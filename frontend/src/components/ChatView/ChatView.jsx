@@ -319,24 +319,7 @@ export default function ChatView({
   // the reader's saved coordinate; an incomplete restoration window stays
   // hidden until the anchor-addressed read repairs or retires that coordinate.
   const initialSavedAnchorKey = savedReadingAnchorKey(chatId)
-  const [loading, setLoading] = useState(initialCacheEntryState === 'missing')
-  const [initialEntryPhase, setInitialEntryPhase] = useState(
-    initialCacheEntryState === 'paintable'
-      ? 'cached'
-      : initialCacheEntryState === 'validating'
-        ? 'cache-validating'
-        : initialCacheEntryState,
-  )
-  const acceptCachedReadingCoordinate = useCallback(() => {
-    setInitialEntryPhase(current => (
-      current === 'cache-validating' ? 'cached' : current
-    ))
-    setLoading(false)
-  }, [])
-  const acceptInitialStreamCatchUp = useCallback(() => {
-    setInitialEntryPhase(current => (
-      current === 'stream-catchup' ? 'ready' : current
-    ))
+  const initialCacheEntryState = chatCacheEntryState(
     cached,
     initialSavedAnchorKey,
     savedReadingAnchorHasNestedPart(chatId),
@@ -347,16 +330,19 @@ export default function ChatView({
       ? 'cached'
       : initialCacheEntryState === 'validating'
         ? 'cache-validating'
-        : 'history',
+        : initialCacheEntryState,
   )
   const acceptCachedReadingCoordinate = useCallback(() => {
-    // The scroll owner has proved the exact nested part against the committed
-    // cached DOM. Admit the same quiet-layout reveal path as an ordinary safe
-    // cache without waiting for the independent freshness handshake.
+    // The scroll owner has proved the exact nested part against committed DOM.
     setInitialEntryPhase(current => (
       current === 'cache-validating' ? 'cached' : current
     ))
     setLoading(false)
+  }, [])
+  const acceptInitialStreamCatchUp = useCallback(() => {
+    setInitialEntryPhase(current => (
+      current === 'stream-catchup' ? 'ready' : current
+    ))
   }, [])
   // On a failed initial /chats/{id} fetch, loadError flips in the catch so
   // the UI can render a retry message. Setting loading false alone would
@@ -1702,17 +1688,7 @@ export default function ChatView({
     }
     const activationAnchorMatch = anchorMatchIn(activationCache)
     const cacheCoversSavedAnchor = !savedAnchorKey || !!activationAnchorMatch
-    setLoading(activationCacheEntryState === 'missing')
-    const activationEntryPhase = activationCacheEntryState === 'paintable'
-      ? 'cached'
-      : activationCacheEntryState === 'validating'
-        ? 'cache-validating'
-        : activationCacheEntryState
-    setInitialEntryPhase(current => (
-      activationEntryPhase === 'cache-validating' && current === 'cached'
-        ? current
-        : activationEntryPhase
-    ))
+    const activationCacheEntryState = chatCacheEntryState(
       activationCache,
       savedAnchorKey,
       savedReadingAnchorHasNestedPart(chatId),
@@ -1720,13 +1696,12 @@ export default function ChatView({
     remapAnchorMatch(activationAnchorMatch)
     chatIdStaleRef.current = false
     setLoadError(false)
-<<<<<<< HEAD
     setLoading(activationCacheEntryState === 'missing')
     const activationEntryPhase = activationCacheEntryState === 'paintable'
       ? 'cached'
       : activationCacheEntryState === 'validating'
         ? 'cache-validating'
-        : 'history'
+        : activationCacheEntryState
     setInitialEntryPhase(current => (
       // Mount-time layout validation can finish before this passive activation
       // effect runs. Do not re-close a cache gate the scroll owner just proved.
@@ -1734,10 +1709,6 @@ export default function ChatView({
         ? current
         : activationEntryPhase
     ))
-=======
-    setLoading(activationEntryPhase === 'history')
-    setInitialEntryPhase(activationEntryPhase)
->>>>>>> b7659c194 (Settle running chat entry after stream catch-up)
 
     const gen = fetchGenRef.current
     const requestJson = async (path, label) => {

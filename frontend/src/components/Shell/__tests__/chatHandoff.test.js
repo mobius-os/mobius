@@ -22,7 +22,7 @@ function ruleBody(selector, source = shellCss) {
 test('chat display readiness admits only coordinate-complete cached transcripts', () => {
   assert.match(
     detailCache,
-    /function chatCacheEntryState\([\s\S]*cached\?\.restorationWindowComplete !== true[\s\S]*messageKey\(message, baseOffset \+ index\)[\s\S]*savedAnchorHasNestedPart \? 'validating' : 'paintable'/,
+    /function chatCacheEntryState\([\s\S]*cached\?\.restorationWindowComplete !== true[\s\S]*messageKey\(message, baseOffset \+ index\)[\s\S]*if \(savedAnchorHasNestedPart\) return 'validating'[\s\S]*cached\.running[\s\S]*'stream-catchup' : 'paintable'/,
     'only canonical caches containing the durable row may paint or validate',
   )
   assert.match(chatView,
@@ -68,7 +68,7 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
   )
 })
 
-test('activation reuses an unchanged retained transcript before stream catch-up', () => {
+test('activation holds an unchanged running transcript until stream catch-up', () => {
   const initialLoad = chatView.match(
     /const loadActivation = async \(\) => \{[\s\S]*?\n    loadActivation\(\)/,
   )?.[0] || ''
@@ -110,8 +110,8 @@ test('activation reuses an unchanged retained transcript before stream catch-up'
     'an activation error before ready must not erase the unconsumed saved coordinate')
   assert.match(
     chatView,
-    /setInitialEntryPhase\('ready'\)[\s\S]*if \(running\) \{[\s\S]*connectToStream\(false\)/,
-    'stream catch-up should continue after the persisted frame becomes paintable',
+    /setInitialEntryPhase\(attachesToStream \? 'stream-catchup' : 'ready'\)[\s\S]*if \(running\) \{[\s\S]*connectToStream\(false\)/,
+    'a running persisted frame remains gated until stream catch-up commits',
   )
   assert.match(
     initialLoad,

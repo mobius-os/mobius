@@ -967,7 +967,7 @@ test.describe('Scroll position', () => {
     expect(restored.scrollTop).toBeGreaterThan(0)
   })
 
-  test('10d. Previous-chat entry reveals authoritative history before catch-up and stays visually fixed', async ({ page }) => {
+  test('10d. Previous-chat entry holds outgoing chat until catch-up, then stays visually fixed', async ({ page }) => {
     await setup(page, { width: 900, height: 760 })
     await newChat(page)
 
@@ -1122,18 +1122,20 @@ test.describe('Scroll position', () => {
       history.back()
     })
 
+    // The returning chat is running, so its persisted rows are incomplete.
+    // Keep painting the outgoing empty chat until subscribe-time replay commits.
+    await expect.poll(() => catchUpServed, { timeout: 700 }).toBe(false)
+    await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible()
+    await expect(page.locator('[data-chat-surface="painted"] [data-key="entry-anchor"]')).toHaveCount(0)
+
+    await expect.poll(() => catchUpServed, { timeout: 3000 }).toBe(true)
     await page.waitForFunction(() => {
       const el = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
       const img = document.querySelector('[data-chat-surface="painted"] .md-image')
       return !!el && getComputedStyle(el).visibility !== 'hidden'
-        // The retained ChatView deliberately reveals its already-settled DOM
-        // immediately. Do not mistake the still-complete initial image for the
-        // delayed authoritative return image we are exercising here.
         && !!img?.src.includes('entry-image-return.png') && !!img.complete
         && !!document.querySelector('[data-key="entry-anchor"]')
     }, { timeout: 10000 })
-    expect(catchUpServed).toBe(false)
-    await expect.poll(() => catchUpServed, { timeout: 3000 }).toBe(true)
 
     const trajectory = await page.evaluate(() => window.__entryTrajectory || [])
     const visibleRows = trajectory.filter(row => row.visible)
