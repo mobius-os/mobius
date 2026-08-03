@@ -977,6 +977,8 @@ test.describe('Scroll position', () => {
     let returning = false
     let streamCount = 0
     let catchUpServed = false
+    let releaseCatchUp
+    const catchUpGate = new Promise(resolve => { releaseCatchUp = resolve })
     let returnImageServed = false
     const squarePng = Buffer.from(
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nWQAAAAASUVORK5CYII=',
@@ -1030,7 +1032,7 @@ test.describe('Scroll position', () => {
     await page.route(new RegExp(`/api/chats/${chatId}/stream$`), async route => {
       streamCount += 1
       if (streamCount > 1) return route.fulfill({ status: 204, body: '' })
-      await new Promise(resolve => setTimeout(resolve, 1200))
+      await catchUpGate
       catchUpServed = true
       return route.fulfill({
         status: 200,
@@ -1133,6 +1135,7 @@ test.describe('Scroll position', () => {
         && !!document.querySelector('[data-key="entry-anchor"]')
     }, { timeout: 10000 })
     expect(catchUpServed).toBe(false)
+    releaseCatchUp()
     await expect.poll(() => catchUpServed, { timeout: 3000 }).toBe(true)
 
     const trajectory = await page.evaluate(() => window.__entryTrajectory || [])
