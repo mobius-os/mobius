@@ -244,7 +244,8 @@ export default function useWorkspaceDrag({
       let holdTimer = null
       let held = false
       let scrolling = false
-      let scrollStripEl = null
+      let scrollEl = null
+      let scrollAxis = null
       let curZone = null
       let scene = null
       let drawerEdgeX = null
@@ -396,7 +397,8 @@ export default function useWorkspaceDrag({
         const dy = ev.clientY - start.y
         if (scrolling) {
           ev.preventDefault?.()
-          if (scrollStripEl) scrollStripEl.scrollLeft += previousPoint.x - ev.clientX
+          if (scrollEl && scrollAxis === 'x') scrollEl.scrollLeft += previousPoint.x - ev.clientX
+          else if (scrollEl && scrollAxis === 'y') scrollEl.scrollTop += previousPoint.y - ev.clientY
           return
         }
         if (!armed) {
@@ -407,6 +409,15 @@ export default function useWorkspaceDrag({
               pinned: srcEl.hasAttribute('data-pinned-key'),
             })
             if (intent === 'pending') return
+            if (intent === 'scroll') {
+              clearTimeout(holdTimer)
+              scrolling = true
+              scrollEl = srcEl.closest('.drawer__scroll')
+              scrollAxis = 'y'
+              ev.preventDefault?.()
+              if (scrollEl) scrollEl.scrollTop += start.y - ev.clientY
+              return
+            }
             if (intent === 'reorder') {
               const handler = drawerGesture()
               ev.preventDefault?.()
@@ -430,9 +441,10 @@ export default function useWorkspaceDrag({
               // Until the hold wins, mirror the strip's one-to-one pan here.
               // Whitespace and close buttons remain native pan-x.
               scrolling = true
-              scrollStripEl = srcEl.closest('.shell__tabstrip')
+              scrollEl = srcEl.closest('.shell__tabstrip')
+              scrollAxis = 'x'
               ev.preventDefault?.()
-              if (scrollStripEl) scrollStripEl.scrollLeft += start.x - ev.clientX
+              if (scrollEl) scrollEl.scrollLeft += start.x - ev.clientX
               return
             }
             if (!armed) return

@@ -649,8 +649,9 @@ test('one held drawer-row gesture resolves menu, reorder, or workspace drag', ()
   assert.equal((paneStrip.match(/data-drag-key=\{dragKey\}/g) || []).length, 1,
     'the tab button is the one drag source')
   assert.match(drawerCss, /\.drawer__row \.drawer__item\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-y pinch-zoom/)
+  assert.match(drawerCss, /\.drawer__row \.drawer__item\[data-pinned-key\]\s*\{[\s\S]*?touch-action:\s*pinch-zoom/)
   assert.match(dragBinding, /touchTabMoveIntent\(dx, dy\)/)
-  assert.match(dragBinding, /scrollStripEl\.scrollLeft \+= previousPoint\.x - ev\.clientX/)
+  assert.match(dragBinding, /scrollAxis === 'x'\)[\s\S]*?scrollEl\.scrollLeft \+= previousPoint\.x - ev\.clientX/)
   assert.doesNotMatch(
     dragBinding,
     /sourceKind === 'drawer' && e\.pointerType !== 'mouse'\) return/,
@@ -665,6 +666,8 @@ test('one held drawer-row gesture resolves menu, reorder, or workspace drag', ()
     'the reorder outcome hands off to the row implementation')
   assert.match(dragBinding, /intent === 'workspace'\) arm\(\)/,
     'the workspace outcome arms the shared drag implementation')
+  assert.match(dragBinding, /intent === 'scroll'[\s\S]*?scrollAxis = 'y'[\s\S]*?scrollTop \+= start\.y - ev\.clientY/,
+    'pre-hold row movement scrolls without surrendering the pointer to the browser')
   assert.match(dragBinding, /sourceKind === 'drawer' && held[\s\S]*?cleanup\(\{ suppressClick: true \}\)[\s\S]*?handler\?\.openMenu\?\.\(point\)/,
     'a stationary held release opens actions only after cleanup')
   assert.doesNotMatch(dragBinding, /openTabMenuAtRef/)
@@ -689,13 +692,14 @@ test('one held drawer-row gesture resolves menu, reorder, or workspace drag', ()
   assert.doesNotMatch(drawerCss, /data-hold-ready/)
 })
 
-test('drawer swipe-to-close leaves vertical scrolling on the native pointer path', () => {
+test('drawer whitespace stays native while pinned rows reserve the shared pointer path', () => {
   assert.match(drawerCss, /\.drawer\s*\{[\s\S]*?touch-action:\s*pan-y pinch-zoom/)
   assert.match(drawer, /onPointerDown=\{onDrawerPointerDown\}/)
   assert.match(drawer, /onPointerMove=\{onDrawerPointerMove\}/)
   assert.match(drawer, /onPointerCancel=\{onDrawerPointerCancel\}/)
   assert.doesNotMatch(drawer, /addEventListener\('touchmove', move/,
     'the panel must never install a scroll-blocking touch listener')
+  assert.match(dragBinding, /scrollAxis === 'y'[\s\S]*?scrollEl\.scrollTop \+= previousPoint\.y - ev\.clientY/)
   assert.match(drawer, /if \(dx < 0 && isHorizontalSwipe\) gesture\.panning = true/)
   assert.match(drawer, /setPointerCapture\?\.\(e\.pointerId\)/)
 })

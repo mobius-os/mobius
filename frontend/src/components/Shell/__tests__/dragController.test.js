@@ -65,8 +65,12 @@ test('touchTabMoveIntent reserves every pre-hold tab move for scrolling', () => 
 test('drawerRowMoveIntent resolves one gesture without competing owners', () => {
   const touchPin = { isTouch: true, pinned: true }
   assert.equal(drawerRowMoveIntent(4, 4, touchPin), 'pending')
-  assert.equal(drawerRowMoveIntent(0, 9, touchPin), 'yield',
-    'movement before the hold returns to native navigation')
+  assert.equal(drawerRowMoveIntent(0, 9, touchPin), 'scroll',
+    'vertical movement before the hold scrolls through the pointer owner')
+  assert.equal(drawerRowMoveIntent(9, 0, touchPin), 'yield',
+    'horizontal movement before the hold returns to drawer swipe')
+  assert.equal(drawerRowMoveIntent(0, 9, { isTouch: true }), 'yield',
+    'an unpinned row keeps native momentum scrolling')
   assert.equal(drawerRowMoveIntent(0, 9, { ...touchPin, held: true }), 'reorder')
   assert.equal(drawerRowMoveIntent(9, 0, { ...touchPin, held: true }), 'workspace')
   assert.equal(drawerRowMoveIntent(-9, 0, { ...touchPin, held: true }), 'cancel')

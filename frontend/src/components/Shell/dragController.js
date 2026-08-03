@@ -102,12 +102,13 @@ export function touchTabMoveIntent(dx, dy, limit = PRE_HOLD_MOVE_PX) {
   return 'scroll'
 }
 
-// The drawer row's one held gesture has three outcomes. Before a touch hold,
-// movement yields to native scrolling/swiping. Afterwards (or immediately for
-// a mouse), vertical movement reorders a pin and outward movement lifts the row
-// into the workspace. Everything else cancels rather than starting a competing
-// interaction. Keeping this classification pure prevents the menu, reorder and
-// workspace branches from growing independent threshold logic again.
+// The drawer row's one held gesture has three outcomes. Before a pinned touch
+// hold, vertical movement scrolls the list through the same pointer owner while
+// a horizontal move yields to drawer swipe; unpinned rows keep native scrolling.
+// Afterwards (or immediately for a mouse), vertical movement reorders a pin and
+// outward movement lifts the row into the workspace. Keeping this classification
+// pure prevents the menu, reorder and workspace branches from growing separate
+// threshold logic.
 export function drawerRowMoveIntent(dx, dy, {
   held = false,
   isTouch = false,
@@ -115,7 +116,9 @@ export function drawerRowMoveIntent(dx, dy, {
 } = {}) {
   const limit = isTouch && !held ? PRE_HOLD_MOVE_PX : POINTER_SLOP
   if (hypot(dx, dy) <= limit) return 'pending'
-  if (isTouch && !held) return 'yield'
+  if (isTouch && !held) {
+    return pinned && Math.abs(dy) > Math.abs(dx) ? 'scroll' : 'yield'
+  }
   if (Math.abs(dy) > Math.abs(dx)) return pinned ? 'reorder' : 'cancel'
   return dx > 0 ? 'workspace' : 'cancel'
 }

@@ -435,10 +435,17 @@
   min-width: 0;
 }
 
-/* Row bodies keep native vertical scrolling until their deliberate hold wins.
-   The pinned reorder handle below owns its pointer stream independently. */
+/* Ordinary rows retain native momentum scrolling. A pinned row must reserve its
+   one-finger pointer stream from pointerdown: touch-action cannot be changed
+   after a gesture starts, so allowing pan-y there lets the browser cancel the
+   pointer exactly when a held pin begins moving vertically. The shared row
+   controller mirrors pre-hold scrolling for pins; pinch zoom remains native. */
 .drawer__row .drawer__item[data-drag-key] {
   touch-action: pan-y pinch-zoom;
+}
+
+.drawer__row .drawer__item[data-pinned-key] {
+  touch-action: pinch-zoom;
 }
 
 /* App cards and drawer rows share one action-menu placement path. */
