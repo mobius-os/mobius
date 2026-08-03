@@ -80,19 +80,18 @@ test('gesture scroll frames defer anchor, spacer, and persistence work until set
   )
   assert.match(
     hotPath,
-    /if \(!hasNativeScrollEnd\)[\s\S]*?setTimeout\(settleReaderScroll, GESTURE_SETTLE_MS\)/,
-    'older engines should schedule exactly one trailing-edge settlement path',
+    /clearTimeout\(readerSettleTimer\)[\s\S]*?setTimeout\(settleReaderScroll, GESTURE_SETTLE_MS\)/,
+    'every browser should have one guaranteed trailing-edge settlement path',
   )
+  assert.doesNotMatch(hotPath, /hasNativeScrollEnd/,
+    'feature detection must not trust browsers to deliver an advertised scrollend')
   assert.match(
     ownerSource,
     /addEventListener\('scrollend', settleReaderScroll/,
-    'supporting engines should settle from the browser scroll lifecycle',
+    'native scrollend should complete the same settlement path early',
   )
-  assert.match(
-    hotPath,
-    /readerScrollAtBottom\s*=\s*distanceToBottom\s*<\s*PHYSICAL_BOTTOM_EPSILON_PX/,
-    'the event must preserve explicit tail intent before live output can move it',
-  )
+  assert.match(hotPath, /atBottom:\s*distanceToBottom\s*<\s*PHYSICAL_BOTTOM_EPSILON_PX/,
+    'the intent reducer must receive each scroll frame\'s physical-tail geometry')
 
   const settleStart = ownerSource.indexOf('const settleReaderScroll = () => {')
   const settleEnd = ownerSource.indexOf(
@@ -215,4 +214,9 @@ test('automatic geometry owners and newer semantic actions share reader authorit
   const hotPath = ownerSource.slice(hotStart, hotEnd)
   assert.match(hotPath, /if \(disclosureInputOwnsGesture\) return/,
     'layout scrolls caused by a disclosure must not create a stale reader settle')
+  assert.match(
+    ownerSource,
+    /const onPointerCancelInput = \(\) => \{[\s\S]*?disclosureInputOwnsGesture = false[\s\S]*?addEventListener\('pointercancel', onPointerCancelInput/,
+    'a disclosure press promoted to a native pan must become reader-owned scroll',
+  )
 })
