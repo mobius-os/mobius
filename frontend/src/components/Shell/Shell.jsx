@@ -2517,7 +2517,7 @@ export default function Shell() {
     // tap immediately instead of leaving the drawer/old transcript painted for
     // the whole async allocation. Builder stays additive and therefore waits
     // for the concrete id before opening its new tab.
-    const presentation = focusComposer && (!SPLITS || ws.viewMode === 'single')
+    const presentation = focusComposer && ws.viewMode === 'single'
       ? { chatId: null }
       : null
     if (presentation) {
