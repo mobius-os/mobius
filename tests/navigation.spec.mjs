@@ -439,7 +439,21 @@ test.describe('Touch navigation', () => {
     const presentation = page.locator('[data-new-chat-presentation]')
     await expect(presentation).toBeVisible()
     await expect(presentation.getByText("What's on your mind?", { exact: true })).toBeVisible()
-    await expect(focusLease).toBeFocused()
+    // Keep the failure actionable: a generic toBeFocused mismatch hides the
+    // element that actually reclaimed ownership during the handoff.
+    await expect.poll(() => page.evaluate(() => {
+      const lease = document.querySelector('.shell__composer-focus-lease')
+      const active = document.activeElement
+      if (active === lease) return 'lease'
+      if (!active) return 'none'
+      const name = active.getAttribute?.('aria-label')
+        || active.getAttribute?.('role')
+        || active.tagName.toLowerCase()
+      const classes = typeof active.className === 'string'
+        ? active.className.trim().split(/\s+/).filter(Boolean).join('.')
+        : ''
+      return classes ? `${name}.${classes}` : name
+    })).toBe('lease')
     await page.keyboard.type('Typed while opening')
     releaseCreation()
 
