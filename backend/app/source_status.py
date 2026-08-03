@@ -73,6 +73,13 @@ def _rev(repo: Path, ref: str) -> str | None:
   return value if proc.returncode == 0 and value else None
 
 
+def _trees_equal(repo: Path, left: str, right: str) -> bool:
+  """Return whether two refs name byte-identical source trees."""
+  left_tree = _rev(repo, f"{left}^{{tree}}")
+  right_tree = _rev(repo, f"{right}^{{tree}}")
+  return bool(left_tree and left_tree == right_tree)
+
+
 def _canonical_repo(url: str | None) -> str | None:
   """Turn common GitHub remote/manifest URLs into ``owner/repo``."""
   if not url:
@@ -469,6 +476,8 @@ def _project_status(
     "head_sha": None,
     "base_ref": "origin/main" if kind == "platform" else "upstream",
     "base_sha": None,
+    "comparison_ref": None,
+    "comparison_sha": None,
     "ahead": None,
     "behind": None,
     "tree": None,
@@ -496,6 +505,15 @@ def _project_status(
     compare_local=(kind == "platform"),
     classify_install=(kind == "app"),
   )
+  if kind == "app" and origin.get("ref"):
+    # Installer-owned ``upstream`` remains the update baseline, but a landed
+    # contribution can reach the last-fetched canonical branch before an app
+    # update advances that marker. Exact tree equality is a projection-safe
+    # witness: unlike an ordinary origin diff, it cannot turn omitted package
+    # files into apparent owner deletions.
+    origin["head_tree_matches_origin"] = _trees_equal(
+      repo, origin["ref"], "HEAD",
+    )
   response.update({"origin": origin, "forks": forks})
 
   response.update({
@@ -515,18 +533,26 @@ def _project_status(
     return response
 
   ahead, behind = _comparison_counts(repo, base_ref, "HEAD")
+  comparison_ref = (
+    origin["ref"]
+    if kind == "app" and origin.get("head_tree_matches_origin")
+    else base_ref
+  )
+  comparison_sha = _rev(repo, comparison_ref)
   tree, managed_paths = _diff_inventory(
-    repo, base_ref, "HEAD", classify_install=(kind == "app"),
+    repo, comparison_ref, "HEAD", classify_install=(kind == "app"),
   )
   reconciliation = _reconciliation_summary(
     repo,
     "HEAD",
-    base_ref,
+    comparison_ref,
     managed_paths=managed_paths,
   )
   response.update({
     "behind": behind,
     "ahead": ahead,
+    "comparison_ref": comparison_ref,
+    "comparison_sha": comparison_sha,
     "tree": tree,
     "reconciliation": reconciliation,
   })

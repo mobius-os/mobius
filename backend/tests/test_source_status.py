@@ -296,6 +296,83 @@ def test_endpoint_equal_sibling_histories_are_semantically_aligned():
   assert _git(repo, "merge-base", "main", "upstream") == base
 
 
+def test_exact_orphan_origin_tree_suppresses_a_stale_installer_baseline():
+  repo = _repo("origin-tree-witness")
+  base = _git(repo, "rev-parse", "HEAD")
+  _git(repo, "remote", "add", "origin", "https://github.com/example/demo.git")
+
+  (repo / "index.jsx").write_text("export default 2\n", encoding="utf-8")
+  _git(repo, "add", "index.jsx")
+  _commit(repo, "local projection")
+
+  _git(repo, "checkout", "-q", "--orphan", "shared")
+  _git(repo, "rm", "-q", "-r", "--cached", ".")
+  (repo / "index.jsx").write_text("export default 2\n", encoding="utf-8")
+  _git(repo, "add", "index.jsx")
+  shared = _commit(repo, "landed source")
+  _git(repo, "update-ref", "refs/remotes/origin/main", shared)
+  _git(repo, "checkout", "-q", "main")
+  _git(repo, "branch", "-D", "shared")
+
+  result = source_status.build_app_status(_app(repo))
+
+  assert result is not None
+  assert result["base_ref"] == "upstream"
+  assert result["base_sha"] == base
+  assert result["origin"]["head_tree_matches_origin"] is True
+  assert result["comparison_ref"] == "origin/main"
+  assert result["comparison_sha"] == shared
+  assert result["tree"]["files"] == 0
+  assert result["reconciliation"]["local_only_count"] == 0
+  assert result["reconciliation"]["new_upstream_count"] == 0
+  assert result["state"] == "aligned"
+  merge_base = subprocess.run(
+    ["git", "-C", str(repo), "merge-base", "main", "origin/main"],
+    capture_output=True,
+    check=False,
+  )
+  assert merge_base.returncode != 0
+
+
+def test_exact_origin_commit_never_hides_live_working_files():
+  repo = _repo("origin-tree-with-working")
+  head = _git(repo, "rev-parse", "HEAD")
+  _git(repo, "remote", "add", "origin", "https://github.com/example/demo.git")
+  _git(repo, "update-ref", "refs/remotes/origin/main", head)
+  (repo / "owner-draft.js").write_text("draft\n", encoding="utf-8")
+
+  result = source_status.build_app_status(_app(repo))
+
+  assert result is not None
+  assert result["origin"]["head_tree_matches_origin"] is True
+  assert result["comparison_ref"] == "origin/main"
+  assert result["state"] == "working"
+  assert result["working"]["untracked"] == 1
+
+
+def test_nonmatching_package_tree_keeps_installer_projection_comparison():
+  repo = _repo("origin-package-files")
+  base = _git(repo, "rev-parse", "HEAD")
+  _git(repo, "remote", "add", "origin", "https://github.com/example/demo.git")
+  _git(repo, "checkout", "-q", "-b", "full-source", base)
+  (repo / "package-only.md").write_text("not installed\n", encoding="utf-8")
+  _git(repo, "add", "package-only.md")
+  full_source = _commit(repo, "package source")
+  _git(repo, "update-ref", "refs/remotes/origin/main", full_source)
+  _git(repo, "checkout", "-q", "main")
+  (repo / "owner.js").write_text("owner\n", encoding="utf-8")
+  _git(repo, "add", "owner.js")
+  _commit(repo, "owner source")
+
+  result = source_status.build_app_status(_app(repo))
+
+  assert result is not None
+  assert result["origin"]["head_tree_matches_origin"] is False
+  assert result["comparison_ref"] == "upstream"
+  assert result["tree"]["paths"][0]["path"] == "owner.js"
+  assert "package-only.md" not in repr(result["tree"])
+
+
 def test_disjoint_same_file_edits_are_classified_as_compatible():
   repo = _repo("compatible-overlap")
   (repo / "index.jsx").write_text(
