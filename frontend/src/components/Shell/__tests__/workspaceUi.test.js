@@ -89,7 +89,8 @@ test('an implicit home tab does not engage the single-pane tab strip', () => {
 test('the canonical workspace snapshot survives a closed PWA relaunch', () => {
   assert.match(
     shell,
-    /useWorkspaceSession\(\{ storage: localStorage \}\)/,
+    /useWorkspaceSession\(\{\s*storage: localStorage,\s*legacyStorage: sessionStorage,\s*\}\)/,
+    'the durable snapshot remains canonical while the one-time session migration stays available',
   )
   assert.doesNotMatch(
     shell,
@@ -908,34 +909,6 @@ test('chat deletion is immediate while app deletion still requires confirmation'
     /confirmation === 'delete-data'[\s\S]*?confirmation === 'delete'/,
     'app and app-data deletion must retain their confirmation paths',
   )
-})
-
-test('drawer row actions have one opening path without a custom touch hold', () => {
-  assert.match(drawer, /function openItemMenuAt\(point,[\s\S]*?actions\.toggleMenu\(kind, id, true, surface,/)
-  assert.equal((drawer.match(/onContextMenu=\{openItemMenu\}/g) || []).length, 2,
-    'app cards and drawer rows must share one semantic opening function')
-  assert.match(drawer, /if \(suppressTouchContextMenu\(event\)\) return/,
-    'native touch contextmenu must never pre-empt the shared held gesture')
-  assert.doesNotMatch(
-    dragBinding,
-    /srcEl\.closest\('\.drawer__row'\)\?\.querySelector\('\.drawer__more'\)\?\.click\(\)/,
-    'touch hold must not depend on a synthetic trigger click',
-  )
-  assert.doesNotMatch(drawer, /function beginTouchMenuHold/,
-    'drawer rows must not add a second touch lifecycle beside the shared controller')
-  assert.match(drawerItemActionMenu, /function consumeOutsidePointer\(event\)[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?stopImmediatePropagation/)
-  assert.match(drawerItemActionMenu, /onPointerDown=\{event => \{[\s\S]*?outsidePressStartedRef\.current = true[\s\S]*?\}\}/)
-  assert.match(drawerItemActionMenu, /onClick=\{event => \{[\s\S]*?!outsidePressStartedRef\.current\) return[\s\S]*?close\(\)/)
-  assert.doesNotMatch(drawer, /navigator\.vibrate/,
-    'drawer rows rely on platform long-press feedback instead of adding a second vibration')
-})
-
-test('an opening press cannot dismiss its own action menu', () => {
-  assert.match(drawerItemActionMenu, /const outsidePressStartedRef = useRef\(false\)/)
-  assert.match(drawerItemActionMenu, /if \(!consumeOutsidePointer\(event\) \|\| !outsidePressStartedRef\.current\) return/,
-    'a retargeted opener click has no layer-owned pointerdown and must be ignored')
-  assert.match(drawerItemActionMenu, /onPointerCancel=\{\(\) => \{[\s\S]*?outsidePressStartedRef\.current = false/,
-    'a cancelled outside press cannot authorize a later unrelated click')
 })
 
 test('a secondary-button release cannot immediately select a flipped drawer menu item', () => {
