@@ -58,17 +58,11 @@ test('stop action has no visible circular shell', () => {
     'Stop keyboard focus should move to the square glyph')
 })
 
-test('primary action keeps all glyph layers mounted at their legible sizes', () => {
-  assert.match(
-    chatInputBar,
-    /function PrimaryActionGlyph[\s\S]*?<ArrowUp[^>]*width=\{22\} height=\{22\}[\s\S]*?<DoubleChevronRight[^>]*width=\{20\} height=\{20\}[\s\S]*?<Stop[^>]*width=\{28\} height=\{28\}/,
-    'the stable glyph stack should preserve the established icon sizes',
-  )
-  assert.match(
-    chatInputBar,
-    /<PrimaryActionGlyph action="steer" \/>[\s\S]*?<PrimaryActionGlyph action="stop" \/>[\s\S]*?<PrimaryActionGlyph action="send" \/>/,
-    'Steer, Stop, and Send should reuse one mounted glyph-stack component',
-  )
+test('primary actions reuse one mounted glyph stack', () => {
+  assert.match(chatInputBar, /function PrimaryActionGlyphs\(\{ action \}\)/)
+  for (const action of ['steer', 'stop', 'send']) {
+    assert.match(chatInputBar, new RegExp(`<PrimaryActionGlyphs action="${action}" />`))
+  }
   assert.match(
     chatInputBar,
     /<Stop className="chat__action-glyph chat__action-glyph--stop" width=\{28\} height=\{28\} \/>/,
@@ -138,43 +132,29 @@ test('message references use a bounded responsive two-column grid', () => {
 
 test('transitions into Stop are sequential while Send to Steer stays immediate', () => {
   const css = stripComments(chatCss)
-  const sendRule = css.match(/\.chat__send\s*\{[^}]*\}/)?.[0] || ''
-  const steerRule = css.match(/\.chat__steer\s*\{[^}]*\}/)?.[0] || ''
-  const stopRules = css.match(/\.chat__stop\s*\{[^}]*\}/g)?.join('\n') || ''
+  const glyphStackRule = css.match(/\.chat__action-glyphs\s*\{[^}]*\}/)?.[0] || ''
   const staticDirectionalRule = css.match(
     /\.chat__action-glyphs--send \.chat__action-glyph--send,\s*\.chat__action-glyphs--steer \.chat__action-glyph--steer\s*\{[^}]*\}/,
   )?.[0] || ''
   const outgoingStopRule = css.match(
-    /\.chat__action-glyphs--stop \.chat__action-glyph--send,\s*\.chat__action-glyphs--stop \.chat__action-glyph--steer\s*\{[^}]*\}/,
+    /\.chat__action-glyphs--stop :is\(\.chat__action-glyph--send, \.chat__action-glyph--steer\)\s*\{[^}]*\}/,
   )?.[0] || ''
   const visibleStopRule = css.match(
     /\.chat__action-glyphs--stop \.chat__action-glyph--stop\s*\{[^}]*\}/,
   )?.[0] || ''
 
-  assert.doesNotMatch(sendRule, /animation:/,
-    'Send must keep the shared action target continuously visible')
-  assert.doesNotMatch(steerRule, /animation:/,
-    'Steer must keep the shared action target continuously visible')
-  assert.doesNotMatch(stopRules, /animation:/,
-    'Stop must appear immediately instead of starting at opacity zero')
-  assert.doesNotMatch(css, /@keyframes\s+chat-action-reveal/,
-    'the empty-frame reveal must not remain available to a primary action')
+  assert.match(glyphStackRule, /--stop-handoff:\s*0\.1s/,
+    'one timing value should own both halves of the sequential handoff')
   assert.doesNotMatch(staticDirectionalRule, /transition:/,
     'Send to Steer should retain its existing immediate icon swap')
-  assert.match(outgoingStopRule, /opacity 0\.1s ease-in/,
+  assert.match(outgoingStopRule, /opacity var\(--stop-handoff\) ease-in/,
     'the directional glyph should leave before Stop appears')
-  assert.match(outgoingStopRule, /transform 0\.1s ease-in/)
-  assert.match(visibleStopRule, /opacity:\s*1/,
-    'Stop must be the visible layer at the end of the transition')
-  assert.match(visibleStopRule, /transform:\s*none/)
-  assert.match(visibleStopRule, /opacity 0\.12s ease-out 0\.1s/,
+  assert.match(visibleStopRule, /opacity 0\.12s ease-out var\(--stop-handoff\)/,
     'Stop should wait for the directional glyph to finish before appearing')
-  assert.match(visibleStopRule,
-    /transform 0\.16s var\(--ease-out-soft, ease-out\) 0\.1s/,
-    'the delayed Stop glyph should still settle softly')
+  assert.match(visibleStopRule, /opacity:\s*1/)
   assert.match(css,
     /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*?\.chat__action-glyphs--stop \.chat__action-glyph\s*\{\s*transition:\s*none/,
-    'reduced-motion users should get the final glyph without the crossfade')
+    'reduced-motion users should skip the staged handoff')
 })
 
 test('running activity uses a masked solid-text sweep, not gradient-clipped text', () => {

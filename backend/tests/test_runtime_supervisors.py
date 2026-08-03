@@ -17,6 +17,14 @@ def _supervisors():
   )
 
 
+class _EmptySession:
+  def __enter__(self):
+    return object()
+
+  def __exit__(self, *_args):
+    return False
+
+
 @pytest.mark.asyncio
 async def test_stop_cancels_and_observes_every_named_task():
   supervisors = _supervisors()
@@ -72,18 +80,11 @@ async def test_reset_park_subscription_exists_only_while_its_task_runs(
 
   broadcast = SystemBroadcast()
 
-  class EmptySession:
-    def __enter__(self):
-      return object()
-
-    def __exit__(self, *_args):
-      return False
-
   async def no_chats(*_args, **_kwargs):
-    return []
+    return chat_module.ContinuationSweepResult()
 
   monkeypatch.setattr(broadcast_module, "get_system_broadcast", lambda: broadcast)
-  monkeypatch.setattr(supervisors_module, "SessionLocal", EmptySession)
+  monkeypatch.setattr(supervisors_module, "SessionLocal", _EmptySession)
   monkeypatch.setattr(chat_module, "sweep_reset_parks", no_chats)
 
   supervisors = _supervisors()
@@ -98,3 +99,40 @@ async def test_reset_park_subscription_exists_only_while_its_task_runs(
 
   await supervisors.stop()
   assert broadcast.subscribers == []
+
+
+@pytest.mark.asyncio
+async def test_restart_backlog_gets_prompt_followup_without_turn_completion(
+  monkeypatch,
+):
+  import app.broadcast as broadcast_module
+  import app.chat as chat_module
+  import app.runtime_supervisors as supervisors_module
+
+  broadcast = SystemBroadcast()
+
+  sweep_authorizations = []
+
+  async def paced_sweep(*_args, **_kwargs):
+    sweep_authorizations.append(_kwargs.get("restart_authorization"))
+    if len(sweep_authorizations) == 1:
+      return chat_module.ContinuationSweepResult(
+        ("first", "second"), restart_deferred=True,
+      )
+    return chat_module.ContinuationSweepResult(("third",))
+
+  monkeypatch.setattr(broadcast_module, "get_system_broadcast", lambda: broadcast)
+  monkeypatch.setattr(supervisors_module, "SessionLocal", _EmptySession)
+  monkeypatch.setattr(supervisors_module, "RESTART_BACKLOG_DRAIN_INTERVAL_SECS", 0)
+  monkeypatch.setattr(chat_module, "sweep_reset_parks", paced_sweep)
+
+  supervisors = _supervisors()
+  supervisors.restart_authorization = "accepted-restart"
+  await supervisors._start_chat_supervisors()
+  for _ in range(10):
+    if len(sweep_authorizations) >= 2:
+      break
+    await asyncio.sleep(0)
+
+  assert sweep_authorizations == ["accepted-restart", "accepted-restart"]
+  await supervisors.stop()

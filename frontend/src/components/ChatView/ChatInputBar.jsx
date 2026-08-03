@@ -131,11 +131,10 @@ _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
  *
  *  Send, Steer, and Stop are states of the same primary action. They
  *  deliberately share the `primary` key so React preserves the 40px action
- *  target. PrimaryActionGlyph likewise preserves all three glyph layers: this
- *  lets transitions into Stop crossfade continuously instead of replacing the
- *  SVG in one frame. Send → Steer remains immediate. Mic stays distinct because
- *  it is the idle input affordance rather than a turn action. */
-function PrimaryActionGlyph({ action }) {
+ *  target. Its glyph stack stays mounted so CSS can finish the directional
+ *  glyph before Stop appears, without timing state in React. Send → Steer
+ *  remains immediate. Mic stays distinct as the idle input affordance. */
+function PrimaryActionGlyphs({ action }) {
   return (
     <span className={`chat__action-glyphs chat__action-glyphs--${action}`} aria-hidden="true">
       <ArrowUp className="chat__action-glyph chat__action-glyph--send" width={22} height={22} />
@@ -166,7 +165,7 @@ function PrimaryAction({
         aria-busy={!steerReady}
         disabled={!steerReady}
       >
-        <PrimaryActionGlyph action="steer" />
+        <PrimaryActionGlyphs action="steer" />
       </button>
     )
   }
@@ -185,7 +184,7 @@ function PrimaryAction({
         onClick={onStop}
         aria-label="Stop"
       >
-        <PrimaryActionGlyph action="stop" />
+        <PrimaryActionGlyphs action="stop" />
       </button>
     )
   }
@@ -207,7 +206,7 @@ function PrimaryAction({
         aria-label="Send"
         disabled={hasUploading || offline || submissionBlocked}
       >
-        <PrimaryActionGlyph action="send" />
+        <PrimaryActionGlyphs action="send" />
       </button>
     )
   }

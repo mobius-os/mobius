@@ -772,6 +772,20 @@ export function shouldPinSend({
 }
 
 
+/** Layout may change bottom geometry without changing reader intent. Preserve
+ *  the queued decision within its generation; after real reader movement,
+ *  Fast-forward's current geometry wins. */
+export function delayedSendWillPin({
+  previousIntent,
+  readerIntentVersion,
+  willPinNow,
+}) {
+  return previousIntent?.readerIntentVersion === readerIntentVersion
+    ? previousIntent.willPin
+    : willPinNow
+}
+
+
 /** Position-based bottom check that treats the dynamic pin spacer as phantom
  *  room, not real content. Send snapshots use the conversation tail because a
  *  new send should not require traversing reserved reply room first. */
@@ -1511,14 +1525,21 @@ export default function useScrollMode({
   const captureSendIntent = useCallback(({
     canPin = true,
     isFirstUserMsg = false,
+    previousIntent = null,
   } = {}) => {
+    const readerIntentVersion = readerIntentVersionRef.current
+    const willPinNow = canPin && shouldPinSend({
+      scrollEl: scrollRef.current,
+      mode: modeRef.current,
+      isFirstUserMsg,
+    })
     const intent = {
-      willPin: canPin && shouldPinSend({
-        scrollEl: scrollRef.current,
-        mode: modeRef.current,
-        isFirstUserMsg,
+      willPin: delayedSendWillPin({
+        previousIntent: canPin ? previousIntent : null,
+        readerIntentVersion,
+        willPinNow,
       }),
-      readerIntentVersion: readerIntentVersionRef.current,
+      readerIntentVersion,
     }
     supersedePendingReaderGesture()
     return intent

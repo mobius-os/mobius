@@ -602,10 +602,10 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   authoritative because `ScrollMode` can lag an input/layout frame; requiring both
   made identical bottom sends behave inconsistently. A real user scroll after
   submission invalidates an automatic delayed queue promotion (a tap without
-  scrolling does not). Explicit fast-forward is itself the visibility action, so it
-  captures fresh bottom geometry when pressed; a real scroll during its request
-  invalidates that snapshot. Missing delayed intent degrades to hold, never to an
-  inferred pin.
+  scrolling does not). Explicit fast-forward reuses that snapshot through tray
+  reflow while its reader generation remains current; after a real scroll it
+  captures current geometry instead. Another scroll during the request invalidates
+  that snapshot. Missing delayed intent degrades to hold, never to an inferred pin.
 - **R3 — Pin holds until the reservation is filled.** A legitimate live pin
   transitions to `PIN_USER_MSG`, not immediately to `FOLLOW_BOTTOM`; the response
   first grows below the prompt without moving it. Exactly when the streaming reply
@@ -658,7 +658,8 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   after submit opens fresh reader ownership and still wins. Queueing behind a live
   turn adds no transcript row, so it
   freezes the visible message before the queue tray/composer/keyboard reflow; the
-  separately captured submit snapshot still controls the row when it is promoted.
+  separately captured submit snapshot still controls the row when it is promoted
+  or explicitly fast-forwarded, unless a newer real reader scroll replaced it.
   Never replace the input-to-first-scroll handoff with a fixed short window: under
   rendering load the browser may deliver that scroll later. Ownership begins only for
   inputs whose default action can scroll the transcript; ordinary typing, Enter, and
@@ -904,11 +905,14 @@ presentation, never restart-cause evidence.
 Eligibility is rechecked under the per-chat transition lock immediately before
 promotion. Provider-limit retries are staggered one at a time; an authenticated
 planned restart restores the exact set that was already concurrent, so its
-eligible batch may start together. An app-initiated restart continuation carries
-the same app id into the next durable run unless a newer owner send is already
-queued and becomes the next run's actor; provider-limit retries remain
-owner-only, and app work queued after a park is never absorbed. The provider
-still receives a synthetic user `continue`, but the durable row is tagged
+eligible chats launch in small batches. While each pass makes progress, the
+supervisor promptly drains the durable remainder without waiting for launched
+turns to finish; a no-progress pass falls back to the ordinary retry cadence.
+An app-initiated restart continuation carries the same app id into the next
+durable run unless a newer owner send is already queued and becomes the next
+run's actor; provider-limit retries remain owner-only, and app work queued after
+a park is never absorbed. The provider still receives a synthetic user
+`continue`, but the durable row is tagged
 `kind="auto_continuation"` with reason `restart` or `usage_limit`; the UI, copy
 behavior, title selection, time context, compaction, provider-switch handoff,
 chat-note summarization, and redacted chat logs treat it as a product marker
@@ -916,10 +920,11 @@ rather than owner speech.
 
 The sweep is cheap: one indexed due-row query immediately at boot, on
 `chat_run_finished`, and on a 60-second fallback. Startup captures the boot
-authorization once and threads that exact value through reconciliation and the
-pre-yield sweep, so a second ledger read cannot make the two phases disagree;
-later sweeps perform one bounded local ledger read only when due restart rows
-exist. It does not create per-chat workers or poll at a short interval. Paid
+authorization once and threads that exact value through reconciliation and
+every supervisor sweep, so a later ledger read cannot disagree with the boot.
+When a successful pass leaves a restart remainder, the same supervisor follows
+up after two seconds; a no-progress pass returns to the event/60-second cadence.
+It creates neither per-chat workers nor a permanent short poll. Paid
 provider-limit continuation (`auto_resume_on_limit`) initially defaults off;
 planned-restart continuation (`auto_resume_on_restart`) initially defaults on.
 Each chat stores both choices independently, and changing either choice seeds

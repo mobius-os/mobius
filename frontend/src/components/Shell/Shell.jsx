@@ -1340,7 +1340,6 @@ export default function Shell() {
     doc: document,
     nav: navigator,
     storage: sessionStorage,
-    cacheStorage: typeof caches !== 'undefined' ? caches : null,
     queryClient,
     persistWorkspaceSnapshot,
     workspaceStateRef,

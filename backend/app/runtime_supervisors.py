@@ -18,6 +18,9 @@ from typing import Protocol
 from app.database import SessionLocal
 
 
+RESTART_BACKLOG_DRAIN_INTERVAL_SECS = 2.0
+
+
 class RuntimeSettings(Protocol):
   data_dir: str
 
@@ -69,6 +72,7 @@ class RuntimeSupervisors:
   async def _start_chat_supervisors(self) -> None:
     from app.broadcast import get_system_broadcast
     from app.chat import (
+      ContinuationSweepResult,
       sweep_idle_pending_chats,
       sweep_reset_parks,
       sweep_wedged_runs,
@@ -86,44 +90,49 @@ class RuntimeSupervisors:
         except Exception as exc:
           self.log.error("wedged-marker sweep failed: %s", exc, exc_info=True)
 
-    async def sweep_reset_parks_once(*, startup: bool = False):
+    async def sweep_reset_parks_once():
       try:
         with SessionLocal() as db:
-          if startup:
-            return await sweep_reset_parks(
-              db, restart_authorization=self.restart_authorization,
-            )
-          return await sweep_reset_parks(db)
+          return await sweep_reset_parks(
+            db, restart_authorization=self.restart_authorization,
+          )
       except asyncio.CancelledError:
         raise
       except Exception as exc:
         self.log.error("reset-park sweep failed: %s", exc, exc_info=True)
-        return []
+        return ContinuationSweepResult()
 
-    startup_continuations = await sweep_reset_parks_once(startup=True)
+    startup_sweep = await sweep_reset_parks_once()
     if self.restart_authorization:
       self.log.info(
         "startup restart continuation pass authorized=%d fallback_recovered=%d "
         "started_or_resolved=%d",
         1,
         len(self.restart_fallback_chats),
-        len(startup_continuations),
+        len(startup_sweep.resolved),
       )
 
     async def reset_park_loop():
       system_broadcast = get_system_broadcast()
       events = system_broadcast.subscribe()
+      last_sweep = startup_sweep
       try:
         while True:
-          try:
-            async with asyncio.timeout(60):
-              while True:
-                event = await events.get()
-                if event and event.get("type") == "chat_run_finished":
-                  break
-          except asyncio.TimeoutError:
-            pass
-          await sweep_reset_parks_once()
+          fast_followup = bool(
+            last_sweep.restart_deferred and last_sweep.resolved
+          )
+          if fast_followup:
+            await asyncio.sleep(RESTART_BACKLOG_DRAIN_INTERVAL_SECS)
+          else:
+            try:
+              async with asyncio.timeout(60):
+                while True:
+                  event = await events.get()
+                  if event and event.get("type") == "chat_run_finished":
+                    break
+            except asyncio.TimeoutError:
+              pass
+          last_sweep = await sweep_reset_parks_once()
       finally:
         system_broadcast.unsubscribe(events)
 

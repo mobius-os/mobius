@@ -1434,8 +1434,25 @@ CONTINUATION_SWEEP_BATCH_SIZE = 100
 # not delay an opted-in chat after its reset, but a bad/early reset timestamp
 # also must not launch a whole parked batch in one burst.
 LIMIT_AUTO_RESUME_STAGGER_SECS = 30.0
+# Planned restarts restore work that was already concurrent, but relaunching a
+# large set in one event-loop pass can starve readiness. Pace that exact set in
+# small batches; RuntimeSupervisors drains a successful remainder promptly.
+RESTART_AUTO_RESUME_BATCH_SIZE = 2
 _next_limit_auto_resume_at = 0.0
 _RESTART_AUTHORIZATION_UNSET = object()
+
+
+@dataclass(frozen=True)
+class ContinuationSweepResult:
+  """Durable outcomes from one continuation pass.
+
+  ``restart_deferred`` means an eligible planned-restart park remains due.
+  Callers may promptly run another pass only when this pass also made progress;
+  a no-progress result falls back to the ordinary retry cadence.
+  """
+
+  resolved: tuple[str, ...] = ()
+  restart_deferred: bool = False
 
 
 def _limit_auto_resume_now() -> float:
@@ -1710,7 +1727,7 @@ async def sweep_reset_parks(
   restart_authorization: str | None | object = (
     _RESTART_AUTHORIZATION_UNSET
   ),
-) -> list[str]:
+) -> ContinuationSweepResult:
   """Notify and optionally continue due durable recovery rows.
 
   A due park is a `chat_runs` row whose
@@ -1731,9 +1748,11 @@ async def sweep_reset_parks(
       at most one starts per sweep and launches are spaced even when unrelated
       chats are live. App-attributed provider-limit runs never auto-resume.
       Planned-restart continuations reclaim the exact set that was already live
-      before the restart, preserve each run's attribution, and may resume
-      independently. A staggered enabled chat stays pending for a later tick,
-      while notify-only chats in the same due batch still resolve normally.
+      before the restart and preserve each run's attribution. A pass launches a
+      small restart batch, then the supervisor promptly drains the durable
+      remainder without waiting for those turns to finish. A staggered enabled
+      chat stays pending while notify-only chats in the same due batch still
+      resolve normally.
       App-attributed messages newly queued behind either kind of park still
       require an ordinary app-owned handoff rather than being swept into the
       synthetic continuation.
@@ -1743,8 +1762,9 @@ async def sweep_reset_parks(
   """
   log = _get_logger()
   resolved: list[str] = []
+  restart_deferred = False
   if draining:
-    return resolved
+    return ContinuationSweepResult()
   now = datetime.now(UTC).replace(tzinfo=None)
   try:
     due = (
@@ -1758,9 +1778,9 @@ async def sweep_reset_parks(
     )
   except Exception:
     log.exception("sweep_reset_parks: query failed")
-    return resolved
+    return ContinuationSweepResult()
   if not due:
-    return resolved
+    return ContinuationSweepResult()
   chat_ids = {run.chat_id for run in due}
   try:
     chats = {
@@ -1773,7 +1793,7 @@ async def sweep_reset_parks(
     }
   except Exception:
     log.exception("sweep_reset_parks: chat batch query failed")
-    return resolved
+    return ContinuationSweepResult()
   accepted_restart_nonce = restart_authorization
   if any(run.park_reason == "restart" for run in due):
     if restart_authorization is _RESTART_AUTHORIZATION_UNSET:
@@ -1832,6 +1852,7 @@ async def sweep_reset_parks(
     return auto_resume_rejection(chat, run) is None
 
   limit_resume_started = False
+  restart_resume_started = 0
   for run in due:
     chat_id = run.chat_id
     chat = chats.get(chat_id)
@@ -1847,6 +1868,12 @@ async def sweep_reset_parks(
       # One provider-limit continuation per sweep. Leave this park untouched,
       # but keep walking so a later notify-only chat is not held hostage by
       # another chat's auto-resume preference.
+      continue
+    if (
+      restart_auto_resume
+      and restart_resume_started >= RESTART_AUTO_RESUME_BATCH_SIZE
+    ):
+      restart_deferred = True
       continue
     if auto_resume:
       try:
@@ -1913,9 +1940,12 @@ async def sweep_reset_parks(
       )
       if resume_started:
         resolved.append(chat_id)
-        if not restart_auto_resume:
+        if restart_auto_resume:
+          restart_resume_started += 1
+        else:
           limit_resume_started = True
       elif restart_auto_resume:
+        restart_deferred = True
         log.warning(
           "restart continuation remained pending after scheduling attempt "
           "chat_id=%s run_token=%s; next event/fallback sweep will retry",
@@ -1987,7 +2017,7 @@ async def sweep_reset_parks(
       "continuation sweep resolved %d park(s): %s",
       len(resolved), ", ".join(resolved),
     )
-  return resolved
+  return ContinuationSweepResult(tuple(resolved), restart_deferred)
 
 
 async def _clear_pending(chat_id: str) -> list[str]:

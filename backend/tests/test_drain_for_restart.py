@@ -512,14 +512,15 @@ def test_five_chat_restart_recovers_timeouts_and_finalize_failure(
   monkeypatch.setattr(chat_mod, "_auto_resume_chat", _record_resume)
   db = SessionLocal()
   try:
-    resumed = asyncio.run(chat_mod.sweep_reset_parks(
+    sweep = asyncio.run(chat_mod.sweep_reset_parks(
       db, restart_authorization=nonce,
     ))
   finally:
     db.close()
 
-  assert set(resumed) == set(all_ids)
-  assert {item[0] for item in scheduled} == set(all_ids)
+  assert len(sweep.resolved) == chat_mod.RESTART_AUTO_RESUME_BATCH_SIZE
+  assert sweep.restart_deferred is True
+  assert {item[0] for item in scheduled} == set(sweep.resolved)
   assert all(item[2] == nonce for item in scheduled)
 
 

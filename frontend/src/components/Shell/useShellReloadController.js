@@ -93,7 +93,6 @@ export default function useShellReloadController(inputs) {
       win,
       nav,
       storage,
-      cacheStorage,
       queryClient,
       persistWorkspaceSnapshot,
       workspaceStateRef,
@@ -125,16 +124,8 @@ export default function useShellReloadController(inputs) {
     try { storage.setItem('sw-skip-initiated', '1') } catch { /* ignore */ }
 
     if (stalePrecache) {
-      if (cacheStorage) {
-        try {
-          const keys = await cacheStorage.keys()
-          await Promise.all(
-            keys
-              .filter(key => key.startsWith('workbox-precache-'))
-              .map(key => cacheStorage.delete(key)),
-          )
-        } catch { /* best effort */ }
-      }
+      // Let the new worker replace its precache during activation. Deleting the
+      // active generation first leaves a failed reload with no Möbius document.
       try { storage.removeItem('sw-stale-precache-pending') } catch { /* ignore */ }
       try { storage.setItem('sw-stale-precache-recovering', '1') } catch { /* ignore */ }
     }
