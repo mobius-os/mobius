@@ -2957,6 +2957,7 @@ export default function Shell() {
             className="shell__rail-action"
             aria-label="New chat shortcut"
             title="New chat"
+            onPointerDown={(event) => event.preventDefault()}
             onClick={() => newChat({ focusComposer: true, recordHistory: true })}
           >
             <NewChatNavIcon aria-hidden="true" />

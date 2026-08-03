@@ -1025,6 +1025,10 @@ export default function Drawer({
           <div className="drawer__scroll-wrap">
             <button
               className="drawer__item drawer__item--new"
+              // The click hands focus to the New-chat keyboard lease. Prevent
+              // pointer activation from restoring native button focus after
+              // that handoff; keyboard activation has no pointerdown.
+              onPointerDown={(event) => event.preventDefault()}
               onClick={() => {
                 resetAppsSurfaceUi({ restoreFocus: false })
                 onNewChat()
