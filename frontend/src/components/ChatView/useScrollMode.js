@@ -2383,6 +2383,57 @@ export default function useScrollMode({
     }
     const onComposerPointerDown = (event) => runComposerTailIntent(event)
     composerEditRunRef.current = runComposerTailIntent
+
+    let pendingInlineEditorAnchor = null
+    let inlineEditorRaf = 0
+    const isGrowingInlineEditor = target => target?.matches?.(
+      'textarea.qcard__input',
+    ) === true
+    const captureInlineEditorAnchor = (event) => {
+      if (!isGrowingInlineEditor(event.target)) return
+      // Capture before the browser changes the textarea/caret. Typing is a
+      // newer semantic action than a half-settled reader gesture, but it is not
+      // new scroll intent, so the exact current anchor becomes layout owner.
+      const readerGesturePending = !layoutMayOwnScroll(
+        gestureWindowUntilRef.current,
+        performance.now(),
+      )
+      const needsFreshAnchor = !readerLocationExplicitRef.current
+        || modeRef.current?.kind !== 'ANCHOR_AT'
+        || readerGesturePending
+      // Once typing has retired FOLLOW/PIN, the current anchor is already the
+      // exact contract to replay. Avoid measuring the transcript again on
+      // every character unless a newer reader gesture made it stale.
+      const nextMode = needsFreshAnchor
+        ? anchorModeFromScroll(scrollEl) || modeRef.current
+        : modeRef.current
+      supersedePendingReaderGesture()
+      if (needsFreshAnchor) {
+        readerLocationExplicitRef.current = true
+        transitionMode(nextMode, 'reader:inline-editor-growth')
+        persistMode()
+      }
+      pendingInlineEditorAnchor = {
+        mode: nextMode,
+        authorityVersion: currentAuthority(),
+      }
+    }
+    const restoreInlineEditorAnchor = (event) => {
+      if (!isGrowingInlineEditor(event.target)) return
+      const plan = pendingInlineEditorAnchor
+      pendingInlineEditorAnchor = null
+      if (!plan) return
+      cancelAnimationFrame(inlineEditorRaf)
+      inlineEditorRaf = requestAnimationFrame(() => {
+        inlineEditorRaf = 0
+        writeMode(
+          scrollEl,
+          plan.mode,
+          'layout:inline-editor-growth',
+          plan.authorityVersion,
+        )
+      })
+    }
     const noteScrollStart = () => {
       if (!pendingGestureStart) return
       perfMark('scroll.startLatency', performance.now() - pendingGestureStart)
@@ -2393,6 +2444,8 @@ export default function useScrollMode({
     scrollEl.addEventListener('pointermove', onPointerMoveInput, { passive: true })
     scrollEl.addEventListener('wheel', onWheelInput, { passive: true })
     scrollEl.addEventListener('keydown', onUserInput, { passive: true })
+    scrollEl.addEventListener('beforeinput', captureInlineEditorAnchor, { passive: true })
+    scrollEl.addEventListener('input', restoreInlineEditorAnchor, { passive: true })
     scrollEl.addEventListener('pointerup', onPointerUpInput, { passive: true })
     scrollEl.addEventListener('pointercancel', onPointerCancelInput, { passive: true })
     chatEl?.addEventListener('pointerdown', onComposerPointerDown, { passive: true })
@@ -2493,12 +2546,15 @@ export default function useScrollMode({
       scrollEl.removeEventListener('pointermove', onPointerMoveInput)
       scrollEl.removeEventListener('wheel', onWheelInput)
       scrollEl.removeEventListener('keydown', onUserInput)
+      scrollEl.removeEventListener('beforeinput', captureInlineEditorAnchor)
+      scrollEl.removeEventListener('input', restoreInlineEditorAnchor)
       scrollEl.removeEventListener('pointerup', onPointerUpInput)
       scrollEl.removeEventListener('pointercancel', onPointerCancelInput)
       chatEl?.removeEventListener('pointerdown', onComposerPointerDown)
       if (composerEditRunRef.current === runComposerTailIntent) {
         composerEditRunRef.current = null
       }
+      cancelAnimationFrame(inlineEditorRaf)
       if (forceRevealRef.current === forceReveal) forceRevealRef.current = null
     }
   }, [

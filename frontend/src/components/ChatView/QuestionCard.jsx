@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import './QuestionCard.css'
 import {
   clearQuestionDraft,
@@ -6,6 +6,7 @@ import {
   readQuestionDraft,
   writeQuestionDraft,
 } from './questionDraft.js'
+import { textareaUsesNativeSizing } from './composerTextareaSizing.js'
 import {
   pointerSelectionChangedWithin,
   textSelectionSnapshot,
@@ -22,6 +23,20 @@ function resolveAnswer(answer, otherText) {
 }
 
 
+const CUSTOM_ANSWER_MAX_HEIGHT = 180
+
+
+function resizeCustomAnswer(textarea) {
+  if (!textarea || textareaUsesNativeSizing()) return
+  textarea.style.height = 'auto'
+  const contentHeight = textarea.scrollHeight
+  textarea.style.height = `${Math.min(contentHeight, CUSTOM_ANSWER_MAX_HEIGHT)}px`
+  textarea.style.overflowY = contentHeight > CUSTOM_ANSWER_MAX_HEIGHT
+    ? 'auto'
+    : 'hidden'
+}
+
+
 function CustomAnswerArea({
   active,
   answered,
@@ -31,13 +46,40 @@ function CustomAnswerArea({
   question,
   value,
 }) {
+  const textareaRef = useRef(null)
+
+  useLayoutEffect(() => {
+    resizeCustomAnswer(textareaRef.current)
+  }, [value])
+
+  // The measured fallback also reacts to width: wrapping can add lines without
+  // changing the answer value when a pane or device rotates.
+  useEffect(() => {
+    const textarea = textareaRef.current
+    if (
+      !textarea
+      || textareaUsesNativeSizing()
+      || typeof ResizeObserver === 'undefined'
+    ) return undefined
+    let lastWidth = -1
+    const observer = new ResizeObserver(() => {
+      const width = textarea.clientWidth
+      if (width === lastWidth) return
+      lastWidth = width
+      resizeCustomAnswer(textarea)
+    })
+    observer.observe(textarea)
+    return () => observer.disconnect()
+  }, [])
+
   return (
     <textarea
+      ref={textareaRef}
       className={`qcard__input${active ? ' qcard__input--active' : ''}`}
       aria-label={`Custom answer for: ${question}`}
       placeholder={answered ? 'No custom answer' : 'Or type your own answer…'}
       autoComplete="off"
-      rows={2}
+      rows={1}
       value={value}
       onChange={e => onChange(e.target.value)}
       readOnly={answered}

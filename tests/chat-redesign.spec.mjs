@@ -283,7 +283,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
   })
 
 
-  test('multiline custom answers scroll inside a steady phone-sized card', async ({ page }) => {
+  test('multiline custom answers grow inline without moving the conversation', async ({ page }) => {
     const streamBody = [
       `data: ${JSON.stringify({
         type: 'question',
@@ -309,21 +309,18 @@ test.describe('Bug 1: AskUserQuestion', () => {
       name: 'Custom answer for: Describe the change',
     })
     await expect(card).toBeVisible({ timeout: 5000 })
+    expect(await card.evaluate(el => !!el.closest('.chat__scroll'))).toBe(true)
+    expect(await card.evaluate(el => !!el.closest('.chat__question-dock'))).toBe(false)
     await customAnswer.focus()
 
     const geometry = () => card.evaluate(el => {
       const scroll = el.closest('.chat__scroll')
       const input = el.querySelector('.qcard__input')
-      const option = el.querySelector('.qcard__opt')
-      const submit = el.querySelector('.qcard__submit')
       const rect = node => node?.getBoundingClientRect()
       return {
+        cardTop: rect(el)?.top,
         cardHeight: rect(el)?.height,
         inputHeight: rect(input)?.height,
-        inputTop: rect(input)?.top,
-        inputScrollTop: input?.scrollTop,
-        optionTop: rect(option)?.top,
-        submitTop: rect(submit)?.top,
         chatScrollTop: scroll?.scrollTop,
       }
     })
@@ -340,13 +337,27 @@ test.describe('Bug 1: AskUserQuestion', () => {
     const after = await geometry()
 
     await expect(customAnswer).toHaveValue('First line\nSecond line\nThird line')
-    expect(after.cardHeight).toBeCloseTo(before.cardHeight, 5)
-    expect(after.inputHeight).toBeCloseTo(before.inputHeight, 5)
-    expect(after.inputTop).toBeCloseTo(before.inputTop, 5)
-    expect(after.optionTop).toBeCloseTo(before.optionTop, 5)
-    expect(after.submitTop).toBeCloseTo(before.submitTop, 5)
+    expect(after.cardHeight).toBeGreaterThan(before.cardHeight)
+    expect(after.inputHeight).toBeGreaterThan(before.inputHeight)
+    expect(after.cardTop).toBeCloseTo(before.cardTop, 5)
     expect(after.chatScrollTop).toBeCloseTo(before.chatScrollTop, 5)
-    expect(after.inputScrollTop).toBeGreaterThan(before.inputScrollTop)
+
+    // Past the growth cap, the writing field—not the transcript—owns overflow.
+    // Drive the real keyboard path so caret reveal, beforeinput, input, and the
+    // chat scroll owner race exactly as they do for an owner writing an answer.
+    for (let line = 4; line <= 14; line += 1) {
+      await page.keyboard.press('Enter')
+      await customAnswer.pressSequentially(`Line ${line}`)
+    }
+    await page.evaluate(() => new Promise(resolve => (
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    )))
+    const capped = await geometry()
+    const inputScrollTop = await customAnswer.evaluate(el => el.scrollTop)
+    expect(capped.inputHeight).toBeLessThanOrEqual(181)
+    expect(inputScrollTop).toBeGreaterThan(0)
+    expect(capped.cardTop).toBeCloseTo(before.cardTop, 5)
+    expect(capped.chatScrollTop).toBeCloseTo(before.chatScrollTop, 5)
   })
 
 

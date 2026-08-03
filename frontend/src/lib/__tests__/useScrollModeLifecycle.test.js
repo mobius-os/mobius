@@ -27,7 +27,7 @@ function fakeElement(fields = {}) {
   }
 }
 
-test('content-only streaming keeps the active reader gesture owner mounted', () => {
+function installBrowserEnvironment({ observers = [], frames = null } = {}) {
   const previous = {
     window: globalThis.window,
     document: globalThis.document,
@@ -36,7 +36,6 @@ test('content-only streaming keeps the active reader gesture owner mounted', () 
     requestAnimationFrame: globalThis.requestAnimationFrame,
     cancelAnimationFrame: globalThis.cancelAnimationFrame,
   }
-  const observers = []
   globalThis.window = {
     addEventListener() {},
     removeEventListener() {},
@@ -60,8 +59,20 @@ test('content-only streaming keeps the active reader gesture owner mounted', () 
     observe() {}
     disconnect() {}
   }
-  globalThis.requestAnimationFrame = () => 1
+  globalThis.requestAnimationFrame = frames
+    ? callback => {
+        frames.push(callback)
+        return frames.length
+      }
+    : () => 1
   globalThis.cancelAnimationFrame = () => {}
+  return () => Object.assign(globalThis, previous)
+}
+
+
+test('transcript changes keep one scroll owner after the first row mounts', () => {
+  const observers = []
+  const restoreBrowser = installBrowserEnvironment({ observers })
 
   const lastUser = fakeElement({ offsetTop: 120, offsetHeight: 40 })
   const list = fakeElement({ offsetHeight: 720 })
@@ -112,6 +123,105 @@ test('content-only streaming keeps the active reader gesture owner mounted', () 
     assert.equal(observers[0].disconnected, true)
     hook.unmount()
   } finally {
-    Object.assign(globalThis, previous)
+    restoreBrowser()
+  }
+})
+
+test('a growing inline editor restores its pre-input anchor but yields to a real scroll', () => {
+  const scrollListeners = new Map()
+  const frames = []
+  const restoreBrowser = installBrowserEnvironment({ frames })
+
+  let scroll
+  const row = fakeElement({
+    dataset: { key: 'assistant-question' },
+    offsetTop: 100,
+    offsetHeight: 300,
+    getBoundingClientRect() {
+      return { top: this.offsetTop - scroll.scrollTop, bottom: 400 - scroll.scrollTop }
+    },
+  })
+  const lastUser = fakeElement({
+    dataset: { cid: 'user-1', key: 'user-1' },
+    offsetTop: 0,
+    offsetHeight: 40,
+  })
+  const list = fakeElement({ offsetHeight: 400 })
+  scroll = fakeElement({
+    scrollTop: 40,
+    scrollHeight: 900,
+    clientHeight: 500,
+    getBoundingClientRect() { return { top: 0, bottom: 500, height: 500 } },
+    addEventListener(type, listener) { scrollListeners.set(type, listener) },
+    removeEventListener(type, listener) {
+      if (scrollListeners.get(type) === listener) scrollListeners.delete(type)
+    },
+    querySelector(selector) {
+      if (selector === '.chat__list') return list
+      if (selector.includes('data-key="assistant-question"')) return row
+      if (selector.includes('data-cid="user-1"')) return lastUser
+      return null
+    },
+    querySelectorAll(selector) {
+      if (selector === '.chat__msg[data-key]') return [row]
+      if (selector === '.chat__msg--user[data-cid]') return [lastUser]
+      return []
+    },
+  })
+  scroll.parentElement = fakeElement()
+  const scrollRef = { current: scroll }
+  const messages = [
+    { role: 'user', cid: 'user-1', content: 'Question' },
+    { role: 'assistant', cid: 'assistant-question', content: '' },
+  ]
+  const hookArgs = {
+    chatId: 'inline-growth-lifecycle',
+    scrollRef,
+    spacerRef: { current: fakeElement() },
+    lastUserMsgRef: { current: lastUser },
+    chatRef: { current: fakeElement() },
+    footRef: { current: fakeElement({ offsetHeight: 80 }) },
+    messages,
+    messagesRef: { current: messages },
+    loadingOlderRef: { current: false },
+    initialEntryPhase: 'ready',
+    hasTranscript: true,
+    ownsReadingPosition: true,
+  }
+  const editor = {
+    matches: selector => selector === 'textarea.qcard__input',
+    closest: () => null,
+  }
+
+  try {
+    const hook = renderHook(useScrollMode, hookArgs)
+    assert.equal(typeof scrollListeners.get('beforeinput'), 'function')
+    assert.equal(typeof scrollListeners.get('input'), 'function')
+
+    const beforeTyping = scroll.scrollTop
+    scrollListeners.get('beforeinput')({ target: editor })
+    scroll.scrollTop = 120 // Native caret reveal races the growing textarea.
+    scrollListeners.get('input')({ target: editor })
+    frames.at(-1)()
+    assert.equal(scroll.scrollTop, beforeTyping,
+      'typing restores the exact row position captured before the field grew')
+
+    scrollListeners.get('beforeinput')({ target: editor })
+    scrollListeners.get('input')({ target: editor })
+    const staleGrowthFrame = frames.at(-1)
+    scrollListeners.get('pointerdown')({
+      type: 'pointerdown', pointerType: 'mouse', button: 0, target: editor,
+    })
+    scroll.scrollTop = 90
+    scrollListeners.get('scroll')()
+    staleGrowthFrame()
+    assert.equal(scroll.scrollTop, 90,
+      'a newer reader gesture owns the viewport instead of the edit correction')
+
+    hook.unmount()
+    assert.equal(scrollListeners.has('beforeinput'), false)
+    assert.equal(scrollListeners.has('input'), false)
+  } finally {
+    restoreBrowser()
   }
 })
