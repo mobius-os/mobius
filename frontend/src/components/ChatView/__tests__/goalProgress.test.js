@@ -182,7 +182,7 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
   )
   assert.match(
     streamConnection,
-    /onConnectionLostRef\.current\?\.\(\)[\s\S]{0,100}onNeedsRefreshRef\.current/,
+    /onConnectionLostRef\.current\?\.\(\)[\s\S]{0,100}refreshThenSettleCatchUp\(\{ force: true \}\)/,
     'retry exhaustion must use the non-terminal handoff before reconciliation',
   )
   assert.match(
