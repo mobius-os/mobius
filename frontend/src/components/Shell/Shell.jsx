@@ -579,6 +579,7 @@ export default function Shell() {
   // ChatView reports a painted frame; the focus lease below carries any early
   // typing across that ID-less interval.
   const [newChatPresentation, setNewChatPresentation] = useState(null)
+  const newChatPresentationRef = useRef(null)
   // The tap reserves keyboard focus before its first await, while this layout
   // commit makes the newly painted presentation the authoritative owner after
   // the drawer and content inert states flip together. This is one handoff
@@ -997,6 +998,9 @@ export default function Shell() {
     setNewChatPresentation(current => (
       current?.chatId === id ? null : current
     ))
+    if (newChatPresentationRef.current?.chatId === id) {
+      newChatPresentationRef.current = null
+    }
     finishDrawerNavigationPresentation()
   }, [finishDrawerNavigationPresentation, workspaceStateRef])
 
@@ -1006,6 +1010,9 @@ export default function Shell() {
   // the New chat landing would stay painted over that surface indefinitely.
   useEffect(() => {
     if (!newChatPresentationSuperseded(newChatPresentation, fullBleedKey)) return
+    if (newChatPresentationRef.current === newChatPresentation) {
+      newChatPresentationRef.current = null
+    }
     setNewChatPresentation(current => (
       current === newChatPresentation ? null : current
     ))
@@ -2546,19 +2553,29 @@ export default function Shell() {
     // tap immediately instead of leaving the drawer/old transcript painted for
     // the whole async allocation. Builder stays additive and therefore waits
     // for the concrete id before opening its new tab.
-  // originKey is the surface the cover is painted over until the row exists.
+    // originKey is the surface the cover is painted over until the row exists.
     // It is what tells a still-running allocation apart from the owner having
     // navigated somewhere else while it ran.
-  const presentation = focusComposer && ws.viewMode === 'single'
-    ? { chatId: null, originKey: fullBleedKey ?? null }
-    : null
-  if (presentation) {
-    setNewChatPresentation(presentation)
-  }
-  // A phone keyboard can only be raised from the tap's live user-activation
-  // task. The modal drawer remains history-open but is no longer displayed,
-  // so no asynchronous traversal can blur this lease before the chat-bound
-  // composer accepts it. The lease also carries any early typing.
+    const presentation = focusComposer && ws.viewMode === 'single'
+      ? {
+          chatId: null,
+          originKey: fullBleedKey ?? null,
+          originView: activeViewRef.current,
+          originChatId: activeChatIdRef.current,
+        }
+      : null
+    if (presentation) {
+      // A second tap belongs to the already visible allocation. Joining it by
+      // doing nothing preserves the first focus lease and guarantees one
+      // destination owns the eventual navigation.
+      if (newChatPresentationRef.current) return
+      newChatPresentationRef.current = presentation
+      setNewChatPresentation(presentation)
+    }
+    // A phone keyboard can only be raised from the tap's live user-activation
+    // task. The modal drawer remains history-open but is no longer displayed,
+    // so no asynchronous traversal can blur this lease before the chat-bound
+    // composer accepts it. The lease also carries any early typing.
     const touchFocusLeased = !!focusComposer && beginTouchComposerFocusLease(
       composerFocusLeaseRef.current,
     )
@@ -2588,6 +2605,9 @@ export default function Shell() {
         releaseComposerFocusLease(composerFocusLeaseRef.current)
       }
       if (presentation) {
+        if (newChatPresentationRef.current === presentation) {
+          newChatPresentationRef.current = null
+        }
         setNewChatPresentation(current => (
           current === presentation ? null : current
         ))
@@ -2601,6 +2621,21 @@ export default function Shell() {
     }
 
     if (presentation) {
+      // Allocation is subordinate to the tap that started it. If the owner
+      // deliberately moved elsewhere while the request was pending, retain
+      // the created empty row but never pull the workspace back to it.
+      const stillAtOrigin = activeViewRef.current === presentation.originView
+        && String(activeChatIdRef.current ?? '') === String(presentation.originChatId ?? '')
+      if (!stillAtOrigin || newChatPresentationRef.current !== presentation) {
+        if (newChatPresentationRef.current === presentation) {
+          newChatPresentationRef.current = null
+          setNewChatPresentation(current => current === presentation ? null : current)
+        }
+        if (touchFocusLeased) {
+          releaseComposerFocusLease(composerFocusLeaseRef.current)
+        }
+        return
+      }
       const alreadyPresented = activeViewRef.current === 'chat'
         && String(activeChatIdRef.current) === String(chatId)
       setNewChatPresentation(current => {
