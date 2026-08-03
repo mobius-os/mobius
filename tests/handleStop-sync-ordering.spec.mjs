@@ -39,6 +39,9 @@ async function setupChat(page) {
 }
 
 async function newChat(page) {
+  const previousChatId = await page
+    .locator('[data-chat-surface="painted"]')
+    .getAttribute('data-chat-id')
   await page.evaluate(() => {
     const btn = document.querySelector('[aria-expanded]')
     if (btn && btn.getAttribute('aria-expanded') !== 'true') btn.click()
@@ -55,12 +58,25 @@ async function newChat(page) {
     () => !document.querySelector('.drawer--open'),
     { timeout: 3000 }
   )
+  // New Chat presents and focuses the empty composer before its durable chat
+  // allocation finishes. This test mocks a chat-id-scoped stream, so wait for
+  // the new identity rather than racing the first send against allocation.
+  await page.waitForFunction(previous => {
+    const surface = document.querySelector('[data-chat-surface="painted"]')
+    const next = surface?.getAttribute('data-chat-id')
+    const composer = surface?.querySelector('[aria-label="Message Möbius…"]')
+    return !!next
+      && next !== previous
+      && !document.querySelector('[data-new-chat-presentation]')
+      && !!composer
+      && !composer.disabled
+  }, previousChatId, { timeout: 10000 })
 }
 
 async function sendMessage(page, text) {
   const input = page.getByRole('textbox', { name: 'Message Möbius…' })
   await input.fill(text)
-  await page.keyboard.press('Enter')
+  await input.press('Enter')
 }
 
 // These tests mock the network via page.route and assert no service-worker
@@ -124,7 +140,11 @@ test.describe('handleStop sync-ordering (Ticket 034 R1)', () => {
           }),
         })
       }
-      return route.fulfill({ status: 202, contentType: 'application/json', body: '{}' })
+      return route.fulfill({
+        status: 202,
+        contentType: 'application/json',
+        body: JSON.stringify({ status: 'started' }),
+      })
     })
     // page.route().fulfill() cannot drip a body: it delivers the complete payload and
     // closes the response. Sleeping before fulfill merely delayed the first SSE event,
