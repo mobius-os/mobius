@@ -43,8 +43,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
     fonts-liberation fonts-noto-color-emoji \
     && npm install -g esbuild@0.28.1 \
-    && npm install -g @anthropic-ai/claude-code@2.1.218 \
-    && npm install -g @openai/codex@0.145.0 \
+    && npm install -g @anthropic-ai/claude-code@2.1.220 \
+    && npm install -g @openai/codex@0.146.0 \
     && npm install -g agent-browser@0.31.1 \
     && agent-browser install \
     && mv /root/.agent-browser /opt/agent-browser \
@@ -115,8 +115,8 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.lock \
 # lockstep npm CLI. This preserves the external SDK contract without storing a
 # second ~350 MB runtime or running a second protocol version.
 # Pinned to commit SHA (not tag) for full reproducibility — tags are
-# mutable on GitHub. SHA corresponds to refs/tags/rust-v0.145.0
-# as of 2026-07-24, and is kept in lockstep with the npm @openai/codex
+# mutable on GitHub. SHA corresponds to refs/tags/rust-v0.146.0
+# as of 2026-08-03, and is kept in lockstep with the npm @openai/codex
 # binary above (the SDK spawns it via codex_bin=shutil.which("codex")).
 # We moved from rust-v0.144.5 to this tag because the 0.144.x generated
 # ReasoningEffort enum was strict (none/minimal/low/medium/high/xhigh)
@@ -124,14 +124,14 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.lock \
 # codex.models() and ThreadResumeResponse validation failed and broke a
 # real chat resume. alpha.13 turned ReasoningEffort into a forgiving
 # `str, Enum` with a `_missing_` hook that accepts any effort string;
-# 0.145.0 is the latest stable tag published to BOTH the git repo and npm, so
+# 0.146.0 is the latest stable tag published to BOTH the git repo and npm, so
 # binary and schema stay matched. The SDK exposes the request bridge as a
 # public `approval_handler` constructor argument on
 # `openai_codex.client.CodexClient`; `AsyncCodex` still does not forward
 # it, so codex_sdk_runner.py installs the handler on the wrapped sync
 # client's `_approval_handler`.
 RUN pip install --no-cache-dir --no-deps \
-      'openai-codex @ git+https://github.com/openai/codex.git@25af12f7e61572b0bc18ddb1008be543b91519b0#subdirectory=sdk/python' \
+      'openai-codex @ git+https://github.com/openai/codex.git@e363b08c9175ac1cbe5893615dd2cb9ddf95043b#subdirectory=sdk/python' \
     && pip install --no-cache-dir 'openai-codex-cli-bin==0.144.4' \
     && _codex_cli_bin="$(python -c \
       'from pathlib import Path; import codex_cli_bin; print(Path(codex_cli_bin.__file__).parent)')" \
