@@ -735,9 +735,9 @@ def test_model_registry_returns_known_models_on_missing_creds(client, auth):
   assert claude_ids == KNOWN_MODELS["claude"]
   codex_ids = [m["id"] for m in body["providers"]["codex"]]
   assert codex_ids == KNOWN_MODELS["codex"]
-  # Labels carry through from MODEL_LABELS.
+  # Offline fallbacks use the exact model id; live catalogs own display names.
   by_id = {m["id"]: m for m in body["providers"]["claude"]}
-  assert by_id["claude-opus-4-8"]["label"] == "Opus 4.8"
+  assert by_id["claude-opus-4-8"]["label"] == "claude-opus-4-8"
   # The user-facing API contract is `available=true` on every fallback
   # entry, but the route layer relies on Pydantic's `ModelEntry`
   # default to fill that field. Verify the underlying helper directly
@@ -782,6 +782,7 @@ def test_fetch_codex_models_reads_cli_catalog_not_sdk(tmp_path, monkeypatch):
   catalog = json.dumps({"models": [
     {
       "slug": "gpt-5.6-sol",
+      "display_name": "GPT-5.6-Sol",
       "supported_reasoning_levels": [
         {"effort": "low"}, {"effort": "max"}, {"effort": "ultra"},
       ],
@@ -808,6 +809,7 @@ def test_fetch_codex_models_reads_cli_catalog_not_sdk(tmp_path, monkeypatch):
   assert entries == [
     {
       "id": "gpt-5.6-sol",
+      "label": "GPT-5.6-Sol",
       "effort_levels": ["low", "max", "ultra"],
     },
     {"id": "gpt-5.6-terra"},
@@ -964,6 +966,21 @@ def test_live_model_entries_float_curated_defaults_in_requested_order():
     "claude-sonnet-4-6",
     "claude-future-model",
   ]
+
+
+def test_live_model_entries_prefer_provider_display_names():
+  from app import providers
+
+  entries = providers._live_model_entries(
+    "claude",
+    [
+      {"id": "claude-opus-4-8", "label": "Claude Opus 4.8"},
+      {"id": "claude-opus-5", "label": "Claude Opus 5"},
+    ],
+  )
+  by_id = {entry["id"]: entry for entry in entries}
+  assert by_id["claude-opus-4-8"]["label"] == "Claude Opus 4.8"
+  assert by_id["claude-opus-5"]["label"] == "Claude Opus 5"
 
 
 def test_live_model_entries_carry_provider_effort_metadata():

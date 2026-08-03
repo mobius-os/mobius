@@ -21,7 +21,6 @@ import {
 } from '../../lib/restartReadiness.js'
 import { updateCheckOutcome, updateCheckLabel } from '../../lib/updateCheckPhase.js'
 import * as themeService from '../../lib/themeService.js'
-import { CLAUDE_MODELS, CODEX_MODELS } from '../ProviderModelPicker/ProviderModelPicker.jsx'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderRow from '../ProviderAuth/ProviderRow.jsx'
@@ -59,10 +58,6 @@ const PROVIDER_CHOICES = [
   { id: 'claude', label: 'Claude Code' },
   { id: 'codex', label: 'OpenAI Codex' },
 ]
-const FALLBACK_MODEL_ROWS = {
-  claude: CLAUDE_MODELS.map((m) => ({ id: m.value, label: m.label, available: true })),
-  codex: CODEX_MODELS.map((m) => ({ id: m.value, label: m.label, available: true })),
-}
 const DEFAULT_BACKGROUND_MODELS = {
   claude: 'claude-opus-4-8',
   codex: 'gpt-5.6-terra',
@@ -73,12 +68,8 @@ function defaultEffort(provider) {
   return efforts.find(e => e.value === 'medium')?.value || efforts[0]?.value || ''
 }
 
-function defaultModel(provider) {
-  return FALLBACK_MODEL_ROWS[provider]?.[0]?.id || ''
-}
-
 function defaultBackgroundModel(provider) {
-  return DEFAULT_BACKGROUND_MODELS[provider] || defaultModel(provider)
+  return DEFAULT_BACKGROUND_MODELS[provider] || ''
 }
 
 function isKnownProvider(provider) {
@@ -166,7 +157,9 @@ function BackgroundProviderRow({
   const Logo = info?.Logo
   const configured = configuredProviders.has(row.provider)
   const enabled = configured && row.enabled !== false
-  const selectedModel = enabled ? (row.model || defaultModel(row.provider)) : ''
+  const selectedModel = enabled
+    ? (row.model || defaultBackgroundModel(row.provider))
+    : ''
   const selectedRow = models.find((m) => m.id === selectedModel)
   const efforts = info?.efforts || []
   const selectedEfforts = modelEfforts(efforts, selectedRow)
@@ -536,7 +529,7 @@ export default function SettingsView({
         effort_levels: m.effort_levels,
       }))
     }
-    return FALLBACK_MODEL_ROWS[provider] || []
+    return []
   }, [modelRegistryQuery.data])
 
   const persistBackgroundAgents = useCallback((draft, companionSettings = {}) => {

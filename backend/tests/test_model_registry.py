@@ -255,7 +255,7 @@ async def test_refresh_preserves_sibling_credential_keys(tmp_path, monkeypatch):
 async def test_fetch_claude_models_uses_refreshed_token(tmp_path, monkeypatch):
   """End-to-end: an expired token does NOT 401 the models fetch — it
   refreshes first, then the /v1/models GET carries the new token and the
-  live id list comes back (not the static fallback)."""
+  live model metadata comes back (not the static fallback)."""
   past = int(time.time() * 1000) - 1000
   _write_creds(
     tmp_path, access="stale", refresh="refresh-tok", expires_at=past,
@@ -271,15 +271,20 @@ async def test_fetch_claude_models_uses_refreshed_token(tmp_path, monkeypatch):
     # /v1/models — must carry the refreshed token, else 401.
     assert request.headers["authorization"] == "Bearer live-tok"
     return httpx.Response(200, json={"data": [
-      {"id": "claude-opus-4-8"},
-      {"id": "claude-some-future-model"},
+      {"id": "claude-opus-4-8", "display_name": "Claude Opus 4.8"},
+      {
+        "id": "claude-some-future-model",
+        "display_name": "Claude Future Model",
+      },
     ]})
 
   _install_mock_transport(monkeypatch, handler)
 
-  ids = await providers._fetch_claude_models(str(tmp_path))
-  assert "claude-opus-4-8" in ids
-  assert "claude-some-future-model" in ids
+  live_models = await providers._fetch_claude_models(str(tmp_path))
+  assert live_models == [
+    {"id": "claude-opus-4-8", "label": "Claude Opus 4.8"},
+    {"id": "claude-some-future-model", "label": "Claude Future Model"},
+  ]
 
 
 @pytest.mark.asyncio
@@ -305,8 +310,8 @@ async def test_fetch_claude_models_raises_when_refresh_fails(
   assert any(e["id"] == "claude-opus-4-8" for e in fallback)
 
 
-def test_codex_model_entries_preserve_live_reasoning_levels():
-  """The loose CLI parser carries new effort values to the picker.
+def test_codex_model_entries_preserve_live_catalog_metadata():
+  """The loose CLI parser carries provider labels and effort values.
 
   The generated SDK enum may still reject max/ultra, so model discovery must
   not discard those strings while extracting the catalog IDs.
@@ -315,6 +320,7 @@ def test_codex_model_entries_preserve_live_reasoning_levels():
     "models": [
       {
         "slug": "gpt-5.6-sol",
+        "display_name": "GPT-5.6-Sol",
         "supported_reasoning_levels": [
           {"effort": "medium"},
           {"effort": "max"},
@@ -329,6 +335,7 @@ def test_codex_model_entries_preserve_live_reasoning_levels():
   assert providers._codex_model_entries_from_payload(payload) == [
     {
       "id": "gpt-5.6-sol",
+      "label": "GPT-5.6-Sol",
       "effort_levels": ["medium", "max", "ultra"],
     },
     {"id": "gpt-future"},

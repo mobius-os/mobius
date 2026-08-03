@@ -1,10 +1,8 @@
 /**
  * ChatSettingsPanel — the per-chat model + effort picker inside the
- * composer's `+` popover. Renders the design-iter row-style layout
- * (provider logo + title + subtitle + radio dot; effort slider under
- * the selected row) instead of the older `ProviderModelPicker` radio
- * list. It also owns the confirmation and atomic handoff flow used for
- * cross-provider switches after a chat has assistant turns.
+ * composer's `+` popover. Renders the model rows and effort slider, and owns
+ * the confirmation and atomic handoff flow used for cross-provider switches
+ * after a chat has assistant turns.
  *
  * ╔══════════════════════════════════════════════════════════════════╗
  * ║                                                                  ║
@@ -73,10 +71,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiFetch } from '../../api/client.js'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { authQueries, modelQueries } from '../../hooks/queries.js'
-import {
-  CLAUDE_MODELS,
-  CODEX_MODELS,
-} from '../ProviderModelPicker/ProviderModelPicker.jsx'
 import EffortStepper from '../ui/EffortStepper.jsx'
 import { modelEfforts, validEffort } from '../ui/modelEfforts.js'
 import {
@@ -163,10 +157,6 @@ export const PROVIDER_INFO = {
     id: 'codex',
     label: 'OpenAI Codex',
     Logo: OpenAILogo,
-    // Models come from the live `/api/models` registry at render
-    // time; this stays as a fallback for the panel-rendered-before-
-    // queries-resolve frame.
-    fallbackModels: CODEX_MODELS,
     efforts: [
       { value: 'none', label: 'None' },
       { value: 'minimal', label: 'Minimal' },
@@ -180,7 +170,6 @@ export const PROVIDER_INFO = {
     id: 'claude',
     label: 'Claude Code',
     Logo: ClaudeLogo,
-    fallbackModels: CLAUDE_MODELS,
     efforts: [
       { value: 'low', label: 'Low' },
       { value: 'medium', label: 'Medium' },
@@ -620,26 +609,14 @@ export default function ChatSettingsPanel({
     : undefined
   const appProviderLocked = chat?.created_by_app_id != null
 
-  // Build the per-provider displayed-models list once per render.
-  // Falls back to the bundled CLAUDE_MODELS / CODEX_MODELS until the
-  // registry query resolves — but we gate the actual model rows on
-  // `dataReady` below (showing a skeleton) to avoid the flicker the
-  // spec calls out (prefs filter applied AFTER the unfiltered list
-  // already painted).
+  // Build the per-provider displayed-models list once per render. The backend
+  // registry owns both live discovery and its offline fallback; keeping a
+  // second frontend catalog would let the two drift.
   const displayedByProvider = useMemo(() => {
     const out = {}
     for (const pid of PROVIDER_ORDER) {
       const live = registry?.[pid]
-      const source = Array.isArray(live) && live.length
-        ? live
-        // Fallback: shape the static list to match the registry
-        // entry shape so the renderer downstream doesn't need to
-        // branch. Used only when the registry query is still
-        // loading AND the deferred-render gate has been bypassed
-        // (it normally hasn't — see `dataReady` above).
-        : PROVIDER_INFO[pid].fallbackModels.map(m => (
-          { id: m.value, label: m.label, provider: pid, available: true }
-        ))
+      const source = Array.isArray(live) ? live : []
       const selectedHere = selectedProvider === pid
         ? selectedModel
         : (draftProvider === pid ? draftModel : null)
