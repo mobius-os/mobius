@@ -92,9 +92,7 @@ def is_waiting(chat_id: str) -> bool:
 
   A resolved or cancelled future can remain in the registry briefly while the
   provider callback unwinds. That entry is useful to its owning runner, but it
-  must not classify the whole SDK turn as an unbounded human wait: if the
-  provider wedges after receiving the answer, the liveness watchdog still
-  needs to reclaim the turn and its child processes.
+  is no longer waiting for an owner answer.
   """
   pending = _pending.get(chat_id)
   return pending is not None and not pending.future.done()

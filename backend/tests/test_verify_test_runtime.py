@@ -545,7 +545,7 @@ def test_documented_browser_commands_use_disposable_runner():
   assert '/home/' not in test_script
 
 
-def test_pull_requests_run_required_suites_and_cutover_publishes_immutable_image():
+def test_manual_and_pull_request_runs_cover_suites_and_cutover_image():
   test_workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
     encoding="utf-8"
   )
@@ -565,6 +565,7 @@ def test_pull_requests_run_required_suites_and_cutover_publishes_immutable_image
   e2e = test_workflow.split("\n  e2e:\n", 1)[1]
 
   assert "pull_request:\n" in test_triggers
+  assert "workflow_dispatch:\n" in test_triggers
   assert "push:\n" not in test_triggers
   assert "'feat/**'" not in test_triggers
   assert "'fix/**'" not in test_triggers

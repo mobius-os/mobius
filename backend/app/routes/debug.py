@@ -8,7 +8,6 @@ ad-hoc debug endpoints.
 
 import json
 import os
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -22,7 +21,7 @@ from app.broadcast import (
   get_all_active_broadcasts,
 )
 from app.browser_profiles import browser_profile_status
-from app.chat import active_sink_memory_diagnostics, live_run_health_fields
+from app.chat import active_sink_memory_diagnostics
 from app.chat_writer import writer_memory_diagnostics
 from app.config import get_settings
 from app.database import database_pool_snapshot, get_db
@@ -108,26 +107,12 @@ def debug_status(
   ``/api/debug/memory``; query options do not turn the status probe into the
   detailed report.
   """
-  now_monotonic = time.monotonic()
-  now_wall = datetime.now(UTC).replace(tzinfo=None)
-
-  def _client_entry(handle):
-    return {
-      "chat_id": handle.chat_id,
-      **live_run_health_fields(
-        handle.chat_id,
-        db,
-        now_monotonic=now_monotonic,
-        now_wall=now_wall,
-      ),
-    }
-
   sdk_clients = [
-    _client_entry(handle)
+    {"chat_id": handle.chat_id}
     for handle in registry.handles_by_kind(RunnerKind.CLAUDE_SDK)
   ]
   sdk_sessions = [
-    _client_entry(handle)
+    {"chat_id": handle.chat_id}
     for handle in registry.handles_by_kind(RunnerKind.CODEX_SDK)
   ]
 
@@ -137,12 +122,7 @@ def debug_status(
       "chat_id": bc.chat_id,
       "running": bc.running,
       "event_count": len(bc.event_log),
-      **live_run_health_fields(
-        bc.chat_id,
-        db,
-        now_monotonic=now_monotonic,
-        now_wall=now_wall,
-      ),
+      "subscriber_count": len(bc.subscribers),
     })
 
   # app.state.reconciliation_failed is set by lifespan() when the

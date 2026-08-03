@@ -9,15 +9,11 @@ from app.runtime_supervisors import RuntimeSupervisors
 
 
 def _supervisors():
-  async def lag_sleep(*_args, **_kwargs):
-    await asyncio.sleep(3600)
-
   return RuntimeSupervisors(
     settings=SimpleNamespace(data_dir="/tmp"),
     logger=logging.getLogger("test.runtime-supervisors"),
     restart_authorization=None,
     restart_fallback_chats=[],
-    lag_sleep=lag_sleep,
   )
 
 

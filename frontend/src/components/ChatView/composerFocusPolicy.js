@@ -2,11 +2,9 @@ export function shouldApplyComposerFocusRequest({
   focusRequest,
   chatId,
   embedded = false,
-  isTouchPrimary = false,
 } = {}) {
-  if (!focusRequest) return false
+  if (focusRequest?.focus !== true) return false
   if (embedded) return false
-  if (isTouchPrimary) return false
   if (focusRequest.chatId == null || chatId == null) return false
   return String(focusRequest.chatId) === String(chatId)
 }

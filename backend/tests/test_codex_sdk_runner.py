@@ -2034,8 +2034,8 @@ def _run_turn_whose_stream_dies(
   """Runs one turn whose stream raises `exc`, optionally mid-teardown.
 
   `on_register` fires against the handle the runner has just registered —
-  the same window in which the real Stop / stall watchdog reaches a live
-  turn — so a test can mark the teardown as ours before the stream dies.
+  the same window in which a real Stop reaches a live turn — so a test can
+  mark the teardown as ours before the stream dies.
   `notifications` are delivered before the death, so a test can give the
   turn something to have spent; `sdk_patch` supplies the payload classes
   those notifications need to be recognized as.
@@ -2095,12 +2095,8 @@ def test_run_codex_sdk_turn_reports_self_requested_kill_as_interrupted(
 ):
   """A stop we asked for must not read as a provider failure.
 
-  Stop and the stall watchdog both interrupt first and then, on timeout,
-  SIGTERM the turn's private process group — so the transport dies
-  mid-stream instead of delivering turn/completed. Reporting the resulting
-  "closed stdout" as an error is wrong twice over: it blames Codex for our
-  own teardown, and the error block overwrites the stop/stall note in the
-  transcript and strips its one-tap Resume.
+  A forced stop closes the transport before turn/completed. Reporting the
+  resulting "closed stdout" as an error would blame Codex for our teardown.
   """
   result, bc = _run_turn_whose_stream_dies(
     monkeypatch,

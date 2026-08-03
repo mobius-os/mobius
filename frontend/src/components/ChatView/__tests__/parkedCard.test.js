@@ -87,12 +87,12 @@ test('the live stream reducer carries the pause descriptor', () => {
   assert.match(
     stream,
     /event\.pause \? \{ pause: event\.pause \}/,
-    'a live limit/restart/stall note must render as the pause card before promote too',
+    'a live limit/restart note must render as the pause card before promote too',
   )
   assert.match(
     stream,
     /event\.resumable \? \{ resumable: true \}/,
-    'a live stalled/paused note must carry resumable',
+    'a live paused note must carry resumable',
   )
 })
 
@@ -187,7 +187,7 @@ test('a system-announced auto-resume reconnects the mounted chat surface', () =>
 })
 
 test('a benign pause (no reset time) renders the calm "Paused" family, not red Error', () => {
-  // A drain-restart or stall carries pause.kind but no resets_at; it must get
+  // A drain-restart carries pause.kind but no resets_at; it must get
   // the soft .chat__text--parked treatment and a "Paused" label. Red "Error"
   // is reserved for genuine failures (no pause at all).
   assert.match(errorCard, /benign = !!block\.pause/,

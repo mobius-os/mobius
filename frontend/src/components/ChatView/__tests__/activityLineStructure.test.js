@@ -112,11 +112,11 @@ test('a delegating stretch keeps helper status and activity under one honest dis
     'helper rows remain honest noninteractive status')
 })
 
-test('lazy tool details keep top-level touch targets and compact nested rows', () => {
+test('lazy tool details and explicit actions keep accessible touch targets', () => {
   const toolBlock = readFileSync(new URL('../ToolBlock.jsx', import.meta.url), 'utf8')
   const coarse = [...chatCss.matchAll(/@media \(pointer: coarse\) \{[\s\S]*?\n\}/g)]
     .map(match => match[0])
-    .join('\n')
+    .find(rule => rule.includes('.chat__empty-action')) || ''
 
   assert.match(toolBlock, /aria-controls=\{detailId\}/)
   assert.match(toolBlock, /id=\{detailId\}[\s\S]*hidden=\{!open\}/,
@@ -129,30 +129,22 @@ test('lazy tool details keep top-level touch targets and compact nested rows', (
   assert.match(coarse, /\.chat__empty-action/)
   assert.match(coarse, /\.chat__quick-action-chip/)
   assert.match(coarse, /\.chat__lazy-retry/)
-  assert.match(coarse, /\.chat__tool--compact > \.chat__tool-header/)
   assert.match(coarse, /min-height:\s*44px/)
-  assert.doesNotMatch(coarse, /(?<!compact > )\.chat__tool-header:not/,
-    'nested tool rows should not inherit top-level transcript spacing')
-  assert.doesNotMatch(coarse, /\.chat__activity-think-toggle/,
-    'nested thought rows should keep the compact timeline rhythm')
 })
 
-test('activity spacing and aligned columns derive from one shared rhythm', () => {
+test('activity spacing and nested hierarchy derive from one shared rhythm', () => {
   const message = cssRule('.chat__msg--assistant')
   const tools = cssRule('.chat__tools')
+  const adjacentTools = cssRule('.chat__tools + .chat__tools')
   const timeline = cssRule('.chat__activity-timeline')
 
   assert.match(message, /--activity-block-gap:\s*8px/)
   assert.match(message, /--activity-row-gap:\s*4px/)
   assert.match(tools, /gap:\s*var\(--activity-row-gap, 4px\)/)
+  assert.match(adjacentTools, /margin-top:\s*var\(--activity-row-gap, 4px\)/,
+    'separate activity stretches should keep the same compact beat as grouped rows')
   assert.match(timeline, /gap:\s*var\(--activity-row-gap, 4px\)/)
   assert.match(timeline, /margin-top:\s*var\(--activity-row-gap, 4px\)/)
-  assert.match(timeline, /margin-inline-start:\s*0/,
-    'child labels must stay in the same column as their summary label')
-  assert.match(timeline, /padding-inline-start:\s*0/,
-    'the timeline must not add a second indentation before child icons')
-  assert.doesNotMatch(timeline, /border-inline-start/,
-    'a nested rail must not occupy the shared activity label column')
-  assert.doesNotMatch(chatCss, /\.chat__tools \+ \.chat__tools\s*\{\s*margin-top:\s*2px/,
-    'adjacent activity blocks should not retain a one-off gap')
+  assert.match(timeline, /border-inline-start:\s*1px/,
+    'a neutral one-pixel rail carries the child hierarchy')
 })

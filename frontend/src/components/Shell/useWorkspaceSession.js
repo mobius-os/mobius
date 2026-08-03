@@ -18,18 +18,27 @@ import { projectFocusedPane } from './workspaceView.js'
  * without moving those policies into the reducer. Every workspace mutation must
  * use dispatchWorkspace so same-batch transitions compose against workspaceStateRef.
  */
-export default function useWorkspaceSession({ storage }) {
+function bootWorkspaceSnapshot(storage, legacyStorage) {
+  const legacyRaw = paneModel.readWorkspaceRaw(legacyStorage)
+  if (paneModel.isValidWorkspaceBlob(legacyRaw)) {
+    return { raw: legacyRaw, source: legacyStorage }
+  }
+  return { raw: paneModel.readWorkspaceRaw(storage), source: storage }
+}
+
+export default function useWorkspaceSession({ storage, legacyStorage = null }) {
+  const [bootSnapshot] = useState(
+    () => bootWorkspaceSnapshot(storage, legacyStorage),
+  )
   const [workspaceState, dispatchWorkspaceRaw] = useReducer(
     paneModel.workspaceReducer,
     undefined,
     () => paneModel.initialWorkspaceState(
-      paneModel.parseWorkspace(paneModel.readWorkspaceRaw(storage)),
+      paneModel.parseWorkspace(bootSnapshot.raw),
     ),
   )
   const workspace = workspaceState.ws
-  const [blobValid] = useState(
-    () => paneModel.isValidWorkspaceBlob(paneModel.readWorkspaceRaw(storage)),
-  )
+  const blobValid = paneModel.isValidWorkspaceBlob(bootSnapshot.raw)
   const replaceImplicitBootTab = !blobValid
     && Object.keys(workspace.panes).length === 1
     && paneModel.flatten(workspace).length <= 1
@@ -42,7 +51,7 @@ export default function useWorkspaceSession({ storage }) {
 
   const [focusedPaneViewId, setFocusedPaneViewIdState] = useState(
     () => paneModel.resolveInitialFocusedPaneView(
-      workspace, paneModel.readFocusedPaneView(storage),
+      workspace, paneModel.readFocusedPaneView(bootSnapshot.source),
     ),
   )
   const focusedPaneViewIdRef = useRef(focusedPaneViewId)
@@ -134,6 +143,28 @@ export default function useWorkspaceSession({ storage }) {
   useEffect(() => {
     paneModel.writeFocusedPaneView(focusedPaneViewId, storage)
   }, [focusedPaneViewId, storage])
+
+  // The workspace is one durable browser-owned snapshot. `legacyStorage` is
+  // only the legacy session value: prefer it once during this live tab's
+  // upgrade, copy the normalized result durably, then remove it so it can never
+  // override a newer cross-launch snapshot on a later reload.
+  useEffect(() => {
+    try {
+      storage.setItem(
+        paneModel.STORAGE_KEY,
+        paneModel.serializeWorkspace(workspace),
+      )
+    } catch {
+      // Private mode/quota may reject writes; keep the session copy as the only
+      // available recovery source rather than deleting it after a failed copy.
+      return
+    }
+    if (!legacyStorage || legacyStorage === storage) return
+    try {
+      legacyStorage.removeItem(paneModel.STORAGE_KEY)
+      legacyStorage.removeItem(paneModel.FOCUSED_PANE_VIEW_KEY)
+    } catch { /* the durable copy already succeeded */ }
+  }, [legacyStorage, storage, workspace])
 
   const toggleFocusedPaneView = useCallback((paneId) => {
     const ws = workspaceStateRef.current.ws

@@ -108,10 +108,20 @@ returning always preserves the exact visible anchor and never restores
 auto-scroll to a newer tail. New send and lifecycle paths must use the shared
 state machine rather than deriving intent from geometry alone.
 
-**End-to-end (Playwright).** Comprehensive browser checks run in GitHub after a
-PR is opened. Do not point raw Playwright, an auth setup, or a preview proxy at
-a live Möbius backend. For a rare local reproduction, first commit the exact
-revision, then run the host-only disposable wrapper from a Docker-capable host:
+**End-to-end (Playwright).** Comprehensive browser checks run in GitHub for pull
+requests. A prepared platform contribution can run the same suite earlier from
+Contribute: **Run GitHub checks** pushes only the reviewed branch to the owner's
+fork and manually dispatches `.github/workflows/test.yml`; it does not open a
+pull request. From another checkout whose branch is already on GitHub, the
+equivalent manual command is:
+
+```bash
+gh workflow run test.yml -R <your-login>/mobius --ref <branch>
+```
+
+Do not point raw Playwright, an auth setup, or a preview proxy at a live Möbius
+backend. For a rare local reproduction, first commit the exact revision, then
+run the host-only disposable wrapper from a Docker-capable host:
 
 ```bash
 npm ci && npx playwright install --with-deps chrome

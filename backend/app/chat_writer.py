@@ -2628,9 +2628,8 @@ class ChatWriterActor:
     # too: a fresh StartTurn / PromotePending on a parked chat means the owner
     # resumed it themselves (one-tap Resume, or any new send), so the stale
     # park must be closed — otherwise it would fire a spurious reset notify /
-    # auto-resume later, and its parked_until could wrongly exempt the NEW
-    # live turn from the stall watchdog. "parked_notified" rows are already
-    # resolved and stay untouched.
+    # auto-resume later. "parked_notified" rows are already resolved and stay
+    # untouched.
     q = db.query(ChatRun).filter(
       ChatRun.chat_id == chat_id,
       ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),

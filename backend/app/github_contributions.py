@@ -424,6 +424,20 @@ def _claim_record(
       status_code=409,
       detail="This contribution is no longer waiting for approval.",
     )
+  early_checks = record.get("early_checks")
+  if (
+    isinstance(early_checks, dict)
+    and early_checks.get("state") in {
+      "dispatching", "uncertain", "queued", "in_progress",
+    }
+  ):
+    raise HTTPException(
+      status_code=409,
+      detail=(
+        "GitHub checks are still starting or running for this review. Wait "
+        "for them to finish before opening the pull request."
+      ),
+    )
   plan = record.get("plan")
   if not isinstance(plan, dict):
     raise HTTPException(

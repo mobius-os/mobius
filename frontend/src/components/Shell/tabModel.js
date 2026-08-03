@@ -33,7 +33,7 @@ export const APPS_TAB_KEY = 'apps:apps'
 export function appsTab() { return { kind: 'apps', id: APPS_ID } }
 export function isAppsTab(tab) { return !!tab && tab.kind === 'apps' }
 
-// Ids are stored as strings for stable React keys + sessionStorage. App ids
+// Ids are stored as strings for stable React keys + browser persistence. App ids
 // are re-coerced to Number in tabNavTarget — the ONLY correct nav shape (the
 // iframe LRU dedups on strict !==, so a string id would double-mount).
 export function makeTab(kind, id) {

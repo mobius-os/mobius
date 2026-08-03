@@ -478,50 +478,90 @@ test.describe('Short responses', () => {
 })
 
 test.describe('Chat switching (the bug)', () => {
-  test('11. Return to chat — RO active, spacer tracks injected content', async ({ page }) => {
+  test('11. Cold return preserves the visible owner\'s exact reading position', async ({ page }) => {
     await setup(page)
     await newChat(page)
-    await sendMessage(page, 'Test switch')
+    const chatId = await page.evaluate(() => localStorage.getItem('moebius_active_chat'))
+    expect(chatId).toBeTruthy()
 
-    const beforeSwitch = await measure(page)
-    expect(beforeSwitch.spacerH).toBeGreaterThan(0)
+    // Persist enough stable transcript rows to make a middle reading position
+    // meaningfully different from both the first row and the recent tail.
+    await page.evaluate(async ({ id }) => {
+      const token = localStorage.getItem('token')
+      const now = Date.now()
+      const messages = Array.from({ length: 36 }, (_, index) => ({
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: `Return position row ${index}. ${'Stable browser contract text. '.repeat(12)}`,
+        ts: now + index,
+        cid: index % 2 === 0 ? `return-position-${index}` : undefined,
+        blocks: [],
+      }))
+      const response = await fetch(`/api/chats/${id}`, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ messages }),
+      })
+      if (!response.ok) throw new Error(`seed PUT failed: ${response.status}`)
+    }, { id: chatId })
 
-    // Simulate switching away: save state to sessionStorage.
+    await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chatId)}`, {
+      waitUntil: 'domcontentloaded',
+    })
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll'))
+      .toBeVisible({ timeout: 15000 })
+
+    // Exercise the reader-owned path rather than assigning scrollTop as test
+    // setup. The pointer edge opens the controller's gesture window; the
+    // resulting ANCHOR_AT write is the product state that must survive return.
     await page.evaluate(() => {
       const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
-      const spacer = document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')
-      if (scroll && spacer) {
-        const positions = JSON.parse(sessionStorage.getItem('chat-scroll') || '{}')
-        const spacers = JSON.parse(sessionStorage.getItem('chat-spacer') || '{}')
-        positions['test-chat'] = scroll.scrollHeight - scroll.scrollTop
-        spacers['test-chat'] = spacer.style.height
-        sessionStorage.setItem('chat-scroll', JSON.stringify(positions))
-        sessionStorage.setItem('chat-spacer', JSON.stringify(spacers))
-      }
+      if (!scroll) throw new Error('scroll surface missing')
+      scroll.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      scroll.scrollTop = Math.floor(scroll.scrollHeight / 3)
     })
+    await page.waitForFunction((id) => {
+      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      const saved = JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[id]
+      return scroll?.dataset.scrollMode === 'ANCHOR_AT'
+        && saved?.kind === 'ANCHOR_AT'
+        && scroll.scrollTop > scroll.clientHeight
+    }, chatId)
 
-    // Reload to simulate returning.
-    await page.goto(BASE)
-    await expect(page.locator('[data-chat-surface="painted"] :is(.chat__scroll, .chat__empty-wrap)').first()).toBeVisible({ timeout: 8000 })
-    await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+    const readPosition = () => page.evaluate((id) => {
+      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      const saved = JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[id]
+      const anchor = scroll.querySelector(`[data-key="${CSS.escape(saved.key)}"]`)
+      return {
+        key: saved.key,
+        offset: saved.offset,
+        anchorTop: anchor.getBoundingClientRect().top - scroll.getBoundingClientRect().top,
+      }
+    }, chatId)
+    const beforeReturn = await readPosition()
 
-    const hasScroll = await page.evaluate(() => !!document.querySelector('[data-chat-surface="painted"] .chat__scroll'))
-    if (!hasScroll) {
-      // App loaded a different (empty) chat — skip this assertion.
-      return
-    }
+    // A cold shell mount may retain physical ChatView owners for both workspace
+    // worlds. An initially hidden owner has never painted and must not replace
+    // the visible owner's durable coordinate while mounting or unloading.
+    await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll'))
+      .toBeVisible({ timeout: 15000 })
+    await page.waitForFunction((id) => (
+      document.querySelector('[data-chat-surface="painted"]')?.dataset.chatId === id
+      && document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+        ?.dataset.scrollMode === 'ANCHOR_AT'
+    ), chatId)
 
-    // Inject content simulating agent still streaming.
-    await injectContent(page, 'Streaming content. ', 50)
-    const afterContent = await measure(page)
-    if (afterContent.error) return // scroll element disappeared
+    const afterReturn = await readPosition()
 
-    // Key assertion: spacer should have shrunk (RO is active).
-    if (afterContent.listH > afterContent.clientH) {
-      expect(afterContent.spacerH).toBe(0)
-    } else {
-      assertSpacerReasonable(afterContent)
-    }
+    expect(afterReturn.key).toBe(beforeReturn.key)
+    expect(Math.abs(afterReturn.offset - beforeReturn.offset)).toBeLessThanOrEqual(1)
+    // A cold fetch may contain fewer paginated rows above the anchor, so raw
+    // scrollTop is deliberately not stable. The semantic coordinate must put
+    // the same anchor at the same visible viewport position.
+    expect(Math.abs(afterReturn.anchorTop - beforeReturn.anchorTop)).toBeLessThanOrEqual(8)
   })
 })
 

@@ -962,10 +962,8 @@ def test_process_error_event_coalesces_duplicates():
 def test_process_error_event_carries_whitelisted_extras_on_append():
   """The park/resume extras ride the error event onto the persisted block.
 
-  Item 4 could only mark notes resumable at boot reconcile because this path
-  stripped everything but `message`; the whitelist passthrough makes the
-  stalled/drain/limit notes live-resumable and the parked card live by
-  construction (design §2.4).
+  The whitelist keeps restart/limit notes resumable and preserves the parked
+  card before terminal persistence.
   """
   blocks = []
   process_event({

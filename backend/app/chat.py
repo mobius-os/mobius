@@ -30,7 +30,6 @@ from app import (
   skills as skills_platform,
 )
 from app.broadcast import (
-  ChatBroadcast,
   clear_active_broadcast_if,
   create_broadcast,
   get_broadcast,
@@ -151,22 +150,14 @@ _SKILL_TEXT_CACHE: str | None = None
 # sink save. Hand durable-marker clearing back to that run's wrapper so
 # the marker survives until persistence is complete.
 _clear_after_terminal_generation: dict[str, int] = {}
-# Outcome paired with the generation handoff above. Explicit Stop and the
-# liveness watchdog share the same safe "bump, let the runner finalize, then
-# clear" mechanism, but they are different durable outcomes.
+# Terminal outcome paired with each handoff generation: explicit Stop uses
+# ``stopped``; restart draining uses ``interrupted``.
 _clear_after_terminal_status: dict[str, str] = {}
 
-# Liveness watchdog. Derived-only in v1: no persisted run-state enum.
-PROGRESS_TIMEOUT = 600.0
-STALLED_TURN_MESSAGE = (
-  "The turn stalled (no activity for 10 minutes) and was stopped. Your "
-  "message is safe — tap Resume to pick up where it left off."
-)
 # Drain-gated restart (design §2.2). `draining` is the process-wide gate: while
 # set, new POST /messages sends append to the durable queue instead of starting
-# turns, and both liveness sweeps stand down so they can't race the drain's own
-# interrupt (the stalled-live watchdog exempts it via `_stall_exemption`; the
-# wedged-marker sweep returns early). `_restart_draining_chats` records the chats
+# turns, and the finished-run marker sweep stands down so it cannot race the
+# drain's own interrupt. `_restart_draining_chats` records the chats
 # whose live turn the drain interrupted, so each turn's terminal transition
 # (run_chat's finally) leaves its exact run intact long enough for the drain to
 # move it to the existing durable continuation state. If that transaction fails,
@@ -265,42 +256,6 @@ def bump_run_generation(chat_id: str) -> int:
   return registry.bump_generation(chat_id)
 
 
-def last_event_age_secs(
-  bc: ChatBroadcast | None,
-  now: float | None = None,
-) -> float | None:
-  """Age in seconds of the broadcast's last event, from monotonic time."""
-  if bc is None or bc.last_event_at is None:
-    return None
-  if now is None:
-    now = time.monotonic()
-  return max(0.0, now - bc.last_event_at)
-
-
-def is_broadcast_stale(
-  bc: ChatBroadcast | None,
-  now: float | None = None,
-) -> bool:
-  """The one staleness predicate used by watchdog and debug status."""
-  age = last_event_age_secs(bc, now)
-  return age is not None and age > PROGRESS_TIMEOUT
-
-
-def _run_age_secs(
-  run: models.ChatRun | None,
-  now: datetime | None = None,
-) -> float | None:
-  """Age in seconds of the current durable run, when derivable."""
-  if run is None or run.started_at is None:
-    return None
-  if now is None:
-    now = datetime.now(UTC).replace(tzinfo=None)
-  started = run.started_at
-  if started.tzinfo is not None:
-    started = started.astimezone(UTC).replace(tzinfo=None)
-  return max(0.0, (now - started).total_seconds())
-
-
 def _parked_until_for_chat(
   db: Session,
   chat_id: str,
@@ -312,9 +267,9 @@ def _parked_until_for_chat(
   ``resume_pending``. A fresh turn
   on a previously-parked chat inserts a newer "running" row (and StartTurn /
   PromotePending close the stale park via `_close_running_runs`), so an
-  orphaned park can never exempt the NEW live turn from the stall watchdog or
-  keep the health surface reporting "parked". Query failures read as
-  not-parked — the liveness checks must never crash on this probe.
+  orphaned park can never suppress recovery for the NEW live turn. Query
+  failures read as not-parked — recovery checks must never crash on this
+  probe.
   """
   try:
     # id.desc() is a deterministic tiebreak: two rows CAN share a started_at
@@ -370,78 +325,6 @@ def _restart_manual_hold_for_chat(db: Session, chat_id: str) -> bool:
     and run[0] == "interrupted"
     and run[1] == "restart"
   )
-
-
-def _is_future_park(
-  parked_until: datetime | None,
-  now: datetime | None = None,
-) -> bool:
-  if parked_until is None:
-    return False
-  if now is None:
-    now = datetime.now(UTC).replace(tzinfo=None)
-  if parked_until.tzinfo is not None:
-    parked_until = parked_until.astimezone(UTC).replace(tzinfo=None)
-  return parked_until > now
-
-
-def _stall_exemption(
-  db: Session,
-  chat_id: str,
-  now: datetime | None = None,
-) -> str | None:
-  """Derived exemptions from design 2.1: question, park, or draining."""
-  if draining:
-    return "draining"
-  # The registry entry can outlive its future while a provider callback
-  # unwinds. Only a genuinely unresolved future is a human wait; treating a
-  # completed entry as exempt forever strands the SDK process when it wedges
-  # after answer delivery.
-  if questions.is_waiting(chat_id):
-    return "pending_question"
-  if _is_future_park(_parked_until_for_chat(db, chat_id), now):
-    return "parked"
-  return None
-
-
-def live_run_health_fields(
-  chat_id: str,
-  db: Session,
-  *,
-  now_monotonic: float | None = None,
-  now_wall: datetime | None = None,
-) -> dict:
-  """Derived liveness surface for one chat, shared by debug status."""
-  if now_monotonic is None:
-    now_monotonic = time.monotonic()
-  if now_wall is None:
-    now_wall = datetime.now(UTC).replace(tzinfo=None)
-  bc = get_broadcast(chat_id)
-  from app.run_state import running_run
-  run = running_run(db, chat_id)
-  parked_until = _parked_until_for_chat(db, chat_id)
-  stale = is_broadcast_stale(bc, now_monotonic)
-  exemption = _stall_exemption(db, chat_id, now_wall)
-  if exemption == "pending_question":
-    state = "pending_question"
-  elif exemption == "parked":
-    state = "parked"
-  elif exemption == "draining":
-    state = "draining"
-  elif stale:
-    state = "stale"
-  else:
-    state = "live"
-  return {
-    "state": state,
-    "last_event_age_secs": last_event_age_secs(bc, now_monotonic),
-    "run_age_secs": _run_age_secs(run, now_wall),
-    "subscriber_count": len(bc.subscribers) if bc is not None else 0,
-    "stale": stale,
-    "parked_until": (
-      parked_until.isoformat() if parked_until is not None else None
-    ),
-  }
 
 
 def forget_chat(chat_id: str) -> None:
@@ -1067,7 +950,7 @@ async def sweep_wedged_runs(db: Session) -> list[str]:
   try:
     cutoff = datetime.now(UTC).replace(tzinfo=None) - _WEDGED_RUN_MIN_AGE
     stale = (
-      # The watchdog needs only run identity. A long-running chat can have a
+      # Recovery needs only run identity. A long-running chat can have a
       # multi-megabyte transcript; hydrating it every minute while merely
       # checking registry/broadcast state repeats the same allocator problem
       # the idle-pending projection below avoids.
@@ -1289,98 +1172,6 @@ async def _stop_handle_with_escalation(
     return False, True
 
 
-async def sweep_stalled_live_runs(db: Session) -> list[str]:
-  """Interrupt live SDK turns whose broadcast has been silent too long.
-
-  This is the runtime liveness watchdog from design 2.3. It uses only derived
-  state: the registry says which turns are live, `ChatBroadcast.last_event_at`
-  says whether progress is stale, and `_stall_exemption` checks the v1
-  exemptions without introducing a persisted run-state enum.
-
-  The interrupt path deliberately mirrors Stop's generation handoff but skips
-  Stop's user-facing queue collapse: pending_messages are not cleared and
-  pending questions are not cancelled. The runner is allowed to unwind through
-  its normal `_complete_turn` path, so the single-writer actor still owns the
-  terminal transcript write and run-marker cleanup.
-  """
-  log = _get_logger()
-  interrupted: list[str] = []
-  now_monotonic = time.monotonic()
-  now_wall = datetime.now(UTC).replace(tzinfo=None)
-  for chat_id in sorted(registry.all_alive_chat_ids()):
-    handles = registry.get_handles(chat_id)
-    if not handles:
-      # Broadcast creation starts the stale clock, but the watchdog only acts
-      # once a live SDK handle exists. Pre-handle stalls remain visible in
-      # /api/debug/status and are not interrupted from this sweep.
-      continue
-    bc = get_broadcast(chat_id)
-    if not is_broadcast_stale(bc, now_monotonic):
-      continue
-    exemption = _stall_exemption(db, chat_id, now_wall)
-    if exemption is not None:
-      # Pending questions and limit parks can remain open for hours. The sweep
-      # runs every minute, so INFO here turns one healthy exemption into an
-      # unbounded stream of duplicate chat.log lines. Debug status already
-      # exposes the live state; retain the per-tick trace only in debug mode.
-      log.debug(
-        "stalled-live watchdog skipped chat_id=%s exemption=%s",
-        chat_id, exemption,
-      )
-      continue
-    sink = get_active_sink(chat_id)
-    # `resumable` rides the event LIVE now that events.process_event carries
-    # the whitelisted extras onto the persisted block — the stalled note gets
-    # its one-tap Resume without waiting for a boot reconcile.
-    if sink is not None:
-      # A stall is a benign timeout, not a failure — `pause.kind='stall'`
-      # renders it in the calm "Paused" family, not the danger-red error card.
-      sink.publish(_pause_note(STALLED_TURN_MESSAGE, kind="stall"))
-    elif bc is not None:
-      # Transport-only fallback for the rare inconsistent state where a handle
-      # is live but chat.py no longer has its sink. Do not persist directly.
-      bc.publish(_pause_note(STALLED_TURN_MESSAGE, kind="stall"))
-      log.warning(
-        "stalled-live watchdog has no active sink for chat_id=%s; "
-        "published transport error only",
-        chat_id,
-      )
-
-    stopped_gen = current_run_generation(chat_id)
-    if not isinstance(stopped_gen, int):
-      log.warning(
-        "stalled-live watchdog skipped chat_id=%s with non-finite generation",
-        chat_id,
-      )
-      continue
-    bump_run_generation(chat_id)
-    _clear_after_terminal_generation[chat_id] = stopped_gen
-    _clear_after_terminal_status[chat_id] = "interrupted"
-
-    all_interrupted = True
-    escalated = False
-    for handle in handles:
-      stopped, used_force = await _stop_handle_with_escalation(
-        chat_id,
-        handle,
-        source="stalled-live watchdog",
-      )
-      escalated = escalated or used_force
-      all_interrupted = all_interrupted and stopped
-    if escalated:
-      # agent-browser daemons intentionally detach from the SDK group. Their
-      # CHAT_ID/session routing is the separate, identity-safe cleanup key.
-      await _close_browser_session(chat_id)
-    if all_interrupted:
-      interrupted.append(chat_id)
-  if interrupted:
-    log.warning(
-      "stalled-live watchdog interrupted %d chat(s): %s",
-      len(interrupted), ", ".join(interrupted),
-    )
-  return interrupted
-
-
 async def drain_all_for_restart(
   timeout: float = DRAIN_TIMEOUT,
   *,
@@ -1412,8 +1203,8 @@ async def drain_all_for_restart(
       best-effort: a commit that loses the race with SIGKILL is repaired by
       boot reconcile, which finalizes the marker with a generic interrupted
       note that is equally resumable);
-    - mirrors the stalled-live watchdog's clean-interrupt handoff — bump the
-      generation so the turn-end drain sees a stale generation and does NOT
+    - mirrors explicit Stop's clean-interrupt handoff — bump the generation so
+      the turn-end drain sees a stale generation and does NOT
       promote the queue — BUT records the chat in `_restart_draining_chats` so
       the turn's finally does not clear the exact run before this drain can
       transition it. After every handle stops, the same writer transaction used
@@ -1643,12 +1434,6 @@ CONTINUATION_SWEEP_BATCH_SIZE = 100
 # not delay an opted-in chat after its reset, but a bad/early reset timestamp
 # also must not launch a whole parked batch in one burst.
 LIMIT_AUTO_RESUME_STAGGER_SECS = 30.0
-# Planned restarts may recover many exact turns at once. Restoring all of them
-# in one lifespan sweep can consume the host before ordinary shell requests get
-# a chance to run. Automatic recovery therefore uses a small process-wide
-# admission ceiling; owner sends remain uncapped and take the available slots
-# first, while durable restart parks stay due for the next sweep.
-RESTART_AUTO_RESUME_MAX_ACTIVE = 2
 _next_limit_auto_resume_at = 0.0
 _RESTART_AUTHORIZATION_UNSET = object()
 
@@ -1675,14 +1460,6 @@ def _claim_limit_auto_resume_slot(now: float | None = None) -> bool:
     return False
   _next_limit_auto_resume_at = now + LIMIT_AUTO_RESUME_STAGGER_SECS
   return True
-
-
-def _restart_auto_resume_capacity_available() -> bool:
-  """Whether automatic restart recovery may add another live turn."""
-  return (
-    len(registry.all_alive_chat_ids())
-    < RESTART_AUTO_RESUME_MAX_ACTIVE
-  )
 
 
 def _has_unanswered_question(chat: models.Chat | None) -> bool:
@@ -1773,8 +1550,9 @@ async def _auto_resume_chat(
         # attribution, the exact latest park, and provider ownership at the
         # actual claim point. Provider-limit retries are staggered by the
         # reset sweep, rather than blocked on unrelated live chats. Planned-
-        # restart continuations are admitted against the process-wide recovery
-        # ceiling so a restart cannot crowd ordinary shell work off the host.
+        # restart continuations are different: they are the exact, owner-opted
+        # set that was already live together before the restart, so each chat
+        # may reclaim its own slot independently.
         async with chat_queue.get_lock(chat_id):
           with SessionLocal() as check_db:
             chat = check_db.query(models.Chat).filter(
@@ -1849,11 +1627,6 @@ async def _auto_resume_chat(
             resume_app_id = (
               park.initiated_by_app_id if restart_park else None
             )
-          if (
-            restart_park
-            and not _restart_auto_resume_capacity_available()
-          ):
-            return False
           if not mark_starting(chat_id):
             return False
           claimed = True
@@ -1940,8 +1713,7 @@ async def sweep_reset_parks(
 ) -> list[str]:
   """Notify and optionally continue due durable recovery rows.
 
-  The third lifespan sweep (same 60s loop shape as the wedged-marker and
-  stalled-live sweeps). A due park is a `chat_runs` row still
+  A due park is a `chat_runs` row whose
   ``status`` is ``parked`` or ``resume_pending`` and whose
   `parked_until` has passed. Provider limits use their reset time; a planned
   restart is parked by the drain itself with a due time of now. Each pass
@@ -1959,11 +1731,9 @@ async def sweep_reset_parks(
       at most one starts per sweep and launches are spaced even when unrelated
       chats are live. App-attributed provider-limit runs never auto-resume.
       Planned-restart continuations reclaim the exact set that was already live
-      before the restart and preserve each run's attribution, but only up to a
-      small process-wide recovery ceiling. Additional exact parks remain due
-      for a later tick, leaving capacity for owner-triggered work. A deferred
-      enabled chat stays pending while notify-only chats in the same due batch
-      still resolve normally.
+      before the restart, preserve each run's attribution, and may resume
+      independently. A staggered enabled chat stays pending for a later tick,
+      while notify-only chats in the same due batch still resolve normally.
       App-attributed messages newly queued behind either kind of park still
       require an ordinary app-owned handoff rather than being swept into the
       synthetic continuation.
@@ -2078,13 +1848,6 @@ async def sweep_reset_parks(
       # but keep walking so a later notify-only chat is not held hostage by
       # another chat's auto-resume preference.
       continue
-    if (
-      restart_auto_resume
-      and not _restart_auto_resume_capacity_available()
-    ):
-      # Keep the exact park untouched. A later sweep admits it after another
-      # turn settles; an owner send can still start immediately in the meantime.
-      continue
     if auto_resume:
       try:
         prepared = await _await_ack(get_writer().submit(
@@ -2132,15 +1895,6 @@ async def sweep_reset_parks(
         resolved.append(chat_id)
         if prepared.get("notify") and not chat_gone:
           queue_due_notification(chat_id, run)
-        continue
-
-      if (
-        restart_auto_resume
-        and not _restart_auto_resume_capacity_available()
-      ):
-        # Capacity can disappear while the actor prepares the durable park.
-        # Leaving resume_pending intact is intentional: the next sweep retries
-        # without duplicating the continuation or its notification.
         continue
 
       if prepared.get("notify"):

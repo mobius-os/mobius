@@ -1,6 +1,10 @@
 name: Tests
 
 on:
+  # Contribute can push an exact reviewed branch to the owner's fork and run
+  # this suite before opening a PR. Manual dispatch creates no PR thread or
+  # organization-wide notification; GitHub reports the run to its triggerer.
+  workflow_dispatch:
   pull_request:
     # True PR stacks target the upstream branch directly beneath them. Run the
     # same suite for every layer so the chain is reviewable in parallel; main's

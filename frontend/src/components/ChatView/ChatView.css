@@ -777,9 +777,14 @@
 }
 
 .chat__text + .chat__tools,
-.chat__tools + .chat__text,
-.chat__tools + .chat__tools {
+.chat__tools + .chat__text {
   margin-top: var(--activity-block-gap, 8px);
+}
+
+/* Consecutive activity stretches share the compact internal row rhythm; prose
+   boundaries keep the wider block gap above. */
+.chat__tools + .chat__tools {
+  margin-top: var(--activity-row-gap, 4px);
 }
 .chat__text--assistant + .chat__text--assistant { margin-top: 0.75rem; }
 
@@ -1587,18 +1592,15 @@
   transform: rotate(-90deg);
 }
 
-/* Expanded child steps keep the same icon and label columns as their summary.
-   An earlier nested rail added 32px before every child, so a parent such as
-   "Browsing the web" and its "Searched the web" steps visibly jumped between
-   columns. The disclosure itself already supplies the hierarchy; alignment is
-   the stronger scanning cue for a chronological activity list. */
+/* A quiet rail makes the expanded parent/child hierarchy scannable. */
 .chat__activity-timeline {
   display: flex;
   flex-direction: column;
   gap: var(--activity-row-gap, 4px);
   margin-top: var(--activity-row-gap, 4px);
-  margin-inline-start: 0;
-  padding-inline-start: 0;
+  margin-inline-start: 20px;
+  padding-inline-start: 11px;
+  border-inline-start: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
 }
 
 /* Shared screen-reader status utility for transcript-local interactions such
@@ -1755,17 +1757,11 @@
   padding: var(--activity-row-gap, 4px) 0;
 }
 
-/* Top-level transcript actions keep a dependable touch target. Nested activity
-   rows deliberately stay at their compact 28px base height: the parent
-   disclosure already establishes one bounded inspection surface, so making
-   every child match top-level chat spacing turns an expanded run back into a
-   full transcript. The rows remain full-width buttons along the timeline. */
+/* Full-size touch targets belong to explicit actions. Full-width activity
+   disclosures retain their compact base height. */
 @media (pointer: coarse) {
   .chat__empty-action,
   .chat__quick-action-chip,
-  .chat__activity-header:not(.chat__activity-header--static),
-  .chat__activity-header--reserve-interactive,
-  .chat__tool--compact > .chat__tool-header:not(.chat__tool-header--static),
   .chat__tool-copy,
   .chat__lazy-retry {
     min-height: 44px;
@@ -2142,6 +2138,48 @@
   transition: transform 0.16s ease;
 }
 
+/* Keep the primary action's three SVGs mounted in one grid cell. Send → Steer
+   stays an immediate swap. Transitions into Stop are deliberately sequential:
+   the directional glyph leaves first, then the square settles in, so the two
+   meanings never mix while the shared button shell changes colour. */
+.chat__action-glyphs {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+}
+
+.chat__action-glyph {
+  grid-area: 1 / 1;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chat__action-glyphs--send .chat__action-glyph--send,
+.chat__action-glyphs--steer .chat__action-glyph--steer {
+  opacity: 1;
+}
+
+.chat__action-glyph--stop {
+  transform: scale(0.76) rotate(-8deg);
+}
+
+.chat__action-glyphs--stop .chat__action-glyph--send,
+.chat__action-glyphs--stop .chat__action-glyph--steer {
+  transform: scale(0.82);
+  transition:
+    opacity 0.1s ease-in,
+    transform 0.1s ease-in;
+}
+
+.chat__action-glyphs--stop .chat__action-glyph--stop {
+  opacity: 1;
+  transform: none;
+  transition:
+    opacity 0.12s ease-out 0.1s,
+    transform 0.16s var(--ease-out-soft, ease-out) 0.1s;
+}
+
 .chat__send {
   background: var(--accent); /* CONTRACT: vivid opaque accent fill */
   color: #fff;
@@ -2173,7 +2211,7 @@
 .chat__stop:focus-visible {
   outline: none;
 }
-.chat__stop:focus-visible svg {
+.chat__stop:focus-visible .chat__action-glyph--stop {
   outline: 2px solid var(--accent);
   /* Offset is measured from the SVG box, so it has to shrink as the glyph
      grows: at 28px a 3px offset draws 28 + 2*(3 + 2) = 38px, exactly the
@@ -2181,6 +2219,12 @@
      around the glyph. 1px keeps the previous 34px visual. */
   outline-offset: 1px;
   border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat__action-glyphs--stop .chat__action-glyph {
+    transition: none;
+  }
 }
 
 /* Steer (fast-forward) button — replaces Stop while a turn is streaming

@@ -72,7 +72,7 @@ test('owner contract freezes question answers without locking keyboard movement'
     new URL('../../../../../ARCHITECTURE.md', import.meta.url),
     'utf8',
   )
-  assert.match(architecture, /Owner-authoritative contract — v1\.13 \(2026-08-01\)/)
+  assert.match(architecture, /Owner-authoritative contract — v1\.14 \(2026-08-02\)/)
   assert.match(
     architecture,
     /In-process question is answered \| any \| transient `ANCHOR_AT` over the prior mode; same active assistant row/,
@@ -92,29 +92,6 @@ test('owner contract freezes question answers without locking keyboard movement'
     architecture,
     /Focused Q&A custom answer grows or its keyboard viewport changes \| ordinary hold \| current caret-visible `ANCHOR_AT`/,
     'editing may adopt native caret movement without weakening stronger scroll modes',
-  )
-})
-
-test('a retained chat crosses the old unmount lifecycle while hidden', () => {
-  const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
-  const scrollController = readFileSync(
-    new URL('../useScrollMode.js', import.meta.url),
-    'utf8',
-  )
-  assert.match(
-    chatView,
-    /useLayoutEffect\(\(\) => \{\s*if \(!hidden\) return\s*freezeChatExit\(\)[\s\S]*setInitialEntryPhase\('history'\)[\s\S]*setLoading\(true\)/,
-    'hiding a retained chat must freeze its position and arm freshness before it can paint again',
-  )
-  assert.match(
-    chatView,
-    /if \(hidden\) return[\s\S]*?\}, \[chatId, loadNonce, hidden\]\)/,
-    'hidden chats must disconnect and refresh history when they become visible again',
-  )
-  assert.match(
-    scrollController,
-    /const freezeChatExit = useCallback\(\(\) => \{[\s\S]*?readerLocationExplicitRef\.current = true[\s\S]*?persistMode\(\{ freezeToCurrentPosition: true \}\)/,
-    'chat navigation must preserve an automatic tail hold through the later unmount cleanup',
   )
 })
 

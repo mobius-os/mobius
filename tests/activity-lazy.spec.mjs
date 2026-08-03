@@ -529,9 +529,8 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
     await expect(activity.locator(`[id="${controlledId}"]`)).toBeHidden()
   }
 
-  // Leading type icons communicate hierarchy while expanded rows keep the
-  // same icon column as their summary; no rail or trailing disclosure chevron
-  // should push the child labels sideways.
+  // The rail and leading type icons communicate hierarchy; activity rows carry
+  // no trailing disclosure chevrons.
   await expect(activity.locator('.chat__chevron')).toHaveCount(0)
   expect(await activity.locator('svg').count()).toBeGreaterThanOrEqual(3)
   const [activityBox, timelineBox, toolBox] = await Promise.all([
@@ -540,15 +539,14 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
     toolToggle.boundingBox(),
   ])
   expect(activityBox).not.toBeNull()
-  expect(Math.abs(timelineBox.x - activityBox.x)).toBeLessThanOrEqual(1)
-  expect(Math.abs(toolBox.x - timelineBox.x)).toBeLessThanOrEqual(1)
-  const activityHeaderBox = await activityHeader.boundingBox()
+  expect(timelineBox.x).toBeGreaterThan(activityBox.x + 12)
+  expect(toolBox.x).toBeGreaterThan(timelineBox.x + 8)
   const thoughtToggleBox = await thoughtToggle.boundingBox()
   const toolToggleBox = await toolToggle.boundingBox()
-  expect(activityHeaderBox.height).toBeGreaterThanOrEqual(43)
+  expect(activityBox.height).toBe(32)
   for (const box of [thoughtToggleBox, toolToggleBox]) {
     expect(box.height).toBeGreaterThanOrEqual(27)
-    expect(box.height).toBeLessThan(43)
+    expect(box.height).toBeLessThan(33)
   }
 
   await thoughtToggle.click()

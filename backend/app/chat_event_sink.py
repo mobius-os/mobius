@@ -58,7 +58,7 @@ def _pause_note(
   """Build the ONE error-block/event shape every pause producer emits.
 
   A pause folds its whole classification into a single `pause` descriptor on
-  the block: `kind` names the family ('restart' | 'stall' | 'rate_limit' |
+  the block: `kind` names the family ('restart' | 'rate_limit' |
   'usage_limit'), and `resets_at` (an explicit-UTC ISO string, present only
   for the limit kinds) is the reset time the card renders. Absorbing the reset
   reason into `kind` keeps the wire at two block keys — `resumable` + `pause` —

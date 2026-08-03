@@ -122,51 +122,6 @@ def _assert_provider_defaults(provider_names) -> None:
   )
 
 
-# A wake warns once only after more than two full periods of lateness.
-_LOOP_PERIOD_SECS = 60.0
-_LOOP_LATE_PERIODS = 2.0
-
-
-def loop_lateness_warning(
-  period: float, observed_gap: float, *, late_periods: float = _LOOP_LATE_PERIODS,
-) -> str | None:
-  """Return a WARNING string when a periodic loop woke far later than scheduled.
-
-  Compares the actual wake gap to the scheduled period: a lateness (observed
-  minus scheduled) beyond `late_periods` periods means the loop was blocked for
-  multiple cycles — event-loop starvation from a long synchronous call, GC
-  pause, or disk stall — not scheduler jitter. Returns None for a healthy or
-  merely-jittery wake. Pure so the watchdog decision is unit-testable without
-  driving a real loop; the log is necessarily retrospective (a loop that never
-  recovers cannot warn — only an external HTTP monitor can).
-  """
-  lateness = observed_gap - period
-  if lateness <= period * late_periods:
-    return None
-  return (
-    "periodic loop woke %.1fs after a %.0fs sleep (%.1fs late, >%.0f periods)"
-    " — the event loop may be starved" % (
-      observed_gap, period, lateness, late_periods,
-    )
-  )
-
-
-async def _sleep_with_lag_warning(
-  sleep,
-  monotonic,
-  logger,
-  *,
-  period: float = _LOOP_PERIOD_SECS,
-) -> str | None:
-  """Sleep once and report a multi-period event-loop stall."""
-  started_at = monotonic()
-  await sleep(period)
-  warning = loop_lateness_warning(period, monotonic() - started_at)
-  if warning is not None:
-    logger.warning("%s", warning)
-  return warning
-
-
 @asynccontextmanager
 async def lifespan(app):
   _log = logging.getLogger(__name__)
@@ -192,7 +147,6 @@ async def lifespan(app):
     logger=_log,
     restart_authorization=startup_context.restart_authorization,
     restart_fallback_chats=startup_context.restart_fallback_chats,
-    lag_sleep=_sleep_with_lag_warning,
   )
   await supervisors.start()
   record_memory_checkpoint("startup_frontend_watcher_started")

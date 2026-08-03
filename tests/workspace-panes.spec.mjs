@@ -13,7 +13,7 @@
  *   (e) a projection flip to phone preserves the persisted tree and pane focus;
  *
  * The flag is enabled per-test (localStorage 'mobius:workspace-splits' = '1')
- * and a 2-pane workspace blob is seeded in sessionStorage before the shell
+ * and a 2-pane workspace blob is seeded in localStorage before the shell
  * boots, exactly like tabs.spec seeds the flat workspace. Agent + apps routes
  * are intercepted so no agent tokens are consumed.
  *
@@ -158,7 +158,7 @@ async function seedWorkspace(page, ws) {
   await page.addInitScript(([flagKey, wsKey, wsBlob, legKey, leg]) => {
     try {
       localStorage.setItem(flagKey, '1')
-      sessionStorage.setItem(wsKey, wsBlob)
+      localStorage.setItem(wsKey, wsBlob)
       sessionStorage.setItem(legKey, leg)
     } catch { /* private mode */ }
   }, ['mobius:workspace-splits', paneModel.STORAGE_KEY, blob, 'mobius-open-tabs', legacy])
@@ -176,7 +176,7 @@ async function seedBuilderSingleLeaf(page, chatId) {
   await page.addInitScript(([flagKey, workspaceKey, workspaceBlob]) => {
     try {
       localStorage.setItem(flagKey, '1')
-      sessionStorage.setItem(workspaceKey, workspaceBlob)
+      localStorage.setItem(workspaceKey, workspaceBlob)
       sessionStorage.setItem('mobius-open-tabs', '[]') // empty legacy -> strip not engaged
     } catch { /* private mode */ }
   }, ['mobius:workspace-splits', paneModel.STORAGE_KEY, blob])
@@ -655,7 +655,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
 
     // Baseline = the normalized blob the shell persisted after boot (a resize
     // must not rewrite it — geometry is projection, not persisted state).
-    const beforeBlob = await page.evaluate(k => sessionStorage.getItem(k), paneModel.STORAGE_KEY)
+    const beforeBlob = await page.evaluate(k => localStorage.getItem(k), paneModel.STORAGE_KEY)
     expect(beforeBlob, 'workspace blob persisted').toBeTruthy()
 
     // Flip the projection: wide → phone.
@@ -663,11 +663,11 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await page.evaluate(() => new Promise(r =>
       requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 200)))))
 
-    const afterBlob = await page.evaluate(k => sessionStorage.getItem(k), paneModel.STORAGE_KEY)
+    const afterBlob = await page.evaluate(k => localStorage.getItem(k), paneModel.STORAGE_KEY)
     expect(afterBlob, 'the persisted tree is unchanged across the projection flip').toBe(beforeBlob)
     // The tree still parses to two panes (projection changed, tree did not).
     const leaves = await page.evaluate((k) => {
-      const ws = JSON.parse(sessionStorage.getItem(k))
+      const ws = JSON.parse(localStorage.getItem(k))
       return Object.keys(ws.panes).length
     }, paneModel.STORAGE_KEY)
     expect(leaves).toBe(2)
@@ -679,7 +679,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await expect(otherStrip).toBeVisible({ timeout: 4000 })
     await otherStrip.click()
     await expect.poll(
-      () => page.evaluate((k) => JSON.parse(sessionStorage.getItem(k)).focusedPaneId,
+      () => page.evaluate((k) => JSON.parse(localStorage.getItem(k)).focusedPaneId,
         paneModel.STORAGE_KEY),
       { timeout: 3000, message: 'phone projection still commits pane focus' },
     ).toBe('p1')
@@ -729,7 +729,7 @@ function whichPaneHas(ws, tabKey) {
 }
 
 async function readWs(page) {
-  return page.evaluate(k => JSON.parse(sessionStorage.getItem(k)), paneModel.STORAGE_KEY)
+  return page.evaluate(k => JSON.parse(localStorage.getItem(k)), paneModel.STORAGE_KEY)
 }
 
 /** Press on a source element, arm past slop, glide to a target point, release —
@@ -1181,6 +1181,118 @@ test.describe('Workspace view-mode toggle', () => {
     })
   })
 
+  test('a Standard round trip preserves Builder reading ownership and geometry', async ({ page }) => {
+    await boot(page, WIDE)
+    const a = await createTaggedChat(page, 'vmReadingA')
+    const b = await createTaggedChat(page, 'vmReadingB')
+    await mockApps(page, [])
+
+    const token = await page.evaluate(() => localStorage.getItem('token'))
+    const now = Date.now()
+    const messages = Array.from({ length: 36 }, (_, index) => ({
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `Workspace reading row ${index}. ${'Stable width-sensitive text. '.repeat(20)}`,
+      ts: now + index,
+      cid: index % 2 === 0 ? `workspace-reading-${index}` : undefined,
+      blocks: index % 2 === 0
+        ? []
+        : [{
+            type: 'text',
+            content: `Workspace reading row ${index}. ${'Stable width-sensitive text. '.repeat(20)}`,
+          }],
+    }))
+    const seeded = await page.request.put(`${BASE}/api/chats/${a.id}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      data: { messages },
+      failOnStatusCode: false,
+    })
+    expect(seeded.ok()).toBe(true)
+
+    const builder = twoChatPanes(a.id, b.id)
+    await seedWorkspace(page, {
+      ...builder,
+      viewMode: 'single',
+      singleScreen: { kind: 'chat', id: String(a.id) },
+    })
+    await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })
+    const standardSurface = page.locator(
+      `[data-chat-world="standard"][data-chat-id="${a.id}"]`,
+    )
+    const builderSurface = page.locator(
+      `[data-chat-world="builder"][data-chat-id="${a.id}"]`,
+    )
+    await expect(standardSurface.locator('.chat__scroll')).toBeVisible({ timeout: 15000 })
+
+    // The parked Builder owner must keep the rect it will paint. Expanding it
+    // to Standard's box before its ownership cleanup changes wrapping and makes
+    // a lifecycle capture describe content the reader was not looking at.
+    const [parkedBuilderWidth, standardWidth] = await Promise.all([
+      builderSurface.evaluate(element => element.getBoundingClientRect().width),
+      standardSurface.evaluate(element => element.getBoundingClientRect().width),
+    ])
+    expect(parkedBuilderWidth).toBeLessThan(standardWidth - 100)
+
+    const brand = page.getByRole('button', { name: 'Toggle navigation' })
+    await brand.focus()
+    await page.keyboard.press('Shift+Enter')
+    await waitTiled(page)
+    const builderScroll = builderSurface.locator('.chat__scroll')
+    await expect(builderScroll).toBeVisible({ timeout: 15000 })
+
+    const previousWriteAt = await page.evaluate(
+      id => JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[id]?.at || 0,
+      String(a.id),
+    )
+    await builderScroll.evaluate((scroll) => {
+      scroll.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        pointerType: 'mouse',
+      }))
+      scroll.scrollTop = Math.floor(scroll.scrollHeight / 3)
+      scroll.dispatchEvent(new PointerEvent('pointerup', {
+        bubbles: true,
+        pointerType: 'mouse',
+      }))
+    })
+    await page.waitForFunction(({ id, after }) => (
+      (JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[id]?.at || 0) > after
+    ), { id: String(a.id), after: previousWriteAt })
+
+    const readBuilderState = () => page.evaluate((id) => {
+      const scroll = document.querySelector(
+        `[data-chat-world="builder"][data-chat-id="${id}"] .chat__scroll`,
+      )
+      const { at: _at, ...saved } =
+        JSON.parse(localStorage.getItem('chat-reading-position') || '{}')[id]
+      const wrapper = scroll.closest('[data-chat-world="builder"]')
+      return {
+        top: scroll.scrollTop,
+        saved,
+        width: wrapper.getBoundingClientRect().width,
+      }
+    }, String(a.id))
+    const before = await readBuilderState()
+
+    await brand.focus()
+    await page.keyboard.press('Shift+Enter')
+    await expect(standardSurface.locator('.chat__scroll'))
+      .toHaveAttribute('data-scroll-mode', 'ANCHOR_AT', { timeout: 15000 })
+    await expect(page.locator('.workspace__chrome')).toHaveCount(0)
+
+    const afterExit = await readBuilderState()
+    expect(afterExit.saved).toEqual(before.saved)
+    expect(Math.abs(afterExit.width - before.width)).toBeLessThanOrEqual(1)
+
+    await brand.focus()
+    await page.keyboard.press('Shift+Enter')
+    await waitTiled(page)
+    await expect(builderScroll).toHaveAttribute('data-scroll-mode', 'ANCHOR_AT', {
+      timeout: 15000,
+    })
+    expect(Math.abs((await builderScroll.evaluate(scroll => scroll.scrollTop)) - before.top))
+      .toBeLessThanOrEqual(8)
+  })
+
   // Regression (item 0): a genuine MULTI-PANE exit via the real POINTER-HOLD
   // completion path — the path the single-leaf keyboard verification missed — must
   // collapse the tiled workspace and STAY collapsed, and a rapid re-enter within
@@ -1393,7 +1505,7 @@ test.describe('Workspace view-mode toggle', () => {
     await page.addInitScript((wsBlob) => {
       try {
         localStorage.setItem('mobius:workspace-splits', '0') // KILL SWITCH OFF
-        sessionStorage.setItem('mobius-workspace', wsBlob)
+        localStorage.setItem('mobius-workspace', wsBlob)
       } catch { /* private mode */ }
     }, blob)
     await page.goto(`${BASE}/shell/?chat=${a.id}`, { waitUntil: 'domcontentloaded' })

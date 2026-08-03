@@ -1,4 +1,4 @@
-"""Runtime liveness watchdog (`sweep_wedged_runs`) + limit classifier.
+"""Finished-run marker recovery (`sweep_wedged_runs`) + limit classifier.
 
 The sweep closes runs orphaned by a completed-but-unclosed turn WITHOUT
 a process restart (a FAILED_LEAVE_MARKER terminal, or the late-promote gap),

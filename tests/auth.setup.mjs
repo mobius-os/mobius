@@ -99,5 +99,10 @@ setup('authenticate', async ({ page, request }) => {
     )
   }
 
+  // The shared state is an authentication fixture, not a snapshot of whatever
+  // workspace the setup page happened to open. Once workspaces became durable,
+  // retaining this value made unrelated specs boot into the setup chat/app and
+  // override the explicit navigation state each test seeds.
+  await page.evaluate(() => localStorage.removeItem('mobius-workspace'))
   await page.context().storageState({ path: AUTH_FILE })
 })

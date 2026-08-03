@@ -73,9 +73,28 @@ test('per-row fast-forward appears with the optimistic row and dispatches on tou
   )
 })
 
-test('the shared steer path snapshots scroll before dismissing the mobile composer', () => {
+test('touch steer dismisses the keyboard only after its committed row is positioned', () => {
   assert.match(
     chatView,
-    /async function steerRowsImpl\(steerRowsList\) \{[\s\S]*?explicitSteerIntent = captureSendIntent\(\{[\s\S]*?previousSendIntent = replaceSendIntent\(steerCid, explicitSteerIntent\)[\s\S]*?if \(_isTouchPrimary\) inputRef\.current\?\.blur\(\)[\s\S]*?pendingQueue\.reserveForSteer\(consumePendingCids\)/,
+    /async function steerRowsImpl\(steerRowsList\) \{[\s\S]*?explicitSteerIntent = captureSendIntent\(\{[\s\S]*?previousSendIntent = replaceSendIntent\(steerCid, explicitSteerIntent\)[\s\S]*?steerKeyboardDismissRequestRef\.current = \{[\s\S]*?pendingQueue\.reserveForSteer\(consumePendingCids\)/,
+    'the tap should retain focus while the provider is still settling the cut',
+  )
+  const requestToCut = chatView.match(
+    /async function steerRowsImpl\(steerRowsList\) \{[\s\S]*?\n  \/\/ STEER \(fast-forward\): inject/,
+  )?.[0] || ''
+  assert.doesNotMatch(
+    requestToCut,
+    /inputRef\.current\?\.blur\(\)|inputEl\.blur\(\)/,
+    'request-time keyboard dismissal recreates the pre-cut resize jitter',
+  )
+  assert.match(
+    chatView,
+    /onSteeredIntoTurn: \(\{[\s\S]*?landSentMessage\(pinCid,[\s\S]*?setCommittedSteerKeyboardDismiss\(keyboardDismissRequest\)[\s\S]*?commitMessages\(prev => insertMessageBatchByTs/,
+    'the authoritative cut should schedule dismissal in the same batch as the row',
+  )
+  assert.match(
+    chatView,
+    /useLayoutEffect\(\(\) => \{[\s\S]*?committedSteerKeyboardDismiss[\s\S]*?querySelector\([\s\S]*?chat__msg--user\[data-cid=[\s\S]*?document\.activeElement === inputEl[\s\S]*?inputValueRef\.current === request\.draft[\s\S]*?inputEl\.blur\(\)/,
+    'blur must wait for the committed row and preserve newer focus/draft intent',
   )
 })

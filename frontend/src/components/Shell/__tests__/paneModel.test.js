@@ -5,7 +5,7 @@ import * as paneModel from '../paneModel.js'
 
 const { makeTab, tabKey } = tabModel
 
-// A Map-backed sessionStorage stub so the legacy dual-write round-trip is
+// A Map-backed browser-storage stub so persistence round-trips are
 // testable without jsdom, mirroring the tabModel tests.
 function fakeStorage(initial = null) {
   let value = initial
@@ -782,7 +782,7 @@ test('readWorkspaceRaw survives a throwing storage instead of crashing boot', ()
   const throwing = {
     getItem() { throw new DOMException('The operation is insecure.', 'SecurityError') },
   }
-  // Must not throw — sessionStorage.getItem can raise in a sandboxed frame, and
+  // Must not throw — browser storage getItem can raise in a sandboxed frame, and
   // the Shell reads it while building the reducer's initial state.
   assert.equal(paneModel.readWorkspaceRaw(throwing), null)
   // The null feeds parseWorkspace, which then seeds a safe empty workspace.

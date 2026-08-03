@@ -301,7 +301,7 @@ test.describe('Tabs', () => {
     await page.locator('.shell__tab-close').first().click()
     await expect(page.locator('.shell__tabstrip')).toHaveCount(0)
     await expect.poll(() => page.evaluate(
-      key => JSON.parse(sessionStorage.getItem(key))?.viewMode,
+      key => JSON.parse(localStorage.getItem(key))?.viewMode,
       paneModel.STORAGE_KEY,
     ), { timeout: 3000 }).toBe('single')
     await expect(page.locator('[data-chat-surface="painted"] .chat__scroll'))
@@ -321,7 +321,7 @@ test.describe('Tabs', () => {
     await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
     await expect.poll(() => appsMock.requests, { timeout: 5000 }).toBeGreaterThan(0)
     await expect.poll(() => page.evaluate(
-      key => JSON.parse(sessionStorage.getItem(key))?.viewMode,
+      key => JSON.parse(localStorage.getItem(key))?.viewMode,
       paneModel.STORAGE_KEY,
     )).toBe('single')
     await sendMessage(page, 'just a chat')
@@ -342,7 +342,7 @@ test.describe('Tabs', () => {
     await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
     await expect.poll(() => appsMock.requests, { timeout: 5000 }).toBeGreaterThan(0)
     await expect.poll(() => page.evaluate(
-      key => JSON.parse(sessionStorage.getItem(key))?.viewMode, paneModel.STORAGE_KEY,
+      key => JSON.parse(localStorage.getItem(key))?.viewMode, paneModel.STORAGE_KEY,
     )).toBe('single')
     await sendMessage(page, 'single with a parked tree')
     // NO strip in single, despite the engaged mirror + the parked 2-tab tree.

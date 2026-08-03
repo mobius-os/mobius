@@ -82,6 +82,10 @@ import {
   stageComposerHandoff,
 } from '../ChatView/composerDraft.js'
 import {
+  beginTouchComposerFocusLease,
+  releaseComposerFocusLease,
+} from './composerFocusLease.js'
+import {
   shouldRearmShellApply,
   watchForShellUpdateOnForeground,
 } from './swHandoff.js'
@@ -171,7 +175,10 @@ export default function Shell() {
     projection,
     visiblePaneIds,
     persistWorkspaceSnapshot,
-  } = useWorkspaceSession({ storage: sessionStorage })
+  } = useWorkspaceSession({
+    storage: localStorage,
+    legacyStorage: sessionStorage,
+  })
 
   const {
     activeView,
@@ -565,6 +572,7 @@ export default function Shell() {
   const shellUpdatePickupCheckStartedRef = useRef(false)
   const [composerRequest, setComposerRequest] = useState(null)
   const composerRequestTokenRef = useRef(0)
+  const composerFocusLeaseRef = useRef(null)
 
   const requestComposer = useCallback((chatId, {
     draft, focus = false,
@@ -708,13 +716,6 @@ export default function Shell() {
     if (openTabs.length >= 2) setTabStripEngaged(true)
     else if (openTabs.length === 0) setTabStripEngaged(false)
   }, [openTabs.length])
-  // Persist only the versioned workspace. The former flat-tab rollback mirror
-  // completed its release window and was removed so every boot has one owner.
-  useEffect(() => {
-    try {
-      sessionStorage.setItem(paneModel.STORAGE_KEY, paneModel.serializeWorkspace(workspace))
-    } catch { /* private mode / quota — workspace stays in memory only */ }
-  }, [workspace])
   // Pointer events inside an iframe do not bubble to its positioned shell
   // wrapper. The verified live frame sends a tiny focus signal so app panes have
   // the same click-to-focus semantics as native chat panes.
@@ -2514,6 +2515,14 @@ export default function Shell() {
     // plus fresh detail probe still prove that it is untouched before reuse, so
     // a send from another browser cannot turn this convenience into reopening a
     // conversation that has already started.
+    //
+    // A phone keyboard can only be raised from the tap's live user-activation
+    // task. Reserve that focus before the first await, then transfer it to the
+    // chat-bound composer after the destination resolves. The lease also holds
+    // any keystrokes entered while a slow allocation is still completing.
+    const touchFocusLeased = !!focusComposer && beginTouchComposerFocusLease(
+      composerFocusLeaseRef.current,
+    )
     const ws = workspaceStateRef.current.ws
     const resumeId = (
       (!SPLITS || ws.viewMode === 'single')
@@ -2537,6 +2546,9 @@ export default function Shell() {
         : { candidate: resumeCandidate, draft, forceNew, exclude },
     )
     if (chatId == null) {
+      if (touchFocusLeased) {
+        releaseComposerFocusLease(composerFocusLeaseRef.current)
+      }
       // Don't leave a dead, drawer-still-open tap. Offline / failed create surface a
       // toast; an in-flight second tap just closes the drawer (the first create lands).
       if (reason === 'offline') showToast("You're offline.")
@@ -2549,9 +2561,13 @@ export default function Shell() {
       || String(activeChatIdRef.current) !== String(chatId)
     const recordsHistory = changesRoute
       && !!(draft || forceNew || drawerPushedRef.current || recordHistory)
-    if (draft) {
-      const draftText = String(draft)
-      stageComposerHandoff(chatId, draftText, { autoSend })
+    const suppliedDraft = draft ? String(draft) : ''
+    const leasedDraft = touchFocusLeased ? composerFocusLeaseRef.current?.value || '' : ''
+    const draftText = suppliedDraft || leasedDraft
+    if (draftText) {
+      stageComposerHandoff(chatId, draftText, {
+        autoSend: suppliedDraft ? autoSend : false,
+      })
     }
     // Keep history writes inside useNavigation so the entry gets its route,
     // unique identity, and monotonic cursor synchronously. The former direct
@@ -2566,7 +2582,12 @@ export default function Shell() {
       const ws = workspaceStateRef.current.ws
       applyModeDestination({ view: 'chat', chatId, appId: null, paneId: ws.focusedPaneId })
     }
-    if (focusComposer) requestComposer(chatId, { focus: true })
+    if (focusComposer) {
+      requestComposer(chatId, {
+        draft: draftText || undefined,
+        focus: true,
+      })
+    }
   }
   // Keep the latest-newChat ref current so handleAppError's crash-report
   // fallback starts a chat with this render's live closure.
@@ -2867,6 +2888,14 @@ export default function Shell() {
       >
         Skip to content
       </a>
+      <textarea
+        ref={composerFocusLeaseRef}
+        className="shell__composer-focus-lease"
+        tabIndex={-1}
+        aria-label="New chat message"
+        autoComplete="off"
+        onBlur={(event) => { event.currentTarget.value = '' }}
+      />
       {/* The existing brand toggle remains the visible close affordance while the
           mobile drawer is modal. Keep the workspace inert below, but do not inert
           the header: doing so lets the scrim intercept the toggle and strands the
@@ -3183,10 +3212,10 @@ export default function Shell() {
               bottom: 'auto',
             }
             : null
-          const chatViewStyle = paned
+          const chatViewStyle = builderRect
             ? {
               ...posStyle,
-              ...modeViewTransitionStyle('pane', paneId, surfaceKey),
+              ...(paned ? modeViewTransitionStyle('pane', paneId, surfaceKey) : {}),
             }
             : undefined
           return (

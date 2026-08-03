@@ -169,7 +169,7 @@ test('each pane holds one outgoing chat over one staging chat', () => {
   )
   assert.match(
     chatView,
-    /if \(!hidden\) return[\s\S]*freezeChatExit\(\)[\s\S]*if \(keepTranscriptPainted\) return[\s\S]*setInitialEntryPhase\('history'\)[\s\S]*setLoading\(true\)/,
+    /if \(!hidden\) return[\s\S]*if \(keepTranscriptPainted\) return[\s\S]*setInitialEntryPhase\('history'\)[\s\S]*setLoading\(true\)/,
     'a held cover must freeze its reading position without arming the transcript blanking gate',
   )
 })
@@ -214,11 +214,11 @@ test('app-supplied drafts update retained composers as well as remounted chats',
   assert.match(chatView,
     /typeof composerRequest\.draft === 'string'[\s\S]*handleComposerInputChange\(composerRequest\.draft\)/,
     'a retained ChatView must apply the requested draft to controlled state')
-  assert.match(chatView, /if \(!composerRequest\.focus\) \{[\s\S]*onComposerRequestHandled\?\.\(token\)/,
+  assert.match(chatView, /if \(!shouldApplyComposerFocusRequest\(\{[\s\S]*onComposerRequestHandled\?\.\(token\)/,
     'a draft-only handoff must settle without stealing focus')
 })
 
-test('direct desktop chat opens hand focus to the destination composer', () => {
+test('direct chat actions hand focus to the destination composer', () => {
   assert.match(shell,
     /startupChatComposerFocusPendingRef = useRef\([\s\S]*activeView === 'chat' && effectiveViewMode === 'single'[\s\S]*\)/,
     'only a restored single-screen chat may retain the startup focus intent')
@@ -229,8 +229,14 @@ test('direct desktop chat opens hand focus to the destination composer', () => {
     /newChat\(\{ focusComposer: true, recordHistory: true \}\)/,
     'the direct New chat action must request composer focus')
   assert.match(shell,
-    /if \(focusComposer\) requestComposer\(chatId, \{ focus: true \}\)/,
-    'New chat must deliver its focus request after the destination is known')
+    /beginTouchComposerFocusLease\([\s\S]*?await resolveNewChatId/,
+    'New chat must reserve phone keyboard focus before its first async boundary')
+  assert.match(shell,
+    /composerFocusLeaseRef\.current\?\.value[\s\S]*?requestComposer\(chatId, \{[\s\S]*?draft: draftText \|\| undefined,[\s\S]*?focus: true/,
+    'New chat must carry early lease typing into the focused destination composer')
+  assert.match(shell,
+    /className="shell__composer-focus-lease"[\s\S]*?aria-label="New chat message"/,
+    'the keyboard lease must remain a named, programmatically focused text control')
   const selectChat = shell.match(/function selectChat\(id\) \{([\s\S]*?)\n  \}/)?.[1] || ''
   assert.match(selectChat,
     /navTo\('chat', \{ chatId: id \}\)[\s\S]*focusDesktopChatPaneComposer\(id\)/,

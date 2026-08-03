@@ -90,10 +90,11 @@ export const BUILDER_POWER_CHROME = (() => {
 export const MIN_PANE_W = 280
 export const MIN_PANE_H = 200
 
-// sessionStorage key for the sole serialized workspace state.
+// localStorage key for the sole serialized workspace state. The workspace must
+// survive a fully closed/relaunched PWA, not only an in-tab reload.
 export const STORAGE_KEY = 'mobius-workspace'
 
-// sessionStorage key for the maximized ("focus one pane full-screen") presentation.
+// localStorage key for the maximized ("focus one pane full-screen") presentation.
 // Deliberately SEPARATE from STORAGE_KEY: focusing a pane must never rewrite the
 // persisted split tree or ratios (design §2), so the maximize is a thin presentation
 // overlay stored beside the blob and re-seeded on mount. Without this, the reload
@@ -1566,7 +1567,7 @@ export function serializeWorkspace(ws) {
   return JSON.stringify(ws)
 }
 
-// The raw stored blob, or null if storage is unavailable. sessionStorage.getItem
+// The raw stored blob, or null if storage is unavailable. Browser storage getItem
 // can THROW (SecurityError in a sandboxed frame, disabled storage, a privacy
 // policy), and the caller reads it while evaluating parseWorkspace's argument —
 // outside parseWorkspace's own try/catch. Guarding the read here keeps broken

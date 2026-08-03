@@ -340,6 +340,13 @@ export default function ChatView({
   // Terminal live-to-settled commits bump this sequence. The corresponding
   // layout effect settles an armed prompt pin against the committed DOM.
   const [pinnedSettleSeq, setPinnedSettleSeq] = useState(0)
+  // A touch fast-forward dismisses the software keyboard only after the
+  // authoritative steer cut has rendered its user row. Closing it at request
+  // time resized the chat while that row did not exist yet, so the old tail
+  // re-anchored once and the steered row pinned in a second visible movement.
+  const steerKeyboardDismissRequestRef = useRef(null)
+  const [committedSteerKeyboardDismiss, setCommittedSteerKeyboardDismiss] =
+    useState(null)
   // Server-hydrated running marker. `sending` is the local UI flag and
   // `isStreaming` belongs to the SSE hook; both can briefly be false across
   // app/chat remounts or reconnect windows even though the backend still has
@@ -555,16 +562,10 @@ export default function ChatView({
       handleComposerInputChange(composerRequest.draft)
     }
 
-    if (!composerRequest.focus) {
-      onComposerRequestHandled?.(token)
-      return
-    }
-
     if (!shouldApplyComposerFocusRequest({
       focusRequest: composerRequest,
       chatId,
       embedded,
-      isTouchPrimary: _isTouchPrimary,
     })) {
       onComposerRequestHandled?.(token)
       return
@@ -695,7 +696,6 @@ export default function ChatView({
     anchorPagination,
     captureSendIntent,
     commitSendIntent,
-    freezeChatExit,
     freezeForegroundReturn,
     freezeQuestionSubmission,
     freezeQueuedSubmission,
@@ -717,6 +717,7 @@ export default function ChatView({
     pendingMessagesLength: pendingQueue.pendingMessages.length,
     loadingOlderRef: loadingOlder,
     initialEntryPhase,
+    ownsReadingPosition: !hidden,
   })
 
   // Forward committed pane-geometry changes to the scroll controller. A new
@@ -735,20 +736,18 @@ export default function ChatView({
     if (paneContentHeight != null) paneResized(paneContentHeight)
   }, [paneContentHeight, paneResized])
 
-  // Settings used to unmount the active chat. Retained pane identity is useful
-  // for split/unsplit transitions, but hiding a pane must still perform the old
-  // leave/return lifecycle: freeze its reader position while geometry is live,
-  // then let the load effect below disconnect while hidden and refresh on show.
+  // A hidden retained owner is not an active runtime. The scroll controller
+  // owns the visible -> hidden reading-position handoff; this layer only arms
+  // freshness so the surface cannot paint stale history when it returns.
   useLayoutEffect(() => {
     if (!hidden) return
-    freezeChatExit()
     if (keepTranscriptPainted) return
     // Arm the freshness + restoration gate while this surface is still
     // physically hidden. A retained ChatView must not reappear with the
     // transcript from its previous visible lifetime for even one frame.
     setInitialEntryPhase('history')
     setLoading(true)
-  }, [hidden, keepTranscriptPainted, freezeChatExit])
+  }, [hidden, keepTranscriptPainted])
 
   function rememberSendIntent(cid, intent) {
     if (!cid || !intent) return
@@ -1185,6 +1184,16 @@ export default function ChatView({
         // Never infer a delayed pin from the reader's later position.
         fallbackWillPin: steeredIsFirstUser,
       })
+      const keyboardDismissRequest = steerKeyboardDismissRequestRef.current
+      if (keyboardDismissRequest
+          && keyboardDismissRequest.chatId === String(chatId)
+          && keyboardDismissRequest.cid === pinCid) {
+        steerKeyboardDismissRequestRef.current = null
+        // This state update batches with the transcript commit below. The
+        // layout effect waits for the exact row, after useScrollMode has
+        // applied its pin/hold, before allowing keyboard geometry to change.
+        setCommittedSteerKeyboardDismiss(keyboardDismissRequest)
+      }
       // Dedup by ts so a reconnect's catch-up replay of the same event
       // can't double-insert the steered user message. Insert by transcript ts
       // instead of blindly appending: if a fetch/replay already committed the
@@ -1207,6 +1216,9 @@ export default function ChatView({
       const cids = Array.isArray(consumePendingCids)
         ? consumePendingCids
         : []
+      if (cids.includes(steerKeyboardDismissRequestRef.current?.cid)) {
+        steerKeyboardDismissRequestRef.current = null
+      }
       pendingQueue.releaseSteerReservation(cids)
       forgetSendIntent({ cidList: cids })
       // A direct Cmd/Ctrl+Enter steer has no local tray row. The same
@@ -1215,6 +1227,35 @@ export default function ChatView({
       fetchMessages({ force: true })
     },
   })
+
+  // useScrollMode's layout effect is registered before this one. At a steer
+  // cut it therefore commits the new row's PIN_USER_MSG/ANCHOR_AT position
+  // first; only then may a still-focused, otherwise-unchanged touch composer
+  // close its keyboard. A draft edit or focus move during a deferred provider
+  // cut is newer owner intent and must not be interrupted by the old tap.
+  useLayoutEffect(() => {
+    const request = committedSteerKeyboardDismiss
+    if (!request) return
+    if (request.chatId !== String(chatId)) {
+      setCommittedSteerKeyboardDismiss(null)
+      return
+    }
+    const scrollEl = scrollRef.current
+    const escapedCid = typeof CSS !== 'undefined' && CSS.escape
+      ? CSS.escape(request.cid)
+      : request.cid
+    const committedRow = scrollEl?.querySelector(
+      `.chat__msg--user[data-cid="${escapedCid}"]`,
+    )
+    if (!committedRow) return
+
+    setCommittedSteerKeyboardDismiss(null)
+    const inputEl = inputRef.current
+    if (document.activeElement === inputEl
+        && inputValueRef.current === request.draft) {
+      inputEl.blur()
+    }
+  }, [chatId, committedSteerKeyboardDismiss, inputValueRef])
   // The composer clears before this boundary, so a slow picker save delays
   // transport without swallowing text entered after Send.
   const sendAfterSettingsSaved = useCallback(async (text, attachments, options) => {
@@ -3151,12 +3192,19 @@ export default function ChatView({
         isFirstUserMsg: steerIsFirstUser,
       })
       previousSendIntent = replaceSendIntent(steerCid, explicitSteerIntent)
-      // Queue-only sends deliberately retain mobile focus. Fast-forward is
-      // the explicit hand-off point, but snapshot reader position BEFORE
-      // blurring: keyboard dismissal resizes the viewport and can otherwise
-      // corrupt the pin decision. Both composer and per-row steer actions
-      // share this path.
-      if (_isTouchPrimary) inputRef.current?.blur()
+      // Queue-only sends deliberately retain mobile focus. Remember a touch
+      // fast-forward's focus/draft now, but do not blur yet: the authoritative
+      // cut must render and pin the steered row before keyboard geometry
+      // changes. Both composer and per-row steer actions share this path.
+      const inputEl = inputRef.current
+      steerKeyboardDismissRequestRef.current = null
+      if (_isTouchPrimary && document.activeElement === inputEl) {
+        steerKeyboardDismissRequestRef.current = {
+          chatId: String(chatId),
+          cid: steerCid,
+          draft: inputValueRef.current,
+        }
+      }
       // The queued tray is part of the footer height. Reserve these rows from
       // presentation before the request so the tray closes once, at the
       // deliberate steer action. The records remain in pendingQueue until the
@@ -3192,6 +3240,9 @@ export default function ChatView({
         onOwnerActivityRef.current?.()
       }
       if (result?.status !== 'steered') {
+        if (steerKeyboardDismissRequestRef.current?.cid === steerCid) {
+          steerKeyboardDismissRequestRef.current = null
+        }
         restoreReplacedSendIntent(
           steerCid,
           explicitSteerIntent,
@@ -3203,6 +3254,9 @@ export default function ChatView({
       // other status: release the unchanged queue back to the tray and let it
       // drain at turn-end.
     } catch {
+      if (steerKeyboardDismissRequestRef.current?.cid === steerCid) {
+        steerKeyboardDismissRequestRef.current = null
+      }
       restoreReplacedSendIntent(
         steerCid,
         explicitSteerIntent,
@@ -3558,7 +3612,7 @@ export default function ChatView({
     && turnActive
 
   // ── Sticky "tap to resume" affordance ──────────────────────────────
-  // A turn paused by a drain-gated restart, a stall, or a provider-limit park
+  // A turn paused by a drain-gated restart or a provider-limit park
   // persists a resumable error block at the tail of the last assistant message
   // (the same tail invariant MsgContent's Resume gate enforces). Like a pending
   // question, that card can sit outside the viewport after a scroll — the chat

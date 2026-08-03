@@ -9,8 +9,8 @@ import { formatResetTime } from './resetTime.js'
 //
 // Classification, all from the single `pause` descriptor: a provider-limit
 // park carries `pause.resets_at` and reads "Rate limit" — the honest, specific
-// name a park deserves. A drain-gated restart or stall carries `pause.kind`
-// ('restart' | 'stall') without a reset time and reads "Paused". Both are WAIT
+// name a park deserves. A drain-gated restart carries `pause.kind='restart'`
+// without a reset time and reads "Paused". Both are WAIT
 // states (any `pause`) and get the soft `.chat__text--parked` treatment; the
 // danger-red "Error" card is reserved for genuine failures (no `pause`). Old
 // persisted blocks predate `pause` and fall back to the error rendering.

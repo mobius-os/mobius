@@ -153,6 +153,10 @@ const _scrollModes = (() => {
   }
   catch { return {} }
 })()
+// `clearReadingPositions` is a terminal owner-session boundary. React and the
+// browser may still deliver cleanup/pagehide work before the ensuing reload;
+// those late callbacks must not recreate storage the session just removed.
+let _readingPositionWritesEnabled = true
 
 /** The durable message row an activation must contain before reveal.
  * ChatView uses only the row identity; this module keeps ownership of the
@@ -203,11 +207,13 @@ export function retireSavedReadingPosition(chatId) {
  *  still-mounted ChatView's pagehide write would put the in-memory map
  *  straight back over the cleared key. */
 export function clearReadingPositions() {
+  _readingPositionWritesEnabled = false
   for (const key of Object.keys(_scrollModes)) delete _scrollModes[key]
   try { localStorage.removeItem(READING_POSITION_KEY) } catch {}
 }
 
 function _persistScrollModes() {
+  if (!_readingPositionWritesEnabled) return
   try {
     const entries = Object.entries(_scrollModes)
     if (entries.length > READING_POSITION_LIMIT) {
@@ -1212,6 +1218,10 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  *   History blocks reveal, cached is a caller-validated restoration window,
  *   preparing is a hidden progressive cold render, and ready means
  *   authoritative history has settled.
+ * @param {boolean} args.ownsReadingPosition
+ *   True only for the physical ChatView participating in the active workspace
+ *   handoff. Retained hidden owners may keep DOM geometry, but never consume
+ *   or write the logical chat's one durable reading coordinate.
  */
 export default function useScrollMode({
   chatId,
@@ -1225,6 +1235,7 @@ export default function useScrollMode({
   pendingMessagesLength,
   loadingOlderRef,
   initialEntryPhase,
+  ownsReadingPosition,
 }) {
   const [revealed, setRevealed] = useState(false)
   // A tiny React mirror reruns the layout effect when a semantic transition
@@ -1238,6 +1249,10 @@ export default function useScrollMode({
   const revealedRef = useRef(false)
   const modeRef = useRef({ kind: 'INITIAL' })
   const modeChatIdRef = useRef(null)
+  // Standard and Builder may retain separate physical ChatViews for one chat.
+  // This is the sole durable-position authority: only the active surface may
+  // persist, and a hidden surface must re-enter through INITIAL before restore.
+  const readingPositionOwnerRef = useRef(ownsReadingPosition)
   // False only when mount had no deliberate reader location and therefore
   // used the automatic latest-message fallback. Passive lifecycle/viewport
   // changes must not promote that fallback into a saved reading position.
@@ -1437,6 +1452,7 @@ export default function useScrollMode({
 
   const persistMode = useCallback(({ freezeToCurrentPosition = false } = {}) => {
     try {
+      if (!readingPositionOwnerRef.current) return
       if (!readerLocationExplicitRef.current) {
         // Keep a stored location this visit merely failed to resolve. Only an
         // absent location — never a retrieval failure — may be cleared here.
@@ -1475,6 +1491,35 @@ export default function useScrollMode({
       _persistScrollModes()
     } catch {}
   }, [chatId, messagesRef, scrollRef, transitionMode])
+
+  // Transfer the logical chat's one durable coordinate with visibility. The
+  // outgoing owner persists before relinquishing authority; the incoming owner
+  // restores through INITIAL. A retained surface that begins hidden does neither.
+  useLayoutEffect(() => {
+    const wasOwner = readingPositionOwnerRef.current
+    if (wasOwner === ownsReadingPosition) return
+
+    if (wasOwner) {
+      if (modeRef.current.kind !== 'INITIAL'
+          && !(savedLocationUnresolvedRef.current
+            && !readerLocationExplicitRef.current)) {
+        readerLocationExplicitRef.current = true
+        // Main-effect cleanup has already settled pending input to ANCHOR_AT.
+        // Preserve that address: re-measuring after a world reflow can lose its
+        // nested part. Live FOLLOW/PIN modes still need one physical freeze.
+        persistMode({
+          freezeToCurrentPosition: modeRef.current.kind !== 'ANCHOR_AT',
+        })
+      }
+      readingPositionOwnerRef.current = false
+      return
+    }
+
+    readingPositionOwnerRef.current = true
+    readerLocationExplicitRef.current = false
+    savedLocationUnresolvedRef.current = false
+    transitionMode({ kind: 'INITIAL' }, 'lifecycle:position-owner-enter')
+  }, [ownsReadingPosition, persistMode, transitionMode])
 
   const settleNonPin = useCallback(({
     retireFollow = false,
@@ -1599,29 +1644,6 @@ export default function useScrollMode({
       : modeRef.current
   }, [scrollRef, transitionMode])
 
-  // A retained pane becoming hidden must cross the same scroll lifecycle
-  // boundary as the old unmounting ChatView. Freeze and persist the exact
-  // visible row before Settings (or another full-workspace overlay) can grow
-  // the transcript in the background. Keeping this as a controller event
-  // avoids exposing persistMode/modeRef mutation to ChatView.
-  const freezeChatExit = useCallback(() => {
-    // Leaving this chat is an explicit navigation action even when its initial
-    // location came from the automatic latest-content fallback. Promote the
-    // currently painted location before persisting it so the later unmount
-    // cleanup cannot delete the snapshot and reopen a growing turn at its new
-    // tail when the reader returns.
-    //
-    // The one exception is a visit that never resolved the stored location and
-    // in which the reader never moved: promoting there would overwrite a good
-    // saved position with the fallback tail this visit happened to show, which
-    // is how a single unresolvable return turned into "coming back again
-    // fails" forever after.
-    if (savedLocationUnresolvedRef.current
-        && !readerLocationExplicitRef.current) return
-    readerLocationExplicitRef.current = true
-    persistMode({ freezeToCurrentPosition: true })
-  }, [persistMode])
-
   // A sticky attention nudge (question or paused turn) is an explicit reader
   // request, but not a scroll gesture inside `.chat__scroll`. Route it through
   // the controller anyway:
@@ -1663,14 +1685,14 @@ export default function useScrollMode({
   // on every messages change; cleanup is only fired on chatId change.)
   useLayoutEffect(() => {
     return () => persistMode({ freezeToCurrentPosition: true })
-  }, [chatId])
+  }, [persistMode])
 
   // A hard shell refresh/page background does not reliably run React's
   // cleanup after the human manually scrolls. Persist the current mode on the
   // browser lifecycle events too, so reload returns to the last reading
   // position rather than an older mode saved during the last message change.
   useLayoutEffect(() => {
-    if (typeof window === 'undefined') return
+    if (!ownsReadingPosition || typeof window === 'undefined') return
     const onPageLeaving = () => persistMode({ freezeToCurrentPosition: true })
     const onVisibilityChange = () => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
@@ -1687,7 +1709,7 @@ export default function useScrollMode({
       window.removeEventListener(BEFORE_SHELL_RELOAD_EVENT, onPageLeaving)
       document.removeEventListener('visibilitychange', onVisibilityChange)
     }
-  }, [chatId])
+  }, [ownsReadingPosition, persistMode])
 
   // Single layout effect: spacer sizing, automatic scroll writes,
   // ResizeObserver layout updates, user-gesture detection, geometry-based
@@ -1702,6 +1724,12 @@ export default function useScrollMode({
       readerIntentVersionRef.current += 1
       transitionMode({ kind: 'INITIAL' }, 'lifecycle:chat-change')
     }
+
+    // Retained hidden workspace worlds keep their DOM but own no scroll
+    // lifecycle, observers, or durable reading-position writes. Becoming the
+    // active owner above re-enters through INITIAL and this effect then installs
+    // the one live controller against fresh geometry.
+    if (!readingPositionOwnerRef.current) return
 
     const scrollEl = scrollRef.current
     const spacerEl = spacerRef.current
@@ -2678,6 +2706,7 @@ export default function useScrollMode({
     pendingMessagesLength,
     chatId,
     initialEntryPhase,
+    ownsReadingPosition,
     pinModeActive,
     chatRef,
     footRef,
@@ -2841,7 +2870,6 @@ export default function useScrollMode({
     anchorPagination,
     captureSendIntent,
     commitSendIntent,
-    freezeChatExit,
     freezeForegroundReturn,
     freezeQuestionSubmission,
     freezeQueuedSubmission,
