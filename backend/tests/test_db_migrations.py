@@ -1,7 +1,9 @@
 import ast
+import asyncio
 import hashlib
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import String, create_engine, inspect, text
@@ -122,8 +124,9 @@ def test_run_migrations_adds_manifest_url_to_existing_apps_table(tmp_path):
 
 
 def test_app_identity_migration_backfills_source_and_enforces_future_writes(
-  tmp_path,
+  tmp_path, monkeypatch,
 ):
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
   eng = create_engine(f"sqlite:///{tmp_path / 'app-identity.db'}")
   with eng.begin() as conn:
     conn.execute(text(
@@ -170,6 +173,285 @@ def test_app_identity_migration_backfills_source_and_enforces_future_writes(
       conn.execute(text(
         "UPDATE apps SET source_dir = :source_dir WHERE id = 2"
       ), {"source_dir": str(apps_root / "canonical-app")})
+
+
+def test_app_identity_migration_materializes_legacy_source_without_overwriting_draft(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
+  apps_root = tmp_path / "apps"
+  occupied = apps_root / "legacy-app"
+  occupied.mkdir(parents=True)
+  (occupied / "index.jsx").write_text("// owner's newer draft", encoding="utf-8")
+  stored = "export default function App() { return <main>Legacy</main> }"
+  eng = create_engine(f"sqlite:///{tmp_path / 'legacy-source.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps ("
+      "id INTEGER PRIMARY KEY, name VARCHAR(128) NOT NULL, "
+      "slug VARCHAR(128), source_dir VARCHAR(512), jsx_source TEXT)"
+    ))
+    conn.execute(text(
+      "INSERT INTO apps (id, name, slug, source_dir, jsx_source) "
+      "VALUES (7, 'Legacy app', 'legacy-app', NULL, :source)"
+    ), {"source": stored})
+
+  run_migrations(eng)
+  with eng.connect() as conn:
+    source_dir = Path(conn.execute(text(
+      "SELECT source_dir FROM apps WHERE id = 7"
+    )).scalar_one())
+
+  assert source_dir == apps_root / "legacy-app-legacy-7"
+  assert (occupied / "index.jsx").read_text(encoding="utf-8") == "// owner's newer draft"
+  assert (source_dir / "index.jsx").read_text(encoding="utf-8") == stored
+  assert (source_dir / ".git").is_dir()
+  from app import app_git
+  assert app_git.worktree_dirty(source_dir) is False
+
+  from app import compiler
+
+  async def fake_compile(_app_id, source, *, out_path, source_path):
+    assert source == stored
+    assert Path(source_path) == source_dir / "index.jsx"
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(out_path).write_text("compiled legacy app", encoding="utf-8")
+
+  class FakeDB:
+    def commit(self):
+      return None
+
+    def rollback(self):
+      raise AssertionError("legacy rebuild must not roll back")
+
+  monkeypatch.setattr(compiler, "compile_jsx", fake_compile)
+  app = SimpleNamespace(
+    id=7,
+    source_dir=str(source_dir),
+    source_commit=None,
+    compiled_path=str(tmp_path / "missing-old-bundle.js"),
+    jsx_source=stored,
+    updated_at=None,
+  )
+  asyncio.run(compiler.recompile_app_bundle(FakeDB(), app, stored))
+  assert Path(app.compiled_path).read_text(encoding="utf-8") == "compiled legacy app"
+
+
+@pytest.mark.parametrize("occupied_nominal", [False, True])
+def test_app_identity_migration_retries_after_repo_initialization_crash(
+  tmp_path, monkeypatch, occupied_nominal,
+):
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
+  apps_root = tmp_path / "apps"
+  if occupied_nominal:
+    nominal = apps_root / "retry-app"
+    nominal.mkdir(parents=True)
+    (nominal / "index.jsx").write_text("// keep draft", encoding="utf-8")
+  stored = "export default () => <main>Retry</main>"
+  eng = create_engine(f"sqlite:///{tmp_path / 'retry-source.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(128) NOT NULL, "
+      "slug VARCHAR(128), source_dir VARCHAR(512), jsx_source TEXT)"
+    ))
+    conn.execute(text(
+      "INSERT INTO apps VALUES (9, 'Retry app', 'retry-app', NULL, :source)"
+    ), {"source": stored})
+
+  from app import app_git
+  real_ensure_repo = app_git.ensure_repo
+  failed = False
+
+  def crash_after_repo(path):
+    nonlocal failed
+    real_ensure_repo(path)
+    if not failed:
+      failed = True
+      raise OSError("simulated crash after repo initialization")
+
+  monkeypatch.setattr(app_git, "ensure_repo", crash_after_repo)
+  with pytest.raises(OSError, match="simulated crash"):
+    run_migrations(eng)
+  run_migrations(eng)
+
+  with eng.connect() as conn:
+    source_dir = Path(conn.execute(text(
+      "SELECT source_dir FROM apps WHERE id = 9"
+    )).scalar_one())
+  expected = apps_root / (
+    "retry-app-legacy-9" if occupied_nominal else "retry-app"
+  )
+  assert source_dir == expected
+  assert (source_dir / "index.jsx").read_text(encoding="utf-8") == stored
+  assert not (source_dir / ".mobius-identity-migration").exists()
+  assert app_git.worktree_dirty(source_dir) is False
+  if occupied_nominal:
+    assert (apps_root / "retry-app" / "index.jsx").read_text(
+      encoding="utf-8"
+    ) == "// keep draft"
+
+
+def test_app_identity_migration_retries_after_pre_marker_directory_crash(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
+  apps_root = tmp_path / "apps"
+  nominal = apps_root / "mkdir-retry"
+  nominal.mkdir(parents=True)
+  (nominal / "index.jsx").write_text("// occupied", encoding="utf-8")
+  eng = create_engine(f"sqlite:///{tmp_path / 'mkdir-retry.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(128) NOT NULL, "
+      "slug VARCHAR(128), source_dir VARCHAR(512), jsx_source TEXT)"
+    ))
+    conn.execute(text(
+      "INSERT INTO apps VALUES (13, 'Retry', 'mkdir-retry', NULL, "
+      "'export default () => 13')"
+    ))
+
+  target = apps_root / "mkdir-retry-legacy-13"
+  real_mkdir = Path.mkdir
+  failed = False
+
+  def crash_after_mkdir(path, *args, **kwargs):
+    nonlocal failed
+    result = real_mkdir(path, *args, **kwargs)
+    if Path(path) == target and not failed:
+      failed = True
+      raise OSError("simulated crash before marker publish")
+    return result
+
+  monkeypatch.setattr(Path, "mkdir", crash_after_mkdir)
+  with pytest.raises(OSError, match="before marker"):
+    run_migrations(eng)
+  run_migrations(eng)
+  with eng.connect() as conn:
+    assert Path(conn.execute(text(
+      "SELECT source_dir FROM apps WHERE id = 13"
+    )).scalar_one()) == target
+  assert (target / "index.jsx").read_text(encoding="utf-8") == "export default () => 13"
+
+
+def test_app_identity_migration_reserves_sanitized_source_names(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
+  apps_root = tmp_path / "apps"
+  claimed = apps_root / "a-b"
+  eng = create_engine(f"sqlite:///{tmp_path / 'identity-collisions.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(128) NOT NULL, "
+      "slug VARCHAR(128), source_dir VARCHAR(512), jsx_source TEXT)"
+    ))
+    conn.execute(text(
+      "INSERT INTO apps VALUES "
+      "(1, 'Existing', 'existing', :claimed, 'export default 1'), "
+      "(2, 'Slash', 'a/b', NULL, 'export default 2'), "
+      "(3, 'Dash', 'a-b', NULL, 'export default 2')"
+    ), {"claimed": str(claimed)})
+
+  run_migrations(eng)
+  with eng.connect() as conn:
+    rows = conn.execute(text(
+      "SELECT id, source_dir FROM apps ORDER BY id"
+    )).all()
+  assert rows == [
+    (1, str(claimed)),
+    (2, str(apps_root / "a-b-legacy-2")),
+    (3, str(apps_root / "a-b-legacy-3")),
+  ]
+  assert len({source for _, source in rows}) == 3
+
+
+def test_app_identity_migration_reserves_names_without_stored_jsx(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
+  apps_root = tmp_path / "apps"
+  claimed = apps_root / "same-name"
+  claimed.mkdir(parents=True)
+  (claimed / "draft.txt").write_text("preserve", encoding="utf-8")
+  eng = create_engine(f"sqlite:///{tmp_path / 'no-jsx-identities.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(128) NOT NULL, "
+      "slug VARCHAR(128), source_dir VARCHAR(512))"
+    ))
+    conn.execute(text(
+      "INSERT INTO apps VALUES "
+      "(1, 'Existing', 'existing', :claimed), "
+      "(2, 'Slash', 'same/name', NULL), "
+      "(3, 'Dash', 'same-name', NULL)"
+    ), {"claimed": str(claimed)})
+
+  run_migrations(eng)
+  with eng.connect() as conn:
+    rows = conn.execute(text(
+      "SELECT id, source_dir FROM apps ORDER BY id"
+    )).all()
+  assert rows == [
+    (1, str(claimed)),
+    (2, str(apps_root / "same-name-legacy-2")),
+    (3, str(apps_root / "same-name-legacy-3")),
+  ]
+  assert (claimed / "draft.txt").read_text(encoding="utf-8") == "preserve"
+
+
+def test_app_identity_migration_rejects_symlink_escape_before_writing(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
+  apps_root = tmp_path / "apps"
+  apps_root.mkdir()
+  outside = tmp_path / "outside"
+  outside.mkdir()
+  (apps_root / "escaped").symlink_to(outside, target_is_directory=True)
+  eng = create_engine(f"sqlite:///{tmp_path / 'symlink-identity.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(128) NOT NULL, "
+      "slug VARCHAR(128), source_dir VARCHAR(512), jsx_source TEXT)"
+    ))
+    conn.execute(text(
+      "INSERT INTO apps VALUES "
+      "(21, 'Escaped', 'escaped', NULL, 'export default 21')"
+    ))
+
+  run_migrations(eng)
+  with eng.connect() as conn:
+    source_dir = Path(conn.execute(text(
+      "SELECT source_dir FROM apps WHERE id = 21"
+    )).scalar_one())
+  assert source_dir == apps_root / "escaped-legacy-21"
+  assert list(outside.iterdir()) == []
+  assert (source_dir / "index.jsx").read_text(encoding="utf-8") == "export default 21"
+
+
+@pytest.mark.parametrize("unsafe_slug", ["../../outside-apps", "/tmp/outside-apps"])
+def test_app_identity_migration_never_treats_url_slug_as_a_source_path(
+  tmp_path, monkeypatch, unsafe_slug,
+):
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
+  eng = create_engine(f"sqlite:///{tmp_path / 'unsafe-slug.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(128) NOT NULL, "
+      "slug VARCHAR(128), source_dir VARCHAR(512), jsx_source TEXT)"
+    ))
+    conn.execute(text(
+      "INSERT INTO apps VALUES (11, 'Unsafe slug', :slug, NULL, 'export default 1')"
+    ), {"slug": unsafe_slug})
+
+  run_migrations(eng)
+  with eng.connect() as conn:
+    source_dir = Path(conn.execute(text(
+      "SELECT source_dir FROM apps WHERE id = 11"
+    )).scalar_one())
+  apps_root = (tmp_path / "apps").resolve()
+  assert source_dir.resolve().parent == apps_root
+  assert source_dir.name and source_dir.name not in {".", ".."}
 
 
 def test_fresh_app_schema_requires_nonempty_slug_and_source_dir(tmp_path):

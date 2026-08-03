@@ -1013,8 +1013,10 @@ def _require_app_identity(eng) -> None:
   """
   from sqlalchemy import inspect as sa_inspect, text
 
-  if "apps" not in sa_inspect(eng).get_table_names():
+  inspector = sa_inspect(eng)
+  if "apps" not in inspector.get_table_names():
     return
+  app_columns = {column["name"] for column in inspector.get_columns("apps")}
   with eng.begin() as conn:
     from app.app_identity import slugify_for_source_dir
 
@@ -1041,19 +1043,159 @@ def _require_app_identity(eng) -> None:
         "UPDATE apps SET slug = :slug WHERE id = :app_id"
       ), {"slug": slug, "app_id": app_id})
       used_slugs.add(slug)
+    source_projection = "jsx_source" if "jsx_source" in app_columns else "NULL"
+    apps_root_resolved = apps_root.resolve()
+    reserved_sources = {
+      str(Path(source_dir).resolve())
+      for (source_dir,) in conn.execute(text(
+        "SELECT source_dir FROM apps "
+        "WHERE source_dir IS NOT NULL AND length(trim(source_dir)) > 0"
+      ))
+    }
     missing_sources = conn.execute(text(
-      "SELECT id, slug FROM apps "
+      f"SELECT id, slug, {source_projection} AS jsx_source FROM apps "
       "WHERE source_dir IS NULL OR length(trim(source_dir)) = 0"
     )).all()
-    for app_id, slug in missing_sources:
+    for app_id, slug, jsx_source in missing_sources:
       if not slug or not str(slug).strip():
         raise RuntimeError(
           f"cannot require app identity: app {app_id} has no slug"
         )
+      # URL slugs on very old/corrupt rows were never a filesystem trust
+      # boundary. Preserve the URL identity in SQLite, but derive the source
+      # basename through the same sanitizer used for newly allocated apps.
+      source_basename = slugify_for_source_dir(str(slug))
+      source_dir = apps_root / source_basename
+      app_git = None
+      if isinstance(jsx_source, str):
+        from app import app_git
+
+        def reusable_legacy_tree(path: Path) -> bool:
+          marker = path / ".mobius-identity-migration"
+          try:
+            migration_owned = marker.read_text(encoding="utf-8") == (
+              f"0004_app_identity_required:{app_id}\n"
+            )
+          except (FileNotFoundError, OSError):
+            migration_owned = False
+          if migration_owned:
+            return True
+          try:
+            names = {child.name for child in path.iterdir()}
+          except (FileNotFoundError, OSError):
+            names = set()
+          # A crash before the atomic marker publish can leave only the new
+          # directory (or its marker temp); a crash in the older implementation
+          # could leave only ensure_repo's clean seed. Neither contains owner
+          # source, so this app may safely resume the same deterministic path.
+          if names <= {
+            ".git",
+            ".mobius-identity-migration",
+            ".mobius-identity-migration.tmp",
+          }:
+            return True
+          try:
+            same_entry = (path / "index.jsx").read_text(
+              encoding="utf-8"
+            ) == jsx_source
+          except (FileNotFoundError, OSError):
+            return False
+          return (
+            app_git.is_repo(path)
+            and not app_git.worktree_dirty(path)
+            and same_entry
+          )
+
+      # Allocate every missing identity, even when an extremely old schema has
+      # no stored JSX. Reservations cover existing rows and earlier assignments
+      # in this transaction. Resolved containment rejects symlinks that escape
+      # apps_root before any mkdir, marker, or Git operation can touch them.
+      candidate_number = 0
+      while True:
+        if candidate_number == 0:
+          candidate = source_dir
+        elif candidate_number == 1:
+          candidate = apps_root / f"{source_basename}-legacy-{app_id}"
+        else:
+          candidate = apps_root / (
+            f"{source_basename}-legacy-{app_id}-{candidate_number}"
+          )
+        candidate_number += 1
+        resolved_path = candidate.resolve()
+        resolved = str(resolved_path)
+        if (
+          resolved_path.parent != apps_root_resolved
+          or resolved_path.name.isdigit()
+          or resolved in reserved_sources
+        ):
+          continue
+        if candidate.exists():
+          if app_git is None or not reusable_legacy_tree(candidate):
+            continue
+        source_dir = candidate
+        reserved_sources.add(resolved)
+        break
+
+      if isinstance(jsx_source, str):
+        source_dir.mkdir(parents=True, exist_ok=True)
+        marker = source_dir / ".mobius-identity-migration"
+        marker_temp = source_dir / ".mobius-identity-migration.tmp"
+        marker_temp.write_text(
+          f"0004_app_identity_required:{app_id}\n", encoding="utf-8"
+        )
+        os.replace(marker_temp, marker)
+        try:
+          app_git.ensure_repo(source_dir)
+          # Keep the durable ownership marker through the source commit without
+          # accepting it as app source. A crash at any earlier boundary can now
+          # retry the same directory deterministically.
+          exclude = source_dir / ".git" / "info" / "exclude"
+          exclude.parent.mkdir(parents=True, exist_ok=True)
+          existing_exclude = (
+            exclude.read_text(encoding="utf-8")
+            if exclude.exists()
+            else ""
+          )
+          if ".mobius-identity-migration" not in existing_exclude.splitlines():
+            exclude.write_text(
+              existing_exclude.rstrip("\n")
+              + ("\n" if existing_exclude else "")
+              + ".mobius-identity-migration\n",
+              encoding="utf-8",
+            )
+          entry = source_dir / "index.jsx"
+          # The marker proves this directory belongs to this migration, so a
+          # partial prior write is safe to replace with the stored revision.
+          entry.write_text(jsx_source, encoding="utf-8")
+          if entry.read_text(encoding="utf-8") != jsx_source:
+            raise RuntimeError(
+              f"cannot require app identity: legacy source for app {app_id} "
+              "does not match its stored revision"
+            )
+          app_git.commit_local(
+            source_dir, "Materialize legacy app source identity"
+          )
+          if app_git.worktree_dirty(source_dir):
+            raise RuntimeError(
+              "cannot require app identity: materialized source for app "
+              f"{app_id} "
+              "is not clean"
+            )
+          marker.unlink(missing_ok=True)
+        except Exception:
+          # Deliberately retain the marker: it is the crash/retry ownership
+          # proof and is excluded from app history once Git exists.
+          raise
+        if app_git.worktree_dirty(source_dir):
+          raise RuntimeError(
+            "cannot require app identity: materialized source for app "
+            f"{app_id} "
+            "is not clean"
+          )
       conn.execute(text(
         "UPDATE apps SET source_dir = :source_dir WHERE id = :app_id"
       ), {
-        "source_dir": str(apps_root / str(slug)),
+        "source_dir": str(source_dir),
         "app_id": app_id,
       })
     invalid = conn.execute(text(
