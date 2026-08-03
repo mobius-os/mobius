@@ -18,7 +18,7 @@
   box-sizing: border-box;
   width: min(100%, 640px);
   margin-inline: auto;
-  margin-bottom: var(--chat-foot-block-gap);
+  margin-bottom: var(--chat-foot-card-gap);
   display: flex;
   flex-direction: column;
   gap: 8px;

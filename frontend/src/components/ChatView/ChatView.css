@@ -1877,7 +1877,10 @@
    on the foot itself and re-enabled selectively on its interactive
    children, so taps on the gutter pass through to the chat. */
 .chat__foot {
-  --chat-foot-block-gap: 3px;
+  --chat-foot-rail-gap: 3px;
+  /* Opaque footer cards need a wider physical gap to read as equally
+     separated from the composer as the translucent progress rail. */
+  --chat-foot-card-gap: 6px;
   position: absolute;
   /* Interactive controls must stay wholly inside the device safe rectangle.
      Android Chrome paints the shell's gesture backdrop in the unsafe band;
@@ -2985,7 +2988,7 @@
    its height, so a height animation would fight the composer clearance. */
 .chat__progress-rail {
   max-width: 720px;
-  margin: 0 auto var(--chat-foot-block-gap);
+  margin: 0 auto var(--chat-foot-rail-gap);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -3080,7 +3083,7 @@
      48px wider than the pill it feeds (owner catch, 2026-07-17). */
   width: 100%;
   max-width: 720px;
-  margin: 0 auto var(--chat-foot-block-gap);
+  margin: 0 auto var(--chat-foot-card-gap);
   background: var(--surface); /* CONTRACT: opaque card/panel fill, sits on --bg */
   border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
   border-radius: 12px;
