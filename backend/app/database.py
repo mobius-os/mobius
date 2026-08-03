@@ -1304,11 +1304,19 @@ def _require_app_identity(eng) -> None:
         ))
 
 
+def _add_connectors_table(eng) -> None:
+  """Create the provider-neutral MCP registry without replacing preview rows."""
+  from app.models import Connector
+
+  Connector.__table__.create(bind=eng, checkfirst=True)
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
   ("0003_chat_run_root_identity", _add_chat_run_root_identity),
   ("0004_app_identity_required", _require_app_identity),
+  ("0005_connectors", _add_connectors_table),
 )
 
 

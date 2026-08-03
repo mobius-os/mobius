@@ -58,6 +58,7 @@ chat_embed_router = _load("chat_embed")
 chats_router = _load("chats")
 chats_stream_router = _load("chats_stream")
 chat_logs_router = _load("chat_logs")
+connectors_router = _load("connectors")
 proxy_router = _load("proxy")
 local_services_router = _load("local_services")
 notify_router = _load("notify")
@@ -92,6 +93,7 @@ __all__ = [
   "chats_router",
   "chats_stream_router",
   "chat_logs_router",
+  "connectors_router",
   "proxy_router",
   "local_services_router",
   "notify_router",
