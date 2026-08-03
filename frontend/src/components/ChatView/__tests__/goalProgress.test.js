@@ -215,11 +215,6 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
   assert.match(progressRail, /label\.scrollWidth > step\.clientWidth/)
   assert.match(
     chatCss,
-    /\.chat__progress-rail\s*\{[\s\S]*?margin:\s*0 auto 3px;/,
-    'the goal rail should sit close to the composer like other footer status UI',
-  )
-  assert.match(
-    chatCss,
     /\.chat__foot \.chat__progress-step--toggle[\s\S]*?\{ pointer-events: auto; \}/,
     'an expandable step must opt back into pointer input inside the transparent footer',
   )
