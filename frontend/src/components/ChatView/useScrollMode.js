@@ -5,7 +5,7 @@
  * single funnel that turns a mode into a concrete `scrollTop`.
  * Layout changes (RO, content mutation, spacer recompute, keyboard)
  * re-apply the mode but never mutate it. Only user gestures and
- * explicit lifecycle events (send, mount restore) mutate it.
+ * explicit semantic events (send, composer intent, mount restore) mutate it.
  *
  * Modes:
  *   { kind: 'INITIAL' }           — pre-restore default; no-op
@@ -849,8 +849,8 @@ export function modeAfterTerminalLayout(mode, spacerH, layoutStable) {
 }
 
 
-/** Resolve the quiet edge of a real reader gesture. The physical tail is the
- * single explicit entrance to following, whether or not reservation remains. */
+/** Resolve the quiet edge of a real reader gesture. The physical tail is an
+ * explicit entrance to following, whether or not reservation remains. */
 export function modeAfterReaderGesture({
   reachedBottom,
   holdMode,
@@ -860,19 +860,33 @@ export function modeAfterReaderGesture({
 }
 
 
+/** A primary composer press at the physical tail is an explicit request to
+ * keep the latest content visible while the software keyboard opens. Read the
+ * geometry before focus changes the viewport; presses higher in the transcript
+ * preserve their exact reading anchor. */
+export function composerPointerRequestsFollow(event, scrollEl) {
+  if (event?.button !== 0
+      || !event?.target?.matches?.('textarea.chat__input')
+      || !scrollEl) return false
+  return scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
+    < PHYSICAL_BOTTOM_EPSILON_PX
+}
+
+
 const FOLLOW_ENTRY_EVENTS = new Set([
   'reader:scroll-bottom',
+  'reader:composer-bottom',
   'layout:reservation-filled',
   'terminal:reservation-filled',
 ])
 
 /** Enforce the state machine's narrow entry authority.
  *
- * Only a send can create a pin. FOLLOW_BOTTOM can be entered only by the two
- * explicit product transitions: a real bottom gesture, or an
- * already-armed pin consuming its reservation. Other events may preserve the
- * current mode, demote it to an anchor/initial hold, or retire an armed pin,
- * but cannot manufacture automatic scroll ownership.
+ * Only a send can create a pin. FOLLOW_BOTTOM can be entered only by explicit
+ * tail intent (a real bottom gesture or a composer press already at the
+ * physical tail), or by an already-armed pin consuming its reservation. Other
+ * events may preserve the current mode, demote it to an anchor/initial hold,
+ * or retire an armed pin, but cannot manufacture automatic scroll ownership.
  */
 export function modeForScrollTransition(previousMode, proposedMode, event) {
   if (!proposedMode) return previousMode
@@ -896,7 +910,7 @@ export function modeForScrollTransition(previousMode, proposedMode, event) {
   if (proposedMode.kind === 'FOLLOW_BOTTOM'
       && previousMode?.kind !== 'FOLLOW_BOTTOM') {
     if (!FOLLOW_ENTRY_EVENTS.has(event)) return previousMode
-    if (event !== 'reader:scroll-bottom'
+    if (!event.startsWith('reader:')
         && !(previousMode?.kind === 'PIN_USER_MSG'
           && previousMode.followWhenFilled)) {
       return previousMode
@@ -1718,6 +1732,7 @@ export default function useScrollMode({
     const scrollEl = scrollRef.current
     const spacerEl = spacerRef.current
     if (!scrollEl || !spacerEl) return
+    const chatEl = chatRef.current
 
     if (observedScrollViewportRef.current.element !== scrollEl) {
       observedScrollViewportRef.current = {
@@ -2466,6 +2481,18 @@ export default function useScrollMode({
       // Keep the gesture gate, but let that scroll become reader-owned.
       disclosureInputOwnsGesture = false
     }
+    const onComposerPointerDown = (event) => {
+      if (!composerPointerRequestsFollow(event, scrollEl)) return
+      // Composer focus is a newer semantic action than any scroll still
+      // waiting on momentum/quiet settlement. Retire that gesture before the
+      // keyboard resize arrives so the viewport observer can apply FOLLOW in
+      // its first committed layout pass instead of waiting behind the old gate.
+      supersedePendingReaderGesture()
+      readerLocationExplicitRef.current = true
+      transitionMode({ kind: 'FOLLOW_BOTTOM' }, 'reader:composer-bottom')
+      persistMode()
+      recordTrace('events', 'reader:composer-bottom', { scrollEl })
+    }
     const noteScrollStart = () => {
       if (!pendingGestureStart) return
       perfMark('scroll.startLatency', performance.now() - pendingGestureStart)
@@ -2482,6 +2509,7 @@ export default function useScrollMode({
     scrollEl.addEventListener('input', onQuestionEditMutation, { passive: true })
     scrollEl.addEventListener('pointerup', onPointerUpInput, { passive: true })
     scrollEl.addEventListener('pointercancel', onPointerCancelInput, { passive: true })
+    chatEl?.addEventListener('pointerdown', onComposerPointerDown, { passive: true })
 
     // Scroll handler — user-driven scrolls only mark intent here. The expensive
     // semantic location/mode work runs once in settleReaderScroll.
@@ -2588,6 +2616,7 @@ export default function useScrollMode({
       scrollEl.removeEventListener('input', onQuestionEditMutation)
       scrollEl.removeEventListener('pointerup', onPointerUpInput)
       scrollEl.removeEventListener('pointercancel', onPointerCancelInput)
+      chatEl?.removeEventListener('pointerdown', onComposerPointerDown)
       if (forceRevealRef.current === forceReveal) forceRevealRef.current = null
     }
   }, [

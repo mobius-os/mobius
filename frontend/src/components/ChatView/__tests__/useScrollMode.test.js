@@ -13,6 +13,7 @@ import {
   applyMode,
   anchorModeFromScroll,
   bottomAnchorModeFromScroll,
+  composerPointerRequestsFollow,
   contentHoldModeFromScroll,
   delayedSendWillPin,
   gestureLayoutRetryDelay,
@@ -203,6 +204,28 @@ test('only scrolling keys claim reader ownership', () => {
   assert.equal(readerInputMayScroll('keydown', 'Tab'), true)
   assert.equal(readerInputMayScroll('wheel'), true)
   assert.equal(readerInputMayScroll('touchmove'), true)
+})
+
+test('a primary composer press requests follow only at the physical tail', () => {
+  const composer = { matches: selector => selector === 'textarea.chat__input' }
+  const otherControl = { matches: () => false }
+  const atTail = makeScrollEl({
+    scrollHeight: 2000,
+    scrollTop: 1200,
+    clientHeight: 800,
+  })
+  const aboveTail = makeScrollEl({
+    scrollHeight: 2000,
+    scrollTop: 1000,
+    clientHeight: 800,
+  })
+
+  assert.equal(composerPointerRequestsFollow({ button: 0, target: composer }, atTail), true)
+  assert.equal(composerPointerRequestsFollow({ button: 0, target: composer }, aboveTail), false,
+    'composer focus must preserve an older reading position')
+  assert.equal(composerPointerRequestsFollow({ button: 1, target: composer }, atTail), false,
+    'non-primary presses do not express writing intent')
+  assert.equal(composerPointerRequestsFollow({ button: 0, target: otherControl }, atTail), false)
 })
 
 test('disclosure activation is recognized as an anchor-latching reading action', () => {

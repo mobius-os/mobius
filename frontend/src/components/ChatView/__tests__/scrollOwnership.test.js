@@ -219,4 +219,17 @@ test('automatic geometry owners and newer semantic actions share reader authorit
     /const onPointerCancelInput = \(\) => \{[\s\S]*?disclosureInputOwnsGesture = false[\s\S]*?addEventListener\('pointercancel', onPointerCancelInput/,
     'a disclosure press promoted to a native pan must become reader-owned scroll',
   )
+
+  const composerStart = ownerSource.indexOf('const onComposerPointerDown =')
+  const composerEnd = ownerSource.indexOf('const noteScrollStart =', composerStart)
+  const composerPath = ownerSource.slice(composerStart, composerEnd)
+  assert.ok(composerStart >= 0 && composerEnd > composerStart,
+    'composer tail intent must remain inside the scroll owner')
+  assert.match(composerPath, /composerPointerRequestsFollow\(event, scrollEl\)/,
+    'composer focus may follow only after checking pre-keyboard tail geometry')
+  assert.ok(
+    composerPath.indexOf('supersedePendingReaderGesture()')
+      < composerPath.indexOf("transitionMode({ kind: 'FOLLOW_BOTTOM' }"),
+    'composer intent must retire an older gesture before keyboard follow begins',
+  )
 })

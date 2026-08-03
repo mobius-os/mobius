@@ -143,7 +143,7 @@ test('question viewport release restores only its captured base authority', () =
   ), followOverlay, 'an equivalent-looking mode is not the overlay\'s authority')
 })
 
-test('only real-bottom or an armed pin handoff can enter follow', () => {
+test('only explicit tail intent or an armed pin handoff can enter follow', () => {
   const hold = { kind: 'ANCHOR_AT', key: 'a-1', offset: 30 }
   const follow = { kind: 'FOLLOW_BOTTOM' }
   const armedPin = {
@@ -162,6 +162,10 @@ test('only real-bottom or an armed pin handoff can enter follow', () => {
   )
   assert.equal(
     modeForScrollTransition(hold, follow, 'reader:scroll-bottom'),
+    follow,
+  )
+  assert.equal(
+    modeForScrollTransition(hold, follow, 'reader:composer-bottom'),
     follow,
   )
 })
