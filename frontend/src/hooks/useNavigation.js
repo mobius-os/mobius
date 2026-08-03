@@ -1638,7 +1638,14 @@ export default function useNavigation({
           // slide); otherwise let the traversal commit and consume right
           // after — the drawer branch of handleBack keys on our own refs,
           // not on the destination.
-          if (e.canIntercept) e.intercept({ handler: consume })
+          // The shell already owns both outcomes: Drawer restores its previous
+          // focus for an ordinary close, while a destination handoff keeps its
+          // composer lease. Navigation API's default post-traversal focus reset
+          // would override either owner (and blur the lease to <body>), so keep
+          // this bookkeeping traversal focus-neutral.
+          if (e.canIntercept) {
+            e.intercept({ handler: consume, focusReset: 'manual' })
+          }
           else setTimeout(consume, 0)
           return
         }
