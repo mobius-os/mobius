@@ -772,6 +772,22 @@ export function shouldPinSend({
 }
 
 
+/** Keep a queued send's submit-time pin decision until the reader actually
+ *  moves again. Opening/closing the queue tray and composer changes geometry,
+ *  but that layout work is not newer reading intent. An explicit fast-forward
+ *  therefore reuses the queued decision while its reader generation is still
+ *  current; after a real scroll, the fast-forward-time snapshot wins. */
+export function delayedSendWillPin({
+  previousIntent,
+  readerIntentVersion,
+  willPinNow,
+}) {
+  return previousIntent?.readerIntentVersion === readerIntentVersion
+    ? previousIntent.willPin
+    : willPinNow
+}
+
+
 /** Position-based bottom check that treats the dynamic pin spacer as phantom
  *  room, not real content. Send snapshots use the conversation tail because a
  *  new send should not require traversing reserved reply room first. */
@@ -1511,14 +1527,21 @@ export default function useScrollMode({
   const captureSendIntent = useCallback(({
     canPin = true,
     isFirstUserMsg = false,
+    previousIntent = null,
   } = {}) => {
+    const readerIntentVersion = readerIntentVersionRef.current
+    const willPinNow = canPin && shouldPinSend({
+      scrollEl: scrollRef.current,
+      mode: modeRef.current,
+      isFirstUserMsg,
+    })
     const intent = {
-      willPin: canPin && shouldPinSend({
-        scrollEl: scrollRef.current,
-        mode: modeRef.current,
-        isFirstUserMsg,
+      willPin: delayedSendWillPin({
+        previousIntent: canPin ? previousIntent : null,
+        readerIntentVersion,
+        willPinNow,
       }),
-      readerIntentVersion: readerIntentVersionRef.current,
+      readerIntentVersion,
     }
     supersedePendingReaderGesture()
     return intent

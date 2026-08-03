@@ -76,7 +76,7 @@ test('per-row fast-forward appears with the optimistic row and dispatches on tou
 test('touch steer dismisses the keyboard only after its committed row is positioned', () => {
   assert.match(
     chatView,
-    /async function steerRowsImpl\(steerRowsList\) \{[\s\S]*?explicitSteerIntent = captureSendIntent\(\{[\s\S]*?previousSendIntent = replaceSendIntent\(steerCid, explicitSteerIntent\)[\s\S]*?steerKeyboardDismissRequestRef\.current = \{[\s\S]*?pendingQueue\.reserveForSteer\(consumePendingCids\)/,
+    /async function steerRowsImpl\(steerRowsList\) \{[\s\S]*?previousSendIntent = peekSendIntent\(steerCid\)[\s\S]*?explicitSteerIntent = captureSendIntent\(\{[\s\S]*?previousIntent: previousSendIntent[\s\S]*?rememberSendIntent\(steerCid, explicitSteerIntent\)[\s\S]*?steerKeyboardDismissRequestRef\.current = \{[\s\S]*?pendingQueue\.reserveForSteer\(consumePendingCids\)/,
     'the tap should retain focus while the provider is still settling the cut',
   )
   const requestToCut = chatView.match(

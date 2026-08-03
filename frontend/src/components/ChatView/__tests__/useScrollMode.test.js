@@ -14,6 +14,7 @@ import {
   anchorModeFromScroll,
   bottomAnchorModeFromScroll,
   contentHoldModeFromScroll,
+  delayedSendWillPin,
   gestureLayoutRetryDelay,
   isNearContentBottom,
   layoutMayOwnScroll,
@@ -148,6 +149,36 @@ test('shouldPinSend trusts bottom geometry even when mode is a stale hold', () =
     mode: { kind: 'PIN_USER_MSG', cid: 'c-123' },
     isFirstUserMsg: false,
   }), true)
+})
+
+test('delayed visibility preserves queue-time pin intent until the reader moves', () => {
+  const bottomAtQueueTime = {
+    willPin: true,
+    readerIntentVersion: 7,
+  }
+  assert.equal(delayedSendWillPin({
+    previousIntent: bottomAtQueueTime,
+    readerIntentVersion: 7,
+    // Opening the tray changed the viewport and made a later geometry snapshot
+    // look away from the tail, but the reader did not move.
+    willPinNow: false,
+  }), true)
+
+  assert.equal(delayedSendWillPin({
+    previousIntent: { willPin: false, readerIntentVersion: 7 },
+    readerIntentVersion: 7,
+    // Tray collapse can also make old content appear near the tail; layout
+    // alone must not manufacture a pin for somebody reading above it.
+    willPinNow: true,
+  }), false)
+
+  assert.equal(delayedSendWillPin({
+    previousIntent: bottomAtQueueTime,
+    // A real scroll advanced the generation, so Fast-forward-time geometry is
+    // now the newer intent and must win over the queued snapshot.
+    readerIntentVersion: 8,
+    willPinNow: false,
+  }), false)
 })
 
 test('layout writes yield from first input through gesture settlement', () => {

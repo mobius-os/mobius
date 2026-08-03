@@ -769,11 +769,9 @@ export default function ChatView({
     return intent
   }
 
-  function replaceSendIntent(cid, intent) {
-    if (!cid || !intent) return null
-    const previous = sendIntentByCidRef.current.get(cid) || null
-    sendIntentByCidRef.current.set(cid, intent)
-    return previous
+  function peekSendIntent(cid) {
+    if (!cid) return null
+    return sendIntentByCidRef.current.get(cid) || null
   }
 
   function restoreReplacedSendIntent(cid, replacement, previous) {
@@ -1155,11 +1153,11 @@ export default function ChatView({
       // segment. That ordering is what makes promoting the live
       // stream here correct; it is not a guess about where the server cut.
       //
-      // It still follows the one visible-row scroll rule. Automatic queue
-      // promotion keeps the original submit snapshot; an explicit fast-forward
-      // captures a fresh snapshot when pressed, because that is the deliberate
-      // action making the row visible. Whether it pins or holds, the row gets
-      // the same permanent bottom reservation as a normal send.
+      // It still follows the one visible-row scroll rule. Queue promotion and
+      // explicit fast-forward keep the original submit snapshot until a real
+      // reader scroll replaces it; tray/footer reflow alone is not intent.
+      // Whether it pins or holds, the row gets the same permanent bottom
+      // reservation as a normal send.
       //
       // Current backends carry a non-empty `messages` array, each row with its
       // stable cid (card-221: every row carries one). During rolling deploys an
@@ -3199,16 +3197,17 @@ export default function ChatView({
     let previousSendIntent = null
     try {
       const steerIsFirstUser = isFirstVisibleUserMessage()
-      // Fast-forward is a deliberate visibility action, unlike automatic
-      // queue drain. Capture the reader's ACTUAL position now: bottom pins,
-      // reading elsewhere holds. A later real scroll during the POST still
-      // invalidates this opaque intent inside the scroll controller. Capturing
-      // also cancels any older quiet settlement, which is what previously
-      // overwrote the new pin and made the row bounce before settling.
+      previousSendIntent = peekSendIntent(steerCid)
+      // Queue submission already captured the reader's position before the
+      // tray changed footer/viewport geometry. Preserve that decision when no
+      // real reader scroll followed; otherwise Fast-forward's current snapshot
+      // wins. The controller owns that generation check and also cancels any
+      // older quiet settlement, which previously overwrote a newer pin.
       explicitSteerIntent = captureSendIntent({
         isFirstUserMsg: steerIsFirstUser,
+        previousIntent: previousSendIntent,
       })
-      previousSendIntent = replaceSendIntent(steerCid, explicitSteerIntent)
+      rememberSendIntent(steerCid, explicitSteerIntent)
       // Queue-only sends deliberately retain mobile focus. Remember a touch
       // fast-forward's focus/draft now, but do not blur yet: the authoritative
       // cut must render and pin the steered row before keyboard geometry

@@ -602,10 +602,13 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   authoritative because `ScrollMode` can lag an input/layout frame; requiring both
   made identical bottom sends behave inconsistently. A real user scroll after
   submission invalidates an automatic delayed queue promotion (a tap without
-  scrolling does not). Explicit fast-forward is itself the visibility action, so it
-  captures fresh bottom geometry when pressed; a real scroll during its request
-  invalidates that snapshot. Missing delayed intent degrades to hold, never to an
-  inferred pin.
+  scrolling does not). Explicit fast-forward keeps that submit snapshot while
+  its reader generation remains current, so opening or closing the queue tray
+  cannot turn a bottom send into a hold (or manufacture a pin for somebody
+  reading above it). If the reader really moved after queueing, fast-forward
+  captures fresh bottom geometry instead; another real scroll during its request
+  invalidates that snapshot. Missing delayed intent degrades to hold, never to
+  an inferred pin.
 - **R3 — Pin holds until the reservation is filled.** A legitimate live pin
   transitions to `PIN_USER_MSG`, not immediately to `FOLLOW_BOTTOM`; the response
   first grows below the prompt without moving it. Exactly when the streaming reply
@@ -658,7 +661,8 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   after submit opens fresh reader ownership and still wins. Queueing behind a live
   turn adds no transcript row, so it
   freezes the visible message before the queue tray/composer/keyboard reflow; the
-  separately captured submit snapshot still controls the row when it is promoted.
+  separately captured submit snapshot still controls the row when it is promoted
+  or explicitly fast-forwarded, unless a newer real reader scroll replaced it.
   Never replace the input-to-first-scroll handoff with a fixed short window: under
   rendering load the browser may deliver that scroll later. Ownership begins only for
   inputs whose default action can scroll the transcript; ordinary typing, Enter, and
