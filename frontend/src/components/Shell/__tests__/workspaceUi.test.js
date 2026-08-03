@@ -672,6 +672,14 @@ test('mobile tabs require a hold before dragging while the strip preserves pinch
   assert.equal((drawer.match(/window\.addEventListener\('touchend', onUp, \{ capture: true, passive: false \}\)/g) || []).length, 2,
     'held row releases must be allowed to suppress their compatibility click')
   assert.match(drawer, /onTouchStart=\{onRowTouchStart\}/)
+  assert.match(drawer, /function drawerGestureEndPoint\(event, pointerId, touchEvents, fallback\)[\s\S]*?!touchWithIdentifier\(event\.touches, pointerId\)[\s\S]*?return fallback/,
+    'a terminal Android touch with empty changedTouches must still settle the first hold')
+  assert.equal((drawer.match(/const point = drawerGestureEndPoint\(cancelEvent, pointerId, touchEvents, lastPoint\)/g) || []).length, 2,
+    'pinned and recent rows must both settle a cancelled touch hold')
+  assert.match(drawer, /const openMenu = touchEvents && held && !cancelledAfterHold/,
+    'a recognized stationary hold must open even when Android terminates it with touchcancel')
+  assert.match(drawer, /const openMenu = touchEvents && held && !dragging && !cancelledAfterHold/,
+    'a stationary pinned hold must open while a cancelled reorder still rolls back')
   assert.match(drawer, /const TOUCH_CONTEXT_MENU_PROVENANCE_MS = 1500/)
   assert.match(drawer, /function suppressTouchContextMenu\(event\)[\s\S]*?event\.nativeEvent\?\.pointerType[\s\S]*?contextPointerType === 'touch'[\s\S]*?freshTouchPointer[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?stopImmediatePropagation/)
   assert.equal((drawer.match(/onContextMenuCapture=\{suppressTouchContextMenu\}/g) || []).length, 2,

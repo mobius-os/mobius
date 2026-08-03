@@ -89,6 +89,17 @@ function drawerGesturePoint(event, pointerId, touchEvents, ended = false) {
   )
 }
 
+// Android may end a long press without repeating the cancelled contact in
+// changedTouches. Once that contact is no longer live, its last known position
+// is the end point; otherwise the first hold remains stranded until another
+// touch happens to clean it up.
+function drawerGestureEndPoint(event, pointerId, touchEvents, fallback) {
+  const point = drawerGesturePoint(event, pointerId, touchEvents, true)
+  if (point) return point
+  if (touchEvents && !touchWithIdentifier(event.touches, pointerId)) return fallback
+  return null
+}
+
 function releaseDrawerRowClaim(source, pointerId, touchEvents, claimRef) {
   source.removeAttribute('data-hold-ready')
   deferDrawerGestureClaimRelease(claimRef, source)
@@ -1571,6 +1582,7 @@ const DrawerRow = memo(function DrawerRow({
       x: touchEvents ? initialTouch.clientX : event.clientX,
       y: touchEvents ? initialTouch.clientY : event.clientY,
     }
+    let lastPoint = start
     let held = false
     let cancelledAfterHold = false
     let cleaned = false
@@ -1603,6 +1615,7 @@ const DrawerRow = memo(function DrawerRow({
     function onMove(moveEvent) {
       const point = drawerGesturePoint(moveEvent, pointerId, touchEvents)
       if (!point) return
+      lastPoint = { x: point.clientX, y: point.clientY }
       const dx = point.clientX - start.x
       const dy = point.clientY - start.y
       if (!held) {
@@ -1614,7 +1627,7 @@ const DrawerRow = memo(function DrawerRow({
       moveEvent.preventDefault()
     }
     function onUp(upEvent) {
-      const point = drawerGesturePoint(upEvent, pointerId, touchEvents, true)
+      const point = drawerGestureEndPoint(upEvent, pointerId, touchEvents, lastPoint)
       if (!point) return
       const openMenu = held && !cancelledAfterHold
       // A touch hold mounts the transparent menu layer during this touchend.
@@ -1625,7 +1638,11 @@ const DrawerRow = memo(function DrawerRow({
       if (openMenu) openItemMenuAt({ x: point.clientX, y: point.clientY })
     }
     function onCancel(cancelEvent) {
-      if (drawerGesturePoint(cancelEvent, pointerId, touchEvents, true)) cleanup()
+      const point = drawerGestureEndPoint(cancelEvent, pointerId, touchEvents, lastPoint)
+      if (!point) return
+      const openMenu = touchEvents && held && !cancelledAfterHold
+      cleanup({ suppressClick: held })
+      if (openMenu) openItemMenuAt({ x: point.clientX, y: point.clientY })
     }
     function onInterrupted() { cleanup() }
     function onVisibility() {
@@ -1683,6 +1700,7 @@ const DrawerRow = memo(function DrawerRow({
       x: touchEvents ? initialTouch.clientX : event.clientX,
       y: touchEvents ? initialTouch.clientY : event.clientY,
     }
+    let lastPoint = start
     const sourceBtn = event.currentTarget
     let held = !isTouch
     let cancelledAfterHold = false
@@ -1810,6 +1828,7 @@ const DrawerRow = memo(function DrawerRow({
     function onMove(moveEvent) {
       const point = drawerGesturePoint(moveEvent, pointerId, touchEvents)
       if (!point) return
+      lastPoint = { x: point.clientX, y: point.clientY }
       const dx = point.clientX - start.x
       const dy = point.clientY - start.y
       if (isTouch && !held) {
@@ -1865,7 +1884,7 @@ const DrawerRow = memo(function DrawerRow({
     }
 
     function onUp(upEvent) {
-      const point = drawerGesturePoint(upEvent, pointerId, touchEvents, true)
+      const point = drawerGestureEndPoint(upEvent, pointerId, touchEvents, lastPoint)
       if (!point) return
       if (touchEvents && held) upEvent.preventDefault()
       removeListeners()
@@ -1884,11 +1903,18 @@ const DrawerRow = memo(function DrawerRow({
       settle(true)
     }
     function onCancel(cancelEvent) {
-      if (!drawerGesturePoint(cancelEvent, pointerId, touchEvents, true)) return
+      const point = drawerGestureEndPoint(cancelEvent, pointerId, touchEvents, lastPoint)
+      if (!point) return
+      const openMenu = touchEvents && held && !dragging && !cancelledAfterHold
       removeListeners()
       releaseTouchClaim()
-      if (dragging) settle(false)
-      else finalize(false)
+      if (held) suppressRowClickRef.current = true
+      if (dragging) {
+        settle(false)
+        return
+      }
+      finalize(false)
+      if (openMenu) openItemMenuAt({ x: point.clientX, y: point.clientY })
     }
 
     if (touchEvents) {
