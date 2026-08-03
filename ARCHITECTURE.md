@@ -72,14 +72,27 @@ Möbius is meant to be self-hosted on a user-provisioned host — a managed plat
 
 Two invariants follow. (1) **Möbius never patches the kernel from inside the container** — it only *surfaces* "host reboot pending / kernel CVE outstanding" to the owner; the platform/OS applies it. (2) **The in-container agent cannot recreate its own container** (the swap would kill its own process), so the shape is *propose-in* (agent scans → bumps → tests → commits) / *dispose-out* (a host-driven `deploy-prod.sh`, or blue-green, does the rebuild+recreate). Detection is the agent's leverage on every tier: `pip-audit` + `npm audit` + an image scanner (Trivy / `docker scout`) over the built image → triage → bump → test → deploy (tier 1) or surface a reboot window (tiers 2/3).
 
-**The in-product platform updater does not update host deployment files.**
-Settings advances the served `/data/platform` clone inside the app volume; the
-bundled self-hosted Caddy service instead reads `./Caddyfile` from the host
-checkout, and image/dependency changes likewise need a host rebuild/recreate.
-An incoming change to `Caddyfile`, `docker-compose.yml`, `Dockerfile`, or a
-dependency manifest therefore carries a separate host action (and may require a
-particular ordering) even when the live clone merges cleanly. Never describe
-Apply + server restart alone as activating those files.
+**The in-product updater owns source reconciliation, not the deployment control
+plane.** `backend/app/platform_activation.py` is the single ordered contract
+used by update preview, Apply/status, and the image-dependency fingerprint:
+
+| Impact | Typical source | Activation |
+|---|---|---|
+| `live` | frontend source, tests, docs | frontend is rebuilt or source is read on demand |
+| `server_restart` | `backend/app/`, `skill/core.md` | restart the FastAPI process |
+| `proxy_reload` | `Caddyfile` | self-hosted host checkout + Caddy reload |
+| `container_recreate` | Compose topology or `railway.toml` | recreate services or trigger a managed deployment |
+| `image_rebuild` | Dockerfile, dependency locks, baked scripts/supervisors/recovery | rebuild the image and replace the app container |
+| `host_maintenance` | host-operated deployment/recovery tooling | update and act from the host |
+
+Rules can be deployment-scoped: Railway does not pretend to reload Caddy, and a
+self-hosted install does not pretend to apply `railway.toml`. Mixed updates keep
+every applicable reason and order by the highest action. Settings shows this
+impact before Apply and never offers **Restart to finish** for a higher level.
+The backend records external activation remainders but never invokes Docker,
+Caddy, Railway, or host package/kernel tools. In-container sudo cannot make
+those changes durable, and mounting a Docker socket would weaken the recovery
+boundary rather than solve the ownership problem.
 
 **lodash is pinned to 4.18.1 via `overrides`.** `@openai/apps-sdk-ui` pulls lodash transitively — only through its `Slider` component, which the shell does not import. The 4.17.x line sat unfixed against several advisories for a long stretch; 4.18.x restored maintenance and patched them, so `frontend/package.json` `overrides` forces the transitive lodash to 4.18.1 (`npm audit` is clean). As defense-in-depth, `frontend/src/lib/__tests__/appsSdkLodash.test.js` also fails if the shell ever imports `Slider`, which keeps lodash tree-shaken out of the shipped bundle regardless of the pin.
 
@@ -138,7 +151,8 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 
 | File | Role |
 |------|------|
-| `main.py` | App factory: CORS, rate limiting, security headers (`_SecurityHeadersMiddleware` — authoritative on every response, strips-and-replaces same-named route headers; deliberately no CSP, see SECURITY.md), router mounting, static file serving; resolves `_static_dir` at load (`main.py:1000`); serves `GET /api/version` (image + served-platform identity) |
+| `main.py` | App factory: CORS, rate limiting, origin-owned standard headers and document CSP selection (`_SecurityHeadersMiddleware`), router mounting, static file serving, and `GET /api/version` identity |
+| `response_policy.py` | Validated origin sources plus the shell, embedded-chat, opaque app-frame, packaged-document, and published-site policies shared by direct and proxied deployments |
 | `frontend_watcher.py` | Polling watcher that auto-rebuilds the served frontend clone (`/data/platform/frontend`) on edit — debounced `vite build`, atomic `.dist-next`→`dist` swap |
 | `config.py` | `Settings` via pydantic-settings; reads `.env` |
 | `database.py` | SQLAlchemy engine, `SessionLocal`, `Base`, `get_db`, and `run_migrations()` (idempotent boot-time additive `ALTER TABLE`s) |

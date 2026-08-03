@@ -1,0 +1,325 @@
+"""Classify platform source changes by the deployment action they require.
+
+This module is intentionally dependency-free.  The running updater imports it,
+and ``scripts/test-image-fingerprint.sh`` executes its small CLI so image inputs
+and owner-facing update semantics cannot grow separate path tables.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import Iterable, Literal, TypedDict
+
+
+class ActivationLevel(str, Enum):
+  """Ordered activation boundary for a changed platform path."""
+
+  LIVE = "live"
+  SERVER_RESTART = "server_restart"
+  PROXY_RELOAD = "proxy_reload"
+  CONTAINER_RECREATE = "container_recreate"
+  IMAGE_REBUILD = "image_rebuild"
+  HOST_MAINTENANCE = "host_maintenance"
+
+
+LEVEL_ORDER = {
+  level: index for index, level in enumerate(ActivationLevel)
+}
+DeploymentKind = Literal["railway", "self_hosted"]
+DeploymentScope = Literal["all", "railway", "self_hosted"]
+
+
+class ActivationReason(TypedDict):
+  """One independently actionable reason within a platform update."""
+
+  code: str
+  level: str
+  summary: str
+  paths: list[str]
+  applies: bool
+
+
+class PlatformActivationImpact(TypedDict):
+  """Owner-readable and machine-ordered activation result."""
+
+  level: str
+  source_level: str
+  deployment: DeploymentKind
+  actions: list[str]
+  reasons: list[ActivationReason]
+  guidance: list[str]
+  requires_operator: bool
+
+
+@dataclass(frozen=True)
+class _Rule:
+  code: str
+  level: ActivationLevel
+  summary: str
+  exact: tuple[str, ...] = ()
+  prefixes: tuple[str, ...] = ()
+  deployment: DeploymentScope = "all"
+  dependency_fingerprint: bool = False
+
+  def matches(self, path: str) -> bool:
+    return path in self.exact or any(path.startswith(prefix) for prefix in self.prefixes)
+
+
+def _normalize_path(path: str) -> str:
+  normalized = path.strip()
+  return normalized[2:] if normalized.startswith("./") else normalized
+
+
+# Ordered first-match rules.  Narrow baked/deployment inputs precede the broad
+# backend runtime rule.  A path may require only one owning activation boundary;
+# mixed updates still report every distinct rule they touch.
+_RULES = (
+  _Rule(
+    "host_operator_tooling",
+    ActivationLevel.HOST_MAINTENANCE,
+    "Host-operated deployment or recovery tooling changed.",
+    exact=("scripts/mobiusctl", "scripts/deploy-prod.sh"),
+    deployment="self_hosted",
+  ),
+  _Rule(
+    "container_image_definition",
+    ActivationLevel.IMAGE_REBUILD,
+    "The container image definition changed.",
+    exact=("Dockerfile",),
+    dependency_fingerprint=True,
+  ),
+  _Rule(
+    "container_build_context",
+    ActivationLevel.IMAGE_REBUILD,
+    "The container build context changed.",
+    exact=(".dockerignore",),
+  ),
+  _Rule(
+    "python_dependencies",
+    ActivationLevel.IMAGE_REBUILD,
+    "Python dependencies changed and must be installed into a new image.",
+    exact=("backend/requirements.txt", "backend/requirements.lock"),
+    dependency_fingerprint=True,
+  ),
+  _Rule(
+    "frontend_dependencies",
+    ActivationLevel.IMAGE_REBUILD,
+    "Frontend or app-compiler dependencies changed and need a new image.",
+    exact=("frontend/package.json", "frontend/package-lock.json"),
+    dependency_fingerprint=True,
+  ),
+  _Rule(
+    "legacy_python_runtime",
+    ActivationLevel.IMAGE_REBUILD,
+    "The image-installed compatibility runtime changed.",
+    prefixes=("backend/legacy_runtime/",),
+    dependency_fingerprint=True,
+  ),
+  _Rule(
+    "baked_runtime",
+    ActivationLevel.IMAGE_REBUILD,
+    "Baked scripts, supervisors, recovery code, or protected-file rules changed.",
+    exact=("protected-files.txt",),
+    prefixes=(
+      "backend/scripts/",
+      "backend/runtime/",
+      "backend/recovery_target/",
+      "backend/static/",
+    ),
+  ),
+  _Rule(
+    "self_hosted_topology",
+    ActivationLevel.CONTAINER_RECREATE,
+    "Self-hosted container topology or runtime configuration changed.",
+    exact=("docker-compose.yml", "docker-compose.prod.yml"),
+    deployment="self_hosted",
+  ),
+  _Rule(
+    "railway_topology",
+    ActivationLevel.CONTAINER_RECREATE,
+    "Railway build or deployment configuration changed.",
+    exact=("railway.toml",),
+    deployment="railway",
+  ),
+  _Rule(
+    "self_hosted_proxy",
+    ActivationLevel.PROXY_RELOAD,
+    "The self-hosted Caddy routing or TLS policy changed.",
+    exact=("Caddyfile",),
+    deployment="self_hosted",
+  ),
+  _Rule(
+    "backend_development_source",
+    ActivationLevel.LIVE,
+    "Backend tests and evaluation tooling do not alter the running server.",
+    exact=(
+      "backend/pyproject.toml",
+      "backend/requirements-static.txt",
+      "backend/test_app_fixtures.py",
+    ),
+    prefixes=("backend/tests/", "backend/memeval/"),
+  ),
+  _Rule(
+    "server_runtime",
+    ActivationLevel.SERVER_RESTART,
+    "Server runtime code or the cached agent constitution changed.",
+    exact=("backend", "backend/app", "skill/core.md"),
+    prefixes=("backend/",),
+  ),
+)
+
+
+def deployment_kind(environ: dict[str, str] | None = None) -> DeploymentKind:
+  """Detect Railway without inventing a generic provider-control contract."""
+  env = os.environ if environ is None else environ
+  railway_markers = (
+    "RAILWAY_PROJECT_ID",
+    "RAILWAY_SERVICE_ID",
+    "RAILWAY_ENVIRONMENT_ID",
+    "RAILWAY_DEPLOYMENT_ID",
+    "RAILWAY_PUBLIC_DOMAIN",
+  )
+  return "railway" if any((env.get(key) or "").strip() for key in railway_markers) else "self_hosted"
+
+
+def _rule_for_path(path: str) -> _Rule | None:
+  normalized = _normalize_path(path)
+  return next((rule for rule in _RULES if rule.matches(normalized)), None)
+
+
+def backend_import_probe_required(paths: Iterable[str]) -> bool:
+  """Whether changed source can alter imports in a fresh FastAPI process."""
+  for path in paths:
+    normalized = _normalize_path(path)
+    rule = _rule_for_path(normalized)
+    if rule and rule.code == "server_runtime" and normalized != "skill/core.md":
+      return True
+  return False
+
+
+def _applies(rule: _Rule, deployment: DeploymentKind) -> bool:
+  return rule.deployment == "all" or rule.deployment == deployment
+
+
+def _guidance(level: ActivationLevel, deployment: DeploymentKind) -> str:
+  if level is ActivationLevel.LIVE:
+    return "No deployment action is required; live source is rebuilt or read on demand."
+  if level is ActivationLevel.SERVER_RESTART:
+    return "Restart Möbius after Apply so the running server loads the new source."
+  if deployment == "railway":
+    if level is ActivationLevel.CONTAINER_RECREATE:
+      return "Trigger a Railway deployment; an in-product restart cannot apply deployment configuration."
+    if level is ActivationLevel.IMAGE_REBUILD:
+      return "Trigger a Railway image rebuild and deployment; Restart cannot install dependencies or baked tools."
+  else:
+    if level is ActivationLevel.PROXY_RELOAD:
+      return "Refresh the host checkout, then reload Caddy; restarting Möbius does not reload the proxy."
+    if level is ActivationLevel.CONTAINER_RECREATE:
+      return "Refresh the host checkout, then recreate the affected Docker Compose services."
+    if level is ActivationLevel.IMAGE_REBUILD:
+      return "Refresh the host checkout, rebuild the image, then recreate the app container."
+    if level is ActivationLevel.HOST_MAINTENANCE:
+      return "Update the host-operated tooling and complete its maintenance outside the container."
+  return "Complete this deployment action outside Möbius; an in-product restart is insufficient."
+
+
+def classify_activation(
+  paths: Iterable[str], *, deployment: DeploymentKind | None = None,
+) -> PlatformActivationImpact:
+  """Classify changed paths once, preserving both universal and local impact."""
+  active_deployment = deployment or deployment_kind()
+  grouped: dict[str, tuple[_Rule | None, list[str]]] = {}
+  for raw_path in paths:
+    path = _normalize_path(raw_path)
+    if not path:
+      continue
+    rule = _rule_for_path(path)
+    key = rule.code if rule else "live_source"
+    if key not in grouped:
+      grouped[key] = (rule, [])
+    grouped[key][1].append(path)
+
+  reasons: list[ActivationReason] = []
+  source_levels: list[ActivationLevel] = [ActivationLevel.LIVE]
+  effective_levels: list[ActivationLevel] = [ActivationLevel.LIVE]
+  for code, (rule, grouped_paths) in grouped.items():
+    level = rule.level if rule else ActivationLevel.LIVE
+    applies = True if rule is None else _applies(rule, active_deployment)
+    source_levels.append(level)
+    if applies:
+      effective_levels.append(level)
+    reasons.append(ActivationReason(
+      code=code,
+      level=level.value,
+      summary=(
+        rule.summary
+        if rule
+        else "These files are rebuilt, read on demand, or do not affect the running installation."
+      ),
+      paths=sorted(set(grouped_paths)),
+      applies=applies,
+    ))
+
+  source_level = max(source_levels, key=LEVEL_ORDER.get)
+  required_level = max(effective_levels, key=LEVEL_ORDER.get)
+  action_levels = sorted(
+    {
+      ActivationLevel(reason["level"])
+      for reason in reasons
+      if reason["applies"] and reason["level"] != ActivationLevel.LIVE.value
+    },
+    key=LEVEL_ORDER.get,
+  )
+  guidance = [_guidance(level, active_deployment) for level in action_levels]
+  if not guidance:
+    guidance = [_guidance(ActivationLevel.LIVE, active_deployment)]
+
+  return PlatformActivationImpact(
+    level=required_level.value,
+    source_level=source_level.value,
+    deployment=active_deployment,
+    actions=[level.value for level in action_levels],
+    reasons=reasons,
+    guidance=guidance,
+    requires_operator=LEVEL_ORDER[required_level] > LEVEL_ORDER[ActivationLevel.SERVER_RESTART],
+  )
+
+
+def dependency_fingerprint_paths(root: Path) -> list[str]:
+  """Enumerate the image dependency inputs declared by the classifier."""
+  paths: set[str] = set()
+  for rule in _RULES:
+    if not rule.dependency_fingerprint:
+      continue
+    paths.update(rule.exact)
+    for prefix in rule.prefixes:
+      base = root / prefix
+      if base.is_file():
+        paths.add(prefix.rstrip("/"))
+      elif base.is_dir():
+        paths.update(
+          str(path.relative_to(root))
+          for path in base.rglob("*")
+          if path.is_file()
+        )
+  return sorted(paths)
+
+
+def _main() -> int:
+  parser = argparse.ArgumentParser()
+  subparsers = parser.add_subparsers(dest="command", required=True)
+  fingerprint = subparsers.add_parser("dependency-fingerprint-paths")
+  fingerprint.add_argument("root", type=Path)
+  args = parser.parse_args()
+  if args.command == "dependency-fingerprint-paths":
+    for path in dependency_fingerprint_paths(args.root.resolve()):
+      print(path)
+  return 0
+
+
+if __name__ == "__main__":
+  raise SystemExit(_main())

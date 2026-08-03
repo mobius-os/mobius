@@ -1077,6 +1077,7 @@ async def test_apply_restarts_and_rebuilds_when_update_touches_backend(
   # A backend change (mixed with frontend) still restarts AND rebuilds.
   assert res["state"] == pu.PlatformUpdateState.RESTART_NEEDED.value
   assert res["needs_restart"] is True
+  assert res["activation"]["level"] == "server_restart"
   assert calls == [(platform, new)]
 
 
@@ -1240,34 +1241,29 @@ async def test_apply_marks_restart_when_disk_already_ahead_of_running_backend(
 
   assert res["state"] == pu.PlatformUpdateState.RESTART_NEEDED.value
   assert res["needs_restart"] is True
-  assert pu.RESTART_NEEDED_FLAG.read_text() == head
+  assert pu._read_activation_marker() == {
+    "target_sha": head,
+    "paths": ["backend/app/main.py"],
+  }
 
 
-# --- path-aware restart classifier (backend/app change → restart; else not) --
+# --- path-aware activation classifier ---------------------------------------
 
-def test_paths_need_restart_classifier():
-  assert pu._paths_need_restart(["backend/app/main.py"]) is True
-  assert pu._paths_need_restart(["backend/app/routes/apps.py", "docs/x.md"]) is True
-  # a backend RUNTIME file outside backend/app/ (root module, deps) also restarts
-  assert pu._paths_need_restart(["backend/config_helper.py"]) is True
-  assert pu._paths_need_restart(["backend/requirements.txt"]) is True
-  assert pu._paths_need_restart(["backend/requirements.lock"]) is True
-  # the platform constitution is process-cached even though it is not Python
-  assert pu._paths_need_restart(["skill/core.md"]) is True
-  # a rename OUT of backend/app (with --no-renames the delete side shows) restarts
-  assert pu._paths_need_restart(
-    ["docs/admin.py", "backend/app/routes/admin.py"]) is True
-  # non-backend-runtime paths never force a restart of the served uvicorn
-  assert pu._paths_need_restart([
-    "frontend/src/App.jsx", "tests/foo.spec.mjs", "backend/tests/test_x.py",
-    "backend/scripts/memory_search.py", "backend/recovery_target/targetd.py",
-    "backend/runtime/restart_ledger.py",
-    "backend/memeval/systems.py", "docs/y.md", "README.md",
-  ]) is False
-  assert pu._paths_need_restart([]) is False
-  # a path merely CONTAINING backend/app/ but not under it is not runtime code
-  assert pu._paths_need_restart(["docs/backend/app/notes.md"]) is False
-  assert pu._paths_need_restart(["skill/building-apps.md"]) is False
+def test_platform_update_uses_explicit_activation_levels():
+  assert pu._activation_for_paths(["backend/app/main.py"])["level"] == \
+    "server_restart"
+  assert pu._activation_for_paths(["backend/config_helper.py"])["level"] == \
+    "server_restart"
+  assert pu._activation_for_paths(["skill/core.md"])["level"] == \
+    "server_restart"
+  assert pu._activation_for_paths(["backend/requirements.txt"])["level"] == \
+    "image_rebuild"
+  assert pu._activation_for_paths(["backend/scripts/entrypoint.sh"])["level"] == \
+    "image_rebuild"
+  assert pu._activation_for_paths(["Caddyfile"])["level"] == "proxy_reload"
+  assert pu._activation_for_paths(["frontend/src/App.jsx"])["level"] == "live"
+  assert pu._activation_for_paths(["backend/tests/test_x.py"])["level"] == "live"
+  assert pu._activation_for_paths(["docs/backend/app/notes.md"])["level"] == "live"
 
 
 def test_import_probe_classifier_excludes_constitution_only_change():
@@ -1305,7 +1301,8 @@ def test_changed_paths_no_renames_surfaces_deleted_backend(clone_env):
 
   paths = pu._changed_paths(platform, before, after)
   assert "backend/app/main.py" in paths  # delete side present
-  assert pu._tree_change_needs_restart(platform, before, after) is True
+  assert pu._tree_change_activation(platform, before, after)["level"] == \
+    "server_restart"
 
 
 def test_empty_commit_does_not_force_restart(clone_env):
@@ -1316,18 +1313,20 @@ def test_empty_commit_does_not_force_restart(clone_env):
 
   assert before != after
   assert pu._changed_paths(platform, before, after) == []  # genuine empty diff
-  assert pu._tree_change_needs_restart(platform, before, after) is False
+  assert pu._tree_change_activation(platform, before, after)["level"] == "live"
 
 
-def test_tree_change_needs_restart_fails_closed_on_missing_sha(clone_env):
+def test_tree_change_activation_fails_closed_on_missing_sha(clone_env):
   origin, platform = clone_env
   served = _served_sha(platform)
   # one side unknown → can't prove no backend change → restart (fail closed)
-  assert pu._tree_change_needs_restart(platform, served, None) is True
-  assert pu._tree_change_needs_restart(platform, None, served) is True
+  assert pu._tree_change_activation(platform, served, None)["level"] == \
+    "server_restart"
+  assert pu._tree_change_activation(platform, None, served)["level"] == \
+    "server_restart"
   # both missing / equal → nothing changed
-  assert pu._tree_change_needs_restart(platform, None, None) is False
-  assert pu._tree_change_needs_restart(platform, served, served) is False
+  assert pu._tree_change_activation(platform, None, None)["level"] == "live"
+  assert pu._tree_change_activation(platform, served, served)["level"] == "live"
 
 
 def test_status_no_restart_when_only_frontend_changed(clone_env):
@@ -1358,6 +1357,40 @@ def test_status_no_restart_when_only_tests_changed(clone_env):
 
   assert status["needs_restart"] is False
   assert status["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
+
+
+def test_status_requires_image_instead_of_offering_restart_for_dependencies(
+  clone_env,
+):
+  _, platform = clone_env
+  served = _served_sha(platform)
+  pu.SERVING_SOURCE_FILE.write_text("platform\n")
+  pu.SERVING_SHA_FILE.write_text(served + "\n")
+  _local_commit(platform, edits={"backend/requirements.txt": "new-package==1\n"})
+
+  status = pu.platform_status(platform)
+
+  assert status["state"] == pu.PlatformUpdateState.ACTIVATION_NEEDED.value
+  assert status["needs_restart"] is False
+  assert status["activation"]["level"] == "image_rebuild"
+  assert status["activation"]["requires_operator"] is True
+
+
+def test_boot_clears_restart_but_preserves_unverified_image_work(clone_env):
+  _, platform = clone_env
+  target = _served_sha(platform)
+  pu.mark_activation_needed(
+    target,
+    ["backend/app/main.py", "backend/requirements.lock"],
+  )
+
+  res = pu.reconcile_clone(platform, at_boot=True)
+
+  assert res.status == "up_to_date"
+  assert pu._read_activation_marker() == {
+    "target_sha": target,
+    "paths": ["backend/requirements.lock"],
+  }
 
 
 # --- restart flag lifecycle -------------------------------------------------
@@ -1526,6 +1559,24 @@ def test_update_preview_clean_fast_forward(clone_env):
   assert "backend/app/main.py" in changed
   assert "LINE_C = 300" in preview["diff"]
   assert preview["diff_truncated"] is False
+  assert preview["activation"]["level"] == "server_restart"
+
+
+def test_update_preview_warns_before_dependency_update_is_applied(clone_env):
+  origin, platform = clone_env
+  _advance_origin(
+    origin,
+    edits={"backend/requirements.lock": "locked dependency bytes\n"},
+    msg="change image dependency",
+  )
+  pu._fetch(platform)
+
+  preview = pu.platform_update_preview(platform)
+
+  assert preview["activation"]["level"] == "image_rebuild"
+  assert preview["activation"]["actions"] == ["image_rebuild"]
+  assert "Restart cannot" not in " ".join(preview["activation"]["guidance"])
+  assert "rebuild the image" in " ".join(preview["activation"]["guidance"])
 
 
 def test_update_preview_excludes_local_edits(clone_env):
@@ -1725,7 +1776,10 @@ async def test_frontend_build_failure_rolls_back_source_and_is_not_success(
 
   assert result["state"] == pu.PlatformUpdateState.ROLLED_BACK.value
   assert result["phase"] == pu.PlatformUpdatePhase.BLOCKED.value
-  assert result["needs_restart"] is False
+  # The failed newer release does not erase activation already pending before
+  # this Apply attempt.
+  assert result["needs_restart"] is True
+  assert result["activation"]["level"] == "server_restart"
   assert result["upstream_commit"] == target
   assert result["merge_commit"] is None
   assert _served_sha(platform) == before

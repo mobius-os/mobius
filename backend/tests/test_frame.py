@@ -75,13 +75,20 @@ def test_frame_returns_etag_and_cache_control(client, owner_token):
   assert r.status_code == 200
   assert r.headers.get("etag", "").startswith('W/"')
   assert "no-cache" in r.headers.get("cache-control", "")
-  sandbox = r.headers.get("content-security-policy", "")
-  assert "sandbox allow-scripts" in sandbox
+  policy = r.headers.get("content-security-policy", "")
+  assert "sandbox allow-scripts" in policy
   # A target=_blank link must open as a normal destination page rather than
   # inheriting this frame's opaque origin (which breaks same-origin fetches and
   # signed-in storage on sites such as GitHub).
-  assert "allow-popups-to-escape-sandbox" in sandbox
-  assert "allow-same-origin" not in sandbox
+  assert "allow-popups-to-escape-sandbox" in policy
+  assert "allow-same-origin" not in policy
+  # The origin response—not a deployment-specific proxy—owns the complete
+  # resource policy, so Railway and self-hosted installs both admit reviewed
+  # browser WebAssembly without enabling JavaScript eval.
+  assert "script-src " in policy
+  assert "'wasm-unsafe-eval'" in policy
+  assert " 'unsafe-eval'" not in policy
+  assert "blob:" in policy
 
 
 def test_frame_304_on_matching_if_none_match(client, owner_token):

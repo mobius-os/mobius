@@ -26,6 +26,27 @@ test('a clean apply consumes the reviewed target but preserves restart readiness
   assert.equal(projected.contained_upstream_sha, 'applied')
 })
 
+test('an image-required apply projects the external activation contract', () => {
+  const activation = {
+    level: 'image_rebuild',
+    guidance: ['Rebuild and deploy.'],
+  }
+  const projected = platformStatusFromApply(
+    { state: 'available', available: true, needs_restart: false },
+    {
+      state: 'activation_needed',
+      needs_restart: false,
+      activation,
+      upstream_commit: 'applied',
+    },
+  )
+
+  assert.equal(projected.available, false)
+  assert.equal(projected.needs_restart, false)
+  assert.equal(projected.activation, activation)
+  assert.equal(platformUpdateStatusLabel(projected), 'Image rebuild required')
+})
+
 test('a failed newer release does not forget an earlier staged update', () => {
   const projected = platformStatusFromApply(
     {
@@ -96,6 +117,14 @@ test('update-row copy represents restart and availability independently', () => 
       available: true,
     }),
     'New update available',
+  )
+  assert.equal(
+    platformUpdateStatusLabel({
+      state: 'activation_needed',
+      activation: { level: 'proxy_reload' },
+      available: false,
+    }),
+    'Proxy reload required',
   )
 })
 

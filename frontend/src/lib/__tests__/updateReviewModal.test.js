@@ -29,13 +29,23 @@ test('the combined raw-diff toggle is gone and truncation is explained per file'
 })
 
 test('apply outcomes close only for explicit clean states and preserve actionable results', () => {
-  assert.match(settingsView, /state === 'restart_needed' \|\| state === 'up_to_date'/)
+  assert.match(settingsView, /state === 'restart_needed' \|\| state === 'activation_needed' \|\| state === 'up_to_date'/)
   assert.match(settingsView, /state === 'conflict' \|\| state === 'rolled_back'/)
   assert.match(settingsView, /The update returned an unexpected result/)
   assert.match(modal, /result\?\.state === 'conflict' \|\| result\?\.state === 'rolled_back'/)
-  assert.match(modal, /result\.state === 'restart_needed' \|\| result\.state === 'up_to_date'/)
+  assert.match(modal, /result\.state === 'activation_needed'/)
+  assert.match(modal, /result\.state === 'up_to_date'/)
   assert.doesNotMatch(modal, /if \(result\?\.ok\) onClose\(\)/)
   assert.match(modal, /applyProgress\?\.plan_id === preview\?\.plan_id/)
+})
+
+test('activation impact is visible before Apply and external work never becomes Restart to finish', () => {
+  assert.match(modal, /platformActivationLabel\(activation\)/)
+  assert.match(modal, /activationGuidance\.map/)
+  assert.match(modal, /activationReasons\.map/)
+  assert.match(settingsView, /platformExternalActivation/)
+  assert.match(settingsView, /A server restart alone will not complete this update\./)
+  assert.match(settingsView, /platformExternalActivation \? \(/)
 })
 
 test('the apply response is a truthful fallback when status refresh fails', () => {

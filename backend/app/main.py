@@ -47,6 +47,13 @@ from app.frontend_assets import (
   resolve_frontend_dir,
 )
 from app.memory_observability import record_memory_checkpoint
+from app.response_policy import (
+  CHAT_EMBED_CSP,
+  PUBLISHED_SITE_CSP,
+  app_frame_csp,
+  shell_csp,
+  static_embed_csp,
+)
 from app.storage_io import atomic_write
 from app import activity, models
 # providers and push are on the agent's write surface; deferred into
@@ -262,24 +269,15 @@ class _BodySizeLimitMiddleware:
     })
 
 
-# Standard security headers. The bundled Caddy sets these, but production is
-# fronted by an external Caddy whose vhost has no header block (and managed
-# deployments often proxy the app directly), so prod serves NONE of them today.
-# Setting them here means they hold regardless of what fronts the app. These are
-# resource-load-agnostic — they protect against clickjacking, MIME-sniffing, TLS
-# downgrade, and referrer leakage WITHOUT restricting what apps may load, so web
-# images / external embeds keep working. There is deliberately no global
-# Content-Security-Policy here yet: mini-apps intentionally support user-chosen
-# external resources and a strict shell-wide policy would break that contract.
-# App isolation instead comes from opaque-origin sandboxed frames plus scoped
-# tokens. Clickjacking is covered by X-Frame-Options without a CSP. Narrow
-# exceptions are the inert embedded-chat bootstrap, response-sandboxed packaged
-# documents, and an explicitly configured shared service-gateway surface.
+# Standard security headers are origin-owned so Railway and the bundled Caddy
+# expose one contract. Camera/location remain unavailable to opaque app frames,
+# while ``self`` leaves room for a future shell-owned capability provider after
+# the owner grants browser permission.
 _SECURITY_HEADERS = [
   (b"x-content-type-options", b"nosniff"),
   (b"x-frame-options", b"SAMEORIGIN"),
   (b"referrer-policy", b"strict-origin-when-cross-origin"),
-  (b"permissions-policy", b"camera=(), geolocation=()"),
+  (b"permissions-policy", b"camera=(self), geolocation=(self)"),
   (b"strict-transport-security",
    b"max-age=31536000; includeSubDomains; preload"),
 ]
@@ -288,6 +286,7 @@ _X_FRAME_OPTIONS = b"x-frame-options"
 _CONTENT_SECURITY_POLICY = b"content-security-policy"
 _OPAQUE_STATIC_EMBED_PREFIX = "/app-embeds/by-id/"
 _PUBLISHED_SITE_PREFIX = "/sites/"
+_APP_FRAME_PATH = re.compile(r"^/api/apps/[^/]+/frame$")
 
 # This isolation boundary must always be enforced, never Report-Only: browsers
 # ignore the CSP sandbox directive in a Report-Only policy. The sandbox omits
@@ -296,17 +295,11 @@ _PUBLISHED_SITE_PREFIX = "/sites/"
 # absolute origin explicitly in every fetch directive. This does not weaken the
 # credential boundary: packaged code already executes in the opaque document,
 # and it still cannot reach the shell's localStorage, cookies, or owner token.
-_STATIC_EMBED_ORIGIN = settings.frontend_origin.rstrip("/")
-_STATIC_EMBED_CSP = (
-  "sandbox allow-scripts allow-forms allow-pointer-lock; "
-  f"default-src {_STATIC_EMBED_ORIGIN}; "
-  f"script-src {_STATIC_EMBED_ORIGIN} 'unsafe-inline'; "
-  f"style-src {_STATIC_EMBED_ORIGIN} 'unsafe-inline'; "
-  f"font-src {_STATIC_EMBED_ORIGIN} data:; "
-  f"connect-src {_STATIC_EMBED_ORIGIN}; "
-  f"img-src {_STATIC_EMBED_ORIGIN} data: blob:; "
-  f"media-src {_STATIC_EMBED_ORIGIN} blob:; "
-  f"worker-src {_STATIC_EMBED_ORIGIN} blob:"
+_STATIC_EMBED_CSP = static_embed_csp(settings.frontend_origin)
+_SHELL_CSP = shell_csp(os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", ""))
+_APP_FRAME_CSP = app_frame_csp(
+  settings.frontend_origin,
+  os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", ""),
 )
 
 # Published sites (`/sites/<token>/`) are public snapshots of the owner's own
@@ -324,10 +317,7 @@ _STATIC_EMBED_CSP = (
 # share token + public artifact data, but never the shell origin or the owner
 # JWT. Must be enforcing, never Report-Only. X-Frame-Options SAMEORIGIN is
 # KEPT (published pages open top-level; no cross-site framing need).
-_PUBLISHED_SITE_CSP = (
-  "sandbox allow-scripts allow-forms allow-popups; "
-  "object-src 'none'; base-uri 'none'; frame-ancestors 'self'"
-)
+_PUBLISHED_SITE_CSP = PUBLISHED_SITE_CSP
 
 
 def _frame_policy_exception(scope) -> bool:
@@ -348,10 +338,9 @@ class _SecurityHeadersMiddleware:
   """Authoritatively sets the platform security headers on every response. Pure
   ASGI so it never buffers a streaming body. It strips any same-named header a
   route may have set first and replaces it with the platform value, so no route
-  can weaken the HSTS/MIME/etc. wall. Opaque static embeds get their enforced
-  response sandbox here alongside their frame-policy exception. Other frame
-  exceptions are exact routes whose inert response or gateway-origin adapter
-  provides the replacement boundary; ordinary routes retain SAMEORIGIN."""
+  can weaken the HSTS/MIME/etc. wall. Document policies are selected by exact
+  origin-owned namespaces. The shared service gateway is the sole exception:
+  its host adapter supplies a topology-specific frame policy."""
 
   def __init__(self, app):
     self.app = app
@@ -365,22 +354,27 @@ class _SecurityHeadersMiddleware:
     path = scope.get("path") or ""
     opaque_static_embed = path.startswith(_OPAQUE_STATIC_EMBED_PREFIX)
     published_site = path.startswith(_PUBLISHED_SITE_PREFIX)
-    # Both namespaces need an ENFORCED response CSP and the same protection on
-    # the generic-500 path; only the embed also drops X-Frame-Options.
-    response_sandboxed = opaque_static_embed or published_site
-    response_headers = _SECURITY_HEADERS
+    chat_embed = path == "/shell/embed/chat"
+    app_frame = bool(_APP_FRAME_PATH.fullmatch(path))
+    service_surface = path.startswith("/services/") and _frame_policy_exception(scope)
+    response_headers = list(_SECURITY_HEADERS)
     replaced_header_names = _SECURITY_HEADER_NAMES
     if opaque_static_embed or _frame_policy_exception(scope):
       response_headers = [
         (name, value) for name, value in _SECURITY_HEADERS
         if name != _X_FRAME_OPTIONS
       ]
-    if response_sandboxed:
-      csp = _STATIC_EMBED_CSP if opaque_static_embed else _PUBLISHED_SITE_CSP
-      # Copy before appending so we never mutate the _SECURITY_HEADERS module
-      # constant (the published-site branch leaves X-Frame-Options in place, so
-      # response_headers is still that shared list here).
-      response_headers = list(response_headers)
+    if not service_surface:
+      if opaque_static_embed:
+        csp = _STATIC_EMBED_CSP
+      elif published_site:
+        csp = _PUBLISHED_SITE_CSP
+      elif chat_embed:
+        csp = CHAT_EMBED_CSP
+      elif app_frame:
+        csp = _APP_FRAME_CSP
+      else:
+        csp = _SHELL_CSP
       response_headers.append((
         _CONTENT_SECURITY_POLICY,
         csp.encode("ascii"),
@@ -407,9 +401,9 @@ class _SecurityHeadersMiddleware:
       return await self.app(scope, receive, _send)
     except Exception:
       # Starlette's unhandled-error response is outside user middleware. Send
-      # this namespace's generic 500 through our wrapper before re-raising so
-      # the outer layer still logs it without bypassing the sandbox boundary.
-      if response_sandboxed and not response_started:
+      # one through this wrapper before re-raising so direct and proxied generic
+      # errors cannot diverge on the response policy.
+      if not response_started:
         response = Response(
           "Internal Server Error",
           status_code=500,

@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -19,6 +20,7 @@ from app.deps import get_current_owner, resolve_owner_or_app
 from app.http_caching import strip_range
 from app.net_utils import validate_url_safe
 from app.resource_access import live_app, live_app_or_404
+from app.response_policy import absolute_csp_origin, app_frame_csp
 
 
 router = APIRouter()
@@ -247,11 +249,22 @@ def _not_modified_if_match(
   return None
 
 
-_APP_FRAME_CSP = (
-  "sandbox allow-scripts allow-forms allow-popups "
-  "allow-popups-to-escape-sandbox "
-  "allow-top-navigation-by-user-activation"
-)
+_absolute_csp_origin = absolute_csp_origin
+
+
+def _app_frame_csp() -> str:
+  """Complete mini-app document policy for every deployment topology.
+
+  The origin response owns this policy so managed platforms and self-hosted
+  reverse proxies cannot drift. Caddy deliberately passes it through rather
+  than maintaining a second copy. ``'wasm-unsafe-eval'`` is the narrow browser
+  permission for WebAssembly compilation; it does not allow JavaScript
+  ``eval()`` or ``new Function()``.
+  """
+  return app_frame_csp(
+    get_settings().frontend_origin,
+    os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", ""),
+  )
 
 
 def _frame_etag(
@@ -371,7 +384,6 @@ def get_frame(
   etag = _frame_etag(app, frame_path, frame_rev=frame_rev)
   frame_cache_headers = {
     "Cache-Control": "no-cache",
-    "Content-Security-Policy": _APP_FRAME_CSP,
   }
   if etag:
     not_modified = _not_modified_if_match(
@@ -404,14 +416,14 @@ def get_frame(
   # bytes are theme-independent (so the ETag no longer folds the theme).
 
   # The element remains unsandboxed until navigation so the shell service
-  # worker can intercept and serve a cached frame offline. Apply the equivalent
-  # sandbox on the RESPONSE: the loaded app still receives an opaque origin,
-  # including when this backend is reached without the edge proxy. Caddy adds
-  # the full resource policy while preserving this sandbox contract. Popups
+  # worker can intercept and serve a cached frame offline. The origin security
+  # middleware applies the response sandbox on both 200 and 304. Popups
   # opened by an explicit app link must escape the opaque-origin sandbox:
   # otherwise the destination inherits Origin: null and sites such as GitHub
   # load their document but fail same-origin API/storage requests. This does
-  # not relax the app frame itself or let it navigate the owner shell.
+  # not relax the app frame itself or let it navigate the owner shell. The
+  # complete resource policy lives at the origin; reverse proxies pass it
+  # through so Railway and self-hosted installs enforce one contract.
   headers = dict(frame_cache_headers)
   if etag:
     headers["ETag"] = etag

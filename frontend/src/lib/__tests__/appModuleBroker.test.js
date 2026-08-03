@@ -170,17 +170,10 @@ test('bundled app packages are not duplicated in the shell install precache', ()
   assert.match(worker, /RETAINED_RUNTIME_ASSETS/)
 })
 
-test('only app-frame responses admit brokered blob modules at the edge', () => {
-  assert.match(caddy, /@appFrame path \/api\/apps\/\*\/frame/)
-  const frameCsp = caddy.split('\n').find(
-    line => line.includes('header @appFrame >Content-Security-Policy'),
-  ) || ''
-  const ordinaryCsp = caddy.split('\n').find(
-    line => line.includes('header @notFrameableEmbed >Content-Security-Policy'),
-  ) || ''
-  assert.match(frameCsp, /sandbox allow-scripts/)
-  assert.match(frameCsp, /allow-popups-to-escape-sandbox/)
-  assert.doesNotMatch(frameCsp, /allow-same-origin/)
-  assert.match(frameCsp, /script-src[^;]*\bblob:/)
-  assert.doesNotMatch(ordinaryCsp, /script-src[^;]*\bblob:/)
+test('the primary edge passes through application response policy', () => {
+  const primaryHost = caddy.split('# Full backend web services', 1)[0]
+  assert.match(primaryHost, /reverse_proxy app:8000/)
+  assert.doesNotMatch(primaryHost, /\bheader\b/)
+  assert.doesNotMatch(primaryHost, /Content-Security-Policy/)
+  assert.match(caddy, /backend owns standard headers/)
 })

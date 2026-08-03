@@ -91,6 +91,12 @@
   line-height: 1.45;
 }
 
+.settings__notice--stacked {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
 .settings__subtext a {
   color: var(--accent);
   text-decoration: underline;

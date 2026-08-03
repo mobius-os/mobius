@@ -64,7 +64,8 @@ from typing import Callable, Literal, TypedDict
 
 from sqlalchemy.orm import Session
 
-from app import app_git, release_channel
+from app import app_git, platform_activation, release_channel
+from app.platform_activation import PlatformActivationImpact
 
 
 log = logging.getLogger(__name__)
@@ -77,6 +78,10 @@ PLATFORM_BACKEND = PLATFORM_REPO / "backend"
 # Runtime marker files. Each is a transient signal, never user data (they are
 # gitignored out of the outer ``/data`` repo in entrypoint.sh).
 UPGRADE_FLAG = Path("/data/.platform-upgrade-available")
+# Durable activation remainder.  The historical filename is retained so old
+# images keep ignoring it and a rolling upgrade never invents another marker.
+# Legacy content was a bare restart SHA; current content is a JSON target+paths
+# record that can survive a server restart when host/image work is still due.
 RESTART_NEEDED_FLAG = Path("/data/.platform-restart-needed")
 # Written by entrypoint.sh before uvicorn starts. These identify the backend
 # tree the current Python process actually imported, which can differ from the
@@ -218,6 +223,7 @@ class PlatformUpdateState(str, Enum):
   AVAILABLE = "available"
   CONFLICT = "conflict"
   RESTART_NEEDED = "restart_needed"
+  ACTIVATION_NEEDED = "activation_needed"
   # A text-clean merge failed the import probe and was rolled back to the
   # previous served commit; the update needs a repair pass before it can land.
   ROLLED_BACK = "rolled_back"
@@ -229,6 +235,7 @@ class PlatformStatus(TypedDict):
   state: str
   available: bool
   needs_restart: bool
+  activation: PlatformActivationImpact
   current_build_sha: str | None
   recorded_upstream_sha: str | None
   # Latest fetched origin/main commit that is already contained in local main.
@@ -248,6 +255,7 @@ class PlatformApplyResult(TypedDict):
 
   state: str
   needs_restart: bool
+  activation: PlatformActivationImpact
   upstream_commit: str | None
   merge_commit: str | None
   conflict_paths: list[str]
@@ -303,6 +311,7 @@ class PlatformUpdatePreview(TypedDict):
   # and rejects a changed local tip or substituted target instead of silently
   # installing bytes other than the ones represented by this preview.
   plan_id: str | None
+  activation: PlatformActivationImpact
   total_commits: int
   commits_truncated: bool
   commits: list[PlatformCommitSummary]
@@ -877,10 +886,52 @@ def recorded_upstream_sha(repo: Path = PLATFORM_REPO) -> str | None:
   return _rev(repo, UPSTREAM_BRANCH) or None
 
 
+def _read_activation_marker() -> dict[str, object] | None:
+  """Read the current target+paths marker, including the legacy bare SHA."""
+  try:
+    raw = RESTART_NEEDED_FLAG.read_text(encoding="utf-8").strip()
+  except (FileNotFoundError, OSError):
+    return None
+  if not raw:
+    return None
+  try:
+    parsed = json.loads(raw)
+  except json.JSONDecodeError:
+    # Before activation impacts existed this file held only a target SHA.  Its
+    # only meaning was a backend restart, so preserve exactly that remainder.
+    return {"target_sha": raw, "paths": ["backend/app"]}
+  if not isinstance(parsed, dict):
+    return None
+  target = str(parsed.get("target_sha") or "").strip()
+  paths = parsed.get("paths")
+  if not isinstance(paths, list):
+    return None
+  clean_paths = sorted({str(path).strip() for path in paths if str(path).strip()})
+  return {"target_sha": target, "paths": clean_paths}
+
+
+def _write_activation_marker(target_sha: str, paths: list[str]) -> None:
+  clean_paths = sorted({path.strip() for path in paths if path.strip()})
+  if not clean_paths:
+    RESTART_NEEDED_FLAG.unlink(missing_ok=True)
+    return
+  _atomic_write_text(RESTART_NEEDED_FLAG, json.dumps({
+    "target_sha": target_sha or "",
+    "paths": clean_paths,
+  }, separators=(",", ":")))
+
+
+def mark_activation_needed(target_sha: str, paths: list[str]) -> None:
+  """Persist activation work, preserving any earlier host/image remainder."""
+  existing = _read_activation_marker() or {}
+  existing_paths = existing.get("paths")
+  carried = existing_paths if isinstance(existing_paths, list) else []
+  _write_activation_marker(target_sha, [*carried, *paths])
+
+
 def mark_restart_needed(target_sha: str) -> None:
-  """Record that a restart is needed to load an owner-applied update, stamping
-  the reconciled commit the running uvicorn does NOT yet import."""
-  _atomic_write_text(RESTART_NEEDED_FLAG, target_sha or "")
+  """Compatibility helper for callers that know only a server restart is due."""
+  mark_activation_needed(target_sha, ["backend/app"])
 
 
 def _served_platform_sha() -> str | None:
@@ -899,39 +950,13 @@ def _served_platform_sha() -> str | None:
   return sha or None
 
 
-# The served uvicorn runs with cwd ``backend/`` and imports the platform backend.
-# Any backend RUNTIME source (anything under ``backend/`` EXCEPT the
-# never-imported subtrees below) can alter the running server. The tracked
-# constitution is also loaded and cached by that process. Both need a restart.
-# Everything else takes effect without one: frontend/** rebuilds into dist,
-# top-level tests/ and docs never run in the server, backend/tests/** never
-# imports, backend/scripts/** are subprocess-invoked fresh each call,
-# backend/recovery_target/** and backend/runtime/** are baked infrastructure,
-# and backend/memeval/** is eval tooling. Broad on backend runtime so a
-# root-level module or symlinked source cannot silently slip past — fail toward
-# restarting.
-_NON_RUNTIME_BACKEND_SUBDIRS = (
-  "backend/tests/", "backend/scripts/", "backend/recovery_target/",
-  "backend/runtime/", "backend/memeval/",
-)
-
-
-def _paths_need_restart(paths: list[str]) -> bool:
-  """True iff changed files are cached or imported by the served process."""
-  for p in paths:
-    if p == "skill/core.md":
-      return True
-    if p != "backend" and not p.startswith("backend/"):
-      continue  # not backend (frontend/tests/docs/…) — no server restart
-    if any(p.startswith(sub) for sub in _NON_RUNTIME_BACKEND_SUBDIRS):
-      continue  # backend, but a subtree the served process never imports
-    return True
-  return False
-
-
 def _paths_need_import_probe(paths: list[str]) -> bool:
   """True iff changed files can affect backend imports in a fresh process."""
-  return _paths_need_restart([p for p in paths if p != "skill/core.md"])
+  return platform_activation.backend_import_probe_required(paths)
+
+
+def _activation_for_paths(paths: list[str]) -> PlatformActivationImpact:
+  return platform_activation.classify_activation(paths)
 
 
 def _tree_change_needs_import_probe(
@@ -948,39 +973,79 @@ def _tree_change_needs_import_probe(
   return _paths_need_import_probe(paths)
 
 
-def _tree_change_needs_restart(
-  repo: Path, before: str | None, after: str | None
-) -> bool:
-  """Does the ``before``→``after`` change require restarting the served uvicorn?
-
-  True iff it touched served backend runtime code or the process-cached
-  constitution. Fail SAFE toward restarting: a missing sha or an uncomputable
-  diff returns True, so a restart is never skipped on an ambiguous change. Same
-  commit → False; a genuinely empty diff (an ``--allow-empty`` commit) → False.
-  """
+def _tree_change_activation(
+  repo: Path, before: str | None, after: str | None,
+) -> PlatformActivationImpact:
+  """Activation contract for a tree delta, failing closed to a server restart."""
   if before == after:
-    return False  # same sha (or both missing) — nothing changed
+    return _activation_for_paths([])
   if not before or not after:
-    return True  # one side unknown — can't prove no backend change, fail closed
+    return _activation_for_paths(["backend/app"])
   paths = _changed_paths(repo, before, after)
   if paths is None:
-    return True  # diff failed — fail closed
-  return _paths_need_restart(paths)  # empty list → genuine no-change → False
+    return _activation_for_paths(["backend/app"])
+  return _activation_for_paths(paths)
 
 
-def _platform_tree_needs_restart(repo: Path = PLATFORM_REPO) -> bool:
+def _pending_activation_paths(repo: Path = PLATFORM_REPO) -> list[str]:
+  marker = _read_activation_marker() or {}
+  marker_paths = marker.get("paths")
+  paths = list(marker_paths) if isinstance(marker_paths, list) else []
   served = _served_platform_sha()
-  if not served:
-    return False
-  try:
-    local = _local_branch(repo)
-    head = _rev(repo, local)
-  except Exception:
-    return False
-  # The tree advanced past what's served, but a restart is only needed if the
-  # served backend package or process-cached constitution changed; a
-  # frontend/tests/docs/scripts advance is already live or irrelevant.
-  return _tree_change_needs_restart(repo, served, head)
+  if served:
+    try:
+      head = _rev(repo, _local_branch(repo))
+    except Exception:
+      head = None
+    changed = _changed_paths(repo, served, head) if head else None
+    if changed:
+      paths.extend(changed)
+  return sorted({str(path) for path in paths if str(path)})
+
+
+def _platform_activation_impact(
+  repo: Path = PLATFORM_REPO,
+) -> PlatformActivationImpact:
+  return _activation_for_paths(_pending_activation_paths(repo))
+
+
+def _complete_boot_activation(repo: Path) -> None:
+  """Retire activation work this boot can prove complete.
+
+  A fresh server always satisfies ``server_restart``.  A new image identity
+  that contains the applied target also proves image/recreate work complete.
+  Proxy reload and host maintenance remain explicit because the container
+  cannot observe or control those external planes.
+  """
+  marker = _read_activation_marker()
+  if not marker:
+    RESTART_NEEDED_FLAG.unlink(missing_ok=True)
+    return
+  paths = marker.get("paths")
+  if not isinstance(paths, list):
+    return
+  target = str(marker.get("target_sha") or "")
+  build = current_build_sha()
+  build_contains_target = bool(
+    target and build and (_rev(repo, build) or "")
+    and _is_ancestor(repo, target, build)
+  )
+  completed_by_image = {
+    platform_activation.ActivationLevel.CONTAINER_RECREATE.value,
+    platform_activation.ActivationLevel.IMAGE_REBUILD.value,
+  }
+  remaining: list[str] = []
+  for path in paths:
+    level = _activation_for_paths([str(path)])["level"]
+    if level in {
+      platform_activation.ActivationLevel.LIVE.value,
+      platform_activation.ActivationLevel.SERVER_RESTART.value,
+    }:
+      continue
+    if build_contains_target and level in completed_by_image:
+      continue
+    remaining.append(str(path))
+  _write_activation_marker(target, remaining)
 
 
 def _changed_paths(
@@ -1262,12 +1327,10 @@ def reconcile_clone(
   _abort_interrupted(repo)
   pre = _rev(repo, local)
 
-  # A boot IS the restart the RESTART_NEEDED flag asks for — the fresh uvicorn
-  # imports whatever is on disk moments from now — so clear it unconditionally at
-  # boot, not only on the success branches, else an owner Apply followed by an
-  # offline reboot (fetch fails, early return) sticks a permanent restart prompt.
+  # A boot satisfies source-restart work, but must not erase image/proxy/host
+  # requirements the process cannot perform or even observe.
   if at_boot:
-    RESTART_NEEDED_FLAG.unlink(missing_ok=True)
+    _complete_boot_activation(repo)
 
   if not _has_origin(repo):
     return ReconcileResult("skipped", pre, pre, None, error="no_origin")
@@ -1339,8 +1402,6 @@ def reconcile_clone(
     _set_upstream(repo, target)
     CONFLICT_FLAG.unlink(missing_ok=True)
     ROLLED_BACK_FLAG.unlink(missing_ok=True)
-    if at_boot:
-      RESTART_NEEDED_FLAG.unlink(missing_ok=True)
     return ReconcileResult("up_to_date", pre, pre, target, error=None)
 
   if progress:
@@ -1514,8 +1575,6 @@ def reconcile_clone(
   _set_upstream(repo, target)
   CONFLICT_FLAG.unlink(missing_ok=True)
   ROLLED_BACK_FLAG.unlink(missing_ok=True)
-  if at_boot:
-    RESTART_NEEDED_FLAG.unlink(missing_ok=True)
   _clear_reconcile_pre()
   return ReconcileResult(
     "updated", pre, new_sha, target, error=None,
@@ -1690,7 +1749,11 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
   upstream_sha = recorded_upstream_sha(repo)
   conflict = CONFLICT_FLAG.exists() or _reconcile_in_progress(repo)
   rolled_back = ROLLED_BACK_FLAG.exists()
-  restart_needed = RESTART_NEEDED_FLAG.exists() or _platform_tree_needs_restart(repo)
+  activation = _platform_activation_impact(repo)
+  restart_needed = (
+    activation["level"]
+    == platform_activation.ActivationLevel.SERVER_RESTART.value
+  )
   local = _local_branch(repo)
   target = _rev(repo, DEFAULT_TARGET_REF)
   target_contained = bool(target) and _is_ancestor(repo, target, local)
@@ -1701,7 +1764,8 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
     paths = flag.get("paths") or _unmerged_paths(repo)
     return PlatformStatus(
       state=PlatformUpdateState.CONFLICT.value, available=False,
-      needs_restart=restart_needed, current_build_sha=image_sha,
+      needs_restart=restart_needed, activation=activation,
+      current_build_sha=image_sha,
       recorded_upstream_sha=upstream_sha,
       contained_upstream_sha=contained_upstream_sha,
       seed_required=False,
@@ -1716,6 +1780,8 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
     available = True
   elif restart_needed:
     state = PlatformUpdateState.RESTART_NEEDED
+  elif activation["level"] != platform_activation.ActivationLevel.LIVE.value:
+    state = PlatformUpdateState.ACTIVATION_NEEDED
   elif available:
     state = PlatformUpdateState.AVAILABLE
   else:
@@ -1723,6 +1789,7 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
 
   return PlatformStatus(
     state=state.value, available=available, needs_restart=restart_needed,
+    activation=activation,
     current_build_sha=image_sha, recorded_upstream_sha=upstream_sha,
     contained_upstream_sha=contained_upstream_sha,
     seed_required=False, conflict_paths=[], conflict_chat_id=None,
@@ -1768,6 +1835,7 @@ def empty_platform_update_preview(
   return PlatformUpdatePreview(
     state=PlatformUpdateState.UP_TO_DATE.value, available=False,
     current_sha=current_sha, target_sha=target_sha, plan_id=None,
+    activation=_activation_for_paths([]),
     total_commits=0, commits_truncated=False,
     commits=[], files=[], diff=None, diff_truncated=False, conflict_paths=[],
   )
@@ -1904,6 +1972,7 @@ def _platform_update_preview_unlocked(repo: Path) -> PlatformUpdatePreview:
       state=PlatformUpdateState.AVAILABLE.value, available=True,
       current_sha=local_sha, target_sha=target,
       plan_id=_update_plan_id(local_sha, target) if local_sha else None,
+      activation=_activation_for_paths(["backend/app"]),
       total_commits=0, commits_truncated=False, commits=[], files=[],
       diff=None, diff_truncated=False, conflict_paths=[],
     )
@@ -1911,10 +1980,14 @@ def _platform_update_preview_unlocked(repo: Path) -> PlatformUpdatePreview:
   commits = _preview_commits(repo, base, target)
   total_commits = _preview_commit_count(repo, base, target)
   conflict = _read_conflict_flag() or {}
+  activation_paths = _changed_paths(repo, base, target)
+  if activation_paths is None:
+    activation_paths = ["backend/app"]
   return PlatformUpdatePreview(
     state=PlatformUpdateState.AVAILABLE.value, available=True,
     current_sha=local_sha, target_sha=target,
     plan_id=_update_plan_id(local_sha, target) if local_sha else None,
+    activation=_activation_for_paths(activation_paths),
     total_commits=total_commits,
     commits_truncated=total_commits > len(commits),
     commits=commits,
@@ -1932,11 +2005,13 @@ async def apply_platform_update(
   target_sha: str,
   repo: Path = PLATFORM_REPO,
 ) -> PlatformApplyResult:
-  """Owner-triggered reconcile. Clean/updated -> ``restart_needed`` (the running
-  uvicorn must restart to load the new code). Conflict -> the conflict is
-  recorded and Settings offers an owner-clicked resolver chat. Rolled back ->
-  the tree stayed on the old code and the state says so. Offline/skipped -> a
-  ``409`` via :class:`PlatformUpdateError`. Never restarts on its own."""
+  """Owner-triggered reconcile with an explicit activation remainder.
+
+  Clean source can be live, restartable, or require an external deployment
+  action.  Conflict/rollback leave the previous runtime and its remainder
+  untouched.  The backend never invokes Docker, Caddy, or a provider control
+  plane.
+  """
   async with _APPLY_LOCK:
     _set_update_progress(
       PlatformUpdatePhase.PREPARING,
@@ -1967,6 +2042,30 @@ async def apply_platform_update(
       )
       chat_id: str | None = None
 
+      def record_current_activation(head: str | None) -> PlatformActivationImpact:
+        served = _served_platform_sha()
+        if served == head:
+          changed_paths: list[str] = []
+        elif not served or not head:
+          changed_paths = ["backend/app"]
+        else:
+          maybe_paths = _changed_paths(repo, served, head)
+          changed_paths = ["backend/app"] if maybe_paths is None else maybe_paths
+        incoming_impact = _tree_change_activation(repo, served, head)
+        if (
+          incoming_impact["source_level"]
+          != platform_activation.ActivationLevel.LIVE.value
+        ):
+          mark_activation_needed(head or "", changed_paths)
+        return _platform_activation_impact(repo)
+
+      def clean_state(impact: PlatformActivationImpact) -> PlatformUpdateState:
+        if impact["level"] == platform_activation.ActivationLevel.SERVER_RESTART.value:
+          return PlatformUpdateState.RESTART_NEEDED
+        if impact["level"] != platform_activation.ActivationLevel.LIVE.value:
+          return PlatformUpdateState.ACTIVATION_NEEDED
+        return PlatformUpdateState.UP_TO_DATE
+
       if res.status == "updated":
         publish_progress(PlatformUpdatePhase.FINALIZING)
         hook_refresh = await asyncio.to_thread(
@@ -1974,15 +2073,11 @@ async def apply_platform_update(
         )
         if hook_refresh:
           log.warning("git hook refresh failed after platform update: %s", hook_refresh)
-        # Compare the SERVED sha (what the running uvicorn imported) to the new
-        # head, not just this reconcile's delta: a backend edit committed locally
-        # while the server ran would otherwise be missed if the incoming update
-        # only touched the frontend, leaving apply and status disagreeing.
-        if _tree_change_needs_restart(repo, _served_platform_sha(), res.new_sha):
-          mark_restart_needed(res.new_sha or "")
-          state = PlatformUpdateState.RESTART_NEEDED
-        else:
-          state = PlatformUpdateState.UP_TO_DATE
+        # Compare what this process imported to the new head, not only the
+        # incoming target: local commits made while uvicorn ran are part of the
+        # same activation remainder.
+        activation = record_current_activation(res.new_sha)
+        state = clean_state(activation)
       elif res.status == "conflict":
         # Keep the resolver gated behind the owner's next click. A conflict pass
         # rewrites the flag with target + paths, so preserve a previously opened
@@ -2003,13 +2098,14 @@ async def apply_platform_update(
       elif res.status == "rolled_back":
         state = PlatformUpdateState.ROLLED_BACK
       elif res.status == "up_to_date":
-        if _platform_tree_needs_restart(repo):
-          mark_restart_needed(_rev(repo, _local_branch(repo)) or res.pre_sha or "")
-          state = PlatformUpdateState.RESTART_NEEDED
-        else:
-          state = PlatformUpdateState.UP_TO_DATE
+        head = _rev(repo, _local_branch(repo)) or res.pre_sha
+        activation = record_current_activation(head)
+        state = clean_state(activation)
       else:  # offline / skipped — nothing changed; tell the UI plainly.
         raise PlatformUpdateError(res.error or res.status)
+
+      if res.status in {"conflict", "rolled_back"}:
+        activation = _platform_activation_impact(repo)
 
       final_phase = (
         PlatformUpdatePhase.BLOCKED
@@ -2025,7 +2121,11 @@ async def apply_platform_update(
       )
       return PlatformApplyResult(
         state=state.value,
-        needs_restart=(state is PlatformUpdateState.RESTART_NEEDED),
+        needs_restart=(
+          activation["level"]
+          == platform_activation.ActivationLevel.SERVER_RESTART.value
+        ),
+        activation=activation,
         upstream_commit=res.target_sha,
         merge_commit=res.new_sha if res.status == "updated" else None,
         conflict_paths=res.conflict_paths,

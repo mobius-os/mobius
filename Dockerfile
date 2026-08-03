@@ -216,6 +216,7 @@ COPY frontend/ ./shell-src/
 # failing the build if any declared input was not copied into the image.
 COPY scripts/test-image-fingerprint.sh /tmp/test-image-inputs/scripts/test-image-fingerprint.sh
 COPY Dockerfile /tmp/test-image-inputs/Dockerfile
+COPY backend/app/platform_activation.py /tmp/test-image-inputs/backend/app/platform_activation.py
 COPY backend/requirements.txt backend/requirements.lock /tmp/test-image-inputs/backend/
 COPY backend/legacy_runtime/ /tmp/test-image-inputs/backend/legacy_runtime/
 COPY frontend/package.json frontend/package-lock.json /tmp/test-image-inputs/frontend/
