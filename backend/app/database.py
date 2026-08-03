@@ -1018,7 +1018,18 @@ def _require_app_identity(eng) -> None:
     return
   app_columns = {column["name"] for column in inspector.get_columns("apps")}
   with eng.begin() as conn:
-    from app.app_identity import slugify_for_source_dir
+    # Frozen migration copy. Historical identities must not change when the
+    # lifecycle helper evolves after this migration has shipped.
+    def slugify_for_source_dir(name: str) -> str:
+      slug = "".join(
+        ch if ch.isalnum() else "-" for ch in (name or "").lower()
+      ).strip("-")
+      while "--" in slug:
+        slug = slug.replace("--", "-")
+      slug = slug or "app"
+      if slug.isdigit():
+        slug = f"app-{slug}"
+      return slug
 
     apps_root = Path(get_settings().data_dir) / "apps"
     used_slugs = {
@@ -1045,13 +1056,43 @@ def _require_app_identity(eng) -> None:
       used_slugs.add(slug)
     source_projection = "jsx_source" if "jsx_source" in app_columns else "NULL"
     apps_root_resolved = apps_root.resolve()
-    reserved_sources = {
-      str(Path(source_dir).resolve())
-      for (source_dir,) in conn.execute(text(
-        "SELECT source_dir FROM apps "
-        "WHERE source_dir IS NOT NULL AND length(trim(source_dir)) > 0"
-      ))
-    }
+    existing_sources = conn.execute(text(
+      "SELECT id, source_dir FROM apps "
+      "WHERE source_dir IS NOT NULL AND length(trim(source_dir)) > 0 "
+      "ORDER BY id"
+    )).all()
+    canonical_sources: dict[str, int] = {}
+    canonical_updates: list[tuple[int, str]] = []
+    for app_id, stored_source in existing_sources:
+      try:
+        resolved_path = Path(stored_source).resolve()
+      except (OSError, RuntimeError) as exc:
+        raise RuntimeError(
+          f"cannot require app identity: app {app_id} has an invalid source_dir"
+        ) from exc
+      if (
+        resolved_path.parent != apps_root_resolved
+        or resolved_path.name.isdigit()
+      ):
+        raise RuntimeError(
+          "cannot require app identity: app "
+          f"{app_id} source_dir is outside the canonical apps root"
+        )
+      resolved = str(resolved_path)
+      prior_owner = canonical_sources.get(resolved)
+      if prior_owner is not None:
+        raise RuntimeError(
+          "cannot require app identity: apps "
+          f"{prior_owner} and {app_id} resolve to the same source_dir"
+        )
+      canonical_sources[resolved] = app_id
+      if str(stored_source) != resolved:
+        canonical_updates.append((app_id, resolved))
+    for app_id, resolved in canonical_updates:
+      conn.execute(text(
+        "UPDATE apps SET source_dir = :source_dir WHERE id = :app_id"
+      ), {"source_dir": resolved, "app_id": app_id})
+    reserved_sources = set(canonical_sources)
     missing_sources = conn.execute(text(
       f"SELECT id, slug, {source_projection} AS jsx_source FROM apps "
       "WHERE source_dir IS NULL OR length(trim(source_dir)) = 0"
@@ -1078,8 +1119,6 @@ def _require_app_identity(eng) -> None:
             )
           except (FileNotFoundError, OSError):
             migration_owned = False
-          if migration_owned:
-            return True
           try:
             names = {child.name for child in path.iterdir()}
           except (FileNotFoundError, OSError):
@@ -1090,6 +1129,7 @@ def _require_app_identity(eng) -> None:
           # source, so this app may safely resume the same deterministic path.
           if names <= {
             ".git",
+            ".gitignore",
             ".mobius-identity-migration",
             ".mobius-identity-migration.tmp",
           }:
@@ -1100,10 +1140,13 @@ def _require_app_identity(eng) -> None:
             ) == jsx_source
           except (FileNotFoundError, OSError):
             return False
-          return (
-            app_git.is_repo(path)
-            and not app_git.worktree_dirty(path)
-            and same_entry
+          if not same_entry:
+            return False
+          # A valid marker plus the stored source is exactly the partial state
+          # this migration itself can leave between write and commit. Without
+          # the marker, accept only an already-clean equivalent repository.
+          return migration_owned or (
+            app_git.is_repo(path) and not app_git.worktree_dirty(path)
           )
 
       # Allocate every missing identity, even when an extremely old schema has
@@ -1121,7 +1164,12 @@ def _require_app_identity(eng) -> None:
             f"{source_basename}-legacy-{app_id}-{candidate_number}"
           )
         candidate_number += 1
-        resolved_path = candidate.resolve()
+        try:
+          resolved_path = candidate.resolve()
+        except (OSError, RuntimeError):
+          # A pathological occupied basename (for example a symlink loop) does
+          # not get to brick boot; allocate the next deterministic sibling.
+          continue
         resolved = str(resolved_path)
         if (
           resolved_path.parent != apps_root_resolved

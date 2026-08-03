@@ -43,7 +43,10 @@ def test_run_migrations_drops_removed_image_generation_columns(tmp_path):
   assert "generated_images" not in chat_columns
 
 
-def test_run_migrations_removes_retired_job_authority_receipts(tmp_path):
+def test_run_migrations_removes_retired_job_authority_receipts(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
   eng = create_engine(f"sqlite:///{tmp_path / 'job-authority.db'}")
   models.Base.metadata.create_all(eng)
   with Session(eng) as session:
@@ -289,6 +292,130 @@ def test_app_identity_migration_retries_after_repo_initialization_crash(
     assert (apps_root / "retry-app" / "index.jsx").read_text(
       encoding="utf-8"
     ) == "// keep draft"
+
+
+def test_app_identity_migration_preserves_edit_after_partial_source_write(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
+  apps_root = tmp_path / "apps"
+  stored = "export default () => <main>Stored</main>"
+  eng = create_engine(f"sqlite:///{tmp_path / 'retry-owner-edit.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(128) NOT NULL, "
+      "slug VARCHAR(128), source_dir VARCHAR(512), jsx_source TEXT)"
+    ))
+    conn.execute(text(
+      "INSERT INTO apps VALUES (17, 'Retry edit', 'retry-edit', NULL, :source)"
+    ), {"source": stored})
+
+  from app import app_git
+  real_commit_local = app_git.commit_local
+  failed = False
+
+  def crash_before_commit(path, message):
+    nonlocal failed
+    if not failed:
+      failed = True
+      raise OSError("simulated crash after source write")
+    return real_commit_local(path, message)
+
+  monkeypatch.setattr(app_git, "commit_local", crash_before_commit)
+  with pytest.raises(OSError, match="after source write"):
+    run_migrations(eng)
+
+  original = apps_root / "retry-edit"
+  (original / "index.jsx").write_text("// owner's recovery edit", encoding="utf-8")
+  run_migrations(eng)
+
+  with eng.connect() as conn:
+    assigned = Path(conn.execute(text(
+      "SELECT source_dir FROM apps WHERE id = 17"
+    )).scalar_one())
+  assert assigned == apps_root / "retry-edit-legacy-17"
+  assert (original / "index.jsx").read_text(encoding="utf-8") == (
+    "// owner's recovery edit"
+  )
+  assert (assigned / "index.jsx").read_text(encoding="utf-8") == stored
+
+
+def test_app_identity_migration_rejects_existing_resolved_aliases(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
+  apps_root = tmp_path / "apps"
+  eng = create_engine(f"sqlite:///{tmp_path / 'resolved-aliases.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(128) NOT NULL, "
+      "slug VARCHAR(128), source_dir VARCHAR(512), jsx_source TEXT)"
+    ))
+    conn.execute(text(
+      "INSERT INTO apps VALUES "
+      "(1, 'One', 'one', :direct, NULL), "
+      "(2, 'Two', 'two', :alias, NULL)"
+    ), {
+      "direct": str(apps_root / "shared"),
+      "alias": str(apps_root / ".." / "apps" / "shared"),
+    })
+
+  with pytest.raises(RuntimeError, match="resolve to the same source_dir"):
+    run_migrations(eng)
+  assert "0004_app_identity_required" not in {
+    row["version"] for row in schema_migration_history(eng)
+  }
+
+
+def test_app_identity_migration_canonicalizes_one_existing_alias(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
+  apps_root = tmp_path / "apps"
+  eng = create_engine(f"sqlite:///{tmp_path / 'canonical-alias.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(128) NOT NULL, "
+      "slug VARCHAR(128), source_dir VARCHAR(512), jsx_source TEXT)"
+    ))
+    conn.execute(text(
+      "INSERT INTO apps VALUES (1, 'One', 'one', :alias, NULL)"
+    ), {"alias": str(apps_root / ".." / "apps" / "one")})
+
+  run_migrations(eng)
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT source_dir FROM apps WHERE id = 1"
+    )).scalar_one() == str((apps_root / "one").resolve())
+
+
+def test_app_identity_migration_skips_symlink_loop_candidate(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
+  apps_root = tmp_path / "apps"
+  apps_root.mkdir()
+  (apps_root / "loop-app").symlink_to("loop-app")
+  eng = create_engine(f"sqlite:///{tmp_path / 'symlink-loop.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(128) NOT NULL, "
+      "slug VARCHAR(128), source_dir VARCHAR(512), jsx_source TEXT)"
+    ))
+    conn.execute(text(
+      "INSERT INTO apps VALUES "
+      "(19, 'Loop app', 'loop-app', NULL, 'export default () => 19')"
+    ))
+
+  run_migrations(eng)
+  with eng.connect() as conn:
+    assigned = Path(conn.execute(text(
+      "SELECT source_dir FROM apps WHERE id = 19"
+    )).scalar_one())
+  assert assigned == apps_root / "loop-app-legacy-19"
+  assert (assigned / "index.jsx").read_text(encoding="utf-8") == (
+    "export default () => 19"
+  )
 
 
 def test_app_identity_migration_retries_after_pre_marker_directory_crash(
