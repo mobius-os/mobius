@@ -53,7 +53,11 @@ test('footer resizes enter through the scroll owner instead of mutating geometry
   assert.ok(bridgeStart >= 0 && bridgeEnd > bridgeStart, 'composer resize bridge exists')
   const bridge = controller.slice(bridgeStart, bridgeEnd)
   assert.match(bridge, /deferLayoutUntilReaderYields\(authorityVersion\)/)
-  assert.match(bridge, /syncLayout\(\{ authorityVersion \}\)/)
+  assert.match(
+    bridge,
+    /syncLayout\(\{[\s\S]*?forceApply:\s*modeRef\.current\.kind === 'FOLLOW_BOTTOM',[\s\S]*?authorityVersion,[\s\S]*?\}\)/,
+    'composer growth must reapply an established tail follow in the same owner pass',
+  )
 })
 
 test('gesture settlement replays deferred footer geometry and mode in one task', () => {

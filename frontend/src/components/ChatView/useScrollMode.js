@@ -862,12 +862,16 @@ export function modeAfterReaderGesture({
 }
 
 
-/** A primary composer press at the physical tail is an explicit request to
- * keep the latest content visible while the software keyboard opens. Read the
- * geometry before focus changes the viewport; presses higher in the transcript
- * preserve their exact reading anchor. */
-export function composerPointerRequestsFollow(event, scrollEl) {
-  if (event?.button !== 0
+/** A primary composer press or direct edit at the physical tail is an explicit
+ * request to keep the latest content visible while the keyboard or composer
+ * changes the viewport. The edit case covers paste/typing while the textarea
+ * is already focused, so there may be no new pointer event to retire an older
+ * scroll gesture. Read the tail before the foot observer publishes the new
+ * composer height; edits higher in the transcript preserve their anchor. */
+export function composerTailIntentRequestsFollow(event, scrollEl) {
+  const primaryPress = event?.type === 'pointerdown' && event?.button === 0
+  const directEdit = event?.type === 'input'
+  if ((!primaryPress && !directEdit)
       || !event?.target?.matches?.('textarea.chat__input')
       || !scrollEl) return false
   return scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight
@@ -2026,7 +2030,14 @@ export default function useScrollMode({
         deferLayoutUntilReaderYields(authorityVersion)
         return
       }
-      syncLayout({ authorityVersion })
+      // Foot growth changes list padding without necessarily changing the
+      // list's observed content box. Reapply an established live follow here;
+      // otherwise only the first new line moves the viewport and later lines
+      // quietly leave the reader above the tail.
+      syncLayout({
+        forceApply: modeRef.current.kind === 'FOLLOW_BOTTOM',
+        authorityVersion,
+      })
     }
     composerResizeRunRef.current = runComposerResize
 
@@ -2497,12 +2508,23 @@ export default function useScrollMode({
       // Keep the gesture gate, but let that scroll become reader-owned.
       disclosureInputOwnsGesture = false
     }
-    const onComposerPointerDown = (event) => {
-      if (!composerPointerRequestsFollow(event, scrollEl)) return
+    const onComposerTailIntent = (event) => {
+      if (!composerTailIntentRequestsFollow(event, scrollEl)) return
+      // Once FOLLOW already owns layout, later characters carry no new scroll
+      // intent. Keep this a one-time handoff instead of persisting and tracing
+      // the same state on every input event. An unfinished older gesture still
+      // comes through so writing can supersede it below.
+      if (modeRef.current?.kind === 'FOLLOW_BOTTOM'
+          && layoutMayOwnScroll(
+            gestureWindowUntilRef.current,
+            performance.now(),
+          )) return
       // Composer focus is a newer semantic action than any scroll still
-      // waiting on momentum/quiet settlement. Retire that gesture before the
-      // keyboard resize arrives so the viewport observer can apply FOLLOW in
-      // its first committed layout pass instead of waiting behind the old gate.
+      // waiting on momentum/quiet settlement. A direct edit is the same intent
+      // when the field was already focused and no new press occurred. Retire
+      // that gesture before the keyboard/composer resize arrives so the
+      // viewport observer can apply FOLLOW in its first committed layout pass
+      // instead of waiting behind the old gate.
       supersedePendingReaderGesture()
       readerLocationExplicitRef.current = true
       transitionMode({ kind: 'FOLLOW_BOTTOM' }, 'reader:composer-bottom')
@@ -2525,7 +2547,8 @@ export default function useScrollMode({
     scrollEl.addEventListener('input', onQuestionEditMutation, { passive: true })
     scrollEl.addEventListener('pointerup', onPointerUpInput, { passive: true })
     scrollEl.addEventListener('pointercancel', onPointerCancelInput, { passive: true })
-    chatEl?.addEventListener('pointerdown', onComposerPointerDown, { passive: true })
+    chatEl?.addEventListener('pointerdown', onComposerTailIntent, { passive: true })
+    chatEl?.addEventListener('input', onComposerTailIntent, { passive: true })
 
     // Scroll handler — user-driven scrolls only mark intent here. The expensive
     // semantic location/mode work runs once in settleReaderScroll.
@@ -2632,7 +2655,8 @@ export default function useScrollMode({
       scrollEl.removeEventListener('input', onQuestionEditMutation)
       scrollEl.removeEventListener('pointerup', onPointerUpInput)
       scrollEl.removeEventListener('pointercancel', onPointerCancelInput)
-      chatEl?.removeEventListener('pointerdown', onComposerPointerDown)
+      chatEl?.removeEventListener('pointerdown', onComposerTailIntent)
+      chatEl?.removeEventListener('input', onComposerTailIntent)
       if (forceRevealRef.current === forceReveal) forceRevealRef.current = null
     }
   }, [

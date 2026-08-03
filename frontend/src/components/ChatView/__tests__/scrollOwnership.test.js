@@ -220,13 +220,13 @@ test('automatic geometry owners and newer semantic actions share reader authorit
     'a disclosure press promoted to a native pan must become reader-owned scroll',
   )
 
-  const composerStart = ownerSource.indexOf('const onComposerPointerDown =')
+  const composerStart = ownerSource.indexOf('const onComposerTailIntent =')
   const composerEnd = ownerSource.indexOf('const noteScrollStart =', composerStart)
   const composerPath = ownerSource.slice(composerStart, composerEnd)
   assert.ok(composerStart >= 0 && composerEnd > composerStart,
     'composer tail intent must remain inside the scroll owner')
-  assert.match(composerPath, /composerPointerRequestsFollow\(event, scrollEl\)/,
-    'composer focus may follow only after checking pre-keyboard tail geometry')
+  assert.match(composerPath, /composerTailIntentRequestsFollow\(event, scrollEl\)/,
+    'composer focus/edit may follow only after checking pre-resize tail geometry')
   assert.ok(
     composerPath.indexOf('supersedePendingReaderGesture()')
       < composerPath.indexOf("transitionMode({ kind: 'FOLLOW_BOTTOM' }"),

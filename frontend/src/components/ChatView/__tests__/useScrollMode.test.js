@@ -13,8 +13,8 @@ import {
   applyMode,
   anchorModeFromScroll,
   bottomAnchorModeFromScroll,
-  composerPointerRequestsFollow,
   contentHoldModeFromScroll,
+  composerTailIntentRequestsFollow,
   delayedSendWillPin,
   gestureLayoutRetryDelay,
   isNearContentBottom,
@@ -206,7 +206,7 @@ test('only scrolling keys claim reader ownership', () => {
   assert.equal(readerInputMayScroll('touchmove'), true)
 })
 
-test('a primary composer press requests follow only at the physical tail', () => {
+test('a composer press or direct edit requests follow only at the physical tail', () => {
   const composer = { matches: selector => selector === 'textarea.chat__input' }
   const otherControl = { matches: () => false }
   const atTail = makeScrollEl({
@@ -220,12 +220,26 @@ test('a primary composer press requests follow only at the physical tail', () =>
     clientHeight: 800,
   })
 
-  assert.equal(composerPointerRequestsFollow({ button: 0, target: composer }, atTail), true)
-  assert.equal(composerPointerRequestsFollow({ button: 0, target: composer }, aboveTail), false,
+  assert.equal(composerTailIntentRequestsFollow({
+    type: 'pointerdown', button: 0, target: composer,
+  }, atTail), true)
+  assert.equal(composerTailIntentRequestsFollow({
+    type: 'input', target: composer,
+  }, atTail), true, 'paste/typing can express tail intent without a new pointer event')
+  assert.equal(composerTailIntentRequestsFollow({
+    type: 'input', target: composer,
+  }, aboveTail), false,
     'composer focus must preserve an older reading position')
-  assert.equal(composerPointerRequestsFollow({ button: 1, target: composer }, atTail), false,
+  assert.equal(composerTailIntentRequestsFollow({
+    type: 'pointerdown', button: 1, target: composer,
+  }, atTail), false,
     'non-primary presses do not express writing intent')
-  assert.equal(composerPointerRequestsFollow({ button: 0, target: otherControl }, atTail), false)
+  assert.equal(composerTailIntentRequestsFollow({
+    type: 'input', target: otherControl,
+  }, atTail), false)
+  assert.equal(composerTailIntentRequestsFollow({
+    type: 'change', target: composer,
+  }, atTail), false, 'unrelated form events do not claim scroll ownership')
 })
 
 test('disclosure activation is recognized as an anchor-latching reading action', () => {

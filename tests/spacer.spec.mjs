@@ -1348,4 +1348,138 @@ test.describe('Scroll edge cases', () => {
     const after = await measure(page)
     expect(Math.abs(after.scrollTop - before.scrollTop)).toBeLessThan(20)
   })
+
+  test('28. An already-focused paste follows the tail before the composer grows', async ({ page }) => {
+    const events = [
+      { type: 'catch_up_done' },
+      { type: 'text', content: 'Long response paragraph. '.repeat(120) },
+      { type: 'done' },
+    ]
+    await setupWithSSE(page, events, { width: 412, height: 615 })
+    await newChat(page)
+    await sendMessage(page, 'First message')
+    await page.waitForFunction(
+      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
+      { timeout: 10000 }
+    )
+
+    const overflow = await measure(page)
+    expect(overflow.scrollH).toBeGreaterThan(overflow.clientH + 100)
+
+    // Establish an ordinary reading anchor, then put that held viewport at the
+    // physical tail without manufacturing FOLLOW_BOTTOM. This is the restored
+    // / already-focused state that previously depended on a fresh composer tap.
+    await page.evaluate(() => {
+      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      scroll.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        button: 0,
+        pointerType: 'touch',
+      }))
+      scroll.scrollTop = Math.max(0, Math.floor(scroll.scrollHeight / 3))
+      scroll.dispatchEvent(new Event('scroll', { bubbles: true }))
+      scroll.dispatchEvent(new PointerEvent('pointerup', {
+        bubbles: true,
+        button: 0,
+        pointerType: 'touch',
+      }))
+    })
+    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 350)))
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll'))
+      .toHaveAttribute('data-scroll-mode', 'ANCHOR_AT')
+    await page.evaluate(() => {
+      const surface = document.querySelector('[data-chat-surface="painted"]')
+      const scroll = surface.querySelector('.chat__scroll')
+      const input = surface.querySelector('.chat__input')
+      scroll.scrollTop = scroll.scrollHeight
+      input.focus({ preventScroll: true })
+    })
+    const atTail = await measure(page)
+    expect(atTail.scrollH - atTail.scrollTop - atTail.clientH).toBeLessThanOrEqual(4)
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll'))
+      .toHaveAttribute('data-scroll-mode', 'ANCHOR_AT')
+
+    const result = await page.evaluate(async () => {
+      const surface = document.querySelector('[data-chat-surface="painted"]')
+      const scroll = surface.querySelector('.chat__scroll')
+      const input = surface.querySelector('.chat__input')
+      const foot = surface.querySelector('.chat__foot')
+      window.__mobiusChatScrollTrace = {
+        version: 1,
+        transitions: [],
+        writes: [],
+        events: [],
+      }
+      const sample = () => ({
+        mode: scroll.dataset.scrollMode,
+        top: Math.round(scroll.scrollTop),
+        height: scroll.scrollHeight,
+        viewport: scroll.clientHeight,
+        gap: Math.round(scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight),
+        inputHeight: input.offsetHeight,
+        footHeight: foot.offsetHeight,
+      })
+
+      // A bottom-edge touch can still be waiting to prove whether a native
+      // scroll will arrive. Paste from the software keyboard then changes the
+      // already-focused textarea without another DOM pointer event.
+      scroll.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        button: 0,
+        pointerType: 'touch',
+      }))
+      const before = sample()
+      const lines = [
+        'First pasted line that wraps across the narrow composer width.',
+        'Second pasted line that also grows the composer.',
+        'Third pasted line.',
+        'Fourth pasted line.',
+      ]
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      ).set
+      valueSetter.call(input, lines[0])
+      input.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        inputType: 'insertFromPaste',
+        data: lines[0],
+      }))
+      const immediate = sample()
+      const settledFrames = []
+      for (const line of lines.slice(1)) {
+        const next = `${input.value}\n${line}`
+        valueSetter.call(input, next)
+        input.dispatchEvent(new InputEvent('input', {
+          bubbles: true,
+          inputType: 'insertLineBreak',
+          data: line,
+        }))
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+        settledFrames.push(sample())
+      }
+      await new Promise(resolve => setTimeout(resolve, 2100))
+      const afterFormerGestureCap = sample()
+      const composerEvents = window.__mobiusChatScrollTrace.events
+        .filter(event => event.event === 'reader:composer-bottom')
+      return {
+        before,
+        immediate,
+        settledFrames,
+        afterFormerGestureCap,
+        composerEvents,
+      }
+    })
+
+    expect(result.immediate.mode).toBe('FOLLOW_BOTTOM')
+    expect(result.composerEvents).toHaveLength(1)
+    expect(result.settledFrames.at(-1).footHeight).toBeGreaterThan(result.before.footHeight)
+    for (const frame of result.settledFrames) {
+      expect(frame.gap).toBeLessThanOrEqual(4)
+    }
+    expect(result.afterFormerGestureCap.gap).toBeLessThanOrEqual(4)
+    expect(Math.abs(
+      result.afterFormerGestureCap.top - result.settledFrames.at(-1).top
+    )).toBeLessThanOrEqual(4)
+  })
 })
