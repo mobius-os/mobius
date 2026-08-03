@@ -2606,8 +2606,17 @@ export default function Shell() {
 
   function selectChat(id) {
     const chatId = String(id)
+    const paintedWorld = effectiveViewMode === 'single'
+      ? STANDARD_CHAT_WORLD
+      : BUILDER_CHAT_WORLD
+    const destinationAlreadyPainted = visibleChatPanes.some(owner => (
+      owner.world === paintedWorld
+      && String(owner.chatId) === chatId
+      && String(presentedChatByPane.get(String(owner.paneId)) ?? '') === chatId
+    ))
     const preserveDrawerPresentation = modalDrawerOpen
       && !(activeView === 'chat' && String(activeChatId) === chatId)
+      && !destinationAlreadyPainted
     clearChatAttention(id)
     navTo('chat', { chatId: id, preserveDrawerPresentation })
     focusDesktopChatPaneComposer(id)
