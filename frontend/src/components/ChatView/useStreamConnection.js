@@ -392,8 +392,8 @@ export default function useStreamConnection(chatId, {
   // screenshots match the partner's framing). interactive-widget=
   // resizes-content shrinks innerHeight when the keyboard opens — and
   // POST /messages typically fires WITH the keyboard open — so the raw
-  // value is keyboard-poisoned. Max-tracking mirrors the same defensive
-  // trick useScrollMode applies to the spacer (fullViewHRef).
+  // value is keyboard-poisoned. Max-tracking is specific to agent screenshot
+  // framing; the visible chat spacer intentionally responds to the keyboard.
   const maxInnerHeightRef = useRef(
     typeof window !== 'undefined' ? window.innerHeight : 0
   )

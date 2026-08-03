@@ -553,7 +553,7 @@ automatically armed by installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.17 (2026-08-02).** This section is the
+**Owner-authoritative contract — v1.17 (2026-08-03).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -577,7 +577,8 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   tail including any remaining room. Real output first consumes that room without
   advancing the tail; after the room reaches zero, the same tail advances with the
   stream. A viewport/keyboard change, foreground return, mount, or chat restoration
-  must never create auto-scroll.
+  must never create follow intent; a resize may only complete an already-armed
+  live-send handoff when its responsive reservation reaches zero.
 - **R1 — Stable latest-turn reservation.** Dynamic bottom spacer derives from the
   latest user row and the real tail geometry, independent of whether that row has
   already entered the viewport. It reserves exactly enough room for that row to
@@ -814,7 +815,7 @@ Controller structure is part of the contract, not an implementation detail:
 - `useScrollMode` is the sole writer of `.spacer-dynamic` height and the
   composer-clearance CSS geometry. Those indirect writes and every `writeMode`
   call share R5's reader-generation commit gate. Spacer height is
-  derived from the latest user row and exact tail deficit;
+  derived from the latest user row, active scroll-box height, and exact tail deficit;
   disclosure helpers and renderers may preserve an on-screen anchor but may never
   prime, enlarge, or unwind spacer themselves.
 - The gesture-gated `scroll` event reads physical-bottom geometry directly.
