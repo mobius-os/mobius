@@ -3,9 +3,10 @@
 import asyncio
 import base64
 import json
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -182,7 +183,6 @@ async def test_codex_usage_ignores_saturated_default_executor(
   monkeypatch, tmp_path,
 ):
   from app import provider_usage
-  import openai_codex.client as codex_client
 
   calls = []
 
@@ -216,9 +216,20 @@ async def test_codex_usage_ignores_saturated_default_executor(
     def close(self):
       self._record("close")
 
+  codex_package = ModuleType("openai_codex")
+  codex_package.__path__ = []
+  codex_client = ModuleType("openai_codex.client")
+  codex_client.CodexClient = FakeClient
+  codex_client.CodexConfig = lambda **kwargs: kwargs
+  generated_package = ModuleType("openai_codex.generated")
+  generated_package.__path__ = []
+  generated_v2 = ModuleType("openai_codex.generated.v2_all")
+  generated_v2.GetAccountRateLimitsResponse = object
+  monkeypatch.setitem(sys.modules, "openai_codex", codex_package)
+  monkeypatch.setitem(sys.modules, "openai_codex.client", codex_client)
+  monkeypatch.setitem(sys.modules, "openai_codex.generated", generated_package)
+  monkeypatch.setitem(sys.modules, "openai_codex.generated.v2_all", generated_v2)
   monkeypatch.setattr(provider_usage.shutil, "which", lambda _name: "/codex")
-  monkeypatch.setattr(codex_client, "CodexClient", FakeClient)
-  monkeypatch.setattr(codex_client, "CodexConfig", lambda **kwargs: kwargs)
 
   loop = asyncio.get_running_loop()
   release = threading.Event()
