@@ -8,6 +8,8 @@ ad-hoc debug endpoints.
 
 import json
 import os
+import threading
+from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -311,11 +313,57 @@ def debug_logs(
 # capped JSONL file that is trimmed on write, so an enabled probe can never
 # grow the data directory without bound.
 _PERF_SAMPLE_LIMIT = 2000
+_PERF_SAMPLE_TRIM_TARGET = 1600
+_perf_sample_count: int | None = None
+_perf_sample_lock = threading.Lock()
 
 
 def _perf_sample_path() -> Path:
   settings = get_settings()
   return Path(settings.data_dir) / "logs" / "perf-samples.jsonl"
+
+
+def _trim_perf_samples(path: Path) -> int:
+  """Atomically retain the newest low-water batch and return its size."""
+  with open(path, encoding="utf-8") as f:
+    retained = deque(f, maxlen=_PERF_SAMPLE_TRIM_TARGET)
+
+  staging = path.with_name(f".{path.name}.tmp")
+  with open(staging, "w", encoding="utf-8") as f:
+    f.writelines(retained)
+  os.replace(staging, path)
+  return len(retained)
+
+
+def _append_perf_sample(path: Path, line: str) -> None:
+  """Append one sample, trimming only at the high-water mark.
+
+  The process-local count is reconstructed once after restart. Möbius runs a
+  single uvicorn worker; the lock also serializes its sync read/clear routes
+  with this async ingest route.
+  """
+  global _perf_sample_count
+
+  with _perf_sample_lock:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if _perf_sample_count is None:
+      try:
+        with open(path, encoding="utf-8") as f:
+          _perf_sample_count = sum(1 for _ in f)
+      except FileNotFoundError:
+        _perf_sample_count = 0
+
+    with open(path, "a", encoding="utf-8") as f:
+      f.write(line + "\n")
+    _perf_sample_count += 1
+
+    if _perf_sample_count > _PERF_SAMPLE_LIMIT:
+      try:
+        _perf_sample_count = _trim_perf_samples(path)
+      except OSError:
+        # The sample was appended successfully. Retry the trim on the next
+        # write rather than reporting that this stored diagnostic was lost.
+        pass
 
 
 @router.post("/perf")
@@ -327,8 +375,8 @@ async def debug_perf_ingest(
 
   The body is stored verbatim alongside a server-side receipt timestamp. The
   probe already bounds its own payload, so the only server-side concern is
-  keeping the file capped; the trim runs on every write rather than on a
-  schedule so a probe left enabled overnight still cannot grow unbounded.
+  keeping the file capped. Crossing the high-water mark trims to a lower
+  target, amortizing the rewrite while keeping retention strictly bounded.
   """
   try:
     sample = await request.json()
@@ -341,22 +389,8 @@ async def debug_perf_ingest(
   sample["received_at"] = datetime.now(UTC).isoformat()
 
   path = _perf_sample_path()
-  path.parent.mkdir(parents=True, exist_ok=True)
-
   line = json.dumps(sample, separators=(",", ":"), default=str)
-  with open(path, "a", encoding="utf-8") as f:
-    f.write(line + "\n")
-
-  # Trim in place once the file exceeds the cap. Reading the whole file is
-  # acceptable because the cap keeps it small by construction.
-  try:
-    with open(path, encoding="utf-8") as f:
-      lines = f.readlines()
-    if len(lines) > _PERF_SAMPLE_LIMIT:
-      with open(path, "w", encoding="utf-8") as f:
-        f.writelines(lines[-_PERF_SAMPLE_LIMIT:])
-  except OSError:
-    pass
+  _append_perf_sample(path, line)
 
   return {"stored": True}
 
@@ -373,19 +407,20 @@ def debug_perf_read(
   mobile and desktop populations can be compared without pulling both.
   """
   path = _perf_sample_path()
-  if not path.exists():
-    return {"samples": [], "total": 0}
-
   samples = []
-  with open(path, encoding="utf-8") as f:
-    for line in f:
-      line = line.strip()
-      if not line:
-        continue
-      try:
-        samples.append(json.loads(line))
-      except ValueError:
-        continue
+  with _perf_sample_lock:
+    if not path.exists():
+      return {"samples": [], "total": 0}
+
+    with open(path, encoding="utf-8") as f:
+      for line in f:
+        line = line.strip()
+        if not line:
+          continue
+        try:
+          samples.append(json.loads(line))
+        except ValueError:
+          continue
 
   if device:
     samples = [s for s in samples if s.get("device", {}).get("formFactor") == device]
@@ -398,7 +433,11 @@ def debug_perf_clear(
   _owner: models.Owner = Depends(get_current_owner),
 ):
   """Drops all collected samples so a new measurement run starts clean."""
+  global _perf_sample_count
+
   path = _perf_sample_path()
-  if path.exists():
-    path.unlink()
+  with _perf_sample_lock:
+    if path.exists():
+      path.unlink()
+    _perf_sample_count = 0
   return {"cleared": True}
