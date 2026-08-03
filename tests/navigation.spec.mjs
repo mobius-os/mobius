@@ -53,7 +53,7 @@ async function navigateToSettings(page) {
 async function setup(
   page,
   viewport = { width: 412, height: 915 },
-  { assistantContent = 'Fixture response' } = {},
+  { assistantContent = 'Fixture response', chatDetailGate = null } = {},
 ) {
   await page.setViewportSize(viewport)
 
@@ -74,11 +74,14 @@ async function setup(
   await page.route(/\/api\/chats\/([0-9a-f-]+)(?:\?.*)?$/, route => {
     if (route.request().method() !== 'GET') return route.fallback()
     const id = new URL(route.request().url()).pathname.split('/').pop()
-    return route.fulfill({
+    const fulfill = () => route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify(navChatDetail(id, assistantContent)),
     })
+    return chatDetailGate?.id === id
+      ? chatDetailGate.wait.then(fulfill)
+      : fulfill()
   })
   await page.route('**/test-image.svg', route => route.fulfill({
     status: 200,
@@ -345,6 +348,39 @@ test.describe('Navigation basics', () => {
 
 test.describe('Touch navigation', () => {
   test.use({ hasTouch: true, isMobile: true })
+
+  test('chat selection keeps the drawer over the outgoing chat until the destination paints', async ({ page }) => {
+    let releaseChatDetail
+    const wait = new Promise(resolve => { releaseChatDetail = resolve })
+    await setup(page, { width: 412, height: 915 }, {
+      chatDetailGate: { id: NAV_CHATS[1].id, wait },
+    })
+
+    await openDrawer(page)
+    await page.getByRole('navigation', { name: 'Primary navigation' })
+      .getByRole('button', { name: NAV_CHATS[1].title, exact: true })
+      .click()
+
+    const drawer = page.getByRole('navigation', { name: 'Primary navigation' })
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
+      .toBe(NAV_CHATS[1].id)
+    await expect(drawer).toHaveClass(/drawer--open/)
+    await expect(drawer).toHaveClass(/drawer--locked/)
+    await expect.poll(() => page.evaluate(() => ({
+      held: document.querySelector('.shell__chat-view--held')?.dataset.chatId,
+      staging: document.querySelector('.shell__chat-view--staging')?.dataset.chatId,
+    }))).toEqual({
+      held: NAV_CHATS[0].id,
+      staging: NAV_CHATS[1].id,
+    })
+
+    releaseChatDetail()
+
+    await expect(page.locator('[data-chat-surface="painted"]'))
+      .toHaveAttribute('data-chat-id', NAV_CHATS[1].id)
+    await expect(drawer).not.toHaveClass(/drawer--open/)
+    await expect(drawer).not.toHaveClass(/drawer--locked/)
+  })
 
   test('New chat preserves phone focus and early typing through allocation', async ({ page }) => {
     const newChatId = '10000000-0000-4000-8000-000000000099'

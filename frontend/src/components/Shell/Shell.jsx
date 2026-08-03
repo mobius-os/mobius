@@ -186,6 +186,7 @@ export default function Shell() {
     activeAppId,
     activeChatId,
     drawerOpen, settingsOverlayOpen, settingsOpenRaw, openDrawer, closeDrawer,
+    finishDrawerNavigationPresentation,
     navTo, tabRevealRevision, applyModeDestination, dismissSettings,
     backFiredRef, drawerPushedRef, navStackRef, navigationEpochRef,
     activeViewRef, activeChatIdRef, activeAppIdRef,
@@ -934,6 +935,12 @@ export default function Shell() {
   // The map advances only from the incoming ChatView's layout-ready callback,
   // so rapid A -> B -> C navigation keeps A painted and replaces only staging B.
   const [presentedChatByPane, setPresentedChatByPane] = useState(() => new Map())
+  // On phones, the drawer is a better visual cover than the outgoing chat.
+  // Navigation still starts immediately; the selected row stays visible and
+  // interaction locks until the destination completes the existing paint
+  // handoff. Desktop's persistent sidebar never enters this presentation.
+  const [drawerChatHandoffId, setDrawerChatHandoffId] = useState(null)
+  const drawerChatHandoffIdRef = useRef(null)
   const visibleChatPaneSignature = visibleChatPanes
     .map(({ world, paneId, chatId }) => `${world}:${paneId}:${chatId}`)
     .join('|')
@@ -971,7 +978,23 @@ export default function Shell() {
       next.set(paneKey, id)
       return next
     })
-  }, [workspaceStateRef])
+    if (drawerChatHandoffIdRef.current === id) {
+      drawerChatHandoffIdRef.current = null
+      setDrawerChatHandoffId(null)
+      finishDrawerNavigationPresentation()
+    }
+  }, [finishDrawerNavigationPresentation, workspaceStateRef])
+
+  // Back, a system navigation, or any other superseding destination must not
+  // leave an unrelated drawer presentation waiting for stale chat readiness.
+  useEffect(() => {
+    if (drawerChatHandoffId == null) return
+    if (activeView === 'chat'
+        && String(activeChatId) === drawerChatHandoffId) return
+    drawerChatHandoffIdRef.current = null
+    setDrawerChatHandoffId(null)
+    finishDrawerNavigationPresentation()
+  }, [activeChatId, activeView, drawerChatHandoffId, finishDrawerNavigationPresentation])
 
   // At most two ChatViews per transitioning owner: the last painted chat and the
   // current active chat. Handoff dedupe is world-local: Standard's retained copy
@@ -2603,8 +2626,22 @@ export default function Shell() {
       workspace.viewMode, workspace.singleScreen, workspaceStateRef])
 
   function selectChat(id) {
+    // One visually open phone drawer can own only one destination handoff.
+    // Its locked state lands on the next render; the ref also rejects a second
+    // activation delivered in the same input batch.
+    if (drawerChatHandoffIdRef.current != null) return
+    const chatId = String(id)
+    const keepDrawerPresented = modalDrawerOpen
+      && !(activeView === 'chat' && String(activeChatId) === chatId)
+    if (keepDrawerPresented) {
+      drawerChatHandoffIdRef.current = chatId
+      setDrawerChatHandoffId(chatId)
+    }
     clearChatAttention(id)
-    navTo('chat', { chatId: id })
+    navTo('chat', {
+      chatId: id,
+      preserveDrawerPresentation: keepDrawerPresented,
+    })
     focusDesktopChatPaneComposer(id)
   }
 
@@ -2953,8 +2990,10 @@ export default function Shell() {
         persistent={persistentDrawer}
         width={desktopSidebarWidth}
         onWidthChange={setDesktopSidebarWidth}
-        interactionLocked={drawerModeTransitioning}
-        onClose={drawerModeTransitioning ? undefined : closeDrawer}
+        interactionLocked={drawerModeTransitioning || drawerChatHandoffId != null}
+        onClose={drawerModeTransitioning || drawerChatHandoffId != null
+          ? undefined
+          : closeDrawer}
         apps={apps}
         appsStatus={appsStatus}
         onRetryApps={() => appsQuery.refetch()}

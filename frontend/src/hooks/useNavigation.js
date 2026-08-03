@@ -661,6 +661,14 @@ export default function useNavigation({
     }
   }
 
+  // A chat destination may prepare behind the phone drawer after navTo has
+  // already consumed its history sentinel. Finish only that visual tail once
+  // Shell confirms the destination has painted; a newly reopened logical
+  // drawer always wins over a late readiness signal.
+  const finishDrawerNavigationPresentation = useCallback(() => {
+    if (!drawerOpenRef.current) setDrawerVisible(false)
+  }, [])
+
   /**
    * Mini-app nav-bridge: install a back-sentinel on behalf of a VISIBLE
    * mini-app. Pushing a real top-level history entry makes Android's swipe-back
@@ -1016,6 +1024,8 @@ export default function useNavigation({
     }
 
     navigationEpochRef.current += 1
+    const keepDrawerPresented = opts.preserveDrawerPresentation === true
+      && drawerOpenRef.current
 
     // Ensure exactly one history entry sits above the current one to serve as
     // this navigation's back-target: retag a consumed drawer sentinel, else push
@@ -1034,7 +1044,7 @@ export default function useNavigation({
     // open try to re-adopt a sentinel this navigation has already retagged.
     drawerClosePendingRef.current = false
     drawerOpenRef.current = false
-    setDrawerVisible(false)
+    setDrawerVisible(keepDrawerPresented)
 
     // One reducer action makes payload+view atomic (§1.3.2). The ONE decision
     // point applies the destination to the correct world: a chat/app nav in single
@@ -1842,6 +1852,7 @@ export default function useNavigation({
     settingsOpenRaw: settingsOpen,
     openDrawer,
     closeDrawer,
+    finishDrawerNavigationPresentation,
     navTo,
     tabRevealRevision,
     applyModeDestination,
