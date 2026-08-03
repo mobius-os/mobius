@@ -1123,9 +1123,13 @@ test.describe('Scroll position', () => {
     })
 
     // The returning chat is running, so its persisted rows are incomplete.
-    // Keep painting the outgoing empty chat until subscribe-time replay commits.
+    // Once navigation targets it, the painted surface must still belong to the
+    // outgoing chat until subscribe-time replay commits. Assert chat ownership
+    // rather than empty-state markup, which the New Chat presentation may omit.
+    await expect.poll(() => new URL(page.url()).searchParams.get('chat')).toBe(chatId)
     await expect.poll(() => catchUpServed, { timeout: 700 }).toBe(false)
-    await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible()
+    await expect(page.locator('[data-chat-surface="painted"]'))
+      .toHaveAttribute('data-chat-id', decoyChatId)
     await expect(page.locator('[data-chat-surface="painted"] [data-key="entry-anchor"]')).toHaveCount(0)
 
     await expect.poll(() => catchUpServed, { timeout: 3000 }).toBe(true)
