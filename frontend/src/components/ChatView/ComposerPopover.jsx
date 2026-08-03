@@ -34,6 +34,11 @@ import { FileDocument, InfoCircle, Paperclip, Plus } from '@openai/apps-sdk-ui/c
 import ChatSettingsPanel from './ChatSettingsPanel.jsx'
 import { popoverMaxHeight, nearestClipTop } from './composerPopoverHeight.js'
 import { focusComposerElement } from './composerFocusPolicy.js'
+import {
+  captureLayoutSpace,
+  clientDeltaToLayout,
+  clientPointToLayout,
+} from '../../lib/layoutSpace.js'
 
 export default function ComposerPopover({
   chatInfo,
@@ -97,17 +102,25 @@ export default function ComposerPopover({
       const trigger = triggerRef.current
       if (!trigger) return
       const rect = trigger.getBoundingClientRect()
+      const rootSpace = captureLayoutSpace(document.documentElement)
+      const pointY = y => clientPointToLayout({ x: 0, y }, rootSpace).y
+      const deltaY = y => clientDeltaToLayout({ x: 0, y }, rootSpace).y
+      const triggerTop = pointY(rect.top)
+      const triggerBottom = pointY(rect.bottom)
+      const viewportTop = deltaY(window.visualViewport?.offsetTop || 0)
+      const viewportHeight = deltaY(window.visualViewport?.height || 0)
+      const clipTop = pointY(nearestClipTop(trigger))
       setMaxHeight(popoverMaxHeight({
-        triggerTop: rect.top,
+        triggerTop,
         // `triggerBottom` + `viewportHeight` are not extra precision — they are
         // how the helper tells which coordinate space `rect` is in. iOS reports
         // fixed-layer rects against the VISUAL viewport once the keyboard
         // offsets it, and subtracting `offsetTop` as well collapsed the panel
         // to a 14px sliver. See composerPopoverHeight.js.
-        triggerBottom: rect.bottom,
-        viewportTop: window.visualViewport?.offsetTop || 0,
-        viewportHeight: window.visualViewport?.height || 0,
-        clipTop: nearestClipTop(trigger),
+        triggerBottom,
+        viewportTop,
+        viewportHeight,
+        clipTop,
       }))
     }
     measure()

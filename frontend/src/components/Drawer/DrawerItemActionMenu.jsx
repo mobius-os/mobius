@@ -12,6 +12,7 @@ import {
 import { Pin, PinFilled } from '@openai/apps-sdk-ui/components/Icon'
 import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
 import useContextMenuOutsideDismiss from '../../hooks/useContextMenuOutsideDismiss.js'
+import { captureLayoutSpace, clientPointToLayout } from '../../lib/layoutSpace.js'
 
 function focusableMenuItems(menu) {
   return [...(menu?.querySelectorAll('[role="menuitem"]:not([disabled])') || [])]
@@ -90,20 +91,21 @@ export default function DrawerItemActionMenu({
   useLayoutEffect(() => {
     if (!open || !menuRef.current) return
     const root = document.documentElement
-    const rootRect = root.getBoundingClientRect()
+    const rootSpace = captureLayoutSpace(root)
     const menuRect = menuRef.current
     const placementX = Number(placement?.clientX)
     const placementY = Number(placement?.clientY)
+    const clientPoint = {
+      x: Number.isFinite(placementX)
+        ? placementX
+        : rootSpace.clientLeft + rootSpace.clientWidth / 2,
+      y: Number.isFinite(placementY)
+        ? placementY
+        : rootSpace.clientTop + rootSpace.clientHeight / 2,
+    }
     setPosition(placeContextMenu({
-      clientPoint: {
-        x: Number.isFinite(placementX)
-          ? placementX
-          : rootRect.left + rootRect.width / 2,
-        y: Number.isFinite(placementY)
-          ? placementY
-          : rootRect.top + rootRect.height / 2,
-      },
-      clientViewport: rootRect,
+      point: clientPointToLayout(clientPoint, rootSpace),
+      viewport: { width: rootSpace.width, height: rootSpace.height },
       menuSize: {
         width: menuRect.offsetWidth,
         height: menuRect.offsetHeight,

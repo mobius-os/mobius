@@ -19,6 +19,7 @@ import usePushSubscription from '../../hooks/usePushSubscription.js'
 import useNavigation, { deepLink } from '../../hooks/useNavigation.js'
 import useContextMenuOutsideDismiss from '../../hooks/useContextMenuOutsideDismiss.js'
 import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
+import { captureLayoutSpace, clientPointToLayout } from '../../lib/layoutSpace.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import useTheme from '../../hooks/useTheme.js'
@@ -1162,10 +1163,10 @@ export default function Shell() {
     if (!tabMenu || !tabMenuRef.current) return
     const menu = tabMenuRef.current
     const root = document.documentElement
-    const rootRect = root.getBoundingClientRect()
+    const rootSpace = captureLayoutSpace(root)
     const position = placeContextMenu({
-      clientPoint: { x: tabMenu.x, y: tabMenu.y },
-      clientViewport: rootRect,
+      point: clientPointToLayout({ x: tabMenu.x, y: tabMenu.y }, rootSpace),
+      viewport: { width: rootSpace.width, height: rootSpace.height },
       menuSize: { width: menu.offsetWidth, height: menu.offsetHeight },
     })
     menu.style.setProperty('--workspace-menu-x', `${position.x}px`)

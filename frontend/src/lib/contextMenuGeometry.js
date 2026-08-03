@@ -1,4 +1,4 @@
-/* Keep a context menu beside the pointer and inside the client viewport. */
+/* Keep a context menu beside its anchor and inside one shared layout viewport. */
 
 function positiveNumber(value, fallback) {
   const number = Number(value)
@@ -10,16 +10,16 @@ function clamp(value, minimum, maximum) {
 }
 
 export function placeContextMenu({
-  clientPoint,
-  clientViewport,
+  point,
+  viewport,
   menuSize,
   gap = 8,
   padding = 12,
 }) {
-  const viewportWidth = positiveNumber(clientViewport?.width, 1)
-  const viewportHeight = positiveNumber(clientViewport?.height, 1)
-  const pointX = Number(clientPoint?.x) - (Number(clientViewport?.left) || 0)
-  const pointY = Number(clientPoint?.y) - (Number(clientViewport?.top) || 0)
+  const viewportWidth = positiveNumber(viewport?.width, 1)
+  const viewportHeight = positiveNumber(viewport?.height, 1)
+  const pointX = Number(point?.x) || 0
+  const pointY = Number(point?.y) || 0
   const menuWidth = positiveNumber(menuSize?.width, 0)
   const menuHeight = positiveNumber(menuSize?.height, 0)
   const safeGap = Math.max(0, Number(gap) || 0)

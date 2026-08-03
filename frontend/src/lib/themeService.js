@@ -7,6 +7,7 @@ import {
 } from '../theme.js'
 import { themeQueries } from '../hooks/queries.js'
 import { applyTheme, inferMode, HEX_RE } from './applyTheme.js'
+import { captureLayoutSpace, clientPointToLayout } from './layoutSpace.js'
 
 /**
  * Owns the theme lifecycle: read, transform, apply (DOM + body bg
@@ -88,10 +89,10 @@ function shouldAnimateThemeChange() {
 
 function defaultThemeTransitionOrigin() {
   if (typeof window === 'undefined') return null
-  const width = window.innerWidth || document.documentElement?.clientWidth || 0
-  const height = window.innerHeight || document.documentElement?.clientHeight || 0
-  if (!width || !height) return null
-  return { x: width / 2, y: height / 2 }
+  const root = document.documentElement
+  const space = captureLayoutSpace(root)
+  if (!space.width || !space.height) return null
+  return { x: space.width / 2, y: space.height / 2 }
 }
 
 function applyThemeTransitionOrigin(root, origin) {
@@ -118,18 +119,20 @@ export function setThemeTransitionOriginFromEvent(event) {
     || native
   const x = Number(point?.clientX)
   const y = Number(point?.clientY)
+  const root = document.documentElement
+  const space = captureLayoutSpace(root)
   if (Number.isFinite(x) && Number.isFinite(y)) {
-    nextThemeTransitionOrigin = { x, y }
+    nextThemeTransitionOrigin = clientPointToLayout({ x, y }, space)
     return
   }
 
   const target = event?.currentTarget || event?.target
   const rect = target?.getBoundingClientRect?.()
   if (rect) {
-    nextThemeTransitionOrigin = {
+    nextThemeTransitionOrigin = clientPointToLayout({
       x: rect.left + rect.width / 2,
       y: rect.top + rect.height / 2,
-    }
+    }, space)
   }
 }
 

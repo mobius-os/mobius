@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from '@openai/apps-sdk-ui/components/Icon'
 import { api } from '../../api/client.js'
 import { appQueries } from '../../hooks/queries.js'
+import { captureLayoutSpace, clientDeltaToLayout } from '../../lib/layoutSpace.js'
 import {
   autopilotOnSend,
   contributeApp as findContributeApp,
@@ -180,7 +181,7 @@ export default function ContributionReviewCard({ chatId, turnActive, onOpenApp }
  */
 function useSwipeToDismiss(onDismiss) {
   const cardRef = useRef(null)
-  const swipe = useRef({ x: 0, y: 0, active: false, claimed: false })
+  const swipe = useRef({ x: 0, y: 0, active: false, claimed: false, layoutSpace: null })
   const dismissRef = useRef(onDismiss)
   dismissRef.current = onDismiss
 
@@ -199,6 +200,7 @@ function useSwipeToDismiss(onDismiss) {
       swipe.current = {
         x: event.touches[0].clientX, y: event.touches[0].clientY,
         active: true, claimed: false,
+        layoutSpace: captureLayoutSpace(el),
       }
     }
     const onMove = (event) => {
@@ -213,7 +215,11 @@ function useSwipeToDismiss(onDismiss) {
       state.claimed = true
       event.preventDefault()
       el.classList.add('contrib-card--dragging')
-      el.style.transform = `translateX(${dx}px)`
+      const layoutDx = clientDeltaToLayout(
+        { x: dx, y: 0 },
+        state.layoutSpace,
+      ).x
+      el.style.transform = `translateX(${layoutDx}px)`
       el.style.opacity = String(Math.max(0.3, 1 - Math.abs(dx) / 260))
     }
     const onEnd = (event) => {

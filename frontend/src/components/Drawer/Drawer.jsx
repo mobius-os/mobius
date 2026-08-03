@@ -57,6 +57,7 @@ import {
   DESKTOP_SIDEBAR_MAX_WIDTH,
   DESKTOP_SIDEBAR_MIN_WIDTH,
 } from '../Shell/useDesktopSidebar.js'
+import { captureLayoutSpace, clientDeltaToLayout } from '../../lib/layoutSpace.js'
 import './Drawer.css'
 
 // Module-level constant so default Set props are stable across renders.
@@ -189,7 +190,11 @@ export default function Drawer({
     if (!root || !section || !rowsStart) return
     const rootRect = root.getBoundingClientRect()
     const rowsRect = rowsStart.getBoundingClientRect()
-    recentSectionTopRef.current = rowsRect.top - rootRect.top + root.scrollTop
+    const rectDelta = clientDeltaToLayout({
+      x: 0,
+      y: rowsRect.top - rootRect.top,
+    }, captureLayoutSpace(root)).y
+    recentSectionTopRef.current = rectDelta + root.scrollTop
     const next = drawerRowWindow({
       total: allRecents.length,
       scrollTop: root.scrollTop,
@@ -734,7 +739,7 @@ export default function Drawer({
 
   function handleDrawerTransitionEnd(e) {
     if (open || e.target !== e.currentTarget || e.propertyName !== 'transform') return
-    const width = e.currentTarget.getBoundingClientRect().width
+    const width = e.currentTarget.offsetWidth
     const x = new DOMMatrixReadOnly(getComputedStyle(e.currentTarget).transform).m41
     if (x > -width + 1) return
     setScrimBlocking(false)
@@ -757,6 +762,7 @@ export default function Drawer({
       pointerId: e.pointerId,
       horizontal: false,
       panning: false,
+      layoutSpace: captureLayoutSpace(drawerRef.current),
     }
   }
   function onDrawerPointerMove(e) {
@@ -788,9 +794,13 @@ export default function Drawer({
     el.classList.add('drawer--dragging')
     // Clamp to [-320, 0]: a finger that drifts back past the origin must not
     // drag an already-open panel further right than open.
-    const clampedX = Math.min(0, Math.max(dx, -320))
-    el.style.transform = `translateX(${clampedX}px)`
-    closeShieldRef.current?.style.setProperty('--drawer-close-start-x', `${clampedX}px`)
+    const clampedClientX = Math.min(0, Math.max(dx, -320))
+    const layoutX = clientDeltaToLayout(
+      { x: clampedClientX, y: 0 },
+      gesture.layoutSpace,
+    ).x
+    el.style.transform = `translateX(${layoutX}px)`
+    closeShieldRef.current?.style.setProperty('--drawer-close-start-x', `${layoutX}px`)
   }
   function onDrawerPointerUp(e) {
     // If the controller took over, it owns pointerup too — do nothing here.
@@ -875,6 +885,7 @@ export default function Drawer({
       startWidth: clampDesktopSidebarWidth(width),
       edgeDirection: handleCenter < panelCenter ? -1 : 1,
       width: clampDesktopSidebarWidth(width),
+      layoutSpace: captureLayoutSpace(panel || document.documentElement),
     }
     e.currentTarget.setPointerCapture(e.pointerId)
     drawerRef.current?.classList.add('drawer--resizing')
@@ -882,10 +893,14 @@ export default function Drawer({
 
   function onResizePointerMove(e) {
     if (resizeRef.current?.pointerId !== e.pointerId) return
+    const layoutDelta = clientDeltaToLayout({
+      x: e.clientX - resizeRef.current.startX,
+      y: 0,
+    }, resizeRef.current.layoutSpace).x
     applyResizeWidth(drawerWidthFromPointerDelta({
       startWidth: resizeRef.current.startWidth,
       startX: resizeRef.current.startX,
-      currentX: e.clientX,
+      currentX: resizeRef.current.startX + layoutDelta,
       edgeDirection: resizeRef.current.edgeDirection,
     }))
   }
@@ -1674,6 +1689,7 @@ const DrawerRow = memo(function DrawerRow({
     // AFTER a superseding drag has taken over cannot double-commit or wipe the
     // newer drag's styles.
     let ended = false
+    let transformSpace = null
     function finalize(commit) {
       if (ended) return
       ended = true
@@ -1709,6 +1725,7 @@ const DrawerRow = memo(function DrawerRow({
 
     function measureRows() {
       const drawerEl = sourceBtn.closest('#navigation-drawer')
+      transformSpace = captureLayoutSpace(drawerEl || document.documentElement)
       pinnedSection = sourceBtn.closest('.drawer__section')
       const wrapOf = (btn) => btn.closest('.drawer__row') || btn
       // Measure once only after the held row resolves to vertical reordering.
@@ -1746,10 +1763,15 @@ const DrawerRow = memo(function DrawerRow({
       const dy = moveEvent.clientY - start.y
       moveEvent.preventDefault()
       last = computePinnedDrag(rows, fromIndex, dy)
-      src.wrap.style.transform = `translateY(${dy}px)`
+      const layoutDy = clientDeltaToLayout({ x: 0, y: dy }, transformSpace).y
+      src.wrap.style.transform = `translateY(${layoutDy}px)`
       for (const r of rows) {
         if (r === src) continue
-        r.wrap.style.transform = `translateY(${last.shifts.get(r.key) || 0}px)`
+        const shift = clientDeltaToLayout({
+          x: 0,
+          y: last.shifts.get(r.key) || 0,
+        }, transformSpace).y
+        r.wrap.style.transform = `translateY(${shift}px)`
       }
     }
 
@@ -1769,7 +1791,11 @@ const DrawerRow = memo(function DrawerRow({
       }
       src.wrap.addEventListener('transitionend', onEnd)
       src.wrap.style.transition = 'transform 190ms cubic-bezier(0.2, 0, 0, 1)'
-      src.wrap.style.transform = `translateY(${commit ? last.slotDelta : 0}px)`
+      const settleY = clientDeltaToLayout({
+        x: 0,
+        y: commit ? last.slotDelta : 0,
+      }, transformSpace).y
+      src.wrap.style.transform = `translateY(${settleY}px)`
       // Fallback if transitionend never fires (e.g. the offset was already 0).
       setTimeout(done, 240)
     }

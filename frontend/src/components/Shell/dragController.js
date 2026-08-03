@@ -165,17 +165,6 @@ export function crossedDrawerExit(pointX, edgeX, gap = DRAWER_EXIT_PX) {
 
 // ── Small geometry helpers ───────────────────────────────────────────────────
 
-// Translate viewport pointer coordinates into an element's local geometry.
-// The shell stays at native document scale, so this boundary owns translation
-// only; introducing a second scaled coordinate space here would make every
-// drag and fixed overlay carry special conversion rules again.
-export function clientPointToLocal(point, clientRect) {
-  return {
-    x: Number(point?.x) - (Number(clientRect?.left) || 0),
-    y: Number(point?.y) - (Number(clientRect?.top) || 0),
-  }
-}
-
 function contains(rect, point) {
   return point.x >= rect.x && point.x <= rect.x + rect.w
     && point.y >= rect.y && point.y <= rect.y + rect.h

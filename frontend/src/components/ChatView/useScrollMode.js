@@ -65,6 +65,7 @@ import { cidOf } from './messageIdentity.js'
 import { isOwnerUserMessage } from './chatRuntimeState.js'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 import { isPerfProbeEnabled, perfMark, perfTime } from '../../lib/perfProbe.js'
+import { captureLayoutSpace, clientDeltaToLayout } from '../../lib/layoutSpace.js'
 
 
 // Hide-then-reveal safety cap. The ordinary path reveals after authoritative
@@ -255,8 +256,17 @@ function _topmostVisibleMsg(scrollEl) {
 }
 
 
+function _captureScrollMeasurement(scrollEl) {
+  const space = captureLayoutSpace(scrollEl)
+  return {
+    space,
+    borderClientTop: space.clientTop - (Number(scrollEl?.clientTop) || 0) * space.scaleY,
+  }
+}
+
+
 /** Position of `el` in the scroll container's coordinate space. */
-function _scrollTopOf(scrollEl, el) {
+function _scrollTopOf(scrollEl, el, measurement = null) {
   // Rects are the only measurement that is correct for BOTH a message row and
   // an arbitrarily nested part of one: a part's offsetParent is whatever
   // happens to be positioned around it, which is not reliably the row or the
@@ -268,9 +278,13 @@ function _scrollTopOf(scrollEl, el) {
   // (which have no rect) still measure row-level anchors the old way.
   if (typeof el?.getBoundingClientRect === 'function'
       && typeof scrollEl?.getBoundingClientRect === 'function') {
-    return el.getBoundingClientRect().top
-      - scrollEl.getBoundingClientRect().top
-      + scrollEl.scrollTop
+    const captured = measurement || _captureScrollMeasurement(scrollEl)
+    const clientTopDelta = el.getBoundingClientRect().top
+      - captured.borderClientTop
+    return clientDeltaToLayout(
+      { x: 0, y: clientTopDelta },
+      captured.space,
+    ).y + scrollEl.scrollTop
   }
   return el?.offsetTop || 0
 }
@@ -296,7 +310,7 @@ function _scrollTopOf(scrollEl, el) {
  * The parts are already discrete, ordered DOM children, so addressing the Nth
  * one needs no extra markup and bounds the restore error by that part's own
  * height (tens of pixels for a worklog line) instead of the whole turn's. */
-function _partPathAt(scrollEl, row, scrollTop) {
+function _partPathAt(scrollEl, row, scrollTop, measurement) {
   const viewportH = scrollEl.clientHeight || 0
   const bottom = scrollTop + viewportH
   const path = []
@@ -309,7 +323,7 @@ function _partPathAt(scrollEl, row, scrollTop) {
     let next = null
     for (let index = 0; index < node.children.length; index += 1) {
       const kid = node.children[index]
-      const kidTop = _scrollTopOf(scrollEl, kid)
+      const kidTop = _scrollTopOf(scrollEl, kid, measurement)
       if (kidTop + (kid.offsetHeight || 0) > scrollTop && kidTop < bottom) {
         path.push(index)
         next = kid
@@ -347,12 +361,13 @@ function _rowPartTarget(row, mode) {
 /** Build an ANCHOR_AT for `row` describing the viewport at `scrollTop`. */
 function _anchorModeForRow(scrollEl, row, scrollTop, extra = null) {
   if (!row?.dataset?.key) return null
-  const part = _partPathAt(scrollEl, row, scrollTop)
+  const measurement = _captureScrollMeasurement(scrollEl)
+  const part = _partPathAt(scrollEl, row, scrollTop, measurement)
   const target = _rowPartTarget(row, { part })
   return {
     kind: 'ANCHOR_AT',
     key: row.dataset.key,
-    offset: _scrollTopOf(scrollEl, target) - scrollTop,
+    offset: _scrollTopOf(scrollEl, target, measurement) - scrollTop,
     ...(part == null ? {} : { part }),
     ...(extra || {}),
   }

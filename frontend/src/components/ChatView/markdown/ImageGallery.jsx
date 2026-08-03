@@ -5,6 +5,7 @@ import { ExpandableImage } from './InlineContent.jsx'
 import ImageLightbox from './ImageLightbox.jsx'
 import { projectResolvedGalleryItems } from './imageGallery.js'
 import { useHistoryDismiss } from '../../../hooks/useHistoryDismiss.jsx'
+import { captureLayoutSpace, clientDeltaToLayout } from '../../../lib/layoutSpace.js'
 
 const REDUCED_MOTION = '(prefers-reduced-motion: reduce)'
 
@@ -80,7 +81,7 @@ export default function ImageGallery({ images, mediaDimensions }) {
     if (!rail || !item) return
     const gap = Number.parseFloat(getComputedStyle(rail).columnGap) || 0
     rail.scrollBy({
-      left: direction * (item.getBoundingClientRect().width + gap),
+      left: direction * (item.offsetWidth + gap),
       behavior: smoothBehavior(),
     })
   }, [])
@@ -123,6 +124,7 @@ export default function ImageGallery({ images, mediaDimensions }) {
       axis: null,
       moved: false,
       captured: false,
+      layoutSpace: captureLayoutSpace(event.currentTarget),
     }
   }
 
@@ -142,7 +144,11 @@ export default function ImageGallery({ images, mediaDimensions }) {
     }
     drag.moved = true
     event.preventDefault()
-    event.currentTarget.scrollLeft = drag.startScrollLeft - deltaX
+    const layoutDeltaX = clientDeltaToLayout(
+      { x: deltaX, y: 0 },
+      drag.layoutSpace,
+    ).x
+    event.currentTarget.scrollLeft = drag.startScrollLeft - layoutDeltaX
   }
 
   function endPointerDrag(event) {

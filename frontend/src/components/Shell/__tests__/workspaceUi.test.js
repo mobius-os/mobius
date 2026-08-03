@@ -658,7 +658,6 @@ test('one held drawer-row gesture resolves menu, reorder, or workspace drag', ()
   assert.match(drawerCss, /\.drawer__row \.drawer__item\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-y pinch-zoom/)
   assert.match(drawerCss, /\.drawer__row \.drawer__item\[data-pinned-key\]\s*\{[\s\S]*?touch-action:\s*pinch-zoom/)
   assert.match(dragBinding, /touchTabMoveIntent\(dx, dy\)/)
-  assert.match(dragBinding, /scrollAxis === 'x'\)[\s\S]*?scrollEl\.scrollLeft \+= previousPoint\.x - ev\.clientX/)
   assert.doesNotMatch(
     dragBinding,
     /sourceKind === 'drawer' && e\.pointerType !== 'mouse'\) return/,
@@ -673,8 +672,6 @@ test('one held drawer-row gesture resolves menu, reorder, or workspace drag', ()
     'the reorder outcome hands off to the row implementation')
   assert.match(dragBinding, /intent === 'workspace'\) arm\(\)/,
     'the workspace outcome arms the shared drag implementation')
-  assert.match(dragBinding, /intent === 'scroll'[\s\S]*?scrollAxis = 'y'[\s\S]*?scrollTop \+= start\.y - ev\.clientY/,
-    'pre-hold row movement scrolls without surrendering the pointer to the browser')
   assert.match(dragBinding, /const point = \{ \.\.\.lastPoint \}[\s\S]*?menuOpened = true[\s\S]*?handler\.openMenu\(point\)/,
     'a stationary long hold opens actions before release')
   assert.doesNotMatch(dragBinding, /const point = \{ \.\.\.lastPoint \}[\s\S]{0,120}?cleanup\(/,
@@ -714,7 +711,6 @@ test('drawer whitespace stays native while pinned rows reserve the shared pointe
   assert.match(drawer, /onPointerCancel=\{onDrawerPointerCancel\}/)
   assert.doesNotMatch(drawer, /addEventListener\('touchmove', move/,
     'the panel must never install a scroll-blocking touch listener')
-  assert.match(dragBinding, /scrollAxis === 'y'[\s\S]*?scrollEl\.scrollTop \+= previousPoint\.y - ev\.clientY/)
   assert.match(drawer, /if \(dx < 0 && isHorizontalSwipe\) gesture\.panning = true/)
   assert.match(drawer, /setPointerCapture\?\.\(e\.pointerId\)/)
 })
@@ -1128,13 +1124,8 @@ test('workspace focus, drag label, and cancel visuals remain coherent', () => {
   const focused = css.match(/\.workspace__strip--focused \.shell__tab--active \{[\s\S]*?\n\}/)?.[0] || ''
   assert.match(focused, /box-shadow: inset 0 -2px 0 0 var\(--accent\)/)
   assert.match(focused, /border-color: color-mix\(in srgb, var\(--accent\) 45%, var\(--border-light\)\)/)
-  // Pointer and tab measurements translate through the one content-box origin.
-  // Fixed drag chrome remains in viewport coordinates and clamps at that edge.
-  assert.match(dragBinding, /return clientPointToLocal\(\{ x: clientX, y: clientY \}, box\)/)
-  assert.match(dragBinding, /left: toLocal\(r\.left, r\.top, box\)\.x/)
-  assert.match(dragBinding, /chipOffset\(\{ x: clientX, y: clientY \}, isTouch\)/)
-  assert.doesNotMatch(dragBinding, /toViewportLayout/)
-  assert.match(dragBinding, /const viewportWidth = document\.documentElement\.clientWidth\s*\n\s*\|\| window\.innerWidth/)
+  // Fixed drag chrome remains clamped inside the viewport edge.
+  assert.match(dragBinding, /const viewportWidth = viewport\.width \|\| window\.innerWidth/)
   assert.match(dragBinding, /const maxLeft = Math\.max\(margin, viewportWidth - chipWidth - margin\)/)
   assert.match(dragBinding, /Math\.max\(margin, Math\.min\(left, maxLeft\)\)/)
   // V6: a CANCELLED drag blurs the drag-origin row so its focus ring clears; a

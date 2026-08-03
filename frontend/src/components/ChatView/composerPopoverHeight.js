@@ -95,8 +95,8 @@ export function nearestClipTop(el) {
 }
 
 /**
- * Where the top of the VISIBLE viewport sits in the same coordinate space the
- * caller's client rects are in. See the coordinate-spaces box above.
+ * Where the top of the VISIBLE viewport sits in the caller's normalized
+ * coordinate space. See the coordinate-spaces box above.
  *
  * The trigger was just tapped, so it is on screen. If its rect already fits
  * inside a band that starts at 0 and is `viewportHeight` tall, the rects are
@@ -105,9 +105,9 @@ export function nearestClipTop(el) {
  * below that band, the rects are layout-viewport-relative (the spec-correct
  * case, and what Android reports), so `offsetTop` is the visible top.
  *
- * @param {number} triggerBottom  trigger's `getBoundingClientRect().bottom`
- * @param {number} viewportTop    `visualViewport.offsetTop`
- * @param {number} viewportHeight `visualViewport.height`
+ * @param {number} triggerBottom  normalized trigger bottom
+ * @param {number} viewportTop    normalized visual viewport offset
+ * @param {number} viewportHeight normalized visual viewport height
  * @returns {number}
  */
 export function visibleTopInRectSpace({ triggerBottom, viewportTop, viewportHeight }) {
@@ -118,11 +118,11 @@ export function visibleTopInRectSpace({ triggerBottom, viewportTop, viewportHeig
 
 /**
  * @param {object} m
- * @param {number} m.triggerTop        trigger's `getBoundingClientRect().top`
- * @param {number} [m.triggerBottom]   trigger's `getBoundingClientRect().bottom`
- * @param {number} [m.viewportTop]     `visualViewport.offsetTop` (0 when absent)
- * @param {number} [m.viewportHeight]  `visualViewport.height` (0 when absent)
- * @param {number} [m.clipTop]         `nearestClipTop(trigger)` (0 when none)
+ * @param {number} m.triggerTop        normalized trigger top
+ * @param {number} [m.triggerBottom]   normalized trigger bottom
+ * @param {number} [m.viewportTop]     normalized viewport offset (0 when absent)
+ * @param {number} [m.viewportHeight]  normalized viewport height (0 when absent)
+ * @param {number} [m.clipTop]         normalized clipping top (0 when none)
  * @param {number} [m.cap]
  * @returns {number} max-height in CSS pixels
  */

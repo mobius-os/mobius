@@ -6,6 +6,7 @@ import {
 import { ARROW_STEP_RATIO } from '../../lib/splitHelper.js'
 import { PaneStrip } from './PaneStrip.jsx'
 import { modeViewTransitionStyle } from './useModeViewTransition.js'
+import { captureLayoutSpace, clientPointToLayout } from '../../lib/layoutSpace.js'
 
 // The chrome layer for a tiled (≥2 visible leaves) workspace (design §2). It is
 // a sibling AFTER the flat content wrappers, absolute inset:0, pointer-events
@@ -140,8 +141,13 @@ export default function WorkspaceChrome({
     // the rects are written imperatively per frame and there is no interpolation to
     // suppress. A divider drag also cannot overlap a mode beat — the chrome is inert
     // during one.
-    const contentBounds = contentEl.getBoundingClientRect()
+    const contentSpace = captureLayoutSpace(contentEl)
     const { dir, splitId } = divider
+    const startPoint = clientPointToLayout({ x: e.clientX, y: e.clientY }, contentSpace)
+    const dividerCenter = dir === 'row'
+      ? divider.x + divider.w / 2
+      : divider.y + divider.h / 2
+    const grabOffset = (dir === 'row' ? startPoint.x : startPoint.y) - dividerCenter
 
     // Cache the elements to move; no React render fires during the drag, so the
     // DOM is stable and one lookup suffices.
@@ -164,10 +170,15 @@ export default function WorkspaceChrome({
     let committed = divider.ratio
 
     const paint = (clientX, clientY) => {
-      const axis = dir === 'row'
-        ? clientX - contentBounds.left
-        : clientY - contentBounds.top
-      const raw = divider.span > 0 ? (axis - divider.origin) / divider.span : 0.5
+      const point = clientPointToLayout({ x: clientX, y: clientY }, contentSpace)
+      const pointerAxis = dir === 'row'
+        ? point.x
+        : point.y
+      const gap = dir === 'row' ? divider.w : divider.h
+      const dividerStart = pointerAxis - grabOffset - gap / 2
+      const raw = divider.span > 0
+        ? (dividerStart - divider.origin) / divider.span
+        : 0.5
       const proj = projectLayout(workspace, mode, contentRect, { splitId, ratio: raw })
       committed = proj.dividers.find(d => d.splitId === splitId)?.ratio ?? committed
       for (const paneId of proj.visibleLeaves) {

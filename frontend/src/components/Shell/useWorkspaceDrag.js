@@ -6,8 +6,13 @@ import {
   passedSlop, touchTabMoveIntent, drawerRowMoveIntent, releasedInPlace,
   TAB_HOLD_MS, DRAWER_DRAG_HOLD_MS, DRAWER_MENU_HOLD_MS,
   crossedDrawerExit,
-  rootEdgeAllowed, clientPointToLocal,
+  rootEdgeAllowed,
 } from './dragController.js'
+import {
+  captureLayoutSpace,
+  clientDeltaToLayout,
+  clientPointToLayout,
+} from '../../lib/layoutSpace.js'
 
 // The thin React binding for the workspace drag controller (design §3). It owns
 // only the side-effects the pure dragController.js cannot: pointer capture, the
@@ -96,6 +101,7 @@ export default function useWorkspaceDrag({
     let chipEl = null
     let chipWidth = 0
     let previewEl = null
+    let fixedSpace = null
     // The one in-flight session's teardown, so an unmount / disable can tear a
     // live drag down cleanly — no orphaned shield. activePointerId / activeSrcEl
     // travel with it so the next-interaction reconcile (below) can tell whether the
@@ -112,13 +118,19 @@ export default function useWorkspaceDrag({
 
     function contentBox() {
       const host = contentElRef.current
-      return host?.getBoundingClientRect() || { left: 0, top: 0 }
+      return captureLayoutSpace(host, {
+        left: 0,
+        top: 0,
+        width: window.innerWidth,
+        height: window.innerHeight,
+      })
     }
     function toLocal(clientX, clientY, box = contentBox()) {
-      return clientPointToLocal({ x: clientX, y: clientY }, box)
+      return clientPointToLayout({ x: clientX, y: clientY }, box)
     }
 
     function ensureOverlays() {
+      fixedSpace = captureLayoutSpace(document.documentElement)
       if (!shieldEl) {
         shieldEl = document.createElement('div')
         shieldEl.className = 'workspace__drag-shield'
@@ -153,6 +165,7 @@ export default function useWorkspaceDrag({
       shieldEl?.remove(); shieldEl = null
       chipEl?.remove(); chipEl = null; chipWidth = 0
       previewEl?.remove(); previewEl = null
+      fixedSpace = null
       clearPreGlow()
     }
 
@@ -166,12 +179,13 @@ export default function useWorkspaceDrag({
         chipEl.hidden = false
         chipWidth = chipEl.offsetWidth || 0
       }
-      const { left, top } = chipOffset({ x: clientX, y: clientY }, isTouch)
+      const viewport = fixedSpace || captureLayoutSpace(document.documentElement)
+      const point = clientPointToLayout({ x: clientX, y: clientY }, viewport)
+      const { left, top } = chipOffset(point, isTouch)
       // V5 (vizreview): clamp the chip within the viewport so its label never clips
       // at the right edge (the +12 offset pushed a right-edge drag off-screen).
       const margin = 8
-      const viewportWidth = document.documentElement.clientWidth
-        || window.innerWidth
+      const viewportWidth = viewport.width || window.innerWidth
       const maxLeft = Math.max(margin, viewportWidth - chipWidth - margin)
       chipEl.style.left = `${Math.max(margin, Math.min(left, maxLeft))}px`
       chipEl.style.top = `${top}px`
@@ -231,7 +245,16 @@ export default function useWorkspaceDrag({
     function buildSceneNow(source, allowRootEdge) {
       const { projection, mode, contentRect } = sceneInputsRef.current
       const ws = workspaceStateRef.current.ws
-      return buildScene(ws, projection, mode, contentRect, source, allowRootEdge, measureTabs)
+      const box = contentBox()
+      return buildScene(
+        ws,
+        projection,
+        mode,
+        contentRect,
+        source,
+        allowRootEdge,
+        paneId => measureTabs(paneId, box),
+      )
     }
 
     // ── One drag session ──────────────────────────────────────────────────────
@@ -248,6 +271,7 @@ export default function useWorkspaceDrag({
       let scrolling = false
       let scrollEl = null
       let scrollAxis = null
+      let scrollSpace = null
       let curZone = null
       let scene = null
       let drawerEdgeX = null
@@ -421,8 +445,12 @@ export default function useWorkspaceDrag({
         const dy = ev.clientY - start.y
         if (scrolling) {
           ev.preventDefault?.()
-          if (scrollEl && scrollAxis === 'x') scrollEl.scrollLeft += previousPoint.x - ev.clientX
-          else if (scrollEl && scrollAxis === 'y') scrollEl.scrollTop += previousPoint.y - ev.clientY
+          const delta = clientDeltaToLayout({
+            x: previousPoint.x - ev.clientX,
+            y: previousPoint.y - ev.clientY,
+          }, scrollSpace)
+          if (scrollEl && scrollAxis === 'x') scrollEl.scrollLeft += delta.x
+          else if (scrollEl && scrollAxis === 'y') scrollEl.scrollTop += delta.y
           return
         }
         if (!armed) {
@@ -438,8 +466,14 @@ export default function useWorkspaceDrag({
               scrolling = true
               scrollEl = srcEl.closest('.drawer__scroll')
               scrollAxis = 'y'
+              scrollSpace = captureLayoutSpace(scrollEl)
               ev.preventDefault?.()
-              if (scrollEl) scrollEl.scrollTop += start.y - ev.clientY
+              if (scrollEl) {
+                scrollEl.scrollTop += clientDeltaToLayout(
+                  { x: 0, y: start.y - ev.clientY },
+                  scrollSpace,
+                ).y
+              }
               return
             }
             if (intent === 'reorder') {
@@ -474,8 +508,14 @@ export default function useWorkspaceDrag({
                 scrolling = true
                 scrollEl = srcEl.closest('.shell__tabstrip')
                 scrollAxis = 'x'
+                scrollSpace = captureLayoutSpace(scrollEl)
                 ev.preventDefault?.()
-                if (scrollEl) scrollEl.scrollLeft += start.x - ev.clientX
+                if (scrollEl) {
+                  scrollEl.scrollLeft += clientDeltaToLayout(
+                    { x: start.x - ev.clientX, y: 0 },
+                    scrollSpace,
+                  ).x
+                }
                 return
               }
               if (!armed) return

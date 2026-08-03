@@ -461,6 +461,49 @@ test.describe('Desktop sidebar navigation', () => {
     await setup(page, { width: 1280, height: 800 })
   }
 
+  test('desktop web keeps 90% density while tablet and phone stay native', async ({ page }) => {
+    await setupDesktop(page)
+
+    const readDensity = () => page.evaluate(() => {
+      const root = document.documentElement
+      const rootRect = root.getBoundingClientRect()
+      const shellRect = document.querySelector('.shell').getBoundingClientRect()
+      return {
+        ratio: root.offsetWidth > 0 ? rootRect.width / root.offsetWidth : 0,
+        shell: {
+          left: shellRect.left,
+          top: shellRect.top,
+          right: shellRect.right,
+          bottom: shellRect.bottom,
+        },
+        viewport: { width: innerWidth, height: innerHeight },
+      }
+    })
+
+    const desktop = await readDensity()
+    expect(desktop.ratio).toBeCloseTo(0.9, 2)
+    expect(desktop.shell.left).toBeCloseTo(0, 1)
+    expect(desktop.shell.top).toBeCloseTo(0, 1)
+    expect(desktop.shell.right).toBeCloseTo(desktop.viewport.width, 1)
+    expect(desktop.shell.bottom).toBeCloseTo(desktop.viewport.height, 1)
+
+    await page.setViewportSize({ width: 900, height: 800 })
+    await expect.poll(async () => (await readDensity()).ratio).toBeCloseTo(1, 2)
+    const tablet = await readDensity()
+    expect(tablet.shell.left).toBeCloseTo(0, 1)
+    expect(tablet.shell.top).toBeCloseTo(0, 1)
+    expect(tablet.shell.right).toBeCloseTo(tablet.viewport.width, 1)
+    expect(tablet.shell.bottom).toBeCloseTo(tablet.viewport.height, 1)
+
+    await page.setViewportSize({ width: 390, height: 844 })
+    const phone = await readDensity()
+    expect(phone.ratio).toBeCloseTo(1, 2)
+    expect(phone.shell.left).toBeCloseTo(0, 1)
+    expect(phone.shell.top).toBeCloseTo(0, 1)
+    expect(phone.shell.right).toBeCloseTo(phone.viewport.width, 1)
+    expect(phone.shell.bottom).toBeCloseTo(phone.viewport.height, 1)
+  })
+
   test('28. desktop sidebar reserves workspace width and persists its toggle', async ({ page }) => {
     await setupDesktop(page)
 

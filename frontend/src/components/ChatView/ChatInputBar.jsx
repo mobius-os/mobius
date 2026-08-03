@@ -108,6 +108,7 @@ import {
   syncComposerTallClass,
 } from './composerTextareaSizing.js'
 import { focusComposerElement } from './composerFocusPolicy.js'
+import { captureLayoutSpace, clientDeltaToLayout } from '../../lib/layoutSpace.js'
 
 
 // Detect touch-primary once (same heuristic ChatView uses).
@@ -609,10 +610,15 @@ export default function ChatInputBar({
       const borderSize = Array.isArray(entry?.borderBoxSize)
         ? entry.borderBoxSize[0]?.blockSize
         : entry?.borderBoxSize?.blockSize
-      syncComposerTallClass(
-        textarea,
-        borderSize ?? entry?.target?.getBoundingClientRect?.().height,
-      )
+      let layoutHeight = borderSize
+      if (layoutHeight == null) {
+        const rectHeight = entry?.target?.getBoundingClientRect?.().height
+        layoutHeight = clientDeltaToLayout(
+          { x: 0, y: rectHeight },
+          captureLayoutSpace(entry?.target),
+        ).y
+      }
+      syncComposerTallClass(textarea, layoutHeight)
     })
     observer.observe(textarea)
     return () => observer.disconnect()

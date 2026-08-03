@@ -1,3 +1,5 @@
+import { captureLayoutSpace, clientDeltaToLayout } from '../../lib/layoutSpace.js'
+
 export function preserveTogglePosition(anchorEl, bodyEl = anchorEl?.nextElementSibling) {
   if (!anchorEl || typeof requestAnimationFrame !== 'function') return
   const scroller = anchorEl.closest?.('.chat__scroll')
@@ -11,6 +13,7 @@ export function preserveTogglePosition(anchorEl, bodyEl = anchorEl?.nextElementS
   if (scroller.dataset?.scrollMode === 'FOLLOW_BOTTOM') return
 
   const before = anchorEl.getBoundingClientRect().top
+  const layoutSpace = captureLayoutSpace(scroller)
 
   // A disclosure inserts/removes its body during React's click commit. Observe
   // that DOM mutation so the scroll correction lands in the same frame, before
@@ -24,7 +27,7 @@ export function preserveTogglePosition(anchorEl, bodyEl = anchorEl?.nextElementS
     settled = true
     observer?.disconnect()
     const after = anchorEl.getBoundingClientRect().top
-    const delta = after - before
+    const delta = clientDeltaToLayout({ x: 0, y: after - before }, layoutSpace).y
     if (Math.abs(delta) > 0.5) scroller.scrollTop += delta
   }
 

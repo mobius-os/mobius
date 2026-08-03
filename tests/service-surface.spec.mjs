@@ -2,6 +2,7 @@
 import { test, expect } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 import { applyApp } from './app-source.mjs'
+import { activateFrameControl } from './frame-actions.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const baseUrl = new URL(BASE)
@@ -373,7 +374,7 @@ test('shared gateway stays branded until heartbeat, preserves cookies, and rejec
     // A later navigation failure must re-cover before Chromium's error
     // document can surface. The child becomes unreadable; adapter branding
     // remains the visible document.
-    await service.locator('#go-bad').click()
+    await activateFrameControl(service.locator('#go-bad'))
     await expect(adapter.locator('#cover')).toBeVisible()
     await expect(adapter.locator('#app')).toHaveCSS('opacity', '0')
     await expect(page.getByText(/refused to connect|127\.0\.0\.1/i)).toHaveCount(0)

@@ -15,11 +15,6 @@ const itemActionMenu = readFileSync(
   'utf8',
 )
 const shell = readFileSync(resolve(src, 'components/Shell/Shell.jsx'), 'utf8')
-const shellCss = readFileSync(resolve(src, 'components/Shell/Shell.css'), 'utf8')
-const workspaceChrome = readFileSync(
-  resolve(src, 'components/Shell/WorkspaceChrome.jsx'),
-  'utf8',
-)
 const tabModel = readFileSync(resolve(src, 'components/Shell/tabModel.js'), 'utf8')
 const navigationIcons = readFileSync(resolve(src, 'components/navigationIcons.js'), 'utf8')
 
@@ -73,14 +68,6 @@ test('chat and app rows share one placed action menu contract', () => {
   assert.doesNotMatch(itemActionMenu, /drawer__item-action-header|drawer__item-action-handle/)
   assert.match(itemActionMenu, /itemKind === 'app' && \(/,
     'Delete data must stay app-only')
-})
-
-test('desktop density keeps the shell at native document scale', () => {
-  const desktop = shellCss.match(/@media \(min-width: 1024px\) \{[\s\S]*$/)?.[0] || ''
-  assert.doesNotMatch(desktop, /(?:^|[;{])\s*zoom\s*:/)
-  assert.match(shellCss, /document remains at native[\s\S]*geometry share one space/)
-  assert.doesNotMatch(drawer, /clientDeltaToLocal/)
-  assert.doesNotMatch(workspaceChrome, /clientPointToLocal/)
 })
 
 test('the app directory distinguishes loading, errors, and confirmed emptiness', () => {

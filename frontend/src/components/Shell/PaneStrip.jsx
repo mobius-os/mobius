@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef } from 'react'
 import { CollapseSm, ExpandSm, X } from '@openai/apps-sdk-ui/components/Icon'
 import * as tabModel from './tabModel.js'
 import { STRIP_H } from './paneModel.js'
+import { captureLayoutSpace, clientDeltaToLayout } from '../../lib/layoutSpace.js'
 
 // Each direction owns 40% of the one-shot cycle, so 1000/12 ms per clipped pixel
 // keeps travel at a readable 30px/s. The cycle runs once, returns to the beginning,
@@ -63,7 +64,14 @@ export function scrollStripWheel(e) {
   if (Math.abs(e.deltaX) >= Math.abs(e.deltaY) || e.deltaY === 0) return
   const strip = e.currentTarget
   if (strip.scrollWidth <= strip.clientWidth) return
-  const scale = e.deltaMode === 1 ? 16 : (e.deltaMode === 2 ? strip.clientWidth : 1)
+  if (e.deltaMode === 0) {
+    strip.scrollLeft += clientDeltaToLayout(
+      { x: e.deltaY, y: 0 },
+      captureLayoutSpace(strip),
+    ).x
+    return
+  }
+  const scale = e.deltaMode === 1 ? 16 : strip.clientWidth
   strip.scrollLeft += e.deltaY * scale
 }
 

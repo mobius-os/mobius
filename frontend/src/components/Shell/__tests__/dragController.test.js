@@ -7,7 +7,6 @@ import {
   CHIP_MOUSE_DX, CHIP_MOUSE_DY, CHIP_TOUCH_ABOVE,
   EDGE_BAND_MIN, EDGE_BAND_FRACTION,
   passedSlop, touchTabMoveIntent, drawerRowMoveIntent, releasedInPlace, chipOffset,
-  clientPointToLocal,
   crossedDrawerExit, edgeBands, edgePreviewRect, caretZone, edgeZone, centerZone,
   rootEdgeZone, hitTest, zoneTarget, releaseZone, zoneEq, buildScene,
 } from '../dragController.js'
@@ -34,18 +33,6 @@ function scene(panes, opts = {}) {
     rootCanSplit: { left: true, right: true, top: true, bottom: true, ...(opts.rootCanSplit || {}) },
   }
 }
-
-// ── Client-to-local coordinate boundary ─────────────────────────────────────
-
-test('clientPointToLocal translates viewport coordinates into the content box', () => {
-  assert.deepEqual(
-    clientPointToLocal(
-      { x: 235, y: 120 },
-      { left: 200, top: 80, width: 500, height: 300 },
-    ),
-    { x: 35, y: 40 },
-  )
-})
 
 // ── Threshold predicates ─────────────────────────────────────────────────────
 

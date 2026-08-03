@@ -9,6 +9,7 @@
  */
 import { test, expect } from '@playwright/test'
 import { applyApp } from './app-source.mjs'
+import { activateFrameControl } from './frame-actions.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -205,7 +206,7 @@ test('opaque embedded chat completes authenticated flow and survives remount', a
     expect(embedResponses.at(-1).headers['x-content-type-options']).toBe('nosniff')
 
     // Picker + real attachment path use the same chat-only principal.
-    await chatFrame.getByRole('button', { name: 'Attach or change model' }).click()
+    await activateFrameControl(chatFrame.getByRole('button', { name: 'Attach or change model' }))
     await expect(chatFrame.getByRole('button', { name: 'Attach files' })).toBeVisible()
     await chatFrame.locator('input[type="file"]').setInputFiles({
       name: 'e2e.txt',
@@ -221,7 +222,7 @@ test('opaque embedded chat completes authenticated flow and survives remount', a
     await chatFrame.locator('textarea').fill(
       'This is a transport test. Reply exactly `capability-ok`; do not call tools or edit files.',
     )
-    await chatFrame.getByRole('button', { name: /send/i }).click()
+    await activateFrameControl(chatFrame.getByRole('button', { name: /send/i }))
     await expect.poll(() => sendBody, { timeout: 10_000 }).not.toBeNull()
     expect(sendBody.content).toContain('<marker>opaque-context-ok</marker>')
     expect(sendBody.attachments?.[0]?.name).toBe('e2e.txt')
@@ -265,7 +266,7 @@ test('opaque embedded chat completes authenticated flow and survives remount', a
 
     // The runtime's supported New chat control rotates both chat and embed
     // instance, revokes the old session and authorizes a fresh blank document.
-    await remountedAppFrame.getByRole('button', { name: 'New chat' }).click()
+    await activateFrameControl(remountedAppFrame.getByRole('button', { name: 'New chat' }))
     await expect.poll(async () => remountedStatus.getAttribute('data-chat'))
       .not.toBe(firstChat)
     await expect(remountedStatus).toHaveText('ready', { timeout: 20_000 })

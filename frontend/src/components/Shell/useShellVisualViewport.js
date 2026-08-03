@@ -1,6 +1,10 @@
 /* Keep the full-screen shell inside the actually visible mobile viewport. */
 
 import { useLayoutEffect } from 'react'
+import {
+  captureLayoutSpace,
+  clientDeltaToLayout,
+} from '../../lib/layoutSpace.js'
 
 // Ignore small browser-bar changes; a software keyboard consumes much more.
 const MIN_KEYBOARD_INSET = 80
@@ -20,14 +24,24 @@ export function fitShellToVisualViewport(root, viewport) {
   if (!root) return false
   clearShellFrame(root)
 
-  const visibleHeight = Number(viewport?.height)
-  const layoutHeight = root.clientHeight
+  const space = captureLayoutSpace(root)
+  const visibleClientHeight = Number(viewport?.height)
+  if (!(visibleClientHeight > 0)) return false
+  const visibleHeight = clientDeltaToLayout({
+    x: 0,
+    y: visibleClientHeight,
+  }, space).y
+  const layoutHeight = space.height
   const coveredHeight = layoutHeight - visibleHeight
-  if (!(visibleHeight > 0) || coveredHeight < MIN_KEYBOARD_INSET) return false
+  const coveredClientHeight = space.clientHeight - visibleClientHeight
+  if (coveredClientHeight < MIN_KEYBOARD_INSET) return false
 
   const visibleTop = Math.min(
     coveredHeight,
-    Math.max(0, Number(viewport.offsetTop) || 0),
+    Math.max(0, clientDeltaToLayout({
+      x: 0,
+      y: Number(viewport.offsetTop) || 0,
+    }, space).y),
   )
   root.style.setProperty('top', `${visibleTop}px`)
   root.style.setProperty('bottom', 'auto')

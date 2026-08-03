@@ -7,6 +7,15 @@ import {
   zoomImageAround,
 } from './imageTransform.js'
 import { gallerySwipeTarget } from './imageGallery.js'
+import {
+  captureLayoutSpace,
+  clientDeltaToLayout,
+  clientPointToLayout,
+} from '../../../lib/layoutSpace.js'
+
+function captureRootLayoutSpace() {
+  return captureLayoutSpace(document.documentElement)
+}
 
 /**
  * Full-screen image viewer with pointer-centred wheel/pinch zoom, drag pan,
@@ -60,35 +69,50 @@ export default function ImageLightbox({
     onClose,
   })
 
-  const metrics = useCallback(() => {
+  const toLayoutPoint = useCallback((x, y, space = captureRootLayoutSpace()) => clientPointToLayout(
+    { x, y },
+    space,
+  ), [])
+
+  const metrics = useCallback((space = captureRootLayoutSpace()) => {
     const img = imgRef.current
     const viewport = window.visualViewport
+    const viewportSize = clientDeltaToLayout({
+      x: viewport?.width || window.innerWidth,
+      y: viewport?.height || window.innerHeight,
+    }, space)
     return {
       baseWidth: img?.clientWidth || 0,
       baseHeight: img?.clientHeight || 0,
-      viewportWidth: viewport?.width || window.innerWidth,
-      viewportHeight: viewport?.height || window.innerHeight,
+      viewportWidth: viewportSize.x,
+      viewportHeight: viewportSize.y,
     }
   }, [])
 
-  const baseCenter = useCallback((current = transformRef.current) => {
+  const baseCenter = useCallback((current = transformRef.current, space = captureRootLayoutSpace()) => {
     const rect = imgRef.current?.getBoundingClientRect()
     if (!rect) {
-      return { x: window.innerWidth / 2, y: window.innerHeight / 2 }
+      const viewport = metrics(space)
+      return { x: viewport.viewportWidth / 2, y: viewport.viewportHeight / 2 }
     }
+    const paintedCenter = toLayoutPoint(
+      rect.left + rect.width / 2,
+      rect.top + rect.height / 2,
+      space,
+    )
     return {
-      x: rect.left + rect.width / 2 - current.x,
-      y: rect.top + rect.height / 2 - current.y,
+      x: paintedCenter.x - current.x,
+      y: paintedCenter.y - current.y,
     }
-  }, [])
+  }, [metrics, toLayoutPoint])
 
-  const zoomAt = useCallback((nextScale, x, y) => {
+  const zoomAt = useCallback((nextScale, x, y, space = captureRootLayoutSpace()) => {
     setTransform((current) => zoomImageAround(
       current,
       nextScale,
       { x, y },
-      baseCenter(current),
-      metrics(),
+      baseCenter(current, space),
+      metrics(space),
     ))
   }, [baseCenter, metrics])
 
@@ -139,44 +163,51 @@ export default function ImageLightbox({
     event.preventDefault()
     const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? window.innerHeight : 1)
     const nextScale = transformRef.current.scale * Math.exp(-delta * 0.0015)
-    zoomAt(nextScale, event.clientX, event.clientY)
-  }, [zoomAt])
+    const space = captureRootLayoutSpace()
+    const point = toLayoutPoint(event.clientX, event.clientY, space)
+    zoomAt(nextScale, point.x, point.y, space)
+  }, [toLayoutPoint, zoomAt])
 
-  const toggleZoomAt = useCallback((x, y) => {
+  const toggleZoomAt = useCallback((x, y, space = captureRootLayoutSpace()) => {
     if (transformRef.current.scale > 1) reset()
-    else zoomAt(2, x, y)
+    else zoomAt(2, x, y, space)
   }, [reset, zoomAt])
 
   const handleDoubleClick = useCallback((event) => {
     event.preventDefault()
     event.stopPropagation()
-    toggleZoomAt(event.clientX, event.clientY)
-  }, [toggleZoomAt])
+    const space = captureRootLayoutSpace()
+    const point = toLayoutPoint(event.clientX, event.clientY, space)
+    toggleZoomAt(point.x, point.y, space)
+  }, [toLayoutPoint, toggleZoomAt])
 
   // Mouse/stylus drag-to-pan. Touch uses the pinch-aware handlers below.
   const handlePointerDown = useCallback((event) => {
     if (event.pointerType === 'touch' || event.button !== 0 || transformRef.current.scale <= 1) return
     event.currentTarget.setPointerCapture(event.pointerId)
+    const point = toLayoutPoint(event.clientX, event.clientY, captureRootLayoutSpace())
     pointerPanRef.current = {
       id: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
+      startX: point.x,
+      startY: point.y,
       x: transformRef.current.x,
       y: transformRef.current.y,
     }
     setDragging(true)
     event.preventDefault()
-  }, [])
+  }, [toLayoutPoint])
 
   const handlePointerMove = useCallback((event) => {
     const pan = pointerPanRef.current
     if (!pan || pan.id !== event.pointerId) return
+    const space = captureRootLayoutSpace()
+    const point = toLayoutPoint(event.clientX, event.clientY, space)
     setTransform((current) => clampImageTransform({
       ...current,
-      x: pan.x + event.clientX - pan.startX,
-      y: pan.y + event.clientY - pan.startY,
-    }, metrics()))
-  }, [metrics])
+      x: pan.x + point.x - pan.startX,
+      y: pan.y + point.y - pan.startY,
+    }, metrics(space)))
+  }, [metrics, toLayoutPoint])
 
   const endPointerPan = useCallback((event) => {
     if (pointerPanRef.current?.id !== event.pointerId) return
@@ -190,14 +221,19 @@ export default function ImageLightbox({
     const el = imgRef.current
     if (!el) return undefined
 
-    const midpoint = (a, b) => ({ x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 })
+    const midpoint = (a, b, space) => toLayoutPoint(
+      (a.clientX + b.clientX) / 2,
+      (a.clientY + b.clientY) / 2,
+      space,
+    )
     const distance = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY)
 
     const onTouchStart = (event) => {
       const current = transformRef.current
+      const space = captureRootLayoutSpace()
       if (event.touches.length === 2) {
-        const mid = midpoint(event.touches[0], event.touches[1])
-        const center = baseCenter(current)
+        const mid = midpoint(event.touches[0], event.touches[1], space)
+        const center = baseCenter(current, space)
         pinchRef.current = {
           distance: distance(event.touches[0], event.touches[1]),
           scale: current.scale,
@@ -209,9 +245,10 @@ export default function ImageLightbox({
         tapStartRef.current = null
       } else if (event.touches.length === 1) {
         const touch = event.touches[0]
+        const point = toLayoutPoint(touch.clientX, touch.clientY, space)
         tapStartRef.current = { x: touch.clientX, y: touch.clientY, moved: false }
         if (current.scale > 1) {
-          panRef.current = { x: touch.clientX - current.x, y: touch.clientY - current.y }
+          panRef.current = { x: point.x - current.x, y: point.y - current.y }
           swipeRef.current = null
         } else if (navigateRef.current) {
           swipeRef.current = {
@@ -240,22 +277,25 @@ export default function ImageLightbox({
       if (event.touches.length === 2 && pinchRef.current) {
         event.preventDefault()
         const pinch = pinchRef.current
-        const mid = midpoint(event.touches[0], event.touches[1])
+        const space = captureRootLayoutSpace()
+        const mid = midpoint(event.touches[0], event.touches[1], space)
         const scale = clampImageScale(pinch.scale * (distance(event.touches[0], event.touches[1]) / pinch.distance))
         setTransform(clampImageTransform({
           scale,
           x: mid.x - pinch.center.x - pinch.imageX * scale,
           y: mid.y - pinch.center.y - pinch.imageY * scale,
-        }, metrics()))
+        }, metrics(space)))
       } else if (event.touches.length === 1 && panRef.current && transformRef.current.scale > 1) {
         event.preventDefault()
         const touch = event.touches[0]
         const pan = panRef.current
+        const space = captureRootLayoutSpace()
+        const point = toLayoutPoint(touch.clientX, touch.clientY, space)
         setTransform((current) => clampImageTransform({
           ...current,
-          x: touch.clientX - pan.x,
-          y: touch.clientY - pan.y,
-        }, metrics()))
+          x: point.x - pan.x,
+          y: point.y - pan.y,
+        }, metrics(space)))
       }
     }
 
@@ -263,7 +303,8 @@ export default function ImageLightbox({
       if (event.touches.length === 1 && pinchRef.current) {
         const touch = event.touches[0]
         const current = transformRef.current
-        panRef.current = { x: touch.clientX - current.x, y: touch.clientY - current.y }
+        const point = toLayoutPoint(touch.clientX, touch.clientY, captureRootLayoutSpace())
+        panRef.current = { x: point.x - current.x, y: point.y - current.y }
       }
       if (event.touches.length === 0) {
         const swipe = swipeRef.current
@@ -280,7 +321,9 @@ export default function ImageLightbox({
           const now = Date.now()
           const previous = lastTapRef.current
           if (previous && now - previous.time < 320 && Math.hypot(tap.x - previous.x, tap.y - previous.y) < 28) {
-            toggleZoomAt(tap.x, tap.y)
+            const space = captureRootLayoutSpace()
+            const point = toLayoutPoint(tap.x, tap.y, space)
+            toggleZoomAt(point.x, point.y, space)
             lastTapRef.current = null
           } else {
             lastTapRef.current = { x: tap.x, y: tap.y, time: now }
@@ -303,7 +346,15 @@ export default function ImageLightbox({
       el.removeEventListener('touchend', onTouchEnd)
       el.removeEventListener('touchcancel', onTouchEnd)
     }
-  }, [baseCenter, galleryItems, goToIndex, index, metrics, toggleZoomAt])
+  }, [
+    baseCenter,
+    galleryItems,
+    goToIndex,
+    index,
+    metrics,
+    toggleZoomAt,
+    toLayoutPoint,
+  ])
 
   // Keep the image reachable if the viewport changes while it is enlarged.
   useEffect(() => {

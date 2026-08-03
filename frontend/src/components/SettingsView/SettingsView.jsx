@@ -11,6 +11,7 @@ import {
   platformUpdateStatusLabel,
 } from '../../lib/platformUpdateState.js'
 import { settleBackgroundAgentSave } from '../../lib/backgroundAgentSave.js'
+import { captureLayoutSpace, clientDeltaToLayout } from '../../lib/layoutSpace.js'
 import {
   PROVIDER_AVAILABILITY_PHASE,
   resolveProviderAvailability,
@@ -688,6 +689,7 @@ export default function SettingsView({
       grabOffsetY: grabY - rowRect.top,
       rowHeight: rowRect.height,
       slots,
+      layoutSpace: captureLayoutSpace(node),
     }
     setBackgroundDrag(next)
   }, [])
@@ -699,7 +701,7 @@ export default function SettingsView({
     // handlers never read stale React state.
     const start = backgroundDragRef.current
     if (!start) return undefined
-    const { fromIndex, grabOffsetY, rowHeight, slots } = start
+    const { fromIndex, grabOffsetY, rowHeight, slots, layoutSpace } = start
     const originTop = slots[fromIndex]?.top ?? 0
     const minOffset = slots.length ? slots[0].top - originTop : 0
     const maxOffset = slots.length ? slots[slots.length - 1].top - originTop : 0
@@ -717,7 +719,11 @@ export default function SettingsView({
       // without re-rendering the whole panel every frame.
       const node = backgroundRowRefs.current[fromIndex]
       if (node) {
-        node.style.transform = `translateY(${followOffset(event.clientY)}px) scale(1.02)`
+        const layoutOffset = clientDeltaToLayout({
+          x: 0,
+          y: followOffset(event.clientY),
+        }, layoutSpace).y
+        node.style.transform = `translateY(${layoutOffset}px) scale(1.02)`
       }
       // Only re-render (to slide the other rows aside) when the target
       // slot actually changes.
@@ -1367,7 +1373,10 @@ export default function SettingsView({
       const raw = (backgroundPointerYRef.current - backgroundDrag.grabOffsetY) - originTop
       const minOffset = slots.length ? slots[0].top - originTop : 0
       const maxOffset = slots.length ? slots[slots.length - 1].top - originTop : 0
-      const offset = Math.max(minOffset, Math.min(maxOffset, raw))
+      const offset = clientDeltaToLayout({
+        x: 0,
+        y: Math.max(minOffset, Math.min(maxOffset, raw)),
+      }, backgroundDrag.layoutSpace).y
       return {
         transform: `translateY(${offset}px) scale(1.02)`,
         zIndex: 3,
@@ -1381,7 +1390,10 @@ export default function SettingsView({
     ) {
       const originSlot = slots[index]
       const targetSlot = slots[index - 1]
-      const offset = originSlot && targetSlot ? targetSlot.top - originSlot.top : 0
+      const offset = clientDeltaToLayout({
+        x: 0,
+        y: originSlot && targetSlot ? targetSlot.top - originSlot.top : 0,
+      }, backgroundDrag.layoutSpace).y
       return { transform: `translateY(${offset}px)` }
     }
     if (
@@ -1391,7 +1403,10 @@ export default function SettingsView({
     ) {
       const originSlot = slots[index]
       const targetSlot = slots[index + 1]
-      const offset = originSlot && targetSlot ? targetSlot.top - originSlot.top : 0
+      const offset = clientDeltaToLayout({
+        x: 0,
+        y: originSlot && targetSlot ? targetSlot.top - originSlot.top : 0,
+      }, backgroundDrag.layoutSpace).y
       return { transform: `translateY(${offset}px)` }
     }
     return undefined

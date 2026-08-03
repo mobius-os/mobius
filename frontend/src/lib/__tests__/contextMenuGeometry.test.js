@@ -2,10 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { placeContextMenu } from '../contextMenuGeometry.js'
 
-test('a desktop context menu stays beside the pointer in a native viewport', () => {
+test('a desktop context menu stays beside its layout-space anchor', () => {
   const position = placeContextMenu({
-    clientPoint: { x: 380, y: 215 },
-    clientViewport: { left: 0, top: 0, width: 1512, height: 861 },
+    point: { x: 380, y: 215 },
+    viewport: { width: 1512, height: 861 },
     menuSize: { width: 220, height: 190 },
   })
 
@@ -14,8 +14,8 @@ test('a desktop context menu stays beside the pointer in a native viewport', () 
 
 test('a context menu flips before the right and bottom viewport edges', () => {
   const position = placeContextMenu({
-    clientPoint: { x: 790, y: 590 },
-    clientViewport: { left: 0, top: 0, width: 800, height: 600 },
+    point: { x: 790, y: 590 },
+    viewport: { width: 800, height: 600 },
     menuSize: { width: 220, height: 180 },
   })
 
@@ -24,8 +24,8 @@ test('a context menu flips before the right and bottom viewport edges', () => {
 
 test('an oversized context menu clamps to the viewport padding', () => {
   const position = placeContextMenu({
-    clientPoint: { x: 10, y: 10 },
-    clientViewport: { left: 0, top: 0, width: 200, height: 150 },
+    point: { x: 10, y: 10 },
+    viewport: { width: 200, height: 150 },
     menuSize: { width: 240, height: 180 },
   })
 

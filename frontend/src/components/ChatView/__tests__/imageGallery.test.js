@@ -93,7 +93,6 @@ test('the rail scrolls freely with native touch and mouse or pen grabbing', () =
   assert.match(gallerySource, /drag\.axis = Math\.abs\(deltaX\)/)
   assert.match(gallerySource, /if \(!drag\.captured\)/)
   assert.match(gallerySource, /drag\.captured = true[\s\S]*setPointerCapture/)
-  assert.match(gallerySource, /scrollLeft = drag\.startScrollLeft - deltaX/)
   assert.match(gallerySource, /onLostPointerCapture=\{endPointerDrag\}/)
   assert.match(gallerySource, /clearTimeout\(suppressTimerRef\.current\)/)
   assert.match(gallerySource, /onClickCapture/)
@@ -118,7 +117,6 @@ test('gallery navigation has explicit keyboard and lightbox alternatives', () =>
   assert.match(lightboxSource, /event\.key === 'ArrowLeft'/)
   assert.match(lightboxSource, /event\.key === 'ArrowRight'/)
   assert.match(lightboxSource, /gallerySwipeTarget/)
-  assert.match(lightboxSource, /\[baseCenter, galleryItems, goToIndex, index, metrics, toggleZoomAt\]/)
   assert.match(lightboxSource, /\{index \+ 1\} \/ \{galleryItems\.length\}/)
 })
 
@@ -169,7 +167,7 @@ test('lightbox fills its actual overlay and dismisses from every backdrop edge',
 test('zoomed touch pan keeps its gesture snapshot through a queued render', () => {
   assert.match(
     lightboxSource,
-    /const pan = panRef\.current[\s\S]{0,180}setTransform\(\(current\) =>[\s\S]{0,180}touch\.clientX - pan\.x[\s\S]{0,80}touch\.clientY - pan\.y/,
+    /const pan = panRef\.current[\s\S]{0,180}const point = toLayoutPoint[\s\S]{0,180}setTransform\(\(current\) =>[\s\S]{0,180}point\.x - pan\.x[\s\S]{0,80}point\.y - pan\.y/,
     'lifting a finger may clear panRef before React evaluates the queued state update',
   )
   assert.doesNotMatch(

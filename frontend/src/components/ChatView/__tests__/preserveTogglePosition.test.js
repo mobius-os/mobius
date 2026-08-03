@@ -89,6 +89,40 @@ test('rAF remains a fallback when MutationObserver is unavailable', () => {
   }
 })
 
+test('a painted toggle delta is converted before changing zoomed scrollTop', () => {
+  const originalMutationObserver = globalThis.MutationObserver
+  const originalRaf = globalThis.requestAnimationFrame
+  let rafCallback = null
+  globalThis.MutationObserver = undefined
+  globalThis.requestAnimationFrame = (callback) => {
+    rafCallback = callback
+    return 1
+  }
+
+  try {
+    const scroller = {
+      scrollTop: 40,
+      currentCSSZoom: 0.9,
+      offsetWidth: 1000,
+      offsetHeight: 800,
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 900, height: 720 }),
+    }
+    let top = 120
+    const anchor = {
+      closest: () => scroller,
+      getBoundingClientRect: () => ({ top }),
+    }
+
+    preserveTogglePosition(anchor)
+    top = 156
+    rafCallback()
+    assert.equal(scroller.scrollTop, 80)
+  } finally {
+    globalThis.MutationObserver = originalMutationObserver
+    globalThis.requestAnimationFrame = originalRaf
+  }
+})
+
 test('FOLLOW_BOTTOM leaves toggle movement entirely to the scroll controller', () => {
   const originalMutationObserver = globalThis.MutationObserver
   const originalRaf = globalThis.requestAnimationFrame

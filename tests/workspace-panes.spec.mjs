@@ -21,6 +21,7 @@
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 import { mockAcceptedMessages } from './_mockAcceptedMessages.mjs'
+import { activateFrameControl } from './frame-actions.mjs'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
@@ -357,6 +358,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
     // Drag the vertical divider right — changes pane WIDTHS. A short top-pinned
     // message must not move vertically.
     const box = await page.locator('.workspace__divider').boundingBox()
+    const dividerCenterBefore = box.x + box.width / 2
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
     await page.mouse.down()
     await page.mouse.move(box.x + box.width / 2 + 140, box.y + box.height / 2, { steps: 6 })
@@ -365,6 +367,9 @@ test.describe('Workspace panes (PR2 gate)', () => {
       requestAnimationFrame(() => requestAnimationFrame(r))))
 
     const after = await readTop()
+    const movedBox = await page.locator('.workspace__divider').boundingBox()
+    const dividerCenterAfter = movedBox.x + movedBox.width / 2
+    expect(dividerCenterAfter - dividerCenterBefore).toBeCloseTo(140, 0)
     expect(after, 'pinned message still measurable after drag').not.toBeNull()
     // Vertical position held (width change must not re-scroll the pin).
     expect(Math.abs(after - before)).toBeLessThanOrEqual(16)
@@ -679,8 +684,10 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await expect(page.getByRole('menu', { name: 'Tab actions' })).toBeVisible()
 
     const frame = page.frameLocator(`iframe[data-app-id="${appId}"]`)
-    await frame.locator('#probe').click()
+    const probe = frame.locator('#probe')
+    await probe.focus()
     await expect(page.getByRole('menu', { name: 'Tab actions' })).toHaveCount(0)
+    await activateFrameControl(probe)
     await expect.poll(() => frame.locator('#probe').evaluate(() => window.__clicks)).toBe(1)
   })
 

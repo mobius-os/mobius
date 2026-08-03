@@ -374,6 +374,27 @@ they are not ordinary standalone mini-apps.
 
 React + Vite. Entry is `main.jsx` → `App.jsx`. `App.jsx` checks setup status and renders one of `SetupWizard` (first boot), `LoginForm` (no token), or `Shell` (authenticated). `Shell` owns drawer state and system-event handling; navigation and theme are extracted to hooks (`useNavigation`, `useTheme`).
 
+### Desktop density and coordinate spaces
+
+Desktop web (the `min-width: 1024px` shell) intentionally uses document-level
+`zoom: 0.9`; narrower layouts stay at `1`. Scaling the whole interface is both
+more complete and easier to maintain than hundreds of component-specific font,
+spacing, hit-area, and pane overrides.
+
+Author zoom creates one boundary. Painted pointer/touch coordinates, DOMRects,
+and VisualViewport measurements are in **client space**; element client/offset/
+scroll dimensions and CSS lengths are in unscaled **layout space**. Custom JavaScript
+that crosses this boundary uses `frontend/src/lib/layoutSpace.js`: capture the
+owning space once, convert the client input once, then keep comparisons,
+thresholds, models, and writes in one space.
+
+Do not replace the root zoom with `transform: scale(...)`: transforms do not
+relayout the viewport and reintroduce gutters, clipping, and hit-test problems.
+Do not pass shell density into mini-app frames; the browser maps a scaled host
+frame into each app's native document. `currentCSSZoom` is preferred, with
+computed and measured fallbacks for older installed browsers. The layout-space
+unit tests and desktop-density browser test protect this policy.
+
 ### Top-level components (`frontend/src/components/`)
 
 | Component (dir) | Role |

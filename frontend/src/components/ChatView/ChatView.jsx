@@ -58,6 +58,7 @@ import {
 } from './providerSwitch.js'
 import { questionKey } from './questionKey.js'
 import { clearChatQuestionDrafts } from './questionDraft.js'
+import { captureLayoutSpace, clientDeltaToLayout } from '../../lib/layoutSpace.js'
 import { resolveStopResend } from './resolveStopResend.js'
 import { focusComposerElement, shouldApplyComposerFocusRequest } from './composerFocusPolicy.js'
 import { shouldDismissComposerKeyboardOnSubmit } from './composerKeyboardPolicy.js'
@@ -561,9 +562,13 @@ export default function ChatView({
   const publishComposerRoom = useCallback(() => {
     const chatEl = chatRef.current
     if (!chatEl) return
+    const viewportHeight = clientDeltaToLayout({
+      x: 0,
+      y: window.visualViewport?.height || window.innerHeight,
+    }, captureLayoutSpace(chatEl)).y
     const room = composerRoom({
       paneHeight: chatEl.clientHeight,
-      viewportHeight: window.visualViewport?.height || window.innerHeight,
+      viewportHeight,
     })
     // Write only on a real change: this also runs from a ResizeObserver on
     // `.chat`, and an unconditional style write there is an easy feedback loop.
