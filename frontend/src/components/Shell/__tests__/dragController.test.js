@@ -1,11 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  POINTER_SLOP, TAB_HOLD_MS, DRAWER_HOLD_MS, PRE_HOLD_MOVE_PX, RELEASE_IN_PLACE_PX,
+  POINTER_SLOP, TAB_HOLD_MS, DRAWER_DRAG_HOLD_MS, DRAWER_MENU_HOLD_MS,
+  PRE_HOLD_MOVE_PX, RELEASE_IN_PLACE_PX,
   HYSTERESIS_PX, ROOT_EDGE_PX, CARET_W, CARET_H, CENTER_INSET, DRAWER_EXIT_PX,
   CHIP_MOUSE_DX, CHIP_MOUSE_DY, CHIP_TOUCH_ABOVE,
   EDGE_BAND_MIN, EDGE_BAND_FRACTION,
-  passedSlop, touchTabMoveIntent, releasedInPlace, chipOffset,
+  passedSlop, touchTabMoveIntent, drawerRowMoveIntent, releasedInPlace, chipOffset,
   clientPointToLocal,
   crossedDrawerExit, edgeBands, edgePreviewRect, caretZone, edgeZone, centerZone,
   rootEdgeZone, hitTest, zoneTarget, releaseZone, zoneEq, buildScene,
@@ -62,14 +63,35 @@ test('touchTabMoveIntent reserves every pre-hold tab move for scrolling', () => 
   assert.equal(PRE_HOLD_MOVE_PX, 8)
 })
 
+test('drawerRowMoveIntent resolves one gesture without competing owners', () => {
+  const touchPin = { isTouch: true, pinned: true }
+  assert.equal(drawerRowMoveIntent(4, 4, touchPin), 'pending')
+  assert.equal(drawerRowMoveIntent(0, 9, touchPin), 'scroll',
+    'vertical movement before the hold scrolls through the pointer owner')
+  assert.equal(drawerRowMoveIntent(9, 0, touchPin), 'yield',
+    'horizontal movement before the hold returns to drawer swipe')
+  assert.equal(drawerRowMoveIntent(0, 9, { isTouch: true }), 'yield',
+    'an unpinned row keeps native momentum scrolling')
+  assert.equal(drawerRowMoveIntent(0, 9, { ...touchPin, held: true }), 'reorder')
+  assert.equal(drawerRowMoveIntent(9, 0, { ...touchPin, held: true }), 'workspace')
+  assert.equal(drawerRowMoveIntent(-9, 0, { ...touchPin, held: true }), 'cancel')
+  assert.equal(drawerRowMoveIntent(0, 9, { isTouch: true, held: true }), 'cancel',
+    'an unpinned row cannot enter the reorder branch')
+  assert.equal(drawerRowMoveIntent(0, 6, { pinned: true }), 'reorder',
+    'mouse rows use ordinary drag slop without a hold')
+})
+
 test('releasedInPlace is true only within the release radius', () => {
   assert.equal(releasedInPlace(RELEASE_IN_PLACE_PX, 0), true)
   assert.equal(releasedInPlace(RELEASE_IN_PLACE_PX + 0.1, 0), false)
 })
 
-test('drawer rows retain a more deliberate hold than tabs', () => {
+test('drawer rows expose drag before a stationary hold opens actions', () => {
   assert.equal(TAB_HOLD_MS, 350)
-  assert.equal(DRAWER_HOLD_MS, 450)
+  assert.equal(DRAWER_DRAG_HOLD_MS, 180)
+  assert.equal(DRAWER_MENU_HOLD_MS, 550)
+  assert.ok(DRAWER_DRAG_HOLD_MS < TAB_HOLD_MS)
+  assert.ok(DRAWER_MENU_HOLD_MS > TAB_HOLD_MS)
 })
 
 test('chipOffset floats above a touch point and trails a mouse', () => {

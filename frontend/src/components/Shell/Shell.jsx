@@ -1180,6 +1180,7 @@ export default function Shell() {
   sceneInputsRef.current = { projection, mode: workspaceMode, contentRect }
   const labelForTabRef = useRef(labelForTab)
   labelForTabRef.current = labelForTab
+  const drawerRowGesturesRef = useRef(new Map())
   // A single-mode drag previews the builder world through the ONE descriptor
   // (INV 5): arm is phase 'drag-preview', and the id it mints is carried to the
   // matching end so a stale event from a superseded drag is ignored.
@@ -1257,6 +1258,7 @@ export default function Shell() {
     labelForTabRef,
     dragActiveRef,
     drawerOpenRef,
+    drawerRowGesturesRef,
     closeDrawer,
     openDrawer,
     onPreviewBuilder: onModeDragPreview,
@@ -3109,6 +3111,7 @@ export default function Shell() {
         newAppIds={appAttentionSet}
         settingsWarning={providerAuth.needsAttention}
         dragActiveRef={dragActiveRef}
+        drawerRowGesturesRef={drawerRowGesturesRef}
       />
 
       {showWalkthrough && (

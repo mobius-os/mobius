@@ -14,3 +14,6 @@ COAUTHOR_TRAILER = (
   "Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>"
 )
 SUBMIT_TIMEOUT_SECONDS = 90
+PRE_PR_CHECK_ACTIVE_STATES = frozenset({
+  "dispatching", "uncertain", "queued", "in_progress",
+})

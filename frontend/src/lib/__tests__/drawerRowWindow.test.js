@@ -30,7 +30,7 @@ test('scrolling to the middle slides the window instead of accumulating rows', (
   })
   assert.ok(window.start >= 400 - DRAWER_ROW_OVERSCAN)
   assert.ok(
-    window.end <= 400 + Math.ceil(860 / DRAWER_ROW_HEIGHT) + DRAWER_ROW_OVERSCAN,
+    window.end <= 400 + Math.ceil(860 / DRAWER_ROW_HEIGHT) + 2 * DRAWER_ROW_OVERSCAN,
   )
   assert.ok(window.end - window.start < DRAWER_INITIAL_WINDOW_ROWS,
     'the mounted row count stays viewport-sized after an arbitrarily long scroll')
@@ -44,6 +44,39 @@ test('scrolling to the middle slides the window instead of accumulating rows', (
       + spacers.after,
     795 * DRAWER_ROW_HEIGHT,
     'windowing preserves the exact scroll extent',
+  )
+})
+
+test('small scroll steps reuse one mounted drawer window', () => {
+  const atBucketStart = drawerRowWindow({
+    total: 795,
+    scrollTop: 400 * DRAWER_ROW_HEIGHT,
+    viewportHeight: 860,
+    sectionTop: 0,
+  })
+
+  for (let row = 401; row < 400 + DRAWER_ROW_OVERSCAN; row += 1) {
+    assert.deepEqual(
+      drawerRowWindow({
+        total: 795,
+        scrollTop: row * DRAWER_ROW_HEIGHT,
+        viewportHeight: 860,
+        sectionTop: 0,
+      }),
+      atBucketStart,
+      'native momentum must not swap React rows at every 40px boundary',
+    )
+  }
+
+  assert.notDeepEqual(
+    drawerRowWindow({
+      total: 795,
+      scrollTop: (400 + DRAWER_ROW_OVERSCAN) * DRAWER_ROW_HEIGHT,
+      viewportHeight: 860,
+      sectionTop: 0,
+    }),
+    atBucketStart,
+    'the window still advances before the viewport can reach its overscan edge',
   )
 })
 

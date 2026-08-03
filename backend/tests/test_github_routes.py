@@ -27,7 +27,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.responses import Response
 
-from app import github_auth, github_preflight_checks, source_status
+from app import github_auth, github_pre_pr_checks, source_status
 from app.contribution_errors import ContributionSubmitError
 from app.config import get_settings
 from app.database import checked_out_connections
@@ -1276,19 +1276,21 @@ def _prepared_platform_review(app_id, record_id):
   return repo, record, diff_text
 
 
-def test_run_prepared_checks_persists_exact_run_and_blocks_duplicates(
+def test_run_pre_pr_checks_persists_exact_run_and_blocks_duplicates(
   client, owner_token, monkeypatch,
 ):
   _write_token(login="octocat", user_id=42, scopes=("public_repo", "workflow"))
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   _repo, _record, _diff = _prepared_platform_review(
-    app_id, "early-check-success",
+    app_id, "pre-pr-check-success",
   )
 
-  def fake_dispatch(record, diff_path, *, requested_at):
-    assert record["early_checks"]["state"] == "dispatching"
-    assert diff_path.name == "early-check-success.diff"
-    assert requested_at == record["early_checks"]["requested_at"]
+  requested_at = "2026-08-02T14:00:00Z"
+
+  def fake_dispatch(record, diff_path):
+    assert record["pre_pr_checks"]["state"] == "dispatching"
+    assert diff_path.name == "pre-pr-check-success.diff"
+    assert "requested_at" not in record["pre_pr_checks"]
     return ({
       "state": "queued",
       "run_id": 734,
@@ -1302,46 +1304,48 @@ def test_run_prepared_checks_persists_exact_run_and_blocks_duplicates(
     }, {"last_submit_push_sha": record["plan"]["head_sha"]})
 
   monkeypatch.setattr(
-    github_preflight_checks, "dispatch_prepared_checks", fake_dispatch,
+    github_pre_pr_checks, "dispatch_pre_pr_checks", fake_dispatch,
   )
   headers = {"Authorization": f"Bearer {app_token}"}
   response = client.post(
-    f"/api/github/contributions/{app_id}/early-check-success/run-checks",
+    f"/api/github/contributions/{app_id}/pre-pr-check-success/pre-pr-checks",
     headers=headers,
   )
   assert response.status_code == 200, response.text
   record = response.json()["record"]
   assert record["status"] == "prepared"
-  assert record["early_checks"]["state"] == "queued"
-  assert record["early_checks"]["run_id"] == 734
-  assert record["early_checks"]["request_id"]
+  assert record["pre_pr_checks"]["state"] == "queued"
+  assert record["pre_pr_checks"]["run_id"] == 734
+  assert record["pre_pr_checks"]["request_id"]
   assert record["last_submit_push_sha"] == record["plan"]["head_sha"]
 
   duplicate = client.post(
-    f"/api/github/contributions/{app_id}/early-check-success/run-checks",
+    f"/api/github/contributions/{app_id}/pre-pr-check-success/pre-pr-checks",
     headers=headers,
   )
   assert duplicate.status_code == 409
   assert "already" in duplicate.json()["detail"].lower()
 
 
-def test_run_prepared_checks_keeps_recoverable_failure_on_the_record(
+def test_run_pre_pr_checks_keeps_recoverable_failure_on_the_record(
   client, owner_token, monkeypatch,
 ):
   _write_token(login="octocat", user_id=42, scopes=("public_repo", "workflow"))
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   _repo, record, _diff = _prepared_platform_review(
-    app_id, "early-check-error",
+    app_id, "pre-pr-check-error",
   )
 
-  def fake_dispatch(_record, _diff_path, *, requested_at):
+  requested_at = "2026-08-02T14:00:00Z"
+
+  def fake_dispatch(_record, _diff_path):
     raise ContributionSubmitError(
       "GitHub could not start Tests.",
       status_code=409,
-      code="early_checks_dispatch_failed",
+      code="pre_pr_checks_dispatch_failed",
       record_patch={
         "last_submit_push_sha": record["plan"]["head_sha"],
-        "early_checks": {
+        "pre_pr_checks": {
           "state": "error",
           "message": "GitHub could not start Tests.",
           "requested_at": requested_at,
@@ -1351,51 +1355,51 @@ def test_run_prepared_checks_keeps_recoverable_failure_on_the_record(
     )
 
   monkeypatch.setattr(
-    github_preflight_checks, "dispatch_prepared_checks", fake_dispatch,
+    github_pre_pr_checks, "dispatch_pre_pr_checks", fake_dispatch,
   )
   response = client.post(
-    f"/api/github/contributions/{app_id}/early-check-error/run-checks",
+    f"/api/github/contributions/{app_id}/pre-pr-check-error/pre-pr-checks",
     headers={"Authorization": f"Bearer {app_token}"},
   )
   assert response.status_code == 409, response.text
   stored = response.json()["detail"]["record"]
   assert stored["status"] == "prepared"
-  assert stored["early_checks"]["state"] == "error"
-  assert stored["early_checks"]["request_id"]
+  assert stored["pre_pr_checks"]["state"] == "error"
+  assert stored["pre_pr_checks"]["request_id"]
   assert stored["last_submit_push_sha"] == record["plan"]["head_sha"]
 
 
-def test_run_prepared_checks_settles_an_invalid_checkout_claim(
+def test_run_pre_pr_checks_settles_an_invalid_checkout_claim(
   client, owner_token,
 ):
   _write_token(login="octocat", user_id=42, scopes=("public_repo", "workflow"))
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   _repo, record, diff_text = _prepared_platform_review(
-    app_id, "early-check-invalid-path",
+    app_id, "pre-pr-check-invalid-path",
   )
   record["plan"]["repo_path"] = ""
-  _write_contribution(app_id, "early-check-invalid-path", record, diff_text)
+  _write_contribution(app_id, "pre-pr-check-invalid-path", record, diff_text)
 
   response = client.post(
-    f"/api/github/contributions/{app_id}/early-check-invalid-path/run-checks",
+    f"/api/github/contributions/{app_id}/pre-pr-check-invalid-path/pre-pr-checks",
     headers={"Authorization": f"Bearer {app_token}"},
   )
   assert response.status_code == 409, response.text
   stored = response.json()["detail"]["record"]
   assert stored["status"] == "prepared"
-  assert stored["early_checks"]["state"] == "error"
-  assert "durable repo_path" in stored["early_checks"]["message"]
+  assert stored["pre_pr_checks"]["state"] == "error"
+  assert "durable repo_path" in stored["pre_pr_checks"]["message"]
 
 
-def test_refresh_prepared_checks_persists_the_exact_terminal_run(
+def test_refresh_pre_pr_checks_persists_the_exact_terminal_run(
   client, owner_token, monkeypatch,
 ):
   _write_token(login="octocat", user_id=42, scopes=("public_repo", "workflow"))
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   _repo, record, diff_text = _prepared_platform_review(
-    app_id, "early-check-refresh",
+    app_id, "pre-pr-check-refresh",
   )
-  record["early_checks"] = {
+  record["pre_pr_checks"] = {
     "state": "in_progress",
     "request_id": "request-1",
     "run_id": 735,
@@ -1404,24 +1408,24 @@ def test_refresh_prepared_checks_persists_the_exact_terminal_run(
     "branch": record["plan"]["branch"],
     "head_sha": record["plan"]["head_sha"],
   }
-  _write_contribution(app_id, "early-check-refresh", record, diff_text)
+  _write_contribution(app_id, "pre-pr-check-refresh", record, diff_text)
 
   def fake_refresh(_record):
     return {
-      **_record["early_checks"],
+      **_record["pre_pr_checks"],
       "state": "completed",
       "conclusion": "success",
       "completed_at": "2026-08-02T15:00:00Z",
     }
 
   monkeypatch.setattr(
-    github_preflight_checks, "refresh_prepared_check", fake_refresh,
+    github_pre_pr_checks, "refresh_pre_pr_check", fake_refresh,
   )
   headers = {"Authorization": f"Bearer {app_token}"}
-  url = f"/api/github/contributions/{app_id}/prepared-checks/refresh"
+  url = f"/api/github/contributions/{app_id}/pre-pr-checks/refresh"
   response = client.post(url, headers=headers)
   assert response.status_code == 200, response.text
-  assert response.json()["refreshed"][0]["early_checks"]["conclusion"] == (
+  assert response.json()["refreshed"][0]["pre_pr_checks"]["conclusion"] == (
     "success"
   )
 
@@ -1430,21 +1434,21 @@ def test_refresh_prepared_checks_persists_the_exact_terminal_run(
   assert repeat.json() == {"refreshed": []}
 
 
-def test_send_waits_while_prepared_checks_are_active(client, owner_token):
+def test_send_waits_while_pre_pr_checks_are_active(client, owner_token):
   _write_token(login="octocat", user_id=42, scopes=("public_repo", "workflow"))
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   _repo, record, diff_text = _prepared_platform_review(
-    app_id, "early-check-send-lock",
+    app_id, "pre-pr-check-send-lock",
   )
-  record["early_checks"] = {
+  record["pre_pr_checks"] = {
     "state": "queued",
     "request_id": "request-2",
     "run_id": 736,
   }
-  _write_contribution(app_id, "early-check-send-lock", record, diff_text)
+  _write_contribution(app_id, "pre-pr-check-send-lock", record, diff_text)
 
   response = client.post(
-    f"/api/github/contributions/{app_id}/early-check-send-lock/submit",
+    f"/api/github/contributions/{app_id}/pre-pr-check-send-lock/submit",
     headers={"Authorization": f"Bearer {app_token}"},
   )
   assert response.status_code == 409
@@ -1452,10 +1456,10 @@ def test_send_waits_while_prepared_checks_are_active(client, owner_token):
 
   stored = json.loads(
     (Path(get_settings().data_dir) / "apps" / str(app_id) /
-     "contributions" / "early-check-send-lock.json").read_text()
+     "contributions" / "pre-pr-check-send-lock.json").read_text()
   )
   assert stored["status"] == "prepared"
-  assert stored["early_checks"]["state"] == "queued"
+  assert stored["pre_pr_checks"]["state"] == "queued"
 
 
 def test_review_status_catches_local_drift_before_send(

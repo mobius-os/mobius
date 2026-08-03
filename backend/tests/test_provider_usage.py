@@ -3,6 +3,12 @@
 import asyncio
 import base64
 import json
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from types import ModuleType, SimpleNamespace
+
+import pytest
 
 
 def test_normalize_claude_usage_keeps_current_and_model_windows():
@@ -170,3 +176,89 @@ def test_configured_plan_labels_never_fetch_usage(monkeypatch):
     "claude": "Max plan",
     "codex": "Plus plan",
   }
+
+
+@pytest.mark.asyncio
+async def test_codex_usage_ignores_saturated_default_executor(
+  monkeypatch, tmp_path,
+):
+  from app import provider_usage
+
+  calls = []
+
+  class FakeLimits:
+    def model_dump(self, **_kwargs):
+      return {"rate_limits": {}}
+
+  class FakeClient:
+    def __init__(self, _config):
+      pass
+
+    def _record(self, name):
+      calls.append((name, threading.current_thread().name))
+
+    def start(self):
+      self._record("start")
+
+    def initialize(self):
+      self._record("initialize")
+
+    def account_read(self):
+      self._record("account_read")
+      return SimpleNamespace(
+        account=SimpleNamespace(root=SimpleNamespace(plan_type="plus")),
+      )
+
+    def request(self, *_args, **_kwargs):
+      self._record("request")
+      return FakeLimits()
+
+    def close(self):
+      self._record("close")
+
+  codex_package = ModuleType("openai_codex")
+  codex_package.__path__ = []
+  codex_client = ModuleType("openai_codex.client")
+  codex_client.CodexClient = FakeClient
+  codex_client.CodexConfig = lambda **kwargs: kwargs
+  generated_package = ModuleType("openai_codex.generated")
+  generated_package.__path__ = []
+  generated_v2 = ModuleType("openai_codex.generated.v2_all")
+  generated_v2.GetAccountRateLimitsResponse = object
+  monkeypatch.setitem(sys.modules, "openai_codex", codex_package)
+  monkeypatch.setitem(sys.modules, "openai_codex.client", codex_client)
+  monkeypatch.setitem(sys.modules, "openai_codex.generated", generated_package)
+  monkeypatch.setitem(sys.modules, "openai_codex.generated.v2_all", generated_v2)
+  monkeypatch.setattr(provider_usage.shutil, "which", lambda _name: "/codex")
+
+  loop = asyncio.get_running_loop()
+  release = threading.Event()
+  occupied = threading.Event()
+  saturated = ThreadPoolExecutor(max_workers=1)
+  replacement = ThreadPoolExecutor(max_workers=1)
+  loop.set_default_executor(saturated)
+
+  def occupy_default_worker():
+    occupied.set()
+    release.wait()
+
+  blocker = loop.run_in_executor(None, occupy_default_worker)
+  while not occupied.is_set():
+    await asyncio.sleep(0)
+
+  try:
+    result = await asyncio.wait_for(
+      provider_usage._fetch_codex_usage(str(tmp_path)), timeout=1,
+    )
+    assert result["plan_label"] == "Plus plan"
+    assert {name for name, _thread in calls} >= {
+      "start", "initialize", "account_read", "request", "close",
+    }
+    assert all(
+      thread.startswith("mobius-codex-usage") for _name, thread in calls
+    )
+  finally:
+    release.set()
+    await blocker
+    loop.set_default_executor(replacement)
+    saturated.shutdown(wait=True)

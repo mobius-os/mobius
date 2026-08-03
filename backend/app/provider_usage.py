@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures as _cf
+import functools
 import logging
 import os
 import shutil
@@ -233,10 +235,11 @@ def _codex_plan_type(account_response: Any) -> Any:
   return getattr(account, "plan_type", None)
 
 
-def _read_started_codex_client(client: Any) -> tuple[Any, Any]:
-  """Run the blocking typed protocol calls after the app-server is started."""
+def _read_codex_client(client: Any) -> tuple[Any, Any]:
+  """Start and read one Codex client entirely on its owned worker."""
   from openai_codex.generated.v2_all import GetAccountRateLimitsResponse
 
+  client.start()
   client.initialize()
   account = client.account_read()
   limits = client.request(
@@ -264,23 +267,37 @@ async def _fetch_codex_usage(data_dir: str) -> dict[str, Any]:
     client_title="Möbius Settings",
   ))
 
-  # Popen itself is immediate and gives cleanup a concrete process to reap.
-  # The JSON-RPC calls run off-loop; if one wedges, close() terminates the
-  # app-server and unblocks its waiter before this endpoint returns.
-  client.start()
-  task = asyncio.create_task(asyncio.to_thread(_read_started_codex_client, client))
+  # Keep Settings' short-lived client off the process-wide default executor.
+  # Live Codex turns may each hold one default worker while waiting for a
+  # notification; queuing start/read/close behind them made this probe leak an
+  # app-server exactly when the system was busiest. Worker one owns the whole
+  # blocking read; worker two remains available to close the transport and
+  # unblock it on timeout.
+  executor = _cf.ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="mobius-codex-usage",
+  )
+  loop = asyncio.get_running_loop()
+
+  def in_worker(fn, /, *args):
+    return loop.run_in_executor(executor, functools.partial(fn, *args))
+
+  task = in_worker(_read_codex_client, client)
   try:
     account, limits = await asyncio.wait_for(
       asyncio.shield(task),
       timeout=_PROVIDER_TIMEOUT_SECONDS,
     )
   except TimeoutError:
-    await asyncio.to_thread(client.close)
+    await in_worker(client.close)
     with suppress(Exception):
       await asyncio.wait_for(task, timeout=2.0)
     raise RuntimeError("codex usage read timed out")
   finally:
-    await asyncio.to_thread(client.close)
+    try:
+      await in_worker(client.close)
+    finally:
+      executor.shutdown(wait=False, cancel_futures=True)
 
   raw = limits.model_dump(mode="json", by_alias=False)
   return normalize_codex_usage(raw, plan_type=_codex_plan_type(account))

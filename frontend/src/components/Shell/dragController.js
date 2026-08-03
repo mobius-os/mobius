@@ -31,11 +31,13 @@ import { tabKey } from './tabModel.js'
 // A mouse drag arms once the pointer travels past this from the press point;
 // below it, the press is still a plain click (tab activate / row open).
 export const POINTER_SLOP = 5
-// Touch lift is a long-press. Tabs use the shorter threshold because they live
-// in a horizontal strip; drawer rows use the longer threshold in their own
-// gesture owner so an ordinary vertical scroll wins before any row action.
+// Touch lift is a long-press. Drawer rows have two deliberate stages: movement
+// can become a drag quickly, while a stationary press must continue longer
+// before opening actions. Keeping both timings here prevents the live pointer
+// owner and launcher cards from inventing their own thresholds.
 export const TAB_HOLD_MS = 350
-export const DRAWER_HOLD_MS = 450
+export const DRAWER_DRAG_HOLD_MS = 180
+export const DRAWER_MENU_HOLD_MS = 550
 // Movement past this before a hold resolves yields to the source scroller.
 export const PRE_HOLD_MOVE_PX = 8
 // After a touch lift, a release that never moved past this is not a drop. Tabs
@@ -96,11 +98,31 @@ export function passedSlop(dx, dy, slop = POINTER_SLOP) {
 
 // Tabs do not infer drag intent from direction: every move before their hold
 // resolves belongs to scrolling, and the binding arms tab dragging only after
-// that deliberate hold. Drawer touch gestures are owned by Drawer itself so a
-// held row can open its menu or reorder a pin without also moving the workspace.
+// that deliberate hold.
 export function touchTabMoveIntent(dx, dy, limit = PRE_HOLD_MOVE_PX) {
   if (hypot(dx, dy) <= limit) return 'pending'
   return 'scroll'
+}
+
+// The drawer row's one held gesture has three outcomes. Before a pinned touch
+// hold, vertical movement scrolls the list through the same pointer owner while
+// a horizontal move yields to drawer swipe; unpinned rows keep native scrolling.
+// Afterwards (or immediately for a mouse), vertical movement reorders a pin and
+// outward movement lifts the row into the workspace. Keeping this classification
+// pure prevents the menu, reorder and workspace branches from growing separate
+// threshold logic.
+export function drawerRowMoveIntent(dx, dy, {
+  held = false,
+  isTouch = false,
+  pinned = false,
+} = {}) {
+  const limit = isTouch && !held ? PRE_HOLD_MOVE_PX : POINTER_SLOP
+  if (hypot(dx, dy) <= limit) return 'pending'
+  if (isTouch && !held) {
+    return pinned && Math.abs(dy) > Math.abs(dx) ? 'scroll' : 'yield'
+  }
+  if (Math.abs(dy) > Math.abs(dx)) return pinned ? 'reorder' : 'cancel'
+  return dx > 0 ? 'workspace' : 'cancel'
 }
 
 // After a lift, a release still within this radius did not become a drag.

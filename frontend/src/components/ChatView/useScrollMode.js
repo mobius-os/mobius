@@ -1198,7 +1198,8 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  * @param {React.RefObject<HTMLElement>} args.footRef
  *   The overlaid composer element measured by the scroll owner.
  * @param {Array<object>} args.messages
- *   Persisted message list (drives effect re-runs).
+ *   Persisted message list. Row-count changes reinstall the DOM owner; content
+ *   growth stays on its ResizeObserver so streaming cannot settle a gesture.
  * @param {React.MutableRefObject<Array<object>>} args.messagesRef
  *   Synchronous mirror for restore-time anchor validation.
  * @param {number} args.pendingMessagesLength
@@ -1229,6 +1230,7 @@ export default function useScrollMode({
   initialEntryPhase,
   ownsReadingPosition,
 }) {
+  const messageCount = messages.length
   const [revealed, setRevealed] = useState(false)
   // A tiny React mirror reruns the layout effect when a semantic transition
   // enters/leaves PIN_USER_MSG before message props necessarily change.
@@ -1713,7 +1715,9 @@ export default function useScrollMode({
   // Single layout effect: spacer sizing, automatic scroll writes,
   // ResizeObserver layout updates (including the mobile keyboard after Shell
   // has resized), user-gesture detection, and geometry-based transitions.
-  // Re-runs on messages / pendingMessages / chatId changes.
+  // Re-runs when transcript structure, queue presence, or chat identity changes.
+  // Content-only streaming is already owned by ResizeObserver; reinstalling
+  // here would settle and recreate the active gesture on every streamed chunk.
   useLayoutEffect(() => {
     // Empty chats intentionally render no scroll node. Initialize the chat
     // identity before that early return so the first send can arm its pin
@@ -2621,7 +2625,7 @@ export default function useScrollMode({
       if (forceRevealRef.current === forceReveal) forceRevealRef.current = null
     }
   }, [
-    messages,
+    messageCount,
     pendingMessagesLength,
     chatId,
     initialEntryPhase,

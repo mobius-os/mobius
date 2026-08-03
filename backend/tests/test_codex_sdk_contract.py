@@ -54,6 +54,12 @@ def _make_sync_handle():
   return ac._client._sync
 
 
+def _make_async_handle():
+  """Return the live async-client instance whose call bridge we replace."""
+  openai_codex = pytest.importorskip("openai_codex")
+  return openai_codex.AsyncCodex()._client
+
+
 def test_codex_approval_handler_attribute_exists():
   """`_approval_handler` must exist on the live `_client._sync` object.
 
@@ -94,6 +100,25 @@ def test_codex_approval_handler_assignment_takes_effect():
     )
   finally:
     sync._approval_handler = original
+
+
+def test_codex_async_call_bridge_assignment_takes_effect():
+  """The per-chat executor must be installable on the pinned SDK instance."""
+  client = _make_async_handle()
+  original = client._call_sync
+
+  async def replacement(_fn, /, *_args, **_kwargs):
+    return "owned-executor"
+
+  try:
+    client._call_sync = replacement
+    assert client._call_sync is replacement, (
+      "Assignment to AsyncCodex()._client._call_sync did not take effect. "
+      "Parked notification waits would fall back to asyncio's shared default "
+      "executor and can take the shell and new chats offline."
+    )
+  finally:
+    client._call_sync = original
 
 
 def test_request_user_input_method_string_unchanged():

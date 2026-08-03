@@ -3,20 +3,11 @@ import assert from 'node:assert/strict'
 
 import {
   computePinnedDrag,
-  heldDrawerRowIntent,
   observePinnedOrderHandoff,
   pinnedEntriesMatchRanks,
   pinnedOrderHandoffStatus,
   projectPinnedEntries,
 } from '../../components/Drawer/pinnedReorder.js'
-
-test('a held drawer row has one button-free menu or reorder contract', () => {
-  assert.equal(heldDrawerRowIntent(3, 4, true), 'pending', 'thumb jitter stays stationary')
-  assert.equal(heldDrawerRowIntent(0, 9, true), 'reorder', 'a held pin moves vertically')
-  assert.equal(heldDrawerRowIntent(9, 0, true), 'cancel', 'sideways drift never moves the drawer')
-  assert.equal(heldDrawerRowIntent(0, 9, false), 'cancel', 'an unpinned row cannot reorder')
-  assert.equal(heldDrawerRowIntent(9, 9, true), 'cancel', 'ambiguous diagonals cancel')
-})
 
 // Four uniform 40px rows stacked from top 0.
 function uniformRows() {

@@ -30,6 +30,7 @@ export default function DrawerItemActionMenu({
   const menuRef = useRef(null)
   const wasOpenRef = useRef(false)
   const restoreOnCloseRef = useRef(true)
+  const outsidePressStartedRef = useRef(false)
   const [confirmation, setConfirmation] = useState(null)
   const [position, setPosition] = useState(null)
 
@@ -43,6 +44,7 @@ export default function DrawerItemActionMenu({
       wasOpenRef.current = true
       return
     }
+    outsidePressStartedRef.current = false
     setConfirmation(null)
     setPosition(null)
     if (!wasOpenRef.current) return
@@ -145,13 +147,22 @@ export default function DrawerItemActionMenu({
       onPointerDown={event => {
         // Keep the layer mounted for the complete tap. Closing on pointerdown
         // lets Android retarget the later release/click to the row underneath.
-        consumeOutsidePointer(event)
+        if (consumeOutsidePointer(event)) {
+          outsidePressStartedRef.current = true
+        }
       }}
       onPointerUp={event => {
         consumeOutsidePointer(event)
       }}
+      onPointerCancel={() => {
+        outsidePressStartedRef.current = false
+      }}
       onClick={event => {
-        if (consumeOutsidePointer(event)) close()
+        // The opener click can be retargeted to a layer that did not exist at
+        // pointerdown; only a new press that began on the layer may dismiss it.
+        if (!consumeOutsidePointer(event) || !outsidePressStartedRef.current) return
+        outsidePressStartedRef.current = false
+        close()
       }}
       onContextMenu={event => event.preventDefault()}
       onWheel={event => {

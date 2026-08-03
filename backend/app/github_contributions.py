@@ -38,6 +38,7 @@ from app.github_contribution_contract import (
   GITHUB_LOGIN as _GITHUB_LOGIN,
   GITHUB_REPO as _GITHUB_REPO,
   GIT_SHA as _GIT_SHA,
+  PRE_PR_CHECK_ACTIVE_STATES as _PRE_PR_CHECK_ACTIVE_STATES,
   SUBMIT_TIMEOUT_SECONDS as _SUBMIT_TIMEOUT,
 )
 from app.contribution_records import (
@@ -424,12 +425,10 @@ def _claim_record(
       status_code=409,
       detail="This contribution is no longer waiting for approval.",
     )
-  early_checks = record.get("early_checks")
+  pre_pr_checks = record.get("pre_pr_checks")
   if (
-    isinstance(early_checks, dict)
-    and early_checks.get("state") in {
-      "dispatching", "uncertain", "queued", "in_progress",
-    }
+    isinstance(pre_pr_checks, dict)
+    and pre_pr_checks.get("state") in _PRE_PR_CHECK_ACTIVE_STATES
   ):
     raise HTTPException(
       status_code=409,

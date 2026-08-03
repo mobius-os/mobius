@@ -12,18 +12,6 @@
 // that identity is what lets the drop settle with no jump, regardless of whether
 // rows have different heights (app rows are taller than chat rows).
 
-import { PRE_HOLD_MOVE_PX } from '../Shell/dragController.js'
-
-// Once a touch hold has claimed a drawer row, only a clearly vertical movement
-// on a pinned item can become reordering. Every other movement cancels the row
-// action while remaining claimed until release, so the same finger cannot fall
-// through into drawer swipe-close or workspace drag-out.
-export function heldDrawerRowIntent(dx, dy, pinned, limit = PRE_HOLD_MOVE_PX) {
-  if (Math.hypot(dx, dy) <= limit) return 'pending'
-  if (pinned && Math.abs(dy) > Math.abs(dx)) return 'reorder'
-  return 'cancel'
-}
-
 export function computePinnedDrag(rows, fromIndex, deltaY) {
   const src = rows[fromIndex]
   const anchorTop = rows[0].top // top edge of the pinned region — a fixed anchor
