@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 
 import {
   APP_ASSETS_CACHE,
-  NAVIGATION_FALLBACK_CACHE,
   APP_ASSETS_MAX_ENTRIES,
   ESM_CACHE,
   OFFLINE_APPS_CACHE,
@@ -23,7 +22,6 @@ import {
   packagedAppAssetCacheKey,
   isStaleRuntimeCache,
   shouldServeCacheFirst,
-  selectNavigationFallback,
   supersededVersionKeys,
   withOpaqueFramePublicAssetCors,
 } from '../../sw-cache-policy.js'
@@ -35,40 +33,9 @@ test('runtime cache cleanup keeps current cache names', () => {
     OFFLINE_APPS_CACHE,
     STANDALONE_APPS_CACHE,
     APP_ASSETS_CACHE,
-    NAVIGATION_FALLBACK_CACHE,
   ]) {
     assert.equal(isStaleRuntimeCache(name), false, `${name} should be kept`)
   }
-})
-
-test('document fallback stays Möbius-owned when the Workbox precache is missing', () => {
-  const shell = { name: 'shell' }
-  const offline = { name: 'offline' }
-  const durable = { name: 'durable-offline' }
-  assert.equal(selectNavigationFallback({
-    shellRoute: true,
-    shellDocument: shell,
-    offlineDocument: offline,
-    durableDocument: durable,
-  }), shell)
-  assert.equal(selectNavigationFallback({
-    shellRoute: true,
-    shellDocument: null,
-    offlineDocument: null,
-    durableDocument: durable,
-  }), durable)
-  assert.equal(selectNavigationFallback({
-    shellRoute: false,
-    shellDocument: shell,
-    offlineDocument: offline,
-    durableDocument: durable,
-  }), offline)
-  assert.equal(selectNavigationFallback({
-    shellRoute: false,
-    shellDocument: null,
-    offlineDocument: null,
-    durableDocument: null,
-  }), null)
 })
 
 test('runtime cache cleanup evicts old offline app caches', () => {

@@ -19,12 +19,6 @@ export const ESM_CACHE = 'mobius-esm-v2'
 // list-affecting write, the page evicts the corresponding cached GET so a
 // NetworkFirst fallback cannot resurrect the pre-mutation projection.
 export const SHELL_DATA_CACHE = 'mobius-shell-data'
-// A durable copy of the branded offline document. Workbox owns the current
-// generation's shell precache, but this separate cache is the last-resort
-// navigation floor when that precache is missing or is being replaced. Keeping
-// it outside Workbox's namespace means a shell repair can never turn a reload
-// into Chromium's native ERR_FAILED document.
-export const NAVIGATION_FALLBACK_CACHE = 'mobius-navigation-fallback-v1'
 // Bumped -v2 → -v3 (2026-06-18): a one-time eviction of app-frame entries
 // cached under the pre-fix, un-revved key (`?v=<updated_at>` with NO
 // `-<frameRev>` suffix, because the SW-precached index.html lacked the
@@ -73,7 +67,6 @@ const KEEP_RUNTIME_CACHES = new Set([
   VENDOR_CACHE,
   ESM_CACHE,
   SHELL_DATA_CACHE,
-  NAVIGATION_FALLBACK_CACHE,
   OFFLINE_APPS_CACHE,
   STANDALONE_APPS_CACHE,
   APP_ASSETS_CACHE,
@@ -148,21 +141,6 @@ export function isStaleRuntimeCache(name) {
   if (/^mobius-(vendor|esm)/.test(name)) return true
   if (/^mobius-(offline-apps|standalone)(?:-v\d+)?$/.test(name)) return true
   return false
-}
-
-// Choose the document that keeps a failed top-level navigation inside Möbius.
-// Shell routes prefer the complete cached shell; server-owned routes start at
-// the branded offline page. Both fall through to the durable copy kept outside
-// Workbox's generation cache, and only return null when no Möbius document
-// exists at all.
-export function selectNavigationFallback({
-  shellRoute,
-  shellDocument,
-  offlineDocument,
-  durableDocument,
-}) {
-  if (shellRoute && shellDocument) return shellDocument
-  return offlineDocument || durableDocument || null
 }
 
 // PURE: does this request ask for a byte sub-range? Ranged requests must

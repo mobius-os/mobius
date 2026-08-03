@@ -124,12 +124,8 @@ export default function useShellReloadController(inputs) {
     try { storage.setItem('sw-skip-initiated', '1') } catch { /* ignore */ }
 
     if (stalePrecache) {
-      // Never delete the active Workbox precache before navigating. The shell
-      // route is deliberately cache-bound; removing its document and branded
-      // offline fallback makes the next reload a browser-owned ERR_FAILED page
-      // whenever the server is also between boots. The fresh worker owns
-      // replacing/cleaning its generation, and reloadWhenWorkerTakesOver keeps
-      // this page alive until that handoff settles.
+      // Let the new worker replace its precache during activation. Deleting the
+      // active generation first leaves a failed reload with no Möbius document.
       try { storage.removeItem('sw-stale-precache-pending') } catch { /* ignore */ }
       try { storage.setItem('sw-stale-precache-recovering', '1') } catch { /* ignore */ }
     }

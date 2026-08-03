@@ -331,7 +331,7 @@
         // reconnected to a running background turn — a boot-time force-reload
         // there would blank a live stream. Shell reads the flag on mount, routes
         // it through the same hold-until-idle path (idle → apply, else wait for
-        // the turn to end), and only then deletes Workbox's precache + reloads.
+        // the turn to end), and only then hands off to the new worker + reloads.
         const stalePrecacheRecoveryKey = 'sw-stale-precache-recovering'
         const wasRecoveringStalePrecache =
           sessionStorage.getItem(stalePrecacheRecoveryKey) === '1'
@@ -361,7 +361,7 @@
             if (!expected || current.includes(expected)) return
             // Re-fetch sw.js so the update watchdog can install the new worker;
             // harmless (conditional GET). Then flag the mismatch for Shell to
-            // resolve at an idle boundary — the cache delete + reload happen
+            // resolve at an idle boundary — the worker handoff + reload happen
             // there, never here.
             try { await reg?.update?.() } catch (_) {}
             try { sessionStorage.setItem('sw-stale-precache-pending', '1') } catch (_) {}

@@ -23,19 +23,19 @@ export const SW_TAKEOVER_TIMEOUT_MS = 2000
 // page came back on the old generation and stuck (feature 207).
 //
 // We reload on the first of these signals:
-//   - the newest installing/waiting worker reaches 'activated' — it is now the
-//     registration's active worker, so the reload navigation below adopts it
-//     as controller (a fresh navigation takes the active worker even without
-//     clients.claim()); this is the authoritative "new generation is live"
-//     cue on a leashed update.
+//   - the waiting worker's state reaches 'activated' — it is now the
+//     registration's active worker, so the reload navigation below adopts it as
+//     controller (a fresh navigation takes the active worker even without
+//     clients.claim()); this is the authoritative "new generation is live" cue
+//     on a leashed update.
 //   - a controllerchange fires — belt-and-suspenders; on a leashed update
 //     without clients.claim() it usually does not, but if a claim ever happens
 //     it is decisive.
-//   - the candidate worker goes 'redundant' — superseded/failed; reload anyway
-//     and let the boot-time re-arm net recover.
+//   - the waiting worker goes 'redundant' — superseded/failed; reload anyway and
+//     let the boot-time re-arm net recover.
 //   - the bounded timeout elapses — SW wedged mid-install; reload anyway.
-// No installing or waiting worker (unchanged sw.js — e.g. a backend-only
-// rebuild) → reload now: the reload alone re-fetches the current generation.
+// No waiting worker (unchanged sw.js — e.g. a backend-only rebuild) → reload
+// now: the reload alone re-fetches the current generation.
 //
 // Dependencies (serviceWorker, timers, reload) are injected so the wiring is
 // unit-testable without a live service worker.
@@ -47,12 +47,8 @@ export function reloadWhenWorkerTakesOver({
   setTimeoutFn = (typeof setTimeout !== 'undefined' ? setTimeout : null),
   clearTimeoutFn = (typeof clearTimeout !== 'undefined' ? clearTimeout : null),
 } = {}) {
-  // Prefer the newest installing generation over an older waiting one. A
-  // stale-precache check can resolve while its update is still installing;
-  // reloading immediately there keeps the old controller/cache and can consume
-  // the one apply request without adopting the repair.
-  const candidate = registration?.installing || registration?.waiting
-  if (!candidate) { reload(); return }
+  const waiting = registration?.waiting
+  if (!waiting) { reload(); return }
 
   let settled = false
   let timer = null
@@ -61,27 +57,20 @@ export function reloadWhenWorkerTakesOver({
     settled = true
     if (timer != null && clearTimeoutFn) clearTimeoutFn(timer)
     serviceWorker?.removeEventListener?.('controllerchange', onControllerChange)
-    candidate.removeEventListener?.('statechange', onStateChange)
+    waiting.removeEventListener?.('statechange', onStateChange)
     reload()
   }
   const onControllerChange = () => finish()
   const onStateChange = () => {
-    // A message sent during `installing` is best-effort. Repeat it at the
-    // explicit waiting boundary so the newest generation cannot sit there
-    // until our timeout and leave the old controller serving the reload.
-    if (candidate.state === 'installed') {
-      try { candidate.postMessage({ type: 'SKIP_WAITING' }) } catch { /* ignore */ }
-      return
-    }
-    if (candidate.state === 'activated' || candidate.state === 'redundant') finish()
+    if (waiting.state === 'activated' || waiting.state === 'redundant') finish()
   }
 
   serviceWorker?.addEventListener?.('controllerchange', onControllerChange)
-  candidate.addEventListener?.('statechange', onStateChange)
+  waiting.addEventListener?.('statechange', onStateChange)
   if (setTimeoutFn) timer = setTimeoutFn(finish, timeoutMs)
-  try { candidate.postMessage({ type: 'SKIP_WAITING' }) } catch { /* ignore */ }
-  // The worker may already be past its captured state by the time we attach.
-  if (candidate.state === 'activated' || candidate.state === 'redundant') finish()
+  try { waiting.postMessage({ type: 'SKIP_WAITING' }) } catch { /* ignore */ }
+  // The worker may already be past 'waiting' by the time we attached above.
+  if (waiting.state === 'activated' || waiting.state === 'redundant') finish()
 }
 
 // Whether a freshly-mounted shell should re-arm its apply-on-idle reload because
