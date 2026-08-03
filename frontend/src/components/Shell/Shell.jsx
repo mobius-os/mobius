@@ -3004,6 +3004,7 @@ export default function Shell() {
         width={desktopSidebarWidth}
         onWidthChange={setDesktopSidebarWidth}
         interactionLocked={drawerModeTransitioning || drawerNavigationCover}
+        focusHandoffActive={newChatPresentation != null}
         onClose={drawerModeTransitioning || drawerNavigationCover
           ? undefined
           : closeDrawer}

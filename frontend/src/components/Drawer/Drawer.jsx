@@ -104,6 +104,7 @@ export default function Drawer({
   width = DESKTOP_SIDEBAR_DEFAULT_WIDTH,
   onWidthChange,
   interactionLocked = false,
+  focusHandoffActive = false,
   onClose,
   apps,
   appsStatus = 'success',
@@ -652,6 +653,7 @@ export default function Drawer({
         drawer: drawerRef.current,
         activeElement: document.activeElement,
         body: document.body,
+        focusHandoffActive,
       })
       if (shouldRestore
           && previousFocusRef.current
@@ -660,7 +662,7 @@ export default function Drawer({
       }
       previousFocusRef.current = null
     }
-  }, [open, persistent])
+  }, [focusHandoffActive, open, persistent])
 
   // Escape key closes the drawer while it is open. Apps is ordinary workspace
   // content, so it never takes ownership away from navigation layered above it.

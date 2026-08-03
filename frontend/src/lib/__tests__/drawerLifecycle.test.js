@@ -24,6 +24,12 @@ test('drawer close restores only while the drawer still owns focus', () => {
   assert.equal(shouldRestoreDrawerFocus({ drawer, activeElement: body, body }), true)
   assert.equal(shouldRestoreDrawerFocus({ drawer, activeElement: null, body }), true)
   assert.equal(shouldRestoreDrawerFocus({ drawer, activeElement: outside, body }), false)
+  assert.equal(shouldRestoreDrawerFocus({
+    drawer,
+    activeElement: inside,
+    body,
+    focusHandoffActive: true,
+  }), false, 'an explicit destination handoff owns focus even before its element mounts')
 })
 
 test('only the persistent sidebar follows active chat selections', () => {
