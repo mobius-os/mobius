@@ -1126,7 +1126,11 @@ test.describe('Scroll position', () => {
     // Once navigation targets it, the painted surface must still belong to the
     // outgoing chat until subscribe-time replay commits. Assert chat ownership
     // rather than empty-state markup, which the New Chat presentation may omit.
-    await expect.poll(() => new URL(page.url()).searchParams.get('chat')).toBe(chatId)
+    await page.waitForFunction(
+      id => localStorage.getItem('moebius_active_chat') === id,
+      chatId,
+      { timeout: 3000 },
+    )
     await expect.poll(() => catchUpServed, { timeout: 700 }).toBe(false)
     await expect(page.locator('[data-chat-surface="painted"]'))
       .toHaveAttribute('data-chat-id', decoyChatId)
