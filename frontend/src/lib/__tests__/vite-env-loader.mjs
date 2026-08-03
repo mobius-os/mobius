@@ -12,7 +12,7 @@
 
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import { transformWithEsbuild } from 'vite'
+import { transformWithOxc } from 'vite'
 
 const REACT_SHIM = new URL(
   '../../components/ChatView/hooks/__tests__/react-hook-shim.mjs',
@@ -58,10 +58,10 @@ export async function load(url, context, nextLoad) {
       .replace(/import\.meta\.env\.DEV/g, 'false')
       .replace(/import\.meta\.env\.PROD/g, 'false')
     if (url.endsWith('.jsx')) {
-      const transformed = await transformWithEsbuild(patched, path, {
-        loader: 'jsx',
-        format: 'esm',
-        jsx: 'automatic',
+      const transformed = await transformWithOxc(patched, path, {
+        lang: 'jsx',
+        jsx: { runtime: 'automatic' },
+        sourcemap: false,
       })
       return {
         format: 'module',

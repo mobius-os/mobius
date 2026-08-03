@@ -1,4 +1,4 @@
-"""Compiles JSX source strings to ES modules using esbuild."""
+"""Compiles JSX source strings to ES modules using Rolldown."""
 
 import asyncio
 import hashlib
@@ -12,10 +12,9 @@ from pathlib import Path
 from app import timeutil
 from app.app_compile_contract import (
   COMPILED_RUNTIME_BANNER,
-  ESBUILD_TIMEOUT_SECS,
-  esbuild_command,
-  esbuild_environment,
-  esbuild_metafile_contract_error,
+  ROLLDOWN_TIMEOUT_SECS,
+  rolldown_command,
+  rolldown_report_contract_error,
 )
 from app.config import get_settings
 
@@ -219,26 +218,53 @@ def _copy_managed_static_assets(source_root: Path, snapshot_root: Path) -> None:
       shutil.copy2(source, destination / name)
 
 
-def _remove_unsupported_outputs(
-  out: Path,
-  metafile: dict,
-  *,
-  metadata_cwd: str | Path | None = None,
-) -> None:
-  """Remove outputs esbuild wrote before metadata exposed a contract error."""
+def _remove_unsupported_output(out: Path) -> None:
+  """Remove the generated module after its Rolldown report fails contract."""
   out.unlink(missing_ok=True)
-  outputs = metafile.get("outputs")
-  if not isinstance(outputs, dict):
-    return
-  for details in outputs.values():
-    if not isinstance(details, dict):
-      continue
-    css_bundle = details.get("cssBundle")
-    if isinstance(css_bundle, str):
-      css_path = Path(css_bundle)
-      if not css_path.is_absolute() and metadata_cwd is not None:
-        css_path = Path(metadata_cwd) / css_path
-      css_path.unlink(missing_ok=True)
+
+
+# Rolldown's native compiler has a larger transient RSS than the old compiler.
+# Installs are normally serialized already, but explicit applies to different
+# apps are not. One process at a time keeps a small Railway instance's peak
+# bounded without retaining a resident build worker between requests.
+_COMPILE_SLOT = asyncio.Semaphore(1)
+
+
+async def _run_rolldown(
+  command: list[str], *, cwd: str | None,
+) -> tuple[int, bytes]:
+  async with _COMPILE_SLOT:
+    try:
+      proc = await asyncio.create_subprocess_exec(
+        *command,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+      )
+    except FileNotFoundError:
+      raise RuntimeError(
+        "Node.js is not installed or not on PATH. "
+        "The Docker image installs it automatically."
+      )
+    try:
+      _, stderr = await asyncio.wait_for(
+        proc.communicate(), timeout=ROLLDOWN_TIMEOUT_SECS,
+      )
+    except asyncio.TimeoutError:
+      proc.kill()
+      await proc.communicate()
+      raise RuntimeError(
+        f"Rolldown timed out after {ROLLDOWN_TIMEOUT_SECS} seconds"
+      )
+    except asyncio.CancelledError:
+      # Shutdown must not leave a child writing after locks are released.
+      proc.kill()
+      try:
+        await proc.communicate()
+      except Exception:
+        pass
+      raise
+    return proc.returncode or 0, stderr
 
 
 async def compile_jsx(
@@ -253,12 +279,12 @@ async def compile_jsx(
   Args:
     app_id: The numeric ID of the mini-app being compiled.
     jsx_source: The JSX source code string.
-    out_path: Where esbuild writes the bundle. Production callers pass the
+    out_path: Where Rolldown writes the bundle. Production callers pass the
       app's staging path, then publish the output by content hash (see
       ``recompile_app_bundle``). It is required so a new caller cannot silently
       bypass immutable publication through the retired fixed live filename.
     source_path: Optional real filesystem entrypoint. When present,
-      esbuild compiles that path directly, allowing relative imports from
+      Rolldown compiles that path directly, allowing relative imports from
       sibling files in the app source tree. When omitted, the legacy
       string-only path writes ``jsx_source`` to a temp file and compiles that.
 
@@ -266,9 +292,9 @@ async def compile_jsx(
     The absolute path of the compiled JS file.
 
   Raises:
-    CompileError: If the JSX is invalid or esbuild rejects the source.
+    CompileError: If the JSX is invalid or Rolldown rejects the source.
   """
-  # Fail loudly on malformed source before invoking esbuild — the
+  # Fail loudly on malformed source before invoking Rolldown — the
   # silent-0-byte case produces a downstream "no default export" at
   # runtime and wastes a debug round-trip.
   if not jsx_source or not jsx_source.strip():
@@ -292,53 +318,23 @@ async def compile_jsx(
   else:
     # Compile real source trees from their root with a relative entry name.
     # Besides keeping sibling imports natural, this makes output deterministic:
-    # esbuild's generated module comments no longer embed a random temporary
+    # Rolldown's generated module comments no longer embed a random temporary
     # snapshot path (explicit apply compiles from one such snapshot).
     entry_path = entry_path.resolve()
     compile_cwd = str(entry_path.parent)
   command_entry = entry_path.name if compile_cwd is not None else entry_path
 
-  metadata_fd, metadata_name = tempfile.mkstemp(
-    prefix="mobius-esbuild-", suffix=".json",
+  report_fd, report_name = tempfile.mkstemp(
+    prefix="mobius-rolldown-", suffix=".json",
   )
-  os.close(metadata_fd)
-  metadata_path = Path(metadata_name)
+  os.close(report_fd)
+  report_path = Path(report_name)
   try:
-    try:
-      proc = await asyncio.create_subprocess_exec(
-        *esbuild_command(command_entry, out, metafile=metadata_path),
-        env=esbuild_environment(),
-        cwd=compile_cwd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-      )
-    except FileNotFoundError:
-      raise RuntimeError(
-        "esbuild is not installed or not on PATH. "
-        "The Docker image installs it automatically; for local dev run: "
-        "npm install -g esbuild"
-      )
-    try:
-      _, stderr = await asyncio.wait_for(
-        proc.communicate(), timeout=ESBUILD_TIMEOUT_SECS,
-      )
-    except asyncio.TimeoutError:
-      proc.kill()
-      await proc.communicate()
-      raise RuntimeError(
-        f"esbuild timed out after {ESBUILD_TIMEOUT_SECS} seconds"
-      )
-    except asyncio.CancelledError:
-      # The awaiting task was cancelled (for example, during shutdown). Kill
-      # the child so it can't keep running and
-      # writing out_path after we've returned and released our locks.
-      proc.kill()
-      try:
-        await proc.communicate()
-      except Exception:
-        pass
-      raise
-    if proc.returncode != 0:
+    returncode, stderr = await _run_rolldown(
+      rolldown_command(command_entry, out, report=report_path),
+      cwd=compile_cwd,
+    )
+    if returncode != 0:
       decoded_stderr = stderr.decode()
       raise CompileError(
         "Compilation failed.",
@@ -346,19 +342,17 @@ async def compile_jsx(
         source_path=entry_path,
       )
     try:
-      metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+      report = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-      raise RuntimeError(f"Could not read esbuild metadata: {exc}") from exc
-    contract_error = esbuild_metafile_contract_error(metadata)
+      raise RuntimeError(f"Could not read Rolldown report: {exc}") from exc
+    contract_error = rolldown_report_contract_error(report)
     if contract_error:
-      _remove_unsupported_outputs(
-        out, metadata, metadata_cwd=compile_cwd,
-      )
+      _remove_unsupported_output(out)
       raise CompileError(
         "Compilation failed.", stderr=contract_error, source_path=entry_path,
       )
   finally:
-    metadata_path.unlink(missing_ok=True)
+    report_path.unlink(missing_ok=True)
     if tmp_path is not None:
       os.unlink(tmp_path)
 
@@ -657,12 +651,12 @@ async def reconcile_outdated_bundles(db) -> list[int]:
   Opaque app frames execute one self-contained module: React, the Mobius
   runtime bridge, and every supported app dependency are part of that artifact.
   A compiler-runtime change therefore needs a durable migration for already
-  installed apps. ``esbuild_command`` stamps the ABI + artifact revision at byte
-  zero, while publication names the output by its SHA-256. Keeping additive
-  refreshes in the revision lets a live checkout and the pre-restart backend
-  remain host-compatible throughout deployment. This boot sweep recompiles any
-  present, non-empty bundle without the current banner or a valid content
-  address. The latter condition migrates
+  installed apps. ``rolldown_command`` stamps the ABI + artifact revision at
+  byte zero, while publication names the output by its SHA-256. Keeping
+  additive refreshes in the revision lets a live checkout and the pre-restart
+  backend remain host-compatible throughout deployment. This boot sweep
+  recompiles any present, non-empty bundle without the current banner or a
+  valid content address. The latter condition migrates
   every legacy fixed-name bundle once and repairs the pre-migration same-ABI
   crash gap by rebuilding from the committed row source.
 

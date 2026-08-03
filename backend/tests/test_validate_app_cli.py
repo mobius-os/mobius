@@ -49,7 +49,7 @@ def test_validator_rejects_a_bundle_compile_failure(tmp_path):
   )
   result = _run(tmp_path)
   assert result.returncode == 1
-  # The source-closure check catches this before esbuild, which is still part of
+  # The source-closure check catches this before Rolldown, which is still part of
   # the same preflight contract and avoids reporting a duplicate compile error.
   assert "resolves to no file" in result.stderr
 
@@ -208,7 +208,7 @@ def test_validator_rejects_css_imports(tmp_path):
   assert "CSS imports are not supported" in result.stderr
 
 
-def test_validator_compiles_only_the_declared_synthetic_tree(tmp_path):
+def test_validator_rejects_css_before_following_nested_imports(tmp_path):
   _write_app(
     tmp_path,
     "import './a.css';\nexport default function App(){ return <div /> }",
@@ -221,8 +221,8 @@ def test_validator_compiles_only_the_declared_synthetic_tree(tmp_path):
 
   result = _run(tmp_path)
   assert result.returncode == 1
-  assert "Could not resolve" in result.stderr
-  assert "b.css" in result.stderr
+  assert "CSS imports are not supported" in result.stderr
+  assert "b.css" not in result.stderr
 
 
 def test_validator_rejects_symlinked_package_files(tmp_path):

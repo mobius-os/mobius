@@ -67,14 +67,14 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend runtime deps
         # frontend_watcher's publish validation executes the locked Acorn /
-        # eslint-scope checker. compile_jsx also uses the lockfile's esbuild,
+        # eslint-scope checker. compile_jsx also uses the lockfile's Rolldown,
         # eliminating a separate global CI pin that can drift from production.
         working-directory: frontend
         run: npm ci --ignore-scripts
       - name: Use locked frontend tools
         run: |
           echo "$GITHUB_WORKSPACE/frontend/node_modules/.bin" >> "$GITHUB_PATH"
-          frontend/node_modules/.bin/esbuild --version
+          frontend/node_modules/.bin/rolldown --version
       - name: Install backend deps
         working-directory: backend
         run: >-

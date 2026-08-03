@@ -36,7 +36,7 @@ test('canonical sources are flat, self-contained, and have no CSS imports', () =
     assert.doesNotMatch(
       source,
       /\b(?:import|export)\b[^'"\n]*['"][^'"]+\.css['"]/,
-      `${name} must not create an esbuild CSS side-output`,
+      `${name} must not create a CSS side-output`,
     )
     const imports = [...source.matchAll(
       /^\s*import(?:\s+[\s\S]+?\s+from)?\s*['"]([^'"]+)['"]/gm,

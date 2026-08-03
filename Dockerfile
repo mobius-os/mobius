@@ -42,7 +42,6 @@ RUN useradd -m -s /bin/bash mobius
 # agent-browser looks by default).
 # Discard npm's download cache in each layer: installed packages are the
 # runtime artifact; registry tarballs only make the production image larger.
-ARG ESBUILD_VERSION=0.28.1
 ARG CLAUDE_CODE_VERSION=2.1.220
 ARG AGENT_BROWSER_VERSION=0.33.2
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -52,8 +51,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
     fonts-liberation fonts-noto-color-emoji \
     && npm install -g --engine-strict --strict-allow-scripts \
-      --allow-scripts="esbuild@${ESBUILD_VERSION},@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION},agent-browser@${AGENT_BROWSER_VERSION}" \
-      "esbuild@${ESBUILD_VERSION}" \
+      --allow-scripts="@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION},agent-browser@${AGENT_BROWSER_VERSION}" \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
       @openai/codex@0.146.0 \
       "agent-browser@${AGENT_BROWSER_VERSION}" \

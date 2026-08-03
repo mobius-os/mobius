@@ -1045,7 +1045,7 @@ def _app_source_dir_for_static_asset(
 # all-DIGIT segment isn't mistaken for a content hash: a date-stamped name
 # like IMG-20260612.png or report.20260101.html is replaced in place on a
 # re-upload and MUST keep revalidate semantics — marking it immutable would
-# pin a year-stale copy in every client's cache. A real esbuild/Vite hash
+# pin a year-stale copy in every client's cache. A real content/Vite hash
 # always mixes in a-f (it's hex of a digest), so this never misfires on a
 # genuine content hash.
 _HASHED_ASSET_NAME = re.compile(

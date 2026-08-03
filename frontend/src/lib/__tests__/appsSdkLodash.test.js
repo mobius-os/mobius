@@ -1,7 +1,7 @@
 // Defense-in-depth for the lodash supply-chain risk. @openai/apps-sdk-ui pulls
 // lodash transitively, only through its `Slider` component — which the shell
 // does not import, so lodash is tree-shaken out of the shipped bundle entirely
-// (verified: an esbuild bundle of the apps-sdk-ui components we DO import
+// (verified: a Rolldown bundle of the apps-sdk-ui components we DO import
 // contains zero lodash). lodash is ALSO pinned to a patched 4.18.1 via
 // `overrides` in package.json. This test is the second layer: it fails the
 // moment the shell imports `Slider`, which would start shipping lodash and make

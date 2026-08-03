@@ -241,7 +241,7 @@ def test_external_scan_ignores_unreachable_files():
   URL in an unreferenced file (a build script, a test) is not flagged."""
   files = {
     "index.jsx": "export default () => null",
-    "build.mjs": "import 'https://esm.sh/esbuild'",
+    "build.mjs": "import 'https://esm.sh/rolldown'",
   }
   result = check_app_source(files, entry="index.jsx", source_files=["build.mjs"])
   assert result.warnings == []

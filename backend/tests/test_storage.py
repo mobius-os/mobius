@@ -991,7 +991,7 @@ async def test_recompile_app_bundle_commit_failure_keeps_live_bundle(
 async def test_recompile_app_bundle_bad_jsx_keeps_live_bundle(
   client, owner_token, db,
 ):
-  """An esbuild failure leaves the committed bundle untouched."""
+  """A Rolldown failure leaves the committed bundle untouched."""
   import os
   import app.models as models
   from app.compiler import recompile_app_bundle
@@ -1000,7 +1000,7 @@ async def test_recompile_app_bundle_bad_jsx_keeps_live_bundle(
   live = Path(row.compiled_path)
   before = live.read_bytes()
   # Has `export default` (passes the cheap guard) but the JSX is unclosed, so
-  # esbuild itself fails.
+  # Rolldown itself fails.
   bad_jsx = "export default function App(){ return <div> }"
   _set_legacy_source(row, bad_jsx)
   with pytest.raises(RuntimeError):

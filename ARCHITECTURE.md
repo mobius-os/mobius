@@ -49,7 +49,7 @@ docker-compose.yml    Self-hosted: Caddy (TLS) + app; on-demand recovery profile
 └── recovery profile  stopped-app root target + read-only worker on loopback
 ```
 
-The image bundles everything the agent needs at runtime (the Claude and Codex CLIs, esbuild, Node) so the platform works out of the box. To join an existing Caddy setup instead of the bundled one, use `docker-compose.override.example.yml`.
+The image bundles everything the agent needs at runtime (the Claude and Codex CLIs, Rolldown, Node) so the platform works out of the box. To join an existing Caddy setup instead of the bundled one, use `docker-compose.override.example.yml`.
 
 ### Frontend serving priority
 
@@ -160,7 +160,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `schemas.py` | Pydantic request/response models |
 | `auth.py` | bcrypt hashing, JWT creation/decoding, Fernet encryption |
 | `deps.py` | FastAPI auth dependencies: `get_current_owner` (owner-only), `get_current_owner_or_app` (owner + app token), `get_principal`, `require_app_permission`, and `reject_cross_site` (CSRF) |
-| `compiler.py` | `compile_jsx()` — calls the esbuild CLI to compile a JSX string into an ES module |
+| `compiler.py` | `compile_jsx()` — calls the Rolldown adapter to compile a JSX string into an ES module |
 | `providers.py` | `BaseProvider` adapters (`ClaudeProvider`, `CodexProvider`) + the `PROVIDERS` registry; identity/auth/env shaping for the SDK runners (`build_env`), and `get_skill_path()`. |
 | `claude_sdk_runner.py` | Claude SDK turn runner; passes `cli_path="/usr/local/bin/claude"` so the SDK drives the same pinned binary recovery + cron use |
 | `codex_sdk_runner.py` | Codex SDK turn runner (Thread/TurnHandle + steer) |
@@ -471,7 +471,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | `frontend/src/sw-cache-policy.js` | Authoritative cache-route policy (see *Service worker + offline* below) |
 | `frontend/src/lib/` | Cross-cutting helpers: `appToken.js`, `chatEmbed.js`, `themeService.js`, `onlineStatus.js`, `navHistory.js`, `errorLog.js`, etc. |
 
-**Mini-app modules are self-contained.** `app_compile_contract.py` points esbuild at the pinned production dependencies in `frontend/package.json`, injects React plus `mobius-runtime`, and bundles every used static import into one ESM artifact. The opaque frame asks its exact controlled parent to fetch and transfer that artifact, so a cold offline load performs no dependency subrequests. A compiler banner carries both a host ABI and an artifact revision: bump the revision to rebuild installed bundles for additive runtime changes, and bump the ABI only when old and new hosts are incompatible. Public `/vendor/` files remain only for true browser assets that code refers to by URL (currently the pdf.js worker, KaTeX CSS/fonts, and the D3/Pixi classic scripts); they are not a package resolver.
+**Mini-app modules are self-contained.** `app_compile_contract.py` points Rolldown at the pinned production dependencies in `frontend/package.json`, injects React plus `mobius-runtime`, and bundles every used static import into one ESM artifact. Production minification intentionally does not preserve JavaScript function/class names; apps must use explicit labels and stable keys instead of `Function.name`. The opaque frame asks its exact controlled parent to fetch and transfer that artifact, so a cold offline load performs no dependency subrequests. A compiler banner carries both a host ABI and an artifact revision: bump the revision to rebuild installed bundles for additive runtime changes, and bump the ABI only when old and new hosts are incompatible. Public `/vendor/` files remain only for true browser assets that code refers to by URL (currently the pdf.js worker, KaTeX CSS/fonts, and the D3/Pixi classic scripts); they are not a package resolver.
 
 ## Where do I make a change?
 
@@ -504,7 +504,7 @@ The in-product agent is a first-class reader of this code, and its behavior has 
 ```
 /data/
 ├── db/ultimate.db          SQLite database
-├── compiled/app-*-<sha256>.js  immutable esbuild output selected by each App row
+├── compiled/app-*-<sha256>.js  immutable Rolldown output selected by each App row
 ├── apps/<slug>/index.jsx   agent-editable JSX source (keyed by app slug)
 ├── apps/<slug>/...          per-app runtime data + per-app git repo
 ├── app-secrets/<id>/       encrypted app-scoped credentials (outside app repos)

@@ -4011,10 +4011,10 @@ def test_rename_keeps_old_slug_when_target_taken(
 #
 # A multi-file app's `index.jsx` imports sibling modules (`cards.js`, …)
 # declared in the manifest's `source_files`. Install must fetch them,
-# write them next to the entry, and compile with esbuild bundling the
+# write them next to the entry, and compile with Rolldown bundling the
 # import graph. An update merges the whole tree so locally edited siblings
 # survive. The JSX below imports a sibling so the compiled bundle proves
-# esbuild resolved + inlined it; the sibling spacing mirrors JSX_MULTI so
+# Rolldown resolved + inlined it; the sibling spacing mirrors JSX_MULTI so
 # git's line-based 3-way merge can interleave disjoint edits cleanly.
 
 JSX_IMPORTS_CARDS = (
@@ -4426,7 +4426,7 @@ def test_multifile_install_writes_siblings_and_bundles(
 ):
   """A fresh multi-file install writes index.jsx + the declared sibling to
   the source dir and the compiled bundle inlines the sibling's export — proof
-  esbuild resolved the `./cards.js` import from the on-disk source tree."""
+  Rolldown resolved the `./cards.js` import from the on-disk source tree."""
   base = "https://multi.test/repo/"
   r = _install_multi(
     client, auth, base, MANIFEST_MULTI, JSX_IMPORTS_CARDS, CARDS_V1,
@@ -4453,7 +4453,7 @@ def test_multifile_install_writes_siblings_and_bundles(
 # index.jsx imports a sibling the manifest's source_files never declares. The
 # synthetic-fetch path won't fetch it, so the install ships a tree that can't
 # resolve the import — the exact shape the Editor launch bug had. The
-# source-completeness check must reject it BEFORE esbuild, with its own 422.
+# source-completeness check must reject it BEFORE Rolldown, with its own 422.
 JSX_IMPORTS_UNDECLARED = (
   "import { CARD_LABEL } from './cards.js'\n"
   "import { EXTRA } from './extra.js'\n"

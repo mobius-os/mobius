@@ -343,7 +343,7 @@ def _process_identity(
     return "codex", None
   if "claude" in value:
     return "claude", None
-  if any(token in value for token in ("node", "npm", "esbuild", "vite")):
+  if any(token in value for token in ("node", "npm", "rolldown", "vite")):
     return "frontend_tools", None
   if "caddy" in value:
     return "proxy", "platform"

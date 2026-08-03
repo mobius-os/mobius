@@ -196,7 +196,7 @@ _STATIC_ASSETS_MANIFEST = ".mobius-static-assets.json"
 _PENDING_UPDATE_DIR = "mobius-pending-update"
 
 # Sibling source modules a multi-file mini-app declares alongside `entry`
-# (`cards.js`, `utils.js`, …) so esbuild can bundle the import graph. The shared
+# (`cards.js`, `utils.js`, …) so Rolldown can bundle the import graph. The shared
 # manifest contract caps the count; fetch additionally caps the summed bytes.
 _SOURCE_FILES_TOTAL_MAX = _CONTRACT_SOURCE_FILES_TOTAL_MAX
 

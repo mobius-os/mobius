@@ -316,7 +316,7 @@ def test_missing_import_compile_failure_returns_friendly_422(
   )
 
   # The source-completeness check now intercepts this synthetic-fetch case
-  # BEFORE esbuild — the entry imports a sibling that is neither declared in
+  # BEFORE Rolldown — the entry imports a sibling that is neither declared in
   # source_files nor fetched, so the install would ship an incomplete tree.
   # The 422 stays friendly (names the app + the file, no raw compiler/ANSI
   # noise) and is more specific than the old "Could not resolve".

@@ -53,7 +53,7 @@ scripts/submit-pr.sh
 ```
 
 **Backend (pytest).** Hermetic Docker path (no local venv, tests current source
-against the real image — esbuild, node, all deps):
+against the real image — Rolldown, Node, all deps):
 
 ```bash
 docker compose -p mobius-test -f docker-compose.test.yml build   # image must exist first

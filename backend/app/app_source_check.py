@@ -39,7 +39,7 @@ _SOURCE_EXTS = frozenset(
   {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
 )
 # Extension resolution order for a bare relative specifier, mirroring how
-# esbuild resolves `./x` -> `./x.jsx` / `./x/index.jsx`. The empty string is
+# The bundler resolves `./x` -> `./x.jsx` / `./x/index.jsx`. The empty string is
 # first so an already-suffixed specifier (`./x.js`) matches exactly.
 _RESOLVE_EXTS = ("", ".jsx", ".js", ".ts", ".tsx", ".mjs", ".cjs", ".json", ".css")
 _INDEX_BASENAMES = ("index.jsx", "index.js", "index.ts", "index.tsx")
@@ -194,7 +194,7 @@ def _relative_specifiers(source: str) -> list[str]:
 
 def _resolve(importer: str, spec: str, keys: Collection[str]) -> str | None:
   """Resolve a relative ``spec`` imported from ``importer`` to a key in the
-  tree, trying esbuild-style extension and directory-index resolution. Returns
+  tree, trying bundler-style extension and directory-index resolution. Returns
   the resolved key or ``None`` when nothing in the tree matches."""
   base = _norm(_parent(importer) + "/" + spec)
   for ext in _RESOLVE_EXTS:

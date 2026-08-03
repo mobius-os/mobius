@@ -3,12 +3,12 @@
 #
 # Worktrees don't get their own node_modules / backend venv, so this
 # resolves both from the MAIN checkout (the same trick the pre-push hook
-# uses): esbuild on PATH (the compile/install tests shell out to it) + the
+# uses): the locked frontend Rolldown tree + the
 # shared venv for deps, while the WORKTREE's backend/ is the code under test.
 # This removes the single most-repeated bit of friction — the long
 # PATH=... SECRET_KEY=... venv-python incantation — and sidesteps the
-# esbuild-PATH-from-worktree trap that has caused a ~70-test false alarm
-# (an empty PATH makes explicit app apply return "esbuild not installed", which
+# bundler-path-from-worktree trap that has caused a ~70-test false alarm
+# (a missing compiler makes explicit app apply fail, which
 # cascades and looks exactly like a mass regression).
 #
 # Usage (from anywhere inside a worktree or the main checkout):
@@ -44,7 +44,7 @@ CONTRIB_ROOT="$(dirname "$MAIN")/contrib"
 backend_test_node_deps() {
   local frontend="$1"
   local modules="$frontend/node_modules"
-  [ -x "$modules/.bin/esbuild" ] || return 1
+  [ -x "$modules/.bin/rolldown" ] || return 1
   NODE_PATH="$modules" node -e \
     "require.resolve('acorn'); require.resolve('eslint-scope')" \
     >/dev/null 2>&1
@@ -84,7 +84,7 @@ else
   echo "  install them with: (cd \"$ROOT/frontend\" && npm ci)" >&2
   exit 1
 fi
-ESB_DIR="$NODE_MODULES/.bin"
+NODE_BIN_DIR="$NODE_MODULES/.bin"
 
 # The runner changes cwd to backend/ before invoking pytest. Accept both the
 # backend-relative paths documented by pytest and the natural repo-relative
@@ -129,7 +129,8 @@ TEST_ENV=(env \
   MOBIUS_TEST_RUNTIME=1 \
   MOEBIUS_SKIP_BOOTSTRAP=1 \
   API_BASE_URL=http://127.0.0.1:9 \
-  PATH="$ESB_DIR:${PATH:-}" \
+  PATH="$NODE_BIN_DIR:${PATH:-}" \
+  MOBIUS_APP_NODE_PATH="$NODE_MODULES" \
   NODE_PATH="$NODE_MODULES${NODE_PATH:+:$NODE_PATH}" \
   SECRET_KEY="${SECRET_KEY:-$(python3 -c 'import secrets;print(secrets.token_hex(32))')}")
 

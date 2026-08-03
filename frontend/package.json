@@ -45,6 +45,7 @@
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "recharts": "2.15.4",
+    "rolldown": "~1.2.2",
     "three": "0.185.1"
   },
   "overrides": {
@@ -54,8 +55,7 @@
     "@eslint/js": "^10.0.1",
     "@tailwindcss/vite": "^4.3.2",
     "@vitejs/plugin-react": "^6.0.5",
-    "acorn": "^8.17.0",
-    "esbuild": "^0.28.1",
+    "acorn": "^8.18.0",
     "eslint": "^10.8.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-scope": "^9.1.2",

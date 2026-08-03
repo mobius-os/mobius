@@ -157,7 +157,7 @@ When the partner asks to share a local-first app as a repo, make the existing so
 1. Keep `mobius.json` at the repo root with stable `id`, `name`, `version`, `description`, `entry`, `icon`, complete `source_files`, any `static_assets`, permissions, and offline flags.
 2. Keep runtime data, tokens, logs, generated reports, and local caches out of the repo; source plus declared static assets only.
 3. Initialize git in the app source if needed: `git init -b main`, commit, push to GitHub, and keep the package at repo root on `main` or a tag. Root packages give the installer a real `origin` clone and clean PR-friendly diffs; repo subdirs and branch names with slashes fall back to synthetic upstream tracking.
-4. Run `python3 /data/platform/backend/scripts/validate-app.py /data/apps/<name>` before push. It checks the declared source/import closure and bundles the real entry with the installer’s exact esbuild contract, catching missing files, missing default exports, and production-only compile failures locally.
+4. Run `python3 /data/platform/backend/scripts/validate-app.py /data/apps/<name>` before push. It checks the declared source/import closure and bundles the real entry with the installer’s exact Rolldown contract, catching missing files, missing default exports, and production-only compile failures locally.
 5. Smoke-install from the raw GitHub `mobius.json` URL on a clean instance or under a test slug before calling it shareable.
 
 **Don't hand-bump a version constant in app source.** If an app carries its released version inline (e.g. `const APP_VERSION = '1.2.0'`), leave that line alone — the catalog/installer sets it per release, not your edits. Bumping it locally guarantees a merge conflict on the *next* update: your bump and the new release's bump land on the same line, so every update stops to ask the owner to reconcile a version number. Git already tracks your edits — you never need a version bump to record them. (This is the single most common avoidable update conflict.)
@@ -220,9 +220,8 @@ imports `index.jsx`):
   point. Siblings import relatively (`./storage.js`, `./ui/Chrome.jsx`) and the
   explicit apply recompiles when any accepted source sibling changes.
 - **Split the stylesheet as a `.js` exporting a CSS string** (`export const
-  CSS = \`...\``), NOT a sibling `.css` import — esbuild emits a `.css` import
-  as a separate artifact the single-module serving path won't deliver, so the
-  app loads unstyled. A `.js` CSS string is just JS and serves fine.
+  CSS = \`...\``), NOT a sibling `.css` import — the single-module compiler
+  rejects CSS side outputs. A `.js` CSS string is just JS and serves fine.
 - **You MAY gather chrome blocks into one `ui/Chrome.jsx`** once chrome is clearly
   its own concept in the app — until then colocate each fenced block where it's
   used (see the next bullet). Either way, `grep -rl 'mobius-ui:'` finds every copy
@@ -483,7 +482,7 @@ restyling UI and **copy the blocks you need**. The rules behind those shapes:
 - **GOTCHA — the stylesheet is a JS template literal.** A literal backtick, or a
   `${` sequence, anywhere in the CSS (inside an `url("data:image/svg+xml,…")`, a
   `content:` string, or even a comment) closes the literal or is read as JS
-  interpolation and breaks the esbuild compile. Keep backticks out of CSS, escape
+  interpolation and breaks JSX compilation. Keep backticks out of CSS, escape
   `${` as `\${`, and use single/double quotes inside `url()` / `content:`.
 - **Naming.** A short per-app class prefix (`mg-` memory, `cb-` atlas, a 2–3-char
   mnemonic for yours) + semantic kebab roles (`ma-header`, `ma-sheet`,
@@ -752,7 +751,7 @@ export default function MyApp({ appId, token }) {
 
 ## Libraries
 
-The canonical supported-import list lives in `backend/app/app_compile_contract.py`, with exact production versions pinned in `frontend/package.json`. Esbuild embeds React, `mobius-runtime`, and every package the app actually imports into one module. This is load-bearing: the in-shell frame has an opaque origin and cannot make service-worker-controlled dependency requests.
+The canonical supported-import list lives in `backend/app/app_compile_contract.py`, with exact production versions pinned in `frontend/package.json`. Rolldown embeds React, `mobius-runtime`, and every package the app actually imports into one module. Production minification does not preserve `Function.name` or `Class.name`; use explicit labels and stable keys. This is load-bearing: the in-shell frame has an opaque origin and cannot make service-worker-controlled dependency requests.
 
 **Use bare package specifiers:**
 

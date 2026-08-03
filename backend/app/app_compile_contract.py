@@ -1,10 +1,11 @@
 """Mini-app compile contract shared by the compiler and local validator."""
 
+import json
 import os
 from collections.abc import Mapping
 from pathlib import Path
 
-ESBUILD_TIMEOUT_SECS = 30
+ROLLDOWN_TIMEOUT_SECS = 30
 
 # Bare imports supported by the platform's self-contained app compiler. These
 # packages are resolved from the frontend runtime installation and bundled into
@@ -16,6 +17,7 @@ BUNDLED_RUNTIME_LIBS: tuple[str, ...] = (
   "react-dom/client",
   "recharts",
   "date-fns",
+  "lucide-react",
   "three",
   "three/addons/*",
   "pdfjs-dist",
@@ -40,7 +42,7 @@ COMPILED_RUNTIME_ABI = 1
 # compiled-runtime change that remains host-compatible. Keep ABI for actual
 # host/runtime incompatibilities: a revision-only rollout is safe while the
 # live checkout and backend process briefly run different generations.
-COMPILED_RUNTIME_ARTIFACT_REVISION = 4
+COMPILED_RUNTIME_ARTIFACT_REVISION = 5
 COMPILED_RUNTIME_GLOBAL = "__mobiusCompiledRuntime"
 COMPILED_RUNTIME_BANNER = (
   f"/* mobius-compiled-runtime-abi:{COMPILED_RUNTIME_ABI};"
@@ -71,20 +73,6 @@ def mobius_runtime_path() -> Path:
   return next((path for path in candidates if path.is_file()), candidates[-1])
 
 
-def esbuild_environment() -> dict[str, str]:
-  """Return a subprocess environment with app dependencies explicitly scoped.
-
-  Esbuild's CLI consumes Node's ``NODE_PATH`` environment variable (its JS API
-  calls the equivalent option ``nodePaths``); there is no ``--node-path`` CLI
-  flag. Replace rather than append any inherited value. ``NODE_PATH`` is only a
-  fallback after an entry's nearby ``node_modules``, so the compile command also
-  aliases every supported package root to the platform runtime installation.
-  """
-  environment = dict(os.environ)
-  environment["NODE_PATH"] = str(runtime_node_path())
-  return environment
-
-
 def _package_root(specifier: str) -> str:
   """Return the package root for a supported bare import or subpath."""
   clean = specifier.removesuffix("/*")
@@ -96,16 +84,16 @@ def _package_root(specifier: str) -> str:
 def runtime_library_aliases() -> tuple[tuple[str, Path], ...]:
   """Pin supported bare imports to one physical runtime package copy.
 
-  Esbuild normally resolves an app entry's imports relative to that app before
-  consulting ``NODE_PATH``. A gitignored development ``node_modules/react``
-  beside an app could therefore be bundled alongside the platform React used by
-  ``app_runtime_inject.js``. React then sees two dispatchers and every hook
-  fails at first render. Package-root aliases apply to the root and its subpaths
-  (for example ``react/jsx-runtime``), keeping each supported library singular.
+  Rolldown normally resolves an app entry's imports relative to that app. A
+  gitignored development ``node_modules/react`` beside an app could therefore
+  be bundled alongside the platform React used by ``app_runtime_inject.js``.
+  React then sees two dispatchers and every hook fails at first render.
+  Package-root aliases apply to the root and its subpaths (for example
+  ``react/jsx-runtime``), keeping each supported library singular.
 
   Three's documented ``three/addons/*`` export is backed by the physical
   ``examples/jsm`` directory rather than an ``addons`` directory. Once the
-  package root is replaced with an absolute alias, esbuild no longer consults
+  package root is replaced with an absolute alias, Rolldown no longer consults
   Three's package exports for that subpath. Pin the public addons spelling to
   its runtime-owned physical directory before adding the package roots.
 
@@ -146,63 +134,85 @@ CSS_IMPORT_ERROR = (
 )
 
 
-def esbuild_command(
+def rolldown_runner_path() -> Path:
+  return Path(__file__).with_name("rolldown_compile.mjs")
+
+
+def rolldown_command(
   entry: str | Path,
   output: str | Path,
   *,
-  metafile: str | Path | None = None,
+  report: str | Path,
 ) -> list[str]:
-  """Return the canonical production/preflight mini-app compile argv."""
-  command = [
-    "esbuild",
-    str(entry),
-    "--bundle",
-    "--format=esm",
-    "--jsx=automatic",
-    "--platform=browser",
-    # Mini-apps are runtime artifacts, not development builds. Without an
-    # explicit production define React selects its development branches and
-    # every app carries nearly a megabyte of validation/debug code that the
-    # opaque frame must copy, parse, and execute on every cold mount.
-    '--define:process.env.NODE_ENV="production"',
-    # Keep the one-module offline contract while reducing transfer, cache,
-    # parse, and evaluation cost. Preserve Function.name/Class.name for apps
-    # that use names in labels or diagnostics.
-    "--minify",
-    "--keep-names",
-    f"--banner:js={COMPILED_RUNTIME_BANNER}",
-    f"--inject:{runtime_inject_path()}",
-    f"--alias:mobius-runtime={mobius_runtime_path()}",
-    *(
-      f"--alias:{specifier}={path}"
-      for specifier, path in runtime_library_aliases()
-    ),
-    f"--outfile={output}",
+  """Return the canonical production/preflight Rolldown adapter argv."""
+  aliases = [
+    ("mobius-runtime", str(mobius_runtime_path())),
+    *((specifier, str(path)) for specifier, path in runtime_library_aliases()),
   ]
-  if metafile is not None:
-    command.append(f"--metafile={metafile}")
-  return command
+  config = {
+    "entry": str(entry),
+    "output": str(output),
+    "report": str(report),
+    "nodeModules": str(runtime_node_path()),
+    "runtimeInject": str(runtime_inject_path()),
+    "banner": COMPILED_RUNTIME_BANNER,
+    "aliases": aliases,
+    "cssImportError": CSS_IMPORT_ERROR,
+  }
+  return [
+    "node",
+    str(rolldown_runner_path()),
+    json.dumps(config, separators=(",", ":")),
+  ]
 
 
-def esbuild_metafile_contract_error(metafile: Mapping) -> str | None:
-  """Return an unsupported-output/default-export error from esbuild metadata.
+def rolldown_report_contract_error(report: Mapping) -> str | None:
+  """Return a single-module/default-export error from Rolldown's report.
 
-  Esbuild, rather than a source regex, is authoritative here. This recognizes
-  default re-exports and cannot be fooled by comments or string literals. The
-  same metadata also exposes CSS side output, which the mini-app module route
-  cannot serve.
+  Rolldown's generated chunks, rather than a source regex, are authoritative.
+  This recognizes default re-exports and cannot be fooled by comments or string
+  literals. The adapter also reports every emitted asset/import so the opaque
+  frame's one-module contract stays explicit. Absolute web imports remain a
+  documented escape hatch for online-only apps; source validation warns about
+  those separately.
   """
-  outputs = metafile.get("outputs")
-  if not isinstance(outputs, Mapping):
-    return "esbuild metadata did not describe any outputs"
+  outputs = report.get("outputs")
+  if not isinstance(outputs, list):
+    return "Rolldown did not describe any outputs"
   entry_outputs = [
-    details for details in outputs.values()
-    if isinstance(details, Mapping) and details.get("entryPoint")
+    details for details in outputs
+    if isinstance(details, Mapping) and details.get("isEntry")
   ]
   if not entry_outputs:
-    return "esbuild metadata did not describe the entry output"
-  if any(details.get("cssBundle") for details in entry_outputs):
+    return "Rolldown did not describe the entry output"
+  assets = [
+    details for details in outputs
+    if isinstance(details, Mapping) and details.get("type") == "asset"
+  ]
+  if any(
+    str(details.get("fileName", "")).endswith(".css")
+    for details in assets
+  ):
     return CSS_IMPORT_ERROR
-  if not any("default" in (details.get("exports") or []) for details in entry_outputs):
+  if assets:
+    return "Mini-app bundles cannot emit additional asset files."
+  if len(entry_outputs) != 1:
+    return "Mini-app bundles must contain exactly one entry module."
+  if len(outputs) != 1:
+    return "Mini-app bundles must contain exactly one output module."
+  entry_output = entry_outputs[0]
+  imports = entry_output.get("imports") or []
+  dynamic_imports = entry_output.get("dynamicImports") or []
+  if not isinstance(imports, list) or not isinstance(dynamic_imports, list):
+    return "Rolldown reported malformed module imports."
+  if any(
+    not isinstance(specifier, str)
+    or not specifier.startswith(("http://", "https://"))
+    for specifier in [*imports, *dynamic_imports]
+  ):
+    return "Mini-app bundles cannot contain external module imports."
+  if not any(
+    "default" in (details.get("exports") or []) for details in entry_outputs
+  ):
     return NO_DEFAULT_EXPORT_ERROR
   return None

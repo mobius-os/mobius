@@ -140,7 +140,6 @@ def test_node_runtime_satisfies_the_pinned_agent_browser_engine():
   preship = (ROOT / "scripts" / "preship-gate.sh").read_text(encoding="utf-8")
   assert "FROM node:24-trixie-slim AS node-runtime" in dockerfile
   pinned_script_packages = {
-    "esbuild": "ESBUILD_VERSION",
     "@anthropic-ai/claude-code": "CLAUDE_CODE_VERSION",
     "agent-browser": "AGENT_BROWSER_VERSION",
   }

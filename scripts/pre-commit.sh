@@ -13,7 +13,7 @@
 # Deliberately skipped:
 #   *.jsx / *.ts / *.tsx — node --check cannot parse these natively, and
 #                          we don't want to pull in a bundler on pre-commit.
-#                          esbuild runs in the build path; let it catch them.
+#                          Rolldown runs in the build path; let it catch them.
 #   tests, linters, formatters — too slow for a pre-commit gate.
 #
 # Install with `scripts/install-hooks.sh`. The installer copies this hook into

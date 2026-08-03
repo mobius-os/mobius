@@ -15,10 +15,10 @@ from app.app_compile_contract import (
   COMPILED_RUNTIME_ABI,
   COMPILED_RUNTIME_ARTIFACT_REVISION,
   COMPILED_RUNTIME_BANNER,
-  ESBUILD_TIMEOUT_SECS,
-  esbuild_command,
-  esbuild_environment,
+  ROLLDOWN_TIMEOUT_SECS,
   mobius_runtime_path,
+  rolldown_command,
+  rolldown_runner_path,
   runtime_library_aliases,
   runtime_inject_path,
   runtime_node_path,
@@ -54,6 +54,17 @@ INJECT = REPO_ROOT / "backend" / "app" / "app_runtime_inject.js"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
 
 
+def _compile(entry: Path, output: Path, *, report: Path | None = None):
+  report = report or output.with_name(f"{output.name}.report.json")
+  return subprocess.run(
+    rolldown_command(entry, output, report=report),
+    capture_output=True,
+    check=False,
+    text=True,
+    timeout=ROLLDOWN_TIMEOUT_SECS,
+  )
+
+
 def _package_name(specifier: str) -> str:
   clean = specifier.removesuffix("/*")
   if clean.startswith("@"):
@@ -73,20 +84,20 @@ def test_supported_runtime_packages_are_production_dependencies():
 
 
 def test_compile_command_bundles_the_complete_runtime_graph():
-  command = esbuild_command("entry.jsx", "app.js")
-  assert "--bundle" in command
-  assert '--define:process.env.NODE_ENV="production"' in command
-  assert "--minify" in command
-  assert "--keep-names" in command
-  assert not any(arg.startswith("--external:") for arg in command)
-  assert f"--banner:js={COMPILED_RUNTIME_BANNER}" in command
-  assert f"--inject:{runtime_inject_path()}" in command
-  assert not any(arg.startswith("--node-path") for arg in command)
-  assert esbuild_environment()["NODE_PATH"]
-  assert f"--alias:mobius-runtime={mobius_runtime_path()}" in command
+  command = rolldown_command("entry.jsx", "app.js", report="report.json")
+  assert command[:2] == ["node", str(rolldown_runner_path())]
+  config = json.loads(command[2])
+  assert config["entry"] == "entry.jsx"
+  assert config["output"] == "app.js"
+  assert config["report"] == "report.json"
+  assert config["banner"] == COMPILED_RUNTIME_BANNER
+  assert config["runtimeInject"] == str(runtime_inject_path())
+  aliases = dict(config["aliases"])
+  assert aliases["mobius-runtime"] == str(mobius_runtime_path())
   for specifier, path in runtime_library_aliases():
-    assert f"--alias:{specifier}={path}" in command
+    assert aliases[specifier] == str(path)
   assert runtime_inject_path().is_file()
+  assert rolldown_runner_path().is_file()
   assert mobius_runtime_path().is_file()
 
 
@@ -94,7 +105,7 @@ def test_compile_command_selects_production_react_and_keeps_one_module(tmp_path)
   """The size win must come from the real production graph, not externals."""
   entry = tmp_path / "entry.jsx"
   output = tmp_path / "app.js"
-  metafile = tmp_path / "app-meta.json"
+  report_path = tmp_path / "app-meta.json"
   entry.write_text(
     """import { useState } from 'react'
 
@@ -105,31 +116,26 @@ export default function NamedFixture() {
 """
   )
 
-  completed = subprocess.run(
-    esbuild_command(entry, output, metafile=metafile),
-    capture_output=True,
-    check=False,
-    env=esbuild_environment(),
-    text=True,
-    timeout=ESBUILD_TIMEOUT_SECS,
-  )
+  completed = _compile(entry, output, report=report_path)
   assert completed.returncode == 0, completed.stderr
 
-  metadata = json.loads(metafile.read_text())
-  inputs = set(metadata["inputs"])
+  report = json.loads(report_path.read_text())
+  inputs = set(report["inputs"])
   react_inputs = {name for name in inputs if "/react" in name}
   assert react_inputs
   assert not any(".development.js" in name for name in react_inputs)
   assert any(".production.js" in name for name in react_inputs)
 
   entry_outputs = [
-    details for details in metadata["outputs"].values()
-    if details.get("entryPoint")
+    details for details in report["outputs"]
+    if details.get("isEntry")
   ]
   assert len(entry_outputs) == 1
   assert entry_outputs[0].get("imports") == []
   assert output.stat().st_size < 400_000
-  assert "NamedFixture" in output.read_text()
+  compiled = output.read_text()
+  assert compiled.startswith(COMPILED_RUNTIME_BANNER)
+  assert "NamedFixture" not in compiled
 
 
 def test_app_local_or_transitive_react_cannot_shadow_platform_runtime(tmp_path):
@@ -163,14 +169,7 @@ export default function Fixture() {
 """
   )
 
-  completed = subprocess.run(
-    esbuild_command(entry, output),
-    capture_output=True,
-    check=False,
-    env=esbuild_environment(),
-    text=True,
-    timeout=ESBUILD_TIMEOUT_SECS,
-  )
+  completed = _compile(entry, output)
   assert completed.returncode == 0, completed.stderr
   assert "shadow-react-copy" not in output.read_text()
 
@@ -186,7 +185,7 @@ def test_three_addons_resolve_from_the_pinned_runtime(tmp_path):
 
   entry = tmp_path / "three-addons.jsx"
   output = tmp_path / "three-addons.js"
-  metafile = tmp_path / "three-addons-meta.json"
+  report_path = tmp_path / "three-addons-meta.json"
   entry.write_text(
     """import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { STLLoader } from 'three/addons/loaders/STLLoader.js'
@@ -197,20 +196,13 @@ export default function ThreeAddonsFixture() {
 """
   )
 
-  completed = subprocess.run(
-    esbuild_command(entry, output, metafile=metafile),
-    capture_output=True,
-    check=False,
-    env=esbuild_environment(),
-    text=True,
-    timeout=ESBUILD_TIMEOUT_SECS,
-  )
+  completed = _compile(entry, output, report=report_path)
   assert completed.returncode == 0, completed.stderr
 
-  metadata = json.loads(metafile.read_text())
+  report = json.loads(report_path.read_text())
   entry_outputs = [
-    details for details in metadata["outputs"].values()
-    if details.get("entryPoint")
+    details for details in report["outputs"]
+    if details.get("isEntry")
   ]
   assert len(entry_outputs) == 1
   assert entry_outputs[0].get("imports") == [], (
@@ -229,7 +221,7 @@ def test_marked_root_import_uses_the_pinned_esm_entry(tmp_path):
 
   entry = tmp_path / "marked.jsx"
   output = tmp_path / "marked.js"
-  metafile = tmp_path / "marked-meta.json"
+  report_path = tmp_path / "marked-meta.json"
   entry.write_text(
     """import { marked } from 'marked'
 
@@ -239,17 +231,10 @@ export default function MarkedFixture() {
 """
   )
 
-  completed = subprocess.run(
-    esbuild_command(entry, output, metafile=metafile),
-    capture_output=True,
-    check=False,
-    env=esbuild_environment(),
-    text=True,
-    timeout=ESBUILD_TIMEOUT_SECS,
-  )
+  completed = _compile(entry, output, report=report_path)
   assert completed.returncode == 0, completed.stderr
 
-  inputs = json.loads(metafile.read_text())["inputs"]
+  inputs = json.loads(report_path.read_text())["inputs"]
   assert any(path.endswith("/marked/lib/marked.esm.js") for path in inputs)
   assert not any(path.endswith("/marked/lib/marked.umd.js") for path in inputs)
 
@@ -315,7 +300,7 @@ def test_markdown_direct_imports_remain_supported():
 def test_markdown_dynamic_imports_compile_into_one_offline_module(tmp_path):
   entry = tmp_path / "markdown.jsx"
   output = tmp_path / "markdown.js"
-  metafile = tmp_path / "markdown-meta.json"
+  report_path = tmp_path / "markdown-meta.json"
   entry.write_text(
     """import React from 'react'
 
@@ -332,20 +317,13 @@ export default function MarkdownFixture() {
 """
   )
 
-  completed = subprocess.run(
-    esbuild_command(entry, output, metafile=metafile),
-    capture_output=True,
-    check=False,
-    env=esbuild_environment(),
-    text=True,
-    timeout=ESBUILD_TIMEOUT_SECS,
-  )
+  completed = _compile(entry, output, report=report_path)
   assert completed.returncode == 0, completed.stderr
 
-  metadata = json.loads(metafile.read_text())
+  report = json.loads(report_path.read_text())
   entry_outputs = [
-    details for details in metadata["outputs"].values()
-    if details.get("entryPoint")
+    details for details in report["outputs"]
+    if details.get("isEntry")
   ]
   assert len(entry_outputs) == 1
   assert entry_outputs[0].get("imports") == [], (
@@ -365,7 +343,7 @@ def test_openai_app_icons_compile_from_the_supported_public_entry(tmp_path):
 
   entry = tmp_path / "openai-icons.jsx"
   output = tmp_path / "openai-icons.js"
-  metafile = tmp_path / "openai-icons-meta.json"
+  report_path = tmp_path / "openai-icons-meta.json"
   entry.write_text(
     """import { ArrowLeft, Chat, Check, Copy, Search, Trash } from '@openai/apps-sdk-ui/components/Icon'
 
@@ -375,23 +353,73 @@ export default function OpenAIIconsFixture() {
 """
   )
 
-  completed = subprocess.run(
-    esbuild_command(entry, output, metafile=metafile),
-    capture_output=True,
-    check=False,
-    env=esbuild_environment(),
-    text=True,
-    timeout=ESBUILD_TIMEOUT_SECS,
-  )
+  completed = _compile(entry, output, report=report_path)
   assert completed.returncode == 0, completed.stderr
 
-  metadata = json.loads(metafile.read_text())
+  report = json.loads(report_path.read_text())
   entry_outputs = [
-    details for details in metadata["outputs"].values()
-    if details.get("entryPoint")
+    details for details in report["outputs"]
+    if details.get("isEntry")
   ]
   assert len(entry_outputs) == 1
   assert entry_outputs[0].get("imports") == [], (
     "OpenAI app icons escaped the pinned self-contained app bundle"
   )
+  assert output.is_file() and output.stat().st_size > 0
+
+
+def test_lucide_icons_compile_from_the_supported_public_entry(tmp_path):
+  """Existing apps use Lucide's package root for small inline icons."""
+  aliases = dict(runtime_library_aliases())
+  assert aliases["lucide-react"] == runtime_node_path() / "lucide-react"
+
+  entry = tmp_path / "lucide-icons.jsx"
+  output = tmp_path / "lucide-icons.js"
+  report_path = tmp_path / "lucide-icons-meta.json"
+  entry.write_text(
+    """import { Search } from 'lucide-react'
+
+export default function LucideIconsFixture() {
+  return <Search aria-label="search" />
+}
+"""
+  )
+
+  completed = _compile(entry, output, report=report_path)
+  assert completed.returncode == 0, completed.stderr
+
+  report = json.loads(report_path.read_text())
+  entry_outputs = [
+    details for details in report["outputs"]
+    if details.get("isEntry")
+  ]
+  assert len(entry_outputs) == 1
+  assert entry_outputs[0].get("imports") == []
+  assert output.is_file() and output.stat().st_size > 0
+
+
+def test_pdfjs_browser_worker_fallback_remains_supported(tmp_path):
+  """PDF.js intentionally retains import(this.workerSrc) as a fallback."""
+  entry = tmp_path / "pdfjs.jsx"
+  output = tmp_path / "pdfjs.js"
+  report_path = tmp_path / "pdfjs-meta.json"
+  entry.write_text(
+    """import { getDocument } from 'pdfjs-dist'
+
+export default function PdfFixture() {
+  return typeof getDocument
+}
+"""
+  )
+
+  completed = _compile(entry, output, report=report_path)
+  assert completed.returncode == 0, completed.stderr
+
+  report = json.loads(report_path.read_text())
+  entry_outputs = [
+    details for details in report["outputs"]
+    if details.get("isEntry")
+  ]
+  assert len(entry_outputs) == 1
+  assert entry_outputs[0].get("imports") == []
   assert output.is_file() and output.stat().st_size > 0
