@@ -1606,7 +1606,7 @@ export default function SettingsView({
           ) : (
             // Loading: no cached data yet and no error — the initial
             // in-flight fetch. Show a neutral notice instead of nothing.
-            <div className="settings__notice settings__notice--stacked" role="status">
+            <div className="settings__notice" role="status">
               Loading providers…
             </div>
           )}
@@ -1783,7 +1783,7 @@ export default function SettingsView({
             </div>
           )}
           {platformExternalActivation && (
-            <div className="settings__notice" role="status">
+            <div className="settings__notice settings__notice--stacked" role="status">
               {(platform?.activation?.guidance || []).map((line) => (
                 <span key={line}>{line}</span>
               ))}

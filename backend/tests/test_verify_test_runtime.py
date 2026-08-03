@@ -5,8 +5,8 @@ import shutil
 import subprocess
 import sys
 
-from scripts.verify_test_runtime import PLATFORM_ROOT, platform_head, validate_runtime
 from app.platform_activation import dependency_fingerprint_paths
+from scripts.verify_test_runtime import PLATFORM_ROOT, platform_head, validate_runtime
 
 
 SHA = "a" * 40
@@ -183,6 +183,7 @@ def test_image_deduplicates_agent_cli_payloads_without_breaking_sdk_contracts():
 
 def test_production_image_keeps_persistent_sso_checkouts_bootable():
   dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+  fingerprint_paths = dependency_fingerprint_paths(ROOT)
   requirements = (ROOT / "backend" / "requirements.txt").read_text(
     encoding="utf-8"
   )

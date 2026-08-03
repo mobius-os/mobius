@@ -508,10 +508,6 @@ valid_gateway_origin() {
 # rather than mounting keeps prod at permanent parity with the file CI
 # validates — the pre-edge setup drifted for months because the external proxy
 # had its own hand-written copy of these vhosts.
-#
-# EDGE_CSP_MODE=report-only downgrades the shell Content-Security-Policy to
-# Report-Only for a staged rollout (violations appear in the browser console
-# without breaking the page); default is enforce.
 install_edge_fragment() {
   external_prod_caddy_running || return 0
   local edge_dir="${MOBIUS_EDGE_DIR:-$HOME/projects/edge}"
@@ -565,18 +561,6 @@ install_edge_fragment() {
     rm -f "$rendered"
     exit 1
   fi
-  case "${EDGE_CSP_MODE:-enforce}" in
-    enforce) ;;
-    report-only)
-      sed -i 's|>Content-Security-Policy |>Content-Security-Policy-Report-Only |g' "$rendered"
-      info "edge fragment CSP rendered as Report-Only (EDGE_CSP_MODE=report-only)"
-      ;;
-    *)
-      rm -f "$rendered"
-      fail "EDGE_CSP_MODE must be 'enforce' or 'report-only'."
-      exit 1
-      ;;
-  esac
   # edgectl is transactional: a bad render never replaces the installed
   # fragment, a failed reload restores it, and the previously SERVED fragment
   # stays available as `edgectl rollback mobius`.

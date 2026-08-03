@@ -12,8 +12,9 @@ def test_ordered_levels_choose_the_highest_effective_action():
   )
 
   assert impact["level"] == "image_rebuild"
-  assert impact["actions"] == ["server_restart", "image_rebuild"]
-  assert impact["requires_operator"] is True
+  assert {reason["code"] for reason in impact["reasons"]} == {
+    "live_source", "server_runtime", "container_image_definition",
+  }
 
 
 def test_deployment_specific_inputs_share_contract_without_fake_commands():
@@ -24,11 +25,10 @@ def test_deployment_specific_inputs_share_contract_without_fake_commands():
     ["railway.toml"], deployment="self_hosted",
   )
 
-  assert caddy_on_railway["source_level"] == "proxy_reload"
   assert caddy_on_railway["level"] == "live"
-  assert caddy_on_railway["reasons"][0]["applies"] is False
-  assert railway_on_self_hosted["source_level"] == "container_recreate"
+  assert caddy_on_railway["reasons"] == []
   assert railway_on_self_hosted["level"] == "live"
+  assert railway_on_self_hosted["reasons"] == []
 
 
 def test_baked_runtime_and_dependencies_never_degrade_to_restart_only():
@@ -42,7 +42,6 @@ def test_baked_runtime_and_dependencies_never_degrade_to_restart_only():
   ):
     impact = activation.classify_activation([path], deployment="self_hosted")
     assert impact["level"] == "image_rebuild", path
-    assert impact["requires_operator"] is True
 
 
 def test_dependency_fingerprint_comes_from_the_image_rules():
@@ -58,10 +57,3 @@ def test_dependency_fingerprint_comes_from_the_image_rules():
     "frontend/package-lock.json",
     "frontend/package.json",
   })
-
-
-def test_no_global_cross_origin_isolation_is_hidden_in_activation_policy():
-  source = Path(__file__).resolve().parents[1] / "app" / "response_policy.py"
-  text = source.read_text(encoding="utf-8")
-  assert "Cross-Origin-Opener-Policy" not in text
-  assert "Cross-Origin-Embedder-Policy" not in text

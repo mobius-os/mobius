@@ -7,6 +7,8 @@ case injects a failure at the route seam, so the test remains hermetic even when
 its runner lives inside a real Möbius installation.
 """
 
+from app.platform_activation import classify_activation
+
 
 def test_update_preview_requires_owner(client):
   assert client.get("/api/platform/update-preview").status_code == 401
@@ -73,15 +75,9 @@ def test_apply_forwards_exact_reviewed_plan(client, auth, monkeypatch):
     return {
       "state": "restart_needed",
       "needs_restart": True,
-      "activation": {
-        "level": "server_restart",
-        "source_level": "server_restart",
-        "deployment": "self_hosted",
-        "actions": ["server_restart"],
-        "reasons": [],
-        "guidance": ["Restart Möbius."],
-        "requires_operator": False,
-      },
+      "activation": classify_activation(
+        ["backend/app/main.py"], deployment="self_hosted"
+      ),
       "upstream_commit": plan["target_sha"],
       "merge_commit": "3" * 40,
       "conflict_paths": [],

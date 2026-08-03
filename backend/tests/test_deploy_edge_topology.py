@@ -43,8 +43,3 @@ def test_stopped_shared_edge_never_falls_back_to_bundled_caddy():
   assert "{{.State.Status}}" in text
   assert "refusing to fall back to bundled Caddy" in text
   assert "Restore the shared edge proxy" in text
-
-
-def test_unknown_csp_mode_fails_instead_of_silently_enforcing():
-  text = SCRIPT.read_text(encoding="utf-8")
-  assert "EDGE_CSP_MODE must be 'enforce' or 'report-only'." in text

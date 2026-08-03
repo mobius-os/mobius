@@ -320,18 +320,16 @@ _APP_FRAME_CSP = app_frame_csp(
 _PUBLISHED_SITE_CSP = PUBLISHED_SITE_CSP
 
 
-def _frame_policy_exception(scope) -> bool:
-  """Exact routes whose own isolation permits a non-SAMEORIGIN ancestor."""
+def _is_public_service_surface(scope) -> bool:
+  """Whether the gateway host may frame this registered service route."""
   path = scope.get("path") or ""
-  if path == "/shell/embed/chat":
-    return True
-  if path.startswith("/services/"):
-    try:
-      from app.routes.local_services import is_public_service_surface_request
-      return is_public_service_surface_request(scope)
-    except Exception:
-      return False
-  return False
+  if not path.startswith("/services/"):
+    return False
+  try:
+    from app.routes.local_services import is_public_service_surface_request
+    return is_public_service_surface_request(scope)
+  except Exception:
+    return False
 
 
 class _SecurityHeadersMiddleware:
@@ -356,10 +354,10 @@ class _SecurityHeadersMiddleware:
     published_site = path.startswith(_PUBLISHED_SITE_PREFIX)
     chat_embed = path == "/shell/embed/chat"
     app_frame = bool(_APP_FRAME_PATH.fullmatch(path))
-    service_surface = path.startswith("/services/") and _frame_policy_exception(scope)
+    service_surface = _is_public_service_surface(scope)
     response_headers = list(_SECURITY_HEADERS)
     replaced_header_names = _SECURITY_HEADER_NAMES
-    if opaque_static_embed or _frame_policy_exception(scope):
+    if opaque_static_embed or chat_embed or service_surface:
       response_headers = [
         (name, value) for name, value in _SECURITY_HEADERS
         if name != _X_FRAME_OPTIONS

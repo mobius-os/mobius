@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="${MOBIUS_TEST_IMAGE_INPUT_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)}"
 CLASSIFIER="$ROOT/backend/app/platform_activation.py"
 mapfile -t files < <(
-  python3 "$CLASSIFIER" dependency-fingerprint-paths "$ROOT"
+  python3 "$CLASSIFIER" "$ROOT"
 )
 
 [ "${#files[@]}" -gt 0 ] || {

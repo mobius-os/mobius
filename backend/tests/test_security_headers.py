@@ -9,8 +9,7 @@ from app import main
 from app.main import (
   _PUBLISHED_SITE_CSP, _SHELL_CSP, _STATIC_EMBED_CSP, app,
 )
-from app.response_policy import CHAT_EMBED_CSP
-from app.routes.app_runtime import _app_frame_csp
+from app.response_policy import CHAT_EMBED_CSP, app_frame_csp
 
 
 def _headers(path="/api/health"):
@@ -88,7 +87,8 @@ def test_direct_shell_response_receives_the_origin_owned_policy():
   assert "https://esm.sh" in policy
   assert "img-src 'self' data: blob:" in policy
   assert "'wasm-unsafe-eval'" not in policy
-  assert "Cross-Origin-Opener-Policy" not in _headers()
+  assert "cross-origin-opener-policy" not in _headers()
+  assert "cross-origin-embedder-policy" not in _headers()
 
 
 def test_embedded_chat_allows_opaque_origin_app_ancestor():
@@ -171,12 +171,11 @@ def test_bundled_caddy_keeps_only_gateway_specific_response_policy():
   assert "{$MOBIUS_SERVICE_GATEWAY_ORIGIN} {" in gateway
 
 
-def test_backend_owns_complete_app_frame_policy(monkeypatch):
+def test_backend_owns_complete_app_frame_policy():
   """Direct managed and proxied installs receive one exact frame policy."""
   gateway = "https://services.example.test"
-  monkeypatch.setenv("MOBIUS_SERVICE_GATEWAY_ORIGIN", gateway)
-  policy = _app_frame_csp()
   origin = main.settings.frontend_origin.rstrip("/")
+  policy = app_frame_csp(origin, gateway)
 
   assert "sandbox allow-scripts" in policy
   assert "allow-popups-to-escape-sandbox" in policy
@@ -197,12 +196,11 @@ def test_backend_owns_complete_app_frame_policy(monkeypatch):
     assert "'self'" not in sources
 
 
-def test_app_frame_policy_drops_malformed_gateway_origin(monkeypatch):
-  monkeypatch.setenv(
-    "MOBIUS_SERVICE_GATEWAY_ORIGIN",
+def test_app_frame_policy_drops_malformed_gateway_origin():
+  policy = app_frame_csp(
+    main.settings.frontend_origin,
     "https://services.example.test; script-src *",
   )
-  policy = _app_frame_csp()
   assert "services.example.test" not in policy
   assert "script-src *" not in policy
 

@@ -37,22 +37,17 @@ class ActivationReason(TypedDict):
   """One independently actionable reason within a platform update."""
 
   code: str
-  level: str
   summary: str
   paths: list[str]
-  applies: bool
 
 
 class PlatformActivationImpact(TypedDict):
   """Owner-readable and machine-ordered activation result."""
 
   level: str
-  source_level: str
   deployment: DeploymentKind
-  actions: list[str]
   reasons: list[ActivationReason]
   guidance: list[str]
-  requires_operator: bool
 
 
 @dataclass(frozen=True)
@@ -183,7 +178,8 @@ def deployment_kind(environ: dict[str, str] | None = None) -> DeploymentKind:
     "RAILWAY_DEPLOYMENT_ID",
     "RAILWAY_PUBLIC_DOMAIN",
   )
-  return "railway" if any((env.get(key) or "").strip() for key in railway_markers) else "self_hosted"
+  on_railway = any((env.get(key) or "").strip() for key in railway_markers)
+  return "railway" if on_railway else "self_hosted"
 
 
 def _rule_for_path(path: str) -> _Rule | None:
@@ -196,7 +192,11 @@ def backend_import_probe_required(paths: Iterable[str]) -> bool:
   for path in paths:
     normalized = _normalize_path(path)
     rule = _rule_for_path(normalized)
-    if rule and rule.code == "server_runtime" and normalized != "skill/core.md":
+    if (
+      rule
+      and rule.level is ActivationLevel.SERVER_RESTART
+      and normalized != "skill/core.md"
+    ):
       return True
   return False
 
@@ -212,12 +212,21 @@ def _guidance(level: ActivationLevel, deployment: DeploymentKind) -> str:
     return "Restart Möbius after Apply so the running server loads the new source."
   if deployment == "railway":
     if level is ActivationLevel.CONTAINER_RECREATE:
-      return "Trigger a Railway deployment; an in-product restart cannot apply deployment configuration."
+      return (
+        "Trigger a Railway deployment; an in-product restart cannot apply "
+        "deployment configuration."
+      )
     if level is ActivationLevel.IMAGE_REBUILD:
-      return "Trigger a Railway image rebuild and deployment; Restart cannot install dependencies or baked tools."
+      return (
+        "Trigger a Railway image rebuild and deployment; Restart cannot "
+        "install dependencies or baked tools."
+      )
   else:
     if level is ActivationLevel.PROXY_RELOAD:
-      return "Refresh the host checkout, then reload Caddy; restarting Möbius does not reload the proxy."
+      return (
+        "Refresh the host checkout, then reload Caddy; restarting Möbius "
+        "does not reload the proxy."
+      )
     if level is ActivationLevel.CONTAINER_RECREATE:
       return "Refresh the host checkout, then recreate the affected Docker Compose services."
     if level is ActivationLevel.IMAGE_REBUILD:
@@ -230,7 +239,7 @@ def _guidance(level: ActivationLevel, deployment: DeploymentKind) -> str:
 def classify_activation(
   paths: Iterable[str], *, deployment: DeploymentKind | None = None,
 ) -> PlatformActivationImpact:
-  """Classify changed paths once, preserving both universal and local impact."""
+  """Classify the actions that apply to this installation."""
   active_deployment = deployment or deployment_kind()
   grouped: dict[str, tuple[_Rule | None, list[str]]] = {}
   for raw_path in paths:
@@ -244,48 +253,38 @@ def classify_activation(
     grouped[key][1].append(path)
 
   reasons: list[ActivationReason] = []
-  source_levels: list[ActivationLevel] = [ActivationLevel.LIVE]
-  effective_levels: list[ActivationLevel] = [ActivationLevel.LIVE]
+  action_levels: set[ActivationLevel] = set()
   for code, (rule, grouped_paths) in grouped.items():
     level = rule.level if rule else ActivationLevel.LIVE
-    applies = True if rule is None else _applies(rule, active_deployment)
-    source_levels.append(level)
-    if applies:
-      effective_levels.append(level)
+    if rule is not None and not _applies(rule, active_deployment):
+      continue
+    if level is not ActivationLevel.LIVE:
+      action_levels.add(level)
     reasons.append(ActivationReason(
       code=code,
-      level=level.value,
       summary=(
         rule.summary
         if rule
         else "These files are rebuilt, read on demand, or do not affect the running installation."
       ),
       paths=sorted(set(grouped_paths)),
-      applies=applies,
     ))
 
-  source_level = max(source_levels, key=LEVEL_ORDER.get)
-  required_level = max(effective_levels, key=LEVEL_ORDER.get)
-  action_levels = sorted(
-    {
-      ActivationLevel(reason["level"])
-      for reason in reasons
-      if reason["applies"] and reason["level"] != ActivationLevel.LIVE.value
-    },
+  required_level = max(
+    action_levels,
+    default=ActivationLevel.LIVE,
     key=LEVEL_ORDER.get,
   )
-  guidance = [_guidance(level, active_deployment) for level in action_levels]
+  ordered_actions = sorted(action_levels, key=LEVEL_ORDER.get)
+  guidance = [_guidance(level, active_deployment) for level in ordered_actions]
   if not guidance:
     guidance = [_guidance(ActivationLevel.LIVE, active_deployment)]
 
   return PlatformActivationImpact(
     level=required_level.value,
-    source_level=source_level.value,
     deployment=active_deployment,
-    actions=[level.value for level in action_levels],
     reasons=reasons,
     guidance=guidance,
-    requires_operator=LEVEL_ORDER[required_level] > LEVEL_ORDER[ActivationLevel.SERVER_RESTART],
   )
 
 
@@ -311,13 +310,10 @@ def dependency_fingerprint_paths(root: Path) -> list[str]:
 
 def _main() -> int:
   parser = argparse.ArgumentParser()
-  subparsers = parser.add_subparsers(dest="command", required=True)
-  fingerprint = subparsers.add_parser("dependency-fingerprint-paths")
-  fingerprint.add_argument("root", type=Path)
+  parser.add_argument("root", type=Path)
   args = parser.parse_args()
-  if args.command == "dependency-fingerprint-paths":
-    for path in dependency_fingerprint_paths(args.root.resolve()):
-      print(path)
+  for path in dependency_fingerprint_paths(args.root.resolve()):
+    print(path)
   return 0
 
 

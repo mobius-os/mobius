@@ -28,7 +28,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import app_git
+from app import app_git, platform_activation
 from app import platform_update as pu
 from app import release_channel
 
@@ -1250,25 +1250,28 @@ async def test_apply_marks_restart_when_disk_already_ahead_of_running_backend(
 # --- path-aware activation classifier ---------------------------------------
 
 def test_platform_update_uses_explicit_activation_levels():
-  assert pu._activation_for_paths(["backend/app/main.py"])["level"] == \
+  classify = platform_activation.classify_activation
+  assert classify(["backend/app/main.py"])["level"] == \
     "server_restart"
-  assert pu._activation_for_paths(["backend/config_helper.py"])["level"] == \
+  assert classify(["backend/config_helper.py"])["level"] == \
     "server_restart"
-  assert pu._activation_for_paths(["skill/core.md"])["level"] == \
+  assert classify(["skill/core.md"])["level"] == \
     "server_restart"
-  assert pu._activation_for_paths(["backend/requirements.txt"])["level"] == \
+  assert classify(["backend/requirements.txt"])["level"] == \
     "image_rebuild"
-  assert pu._activation_for_paths(["backend/scripts/entrypoint.sh"])["level"] == \
+  assert classify(["backend/scripts/entrypoint.sh"])["level"] == \
     "image_rebuild"
-  assert pu._activation_for_paths(["Caddyfile"])["level"] == "proxy_reload"
-  assert pu._activation_for_paths(["frontend/src/App.jsx"])["level"] == "live"
-  assert pu._activation_for_paths(["backend/tests/test_x.py"])["level"] == "live"
-  assert pu._activation_for_paths(["docs/backend/app/notes.md"])["level"] == "live"
+  assert classify(["Caddyfile"])["level"] == "proxy_reload"
+  assert classify(["frontend/src/App.jsx"])["level"] == "live"
+  assert classify(["backend/tests/test_x.py"])["level"] == "live"
+  assert classify(["docs/backend/app/notes.md"])["level"] == "live"
 
 
 def test_import_probe_classifier_excludes_constitution_only_change():
-  assert pu._paths_need_import_probe(["skill/core.md"]) is False
-  assert pu._paths_need_import_probe([
+  assert platform_activation.backend_import_probe_required(
+    ["skill/core.md"]
+  ) is False
+  assert platform_activation.backend_import_probe_required([
     "skill/core.md", "backend/app/chat.py",
   ]) is True
 
@@ -1301,8 +1304,7 @@ def test_changed_paths_no_renames_surfaces_deleted_backend(clone_env):
 
   paths = pu._changed_paths(platform, before, after)
   assert "backend/app/main.py" in paths  # delete side present
-  assert pu._tree_change_activation(platform, before, after)["level"] == \
-    "server_restart"
+  assert platform_activation.classify_activation(paths)["level"] == "server_restart"
 
 
 def test_empty_commit_does_not_force_restart(clone_env):
@@ -1313,20 +1315,18 @@ def test_empty_commit_does_not_force_restart(clone_env):
 
   assert before != after
   assert pu._changed_paths(platform, before, after) == []  # genuine empty diff
-  assert pu._tree_change_activation(platform, before, after)["level"] == "live"
+  assert pu._activation_paths_between(platform, before, after) == []
 
 
-def test_tree_change_activation_fails_closed_on_missing_sha(clone_env):
+def test_activation_paths_fail_closed_on_missing_sha(clone_env):
   origin, platform = clone_env
   served = _served_sha(platform)
   # one side unknown → can't prove no backend change → restart (fail closed)
-  assert pu._tree_change_activation(platform, served, None)["level"] == \
-    "server_restart"
-  assert pu._tree_change_activation(platform, None, served)["level"] == \
-    "server_restart"
+  assert pu._activation_paths_between(platform, served, None) == ["backend/app"]
+  assert pu._activation_paths_between(platform, None, served) == ["backend/app"]
   # both missing / equal → nothing changed
-  assert pu._tree_change_activation(platform, None, None)["level"] == "live"
-  assert pu._tree_change_activation(platform, served, served)["level"] == "live"
+  assert pu._activation_paths_between(platform, None, None) == []
+  assert pu._activation_paths_between(platform, served, served) == []
 
 
 def test_status_no_restart_when_only_frontend_changed(clone_env):
@@ -1373,7 +1373,6 @@ def test_status_requires_image_instead_of_offering_restart_for_dependencies(
   assert status["state"] == pu.PlatformUpdateState.ACTIVATION_NEEDED.value
   assert status["needs_restart"] is False
   assert status["activation"]["level"] == "image_rebuild"
-  assert status["activation"]["requires_operator"] is True
 
 
 def test_boot_clears_restart_but_preserves_unverified_image_work(clone_env):
@@ -1397,7 +1396,7 @@ def test_boot_clears_restart_but_preserves_unverified_image_work(clone_env):
 
 def test_boot_reconcile_clears_restart_flag(clone_env):
   origin, platform = clone_env
-  pu.mark_restart_needed("some-sha")
+  pu.mark_activation_needed("some-sha", ["backend/app"])
   assert pu.RESTART_NEEDED_FLAG.exists()
   # A boot with no new deploy is up_to_date; a boot IS the restart the flag asks
   # for, so it clears (the fresh process serves the on-disk code).
@@ -1408,7 +1407,7 @@ def test_boot_reconcile_clears_restart_flag(clone_env):
 
 def test_non_boot_reconcile_keeps_restart_flag(clone_env):
   origin, platform = clone_env
-  pu.mark_restart_needed("some-sha")
+  pu.mark_activation_needed("some-sha", ["backend/app"])
   # An owner-apply reconcile (at_boot=False) must NOT clear the flag on an
   # up-to-date pass — the running process is unchanged.
   res = pu.reconcile_clone(platform, at_boot=False)
@@ -1424,7 +1423,7 @@ def test_non_boot_reconcile_keeps_restart_flag(clone_env):
 
 def test_offline_boot_clears_stale_restart_flag(clone_env):
   origin, platform = clone_env
-  pu.mark_restart_needed("some-sha")
+  pu.mark_activation_needed("some-sha", ["backend/app"])
   assert pu.RESTART_NEEDED_FLAG.exists()
   # Force the fetch to fail so the reconcile returns 'offline' BEFORE reaching any
   # success/up-to-date branch — the flag must still clear (the boot IS the restart
@@ -1574,7 +1573,6 @@ def test_update_preview_warns_before_dependency_update_is_applied(clone_env):
   preview = pu.platform_update_preview(platform)
 
   assert preview["activation"]["level"] == "image_rebuild"
-  assert preview["activation"]["actions"] == ["image_rebuild"]
   assert "Restart cannot" not in " ".join(preview["activation"]["guidance"])
   assert "rebuild the image" in " ".join(preview["activation"]["guidance"])
 

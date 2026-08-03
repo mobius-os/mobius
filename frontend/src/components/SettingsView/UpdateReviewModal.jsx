@@ -137,7 +137,7 @@ export default function UpdateReviewModal({
     ? activation.guidance
     : []
   const activationReasons = Array.isArray(activation?.reasons)
-    ? activation.reasons.filter((reason) => reason?.applies)
+    ? activation.reasons
     : []
   const parsedFiles = useMemo(
     () => parseUnifiedDiff(preview?.diff),

@@ -3,7 +3,6 @@
 import asyncio
 import hashlib
 import json
-import os
 import re
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -20,7 +19,6 @@ from app.deps import get_current_owner, resolve_owner_or_app
 from app.http_caching import strip_range
 from app.net_utils import validate_url_safe
 from app.resource_access import live_app, live_app_or_404
-from app.response_policy import absolute_csp_origin, app_frame_csp
 
 
 router = APIRouter()
@@ -247,17 +245,6 @@ def _not_modified_if_match(
       headers["X-Mobius-Offline"] = "1"
     return Response(status_code=304, headers=headers)
   return None
-
-
-_absolute_csp_origin = absolute_csp_origin
-
-
-def _app_frame_csp() -> str:
-  """Complete mini-app policy shared by every deployment topology."""
-  return app_frame_csp(
-    get_settings().frontend_origin,
-    os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", ""),
-  )
 
 
 def _frame_etag(

@@ -264,6 +264,13 @@ class PlatformApplyResult(TypedDict):
   reconciliation: dict[str, list[str]]
 
 
+class _ActivationMarker(TypedDict):
+  """Validated durable activation remainder."""
+
+  target_sha: str
+  paths: list[str]
+
+
 class PlatformRestartResponse(TypedDict):
   """Response shape for ``POST /api/platform/restart``."""
 
@@ -886,7 +893,7 @@ def recorded_upstream_sha(repo: Path = PLATFORM_REPO) -> str | None:
   return _rev(repo, UPSTREAM_BRANCH) or None
 
 
-def _read_activation_marker() -> dict[str, object] | None:
+def _read_activation_marker() -> _ActivationMarker | None:
   """Read the current target+paths marker, including the legacy bare SHA."""
   try:
     raw = RESTART_NEEDED_FLAG.read_text(encoding="utf-8").strip()
@@ -923,15 +930,9 @@ def _write_activation_marker(target_sha: str, paths: list[str]) -> None:
 
 def mark_activation_needed(target_sha: str, paths: list[str]) -> None:
   """Persist activation work, preserving any earlier host/image remainder."""
-  existing = _read_activation_marker() or {}
-  existing_paths = existing.get("paths")
-  carried = existing_paths if isinstance(existing_paths, list) else []
+  existing = _read_activation_marker()
+  carried = existing["paths"] if existing else []
   _write_activation_marker(target_sha, [*carried, *paths])
-
-
-def mark_restart_needed(target_sha: str) -> None:
-  """Compatibility helper for callers that know only a server restart is due."""
-  mark_activation_needed(target_sha, ["backend/app"])
 
 
 def _served_platform_sha() -> str | None:
@@ -950,63 +951,44 @@ def _served_platform_sha() -> str | None:
   return sha or None
 
 
-def _paths_need_import_probe(paths: list[str]) -> bool:
-  """True iff changed files can affect backend imports in a fresh process."""
-  return platform_activation.backend_import_probe_required(paths)
-
-
-def _activation_for_paths(paths: list[str]) -> PlatformActivationImpact:
-  return platform_activation.classify_activation(paths)
+def _activation_paths_between(
+  repo: Path, before: str | None, after: str | None,
+) -> list[str]:
+  """Changed paths, failing closed to backend runtime when unreadable."""
+  if before == after:
+    return []
+  if not before or not after:
+    return ["backend/app"]
+  paths = _changed_paths(repo, before, after)
+  return ["backend/app"] if paths is None else paths
 
 
 def _tree_change_needs_import_probe(
   repo: Path, before: str | None, after: str | None
 ) -> bool:
   """Whether a reconciled tree needs the defensive throwaway backend boot."""
-  if before == after:
-    return False
-  if not before or not after:
-    return True
-  paths = _changed_paths(repo, before, after)
-  if paths is None:
-    return True
-  return _paths_need_import_probe(paths)
-
-
-def _tree_change_activation(
-  repo: Path, before: str | None, after: str | None,
-) -> PlatformActivationImpact:
-  """Activation contract for a tree delta, failing closed to a server restart."""
-  if before == after:
-    return _activation_for_paths([])
-  if not before or not after:
-    return _activation_for_paths(["backend/app"])
-  paths = _changed_paths(repo, before, after)
-  if paths is None:
-    return _activation_for_paths(["backend/app"])
-  return _activation_for_paths(paths)
+  return platform_activation.backend_import_probe_required(
+    _activation_paths_between(repo, before, after)
+  )
 
 
 def _pending_activation_paths(repo: Path = PLATFORM_REPO) -> list[str]:
-  marker = _read_activation_marker() or {}
-  marker_paths = marker.get("paths")
-  paths = list(marker_paths) if isinstance(marker_paths, list) else []
+  marker = _read_activation_marker()
+  paths = list(marker["paths"]) if marker else []
   served = _served_platform_sha()
   if served:
     try:
       head = _rev(repo, _local_branch(repo))
     except Exception:
       head = None
-    changed = _changed_paths(repo, served, head) if head else None
-    if changed:
-      paths.extend(changed)
+    paths.extend(_activation_paths_between(repo, served, head))
   return sorted({str(path) for path in paths if str(path)})
 
 
 def _platform_activation_impact(
   repo: Path = PLATFORM_REPO,
 ) -> PlatformActivationImpact:
-  return _activation_for_paths(_pending_activation_paths(repo))
+  return platform_activation.classify_activation(_pending_activation_paths(repo))
 
 
 def _complete_boot_activation(repo: Path) -> None:
@@ -1021,10 +1003,8 @@ def _complete_boot_activation(repo: Path) -> None:
   if not marker:
     RESTART_NEEDED_FLAG.unlink(missing_ok=True)
     return
-  paths = marker.get("paths")
-  if not isinstance(paths, list):
-    return
-  target = str(marker.get("target_sha") or "")
+  paths = marker["paths"]
+  target = marker["target_sha"]
   build = current_build_sha()
   build_contains_target = bool(
     target and build and (_rev(repo, build) or "")
@@ -1036,7 +1016,7 @@ def _complete_boot_activation(repo: Path) -> None:
   }
   remaining: list[str] = []
   for path in paths:
-    level = _activation_for_paths([str(path)])["level"]
+    level = platform_activation.classify_activation([path])["level"]
     if level in {
       platform_activation.ActivationLevel.LIVE.value,
       platform_activation.ActivationLevel.SERVER_RESTART.value,
@@ -1726,6 +1706,17 @@ def managed_release_ready_sync() -> str:
   )
 
 
+def _state_for_activation(
+  impact: PlatformActivationImpact,
+) -> PlatformUpdateState:
+  level = impact["level"]
+  if level == platform_activation.ActivationLevel.SERVER_RESTART.value:
+    return PlatformUpdateState.RESTART_NEEDED
+  if level == platform_activation.ActivationLevel.LIVE.value:
+    return PlatformUpdateState.UP_TO_DATE
+  return PlatformUpdateState.ACTIVATION_NEEDED
+
+
 def boot_guard_sync() -> str:
   """Shell entry point run after reconcile and before uvicorn.
 
@@ -1750,6 +1741,7 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
   conflict = CONFLICT_FLAG.exists() or _reconcile_in_progress(repo)
   rolled_back = ROLLED_BACK_FLAG.exists()
   activation = _platform_activation_impact(repo)
+  activation_state = _state_for_activation(activation)
   restart_needed = (
     activation["level"]
     == platform_activation.ActivationLevel.SERVER_RESTART.value
@@ -1778,10 +1770,8 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
     # An update is available but its last apply failed the import probe.
     state = PlatformUpdateState.ROLLED_BACK
     available = True
-  elif restart_needed:
-    state = PlatformUpdateState.RESTART_NEEDED
-  elif activation["level"] != platform_activation.ActivationLevel.LIVE.value:
-    state = PlatformUpdateState.ACTIVATION_NEEDED
+  elif activation_state is not PlatformUpdateState.UP_TO_DATE:
+    state = activation_state
   elif available:
     state = PlatformUpdateState.AVAILABLE
   else:
@@ -1835,7 +1825,7 @@ def empty_platform_update_preview(
   return PlatformUpdatePreview(
     state=PlatformUpdateState.UP_TO_DATE.value, available=False,
     current_sha=current_sha, target_sha=target_sha, plan_id=None,
-    activation=_activation_for_paths([]),
+    activation=platform_activation.classify_activation([]),
     total_commits=0, commits_truncated=False,
     commits=[], files=[], diff=None, diff_truncated=False, conflict_paths=[],
   )
@@ -1972,7 +1962,7 @@ def _platform_update_preview_unlocked(repo: Path) -> PlatformUpdatePreview:
       state=PlatformUpdateState.AVAILABLE.value, available=True,
       current_sha=local_sha, target_sha=target,
       plan_id=_update_plan_id(local_sha, target) if local_sha else None,
-      activation=_activation_for_paths(["backend/app"]),
+      activation=platform_activation.classify_activation(["backend/app"]),
       total_commits=0, commits_truncated=False, commits=[], files=[],
       diff=None, diff_truncated=False, conflict_paths=[],
     )
@@ -1980,14 +1970,12 @@ def _platform_update_preview_unlocked(repo: Path) -> PlatformUpdatePreview:
   commits = _preview_commits(repo, base, target)
   total_commits = _preview_commit_count(repo, base, target)
   conflict = _read_conflict_flag() or {}
-  activation_paths = _changed_paths(repo, base, target)
-  if activation_paths is None:
-    activation_paths = ["backend/app"]
+  activation_paths = _activation_paths_between(repo, base, target)
   return PlatformUpdatePreview(
     state=PlatformUpdateState.AVAILABLE.value, available=True,
     current_sha=local_sha, target_sha=target,
     plan_id=_update_plan_id(local_sha, target) if local_sha else None,
-    activation=_activation_for_paths(activation_paths),
+    activation=platform_activation.classify_activation(activation_paths),
     total_commits=total_commits,
     commits_truncated=total_commits > len(commits),
     commits=commits,
@@ -2044,27 +2032,11 @@ async def apply_platform_update(
 
       def record_current_activation(head: str | None) -> PlatformActivationImpact:
         served = _served_platform_sha()
-        if served == head:
-          changed_paths: list[str] = []
-        elif not served or not head:
-          changed_paths = ["backend/app"]
-        else:
-          maybe_paths = _changed_paths(repo, served, head)
-          changed_paths = ["backend/app"] if maybe_paths is None else maybe_paths
-        incoming_impact = _tree_change_activation(repo, served, head)
-        if (
-          incoming_impact["source_level"]
-          != platform_activation.ActivationLevel.LIVE.value
-        ):
+        changed_paths = _activation_paths_between(repo, served, head)
+        incoming_impact = platform_activation.classify_activation(changed_paths)
+        if incoming_impact["level"] != platform_activation.ActivationLevel.LIVE.value:
           mark_activation_needed(head or "", changed_paths)
         return _platform_activation_impact(repo)
-
-      def clean_state(impact: PlatformActivationImpact) -> PlatformUpdateState:
-        if impact["level"] == platform_activation.ActivationLevel.SERVER_RESTART.value:
-          return PlatformUpdateState.RESTART_NEEDED
-        if impact["level"] != platform_activation.ActivationLevel.LIVE.value:
-          return PlatformUpdateState.ACTIVATION_NEEDED
-        return PlatformUpdateState.UP_TO_DATE
 
       if res.status == "updated":
         publish_progress(PlatformUpdatePhase.FINALIZING)
@@ -2077,7 +2049,7 @@ async def apply_platform_update(
         # incoming target: local commits made while uvicorn ran are part of the
         # same activation remainder.
         activation = record_current_activation(res.new_sha)
-        state = clean_state(activation)
+        state = _state_for_activation(activation)
       elif res.status == "conflict":
         # Keep the resolver gated behind the owner's next click. A conflict pass
         # rewrites the flag with target + paths, so preserve a previously opened
@@ -2100,7 +2072,7 @@ async def apply_platform_update(
       elif res.status == "up_to_date":
         head = _rev(repo, _local_branch(repo)) or res.pre_sha
         activation = record_current_activation(head)
-        state = clean_state(activation)
+        state = _state_for_activation(activation)
       else:  # offline / skipped — nothing changed; tell the UI plainly.
         raise PlatformUpdateError(res.error or res.status)
 

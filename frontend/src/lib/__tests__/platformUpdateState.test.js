@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  platformActivationLabel,
   platformStatusFromApply,
   platformUpdateStatusLabel,
 } from '../platformUpdateState.js'
@@ -44,6 +45,7 @@ test('an image-required apply projects the external activation contract', () => 
   assert.equal(projected.available, false)
   assert.equal(projected.needs_restart, false)
   assert.equal(projected.activation, activation)
+  assert.equal(platformActivationLabel(projected.activation), 'Image rebuild')
   assert.equal(platformUpdateStatusLabel(projected), 'Image rebuild required')
 })
 
