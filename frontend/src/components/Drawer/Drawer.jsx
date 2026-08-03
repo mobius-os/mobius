@@ -649,14 +649,13 @@ export default function Drawer({
       })
       return () => cancelAnimationFrame(focusFrame)
     } else {
-      // Restore focus when the drawer closes so keyboard users land
-      // back on the toggle that opened it (or whatever was focused). Do not
-      // steal focus back from a destination that already accepted the handoff.
+      // Restore focus when the drawer closes so keyboard users land back on the
+      // toggle that opened it (or whatever was focused). An accepted handoff
+      // never reaches here — the guard above already stood this effect down.
       const shouldRestore = shouldRestoreDrawerFocus({
         drawer: drawerRef.current,
         activeElement: document.activeElement,
         body: document.body,
-        focusHandoffActive,
       })
       if (shouldRestore
           && previousFocusRef.current

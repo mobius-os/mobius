@@ -65,6 +65,7 @@ import {
   rememberCreatedChat,
   reusableChatDetailVerdict,
 } from './newChatPolicy.js'
+import { newChatPresentationSuperseded } from './newChatPresentation.js'
 import {
   forgetConfirmedDeletion,
   forgetConfirmedDeletionIfExists,
@@ -983,6 +984,17 @@ export default function Shell() {
     ))
     finishDrawerNavigationPresentation()
   }, [finishDrawerNavigationPresentation, workspaceStateRef])
+
+  // Display-ready above is the cover's ONLY completion signal, and it belongs to
+  // the destination — a destination the owner has already left never emits it.
+  // Take the bridge down as soon as another surface owns the full-bleed box, or
+  // the New chat landing would stay painted over that surface indefinitely.
+  useEffect(() => {
+    if (!newChatPresentationSuperseded(newChatPresentation, fullBleedKey)) return
+    setNewChatPresentation(current => (
+      current === newChatPresentation ? null : current
+    ))
+  }, [fullBleedKey, newChatPresentation])
 
   // At most two ChatViews per transitioning owner: the last painted chat and the
   // current active chat. Handoff dedupe is world-local: Standard's retained copy
@@ -2517,8 +2529,11 @@ export default function Shell() {
     // tap immediately instead of leaving the drawer/old transcript painted for
     // the whole async allocation. Builder stays additive and therefore waits
     // for the concrete id before opening its new tab.
+    // originKey is the surface the cover is painted over until the row exists.
+    // It is what tells a still-running allocation apart from the owner having
+    // navigated somewhere else while it ran.
     const presentation = focusComposer && ws.viewMode === 'single'
-      ? { chatId: null }
+      ? { chatId: null, originKey: fullBleedKey ?? null }
       : null
     if (presentation) {
       setNewChatPresentation(presentation)

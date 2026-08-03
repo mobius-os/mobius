@@ -35,14 +35,11 @@ export function shouldRestoreDrawerFocus({
   drawer,
   activeElement,
   body,
-  focusHandoffActive = false,
 } = {}) {
-  return !focusHandoffActive && (
-    !activeElement
+  return !activeElement
     || activeElement === body
     || !drawer
     || drawer.contains(activeElement)
-  )
 }
 
 function cssTimeMs(value) {
