@@ -15,6 +15,7 @@ import json
 import logging
 import time
 
+import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
@@ -41,6 +42,22 @@ log = logging.getLogger(__name__)
 # Keepalive cadence for the shell-level SSE — same value used in
 # chats_stream so proxies behave consistently.
 _KEEPALIVE_INTERVAL = 30
+
+
+class _SystemEventStreamingResponse(StreamingResponse):
+  """Close the event iterator when ASGI abandons an in-flight body send."""
+
+  async def __call__(self, scope, receive, send):
+    try:
+      await super().__call__(scope, receive, send)
+    finally:
+      close = getattr(self.body_iterator, "aclose", None)
+      if close is not None:
+        # A server can cancel the outer ASGI task as well as Starlette's body
+        # task. Re-enter the suspended async generator even in that state.
+        with anyio.CancelScope(shield=True):
+          await close()
+
 
 # Characters kept from a build_phase label. The label is the one free-text
 # field on this otherwise-closed schema and renders untrusted in the chat foot
@@ -344,9 +361,13 @@ async def stream_system_events(
     principal.embed_session_id if principal.scope == "chat_embed" else None
   )
   db.close()
-  queue = get_system_broadcast().subscribe()
 
   async def generate():
+    # Pair registration with this generator's finally across the whole live
+    # body lifetime. Subscribing while constructing the StreamingResponse
+    # leaks a queue when the client disconnects before body iteration starts.
+    broadcast = get_system_broadcast()
+    queue = broadcast.subscribe()
     last_embed_auth_check = 0.0
 
     def embed_session_active() -> bool:
@@ -380,9 +401,9 @@ async def stream_system_events(
           continue
         yield f"data: {json.dumps(event)}\n\n"
     finally:
-      get_system_broadcast().unsubscribe(queue)
+      broadcast.unsubscribe(queue)
 
-  return StreamingResponse(
+  return _SystemEventStreamingResponse(
     generate(),
     media_type="text/event-stream",
     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
