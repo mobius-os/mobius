@@ -658,9 +658,12 @@ export default function useStreamConnection(chatId, {
 
     try {
       const res = await fetch(
-        `${BASE}/api/chats/${chatIdRef.current}/stream?snapshot=1`,
+        `${BASE}/api/chats/${chatIdRef.current}/stream`,
         {
-          headers: getAuthHeaders(),
+          headers: {
+            ...getAuthHeaders(),
+            'X-Mobius-Stream-Snapshot': '1',
+          },
           signal: controller.signal,
         },
       )

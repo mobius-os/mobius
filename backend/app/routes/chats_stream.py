@@ -6,7 +6,7 @@ import logging
 import time
 from pathlib import Path as FilePath
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.responses import Response
 from sqlalchemy.orm import Session
@@ -1143,7 +1143,7 @@ async def cancel_pending_message(
 async def stream_chat(
   request: Request,
   chat_id: str,
-  snapshot: bool = False,
+  snapshot: bool = Header(False, alias="X-Mobius-Stream-Snapshot"),
   principal: Principal = Depends(get_chat_view_principal),
   db: Session = Depends(get_db),
 ):

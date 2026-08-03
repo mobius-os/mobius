@@ -31,8 +31,8 @@ test('active DB, live deltas, and reconnect snapshots share one assistant surfac
     'the live source must feed the same DB-shaped payload consumed by MsgContent')
   assert.match(chatViewSource, /key=\{streamingDataKey\}[\s\S]*dataKey=\{streamingDataKey\}/,
     'the active row key and scroll-anchor data-key must remain stable across source selection')
-  assert.match(streamHookSource, /\/stream\?snapshot=1/,
-    'new clients must opt into snapshot catch-up without changing old-client replay')
+  assert.match(streamHookSource, /\/stream[\s\S]*?'X-Mobius-Stream-Snapshot': '1'/,
+    'new clients must opt into snapshot catch-up without changing the stable stream URL')
   assert.match(
     streamHookSource,
     /event\.type === 'stream_snapshot'[\s\S]*catchUpItems = Array\.isArray\(event\.items\)[\s\S]*event\.items\.filter\(Boolean\)/,
