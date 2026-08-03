@@ -387,8 +387,8 @@ if __name__ == "__main__":
     raise
   except BaseException as exc:
     # A crash in the supervisor itself (lease publication, /proc read,
-    # Popen) must not die silently under cron. SIGTERM is deliberately
-    # not trapped: a handler would buy one log line at the cost of
-    # masking the kill semantics uninstall/shutdown rely on.
+    # Popen) must not die silently under cron. Outside the child-wait window,
+    # SIGTERM keeps its default action; _execute_job ignores it only while it
+    # must retain the lease through uninstall's TERM/KILL process-group grace.
     _log(sys.argv[1] if len(sys.argv) > 1 else "?", f"crashed: {exc!r}")
     raise
