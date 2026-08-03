@@ -89,8 +89,7 @@ test('an implicit home tab does not engage the single-pane tab strip', () => {
 test('the canonical workspace snapshot survives a closed PWA relaunch', () => {
   assert.match(
     shell,
-    /useWorkspaceSession\(\{\s*storage: localStorage,\s*legacyStorage: sessionStorage,\s*\}\)/,
-    'the durable snapshot remains canonical while the one-time session migration stays available',
+    /useWorkspaceSession\(\{ storage: localStorage \}\)/,
   )
   assert.doesNotMatch(
     shell,
@@ -641,7 +640,7 @@ test('the logo keeps the stable "Toggle navigation" name; gesture rides aria-des
   assert.match(shellBrand, /builderModeActive \? 'Builder mode' : 'Single screen'/)
 })
 
-test('mobile tabs require a hold before dragging while the strip preserves pinch zoom', () => {
+test('one held drawer-row gesture resolves menu, reorder, or workspace drag', () => {
   assert.match(shellCss, /\.shell__tabstrip\s*\{[\s\S]*?touch-action:\s*pan-x pinch-zoom/)
   assert.match(shellCss, /\.shell__tab-open\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pinch-zoom/)
   assert.doesNotMatch(shellCss, /data-touch-drag-handle/)
@@ -652,44 +651,42 @@ test('mobile tabs require a hold before dragging while the strip preserves pinch
   assert.match(drawerCss, /\.drawer__row \.drawer__item\[data-drag-key\]\s*\{[\s\S]*?touch-action:\s*pan-y pinch-zoom/)
   assert.match(dragBinding, /touchTabMoveIntent\(dx, dy\)/)
   assert.match(dragBinding, /scrollStripEl\.scrollLeft \+= previousPoint\.x - ev\.clientX/)
-  assert.match(
+  assert.doesNotMatch(
     dragBinding,
     /sourceKind === 'drawer' && e\.pointerType !== 'mouse'\) return/,
-    'touch drawer rows must not enter the workspace drag-out controller',
+    'touch drawer rows must remain available to the workspace drag controller',
   )
-  assert.match(drawer, /heldDrawerRowIntent\(dx, dy, true\)/)
-  assert.match(drawer, /openItemMenuAt\(\{ x: point\.clientX, y: point\.clientY \}\)/)
+  assert.match(dragBinding, /sourceKind === 'drawer' \? DRAWER_HOLD_MS : TAB_HOLD_MS/)
+  assert.match(dragBinding, /if \(sourceKind !== 'drawer'\) arm\(\)/,
+    'a drawer hold waits for intent rather than opening or dragging immediately')
+  assert.match(dragBinding, /drawerRowMoveIntent\(dx, dy, \{[\s\S]*?held,[\s\S]*?isTouch,[\s\S]*?data-pinned-key/,
+    'one pure decision boundary owns the held row directions')
+  assert.match(dragBinding, /intent === 'reorder'[\s\S]*?beginReorder/,
+    'the reorder outcome hands off to the row implementation')
+  assert.match(dragBinding, /intent === 'workspace'\) arm\(\)/,
+    'the workspace outcome arms the shared drag implementation')
+  assert.match(dragBinding, /sourceKind === 'drawer' && held[\s\S]*?cleanup\(\{ suppressClick: true \}\)[\s\S]*?handler\?\.openMenu\?\.\(point\)/,
+    'a stationary held release opens actions only after cleanup')
   assert.doesNotMatch(dragBinding, /openTabMenuAtRef/)
   assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
-  assert.match(drawer, /function beginTouchMenuHold\(event, \{ touchEvents = false \} = \{\}\)/)
-  assert.match(drawer, /function onRowTouchStart\(event\)[\s\S]*?beginPinnedReorder\(event, \{ touchEvents: true \}\)/)
-  assert.match(drawer, /if \(event\.pointerType === 'touch'\) return/)
-  assert.equal((drawer.match(/window\.addEventListener\('touchmove', onMove, \{ capture: true, passive: true \}\)/g) || []).length, 2,
-    'ordinary drawer-row scrolling must begin with passive touch listeners')
-  assert.equal((drawer.match(/holdTimerRef\.current = setTimeout\(\(\) => \{[\s\S]*?window\.addEventListener\('touchmove', onMove, \{ capture: true, passive: false \}\)/g) || []).length, 2,
-    'only a resolved hold may promote row gestures to cancelable ownership')
-  assert.doesNotMatch(drawer, /blockingTouchMove|function claimTouchMoves/)
-  assert.equal((drawer.match(/window\.addEventListener\('touchend', onUp, \{ capture: true, passive: false \}\)/g) || []).length, 2,
-    'held row releases must be allowed to suppress their compatibility click')
-  assert.match(drawer, /onTouchStart=\{onRowTouchStart\}/)
-  assert.match(drawer, /function drawerGestureEndPoint\(event, pointerId, touchEvents, fallback\)[\s\S]*?!touchWithIdentifier\(event\.touches, pointerId\)[\s\S]*?return fallback/,
-    'a terminal Android touch with empty changedTouches must still settle the first hold')
-  assert.equal((drawer.match(/const point = drawerGestureEndPoint\(cancelEvent, pointerId, touchEvents, lastPoint\)/g) || []).length, 2,
-    'pinned and recent rows must both settle a cancelled touch hold')
-  assert.match(drawer, /const openMenu = touchEvents && held && !cancelledAfterHold/,
-    'a recognized stationary hold must open even when Android terminates it with touchcancel')
-  assert.match(drawer, /const openMenu = touchEvents && held && !dragging && !cancelledAfterHold/,
-    'a stationary pinned hold must open while a cancelled reorder still rolls back')
+  assert.match(shell, /const drawerRowGesturesRef = useRef\(new Map\(\)\)/)
+  assert.match(drawer, /const registry = drawerRowGesturesRef\.current[\s\S]*?registry\.set\(key, drawerGestureHandlerRef\)/)
+  assert.doesNotMatch(drawer, /pinnedReorderIntent|heldDrawerRowIntent/,
+    'the row implementation must not classify the same gesture a second time')
+  assert.doesNotMatch(drawer, /onTouchStart|addEventListener\('touchmove'|addEventListener\('touchend'/,
+    'reordering has one Pointer Events lifecycle')
+  assert.doesNotMatch(drawer, /beginTouchMenuHold|touchMenuCleanupRef|drawerGestureEndPoint/,
+    'drawer menu access must not own a parallel custom touch lifecycle')
   assert.match(drawer, /const TOUCH_CONTEXT_MENU_PROVENANCE_MS = 1500/)
   assert.match(drawer, /function suppressTouchContextMenu\(event\)[\s\S]*?event\.nativeEvent\?\.pointerType[\s\S]*?contextPointerType === 'touch'[\s\S]*?freshTouchPointer[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?stopImmediatePropagation/)
-  assert.equal((drawer.match(/onContextMenuCapture=\{suppressTouchContextMenu\}/g) || []).length, 2,
-    'touch contextmenu must be stopped before the shared bubble-phase menu opener')
-  assert.match(drawerCss, /\.drawer__row \.drawer__item\s*\{[\s\S]*?-webkit-touch-callout:\s*none/)
-  assert.match(drawer, /sourceBtn\.setAttribute\('data-hold-ready', 'true'\)/)
-  assert.match(drawer, /const openMenu = held && !dragging && !cancelledAfterHold/)
-  assert.match(drawer, /if \(openMenu\) openItemMenuAt\(\{ x: point\.clientX, y: point\.clientY \}\)/)
-  assert.match(drawer, /if \(intent === 'cancel'\)[\s\S]*?cancelledAfterHold = true/)
-  assert.match(drawerCss, /\.drawer__item\[data-hold-ready="true"\]/)
+  assert.equal((drawer.match(/onContextMenuCapture=\{suppressTouchContextMenu\}/g) || []).length, 1,
+    'the card still suppresses native contextmenu during its own hold')
+  assert.doesNotMatch(drawerCss, /\.drawer__row \.drawer__item\s*\{[\s\S]*?-webkit-touch-callout:/,
+    'the shared controller owns callout suppression for its full hold window')
+  assert.doesNotMatch(drawer, /data-hold-ready/)
+  assert.match(drawer, /if \(dragging\) \{[\s\S]*?settle\(false\)/,
+    'a cancelled pinned reorder still rolls back')
+  assert.doesNotMatch(drawerCss, /data-hold-ready/)
 })
 
 test('drawer swipe-to-close leaves vertical scrolling on the native pointer path', () => {
@@ -833,7 +830,7 @@ test('live preview reveal keeps the workspace controller distinct from device mo
   assert.doesNotMatch(shell, /const mode = paneModel\.modeForRect\(contentRect\)/)
 })
 
-test('drawer rows preserve ordering, action identity, and app artwork', () => {
+test('large drawer lists memoize ordering and row actions without changing row ownership', () => {
   assert.match(drawer, /useMemo\(\(\) => buildDrawerSections\(chats, apps\), \[chats, apps\]\)/)
   assert.match(drawer, /const filteredApps = useMemo\(/)
   assert.match(drawer, /const rowActions = useMemo\(/)
@@ -841,6 +838,9 @@ test('drawer rows preserve ordering, action identity, and app artwork', () => {
   assert.match(drawer, /visibleRecents\.map\(\(\{ kind, item \}\)[\s\S]*?item=\{item\}[\s\S]*?actions=\{rowActions\}/)
   assert.match(drawer, /item=\{app\}[\s\S]*?actions=\{rowActions\}/)
   assert.doesNotMatch(drawer, /onSelect=\{\(\) => on(?:Chat|App)/)
+})
+
+test('mixed recents reserve artwork for apps without redundant chat icons', () => {
   assert.match(drawer, /kind === 'app'[\s\S]*?<AppIcon/)
   assert.doesNotMatch(drawer, /drawer__chat-icon|<Chat\b|<Clock\b|<PinFilled\b/)
 })
@@ -871,13 +871,13 @@ test('the Möbius header keeps its phone divider but flows into desktop navigati
   )
 })
 
-test('row-owned context menus need no permanent kebab or hidden anchor', () => {
+test('drawer rows keep action and reorder chrome out of the list', () => {
   assert.match(drawer, /<DrawerItemActionMenu[\s\S]*?itemKind=\{kind\}/)
   assert.doesNotMatch(
     drawer,
-    /triggerHidden|drawer__menu-anchor|drawer__more|DotsVerticalMoreMenu/,
+    /triggerHidden|drawer__menu-anchor|drawer__more|drawer__row-actions|drawer__reorder-handle|DotsHorizontalMoreMenu|DotsVerticalMoreMenu|GripVertical/,
   )
-  assert.doesNotMatch(drawerCss, /drawer__menu-anchor|drawer__more/)
+  assert.doesNotMatch(drawerCss, /drawer__menu-anchor|drawer__more|drawer__row-actions|drawer__reorder-handle/)
   assert.match(drawer, /onContextMenu=\{openItemMenu\}/)
   assert.match(
     drawer,
@@ -903,31 +903,32 @@ test('chat deletion is immediate while app deletion still requires confirmation'
   )
 })
 
-test('drawer row menus use one semantic context-menu path across pointer types', () => {
-  assert.match(drawer, /function openItemMenuAt\(point\)[\s\S]*?actions\.toggleMenu\(kind, id, true, surface,/)
+test('drawer row actions have one opening path without a custom touch hold', () => {
+  assert.match(drawer, /function openItemMenuAt\(point,[\s\S]*?actions\.toggleMenu\(kind, id, true, surface,/)
   assert.equal((drawer.match(/onContextMenu=\{openItemMenu\}/g) || []).length, 2,
-    'app cards, app rows, and chat rows must share one opening function')
-  assert.match(drawer, /if \(openMenu\) openItemMenuAt\(\{ x: point\.clientX, y: point\.clientY \}\)/)
+    'app cards and drawer rows must share one semantic opening function')
+  assert.match(drawer, /if \(suppressTouchContextMenu\(event\)\) return/,
+    'native touch contextmenu must never pre-empt the shared held gesture')
   assert.doesNotMatch(
     dragBinding,
     /srcEl\.closest\('\.drawer__row'\)\?\.querySelector\('\.drawer__more'\)\?\.click\(\)/,
     'touch hold must not depend on a synthetic trigger click',
   )
+  assert.doesNotMatch(drawer, /function beginTouchMenuHold/,
+    'drawer rows must not add a second touch lifecycle beside the shared controller')
   assert.match(drawerItemActionMenu, /function consumeOutsidePointer\(event\)[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?stopImmediatePropagation/)
-  assert.match(drawerItemActionMenu, /onPointerDown=\{event => \{[\s\S]*?consumeOutsidePointer\(event\)[\s\S]*?\}\}/)
-  assert.match(drawerItemActionMenu, /onClick=\{event => \{[\s\S]*?if \(consumeOutsidePointer\(event\)\) close\(\)/)
+  assert.match(drawerItemActionMenu, /onPointerDown=\{event => \{[\s\S]*?outsidePressStartedRef\.current = true[\s\S]*?\}\}/)
+  assert.match(drawerItemActionMenu, /onClick=\{event => \{[\s\S]*?!outsidePressStartedRef\.current\) return[\s\S]*?close\(\)/)
   assert.doesNotMatch(drawer, /navigator\.vibrate/,
     'drawer rows rely on platform long-press feedback instead of adding a second vibration')
 })
 
-test('one touch hold cannot dismiss its own drawer row menu', () => {
-  assert.equal((drawer.match(/if \(touchEvents && held\) upEvent\.preventDefault\(\)/g) || []).length, 2,
-    'both pinned and unpinned touch holds must consume the trailing compatibility click')
-  assert.match(
-    drawer,
-    /const openMenu = held && !cancelledAfterHold[\s\S]*?if \(touchEvents && held\) upEvent\.preventDefault\(\)[\s\S]*?cleanup\(\{ suppressClick: held \}\)[\s\S]*?if \(openMenu\) openItemMenuAt/,
-    'the release must be consumed before mounting the outside-dismiss layer',
-  )
+test('an opening press cannot dismiss its own action menu', () => {
+  assert.match(drawerItemActionMenu, /const outsidePressStartedRef = useRef\(false\)/)
+  assert.match(drawerItemActionMenu, /if \(!consumeOutsidePointer\(event\) \|\| !outsidePressStartedRef\.current\) return/,
+    'a retargeted opener click has no layer-owned pointerdown and must be ignored')
+  assert.match(drawerItemActionMenu, /onPointerCancel=\{\(\) => \{[\s\S]*?outsidePressStartedRef\.current = false/,
+    'a cancelled outside press cannot authorize a later unrelated click')
 })
 
 test('a secondary-button release cannot immediately select a flipped drawer menu item', () => {
@@ -935,11 +936,11 @@ test('a secondary-button release cannot immediately select a flipped drawer menu
   assert.match(drawer, /event\.pointerType !== 'mouse' \|\| event\.button !== 2/)
   assert.match(drawer, /window\.addEventListener\('pointerup', onSecondaryPointerUp, true\)/)
   assert.match(drawer, /upEvent\.pointerId !== pointerId \|\| upEvent\.button !== 2/)
-  assert.match(drawer, /cleanup\(\)[\s\S]*?actions\.toggleMenu\(kind, id, true, surface, placement\)/)
+  assert.match(drawer, /cleanup\(\)[\s\S]*?openItemMenuAt\(placement, sourceBtn\)/)
   assert.match(drawer, /timer = setTimeout\(cleanup, 1500\)/)
 })
 
-test('launcher cards and drawer rows share the same long-press threshold and movement slop', () => {
+test('launcher cards and drawer rows share one deliberate hold threshold', () => {
   const dragImports = drawer.match(
     /import \{([\s\S]*?)\} from '\.\.\/Shell\/dragController\.js'/,
   )?.[1] || ''
@@ -947,6 +948,12 @@ test('launcher cards and drawer rows share the same long-press threshold and mov
   assert.match(dragImports, /PRE_HOLD_MOVE_PX/)
   assert.match(drawer, /\}, DRAWER_HOLD_MS\)/)
   assert.match(drawer, /> PRE_HOLD_MOVE_PX/)
+  assert.match(dragBinding, /sourceKind === 'drawer' \? DRAWER_HOLD_MS : TAB_HOLD_MS/)
+  assert.doesNotMatch(
+    drawer.match(/function beginPinnedReorder\([\s\S]*?\n  function onRowPointerDown/)?.[0] || '',
+    /DRAWER_HOLD_MS/,
+    'the shared controller, not the reorder implementation, owns hold timing',
+  )
   assert.doesNotMatch(drawer, /520/)
 })
 

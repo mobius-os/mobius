@@ -5,7 +5,7 @@ import {
   HYSTERESIS_PX, ROOT_EDGE_PX, CARET_W, CARET_H, CENTER_INSET, DRAWER_EXIT_PX,
   CHIP_MOUSE_DX, CHIP_MOUSE_DY, CHIP_TOUCH_ABOVE,
   EDGE_BAND_MIN, EDGE_BAND_FRACTION,
-  passedSlop, touchTabMoveIntent, releasedInPlace, chipOffset,
+  passedSlop, touchTabMoveIntent, drawerRowMoveIntent, releasedInPlace, chipOffset,
   clientPointToLocal,
   crossedDrawerExit, edgeBands, edgePreviewRect, caretZone, edgeZone, centerZone,
   rootEdgeZone, hitTest, zoneTarget, releaseZone, zoneEq, buildScene,
@@ -60,6 +60,20 @@ test('touchTabMoveIntent reserves every pre-hold tab move for scrolling', () => 
   assert.equal(touchTabMoveIntent(0, 8.1), 'scroll', 'vertical jitter does not bypass the hold')
   assert.equal(touchTabMoveIntent(8.1, 0), 'scroll', 'horizontal pull scrolls over a tab body')
   assert.equal(PRE_HOLD_MOVE_PX, 8)
+})
+
+test('drawerRowMoveIntent resolves one gesture without competing owners', () => {
+  const touchPin = { isTouch: true, pinned: true }
+  assert.equal(drawerRowMoveIntent(4, 4, touchPin), 'pending')
+  assert.equal(drawerRowMoveIntent(0, 9, touchPin), 'yield',
+    'movement before the hold returns to native navigation')
+  assert.equal(drawerRowMoveIntent(0, 9, { ...touchPin, held: true }), 'reorder')
+  assert.equal(drawerRowMoveIntent(9, 0, { ...touchPin, held: true }), 'workspace')
+  assert.equal(drawerRowMoveIntent(-9, 0, { ...touchPin, held: true }), 'cancel')
+  assert.equal(drawerRowMoveIntent(0, 9, { isTouch: true, held: true }), 'cancel',
+    'an unpinned row cannot enter the reorder branch')
+  assert.equal(drawerRowMoveIntent(0, 6, { pinned: true }), 'reorder',
+    'mouse rows use ordinary drag slop without a hold')
 })
 
 test('releasedInPlace is true only within the release radius', () => {

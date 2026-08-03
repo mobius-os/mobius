@@ -348,14 +348,6 @@
   background-color: var(--surface);
 }
 
-/* The hold threshold has resolved, but the owner has not moved or released yet.
-   A quiet lift is the button-free affordance: release opens actions; vertical
-   movement of a pin becomes reorder. */
-.drawer__item[data-hold-ready="true"] {
-  background: var(--surface);
-  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.20);
-}
-
 /* The lifted row while it is being dragged to a new spot. It reads as "picked
    up" — raised surface + shadow — rather than faded, so the movement is legible.
    The vertical follow/settle transform lives on the parent .drawer__row. */
@@ -441,13 +433,10 @@
 .drawer__row .drawer__item {
   flex: 1;
   min-width: 0;
-  /* iOS can cancel the pointer and show its callout before our release path.
-     This property affects touch callouts only; desktop context menus remain. */
-  -webkit-touch-callout: none;
 }
 
-/* Drawer rows scroll vertically before a hold. Once a hold resolves, the local
-   row gesture owns menu/reorder and the shared drawer swipe recognizer yields. */
+/* Row bodies keep native vertical scrolling until their deliberate hold wins.
+   The pinned reorder handle below owns its pointer stream independently. */
 .drawer__row .drawer__item[data-drag-key] {
   touch-action: pan-y pinch-zoom;
 }

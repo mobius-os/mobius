@@ -3,7 +3,9 @@ import * as tabModel from './tabModel.js'
 import { STRIP_H } from './paneModel.js'
 import {
   buildScene, hitTest, zoneTarget, releaseZone, chipOffset, STRIP_CARET_PAD,
-  passedSlop, touchTabMoveIntent, releasedInPlace, TAB_HOLD_MS, crossedDrawerExit,
+  passedSlop, touchTabMoveIntent, drawerRowMoveIntent, releasedInPlace,
+  TAB_HOLD_MS, DRAWER_HOLD_MS,
+  crossedDrawerExit,
   rootEdgeAllowed, clientPointToLocal,
 } from './dragController.js'
 
@@ -75,6 +77,7 @@ export default function useWorkspaceDrag({
   labelForTabRef, // ref → (tab) => string
   dragActiveRef, // shared flag the Drawer's swipe-close handlers stand down on
   drawerOpenRef,
+  drawerRowGesturesRef, // key -> ref({ openMenu, beginReorder }) registered by Drawer rows
   closeDrawer,
   openDrawer,
   onPreviewBuilder, // (active, { committed }) => void — enter/leave the LIVE
@@ -261,6 +264,7 @@ export default function useWorkspaceDrag({
           ? (workspaceStateRef.current.ws.panes[paneId]?.tabs.length || 0)
           : 0,
       })
+      const drawerGesture = () => drawerRowGesturesRef?.current?.get(key)?.current
 
       // iOS callout/selection suppression begins NOW (pointerdown), scoped to the
       // source, for the WHOLE hold window — not at arm, when the magnifier has
@@ -304,18 +308,18 @@ export default function useWorkspaceDrag({
         }
       }
 
-      // Tabs use one unambiguous touch contract across their whole surface:
-      // movement before the hold belongs to strip scrolling; surviving the short
-      // hold lifts the tab so a following move drags it. Drawer touch rows never
-      // enter this controller: Drawer owns their menu/reorder gesture as one
-      // interaction, so a held finger cannot also glide navigation closed.
+      // Tabs and drawer rows share this ONE pointer owner. Tabs lift as soon as
+      // their hold resolves. A drawer hold stays undecided until the owner moves
+      // or releases: outward movement lifts into the workspace, vertical movement
+      // of a pin hands off to its reorder implementation, and release in place
+      // opens actions. Pre-hold movement returns to native scroll/swipe.
       if (isTouch) {
         holdTimer = setTimeout(() => {
           if (cancelled || cleaned) return
           held = true
           if (navigator.vibrate) { try { navigator.vibrate(8) } catch { /* unsupported */ } }
-          arm()
-        }, TAB_HOLD_MS)
+          if (sourceKind !== 'drawer') arm()
+        }, sourceKind === 'drawer' ? DRAWER_HOLD_MS : TAB_HOLD_MS)
       }
 
       function stopAutoScroll() {
@@ -396,7 +400,28 @@ export default function useWorkspaceDrag({
           return
         }
         if (!armed) {
-          if (isTouch) {
+          if (sourceKind === 'drawer') {
+            const intent = drawerRowMoveIntent(dx, dy, {
+              held,
+              isTouch,
+              pinned: srcEl.hasAttribute('data-pinned-key'),
+            })
+            if (intent === 'pending') return
+            if (intent === 'reorder') {
+              const handler = drawerGesture()
+              ev.preventDefault?.()
+              cancelled = true
+              cleanup()
+              handler?.beginReorder?.({ pointerId, start, moveEvent: ev })
+              return
+            }
+            if (intent === 'workspace') arm()
+            else {
+              cancelled = true
+              cleanup()
+            }
+            if (!armed) return
+          } else if (isTouch) {
             const intent = touchTabMoveIntent(dx, dy)
             if (intent === 'scroll') {
               clearTimeout(holdTimer)
@@ -412,19 +437,7 @@ export default function useWorkspaceDrag({
             }
             if (!armed) return
           } else {
-            if (sourceKind === 'drawer') {
-              // Drawer rows have two orthogonal mouse gestures: a deliberate
-              // rightward pull leaves navigation for the workspace, while a
-              // vertical drag belongs to pinned-item reordering. The previous
-              // any-axis arm contradicted that contract and stole vertical
-              // movement before the drawer could reorder it.
-              if (Math.abs(dy) > Math.abs(dx) && passedSlop(dx, dy)) {
-                cancelled = true
-                cleanup()
-                return
-              }
-              if (dx > 0 && Math.abs(dx) >= Math.abs(dy) && passedSlop(dx, dy)) arm()
-            } else if (passedSlop(dx, dy)) arm()
+            if (passedSlop(dx, dy)) arm()
             if (!armed) return
           }
         }
@@ -491,6 +504,11 @@ export default function useWorkspaceDrag({
         if (!armed) {
           if (scrolling) {
             cleanup({ suppressClick: true })
+          } else if (isTouch && sourceKind === 'drawer' && held) {
+            const handler = drawerGesture()
+            const point = { x: ev.clientX, y: ev.clientY }
+            cleanup({ suppressClick: true })
+            handler?.openMenu?.(point)
           } else cleanup()
           return
         }
@@ -676,10 +694,6 @@ export default function useWorkspaceDrag({
       const strip = srcEl.closest('[data-pane-strip]')
       const sourceKind = inDrawer ? 'drawer' : (strip ? 'tab' : null)
       if (!sourceKind) return
-      // Touch drawer rows have a different, local contract: stationary hold
-      // opens their contextual menu and held vertical movement reorders a pin.
-      // Never create a second workspace-drag session for that same pointer.
-      if (sourceKind === 'drawer' && e.pointerType !== 'mouse') return
       const paneId = strip ? strip.dataset.paneStrip : null
       startSession(e, srcEl, sourceKind, key, paneId)
     }

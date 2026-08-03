@@ -96,11 +96,28 @@ export function passedSlop(dx, dy, slop = POINTER_SLOP) {
 
 // Tabs do not infer drag intent from direction: every move before their hold
 // resolves belongs to scrolling, and the binding arms tab dragging only after
-// that deliberate hold. Drawer touch gestures are owned by Drawer itself so a
-// held row can open its menu or reorder a pin without also moving the workspace.
+// that deliberate hold.
 export function touchTabMoveIntent(dx, dy, limit = PRE_HOLD_MOVE_PX) {
   if (hypot(dx, dy) <= limit) return 'pending'
   return 'scroll'
+}
+
+// The drawer row's one held gesture has three outcomes. Before a touch hold,
+// movement yields to native scrolling/swiping. Afterwards (or immediately for
+// a mouse), vertical movement reorders a pin and outward movement lifts the row
+// into the workspace. Everything else cancels rather than starting a competing
+// interaction. Keeping this classification pure prevents the menu, reorder and
+// workspace branches from growing independent threshold logic again.
+export function drawerRowMoveIntent(dx, dy, {
+  held = false,
+  isTouch = false,
+  pinned = false,
+} = {}) {
+  const limit = isTouch && !held ? PRE_HOLD_MOVE_PX : POINTER_SLOP
+  if (hypot(dx, dy) <= limit) return 'pending'
+  if (isTouch && !held) return 'yield'
+  if (Math.abs(dy) > Math.abs(dx)) return pinned ? 'reorder' : 'cancel'
+  return dx > 0 ? 'workspace' : 'cancel'
 }
 
 // After a lift, a release still within this radius did not become a drag.
