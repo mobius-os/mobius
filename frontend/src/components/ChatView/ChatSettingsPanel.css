@@ -76,7 +76,6 @@
   color: var(--text);
   text-align: left;
   transition: background 0.12s ease, border-color 0.12s ease;
-  touch-action: pan-y;
 }
 
 @media (hover: hover) and (pointer: fine) {

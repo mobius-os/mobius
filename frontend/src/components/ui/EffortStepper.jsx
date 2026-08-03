@@ -12,10 +12,6 @@ import './EffortStepper.css'
  * an `onChange`. Stops at/below the selected one read as filled; the
  * selected one sits proud with an accent ring, like a slider thumb.
  *
- * `onStopPointerDown` is the composer's escape hatch: the `+` popover
- * must not let a stop-tap move focus off the chat textarea (it would
- * pop the soft keyboard), so it passes `preserveFocusUnlessTouch`.
- * Surfaces without that constraint (Settings) omit it.
  */
 export default function EffortStepper({
   efforts,
@@ -23,7 +19,6 @@ export default function EffortStepper({
   onChange,
   disabled = false,
   ariaLabel = 'Reasoning effort',
-  onStopPointerDown,
 }) {
   if (!efforts || efforts.length === 0) return null
   // Default to index 0 when the persisted value isn't in this
@@ -50,7 +45,6 @@ export default function EffortStepper({
               + (index === selectedIndex ? ' effort-stepper__stop--on' : '')
               + (index < selectedIndex ? ' effort-stepper__stop--filled' : '')
             }
-            onPointerDown={onStopPointerDown}
             onClick={() => onChange(effort.value)}
             onKeyDown={(event) => {
               let next

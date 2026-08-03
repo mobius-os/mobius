@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 
 import {
   focusComposerElement,
-  preserveComposerInputFocus,
   shouldApplyComposerFocusRequest,
 } from '../composerFocusPolicy.js'
 
@@ -55,15 +54,4 @@ test('focusComposerElement falls back for older focus implementations', () => {
   }
   assert.equal(focusComposerElement(el), true)
   assert.deepEqual(calls, [[{ preventScroll: true }], []])
-})
-
-test('composer pointer actions preserve input focus for touch, mouse, and pen', () => {
-  for (const pointerType of ['touch', 'mouse', 'pen']) {
-    let prevented = 0
-    assert.equal(preserveComposerInputFocus({
-      pointerType,
-      preventDefault() { prevented += 1 },
-    }), true)
-    assert.equal(prevented, 1, pointerType)
-  }
 })
