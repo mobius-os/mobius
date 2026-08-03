@@ -27,7 +27,7 @@ test('text reveal speed follows elapsed time instead of display refresh rate', (
     'ordinary 60Hz frames should retain the current visual cadence')
 })
 
-test('text reveal carries fractional credit and caps wake-from-background bursts', () => {
+test('text reveal carries fractional credit and catches up after a delayed frame', () => {
   const first = textRevealBudget({
     elapsedMs: 16.6,
     bufferLength: 100,
@@ -44,8 +44,8 @@ test('text reveal carries fractional credit and caps wake-from-background bursts
 
   assert.equal(first.count, 2)
   assert.equal(second.count, 3)
-  assert.equal(afterWake.count, 9,
-    'returning to a visible tab must not dump seconds of buffered text at once')
+  assert.equal(afterWake.count, 900,
+    'render stalls and tab wake-ups must retain their elapsed reveal credit')
 })
 
 test('text reveal never spends beyond the buffer and clears stale credit', () => {
