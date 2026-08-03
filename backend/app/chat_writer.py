@@ -3719,7 +3719,6 @@ def update_live_assistant(
   """Persist the current assistant snapshot without rewriting history."""
   if not chat_id:
     return True
-  from datetime import UTC, datetime
   from app.models import Chat
 
   row = db.execute(
@@ -3773,7 +3772,9 @@ def update_live_assistant(
   db.execute(
     update(Chat)
     .where(Chat.id == chat_id, Chat.deleted_at.is_(None))
-    .values(live_assistant=snapshot, updated_at=datetime.now(UTC))
+    # The stream is authoritative while this value changes. Bypass
+    # updated_at's onupdate default so retained history remains reusable.
+    .values(live_assistant=snapshot, updated_at=Chat.updated_at)
   )
   return _commit_or_rollback(db)
 

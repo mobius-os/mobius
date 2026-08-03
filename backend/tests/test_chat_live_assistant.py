@@ -28,6 +28,7 @@ def _chat(db, *, trailing_role="user"):
 
 def test_stream_snapshot_updates_only_live_value(db):
   chat, history = _chat(db)
+  history_version = chat.updated_at
 
   assert update_live_assistant(db, chat.id, {
     "role": "assistant",
@@ -38,11 +39,13 @@ def test_stream_snapshot_updates_only_live_value(db):
   assert chat.messages == history
   assert chat.live_assistant["ts"] == 4
   assert chat.live_assistant["blocks"][0]["text"] == "streaming"
+  assert chat.updated_at == history_version
   assert materialized_messages(chat)[-1] == chat.live_assistant
 
 
 def test_finalize_merges_live_turn_once_and_clears_snapshot(db):
   chat, history = _chat(db)
+  history_version = chat.updated_at
   update_live_assistant(db, chat.id, {
     "role": "assistant",
     "blocks": [{"type": "text", "text": "partial"}],
@@ -58,6 +61,7 @@ def test_finalize_merges_live_turn_once_and_clears_snapshot(db):
   assert len(chat.messages) == len(history) + 1
   assert chat.messages[-1]["ts"] == 4
   assert chat.messages[-1]["blocks"][0]["text"] == "complete"
+  assert chat.updated_at != history_version
 
 
 def test_materialized_snapshot_replaces_question_barrier_row():
