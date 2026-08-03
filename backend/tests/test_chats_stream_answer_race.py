@@ -50,7 +50,12 @@ def _make_pending(future: asyncio.Future) -> PendingQuestion:
   )
 
 
-def _seed_question_block(chat_id: str, question_id: str) -> None:
+def _seed_question_block(
+  chat_id: str,
+  question_id: str,
+  *,
+  user_content: str = "go",
+) -> None:
   """Persist an assistant message carrying the open question block.
 
   C2 routes the answer write through the actor's AnswerQuestion, which
@@ -64,7 +69,7 @@ def _seed_question_block(chat_id: str, question_id: str) -> None:
   try:
     chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
     chat.messages = [
-      {"role": "user", "content": "go", "ts": 1},
+      {"role": "user", "content": user_content, "ts": 1},
       {
         "role": "assistant",
         "content": "",
@@ -224,7 +229,22 @@ def test_answer_recovers_durable_question_without_live_pending(
 
   async def go():
     qid = "q-recovered"
-    _seed_question_block(chat.id, qid)
+    _seed_question_block(
+      chat.id, qid, user_content="/goal finish the migration",
+    )
+    db = SessionLocal()
+    try:
+      db.add(models.ChatRun(
+        id="rt-interrupted-goal",
+        chat_id=chat.id,
+        status="interrupted",
+        provider="codex",
+        goal_objective="finish the migration",
+        started_at=datetime.now(UTC),
+      ))
+      db.commit()
+    finally:
+      db.close()
     _set_pending_messages(
       chat.id,
       [{"role": "user", "content": "queued-visible", "ts": 3}],
@@ -251,6 +271,11 @@ def test_answer_recovers_durable_question_without_live_pending(
     assert scheduled, "recovered answer should start a hidden continuation"
     assert scheduled[0]["next_user"]["hidden"] is True
     assert scheduled[0]["next_user"]["content"] == "- Pick one: b"
+    assert scheduled[0]["next_user"]["kind"] == "continuation"
+    assert (
+      scheduled[0]["next_user"]["continuation_reason"]
+      == "question_answer"
+    )
 
     db = SessionLocal()
     try:
@@ -265,9 +290,10 @@ def test_answer_recovers_durable_question_without_live_pending(
       assert [m["content"] for m in row.pending_messages] == [
         "queued-visible"
       ]
-      assert db.query(models.ChatRun).filter_by(
+      running = db.query(models.ChatRun).filter_by(
         chat_id=chat.id, status="running",
-      ).count() == 1
+      ).one()
+      assert running.goal_objective == "finish the migration"
     finally:
       db.close()
 

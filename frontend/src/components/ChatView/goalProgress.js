@@ -85,6 +85,12 @@ export function goalObjectiveAtRunStart(text, messages) {
   return priorGoalObjective(messages, tailIndex)
 }
 
+/** Keep a known goal through a rolling/recovered active runtime; idle ends it. */
+export function goalObjectiveFromRuntime(runtime, fallbackObjective = '') {
+  if (!runtime?.running) return ''
+  return runtime.active_goal_objective || fallbackObjective || ''
+}
+
 /**
  * Put the active goal and ordinary build phases on one existing progress rail.
  *

@@ -215,29 +215,23 @@ async function seedTabs(page, tabs, { viewMode = 'panes' } = {}) {
   let ws = paneModel.seedFromFlatTabs(tabs)
   ws = paneModel.setViewMode(ws, viewMode)
   const workspace = paneModel.serializeWorkspace(ws)
-  await page.addInitScript(([workspaceKey, workspaceRaw, legacyKey, t]) => {
+  await page.addInitScript(([workspaceKey, workspaceRaw]) => {
     try {
-      // Match the shell's dual-write persistence contract. The versioned
-      // workspace is authoritative; the flat key only supports one-release
-      // rollback and may already contain an older projection.
-      sessionStorage.setItem(workspaceKey, workspaceRaw)
-      sessionStorage.setItem(legacyKey, JSON.stringify(t))
+      localStorage.setItem(workspaceKey, workspaceRaw)
     } catch { /* private mode */ }
-  }, [paneModel.STORAGE_KEY, workspace, 'mobius-open-tabs', tabs])
+  }, [paneModel.STORAGE_KEY, workspace])
 }
 
-// Single-SCREEN workspace holding just `chatId`, with an EMPTY legacy mirror so
-// the strip is unengaged. A valid blob remains authoritative through a cold
-// ?chat= deep-link; the target opens into that workspace without RESET_FLAT
-// replacing its preserved view mode.
+// Single-SCREEN workspace holding just `chatId`. A valid blob remains
+// authoritative through a cold ?chat= deep-link; the target opens into that
+// workspace without RESET_FLAT replacing its preserved view mode.
 async function seedSingleModeChat(page, chatId) {
   const ws = paneModel.setViewMode(
     paneModel.seedFromFlatTabs([{ kind: 'chat', id: chatId }]), 'single')
   const workspace = paneModel.serializeWorkspace(ws)
   await page.addInitScript(([workspaceKey, workspaceRaw]) => {
     try {
-      sessionStorage.setItem(workspaceKey, workspaceRaw)
-      sessionStorage.setItem('mobius-open-tabs', '[]')
+      localStorage.setItem(workspaceKey, workspaceRaw)
     } catch { /* private mode */ }
   }, [paneModel.STORAGE_KEY, workspace])
 }
@@ -395,7 +389,6 @@ test.describe('Tabs', () => {
     const chat = await bootAndCreateChat(page, 'split', { width: 1200, height: 800 })
     const appsMock = await mockOwnedApp(page, chat.id)
     await seedTabs(page, [{ kind: 'chat', id: chat.id }, { kind: 'app', id: APP_ID }])
-    await page.addInitScript(() => localStorage.setItem('mobius:workspace-splits', '1'))
 
     await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
     await expect.poll(() => appsMock.requests, { timeout: 5000 }).toBeGreaterThan(0)

@@ -45,21 +45,15 @@ export function modeReducer(state, event) {
   }
 }
 
-function clampMode(committedMode, splitsEnabled) {
-  if (!splitsEnabled) return 'single'
-  return committedMode
-}
-
-export function effectiveViewMode(state, { splitsEnabled = true } = {}) {
-  if (!splitsEnabled) return 'single'
+export function effectiveViewMode(state) {
   if (state.transition?.phase === 'drag-preview') return 'panes'
-  return clampMode(state.committedMode, splitsEnabled)
+  return state.committedMode
 }
 
-export function builderModeActive(state, { splitsEnabled = true } = {}) {
-  return clampMode(state.committedMode, splitsEnabled) === 'panes'
+export function builderModeActive(state) {
+  return state.committedMode === 'panes'
 }
 
-export function dragPreviewActive(state, { splitsEnabled = true } = {}) {
-  return !!splitsEnabled && state.transition?.phase === 'drag-preview'
+export function dragPreviewActive(state) {
+  return state.transition?.phase === 'drag-preview'
 }

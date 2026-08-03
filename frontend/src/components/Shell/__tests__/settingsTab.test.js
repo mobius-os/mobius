@@ -103,54 +103,6 @@ test('an older/unknown tab kind is scrubbed on parse (forgiving read)', () => {
     'the unknown kind is dropped, the chat survives')
 })
 
-test('flag OFF scrubs a persisted Settings tab before first render (rollback safety)', async () => {
-  // A blob a builder (flag-on) shell wrote, carrying a Settings tab.
-  const onWs = paneModel.openTab(onePane('9'), settingsTab(), { paneId: 'p0', activate: true })
-  const blob = paneModel.serializeWorkspace(onWs)
-  assert.ok(paneModel.flatten(onWs).some(tabModel.isSettingsTab), 'flag-on keeps it')
-
-  // Re-evaluate paneModel with the kill switch OFF (a fresh module instance via a
-  // cache-busting query, evaluated while localStorage returns '0' for the key).
-  const prevLS = globalThis.localStorage
-  globalThis.localStorage = { getItem: (k) => (k === 'mobius:builder-settings' ? '0' : null) }
-  try {
-    const pmOff = await import('../paneModel.js?builder-settings-off')
-    assert.equal(pmOff.BUILDER_SETTINGS_ENABLED, false, 'flag read as off')
-    const parsed = pmOff.parseWorkspace(blob)
-    assert.ok(!pmOff.flatten(parsed).some(t => t.kind === 'settings'),
-      'the Settings tab is scrubbed like any unknown kind')
-    assert.ok(pmOff.flatten(parsed).some(t => t.kind === 'chat' && t.id === '9'),
-      'the chat survives the scrub')
-  } finally {
-    if (prevLS === undefined) delete globalThis.localStorage
-    else globalThis.localStorage = prevLS
-  }
-})
-
-test('workspace-splits OFF also disables the Settings tab and scrubs it (review §3)', async () => {
-  // The Settings tab only makes sense where builder mode can exist. With splits off
-  // there is no builder mode, so BUILDER_SETTINGS_ENABLED must be false even though
-  // the builder-settings key is unset — a persisted settings:settings is scrubbed
-  // and can never leak into the legacy single-pane strip.
-  const onWs = paneModel.openTab(onePane('9'), settingsTab(), { paneId: 'p0', activate: true })
-  const blob = paneModel.serializeWorkspace(onWs)
-
-  const prevLS = globalThis.localStorage
-  // splits off; the builder-settings key is UNSET (its own default would be "on").
-  globalThis.localStorage = { getItem: (k) => (k === 'mobius:workspace-splits' ? '0' : null) }
-  try {
-    const pmOff = await import('../paneModel.js?workspace-splits-off')
-    assert.equal(pmOff.WORKSPACE_SPLITS_ENABLED, false)
-    assert.equal(pmOff.BUILDER_SETTINGS_ENABLED, false, 'gated on splits, not just its own key')
-    const parsed = pmOff.parseWorkspace(blob)
-    assert.ok(!pmOff.flatten(parsed).some(t => t.kind === 'settings'), 'settings scrubbed')
-    assert.ok(pmOff.flatten(parsed).some(t => t.kind === 'chat' && t.id === '9'), 'chat kept')
-  } finally {
-    if (prevLS === undefined) delete globalThis.localStorage
-    else globalThis.localStorage = prevLS
-  }
-})
-
 test('a mode flip (SET_VIEW_MODE) PRESERVES a builder Settings tab AND a pending undo', () => {
   // v2 deleted the 'mode-convert' close: a builder Settings tab SURVIVES entering
   // single (single paints its own slot, never Settings), and the pure SET_VIEW_MODE

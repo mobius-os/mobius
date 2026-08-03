@@ -111,7 +111,7 @@ def test_start_turn_opens_a_running_run_record():
   assert _active_status("r1") == "running"
 
 
-def test_goal_identity_lives_on_the_run_and_real_resume_inherits_it():
+def test_only_semantic_continuation_inherits_goal_identity():
   _seed_chat("r-goal")
   get_writer().submit(StartTurn(
     chat_id="r-goal", run_token="rt-goal",
@@ -129,10 +129,25 @@ def test_goal_identity_lives_on_the_run_and_real_resume_inherits_it():
   )).result(timeout=5)
   get_writer().submit(StartTurn(
     chat_id="r-goal", run_token="rt-resume",
-    user_msg={"role": "user", "content": "continue", "ts": 2},
+    user_msg={
+      "role": "user", "content": "continue", "ts": 2,
+      "kind": "continuation", "continuation_reason": "manual",
+    },
     title_source="continue", default_provider="codex",
   )).result(timeout=5)
   assert _goal_objective("r-goal") == "finish the migration"
+
+  get_writer().submit(FinishRun(
+    chat_id="r-goal",
+    run_token="rt-resume",
+    terminal_status="interrupted",
+  )).result(timeout=5)
+  get_writer().submit(StartTurn(
+    chat_id="r-goal", run_token="rt-plain-continue",
+    user_msg={"role": "user", "content": "continue", "ts": 3},
+    title_source="continue", default_provider="codex",
+  )).result(timeout=5)
+  assert _goal_objective("r-goal") is None
 
 
 def test_completed_goal_does_not_leak_into_an_ordinary_later_run():
@@ -151,6 +166,35 @@ def test_completed_goal_does_not_leak_into_an_ordinary_later_run():
     title_source="ordinary", default_provider="codex",
   )).result(timeout=5)
   assert _goal_objective("r-complete-goal") is None
+
+
+def test_stopped_goal_does_not_leak_into_a_later_question_answer():
+  _seed_chat("r-stopped-goal")
+  get_writer().submit(StartTurn(
+    chat_id="r-stopped-goal", run_token="rt-stopped-goal",
+    user_msg={
+      "role": "user", "content": "/goal old work", "ts": 1,
+    },
+    title_source="goal", default_provider="codex",
+  )).result(timeout=5)
+  get_writer().submit(FinishRun(
+    chat_id="r-stopped-goal",
+    run_token="rt-stopped-goal",
+    terminal_status="stopped",
+  )).result(timeout=5)
+  get_writer().submit(StartTurn(
+    chat_id="r-stopped-goal", run_token="rt-later-answer",
+    user_msg={
+      "role": "user",
+      "content": "- Pick one: b",
+      "kind": "continuation",
+      "continuation_reason": "question_answer",
+      "hidden": True,
+      "ts": 2,
+    },
+    title_source="answer", default_provider="codex",
+  )).result(timeout=5)
+  assert _goal_objective("r-stopped-goal") is None
 
 
 # -- clean close ----------------------------------------------------------

@@ -175,11 +175,11 @@ test('the legacy active destination wins every blob-invalid flat-tab boot', () =
 // nav-bookkeeping consumers that decide "what is visible / what did Back see" must
 // read the PAINTED overlay (world-gated), never the raw settingsOpen flag.
 test('M1: overlayShowingForWs is the world-gated PAINTED takeover, not the raw flag', () => {
-  // Mirrors the render-time overlayShowing derivation: single world OR builder-
-  // Settings flag off. This is the one predicate both consumers below share.
+  // Mirrors the render-time overlayShowing derivation. This is the one predicate
+  // both consumers below share.
   assert.match(
     navigation,
-    /const overlayShowingForWs = useCallback\(\s*\(ws\) => settingsOpenRef\.current\s*&& \(ws\.viewMode === 'single' \|\| !paneModel\.BUILDER_SETTINGS_ENABLED\)/,
+    /const overlayShowingForWs = useCallback\(\s*\(ws\) => settingsOpenRef\.current\s*&& ws\.viewMode === 'single'/,
   )
 })
 

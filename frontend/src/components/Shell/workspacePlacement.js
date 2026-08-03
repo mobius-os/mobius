@@ -271,8 +271,7 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
   // point for USER nav; the agent path funnels here) and honors the invariant that
   // single-mode opens never touch the pane tree. BACKGROUND work still parks in the
   // builder tree plus its attention dot — the builder world is the workshop. The
-  // world is clamped to single when the splits kill switch is off (INV 16).
-  const world = paneModel.WORKSPACE_SPLITS_ENABLED ? ws.viewMode : 'single'
+  const world = ws.viewMode
   if (foreground && world === 'single') {
     return paneModel.setSingleScreen(ws, { kind: item.kind, id: String(item.id) })
   }
@@ -291,7 +290,6 @@ export function resolveWorkspaceRequest(ws, request, env = {}) {
   // and park the preview in the hidden Builder tree for an explicit later open.
   let working = (
     preview
-    && paneModel.WORKSPACE_SPLITS_ENABLED
     && (world === 'panes' || singleShowsSource)
   )
     ? paneModel.setViewMode(ws, 'panes')

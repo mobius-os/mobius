@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef } from 'react'
 import { CollapseSm, ExpandSm, X } from '@openai/apps-sdk-ui/components/Icon'
 import * as tabModel from './tabModel.js'
-import { STRIP_H, WORKSPACE_SPLITS_ENABLED } from './paneModel.js'
+import { STRIP_H } from './paneModel.js'
 
 // Each direction owns 40% of the one-shot cycle, so 1000/12 ms per clipped pixel
 // keeps travel at a readable 30px/s. The cycle runs once, returns to the beginning,
@@ -233,7 +233,7 @@ export function PaneStrip({
             tabId={paneTabDomId(pane.id, key)}
             controlsId={panePanelDomId(pane.id, key)}
             tabIndex={active ? 0 : -1}
-            dragKey={WORKSPACE_SPLITS_ENABLED ? key : undefined}
+            dragKey={key}
             onActivate={() => onActivate(pane.id, tab)}
             onClose={() => onClose(tab)}
             onContextMenu={(e) => onTabContextMenu(e, tab, pane.id)}

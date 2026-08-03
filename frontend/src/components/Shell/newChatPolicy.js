@@ -11,9 +11,9 @@ function normalizedId(value) {
  * edge check is important: actions while the landing is already visible must
  * not manufacture new request tokens.
  */
-export function enteredEmptySingleScreen(previous, next, splitsEnabled = true) {
-  const previousSingle = !splitsEnabled || previous?.viewMode === 'single'
-  const nextSingle = !splitsEnabled || next?.viewMode === 'single'
+export function enteredEmptySingleScreen(previous, next) {
+  const previousSingle = previous?.viewMode === 'single'
+  const nextSingle = next?.viewMode === 'single'
   return nextSingle
     && next?.singleScreen == null
     && (!previousSingle || previous?.singleScreen != null)

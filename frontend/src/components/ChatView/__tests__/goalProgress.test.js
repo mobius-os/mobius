@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs'
 import {
   goalObjectiveAtRunStart,
   goalObjectiveFromText,
+  goalObjectiveFromRuntime,
   latestGoalObjective,
   progressRailViewModel,
 } from '../goalProgress.js'
@@ -75,7 +76,7 @@ test('a resumable continue keeps the same goal through live start and cold attac
   )
 })
 
-test('continue does not revive a completed, cleared, or superseded goal', () => {
+test('continuation recovery preserves only an active goal', () => {
   assert.equal(goalObjectiveAtRunStart('continue', [
     { role: 'user', content: '/goal old objective' },
     { role: 'assistant', content: 'Done' },
@@ -94,6 +95,18 @@ test('continue does not revive a completed, cleared, or superseded goal', () => 
     { role: 'assistant', blocks: [{ type: 'error', resumable: true }] },
     { role: 'user', content: 'continue' },
   ]), '')
+  assert.equal(goalObjectiveFromRuntime({
+    running: true,
+    active_goal_objective: null,
+  }, 'finish the migration'), 'finish the migration')
+  assert.equal(goalObjectiveFromRuntime({
+    running: true,
+    active_goal_objective: 'authoritative goal',
+  }, 'stale goal'), 'authoritative goal')
+  assert.equal(goalObjectiveFromRuntime({
+    running: false,
+    active_goal_objective: null,
+  }, 'finished goal'), '')
 })
 
 test('the goal reuses the progress rail and stays as context for build phases', () => {
@@ -184,7 +197,7 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
   )
   assert.match(
     chatView,
-    /runtime\.active_goal_objective \|\| latestGoalObjective\(visibleMessages\)/,
+    /goalObjectiveFromRuntime\(\s*runtime,\s*latestGoalObjective\(visibleMessages\)/,
     'a cold chat read should restore the objective from the durable active run',
   )
   assert.match(

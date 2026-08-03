@@ -65,9 +65,7 @@ export default function useWorkspaceSession({ storage, legacyStorage = null }) {
     const next = paneModel.workspaceReducer(prev, action)
     workspaceStateRef.current = next
     const enteredEmptySingle = next.ws !== prev.ws
-      && enteredEmptySingleScreen(
-        prev.ws, next.ws, paneModel.WORKSPACE_SPLITS_ENABLED,
-      )
+      && enteredEmptySingleScreen(prev.ws, next.ws)
     if (next.ws !== prev.ws) {
       onWorkspaceTransitionRef.current?.(prev.ws, next.ws)
       const expanded = focusedPaneViewIdRef.current
@@ -100,8 +98,6 @@ export default function useWorkspaceSession({ storage, legacyStorage = null }) {
     if (settlePending) pendingContentRectRef.current = null
     setContentRect(prev => {
       if (prev.w === w && prev.h === h) return prev
-      if (!paneModel.WORKSPACE_SPLITS_ENABLED
-          && Object.keys(workspaceStateRef.current.ws.panes).length <= 1) return prev
       return { w, h }
     })
   }, [])

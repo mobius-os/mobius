@@ -76,19 +76,30 @@ test('an implicit home tab does not engage the single-pane tab strip', () => {
   // single-screen blob intentionally has an empty legacy mirror; resetting it
   // on a deep link would silently change its view mode back to builder.
   assert.match(workspaceSession, /const replaceImplicitBootTab = !blobValid\s*\n?\s*&& Object\.keys\(workspace\.panes\)\.length === 1/)
-  assert.match(shell, /const \[tabStripEngaged, setTabStripEngaged\] = useState\(openTabs\.length >= 2\)/)
-  assert.match(shell, /if \(openTabs\.length >= 2\) setTabStripEngaged\(true\)/)
-  assert.match(shell, /else if \(openTabs\.length === 0\) setTabStripEngaged\(false\)/)
-  // With splits ON the strip follows the EFFECTIVE builder world only (never
-  // single mode or an immersive takeover); the engaged latch is the kill-switch
-  // world's legacy rule.
-  assert.match(shell, /const tabStripVisible = !immersiveActive\s*\n?\s*&& \(SPLITS \? effectiveViewMode === 'panes' : tabStripEngaged\)\s*\n?\s*&& openTabs\.length >= 1/)
+  assert.doesNotMatch(shell, /tabStripEngaged/)
+  assert.match(shell, /const tabStripVisible = !immersiveActive\s*\n?\s*&& effectiveViewMode === 'panes'\s*\n?\s*&& openTabs\.length >= 1/)
   assert.doesNotMatch(shell, /mobius-open-tabs|flattenRollbackPriority|writeOpenTabs/)
   // v2 DELETED the legacy sole-tab "unpin" shortcut (deletion list): the sole-tab
   // close is always a real CLOSE_TAB now, so an emptied builder auto-returns to
   // single. The ONE unified close takes a tab object + opts (INV 13).
   assert.doesNotMatch(shell, /openTabs\.length === 1 && kind !== 'settings'/)
   assert.match(shell, /const closeTab = useCallback\(\(tab, \{ reason \} = \{\}\)/)
+})
+
+test('the canonical workspace snapshot survives a closed PWA relaunch', () => {
+  assert.match(
+    shell,
+    /useWorkspaceSession\(\{\s*storage: localStorage,\s*legacyStorage: sessionStorage,\s*\}\)/,
+    'the durable snapshot remains canonical while the one-time session migration stays available',
+  )
+  assert.doesNotMatch(
+    shell,
+    /sessionStorage\.setItem\(paneModel\.STORAGE_KEY/,
+  )
+  assert.match(
+    workspaceSession,
+    /storage\.setItem\(\s*paneModel\.STORAGE_KEY,\s*paneModel\.serializeWorkspace\(workspace\)/,
+  )
 })
 
 test('the drop preview reads as an 18% accent fill with a 2px border and morph', () => {
@@ -147,8 +158,7 @@ test('post-drag click suppression is source-scoped and expires on fresh input', 
   assert.match(dragBinding, /suppressNextSourceClick\(srcEl\)/)
 })
 
-test('the undo chord is flag-gated and defers to focused inputs', () => {
-  assert.match(shell, /if \(!paneModel\.WORKSPACE_SPLITS_ENABLED\) return undefined[\s\S]*?undoKeyPressed\(e\)/)
+test('the undo chord defers to focused inputs', () => {
   assert.match(shell, /isEditableTarget\(document\.activeElement\)/)
   assert.match(shell, /dispatchWorkspace\(\{ type: 'UNDO_LAST' \}\)/)
 })
@@ -562,7 +572,7 @@ test('logo pointer provenance EXPIRES so a keyboard context menu reaches the nat
   // as keyboard-invoked; Shell wires it into the brand's onKeyDown.
   assert.match(logoGestureSrc, /const onKeyDown = useCallback\(\(\) => \{\s*\n?\s*lastPointerTypeRef\.current = ''\s*\n?\s*lastPointerTypeAtRef\.current = 0/)
   assert.match(logoGestureSrc, /onKeyDown, onLostPointerCapture,\s*\n?\s*consumeSuppressedClick/)
-  assert.match(shellBrand, /if \(splitsEnabled\) logoGesture\.onKeyDown\(\)/)
+  assert.match(shellBrand, /logoGesture\.onKeyDown\(\)/)
 })
 
 test('the Builder brand indicator is static and has no perpetual frame loop', () => {
@@ -621,22 +631,12 @@ test('the mode handler commits one final world inside the scene transaction', ()
   assert.match(modeViewTransitionSrc, /if \(!supported\) \{[\s\S]*?flushSync\(update\)/)
 })
 
-test('the PROPOSED builder power-chrome is behind a default-OFF flag + root class', () => {
-  // The flag only enables on the literal '1' (default off), read once at load.
-  assert.match(paneModelSrc, /export const BUILDER_POWER_CHROME = \(\(\) => \{[\s\S]*?localStorage\.getItem\('mobius:builder-power'\) === '1'/)
-  // Shell adds the root class only when the flag is on AND builder mode is active.
-  assert.match(shell, /builderModeActive && paneModel\.BUILDER_POWER_CHROME \? ' shell--builder-power' : ''/)
-  // The gated chrome: a power-rail under the bar + energized dividers.
-  assert.match(shellCss, /\.shell--builder-power \.shell__bar\s*\{[\s\S]*?box-shadow/)
-  assert.match(css, /\.shell--builder-power \.workspace__divider-bar/)
-})
-
 test('the logo keeps the stable "Toggle navigation" name; gesture rides aria-description + live region', () => {
   // The accessible NAME stays stable (drawer semantics + e2e selectors depend on
   // it); the hold/keyboard path is a supplementary aria-description, and mode state
   // rides a polite live region (not a conflicting aria-pressed).
   assert.match(shellBrand, /aria-label="Toggle navigation"/)
-  assert.match(shellBrand, /aria-description=\{splitsEnabled\s*\n?\s*\? 'Hold or press Shift\+Enter for builder mode'/)
+  assert.match(shellBrand, /aria-description="Hold or press Shift\+Enter for builder mode"/)
   assert.match(shellBrand, /role="status" aria-live="polite"/)
   assert.match(shellBrand, /builderModeActive \? 'Builder mode' : 'Single screen'/)
 })
@@ -1064,17 +1064,6 @@ test('the builder preview cannot outlive its drag session past one visibility bo
   assert.match(dragBinding, /may outlive its session by at most ONE visibility\/foreground boundary,\s*\n?\s*\/\/ or at most one subsequent user interaction/)
 })
 
-test('the splits kill-switch forces the single-pane fallback so a rolled-back panes blob is not un-exitable', () => {
-  // The tiled render (chromeActive) is flag-INDEPENDENT, but both exit controls
-  // (the logo gesture + Shift+Enter) are flag-GATED. So a rolled-back client that
-  // persisted a 'panes' blob and then had WORKSPACE_SPLITS disabled would restore
-  // TILED with no way to reach single ("cannot reach single mode", survives reload).
-  // coerceViewMode — run by normalize() on every parse/restore — forces 'single'
-  // when splits are off, delivering the kill-switch's documented single-pane fallback
-  // (the tree is preserved; re-enabling splits restores the panes).
-  assert.match(paneModelSrc, /function coerceViewMode\(mode\) \{\s*\n\s*if \(!WORKSPACE_SPLITS_ENABLED\) return 'single'/)
-})
-
 test('workspace focus, drag label, and cancel visuals remain coherent', () => {
   // V4: the FOCUSED pane's active pill softens the base full-accent border so the 2px
   // underline is what carries focus (the border used to mask it).
@@ -1176,7 +1165,6 @@ test('round4-3: every reducer edge into an empty single screen uses one policy b
   assert.ok(dispatch.length > 0, 'found the workspace dispatch boundary')
   assert.match(dispatch, /workspaceReducer\(prev, action\)/)
   assert.match(dispatch, /enteredEmptySingleScreen\(\s*prev\.ws, next\.ws/)
-  assert.match(dispatch, /prev\.ws, next\.ws, paneModel\.WORKSPACE_SPLITS_ENABLED/)
   assert.match(dispatch, /requestEmptySingleNewChatRef\.current\?\.\(\)/)
   // Explicit calls remain only for boot states that do not cross a reducer edge:
   // populated-history null restore and live-confirmed zero-chat bootstrap.

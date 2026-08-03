@@ -256,17 +256,15 @@ export default function Shell() {
   // The render never uses `activeView === 'settings'` for pane suppression (that
   // would hide every pane behind a builder Settings tab — the named risk).
   const settingsActive = settingsOverlayOpen
-  // Builder mode is the tiled 'panes' view-mode (only meaningful when splits can
-  // exist). The logo itself is the persistent mode indicator and gesture surface;
+  // Builder mode is the tiled 'panes' view-mode. The logo itself is the
+  // persistent mode indicator and gesture surface;
   // there is deliberately no separate header control.
   // Durable mode and drag-preview stay in the small mode reducer. The visual
   // Standard ↔ Builder scene belongs independently to the browser transition.
-  const SPLITS = paneModel.WORKSPACE_SPLITS_ENABLED
   const shellRootRef = useRef(null)
   useShellVisualViewport(shellRootRef)
   const mode = useModeController({
     committedMode: workspace.viewMode,
-    splitsEnabled: SPLITS,
   })
   const modeView = useModeViewTransition({
     rootRef: shellRootRef,
@@ -283,12 +281,11 @@ export default function Shell() {
     }
   }, [workspace.viewMode, modeView.active, modeState.transition, setFocusedPaneViewId])
 
-  // Builder mode = the committed 'panes' world (logo twist + static brand cue + power
-  // chrome), clamped off by the splits kill switch (INV 16). Flips synchronously
-  // with the toggle, matching the gesture's own spring/snap.
-  const builderModeActive = modeMachine.builderModeActive(modeState, { splitsEnabled: SPLITS })
+  // Builder mode = the committed 'panes' world. It flips synchronously with the
+  // toggle, matching the gesture's own spring/snap.
+  const builderModeActive = modeMachine.builderModeActive(modeState)
   // Drag-preview alone may project the tiled world before it is committed.
-  const effectiveViewMode = modeMachine.effectiveViewMode(modeState, { splitsEnabled: SPLITS })
+  const effectiveViewMode = modeMachine.effectiveViewMode(modeState)
   const multiPaneBuilderVisible = effectiveViewMode === 'panes'
     && paneModel.paneIdsInOrder(workspace).length > 1
   const multiPaneBuilderVisibleRef = useRef(multiPaneBuilderVisible)
@@ -713,11 +710,6 @@ export default function Shell() {
   // A single implicit home tab on a fresh session stays visually identical to
   // the pre-workspace shell. State (rather than a render-time ref mutation) keeps
   // this safe under replayed or abandoned concurrent renders.
-  const [tabStripEngaged, setTabStripEngaged] = useState(openTabs.length >= 2)
-  useEffect(() => {
-    if (openTabs.length >= 2) setTabStripEngaged(true)
-    else if (openTabs.length === 0) setTabStripEngaged(false)
-  }, [openTabs.length])
   // Pointer events inside an iframe do not bubble to its positioned shell
   // wrapper. The verified live frame sends a tiny focus signal so app panes have
   // the same click-to-focus semantics as native chat panes.
@@ -742,7 +734,7 @@ export default function Shell() {
   // retired.
   const requestEmptySingleNewChat = useCallback(() => {
     const ws = workspaceStateRef.current.ws
-    const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+    const single = ws.viewMode === 'single'
     if (!single || ws.singleScreen != null) return
     const candidate = currentReusableEmptyChat(chatsRef.current, {
       activeChatId: activeChatIdRef.current,
@@ -784,7 +776,7 @@ export default function Shell() {
     // would unmount the mounted-hidden SettingsView). dismissSettings no-ops when no
     // takeover is open.
     const currentWs = workspaceStateRef.current.ws
-    const world = paneModel.WORKSPACE_SPLITS_ENABLED ? currentWs.viewMode : 'single'
+    const world = currentWs.viewMode
     if (world === 'single'
         && requests.some(r => r && r.item && r.activation === ACTIVATE_FOREGROUND)) {
       dismissSettings()
@@ -809,15 +801,10 @@ export default function Shell() {
   // single leaf, where this single-pane .shell__tabstrip stands in for the
   // tiled WorkspaceChrome strips, giving phone users the drag source), riding
   // a single-mode drag preview with the rest of the tiled presentation, and NEVER
-  // rendered in single mode OR over an immersive lease
-  // (the shell exit replaces every builder navigation surface). The legacy
-  // tabStripEngaged latch is
-  // the KILL-SWITCH world's rule only (engaged after 2+ tabs) — letting it
-  // leak into the flag-ON formula painted the parked builder tree's strip
-  // over single mode whenever the latch was set. An empty workspace (no tabs)
-  // shows nothing either way — the >= 1 gate stays.
+  // rendered in single mode OR over an immersive lease (the shell exit replaces
+  // every builder navigation surface). An empty workspace shows no strip.
   const tabStripVisible = !immersiveActive
-    && (SPLITS ? effectiveViewMode === 'panes' : tabStripEngaged)
+    && effectiveViewMode === 'panes'
     && openTabs.length >= 1
   const shellTabStripVisible = tabStripVisible && !workspaceChromeActive
 
@@ -1040,7 +1027,7 @@ export default function Shell() {
     // Only builder repair falls back to a historical chat. In single mode the
     // deleted-close edge already requested the explicit New Chat destination;
     // selecting chats[0] here would overwrite it with an unrelated transcript.
-    const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+    const single = ws.viewMode === 'single'
     const builderEmpty = !single
       && Object.keys(ws.panes).length === 1
       && !ws.panes[ws.focusedPaneId]?.activeTabKey
@@ -1138,8 +1125,7 @@ export default function Shell() {
   }, [closeTabMenu, tabActionsAvailable, tabMenu])
 
   // ── Workspace drag controller wiring (design §3, PR3) ─────────────────────
-  // All of this is gated behind WORKSPACE_SPLITS_ENABLED — the hook installs no
-  // listeners when the flag is off, so the default build is byte-unchanged.
+  // One shared controller owns the shipped workspace's document-level gesture.
   // Volatile inputs travel through refs so the hook installs its single
   // document-level pointerdown listener exactly once (never re-registers).
   // dragActiveRef is declared above useNavigation (the drawer OPEN path reads it).
@@ -1217,7 +1203,6 @@ export default function Shell() {
     openDrawer,
   ])
   useWorkspaceDrag({
-    enabled: paneModel.WORKSPACE_SPLITS_ENABLED,
     contentElRef,
     sceneInputsRef,
     workspaceStateRef,
@@ -1242,7 +1227,6 @@ export default function Shell() {
   // case click into the shell chrome (a strip tab or the divider) first, then
   // press the chord.
   useEffect(() => {
-    if (!paneModel.WORKSPACE_SPLITS_ENABLED) return undefined
     const onKey = (e) => {
       if (!undoKeyPressed(e) || isEditableTarget(document.activeElement)) return
       e.preventDefault()
@@ -1851,7 +1835,7 @@ export default function Shell() {
       // A zero-chat install waits for the live-confirmed bootstrap effect below so a
       // stale empty list cannot manufacture a server row.
       const ws = workspaceStateRef.current.ws
-      const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+      const single = ws.viewMode === 'single'
       const focusedPaneEmpty = !ws.panes[ws.focusedPaneId]?.activeTabKey
       if (single && ws.singleScreen == null && chats.length > 0
           && pendingNewChatRef.current == null) {
@@ -1904,7 +1888,7 @@ export default function Shell() {
           reason: 'deleted',
         })
         const ws = workspaceStateRef.current.ws
-        const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+        const single = ws.viewMode === 'single'
         const builderEmpty = !single && !ws.panes[ws.focusedPaneId]?.activeTabKey
         const fallback = chats.find(c => c.id !== probedChatId)
         if (builderEmpty && fallback) {
@@ -2457,7 +2441,7 @@ export default function Shell() {
       // watcher will retry after that beat without issuing another detail/POST call.
       if (chatId != null) pending.resolvedChatId = chatId
       const ws = workspaceStateRef.current.ws
-      const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+      const single = ws.viewMode === 'single'
       if (!single || ws.singleScreen != null) {
         if (pendingNewChatRef.current && pendingNewChatRef.current.token === pending.token) {
           pendingNewChatRef.current = null
@@ -2527,7 +2511,7 @@ export default function Shell() {
     )
     const ws = workspaceStateRef.current.ws
     const resumeId = (
-      (!SPLITS || ws.viewMode === 'single')
+      (ws.viewMode === 'single')
       && activeChatIdRef.current == null
       && !draft
       && !forceNew
@@ -2607,7 +2591,7 @@ export default function Shell() {
     const pending = pendingNewChatRef.current
     if (!pending || pending.token !== pendingNewChatToken) return
     const ws = workspaceStateRef.current.ws
-    const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+    const single = ws.viewMode === 'single'
     if (!single || ws.singleScreen != null) {
       // No longer an empty single slot (re-toggled to builder, or a slot was set by
       // another path) — drop the request.
@@ -2681,7 +2665,7 @@ export default function Shell() {
       reason: 'deleted',
     })
     const wsAfterClose = workspaceStateRef.current.ws
-    const single = !paneModel.WORKSPACE_SPLITS_ENABLED || wsAfterClose.viewMode === 'single'
+    const single = wsAfterClose.viewMode === 'single'
     const focusedAfterClose = wsAfterClose.panes[wsAfterClose.focusedPaneId]
     if (!single && !focusedAfterClose?.activeTabKey) {
       // Exclude the just-deleted id: it's still in `chats` until the
@@ -2856,7 +2840,7 @@ export default function Shell() {
     // the starter chat then.
     if (chats.length === 0 && activeChatId === null && activeView === 'chat') {
       const ws = workspaceStateRef.current.ws
-      const single = !paneModel.WORKSPACE_SPLITS_ENABLED || ws.viewMode === 'single'
+      const single = ws.viewMode === 'single'
       if (single && ws.singleScreen == null) requestEmptySingleNewChat()
       else newChat()
     }
@@ -2877,9 +2861,7 @@ export default function Shell() {
       data-mode-phase={modeView.active?.phase || modeState.transition?.phase || 'idle'}
       data-mode-epoch={modeView.active?.id || modeState.transition?.id || undefined}
       data-workspace-visual-state={workspaceVisualState}
-      className={`shell${immersiveActive ? ' shell--immersive' : ''}`
-      + `${desktopSidebarReserved ? ' shell--drawer-docked' : ''}`
-      + `${builderModeActive && paneModel.BUILDER_POWER_CHROME ? ' shell--builder-power' : ''}`}>
+      className={`shell${immersiveActive ? ' shell--immersive' : ''}${desktopSidebarReserved ? ' shell--drawer-docked' : ''}`}>
       <a
         className="shell__skip-link"
         href="#main-content"
@@ -2909,7 +2891,6 @@ export default function Shell() {
       >
         <ShellBrand
           brandRef={brandButtonRef}
-          splitsEnabled={paneModel.WORKSPACE_SPLITS_ENABLED}
           navigationOpen={navigationOpen}
           builderModeActive={builderModeActive}
           // The live descriptor drives the logo's hold→completion spring (round 4
@@ -3054,7 +3035,7 @@ export default function Shell() {
           // Tag it with the sole pane's id so the drag controller resolves a
           // source pane exactly as it does for a WorkspaceChrome strip; dragging
           // a tab out with ≥2 tabs present splits the pane.
-          data-pane-strip={paneModel.WORKSPACE_SPLITS_ENABLED ? workspace.focusedPaneId : undefined}
+          data-pane-strip={workspace.focusedPaneId}
           data-mode-pane-vt={navViewStyle ? navPaneId : undefined}
           style={navViewStyle || undefined}
           onKeyDown={(e) => stripKeyDown(e, openTabs, (tab) => closeTab(tab))}
@@ -3074,7 +3055,7 @@ export default function Shell() {
                 active={active}
                 revealKey={tabRevealRevision}
                 tabIndex={active ? 0 : -1}
-                dragKey={paneModel.WORKSPACE_SPLITS_ENABLED ? key : undefined}
+                dragKey={key}
                 onActivate={() => {
                   const { view, opts } = tabModel.tabNavTarget(tab)
                   navTo(view, opts)

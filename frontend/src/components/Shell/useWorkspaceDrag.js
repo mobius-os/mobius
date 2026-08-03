@@ -18,9 +18,7 @@ import {
 // document identifies a drag source by its `data-drag-key` (strip tabs in the
 // chrome AND the single-pane top strip, rows in the drawer) and geometrically
 // hit-tests against projectLayout rects — never DOM-event bubbling, because
-// iframes swallow events and the drawer is inert. Everything is gated behind
-// `enabled` (WORKSPACE_SPLITS_ENABLED); with the flag off the listener never
-// installs and the shell is unchanged.
+// iframes swallow events and the drawer is inert.
 
 const STRIP_ZONE_H = STRIP_H + STRIP_CARET_PAD
 const AUTO_SCROLL_EDGE = 32 // px from a strip's scroll edge that arms auto-scroll
@@ -70,7 +68,6 @@ function suppressNextSourceClick(sourceEl) {
 }
 
 export default function useWorkspaceDrag({
-  enabled,
   contentElRef,
   sceneInputsRef, // ref → { projection, mode, contentRect }
   workspaceStateRef, // ref → { ws, undo } (advanced synchronously by Shell's dispatch)
@@ -90,8 +87,6 @@ export default function useWorkspaceDrag({
   // single mode paints its own slot, never a forced takeover.)
 }) {
   useEffect(() => {
-    if (!enabled) return undefined
-
     // ── Reusable overlay DOM (created lazily on the first arm) ────────────────
     let shieldEl = null
     let chipEl = null
@@ -728,8 +723,7 @@ export default function useWorkspaceDrag({
       clearPendingSourceClick?.()
       removeOverlays()
     }
-    // enabled is a module-load constant and every volatile input arrives through
-    // a ref, so the listener installs exactly once.
+    // Every volatile input arrives through a ref, so the listener installs once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled])
+  }, [])
 }
