@@ -33,3 +33,49 @@ export function newChatPresentationSuperseded(presentation, paintedSurfaceKey) {
   const bridged = newChatPresentationBridgedKey(presentation)
   return (paintedSurfaceKey ?? null) !== bridged
 }
+
+/** Whether the navigation generation that started allocation still owns it. */
+export function newChatPresentationIsCurrent(presentation, {
+  navigationEpoch,
+  viewMode,
+  drawerEntryOpen,
+  activeView,
+  activeChatId,
+} = {}) {
+  if (!presentation || presentation.viewMode !== viewMode) return false
+  if (presentation.chatId != null) {
+    return activeView === 'chat'
+      && String(activeChatId ?? '') === String(presentation.chatId)
+  }
+  return presentation.navigationEpoch === navigationEpoch
+    && presentation.drawerEntryOpen === !!drawerEntryOpen
+}
+
+/** Claim the single in-flight presentation owner synchronously. */
+export function claimNewChatPresentation(ownerRef, presentation) {
+  if (!presentation || ownerRef.current) return false
+  ownerRef.current = presentation
+  return true
+}
+
+/** Advance an owned allocation while preserving one identity in ref and state. */
+export function allocateNewChatPresentation(ownerRef, presentation, chatId) {
+  if (ownerRef.current !== presentation) return null
+  const allocated = { ...presentation, chatId: String(chatId) }
+  ownerRef.current = allocated
+  return allocated
+}
+
+/** Release only the async operation that still owns the presentation. */
+export function releaseNewChatPresentation(ownerRef, presentation) {
+  if (ownerRef.current !== presentation) return false
+  ownerRef.current = null
+  return true
+}
+
+/** Release the allocated owner after its concrete chat has painted. */
+export function releaseNewChatPresentationForChat(ownerRef, chatId) {
+  if (String(ownerRef.current?.chatId ?? '') !== String(chatId)) return false
+  ownerRef.current = null
+  return true
+}

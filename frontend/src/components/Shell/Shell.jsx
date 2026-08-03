@@ -65,7 +65,14 @@ import {
   rememberCreatedChat,
   reusableChatDetailVerdict,
 } from './newChatPolicy.js'
-import { newChatPresentationSuperseded } from './newChatPresentation.js'
+import {
+  allocateNewChatPresentation,
+  claimNewChatPresentation,
+  newChatPresentationIsCurrent,
+  newChatPresentationSuperseded,
+  releaseNewChatPresentation,
+  releaseNewChatPresentationForChat,
+} from './newChatPresentation.js'
 import {
   forgetConfirmedDeletion,
   forgetConfirmedDeletionIfExists,
@@ -998,9 +1005,7 @@ export default function Shell() {
     setNewChatPresentation(current => (
       current?.chatId === id ? null : current
     ))
-    if (newChatPresentationRef.current?.chatId === id) {
-      newChatPresentationRef.current = null
-    }
+    releaseNewChatPresentationForChat(newChatPresentationRef, id)
     finishDrawerNavigationPresentation()
   }, [finishDrawerNavigationPresentation, workspaceStateRef])
 
@@ -1009,14 +1014,33 @@ export default function Shell() {
   // Take the bridge down as soon as another surface owns the full-bleed box, or
   // the New chat landing would stay painted over that surface indefinitely.
   useEffect(() => {
-    if (!newChatPresentationSuperseded(newChatPresentation, fullBleedKey)) return
-    if (newChatPresentationRef.current === newChatPresentation) {
-      newChatPresentationRef.current = null
-    }
+    const navigationSuperseded = !newChatPresentationIsCurrent(
+      newChatPresentation,
+      {
+        navigationEpoch: navigationEpochRef.current,
+        viewMode: workspace.viewMode,
+        drawerEntryOpen: drawerPushedRef.current && navigationOpen,
+        activeView,
+        activeChatId,
+      },
+    )
+    if (
+      !navigationSuperseded
+      && !newChatPresentationSuperseded(newChatPresentation, fullBleedKey)
+    ) return
+    releaseNewChatPresentation(newChatPresentationRef, newChatPresentation)
     setNewChatPresentation(current => (
       current === newChatPresentation ? null : current
     ))
-  }, [fullBleedKey, newChatPresentation])
+    releaseComposerFocusLease(composerFocusLeaseRef.current)
+  }, [
+    activeChatId,
+    activeView,
+    fullBleedKey,
+    navigationOpen,
+    newChatPresentation,
+    workspace.viewMode,
+  ])
 
   // At most two ChatViews per transitioning owner: the last painted chat and the
   // current active chat. Handoff dedupe is world-local: Standard's retained copy
@@ -2560,14 +2584,16 @@ export default function Shell() {
           originKey: fullBleedKey ?? null,
           originView: activeViewRef.current,
           originChatId: activeChatIdRef.current,
+          navigationEpoch: navigationEpochRef.current,
+          viewMode: ws.viewMode,
+          drawerEntryOpen: drawerPushedRef.current,
         }
       : null
     if (presentation) {
       // A second tap belongs to the already visible allocation. Joining it by
       // doing nothing preserves the first focus lease and guarantees one
       // destination owns the eventual navigation.
-      if (newChatPresentationRef.current) return
-      newChatPresentationRef.current = presentation
+      if (!claimNewChatPresentation(newChatPresentationRef, presentation)) return
       setNewChatPresentation(presentation)
     }
     // A phone keyboard can only be raised from the tap's live user-activation
@@ -2603,12 +2629,14 @@ export default function Shell() {
         releaseComposerFocusLease(composerFocusLeaseRef.current)
       }
       if (presentation) {
-        if (newChatPresentationRef.current === presentation) {
-          newChatPresentationRef.current = null
-        }
+        const stillOwnsPresentation = releaseNewChatPresentation(
+          newChatPresentationRef,
+          presentation,
+        )
         setNewChatPresentation(current => (
           current === presentation ? null : current
         ))
+        if (!stillOwnsPresentation) return
       }
       // Don't leave a dead, drawer-still-open tap. Offline / failed create surface a
       // toast; an in-flight second tap just closes the drawer (the first create lands).
@@ -2622,11 +2650,15 @@ export default function Shell() {
       // Allocation is subordinate to the tap that started it. If the owner
       // deliberately moved elsewhere while the request was pending, retain
       // the created empty row but never pull the workspace back to it.
-      const stillAtOrigin = activeViewRef.current === presentation.originView
-        && String(activeChatIdRef.current ?? '') === String(presentation.originChatId ?? '')
+      const stillAtOrigin = newChatPresentationIsCurrent(presentation, {
+        navigationEpoch: navigationEpochRef.current,
+        viewMode: workspaceStateRef.current.ws.viewMode,
+        drawerEntryOpen: drawerPushedRef.current,
+        activeView: activeViewRef.current,
+        activeChatId: activeChatIdRef.current,
+      })
       if (!stillAtOrigin || newChatPresentationRef.current !== presentation) {
-        if (newChatPresentationRef.current === presentation) {
-          newChatPresentationRef.current = null
+        if (releaseNewChatPresentation(newChatPresentationRef, presentation)) {
           setNewChatPresentation(current => current === presentation ? null : current)
         }
         if (touchFocusLeased) {
@@ -2636,11 +2668,19 @@ export default function Shell() {
       }
       const alreadyPresented = activeViewRef.current === 'chat'
         && String(activeChatIdRef.current) === String(chatId)
+      let allocatedPresentation = null
+      if (alreadyPresented) {
+        releaseNewChatPresentation(newChatPresentationRef, presentation)
+      } else {
+        allocatedPresentation = allocateNewChatPresentation(
+          newChatPresentationRef,
+          presentation,
+          chatId,
+        )
+      }
       setNewChatPresentation(current => {
         if (current !== presentation) return current
-        return alreadyPresented
-          ? null
-          : { ...current, chatId: String(chatId) }
+        return alreadyPresented ? null : allocatedPresentation
       })
     }
 
