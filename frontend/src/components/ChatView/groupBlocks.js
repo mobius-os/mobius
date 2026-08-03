@@ -7,34 +7,6 @@ import {
 } from './toolActivityLabel.js'
 export { groupActivityRuns } from './activityGrouping.js'
 
-// Fold runs of adjacent ACTIVITY entries — thinking AND tool blocks — into one
-// activity node, including a lone entry. A build turn's pre-prose burst is one
-// contiguous stretch of reasoning + tool calls with nothing prose-like between
-// the pieces, so it honestly collapses to ONE quiet line (ActivityStretch)
-// instead of alternating "> Thought" lines and bordered tool cards. Giving
-// single- and multi-entry runs the same collapsed line also lets a lone tool (or
-// lone thinking) grow into a multi-entry stretch without swapping visual
-// primitives. MsgContent applies this to both DB-shaped history blocks and the
-// converted live payload, so source selection cannot reshuffle the active answer.
-//
-// Rules:
-//   - any run of entries whose item.type is 'tool' OR 'thinking' becomes a group
-//   - a DISTINCTIVE tool (isDistinctiveActivityTool — today an image view)
-//     breaks the run and stands as its OWN single-entry group, so notable beats
-//     punctuate the flow on their own line instead of folding into the combined
-//     "Edited files, read files, ran commands" summary (owner ref 2026-07-17).
-//     Consecutive distinctive tools each get their own line — they do not
-//     accumulate.
-//   - any non-activity entry (text, question, error) breaks the run and passes
-//     through, so interleave order is preserved exactly (interleave is sacred —
-//     these are the blocks a reader must not lose the position of)
-//
-// Input: an array of entries, each `{ item, ... }` where `item.type` decides
-// grouping. The rest of the entry (e.g. the caller's original index) is opaque
-// and carried through untouched, so the caller can still key/answer correctly.
-//
-// Output: an array of nodes, each either `{ single: entry }` or
-// `{ group: [entry, entry, ...] }`. Pure — no React, no mutation of inputs.
 // Merge runs of ADJACENT thinking entries into one, so a persisted transcript
 // renders a continuous reasoning pass as a SINGLE "Thought for Ns" disclosure
 // instead of many tiny fragments. Fragments only exist in already-saved chats

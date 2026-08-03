@@ -1,4 +1,4 @@
-import { cidOf } from './chatRuntimeState.js'
+import { cidOf } from './messageIdentity.js'
 
 /**
  * Decide what handleStop should re-send after a Stop, from the queued

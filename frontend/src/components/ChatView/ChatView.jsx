@@ -83,7 +83,6 @@ import {
   answerKeepsCurrentTurn,
   builtAppPulseDecision,
   canFastForwardQueue,
-  cidOf,
   coldTranscriptRenderFrames,
   continuationRowsFromPromotedMessage,
   isContinuationMessage,
@@ -99,6 +98,7 @@ import {
   stripInternalUserMessageFields,
   systemEventForChat,
 } from './chatRuntimeState.js'
+import { cidOf } from './messageIdentity.js'
 import {
   cidForSendAttempt,
   sendDraftIdentity,

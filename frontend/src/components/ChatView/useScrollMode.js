@@ -61,7 +61,8 @@
  */
 
 import { useState, useRef, useLayoutEffect, useCallback } from 'react'
-import { cidOf, isOwnerUserMessage } from './chatRuntimeState.js'
+import { cidOf } from './messageIdentity.js'
+import { isOwnerUserMessage } from './chatRuntimeState.js'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 import { isPerfProbeEnabled, perfMark, perfTime } from '../../lib/perfProbe.js'
 

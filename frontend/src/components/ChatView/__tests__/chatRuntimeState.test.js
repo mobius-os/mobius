@@ -7,7 +7,6 @@ import {
   builtAppPulseDecision,
   canFastForwardQueue,
   shouldFreezeStreamingReturn,
-  cidOf,
   coldTranscriptRenderFrames,
   continuationRowsFromPromotedMessage,
   isContinuationMessage,
@@ -269,17 +268,6 @@ test('a local turn refreshes completed history while preserving its optimistic s
     recent[1],
     loaded[2],
   ])
-})
-
-test('cidOf returns the row cid, else null (no read-time derivation)', () => {
-  // Post-card-221 every user row carries an explicit cid (client-minted, or a
-  // backfilled `legacy-<ts>`); cidOf returns it as-is and no longer derives one
-  // from `ts`. `ts` is display/ordering metadata only.
-  assert.equal(cidOf({ cid: 'abc', ts: 5 }), 'abc')
-  assert.equal(cidOf({ cid: 'legacy-5', ts: 5 }), 'legacy-5')
-  assert.equal(cidOf({ ts: 5 }), null)
-  assert.equal(cidOf({}), null)
-  assert.equal(cidOf(null), null)
 })
 
 test('stripInternalUserMessageFields KEEPS cid and drops the envelope fields', () => {

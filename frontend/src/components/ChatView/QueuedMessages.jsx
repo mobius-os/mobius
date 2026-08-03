@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react'
 import { ChevronDown, DoubleChevronRight, X } from '@openai/apps-sdk-ui/components/Icon'
 import { stripAugmentation } from './msgText.js'
-import { cidOf } from './chatRuntimeState.js'
+import { cidOf } from './messageIdentity.js'
 import {
   pointerSelectionChangedWithin,
   textSelectionSnapshot,

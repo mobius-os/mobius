@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback } from 'react'
-import { cidOf } from '../chatRuntimeState.js'
+import { cidOf } from '../messageIdentity.js'
 
 /**
  * Hook that owns the per-chat pending-message queue (the items shown
