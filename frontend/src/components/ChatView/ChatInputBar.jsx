@@ -101,7 +101,12 @@ import {
   slashCommandUnavailableReason,
   visibleSlashCommands,
 } from './slashCommands.js'
-import { filePasteNeedsDefaultPrevented, pastedFiles } from './pasteUpload.js'
+import {
+  filePasteNeedsDefaultPrevented,
+  insertClipboardText,
+  pastedFiles,
+  readClipboardContents,
+} from './pasteUpload.js'
 import { hasSendablePayload } from './composerSubmission.js'
 import {
   textareaUsesNativeSizing,
@@ -499,13 +504,17 @@ export default function ChatInputBar({
   leftButtons,
   rightButtons,
   attachTriggerRef,
+  clipboardTriggerRef,
   messageHistory = [],
   provider,
 }) {
   const fileInputRef = useRef(null)
   const historyIndexRef = useRef(null)
   const historyDraftRef = useRef('')
-  const historyCaretRef = useRef(null)
+  // One caret handoff serves every programmatic composer edit (sent-message
+  // history and explicit clipboard insertion). React first commits the
+  // controlled value; the layout effect below then restores its intended caret.
+  const pendingCaretRef = useRef(null)
   const historyProbeVersionRef = useRef(0)
   // Captures whether the textarea was focused at the moment the file
   // picker opened. Read by `handleFileSelect` to decide whether to
@@ -571,8 +580,47 @@ export default function ChatInputBar({
     historyProbeVersionRef.current += 1
     historyIndexRef.current = null
     historyDraftRef.current = ''
-    historyCaretRef.current = null
+    pendingCaretRef.current = null
   }
+
+  // Keep clipboard access behind the same narrow trigger boundary as Attach:
+  // ComposerPopover owns the visible action while the bar owns how clipboard
+  // text and files enter its controlled draft and attachment pipeline.
+  useLayoutEffect(() => {
+    if (!clipboardTriggerRef) return
+    clipboardTriggerRef.current = async () => {
+      const result = await readClipboardContents()
+      if (result.status !== 'ready') return result
+
+      if (result.files.length > 0) onAddFiles(result.files)
+      if (result.text) {
+        resetMessageHistory()
+        const textarea = inputRef?.current
+        const inserted = insertClipboardText(
+          input,
+          result.text,
+          textarea?.selectionStart,
+          textarea?.selectionEnd,
+        )
+        pendingCaretRef.current = inserted
+        if (listeningRef?.current) onManualVoiceEdit?.(inserted.value)
+        onInputChange(inserted.value)
+      }
+
+      return { ...result, status: 'pasted' }
+    }
+    return () => {
+      if (clipboardTriggerRef.current) clipboardTriggerRef.current = null
+    }
+  }, [
+    clipboardTriggerRef,
+    input,
+    inputRef,
+    listeningRef,
+    onAddFiles,
+    onInputChange,
+    onManualVoiceEdit,
+  ])
 
   // Never carry a traversal or its saved draft into another chat. History
   // list refreshes deliberately do not reset this: a queued message can move
@@ -585,11 +633,11 @@ export default function ChatInputBar({
   // History values arrive through the controlled composer boundary. Restore
   // the caret after React commits that value without changing focus or scroll.
   useLayoutEffect(() => {
-    const pending = historyCaretRef.current
+    const pending = pendingCaretRef.current
     const textarea = inputRef?.current
     if (!pending || pending.value !== input || !textarea) return
     try { textarea.setSelectionRange(pending.caret, pending.caret) } catch {}
-    historyCaretRef.current = null
+    pendingCaretRef.current = null
   }, [input, inputRef])
 
   // Modern browsers size the textarea from CSS (`field-sizing: content`).
@@ -688,7 +736,7 @@ export default function ChatInputBar({
     function applyHistoryMove(historyMove) {
       historyIndexRef.current = historyMove.index
       historyDraftRef.current = historyMove.draft
-      historyCaretRef.current = {
+      pendingCaretRef.current = {
         value: historyMove.value,
         caret: historyMove.value.length,
       }
@@ -705,7 +753,7 @@ export default function ChatInputBar({
             historyMove.value.length,
           )
         } catch {}
-        historyCaretRef.current = null
+        pendingCaretRef.current = null
       }
     }
 

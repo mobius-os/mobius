@@ -2419,7 +2419,7 @@
   gap: 1px;
 }
 
-/* Hairline divider between Attach and the picker. The popover owns the one
+/* Hairline divider between content actions and the picker. The popover owns the one
    scroll surface; a nested model-list scroller hid the continuation control
    above summary rows on phones and made their visible order misleading. */
 .composer-popover__section--picker {
@@ -2434,7 +2434,7 @@
   border-top: 1px solid var(--border-light);
 }
 
-/* Generic popover row — used by the Attach files entry. Same
+/* Generic popover row — used by the clipboard and Attach entries. Same
    geometry as `.csp-row` in ChatSettingsPanel so the two sections
    align visually. */
 .composer-popover__row {
@@ -2453,7 +2453,8 @@
   transition: background 0.12s ease;
 }
 
-.composer-popover__row:hover { background: var(--surface2); /* CONTRACT: opaque hover/raised fill, slightly above --surface */ }
+.composer-popover__row:not(:disabled):hover { background: var(--surface2); /* CONTRACT: opaque hover/raised fill, slightly above --surface */ }
+.composer-popover__row:disabled { cursor: wait; opacity: 0.68; }
 
 .composer-popover__row-icon {
   width: 30px;
@@ -2489,6 +2490,8 @@
   color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   line-height: 1.4;
 }
+
+.composer-popover__row-sub--error { color: var(--danger); }
 
 /* ── File chips: attach cards inside the pill ────────────────
    When the user attaches files the pill flips to a column layout

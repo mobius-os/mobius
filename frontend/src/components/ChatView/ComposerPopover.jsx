@@ -2,8 +2,8 @@
  * ComposerPopover — the `+` button in the chat composer and the popover
  * it opens. Two sections in one popover:
  *
- *   1. Attach files  — calls `onAttachClick` (parent owns the hidden
- *      <input type="file"> so it can clear .value after each pick).
+ *   1. Add content — reads browser-exposed clipboard text/files or calls
+ *      `onAttachClick` (parent owns the hidden file input).
  *   2. Model / effort / summary / automation — renders
  *      <ChatSettingsPanel> when a chatInfo is available; omitted on a fresh
  *      empty chat where chatInfo hasn't loaded yet.
@@ -61,7 +61,7 @@
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { FileDocument, InfoCircle, Paperclip, Plus } from '@openai/apps-sdk-ui/components/Icon'
+import { Clipboard, FileDocument, InfoCircle, Paperclip, Plus } from '@openai/apps-sdk-ui/components/Icon'
 import ChatSettingsPanel from './ChatSettingsPanel.jsx'
 import { popoverMaxHeight, nearestClipTop } from './composerPopoverHeight.js'
 import { focusComposerElement } from './composerFocusPolicy.js'
@@ -70,6 +70,7 @@ export default function ComposerPopover({
   chatInfo,
   chatId,
   onAttachClick,
+  onPasteFromClipboard,
   onChangeChatInfo,
   // Live-derived in the parent: `chatInfo.has_assistant_turns` is
   // set once on mount and never refreshed when the running turn
@@ -95,6 +96,8 @@ export default function ComposerPopover({
   embedded = false,
 }) {
   const [open, setOpen] = useState(false)
+  const [pasteBusy, setPasteBusy] = useState(false)
+  const [pasteMessage, setPasteMessage] = useState('')
   const wrapRef = useRef(null)
   const triggerRef = useRef(null)
   // Tracks whether the chat textarea was focused at the moment the
@@ -191,6 +194,28 @@ export default function ComposerPopover({
     onAttachClick()
   }
 
+  async function handlePasteFromClipboard() {
+    if (pasteBusy) return
+    setPasteBusy(true)
+    setPasteMessage('')
+    try {
+      const result = await onPasteFromClipboard?.()
+      if (result?.status === 'pasted') {
+        setOpen(false)
+        return
+      }
+      const messages = {
+        denied: 'Clipboard access was blocked. Allow it in your browser settings, then retry.',
+        empty: 'No usable text or files were found on the clipboard.',
+        unsupported: 'Clipboard reading is unavailable here. Use Attach files instead.',
+        failed: 'Your browser could not read that clipboard item. Use Attach files instead.',
+      }
+      setPasteMessage(messages[result?.status] || messages.failed)
+    } finally {
+      setPasteBusy(false)
+    }
+  }
+
   function handleOpenInspector() {
     setOpen(false)
     onOpenInspector?.()
@@ -219,7 +244,10 @@ export default function ComposerPopover({
           // wasInputFocusedRef declaration above.
           const el = composerInputRef?.current
           const wasFocused = document.activeElement === el
-          if (!open) wasInputFocusedRef.current = wasFocused
+          if (!open) {
+            wasInputFocusedRef.current = wasFocused
+            setPasteMessage('')
+          }
           setOpen(o => !o)
           // Belt-and-suspenders against Android Chrome's focus
           // restoration: when the popover mounts as a sibling of
@@ -235,7 +263,7 @@ export default function ComposerPopover({
             })
           }
         }}
-        aria-label="Attach or change model"
+        aria-label="Chat options"
         aria-haspopup="dialog"
         aria-expanded={open}
       >
@@ -249,6 +277,24 @@ export default function ComposerPopover({
           style={maxHeight !== null ? { maxHeight: `${maxHeight}px` } : undefined}
         >
           <div className="composer-popover__section">
+            <button
+              type="button"
+              className="composer-popover__row"
+              onClick={handlePasteFromClipboard}
+              disabled={pasteBusy}
+            >
+              <span className="composer-popover__row-icon"><Clipboard width={20} height={20} /></span>
+              <span className="composer-popover__row-main">
+                <span className="composer-popover__row-title">Paste from clipboard</span>
+                <span
+                  className={`composer-popover__row-sub${pasteMessage ? ' composer-popover__row-sub--error' : ''}`}
+                  role={pasteMessage ? 'status' : undefined}
+                  aria-live={pasteMessage ? 'polite' : undefined}
+                >
+                  {pasteBusy ? 'Reading clipboard…' : pasteMessage || 'Text, images, and files'}
+                </span>
+              </span>
+            </button>
             <button
               type="button"
               className="composer-popover__row"

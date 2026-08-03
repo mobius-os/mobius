@@ -35,6 +35,17 @@ test('chat context actions follow model selection and continuation policy', () =
 })
 
 
+test('composer offers general clipboard content before the file picker fallback', () => {
+  const clipboard = composerSource.indexOf('>Paste from clipboard</span>')
+  const attach = composerSource.indexOf('>Attach files</span>')
+
+  assert.ok(clipboard !== -1 && attach !== -1)
+  assert.ok(clipboard < attach)
+  assert.match(composerSource, /Text, images, and files/)
+  assert.match(composerSource, /onPasteFromClipboard/)
+})
+
+
 test('agent context inspector keeps continuity and active turn context visible', () => {
   assert.match(inspectorSource, /title: 'System prompt'/)
   assert.match(inspectorSource, /title: 'Recent chat summaries'/)

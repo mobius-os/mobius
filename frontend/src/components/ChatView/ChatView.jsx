@@ -508,6 +508,10 @@ export default function ChatView({
   // current() to fire the bar's hidden picker. ChatInputBar's layout
   // effect installs the function.
   const attachTriggerRef = useRef(null)
+  // Clipboard reading also belongs to ChatInputBar because that component owns
+  // both destinations: controlled composer text and pending attachments. The
+  // popover calls this ref and renders only the browser outcome it returns.
+  const clipboardTriggerRef = useRef(null)
   // The model/effort picker can accept another choice before the prior save
   // settles. Keep its serialized write tail at ChatView scope so both a closed
   // + popover and an immediate Send still observe the same ordering boundary.
@@ -4214,6 +4218,7 @@ export default function ChatView({
           onAddFiles={handleComposerAddFiles}
           onRemoveFile={handleComposerRemoveFile}
           attachTriggerRef={attachTriggerRef}
+          clipboardTriggerRef={clipboardTriggerRef}
           messageHistory={messageHistory}
           provider={chatInfo?.provider}
           leftButtons={
@@ -4222,6 +4227,7 @@ export default function ChatView({
                 chatInfo={showPicker ? chatInfo : null}
                 chatId={chatId}
                 onAttachClick={() => attachTriggerRef.current?.()}
+                onPasteFromClipboard={() => clipboardTriggerRef.current?.()}
                 /* Derive live — `chatInfo.has_assistant_turns` is set
                    once on mount via the API and never refreshed when
                    the running turn finishes. Without this OR, sending
