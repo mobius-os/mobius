@@ -37,7 +37,13 @@ export const SHELL_DATA_CACHE = 'mobius-shell-data'
 // blocks every API call and see no fix at all on its first post-upgrade open.
 // That is precisely the population this change is for, so the eviction is the
 // half that actually delivers it.
-export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v5'
+// Bumped -v5 → -v6 (2026-08-03): app frames now permit the narrow
+// `wasm-unsafe-eval` source needed to compile WebAssembly without enabling
+// JavaScript eval. A cached response retains its original CSP header, so merely
+// changing the backend header leaves existing devices serving v5 indefinitely
+// on this cache-first route. Activation evicts that response before News (or
+// any other Wasm app) opens under the revised policy.
+export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v6'
 // Bumped -v2 → -v3 (2026-07-30): v2 standalone documents executed app-authored
 // modules directly at owner origin. The secure host now mounts the shared
 // opaque AppCanvas frame; activation must evict every cached v2 document so an

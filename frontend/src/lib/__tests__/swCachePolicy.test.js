@@ -51,6 +51,10 @@ test('runtime cache cleanup evicts old offline app caches', () => {
   // from the frame's opaque origin. Serving one cache-first would reinstate the
   // blocked-network failure on exactly the devices the fix targets.
   assert.equal(isStaleRuntimeCache('mobius-offline-apps-v4'), true)
+  // v5 stored frames before the narrow WebAssembly CSP source was enabled.
+  // Those response headers must not keep blocking Wasm compilation after the
+  // server policy changes.
+  assert.equal(isStaleRuntimeCache('mobius-offline-apps-v5'), true)
   assert.equal(isStaleRuntimeCache(OFFLINE_APPS_CACHE), false)
   assert.equal(isStaleRuntimeCache('mobius-standalone'), true)
   assert.equal(isStaleRuntimeCache('mobius-standalone-v1'), true)
