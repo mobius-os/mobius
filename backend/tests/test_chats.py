@@ -277,7 +277,7 @@ def test_create_repair_chat_is_idempotent_across_ambiguous_retries(client, auth)
 
 
 def test_chat_list_projects_summaries_without_hydrating_transcripts(
-  client, auth,
+  client, auth, db,
 ):
   created = client.post(
     "/api/chats",
@@ -290,15 +290,22 @@ def test_chat_list_projects_summaries_without_hydrating_transcripts(
   assert created.status_code == 200
 
   hydrated_chat_ids = []
+  drawer_selects = []
 
   def on_load(chat, _context):
     hydrated_chat_ids.append(chat.id)
 
+  def capture_sql(_conn, _cursor, statement, _parameters, _context, _many):
+    if "FROM chats" in statement:
+      drawer_selects.append(statement)
+
   event.listen(models.Chat, "load", on_load)
+  event.listen(db.get_bind(), "before_cursor_execute", capture_sql)
   try:
     listed = client.get("/api/chats", headers=auth)
   finally:
     event.remove(models.Chat, "load", on_load)
+    event.remove(db.get_bind(), "before_cursor_execute", capture_sql)
 
   assert listed.status_code == 200
   row = next(item for item in listed.json() if item["id"] == created.json()["id"])
@@ -306,6 +313,48 @@ def test_chat_list_projects_summaries_without_hydrating_transcripts(
   assert hydrated_chat_ids == [], (
     "the drawer list must not instantiate Chat objects and decode messages"
   )
+  drawer_query = next(
+    statement for statement in drawer_selects
+    if "ORDER BY" in statement and "chats.has_messages" in statement
+  )
+  assert "chats.messages AS" not in drawer_query, (
+    "the drawer list must not read the transcript blob"
+  )
+
+
+def test_chat_list_message_summary_tracks_transcript_replacements(
+  client, auth,
+):
+  created = client.post(
+    "/api/chats",
+    json={
+      "title": "Summary invariant",
+      "messages": [{"role": "user", "content": "hello"}],
+    },
+    headers=auth,
+  )
+  assert created.status_code == 200
+  chat_id = created.json()["id"]
+
+  cleared = client.put(
+    f"/api/chats/{chat_id}", json={"messages": []}, headers=auth,
+  )
+  assert cleared.status_code == 200
+  listed = client.get("/api/chats", headers=auth)
+  assert next(row for row in listed.json() if row["id"] == chat_id)[
+    "has_messages"
+  ] is False
+
+  restored = client.put(
+    f"/api/chats/{chat_id}",
+    json={"messages": [{"role": "user", "content": "back"}]},
+    headers=auth,
+  )
+  assert restored.status_code == 200
+  listed = client.get("/api/chats", headers=auth)
+  assert next(row for row in listed.json() if row["id"] == chat_id)[
+    "has_messages"
+  ] is True
 
 
 def test_chat_list_orders_by_owner_activity_not_agent_updates(

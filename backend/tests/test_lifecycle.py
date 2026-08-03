@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import uuid
 
-from app import models
+from app import chat_search, models
 from app.chat_retention import purge_expired_chat_tombstones
 from sqlalchemy import event
 
@@ -34,6 +34,39 @@ def test_purge_after_seven_days(db, chat):
     models.Chat.id == chat_id
   ).first()
   assert gone is None, "Chat deleted 8 days ago must be purged"
+
+
+def test_hard_purge_removes_derived_search_transcript_without_later_search(
+  db, chat,
+):
+  chat.messages = [{
+    "role": "user",
+    "content": "retentioncassowary searchable transcript",
+    "ts": 1000,
+  }]
+  db.commit()
+  assert any(
+    result["id"] == chat.id
+    for result in chat_search.search(db, "retentioncassowary")
+  )
+
+  chat_id = chat.id
+  chat.deleted_at = datetime.utcnow() - timedelta(days=8)
+  db.commit()
+  purge_expired_chat_tombstones(db)
+
+  assert db.execute(
+    chat_search.sql(
+      "SELECT count(*) FROM chat_search_docs WHERE chat_id = :chat_id"
+    ),
+    {"chat_id": chat_id},
+  ).scalar_one() == 0
+  assert db.execute(
+    chat_search.sql(
+      "SELECT count(*) FROM chat_search_state WHERE chat_id = :chat_id"
+    ),
+    {"chat_id": chat_id},
+  ).scalar_one() == 0
 
 
 def test_expired_tombstone_purge_does_not_hydrate_transcript_json(

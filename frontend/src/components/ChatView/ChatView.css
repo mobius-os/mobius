@@ -370,6 +370,34 @@
   align-items: flex-start;
 }
 
+/* A search jump is a one-shot held position, not a new scrolling mode. The
+   restrained row wash and text highlight make the destination legible without
+   competing with ordinary user/assistant surfaces. */
+.chat__msg--search-reveal {
+  animation: chat-search-reveal 2.6s ease-out both;
+}
+
+.chat__msg--search-reveal .chat__text::highlight(chat-search-result) {
+  color: inherit;
+  background-color: color-mix(in srgb, var(--accent) 34%, transparent);
+}
+
+.chat__msg--search-reveal:focus { outline: none; }
+.chat__msg--search-reveal:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 6px;
+}
+
+@keyframes chat-search-reveal {
+  0%, 55% { filter: drop-shadow(0 0 0.55rem color-mix(in srgb, var(--accent) 45%, transparent)); }
+  100% { filter: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat__msg--search-reveal { animation: none; }
+}
+
 /* Tap-to-show message metadata. User timestamps and copy share one row, while
    assistant rows show the copy action alone. ChatView clears the visible state
    automatically after a short glance, so the row never remains expanded. */

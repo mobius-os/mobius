@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
 const shellCss = readFileSync(new URL('../Shell.css', import.meta.url), 'utf8')
 const paneChatView = readFileSync(new URL('../PaneChatView.jsx', import.meta.url), 'utf8')
+const drawer = readFileSync(new URL('../../Drawer/Drawer.jsx', import.meta.url), 'utf8')
 const drawerCss = readFileSync(new URL('../../Drawer/Drawer.css', import.meta.url), 'utf8')
 const indexCss = readFileSync(new URL('../../../index.css', import.meta.url), 'utf8')
 const chatSurfaceModel = readFileSync(new URL('../chatSurfaceModel.js', import.meta.url), 'utf8')
@@ -12,6 +13,7 @@ const workspaceChrome = readFileSync(new URL('../WorkspaceChrome.jsx', import.me
 const chatView = readFileSync(new URL('../../ChatView/ChatView.jsx', import.meta.url), 'utf8')
 const scrollMode = readFileSync(new URL('../../ChatView/useScrollMode.js', import.meta.url), 'utf8')
 const detailCache = readFileSync(new URL('../../../lib/chatDetailCache.js', import.meta.url), 'utf8')
+const searchTermHighlight = readFileSync(new URL('../../../lib/searchTermHighlight.js', import.meta.url), 'utf8')
 const apiClient = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
 
 function ruleBody(selector, source = shellCss) {
@@ -87,11 +89,31 @@ test('activation holds an unchanged running transcript until stream catch-up', (
     /if \(reused\) \{[\s\S]*updateChatRuntimeCache[\s\S]*applyMessagesToView\(msgs, detailCache\.offset\)[\s\S]*settleRuntime\(runtime, msgs\)[\s\S]*return/,
     'the fast path must reconcile a retained hidden owner before revealing it',
   )
-  assert.match(initialLoad,
-    /anchorParam = savedAnchorKey[\s\S]*&anchor=\$\{encodeURIComponent\(savedAnchorKey\)\}/,
-    'every authoritative return read must contain the exact saved row')
   assert.match(chatView,
-    /messageMatchesKey\(message, baseOffset \+ index, savedAnchorKey\)[\s\S]*remapSavedReadingAnchor/,
+    /activationAnchorKey = searchAnchorKey \|\| savedAnchorKey/,
+    'search navigation takes precedence over the saved reading row for one activation')
+  assert.match(drawer,
+    /chatSearchState\.query === normalizedChatSearchQuery[\s\S]*results: \[\]/,
+    'a changed query must hide stale result buttons before debounce completes')
+  assert.match(drawer,
+    /result\.searchQuery !== latestChatSearchQueryRef\.current/,
+    'a stale result handler must also reject an activation after input changes')
+  assert.match(drawer,
+    /searchSnippetPresentation\(result\.snippet\)[\s\S]*searchTerms: snippet\.terms/,
+    'the server-marked visible snippet, not a second query parser, owns destination terms')
+  assert.match(chatView,
+    /reconcileChatSearchActivation\([\s\S]*const searchRevealConsumed[\s\S]*if \(!searchReveal \|\| searchRevealConsumed \|\| !displayReady\) return[\s\S]*consumeChatSearchActivation\([\s\S]*clearChatSearchReveal/,
+    'consumption stays latched to the searched activation instead of reloading its saved anchor')
+  assert.match(chatView,
+    /highlightSearchTerms\(row, searchReveal\.terms\)[\s\S]*row\.focus\(\{ preventScroll: true \}\)[\s\S]*revealAnchor\(canonicalKey, 96, highlight\.firstRange\)/,
+    'a validated visible destination focuses and positions the exact marked word')
+  assert.doesNotMatch(searchTermHighlight, /replaceWith\(|createElement\(['"]mark['"]\)/,
+    'search emphasis must never rewrite React-owned transcript text')
+  assert.match(initialLoad,
+    /anchorParam = activationAnchorKey[\s\S]*&anchor=\$\{encodeURIComponent\(activationAnchorKey\)\}/,
+    'every authoritative return read must contain the exact saved or searched row')
+  assert.match(chatView,
+    /messageMatchesKey\(message, baseOffset \+ index, activationAnchorKey\)[\s\S]*!searchActivation[\s\S]*remapSavedReadingAnchor/,
     'cache and server rows must resolve every durable alias before canonicalizing it')
   assert.match(initialLoad,
     /runtime\.requested_anchor_found === false[\s\S]*if \(runtimeAnchorMatch\)[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND[\s\S]*retireSavedReadingPosition\(chatId\)[\s\S]*anchorRetired = true/,
@@ -242,10 +264,18 @@ test('direct chat actions hand focus to the destination composer', () => {
   assert.match(shell,
     /className="shell__composer-focus-lease"[\s\S]*?aria-label="New chat message"/,
     'the keyboard lease must remain a named, programmatically focused text control')
-  const selectChat = shell.match(/function selectChat\(id\) \{([\s\S]*?)\n  \}/)?.[1] || ''
+  const selectChat = shell.match(
+    /function selectChat\(id, \{ focusComposer = true \} = \{\}\) \{([\s\S]*?)\n  \}/,
+  )?.[1] || ''
   assert.match(selectChat,
-    /navTo\('chat', \{ chatId: id, preserveDrawerPresentation \}\)[\s\S]*focusDesktopChatPaneComposer\(id\)/,
+    /navTo\('chat', \{ chatId: id, preserveDrawerPresentation \}\)[\s\S]*if \(focusComposer\) focusDesktopChatPaneComposer\(id\)/,
     'drawer and settings chat selection must focus after requesting navigation')
+  assert.match(drawer,
+    /selectChatSearchResult[\s\S]*const reveal = result\.anchor_key[\s\S]*onChat\(result\.id, \{ focusComposer: !reveal \}\)/,
+    'search focuses an exact message row and gives title-only results a composer fallback')
+  assert.match(chatView,
+    /className=\{`chat__msg[\s\S]*tabIndex=\{-1\}/,
+    'message rows must accept the programmatic search focus without joining tab order')
   assert.match(shell,
     /onActivate=\{\(\) => \{[\s\S]*tabModel\.tabNavTarget\(tab\)[\s\S]*navTo\(view, opts\)[\s\S]*tab\.kind === 'chat'[\s\S]*focusDesktopChatPaneComposer\(tab\.id\)/,
     'the single-pane tab strip must focus a selected chat composer')

@@ -73,6 +73,16 @@ import {
   messageMatchesKey,
   optimisticHandoffWindow,
 } from '../../lib/chatDetailCache.js'
+import {
+  chatSearchRevealFor,
+  clearChatSearchReveal,
+  consumeChatSearchActivation,
+  reconcileChatSearchActivation,
+  subscribeChatSearchReveal,
+} from '../../lib/chatSearchReveal.js'
+import {
+  highlightSearchTerms,
+} from '../../lib/searchTermHighlight.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
 import { sendFailureMessage } from './sendFailure.js'
 import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, findTrailingAssistantPartialIndex, streamItemsHaveRenderableContent } from './streamPromotion.js'
@@ -278,6 +288,30 @@ export default function ChatView({
   const queryClient = useQueryClient()
   const hiddenRef = useRef(hidden)
   hiddenRef.current = hidden
+  // A drawer search may target a ChatView that is already mounted. Subscribe
+  // to its tiny transient intent store so same-chat searches do not require a
+  // route/remount to run the anchor reveal.
+  const [, setSearchRevealVersion] = useState(0)
+  const searchActivationRef = useRef(null)
+  searchActivationRef.current = reconcileChatSearchActivation(
+    searchActivationRef.current,
+    chatId,
+    chatSearchRevealFor(chatId),
+  )
+  useEffect(() => subscribeChatSearchReveal(chatId, () => {
+    const next = reconcileChatSearchActivation(
+      searchActivationRef.current,
+      chatId,
+      chatSearchRevealFor(chatId),
+    )
+    if (next === searchActivationRef.current) return
+    searchActivationRef.current = next
+    setSearchRevealVersion(version => version + 1)
+  }), [chatId])
+  const searchReveal = searchActivationRef.current.reveal
+  const searchRevealConsumed = searchActivationRef.current.consumedId === searchReveal?.id
+  const searchRevealCleanupRef = useRef(() => {})
+  useEffect(() => () => searchRevealCleanupRef.current(), [])
   const inputRef = useRef(null)
   const handleInternalNav = useCallback((url) => {
     onInternalNav?.(url)
@@ -320,10 +354,11 @@ export default function ChatView({
   // saved coordinate; an incomplete restoration window stays hidden until the
   // anchor-addressed read repairs or retires that coordinate.
   const initialSavedAnchorKey = savedReadingAnchorKey(chatId)
+  const initialActivationAnchorKey = searchReveal?.anchorKey || initialSavedAnchorKey
   const initialCacheEntryState = chatCacheEntryState(
     cached,
-    initialSavedAnchorKey,
-    savedReadingAnchorHasNestedPart(chatId),
+    initialActivationAnchorKey,
+    !searchReveal && savedReadingAnchorHasNestedPart(chatId),
   )
   const [loading, setLoading] = useState(initialCacheEntryState === 'missing')
   const [initialEntryPhase, setInitialEntryPhase] = useState(
@@ -729,6 +764,7 @@ export default function ChatView({
     freezeQuestionSubmission,
     freezeQueuedSubmission,
     revealConversationTail,
+    revealAnchor,
     reapplyActiveMode,
     settleSendIntent,
     settleStreamingPin,
@@ -1638,11 +1674,17 @@ export default function ChatView({
     const queryKey = chatMessagesQueryKey(chatId)
     const activationCache = queryClient.getQueryData(queryKey)
     const savedAnchorKey = savedReadingAnchorKey(chatId)
+    const searchAnchorKey = searchReveal?.anchorKey || null
+    // A search selection is a deliberate one-shot navigation, so it wins over
+    // the stored reader coordinate for this activation. It never remaps or
+    // retires that saved position.
+    const activationAnchorKey = searchAnchorKey || savedAnchorKey
+    const searchActivation = !!searchAnchorKey
     const anchorMatchIn = (snapshot) => {
-      if (!savedAnchorKey || !Array.isArray(snapshot?.messages)) return null
+      if (!activationAnchorKey || !Array.isArray(snapshot?.messages)) return null
       const baseOffset = Number.isInteger(snapshot.offset) ? snapshot.offset : 0
       const localIndex = snapshot.messages.findIndex((message, index) => (
-        messageMatchesKey(message, baseOffset + index, savedAnchorKey)
+        messageMatchesKey(message, baseOffset + index, activationAnchorKey)
       ))
       if (localIndex < 0) return null
       const messageIndex = baseOffset + localIndex
@@ -1652,16 +1694,16 @@ export default function ChatView({
       }
     }
     const remapAnchorMatch = (match) => {
-      if (match?.canonicalKey && match.canonicalKey !== savedAnchorKey) {
+      if (!searchActivation && match?.canonicalKey && match.canonicalKey !== savedAnchorKey) {
         remapSavedReadingAnchor(chatId, savedAnchorKey, match.canonicalKey)
       }
     }
     const activationAnchorMatch = anchorMatchIn(activationCache)
-    const cacheCoversSavedAnchor = !savedAnchorKey || !!activationAnchorMatch
+    const cacheCoversSavedAnchor = !activationAnchorKey || !!activationAnchorMatch
     const activationCacheEntryState = chatCacheEntryState(
       activationCache,
-      savedAnchorKey,
-      savedReadingAnchorHasNestedPart(chatId),
+      activationAnchorKey,
+      !searchActivation && savedReadingAnchorHasNestedPart(chatId),
     )
     remapAnchorMatch(activationAnchorMatch)
     chatIdStaleRef.current = false
@@ -1742,7 +1784,7 @@ export default function ChatView({
         // captured object can never overwrite the fresher publication.
         const latestCache = queryClient.getQueryData(queryKey)
         const latestAnchorMatch = anchorMatchIn(latestCache)
-        const latestCoversSavedAnchor = !savedAnchorKey || !!latestAnchorMatch
+        const latestCoversSavedAnchor = !activationAnchorKey || !!latestAnchorMatch
         remapAnchorMatch(latestAnchorMatch)
         if (latestCoversSavedAnchor && chatSnapshotMatchesRuntime(latestCache, runtime)) {
           detailCache = latestCache
@@ -1750,28 +1792,32 @@ export default function ChatView({
         }
       }
       if (!reused) {
-        const anchorParam = savedAnchorKey
-          ? `&anchor=${encodeURIComponent(savedAnchorKey)}`
+        const anchorParam = activationAnchorKey
+          ? `&anchor=${encodeURIComponent(activationAnchorKey)}`
           : ''
         runtime = await requestJson(
           `/chats/${chatId}?limit=20&compact=1${anchorParam}`,
           'CHAT_LOAD_FAILED',
         )
         const runtimeAnchorMatch = anchorMatchIn(runtime)
-        if (savedAnchorKey && runtime.requested_anchor_found === true) {
+        if (activationAnchorKey && runtime.requested_anchor_found === true) {
           if (!runtimeAnchorMatch) {
             throw new Error('CHAT_READING_ANCHOR_NOT_FOUND')
           }
           remapAnchorMatch(runtimeAnchorMatch)
-        } else if (savedAnchorKey && runtime.requested_anchor_found === false) {
+        } else if (activationAnchorKey && runtime.requested_anchor_found === false) {
           // Only the authoritative false + absent-row combination proves that
           // the durable coordinate is gone. A contradictory response is a
           // protocol error; retiring on it would destroy a valid location.
           if (runtimeAnchorMatch) {
             throw new Error('CHAT_READING_ANCHOR_NOT_FOUND')
           }
-          retireSavedReadingPosition(chatId)
-          anchorRetired = true
+          if (!searchActivation) {
+            retireSavedReadingPosition(chatId)
+            anchorRetired = true
+          } else {
+            clearChatSearchReveal(chatId, searchReveal?.id)
+          }
         } else {
           // Rolling servers may omit the coverage bit. A row that is present
           // can still be canonicalized safely; absence without the bit cannot.
@@ -1958,7 +2004,7 @@ export default function ChatView({
       loadingOlder.current = false
       disconnect()
     }
-  }, [chatId, loadNonce, hidden])
+  }, [chatId, loadNonce, hidden, searchReveal?.id, searchReveal?.anchorKey])
 
 
   // Paginate older messages. Captures a pre-prepend anchor so we can
@@ -3559,6 +3605,62 @@ export default function ChatView({
   const displayReady = activationSettled
     && !loading
     && (transcriptPaintable || showEmpty || showLoadError)
+
+  // The requested server window contains the matching row through the tail.
+  // Resolve the result's alias only after validation made the visible transcript
+  // paintable. The saved reading coordinate stays untouched until the owner
+  // next scrolls or otherwise chooses a new position.
+  useLayoutEffect(() => {
+    if (!searchReveal || searchRevealConsumed || !displayReady) return
+    if (hidden) {
+      // More than one physical ChatView can retain this logical chat. A hidden
+      // copy must neither reveal nor consume the one intent; the visible copy
+      // owns it, and the TTL clears a navigation that never becomes visible.
+      return
+    }
+    const localIndex = messages.findIndex((message, index) => (
+      messageMatchesKey(message, offset + index, searchReveal.anchorKey)
+    ))
+    if (localIndex < 0) return
+    const canonicalKey = messageKey(messages[localIndex], offset + localIndex)
+    const row = [...(scrollRef.current?.querySelectorAll('.chat__msg[data-key]') || [])]
+      .find(element => element.dataset.key === canonicalKey)
+    if (!canonicalKey || !row) return
+
+    searchRevealCleanupRef.current()
+    row.classList.add('chat__msg--search-reveal')
+    const highlight = highlightSearchTerms(row, searchReveal.terms)
+    row.focus({ preventScroll: true })
+    if (!revealAnchor(canonicalKey, 96, highlight.firstRange)) {
+      row.classList.remove('chat__msg--search-reveal')
+      highlight.clear()
+      return
+    }
+    const timer = setTimeout(() => {
+      row.classList.remove('chat__msg--search-reveal')
+      highlight.clear()
+    }, 2600)
+    searchRevealCleanupRef.current = () => {
+      clearTimeout(timer)
+      row.classList.remove('chat__msg--search-reveal')
+      highlight.clear()
+    }
+    searchActivationRef.current = consumeChatSearchActivation(
+      searchActivationRef.current,
+      searchReveal.id,
+    )
+    clearChatSearchReveal(chatId, searchReveal.id)
+  }, [
+    chatId,
+    displayReady,
+    hidden,
+    messages,
+    offset,
+    revealAnchor,
+    searchReveal,
+    searchRevealConsumed,
+  ])
+
   useLayoutEffect(() => {
     if (displayReady) onDisplayReady?.(chatId)
   }, [chatId, displayReady, onDisplayReady])
@@ -4003,6 +4105,7 @@ export default function ChatView({
             <li
               key={userCid || msg.id || msg.ts || `${msg.role}-${i}`}
               className={`chat__msg chat__msg--${continuationMarker ? 'marker' : msg.role}`}
+              tabIndex={-1}
               ref={i === lastUserIdx ? setLastUserMsgRef : null}
               data-key={dataKey}
               data-anchor-key={anchorKey === dataKey ? undefined : anchorKey}

@@ -2738,7 +2738,7 @@ export default function Shell() {
   }, [pendingNewChatToken, materializeNewChatRevision, modeView.active, modeState.transition,
       workspace.viewMode, workspace.singleScreen, workspaceStateRef])
 
-  function selectChat(id) {
+  function selectChat(id, { focusComposer = true } = {}) {
     const chatId = String(id)
     const paintedWorld = effectiveViewMode === 'single'
       ? STANDARD_CHAT_WORLD
@@ -2753,7 +2753,7 @@ export default function Shell() {
       && !destinationAlreadyPainted
     clearChatAttention(id)
     navTo('chat', { chatId: id, preserveDrawerPresentation })
-    focusDesktopChatPaneComposer(id)
+    if (focusComposer) focusDesktopChatPaneComposer(id)
   }
 
   async function deleteChat(id) {

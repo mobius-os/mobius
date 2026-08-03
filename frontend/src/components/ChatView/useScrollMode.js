@@ -1252,6 +1252,10 @@ export default function useScrollMode({
   // used the automatic latest-message fallback. Passive lifecycle/viewport
   // changes must not promote that fallback into a saved reading position.
   const readerLocationExplicitRef = useRef(false)
+  // A drawer result is navigation, not a new saved reading location. Preserve
+  // the owner's prior coordinate until they actively scroll or send from the
+  // revealed row.
+  const transientSearchRevealRef = useRef(false)
   // A saved location existed but this visit could not resolve it (its row or
   // part was not in the committed window yet). That is a RETRIEVAL failure,
   // not the reader choosing the tail — so the automatic tail fallback must not
@@ -1437,6 +1441,7 @@ export default function useScrollMode({
   const persistMode = useCallback(({ freezeToCurrentPosition = false } = {}) => {
     try {
       if (!readingPositionOwnerRef.current) return
+      if (transientSearchRevealRef.current) return
       if (!readerLocationExplicitRef.current) {
         // Keep a stored location this visit merely failed to resolve. Only an
         // absent location — never a retrieval failure — may be cleared here.
@@ -1540,6 +1545,7 @@ export default function useScrollMode({
     isFirstUserMsg = false,
     previousIntent = null,
   } = {}) => {
+    transientSearchRevealRef.current = false
     const readerIntentVersion = readerIntentVersionRef.current
     const willPinNow = canPin && shouldPinSend({
       scrollEl: scrollRef.current,
@@ -1627,6 +1633,35 @@ export default function useScrollMode({
       'reader:paginate-anchor',
     )
   }, [transitionMode])
+
+  /** One held search result reveal; unlike a reader gesture it is never
+   * persisted over the owner's saved location. */
+  const revealAnchor = useCallback((key, offset = 96, exactTarget = null) => {
+    const scrollEl = scrollRef.current
+    const row = _anchorRow(scrollEl, key)
+    if (!scrollEl || !row) return false
+    let anchorOffset = offset
+    const targetRect = exactTarget?.getBoundingClientRect?.()
+    const rowRect = row.getBoundingClientRect?.()
+    if (Number.isFinite(targetRect?.top) && Number.isFinite(rowRect?.top)) {
+      const targetDelta = clientDeltaToLayout(
+        { x: 0, y: targetRect.top - rowRect.top },
+        captureLayoutSpace(scrollEl),
+      ).y
+      if (Number.isFinite(targetDelta)) anchorOffset -= targetDelta
+    }
+    supersedePendingReaderGesture()
+    transientSearchRevealRef.current = true
+    readerLocationExplicitRef.current = false
+    const mode = transitionMode(
+      { kind: 'ANCHOR_AT', key: row.dataset.key, offset: anchorOffset },
+      'search:reveal-anchor',
+    )
+    const authorityVersion = readerIntentVersionRef.current
+    writeMode(scrollEl, mode, 'search:reveal-anchor', authorityVersion)
+    lastAppliedModeRef.current = mode
+    return true
+  }, [scrollRef, supersedePendingReaderGesture, transitionMode, writeMode])
 
   const freezeForegroundReturn = useCallback(() => {
     const nextMode = modeForForegroundReturn(scrollRef.current)
@@ -2473,6 +2508,7 @@ export default function useScrollMode({
       if (!userDriven) {
         return
       }
+      transientSearchRevealRef.current = false
       const distanceToBottom = scrollEl.scrollHeight
         - scrollEl.scrollTop
         - scrollEl.clientHeight
@@ -2741,6 +2777,7 @@ export default function useScrollMode({
     freezeQuestionSubmission,
     freezeQueuedSubmission,
     revealConversationTail,
+    revealAnchor,
     reapplyActiveMode,
     settleSendIntent,
     settleStreamingPin,

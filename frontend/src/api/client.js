@@ -423,6 +423,10 @@ export const api = {
   },
   chats: {
     list: (options = {}) => apiFetch('/chats', options),
+    search: (query, options = {}) => apiFetch(
+      `/chats/search?q=${encodeURIComponent(query)}`,
+      { timeoutMs: 10000, ...options },
+    ),
     create: (payload, options = {}) => listAffectingMutation('chats', '/chats', {
       ...options,
       method: 'POST',
@@ -433,10 +437,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
-    detail: (chatId, { limit, compact, signal, timeoutMs } = {}) => {
+    detail: (chatId, { limit, compact, anchor, signal, timeoutMs } = {}) => {
       const params = new URLSearchParams()
       if (limit !== undefined) params.set('limit', String(limit))
       if (compact !== undefined) params.set('compact', compact ? '1' : '0')
+      if (anchor) params.set('anchor', String(anchor))
       const query = params.toString()
       return apiFetch(
         `/chats/${chatId}${query ? `?${query}` : ''}`,
