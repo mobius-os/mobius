@@ -92,6 +92,22 @@ def get_active_sink(chat_id: str) -> "ChatEventSink | None":
   return _active_sinks.get(chat_id)
 
 
+def active_sink_stream_snapshot(chat_id: str, broadcast) -> list[dict] | None:
+  """Freeze the current assistant items for one snapshot-capable subscriber.
+
+  The sink is the reduction authority for a running turn: every content event
+  reaches ``assistant_blocks`` before it reaches the broadcast.  Pairing by
+  broadcast identity prevents a late sink from seeding a successor turn (or a
+  successor sink from seeding a completed broadcast during teardown). ``None``
+  means the caller must use ordinary event-log replay; an empty list is a valid
+  live snapshot before the assistant has produced its first item.
+  """
+  sink = get_active_sink(chat_id)
+  if sink is None or sink.bc is not broadcast:
+    return None
+  return copy.deepcopy(sink.assistant_blocks)
+
+
 def unregister_active_sink(chat_id: str, sink: "ChatEventSink") -> None:
   """Drop the live sink for `chat_id`, identity-keyed.
 

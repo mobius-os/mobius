@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app import activity, models, questions, schemas
 from app.broadcast import create_broadcast, get_broadcast, get_system_broadcast
+from app.chat_event_sink import active_sink_stream_snapshot
 from app.chat import (
   _schedule_continuation,
   discard_starting,
@@ -55,6 +56,23 @@ log = logging.getLogger(__name__)
 
 # Keepalive interval for the SSE stream to prevent proxy timeouts.
 _KEEPALIVE_INTERVAL = 30  # seconds
+
+# A server-owned assistant snapshot already contains every content-bearing
+# event reduced by ChatEventSink. These few replay-safe control facts live
+# outside that block list and remain necessary when a reconnect skips the full
+# content log. They are replay-safe by contract: cumulative, idempotent by
+# identity, or a durable transcript boundary that tells the client to refresh.
+_SNAPSHOT_REPLAY_EVENT_TYPES = frozenset({
+  "answers_applied",
+  "app_updated",
+  "build_phase",
+  "chat_run_finished",
+  "chat_run_started",
+  "queued_turn_starting",
+  "steer_delivery_failed",
+  "steered_into_turn",
+  "theme_updated",
+})
 
 
 def _message_persist_unavailable(exc: Exception, *, chat_id: str) -> HTTPException:
@@ -1125,14 +1143,17 @@ async def cancel_pending_message(
 async def stream_chat(
   request: Request,
   chat_id: str,
+  snapshot: bool = False,
   principal: Principal = Depends(get_chat_view_principal),
   db: Session = Depends(get_db),
 ):
   """SSE endpoint: subscribes to the chat's broadcast and streams events.
 
-  Sends a catch-up burst of all prior events, then streams live events
-  until the broadcast is completed or the client disconnects.  Keepalive
-  comments are sent every 30 s to prevent proxy timeouts.
+  Snapshot-capable clients receive the live sink's current assistant items plus
+  the small set of replay-safe control facts that are not represented there;
+  older clients receive the full prior event log. Both then stream only new
+  events until completion or disconnect. Keepalive comments are sent every
+  30 s to prevent proxy timeouts.
 
   Same actor gate as send_message: owner streams any chat; an app token
   streams only a chat it created (403 otherwise). The ownership check
@@ -1180,6 +1201,14 @@ async def stream_chat(
     # the queue with no await in between), so the catch-up burst still
     # captures exactly the events present when this subscriber attaches.
     catch_up, queue = bc.subscribe()
+    snapshot_items = (
+      active_sink_stream_snapshot(chat_id, bc) if snapshot else None
+    )
+    if snapshot_items is not None:
+      catch_up = [
+        event for event in catch_up
+        if event.get("type") in _SNAPSHOT_REPLAY_EVENT_TYPES
+      ]
     last_embed_auth_check = 0.0
 
     def embed_session_active() -> bool:
@@ -1194,6 +1223,8 @@ async def stream_chat(
     try:
       if not embed_session_active():
         return
+      if snapshot_items is not None:
+        yield _sse({"type": "stream_snapshot", "items": snapshot_items})
       # Send all events buffered before this client connected.
       has_done = False
       for event in catch_up:

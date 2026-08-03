@@ -64,7 +64,7 @@ import { shouldDismissComposerKeyboardOnSubmit } from './composerKeyboardPolicy.
 import { updateChatRuntimeCache } from './chatRuntimeCache.js'
 import {
   assistantAnchorKey,
-  chatCacheCanPaint,
+  chatCacheEntryState,
   chatDetailCacheValue,
   chatSnapshotMatchesRuntime,
   mergeRecentMessagesIntoLoadedWindow,
@@ -319,15 +319,28 @@ export default function ChatView({
   // the reader's saved coordinate; an incomplete restoration window stays
   // hidden until the anchor-addressed read repairs or retires that coordinate.
   const initialSavedAnchorKey = savedReadingAnchorKey(chatId)
-  const initialCachePaintable = chatCacheCanPaint(
+  const initialCacheEntryState = chatCacheEntryState(
     cached,
     initialSavedAnchorKey,
     savedReadingAnchorHasNestedPart(chatId),
   )
-  const [loading, setLoading] = useState(!initialCachePaintable)
+  const [loading, setLoading] = useState(initialCacheEntryState === 'missing')
   const [initialEntryPhase, setInitialEntryPhase] = useState(
-    initialCachePaintable ? 'cached' : 'history',
+    initialCacheEntryState === 'paintable'
+      ? 'cached'
+      : initialCacheEntryState === 'validating'
+        ? 'cache-validating'
+        : 'history',
   )
+  const acceptCachedReadingCoordinate = useCallback(() => {
+    // The scroll owner has proved the exact nested part against the committed
+    // cached DOM. Admit the same quiet-layout reveal path as an ordinary safe
+    // cache without waiting for the independent freshness handshake.
+    setInitialEntryPhase(current => (
+      current === 'cache-validating' ? 'cached' : current
+    ))
+    setLoading(false)
+  }, [])
   // On a failed initial /chats/{id} fetch, loadError flips in the catch so
   // the UI can render a retry message. Setting loading false alone would
   // render the empty-state UI ("What's on your mind?") as if the chat had no
@@ -719,6 +732,7 @@ export default function ChatView({
     pendingMessagesLength: pendingQueue.pendingMessages.length,
     loadingOlderRef: loadingOlder,
     initialEntryPhase,
+    onCachedCoordinateReady: acceptCachedReadingCoordinate,
     ownsReadingPosition: !hidden,
   })
 
@@ -1670,7 +1684,7 @@ export default function ChatView({
     }
     const activationAnchorMatch = anchorMatchIn(activationCache)
     const cacheCoversSavedAnchor = !savedAnchorKey || !!activationAnchorMatch
-    const activationCachePaintable = chatCacheCanPaint(
+    const activationCacheEntryState = chatCacheEntryState(
       activationCache,
       savedAnchorKey,
       savedReadingAnchorHasNestedPart(chatId),
@@ -1678,8 +1692,19 @@ export default function ChatView({
     remapAnchorMatch(activationAnchorMatch)
     chatIdStaleRef.current = false
     setLoadError(false)
-    setLoading(!activationCachePaintable)
-    setInitialEntryPhase(activationCachePaintable ? 'cached' : 'history')
+    setLoading(activationCacheEntryState === 'missing')
+    const activationEntryPhase = activationCacheEntryState === 'paintable'
+      ? 'cached'
+      : activationCacheEntryState === 'validating'
+        ? 'cache-validating'
+        : 'history'
+    setInitialEntryPhase(current => (
+      // Mount-time layout validation can finish before this passive activation
+      // effect runs. Do not re-close a cache gate the scroll owner just proved.
+      activationEntryPhase === 'cache-validating' && current === 'cached'
+        ? current
+        : activationEntryPhase
+    ))
 
     const gen = fetchGenRef.current
     const requestJson = async (path, label) => {

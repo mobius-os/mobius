@@ -39,6 +39,12 @@ from app.broadcast import (
 )
 from app.chat_writer import Barrier, get_writer
 from app.chat_transcript import materialized_messages
+from app.chat_event_sink import (
+  ChatEventSink,
+  active_sink_stream_snapshot,
+  register_active_sink,
+  unregister_active_sink,
+)
 from app.deps import Principal
 from app.routes.notify import NotifyBody
 from app.memory_recall import EMPTY_RECALL_BINDING
@@ -101,6 +107,29 @@ def test_chat_broadcast_fans_out_to_phone_and_web_subscribers():
   assert phone.get_nowait() == event
   assert web.get_nowait() == event
   assert len(bc.subscribers) == 2
+
+
+def test_active_sink_snapshot_is_frozen_and_broadcast_identity_keyed():
+  bc = ChatBroadcast("snapshot-chat")
+  sink = ChatEventSink(
+    bc,
+    bc.chat_id,
+    recall_binding=EMPTY_RECALL_BINDING,
+  )
+  sink.assistant_blocks = [{"type": "text", "content": "hello"}]
+  register_active_sink(bc.chat_id, sink)
+  try:
+    snapshot = active_sink_stream_snapshot(bc.chat_id, bc)
+    assert snapshot == sink.assistant_blocks
+    assert snapshot is not sink.assistant_blocks
+    snapshot[0]["content"] = "changed by subscriber"
+    assert sink.assistant_blocks[0]["content"] == "hello"
+    assert active_sink_stream_snapshot(
+      bc.chat_id,
+      ChatBroadcast(bc.chat_id),
+    ) is None
+  finally:
+    unregister_active_sink(bc.chat_id, sink)
 
 
 def test_task_progress_coalesces_by_task_id_in_log():
@@ -824,5 +853,63 @@ async def test_stream_generator_unsubscribes_after_finally_runs(db, chat):
     assert len(bc.subscribers) == baseline, (
       "the generator finished but its finally never unsubscribed — leak"
     )
+  finally:
+    bc_mod._broadcasts.pop(bc.chat_id, None)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_stream_sends_reduced_items_plus_control_tail(
+  db, chat, monkeypatch,
+):
+  """A snapshot client must not replay the content event log it replaces.
+
+  The subscribe boundary still owns ordering: the frozen sink items arrive
+  first, replay-safe control facts follow, then ``catch_up_done`` separates
+  every event that was queued after subscribe.
+  """
+  from app.routes import chats_stream as stream_mod
+
+  bc = ChatBroadcast(chat.id)
+  bc.publish({"type": "text", "content": "old delta"})
+  bc.publish({"type": "tool_start", "tool": "Bash", "tool_use_id": "u1"})
+  bc.publish({"type": "build_phase", "phase": "rebuilding"})
+  bc.publish({"type": "answers_applied", "question_id": "q1", "answers": {}})
+  bc.publish({"type": "steered_into_turn", "ts": 4, "content": "follow up"})
+  bc.running = False
+  bc_mod._broadcasts[bc.chat_id] = bc
+  snapshot_items = [
+    {"type": "text", "content": "complete answer", "text_item_id": "t1"},
+    {"type": "tool", "tool": "Bash", "status": "running", "tool_use_id": "u1"},
+  ]
+  monkeypatch.setattr(
+    stream_mod,
+    "active_sink_stream_snapshot",
+    lambda chat_id, broadcast: snapshot_items
+      if chat_id == chat.id and broadcast is bc else None,
+  )
+  try:
+    resp = await stream_mod.stream_chat(
+      request=_NeverDisconnectedRequest(),
+      chat_id=bc.chat_id,
+      snapshot=True,
+      principal=Principal(owner=db.query(models.Owner).one(), app_id=None),
+      db=db,
+    )
+    chunks = [chunk async for chunk in resp.body_iterator]
+    payloads = [
+      json.loads(line.removeprefix("data: "))
+      for chunk in chunks
+      for line in chunk.splitlines()
+      if line.startswith("data: ")
+    ]
+
+    assert payloads[0] == {"type": "stream_snapshot", "items": snapshot_items}
+    replay_types = [event.get("type") for event in payloads]
+    assert "build_phase" in replay_types
+    assert "answers_applied" in replay_types
+    assert "steered_into_turn" in replay_types
+    assert "text" not in replay_types
+    assert "tool_start" not in replay_types
+    assert replay_types[-2:] == ["catch_up_done", "done"]
   finally:
     bc_mod._broadcasts.pop(bc.chat_id, None)

@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  chatCacheCanPaint,
+  chatCacheEntryState,
   chatDetailCacheValue,
   chatSnapshotMatchesRuntime,
   mergeRecentMessagesIntoLoadedWindow,
@@ -12,32 +12,34 @@ import {
 } from '../../../lib/chatDetailCache.js'
 
 test('cache first paint requires the saved reading coordinate when one exists', () => {
-  assert.equal(chatCacheCanPaint(null), false)
-  assert.equal(chatCacheCanPaint({ messages: [], offset: 0 }), false,
+  assert.equal(chatCacheEntryState(null), 'missing')
+  assert.equal(chatCacheEntryState({ messages: [], offset: 0 }), 'missing',
     'legacy or previously poisoned cache shapes fail closed')
-  assert.equal(chatCacheCanPaint({
+  assert.equal(chatCacheEntryState({
     restorationWindowComplete: true, messages: [], offset: 0,
-  }), true,
+  }), 'paintable',
     'a complete newly-created empty chat can paint before background refresh')
   const cached = {
     restorationWindowComplete: true,
     offset: 4,
     messages: [{ id: 'server-row', cid: 'client-row', role: 'user', ts: 10 }],
   }
-  assert.equal(chatCacheCanPaint(cached, 'server-row'), true)
-  assert.equal(chatCacheCanPaint(cached, 'client-row'), true,
+  assert.equal(chatCacheEntryState(cached, 'server-row'), 'paintable')
+  assert.equal(chatCacheEntryState(cached, 'client-row'), 'paintable',
     'optimistic-to-server aliases remain valid restoration coordinates')
-  assert.equal(chatCacheCanPaint(cached, 'user-10'), false,
+  assert.equal(chatCacheEntryState(cached, 'user-10'), 'missing',
     'a role/timestamp alias waits for passive canonical remapping')
-  assert.equal(chatCacheCanPaint({
+  assert.equal(chatCacheEntryState({
     restorationWindowComplete: true,
     offset: 4,
     messages: [{ id: 'persisted-answer', role: 'assistant', ts: 12 }],
-  }, 'assistant-4'), true,
+  }, 'assistant-4'), 'paintable',
   'a live-first positional alias survives the authoritative timestamp')
-  assert.equal(chatCacheCanPaint(cached, 'server-row', true), false,
-    'a nested part waits for committed DOM validation')
-  assert.equal(chatCacheCanPaint(cached, 'missing-row'), false,
+  assert.equal(chatCacheEntryState(cached, 'server-row', true), 'validating',
+    'a nested part mounts behind the gate for committed DOM validation')
+  assert.equal(chatCacheEntryState(cached, 'missing-row', true), 'missing',
+    'a nested part cannot validate when its row is absent')
+  assert.equal(chatCacheEntryState(cached, 'missing-row'), 'missing',
     'an incomplete cache stays hidden until the anchor-addressed read settles')
 })
 

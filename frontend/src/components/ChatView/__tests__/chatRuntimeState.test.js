@@ -151,6 +151,19 @@ test('ordinary cold transcripts keep the one-commit path', () => {
   assert.deepEqual(coldTranscriptRenderFrames(messages), [messages])
 })
 
+test('collapsed activity runs are prepared as the one row they present', () => {
+  const blocks = Array.from({ length: 360 }, (_, index) => ({
+    type: index % 2 === 0 ? 'thinking' : 'tool',
+    ...(index % 2 === 0
+      ? { content: `reasoning ${index}` }
+      : { tool: 'Bash', status: 'done', output: `step ${index}` }),
+  }))
+  const messages = [{ role: 'assistant', ts: 1, blocks }]
+
+  assert.deepEqual(coldTranscriptRenderFrames(messages), [messages],
+    'one collapsed ActivityStretch must not become ninety hidden prefix commits')
+})
+
 test('one long markdown block grows by token fractions instead of one giant frame', () => {
   const block = { type: 'text', content: 'x'.repeat(48000) }
   const messages = [{ role: 'assistant', ts: 1, blocks: [block] }]

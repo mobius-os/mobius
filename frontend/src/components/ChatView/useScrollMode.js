@@ -1207,10 +1207,13 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  *   shows/hides because the tray's margin shrinks the spacer math).
  * @param {React.MutableRefObject<boolean>} args.loadingOlderRef
  *   When true, scroll events from pagination shouldn't mutate mode.
- * @param {'history'|'cached'|'preparing'|'ready'} args.initialEntryPhase
+ * @param {'history'|'cache-validating'|'cached'|'preparing'|'ready'} args.initialEntryPhase
  *   History blocks reveal, cached is a caller-validated restoration window,
- *   preparing is a hidden progressive cold render, and ready means
- *   authoritative history has settled.
+ *   cache-validating mounts a complete cached window behind the gate so its
+ *   exact nested coordinate can be checked, preparing is a hidden progressive
+ *   cold render, and ready means authoritative history has settled.
+ * @param {() => void} [args.onCachedCoordinateReady]
+ *   Promotes a hidden validation cache after its exact saved part resolves.
  * @param {boolean} args.ownsReadingPosition
  *   True only for the physical ChatView participating in the active workspace
  *   handoff. Retained hidden owners may keep DOM geometry, but never consume
@@ -1228,6 +1231,7 @@ export default function useScrollMode({
   pendingMessagesLength,
   loadingOlderRef,
   initialEntryPhase,
+  onCachedCoordinateReady,
   ownsReadingPosition,
 }) {
   const messageCount = messages.length
@@ -1756,7 +1760,8 @@ export default function useScrollMode({
     if (
       modeRef.current.kind === 'INITIAL'
       && (
-        initialEntryPhaseRef.current === 'cached'
+        initialEntryPhaseRef.current === 'cache-validating'
+        || initialEntryPhaseRef.current === 'cached'
         || initialEntryPhaseRef.current === 'ready'
       )
     ) {
@@ -1767,10 +1772,15 @@ export default function useScrollMode({
         && !restored?.defaultTail
       readerLocationExplicitRef.current = resolved
       savedLocationUnresolvedRef.current = !!saved && !resolved
-      transitionMode(
-        restored,
-        'lifecycle:restore',
-      )
+      if (initialEntryPhaseRef.current !== 'cache-validating' || resolved) {
+        transitionMode(
+          restored,
+          'lifecycle:restore',
+        )
+        if (initialEntryPhaseRef.current === 'cache-validating') {
+          onCachedCoordinateReady?.()
+        }
+      }
     }
     // Semantic transitions use a fresh mode object. Identity therefore keeps
     // steady streaming from rewriting scrollTop, while the ref survives effect
@@ -2629,6 +2639,7 @@ export default function useScrollMode({
     pendingMessagesLength,
     chatId,
     initialEntryPhase,
+    onCachedCoordinateReady,
     ownsReadingPosition,
     pinModeActive,
     chatRef,

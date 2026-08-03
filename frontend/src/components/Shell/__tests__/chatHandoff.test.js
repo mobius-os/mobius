@@ -22,14 +22,14 @@ function ruleBody(selector, source = shellCss) {
 test('chat display readiness admits only coordinate-complete cached transcripts', () => {
   assert.match(
     detailCache,
-    /function chatCacheCanPaint\([\s\S]*cached\?\.restorationWindowComplete !== true[\s\S]*savedAnchorHasNestedPart[\s\S]*messageKey\(message, baseOffset \+ index\)/,
-    'only canonical cache projections containing the durable coordinate may paint',
+    /function chatCacheEntryState\([\s\S]*cached\?\.restorationWindowComplete !== true[\s\S]*messageKey\(message, baseOffset \+ index\)[\s\S]*savedAnchorHasNestedPart \? 'validating' : 'paintable'/,
+    'only canonical caches containing the durable row may paint or validate',
   )
   assert.match(chatView,
-    /const initialSavedAnchorKey = savedReadingAnchorKey\(chatId\)[\s\S]*const initialCachePaintable = chatCacheCanPaint\([\s\S]*savedReadingAnchorHasNestedPart\(chatId\)[\s\S]*useState\(!initialCachePaintable\)[\s\S]*initialCachePaintable \? 'cached' : 'history'/,
-    'mount paints a safe cache immediately while incomplete caches remain gated')
+    /const initialSavedAnchorKey = savedReadingAnchorKey\(chatId\)[\s\S]*const initialCacheEntryState = chatCacheEntryState\([\s\S]*savedReadingAnchorHasNestedPart\(chatId\)[\s\S]*initialCacheEntryState === 'missing'[\s\S]*'cache-validating'/,
+    'mount paints a safe cache or mounts an exact-part cache behind validation')
   assert.match(chatView,
-    /const activationCachePaintable = chatCacheCanPaint\([\s\S]*setLoading\(!activationCachePaintable\)[\s\S]*activationCachePaintable \? 'cached' : 'history'/,
+    /const activationCacheEntryState = chatCacheEntryState\([\s\S]*setLoading\(activationCacheEntryState === 'missing'\)[\s\S]*activationCacheEntryState === 'validating'[\s\S]*'cache-validating'/,
     'a retained chat revalidates cache coverage on every visible activation')
   assert.match(scrollMode,
     /initialEntryPhaseRef\.current !== 'cached'[\s\S]*initialEntryPhaseRef\.current !== 'ready'[\s\S]*forceRevealRef/,
@@ -103,8 +103,8 @@ test('activation reuses an unchanged retained transcript before stream catch-up'
     /cacheIsSafeFallback[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND[\s\S]*applyMessagesToView\(\[\], 0\)[\s\S]*setLoadError\(!cacheIsSafeFallback\)/,
     'an incomplete or contradictory cache must be cleared before the error surface paints')
   assert.match(scrollMode,
-    /modeRef\.current\.kind === 'INITIAL'[\s\S]*initialEntryPhaseRef\.current === 'cached'[\s\S]*initialEntryPhaseRef\.current === 'ready'[\s\S]*const saved = _scrollModes\[chatId\]/,
-    'the scroll controller consumes a coordinate only after cache coverage or activation proof')
+    /modeRef\.current\.kind === 'INITIAL'[\s\S]*initialEntryPhaseRef\.current === 'cache-validating'[\s\S]*const saved = _scrollModes\[chatId\][\s\S]*const resolved =[\s\S]*onCachedCoordinateReady\?\.\(\)/,
+    'the scroll controller admits a nested cache only after the exact DOM part resolves')
   assert.match(scrollMode,
     /savedLocationUnresolvedRef\.current[\s\S]*Object\.hasOwn\(_scrollModes, chatId\)/,
     'an activation error before ready must not erase the unconsumed saved coordinate')

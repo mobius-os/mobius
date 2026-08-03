@@ -22,7 +22,7 @@ const activeAssistantSource = readFileSync(
 )
 const blockRendererSource = readFileSync(new URL('../markdown/BlockRenderer.jsx', import.meta.url), 'utf8')
 
-test('active DB and live sources share one row shell and one block renderer', () => {
+test('active DB, live deltas, and reconnect snapshots share one assistant surface', () => {
   assert.match(streamingMessageSource, /<MsgContent[\s\S]*msg=\{msg\}/,
     'the stable active <li> must always delegate its selected payload to MsgContent')
   assert.doesNotMatch(streamingMessageSource, /ToolBlock|QuestionCard|ErrorCard|ProgressiveMarkdown/,
@@ -31,6 +31,18 @@ test('active DB and live sources share one row shell and one block renderer', ()
     'the live source must feed the same DB-shaped payload consumed by MsgContent')
   assert.match(chatViewSource, /key=\{streamingDataKey\}[\s\S]*dataKey=\{streamingDataKey\}/,
     'the active row key and scroll-anchor data-key must remain stable across source selection')
+  assert.match(streamHookSource, /\/stream\?snapshot=1/,
+    'new clients must opt into snapshot catch-up without changing old-client replay')
+  assert.match(
+    streamHookSource,
+    /event\.type === 'stream_snapshot'[\s\S]*catchUpItems = Array\.isArray\(event\.items\)[\s\S]*event\.items\.filter\(Boolean\)/,
+    'the trusted snapshot must seed the off-screen catch-up buffer before tail events reduce',
+  )
+  assert.match(
+    streamHookSource,
+    /seededByServerSnapshot[\s\S]*event\.type === 'steered_into_turn'[\s\S]*if \(!seededByServerSnapshot\) catchUpItems = \[\]/,
+    'a reconnect snapshot already sits after prior steer cuts and must retain its continuation',
+  )
 })
 
 test('streaming deltas are flags on the shared active markdown tree', () => {

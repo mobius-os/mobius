@@ -96,6 +96,9 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  * each. Adding a new event type requires editing BOTH the backend
  * emitter AND the dispatch switch below in this file.
  *
+ *   stream_snapshot       Server-reduced assistant items at the exact
+ *                         subscription boundary { items }. Seeds reconnect
+ *                         catch-up so prior deltas need not be replayed.
  *   text                  Streamed assistant token chunk
  *                         { content }. Buffered + drained by rAF.
  *   text_boundary         Next text starts a fresh assistant block.
@@ -654,10 +657,13 @@ export default function useStreamConnection(chatId, {
     lastReadAtRef.current = 0
 
     try {
-      const res = await fetch(`${BASE}/api/chats/${chatIdRef.current}/stream`, {
-        headers: getAuthHeaders(),
-        signal: controller.signal,
-      })
+      const res = await fetch(
+        `${BASE}/api/chats/${chatIdRef.current}/stream?snapshot=1`,
+        {
+          headers: getAuthHeaders(),
+          signal: controller.signal,
+        },
+      )
 
       // Stale-connection guard. Between scheduling this fetch and its
       // resolution, the connection we belong to may have been torn down
@@ -742,6 +748,7 @@ export default function useStreamConnection(chatId, {
       // temporary blank/thinking state while a long catch-up replay is parsed.
       let isCatchUp = true
       let catchUpItems = []
+      let seededByServerSnapshot = false
 
       const applyStreamItems = (updater) => {
         if (!isCatchUp) {
@@ -842,7 +849,21 @@ export default function useStreamConnection(chatId, {
             continue
           }
 
-          if (event.type === 'text_boundary') {
+          if (event.type === 'stream_snapshot') {
+            // ChatEventSink reduced every content event before publishing it,
+            // so this is the complete assistant surface at subscribe time.
+            // Replace only the off-screen catch-up buffer; live deltas queued
+            // after that boundary are still handled by the normal reducers.
+            if (isCatchUp) {
+              catchUpItems = Array.isArray(event.items)
+                ? event.items.filter(Boolean)
+                : []
+              seededByServerSnapshot = true
+              textBufferRef.current = ''
+              textBufferItemIdRef.current = null
+              forceNewTextBlockRef.current = false
+            }
+          } else if (event.type === 'text_boundary') {
             flushBuffer()
             forceNewTextBlockRef.current = true
           } else if (event.type === 'text') {
@@ -1103,7 +1124,12 @@ export default function useStreamConnection(chatId, {
               // arrival instead, the A1 blocks that followed it survived here
               // and replayed as the head of A2 — the duplication, reproduced on
               // every reconnect.
-              catchUpItems = []
+              // Full-log replay has accumulated A1 before this cut and must
+              // drop it. A server snapshot is already reduced *after* every
+              // prior cut, so it contains only the current A2 surface; keep
+              // that payload while the authoritative DB refresh restores the
+              // sealed A1 + user rows this socket may have missed.
+              if (!seededByServerSnapshot) catchUpItems = []
               forceNewTextBlockRef.current = false
               // Dropping the replayed segment only reconstructs the transcript
               // if those DB rows are actually loaded, and this branch is exactly

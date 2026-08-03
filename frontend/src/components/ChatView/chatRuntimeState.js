@@ -3,6 +3,8 @@
  * focused tests because mobile timing regressions repeatedly happened here.
  */
 
+import { groupActivityRuns } from './groupBlocks.js'
+
 /**
  * The stable identity of a user message. `cid` is the canonical identity
  * (React key, DOM pin target `data-cid`, queue cancel key, force-steer
@@ -136,6 +138,24 @@ function coldBlockRenderCost(block) {
   return Math.max(1, Math.ceil(String(block.content || '').length / 4000))
 }
 
+function coldPresentationChunks(blocks) {
+  const entries = blocks.map(item => ({ item }))
+  return groupActivityRuns(entries).map(node => {
+    if (node.group) {
+      return {
+        blocks: node.group.map(entry => entry.item),
+        // MsgContent presents one contiguous thinking/tool run as one collapsed
+        // ActivityStretch. Preparing every private entry as its own frame made
+        // the scheduler repeat the same growing group dozens of times before
+        // revealing a surface that contains only one row.
+        cost: 1,
+      }
+    }
+    const block = node.single.item
+    return { blocks: [block], cost: coldBlockRenderCost(block) }
+  })
+}
+
 /**
  * Build prefix-complete frames for a pathological cold transcript commit.
  *
@@ -153,7 +173,8 @@ export function coldTranscriptRenderFrames(
   const totalCost = messages.reduce((sum, message) => {
     const blocks = Array.isArray(message?.blocks) ? message.blocks : []
     return sum + (blocks.length > 0
-      ? blocks.reduce((blockSum, block) => blockSum + coldBlockRenderCost(block), 0)
+      ? coldPresentationChunks(blocks)
+        .reduce((chunkSum, chunk) => chunkSum + chunk.cost, 0)
       : 1)
   }, 0)
   if (totalCost < minCost) return [messages]
@@ -181,8 +202,8 @@ export function coldTranscriptRenderFrames(
       ])
     }
 
-    for (const block of blocks) {
-      const blockCost = coldBlockRenderCost(block)
+    for (const chunk of coldPresentationChunks(blocks)) {
+      const blockCost = chunk.cost
       let consumed = 0
       while (consumed < blockCost) {
         const take = Math.min(
@@ -192,10 +213,10 @@ export function coldTranscriptRenderFrames(
         consumed += take
         frameCost += take
         const complete = consumed === blockCost
-        const partialBlock = complete
+        const partialBlock = complete || chunk.blocks.length !== 1
           ? null
-          : { ...block, _coldRenderFraction: consumed / blockCost }
-        if (complete) visibleBlocks.push(block)
+          : { ...chunk.blocks[0], _coldRenderFraction: consumed / blockCost }
+        if (complete) visibleBlocks.push(...chunk.blocks)
         if (frameCost === frameBudget) {
           publish(partialBlock)
           frameCost = 0

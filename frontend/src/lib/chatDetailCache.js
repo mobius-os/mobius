@@ -32,25 +32,23 @@ export function messageMatchesKey(message, index, key) {
   return `${role}-${index}` === target
 }
 
-/** Whether a canonical detail cache can be painted while its background
- * freshness check runs. A saved reading coordinate must be present in the
- * cached window; otherwise the transcript stays hidden until the
- * anchor-addressed authoritative read repairs or retires that coordinate. */
-export function chatCacheCanPaint(
+/** Classify the strongest safe entry a canonical detail cache can provide.
+ *
+ * A saved row must be present in the cached window. Exact nested parts are a
+ * DOM fact rather than a data fact: mount those caches behind the reveal gate
+ * as `validating`, then let the scroll owner promote them only when the saved
+ * part resolves in the committed cached DOM. */
+export function chatCacheEntryState(
   cached,
   savedAnchorKey = null,
   savedAnchorHasNestedPart = false,
 ) {
   if (cached?.restorationWindowComplete !== true || !Array.isArray(cached.messages)) {
-    return false
+    return 'missing'
   }
-  if (savedAnchorKey == null) return true
-  // A nested row-part address needs committed DOM validation. Keep it behind
-  // the authoritative phase so a compact/stale cache cannot consume the
-  // coordinate by falling back to the tail before that validation runs.
-  if (savedAnchorHasNestedPart) return false
+  if (savedAnchorKey == null) return 'paintable'
   const baseOffset = Number.isInteger(cached.offset) ? cached.offset : 0
-  return cached.messages.some((message, index) => (
+  const containsAnchor = cached.messages.some((message, index) => (
     messageKey(message, baseOffset + index) === String(savedAnchorKey)
     || (
       message?.role === 'assistant'
@@ -66,6 +64,8 @@ export function chatCacheCanPaint(
       && String(message.cid) === String(savedAnchorKey)
     )
   ))
+  if (!containsAnchor) return 'missing'
+  return savedAnchorHasNestedPart ? 'validating' : 'paintable'
 }
 
 function settledToolBlocks(message) {
