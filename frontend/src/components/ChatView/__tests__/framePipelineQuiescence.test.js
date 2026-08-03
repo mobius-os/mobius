@@ -102,7 +102,7 @@ function enclosingEffectHook(source, needle) {
 
 test('pane resize correction runs before paint', () => {
   assert.equal(
-    enclosingEffectHook(chatView, 'paneResized(paneContentHeight)'),
+    enclosingEffectHook(chatView, 'if (paneContentHeight != null) paneResized()'),
     'useLayoutEffect',
     'a post-paint pane-resize correction shows one frame at the stale scroll position',
   )

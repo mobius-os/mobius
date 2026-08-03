@@ -4,7 +4,6 @@ import assert from 'node:assert/strict'
 
 const component = readFileSync(new URL('../QuestionCard.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
-const scrollMode = readFileSync(new URL('../useScrollMode.js', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../QuestionCard.css', import.meta.url), 'utf8')
 
 test('question option explanations remain selectable without choosing them', () => {
@@ -39,22 +38,12 @@ test('unanswered question cards do not have a stale gray state', () => {
     'a custom answer should be a direct writing surface, not an Other option')
   assert.match(component, /<CustomAnswerArea[\s\S]*?answered=\{answered\}[\s\S]*?value=\{answered[\s\S]*?unmatchedAnswers\.join\(', '\)/,
     'the custom answer should stay mounted and retain submitted custom text')
-  assert.match(component, /rows=\{1\}/,
-    'the custom answer should begin as a single line')
-  assert.match(component, /data-chat-scroll-edit-field/,
-    'the custom answer should publish its native caret-scroll ownership')
-  assert.doesNotMatch(component, /onInput=\{e => resizeCustomAnswer/,
-    'one post-commit measurement should own growth instead of resizing twice per edit')
-  assert.match(component, /if \(!textarea \|\| textareaUsesNativeSizing\(\)\) return/,
-    'current browsers should not run a per-character height measurement cycle')
-  assert.match(component, /textarea\.style\.height = 'auto'[\s\S]*?Math\.min\(contentHeight, CUSTOM_ANSWER_MAX_HEIGHT\)/,
-    'the older-browser fallback should grow with content up to the phone-safe cap')
-  assert.match(component, /useLayoutEffect\(\(\) => \{\s*resizeCustomAnswer\(textareaRef\.current\)\s*\}, \[value\]\)/,
-    'confirmed answer values should retain their natural content height')
-  assert.match(component, /textareaUsesNativeSizing\(\)[\s\S]*?new ResizeObserver\(\(\) => \{[\s\S]*?const width = textarea\.clientWidth[\s\S]*?if \(width === lastWidth\) return[\s\S]*?resizeCustomAnswer\(textarea\)/,
-    'only the measured fallback should observe width changes')
-  assert.match(component, /observer\.observe\(textarea\)[\s\S]*?return \(\) => observer\.disconnect\(\)/,
-    'the width observer should be released with the answered card')
+  assert.match(component, /rows=\{2\}/,
+    'the custom answer should provide two stable writing lines')
+  assert.match(component, /readOnly=\{answered\}[\s\S]*?disabled=\{disabled && !answered\}/,
+    'a submitted multiline answer should stay scrollable but not editable')
+  assert.doesNotMatch(component, /resizeCustomAnswer|textareaUsesNativeSizing|data-chat-scroll-edit-field/,
+    'the question editor should not grow the transcript or install a second scroll owner')
   assert.match(component, /e\.key === 'Enter' && \(e\.metaKey \|\| e\.ctrlKey\)/,
     'plain Enter should create a new line while the explicit shortcut submits')
   assert.match(component, /val\.replace\(\/\\n\/g, '\\n  '\)/,
@@ -82,10 +71,10 @@ test('question card css has no stale styling hook', () => {
     'stale question styling should not come back')
   assert.doesNotMatch(css, /\.qcard__status\s*\{[\s\S]*?\}/,
     'expiration status styling should not come back')
-  assert.match(css, /\.qcard__input:disabled\s*\{[\s\S]*?color:\s*var\(--muted\);[\s\S]*?-webkit-text-fill-color:\s*var\(--muted\);[\s\S]*?\}/,
+  assert.match(css, /\.qcard__input:disabled,\s*\.qcard__input\[readonly\]\s*\{[\s\S]*?color:\s*var\(--muted\);[\s\S]*?-webkit-text-fill-color:\s*var\(--muted\);[\s\S]*?\}/,
     'a submitted custom answer should visibly gray out in every browser')
-  assert.match(css, /\.qcard__input\s*\{[\s\S]*?width:\s*100%;[\s\S]*?min-height:\s*38px;[\s\S]*?field-sizing:\s*content;[\s\S]*?overflow-y:\s*auto;[\s\S]*?resize:\s*none;/,
-    'the custom answer should span the card and begin as a single growing line')
+  assert.match(css, /\.qcard__input\s*\{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*60px;[\s\S]*?overflow-y:\s*auto;[\s\S]*?resize:\s*none;/,
+    'the custom answer should span the card and scroll internally at a stable height')
   assert.match(css, /\.qcard__submit-error\s*\{/,
     'a failed answer should keep its retry notice attached to the card')
 })
@@ -98,24 +87,6 @@ test('multiple questions read as one compact decision panel', () => {
   assert.match(css, /\.qcard\s*\{[\s\S]*?width:\s*min\(100%, 640px\);[\s\S]*?margin:\s*10px auto;/)
   assert.match(css, /\.qcard--grouped\s*\{[\s\S]*?overflow:\s*hidden;/)
   assert.match(css, /\.qcard--grouped \.qcard__q \+ \.qcard__q\s*\{[\s\S]*?margin-top:\s*0;/)
-})
-
-test('question editing lets native caret movement settle before layout reclaims scroll', () => {
-  assert.match(
-    scrollMode,
-    /addEventListener\('beforeinput', onQuestionEditMutation[\s\S]*?addEventListener\('input', onQuestionEditMutation/,
-    'all text mutation paths should enter the shared reader-ownership gate',
-  )
-  assert.match(
-    scrollMode,
-    /onQuestionEditMutation[\s\S]*?!isOrdinaryReadingHold\(modeRef\.current\)\) return[\s\S]*?onUserInput\(event\)/,
-    'tail-follow and other stronger modes must keep layout ownership while the field grows',
-  )
-  assert.match(
-    scrollMode,
-    /questionSubmissionWasActive[\s\S]*?editingAnchor = questionEditSessionRef\.current[\s\S]*?!questionSubmissionWasActive/,
-    'the editing rebase must never replace the established submission overlay',
-  )
 })
 
 test('a failed question submission does not append a transcript row', () => {

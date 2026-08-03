@@ -256,8 +256,8 @@ export default function ChatView({
   // Multi-pane workspace (design §2): when this chat renders inside a tiled
   // pane, Shell passes the pane's projected CONTENT height (pane rect minus the
   // strip). A change means a committed geometry event (divider commit,
-  // projection/mode flip, rotation, pane open/close) — forwarded to the scroll
-  // controller's paneResized() below. Null for a single-pane chat (today's
+  // projection/mode flip, rotation, pane open/close) — forwarded as a signal to
+  // the scroll controller's paneResized() below. Null for a single-pane chat (today's
   // behavior — the controller's own ResizeObserver owns resize there).
   paneContentHeight = null,
   // True when this mounted chat is hidden behind the full-workspace Settings
@@ -745,10 +745,10 @@ export default function ChatView({
   })
 
   // Forward committed pane-geometry changes to the scroll controller. A new
-  // projected height (divider commit, projection/mode flip, rotation) sets the
-  // layout-derived floor and re-applies the active mode under the reader gate
-  // (design §2). Skipped entirely for single-pane chats (paneContentHeight
-  // null) so today's resize behavior is untouched.
+  // projected height (divider commit, projection/mode flip, rotation) signals
+  // that the committed DOM geometry should re-apply the active mode under the
+  // reader gate (design §2). Skipped entirely for single-pane chats
+  // (paneContentHeight null) so today's resize behavior is untouched.
   //
   // Must be a layout effect: this is the only automatic scroll write in the
   // controller that would otherwise run after paint. Every other one is
@@ -757,7 +757,7 @@ export default function ChatView({
   // post-paint shows the reader a frame at the old scroll position before the
   // correction lands — visible as a jump when pane geometry changes.
   useLayoutEffect(() => {
-    if (paneContentHeight != null) paneResized(paneContentHeight)
+    if (paneContentHeight != null) paneResized()
   }, [paneContentHeight, paneResized])
 
   // A hidden retained owner is not an active runtime. The scroll controller

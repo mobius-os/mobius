@@ -29,8 +29,12 @@ function fulfillStartedPost(route) {
 
 /** Helper: log in via the storageState set by auth.setup.mjs and
  *  install a default route mock that returns 204 for /stream. */
-async function setupWithStreamMock(page, streamBody) {
-  await page.setViewportSize({ width: 412, height: 915 })
+async function setupWithStreamMock(
+  page,
+  streamBody,
+  viewport = { width: 412, height: 915 },
+) {
+  await page.setViewportSize(viewport)
   await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route =>
     fulfillStartedPost(route)
   )
@@ -261,7 +265,8 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await expect(page.getByRole('button', { name: 'Submitted' })).toBeDisabled()
     await expect(card.locator('.qcard__hint')).toHaveText('Choose one')
     await expect(card.locator('.qcard__opt')).toHaveCount(2)
-    await expect(customAnswer).toBeDisabled()
+    await expect(customAnswer).toHaveAttribute('readonly', '')
+    await expect(customAnswer).not.toBeEditable()
     await expect(customAnswer).toHaveValue('Take the quiet streets')
 
     const after = await geometry()
@@ -275,6 +280,73 @@ test.describe('Bug 1: AskUserQuestion', () => {
     expect(after.input.color).not.toBe(before.input.color)
     expect(after.input.textFillColor).toBe(after.input.color)
     expect(after.submitTop).toBeCloseTo(before.submitTop, 5)
+  })
+
+
+  test('multiline custom answers scroll inside a steady phone-sized card', async ({ page }) => {
+    const streamBody = [
+      `data: ${JSON.stringify({
+        type: 'question',
+        question_id: 'q-steady-multiline',
+        questions: [{
+          question: 'Describe the change',
+          header: 'Details',
+          multiSelect: false,
+          options: [
+            { label: 'Small', description: 'Keep the change focused' },
+            { label: 'Broad', description: 'Cover the surrounding behavior' },
+          ],
+        }],
+      })}\n\n`,
+      'data: {"type":"done"}\n\n',
+    ].join('')
+    await setupWithStreamMock(page, streamBody, { width: 426, height: 510 })
+    await newChat(page)
+    await sendMessage(page, 'Ask for multiline details')
+
+    const card = page.locator('[data-chat-surface="painted"] .qcard')
+    const customAnswer = card.getByRole('textbox', {
+      name: 'Custom answer for: Describe the change',
+    })
+    await expect(card).toBeVisible({ timeout: 5000 })
+    await customAnswer.focus()
+
+    const geometry = () => card.evaluate(el => {
+      const scroll = el.closest('.chat__scroll')
+      const input = el.querySelector('.qcard__input')
+      const option = el.querySelector('.qcard__opt')
+      const submit = el.querySelector('.qcard__submit')
+      const rect = node => node?.getBoundingClientRect()
+      return {
+        cardHeight: rect(el)?.height,
+        inputHeight: rect(input)?.height,
+        inputTop: rect(input)?.top,
+        inputScrollTop: input?.scrollTop,
+        optionTop: rect(option)?.top,
+        submitTop: rect(submit)?.top,
+        chatScrollTop: scroll?.scrollTop,
+      }
+    })
+
+    const before = await geometry()
+    await customAnswer.pressSequentially('First line')
+    await page.keyboard.press('Enter')
+    await customAnswer.pressSequentially('Second line')
+    await page.keyboard.press('Enter')
+    await customAnswer.pressSequentially('Third line')
+    await page.evaluate(() => new Promise(resolve => (
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    )))
+    const after = await geometry()
+
+    await expect(customAnswer).toHaveValue('First line\nSecond line\nThird line')
+    expect(after.cardHeight).toBeCloseTo(before.cardHeight, 5)
+    expect(after.inputHeight).toBeCloseTo(before.inputHeight, 5)
+    expect(after.inputTop).toBeCloseTo(before.inputTop, 5)
+    expect(after.optionTop).toBeCloseTo(before.optionTop, 5)
+    expect(after.submitTop).toBeCloseTo(before.submitTop, 5)
+    expect(after.chatScrollTop).toBeCloseTo(before.chatScrollTop, 5)
+    expect(after.inputScrollTop).toBeGreaterThan(before.inputScrollTop)
   })
 
 

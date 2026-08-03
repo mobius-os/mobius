@@ -23,7 +23,6 @@ import {
   modeForDisclosureToggle,
   modeForForegroundReturn,
   modeForQuestionSubmission,
-  modeForQuestionEditingViewportChange,
   modeForQueuedSubmission,
   modeAfterReaderGesture,
   modeAfterSpacerResize,
@@ -728,7 +727,7 @@ test('anchor reapply is inert for non-anchor modes and unresolved keys', () => {
 test('viewport resize reapplies the current mode without reclassifying it', () => {
   assert.match(
     scrollModeSource,
-    /const ordinaryViewportMode = modeRef\.current/,
+    /transitionMode\(\s*modeRef\.current,\s*'layout:viewport-change'/,
     'keyboard geometry keeps the existing pin, follow, or exact anchor',
   )
   assert.doesNotMatch(
@@ -740,46 +739,6 @@ test('viewport resize reapplies the current mode without reclassifying it', () =
     scrollModeSource,
     /visualViewport\.addEventListener/,
     'chat observes its actual resized box instead of racing Shell for the browser event',
-  )
-})
-
-test('question editing rebases only an ordinary held viewport to native caret movement', () => {
-  const staleHold = { kind: 'ANCHOR_AT', key: 'before-edit', offset: 20 }
-  const caretHold = { kind: 'ANCHOR_AT', key: 'question-row', offset: 84 }
-  assert.equal(
-    modeForQuestionEditingViewportChange(staleHold, caretHold),
-    caretHold,
-    'the visible caret-adjusted position becomes the new ordinary hold',
-  )
-
-  for (const strongerMode of [
-    { kind: 'PIN_USER_MSG', cid: 'c-1' },
-    { kind: 'HOLD_RESERVED_TAIL', cid: 'c-1' },
-    { kind: 'FOLLOW_BOTTOM' },
-    {
-      kind: 'ANCHOR_AT',
-      key: 'question-row',
-      offset: 84,
-      questionSubmitViewportH: 600,
-      questionSubmitBaseMode: { kind: 'FOLLOW_BOTTOM' },
-    },
-  ]) {
-    assert.equal(
-      modeForQuestionEditingViewportChange(strongerMode, caretHold),
-      strongerMode,
-      `${strongerMode.kind} must keep its existing ownership contract`,
-    )
-  }
-  assert.equal(
-    modeForQuestionEditingViewportChange(staleHold, null),
-    staleHold,
-    'an unresolved visible anchor never invents a new location',
-  )
-  const settledHold = { kind: 'ANCHOR_AT', key: 'question-row', offset: 84 }
-  assert.equal(
-    modeForQuestionEditingViewportChange(settledHold, { ...settledHold }),
-    settledHold,
-    'an unchanged caret hold does not manufacture a mode transition',
   )
 })
 

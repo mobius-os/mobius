@@ -804,26 +804,6 @@ export function isNearContentBottom(scrollEl, threshold = NEAR_BOTTOM_PX) {
 }
 
 
-/** The plain reading-position hold, excluding the question-submission overlay
- * that uses the same ANCHOR_AT shape with a stronger transient contract. */
-export function isOrdinaryReadingHold(mode) {
-  return mode?.kind === 'ANCHOR_AT'
-    && !Number.isFinite(mode.questionSubmitViewportH)
-}
-
-/** A focused, content-growing question field gives the browser temporary
- * ownership of caret visibility. If that native adjustment moved an ordinary
- * held viewport, rebase the hold to what is visible now instead of restoring
- * the stale pre-edit anchor. Send pins, reserved-tail holds, live following,
- * and the submission overlay keep their stronger contracts. */
-export function modeForQuestionEditingViewportChange(mode, anchorMode = null) {
-  if (!isOrdinaryReadingHold(mode) || !anchorMode) return mode
-  if (mode.key === anchorMode.key
-      && Math.abs(mode.offset - anchorMode.offset) <= 0.5) return mode
-  return anchorMode
-}
-
-
 /** Advance an armed live pin to tail-follow exactly when its reserved reply
  * room is exhausted. Settled/restored pins omit `followWhenFilled`, so later
  * viewport or lazy-layout changes cannot manufacture follow intent. */
@@ -1278,10 +1258,6 @@ export default function useScrollMode({
   // once a newer gesture lands, older work can never regain ownership merely
   // because the gesture timing window later closes.
   const readerIntentVersionRef = useRef(0)
-  // Largest committed pane height for the current geometry. Spacer sizing is
-  // intentionally based on the active scroll box instead; this reference only
-  // tells a focused Q&A edit when the keyboard has fully closed again.
-  const fullPaneHRef = useRef(0)
   // The chat reacts to the size of its actual scroll viewport, after Shell has
   // reconciled any visual-viewport overlay. Keeping the last observed height
   // across effect re-runs makes ResizeObserver the one keyboard/layout signal
@@ -1302,9 +1278,6 @@ export default function useScrollMode({
   // last apply, so the post-reveal anchor clamp-repair only fires on a real
   // shift/clamp (design §2). Null when no anchor is active.
   const lastAnchorTopRef = useRef(null)
-  // A committed pane resize can lower the keyboard-closed height. Defer that
-  // value with the layout transaction when reader input currently owns scroll.
-  const pendingFullPaneHeightRef = useRef(null)
   // Set inside the layout effect to the live pane-resize runner; the returned
   // paneResized() forwards to it (null when no scroll DOM is mounted). Mirrors
   // the forceRevealRef / resumeLayoutAfterGestureRef effect-bridge pattern.
@@ -1315,12 +1288,6 @@ export default function useScrollMode({
   // transition can render. React's change handler invokes this effect-owned
   // bridge after accepting the new value.
   const composerEditRunRef = useRef(null)
-  // A custom Q&A field can grow while the phone browser is also moving its
-  // visual viewport to keep the caret above the keyboard. Keep that native
-  // editing lifecycle visible across focusout until the keyboard has returned
-  // to the full pane height; otherwise the controller can restore a stale
-  // anchor between viewport-animation frames and make the card oscillate.
-  const questionEditSessionRef = useRef(false)
   const initialEntryPhaseRef = useRef(initialEntryPhase)
   initialEntryPhaseRef.current = initialEntryPhase
   // A normal reveal ends entry stabilization. A forced safety-cap reveal keeps
@@ -1869,19 +1836,6 @@ export default function useScrollMode({
       if (chatRef.current && Number.isFinite(composerHeight)) {
         chatRef.current.style.setProperty('--composer-h', `${composerHeight}px`)
       }
-      // Keep the keyboard-closed pane reference current for the focused Q&A
-      // editing lifecycle. A committed pane resize may lower that reference;
-      // ordinary viewport changes only grow it, so a keyboard opening cannot
-      // masquerade as the new full pane. This value no longer sizes the spacer:
-      // reservation follows the active visible scroll box below.
-      if (pendingFullPaneHeightRef.current != null) {
-        const ph = pendingFullPaneHeightRef.current
-        if (Number.isFinite(ph) && ph > 0) fullPaneHRef.current = ph
-        pendingFullPaneHeightRef.current = null
-      }
-      if (scrollEl.clientHeight > fullPaneHRef.current) {
-        fullPaneHRef.current = scrollEl.clientHeight
-      }
       // A sent row remounts when its optimistic identity becomes canonical.
       // Read the mounted last-user row while its React ref reattaches so that
       // brief handoff cannot collapse the reservation to zero.
@@ -1956,9 +1910,6 @@ export default function useScrollMode({
       viewportChange = false,
       authorityVersion = currentAuthority(),
     } = {}) {
-      const questionSubmissionWasActive = viewportChange
-        && modeRef.current?.kind === 'ANCHOR_AT'
-        && Number.isFinite(modeRef.current.questionSubmitViewportH)
       // Question submission freezes the card-to-stream handoff, not the
       // keyboard. Restore the unanswered card's mode before sizing a changed
       // viewport so its ordinary reservation and clamp remain authoritative.
@@ -1981,26 +1932,12 @@ export default function useScrollMode({
       }
       sizeSpacer(authorityVersion)
       if (viewportChange) {
-        const editingAnchor = questionEditSessionRef.current
-          && !questionSubmissionWasActive
-          ? anchorModeFromScroll(scrollEl)
-          : null
         // A viewport resize is geometry, not reading intent. Reapply the mode
         // that already owns the chat instead of deriving a different mode from
-        // the browser's intermediate clamp. Only native Q&A caret movement may
-        // deliberately rebase an ordinary hold.
-        const ordinaryViewportMode = modeRef.current
-        const editingViewportMode = editingAnchor
-          ? modeForQuestionEditingViewportChange(ordinaryViewportMode, editingAnchor)
-          : ordinaryViewportMode
-        if (editingViewportMode !== ordinaryViewportMode) {
-          readerLocationExplicitRef.current = true
-        }
+        // the browser's intermediate clamp.
         transitionMode(
-          editingViewportMode,
-          editingViewportMode !== ordinaryViewportMode
-            ? 'layout:question-edit-viewport'
-            : 'layout:viewport-change',
+          modeRef.current,
+          'layout:viewport-change',
         )
         persistMode()
         applyLayoutMode('layout:viewport-change', authorityVersion)
@@ -2025,9 +1962,9 @@ export default function useScrollMode({
     syncLayout({ authorityVersion: currentAuthority() })
 
     // Shell supplies committed pane geometry separately from viewport resize.
-    // Its projected full height keeps Q&A keyboard-close detection honest even
-    // when the pane itself changes while the keyboard is open.
-    function runPaneResize(projectedHeightPx) {
+    // The signal distinguishes a deliberate workspace reflow from a transient
+    // visual-viewport change; the committed DOM is the geometry authority.
+    function runPaneResize() {
       const authorityVersion = currentAuthority()
       // This committed pane change has its own explicit owner. Adopt the DOM's
       // resulting scroll-box height now so the ResizeObserver delivery that
@@ -2036,12 +1973,8 @@ export default function useScrollMode({
         element: scrollEl,
         height: scrollEl.clientHeight,
       }
-      pendingFullPaneHeightRef.current =
-        (Number.isFinite(projectedHeightPx) && projectedHeightPx > 0)
-          ? projectedHeightPx
-          : pendingFullPaneHeightRef.current
       if (!layoutOwnsScroll(authorityVersion)) {
-        // Keep projected pane height, spacer, and mode in one replayable pass.
+        // Keep spacer and mode in one replayable pass.
         deferLayoutUntilReaderYields(authorityVersion)
         return
       }
@@ -2138,11 +2071,6 @@ export default function useScrollMode({
           viewportChange: true,
           authorityVersion,
         })
-        if (questionEditSessionRef.current
-            && !questionEditField(document.activeElement)
-            && scrollEl.clientHeight >= fullPaneHRef.current - 1) {
-          questionEditSessionRef.current = false
-        }
         requestRevealOnQuiet()
         return
       }
@@ -2295,24 +2223,6 @@ export default function useScrollMode({
         releasePendingGesture(sequence)
       })
     }
-    const scheduleQuestionEditNoScrollRelease = () => {
-      if (gestureWindowUntilRef.current !== Number.POSITIVE_INFINITY
-          || readerScrollDirty) return
-      // Q&A mutation changes DOM height after the input event. Hold ownership
-      // through one complete rendered frame so ResizeObserver and the browser's
-      // native caret reveal can settle before a no-scroll input gives layout
-      // writes back. This is a layout handshake, not a guessed delay.
-      const sequence = gestureSequenceRef.current
-      cancelAnimationFrame(pendingGestureReleaseRafRef.current)
-      pendingGestureReleaseRafRef.current = requestAnimationFrame(() => {
-        if (gestureSequenceRef.current !== sequence
-            || gestureWindowUntilRef.current !== Number.POSITIVE_INFINITY) return
-        pendingGestureReleaseRafRef.current = requestAnimationFrame(() => {
-          pendingGestureReleaseRafRef.current = 0
-          releasePendingGesture(sequence)
-        })
-      })
-    }
     const onUserInput = (event) => {
       const activatesDisclosure = readerInputActivatesDisclosure(
         event?.type,
@@ -2383,49 +2293,6 @@ export default function useScrollMode({
         )) {
         scheduleNoScrollRelease()
       }
-    }
-    const questionEditField = (target) => target?.matches?.(
-      'textarea[data-chat-scroll-edit-field]',
-    ) ? target : null
-    const onQuestionEditFocusIn = (event) => {
-      if (questionEditField(event.target)) {
-        questionEditSessionRef.current = true
-        return
-      }
-      // Moving directly into another writing surface usually keeps the same
-      // keyboard open. That new field owns any later caret/viewport movement;
-      // do not leave the Q&A session waiting for a full-height close that will
-      // not happen during this focus transfer.
-      if (questionEditSessionRef.current && event.target?.matches?.(
-        'textarea, input, [contenteditable="true"], [role="textbox"]',
-      )) {
-        questionEditSessionRef.current = false
-      }
-    }
-    const onQuestionEditFocusOut = (event) => {
-      if (!questionEditField(event.target)) return
-      if (questionEditField(event.relatedTarget)) {
-        questionEditSessionRef.current = true
-        return
-      }
-      if (scrollEl.clientHeight >= fullPaneHRef.current - 1) {
-        questionEditSessionRef.current = false
-      }
-    }
-    const onQuestionEditMutation = (event) => {
-      if (!questionEditField(event.target)) return
-      questionEditSessionRef.current = true
-      // Stronger modes already know where this resize belongs. In particular,
-      // FOLLOW_BOTTOM must absorb the new line in the same ResizeObserver pass
-      // instead of yielding for two painted frames and then snapping back.
-      if (!isOrdinaryReadingHold(modeRef.current)) return
-      if (layoutMayOwnScroll(
-        gestureWindowUntilRef.current,
-        performance.now(),
-      )) {
-        onUserInput(event)
-      }
-      scheduleQuestionEditNoScrollRelease()
     }
     // Reuse the exact input handler when the opt-in field probe is disabled;
     // the hot path then carries no timing closure or extra wrapper.
@@ -2526,10 +2393,6 @@ export default function useScrollMode({
     scrollEl.addEventListener('pointermove', onPointerMoveInput, { passive: true })
     scrollEl.addEventListener('wheel', onWheelInput, { passive: true })
     scrollEl.addEventListener('keydown', onUserInput, { passive: true })
-    scrollEl.addEventListener('focusin', onQuestionEditFocusIn, { passive: true })
-    scrollEl.addEventListener('focusout', onQuestionEditFocusOut, { passive: true })
-    scrollEl.addEventListener('beforeinput', onQuestionEditMutation, { passive: true })
-    scrollEl.addEventListener('input', onQuestionEditMutation, { passive: true })
     scrollEl.addEventListener('pointerup', onPointerUpInput, { passive: true })
     scrollEl.addEventListener('pointercancel', onPointerCancelInput, { passive: true })
     chatEl?.addEventListener('pointerdown', onComposerPointerDown, { passive: true })
@@ -2630,10 +2493,6 @@ export default function useScrollMode({
       scrollEl.removeEventListener('pointermove', onPointerMoveInput)
       scrollEl.removeEventListener('wheel', onWheelInput)
       scrollEl.removeEventListener('keydown', onUserInput)
-      scrollEl.removeEventListener('focusin', onQuestionEditFocusIn)
-      scrollEl.removeEventListener('focusout', onQuestionEditFocusOut)
-      scrollEl.removeEventListener('beforeinput', onQuestionEditMutation)
-      scrollEl.removeEventListener('input', onQuestionEditMutation)
       scrollEl.removeEventListener('pointerup', onPointerUpInput)
       scrollEl.removeEventListener('pointercancel', onPointerCancelInput)
       chatEl?.removeEventListener('pointerdown', onComposerPointerDown)
@@ -2796,9 +2655,9 @@ export default function useScrollMode({
   // (design §2). A stable identity is required — ChatView wires it to a
   // prop-change effect. Forwards to the live in-effect runner; no-op before the
   // scroll DOM mounts (single-pane chats never call it).
-  const paneResized = useCallback((projectedHeightPx) => {
+  const paneResized = useCallback(() => {
     const run = paneResizeRunRef.current
-    if (run) run(projectedHeightPx)
+    if (run) run()
   }, [])
 
   const composerEdited = useCallback((event) => {
