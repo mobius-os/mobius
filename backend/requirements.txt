@@ -14,7 +14,7 @@ pywebpush>=2.0.0
 pytest>=8.0
 pytest-asyncio>=0.23
 watchdog>=4.0.0
-claude-agent-sdk==0.2.126
+claude-agent-sdk==0.2.128
 # openai-codex is installed --no-deps from a pinned Git SHA in Dockerfile.
 # Its declared cli-bin package is retained for SDK compatibility, but its
 # duplicate payload is replaced in-layer with a link to the pinned npm CLI.
