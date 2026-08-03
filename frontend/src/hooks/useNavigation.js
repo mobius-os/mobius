@@ -19,7 +19,10 @@ import {
   readRestoredCanvas,
   readStoredChatId,
 } from '../lib/navigationPersistence.js'
-import { drawerOpenBlockedByDrag } from '../lib/drawerLifecycle.js'
+import {
+  createDrawerNavigationCoverCap,
+  drawerOpenBlockedByDrag,
+} from '../lib/drawerLifecycle.js'
 import { shellReload } from '../lib/shellReloadState.js'
 import * as tabModel from '../components/Shell/tabModel.js'
 import * as paneModel from '../components/Shell/paneModel.js'
@@ -663,9 +666,23 @@ export default function useNavigation({
 
   // Finish a drawer deliberately retained after its navigation sentinel was
   // consumed. A newly reopened logical drawer wins over late readiness.
-  const finishDrawerNavigationPresentation = useCallback(() => {
+  const endDrawerNavigationCover = useCallback(() => {
     if (!drawerOpenRef.current) setDrawerVisible(false)
   }, [])
+  // The cover is interaction-locked and hands out no close affordance, so it
+  // may not depend on a signal that is allowed never to arrive (see
+  // DRAWER_NAVIGATION_COVER_CAP_MS). Readiness disarms this; silence releases.
+  const drawerCoverCapRef = useRef(null)
+  if (!drawerCoverCapRef.current) {
+    drawerCoverCapRef.current = createDrawerNavigationCoverCap({
+      release: endDrawerNavigationCover,
+    })
+  }
+  const finishDrawerNavigationPresentation = useCallback(() => {
+    drawerCoverCapRef.current.disarm()
+    endDrawerNavigationCover()
+  }, [endDrawerNavigationCover])
+  useEffect(() => () => drawerCoverCapRef.current.disarm(), [])
 
   /**
    * Mini-app nav-bridge: install a back-sentinel on behalf of a VISIBLE
@@ -1043,6 +1060,8 @@ export default function useNavigation({
     drawerClosePendingRef.current = false
     drawerOpenRef.current = false
     setDrawerVisible(keepDrawerPresented)
+    if (keepDrawerPresented) drawerCoverCapRef.current.arm()
+    else drawerCoverCapRef.current.disarm()
 
     // One reducer action makes payload+view atomic (§1.3.2). The ONE decision
     // point applies the destination to the correct world: a chat/app nav in single

@@ -9,6 +9,19 @@ export const DRAWER_CLOSE_WATCHDOG_BUFFER_MS = 80
 export const DRAWER_SWIPE_THRESHOLD_PX = 10
 export const DRAWER_SWIPE_DOMINANCE = 1.15
 
+// Upper bound on the navigation cover: the already-closed drawer held on
+// screen while the destination prepares its first frame.
+//
+// Destination readiness is the cover's completion signal, and that contract
+// deliberately guarantees nothing about arrival. A chat whose detail read
+// never settles stays loading, and the transcript's own reveal deadline may
+// release slow LAYOUT but never unvalidated DATA — by design, so a stalled
+// request cannot expose an incomplete transcript. The cover is interaction-
+// locked and owns no scrim close, so that silence would strand the drawer over
+// the workspace with no way out. Match the readiness contract's longest
+// absolute cap (ChatView's preparing-transcript deadline) and release there.
+export const DRAWER_NAVIGATION_COVER_CAP_MS = 5000
+
 /**
  * Only the always-visible sidebar follows chat selections made elsewhere.
  *
@@ -40,6 +53,41 @@ export function shouldRestoreDrawerFocus({
     || activeElement === body
     || !drawer
     || drawer.contains(activeElement)
+}
+
+/**
+ * Dead-man release for the drawer's navigation cover.
+ *
+ * `arm` starts the bound when a navigation retains the drawer; `disarm` is the
+ * ordinary path, called when destination readiness (or a fresh logical open)
+ * ends the cover first. `release` is only ever the escape hatch — it runs when
+ * the readiness signal the cover was waiting on never came at all.
+ */
+export function createDrawerNavigationCoverCap({
+  release,
+  capMs = DRAWER_NAVIGATION_COVER_CAP_MS,
+  schedule = setTimeout,
+  cancel = clearTimeout,
+} = {}) {
+  let timer = 0
+  function disarm() {
+    if (!timer) return
+    cancel(timer)
+    timer = 0
+  }
+  return {
+    arm() {
+      disarm()
+      timer = schedule(() => {
+        timer = 0
+        release?.()
+      }, capMs)
+    },
+    disarm,
+    get armed() {
+      return timer !== 0
+    },
+  }
 }
 
 function cssTimeMs(value) {
