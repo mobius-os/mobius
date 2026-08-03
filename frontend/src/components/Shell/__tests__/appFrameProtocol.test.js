@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  appMediaSessionEvent,
   applyVirtualStorageMutation,
   attributedFrameVersion,
   serveModuleRequest,
@@ -91,4 +92,28 @@ test('storage RPC narrows arguments and returns one correlated result', async ()
 
 test('unknown virtual-storage messages remain outside the storage owner', () => {
   assert.equal(applyVirtualStorageMutation(7, { type: 'other' }, () => {}), false)
+})
+
+
+test('media-session messages are bounded to the drawer contract', () => {
+  assert.deepEqual(appMediaSessionEvent({
+    type: 'moebius:media-session', event: 'open', sessionId: 'digest-1',
+    title: ' Daily digest ', subtitle: ' Untrusted app label ', playbackState: 'playing',
+  }), {
+    event: 'open', sessionId: 'digest-1', title: 'Daily digest',
+    playbackState: 'playing',
+  })
+  assert.deepEqual(appMediaSessionEvent({
+    type: 'moebius:media-session', event: 'close', sessionId: 'digest-1',
+  }), { event: 'close', sessionId: 'digest-1' })
+  assert.equal(appMediaSessionEvent({
+    type: 'moebius:media-session', event: 'update', sessionId: '',
+  }), null)
+  assert.equal(appMediaSessionEvent({
+    type: 'moebius:media-session', event: 'open', sessionId: ' padded ',
+  }), null)
+  assert.equal(appMediaSessionEvent({
+    type: 'moebius:media-session', event: 'open', sessionId: 'x'.repeat(161),
+  }), null)
+  assert.equal(appMediaSessionEvent({ type: 'moebius:other' }), null)
 })

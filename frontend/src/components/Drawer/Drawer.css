@@ -275,6 +275,127 @@
   font-weight: 500;
 }
 
+.drawer__now-playing {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: 2px 0 8px;
+  padding: 5px 6px;
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.drawer__now-playing-main,
+.drawer__now-playing-control {
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.drawer__now-playing-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 3px 5px;
+  text-align: left;
+}
+
+.drawer__now-playing-icon {
+  position: relative;
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--app-color, var(--accent));
+  color: var(--accent-fg, #fff);
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.drawer__now-playing-icon img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.drawer__now-playing-icon.is-image {
+  overflow: visible;
+  border-radius: 0;
+  background: transparent;
+}
+
+.drawer__now-playing-icon.is-image > span { visibility: hidden; }
+
+.drawer__now-playing-copy {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.drawer__now-playing-copy strong,
+.drawer__now-playing-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawer__now-playing-copy strong {
+  font-size: 13px;
+  line-height: 17px;
+  font-weight: 600;
+}
+
+.drawer__now-playing-copy small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.drawer__now-playing-control {
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  padding: 8px;
+  border-radius: 999px;
+}
+
+.drawer__now-playing-control svg {
+  width: 17px;
+  height: 17px;
+}
+
+.drawer__now-playing-main:focus-visible,
+.drawer__now-playing-control:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.drawer__now-playing-control:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .drawer__now-playing-main:hover,
+  .drawer__now-playing-control:not(:disabled):hover {
+    background: var(--surface-raised, var(--border-light));
+  }
+}
+
 .drawer__item-count {
   flex: 0 0 auto;
   min-width: 20px;

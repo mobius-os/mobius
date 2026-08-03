@@ -134,6 +134,7 @@ import useShellReloadController from './useShellReloadController.js'
 import useAppFrameCache from './useAppFrameCache.js'
 import useShellVisualViewport from './useShellVisualViewport.js'
 import ShellBrand from './ShellBrand.jsx'
+import { createMediaSessionOwner } from './mediaSessionOwner.js'
 import { HistoryDismissProvider } from '../../hooks/useHistoryDismiss.jsx'
 
 const APP_SETTINGS_SECTIONS = new Set([
@@ -327,6 +328,17 @@ export default function Shell() {
   // immersive can solo its pane over the whole workspace (§4/§9). Full contract:
   // lib/immersive.js.
   const [immersiveAppId, dispatchImmersive] = useReducer(immersiveReducer, null)
+  const [nowPlaying, setNowPlaying] = useState(null)
+  const mediaSessionOwnerRef = useRef(null)
+  if (!mediaSessionOwnerRef.current) {
+    mediaSessionOwnerRef.current = createMediaSessionOwner(setNowPlaying)
+  }
+  const handleMediaSession = useCallback((appId, event, sendControl) => {
+    mediaSessionOwnerRef.current.receive(appId, event, sendControl)
+  }, [])
+  const handleNowPlayingControl = useCallback((action) => {
+    mediaSessionOwnerRef.current.control(action)
+  }, [])
   // Stable identity — AppCanvas's message-listener effect depends on it.
   const handleImmersive = useCallback((appId, value) => {
     dispatchImmersive({ type: 'request', appId, value })
@@ -380,6 +392,9 @@ export default function Shell() {
   // with the per-render navTo identity. Pane handlers call through this stable
   // facade and still reach the latest navigation implementation via the ref.
   const stablePaneNavTo = useCallback((view, opts) => navToRef.current(view, opts), [])
+  const handleNowPlayingOpen = useCallback((appId) => {
+    navToRef.current('canvas', { appId })
+  }, [])
   // Reconcile in-memory route hints after every workspace transition (design
   // §5.1.3). navStackRef is stable, so recreating this closure each render is
   // behaviourally identical. reconcileRoutePanes points each hint at the pane
@@ -3111,6 +3126,9 @@ export default function Shell() {
         appsActive={appsVisibleAsTab}
         onAppsOpen={() => navTo('apps')}
         appsHost={appsDirectoryHost}
+        nowPlaying={nowPlaying}
+        onNowPlayingOpen={handleNowPlayingOpen}
+        onNowPlayingControl={handleNowPlayingControl}
         streamingChatIds={streamingChatIds}
         attentionChatIds={attentionChatIds}
         newAppIds={appAttentionSet}
@@ -3286,6 +3304,7 @@ export default function Shell() {
               onIntentDelivered={handleAppIntentDelivered}
               onAppError={handleAppError}
               onHostRequest={handleAppHostRequest}
+              onMediaSession={handleMediaSession}
             />
             </ErrorBoundary>
           </div>

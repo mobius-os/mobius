@@ -13,6 +13,27 @@ export function attributedFrameVersion(frames, source) {
   return null
 }
 
+const MEDIA_EVENTS = new Set(['open', 'update', 'close'])
+const MEDIA_STATES = new Set(['loading', 'playing', 'paused'])
+
+export function appMediaSessionEvent(message) {
+  if (!message || message.type !== 'moebius:media-session') return null
+  if (!MEDIA_EVENTS.has(message.event)) return null
+  const sessionId = typeof message.sessionId === 'string' ? message.sessionId : ''
+  if (!sessionId || sessionId.length > 160 || sessionId.trim() !== sessionId) return null
+  if (message.event === 'close') return { event: 'close', sessionId }
+  return {
+    event: message.event,
+    sessionId,
+    title: typeof message.title === 'string'
+      ? message.title.trim().slice(0, 120) || 'Playing audio'
+      : 'Playing audio',
+    playbackState: MEDIA_STATES.has(message.playbackState)
+      ? message.playbackState
+      : 'loading',
+  }
+}
+
 function requestIdOf(message) {
   return typeof message.requestId === 'string' && message.requestId.length <= 160
     ? message.requestId

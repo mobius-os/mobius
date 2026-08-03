@@ -22,6 +22,7 @@ import { builtInCapabilityProviders } from '../../lib/capabilityProviders.js'
 import { requestAppCodeWarm } from '../../lib/appPrecache.js'
 import { appHostRequest } from '../../lib/appHostRequest.js'
 import {
+  appMediaSessionEvent,
   applyVirtualStorageMutation,
   attributedFrameVersion,
   serveModuleRequest,
@@ -264,6 +265,7 @@ const AppCanvas = forwardRef(function AppCanvas({
   pendingIntent = null,
   onNavPush, onNavPop, onNavReset, onNavForwardResult,
   onAppFocus, onImmersive, onIntentDelivered, onAppError, onHostRequest,
+  onMediaSession,
 }, hostRef) {
   const queryClient = useQueryClient()
   const [serviceSurface, setServiceSurface] = useState(null)
@@ -356,6 +358,17 @@ const AppCanvas = forwardRef(function AppCanvas({
   // VERSION — a Map, not a single ref, because two iframes are alive during the
   // swap window and each must be addressable independently.
   const framesRef = useRef(new Map())
+  // Playback remains inside the app frame. This map only binds the shell's
+  // small metadata/control surface to the exact document that owns it.
+  const frameMediaSessionRef = useRef(new Map())
+  const onMediaSessionRef = useRef(onMediaSession)
+  onMediaSessionRef.current = onMediaSession
+  function retireFrameMediaSession(v) {
+    const sessionId = frameMediaSessionRef.current.get(v)
+    if (!sessionId) return
+    frameMediaSessionRef.current.delete(v)
+    onMediaSessionRef.current?.(appId, { event: 'close', sessionId })
+  }
   // Message attribution lives in one intentionally stable listener below, so
   // keep the current one-shot intent in a ref rather than re-registering that
   // listener on every deep link. The nonce prevents a late acknowledgement for
@@ -426,6 +439,7 @@ const AppCanvas = forwardRef(function AppCanvas({
             framesRef.current.get(v)?.contentWindow,
           )
           storageHostRef.current.detachSource(framesRef.current.get(v)?.contentWindow)
+          retireFrameMediaSession(v)
           // A service-surface takeover can remove the live iframe without
           // unmounting AppCanvas or advancing the buffered version. Retire its
           // host sentinels at this exhaustive document-removal boundary too.
@@ -721,6 +735,38 @@ const AppCanvas = forwardRef(function AppCanvas({
       // browsing context). Route acks back to the source frame via e.source
       // directly — it is the verified sender window.
       if (srcVersion !== liveVersionRef.current) return
+
+      // App-owned playback may continue while its warm frame is hidden, so its
+      // drawer control surface is live-frame-scoped rather than visibility-
+      // scoped. Only small metadata/state crosses this boundary; the frame
+      // keeps the audio graph, buffers, and native Media Session integration.
+      const mediaEvent = appMediaSessionEvent(msg)
+      if (mediaEvent) {
+        const currentSessionId = frameMediaSessionRef.current.get(srcVersion)
+        if (mediaEvent.event === 'close') {
+          if (currentSessionId !== mediaEvent.sessionId) return
+          frameMediaSessionRef.current.delete(srcVersion)
+          onMediaSessionRef.current?.(appId, mediaEvent)
+          return
+        }
+        if (mediaEvent.event === 'update' && currentSessionId !== mediaEvent.sessionId) return
+        frameMediaSessionRef.current.set(srcVersion, mediaEvent.sessionId)
+        const source = e.source
+        onMediaSessionRef.current?.(appId, mediaEvent, (action) => {
+          if (!['play', 'pause', 'stop'].includes(action)) return false
+          try {
+            source?.postMessage({
+              type: 'moebius:media-control',
+              sessionId: mediaEvent.sessionId,
+              action,
+            }, '*')
+            return true
+          } catch {
+            return false
+          }
+        })
+        return
+      }
 
       if (msg.type === 'moebius:app-intent-applied') {
         const pending = pendingIntentRef.current
@@ -1236,6 +1282,7 @@ const AppCanvas = forwardRef(function AppCanvas({
     // re-init below then runs the fresh document's handshake (this is exactly
     // why the parent never dedups frame-init).
     if (loadedDocsRef.current.has(v)) {
+      retireFrameMediaSession(v)
       capabilityHostRef.current.detachSource(
         framesRef.current.get(v)?.contentWindow,
       )

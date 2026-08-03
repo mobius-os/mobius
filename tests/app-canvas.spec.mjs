@@ -344,6 +344,75 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 6000 })
   })
 
+  test('drawer playback controls stay bound to the owning live frame', async ({ page }) => {
+    const appId = 97
+    await setupAppRoutes(page, appId, mockFrameHTML(appId))
+    await page.goto(`${BASE}/app/${appId}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.canvas-loading')).toBeHidden({ timeout: 10000 })
+    const frame = await waitForContentFrame(page, 'iframe.canvas--live')
+    await frame.evaluate(() => {
+      window.__mediaControls = []
+      window.addEventListener('message', (event) => {
+        if (event.data?.type === 'moebius:media-control') {
+          window.__mediaControls.push(event.data)
+        }
+      })
+      window.parent.postMessage({
+        type: 'moebius:media-session',
+        event: 'open',
+        sessionId: 'digest-one',
+        title: 'Daily digest',
+        subtitle: 'Spoofed app name',
+        playbackState: 'playing',
+      }, window.location.origin)
+    })
+
+    const drawerToggle = page.getByRole('button', { name: 'Toggle navigation' })
+    await drawerToggle.click()
+    const player = page.getByRole('region', { name: 'Now playing from mock-app' })
+    await expect(player).toBeVisible()
+    await expect(player).toContainText('Daily digest')
+    await expect(player).toContainText('mock-app · Playing')
+    await expect(player).not.toContainText('Spoofed app name')
+
+    await player.getByRole('button', { name: 'Pause playback' }).click()
+    await expect.poll(() => frame.evaluate(() => window.__mediaControls.at(-1)?.action))
+      .toBe('pause')
+    await frame.evaluate(() => window.parent.postMessage({
+      type: 'moebius:media-session',
+      event: 'update',
+      sessionId: 'digest-one',
+      title: 'Daily digest',
+      playbackState: 'paused',
+    }, window.location.origin))
+    await expect(player.getByRole('button', { name: 'Resume playback' })).toBeVisible()
+
+    await player.getByRole('button', { name: 'Stop playback' }).click()
+    await expect.poll(() => frame.evaluate(() => window.__mediaControls.at(-1)?.action))
+      .toBe('stop')
+    // Stop is a request, not confirmation: controls remain until the app closes.
+    await expect(player).toBeVisible()
+    await frame.evaluate(() => window.parent.postMessage({
+      type: 'moebius:media-session',
+      event: 'close',
+      sessionId: 'digest-one',
+    }, window.location.origin))
+    await expect(player).toBeHidden()
+
+    // A same-element iframe reload replaces its document without firing a
+    // callback-ref teardown. The load boundary must retire the old lease too.
+    await frame.evaluate(() => window.parent.postMessage({
+      type: 'moebius:media-session',
+      event: 'open',
+      sessionId: 'digest-two',
+      title: 'Reloading digest',
+      playbackState: 'playing',
+    }, window.location.origin))
+    await expect(player).toContainText('Reloading digest')
+    await frame.evaluate(() => window.location.reload())
+    await expect(player).toBeHidden({ timeout: 10000 })
+  })
+
   test('app-token failure shows a retry that opens the app', async ({ page }) => {
     const appId = 98
     let tokenAttempts = 0

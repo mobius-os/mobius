@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { createPortal } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
+import { Pause, Play, Stop } from '@openai/apps-sdk-ui/components/Icon'
 import { api } from '../../api/client.js'
 import { appQueries, chatQueries } from '../../hooks/queries.js'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
@@ -90,6 +91,9 @@ export default function Drawer({
   appsActive = false,
   onAppsOpen,
   appsHost,
+  nowPlaying,
+  onNowPlayingOpen,
+  onNowPlayingControl,
   // Set of chat ids whose agent is currently streaming. Used to
   // show a small accent dot next to the row label so the user can
   // see at a glance which background builds are still running.
@@ -1019,6 +1023,15 @@ export default function Drawer({
                 <span className="drawer__item-text">Apps</span>
               </button>
 
+              {nowPlaying && (
+                <NowPlaying
+                  session={nowPlaying}
+                  app={apps.find(app => String(app.id) === String(nowPlaying.appId))}
+                  onOpen={onNowPlayingOpen}
+                  onControl={onNowPlayingControl}
+                />
+              )}
+
               {pinnedItems.length > 0 && (
                 <section className="drawer__section" aria-labelledby="drawer-pinned-label">
                   <h2 id="drawer-pinned-label" className="drawer__label">
@@ -1228,6 +1241,54 @@ export default function Drawer({
         />
       )}
     </>
+  )
+}
+
+function NowPlaying({ session, app, onOpen, onControl }) {
+  const appName = app?.name || 'App'
+  const paused = session.playbackState === 'paused'
+  const loading = session.playbackState === 'loading'
+  const stateLabel = loading ? 'Preparing' : paused ? 'Paused' : 'Playing'
+  return (
+    <section className="drawer__now-playing" aria-label={`Now playing from ${appName}`}>
+      <button
+        type="button"
+        className="drawer__now-playing-main"
+        onClick={() => onOpen?.(session.appId)}
+        aria-label={`Open ${appName}`}
+      >
+        {app ? (
+          <AppIcon item={app} label={appName} className="drawer__now-playing-icon" size={64} />
+        ) : (
+          <span className="drawer__now-playing-icon" aria-hidden="true">
+            <span>{appInitials(appName)}</span>
+          </span>
+        )}
+        <span className="drawer__now-playing-copy">
+          <strong>{session.title}</strong>
+          <small>{appName} · {stateLabel}</small>
+        </span>
+      </button>
+      <button
+        type="button"
+        className="drawer__now-playing-control"
+        aria-label={paused ? 'Resume playback' : 'Pause playback'}
+        title={paused ? 'Resume' : 'Pause'}
+        disabled={loading}
+        onClick={() => onControl?.(paused ? 'play' : 'pause')}
+      >
+        {paused ? <Play aria-hidden="true" /> : <Pause aria-hidden="true" />}
+      </button>
+      <button
+        type="button"
+        className="drawer__now-playing-control"
+        aria-label="Stop playback"
+        title="Stop"
+        onClick={() => onControl?.('stop')}
+      >
+        <Stop aria-hidden="true" />
+      </button>
+    </section>
   )
 }
 
