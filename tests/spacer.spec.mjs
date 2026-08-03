@@ -1490,5 +1490,26 @@ test.describe('Scroll edge cases', () => {
     expect(Math.abs(
       result.afterFormerGestureCap.top - result.settledFrames.at(-1).top
     )).toBeLessThanOrEqual(4)
+
+    // Keyboard-animation resize signals may update the composer room, but the
+    // footer/scroll ResizeObserver remains the only transcript geometry owner.
+    const signalOnly = await page.evaluate(async () => {
+      const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      scroll.scrollTop = Math.max(0, scroll.scrollTop - 12)
+      await new Promise(resolve => requestAnimationFrame(resolve))
+      const beforeSignal = Math.round(scroll.scrollTop)
+      window.dispatchEvent(new Event('resize'))
+      window.visualViewport?.dispatchEvent(new Event('resize'))
+      await new Promise(resolve => requestAnimationFrame(() => {
+        requestAnimationFrame(() => requestAnimationFrame(resolve))
+      }))
+      return {
+        mode: scroll.dataset.scrollMode,
+        beforeSignal,
+        afterSignal: Math.round(scroll.scrollTop),
+      }
+    })
+    expect(signalOnly.mode).toBe('FOLLOW_BOTTOM')
+    expect(signalOnly.afterSignal).toBe(signalOnly.beforeSignal)
   })
 })

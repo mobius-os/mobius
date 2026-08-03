@@ -1207,9 +1207,6 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  *   growth stays on its ResizeObserver so streaming cannot settle a gesture.
  * @param {React.MutableRefObject<Array<object>>} args.messagesRef
  *   Synchronous mirror for restore-time anchor validation.
- * @param {number} args.pendingMessagesLength
- *   Count of queued messages (drives effect re-runs when the tray
- *   shows/hides because the tray's margin shrinks the spacer math).
  * @param {React.MutableRefObject<boolean>} args.loadingOlderRef
  *   When true, scroll events from pagination shouldn't mutate mode.
  * @param {'history'|'cache-validating'|'cached'|'stream-catchup'|'preparing'|'ready'} args.initialEntryPhase
@@ -1234,7 +1231,6 @@ export default function useScrollMode({
   footRef,
   messages,
   messagesRef,
-  pendingMessagesLength,
   loadingOlderRef,
   initialEntryPhase,
   onCachedCoordinateReady,
@@ -1313,11 +1309,8 @@ export default function useScrollMode({
   // paneResized() forwards to it (null when no scroll DOM is mounted). Mirrors
   // the forceRevealRef / resumeLayoutAfterGestureRef effect-bridge pattern.
   const paneResizeRunRef = useRef(null)
-  // Footer height changes are scroll geometry: `.chat__list` consumes the
-  // published composer height and the dynamic spacer compensates that padding.
-  // The observer in ChatView notifies this runner rather than writing the CSS
-  // variable itself, so both mutations share the reader-gesture gate.
-  const composerResizeRunRef = useRef(null)
+  // Footer height changes are scroll geometry: the controller observes the
+  // footer and publishes its list clearance in the same guarded transaction.
   // Controlled composer edits must publish their draft before a PIN -> FOLLOW
   // transition can render. React's change handler invokes this effect-owned
   // bridge after accepting the new value.
@@ -2029,23 +2022,6 @@ export default function useScrollMode({
       settlePinnedMode(authorityVersion)
       return true
     }
-    function runComposerResize() {
-      const authorityVersion = currentAuthority()
-      if (!layoutOwnsScroll(authorityVersion)) {
-        deferLayoutUntilReaderYields(authorityVersion)
-        return
-      }
-      // Foot growth changes list padding without necessarily changing the
-      // list's observed content box. Reapply an established live follow here;
-      // otherwise only the first new line moves the viewport and later lines
-      // quietly leave the reader above the tail.
-      syncLayout({
-        forceApply: modeRef.current.kind === 'FOLLOW_BOTTOM',
-        authorityVersion,
-      })
-    }
-    composerResizeRunRef.current = runComposerResize
-
     syncLayout({ authorityVersion: currentAuthority() })
 
     // Shell supplies committed pane geometry separately from viewport resize.
@@ -2200,9 +2176,11 @@ export default function useScrollMode({
       requestRevealOnQuiet()  // each RO firing pushes the reveal back
     })
     ro.observe(listEl)
-    ro.observe(scrollEl)  // catches form-row growth (file chips, queue tray)
-    const queuedTrayEl = scrollEl.parentElement?.querySelector('.queued')
-    if (queuedTrayEl) ro.observe(queuedTrayEl)
+    ro.observe(scrollEl)  // catches real scroll-viewport size changes
+    // Composer height is list clearance, so it belongs to this same observer
+    // transaction. Queue rows, file chips, and other footer content are all
+    // descendants, so observing them separately would duplicate this signal.
+    if (footRef.current) ro.observe(footRef.current)
     // ResizeObserver alone is not a sufficient reveal gate. It reports that a
     // box ALREADY changed size, so it cannot hold the reveal for asynchronous
     // renderers that have not started yet: KaTeX is loaded on demand and then
@@ -2646,9 +2624,6 @@ export default function useScrollMode({
       scrollEl.removeEventListener('error', requestRevealOnQuiet, true)
       ro.disconnect()
       if (paneResizeRunRef.current === runPaneResize) paneResizeRunRef.current = null
-      if (composerResizeRunRef.current === runComposerResize) {
-        composerResizeRunRef.current = null
-      }
       scrollEl.removeEventListener('scroll', onScroll)
       scrollEl.removeEventListener('scrollend', settleReaderScroll)
       scrollEl.removeEventListener('pointerdown', onPointerDownInput)
@@ -2669,7 +2644,6 @@ export default function useScrollMode({
     }
   }, [
     messageCount,
-    pendingMessagesLength,
     chatId,
     initialEntryPhase,
     onCachedCoordinateReady,
@@ -2827,10 +2801,6 @@ export default function useScrollMode({
     if (run) run(projectedHeightPx)
   }, [])
 
-  const composerResized = useCallback(() => {
-    composerResizeRunRef.current?.()
-  }, [])
-
   const composerEdited = useCallback((event) => {
     composerEditRunRef.current?.(event)
   }, [])
@@ -2848,7 +2818,6 @@ export default function useScrollMode({
     reapplyActiveMode,
     settleSendIntent,
     settleStreamingPin,
-    composerResized,
     composerEdited,
     paneResized,
   }

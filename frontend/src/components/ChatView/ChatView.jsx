@@ -727,7 +727,6 @@ export default function ChatView({
     reapplyActiveMode,
     settleSendIntent,
     settleStreamingPin,
-    composerResized,
     composerEdited,
     paneResized,
   } = useScrollMode({
@@ -739,7 +738,6 @@ export default function ChatView({
     footRef,
     messages,
     messagesRef,
-    pendingMessagesLength: pendingQueue.pendingMessages.length,
     loadingOlderRef: loadingOlder,
     initialEntryPhase,
     onCachedCoordinateReady: acceptCachedReadingCoordinate,
@@ -1549,81 +1547,40 @@ export default function ChatView({
     if (el && !hidden) reconcileComposerTextarea(el, input)
   }, [chatId, hidden, input])
 
-  // Notify the scroll owner when `.chat__foot` geometry may have changed.
-  // The controller publishes the matching list clearance and spacer in one
-  // guarded layout pass so an observer cannot move the reader indirectly.
+  // Composer room depends on the pane and visual viewport, not footer
+  // geometry. The scroll controller observes the actual footer and scroll
+  // viewport so transcript clearance and anchoring share one owner.
   useEffect(() => {
-    const footEl = footRef.current
-    if (!footEl) return
-
-    let raf1 = 0
-    let raf2 = 0
-    // The room is published unconditionally; the foot measurement goes through
-    // the scroll controller, which may decline while the reader owns the
-    // scroll. Keeping them in one settle sequence means the cap and the list
-    // padding still land from the same events.
-    const applyNow = () => {
-      publishComposerRoom()
-      composerResized()
-    }
-    const applySoon = () => {
-      applyNow()
-      if (raf1) cancelAnimationFrame(raf1)
-      if (raf2) cancelAnimationFrame(raf2)
-      raf1 = requestAnimationFrame(() => {
-        applyNow()
-        raf2 = requestAnimationFrame(applyNow)
-      })
-    }
     const reconcileForegroundGeometry = () => {
       // Chromium can restore form/layout state independently when a document
       // returns from background or the back-forward cache. Reconcile the
-      // textarea first; measuring only the outer foot would preserve a stale
-      // multi-line height on an empty composer.
+      // textarea before publishing the restored room.
       reconcileComposerTextarea(inputRef.current, inputValueRef.current)
-      applySoon()
+      publishComposerRoom()
     }
     const onVisible = () => {
       if (document.visibilityState === 'visible') reconcileForegroundGeometry()
     }
 
-    applySoon()
-    const ro = typeof ResizeObserver !== 'undefined'
-      ? new ResizeObserver(applySoon)
-      : null
-    ro?.observe(footEl)
-    // The pane is the room's other input, and it can change without any window
-    // or viewport event at all — dragging a workspace split resizes this chat
-    // while the window stands still. Observe it directly rather than hoping a
-    // neighbouring event fires.
+    publishComposerRoom()
+    // A workspace split can resize this pane while the window stands still.
     const paneRo = typeof ResizeObserver !== 'undefined'
       ? new ResizeObserver(publishComposerRoom)
       : null
     if (chatRef.current) paneRo?.observe(chatRef.current)
-    window.addEventListener('resize', applySoon)
+    window.addEventListener('resize', publishComposerRoom)
     window.addEventListener('pageshow', reconcileForegroundGeometry)
-    window.visualViewport?.addEventListener('resize', applySoon)
-    window.visualViewport?.addEventListener('scroll', applySoon)
+    window.visualViewport?.addEventListener('resize', publishComposerRoom)
     document.addEventListener('visibilitychange', onVisible)
 
     return () => {
-      if (raf1) cancelAnimationFrame(raf1)
-      if (raf2) cancelAnimationFrame(raf2)
-      ro?.disconnect()
       paneRo?.disconnect()
-      window.removeEventListener('resize', applySoon)
+      window.removeEventListener('resize', publishComposerRoom)
       window.removeEventListener('pageshow', reconcileForegroundGeometry)
-      window.visualViewport?.removeEventListener('resize', applySoon)
-      window.visualViewport?.removeEventListener('scroll', applySoon)
+      window.visualViewport?.removeEventListener('resize', publishComposerRoom)
       document.removeEventListener('visibilitychange', onVisible)
     }
-  }, [composerResized, publishComposerRoom])
-
-  useEffect(() => {
-    composerResized()
-    const raf = requestAnimationFrame(composerResized)
-    return () => cancelAnimationFrame(raf)
-  }, [builtApps, sending, buildPhases, composerResized])
+  }, [publishComposerRoom])
 
   useEffect(() => {
     const latest = buildPhases[buildPhases.length - 1]

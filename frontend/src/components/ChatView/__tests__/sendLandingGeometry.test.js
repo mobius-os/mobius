@@ -35,29 +35,13 @@ test('ChatView gives its composer elements to the scroll owner', () => {
     'ChatView must notify geometry changes without publishing scroll geometry')
 })
 
-test('footer resizes enter through the scroll owner instead of mutating geometry directly', () => {
-  const commentStart = chatView.indexOf('// Notify the scroll owner when `.chat__foot`')
-  const effectStart = chatView.indexOf('useEffect(() => {', commentStart)
-  const effectEnd = chatView.indexOf('\n  useEffect(() => {', effectStart + 20)
-  assert.ok(commentStart >= 0 && effectStart > commentStart && effectEnd > effectStart,
-    'footer resize effect exists')
-  const footerEffect = chatView.slice(effectStart, effectEnd)
-
-  assert.match(footerEffect, /new ResizeObserver\(applySoon\)/)
-  assert.match(footerEffect, /composerResized\(\)/)
-  assert.doesNotMatch(footerEffect, /style\.setProperty|measureComposerHeight/,
-    'the footer observer must not bypass reader-gesture ownership')
-
-  const bridgeStart = controller.indexOf('function runComposerResize()')
-  const bridgeEnd = controller.indexOf('\n    composerResizeRunRef.current', bridgeStart)
-  assert.ok(bridgeStart >= 0 && bridgeEnd > bridgeStart, 'composer resize bridge exists')
-  const bridge = controller.slice(bridgeStart, bridgeEnd)
-  assert.match(bridge, /deferLayoutUntilReaderYields\(authorityVersion\)/)
-  assert.match(
-    bridge,
-    /syncLayout\(\{[\s\S]*?forceApply:\s*modeRef\.current\.kind === 'FOLLOW_BOTTOM',[\s\S]*?authorityVersion,[\s\S]*?\}\)/,
-    'composer growth must reapply an established tail follow in the same owner pass',
-  )
+test('footer resizes are owned by the scroll controller observer', () => {
+  assert.match(controller, /ro\.observe\(scrollEl\)/)
+  assert.match(controller, /ro\.observe\(footRef\.current\)/)
+  assert.doesNotMatch(controller, /querySelector\(['"]\.queued['"]\)/,
+    'footer descendants must not add duplicate geometry observers')
+  assert.doesNotMatch(chatView, /new ResizeObserver\(applySoon\)|composerResized/,
+    'ChatView must not bridge footer geometry through a second observer')
 })
 
 test('gesture settlement replays deferred footer geometry and mode in one task', () => {

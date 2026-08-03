@@ -12,8 +12,8 @@
    ║      opt back in through the allow-list beside the foot;   ║
    ║      transparent wrappers keep the gutter pass-through.    ║
    ║                                                            ║
-   ║   2. `--composer-h` is published by a ResizeObserver in    ║
-   ║      ChatView.jsx that watches `.chat__foot`. `.chat__list`║
+   ║   2. `--composer-h` is published by the scroll controller's║
+   ║      ResizeObserver on `.chat__foot`. `.chat__list`        ║
    ║      reserves --composer-h + the same full safe-area       ║
    ║      expression + 16px so the last message clears the      ║
    ║      pill and gesture area as it grows                     ║
@@ -156,12 +156,12 @@
   margin: 0 auto;
   /* Bottom padding clears the absolutely-positioned `.chat__foot`.
      Tracks the foot's measured height via the `--composer-h` CSS
-     var (written by ChatView's ResizeObserver), the full device safe-area
-     gap below the foot (the SAME env() expression as `.chat__foot`'s
-     `bottom` — keep them in sync), plus a small breathing-room
-     margin so chips/queue tray growing the foot keeps the last
-     message clear of the pill. Fallback 80px is for the first
-     paint before the RO fires. */
+     var (written by the scroll controller's ResizeObserver), the
+     full device safe-area gap below the foot (the SAME env()
+     expression as `.chat__foot`'s `bottom` — keep them in sync),
+     plus a small breathing-room margin so chips/queue tray growing
+     the foot keeps the last message clear of the pill. Fallback
+     80px is for the first paint before the RO fires. */
   padding: 8px 6px calc(var(--composer-h, 80px) + env(safe-area-inset-bottom, 0px) + 16px);
   display: flex;
   flex-direction: column;

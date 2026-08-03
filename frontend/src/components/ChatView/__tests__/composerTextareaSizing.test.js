@@ -111,7 +111,7 @@ test('ChatView reconciles textarea geometry on value commits and foreground retu
   const inputBarSource = readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8')
   const voiceSource = readFileSync(new URL('../useVoiceInput.js', import.meta.url), 'utf8')
   assert.match(source, /useLayoutEffect\(\(\) => \{[\s\S]*reconcileComposerTextarea\(el, input\)[\s\S]*\}, \[chatId, hidden, input\]\)/)
-  assert.match(source, /const reconcileForegroundGeometry = \(\) => \{[\s\S]*reconcileComposerTextarea\(inputRef\.current, inputValueRef\.current\)[\s\S]*applySoon\(\)/)
+  assert.match(source, /const reconcileForegroundGeometry = \(\) => \{[\s\S]*reconcileComposerTextarea\(inputRef\.current, inputValueRef\.current\)[\s\S]*publishComposerRoom\(\)/)
   assert.match(source, /window\.addEventListener\('pageshow', reconcileForegroundGeometry\)/)
   assert.match(inputBarSource, /new ResizeObserver\(/)
   assert.match(inputBarSource, /syncComposerTallClass\(/)
