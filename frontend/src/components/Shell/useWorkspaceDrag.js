@@ -4,7 +4,7 @@ import { STRIP_H } from './paneModel.js'
 import {
   buildScene, hitTest, zoneTarget, releaseZone, chipOffset, STRIP_CARET_PAD,
   passedSlop, touchTabMoveIntent, drawerRowMoveIntent, releasedInPlace,
-  TAB_HOLD_MS, DRAWER_HOLD_MS,
+  TAB_HOLD_MS, DRAWER_DRAG_HOLD_MS, DRAWER_MENU_HOLD_MS,
   crossedDrawerExit,
   rootEdgeAllowed, clientPointToLocal,
 } from './dragController.js'
@@ -310,17 +310,27 @@ export default function useWorkspaceDrag({
       }
 
       // Tabs and drawer rows share this ONE pointer owner. Tabs lift as soon as
-      // their hold resolves. A drawer hold stays undecided until the owner moves
-      // or releases: outward movement lifts into the workspace, vertical movement
-      // of a pin hands off to its reorder implementation, and release in place
-      // opens actions. Pre-hold movement returns to native scroll/swipe.
+      // their hold resolves. Drawer rows become draggable after the brief first
+      // stage; if the pointer stays still through the second stage, actions open
+      // immediately. Movement clears the same timer before handing off to reorder,
+      // workspace drag, or scrolling, so no competing gesture lifecycle exists.
       if (isTouch) {
         holdTimer = setTimeout(() => {
           if (cancelled || cleaned) return
           held = true
           if (navigator.vibrate) { try { navigator.vibrate(8) } catch { /* unsupported */ } }
-          if (sourceKind !== 'drawer') arm()
-        }, sourceKind === 'drawer' ? DRAWER_HOLD_MS : TAB_HOLD_MS)
+          if (sourceKind !== 'drawer') {
+            arm()
+            return
+          }
+          holdTimer = setTimeout(() => {
+            if (cancelled || cleaned || armed || scrolling) return
+            const handler = drawerGesture()
+            const point = { ...lastPoint }
+            cleanup({ suppressClick: true })
+            handler?.openMenu?.(point)
+          }, DRAWER_MENU_HOLD_MS - DRAWER_DRAG_HOLD_MS)
+        }, sourceKind === 'drawer' ? DRAWER_DRAG_HOLD_MS : TAB_HOLD_MS)
       }
 
       function stopAutoScroll() {
@@ -516,11 +526,6 @@ export default function useWorkspaceDrag({
         if (!armed) {
           if (scrolling) {
             cleanup({ suppressClick: true })
-          } else if (isTouch && sourceKind === 'drawer' && held) {
-            const handler = drawerGesture()
-            const point = { x: ev.clientX, y: ev.clientY }
-            cleanup({ suppressClick: true })
-            handler?.openMenu?.(point)
           } else cleanup()
           return
         }

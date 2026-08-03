@@ -31,11 +31,13 @@ import { tabKey } from './tabModel.js'
 // A mouse drag arms once the pointer travels past this from the press point;
 // below it, the press is still a plain click (tab activate / row open).
 export const POINTER_SLOP = 5
-// Touch lift is a long-press. Tabs use the shorter threshold because they live
-// in a horizontal strip; drawer rows use the longer threshold in their own
-// gesture owner so an ordinary vertical scroll wins before any row action.
+// Touch lift is a long-press. Drawer rows have two deliberate stages: movement
+// can become a drag quickly, while a stationary press must continue longer
+// before opening actions. Keeping both timings here prevents the live pointer
+// owner and launcher cards from inventing their own thresholds.
 export const TAB_HOLD_MS = 350
-export const DRAWER_HOLD_MS = 450
+export const DRAWER_DRAG_HOLD_MS = 180
+export const DRAWER_MENU_HOLD_MS = 550
 // Movement past this before a hold resolves yields to the source scroller.
 export const PRE_HOLD_MOVE_PX = 8
 // After a touch lift, a release that never moved past this is not a drop. Tabs

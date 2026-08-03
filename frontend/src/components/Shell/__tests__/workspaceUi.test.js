@@ -657,9 +657,9 @@ test('one held drawer-row gesture resolves menu, reorder, or workspace drag', ()
     /sourceKind === 'drawer' && e\.pointerType !== 'mouse'\) return/,
     'touch drawer rows must remain available to the workspace drag controller',
   )
-  assert.match(dragBinding, /sourceKind === 'drawer' \? DRAWER_HOLD_MS : TAB_HOLD_MS/)
-  assert.match(dragBinding, /if \(sourceKind !== 'drawer'\) arm\(\)/,
-    'a drawer hold waits for intent rather than opening or dragging immediately')
+  assert.match(dragBinding, /sourceKind === 'drawer' \? DRAWER_DRAG_HOLD_MS : TAB_HOLD_MS/)
+  assert.match(dragBinding, /DRAWER_MENU_HOLD_MS - DRAWER_DRAG_HOLD_MS/,
+    'one sequential timer owns both drawer hold stages')
   assert.match(dragBinding, /drawerRowMoveIntent\(dx, dy, \{[\s\S]*?held,[\s\S]*?isTouch,[\s\S]*?data-pinned-key/,
     'one pure decision boundary owns the held row directions')
   assert.match(dragBinding, /intent === 'reorder'[\s\S]*?beginReorder/,
@@ -668,8 +668,11 @@ test('one held drawer-row gesture resolves menu, reorder, or workspace drag', ()
     'the workspace outcome arms the shared drag implementation')
   assert.match(dragBinding, /intent === 'scroll'[\s\S]*?scrollAxis = 'y'[\s\S]*?scrollTop \+= start\.y - ev\.clientY/,
     'pre-hold row movement scrolls without surrendering the pointer to the browser')
-  assert.match(dragBinding, /sourceKind === 'drawer' && held[\s\S]*?cleanup\(\{ suppressClick: true \}\)[\s\S]*?handler\?\.openMenu\?\.\(point\)/,
-    'a stationary held release opens actions only after cleanup')
+  assert.match(dragBinding, /const point = \{ \.\.\.lastPoint \}[\s\S]*?cleanup\(\{ suppressClick: true \}\)[\s\S]*?handler\?\.openMenu\?\.\(point\)/,
+    'a stationary long hold opens actions before release and suppresses its trailing click')
+  const drawerPointerUp = dragBinding.match(/const onUp = \(ev\) => \{[\s\S]*?\n      \}/)?.[0] || ''
+  assert.doesNotMatch(drawerPointerUp, /openMenu/,
+    'releasing a shorter stationary hold remains a normal tap')
   assert.doesNotMatch(dragBinding, /openTabMenuAtRef/)
   assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
   assert.match(shell, /const drawerRowGesturesRef = useRef\(new Map\(\)\)/)
@@ -944,18 +947,18 @@ test('a secondary-button release cannot immediately select a flipped drawer menu
   assert.match(drawer, /timer = setTimeout\(cleanup, 1500\)/)
 })
 
-test('launcher cards and drawer rows share one deliberate hold threshold', () => {
+test('launcher cards and drawer rows share the stationary menu threshold', () => {
   const dragImports = drawer.match(
     /import \{([\s\S]*?)\} from '\.\.\/Shell\/dragController\.js'/,
   )?.[1] || ''
-  assert.match(dragImports, /DRAWER_HOLD_MS/)
+  assert.match(dragImports, /DRAWER_MENU_HOLD_MS/)
   assert.match(dragImports, /PRE_HOLD_MOVE_PX/)
-  assert.match(drawer, /\}, DRAWER_HOLD_MS\)/)
+  assert.match(drawer, /\}, DRAWER_MENU_HOLD_MS\)/)
   assert.match(drawer, /> PRE_HOLD_MOVE_PX/)
-  assert.match(dragBinding, /sourceKind === 'drawer' \? DRAWER_HOLD_MS : TAB_HOLD_MS/)
+  assert.match(dragBinding, /sourceKind === 'drawer' \? DRAWER_DRAG_HOLD_MS : TAB_HOLD_MS/)
   assert.doesNotMatch(
     drawer.match(/function beginPinnedReorder\([\s\S]*?\n  function onRowPointerDown/)?.[0] || '',
-    /DRAWER_HOLD_MS/,
+    /DRAWER_(?:DRAG|MENU)_HOLD_MS/,
     'the shared controller, not the reorder implementation, owns hold timing',
   )
   assert.doesNotMatch(drawer, /520/)
