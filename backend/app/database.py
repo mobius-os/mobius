@@ -1385,6 +1385,43 @@ def _add_connector_capability_identity(eng) -> None:
       ))
 
 
+def _converge_interim_connector_schema(eng) -> None:
+  """Retire the short-lived nonce shape without a compatibility path.
+
+  One local restoration briefly replaced ``capability_id`` with a required
+  ``capability_nonce`` and omitted ``last_checked_at``. ``create_all`` cannot
+  repair an existing table, so converge that physical shape once before ORM
+  access.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "connectors" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("connectors")}
+  with eng.begin() as conn:
+    if "last_checked_at" not in columns:
+      column_type = (
+        "TIMESTAMP" if eng.dialect.name == "postgresql" else "DATETIME"
+      )
+      conn.execute(text(
+        f"ALTER TABLE connectors ADD COLUMN last_checked_at {column_type}"
+      ))
+
+    if eng.dialect.name == "sqlite":
+      conn.execute(text(
+        "DROP TRIGGER IF EXISTS connectors_require_nonce_insert"
+      ))
+      conn.execute(text(
+        "DROP TRIGGER IF EXISTS connectors_require_nonce_update"
+      ))
+    conn.execute(text("DROP INDEX IF EXISTS ix_connectors_capability_nonce"))
+    if "capability_nonce" in columns:
+      conn.execute(text(
+        "ALTER TABLE connectors DROP COLUMN capability_nonce"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -1393,6 +1430,7 @@ _SCHEMA_MIGRATIONS = (
   ("0005_connectors", _add_connectors_table),
   ("0006_connector_capability_identity", _add_connector_capability_identity),
   ("0007_chat_has_messages", _add_chat_has_messages),
+  ("0008_converge_interim_connector_schema", _converge_interim_connector_schema),
 )
 
 

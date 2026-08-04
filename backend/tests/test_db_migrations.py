@@ -1010,6 +1010,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0005_connectors",
     "0006_connector_capability_identity",
     "0007_chat_has_messages",
+    "0008_converge_interim_connector_schema",
   ]
   assert second == first
 
@@ -1067,6 +1068,146 @@ def test_connectors_migration_preserves_preview_era_rows(tmp_path):
   assert "0006_connector_capability_identity" in {
     entry["version"] for entry in schema_migration_history(eng)
   }
+
+
+def test_connector_migration_repairs_partially_upgraded_nonce_schema(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'connector-interim.db'}")
+  capability_id = "a" * 64
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps ("
+      "id INTEGER PRIMARY KEY, name VARCHAR(255), slug VARCHAR(128), "
+      "source_dir VARCHAR(512))"
+    ))
+    conn.execute(text(
+      "CREATE TABLE connectors ("
+      "id INTEGER PRIMARY KEY, capability_nonce VARCHAR(64) NOT NULL, "
+      "slug VARCHAR(64) NOT NULL UNIQUE, name VARCHAR(128) NOT NULL, "
+      "url VARCHAR(2048) NOT NULL, auth_header VARCHAR(64), "
+      "auth_value_encrypted TEXT, enabled BOOLEAN NOT NULL DEFAULT TRUE, "
+      "tools_json JSON NOT NULL, est_tokens INTEGER NOT NULL DEFAULT 0, "
+      "status VARCHAR(16) NOT NULL, status_detail TEXT, created_at DATETIME, "
+      "capability_id VARCHAR(64))"
+    ))
+    conn.execute(text(
+      "CREATE UNIQUE INDEX ix_connectors_capability_nonce "
+      "ON connectors (capability_nonce)"
+    ))
+    conn.execute(text(
+      "CREATE TRIGGER connectors_require_nonce_insert "
+      "BEFORE INSERT ON connectors WHEN NEW.capability_nonce IS NULL "
+      "OR length(trim(NEW.capability_nonce)) = 0 BEGIN "
+      "SELECT RAISE(ABORT, 'connectors require a capability nonce'); END"
+    ))
+    conn.execute(text(
+      "CREATE TRIGGER connectors_require_nonce_update "
+      "BEFORE UPDATE OF capability_nonce ON connectors "
+      "WHEN NEW.capability_nonce IS NULL "
+      "OR length(trim(NEW.capability_nonce)) = 0 BEGIN "
+      "SELECT RAISE(ABORT, 'connectors require a capability nonce'); END"
+    ))
+    conn.execute(text(
+      "INSERT INTO connectors ("
+      "id, capability_nonce, capability_id, slug, name, url, enabled, "
+      "tools_json, status, created_at) VALUES ("
+      "1, 'legacy-nonce', :capability_id, 'legacy', 'Legacy', "
+      "'https://old.example/mcp', TRUE, '[]', 'ok', "
+      "'2026-08-03 00:00:00')"
+    ), {"capability_id": capability_id})
+    conn.execute(text(
+      "CREATE TABLE schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version in (
+      "0001_legacy_schema_convergence",
+      "0002_chat_run_goal_objective",
+      "0003_chat_run_root_identity",
+      "0004_app_identity_required",
+      "0005_connectors",
+      "0006_connector_capability_identity",
+      "0007_chat_has_messages",
+      "0006_chat_has_messages",
+    ):
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) "
+        "VALUES (:version, '2026-08-04 08:07:51')"
+      ), {"version": version})
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  inspector = inspect(eng)
+  columns = {item["name"] for item in inspector.get_columns("connectors")}
+  indexes = {item["name"] for item in inspector.get_indexes("connectors")}
+  with eng.begin() as conn:
+    row = conn.execute(text(
+      "SELECT slug, url, capability_id, last_checked_at "
+      "FROM connectors WHERE id = 1"
+    )).one()
+    triggers = {
+      trigger[0] for trigger in conn.execute(text(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+        "AND name LIKE 'connectors_require_nonce_%'"
+      ))
+    }
+    conn.execute(text(
+      "INSERT INTO connectors ("
+      "id, capability_id, slug, name, url, enabled, tools_json, status) "
+      "VALUES (2, :capability_id, 'new', 'New', "
+      "'https://new.example/mcp', TRUE, '[]', 'ok')"
+    ), {"capability_id": "b" * 64})
+
+  assert tuple(row) == (
+    "legacy", "https://old.example/mcp", capability_id, None,
+  )
+  assert "capability_id" in columns
+  assert "last_checked_at" in columns
+  assert "capability_nonce" not in columns
+  assert "ix_connectors_capability_nonce" not in indexes
+  assert triggers == set()
+  assert "0008_converge_interim_connector_schema" in {
+    entry["version"] for entry in schema_migration_history(eng)
+  }
+
+
+def test_connector_interim_convergence_emits_postgres_ddl(monkeypatch):
+  statements = []
+
+  class Inspector:
+    def get_table_names(self):
+      return ["connectors"]
+
+    def get_columns(self, _table):
+      return [{"name": "capability_nonce"}]
+
+  class RecordingConnection:
+    def execute(self, statement):
+      statements.append(str(statement))
+
+  class RecordingEngine:
+    dialect = SimpleNamespace(name="postgresql")
+
+    def begin(self):
+      connection = RecordingConnection()
+
+      class Transaction:
+        def __enter__(self):
+          return connection
+
+        def __exit__(self, *_args):
+          return False
+
+      return Transaction()
+
+  import sqlalchemy
+  monkeypatch.setattr(sqlalchemy, "inspect", lambda _eng: Inspector())
+  database._converge_interim_connector_schema(RecordingEngine())
+
+  assert statements == [
+    "ALTER TABLE connectors ADD COLUMN last_checked_at TIMESTAMP",
+    "DROP INDEX IF EXISTS ix_connectors_capability_nonce",
+    "ALTER TABLE connectors DROP COLUMN capability_nonce",
+  ]
 
 
 def test_chat_message_summary_migration_backfills_legacy_transcripts(tmp_path):
