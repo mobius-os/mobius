@@ -11,13 +11,8 @@ import {
   NewChatNavIcon,
   SettingsNavIcon,
 } from '../navigationIcons.js'
-import {
-  appIconIsReady,
-  appIconUrl,
-  forgetAppIconReady,
-  preloadAppIcons,
-  rememberAppIconReady,
-} from '../appIcon.js'
+import AppIcon from '../AppIcon.jsx'
+import { preloadAppIcons } from '../appIcon.js'
 import {
   computePinnedDrag,
   observePinnedOrderHandoff,
@@ -43,7 +38,6 @@ import InstallSheet from './InstallSheet.jsx'
 import AppsDirectory from './AppsDirectory.jsx'
 import DrawerItemActionMenu from './DrawerItemActionMenu.jsx'
 import {
-  appInitials,
   buildDrawerSections,
   filterInstalledApps,
 } from './drawerInformationArchitecture.js'
@@ -1296,13 +1290,7 @@ function NowPlaying({ session, app, onOpen, onControl }) {
         onClick={() => onOpen?.(session.appId)}
         aria-label={`Open ${appName}`}
       >
-        {app ? (
-          <AppIcon item={app} label={appName} className="drawer__now-playing-icon" />
-        ) : (
-          <span className="drawer__now-playing-icon" aria-hidden="true">
-            <span>{appInitials(appName)}</span>
-          </span>
-        )}
+        <AppIcon item={app} label={appName} className="drawer__now-playing-icon" />
         <span className="drawer__now-playing-copy">
           <strong>{session.title}</strong>
           <small>{appName} · {stateLabel}</small>
@@ -1946,43 +1934,6 @@ const DrawerRow = memo(function DrawerRow({
     </div>
   )
 })
-
-function AppIcon({ item, label, className }) {
-  const iconUrl = appIconUrl(item)
-  const [loadedUrl, setLoadedUrl] = useState(
-    () => (appIconIsReady(iconUrl) ? iconUrl : null),
-  )
-  const hasImage = Boolean(
-    iconUrl && (loadedUrl === iconUrl || appIconIsReady(iconUrl)),
-  )
-  return (
-    <span
-      className={`${className}${hasImage ? ' is-image' : ''}`}
-      style={{ '--app-color': item.background_color || item.theme_color || 'var(--accent)' }}
-      aria-hidden="true"
-    >
-      <span>{appInitials(label)}</span>
-      {iconUrl && (
-        <img
-          src={iconUrl}
-          alt=""
-          loading="eager"
-          decoding="async"
-          onLoad={event => {
-            event.currentTarget.hidden = false
-            rememberAppIconReady(iconUrl)
-            setLoadedUrl(iconUrl)
-          }}
-          onError={event => {
-            event.currentTarget.hidden = true
-            forgetAppIconReady(iconUrl)
-            setLoadedUrl(null)
-          }}
-        />
-      )}
-    </span>
-  )
-}
 
 function DrawerItemMenu({
   kind,

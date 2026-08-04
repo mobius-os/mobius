@@ -3,8 +3,15 @@ import assert from 'node:assert/strict'
 import {
   appIconIsReady,
   appIconUrl,
+  appInitials,
   preloadAppIcons,
 } from '../../appIcon.js'
+
+test('app initials remain useful when custom artwork is missing', () => {
+  assert.equal(appInitials('Beat Machine'), 'BM')
+  assert.equal(appInitials('Atlas'), 'AT')
+  assert.equal(appInitials('---'), 'A')
+})
 
 test('installed app chrome sizes the canonical icon reference from AppOut', () => {
   const app = {

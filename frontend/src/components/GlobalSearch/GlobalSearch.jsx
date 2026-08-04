@@ -1,9 +1,8 @@
-/* GlobalSearch is the full-screen, keyboard-openable search surface for chats and installed apps. */
+/* GlobalSearch is the keyboard-openable search dialog for chats and installed apps. */
 import { createPortal } from 'react-dom'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Chat,
-  Grid,
   MagnifyingGlassSearch,
   X,
 } from '@openai/apps-sdk-ui/components/Icon'
@@ -11,6 +10,7 @@ import { api } from '../../api/client.js'
 import { appQueries } from '../../hooks/queries.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { requestChatSearchReveal } from '../../lib/chatSearchReveal.js'
+import AppIcon from '../AppIcon.jsx'
 import {
   SHELL_SHORTCUTS,
   shortcutLabel,
@@ -144,14 +144,20 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
 
   return createPortal(
     <div
-      id="global-search-dialog"
-      ref={dialogRef}
       className="global-search__overlay"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="global-search-title"
+      role="presentation"
+      onPointerDown={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
     >
-      <div className="global-search">
+      <div
+        id="global-search-dialog"
+        ref={dialogRef}
+        className="global-search"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="global-search-title"
+      >
         <header className="global-search__header">
           <div>
             <h2 id="global-search-title" className="global-search__title">Search</h2>
@@ -206,9 +212,11 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
                         className="global-search__result"
                         onClick={() => openApp(app)}
                       >
-                        <span className="global-search__result-icon" aria-hidden="true">
-                          <Grid width={18} height={18} />
-                        </span>
+                        <AppIcon
+                          item={app}
+                          label={app.name}
+                          className="global-search__result-icon"
+                        />
                         <span className="global-search__result-main">
                           <span className="global-search__result-title">{app.name}</span>
                           <span className="global-search__result-detail">

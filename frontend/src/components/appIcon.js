@@ -4,6 +4,17 @@ const readyIconUrls = new Set()
 
 const APP_ICON_READY_CACHE_MAX = 256
 
+export function appInitials(name) {
+  const words = String(name || '')
+    .replace(/[^a-z0-9]+/gi, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+  if (words.length === 0) return 'A'
+  if (words.length === 1) return words[0].slice(0, 2).toLocaleUpperCase()
+  return `${words[0][0]}${words[1][0]}`.toLocaleUpperCase()
+}
+
 export function appIconUrl(app, size = 128) {
   if (!app?.icon_url) return null
   if (size == null) return app.icon_url

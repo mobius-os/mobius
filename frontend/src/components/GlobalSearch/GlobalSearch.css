@@ -1,4 +1,4 @@
-/* Full-screen shell search: one overlay on mobile and desktop, with a bounded reading column. */
+/* Search stays full-screen on phones and becomes a wide, bounded dialog on web. */
 
 .global-search-button {
   position: relative;
@@ -259,9 +259,13 @@
   flex: none;
   width: 34px;
   height: 34px;
+  border-radius: 10px;
+  font-size: 10px;
+}
+
+.global-search__result-icon:not(.app-icon) {
   display: grid;
   place-items: center;
-  border-radius: 10px;
   background: var(--surface2);
   color: var(--muted);
 }
@@ -305,6 +309,30 @@
 }
 
 .global-search__status--error { color: var(--danger); }
+
+@media (min-width: 700px) {
+  .global-search__overlay {
+    align-items: flex-start;
+    padding:
+      max(40px, env(safe-area-inset-top))
+      max(32px, env(safe-area-inset-right))
+      max(40px, env(safe-area-inset-bottom))
+      max(32px, env(safe-area-inset-left));
+    background: rgba(0, 0, 0, 0.46);
+  }
+
+  .global-search {
+    box-sizing: border-box;
+    width: min(1120px, 100%);
+    height: min(720px, 100%);
+    padding: 20px 22px 22px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    background: color-mix(in srgb, var(--bg) 96%, var(--surface));
+    box-shadow: 0 24px 72px rgba(0, 0, 0, 0.32);
+  }
+}
 
 @media (max-width: 520px) {
   .global-search__overlay {

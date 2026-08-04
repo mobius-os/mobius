@@ -2,7 +2,6 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  appInitials,
   buildDrawerSections,
   filterInstalledApps,
 } from '../../components/Drawer/drawerInformationArchitecture.js'
@@ -118,10 +117,4 @@ test('app search covers names, descriptions, and slugs without reordering', () =
   assert.equal(filterInstalledApps(apps, 'places')[0].id, 2)
   assert.equal(filterInstalledApps(apps, 'missing').length, 0)
   assert.equal(filterInstalledApps(apps, ''), apps)
-})
-
-test('app initials remain useful for missing custom icons', () => {
-  assert.equal(appInitials('Beat Machine'), 'BM')
-  assert.equal(appInitials('Atlas'), 'AT')
-  assert.equal(appInitials('---'), 'A')
 })

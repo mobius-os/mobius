@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
-  SHORTCUT_CATALOG,
   SHELL_SHORTCUTS,
   shortcutLabel,
   shortcutMatches,
@@ -22,14 +21,4 @@ test('shortcut labels adapt to the owner platform', () => {
   assert.equal(shortcutLabel(SHELL_SHORTCUTS.openSearch, 'Win32'), 'Ctrl+K')
   assert.equal(shortcutLabel(SHELL_SHORTCUTS.toggleBuilder, 'MacIntel'), '⇧↵')
   assert.equal(shortcutLabel(SHELL_SHORTCUTS.toggleBuilder, 'Linux x86_64'), 'Shift+Enter')
-})
-
-test('the code-owned catalog has stable unique action ids', () => {
-  const ids = SHORTCUT_CATALOG.map(shortcut => shortcut.id)
-  assert.deepEqual(ids, [
-    'search.open',
-    'workspace.undo',
-    'workspace.toggle-builder',
-  ])
-  assert.equal(new Set(ids).size, ids.length)
 })

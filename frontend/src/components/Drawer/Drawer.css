@@ -308,35 +308,12 @@
 }
 
 .drawer__now-playing-icon {
-  position: relative;
   flex: 0 0 30px;
   width: 30px;
   height: 30px;
-  display: grid;
-  place-items: center;
-  overflow: hidden;
   border-radius: 8px;
-  background: var(--app-color, var(--accent));
-  color: var(--accent-fg, #fff);
   font-size: 9px;
-  font-weight: 750;
 }
-
-.drawer__now-playing-icon img {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-
-.drawer__now-playing-icon.is-image {
-  overflow: visible;
-  border-radius: 0;
-  background: transparent;
-}
-
-.drawer__now-playing-icon.is-image > span { visibility: hidden; }
 
 .drawer__now-playing-copy {
   min-width: 0;
@@ -509,36 +486,10 @@
 }
 
 .drawer__app-icon {
-  position: relative;
-  flex-shrink: 0;
   width: 24px;
   height: 24px;
-  display: grid;
-  place-items: center;
-  overflow: hidden;
   border-radius: 7px;
-  background: var(--app-color, var(--accent));
-  color: var(--accent-fg, #fff);
   font-size: 8px;
-  font-weight: 750;
-}
-
-.drawer__app-icon img {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-
-.drawer__app-icon.is-image {
-  overflow: visible;
-  border-radius: 0;
-  background: transparent;
-}
-
-.drawer__app-icon.is-image > span {
-  visibility: hidden;
 }
 
 /* ── Context-menu row ──────────────────────────────── */
