@@ -7,6 +7,7 @@ import uuid
 
 from app import chat_search, models
 from app.chat_search import sql
+from app.chat_visibility import visible_in_owner_drawer
 from app.timeutil import now_naive_utc
 
 
@@ -46,9 +47,8 @@ def test_result_carries_reveal_anchor_of_matching_message(db):
     db, "Notes", ["intro line", "the wombat migration route", "outro line"]
   )
   hit = next(r for r in chat_search.search(db, "wombat") if r["id"] == c.id)
-  assert hit["role"] == "user"
-  assert hit["ts"] == 1001
   assert hit["anchor_key"] == "user-1001"
+  assert set(hit) == {"id", "title", "snippet", "anchor_key"}
 
 
 def test_result_falls_back_to_role_index_anchor_without_timestamp(db):
@@ -69,7 +69,6 @@ def test_result_falls_back_to_role_index_anchor_without_timestamp(db):
 def test_title_only_hit_has_no_reveal_anchor(db):
   c = _make_chat(db, "Marimba tuning", ["unrelated body"])
   hit = next(r for r in chat_search.search(db, "marimba") if r["id"] == c.id)
-  assert hit["ts"] is None and hit["role"] is None
   assert hit["anchor_key"] is None
 
 
@@ -78,7 +77,7 @@ def test_prefix_match_on_last_token(db):
   assert any(r["id"] == c.id for r in chat_search.search(db, "budg"))
 
 
-def test_portable_fallback_preserves_visibility_prefix_and_reveal_contract(
+def test_normalized_documents_preserve_visibility_prefix_and_reveal_contract(
   db, monkeypatch,
 ):
   suffix = uuid.uuid4().hex
@@ -121,11 +120,6 @@ def test_portable_fallback_preserves_visibility_prefix_and_reveal_contract(
   db.commit()
 
   monkeypatch.setattr(chat_search, "_database_dialect", lambda _db: "postgresql")
-
-  def unexpected_reconcile(_db):
-    raise AssertionError("portable search must not touch the SQLite FTS schema")
-
-  monkeypatch.setattr(chat_search, "reconcile", unexpected_reconcile)
   results = chat_search.search(db, f"{exact} capy")
   ids = {result["id"] for result in results}
   assert visible.id in ids
@@ -135,7 +129,7 @@ def test_portable_fallback_preserves_visibility_prefix_and_reveal_contract(
   assert "capybara" in hit["snippet"]
 
 
-def test_portable_fallback_finds_json_escaped_unicode_transcript(db, monkeypatch):
+def test_normalized_postgres_path_finds_unicode_document_text(db, monkeypatch):
   c = _make_chat(db, "Unicode", ["réunion café itinerary"])
   monkeypatch.setattr(chat_search, "_database_dialect", lambda _db: "postgresql")
 
@@ -148,21 +142,38 @@ def test_portable_fallback_finds_json_escaped_unicode_transcript(db, monkeypatch
   assert "café" in hit["snippet"]
 
 
-def test_portable_fallback_bounds_candidates_by_recent_activity(db, monkeypatch):
-  needle = f"boundedportable{uuid.uuid4().hex}"
+def test_postgres_path_ranks_all_matches_beyond_the_old_512_chat_cap(
+  db, monkeypatch,
+):
+  needle = f"completeportable{uuid.uuid4().hex}"
   now = now_naive_utc()
-  older = _make_chat(db, "Older dense match", [f"{needle} {needle} {needle}"])
-  newer = _make_chat(db, "Newer match", [needle])
-  older.activity_at = now - timedelta(days=1)
-  newer.activity_at = now
+  best = models.Chat(
+    id=str(uuid.uuid4()),
+    title="Older best match",
+    messages=[{
+      "role": "user",
+      "content": f"{needle} {needle} {needle}",
+      "ts": 1000,
+    }],
+    activity_at=now - timedelta(days=1),
+  )
+  recent = [
+    models.Chat(
+      id=str(uuid.uuid4()),
+      title=f"Recent match {index}",
+      messages=[{"role": "user", "content": needle, "ts": 1000}],
+      activity_at=now,
+    )
+    for index in range(512)
+  ]
+  db.add_all([best, *recent])
   db.commit()
 
   monkeypatch.setattr(chat_search, "_database_dialect", lambda _db: "postgresql")
-  monkeypatch.setattr(chat_search, "_PORTABLE_CANDIDATE_LIMIT", 1)
 
-  results = chat_search.search(db, needle, limit=20)
-
-  assert [result["id"] for result in results] == [newer.id]
+  assert [result["id"] for result in chat_search.search(db, needle, limit=1)] == [
+    best.id,
+  ]
 
 
 def test_title_match_has_no_snippet(db):
@@ -208,8 +219,6 @@ def test_rename_reindexes_title(db):
 
 
 def test_deleted_chat_leaves_index_and_restore_returns(db):
-  from app.timeutil import now_naive_utc
-
   c = _make_chat(db, "Doomed", ["ephemeral pangolin facts"])
   chat_search.search(db, "pangolin")
   c.deleted_at = now_naive_utc()
@@ -226,7 +235,7 @@ def test_shrunk_history_triggers_full_rebuild(db):
   chat_search.search(db, "wombat")
   c.messages = [{"role": "user", "content": "gamma capybara", "ts": 3}]
   db.commit()
-  assert chat_search.search(db, "wombat") == [] or not any(
+  assert not any(
     r["id"] == c.id for r in chat_search.search(db, "wombat")
   )
   assert any(r["id"] == c.id for r in chat_search.search(db, "capybara"))
@@ -348,45 +357,7 @@ def test_search_and_drawer_visibility_helpers_share_one_behavior_contract():
       created_by_app_id=created_by_app_id,
       agent_settings_json=settings,
     )
-    assert chat_search._visible_in_owner_drawer(chat) is drawer_visible(chat)
-
-
-def test_index_version_rebuild_purges_rows_from_older_indexing_semantics(db):
-  c = models.Chat(
-    id=str(uuid.uuid4()),
-    title="Versioned search",
-    messages=[{
-      "role": "user",
-      "content": "legacyhiddenibis",
-      "ts": 1000,
-      "hidden": True,
-    }],
-  )
-  db.add(c)
-  db.commit()
-  chat_search.search(db, "unrelated")
-
-  # Model an older generation that indexed this now-hidden row. Changing the
-  # semantic version must replace the complete disposable index before query.
-  db.execute(sql(
-    "INSERT INTO chat_search_docs (chat_id, msg_idx, ts, role, text)"
-    " VALUES (:cid, 0, 1000, 'user', 'legacyhiddenibis')"
-  ), {"cid": c.id})
-  db.execute(sql(
-    "UPDATE chat_search_meta SET value = 'legacy' WHERE key = 'index_version'"
-  ))
-  db.commit()
-  chat_search._schema_ready = False
-
-  assert not any(
-    result["id"] == c.id
-    for result in chat_search.search(db, "legacyhiddenibis")
-  )
-  version = db.execute(sql(
-    "SELECT value FROM chat_search_meta WHERE key = 'index_version'"
-  )).scalar_one()
-  assert version == chat_search._INDEX_VERSION
-  assert _doc_count(db, c.id) == 1  # title only; hidden message stayed absent
+    assert visible_in_owner_drawer(chat) is drawer_visible(chat)
 
 
 def test_long_matching_chat_cannot_crowd_other_chats_out_before_grouping(db):
@@ -398,6 +369,17 @@ def test_long_matching_chat_cannot_crowd_other_chats_out_before_grouping(db):
 
   ids = {result["id"] for result in chat_search.search(db, needle, limit=3)}
   assert ids == {long_chat.id, short_a.id, short_b.id}
+
+
+def test_streaming_ranker_keeps_complete_top_k_when_best_chat_arrives_last():
+  rows = iter((
+    ("chat-a", 0, 1, "user", "one lynx", "A", "2026-08-01"),
+    ("chat-b", 0, 2, "user", "lynx lynx lynx", "B", "2026-08-02"),
+  ))
+
+  results = chat_search._rank_results(rows, ["lynx"], limit=1)
+
+  assert [result["id"] for result in results] == ["chat-b"]
 
 
 def test_overlapping_first_searches_leave_one_idempotent_document_generation(db):

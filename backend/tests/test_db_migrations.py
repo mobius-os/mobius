@@ -1010,6 +1010,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0005_connectors",
     "0006_connector_capability_identity",
     "0007_chat_has_messages",
+    "0008_chat_search_documents",
   ]
   assert second == first
 
@@ -1100,6 +1101,127 @@ def test_chat_message_summary_migration_backfills_legacy_transcripts(tmp_path):
   assert "0007_chat_has_messages" in {
     row["version"] for row in schema_migration_history(eng)
   }
+
+
+def test_chat_search_migration_replaces_runtime_schema_and_uses_one_docs_index(
+  tmp_path,
+):
+  eng = create_engine(f"sqlite:///{tmp_path / 'chat-search-schema.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(255))"
+    ))
+    conn.execute(text(
+      "CREATE TABLE chat_search_docs ("
+      "id INTEGER PRIMARY KEY, chat_id TEXT, msg_idx INTEGER, text TEXT)"
+    ))
+    conn.execute(text(
+      "CREATE INDEX chat_search_docs_chat ON chat_search_docs (chat_id)"
+    ))
+    conn.execute(text(
+      "CREATE VIRTUAL TABLE chat_search_fts USING fts5("
+      "text, content='chat_search_docs', content_rowid='id')"
+    ))
+    conn.execute(text(
+      "CREATE TRIGGER chat_search_docs_ai "
+      "AFTER INSERT ON chat_search_docs BEGIN "
+      "INSERT INTO chat_search_fts(rowid, text) VALUES (new.id, new.text); "
+      "END"
+    ))
+    conn.execute(text(
+      "CREATE TRIGGER chat_search_docs_ad "
+      "AFTER DELETE ON chat_search_docs BEGIN "
+      "INSERT INTO chat_search_fts(chat_search_fts, rowid, text) "
+      "VALUES ('delete', old.id, old.text); END"
+    ))
+    conn.execute(text(
+      "CREATE TABLE chat_search_state ("
+      "chat_id TEXT PRIMARY KEY, indexed_updated_at TEXT)"
+    ))
+    conn.execute(text(
+      "CREATE TABLE chat_search_meta (key TEXT PRIMARY KEY, value TEXT)"
+    ))
+    conn.execute(text(
+      "INSERT INTO chat_search_docs (chat_id, msg_idx, text) "
+      "VALUES ('runtime-chat', 0, 'discarded derived prose')"
+    ))
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  inspector = inspect(eng)
+  tables = set(inspector.get_table_names())
+  columns = {
+    column["name"] for column in inspector.get_columns("chat_search_docs")
+  }
+  indexes = inspector.get_indexes("chat_search_docs")
+  with eng.connect() as conn:
+    doc_count = conn.execute(text(
+      "SELECT COUNT(*) FROM chat_search_docs"
+    )).scalar_one()
+    triggers = {
+      row[0] for row in conn.execute(text(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+        "AND name LIKE 'chat_search_docs_%'"
+      ))
+    }
+    plan = " ".join(
+      row[-1] for row in conn.execute(text(
+        "EXPLAIN QUERY PLAN SELECT id, msg_idx, ts, role, text "
+        "FROM chat_search_docs WHERE chat_id = 'runtime-chat' "
+        "ORDER BY msg_idx"
+      ))
+    )
+
+  assert {"chat_search_docs", "chat_search_state", "chat_search_fts"} <= tables
+  assert "chat_search_meta" not in tables
+  assert columns == {"id", "chat_id", "msg_idx", "ts", "role", "text"}
+  assert doc_count == 0
+  assert triggers == {"chat_search_docs_ai", "chat_search_docs_ad"}
+  assert [
+    (index["name"], index["column_names"], index["unique"])
+    for index in indexes
+  ] == [(
+    "ix_chat_search_docs_chat_message",
+    ["chat_id", "msg_idx"],
+    1,
+  )]
+  assert "USING INDEX ix_chat_search_docs_chat_message" in plan
+  assert "0008_chat_search_documents" in {
+    row["version"] for row in schema_migration_history(eng)
+  }
+
+
+def test_chat_search_migration_emits_plain_postgres_documents_without_fts():
+  statements = []
+
+  class RecordingConnection:
+    dialect = SimpleNamespace(name="postgresql")
+
+    def begin(self):
+      return self
+
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *_args):
+      return False
+
+    def execute(self, statement):
+      statements.append(str(statement))
+
+  database._create_chat_search_tables(RecordingConnection())
+
+  emitted = "\n".join(statements)
+  assert "DROP TABLE IF EXISTS chat_search_docs" in emitted
+  assert "DROP TABLE IF EXISTS chat_search_meta" in emitted
+  assert "id BIGSERIAL PRIMARY KEY" in emitted
+  assert "CREATE TABLE chat_search_state" in emitted
+  assert "ts BIGINT" in emitted
+  assert emitted.count("CREATE UNIQUE INDEX") == 1
+  assert "ON chat_search_docs (chat_id, msg_idx)" in emitted
+  assert "VIRTUAL TABLE" not in emitted
+  assert "CREATE TRIGGER" not in emitted
 
 
 def test_chat_run_root_migration_backfills_existing_physical_runs(tmp_path):

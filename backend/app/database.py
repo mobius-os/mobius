@@ -1329,6 +1329,73 @@ def _add_chat_has_messages(eng) -> None:
       ))
 
 
+def _create_chat_search_tables(eng) -> None:
+  """Install the disposable normalized search schema for each database."""
+  from sqlalchemy import text
+
+  dialect = eng.dialect.name
+  if dialect not in {"sqlite", "postgresql"}:
+    raise RuntimeError(f"unsupported chat-search database: {dialect}")
+
+  # Search rows are derived from chats. Replace the runtime-created generation
+  # once rather than preserving a permanent schema detector in the
+  # request path; the first search repopulates these empty canonical tables.
+  with eng.begin() as conn:
+    if dialect == "sqlite":
+      conn.execute(text("DROP TABLE IF EXISTS chat_search_fts"))
+    for table_name in (
+      "chat_search_docs",
+      "chat_search_state",
+      "chat_search_meta",
+    ):
+      conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+
+    id_type = "INTEGER" if dialect == "sqlite" else "BIGSERIAL"
+    conn.execute(text(
+      "CREATE TABLE chat_search_docs ("
+      f"id {id_type} PRIMARY KEY, "
+      "chat_id VARCHAR(64) NOT NULL, "
+      "msg_idx INTEGER NOT NULL, "
+      "ts BIGINT, "
+      "role VARCHAR(16), "
+      "text TEXT NOT NULL"
+      ")"
+    ))
+    # One composite index owns both row identity and chat-local scans; a
+    # separate chat_id index would duplicate its leftmost prefix.
+    conn.execute(text(
+      "CREATE UNIQUE INDEX ix_chat_search_docs_chat_message "
+      "ON chat_search_docs (chat_id, msg_idx)"
+    ))
+    conn.execute(text(
+      "CREATE TABLE chat_search_state ("
+      "chat_id VARCHAR(64) PRIMARY KEY, "
+      "indexed_updated_at TEXT NOT NULL"
+      ")"
+    ))
+
+    if dialect == "sqlite":
+      conn.execute(text(
+        "CREATE VIRTUAL TABLE chat_search_fts USING fts5("
+        "text, content='chat_search_docs', content_rowid='id', "
+        "tokenize='unicode61 remove_diacritics 2'"
+        ")"
+      ))
+      conn.execute(text(
+        "CREATE TRIGGER chat_search_docs_ai "
+        "AFTER INSERT ON chat_search_docs BEGIN "
+        "INSERT INTO chat_search_fts(rowid, text) VALUES (new.id, new.text); "
+        "END"
+      ))
+      conn.execute(text(
+        "CREATE TRIGGER chat_search_docs_ad "
+        "AFTER DELETE ON chat_search_docs BEGIN "
+        "INSERT INTO chat_search_fts(chat_search_fts, rowid, text) "
+        "VALUES ('delete', old.id, old.text); "
+        "END"
+      ))
+
+
 def _add_connectors_table(eng) -> None:
   """Create the provider-neutral MCP registry without replacing preview rows."""
   from app.models import Connector
@@ -1393,6 +1460,7 @@ _SCHEMA_MIGRATIONS = (
   ("0005_connectors", _add_connectors_table),
   ("0006_connector_capability_identity", _add_connector_capability_identity),
   ("0007_chat_has_messages", _add_chat_has_messages),
+  ("0008_chat_search_documents", _create_chat_search_tables),
 )
 
 

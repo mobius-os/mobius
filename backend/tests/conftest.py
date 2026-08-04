@@ -71,7 +71,7 @@ if not (_static / "index.html").is_file():
     encoding="utf-8",
   )
 
-from app.database import Base, engine
+from app.database import Base, _create_chat_search_tables, engine
 from app.main import app
 from app.routes import auth as auth_module
 from app.routes.auth import _limiter as auth_limiter
@@ -116,10 +116,18 @@ def _isolate_git_env(monkeypatch, tmp_path):
 
 @pytest.fixture(scope="session", autouse=True)
 def _test_schema():
-  """Create the immutable schema once; per-test cleanup removes its rows."""
+  """Create model and migration-owned schemas once for the test process."""
   Base.metadata.drop_all(bind=engine)
   Base.metadata.create_all(bind=engine)
+  # Tests do not enter FastAPI's production lifespan, which normally runs
+  # numbered migrations after create_all. Search tables deliberately have no
+  # ORM model, so install their migration-owned schema explicitly here.
+  _create_chat_search_tables(engine)
   yield
+  with engine.begin() as connection:
+    connection.exec_driver_sql("DROP TABLE IF EXISTS chat_search_fts")
+    connection.exec_driver_sql("DROP TABLE IF EXISTS chat_search_docs")
+    connection.exec_driver_sql("DROP TABLE IF EXISTS chat_search_state")
   Base.metadata.drop_all(bind=engine)
 
 
@@ -228,6 +236,11 @@ def fresh_db():
   # The writer is already stopped, so no background transaction can race this
   # cleanup; the next test still gets a fresh actor and SQLAlchemy session.
   with engine.begin() as connection:
+    # These disposable tables are migration-owned rather than ORM-owned, so
+    # Base.metadata cannot include them in the generic deletion pass. Deleting
+    # docs first also drives the SQLite external-content FTS trigger.
+    connection.exec_driver_sql("DELETE FROM chat_search_docs")
+    connection.exec_driver_sql("DELETE FROM chat_search_state")
     for table in reversed(Base.metadata.sorted_tables):
       connection.execute(table.delete())
 
