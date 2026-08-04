@@ -103,6 +103,7 @@ import { undoKeyPressed, isEditableTarget } from './workspaceOnboarding.js'
 import PaneChatView from './PaneChatView.jsx'
 import {
   BUILDER_CHAT_WORLD,
+  FOCUSED_BUILDER_CHAT_SURFACE,
   STANDARD_CHAT_WORLD,
   deriveChatSurfaceLayers,
   deriveChatSurfaceOwners,
@@ -970,26 +971,32 @@ export default function Shell() {
   const visibleChatPanes = useMemo(() => {
     return deriveChatSurfaceOwners({ workspace, baseProjection, projection })
   }, [baseProjection, projection, workspace])
-  // Last chat that reached a stable painted frame in each visible pane. On a
-  // chat-tab change, keep that outgoing ChatView mounted as an inert cover while
-  // the incoming chat runs its existing hide/restore/reveal transaction below.
-  // The map advances only from the incoming ChatView's layout-ready callback,
-  // so rapid A -> B -> C navigation keeps A painted and replaces only staging B.
-  const [presentedChatByPane, setPresentedChatByPane] = useState(() => new Map())
+  // Last chat that reached a stable painted frame on each presentation surface.
+  // Physical pane ids own ordinary Builder handoffs; one synthetic surface owns
+  // focused Builder presentation across pane changes. The map advances only from
+  // the incoming ChatView's layout-ready callback, so rapid A -> B -> C
+  // navigation keeps A painted and replaces only staging B.
+  const [presentedChatBySurface, setPresentedChatBySurface] = useState(() => new Map())
   const visibleChatPaneSignature = visibleChatPanes
     .map(({ world, paneId, chatId }) => `${world}:${paneId}:${chatId}`)
     .join('|')
 
-  // Drop state for panes whose active visible surface is no longer a chat.
+  // Drop state for surfaces whose active owner is no longer a chat.
   // Same-pane A -> B deliberately keeps A until B reports display-ready.
   useEffect(() => {
-    const livePaneIds = new Set(visibleChatPanes.map(({ paneId }) => String(paneId)))
-    setPresentedChatByPane(prev => {
+    const liveSurfaceIds = new Set(visibleChatPanes.map(({ paneId }) => String(paneId)))
+    if (focusedPaneViewId != null && visibleChatPanes.some(owner => (
+      owner.world === BUILDER_CHAT_WORLD
+      && String(owner.paneId) === String(focusedPaneViewId)
+    ))) {
+      liveSurfaceIds.add(FOCUSED_BUILDER_CHAT_SURFACE)
+    }
+    setPresentedChatBySurface(prev => {
       let changed = false
       const next = new Map(prev)
-      for (const paneId of next.keys()) {
-        if (!livePaneIds.has(String(paneId))) {
-          next.delete(paneId)
+      for (const surfaceId of next.keys()) {
+        if (!liveSurfaceIds.has(String(surfaceId))) {
+          next.delete(surfaceId)
           changed = true
         }
       }
@@ -998,20 +1005,33 @@ export default function Shell() {
     // The primitive signature is the intentional dependency: visibleChatPanes
     // is rebuilt from workspace objects and should not churn this cleanup.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleChatPaneSignature])
+  }, [focusedPaneViewId, visibleChatPaneSignature])
 
-  const handlePaneChatDisplayReady = useCallback((paneId, readyChatId) => {
+  const handlePaneChatDisplayReady = useCallback((
+    paneId,
+    readyChatId,
+    focusedPresentation = false,
+  ) => {
     const id = String(readyChatId)
     const paneKey = String(paneId)
     // Ignore a late ready signal from staging B after rapid navigation reached C.
     // Surface owners include both real builder panes and the single world's
     // synthetic slot, so resolve the selected key through their shared boundary.
     if (paneModel.activeKeyForOwner(workspaceStateRef.current.ws, paneKey) !== `chat:${id}`) return
-    setPresentedChatByPane(prev => {
-      if (String(prev.get(paneKey) ?? '') === id) return prev
+    setPresentedChatBySurface(prev => {
       const next = new Map(prev)
-      next.set(paneKey, id)
-      return next
+      let changed = false
+      if (String(next.get(paneKey) ?? '') !== id) {
+        next.set(paneKey, id)
+        changed = true
+      }
+      if (focusedPresentation
+          && String(focusedPaneViewIdRef.current) === paneKey
+          && String(next.get(FOCUSED_BUILDER_CHAT_SURFACE) ?? '') !== id) {
+        next.set(FOCUSED_BUILDER_CHAT_SURFACE, id)
+        changed = true
+      }
+      return changed ? next : prev
     })
     const presentation = newChatPresentationRef.current
     if (
@@ -1026,7 +1046,7 @@ export default function Shell() {
       releaseComposerFocusLease(composerFocusLeaseRef.current)
     }
     finishDrawerNavigationPresentation()
-  }, [finishDrawerNavigationPresentation, workspaceStateRef])
+  }, [finishDrawerNavigationPresentation, focusedPaneViewIdRef, workspaceStateRef])
 
   const finishNewChatPresentationRelease = useCallback((presentation) => {
     if (!presentation?.releasing || newChatPresentationRef.current !== presentation) return
@@ -1067,8 +1087,12 @@ export default function Shell() {
   // current active chat. Handoff dedupe is world-local: Standard's retained copy
   // must never suppress Builder's outgoing cover for the same underlying chat.
   const chatPaneLayers = useMemo(() => {
-    return deriveChatSurfaceLayers(visibleChatPanes, presentedChatByPane)
-  }, [presentedChatByPane, visibleChatPanes])
+    return deriveChatSurfaceLayers(
+      visibleChatPanes,
+      presentedChatBySurface,
+      { focusedBuilderPaneId: focusedPaneViewId },
+    )
+  }, [focusedPaneViewId, presentedChatBySurface, visibleChatPanes])
   // Shell is the only layer that knows which retained workspace world is
   // actually painted. Publish one stable readiness contract for visual tools;
   // they must not learn private handoff classes or compositor attributes.
@@ -2736,6 +2760,13 @@ export default function Shell() {
     }
   }
 
+  // Single screen owns one compose surface; Builder treats New chat as an
+  // additive tab action in the focused pane.
+  function startUserChat() {
+    const forceNew = workspaceStateRef.current.ws.viewMode === 'panes'
+    return newChat({ forceNew, focusComposer: true, recordHistory: true })
+  }
+
   // Keep the latest-newChat ref current so handleAppError's crash-report
   // fallback starts a chat with this render's live closure.
   newChatRef.current = newChat
@@ -2771,7 +2802,14 @@ export default function Shell() {
     const destinationAlreadyPainted = visibleChatPanes.some(owner => (
       owner.world === paintedWorld
       && String(owner.chatId) === chatId
-      && String(presentedChatByPane.get(String(owner.paneId)) ?? '') === chatId
+      && (paintedWorld !== BUILDER_CHAT_WORLD
+        || focusedPaneViewId == null
+        || String(owner.paneId) === String(focusedPaneViewId))
+      && String(presentedChatBySurface.get(
+        paintedWorld === BUILDER_CHAT_WORLD && focusedPaneViewId != null
+          ? FOCUSED_BUILDER_CHAT_SURFACE
+          : String(owner.paneId),
+      ) ?? '') === chatId
     ))
     const preserveDrawerPresentation = modalDrawerOpen
       && !(activeView === 'chat' && String(activeChatId) === chatId)
@@ -3080,7 +3118,7 @@ export default function Shell() {
             className="shell__rail-action"
             aria-label="New chat shortcut"
             title="New chat"
-            onClick={() => newChat({ forceNew: true, focusComposer: true, recordHistory: true })}
+            onClick={startUserChat}
           >
             <NewChatNavIcon aria-hidden="true" />
           </button>
@@ -3141,7 +3179,7 @@ export default function Shell() {
         activeChatId={activeChatId}
         onChat={selectChat}
         onApp={(id) => navTo('canvas', { appId: id })}
-        onNewChat={() => newChat({ forceNew: true, focusComposer: true, recordHistory: true })}
+        onNewChat={startUserChat}
         onDeleteChat={deleteChat}
         onDeleteApp={deleteApp}
         onDeleteAppData={deleteAppData}
@@ -3341,10 +3379,13 @@ export default function Shell() {
             their projected pane geometry even while hidden. During a chat change
             the last painted chat remains as an inert opaque same-world cover until
             the incoming chat reports a stable frame. */}
-        {chatPaneLayers.map(({ world, paneId, chatId, role, surfaceKey }) => {
+        {chatPaneLayers.map(({
+          world, paneId, presentationPaneId, chatId, role, surfaceKey,
+        }) => {
           const tabKey = `chat:${chatId}`
           const standardOwner = world === STANDARD_CHAT_WORLD
-          const paneActiveKey = paneModel.activeKeyForOwner(workspace, paneId) || tabKey
+          const layoutPaneId = presentationPaneId ?? paneId
+          const paneActiveKey = paneModel.activeKeyForOwner(workspace, layoutPaneId) || tabKey
           const builderRect = standardOwner ? null : builderChatTabRects.get(paneActiveKey)
           const builderPainted = !standardOwner
             && effectiveViewMode === 'panes'
@@ -3378,7 +3419,7 @@ export default function Shell() {
           const chatViewStyle = builderRect
             ? {
               ...posStyle,
-              ...(paned ? modeViewTransitionStyle('pane', paneId, surfaceKey) : {}),
+              ...(paned ? modeViewTransitionStyle('pane', layoutPaneId, surfaceKey) : {}),
             }
             : undefined
           return (
@@ -3389,7 +3430,7 @@ export default function Shell() {
               aria-labelledby={tabPanel ? paneTabDomId(paneId, tabKey) : undefined}
               data-chat-world={world}
               data-chat-id={chatId}
-              data-mode-pane-vt={paned ? paneId : undefined}
+              data-mode-pane-vt={paned ? layoutPaneId : undefined}
               data-tab-key={!standardOwner && (multiPane || focusedPaneViewId != null)
                 && role !== 'held'
                 ? tabKey : undefined}
@@ -3410,8 +3451,8 @@ export default function Shell() {
                 ? 'true' : undefined}
               onPointerDownCapture={paned && role === 'active' && !modeBeatActive
                 ? (event) => {
-                  const wasFocused = workspaceStateRef.current.ws.focusedPaneId === paneId
-                  dispatchWorkspace({ type: 'FOCUS', paneId })
+                  const wasFocused = workspaceStateRef.current.ws.focusedPaneId === layoutPaneId
+                  dispatchWorkspace({ type: 'FOCUS', paneId: layoutPaneId })
                   if (supportsDesktopPaneComposerFocus()
                     && shouldFocusComposerAfterPanePointer({
                       wasFocused,
@@ -3432,6 +3473,9 @@ export default function Shell() {
                 // staging owns the work while held remains the visual cover.
                 runtimeActive={surfaceVisible && chatPanesVisible && role !== 'held'}
                 keepTranscriptPainted={surfaceVisible && role === 'held'}
+                focusedPresentation={!standardOwner
+                  && focusedPaneViewId != null
+                  && String(layoutPaneId) === String(focusedPaneViewId)}
                 paneContentHeight={builderRect ? builderRect.h : null}
                 // Select before the memo boundary. Passing the replacement Map
                 // would rerender every visible chat pane for another chat's run.

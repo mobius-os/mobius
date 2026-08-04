@@ -35,7 +35,7 @@ const apps = [
 test('installed app search prioritizes names, then descriptions', () => {
   assert.deepEqual(
     searchInstalledApps(apps, 'news').map(result => [result.app.id, result.matchArea]),
-    [[2, 'Name'], [1, 'Manifest']],
+    [[2, 'Name'], [1, 'App details']],
   )
   assert.deepEqual(searchInstalledApps(apps, 'calm'), [{
     app: apps[0],
@@ -43,15 +43,15 @@ test('installed app search prioritizes names, then descriptions', () => {
   }])
 })
 
-test('manifest declarations are searchable without exposing a second index', () => {
+test('manifest declarations stay searchable under partner-facing app details language', () => {
   assert.match(appManifestSearchDocument(apps[0]), /scheduled/)
   assert.deepEqual(searchInstalledApps(apps, 'cron scheduled'), [{
     app: apps[0],
-    matchArea: 'Manifest',
+    matchArea: 'App details',
   }])
   assert.deepEqual(searchInstalledApps(apps, 'offline reads'), [{
     app: apps[1],
-    matchArea: 'Manifest',
+    matchArea: 'App details',
   }])
 })
 
@@ -70,14 +70,14 @@ test('false capability defaults never create manifest matches', () => {
   }
   assert.deepEqual(searchInstalledApps([ordinary, connected], 'github_connect'), [{
     app: connected,
-    matchArea: 'Manifest',
+    matchArea: 'App details',
   }])
 })
 
 test('all query terms must match and result limits are stable', () => {
   assert.deepEqual(searchInstalledApps(apps, 'news scheduled'), [{
     app: apps[0],
-    matchArea: 'Manifest',
+    matchArea: 'App details',
   }])
   assert.deepEqual(searchInstalledApps(apps, 'news missing'), [])
   assert.equal(searchInstalledApps(apps, 'news', 1).length, 1)

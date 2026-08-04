@@ -31,6 +31,24 @@ def test_serve_chat_media(client, auth, chat):
   assert response.headers["content-type"] == "image/png"
 
 
+def test_serve_chat_media_from_nested_report_directory(client, auth, chat):
+  _write_chat_image(
+    chat.id,
+    "media/report/desktop",
+    "contact-sheet.png",
+    b"nested-image-bytes",
+  )
+
+  response = client.get(
+    f"/api/chats/{chat.id}/media/report/desktop/contact-sheet.png",
+    params={"token": _media_token(client, auth, chat.id)},
+  )
+
+  assert response.status_code == 200
+  assert response.content == b"nested-image-bytes"
+  assert response.headers["content-type"] == "image/png"
+
+
 def test_serve_chat_media_uses_safe_raster_content_type(client, auth, chat):
   _write_chat_image(chat.id, "media", "photo.jpg", b"jpeg-bytes")
 
@@ -81,6 +99,37 @@ def test_chat_media_preview_is_bounded_webp_and_original_stays_unchanged(
   )
   assert again.content == preview.content
   assert previews[0].stat().st_mtime_ns == first_mtime
+
+
+def test_nested_chat_media_previews_with_same_name_do_not_share_cache(
+  client, auth, chat,
+):
+  media_dir = Path(get_settings().data_dir) / "chats" / chat.id / "media"
+  landscape = media_dir / "reports/landscape/result.png"
+  portrait = media_dir / "reports/portrait/result.png"
+  landscape.parent.mkdir(parents=True)
+  portrait.parent.mkdir(parents=True)
+  Image.new("RGB", (120, 60), (220, 20, 20)).save(landscape, "PNG")
+  Image.new("RGB", (60, 120), (20, 20, 220)).save(portrait, "PNG")
+  token = _media_token(client, auth, chat.id)
+
+  landscape_preview = client.get(
+    f"/api/chats/{chat.id}/media/reports/landscape/result.png",
+    params={"token": token, "preview": "true"},
+  )
+  portrait_preview = client.get(
+    f"/api/chats/{chat.id}/media/reports/portrait/result.png",
+    params={"token": token, "preview": "true"},
+  )
+
+  assert landscape_preview.status_code == 200
+  assert portrait_preview.status_code == 200
+  assert landscape_preview.content != portrait_preview.content
+  with Image.open(BytesIO(landscape_preview.content)) as image:
+    assert image.size == (120, 60)
+  with Image.open(BytesIO(portrait_preview.content)) as image:
+    assert image.size == (60, 120)
+  assert len(list((media_dir / ".previews").glob("*.webp"))) == 2
 
 
 def test_chat_media_preview_falls_back_for_undecodable_image(client, auth, chat):

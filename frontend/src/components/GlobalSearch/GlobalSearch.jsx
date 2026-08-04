@@ -205,8 +205,8 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
             type="search"
             value={query}
             onChange={event => setQuery(event.target.value)}
-            placeholder="Search chats, apps, and manifests"
-            aria-label="Search chats, apps, and manifests"
+            placeholder="Search chats, apps, and app details"
+            aria-label="Search chats, apps, and app details"
             autoComplete="off"
             spellCheck="false"
           />
@@ -220,7 +220,7 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
                 <MagnifyingGlassSearch width={30} height={30} />
               </span>
               <h3>Find anything you’ve worked on</h3>
-              <p>Search chat titles and conversation text, plus app names and manifest details.</p>
+              <p>Search chat titles and conversation text, plus app names and app details.</p>
             </div>
           )}
 
@@ -306,7 +306,7 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
               {noResults && (
                 <div className="global-search__empty global-search__empty--results">
                   <h3>No matches</h3>
-                  <p>Try a shorter phrase or a manifest term such as “offline”, “schedule”, or a skill name.</p>
+                  <p>Try a shorter phrase or an app detail such as “offline”, “schedule”, or a skill name.</p>
                 </div>
               )}
             </div>

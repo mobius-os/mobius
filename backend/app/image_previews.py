@@ -22,8 +22,25 @@ _GENERATION_SLOTS = threading.BoundedSemaphore(2)
 
 
 def preview_cache_path(file_path: Path, base: Path) -> Path:
-  """Return the single stable derivative path owned by one source filename."""
-  digest = hashlib.sha256(file_path.name.encode("utf-8")).hexdigest()[:24]
+  """Return the single stable derivative path owned by one source path."""
+  try:
+    source_path = file_path.resolve()
+  except (OSError, RuntimeError):
+    source_path = Path(os.path.abspath(file_path))
+  try:
+    base_path = base.resolve()
+  except (OSError, RuntimeError):
+    base_path = Path(os.path.abspath(base))
+
+  try:
+    cache_key = os.fsencode(source_path.relative_to(base_path).as_posix())
+  except ValueError:
+    # Normal callers validate containment before reaching this module. Keep an
+    # unexpected out-of-base path deterministic and confined to the cache by
+    # hashing its normalized absolute path, separated from relative keys by a
+    # byte that cannot occur in a filesystem path.
+    cache_key = b"\0outside\0" + os.fsencode(source_path.as_posix())
+  digest = hashlib.sha256(cache_key).hexdigest()[:24]
   return base / PREVIEW_DIR / f"{digest}.webp"
 
 

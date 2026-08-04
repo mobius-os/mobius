@@ -288,6 +288,10 @@
    visibility:hidden settlement frame is never exposed. */
 .shell__chat-view {
   background: var(--bg);
+  /* A ChatView owns several internal paint layers (composer, progress rail,
+     menus). Keep those z-index values local to the view so they cannot punch
+     through a shell-owned handoff or New Chat presentation above it. */
+  isolation: isolate;
 }
 
 .shell__chat-view--staging {
