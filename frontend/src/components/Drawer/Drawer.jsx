@@ -40,6 +40,7 @@ import DrawerItemActionMenu from './DrawerItemActionMenu.jsx'
 import {
   buildDrawerSections,
   filterInstalledApps,
+  findDrawerMenuItem,
 } from './drawerInformationArchitecture.js'
 import ShareAppSheet from './ShareAppSheet.jsx'
 import { isDrawerAppShareEligible } from './appShareState.js'
@@ -314,10 +315,7 @@ export default function Drawer({
   // and a focus-return target without mounting their own controllers.
   const [openMenu, setOpenMenu] = useState(null)
   const menuRestoreFocusRef = useRef(null)
-  const activeMenuItem = openMenu
-    ? (openMenu.kind === 'chat' ? (chats || []) : (apps || []))
-      .find(item => item.id === openMenu.id) || null
-    : null
+  const activeMenuItem = findDrawerMenuItem(openMenu, chats, apps)
   const {
     open: openItemMenuHistory,
     close: closeItemMenu,
