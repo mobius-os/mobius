@@ -11,6 +11,7 @@ import {
   continuationRowsFromPromotedMessage,
   isContinuationMessage,
   isOwnerUserMessage,
+  jumpToLatestShown,
   openAppCtaViewModel,
   previewReadyAnnouncement,
   previewUpdatedAnnouncement,
@@ -25,6 +26,25 @@ import {
   systemEventForChat,
 } from '../chatRuntimeState.js'
 import { mergeRecentMessagesIntoLoadedWindow } from '../../../lib/chatDetailCache.js'
+
+test('R5a: jump-to-latest shows only away from the tail and yields to attention nudges', () => {
+  // At the content tail there is nothing to jump to.
+  assert.equal(jumpToLatestShown({ awayFromTail: false }), false)
+  // Scrolled up with no competing nudge: show.
+  assert.equal(jumpToLatestShown({ awayFromTail: true }), true)
+  // A visible attention nudge navigates to the same tail with more context —
+  // never stack two controls for one action.
+  assert.equal(
+    jumpToLatestShown({ awayFromTail: true, questionNudgeShown: true }),
+    false,
+  )
+  assert.equal(
+    jumpToLatestShown({ awayFromTail: true, resumeNudgeShown: true }),
+    false,
+  )
+  // Fails closed on an empty call.
+  assert.equal(jumpToLatestShown(), false)
+})
 
 test('automatic and manual continuations are product markers, not owner messages', () => {
   const marker = {
