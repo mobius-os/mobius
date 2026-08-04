@@ -4,6 +4,9 @@ import {
   appManifestSearchDocument,
   chatSearchOpenTarget,
   chatSearchResultIsCurrent,
+  clearLastSearch,
+  readLastSearch,
+  rememberLastSearch,
   searchInstalledApps,
   visibleChatSearchState,
 } from '../globalSearchModel.js'
@@ -106,4 +109,44 @@ test('chat destinations focus either the matched row or the ordinary composer', 
     chatId: 'chat-row',
     focusComposer: false,
   })
+})
+
+test('the last search survives a close/reopen so the term does not have to be retyped', () => {
+  clearLastSearch()
+  assert.deepEqual(readLastSearch(), {
+    query: '',
+    chatState: { query: '', status: 'idle', results: [] },
+  })
+
+  const settled = {
+    query: 'password',
+    status: 'ready',
+    results: [{ id: 'chat-1', searchQuery: 'password' }],
+  }
+  rememberLastSearch('password', settled)
+
+  // What a reopened dialog seeds its state from: the term AND the results the
+  // owner was looking at, so the list is on screen before any refetch lands.
+  const restored = readLastSearch()
+  assert.equal(restored.query, 'password')
+  assert.equal(restored.chatState.status, 'ready')
+  assert.deepEqual(restored.chatState.results, settled.results)
+  assert.deepEqual(visibleChatSearchState(restored.chatState, restored.query), settled)
+  // The restored rows stay clickable: the staleness guard keys off the term the
+  // dialog reopens with, not a fresh empty one.
+  assert.equal(chatSearchResultIsCurrent(restored.chatState.results[0], restored.query), true)
+
+  clearLastSearch()
+})
+
+test('an unsettled search is not restored, only its term', () => {
+  clearLastSearch()
+  for (const status of ['loading', 'error', 'idle']) {
+    rememberLastSearch('half typed', { query: 'half typed', status, results: [] })
+    const restored = readLastSearch()
+    assert.equal(restored.query, 'half typed', `${status} keeps the term`)
+    assert.equal(restored.chatState.status, 'idle', `${status} is not replayed`)
+    assert.deepEqual(restored.chatState.results, [])
+  }
+  clearLastSearch()
 })

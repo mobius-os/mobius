@@ -19,6 +19,8 @@ import { searchSnippetPresentation } from '../../lib/searchTermHighlight.js'
 import {
   chatSearchOpenTarget,
   chatSearchResultIsCurrent,
+  readLastSearch,
+  rememberLastSearch,
   searchInstalledApps,
   visibleChatSearchState,
 } from './globalSearchModel.js'
@@ -49,11 +51,14 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
   const dialogRef = useRef(null)
   const inputRef = useRef(null)
   const chatSearchControllerRef = useRef(null)
-  const latestQueryRef = useRef('')
-  const [query, setQuery] = useState('')
-  const [chatState, setChatState] = useState({
-    query: '', status: 'idle', results: [],
-  })
+  // Reopening restores the owner's last search (see rememberLastSearch), so the
+  // in-flight-result guard has to start from that same term rather than '' —
+  // otherwise clicking a restored result before the revalidating fetch lands
+  // would be discarded as stale.
+  const restored = useRef(readLastSearch()).current
+  const latestQueryRef = useRef(restored.query.trim())
+  const [query, setQuery] = useState(restored.query)
+  const [chatState, setChatState] = useState(restored.chatState)
   const appsQuery = appQueries.list.useQuery()
 
   useDialogFocus({
@@ -61,6 +66,17 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
     initialFocusRef: inputRef,
     onClose,
   })
+
+  // A restored term is a starting point, not something to edit around: select
+  // it so the next keystroke replaces it, exactly like reopening a browser's
+  // find bar. Runs once, after useDialogFocus has moved focus to the input.
+  useEffect(() => {
+    if (restored.query) inputRef.current?.select()
+  }, [restored.query])
+
+  useEffect(() => {
+    rememberLastSearch(query, chatState)
+  }, [query, chatState])
 
   useEffect(() => {
     const normalizedQuery = query.trim()
@@ -74,7 +90,16 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
 
     const controller = new AbortController()
     chatSearchControllerRef.current = controller
-    setChatState({ query: normalizedQuery, status: 'loading', results: [] })
+    // Reopening re-runs the query so a chat renamed, added, or deleted since
+    // last time is reflected. Keep the restored results on screen while that
+    // happens: blanking them to "Searching chats…" would undo the point of
+    // restoring them. A genuinely new term has no settled results to hold, so
+    // it still shows the loading state.
+    setChatState(previous => (
+      previous.query === normalizedQuery && previous.status === 'ready'
+        ? previous
+        : { query: normalizedQuery, status: 'loading', results: [] }
+    ))
     const timer = window.setTimeout(async () => {
       try {
         const response = await api.chats.search(normalizedQuery, {
