@@ -245,7 +245,7 @@ test('finding 11: the hold cancels on the page-lifecycle interruptions', () => {
 
 // -- Finding 12: Shift+Enter e.repeat guard + keyboardModeClickRef cleanup -----
 test('finding 12: Shift+Enter ignores auto-repeat and clears its click-suppression on keyup', () => {
-  assert.match(brand, /e\.shiftKey && e\.key === 'Enter' && !e\.repeat/)
+  assert.match(brand, /shortcutMatches\(e, SHELL_SHORTCUTS\.toggleBuilder\)/)
   assert.match(brand, /onKeyUp=\{\(e\) => \{[\s\S]*?keyboardModeClickRef\.current = false/)
 })
 

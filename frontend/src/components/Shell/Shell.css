@@ -308,6 +308,29 @@
   z-index: 3;
 }
 
+/* The resolved ChatView is already painted underneath. Fade the complete,
+   opaque welcome surface rather than unmounting one logo and asking the next
+   image node to replace it on the same frame; matching pixels stay visually
+   stable while the real composer arrives softly. */
+.shell__new-chat-presentation--releasing {
+  pointer-events: none;
+  will-change: opacity;
+  animation: shell-new-chat-release 180ms ease-out both;
+}
+
+@keyframes shell-new-chat-release {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Keep animationend as the state-machine completion signal without exposing
+     a visible transition to owners who prefer reduced motion. */
+  .shell__new-chat-presentation--releasing {
+    animation-duration: 1ms;
+  }
+}
+
 /* ── Tab strip: pinned chats/apps to swap between ─────────────────── */
 .shell__tabstrip {
   flex-shrink: 0;

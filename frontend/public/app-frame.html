@@ -253,7 +253,6 @@
   <meta charset="UTF-8" />
   <!-- One font-face source serves both the shell and isolated app frames. -->
   <link rel="stylesheet" href="/vendor/fonts/mobius-fonts.css" />
-  <script src="/vendor/fonts/mobius-font-readiness.js"></script>
   <!-- viewport-fit=cover makes the iframe's layout viewport extend UNDER the
        notch/punch-hole so an immersive app's background paints full-bleed (the
        safe-rect-only default left a strip of shell colour above the app), and
@@ -1181,8 +1180,13 @@
         const requestId = typeof msg.requestId === 'string' ? msg.requestId : '';
         if (!requestId || requestId.length > 160) return;
         const fonts = window.__mobiusFontReadiness;
+        // This sandbox intentionally has an opaque Origin:null identity, so
+        // its external readiness helper is not executable under script-src
+        // 'self'. Its font stylesheet remains CORS-readable; once the frame's
+        // own FontFaceSet settles, its permanent metric-matched fallback is a
+        // stable capture boundary with no later in-frame font swap to await.
         Promise.resolve(
-          fonts ? fonts.settleDocument(document) : false
+          fonts ? fonts.settleDocument(document) : (document.fonts?.ready?.then(() => true) || true)
         ).then((ready) => {
           window.parent.postMessage(
             { type: 'moebius:frame-font-check-result', requestId, ready: ready === true },

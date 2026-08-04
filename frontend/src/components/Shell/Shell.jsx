@@ -1014,15 +1014,27 @@ export default function Shell() {
       return next
     })
     const presentation = newChatPresentationRef.current
-    if (String(presentation?.chatId ?? '') === id) {
-      newChatPresentationRef.current = null
+    if (
+      !presentation?.releasing
+      && String(presentation?.chatId ?? '') === id
+    ) {
+      const releasing = { ...presentation, releasing: true }
+      newChatPresentationRef.current = releasing
       setNewChatPresentation(current => (
-        current === presentation ? null : current
+        current === presentation ? releasing : current
       ))
       releaseComposerFocusLease(composerFocusLeaseRef.current)
     }
     finishDrawerNavigationPresentation()
   }, [finishDrawerNavigationPresentation, workspaceStateRef])
+
+  const finishNewChatPresentationRelease = useCallback((presentation) => {
+    if (!presentation?.releasing || newChatPresentationRef.current !== presentation) return
+    newChatPresentationRef.current = null
+    setNewChatPresentation(current => (
+      current === presentation ? null : current
+    ))
+  }, [])
 
   // A route change, Back gesture, drawer reopen, or mode switch supersedes a
   // pending New-chat tap. Retire its cover and keyboard lease together so its
@@ -1727,8 +1739,11 @@ export default function Shell() {
       void openAppWithIntent(target.app, target.intent)
     } else if (target?.view === 'chat') {
       navToRef.current('chat', { chatId: target.chatId })
+      if (target.focusComposer === true && supportsDesktopPaneComposerFocus()) {
+        requestComposer(target.chatId, { focus: true })
+      }
     }
-  }, [openAppWithIntent])
+  }, [openAppWithIntent, requestComposer])
 
   const coldDeepLinkHandledRef = useRef(false)
   useEffect(() => {
@@ -2720,6 +2735,7 @@ export default function Shell() {
       })
     }
   }
+
   // Keep the latest-newChat ref current so handleAppError's crash-report
   // fallback starts a chat with this render's live closure.
   newChatRef.current = newChat
@@ -3064,7 +3080,7 @@ export default function Shell() {
             className="shell__rail-action"
             aria-label="New chat shortcut"
             title="New chat"
-            onClick={() => newChat({ focusComposer: true, recordHistory: true })}
+            onClick={() => newChat({ forceNew: true, focusComposer: true, recordHistory: true })}
           >
             <NewChatNavIcon aria-hidden="true" />
           </button>
@@ -3125,7 +3141,7 @@ export default function Shell() {
         activeChatId={activeChatId}
         onChat={selectChat}
         onApp={(id) => navTo('canvas', { appId: id })}
-        onNewChat={() => newChat({ focusComposer: true, recordHistory: true })}
+        onNewChat={() => newChat({ forceNew: true, focusComposer: true, recordHistory: true })}
         onDeleteChat={deleteChat}
         onDeleteApp={deleteApp}
         onDeleteAppData={deleteAppData}
@@ -3542,21 +3558,32 @@ export default function Shell() {
         {/* One New Chat landing owns both the resting null slot and the immediate
             user-initiated cover while its chat row is allocated. */}
         {(() => {
-          const allocatingNewChat = newChatPresentation != null
+          const presentingNewChat = newChatPresentation != null
+          const releasingNewChat = !!newChatPresentation?.releasing
           const newChatSurface = fullBleedKey === EMPTY_SINGLE_SURFACE_KEY
-            || allocatingNewChat
+            || presentingNewChat
           if (!newChatSurface) return null
           return (
             <div
               key="home-new-chat"
-              className={`shell__view shell__view--active shell__chat-view${allocatingNewChat ? ' shell__new-chat-presentation' : ''}`}
-              data-new-chat-presentation={allocatingNewChat
+              className={`shell__view shell__view--active shell__chat-view`
+                + `${presentingNewChat ? ' shell__new-chat-presentation' : ''}`
+                + `${releasingNewChat ? ' shell__new-chat-presentation--releasing' : ''}`}
+              data-new-chat-presentation={presentingNewChat
                 ? newChatPresentation.chatId || 'allocating'
                 : undefined}
-              aria-busy={allocatingNewChat || undefined}
+              aria-busy={(presentingNewChat && !releasingNewChat) || undefined}
+              onAnimationEnd={releasingNewChat
+                ? event => {
+                  if (event.target === event.currentTarget
+                    && event.animationName === 'shell-new-chat-release') {
+                    finishNewChatPresentationRelease(newChatPresentation)
+                  }
+                }
+                : undefined}
             >
               <NewChatLanding
-                failure={allocatingNewChat ? null : newChatLandingFailure}
+                failure={presentingNewChat ? null : newChatLandingFailure}
                 onRetry={requestEmptySingleNewChat}
               />
             </div>

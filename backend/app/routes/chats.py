@@ -301,29 +301,8 @@ def issue_media_token(
   return {"token": token, "expires_in": 900}
 
 
-def _owner_chat_summary(chat: models.Chat, *, durable_running: bool = False) -> dict:
-  """Canonical shape shared by create and the owner drawer list."""
-  return {
-    "id": chat.id,
-    "title": chat.title,
-    "updated_at": chat.updated_at.isoformat(),
-    "activity_at": chat.activity_at.isoformat() if chat.activity_at else None,
-    "pinned_at": chat.pinned_at.isoformat() if chat.pinned_at else None,
-    "has_messages": bool(chat.has_messages),
-    "created_by_app_id": chat.created_by_app_id,
-    "running": durable_running or is_chat_running(chat.id),
-  }
-
-
-def _owner_chat_summary_projection(chat, *, durable_running: bool = False) -> dict:
-  """Serialize the lightweight row projection used by the drawer list.
-
-  ``GET /api/chats`` used to hydrate every complete ``Chat`` ORM object merely
-  to return eight summary fields. On a long-lived instance that decoded tens of
-  megabytes of transcript JSON on every drawer open and chat switch, contending
-  with the selected chat's small detail read. The writer-owned ``has_messages``
-  summary keeps this projection independent of the transcript blob entirely.
-  """
+def _owner_chat_summary(chat, *, durable_running: bool = False) -> dict:
+  """Canonical owner-list shape for a Chat or its lightweight projection."""
   return {
     "id": chat.id,
     "title": chat.title,
@@ -580,7 +559,7 @@ def list_chats(
     chat_count=len(chats),
   )
   return [
-    _owner_chat_summary_projection(
+    _owner_chat_summary(
       chat, durable_running=chat.id in durable_running,
     )
     for chat in chats

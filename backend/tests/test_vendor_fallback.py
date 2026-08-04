@@ -30,7 +30,8 @@ def test_shell_and_frame_share_source_owned_font_contract():
   assert stylesheet_path in index
   assert stylesheet_path in frame
   assert readiness_path in index
-  assert readiness_path in frame
+  assert readiness_path not in frame
+  assert "document.fonts?.ready" in frame
   assert "@font-face" in fonts
   assert "font-family: 'Inter'" in fonts
   assert "font-family: 'JetBrains Mono'" in fonts

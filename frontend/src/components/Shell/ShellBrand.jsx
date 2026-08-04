@@ -1,5 +1,9 @@
 import { memo, useRef } from 'react'
 import { useLogoModeGesture } from './useLogoModeGesture.js'
+import {
+  SHELL_SHORTCUTS,
+  shortcutMatches,
+} from '../../lib/keyboardShortcuts.js'
 
 /**
  * The brand owns its transient press/hold animation state. Keeping that state in
@@ -73,9 +77,9 @@ const ShellBrand = memo(function ShellBrand({
           // contextmenu on the focused brand reaches the native menu instead of
           // inheriting a stale touch/pen suppression.
           logoGesture.onKeyDown()
-          // e.repeat guard: holding Shift+Enter must fire ONE toggle, not a storm
-          // of them at the keyboard repeat rate (INV 3).
-          if (e.shiftKey && e.key === 'Enter' && !e.repeat) {
+          // The catalog matcher owns both the chord and repeat guard so the
+          // discoverable shortcut list cannot drift from behavior.
+          if (shortcutMatches(e, SHELL_SHORTCUTS.toggleBuilder)) {
             e.preventDefault()
             keyboardModeClickRef.current = true
             // Honest cause (finding F13): Shift+Enter is the 'keyboard' beat.

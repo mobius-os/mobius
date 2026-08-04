@@ -9,7 +9,7 @@ import {
 } from './dragController.js'
 import {
   captureLayoutSpace,
-  clientDeltaToLayout,
+  clientLengthToLayout,
   clientPointToLayout,
 } from '../../lib/layoutSpace.js'
 
@@ -115,13 +115,7 @@ export default function useWorkspaceDrag({
     let clearPendingSourceClick = null
 
     function contentBox() {
-      const host = contentElRef.current
-      return captureLayoutSpace(host, {
-        left: 0,
-        top: 0,
-        width: window.innerWidth,
-        height: window.innerHeight,
-      })
+      return captureLayoutSpace(contentElRef.current)
     }
     function toLocal(clientX, clientY, box = contentBox()) {
       return clientPointToLayout({ x: clientX, y: clientY }, box)
@@ -203,18 +197,14 @@ export default function useWorkspaceDrag({
         x: box.clientLeft,
         y: box.clientTop,
       }, viewport)
-      const offset = clientDeltaToLayout({
-        x: rect.x * box.zoom,
-        y: rect.y * box.zoom,
-      }, viewport)
-      const size = clientDeltaToLayout({
-        x: rect.w * box.zoom,
-        y: rect.h * box.zoom,
-      }, viewport)
-      previewEl.style.left = `${contentOrigin.x + offset.x}px`
-      previewEl.style.top = `${contentOrigin.y + offset.y}px`
-      previewEl.style.width = `${size.x}px`
-      previewEl.style.height = `${size.y}px`
+      const toViewportLength = value => clientLengthToLayout(
+        value * box.zoom,
+        viewport,
+      )
+      previewEl.style.left = `${contentOrigin.x + toViewportLength(rect.x)}px`
+      previewEl.style.top = `${contentOrigin.y + toViewportLength(rect.y)}px`
+      previewEl.style.width = `${toViewportLength(rect.w)}px`
+      previewEl.style.height = `${toViewportLength(rect.h)}px`
       previewEl.classList.add('is-visible')
     }
 
@@ -257,13 +247,12 @@ export default function useWorkspaceDrag({
       if (!strip) return null
       const stripBox = strip.getBoundingClientRect()
       const origin = clientPointToLayout({ x: stripBox.left, y: stripBox.top }, box)
-      const size = clientDeltaToLayout({ x: stripBox.width, y: stripBox.height }, box)
       return {
         rect: {
           x: origin.x,
           y: origin.y,
-          w: size.x,
-          h: size.y,
+          w: clientLengthToLayout(stripBox.width, box),
+          h: clientLengthToLayout(stripBox.height, box),
         },
         tabs: [...strip.querySelectorAll('.shell__tab')].map((el) => {
           const r = el.getBoundingClientRect()
@@ -495,12 +484,17 @@ export default function useWorkspaceDrag({
         const dy = ev.clientY - start.y
         if (scrolling) {
           ev.preventDefault?.()
-          const delta = clientDeltaToLayout({
-            x: previousPoint.x - ev.clientX,
-            y: previousPoint.y - ev.clientY,
-          }, scrollSpace)
-          if (scrollEl && scrollAxis === 'x') scrollEl.scrollLeft += delta.x
-          else if (scrollEl && scrollAxis === 'y') scrollEl.scrollTop += delta.y
+          if (scrollEl && scrollAxis === 'x') {
+            scrollEl.scrollLeft += clientLengthToLayout(
+              previousPoint.x - ev.clientX,
+              scrollSpace,
+            )
+          } else if (scrollEl && scrollAxis === 'y') {
+            scrollEl.scrollTop += clientLengthToLayout(
+              previousPoint.y - ev.clientY,
+              scrollSpace,
+            )
+          }
           return
         }
         if (!armed) {
@@ -516,13 +510,13 @@ export default function useWorkspaceDrag({
               scrolling = true
               scrollEl = srcEl.closest('.drawer__scroll')
               scrollAxis = 'y'
-              scrollSpace = captureLayoutSpace(scrollEl)
               ev.preventDefault?.()
               if (scrollEl) {
-                scrollEl.scrollTop += clientDeltaToLayout(
-                  { x: 0, y: start.y - ev.clientY },
+                scrollSpace = captureLayoutSpace(scrollEl)
+                scrollEl.scrollTop += clientLengthToLayout(
+                  start.y - ev.clientY,
                   scrollSpace,
-                ).y
+                )
               }
               return
             }
@@ -558,13 +552,13 @@ export default function useWorkspaceDrag({
                 scrolling = true
                 scrollEl = srcEl.closest('.shell__tabstrip')
                 scrollAxis = 'x'
-                scrollSpace = captureLayoutSpace(scrollEl)
                 ev.preventDefault?.()
                 if (scrollEl) {
-                  scrollEl.scrollLeft += clientDeltaToLayout(
-                    { x: start.x - ev.clientX, y: 0 },
+                  scrollSpace = captureLayoutSpace(scrollEl)
+                  scrollEl.scrollLeft += clientLengthToLayout(
+                    start.x - ev.clientX,
                     scrollSpace,
-                  ).x
+                  )
                 }
                 return
               }

@@ -1083,6 +1083,7 @@ def test_chat_message_summary_migration_backfills_legacy_transcripts(tmp_path):
     conn.execute(text(
       "INSERT INTO chats (id, title, messages) VALUES "
       "('empty', 'Empty', '[]'), "
+      "('spaced-empty', 'Spaced empty', '[ ]'), "
       "('started', 'Started', '[{\"role\": \"user\"}]')"
     ))
 
@@ -1095,7 +1096,7 @@ def test_chat_message_summary_migration_backfills_legacy_transcripts(tmp_path):
       "SELECT id, has_messages FROM chats ORDER BY id"
     )).all()
   assert "has_messages" in columns
-  assert values == [("empty", 0), ("started", 1)]
+  assert values == [("empty", 0), ("spaced-empty", 0), ("started", 1)]
   assert "0007_chat_has_messages" in {
     row["version"] for row in schema_migration_history(eng)
   }

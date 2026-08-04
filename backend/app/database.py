@@ -1320,11 +1320,11 @@ def _add_chat_has_messages(eng) -> None:
       "NOT NULL DEFAULT FALSE"
     ))
     # One deliberate upgrade-time scan replaces the same scan on every drawer
-    # refresh. Legacy rows are non-null JSON, but guard NULL for hand-built DBs.
+    # refresh. Inspect the JSON value rather than relying on its serialization.
     if "messages" in columns:
       conn.execute(text(
         "UPDATE chats SET has_messages = CASE "
-        "WHEN messages IS NOT NULL AND CAST(messages AS TEXT) != '[]' "
+        "WHEN json_array_length(messages) > 0 "
         "THEN TRUE ELSE FALSE END"
       ))
 

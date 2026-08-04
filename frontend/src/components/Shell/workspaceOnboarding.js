@@ -1,13 +1,14 @@
-// Keyboard-undo gating for the workspace drag feature (design §3.5). Pure,
-// dependency-free helpers keep Shell's global shortcut declarative and tested
-// without a DOM.
+// Keyboard-undo gating for the workspace drag feature (design §3.5). Pure
+// helpers keep Shell's global shortcut declarative and tested without a DOM.
+import {
+  SHELL_SHORTCUTS,
+  shortcutMatches,
+} from '../../lib/keyboardShortcuts.js'
 
 // Cmd/Ctrl+Z (no Shift, no Alt) — the workspace-undo chord (design §3.5). Shift
 // is excluded so it never steals redo.
 export function undoKeyPressed(e) {
-  if (!e || (!e.metaKey && !e.ctrlKey) || e.shiftKey || e.altKey) return false
-  const k = typeof e.key === 'string' ? e.key.toLowerCase() : ''
-  return k === 'z'
+  return shortcutMatches(e, SHELL_SHORTCUTS.undoWorkspace)
 }
 
 // True when focus is in a text-entry surface, so the global undo chord defers to

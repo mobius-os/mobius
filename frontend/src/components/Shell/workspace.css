@@ -254,7 +254,7 @@ html[data-mode-view-transition]::view-transition-new(*) {
 
 /* ── Drag-to-organize overlays (design §3.3, PR3) ────────────────────────────
    The drag controller (useWorkspaceDrag) creates these imperatively and writes
-   their GEOMETRY inline (viewport px for the fixed preview/chip, content-local px
+   their GEOMETRY inline (root-layout px for the fixed preview/chip, content-local px
    for pre-glow); this stylesheet owns only their APPEARANCE and motion. All are
    pointer-transparent and none exist unless the splits flag is on. */
 

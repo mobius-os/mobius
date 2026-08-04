@@ -127,7 +127,9 @@ test('the drop preview reads as an 18% accent fill with a 2px border and morph',
     'the landing marker stays above the drag layer and below its label')
   assert.match(dragBinding, /document\.body\.appendChild\(previewEl\)/)
   assert.match(dragBinding, /clientPointToLayout\(\{\s*x: box\.clientLeft,/)
-  assert.match(dragBinding, /x: rect\.x \* box\.zoom/)
+  assert.match(dragBinding, /value \* box\.zoom/,
+    'content-local lengths cross into the fixed root layout exactly once')
+  assert.doesNotMatch(dragBinding, /clientDeltaToLayout/)
   assert.match(dragBinding, /contentElRef\.current\?\.closest\?\.\('\.shell'\)/)
   assert.match(dragBinding, /refreshSceneStrips\(scene, box\)/,
     'the live frame follows the Builder strip that mounted after preview reveal')
@@ -492,8 +494,12 @@ test('ShellBrand isolates gesture state and wires the brand ref + Shift+Enter', 
   assert.match(shell, /<ShellBrand[\s\S]*?brandRef=\{brandButtonRef\}/)
   // The drag-deny vibrate is DEAD (point 15: dragging is building, never denied).
   assert.doesNotMatch(shell, /viewModeVibrateRef|onDragBlocked/)
-  // Keyboard path: Shift+Enter flips the mode (preventDefault keeps it off the drawer).
-  assert.match(shellBrand, /e\.shiftKey && e\.key === 'Enter'/)
+  // Keyboard path: the discoverable Shift+Enter binding flips the mode
+  // (preventDefault keeps it off the drawer).
+  assert.match(
+    shellBrand,
+    /shortcutMatches\(e, SHELL_SHORTCUTS\.toggleBuilder\)/,
+  )
   assert.match(shellBrand, /keyboardModeClickRef\.current = true/)
   assert.match(shellBrand, /keyboardModeClickRef\.current && e\.detail === 0/)
 })

@@ -16,11 +16,12 @@ The index is DERIVED data, reconciled lazily at query time:
   table itself (the canonical FTS5 external-content pattern — the triggers
   watch OUR derived table, never `chats`).
 - `chat_search_state` remembers the exact `chats.updated_at` text indexed for
-  each chat. A search request first reconciles any live chat whose row changed
-  against its current transcript, while deleted/purged chats are dropped. The
-  comparison is exact because assistant snapshots and owner replacements can
-  rewrite an existing message without changing the list length; stable derived
-  rows keep their identities so FTS re-tokenizes only changed prose.
+  each chat. A search request first reconciles: any live chat whose row changed
+  is rebuilt from its current transcript, while deleted/purged chats are
+  dropped. Rebuilding the changed chat is deliberate: assistant snapshots and
+  owner transcript replacements can rewrite an existing message without
+  changing the list length, so an append-only shortcut would make stale text
+  permanent.
 - Only chats that belong in the owner's drawer are indexed, and hidden
   transcript messages are omitted. A small derived-schema version makes those
   indexing semantics migratable: changing them drops and regenerates only the
@@ -46,7 +47,7 @@ from sqlalchemy import Text, cast, func, or_, text as sql
 from sqlalchemy.orm import Session
 
 from app import models
-from app.chat_visibility import visible_in_owner_drawer
+from app.chat_visibility import visible_in_owner_drawer as _visible_in_owner_drawer
 
 # Private-use sentinels around FTS5 snippet matches. The API converts them to
 # a JSON-friendly form; they can never collide with real transcript text.
@@ -223,9 +224,6 @@ def _prose_docs(title: str, messages: list) -> list[tuple[int, object, object, s
   return docs
 
 
-_visible_in_owner_drawer = visible_in_owner_drawer
-
-
 def _delete_chat_docs(db: Session, chat_id: str) -> None:
   db.execute(
     sql("DELETE FROM chat_search_docs WHERE chat_id = :cid"), {"cid": chat_id}
@@ -248,53 +246,6 @@ def _write_docs(db: Session, chat_id: str, docs: list[tuple[int, object, object,
       for idx, ts, role, text in docs
     ],
   )
-
-
-def _sync_docs(
-  db: Session,
-  chat_id: str,
-  docs: list[tuple[int, object, object, str]],
-) -> None:
-  """Make one chat's derived rows exact without re-tokenizing stable prose.
-
-  A changed chat still has to deserialize and scan its transcript: only the
-  source transcript can prove an equal-length replacement did not occur. But
-  most updates append one message or replace the trailing assistant snapshot.
-  Comparing exact derived rows lets FTS delete/insert only those changed rows
-  rather than rebuilding and re-tokenizing the full history.
-  """
-  existing = {
-    msg_idx: (row_id, ts, role, doc_text)
-    for row_id, msg_idx, ts, role, doc_text in db.execute(
-      sql(
-        "SELECT id, msg_idx, ts, role, text FROM chat_search_docs"
-        " WHERE chat_id = :cid"
-      ),
-      {"cid": chat_id},
-    ).fetchall()
-  }
-  desired = {msg_idx: (ts, role, doc_text) for msg_idx, ts, role, doc_text in docs}
-
-  remove_ids = [
-    row_id
-    for msg_idx, (row_id, ts, role, doc_text) in existing.items()
-    if desired.get(msg_idx) != (ts, role, doc_text)
-  ]
-  if remove_ids:
-    db.execute(
-      sql("DELETE FROM chat_search_docs WHERE id = :id"),
-      [{"id": row_id} for row_id in remove_ids],
-    )
-
-  changed = [
-    (msg_idx, ts, role, doc_text)
-    for msg_idx, (ts, role, doc_text) in desired.items()
-    if (
-      msg_idx not in existing
-      or existing[msg_idx][1:] != (ts, role, doc_text)
-    )
-  ]
-  _write_docs(db, chat_id, changed)
 
 
 def _upsert_state(
@@ -369,14 +320,13 @@ def _reconcile_locked(db: Session) -> None:
     updated_text = row[0] if row else ""
     messages = chat.messages or []
     title = chat.title or ""
-    # Exact row reconciliation preserves same-length replacement correctness
-    # without forcing FTS to re-tokenize every stable message. Non-drawer chats
-    # retain only a tiny state row so an unchanged hidden app/autopilot chat is
-    # not re-hydrated on every query.
+    # The index is disposable: replace this chat's derived rows at its durable
+    # revision boundary instead of maintaining a second row-diff algorithm.
+    # Non-drawer chats retain only a tiny state row so an unchanged hidden
+    # app/autopilot chat is not re-hydrated on every query.
+    _delete_chat_docs(db, chat_id)
     if _visible_in_owner_drawer(chat):
-      _sync_docs(db, chat_id, _prose_docs(title, messages))
-    else:
-      _delete_chat_docs(db, chat_id)
+      _write_docs(db, chat_id, _prose_docs(title, messages))
     _upsert_state(
       db,
       chat_id=chat_id,

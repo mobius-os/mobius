@@ -84,6 +84,7 @@ import {
   highlightSearchTerms,
 } from '../../lib/searchTermHighlight.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
+import { stopChatSpeech } from './chatSpeechPlayer.js'
 import { sendFailureMessage } from './sendFailure.js'
 import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, findTrailingAssistantPartialIndex, streamItemsHaveRenderableContent } from './streamPromotion.js'
 import {
@@ -286,6 +287,7 @@ export default function ChatView({
   onDisplayReady = null,
 }) {
   const queryClient = useQueryClient()
+  useEffect(() => () => stopChatSpeech({ chatId }), [chatId])
   const hiddenRef = useRef(hidden)
   hiddenRef.current = hidden
   // A drawer search may target a ChatView that is already mounted. Subscribe
@@ -4147,6 +4149,9 @@ export default function ChatView({
               <MessageMetaRow
                 timestamp={ownerUserMessage ? msg.ts : null}
                 copyText={copyText}
+                speechText={msg.role === 'assistant' ? copyText : ''}
+                speechKey={dataKey}
+                speechChatId={chatId}
                 visible={visibleMessageMetaKey === dataKey}
               />
             </li>

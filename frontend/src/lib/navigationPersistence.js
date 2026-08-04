@@ -4,7 +4,7 @@ const ACTIVE_APP_KEY = 'moebius_active_app'
 const RETURN_VIEW_KEY = 'mobius:return-view'
 const RECENT_CHAT_IDS_KEY = 'mobius:recent-chat-ids'
 
-export const RECENT_CHAT_HISTORY_LIMIT = 12
+const RECENT_CHAT_HISTORY_LIMIT = 12
 
 export function readRecentlyOpenedChatIds(storage = globalThis.localStorage) {
   try {
@@ -15,7 +15,7 @@ export function readRecentlyOpenedChatIds(storage = globalThis.localStorage) {
   } catch { return [] }
 }
 
-export function rememberOpenedChat(storage, chatId) {
+function rememberOpenedChat(storage, chatId) {
   const normalized = String(chatId || '')
   if (!normalized) return
   try {

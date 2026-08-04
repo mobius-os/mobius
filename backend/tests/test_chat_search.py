@@ -173,7 +173,7 @@ def test_title_match_has_no_snippet(db):
   assert hit["snippet"] is None
 
 
-def test_appended_message_sync_keeps_one_doc_per_transcript_row(db):
+def test_appended_message_rebuild_keeps_one_doc_per_transcript_row(db):
   c = _make_chat(db, "Log", ["first entry"])
   chat_search.search(db, "first")  # index it
   before = _doc_count(db, c.id)
@@ -183,28 +183,6 @@ def test_appended_message_sync_keeps_one_doc_per_transcript_row(db):
   db.commit()
   assert any(r["id"] == c.id for r in chat_search.search(db, "quokka"))
   assert _doc_count(db, c.id) == before + 1
-
-
-def test_append_preserves_stable_fts_document_rows(db):
-  c = _make_chat(db, "Stable history", ["first stable", "second stable"])
-  chat_search.search(db, "stable")
-  before = dict(db.execute(
-    sql("SELECT msg_idx, id FROM chat_search_docs WHERE chat_id = :cid"),
-    {"cid": c.id},
-  ).fetchall())
-
-  c.messages = c.messages + [
-    {"role": "assistant", "content": "third stable", "ts": 1002}
-  ]
-  db.commit()
-  chat_search.search(db, "stable")
-  after = dict(db.execute(
-    sql("SELECT msg_idx, id FROM chat_search_docs WHERE chat_id = :cid"),
-    {"cid": c.id},
-  ).fetchall())
-
-  assert before.items() <= after.items()
-  assert 2 in after
 
 
 def test_same_length_transcript_replacement_updates_existing_search_rows(db):

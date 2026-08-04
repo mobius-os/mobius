@@ -5,54 +5,71 @@ import assert from 'node:assert/strict'
 
 import {
   captureLayoutSpace,
-  clientDeltaToLayout,
+  clientLengthToLayout,
   clientPointToLayout,
 } from '../layoutSpace.js'
 
 function box({
   left = 0,
   top = 0,
-  clientWidth = 900,
-  clientHeight = 720,
+  paintedWidth = 900,
+  paintedHeight = 720,
   layoutWidth = 1000,
   layoutHeight = 800,
   currentCSSZoom = 0.9,
+  clientLeft = 0,
+  clientTop = 0,
 } = {}) {
   return {
     currentCSSZoom,
+    clientLeft,
+    clientTop,
     clientWidth: layoutWidth,
     clientHeight: layoutHeight,
     offsetWidth: layoutWidth,
     offsetHeight: layoutHeight,
+    ownerDocument: { documentElement: {} },
     getBoundingClientRect: () => ({
       left,
       top,
-      width: clientWidth,
-      height: clientHeight,
+      width: paintedWidth,
+      height: paintedHeight,
     }),
   }
 }
 
-test('captureLayoutSpace records the effective 90% client-to-layout scale', () => {
-  assert.deepEqual(captureLayoutSpace(box({ left: 288 })), {
-    clientLeft: 288,
-    clientTop: 0,
+test('author-scaled client input crosses into layout space once', () => {
+  const space = captureLayoutSpace(box({
+    left: 288,
+    top: 18,
+    clientLeft: 10,
+    clientTop: 10,
+  }))
+
+  assert.deepEqual(space, {
+    clientLeft: 297,
+    clientTop: 27,
     width: 1000,
     height: 800,
     zoom: 0.9,
   })
+  assert.deepEqual(
+    clientPointToLayout({ x: 747, y: 297 }, space),
+    { x: 500, y: 300 },
+  )
+  assert.equal(clientLengthToLayout(90, space), 100)
 })
 
 test('the zoomed document root keeps its expanded offset dimensions as layout space', () => {
   const root = box({
-    clientWidth: 1080,
-    clientHeight: 720,
+    paintedWidth: 1080,
+    paintedHeight: 720,
     layoutWidth: 1200,
     layoutHeight: 800,
   })
   root.clientWidth = 1080
   root.clientHeight = 720
-  root.ownerDocument = { documentElement: root }
+  root.ownerDocument.documentElement = root
 
   const space = captureLayoutSpace(root)
 
@@ -64,39 +81,36 @@ test('the zoomed document root keeps its expanded offset dimensions as layout sp
   })
 })
 
-test('client points and deltas cross the zoom boundary once', () => {
+test('client points and lengths cross the zoom boundary once', () => {
   const space = captureLayoutSpace(box({ left: 288, top: 18 }))
 
   assert.deepEqual(
     clientPointToLayout({ x: 738, y: 288 }, space),
     { x: 500, y: 300 },
   )
-  assert.deepEqual(
-    clientDeltaToLayout({ x: 90, y: -45 }, space),
-    { x: 100, y: -50 },
-  )
+  assert.equal(clientLengthToLayout(-45, space), -50)
 })
 
 test('native scale remains an ordinary identity boundary', () => {
   const space = captureLayoutSpace(box({
     left: 20,
     top: 30,
-    clientWidth: 500,
-    clientHeight: 300,
+    paintedWidth: 500,
+    paintedHeight: 300,
     layoutWidth: 500,
     layoutHeight: 300,
     currentCSSZoom: 1,
   }))
 
   assert.deepEqual(clientPointToLayout({ x: 55, y: 70 }, space), { x: 35, y: 40 })
-  assert.deepEqual(clientDeltaToLayout({ x: 48, y: 24 }, space), { x: 48, y: 24 })
+  assert.equal(clientLengthToLayout(48, space), 48)
 })
 
 test('the document root computed zoom is the legacy fallback', () => {
   const originalGetComputedStyle = globalThis.getComputedStyle
   const root = { authoredZoom: 0.9 }
   const legacy = box({ currentCSSZoom: undefined })
-  legacy.ownerDocument = { documentElement: root }
+  legacy.ownerDocument.documentElement = root
   globalThis.getComputedStyle = node => ({ zoom: String(node.authoredZoom) })
   let space
   try {
@@ -110,8 +124,8 @@ test('the document root computed zoom is the legacy fallback', () => {
 test('currentCSSZoom does not mistake transform scaling for CSS zoom', () => {
   const transformed = box({
     currentCSSZoom: 0.9,
-    clientWidth: 720,
-    clientHeight: 576,
+    paintedWidth: 720,
+    paintedHeight: 576,
   })
   const space = captureLayoutSpace(transformed)
   assert.equal(space.zoom, 0.9)

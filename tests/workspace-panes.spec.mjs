@@ -21,7 +21,6 @@
 import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 import { mockAcceptedMessages } from './_mockAcceptedMessages.mjs'
-import { activateFrameControl } from './frame-actions.mjs'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
@@ -139,8 +138,9 @@ async function mockApps(page, apps) {
   for (const a of apps) {
     await page.route(new RegExp(`/api/apps/${a.id}/frame`), route => route.fulfill({
       status: 200, contentType: 'text/html',
-      body: '<!doctype html><html><body style="margin:0">'
-        + '<button id="probe" onclick="window.__clicks += 1">app</button>'
+      body: '<!doctype html><html><body style="margin:0;min-height:100vh" '
+        + 'onclick="window.__clicks += 1">'
+        + '<button id="probe">app</button>'
         + '<script>window.__fi = 0; window.__clicks = 0;'
         + 'addEventListener("message", e => {'
         + ' if (e && e.data && e.data.type === "moebius:frame-init") window.__fi += 1;'
@@ -336,7 +336,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
     }
   })
 
-  test('(a) a pinned user message keeps its position across a divider drag', async ({ page }) => {
+  test('(a) the divider follows physical drag travel without moving a pinned message', async ({ page }) => {
     await boot(page, WIDE)
     const a = await createTaggedChat(page, 'wpA')
     const b = await createTaggedChat(page, 'wpB')
@@ -673,7 +673,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await page.keyboard.press('Escape')
   })
 
-  test('(d2) an app-frame click dismisses tab actions and still reaches the app', async ({ page }) => {
+  test('(d2) a physical app-frame click dismisses tab actions and reaches the app', async ({ page }) => {
     await boot(page, WIDE)
     const chat = await createTaggedChat(page, 'wpFrameMenu')
     const appId = 990102
@@ -691,12 +691,13 @@ test.describe('Workspace panes (PR2 gate)', () => {
     await activeTab.click({ button: 'right' })
     await expect(page.getByRole('menu', { name: 'Tab actions' })).toBeVisible()
 
+    const appFrame = page.locator(`iframe[data-app-id="${appId}"]`)
     const frame = page.frameLocator(`iframe[data-app-id="${appId}"]`)
-    const probe = frame.locator('#probe')
-    await probe.focus()
+    const box = await appFrame.boundingBox()
+    expect(box).not.toBeNull()
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
     await expect(page.getByRole('menu', { name: 'Tab actions' })).toHaveCount(0)
-    await activateFrameControl(probe)
-    await expect.poll(() => frame.locator('#probe').evaluate(() => window.__clicks)).toBe(1)
+    await expect.poll(() => frame.locator('body').evaluate(() => window.__clicks)).toBe(1)
   })
 
   test('(e) a projection flip to phone preserves the persisted tree and pane focus', async ({ page }) => {

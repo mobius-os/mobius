@@ -11,13 +11,11 @@ function positiveNumber(value, fallback = 0) {
 }
 
 function layoutZoom(element) {
-  const current = positiveNumber(element?.currentCSSZoom)
+  const current = positiveNumber(element.currentCSSZoom)
   if (current) return current
   if (typeof getComputedStyle !== 'function') return 1
-  const root = element?.ownerDocument?.documentElement
-  if (!root) return 1
   return positiveNumber(
-    getComputedStyle(root).zoom,
+    getComputedStyle(element.ownerDocument.documentElement).zoom,
     1,
   )
 }
@@ -28,27 +26,27 @@ function layoutZoom(element) {
  * is the single boundary where client input crosses into that layout space.
  */
 export function captureLayoutSpace(element) {
-  const rect = element?.getBoundingClientRect?.() || {}
+  const rect = element.getBoundingClientRect()
   const zoom = layoutZoom(element)
-  const isDocumentRoot = element?.ownerDocument?.documentElement === element
+  const isDocumentRoot = element.ownerDocument?.documentElement === element
   const width = positiveNumber(
-    isDocumentRoot ? element?.offsetWidth : element?.clientWidth,
+    isDocumentRoot ? element.offsetWidth : element.clientWidth,
     positiveNumber(
-      isDocumentRoot ? element?.clientWidth : element?.offsetWidth,
+      isDocumentRoot ? element.clientWidth : element.offsetWidth,
       finiteNumber(rect.width) / zoom,
     ),
   )
   const height = positiveNumber(
-    isDocumentRoot ? element?.offsetHeight : element?.clientHeight,
+    isDocumentRoot ? element.offsetHeight : element.clientHeight,
     positiveNumber(
-      isDocumentRoot ? element?.clientHeight : element?.offsetHeight,
+      isDocumentRoot ? element.clientHeight : element.offsetHeight,
       finiteNumber(rect.height) / zoom,
     ),
   )
 
   return {
-    clientLeft: finiteNumber(rect.left) + finiteNumber(element?.clientLeft) * zoom,
-    clientTop: finiteNumber(rect.top) + finiteNumber(element?.clientTop) * zoom,
+    clientLeft: finiteNumber(rect.left) + finiteNumber(element.clientLeft) * zoom,
+    clientTop: finiteNumber(rect.top) + finiteNumber(element.clientTop) * zoom,
     width,
     height,
     zoom,
@@ -67,12 +65,4 @@ export function clientPointToLayout(point, space) {
 /** Convert a viewport/client length into a CSS-layout length. */
 export function clientLengthToLayout(value, space) {
   return finiteNumber(value) / positiveNumber(space?.zoom, 1)
-}
-
-/** Convert a two-axis viewport/client displacement into layout space. */
-export function clientDeltaToLayout(delta, space) {
-  return {
-    x: clientLengthToLayout(delta?.x, space),
-    y: clientLengthToLayout(delta?.y, space),
-  }
 }

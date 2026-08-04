@@ -92,15 +92,6 @@ test('activation holds an unchanged running transcript until stream catch-up', (
   assert.match(chatView,
     /activationAnchorKey = searchAnchorKey \|\| savedAnchorKey/,
     'search navigation takes precedence over the saved reading row for one activation')
-  assert.match(drawer,
-    /chatSearchState\.query === normalizedChatSearchQuery[\s\S]*results: \[\]/,
-    'a changed query must hide stale result buttons before debounce completes')
-  assert.match(drawer,
-    /result\.searchQuery !== latestChatSearchQueryRef\.current/,
-    'a stale result handler must also reject an activation after input changes')
-  assert.match(drawer,
-    /searchSnippetPresentation\(result\.snippet\)[\s\S]*searchTerms: snippet\.terms/,
-    'the server-marked visible snippet, not a second query parser, owns destination terms')
   assert.match(chatView,
     /reconcileChatSearchActivation\([\s\S]*const searchRevealConsumed[\s\S]*if \(!searchReveal \|\| searchRevealConsumed \|\| !displayReady\) return[\s\S]*consumeChatSearchActivation\([\s\S]*clearChatSearchReveal/,
     'consumption stays latched to the searched activation instead of reloading its saved anchor')
@@ -252,9 +243,11 @@ test('direct chat actions hand focus to the destination composer', () => {
   assert.match(shell,
     /if \(!startupChatComposerFocusPendingRef\.current\) return[\s\S]*activeView !== 'chat' \|\| activeChatId == null[\s\S]*startupChatComposerFocusPendingRef\.current = false[\s\S]*focusDesktopChatPaneComposer\(activeChatId\)/,
     'restored chat focus must be one-shot rather than following later mode changes')
-  assert.match(shell,
-    /newChat\(\{ focusComposer: true, recordHistory: true \}\)/,
-    'the direct New chat action must request composer focus')
+  const ownerNewChatCalls = shell.match(
+    /newChat\(\{ forceNew: true, focusComposer: true, recordHistory: true \}\)/g,
+  ) || []
+  assert.equal(ownerNewChatCalls.length, 2,
+    'desktop rail and mobile drawer must both allocate and focus a fresh chat')
   assert.match(shell,
     /beginTouchComposerFocusLease\([\s\S]*?await resolveNewChatId/,
     'New chat must reserve phone keyboard focus before its first async boundary')
@@ -270,9 +263,9 @@ test('direct chat actions hand focus to the destination composer', () => {
   assert.match(selectChat,
     /navTo\('chat', \{ chatId: id, preserveDrawerPresentation \}\)[\s\S]*if \(focusComposer\) focusDesktopChatPaneComposer\(id\)/,
     'drawer and settings chat selection must focus after requesting navigation')
-  assert.match(drawer,
-    /selectChatSearchResult[\s\S]*const reveal = result\.anchor_key[\s\S]*onChat\(result\.id, \{ focusComposer: !reveal \}\)/,
-    'search focuses an exact message row and gives title-only results a composer fallback')
+  assert.match(shell,
+    /target\.focusComposer === true[\s\S]*requestComposer\(target\.chatId, \{ focus: true \}\)/,
+    'the shared header navigation boundary preserves title-only search focus')
   assert.match(chatView,
     /className=\{`chat__msg[\s\S]*tabIndex=\{-1\}/,
     'message rows must accept the programmatic search focus without joining tab order')

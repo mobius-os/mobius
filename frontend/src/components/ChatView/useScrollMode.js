@@ -65,7 +65,7 @@ import { cidOf } from './messageIdentity.js'
 import { isOwnerUserMessage } from './chatRuntimeState.js'
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 import { isPerfProbeEnabled, perfMark, perfTime } from '../../lib/perfProbe.js'
-import { captureLayoutSpace, clientDeltaToLayout } from '../../lib/layoutSpace.js'
+import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 
 
 // Hide-then-reveal safety cap. The ordinary path reveals after authoritative
@@ -257,10 +257,9 @@ function _topmostVisibleMsg(scrollEl) {
 
 
 function _captureScrollMeasurement(scrollEl) {
-  const space = captureLayoutSpace(scrollEl)
   return {
-    space,
-    borderClientTop: space.clientTop - (Number(scrollEl?.clientTop) || 0) * space.zoom,
+    space: captureLayoutSpace(scrollEl),
+    borderClientTop: scrollEl.getBoundingClientRect().top,
   }
 }
 
@@ -281,10 +280,7 @@ function _scrollTopOf(scrollEl, el, measurement = null) {
     const captured = measurement || _captureScrollMeasurement(scrollEl)
     const clientTopDelta = el.getBoundingClientRect().top
       - captured.borderClientTop
-    return clientDeltaToLayout(
-      { x: 0, y: clientTopDelta },
-      captured.space,
-    ).y + scrollEl.scrollTop
+    return clientLengthToLayout(clientTopDelta, captured.space) + scrollEl.scrollTop
   }
   return el?.offsetTop || 0
 }
@@ -361,7 +357,11 @@ function _rowPartTarget(row, mode) {
 /** Build an ANCHOR_AT for `row` describing the viewport at `scrollTop`. */
 function _anchorModeForRow(scrollEl, row, scrollTop, extra = null) {
   if (!row?.dataset?.key) return null
-  const measurement = _captureScrollMeasurement(scrollEl)
+  // Real DOM anchors share one rect measurement. Plain row-level fixtures use
+  // the offset fallback without having to imitate browser geometry.
+  const measurement = typeof scrollEl?.getBoundingClientRect === 'function'
+    ? _captureScrollMeasurement(scrollEl)
+    : null
   const part = _partPathAt(scrollEl, row, scrollTop, measurement)
   const target = _rowPartTarget(row, { part })
   return {
@@ -1644,10 +1644,10 @@ export default function useScrollMode({
     const targetRect = exactTarget?.getBoundingClientRect?.()
     const rowRect = row.getBoundingClientRect?.()
     if (Number.isFinite(targetRect?.top) && Number.isFinite(rowRect?.top)) {
-      const targetDelta = clientDeltaToLayout(
-        { x: 0, y: targetRect.top - rowRect.top },
+      const targetDelta = clientLengthToLayout(
+        targetRect.top - rowRect.top,
         captureLayoutSpace(scrollEl),
-      ).y
+      )
       if (Number.isFinite(targetDelta)) anchorOffset -= targetDelta
     }
     supersedePendingReaderGesture()

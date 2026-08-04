@@ -9,12 +9,15 @@ import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import {
   AppsNavIcon,
   NewChatNavIcon,
-  SearchNavIcon,
   SettingsNavIcon,
 } from '../navigationIcons.js'
-import { requestChatSearchReveal } from '../../lib/chatSearchReveal.js'
-import { searchSnippetPresentation } from '../../lib/searchTermHighlight.js'
-import { appIconUrl } from '../appIcon.js'
+import {
+  appIconIsReady,
+  appIconUrl,
+  forgetAppIconReady,
+  preloadAppIcons,
+  rememberAppIconReady,
+} from '../appIcon.js'
 import {
   computePinnedDrag,
   observePinnedOrderHandoff,
@@ -68,7 +71,8 @@ import './Drawer.css'
 // downstream.
 const EMPTY_SET = new Set()
 const TOUCH_CONTEXT_MENU_PROVENANCE_MS = 1500
-const SEARCH_DEBOUNCE_MS = 180
+const APP_ICON_PRIORITY_COUNT = 24
+const APP_ICON_WARM_LIMIT = 96
 
 export default function Drawer({
   open,
@@ -136,6 +140,23 @@ export default function Drawer({
     recents: allRecents,
     apps: sortedApps,
   } = useMemo(() => buildDrawerSections(chats, apps), [chats, apps])
+
+  // Decode the first launcher viewport immediately, then warm a bounded
+  // remainder without competing with initial shell work.
+  useEffect(() => {
+    if (sortedApps.length === 0) return
+    const priority = sortedApps.slice(0, APP_ICON_PRIORITY_COUNT)
+    const remainder = sortedApps.slice(APP_ICON_PRIORITY_COUNT, APP_ICON_WARM_LIMIT)
+    void preloadAppIcons(priority)
+    if (remainder.length === 0 || navigator.connection?.saveData) return
+
+    const warmRemainder = () => { void preloadAppIcons(remainder) }
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(warmRemainder, { timeout: 3000 })
+    } else {
+      setTimeout(warmRemainder, 500)
+    }
+  }, [sortedApps])
   const pinnedItems = useMemo(() => (
     pinnedOrderHandoff
       ? projectPinnedEntries(basePinnedItems, pinnedOrderHandoff.visibleKeys)
@@ -340,12 +361,6 @@ export default function Drawer({
   // rather than in Shell so this stays drawer-local.
   const [installingApp, setInstallingApp] = useState(null)
   const [appQuery, setAppQuery] = useState('')
-  const [chatSearchQuery, setChatSearchQuery] = useState('')
-  const [chatSearchState, setChatSearchState] = useState({
-    query: '', status: 'idle', results: [],
-  })
-  const latestChatSearchQueryRef = useRef('')
-  const chatSearchControllerRef = useRef(null)
   const appsButtonRef = useRef(null)
   const filteredApps = useMemo(
     () => filterInstalledApps(sortedApps, appQuery),
@@ -383,79 +398,6 @@ export default function Drawer({
     window.addEventListener('pageshow', closeOnReshow)
     return () => window.removeEventListener('pageshow', closeOnReshow)
   }, [])
-
-  // Search deliberately stays drawer-local. Results carry the exact normalized
-  // query that produced them, so the first render of a changed input cannot
-  // leave the previous response actionable during the debounce window.
-  useEffect(() => {
-    const query = chatSearchQuery.trim()
-    chatSearchControllerRef.current?.abort()
-    chatSearchControllerRef.current = null
-    if (!query) {
-      setChatSearchState({ query: '', status: 'idle', results: [] })
-      return undefined
-    }
-    const controller = new AbortController()
-    chatSearchControllerRef.current = controller
-    setChatSearchState({ query, status: 'loading', results: [] })
-    const timer = setTimeout(async () => {
-      try {
-        const response = await api.chats.search(query, { signal: controller.signal })
-        if (!response.ok) throw new Error(`CHAT_SEARCH_${response.status}`)
-        const results = await response.json()
-        if (!controller.signal.aborted && chatSearchControllerRef.current === controller) {
-          setChatSearchState({
-            query,
-            status: 'ready',
-            results: (Array.isArray(results) ? results : []).map(result => {
-              const snippet = searchSnippetPresentation(result.snippet)
-              return {
-                ...result,
-                searchQuery: query,
-                searchTerms: snippet.terms,
-                snippetParts: snippet.parts,
-              }
-            }),
-          })
-        }
-      } catch (error) {
-        if (error?.name !== 'AbortError'
-            && !controller.signal.aborted
-            && chatSearchControllerRef.current === controller) {
-          setChatSearchState({ query, status: 'error', results: [] })
-        }
-      }
-    }, SEARCH_DEBOUNCE_MS)
-    return () => {
-      clearTimeout(timer)
-      controller.abort()
-      if (chatSearchControllerRef.current === controller) {
-        chatSearchControllerRef.current = null
-      }
-    }
-  }, [chatSearchQuery])
-
-  useEffect(() => () => chatSearchControllerRef.current?.abort(), [])
-
-  const selectChatSearchResult = useCallback((result) => {
-    if (!result || result.searchQuery !== latestChatSearchQueryRef.current) return
-    resetAppsSurfaceUi({ restoreFocus: false })
-    const reveal = result.anchor_key
-      ? requestChatSearchReveal(result.id, {
-          anchorKey: result.anchor_key,
-          terms: result.searchTerms,
-        })
-      : null
-    // Exact transcript hits transfer focus to the addressed row. A title-only
-    // result has no row to receive focus, so use the ordinary composer handoff
-    // rather than leaving focus on a drawer button that is about to unmount.
-    onChat(result.id, { focusComposer: !reveal })
-  }, [onChat, resetAppsSurfaceUi])
-
-  const normalizedChatSearchQuery = chatSearchQuery.trim()
-  const visibleChatSearch = chatSearchState.query === normalizedChatSearchQuery
-    ? chatSearchState
-    : { query: normalizedChatSearchQuery, status: 'loading', results: [] }
 
   // Rows receive one stable action surface instead of a new closure for every
   // action on every item. The ref supplies the latest props and local helpers,
@@ -1106,54 +1048,6 @@ export default function Drawer({
               <span className="drawer__item-text">New chat</span>
             </button>
 
-            <section className="drawer__chat-search" aria-label="Search chats">
-              <label className="drawer__chat-search-input">
-                <SearchNavIcon aria-hidden="true" />
-                <input
-                  type="search"
-                  value={chatSearchQuery}
-                  onChange={event => {
-                    latestChatSearchQueryRef.current = event.target.value.trim()
-                    setChatSearchQuery(event.target.value)
-                  }}
-                  placeholder="Search chats"
-                  aria-label="Search chats"
-                />
-              </label>
-              {chatSearchQuery.trim() && (
-                <div className="drawer__chat-search-results" aria-live="polite">
-                  {visibleChatSearch.status === 'loading' && (
-                    <p className="drawer__chat-search-status">Searching chats…</p>
-                  )}
-                  {visibleChatSearch.status === 'error' && (
-                    <p className="drawer__chat-search-status">Search is unavailable right now.</p>
-                  )}
-                  {visibleChatSearch.status === 'ready' && visibleChatSearch.results.length === 0 && (
-                    <p className="drawer__chat-search-status">No matching chats.</p>
-                  )}
-                  {visibleChatSearch.results.map(result => (
-                    <button
-                      key={result.id}
-                      type="button"
-                      className="drawer__chat-search-result"
-                      onClick={() => selectChatSearchResult(result)}
-                    >
-                      <span className="drawer__chat-search-title">{result.title || 'Untitled chat'}</span>
-                      {result.snippet && (
-                        <span className="drawer__chat-search-snippet">
-                          {result.snippetParts.map((part, index) => (
-                            part.marked
-                              ? <mark key={index}>{part.text}</mark>
-                              : <span key={index}>{part.text}</span>
-                          ))}
-                        </span>
-                      )}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </section>
-
             <div className="drawer__scroll drawer__scroll--navigation" ref={navigationScrollRef}>
               <button
                 ref={appsButtonRef}
@@ -1403,7 +1297,7 @@ function NowPlaying({ session, app, onOpen, onControl }) {
         aria-label={`Open ${appName}`}
       >
         {app ? (
-          <AppIcon item={app} label={appName} className="drawer__now-playing-icon" size={64} />
+          <AppIcon item={app} label={appName} className="drawer__now-playing-icon" />
         ) : (
           <span className="drawer__now-playing-icon" aria-hidden="true">
             <span>{appInitials(appName)}</span>
@@ -1741,7 +1635,6 @@ const DrawerRow = memo(function DrawerRow({
             item={item}
             label={label}
             className="apps-directory__card-icon"
-            size={128}
           />
           <span className="apps-directory__card-meta">
             <span className="apps-directory__card-name">{label}</span>
@@ -2012,7 +1905,7 @@ const DrawerRow = memo(function DrawerRow({
         }}
       >
         {kind === 'app' && (
-          <AppIcon item={item} label={label} className="drawer__app-icon" size={64} />
+          <AppIcon item={item} label={label} className="drawer__app-icon" />
         )}
         {/* Status dot. Sits before the text so the user's eye
             picks it up alongside the label rather than at the row's
@@ -2054,10 +1947,14 @@ const DrawerRow = memo(function DrawerRow({
   )
 })
 
-function AppIcon({ item, label, className, size }) {
-  const iconUrl = appIconUrl(item, size)
-  const [loadedUrl, setLoadedUrl] = useState(null)
-  const hasImage = Boolean(iconUrl && loadedUrl === iconUrl)
+function AppIcon({ item, label, className }) {
+  const iconUrl = appIconUrl(item)
+  const [loadedUrl, setLoadedUrl] = useState(
+    () => (appIconIsReady(iconUrl) ? iconUrl : null),
+  )
+  const hasImage = Boolean(
+    iconUrl && (loadedUrl === iconUrl || appIconIsReady(iconUrl)),
+  )
   return (
     <span
       className={`${className}${hasImage ? ' is-image' : ''}`}
@@ -2069,14 +1966,16 @@ function AppIcon({ item, label, className, size }) {
         <img
           src={iconUrl}
           alt=""
-          loading="lazy"
+          loading="eager"
           decoding="async"
           onLoad={event => {
             event.currentTarget.hidden = false
+            rememberAppIconReady(iconUrl)
             setLoadedUrl(iconUrl)
           }}
           onError={event => {
             event.currentTarget.hidden = true
+            forgetAppIconReady(iconUrl)
             setLoadedUrl(null)
           }}
         />

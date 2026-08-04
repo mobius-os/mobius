@@ -1,6 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { appIconUrl } from '../../appIcon.js'
+import {
+  appIconIsReady,
+  appIconUrl,
+  preloadAppIcons,
+} from '../../appIcon.js'
 
 test('installed app chrome sizes the canonical icon reference from AppOut', () => {
   const app = {
@@ -25,4 +29,46 @@ test('installed app chrome sizes the canonical icon reference from AppOut', () =
   assert.equal(appIconUrl({ id: 7, icon_url: null }), null)
   assert.equal(appIconUrl({ id: 7 }), null)
   assert.equal(appIconUrl(null), null)
+})
+
+test('shell icon warming preserves app order and removes duplicate asset work', async () => {
+  const apps = [
+    { icon_url: '/api/apps/1/icon?v=a' },
+    { icon_url: '/api/apps/2/icon?v=b' },
+    { icon_url: '/api/apps/1/icon?v=a' },
+    { icon_url: null },
+  ]
+  const requested = []
+  class FakeImage {
+    set src(value) {
+      requested.push(value)
+      queueMicrotask(() => this.onload())
+    }
+  }
+  await preloadAppIcons(apps, { ImageCtor: FakeImage })
+  assert.deepEqual(requested, [
+    '/api/apps/1/icon?v=a&size=128',
+    '/api/apps/2/icon?v=b&size=128',
+  ])
+})
+
+test('preloaded artwork is decoded and ready for the launcher first render', async () => {
+  let decodeCount = 0
+  class FakeImage {
+    set src(value) {
+      this.value = value
+      queueMicrotask(() => this.onload())
+    }
+    decode() {
+      decodeCount += 1
+      return Promise.resolve()
+    }
+  }
+
+  const app = { icon_url: '/api/apps/9/icon?v=ready' }
+  const url = `${app.icon_url}&size=128`
+  const result = await preloadAppIcons([app], { ImageCtor: FakeImage })
+  assert.deepEqual(result, [true])
+  assert.equal(decodeCount, 1)
+  assert.equal(appIconIsReady(url), true)
 })
