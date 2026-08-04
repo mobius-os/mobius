@@ -51,6 +51,8 @@ _HANDSHAKE_DEADLINE_SECONDS = 22.0
 _MAX_RPC_BYTES = 2 * 1024 * 1024
 _MAX_TOOLS = 128
 _MAX_TOOL_PAGES = 10
+_MIN_AUTH_SECRET_CHARS = 8
+_MAX_AUTH_SECRET_CHARS = 4096
 # A provider turn can legitimately remain alive for hours, but a copied child
 # environment must not retain broker access for days. Cap one turn credential
 # at 24 hours; disabling or deleting the connector revokes it immediately
@@ -60,12 +62,25 @@ _SLUG_RE = re.compile(r"[^a-z0-9_]+")
 _HEADER_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _RESERVED_AUTH_HEADERS = {
   "accept",
+  "connection",
   "content-length",
   "content-type",
+  "expect",
   "host",
+  "keep-alive",
+  "last-event-id",
+  "mcp-method",
+  "mcp-name",
   "mcp-protocol-version",
   "mcp-session-id",
   "origin",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "proxy-connection",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
 }
 
 
@@ -185,7 +200,8 @@ def validate_auth_header(name: str | None) -> str | None:
     return None
   if not _HEADER_RE.fullmatch(value):
     raise ConnectorError("The API-key header name is not valid.")
-  if value.lower() in _RESERVED_AUTH_HEADERS:
+  lower = value.lower()
+  if lower in _RESERVED_AUTH_HEADERS or lower.startswith("mcp-param-"):
     raise ConnectorError(f"{value} is reserved by the MCP transport.")
   return value
 
@@ -205,6 +221,19 @@ def bare_secret(header_name: str | None, secret: str) -> str:
   """Return the token form Codex expects for Authorization credentials."""
   if header_name and header_name.lower() == "authorization":
     return re.sub(r"(?i)^bearer\s+", "", secret, count=1)
+  return secret
+
+
+def validate_auth_secret(
+  header_name: str | None,
+  secret: str | None,
+) -> str | None:
+  """Keep static keys safely bounded and specific enough to redact."""
+  if secret and len(secret) > _MAX_AUTH_SECRET_CHARS:
+    raise ConnectorError("The API key is too long.")
+  effective = bare_secret(header_name, secret) if secret else None
+  if effective and len(effective) < _MIN_AUTH_SECRET_CHARS:
+    raise ConnectorError("API keys must be at least 8 characters.")
   return secret
 
 
@@ -442,6 +471,7 @@ async def handshake(
 ) -> dict:
   """Probe a shared-provider MCP endpoint and return bounded tool names."""
   header_name = validate_auth_header(header_name)
+  secret = validate_auth_secret(header_name, secret)
   auth = auth_headers(header_name, secret)
   headers = {
     "Accept": "application/json, text/event-stream",
@@ -592,7 +622,7 @@ def build_turn_plan(
       }
       codex_servers[server_key] = {
         "url": broker_url,
-        "startup_timeout_sec": 15,
+        "startup_timeout_sec": 30,
         "bearer_token_env_var": env_var,
       }
       codex_env[env_var] = capability

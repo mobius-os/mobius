@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -63,12 +63,24 @@ class ConnectorCreate(BaseModel):
   url: str = Field(min_length=8, max_length=2048)
   name: str = Field(default="", max_length=128)
   auth_header: str = Field(default="", max_length=64)
-  auth_value: str = Field(default="", max_length=4096)
+  # Validate this write-only value in the route. Pydantic includes rejected
+  # field input in its standard 422 body, which would echo an invalid key.
+  auth_value: object = ""
 
 
 class ConnectorPatch(BaseModel):
   enabled: bool | None = None
   name: str | None = Field(default=None, min_length=1, max_length=128)
+
+  @field_validator("name")
+  @classmethod
+  def nonblank_name(cls, value: str | None) -> str | None:
+    if value is None:
+      return None
+    stripped = value.strip()
+    if not stripped:
+      raise ValueError("Connection name must not be blank.")
+    return stripped
 
 
 def _public(row: models.Connector) -> dict:
@@ -168,16 +180,24 @@ def _snapshot_broker_row(
       status_code=401, detail="MCP broker capability rejected."
     ) from exc
   secret = None
-  if row.auth_header and row.auth_value_encrypted:
+  try:
+    auth_header = core.validate_auth_header(row.auth_header)
+  except core.ConnectorError as exc:
+    raise HTTPException(
+      status_code=502,
+      detail="The connection key configuration is not valid.",
+    ) from exc
+  if auth_header and row.auth_value_encrypted:
     try:
       secret = core.decrypt_secret(row.auth_value_encrypted)
+      core.validate_auth_secret(auth_header, secret)
     except core.ConnectorError as exc:
       raise HTTPException(
         status_code=502, detail="The connection key could not be loaded.",
       ) from exc
   return _BrokerSnapshot(
     url=str(row.url),
-    auth_header=str(row.auth_header) if row.auth_header else None,
+    auth_header=auth_header,
     secret=secret,
   )
 
@@ -389,6 +409,8 @@ async def add_connector(
   db: Session = Depends(get_db),
 ):
   url = body.url.strip()
+  if not isinstance(body.auth_value, str):
+    raise HTTPException(status_code=400, detail="The API key must be text.")
   auth_value = body.auth_value.strip()
   auth_header = body.auth_header.strip()
   if auth_value and not auth_header:
@@ -400,11 +422,15 @@ async def add_connector(
   )
   try:
     normalized_header = core.validate_auth_header(auth_header or None)
+    normalized_secret = core.validate_auth_secret(
+      normalized_header,
+      auth_value or None,
+    )
     # The probe can consume the complete handshake deadline. Release the
     # checked-out connection first; this Session reacquires only after the
     # network result is back in hand.
     db.close()
-    probe = await core.handshake(url, normalized_header, auth_value or None)
+    probe = await core.handshake(url, normalized_header, normalized_secret)
   except core.ConnectorError as exc:
     raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -422,7 +448,8 @@ async def add_connector(
       url=url,
       auth_header=normalized_header,
       auth_value_encrypted=(
-        core.encrypt_secret(auth_value) if normalized_header and auth_value else None
+        core.encrypt_secret(normalized_secret)
+        if normalized_header and normalized_secret else None
       ),
       enabled=True,
       tools_json=probe["tools"],
@@ -467,7 +494,7 @@ async def patch_connector(
       values["capability_id"] = secrets.token_hex(32)
     values["enabled"] = body.enabled
   if body.name is not None:
-    values["name"] = body.name.strip()[:128]
+    values["name"] = body.name
   if not values:
     return _public(row)
   target = db.query(models.Connector).filter(
@@ -503,13 +530,20 @@ async def refresh_connector(
 ):
   stored = _get_row(db, connector_id, generation)
   secret = None
-  if stored.auth_header and stored.auth_value_encrypted:
+  try:
+    auth_header = core.validate_auth_header(stored.auth_header)
+  except core.ConnectorError as exc:
+    raise HTTPException(
+      status_code=409,
+      detail="The connection key configuration is not valid.",
+    ) from exc
+  if auth_header and stored.auth_value_encrypted:
     try:
       secret = core.decrypt_secret(stored.auth_value_encrypted)
+      core.validate_auth_secret(auth_header, secret)
     except core.ConnectorError as exc:
       raise HTTPException(status_code=409, detail=str(exc)) from exc
   url = str(stored.url)
-  auth_header = str(stored.auth_header) if stored.auth_header else None
   # Do not lease a DB connection while waiting on DNS or a remote service.
   # Re-fetch after the probe so a concurrent disable/delete remains decisive.
   db.close()

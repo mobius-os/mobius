@@ -32,8 +32,18 @@ def test_slug_auth_and_token_helpers_are_provider_consistent():
   }
   assert core.bare_secret("Authorization", "Bearer sk-123") == "sk-123"
   assert core.bare_secret("X-Api-Key", "Bearer sk-123") == "Bearer sk-123"
+  with pytest.raises(core.ConnectorError, match="at least 8"):
+    core.validate_auth_secret("X-Api-Key", "tiny")
+  with pytest.raises(core.ConnectorError, match="at least 8"):
+    core.validate_auth_secret("Authorization", "Bearer a")
   with pytest.raises(core.ConnectorError, match="reserved"):
     core.validate_auth_header("MCP-Protocol-Version")
+  with pytest.raises(core.ConnectorError, match="reserved"):
+    core.validate_auth_header("Last-Event-ID")
+  with pytest.raises(core.ConnectorError, match="reserved"):
+    core.validate_auth_header("Transfer-Encoding")
+  with pytest.raises(core.ConnectorError, match="reserved"):
+    core.validate_auth_header("Mcp-Param-Cursor")
 
 
 @pytest.mark.asyncio
@@ -459,7 +469,7 @@ def test_turn_plan_serves_both_providers_without_config_secrets():
     capability = claude["headers"]["Authorization"].removeprefix("Bearer ")
     row = next(row for row in plan_source_rows if row.id == connector_id)
     core.verify_broker_capability(capability, connector_id, row.capability_id)
-    assert codex["startup_timeout_sec"] == 15
+    assert codex["startup_timeout_sec"] == 30
     env_var = codex["bearer_token_env_var"]
     assert plan.codex_env[env_var] == capability
   assert "sk-9" not in repr(plan)
@@ -523,6 +533,32 @@ def test_connector_routes_keep_keys_out_of_responses(
   handshake = AsyncMock(side_effect=probe_without_db_lease)
   monkeypatch.setattr("app.routes.connectors.core.handshake", handshake)
 
+  overlong_secret = "never-echo-overlong-" + ("z" * 4096)
+  overlong = client.post("/api/connectors", headers=auth, json={
+    "url": "https://mcp.example/mcp",
+    "auth_value": overlong_secret,
+  })
+  assert overlong.status_code == 422
+  assert overlong_secret not in overlong.text
+  assert "never-echo-overlong" not in overlong.text
+
+  wrong_type = client.post("/api/connectors", headers=auth, json={
+    "url": "https://mcp.example/mcp",
+    "auth_value": {"secret": "never-echo-object"},
+  })
+  assert wrong_type.status_code == 400
+  assert "never-echo-object" not in wrong_type.text
+  assert handshake.await_count == 0
+
+  short = client.post("/api/connectors", headers=auth, json={
+    "url": "https://mcp.example/mcp",
+    "auth_header": "Authorization",
+    "auth_value": "Bearer a",
+  })
+  assert short.status_code == 422
+  assert "at least 8" in short.text
+  assert handshake.await_count == 0
+
   add_baseline = checked_out_connections()
   created = client.post("/api/connectors", headers=auth, json={
     "url": "https://mcp.example/mcp",
@@ -545,6 +581,15 @@ def test_connector_routes_keep_keys_out_of_responses(
   assert body["generation"] == original_identity
   assert stored.auth_value_encrypted != "top-secret"
   assert core.decrypt_secret(stored.auth_value_encrypted) == "top-secret"
+
+  blank_name = client.patch(
+    f"/api/connectors/{stored.id}",
+    headers=_owner_headers(auth, original_identity),
+    json={"name": "   "},
+  )
+  assert blank_name.status_code == 422
+  db.refresh(stored)
+  assert stored.name == "Example MCP"
 
   listed = client.get("/api/connectors", headers=auth)
   assert listed.status_code == 200
@@ -716,6 +761,36 @@ def test_refresh_cannot_overwrite_reused_connector_id(
     replacement = check.query(models.Connector).filter_by(id=73).one()
     assert replacement.slug == "replacement"
     assert replacement.tools_json == [{"name": "replacement"}]
+
+
+@pytest.mark.parametrize(("auth_header", "secret"), (
+  ("Authorization", "Bearer a"),
+  ("Transfer-Encoding", "long-enough-key"),
+))
+def test_broker_rejects_legacy_unsafe_key_configuration(
+  client,
+  db,
+  auth_header,
+  secret,
+):
+  row = _row(
+    79,
+    "unsafe_legacy_key",
+    "https://unsafe-key.example/mcp",
+    auth_header,
+    secret,
+  )
+  db.add(row)
+  db.commit()
+  capability = core.mint_broker_capability(row.id, row.capability_id)
+
+  with TestClient(client.app, client=("127.0.0.1", 43100)) as loopback:
+    rejected = loopback.get(
+      f"/api/connectors/{row.id}/broker",
+      headers={"Authorization": f"Bearer {capability}"},
+    )
+
+  assert rejected.status_code == 502
 
 
 def test_broker_requires_loopback_and_connector_scoped_capability(
