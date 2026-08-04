@@ -1043,7 +1043,14 @@ export default function Shell() {
       setNewChatPresentation(current => (
         current === presentation ? releasing : current
       ))
-      releaseComposerFocusLease(composerFocusLeaseRef.current)
+      // The keyboard lease is deliberately NOT released here. Display-ready only
+      // unblocks the composerRequest (gated on surfaceVisible); the destination
+      // composer accepts focus one animation frame later. Releasing now blurs
+      // the lease a frame early, leaving nothing focused — Android drops and
+      // re-raises the soft keyboard (the New-chat "bounce"). On this success
+      // path the composer's own focus atomically takes the keyboard from the
+      // lease and the lease's onBlur clears it; only the abandon paths (failed
+      // or superseded allocation) release the lease explicitly.
     }
     finishDrawerNavigationPresentation()
   }, [finishDrawerNavigationPresentation, focusedPaneViewIdRef, workspaceStateRef])
