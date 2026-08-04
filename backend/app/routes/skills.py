@@ -460,6 +460,8 @@ async def _fetch_files(
       except BaseException:
         # Signal before releasing the semaphore so a queued task that acquires
         # this slot cannot begin another request during gather's error handoff.
+        # (test_install_repo_dir_settles_parallel_fetches_before_returning_failure
+        # pins that no request starts beyond the in-flight batch once one fails.)
         fetch_failed.set()
         raise
     return rel, data
@@ -570,7 +572,7 @@ def list_skills(principal=Depends(get_principal)) -> dict:
     "install_contract": {
       "version": 1,
       "max_resources": _RESOURCE_COUNT_MAX,
-      "max_resource_bytes": _RESOURCE_TOTAL_MAX,
+      "max_total_resource_bytes": _RESOURCE_TOTAL_MAX,
       "max_depth": _RESOURCE_MAX_DEPTH,
       "max_skill_bytes": SKILL_MAX_BYTES,
     },

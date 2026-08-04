@@ -203,7 +203,7 @@ def test_list_skills_route(client, auth, skills_dir):
   assert r.json()["install_contract"] == {
     "version": 1,
     "max_resources": skills_mod.RESOURCE_COUNT_MAX,
-    "max_resource_bytes": skills_mod.RESOURCE_TOTAL_MAX,
+    "max_total_resource_bytes": skills_mod.RESOURCE_TOTAL_MAX,
     "max_depth": skills_mod.RESOURCE_MAX_DEPTH,
     "max_skill_bytes": 256 * 1024,
   }
