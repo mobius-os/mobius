@@ -37,14 +37,18 @@ test('normalize preserves property ABSENCE as the migration marker', () => {
   assert.equal('singleScreen' in n, false, 'absence survives normalize')
 })
 
-test('a fresh standard seed routes through its focused fallback until the slot initializes', () => {
+test('a fresh standard seed reports the empty home until its slot initializes — never Builder focus', () => {
+  // Two-worlds: an uninitialized Standard (absent slot) is its OWN empty home; it
+  // never borrows the focused Builder pane (the first item opened initializes it).
   const chat = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
   assert.equal('singleScreen' in chat, false)
-  assert.equal(paneModel.activeContentRoute(chat).chatId, '5')
+  assert.equal(chat.viewMode, 'single')
+  assert.equal(paneModel.activeContentRoute(chat).chatId, null, 'absent slot is home, not the focused chat')
 
   const app = paneModel.seedFromFlatTabs([makeTab('chat', '5'), makeTab('app', '42')])
   assert.equal('singleScreen' in app, false)
-  assert.equal(paneModel.activeContentRoute(app).appId, 42)
+  assert.equal(paneModel.activeContentRoute(app).appId, null, 'never borrows the focused app')
+  assert.equal(paneModel.activeContentRoute(app).chatId, null)
 
   const empty = paneModel.seedFromFlatTabs([])
   assert.equal(paneModel.activeContentRoute(empty).chatId, null, 'an empty first boot starts at home')
@@ -108,14 +112,16 @@ test('activeKeyForOwner resolves real panes and the synthetic single owner', () 
   assert.equal(paneModel.activeKeyForOwner(ws, 'missing-pane'), null)
 })
 
-test('activeKeyForOwner gives a legacy Standard owner the focused seed without overriding explicit null', () => {
+test('activeKeyForOwner treats a legacy absent slot as empty — never the focused seed', () => {
   const legacy = paneModel.seedFromFlatTabs([
     { kind: 'chat', id: '5', title: 'Five' },
   ])
   assert.equal('singleScreen' in legacy, false)
+  // Two-worlds: the Standard owner selects through its OWN slot only. An absent slot
+  // is empty (null), never the focused Builder pane's chat.
   assert.equal(
     paneModel.activeKeyForOwner(legacy, paneModel.SINGLE_SLOT_PANE),
-    'chat:5',
+    null,
   )
 
   const initializedEmpty = { ...legacy, singleScreen: null }

@@ -234,12 +234,15 @@ test('exit restores the ordinary multi-pane view (derivation is stateless)', () 
 
 // ── Single view-mode (design: view-mode toggle) ─────────────────────────────
 //
-// Single-mode collapses a preserved multi-pane tree to the focused pane's active
-// tab, full-bleed. It reuses the immersive/single-pane full-bleed path but is
-// driven by viewMode, not an overlay, and it is orthogonal to both overlays.
+// Single-mode paints its single-screen SLOT full-bleed over a preserved multi-pane
+// tree (never the focused pane — two-worlds design). It reuses the immersive/
+// single-pane full-bleed path but is driven by viewMode, not an overlay, and it is
+// orthogonal to both overlays.
 
-test('single-mode, multi-pane, focused app: chrome off, holder full-bleed, only focused app visible', () => {
-  const ws = twoPaneChatAndApp() // right (app 42) pane focused
+test('single-mode, multi-pane, app slot: chrome off, holder full-bleed, only slot app visible', () => {
+  // The slot app (42) is also present in the right pane, but single mode paints it
+  // because it is the SLOT, not because that pane is focused.
+  const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'app', id: '42' } }
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
     settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
@@ -248,23 +251,22 @@ test('single-mode, multi-pane, focused app: chrome off, holder full-bleed, only 
   assert.equal(v.single, true)
   assert.equal(v.multiPane, true, 'the tree is preserved — still two leaves')
   assert.equal(v.chromeActive, false, 'no strips/dividers over a single surface')
-  assert.equal(v.fullBleedKey, 'app:42', 'the focused pane paints full-bleed')
-  // Only the focused pane's app stays frame-visible; the sibling chat pane hides.
+  assert.equal(v.fullBleedKey, 'app:42', 'the slot app paints full-bleed')
+  // Only the slot app stays frame-visible; the sibling chat pane hides.
   assert.deepEqual([...v.visibleAppIds], ['42'])
 })
 
-test('single-mode with a focused CHAT pane paints the chat and hides the sibling app frame', () => {
-  // Focus p0 (the chat) instead of the app pane.
-  const ws = paneModel.focusPane(twoPaneChatAndApp(), 'p0')
-  assert.equal(ws.panes.p0.activeTabKey, tabKey(makeTab('chat', '5')))
+test('single-mode with a CHAT slot paints the chat and hides the sibling app frame', () => {
+  // The slot is chat 5; app 42 lives in a sibling pane but never paints in single mode.
+  const ws = { ...twoPaneChatAndApp(), singleScreen: { kind: 'chat', id: '5' } }
   const v = deriveContentVisibility({
     workspace: ws, projection: project(ws),
     settingsOverlayOpen: false, immersiveActive: false, immersiveAppId: null,
     viewMode: 'single',
   })
   assert.equal(v.single, true)
-  assert.equal(v.fullBleedKey, 'chat:5', 'the focused chat is the full-bleed surface')
-  // The sibling app 42 is NOT focused, so its frame goes visibility:false.
+  assert.equal(v.fullBleedKey, 'chat:5', 'the slot chat is the full-bleed surface')
+  // The sibling app 42 is NOT the slot, so its frame goes visibility:false.
   assert.deepEqual([...v.visibleAppIds], [])
 })
 
@@ -319,7 +321,7 @@ test('single-mode yields to immersive: the holder solo governs and single is ine
 })
 
 test('single-mode on a single-pane workspace is a no-op (already full-bleed)', () => {
-  const ws = paneModel.seedFromFlatTabs([makeTab('app', '42')])
+  const ws = { ...paneModel.seedFromFlatTabs([makeTab('app', '42')]), singleScreen: { kind: 'app', id: '42' } }
   const panes = deriveContentVisibility({
     workspace: ws, projection: project(ws), settingsOverlayOpen: false,
     immersiveActive: false, immersiveAppId: null, viewMode: 'panes',
@@ -370,7 +372,7 @@ test('single-leaf builder: not single, no tiled chrome, the leaf is full-bleed (
 // forcing (byte-identical to before): same content flags as builder, the only
 // difference (the strip) lives in Shell's builderModeActive gate, not here.
 test('single-leaf single-screen matches builder content flags (strip difference is Shell-only)', () => {
-  const ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
+  const ws = { ...paneModel.seedFromFlatTabs([makeTab('chat', '5')]), singleScreen: { kind: 'chat', id: '5' } }
   const builder = deriveContentVisibility({
     workspace: ws, projection: project(ws), settingsOverlayOpen: false,
     immersiveActive: false, immersiveAppId: null, viewMode: 'panes',
@@ -426,13 +428,16 @@ test('single mode with a NULL slot is the first-class New Chat landing (round 4 
   assert.deepEqual([...v.visibleAppIds], [], 'no app paints for the New Chat landing')
 })
 
-test('legacy (ABSENT slot) single mode falls back to the focused pane', () => {
-  // No singleScreen property → uninitialized → the pre-two-worlds collapse.
-  let ws = twoPaneChatAndApp() // app 42 focused
+test('legacy (ABSENT slot) single mode paints the New Chat landing — never the focused pane', () => {
+  // No singleScreen property → uninitialized. Two-worlds: Standard never borrows the
+  // focused Builder pane; an uninitialized slot is the empty home until an item is
+  // opened in single mode.
+  let ws = twoPaneChatAndApp() // app 42 focused in Builder
   assert.equal('singleScreen' in ws, false)
   const v = singleView(ws)
-  assert.equal(v.fullBleedKey, 'app:42', 'falls back to the focused pane app')
-  assert.deepEqual([...v.visibleAppIds], ['42'])
+  assert.equal(v.fullBleedKey, EMPTY_SINGLE_SURFACE_KEY, 'the New Chat landing, not the focused app')
+  assert.equal(v.focusedActiveKey, null, 'the landing is not a chat/app tab')
+  assert.deepEqual([...v.visibleAppIds], [], 'never borrows the focused pane app')
 })
 
 test('a fresh empty legacy seed paints the New Chat landing instead of a blank main', () => {
@@ -459,11 +464,11 @@ test('round 4 item 3: a null slot renders home:new-chat while its ROUTE stays ch
 test('round 4 item 3: an INITIALIZED null slot is the New Chat landing without transition-only routing', () => {
   const nullSlot = { ...twoPaneChatAndApp(), singleScreen: null }
   assert.equal(singleView(nullSlot).fullBleedKey, EMPTY_SINGLE_SURFACE_KEY)
-  // A legacy absent-slot still falls back through the ordinary durable route; no
-  // separate animation destination classifier is needed.
+  // A legacy absent-slot is the empty home too — it never borrows the focused Builder
+  // surface (here a Settings tab).
   const legacy = paneModel.seedFromFlatTabs([tabModel.settingsTab()])
   assert.equal('singleScreen' in legacy, false, 'absent slot (legacy)')
-  assert.equal(singleView(legacy).fullBleedKey, tabModel.SETTINGS_TAB_KEY)
+  assert.equal(singleView(legacy).fullBleedKey, EMPTY_SINGLE_SURFACE_KEY)
 })
 
 // ── Settings takeover is EFFECTIVE-mode gated (finding F3) ───────────────────

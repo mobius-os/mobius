@@ -435,9 +435,10 @@ function coerceViewMode(mode) {
 }
 
 function singleScreenTab(ws) {
-  const item = ('singleScreen' in ws)
-    ? sanitizeSingleScreen(ws.singleScreen)
-    : focusedSlotSeed(ws)
+  // Standard's surface is its OWN slot only — an absent (legacy/uninitialized) slot
+  // is the empty home, never the focused Builder pane. sanitizeSingleScreen(undefined)
+  // collapses to null, so Standard never borrows Builder's focus (two-worlds design).
+  const item = sanitizeSingleScreen(ws.singleScreen)
   if (!item) return null
   if (item.kind === 'apps') return tabModel.appsTab()
   return tabModel.makeTab(item.kind, item.id)
@@ -494,11 +495,10 @@ export function singleScreenKey(ws) {
 // selects through its independent slot. Callers that bind lifecycle events to
 // an owner use this instead of assuming every owner exists in ws.panes.
 export function activeKeyForOwner(ws, ownerPaneId) {
-  if (String(ownerPaneId) === SINGLE_SLOT_PANE) {
-    if ('singleScreen' in ws) return singleScreenKey(ws)
-    const seed = focusedSlotSeed(ws)
-    return seed ? tabModel.tabKey(seed) : null
-  }
+  // The single-world slot owner selects through its OWN slot only. An absent slot
+  // is empty (singleScreenKey → null), never the focused Builder pane's tab —
+  // Standard never borrows Builder's focus (two-worlds design).
+  if (String(ownerPaneId) === SINGLE_SLOT_PANE) return singleScreenKey(ws)
   return ws.panes?.[ownerPaneId]?.activeTabKey ?? null
 }
 
@@ -521,7 +521,7 @@ export function setSingleScreen(ws, slot) {
 // back to the most recently positioned concrete tab in that same pane. Otherwise
 // the first-ever builder→single toggle from the common Settings flow paints an
 // empty shell even though the owner's chat is still directly underneath it.
-export function focusedSlotSeed(ws) {
+function focusedSlotSeed(ws) {
   const pane = ws.panes[ws.focusedPaneId]
   const key = pane?.activeTabKey
   if (!pane || !key) return null
@@ -637,12 +637,11 @@ export function singleScreenRoute(ws) {
 // and the reload snapshot — so a single-world reload restores the slot, not the
 // builder focus (design: derive activeView from the current world).
 export function activeContentRoute(ws) {
-  // An absent slot is the migration marker for a fresh/legacy workspace. The
-  // renderer already falls back to the focused pane in that state; route
-  // projection must do the same or first boot paints one surface while
-  // navigation reports the empty home screen. Once singleScreen is initialized
-  // (including explicit null), the independent Standard world is authoritative.
-  if (ws.viewMode === 'single' && 'singleScreen' in ws) return singleScreenRoute(ws)
+  // In single mode the active content is ALWAYS the Standard slot, never the focused
+  // Builder pane. An absent (legacy/uninitialized) slot reports the empty home exactly
+  // like an explicit-null slot — Standard is authoritative and never borrows Builder's
+  // focus (two-worlds design); opening an item in single mode initializes the slot.
+  if (ws.viewMode === 'single') return singleScreenRoute(ws)
   return focusedContentRoute(ws)
 }
 

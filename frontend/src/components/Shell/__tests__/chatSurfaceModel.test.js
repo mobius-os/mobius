@@ -47,7 +47,7 @@ function focusedBuilderLayers(presentedFocusedId) {
   })
 }
 
-test('a legacy absent slot retains the focused chat in the Standard world immediately', () => {
+test('a legacy absent slot mounts NO Standard ChatView — it never borrows Builder focus', () => {
   const legacy = workspace()
   legacy.focusedPaneId = 'right'
   delete legacy.singleScreen
@@ -58,11 +58,14 @@ test('a legacy absent slot retains the focused chat in the Standard world immedi
     projection,
   })
 
-  assert.ok(owners.some(owner => (
-    owner.world === STANDARD_CHAT_WORLD
-      && owner.paneId === SINGLE_SLOT_PANE
-      && owner.chatId === 'b'
-  )))
+  // Two-worlds: an uninitialized Standard is the empty home, so it retains no
+  // Standard-world ChatView (it never borrows the focused Builder chat).
+  assert.equal(
+    owners.some(owner => (
+      owner.world === STANDARD_CHAT_WORLD && owner.paneId === SINGLE_SLOT_PANE
+    )),
+    false,
+  )
 })
 
 test('an explicit null slot remains the New Chat landing', () => {

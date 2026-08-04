@@ -24,8 +24,10 @@ function twoPanes() {
 // ── viewMode field + persistence (design: view-mode toggle, forgiving parse) ──
 
 test('first boot workspaces default to an empty standard single-screen mode', () => {
+  // Two-worlds: an uninitialized Standard (absent slot) is its OWN empty home — it
+  // never borrows the focused Builder pane, even when the tree already holds a chat.
   assert.equal(freshWorkspace().viewMode, 'single')
-  assert.equal(paneModel.activeContentRoute(freshWorkspace()).chatId, '5')
+  assert.equal(paneModel.activeContentRoute(freshWorkspace()).chatId, null, 'absent slot is home, never the tree chat')
   const firstBoot = paneModel.parseWorkspace(null)
   assert.equal(firstBoot.viewMode, 'single')
   assert.equal(paneModel.activeContentRoute(firstBoot).chatId, null)
