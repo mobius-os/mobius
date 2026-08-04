@@ -409,6 +409,16 @@ export default function Drawer({
     startRename(kind, id, surface = 'drawer') {
       rowActionInputsRef.current.setRenaming({ kind, id, surface })
     },
+    // Closing the menu consumes its Back-stack sentinel, and the traversal that
+    // follows drops focus to the document a few milliseconds later. The menu's
+    // post-close animation frame is the one place that focus is reclaimed, so
+    // its target has to be whatever the action left behind. Rename replaces the
+    // row trigger with an editor, and reasserting focus onto the now-unmounted
+    // trigger does nothing at all — the editor stays blurred, and its own blur
+    // handler then commits and unmounts it before the user can type.
+    claimMenuFocusReturn(element) {
+      rowActionInputsRef.current.menuRestoreFocusRef.current = element
+    },
     cancelRename() {
       rowActionInputsRef.current.setRenaming(null)
     },
@@ -951,6 +961,7 @@ export default function Drawer({
     onDeleteAppData,
     showItemMenu,
     closeItemMenu,
+    menuRestoreFocusRef,
     setRenaming,
     setInstallingApp,
     resetAppsSurfaceUi,
@@ -1399,10 +1410,11 @@ const DrawerRow = memo(function DrawerRow({
   // from scratch or tap into the existing name to edit it.
   useEffect(() => {
     if (renaming && inputRef.current) {
+      actions.claimMenuFocusReturn(inputRef.current)
       inputRef.current.focus()
       inputRef.current.select()
     }
-  }, [renaming])
+  }, [actions, renaming])
 
   function commitRename() {
     if (cancelingRef.current) {
