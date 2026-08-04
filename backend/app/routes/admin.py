@@ -162,7 +162,7 @@ def emit_activity_event(
   because:
     - the events are sidecar telemetry, never load-bearing,
     - _KNOWN_EVENTS bounds the vocabulary so a misuse can only emit
-      one of the four already-legitimate event types,
+      an allowlisted legitimate event type,
     - rotation + 90-day retention bound disk pressure from spam,
     - same-origin CSRF baseline (Sec-Fetch-Site / CORS preflight)
       keeps cross-origin pages from emitting on the owner's behalf.

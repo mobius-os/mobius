@@ -43,7 +43,7 @@ from pathlib import Path
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
 VERSION_FILE = SKILLS / ".seed-version"
-SEED_VERSION = "23"  # v23: move platform recovery outside the app container
+SEED_VERSION = "24"  # v24: propagate current scheduling skill contracts
 # Update only byte-for-byte baked copies; an owner/agent-edited file is never
 # touched. A set preserves every known unmodified predecessor when one skill
 # needs more than one fix-forward migration over its lifetime.
@@ -65,6 +65,8 @@ _UNMODIFIED_MIGRATIONS = {
     # the migration is only as complete as this set.
     "76ab03fd128157715b388b16146239217f57bba62c5248b8192a39639d0200b1",
     "e4539739815b80b4c52ca2c56f2a4055e7a4a12cd1843c0cb5077a149547acd1",
+    # Pre-#612 baked copy: remove guidance for the retired cron-emit wrapper.
+    "55a350281a94ecabf35297d4aef019eedaed28378ac0a2a440815120c6219ba7",
     # Locally curated pre-app-token copy. It tells scheduled app jobs to read
     # the owner service token, contradicting supervised $APP_TOKEN authority.
     # Not a baked generation: it exists only on instances whose owner edited
@@ -72,6 +74,10 @@ _UNMODIFIED_MIGRATIONS = {
     # cannot be reproduced from this repository's history.  Registered
     # deliberately -- see the propagation policy note in the module docstring.
     "16055ea6ba6e4663636f87fde9868aa98d49ab39c5037ff90fa673d96c259cd9",
+  },
+  "embedded-app-agent.md": {
+    # Pre-#612 baked copy: clarify that an accepted overlapping run may skip.
+    "e58970bb7357030b9ac9c72e3b547d3bc93cdb75a1442dc5bb92db6174beebad",
   },
   "recovery.md": {
     "ef62abb0d03d740f99add1b6f3938f780b34439cb0025616cb9dc5f74f779633",
