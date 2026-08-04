@@ -1792,7 +1792,11 @@ class ChatWriterActor:
     chat_update = db.execute(
       update(Chat)
       .where(Chat.id == cmd.chat_id, Chat.deleted_at.is_(None))
-      .values(messages=cmd.messages, live_assistant=None)
+      .values(
+        messages=cmd.messages,
+        has_messages=bool(cmd.messages),
+        live_assistant=None,
+      )
     )
     if chat_update.rowcount != 1:
       db.rollback()
@@ -1938,7 +1942,11 @@ class ChatWriterActor:
           ~active_run_exists,
           Chat.updated_at == snap_updated_at,
         )
-        .values(messages=plan.new_messages, pending_messages=plan.new_pending)
+        .values(
+          messages=plan.new_messages,
+          has_messages=bool(plan.new_messages),
+          pending_messages=plan.new_pending,
+        )
       )
     except OperationalError:
       db.rollback()

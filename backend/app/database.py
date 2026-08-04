@@ -1360,6 +1360,31 @@ def _add_connector_capability_identity(eng) -> None:
       ))
 
 
+def _add_chat_has_messages(eng) -> None:
+  """Materialize transcript emptiness for the drawer's hot list query."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chats" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chats")}
+  if "has_messages" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE chats ADD COLUMN has_messages BOOLEAN "
+      "NOT NULL DEFAULT FALSE"
+    ))
+    # One deliberate upgrade-time scan replaces the same scan on every drawer
+    # refresh. Legacy rows are non-null JSON, but guard NULL for hand-built DBs.
+    if "messages" in columns:
+      conn.execute(text(
+        "UPDATE chats SET has_messages = CASE "
+        "WHEN messages IS NOT NULL AND CAST(messages AS TEXT) != '[]' "
+        "THEN TRUE ELSE FALSE END"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -1367,6 +1392,7 @@ _SCHEMA_MIGRATIONS = (
   ("0004_app_identity_required", _require_app_identity),
   ("0005_connectors", _add_connectors_table),
   ("0006_connector_capability_identity", _add_connector_capability_identity),
+  ("0007_chat_has_messages", _add_chat_has_messages),
 )
 
 

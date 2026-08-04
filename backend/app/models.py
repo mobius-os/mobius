@@ -21,7 +21,7 @@ from sqlalchemy import (
   LargeBinary, String, Text, UniqueConstraint, event, false, or_, true,
 )
 
-from sqlalchemy.orm import column_property
+from sqlalchemy.orm import column_property, validates
 
 from app.database import Base
 from app.timeutil import now_naive_utc
@@ -116,6 +116,13 @@ class Chat(Base):
   # drops back to the agent summary / first message and gets re-derived.
   title_locked = Column(Boolean, nullable=False, default=False)
   messages = Column(JSON, nullable=False, default=list)
+  # Drawer/list reads need only to know whether a transcript is empty. Keeping
+  # that fact beside the blob prevents every chat-list request from scanning
+  # every stored transcript. All runtime transcript writes flow through normal
+  # ORM assignment or the two explicit bulk paths in chat_writer.
+  has_messages = Column(
+    Boolean, nullable=False, default=False, server_default=false()
+  )
   # Current in-flight assistant state is separate from immutable history so a
   # streaming update never rewrites every prior message. Finalize and startup
   # recovery merge this bounded value into `messages`.
@@ -180,6 +187,11 @@ class Chat(Base):
   activity_at = Column(
     DateTime, nullable=True, default=lambda: datetime.now(UTC)
   )
+
+  @validates("messages")
+  def _sync_has_messages(self, _key, value):
+    self.has_messages = bool(value)
+    return value
 
 
 class ChatRun(Base):

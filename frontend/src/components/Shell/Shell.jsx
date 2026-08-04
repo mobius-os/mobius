@@ -122,7 +122,8 @@ import {
   MODE_MOTION, EMPTY_SINGLE_SURFACE_KEY,
 } from './workspaceView.js'
 import NewChatLanding from './NewChatLanding.jsx'
-import { recentChatsToPrefetch } from './chatPrefetch.js'
+import { warmChatCandidates } from './chatPrefetch.js'
+import { readRecentlyOpenedChatIds } from '../../lib/navigationPersistence.js'
 import {
   PaneTab, panePanelDomId, paneTabDomId, scrollStripWheel, stripKeyDown,
 } from './PaneStrip.jsx'
@@ -491,13 +492,18 @@ export default function Shell() {
   const chatsStatus = chats.length > 0 || chatsQuery.isSuccess
     ? 'success'
     : (chatsQuery.isError ? 'error' : 'loading')
-  // Prime only the two most-recent chats that are not already open, including
-  // active chats: their cached transcript is useful while stream catch-up runs.
+  // Prime a bounded blend of recently opened and recently owner-active chats.
+  // The blend stays useful when the owner is moving among several pieces of
+  // work without letting background agent updates consume the warm budget.
   // ChatView still revalidates on mount, but this gives its synchronous cache
   // read a real transcript so a later chat switch can paint immediately. Run
   // once after the live drawer projection arrives, at browser idle, and stand
   // down under data-saver so speed never creates surprise background transfer.
   const warmedChatsOnLoadRef = useRef(false)
+  const recentlyOpenedChatIds = useMemo(
+    () => readRecentlyOpenedChatIds(),
+    [],
+  )
   useEffect(() => {
     if (
       warmedChatsOnLoadRef.current
@@ -506,7 +512,9 @@ export default function Shell() {
     ) return
     warmedChatsOnLoadRef.current = true
     if (navigator.connection?.saveData) return
-    const candidates = recentChatsToPrefetch(chats, activeChatId)
+    const candidates = warmChatCandidates(
+      chats, activeChatId, recentlyOpenedChatIds,
+    )
     if (candidates.length === 0) return
     const warm = async () => {
       for (const chat of candidates) {
@@ -524,6 +532,7 @@ export default function Shell() {
     chatsQuery.isFetchedAfterMount,
     chatsQuery.isSuccess,
     queryClient,
+    recentlyOpenedChatIds,
   ])
   const appPreviewAckRef = useRef(new Set())
   const handleAppPreviewSeen = useCallback((app, final) => {

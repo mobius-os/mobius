@@ -1009,6 +1009,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0004_app_identity_required",
     "0005_connectors",
     "0006_connector_capability_identity",
+    "0007_chat_has_messages",
   ]
   assert second == first
 
@@ -1065,6 +1066,38 @@ def test_connectors_migration_preserves_preview_era_rows(tmp_path):
   }
   assert "0006_connector_capability_identity" in {
     entry["version"] for entry in schema_migration_history(eng)
+  }
+
+
+def test_chat_message_summary_migration_backfills_legacy_transcripts(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'chat-message-summary.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(255))"
+    ))
+    conn.execute(text(
+      "CREATE TABLE chats ("
+      "id VARCHAR(64) PRIMARY KEY, title VARCHAR(255), messages JSON, "
+      "updated_at DATETIME)"
+    ))
+    conn.execute(text(
+      "INSERT INTO chats (id, title, messages) VALUES "
+      "('empty', 'Empty', '[]'), "
+      "('started', 'Started', '[{\"role\": \"user\"}]')"
+    ))
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  columns = {item["name"] for item in inspect(eng).get_columns("chats")}
+  with eng.connect() as conn:
+    values = conn.execute(text(
+      "SELECT id, has_messages FROM chats ORDER BY id"
+    )).all()
+  assert "has_messages" in columns
+  assert values == [("empty", 0), ("started", 1)]
+  assert "0007_chat_has_messages" in {
+    row["version"] for row in schema_migration_history(eng)
   }
 
 

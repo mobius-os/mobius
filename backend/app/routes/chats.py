@@ -341,7 +341,7 @@ def _owner_chat_summary(chat: models.Chat, *, durable_running: bool = False) -> 
     "updated_at": chat.updated_at.isoformat(),
     "activity_at": chat.activity_at.isoformat() if chat.activity_at else None,
     "pinned_at": chat.pinned_at.isoformat() if chat.pinned_at else None,
-    "has_messages": bool(chat.messages and len(chat.messages) > 0),
+    "has_messages": bool(chat.has_messages),
     "created_by_app_id": chat.created_by_app_id,
     "running": durable_running or is_chat_running(chat.id),
   }
@@ -353,8 +353,8 @@ def _owner_chat_summary_projection(chat, *, durable_running: bool = False) -> di
   ``GET /api/chats`` used to hydrate every complete ``Chat`` ORM object merely
   to return eight summary fields. On a long-lived instance that decoded tens of
   megabytes of transcript JSON on every drawer open and chat switch, contending
-  with the selected chat's small detail read. Keep transcript inspection inside
-  the database (``message_count``) and never materialize ``messages`` here.
+  with the selected chat's small detail read. The writer-owned ``has_messages``
+  summary keeps this projection independent of the transcript blob entirely.
   """
   return {
     "id": chat.id,
@@ -362,7 +362,7 @@ def _owner_chat_summary_projection(chat, *, durable_running: bool = False) -> di
     "updated_at": chat.updated_at.isoformat(),
     "activity_at": chat.activity_at.isoformat() if chat.activity_at else None,
     "pinned_at": chat.pinned_at.isoformat() if chat.pinned_at else None,
-    "has_messages": bool(chat.message_count),
+    "has_messages": bool(chat.has_messages),
     "created_by_app_id": chat.created_by_app_id,
     "running": durable_running or is_chat_running(chat.id),
   }
@@ -577,16 +577,9 @@ def list_chats(
   # a `desc()` on a nullable column would put NULL last under our
   # SQLite collation, but making the boolean explicit is clearer and
   # portable.
-  # Drawer projection only. Selecting the Chat entity here hydrates its full
-  # ``messages`` JSON column even though the response needs only a boolean; on
-  # this owner's history that was ~47 MB of JSON decoding per refresh. Compare
-  # the canonical serialized empty-array value in SQL instead of parsing every
-  # JSON array with json_array_length: Chat.messages is a non-null list written
-  # by SQLAlchemy's canonical serializer, and CAST(... AS TEXT) is portable
-  # across SQLite and PostgreSQL. A future raw-import path must normalize JSON
-  # text first (PostgreSQL's json type preserves whitespace such as ``[ ]``).
-  # The database can reject non-empty values from their stored length without
-  # walking every transcript.
+  # Drawer projection only. ``has_messages`` is maintained with the transcript
+  # by the Chat model and the two writer bulk-update paths, so this hot query
+  # never reads or decodes the potentially large ``messages`` JSON column.
   q = db.query(
     models.Chat.id,
     models.Chat.title,
@@ -598,10 +591,7 @@ def list_chats(
     # chats normally keep this NULL, so this remains a tiny projection rather
     # than pulling transcript/runtime JSON into the hot path.
     models.Chat.agent_settings_json,
-    case(
-      (cast(models.Chat.messages, Text) != "[]", 1),
-      else_=0,
-    ).label("message_count"),
+    models.Chat.has_messages,
   ).filter(models.Chat.deleted_at.is_(None))
   chats = (
     q.order_by(
@@ -2373,7 +2363,7 @@ def _app_chat_summary(chat: models.Chat) -> dict:
     "created_at": chat.created_at.isoformat() if chat.created_at else None,
     "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
     "activity_at": chat.activity_at.isoformat() if chat.activity_at else None,
-    "has_messages": bool(chat.messages and len(chat.messages) > 0),
+    "has_messages": bool(chat.has_messages),
     "provider": chat.provider or "claude",
     "scope": _app_chat_scope(chat),
     "scope_label": _app_chat_scope_label(chat),
