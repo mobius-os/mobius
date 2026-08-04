@@ -55,7 +55,7 @@ test('recovery panel exposes last resorts only after repair fails', () => {
   assert.match(failed, /href="https:\/\/www\.mobius\.you\/"/)
   assert.match(failed, /target="_top"/)
   assert.match(failed, /open Recovery in mobius\.you/i)
-  assert.match(failed, /<code>mobiusctl recovery start<\/code>/)
+  assert.match(failed, /<code[^>]*>mobiusctl recovery start<\/code>/)
 
   const restricted = renderPanel({
     attempt: { phase: 'refreshed' },
@@ -63,5 +63,18 @@ test('recovery panel exposes last resorts only after repair fails', () => {
   })
   assert.doesNotMatch(restricted, /Start repair chat|Retry repair chat/)
   assert.match(restricted, /open Recovery in mobius\.you/i)
-  assert.match(restricted, /<code>mobiusctl recovery start<\/code>/)
+  assert.match(restricted, /<code[^>]*>mobiusctl recovery start<\/code>/)
+})
+
+test('a directed repair asks the owner to wait instead of linking back to the broken screen', () => {
+  const directed = renderPanel({
+    attempt: { phase: 'agent-directed', chatId: 'repair/chat' },
+    deployment: 'self_hosted',
+  })
+  assert.match(directed, /repair request was sent/i)
+  assert.match(directed, /Give the agent a few minutes/i)
+  assert.match(directed, />Refresh again</)
+  assert.doesNotMatch(directed, />Open repair chat</)
+  assert.match(directed, /This is a self-hosted Möbius instance/)
+  assert.doesNotMatch(directed, /mobius\.you/)
 })

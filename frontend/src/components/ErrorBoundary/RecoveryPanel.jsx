@@ -19,7 +19,7 @@ function recoveryMessage({ phase, attemptPhase, canAskAgent, subject }) {
     return `Refreshing didn’t fix ${currentSubject}. Use system recovery to diagnose the problem without relying on this embedded chat.`
   }
   if (attemptPhase === 'agent-directed') {
-    return `The repair chat started, but ${currentSubject} still can’t open. System recovery is the remaining fallback.`
+    return `The repair request was sent. Give the agent a few minutes to work, then refresh ${currentSubject}.`
   }
   return 'The repair chat couldn’t start. You can retry it or use system recovery as a last resort.'
 }
@@ -38,6 +38,7 @@ export default function RecoveryPanel({
   subject,
   title,
   variant,
+  deployment,
 }) {
   const headingId = useId()
   const phase = recoveryPhaseForAttempt(attempt, { canAskAgent })
@@ -104,7 +105,7 @@ export default function RecoveryPanel({
             Refresh again
           </button>
         )}
-        {phase === 'recovery' && repairChatId && (
+        {phase === 'recovery' && repairChatId && attemptPhase !== 'agent-directed' && (
           <a className="recovery-panel__button" href={repairChatPath(repairChatId, BASE)}>
             Open repair chat
           </a>
@@ -124,6 +125,8 @@ export default function RecoveryPanel({
         <RecoveryLink
           className="recovery-panel__recovery"
           lead="If the repair chat can’t get you back in,"
+          deployment={deployment}
+          detectDeployment={canAskAgent}
         />
       )}
     </section>

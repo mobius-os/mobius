@@ -17,6 +17,20 @@ test('recovery points outside the Mobius container with self-host guidance', () 
   assert.match(defaultHtml, /mobiusctl recovery start/)
   assert.doesNotMatch(defaultHtml, /href="\/recover/)
 
+  const selfHostedHtml = renderToStaticMarkup(createElement(RecoveryLink, {
+    deployment: 'self_hosted',
+  }))
+  assert.match(selfHostedHtml, /This is a self-hosted Möbius instance/)
+  assert.match(selfHostedHtml, /mobiusctl recovery start/)
+  assert.doesNotMatch(selfHostedHtml, /mobius\.you/)
+
+  const railwayHtml = renderToStaticMarkup(createElement(RecoveryLink, {
+    deployment: 'railway',
+  }))
+  assert.match(railwayHtml, /managed on Railway/)
+  assert.match(railwayHtml, />Open Recovery in mobius\.you<\/a>/)
+  assert.doesNotMatch(railwayHtml, /mobiusctl recovery start/)
+
   const standaloneHtml = renderToStaticMarkup(createElement(RecoveryLink, {
     className: 'standalone-app__recovery',
     lead: 'If the app still won’t open,',
