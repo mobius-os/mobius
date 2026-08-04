@@ -350,6 +350,24 @@ def contract_with_chat_log_access(
   return updated
 
 
+def contract_with_runtime_capabilities(
+  contract: dict[str, Any] | None,
+  manifest: dict[str, Any],
+) -> dict[str, Any] | None:
+  """Replace only the runtime capabilities in a reviewed contract.
+
+  Store-installed apps keep package-owned background, data, agent, and offline
+  facts when an owner explicitly accepts capabilities from a local source
+  revision.  The caller binds that acceptance to a digest; this projection
+  merely owns the narrow immutable replacement.
+  """
+  if not isinstance(contract, dict):
+    return None
+  updated = deepcopy(contract)
+  updated["runtime"] = normalize_runtime_capabilities(manifest)
+  return updated
+
+
 def canonical_contract_json(contract: dict[str, Any]) -> str:
   return json.dumps(
     contract, ensure_ascii=False, sort_keys=True, separators=(",", ":"),

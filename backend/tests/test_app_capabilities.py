@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from app import models
 from app.app_capabilities import contract_and_digest
+from app.app_capabilities import contract_with_runtime_capabilities
 from app.app_capabilities import normalize_runtime_capabilities
 from app.config import get_settings
 from test_app_fixtures import create_local_app, write_local_source
@@ -145,6 +146,33 @@ def test_speech_capabilities_separate_model_management_from_generation():
   assert runtime["media.speech"]["risk"] == "device"
   assert runtime["media.speech"]["lifecycle"] == "background"
   assert runtime["media.speech"]["limits"] == {"max_text_chars": 20_000}
+
+
+def test_explicit_local_runtime_acceptance_preserves_store_contract():
+  installed = _manifest(capabilities={
+    "device.asset-cache": {"version": 1},
+  })
+  contract, _ = contract_and_digest(installed)
+  candidate = contract_with_runtime_capabilities(contract, _manifest(capabilities={
+    "media.speech": {
+      "version": 1,
+      "reason": "Read reports with the shared local voice.",
+      "limits": {"max_text_chars": 50_000},
+    },
+  }))
+
+  assert candidate is not None
+  assert candidate["runtime"] == normalize_runtime_capabilities(_manifest(capabilities={
+    "media.speech": {
+      "version": 1,
+      "reason": "Read reports with the shared local voice.",
+      "limits": {"max_text_chars": 50_000},
+    },
+  }))
+  assert {key: value for key, value in candidate.items() if key != "runtime"} == {
+    key: value for key, value in contract.items() if key != "runtime"
+  }
+  assert contract["runtime"] == normalize_runtime_capabilities(installed)
 
 
 def test_runtime_capability_rejects_unknown_name_version_and_limits():
