@@ -12,7 +12,7 @@ const empty = () => ({ press: null, clickAction: null })
 const actionA = {}
 const actionB = {}
 
-test('the opener release has no menu-owned press and cannot activate an action', () => {
+test('the shared menu ignores its opener release without a menu-owned press', () => {
   const outcome = consumeMenuClick(empty(), { detail: 1, action: actionA })
   assert.equal(outcome.allowed, false)
 })
