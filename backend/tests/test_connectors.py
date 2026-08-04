@@ -229,6 +229,41 @@ async def test_handshake_prefers_stateless_2026_discovery(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_modern_probe_distinguishes_protocol_errors_from_legacy_fallback():
+  endpoint = ("https://203.0.113.8/mcp", "mcp.example", "mcp.example")
+
+  async def probe(error, status=400):
+    def handler(request: httpx.Request) -> httpx.Response:
+      return httpx.Response(
+        status,
+        request=request,
+        headers={"content-type": "application/json"},
+        json={"jsonrpc": "2.0", "id": 1, "error": error},
+      )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+      return await core._modern_rpc(
+        client, endpoint, {}, "server/discover", {}, 1,
+        allow_unsupported=True,
+      )
+
+  assert await probe({
+    "code": -32022,
+    "message": "unsupported",
+    "data": {"supported": ["2025-11-25"]},
+  }) is None
+  assert await probe({"code": -32601, "message": "unknown"}, 404) is None
+  with pytest.raises(core.ConnectorError, match="rejected"):
+    await probe({"code": -32020, "message": "header mismatch"})
+  with pytest.raises(core.ConnectorError, match="rejected"):
+    await probe({
+      "code": -32022,
+      "message": "unsupported",
+      "data": {"supported": ["2027-01-01"]},
+    })
+
+
+@pytest.mark.asyncio
 async def test_handshake_redacts_secret_echoes_and_rpc_errors(monkeypatch):
   error_mode = False
 
@@ -383,16 +418,21 @@ def test_secret_roundtrip_and_garbage_are_write_only():
 
 def test_broker_capability_expires_and_is_connector_scoped():
   assert core._BROKER_CAPABILITY_TTL_SECONDS <= 24 * 60 * 60
-  capability = core.mint_broker_capability(41)
-  core.verify_broker_capability(capability, 41)
+  stable_a = "a" * 64
+  stable_b = "b" * 64
+  capability = core.mint_broker_capability(41, stable_a)
+  core.verify_broker_capability(capability, 41, stable_a)
   with pytest.raises(core.ConnectorError, match="not valid for"):
-    core.verify_broker_capability(capability, 42)
+    core.verify_broker_capability(capability, 42, stable_a)
+  with pytest.raises(core.ConnectorError, match="not valid for"):
+    core.verify_broker_capability(capability, 41, stable_b)
 
   expired = core._broker_fernet().encrypt_at_time(
-    b'{"connector_id":41}', current_time=0,
+    json.dumps({"connector_id": 41, "capability_id": stable_a}).encode(),
+    current_time=0,
   ).decode()
   with pytest.raises(core.ConnectorError, match="not valid"):
-    core.verify_broker_capability(expired, 41)
+    core.verify_broker_capability(expired, 41, stable_a)
 
 
 class _FakeQuery:
@@ -420,6 +460,7 @@ class _FakeDb:
 def _row(row_id, slug, url, auth_header=None, secret=None):
   return models.Connector(
     id=row_id,
+    capability_id=(f"stable-{row_id}-{slug}-" + "x" * 64)[:64],
     slug=slug,
     name=slug,
     url=url,
@@ -433,11 +474,12 @@ def _row(row_id, slug, url, auth_header=None, secret=None):
 
 
 def test_turn_plan_serves_both_providers_without_config_secrets():
-  plan = core.build_turn_plan(_FakeDb([
+  plan_source_rows = [
     _row(4, "docs", "https://docs.example/mcp"),
     _row(9, "search", "https://search.example/mcp", "Authorization", "sk-9"),
     _row(12, "data", "https://data.example/mcp", "X-Api-Key", "key-12"),
-  ]))
+  ]
+  plan = core.build_turn_plan(_FakeDb(plan_source_rows))
 
   expected_keys = {
     "mobius_connector_4_docs",
@@ -456,7 +498,8 @@ def test_turn_plan_serves_both_providers_without_config_secrets():
     assert codex["url"] == expected_url
     assert "example" not in claude["url"]
     capability = claude["headers"]["Authorization"].removeprefix("Bearer ")
-    core.verify_broker_capability(capability, connector_id)
+    row = next(row for row in plan_source_rows if row.id == connector_id)
+    core.verify_broker_capability(capability, connector_id, row.capability_id)
     env_var = codex["bearer_token_env_var"]
     assert plan.codex_env[env_var] == capability
   assert "sk-9" not in repr(plan)
@@ -551,7 +594,7 @@ def test_broker_requires_loopback_and_connector_scoped_capability(
   )
   db.add(row)
   db.commit()
-  capability = core.mint_broker_capability(row.id)
+  capability = core.mint_broker_capability(row.id, row.capability_id)
 
   denied = client.get(
     f"/api/connectors/{row.id}/broker",
@@ -565,10 +608,58 @@ def test_broker_requires_loopback_and_connector_scoped_capability(
     wrong_scope = loopback.get(
       f"/api/connectors/{row.id}/broker",
       headers={
-        "Authorization": f"Bearer {core.mint_broker_capability(row.id + 1)}",
+        "Authorization": f"Bearer {core.mint_broker_capability(row.id + 1, row.capability_id)}",
       },
     )
     assert wrong_scope.status_code == 401
+    row.enabled = False
+    db.commit()
+    disabled = loopback.get(
+      f"/api/connectors/{row.id}/broker",
+      headers={"Authorization": f"Bearer {capability}"},
+    )
+    assert disabled.status_code == 404
+
+
+def test_deleted_connector_capability_cannot_authorize_reused_row_id(client, db):
+  old = _row(31, "old", "https://old.example/mcp", secret="old-secret")
+  db.add(old)
+  db.commit()
+  old_identity = old.capability_id
+  old_capability = core.mint_broker_capability(old.id, old_identity)
+  db.delete(old)
+  db.commit()
+
+  replacement = _row(
+    31, "replacement", "https://new.example/mcp", secret="new-secret",
+  )
+  db.add(replacement)
+  db.commit()
+  assert replacement.capability_id != old_identity
+
+  with TestClient(client.app, client=("127.0.0.1", 43100)) as loopback:
+    denied = loopback.get(
+      f"/api/connectors/{replacement.id}/broker",
+      headers={"Authorization": f"Bearer {old_capability}"},
+    )
+  assert denied.status_code == 401
+
+
+def test_broker_drops_allowed_response_headers_that_reflect_secrets():
+  snapshot = connector_routes._BrokerSnapshot(
+    url="https://remote.example/mcp",
+    auth_header="Authorization",
+    secret="Bearer upstream-secret",
+  )
+  upstream = httpx.Response(200, headers={
+    "content-type": "application/json",
+    "mcp-protocol-version": "upstream-secret",
+    "mcp-session-id": "Bearer upstream-secret",
+    "cache-control": "private, upstream-secret",
+    "x-untrusted": "ignored",
+  })
+  headers = connector_routes._broker_response_headers(upstream, snapshot)
+  assert headers == {"content-type": "application/json"}
 
 
 def test_broker_revalidates_pins_and_streams_each_mcp_method(
@@ -580,7 +671,7 @@ def test_broker_revalidates_pins_and_streams_each_mcp_method(
   )
   db.add(row)
   db.commit()
-  capability = core.mint_broker_capability(row.id)
+  capability = core.mint_broker_capability(row.id, row.capability_id)
   validated = []
   upstream_calls = []
 
@@ -663,7 +754,7 @@ def test_broker_refuses_redirects_and_releases_upstream(
   row = _row(23, "redirect", "https://remote.example/mcp")
   db.add(row)
   db.commit()
-  capability = core.mint_broker_capability(row.id)
+  capability = core.mint_broker_capability(row.id, row.capability_id)
   monkeypatch.setattr(
     core,
     "_safe_endpoint",

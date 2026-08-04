@@ -874,6 +874,13 @@ class Connector(Base):
   __tablename__ = "connectors"
 
   id = Column(Integer, primary_key=True, index=True)
+  # Stable authorization identity. SQLite may reuse an INTEGER PRIMARY KEY
+  # after deletion, so broker capabilities must never authorize by ``id``
+  # alone or an old turn could reach a later connector that reused the row id.
+  capability_id = Column(
+    String(64), nullable=False, unique=True, index=True,
+    default=lambda: secrets.token_hex(32),
+  )
   slug = Column(String(64), nullable=False, unique=True, index=True)
   name = Column(String(128), nullable=False)
   url = Column(String(2048), nullable=False)

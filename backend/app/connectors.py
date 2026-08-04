@@ -124,15 +124,25 @@ def _broker_fernet() -> Fernet:
   return Fernet(key)
 
 
-def mint_broker_capability(connector_id: int) -> str:
+def mint_broker_capability(connector_id: int, capability_id: str) -> str:
   """Mint one short-lived, connector-scoped credential for a provider turn."""
+  if not isinstance(capability_id, str) or len(capability_id) < 32:
+    raise ConnectorError("The MCP connection has no broker identity.")
   payload = json.dumps(
-    {"connector_id": connector_id}, separators=(",", ":"),
+    {
+      "connector_id": connector_id,
+      "capability_id": capability_id,
+    },
+    separators=(",", ":"),
   ).encode()
   return _broker_fernet().encrypt(payload).decode()
 
 
-def verify_broker_capability(token: str, connector_id: int) -> None:
+def verify_broker_capability(
+  token: str,
+  connector_id: int,
+  capability_id: str,
+) -> None:
   """Fail closed unless ``token`` is live and scoped to this connection."""
   try:
     payload = json.loads(
@@ -142,7 +152,11 @@ def verify_broker_capability(token: str, connector_id: int) -> None:
     )
   except (InvalidToken, UnicodeError, ValueError, TypeError, json.JSONDecodeError) as exc:
     raise ConnectorError("The MCP broker capability is not valid.") from exc
-  if not isinstance(payload, dict) or payload.get("connector_id") != connector_id:
+  if (
+    not isinstance(payload, dict)
+    or payload.get("connector_id") != connector_id
+    or payload.get("capability_id") != capability_id
+  ):
     raise ConnectorError("The MCP broker capability is not valid for this connection.")
 
 
@@ -474,8 +488,19 @@ async def _modern_rpc(
       raise ConnectorError(
         "The service rejected the key or requires an OAuth sign-in flow."
       )
-    if allow_unsupported and response.status_code in (400, 404):
-      return None
+    if allow_unsupported and response.status_code in (400, 404, 405):
+      payload = await _bounded_error_payload(response, rpc_id)
+      if payload is None:
+        # A legacy Streamable HTTP endpoint commonly answers an unknown modern
+        # probe with an empty/plain HTTP error. Only that unrecognized shape is
+        # an era signal; modern JSON-RPC errors remain authoritative.
+        return None
+      error = payload.get("error")
+      if not isinstance(error, dict):
+        raise ConnectorError("The service returned an invalid server/discover error.")
+      if _modern_error_allows_legacy_fallback(error):
+        return None
+      raise ConnectorError("The service rejected the modern MCP discovery request.")
     if response.status_code >= 400:
       raise ConnectorError(
         f"The service answered HTTP {response.status_code} to {method}."
@@ -483,7 +508,7 @@ async def _modern_rpc(
     payload = await _matching_rpc(response, rpc_id)
     error = payload.get("error")
     if isinstance(error, dict):
-      if allow_unsupported and error.get("code") in (-32601, -32022):
+      if allow_unsupported and _modern_error_allows_legacy_fallback(error):
         return None
       raise ConnectorError(f"The service reported an MCP error during {method}.")
     result = payload.get("result")
@@ -492,6 +517,44 @@ async def _modern_rpc(
     return result
   finally:
     await response.aclose()
+
+
+async def _bounded_error_payload(
+  response: httpx.Response,
+  rpc_id: int,
+) -> dict | None:
+  """Read a bounded HTTP error body, returning only matching JSON-RPC."""
+  chunks: list[bytes] = []
+  total = 0
+  async for chunk in response.aiter_bytes():
+    total += len(chunk)
+    if total > _MAX_RPC_BYTES:
+      raise ConnectorError("The service returned an MCP response that is too large.")
+    chunks.append(chunk)
+  try:
+    payload = json.loads(b"".join(chunks).decode("utf-8"))
+  except (UnicodeError, ValueError, json.JSONDecodeError, RecursionError):
+    return None
+  return _matching_payload(payload, rpc_id)
+
+
+def _modern_error_allows_legacy_fallback(error: dict) -> bool:
+  """Whether a recognized modern probe error proves legacy is worth trying."""
+  code = error.get("code")
+  if code == -32601:
+    return True
+  if code != -32022:
+    return False
+  data = error.get("data")
+  supported = data.get("supported") if isinstance(data, dict) else None
+  return (
+    isinstance(supported, list)
+    and any(
+      isinstance(version, str)
+      and version in _SUPPORTED_LEGACY_PROTOCOL_VERSIONS
+      for version in supported
+    )
+  )
 
 
 async def _modern_catalog(
@@ -692,7 +755,7 @@ def build_turn_plan(db) -> ConnectorTurnPlan:
     try:
       server_key = f"mobius_connector_{row.id}_{slugify(row.slug)}"
       broker_url = _broker_url(row.id)
-      capability = mint_broker_capability(row.id)
+      capability = mint_broker_capability(row.id, row.capability_id)
       env_var = f"MOBIUS_CONNECTOR_CAPABILITY_{row.id}_{slugify(row.slug).upper()}"
 
       claude_servers[server_key] = {

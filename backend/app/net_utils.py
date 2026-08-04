@@ -106,6 +106,15 @@ def validate_url_safe(url: str) -> tuple[str, str, str]:
       elif ip in ipaddress.ip_network("::/96"):
         candidates.append(ipaddress.ip_address(int(ip) & 0xFFFFFFFF))
     for cand in candidates:
+      # "Public URL" means every address is globally routable, not merely
+      # absent from today's private-network shortlist. Benchmark, reserved,
+      # multicast, documentation, and future special-use ranges can all be
+      # routed inside a deployment and therefore remain SSRF targets.
+      if not cand.is_global or cand.is_multicast:
+        raise HTTPException(
+          400,
+          f"URL {host!r} resolves to non-public address {ip}.",
+        )
       for net in _BLOCKED_NETS:
         if cand in net:
           raise HTTPException(

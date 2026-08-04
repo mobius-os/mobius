@@ -1311,12 +1311,62 @@ def _add_connectors_table(eng) -> None:
   Connector.__table__.create(bind=eng, checkfirst=True)
 
 
+def _add_connector_capability_identity(eng) -> None:
+  """Give every connector an immutable identity for broker authorization."""
+  import secrets
+  from sqlalchemy import inspect as sa_inspect, text
+
+  columns = {
+    column["name"] for column in sa_inspect(eng).get_columns("connectors")
+  }
+  with eng.begin() as conn:
+    if "capability_id" not in columns:
+      conn.execute(text(
+        "ALTER TABLE connectors ADD COLUMN capability_id VARCHAR(64) NULL"
+      ))
+    rows = conn.execute(text(
+      "SELECT id FROM connectors "
+      "WHERE capability_id IS NULL OR length(trim(capability_id)) = 0"
+    )).all()
+    for (connector_id,) in rows:
+      conn.execute(text(
+        "UPDATE connectors SET capability_id = :capability_id WHERE id = :id"
+      ), {
+        "capability_id": secrets.token_hex(32),
+        "id": connector_id,
+      })
+    conn.execute(text(
+      "CREATE UNIQUE INDEX IF NOT EXISTS ix_connectors_capability_id "
+      "ON connectors (capability_id)"
+    ))
+    if eng.dialect.name == "postgresql":
+      conn.execute(text(
+        "ALTER TABLE connectors ALTER COLUMN capability_id SET NOT NULL"
+      ))
+    elif eng.dialect.name == "sqlite":
+      predicate = (
+        "NEW.capability_id IS NULL "
+        "OR length(trim(NEW.capability_id)) = 0"
+      )
+      conn.execute(text(
+        "CREATE TRIGGER IF NOT EXISTS connectors_require_capability_insert "
+        f"BEFORE INSERT ON connectors WHEN {predicate} BEGIN "
+        "SELECT RAISE(ABORT, 'connectors require capability_id'); END"
+      ))
+      conn.execute(text(
+        "CREATE TRIGGER IF NOT EXISTS connectors_require_capability_update "
+        f"BEFORE UPDATE OF capability_id ON connectors WHEN {predicate} BEGIN "
+        "SELECT RAISE(ABORT, 'connectors require capability_id'); END"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
   ("0003_chat_run_root_identity", _add_chat_run_root_identity),
   ("0004_app_identity_required", _require_app_identity),
   ("0005_connectors", _add_connectors_table),
+  ("0006_connector_capability_identity", _add_connector_capability_identity),
 )
 
 

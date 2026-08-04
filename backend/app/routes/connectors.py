@@ -126,7 +126,7 @@ def _get_row(db: Session, connector_id: int) -> models.Connector:
   return row
 
 
-def _require_loopback_capability(request: Request, connector_id: int) -> None:
+def _require_loopback(request: Request) -> str:
   peer = request.client.host if request.client else ""
   try:
     address = ipaddress.ip_address(peer)
@@ -140,19 +140,30 @@ def _require_loopback_capability(request: Request, connector_id: int) -> None:
   scheme, _, token = request.headers.get("authorization", "").partition(" ")
   if scheme.lower() != "bearer" or not token:
     raise HTTPException(status_code=401, detail="MCP broker capability required.")
-  try:
-    core.verify_broker_capability(token, connector_id)
-  except core.ConnectorError as exc:
-    raise HTTPException(status_code=401, detail="MCP broker capability rejected.") from exc
+  return token
 
 
-def _snapshot_broker_row(db: Session, connector_id: int) -> _BrokerSnapshot:
+def _snapshot_broker_row(
+  db: Session,
+  connector_id: int,
+  capability: str,
+) -> _BrokerSnapshot:
   row = db.query(models.Connector).filter(
     models.Connector.id == connector_id,
     models.Connector.enabled.is_(True),
   ).first()
   if row is None:
     raise HTTPException(status_code=404, detail="MCP connection unavailable.")
+  try:
+    core.verify_broker_capability(
+      capability,
+      connector_id,
+      row.capability_id,
+    )
+  except core.ConnectorError as exc:
+    raise HTTPException(
+      status_code=401, detail="MCP broker capability rejected."
+    ) from exc
   secret = None
   if row.auth_header and row.auth_value_encrypted:
     try:
@@ -199,6 +210,20 @@ def _broker_secret_patterns(snapshot: _BrokerSnapshot) -> tuple[bytes, ...]:
     key=len,
     reverse=True,
   ))
+
+
+def _broker_response_headers(
+  upstream: httpx.Response,
+  snapshot: _BrokerSnapshot,
+) -> dict[str, str]:
+  """Forward only transport headers whose values cannot reflect a secret."""
+  patterns = _broker_secret_patterns(snapshot)
+  return {
+    name: value
+    for name, value in upstream.headers.items()
+    if name.lower() in _BROKER_RESPONSE_HEADERS
+    and not any(pattern in value.encode("utf-8") for pattern in patterns)
+  }
 
 
 async def _redacted_broker_stream(
@@ -326,9 +351,9 @@ async def broker_connector(
   endpoint and credential are copied out of the database, then the session is
   closed before DNS validation, request upload, or response streaming begins.
   """
-  _require_loopback_capability(request, connector_id)
+  capability = _require_loopback(request)
   try:
-    snapshot = _snapshot_broker_row(db, connector_id)
+    snapshot = _snapshot_broker_row(db, connector_id, capability)
   finally:
     db.close()
 
@@ -342,10 +367,7 @@ async def broker_connector(
       await upstream.aclose()
       await client.aclose()
 
-  headers = {
-    name: value for name, value in upstream.headers.items()
-    if name.lower() in _BROKER_RESPONSE_HEADERS
-  }
+  headers = _broker_response_headers(upstream, snapshot)
   return StreamingResponse(
     stream(),
     status_code=upstream.status_code,

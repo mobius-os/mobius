@@ -462,6 +462,19 @@ def test_validate_url_rejects_if_any_ip_is_private():
     assert exc_info.value.status_code == 400
 
 
+@pytest.mark.parametrize("address", [
+  "198.18.0.1",  # benchmarking; commonly routed inside test networks
+  "192.0.0.8",   # IETF special-purpose space
+  "224.0.0.1",   # multicast
+  "240.0.0.1",   # reserved
+])
+def test_validate_url_rejects_every_non_global_address(address):
+  fake = _fake_getaddrinfo([(2, 1, 6, "", (address, 443))])
+  with patch("app.net_utils.socket.getaddrinfo", side_effect=fake):
+    with pytest.raises(HTTPException, match="non-public"):
+      validate_url_safe("https://internal.example/mcp")
+
+
 def test_validate_url_ipv6_brackets():
   """IPv6 validated IPs are wrapped in brackets in the pinned URL."""
   fake = _fake_getaddrinfo([

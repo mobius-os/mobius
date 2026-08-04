@@ -1008,6 +1008,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0003_chat_run_root_identity",
     "0004_app_identity_required",
     "0005_connectors",
+    "0006_connector_capability_identity",
   ]
   assert second == first
 
@@ -1029,6 +1030,16 @@ def test_connectors_migration_preserves_preview_era_rows(tmp_path):
       "est_tokens INTEGER NOT NULL DEFAULT 0, status VARCHAR(16) NOT NULL, "
       "status_detail TEXT, created_at DATETIME, last_checked_at DATETIME)"
     ))
+    # Simulate a preview checkout that already recorded the original table
+    # migration before immutable broker identities were added in 0006.
+    conn.execute(text(
+      "CREATE TABLE schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    conn.execute(text(
+      "INSERT INTO schema_migrations (version, applied_at) "
+      "VALUES ('0005_connectors', '2026-08-03 00:00:00')"
+    ))
     conn.execute(text(
       "INSERT INTO connectors ("
       "id, slug, name, url, auth_header, auth_value_encrypted, enabled, "
@@ -1042,12 +1053,17 @@ def test_connectors_migration_preserves_preview_era_rows(tmp_path):
 
   with eng.connect() as conn:
     row = conn.execute(text(
-      "SELECT slug, url, auth_value_encrypted FROM connectors WHERE id = 7"
+      "SELECT slug, url, auth_value_encrypted, capability_id "
+      "FROM connectors WHERE id = 7"
     )).one()
-  assert tuple(row) == (
+  assert tuple(row[:3]) == (
     "preview", "https://mcp.example/mcp", "encrypted-preview-key",
   )
+  assert isinstance(row.capability_id, str) and len(row.capability_id) == 64
   assert "0005_connectors" in {
+    entry["version"] for entry in schema_migration_history(eng)
+  }
+  assert "0006_connector_capability_identity" in {
     entry["version"] for entry in schema_migration_history(eng)
   }
 
