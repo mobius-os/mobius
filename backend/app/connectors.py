@@ -37,12 +37,12 @@ from app.net_utils import validate_url_safe
 
 log = logging.getLogger(__name__)
 
-# Probe the current stateless transport first, then fall back to the stateful
-# 2025 transport still used by many deployed servers and provider SDKs.
-MCP_PROTOCOL_VERSION = "2026-07-28"
-_LEGACY_PROTOCOL_VERSION = "2025-11-25"
-_SUPPORTED_LEGACY_PROTOCOL_VERSIONS = {
-  _LEGACY_PROTOCOL_VERSION,
+# The shared registry targets the newest protocol understood by both bundled
+# providers. Codex may move ahead independently, but a saved connection must
+# remain usable by Claude as well.
+MCP_PROTOCOL_VERSION = "2025-11-25"
+_SUPPORTED_PROTOCOL_VERSIONS = {
+  MCP_PROTOCOL_VERSION,
   "2025-06-18",
   "2025-03-26",
 }
@@ -77,20 +77,14 @@ class ConnectorError(Exception):
 class ConnectorTurnPlan:
   """Detached provider configuration built before the turn releases its DB.
 
-  The values contain turn-lifetime (at most 24-hour) broker capabilities, so their repr is
-  deliberately empty of fields and callers must never log or persist it.
+  The values contain turn-lifetime (at most 24-hour) broker capabilities, so
+  their repr is deliberately empty of fields and callers must never log or
+  persist it.
   """
 
   claude_servers: dict[str, dict] = field(default_factory=dict, repr=False)
   codex_config: dict | None = field(default=None, repr=False)
   codex_env: dict[str, str] = field(default_factory=dict, repr=False)
-
-  @property
-  def empty(self) -> bool:
-    return not self.claude_servers and not self.codex_config
-
-
-EMPTY_CONNECTOR_TURN_PLAN = ConnectorTurnPlan()
 
 
 @dataclass
@@ -177,20 +171,12 @@ def verify_broker_capability(
     raise ConnectorError("The MCP broker capability is not valid for this connection.")
 
 
-# ── Pure naming/auth/sizing helpers ─────────────────────────────────────
+# ── Pure naming/auth helpers ─────────────────────────────────────
 
 
 def slugify(name: str) -> str:
   slug = _SLUG_RE.sub("_", name.strip().lower()).strip("_")
   return slug[:48] or "connector"
-
-
-def estimate_tokens(tools: list) -> int:
-  """Conservative chars/4 estimate for the cached full tool definitions."""
-  try:
-    return max(0, len(json.dumps(tools, separators=(",", ":"))) // 4)
-  except (TypeError, ValueError):
-    return 0
 
 
 def validate_auth_header(name: str | None) -> str | None:
@@ -216,7 +202,7 @@ def auth_headers(header_name: str | None, secret: str | None) -> dict[str, str]:
 
 
 def bare_secret(header_name: str | None, secret: str) -> str:
-  """Codex adds ``Bearer`` for bearer_token_env_var; keep only the token."""
+  """Return the token form Codex expects for Authorization credentials."""
   if header_name and header_name.lower() == "authorization":
     return re.sub(r"(?i)^bearer\s+", "", secret, count=1)
   return secret
@@ -321,24 +307,23 @@ async def _matching_rpc(response: httpx.Response, rpc_id: int) -> dict:
   raise ConnectorError("The service did not answer the MCP request.")
 
 
-def _redact_metadata(value: object, secrets: tuple[str, ...], depth: int = 0) -> object:
-  """Remove submitted credentials recursively before remote metadata persists."""
-  if depth > 64:
-    return "[metadata omitted]"
-  if isinstance(value, str):
-    for secret in secrets:
-      if secret:
-        value = value.replace(secret, "[redacted]")
-    return value
-  if isinstance(value, list):
-    return [_redact_metadata(item, secrets, depth + 1) for item in value]
-  if isinstance(value, dict):
-    return {
-      _redact_metadata(key, secrets, depth + 1) if isinstance(key, str) else key:
-      _redact_metadata(item, secrets, depth + 1)
-      for key, item in value.items()
-    }
-  return value
+def _redact_text(value: object, secrets: tuple[str, ...], limit: int) -> str:
+  """Normalize, redact, and bound the remote text that may be persisted."""
+  text = " ".join(str(value or "").split())
+  for secret in secrets:
+    text = text.replace(secret, "[redacted]")
+  return text[:limit]
+
+
+def _tool_names(
+  tools: list[dict],
+  secrets: tuple[str, ...],
+) -> list[str]:
+  """Keep only bounded names so the registry can present a tool count."""
+  names = [
+    _redact_text(tool.get("name"), secrets, 128) for tool in tools
+  ]
+  return [name for name in names if name]
 
 
 async def _post_rpc(
@@ -416,7 +401,7 @@ async def _initialize_rpc(
       "id": 1,
       "method": "initialize",
       "params": {
-        "protocolVersion": _LEGACY_PROTOCOL_VERSION,
+        "protocolVersion": MCP_PROTOCOL_VERSION,
         "capabilities": {},
         "clientInfo": {"name": "mobius", "version": "1.0"},
       },
@@ -450,198 +435,17 @@ async def _initialize_rpc(
     await response.aclose()
 
 
-def _modern_request_params(params: dict | None = None) -> dict:
-  return {
-    **(params or {}),
-    "_meta": {
-      "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
-      "io.modelcontextprotocol/clientInfo": {
-        "name": "mobius",
-        "version": "1.0",
-      },
-      "io.modelcontextprotocol/clientCapabilities": {},
-    },
-  }
-
-
-async def _modern_rpc(
-  client: httpx.AsyncClient,
-  endpoint: tuple[str, str, str],
-  auth: dict[str, str],
-  method: str,
-  params: dict | None,
-  rpc_id: int,
-  *,
-  allow_unsupported: bool = False,
-) -> dict | None:
-  """Send one stateless 2026 request; return ``None`` for a legacy server."""
-  pinned_url, host_header, sni_host = endpoint
-  headers = {
-    "Accept": "application/json, text/event-stream",
-    "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
-    "Mcp-Method": method,
-    **auth,
-  }
-  request = client.build_request(
-    "POST",
-    pinned_url,
-    json={
-      "jsonrpc": "2.0",
-      "id": rpc_id,
-      "method": method,
-      "params": _modern_request_params(params),
-    },
-    headers=headers,
-  )
-  request.headers["host"] = host_header
-  request.extensions["sni_hostname"] = sni_host
-  response = await client.send(request, stream=True)
-  try:
-    if response.status_code in (301, 302, 303, 307, 308):
-      raise ConnectorError(
-        "The endpoint redirected. Add the final HTTPS MCP address instead."
-      )
-    if response.status_code in (401, 403):
-      raise ConnectorError(
-        "The service rejected the key or requires an OAuth sign-in flow."
-      )
-    if allow_unsupported and response.status_code in (400, 404, 405):
-      payload = await _bounded_error_payload(response, rpc_id)
-      if payload is None:
-        # A legacy Streamable HTTP endpoint commonly answers an unknown modern
-        # probe with an empty/plain HTTP error. Only that unrecognized shape is
-        # an era signal; modern JSON-RPC errors remain authoritative.
-        return None
-      error = payload.get("error")
-      if not isinstance(error, dict):
-        raise ConnectorError("The service returned an invalid server/discover error.")
-      if _modern_error_allows_legacy_fallback(error):
-        return None
-      raise ConnectorError("The service rejected the modern MCP discovery request.")
-    if response.status_code >= 400:
-      raise ConnectorError(
-        f"The service answered HTTP {response.status_code} to {method}."
-      )
-    payload = await _matching_rpc(response, rpc_id)
-    error = payload.get("error")
-    if isinstance(error, dict):
-      if allow_unsupported and _modern_error_allows_legacy_fallback(error):
-        return None
-      raise ConnectorError(f"The service reported an MCP error during {method}.")
-    result = payload.get("result")
-    if not isinstance(result, dict):
-      raise ConnectorError(f"The service returned an invalid {method} result.")
-    return result
-  finally:
-    await response.aclose()
-
-
-async def _bounded_error_payload(
-  response: httpx.Response,
-  rpc_id: int,
-) -> dict | None:
-  """Read a bounded HTTP error body, returning only matching JSON-RPC."""
-  chunks: list[bytes] = []
-  total = 0
-  async for chunk in response.aiter_bytes():
-    total += len(chunk)
-    if total > _MAX_RPC_BYTES:
-      raise ConnectorError("The service returned an MCP response that is too large.")
-    chunks.append(chunk)
-  try:
-    payload = json.loads(b"".join(chunks).decode("utf-8"))
-  except (UnicodeError, ValueError, json.JSONDecodeError, RecursionError):
-    return None
-  return _matching_payload(payload, rpc_id)
-
-
-def _modern_error_allows_legacy_fallback(error: dict) -> bool:
-  """Whether a recognized modern probe error proves legacy is worth trying."""
-  code = error.get("code")
-  if code == -32601:
-    return True
-  if code != -32022:
-    return False
-  data = error.get("data")
-  supported = data.get("supported") if isinstance(data, dict) else None
-  return (
-    isinstance(supported, list)
-    and any(
-      isinstance(version, str)
-      and version in _SUPPORTED_LEGACY_PROTOCOL_VERSIONS
-      for version in supported
-    )
-  )
-
-
-async def _modern_catalog(
-  client: httpx.AsyncClient,
-  endpoint: tuple[str, str, str],
-  auth: dict[str, str],
-) -> tuple[dict, list[dict]] | None:
-  """Read a stateless 2026 catalog, or return ``None`` for a legacy server."""
-  discovered = await _modern_rpc(
-    client,
-    endpoint,
-    auth,
-    "server/discover",
-    {},
-    1,
-    allow_unsupported=True,
-  )
-  if discovered is None:
-    return None
-  versions = discovered.get("supportedVersions")
-  if not isinstance(versions, list) or MCP_PROTOCOL_VERSION not in versions:
-    return None
-
-  tools: list[dict] = []
-  cursor: str | None = None
-  for page in range(_MAX_TOOL_PAGES):
-    params = {"cursor": cursor} if cursor else {}
-    listed = await _modern_rpc(
-      client,
-      endpoint,
-      auth,
-      "tools/list",
-      params,
-      2 + page,
-    )
-    rows = (listed or {}).get("tools")
-    if not isinstance(rows, list):
-      raise ConnectorError("The service returned an invalid tool catalog.")
-    tools.extend(item for item in rows if isinstance(item, dict))
-    if len(tools) > _MAX_TOOLS:
-      raise ConnectorError(
-        f"The service exposes more than {_MAX_TOOLS} tools; narrow the endpoint first."
-      )
-    next_cursor = (listed or {}).get("nextCursor")
-    cursor = str(next_cursor) if next_cursor else None
-    if not cursor:
-      break
-  else:
-    raise ConnectorError("The service tool catalog has too many pages.")
-
-  metadata = discovered.get("_meta")
-  server_info = (
-    metadata.get("io.modelcontextprotocol/serverInfo")
-    if isinstance(metadata, dict)
-    else {}
-  )
-  return (server_info if isinstance(server_info, dict) else {}), tools
-
-
 async def handshake(
   url: str,
   header_name: str | None = None,
   secret: str | None = None,
 ) -> dict:
-  """Probe a Streamable HTTP MCP endpoint and return its bounded tool catalog."""
+  """Probe a shared-provider MCP endpoint and return bounded tool names."""
   header_name = validate_auth_header(header_name)
   auth = auth_headers(header_name, secret)
-  legacy_headers = {
+  headers = {
     "Accept": "application/json, text/event-stream",
-    "MCP-Protocol-Version": _LEGACY_PROTOCOL_VERSION,
+    "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
     **auth,
   }
   try:
@@ -654,24 +458,18 @@ async def handshake(
         follow_redirects=False,
         trust_env=False,
       ) as client:
-        modern = await _modern_catalog(client, endpoint, auth)
-        if modern is not None:
-          server_info, tools = modern
-          negotiated = MCP_PROTOCOL_VERSION
-        else:
-          init, session_id = await _initialize_rpc(
-            client, endpoint, legacy_headers,
+        init, session_id = await _initialize_rpc(client, endpoint, headers)
+        negotiated = str(init.get("protocolVersion") or "")
+        if negotiated not in _SUPPORTED_PROTOCOL_VERSIONS:
+          raise ConnectorError(
+            "The service negotiated an unsupported MCP version."
           )
-          negotiated = str(init.get("protocolVersion") or "")
-          if negotiated not in _SUPPORTED_LEGACY_PROTOCOL_VERSIONS:
-            raise ConnectorError(
-              "The service negotiated an unsupported MCP version."
-            )
-          session_headers = dict(legacy_headers)
-          session_headers["MCP-Protocol-Version"] = negotiated
-          if session_id:
-            session_headers["MCP-Session-Id"] = session_id
+        session_headers = dict(headers)
+        session_headers["MCP-Protocol-Version"] = negotiated
+        if session_id:
+          session_headers["MCP-Session-Id"] = session_id
 
+        try:
           await _post_rpc(
             client, endpoint, session_headers,
             "notifications/initialized", {}, None,
@@ -699,12 +497,12 @@ async def handshake(
               break
           else:
             raise ConnectorError("The service tool catalog has too many pages.")
-
+        finally:
           if session_id:
             await _close_session(client, endpoint, session_headers)
-          server_info = init.get("serverInfo")
-          if not isinstance(server_info, dict):
-            server_info = {}
+        server_info = init.get("serverInfo")
+        if not isinstance(server_info, dict):
+          server_info = {}
   except ConnectorError:
     raise
   except (TimeoutError, httpx.TimeoutException) as exc:
@@ -714,22 +512,22 @@ async def handshake(
   except httpx.HTTPError as exc:
     raise ConnectorError("Could not reach the MCP service.") from exc
 
-  submitted_secrets = tuple(filter(None, (
-    secret or "",
-    bare_secret(header_name, secret) if secret else "",
-    *(auth_headers(header_name, secret).values() if secret else ()),
-  )))
-  safe_server_info = _redact_metadata(server_info, submitted_secrets)
-  safe_tools = _redact_metadata(tools, submitted_secrets)
-  if not isinstance(safe_server_info, dict) or not isinstance(safe_tools, list):
-    raise ConnectorError("The service returned invalid MCP metadata.")
+  submitted_secrets = tuple(sorted({
+    value
+    for value in (
+      secret or "",
+      bare_secret(header_name, secret) if secret else "",
+      *auth.values(),
+    )
+    if value
+  }, key=len, reverse=True))
   return {
-    "name": str(
-      safe_server_info.get("title") or safe_server_info.get("name") or ""
-    ).strip(),
-    "tools": safe_tools,
-    "est_tokens": estimate_tokens(safe_tools),
-    "protocol_version": negotiated,
+    "name": _redact_text(
+      server_info.get("title") or server_info.get("name"),
+      submitted_secrets,
+      128,
+    ),
+    "tools": _tool_names(tools, submitted_secrets),
   }
 
 
@@ -755,13 +553,25 @@ def _broker_url(connector_id: int) -> str:
   return f"http://127.0.0.1:{port}/api/connectors/{connector_id}/broker"
 
 
-def build_turn_plan(db) -> ConnectorTurnPlan:
-  """Snapshot enabled rows into provider config while ``db`` is still live."""
-  if db is None:
-    return EMPTY_CONNECTOR_TURN_PLAN
+def build_turn_plan(
+  db,
+  *,
+  include_owner_connectors: bool,
+) -> ConnectorTurnPlan | None:
+  """Snapshot allowed, enabled rows while ``db`` is still live.
+
+  The policy decision is a required argument so a new child-run caller cannot
+  accidentally inherit the owner's remote services. A future delegated grant
+  can opt in at the call site that owns that policy.
+  """
+  if db is None or not include_owner_connectors:
+    return None
   rows = (
     db.query(models.Connector)
-    .filter(models.Connector.enabled.is_(True))
+    .filter(
+      models.Connector.enabled.is_(True),
+      models.Connector.status == "ok",
+    )
     .order_by(models.Connector.id)
     .all()
   )
@@ -789,9 +599,11 @@ def build_turn_plan(db) -> ConnectorTurnPlan:
     except ConnectorError:
       log.warning("connection %s skipped because its broker plan is invalid", row.slug)
 
+  if not claude_servers:
+    return None
   return ConnectorTurnPlan(
     claude_servers=claude_servers,
-    codex_config={"mcp_servers": codex_servers} if codex_servers else None,
+    codex_config={"mcp_servers": codex_servers},
     codex_env=codex_env,
   )
 

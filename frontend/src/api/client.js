@@ -472,15 +472,21 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
-    update: (connectorId, payload) => apiFetch(`/connectors/${connectorId}`, {
+    update: (connectorId, generation, payload) => apiFetch(`/connectors/${connectorId}`, {
       method: 'PATCH',
+      headers: { 'X-Mobius-Connector-Generation': generation },
       body: JSON.stringify(payload),
+      timeoutMs: 15000,
     }),
-    refresh: (connectorId) => apiFetch(`/connectors/${connectorId}/refresh`, {
+    refresh: (connectorId, generation) => apiFetch(`/connectors/${connectorId}/refresh`, {
       method: 'POST',
+      headers: { 'X-Mobius-Connector-Generation': generation },
+      timeoutMs: 25000,
     }),
-    remove: (connectorId) => apiFetch(`/connectors/${connectorId}`, {
+    remove: (connectorId, generation) => apiFetch(`/connectors/${connectorId}`, {
       method: 'DELETE',
+      headers: { 'X-Mobius-Connector-Generation': generation },
+      timeoutMs: 15000,
     }),
   },
   apps: {

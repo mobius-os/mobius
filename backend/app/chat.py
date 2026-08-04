@@ -4240,7 +4240,10 @@ async def _run_chat_impl_with_db(
   # provider's native tools instead of breaking chat.
   try:
     from app.connectors import build_turn_plan
-    connector_turn_plan = build_turn_plan(db)
+    connector_turn_plan = build_turn_plan(
+      db,
+      include_owner_connectors=run_policy is None,
+    )
   except Exception:
     log.warning(
       "MCP connection snapshot skipped chat_id=%s",

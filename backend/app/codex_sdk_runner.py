@@ -1546,20 +1546,13 @@ async def run_codex_sdk_turn(
 
   # Remote MCP connections are materialized in chat.py while its DB session is
   # still live. Secrets use Codex's env indirection rather than thread config or
-  # argv; the thread receives only env-variable names. A malformed plan is
-  # local to this optional capability and must not stop the owner from chatting.
+  # argv; the thread receives only env-variable names. Snapshot construction is
+  # the optional-capability failure boundary; this runner trusts the typed,
+  # detached plan rather than silently masking internal contract violations.
   connector_thread_config = None
   if connector_plan is not None:
-    try:
-      connector_thread_config = connector_plan.codex_config
-      env.update(connector_plan.codex_env)
-    except Exception:
-      log.warning(
-        "Codex MCP connection injection skipped chat_id=%s",
-        chat_id,
-        exc_info=True,
-      )
-      connector_thread_config = None
+    connector_thread_config = connector_plan.codex_config
+    env.update(connector_plan.codex_env)
 
   # config_overrides always isolates the prompt stack, then carries the
   # request_user_input (AskUserQuestion parity), goal, and multi-agent flags.

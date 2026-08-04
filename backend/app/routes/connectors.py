@@ -6,11 +6,12 @@ import asyncio
 import ipaddress
 import json
 import logging
+import secrets
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
@@ -70,38 +71,20 @@ class ConnectorPatch(BaseModel):
   name: str | None = Field(default=None, min_length=1, max_length=128)
 
 
-def _tool_preview(tools: list) -> list[dict]:
-  preview = []
-  for tool in tools[:64]:
-    if not isinstance(tool, dict):
-      continue
-    description = " ".join(str(tool.get("description") or "").split())
-    preview.append({
-      "name": str(tool.get("name") or "")[:128],
-      "description": description[:180],
-    })
-  return preview
-
-
 def _public(row: models.Connector) -> dict:
   tools = row.tools_json if isinstance(row.tools_json, list) else []
   return {
     "id": row.id,
-    "slug": row.slug,
+    # This generation changes at revocation boundaries. Owner mutations must
+    # echo it so a reused SQLite integer key cannot target a later connection.
+    "generation": row.capability_id,
     "name": row.name,
     "url": row.url,
     "enabled": row.enabled,
     "has_auth": bool(row.auth_header and row.auth_value_encrypted),
-    "auth_header": row.auth_header,
     "tool_count": len(tools),
-    "tools": _tool_preview(tools),
-    "est_tokens": row.est_tokens,
     "status": row.status,
     "status_detail": row.status_detail,
-    "providers": ["claude", "codex"],
-    "last_checked_at": (
-      row.last_checked_at.isoformat() if row.last_checked_at else None
-    ),
   }
 
 
@@ -117,9 +100,28 @@ def _unique_slug(db: Session, base: str) -> str:
   return slug
 
 
-def _get_row(db: Session, connector_id: int) -> models.Connector:
+def _require_generation(
+  generation: str | None = Header(
+    default=None,
+    alias="X-Mobius-Connector-Generation",
+  ),
+) -> str:
+  if not generation or len(generation) > 128:
+    raise HTTPException(
+      status_code=428,
+      detail="Refresh the connection list before changing it.",
+    )
+  return generation
+
+
+def _get_row(
+  db: Session,
+  connector_id: int,
+  generation: str,
+) -> models.Connector:
   row = db.query(models.Connector).filter(
-    models.Connector.id == connector_id
+    models.Connector.id == connector_id,
+    models.Connector.capability_id == generation,
   ).first()
   if row is None:
     raise HTTPException(status_code=404, detail="Connection not found.")
@@ -151,6 +153,7 @@ def _snapshot_broker_row(
   row = db.query(models.Connector).filter(
     models.Connector.id == connector_id,
     models.Connector.enabled.is_(True),
+    models.Connector.status == "ok",
   ).first()
   if row is None:
     raise HTTPException(status_code=404, detail="MCP connection unavailable.")
@@ -230,12 +233,7 @@ async def _redacted_broker_stream(
   upstream: httpx.Response,
   snapshot: _BrokerSnapshot,
 ):
-  """Stream decoded MCP bytes while retaining only a secret-sized carry.
-
-  The carry prevents a credential split across network chunks from escaping.
-  Scanning original bytes (rather than replacing each chunk independently)
-  keeps memory bounded and preserves normal response streaming.
-  """
+  """Stream MCP bytes without leaking a reflected connection credential."""
   patterns = _broker_secret_patterns(snapshot)
   if not patterns:
     async for chunk in upstream.aiter_bytes():
@@ -428,7 +426,7 @@ async def add_connector(
       ),
       enabled=True,
       tools_json=probe["tools"],
-      est_tokens=probe["est_tokens"],
+      est_tokens=0,
       status="ok",
       status_detail=None,
       last_checked_at=now_naive_utc(),
@@ -451,26 +449,59 @@ async def add_connector(
 async def patch_connector(
   connector_id: int,
   body: ConnectorPatch,
+  generation: str = Depends(_require_generation),
   _owner: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
-  row = _get_row(db, connector_id)
+  row = _get_row(db, connector_id, generation)
+  values: dict[str, object] = {}
   if body.enabled is not None:
-    row.enabled = body.enabled
+    if body.enabled and row.status != "ok":
+      raise HTTPException(
+        status_code=409,
+        detail="Re-check this connection successfully before enabling it.",
+      )
+    if row.enabled and not body.enabled:
+      # Disabling is a revocation boundary. Give a later re-enable a fresh
+      # identity so a capability minted before the disable cannot revive.
+      values["capability_id"] = secrets.token_hex(32)
+    values["enabled"] = body.enabled
   if body.name is not None:
-    row.name = body.name.strip()[:128]
+    values["name"] = body.name.strip()[:128]
+  if not values:
+    return _public(row)
+  target = db.query(models.Connector).filter(
+    models.Connector.id == connector_id,
+    models.Connector.capability_id == generation,
+  )
+  if body.enabled:
+    target = target.filter(models.Connector.status == "ok")
+  updated = target.update(values, synchronize_session=False)
+  if updated != 1:
+    db.rollback()
+    if body.enabled:
+      raise HTTPException(
+        status_code=409,
+        detail="Re-check this connection successfully before enabling it.",
+      )
+    raise HTTPException(
+      status_code=404,
+      detail="The connection changed before the update completed.",
+    )
   db.commit()
-  db.refresh(row)
-  return _public(row)
+  current_generation = str(values.get("capability_id", generation))
+  current = _get_row(db, connector_id, current_generation)
+  return _public(current)
 
 
 @router.post("/{connector_id}/refresh")
 async def refresh_connector(
   connector_id: int,
+  generation: str = Depends(_require_generation),
   _owner: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
-  stored = _get_row(db, connector_id)
+  stored = _get_row(db, connector_id, generation)
   secret = None
   if stored.auth_header and stored.auth_value_encrypted:
     try:
@@ -484,28 +515,55 @@ async def refresh_connector(
   db.close()
   try:
     probe = await core.handshake(url, auth_header, secret)
-    row = _get_row(db, connector_id)
-    row.tools_json = probe["tools"]
-    row.est_tokens = probe["est_tokens"]
-    row.status = "ok"
-    row.status_detail = None
+    values = {
+      "tools_json": probe["tools"],
+      "est_tokens": 0,
+      "status": "ok",
+      "status_detail": None,
+    }
   except core.ConnectorError as exc:
-    row = _get_row(db, connector_id)
-    row.status = "error"
-    row.status_detail = str(exc)
-  row.last_checked_at = now_naive_utc()
+    values = {
+      "status": "error",
+      "status_detail": str(exc),
+    }
+  values["last_checked_at"] = now_naive_utc()
+  identity = db.query(models.Connector).filter(
+    models.Connector.id == connector_id,
+    models.Connector.capability_id == generation,
+  )
+  updated = identity.update(values, synchronize_session=False)
+  if updated != 1:
+    db.rollback()
+    raise HTTPException(
+      status_code=404,
+      detail="The connection changed while it was being refreshed.",
+    )
   db.commit()
-  db.refresh(row)
+  row = db.query(models.Connector).filter(
+    models.Connector.id == connector_id,
+    models.Connector.capability_id == generation,
+  ).first()
+  if row is None:
+    raise HTTPException(
+      status_code=404,
+      detail="The connection changed while it was being refreshed.",
+    )
   return _public(row)
 
 
 @router.delete("/{connector_id}")
 async def delete_connector(
   connector_id: int,
+  generation: str = Depends(_require_generation),
   _owner: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
-  row = _get_row(db, connector_id)
-  db.delete(row)
+  deleted = db.query(models.Connector).filter(
+    models.Connector.id == connector_id,
+    models.Connector.capability_id == generation,
+  ).delete(synchronize_session=False)
+  if deleted != 1:
+    db.rollback()
+    raise HTTPException(status_code=404, detail="Connection not found.")
   db.commit()
   return {"ok": True}

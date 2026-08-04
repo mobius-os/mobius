@@ -20,6 +20,7 @@ const providerUsageRootKey = ['settings', 'provider-usage']
 const providerUsageKey = (provider) => [...providerUsageRootKey, provider]
 const appsKey = ['apps']
 const chatsKey = ['chats']
+const connectorsKey = ['connectors']
 const providersStatusKey = ['auth', 'providers', 'status']
 const modelRegistryKey = ['models', 'registry']
 const modelPrefsKey = ['owner', 'model-prefs']
@@ -143,6 +144,22 @@ function useChatsQuery({ reconcile } = {}) {
       const rows = await fetchChats(context)
       return reconcile ? reconcile(rows) : rows
     },
+  })
+}
+
+async function fetchConnectors({ signal } = {}) {
+  const res = await api.connectors.list({ signal, timeoutMs: 10_000 })
+  const data = await jsonOrThrow(res, 'connections fetch failed:')
+  return Array.isArray(data?.connectors) ? data.connectors : []
+}
+
+function useConnectorsQuery({ enabled = true } = {}) {
+  return useQuery({
+    queryKey: connectorsKey,
+    queryFn: fetchConnectors,
+    enabled,
+    staleTime: 0,
+    refetchOnWindowFocus: true,
   })
 }
 
@@ -392,6 +409,17 @@ export const chatQueries = {
       }).then(() => true)
     },
     remove: (queryClient, chatId) => queryClient.removeQueries({ queryKey: ['chat-messages', chatId] }),
+  },
+}
+
+export const connectorQueries = {
+  list: {
+    key: connectorsKey,
+    fetch: fetchConnectors,
+    useQuery: useConnectorsQuery,
+    invalidate: (queryClient) => queryClient.invalidateQueries({
+      queryKey: connectorsKey,
+    }),
   },
 }
 
