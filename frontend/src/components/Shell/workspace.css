@@ -254,17 +254,17 @@ html[data-mode-view-transition]::view-transition-new(*) {
 
 /* ── Drag-to-organize overlays (design §3.3, PR3) ────────────────────────────
    The drag controller (useWorkspaceDrag) creates these imperatively and writes
-   their GEOMETRY inline (content-local px for the preview/pre-glow, viewport px
-   for the chip); this stylesheet owns only their APPEARANCE and motion. All are
-   pointer-transparent except the shield, and none exist unless the splits flag
-   is on. */
+   their GEOMETRY inline (viewport px for the fixed preview/chip, content-local px
+   for pre-glow); this stylesheet owns only their APPEARANCE and motion. All are
+   pointer-transparent and none exist unless the splits flag is on. */
 
 /* The single reused drop preview. Its rect is the exact geometry the drop would
    produce (an edge's resulting half, a center's inset pane, a strip caret); the
    morphing rectangle IS the whole preview language — no arrows, no text. */
 .workspace__drop-preview {
-  position: absolute;
-  z-index: 5;
+  position: fixed;
+  /* Paint over the visual shield (250), while the dragged label stays topmost. */
+  z-index: 260;
   pointer-events: none;
   border: 2px solid var(--accent);
   border-radius: 10px;

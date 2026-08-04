@@ -1,6 +1,5 @@
 import { useEffect } from 'react'
 import * as tabModel from './tabModel.js'
-import { STRIP_H } from './paneModel.js'
 import {
   buildScene, hitTest, zoneTarget, releaseZone, chipOffset, STRIP_CARET_PAD,
   passedSlop, touchTabMoveIntent, drawerRowMoveIntent, releasedInPlace,
@@ -27,7 +26,6 @@ import {
 // hit-tests against projectLayout rects — never DOM-event bubbling, because
 // iframes swallow events and the drawer is inert.
 
-const STRIP_ZONE_H = STRIP_H + STRIP_CARET_PAD
 const AUTO_SCROLL_EDGE = 32 // px from a strip's scroll edge that arms auto-scroll
 const AUTO_SCROLL_STEP = 6 // px/frame
 
@@ -145,7 +143,7 @@ export default function useWorkspaceDrag({
       if (!previewEl) {
         previewEl = document.createElement('div')
         previewEl.className = 'workspace__drop-preview'
-        contentElRef.current?.appendChild(previewEl)
+        document.body.appendChild(previewEl)
       }
     }
     // Pre-glow nodes are appended separately from the shield/chip/preview and
@@ -191,17 +189,32 @@ export default function useWorkspaceDrag({
       chipEl.style.top = `${top}px`
     }
 
-    // Render (or clear) the drop preview for a zone. Geometry is written inline
-    // (content-local px); appearance + morph transitions come from the CSS.
-    function renderPreview(zone) {
+    // Render (or clear) the drop preview for a zone. The geometry engine speaks
+    // content-local pixels, including a negative y for the shell-level one-pane
+    // strip. Translate once to viewport coordinates so the fixed preview can
+    // paint both inside content and over that sibling strip without clipping.
+    function renderPreview(zone, box) {
       if (!previewEl) return
       if (!zone) { previewEl.classList.remove('is-visible'); return }
       previewEl.classList.toggle('workspace__drop-preview--caret', zone.type === 'strip')
       const { rect } = zone
-      previewEl.style.left = `${rect.x}px`
-      previewEl.style.top = `${rect.y}px`
-      previewEl.style.width = `${rect.w}px`
-      previewEl.style.height = `${rect.h}px`
+      const viewport = fixedSpace || captureLayoutSpace(document.documentElement)
+      const contentOrigin = clientPointToLayout({
+        x: box.clientLeft,
+        y: box.clientTop,
+      }, viewport)
+      const offset = clientDeltaToLayout({
+        x: rect.x * box.zoom,
+        y: rect.y * box.zoom,
+      }, viewport)
+      const size = clientDeltaToLayout({
+        x: rect.w * box.zoom,
+        y: rect.h * box.zoom,
+      }, viewport)
+      previewEl.style.left = `${contentOrigin.x + offset.x}px`
+      previewEl.style.top = `${contentOrigin.y + offset.y}px`
+      previewEl.style.width = `${size.x}px`
+      previewEl.style.height = `${size.y}px`
       previewEl.classList.add('is-visible')
     }
 
@@ -228,18 +241,48 @@ export default function useWorkspaceDrag({
       }
     }
 
-    // Measure a pane's strip tab rects (content-local) for the caret index.
-    function measureTabs(paneId, box = contentBox()) {
-      const host = contentElRef.current
-      const strip = host?.querySelector(`[data-pane-strip="${cssEscape(paneId)}"]`)
-      if (!strip) return []
-      return [...strip.querySelectorAll('.shell__tab')].map((el) => {
-        const r = el.getBoundingClientRect()
-        return {
-          left: toLocal(r.left, r.top, box).x,
-          right: toLocal(r.right, r.bottom, box).x,
-        }
-      })
+    function findStrip(paneId) {
+      const selector = `[data-pane-strip="${cssEscape(paneId)}"]`
+      const shell = contentElRef.current?.closest?.('.shell')
+        || contentElRef.current?.parentElement
+      return shell?.querySelector?.(selector) || null
+    }
+
+    // Measure one pane's whole strip contract. Most strips are content children;
+    // the one-pane Builder strip is a shell sibling above content, so its local y
+    // is negative. Keeping rect + tabs together prevents hit-testing, previews,
+    // and auto-scroll from inventing different ideas of where the strip lives.
+    function measureStrip(paneId, box = contentBox()) {
+      const strip = findStrip(paneId)
+      if (!strip) return null
+      const stripBox = strip.getBoundingClientRect()
+      const origin = clientPointToLayout({ x: stripBox.left, y: stripBox.top }, box)
+      const size = clientDeltaToLayout({ x: stripBox.width, y: stripBox.height }, box)
+      return {
+        rect: {
+          x: origin.x,
+          y: origin.y,
+          w: size.x,
+          h: size.y,
+        },
+        tabs: [...strip.querySelectorAll('.shell__tab')].map((el) => {
+          const r = el.getBoundingClientRect()
+          return {
+            left: toLocal(r.left, r.top, box).x,
+            right: toLocal(r.right, r.bottom, box).x,
+          }
+        }),
+      }
+    }
+
+    function refreshSceneStrips(activeScene, box = contentBox()) {
+      if (!activeScene) return
+      for (const pane of activeScene.panes) {
+        const measured = measureStrip(pane.paneId, box)
+        if (!measured) continue
+        pane.stripRect = measured.rect
+        pane.tabs = measured.tabs
+      }
     }
 
     function buildSceneNow(source, allowRootEdge) {
@@ -247,13 +290,8 @@ export default function useWorkspaceDrag({
       const ws = workspaceStateRef.current.ws
       const box = contentBox()
       return buildScene(
-        ws,
-        projection,
-        mode,
-        contentRect,
-        source,
-        allowRootEdge,
-        paneId => measureTabs(paneId, box),
+        ws, projection, mode, contentRect, source, allowRootEdge,
+        paneId => measureStrip(paneId, box),
       )
     }
 
@@ -331,7 +369,11 @@ export default function useWorkspaceDrag({
         preGlow(scene)
         if (isTouch && !held && navigator.vibrate) { try { navigator.vibrate(10) } catch { /* unsupported */ } }
         if (sourceKind === 'drawer') {
-          drawerEdgeX = document.getElementById('navigation-drawer')?.getBoundingClientRect().right ?? null
+          const drawer = document.getElementById('navigation-drawer')
+          if (drawer) {
+            const drawerSpace = captureLayoutSpace(drawer)
+            drawerEdgeX = drawerSpace.clientLeft + drawerSpace.width * drawerSpace.zoom
+          }
         }
       }
 
@@ -381,9 +423,9 @@ export default function useWorkspaceDrag({
         let dir = 0
         let pid = null
         for (const pane of scene.panes) {
-          const r = pane.rect
-          if (xL < r.x || xL > r.x + r.w || yL < r.y || yL > r.y + STRIP_ZONE_H) continue
-          const el = contentElRef.current?.querySelector(`[data-pane-strip="${cssEscape(pane.paneId)}"]`)
+          const r = pane.stripRect
+          if (xL < r.x || xL > r.x + r.w || yL < r.y || yL > r.y + r.h + STRIP_CARET_PAD) continue
+          const el = findStrip(pane.paneId)
           pid = pane.paneId
           if (el && el.scrollWidth > el.clientWidth + 1) {
             const sb = el.getBoundingClientRect()
@@ -404,9 +446,13 @@ export default function useWorkspaceDrag({
         autoStripEl.scrollLeft += autoDir * AUTO_SCROLL_STEP
         const box = contentBox()
         const p = scene?.panes.find(pp => pp.paneId === autoPaneId)
-        if (p) p.tabs = measureTabs(autoPaneId, box) // re-measure the scrolled strip
+        const measured = measureStrip(autoPaneId, box)
+        if (p && measured) {
+          p.stripRect = measured.rect
+          p.tabs = measured.tabs
+        }
         const next = hitTest(toLocal(lastPoint.x, lastPoint.y, box), scene, curZone)
-        renderPreview(next)
+        renderPreview(next, box)
         curZone = next
         autoRAF = requestAnimationFrame(autoStep)
       }
@@ -422,15 +468,19 @@ export default function useWorkspaceDrag({
         const { x: cx, y: cy } = lastPoint
         // While the drawer still covers the panes, show no preview (the glide-close
         // crossing is handled synchronously in onMove).
-        if (sourceKind === 'drawer' && drawerOpenRef.current && !glided) {
+        if (sourceKind === 'drawer' && !glided) {
           positionChip(cx, cy, isTouch, key)
           curZone = null; renderPreview(null); stopAutoScroll(); return
         }
         const box = contentBox()
+        // Arming a single-mode drag changes the rendered strip owner. Refresh
+        // after that React commit (and after any subsequent layout change) so
+        // hit-testing follows the strip that is actually mounted this frame.
+        refreshSceneStrips(scene, box)
         updateAutoScroll(cx, cy, box)
         const next = hitTest(toLocal(cx, cy, box), scene, curZone)
         positionChip(cx, cy, isTouch, key)
-        renderPreview(next)
+        renderPreview(next, box)
         curZone = next
       }
       const onMove = (ev) => {
@@ -529,8 +579,7 @@ export default function useWorkspaceDrag({
         // Drawer drag-out glide-close must fire SYNCHRONOUSLY (it dispatches
         // closeDrawer and stands the OS gesture down); the heavy hit-test/preview
         // work is deferred to the coalesced rAF pass above (design §3.1).
-        if (sourceKind === 'drawer' && drawerOpenRef.current
-            && drawerEdgeX != null && !glided
+        if (sourceKind === 'drawer' && drawerEdgeX != null && !glided
             && crossedDrawerExit(ev.clientX, drawerEdgeX)) {
           glided = true
           closeDrawer?.()
