@@ -65,7 +65,7 @@ export function searchInstalledApps(apps, query, limit = 8) {
     if (!includesEvery(whole, tokens)) continue
 
     let score = 100
-    let matchArea = 'Manifest'
+    let matchArea = 'App details'
     const normalizedQuery = tokens.join(' ')
     if (name === normalizedQuery) {
       score = 500
