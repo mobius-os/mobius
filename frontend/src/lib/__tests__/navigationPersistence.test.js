@@ -5,6 +5,7 @@ import {
   consumeReturnView,
   parseShellDeepLink,
   persistActiveNavigation,
+  readRecentlyOpenedChatIds,
   readRestoredCanvas,
   readStoredChatId,
 } from '../navigationPersistence.js'
@@ -57,4 +58,39 @@ test('active navigation mirrors cold state without retaining a stale app', () =>
     activeView: 'chat', activeChatId: 'chat-2', activeAppId: null,
   })
   assert.equal(store.values.has('moebius_active_app'), false)
+})
+
+test('recent chat history is device-local, deduplicated, and bounded', () => {
+  const store = storage()
+  for (let index = 0; index < 14; index += 1) {
+    persistActiveNavigation(store, {
+      activeView: 'chat', activeChatId: `chat-${index}`, activeAppId: null,
+    })
+  }
+  persistActiveNavigation(store, {
+    activeView: 'chat', activeChatId: 'chat-7', activeAppId: null,
+  })
+
+  const recent = readRecentlyOpenedChatIds(store)
+  assert.equal(recent.length, 12)
+  assert.equal(recent[0], 'chat-7')
+  assert.equal(recent.filter(id => id === 'chat-7').length, 1)
+})
+
+test('only a visible chat navigation records an open', () => {
+  const store = storage()
+  persistActiveNavigation(store, {
+    activeView: 'canvas', activeChatId: 'remembered-chat', activeAppId: 7,
+  })
+  assert.deepEqual(readRecentlyOpenedChatIds(store), [])
+
+  persistActiveNavigation(store, {
+    activeView: 'chat', activeChatId: 'visible-chat', activeAppId: null,
+  })
+  assert.deepEqual(readRecentlyOpenedChatIds(store), ['visible-chat'])
+})
+
+test('malformed recent chat history degrades to no history', () => {
+  const store = storage({ 'mobius:recent-chat-ids': '{bad' })
+  assert.deepEqual(readRecentlyOpenedChatIds(store), [])
 })
