@@ -16,7 +16,9 @@
 //
 // Geometry convention: every point and rect here is in CONTENT-LOCAL pixels
 // (relative to .shell__content's box), the same coordinate space projectLayout
-// emits its pane rects in. The binding subtracts the content bounding rect once.
+// emits its pane rects in. A strip may have a negative y when the single-pane
+// Builder strip is the shell sibling immediately above content; the binding
+// measures that real rect rather than pretending every strip is inside a pane.
 
 import {
   STRIP_H, PANE_GAP,
@@ -174,6 +176,15 @@ function insetRect(rect, m) {
   return { x: rect.x + m, y: rect.y + m, w: Math.max(0, rect.w - 2 * m), h: Math.max(0, rect.h - 2 * m) }
 }
 
+function paneStripRect(pane) {
+  return pane.stripRect || {
+    x: pane.rect.x,
+    y: pane.rect.y,
+    w: pane.rect.w,
+    h: STRIP_H,
+  }
+}
+
 // The band widths for a pane (design §3.2). Both axes are an uncapped proportional
 // quarter above the 40px floor — the same proportional shape phone uses, just a
 // smaller fraction (desktop 0.25 vs phone 0.34).
@@ -227,6 +238,7 @@ function rawCaretIndex(point, tabs) {
 // jump takes the raw index immediately).
 export function caretZone(point, pane, prevZone = null) {
   const tabs = pane.tabs || []
+  const stripRect = paneStripRect(pane)
   let index = rawCaretIndex(point, tabs)
   const prevIdx = (prevZone && prevZone.type === 'strip' && prevZone.paneId === pane.paneId)
     ? prevZone.index : null
@@ -238,21 +250,22 @@ export function caretZone(point, pane, prevZone = null) {
     if (index > prevIdx) index = point.x >= boundary + HYSTERESIS_PX ? index : prevIdx
     else index = point.x <= boundary - HYSTERESIS_PX ? index : prevIdx
   }
-  let caretX = pane.rect.x + STRIP_CARET_PAD
+  let caretX = stripRect.x + STRIP_CARET_PAD
   if (index > 0 && tabs[index - 1]) caretX = tabs[index - 1].right + 1
   if (index < tabs.length && tabs[index]) caretX = tabs[index].left - 1
   return {
     type: 'strip',
     paneId: pane.paneId,
     index,
-    rect: { x: caretX, y: pane.rect.y + 5, w: CARET_W, h: CARET_H },
+    rect: { x: caretX, y: stripRect.y + 5, w: CARET_W, h: CARET_H },
   }
 }
 
 // The strip region a caret owns: the strip row plus a small pad below it.
 function overStrip(point, pane) {
-  return point.y >= pane.rect.y && point.y <= pane.rect.y + STRIP_H + STRIP_CARET_PAD
-    && point.x >= pane.rect.x && point.x <= pane.rect.x + pane.rect.w
+  const rect = paneStripRect(pane)
+  return point.y >= rect.y && point.y <= rect.y + rect.h + STRIP_CARET_PAD
+    && point.x >= rect.x && point.x <= rect.x + rect.w
 }
 
 // The edge (split) zone for a point inside a pane, with cap/min suppression via
@@ -374,18 +387,28 @@ function paneAt(point, scene) {
   return null
 }
 
+function stripPaneAt(point, scene) {
+  for (const pane of scene.panes) {
+    if (overStrip(point, pane)) return pane
+  }
+  return null
+}
+
 // The single hit-test entry the binding calls each move. Fixed precedence
 // (design §3.2): tab-strip caret > workspace-root edge > pane edge > center.
 // `prevZone` is the zone from the previous move, threaded through for
 // hysteresis; pass null for a fresh test. Returns a zone with a `rect` (the
 // preview geometry) or null (no drop target — the drop cancels).
 export function hitTest(point, scene, prevZone = null) {
-  const pane = paneAt(point, scene)
-  const canJoin = !!pane
+  const stripPane = stripPaneAt(point, scene)
 
   // 1. strip caret — checked first so a drop over the tabs always reads as an
   // insert, even in the outer-margin corner where a root edge would also apply.
-  if (pane && overStrip(point, pane)) return canJoin ? caretZone(point, pane, prevZone) : null
+  // The single-pane Builder strip is outside the content box, so strip ownership
+  // is deliberately independent of paneAt().
+  if (stripPane) return caretZone(point, stripPane, prevZone)
+
+  const pane = paneAt(point, scene)
 
   // 2. workspace-root edge — fine pointers only.
   if (scene.allowRootEdge) {
@@ -397,10 +420,8 @@ export function hitTest(point, scene, prevZone = null) {
   if (pane) {
     const ez = edgeZone(point, pane, scene, prevZone)
     if (ez) return ez
-    if (canJoin) {
-      const cz = centerZone(point, pane, scene)
-      if (cz) return cz
-    }
+    const cz = centerZone(point, pane, scene)
+    if (cz) return cz
   }
   return null
 }
@@ -440,24 +461,28 @@ export function releaseZone(freshZone, previewedZone) {
   return freshZone && zoneEq(freshZone, previewedZone) ? freshZone : null
 }
 
-// Build a scene from the live workspace + projection. `measureTabs(paneId)`
-// returns that pane's measured tab rects ([{ key, left, right }] in content
-// coordinates); the binding supplies it from the DOM, tests supply a stub. The
+// Build a scene from the live workspace + projection. `measureStrip(paneId)`
+// returns that pane's measured strip rect plus tab rects in content coordinates;
+// the binding supplies it from the DOM, tests supply a stub. The
 // shared canSplit / canRootSplit predicates are evaluated HERE, so a zone that
 // would violate a cap or a minimum is never even offered — the exact predicates
 // the context menu and the resolver consult (design §3.2 / §6.2).
-export function buildScene(ws, projection, mode, contentRect, source, allowRootEdge, measureTabs) {
+export function buildScene(ws, projection, mode, contentRect, source, allowRootEdge, measureStrip) {
   const panes = projection.visibleLeaves.map((paneId) => {
     const rect = projection.rects[paneId]
     const paneTabs = ws.panes[paneId] ? ws.panes[paneId].tabs : []
+    const measuredStrip = measureStrip ? measureStrip(paneId) : null
     return {
       paneId,
       rect,
+      stripRect: measuredStrip?.rect || {
+        x: rect.x, y: rect.y, w: rect.w, h: STRIP_H,
+      },
       // The key of this pane's SOLE tab (else null): edgeZone suppresses a split
       // that would just rename a single-tab pane, including a drawer drag of the
       // item already open here.
       soleTabKey: paneTabs.length === 1 ? tabKey(paneTabs[0]) : null,
-      tabs: measureTabs ? (measureTabs(paneId) || []) : [],
+      tabs: measuredStrip?.tabs || [],
       canSplit: {
         left: paneCanSplit(ws, paneId, 'left', mode, contentRect),
         right: paneCanSplit(ws, paneId, 'right', mode, contentRect),

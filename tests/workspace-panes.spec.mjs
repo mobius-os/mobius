@@ -75,7 +75,15 @@ async function boot(page, viewport = WIDE) {
 async function ensureNavigationOpen(page) {
   const toggle = page.getByLabel('Toggle navigation')
   if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click()
-  await expect(page.locator('.drawer.drawer--open')).toBeVisible({ timeout: 3000 })
+  const drawer = page.locator('.drawer.drawer--open')
+  await expect(drawer).toBeVisible({ timeout: 3000 })
+  // A visible modal drawer may still be translating in from the edge. Gesture
+  // geometry belongs to the settled panel the user can deliberately drag from,
+  // not an arbitrary animation frame captured between the click and pointerdown.
+  await expect.poll(() => drawer.evaluate((element) => getComputedStyle(element).transform), {
+    timeout: 3000,
+    message: 'navigation panel has reached its open position',
+  }).toMatch(/^(none|matrix\(1, 0, 0, 1, 0, 0\))$/)
 }
 
 /** Press-and-HOLD the logo past HOLD_MS (450ms) so the rAF completion fires — the
@@ -779,6 +787,32 @@ async function readWs(page) {
   return page.evaluate(k => JSON.parse(localStorage.getItem(k)), paneModel.STORAGE_KEY)
 }
 
+async function expectCaretAligned(page, caret, target, label) {
+  const zoom = await page.evaluate(() => Number(getComputedStyle(document.documentElement).zoom) || 1)
+  // Visibility begins as soon as opacity rises above zero, while the preview's
+  // left/top/size transition is still moving. Wait for that owned animation
+  // boundary, then sample final geometry exactly once: polling coordinates can
+  // accidentally accept a transient crossing before the caret drifts onward.
+  await caret.evaluate(async (element) => {
+    await Promise.all(element.getAnimations().map(animation => animation.finished))
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+  })
+  const [caretBox, targetGeometry] = await Promise.all([
+    caret.boundingBox(),
+    target.evaluate((element) => {
+      const tabBox = element.closest('.shell__tab').getBoundingClientRect()
+      const stripBox = element.closest('[data-pane-strip]').getBoundingClientRect()
+      return { tabX: tabBox.x, stripY: stripBox.y }
+    }),
+  ])
+  expect(caretBox.x, `${label} final x matches the measured strip target`)
+    .toBeCloseTo(targetGeometry.tabX - zoom, 0)
+  expect(caretBox.y, `${label} final y matches the measured strip target`)
+    .toBeCloseTo(targetGeometry.stripY + 5 * zoom, 0)
+  expect(caretBox.width, `${label} has a real fixed-space width`).toBeGreaterThan(0)
+  expect(caretBox.height, `${label} has a real fixed-space height`).toBeGreaterThan(0)
+}
+
 /** Press on a source element, arm past slop, glide to a target point, release —
  *  the mouse-path drag Chromium delivers as real pointer events. */
 async function mouseDrag(page, sourceLocator, toX, toY, { release = true } = {}) {
@@ -798,7 +832,7 @@ async function touchDrag(
   sourceLocator,
   toX,
   toY,
-  { firstDx = 0, firstDy = 12, holdMs = 0 } = {},
+  { firstDx = 0, firstDy = 12, holdMs = 0, release = true } = {},
 ) {
   const box = await sourceLocator.boundingBox()
   const sx = box.x + box.width / 2
@@ -821,8 +855,29 @@ async function touchDrag(
       ),
     })
   }
-  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
-  await cdp.detach()
+  if (release) {
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    await cdp.detach()
+    return null
+  }
+  let current = { x: toX, y: toY }
+  return {
+    async moveTo(x, y) {
+      const from = current
+      for (let i = 1; i <= 10; i += 1) {
+        const t = i / 10
+        await cdp.send('Input.dispatchTouchEvent', {
+          type: 'touchMove',
+          touchPoints: point(from.x + (x - from.x) * t, from.y + (y - from.y) * t),
+        })
+      }
+      current = { x, y }
+    },
+    async release() {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+      await cdp.detach()
+    },
+  }
 }
 
 async function bootThreeTab(page, tag, workspaceFixture = twoPanesThreeTabs, expectTiled = true) {
@@ -844,6 +899,96 @@ async function bootThreeTab(page, tag, workspaceFixture = twoPanesThreeTabs, exp
 }
 
 test.describe('Workspace drag (PR3)', () => {
+  async function bootSingleModeDrawerDrag(page, tag, viewport) {
+    await boot(page, viewport)
+    const a = await createTaggedChat(page, `${tag}A`)
+    const b = await createTaggedChat(page, `${tag}B`)
+    const c = await createTaggedChat(page, `${tag}C`)
+    await mockApps(page, [])
+    await exposeChatsInDrawer(page, [a.id, b.id, c.id])
+    await seedWorkspace(page, paneModel.setViewMode(
+      paneModel.seedFromFlatTabs([{ kind: 'chat', id: c.id }]),
+      'single',
+    ))
+    await page.goto(`${BASE}/shell/?chat=${c.id}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator('.shell__chat-view.shell__view--active')).toHaveCount(1, { timeout: 8000 })
+    await expect(page.locator('[data-pane-strip="p0"]')).toHaveCount(0)
+    await expect(page.locator('.workspace__chrome')).toHaveCount(0)
+    await ensureNavigationOpen(page)
+    return { a, b, c }
+  }
+
+  test('90%-zoom desktop follows the fresh Builder strip and commits its caret landing', async ({ page }) => {
+    const { b, c } = await bootSingleModeDrawerDrag(page, 'singleFlipZoom', WIDE)
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).zoom), {
+      timeout: 3000, message: 'desktop density applies the 90% layout space',
+    }).toBe('0.9')
+
+    const source = page.locator(`.drawer__item[data-drag-key="chat:${b.id}"]`)
+    const content = await page.locator('.shell__content').boundingBox()
+    const drawerBox = await page.locator('#navigation-drawer').boundingBox()
+    await mouseDrag(
+      page, source,
+      drawerBox.x + drawerBox.width + 30,
+      content.y + content.height / 2,
+      { release: false },
+    )
+    // Desktop navigation is a persistent, reserved sidebar rather than the
+    // history-backed modal drawer. Crossing its inner edge releases preview
+    // suppression, but a committed workspace drop must not collapse the user's
+    // saved sidebar preference.
+    await expect(page.locator('.drawer.drawer--persistent.drawer--open')).toBeVisible()
+    await expect(page.locator('[data-pane-strip="p0"]')).toBeVisible({ timeout: 3000 })
+
+    const freshTarget = page.locator(
+      `[data-pane-strip="p0"] [data-drag-key="chat:${c.id}"]`,
+    )
+    const targetBox = await freshTarget.boundingBox()
+    await page.mouse.move(targetBox.x + 2, targetBox.y + targetBox.height / 2, { steps: 10 })
+    const caret = page.locator('.workspace__drop-preview--caret.is-visible')
+    await expect(caret).toBeVisible()
+    await expectCaretAligned(page, caret, freshTarget, 'desktop caret')
+    await page.mouse.up()
+    await expect(page.locator('.drawer.drawer--persistent.drawer--open')).toBeVisible()
+
+    await expect.poll(async () => (await readWs(page)).panes.p0.tabs
+      .map(tab => `${tab.kind}:${tab.id}`), {
+      timeout: 3000, message: 'the previewed caret position is the committed order',
+    }).toEqual([`chat:${b.id}`, `chat:${c.id}`])
+    expect((await readWs(page)).viewMode).toBe('panes')
+  })
+
+  test('phone geometry follows the strip mounted by the single-to-Builder preview flip', async ({ page }) => {
+    const { b, c } = await bootSingleModeDrawerDrag(page, 'singleFlipPhone', PHONE)
+    const source = page.locator(`.drawer__item[data-drag-key="chat:${b.id}"]`)
+    const content = await page.locator('.shell__content').boundingBox()
+    const drawerBox = await page.locator('#navigation-drawer').boundingBox()
+    const touch = await touchDrag(
+      page, source,
+      drawerBox.x + drawerBox.width + 30,
+      content.y + content.height / 2,
+      { firstDx: 12, firstDy: 0, holdMs: 250, release: false },
+    )
+    await expect(page.locator('.drawer.drawer--open')).toHaveCount(0)
+    await expect(page.locator('[data-pane-strip="p0"]')).toBeVisible({ timeout: 3000 })
+
+    const freshTarget = page.locator(
+      `[data-pane-strip="p0"] [data-drag-key="chat:${c.id}"]`,
+    )
+    const targetBox = await freshTarget.boundingBox()
+    await touch.moveTo(targetBox.x + 2, targetBox.y + targetBox.height / 2)
+    const caret = page.locator('.workspace__drop-preview--caret.is-visible')
+    await expect(caret).toBeVisible()
+    await expectCaretAligned(page, caret, freshTarget, 'phone caret')
+    await touch.release()
+
+    await expect.poll(async () => (await readWs(page)).panes.p0.tabs
+      .map(tab => `${tab.kind}:${tab.id}`), {
+      timeout: 3000, message: 'phone commits against the strip that mounted after arm',
+    }).toEqual([`chat:${b.id}`, `chat:${c.id}`])
+    expect((await readWs(page)).viewMode).toBe('panes')
+  })
+
   test('dragging a tab to a pane edge splits (one new pane)', async ({ page }) => {
     const { c, b } = await bootThreeTab(page, 'dragEdge')
     const p1 = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()

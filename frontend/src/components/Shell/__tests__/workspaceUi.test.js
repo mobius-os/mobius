@@ -110,6 +110,7 @@ test('the canonical workspace snapshot survives a closed PWA relaunch', () => {
 
 test('the drop preview reads as an 18% accent fill with a 2px border and morph', () => {
   const rule = css.match(/\.workspace__drop-preview\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(rule, /position:\s*fixed/)
   assert.match(rule, /border:\s*2px solid var\(--accent\)/)
   assert.match(rule, /var\(--accent\)\s*18%/)
   assert.match(rule, /border-radius:\s*10px/)
@@ -117,6 +118,21 @@ test('the drop preview reads as an 18% accent fill with a 2px border and morph',
   // morph makes the larger uncapped bands feel even more responsive.
   assert.match(rule, /opacity 60ms/)
   assert.match(rule, /90ms cubic-bezier\(0\.2, 0, 0, 1\)/)
+  const previewZ = Number(rule.match(/z-index:\s*(\d+)/)?.[1] || 0)
+  const shieldRule = css.match(/\.workspace__drag-shield\s*\{[\s\S]*?\}/)?.[0] || ''
+  const chipRule = css.match(/\.workspace__drag-chip\s*\{[\s\S]*?\}/)?.[0] || ''
+  const shieldZ = Number(shieldRule.match(/z-index:\s*(\d+)/)?.[1] || 0)
+  const chipZ = Number(chipRule.match(/z-index:\s*(\d+)/)?.[1] || 0)
+  assert.ok(previewZ > shieldZ && previewZ < chipZ,
+    'the landing marker stays above the drag layer and below its label')
+  assert.match(dragBinding, /document\.body\.appendChild\(previewEl\)/)
+  assert.match(dragBinding, /clientPointToLayout\(\{\s*x: box\.clientLeft,/)
+  assert.match(dragBinding, /x: rect\.x \* box\.zoom/)
+  assert.match(dragBinding, /contentElRef\.current\?\.closest\?\.\('\.shell'\)/)
+  assert.match(dragBinding, /refreshSceneStrips\(scene, box\)/,
+    'the live frame follows the Builder strip that mounted after preview reveal')
+  assert.match(dragBinding, /renderPreview\(next, box\)/,
+    'the frame passes its existing geometry read into preview rendering')
 })
 
 test('the strip caret variant drops the fill and border for a solid bar', () => {
@@ -672,6 +688,16 @@ test('one held drawer-row gesture resolves menu, reorder, or workspace drag', ()
     'the reorder outcome hands off to the row implementation')
   assert.match(dragBinding, /intent === 'workspace'\) arm\(\)/,
     'the workspace outcome arms the shared drag implementation')
+  assert.match(dragBinding, /sourceKind === 'drawer' && !glided[\s\S]*?positionChip/,
+    'a captured drawer session suppresses preview until its own glide completes')
+  assert.match(dragBinding, /sourceKind === 'drawer' && drawerEdgeX != null && !glided[\s\S]*?crossedDrawerExit/,
+    'the captured drawer edge owns glide-close even if preview rendering has already changed the drawer ref')
+  assert.match(dragBinding, /const drawerSpace = captureLayoutSpace\(drawer\)[\s\S]*?drawerSpace\.clientLeft \+ drawerSpace\.width \* drawerSpace\.zoom/,
+    'the drawer exit threshold and pointer clientX share client-pixel space under document zoom')
+  assert.doesNotMatch(dragBinding, /drawerEdgeX = [^\n]*getBoundingClientRect\(\)\.right/,
+    'raw zoom-sensitive rectangle coordinates cannot own the drawer exit threshold')
+  assert.doesNotMatch(dragBinding, /sourceKind === 'drawer' && drawerOpenRef\.current[\s\S]{0,160}?glided/,
+    'drawer-session behavior must not depend on a render-world ref that can change before the drawer DOM leaves')
   assert.match(dragBinding, /const point = \{ \.\.\.lastPoint \}[\s\S]*?menuOpened = true[\s\S]*?handler\.openMenu\(point\)/,
     'a stationary long hold opens actions before release')
   assert.doesNotMatch(dragBinding, /const point = \{ \.\.\.lastPoint \}[\s\S]{0,120}?cleanup\(/,
@@ -1141,7 +1167,7 @@ test('workspace drag batches geometry reads before frame writes', () => {
   assert.ok(frame.indexOf('const box = contentBox()') < frame.lastIndexOf('positionChip(cx, cy, isTouch, key)'))
   assert.match(frame, /updateAutoScroll\(cx, cy, box\)/)
   assert.match(frame, /toLocal\(cx, cy, box\)/)
-  assert.match(dragBinding, /measureTabs\(autoPaneId, box\)/,
+  assert.match(dragBinding, /measureStrip\(autoPaneId, box\)/,
     'auto-scroll shares its content rect across strip and pointer measurements')
 })
 
