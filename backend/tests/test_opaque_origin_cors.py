@@ -35,6 +35,25 @@ def test_sandboxed_frame_preflight_is_answered_with_a_wildcard(client):
   assert _origin(r) == "*"
 
 
+def test_connector_mutation_preflight_allows_the_generation_header(client):
+  """The Connections app's frame is opaque-origin: every toggle/re-check
+  sends X-Mobius-Connector-Generation, which the browser preflights. If the
+  header falls out of the allow-list, mutations die client-side as
+  "Failed to fetch" while same-origin shell calls keep working."""
+  r = client.options(
+    "/api/connectors/1",
+    headers={
+      "Origin": "null",
+      "Access-Control-Request-Method": "PATCH",
+      "Access-Control-Request-Headers":
+        "authorization,content-type,x-mobius-connector-generation",
+    },
+  )
+  assert r.status_code == 200
+  allowed = r.headers.get("access-control-allow-headers", "").lower()
+  assert "x-mobius-connector-generation" in allowed
+
+
 def test_sandboxed_frame_gets_a_wildcard_on_the_real_response_too(client, auth):
   # A preflight alone is not enough: WebKit checks the actual response as well.
   r = client.get("/api/apps/", headers={"Origin": "null", **auth})

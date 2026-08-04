@@ -53,6 +53,9 @@ BOOTSTRAP_MEMORY_MANIFEST_URL = (
 BOOTSTRAP_REFLECTION_MANIFEST_URL = (
   "https://raw.githubusercontent.com/mobius-os/app-reflection/main/mobius.json"
 )
+BOOTSTRAP_CONNECTIONS_MANIFEST_URL = (
+  "https://raw.githubusercontent.com/mobius-os/app-connections/main/mobius.json"
+)
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,12 @@ _BOOTSTRAP_APPS = (
   _BootstrapApp("memory", BOOTSTRAP_MEMORY_MANIFEST_URL, False),
   _BootstrapApp(
     "reflection", BOOTSTRAP_REFLECTION_MANIFEST_URL, False,
+  ),
+  # Connections manages owner MCP connections — the only management surface
+  # since the Settings section moved into the app. An owner uninstall is
+  # respected; the Store remains the way back.
+  _BootstrapApp(
+    "connections", BOOTSTRAP_CONNECTIONS_MANIFEST_URL, False,
   ),
 )
 

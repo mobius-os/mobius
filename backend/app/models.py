@@ -684,6 +684,11 @@ class App(Base):
   # surface (still path-confined and secret-denied there). The Editor is the
   # canonical holder. Default false and checked from the live row per request.
   filesystem_access = Column(Boolean, nullable=False, default=False)
+  # Connection-registry management: the owner's /api/connectors surface
+  # (list/add/re-check/toggle/remove). The Connections mini-app is the
+  # canonical holder. Stored keys and broker capabilities never cross this
+  # surface, so the grant manages rows without holding what they protect.
+  connections_manage = Column(Boolean, nullable=False, default=False)
   # Offline capability. The agent opts an app in (default False) only
   # when it's built to run without the network — it uses
   # window.mobius.storage (which queues writes and syncs on reconnect)
