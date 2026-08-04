@@ -465,6 +465,24 @@ export const api = {
       'chats', `/chats/${chatId}/recover`, { method: 'POST' },
     ),
   },
+  connectors: {
+    list: (options = {}) => apiFetch('/connectors', options),
+    add: (payload, options = {}) => apiFetch('/connectors', {
+      ...options,
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+    update: (connectorId, payload) => apiFetch(`/connectors/${connectorId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+    refresh: (connectorId) => apiFetch(`/connectors/${connectorId}/refresh`, {
+      method: 'POST',
+    }),
+    remove: (connectorId) => apiFetch(`/connectors/${connectorId}`, {
+      method: 'DELETE',
+    }),
+  },
   apps: {
     list: () => apiFetch('/apps/'),
     markOpened: (appId) => apiFetch(`/apps/${appId}/opened`, {
