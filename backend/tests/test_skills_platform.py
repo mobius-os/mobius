@@ -360,9 +360,9 @@ def test_resource_rel_ok_contract():
 def test_skill_package_bounds_fit_command_routed_toolkits():
   from app import skills as skills_mod
 
-  assert skills_mod.RESOURCE_COUNT_MAX >= 256
-  assert skills_mod.RESOURCE_TOTAL_MAX >= 8 * 1024 * 1024
-  assert skills_mod.RESOURCE_MAX_DEPTH >= 8
+  assert skills_mod.RESOURCE_COUNT_MAX == 256
+  assert skills_mod.RESOURCE_TOTAL_MAX == 8 * 1024 * 1024
+  assert skills_mod.RESOURCE_MAX_DEPTH == 8
 
 
 def test_install_collision_is_409_with_provenance(
