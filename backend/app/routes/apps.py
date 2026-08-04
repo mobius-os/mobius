@@ -1279,6 +1279,7 @@ async def create_conflict_resolver_chat(
         app_git.start_conflict_merge,
         repo,
         merge_base=merge.merge_base_oid,
+        allow_unrelated_histories=merge.unrelated_histories,
       ) or conflict_paths
       if not conflict_paths:
         raise HTTPException(

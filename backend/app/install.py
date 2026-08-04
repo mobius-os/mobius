@@ -2488,6 +2488,7 @@ async def install_from_manifest(
   )
   cloned_install = False
   cloned_update = False
+  allow_unrelated_histories = False
   # Source deletes are computed from old-upstream minus new-upstream. The prune
   # phase consumes this explicit diff so local-only tracked siblings are not
   # mistaken for files the manifest intentionally removed.
@@ -2634,8 +2635,15 @@ async def install_from_manifest(
         ):
           _, ref = repo_ref
           try:
-            app.upstream_commit = await asyncio.to_thread(
-              app_git.fetch_upstream, git_source_dir, ref,
+            fetched_upstream = await asyncio.to_thread(
+              app_git.fetch_upstream,
+              git_source_dir,
+              ref,
+              adopt_equal_local_tree=target.adopting_trusted_origin,
+            )
+            app.upstream_commit = fetched_upstream.sha
+            allow_unrelated_histories = (
+              fetched_upstream.allow_unrelated_histories
             )
             cloned_update = True
           except Exception as exc:
@@ -2662,41 +2670,7 @@ async def install_from_manifest(
             app_git.UPSTREAM_BRANCH,
           )
         dropped_source_paths = previous_upstream_paths - new_upstream_paths
-        if target.adopting_trusted_origin and cloned_update:
-          # Legacy explicit-apply rewrote Git history even when it preserved
-          # the canonical repository tree byte-for-byte. Exact tree equality
-          # is therefore the safe adoption fast path: there is no local byte
-          # to overwrite, so advancing the catalog baseline cannot lose work.
-          # Different unrelated trees have no honest three-way base; surface
-          # every endpoint difference for owner-gated resolution instead of
-          # guessing or failing the install with a raw merge-tree error.
-          same_tree = await asyncio.to_thread(
-            app_git.ref_trees_equal,
-            git_source_dir,
-            app_git.LOCAL_BRANCH,
-            app_git.UPSTREAM_BRANCH,
-          )
-          if same_tree:
-            diverged = False
-          elif not await asyncio.to_thread(
-            app_git.refs_share_history,
-            git_source_dir,
-            app_git.LOCAL_BRANCH,
-            app_git.UPSTREAM_BRANCH,
-          ):
-            conflict_paths = list(await asyncio.to_thread(
-              app_git.diff_paths,
-              git_source_dir,
-              app_git.LOCAL_BRANCH,
-              app_git.UPSTREAM_BRANCH,
-            )) or [entry_key]
-            mode = "conflict"
-            reconciliation = app_git.ReconciliationReceipt(
-              unresolved_conflict_paths=tuple(conflict_paths),
-            )
-        if mode == "conflict":
-          pass
-        elif not diverged:
+        if not diverged:
           # No local edits → upstream wins outright for the whole tree; it is
           # `source_tree` as fetched for synthetic repos, or the full
           # origin-backed upstream tree for cloned repos. Taking the bytes
@@ -2747,7 +2721,9 @@ async def install_from_manifest(
           # a three-way merge that touches neither `main` nor the working
           # tree, then act on the clean-vs-conflict verdict.
           merge = await asyncio.to_thread(
-            app_git.merge_upstream, git_source_dir,
+            app_git.merge_upstream,
+            git_source_dir,
+            allow_unrelated_histories=allow_unrelated_histories,
           )
           reconciliation = merge.reconciliation
           if merge.status == "conflict":

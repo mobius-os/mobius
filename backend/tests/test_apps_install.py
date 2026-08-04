@@ -1853,9 +1853,9 @@ def test_trusted_origin_adoption_is_always_reconciled_as_local_source(
 
 
 def test_trusted_origin_adoption_accepts_equal_tree_with_unrelated_history(
-  client, auth, db, bypass_url_validation,
+  client, auth, db, bypass_url_validation, tmp_path,
 ):
-  """Equal local/catalog bytes adopt in place even after history rewrites."""
+  """Equal trusted-origin bytes replace unrelated synthetic provenance."""
   manifest = {
     "id": "codex",
     "name": "Subagents",
@@ -1873,50 +1873,85 @@ def test_trusted_origin_adoption_accepts_equal_tree_with_unrelated_history(
     manifest_extra={"version": "1.0.0"},
   )
   repo = Path(legacy["source_dir"])
+
+  # Model Atlas's exact legacy shape. The installer-owned upstream branch has
+  # synthetic history + a generated .gitignore, while a prior explicit apply
+  # rewrote main onto the canonical repository's complete tree. The configured
+  # origin proves package identity even though neither history shares a root.
+  fixture = tmp_path / "trusted-origin"
+  bare = tmp_path / "trusted-origin.git"
+  fixture.mkdir()
+  subprocess.run(
+    ["git", "init", "-q", "-b", "main", str(fixture)], check=True,
+  )
+  canonical_files = {
+    ".gitignore": "node_modules/\ntests/.build/\n",
+    "README.md": "canonical package data\n",
+    "index.jsx": JSX,
+    "mobius.json": json.dumps(manifest, sort_keys=True) + "\n",
+  }
+  for rel, content in canonical_files.items():
+    (fixture / rel).write_text(content, encoding="utf-8")
+  subprocess.run(["git", "-C", str(fixture), "add", "-A"], check=True)
   subprocess.run(
     [
-      "git", "-C", str(repo), "remote", "add", "origin",
-      "https://github.com/mobius-os/app-subagents.git",
+      "git", "-c", "user.name=Mobius", "-c",
+      "user.email=mobius@localhost", "-C", str(fixture),
+      "commit", "-q", "-m", "canonical release",
     ],
     check=True,
   )
-  tree = subprocess.run(
-    ["git", "-C", str(repo), "rev-parse", "main^{tree}"],
+  canonical_head = subprocess.run(
+    ["git", "-C", str(fixture), "rev-parse", "HEAD"],
     capture_output=True, text=True, check=True,
   ).stdout.strip()
-  upstream_sha = subprocess.run(
+  canonical_tree = subprocess.run(
+    ["git", "-C", str(fixture), "rev-parse", "HEAD^{tree}"],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip()
+  subprocess.run(
+    ["git", "clone", "-q", "--bare", str(fixture), str(bare)],
+    check=True,
+  )
+  subprocess.run(
+    ["git", "-C", str(repo), "remote", "add", "origin", bare.as_uri()],
+    check=True,
+  )
+  subprocess.run(
+    ["git", "-C", str(repo), "fetch", "-q", "origin", "main"], check=True,
+  )
+
+  synthetic_upstream = subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", "upstream"],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip()
+  # An orphan commit preserves the canonical tree but intentionally shares no
+  # ancestry with the installer-owned upstream branch.
+  rewritten_main = subprocess.run(
     [
       "git", "-c", "user.name=Mobius", "-c",
       "user.email=mobius@localhost", "-C", str(repo),
-      "commit-tree", tree, "-m", "catalog",
+      "commit-tree", canonical_tree, "-m", "apply app source",
     ],
     capture_output=True, text=True, check=True,
   ).stdout.strip()
   subprocess.run(
-    [
-      "git", "-C", str(repo), "update-ref",
-      "refs/remotes/origin/main", upstream_sha,
-    ],
+    ["git", "-C", str(repo), "update-ref", "refs/heads/main", rewritten_main],
     check=True,
   )
+  subprocess.run(
+    ["git", "-C", str(repo), "reset", "-q", "--hard", "main"], check=True,
+  )
   assert subprocess.run(
-    ["git", "-C", str(repo), "merge-base", "main", "origin/main"],
+    ["git", "-C", str(repo), "merge-base", "main", "upstream"],
     capture_output=True,
   ).returncode != 0
-  before = {
-    path.name: path.read_bytes()
-    for path in (repo / "index.jsx", repo / "mobius.json")
-  }
+  assert subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", "main^{tree}"],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip() == canonical_tree
 
-  def fetch_equal_upstream(source_dir, _ref):
-    subprocess.run(
-      [
-        "git", "-C", str(source_dir), "update-ref",
-        "refs/heads/upstream", upstream_sha,
-      ],
-      check=True,
-    )
-    return upstream_sha
+  expected_origin = "https://github.com/mobius-os/app-subagents.git"
 
   manifest_url = (
     "https://raw.githubusercontent.com/mobius-os/"
@@ -1931,8 +1966,8 @@ def test_trusted_origin_adoption_accepts_equal_tree_with_unrelated_history(
     "app.install.httpx.AsyncClient",
     side_effect=_fake_async_client(responses),
   ), patch(
-    "app.install.app_git.fetch_upstream",
-    side_effect=fetch_equal_upstream,
+    "app.install.app_git.origin_url",
+    return_value=expected_origin,
   ):
     adopted = client.post(
       "/api/apps/install", headers=auth,
@@ -1946,11 +1981,27 @@ def test_trusted_origin_adoption_accepts_equal_tree_with_unrelated_history(
   assert payload["manifest_url"] == (
     raw_base.rstrip("/") + "#manifest-id=codex"
   )
-  after = {
-    path.name: path.read_bytes()
-    for path in (repo / "index.jsx", repo / "mobius.json")
-  }
-  assert after == before
+  assert payload["divergence"] == "clean_merge"
+  assert subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", "upstream"],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip() == canonical_head
+  assert subprocess.run(
+    ["git", "-C", str(repo), "merge-base", "--is-ancestor", canonical_head, "main"],
+  ).returncode == 0
+  assert subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", "main^{tree}"],
+    capture_output=True, text=True, check=True,
+  ).stdout.strip() == canonical_tree
+  assert subprocess.run(
+    ["git", "-C", str(repo), "status", "--porcelain"],
+    capture_output=True, text=True, check=True,
+  ).stdout == ""
+  assert (repo / "README.md").read_text() == canonical_files["README.md"]
+  assert (repo / ".gitignore").read_text() == canonical_files[".gitignore"]
+  assert subprocess.run(
+    ["git", "-C", str(repo), "merge-base", "--is-ancestor", synthetic_upstream, "main"],
+  ).returncode != 0
 
 
 def test_install_same_manifest_twice_updates(

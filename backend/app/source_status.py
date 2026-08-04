@@ -73,13 +73,6 @@ def _rev(repo: Path, ref: str) -> str | None:
   return value if proc.returncode == 0 and value else None
 
 
-def _trees_equal(repo: Path, left: str, right: str) -> bool:
-  """Return whether two refs name byte-identical source trees."""
-  left_tree = _rev(repo, f"{left}^{{tree}}")
-  right_tree = _rev(repo, f"{right}^{{tree}}")
-  return bool(left_tree and left_tree == right_tree)
-
-
 def _canonical_repo(url: str | None) -> str | None:
   """Turn common GitHub remote/manifest URLs into ``owner/repo``."""
   if not url:
@@ -242,14 +235,6 @@ def _diff_summary(
   return summary
 
 
-def _endpoint_diff_paths(repo: Path, left: str, right: str) -> set[str] | None:
-  """Return path names whose endpoint bytes differ, independent of topology."""
-  proc = _git(repo, "diff", "--name-only", "--no-renames", "-z", left, right, "--")
-  if proc.returncode != 0:
-    return None
-  return {path for path in proc.stdout.split("\0") if path}
-
-
 def _reconciliation_summary(
   repo: Path,
   local: str,
@@ -274,7 +259,7 @@ def _reconciliation_summary(
   }
   try:
     receipt = app_git.preview_reconciliation(repo, local, upstream)
-    endpoint_paths = _endpoint_diff_paths(repo, upstream, local)
+    endpoint_paths = app_git.endpoint_diff_paths(repo, upstream, local)
   except (OSError, subprocess.SubprocessError, RuntimeError):
     return empty
   if endpoint_paths is None:
@@ -511,7 +496,7 @@ def _project_status(
     # update advances that marker. Exact tree equality is a projection-safe
     # witness: unlike an ordinary origin diff, it cannot turn omitted package
     # files into apparent owner deletions.
-    origin["head_tree_matches_origin"] = _trees_equal(
+    origin["head_tree_matches_origin"] = app_git.ref_trees_equal(
       repo, origin["ref"], "HEAD",
     )
   response.update({"origin": origin, "forks": forks})

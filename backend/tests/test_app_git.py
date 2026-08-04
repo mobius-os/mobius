@@ -173,6 +173,28 @@ def _commit_all(repo: Path, msg: str) -> str:
   ).stdout.strip()
 
 
+def _init_unrelated_branches(
+  repo: Path,
+  local_files: dict[str, str],
+  upstream_files: dict[str, str],
+) -> None:
+  """Create canonical main/upstream branches with no shared commit."""
+  subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+  for rel, body in local_files.items():
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+  _commit_all(repo, "local root")
+  app_git._run(repo, "checkout", "-q", "--orphan", app_git.UPSTREAM_BRANCH)
+  app_git._run(repo, "rm", "-q", "-rf", ".")
+  for rel, body in upstream_files.items():
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+  _commit_all(repo, "upstream root")
+  app_git._run(repo, "checkout", "-q", app_git.LOCAL_BRANCH)
+
+
 def test_ref_is_ancestor_distinguishes_false_from_git_errors(tmp_path):
   repo = tmp_path / "app"
   repo.mkdir()
@@ -481,7 +503,8 @@ def test_fetch_upstream_advances_real_origin_and_reads_full_tree(tmp_path):
   fetched = app_git.fetch_upstream(source_dir, "main")
   tree = app_git.read_ref_tree(source_dir, app_git.UPSTREAM_BRANCH)
 
-  assert fetched == new_head
+  assert fetched.sha == new_head
+  assert fetched.allow_unrelated_histories is False
   assert app_git.head_sha(source_dir, app_git.UPSTREAM_BRANCH) == new_head
   origin_head = app_git._run(
     source_dir, "rev-parse", "origin/main",
@@ -1680,6 +1703,70 @@ def test_start_conflict_merge_leaves_real_markers_and_merge_head(tmp_path):
   assert (repo / "index.jsx").read_text() == local_before
 
 
+def test_unrelated_history_conflict_uses_same_verdict_and_resolver(tmp_path):
+  """A rewritten legacy checkout remains resolvable through ordinary Git."""
+  repo = tmp_path / "unrelated-conflict"
+  _init_unrelated_branches(
+    repo,
+    {"index.jsx": "local\n", "local.js": "local only\n"},
+    {"index.jsx": "upstream\n", "upstream.js": "upstream only\n"},
+  )
+
+  result = app_git.merge_upstream(repo, allow_unrelated_histories=True)
+
+  assert result.status == "conflict"
+  assert result.conflict_paths == ["index.jsx"]
+  assert result.unrelated_histories is True
+  assert result.reconciliation.unresolved_conflict_paths == ("index.jsx",)
+
+  paths = app_git.start_conflict_merge(
+    repo, allow_unrelated_histories=result.unrelated_histories,
+  )
+
+  assert paths == ["index.jsx"]
+  materialized = (repo / "index.jsx").read_text()
+  assert "<<<<<<<" in materialized and ">>>>>>>" in materialized
+  assert "local" in materialized and "upstream" in materialized
+  assert (repo / "local.js").read_text() == "local only\n"
+  assert (repo / "upstream.js").read_text() == "upstream only\n"
+  assert app_git.abort_in_progress_merge(repo) is True
+  assert (repo / "index.jsx").read_text() == "local\n"
+  assert not (repo / "upstream.js").exists()
+
+
+def test_unrelated_history_preserves_compatible_files_without_conflict(tmp_path):
+  """Unrelated roots still combine non-overlapping source through Git."""
+  repo = tmp_path / "unrelated-clean"
+  _init_unrelated_branches(
+    repo,
+    {"index.jsx": "same\n", "local.js": "local only\n"},
+    {"index.jsx": "same\n", "upstream.js": "upstream only\n"},
+  )
+
+  result = app_git.merge_upstream(repo, allow_unrelated_histories=True)
+  tree = app_git.read_merged_tree(repo, result.merged_tree_oid)
+
+  assert result.status == "clean"
+  assert result.unrelated_histories is True
+  assert tree == {
+    "index.jsx": b"same\n",
+    "local.js": b"local only\n",
+    "upstream.js": b"upstream only\n",
+  }
+
+
+def test_unrelated_history_is_rejected_without_explicit_proof(tmp_path):
+  repo = tmp_path / "unrelated-default-rejection"
+  _init_unrelated_branches(
+    repo,
+    {"index.jsx": "same\n", "local.js": "local only\n"},
+    {"index.jsx": "same\n", "upstream.js": "upstream only\n"},
+  )
+
+  with pytest.raises(RuntimeError, match="unrelated histories"):
+    app_git.merge_upstream(repo)
+
+
 @pytest.mark.parametrize("entrypoint", ["verdict", "resolver"])
 def test_merge_entry_points_unshallow_when_depth_one_hides_base(
   tmp_path, entrypoint,
@@ -1749,7 +1836,9 @@ def test_fetch_upstream_repairs_same_tip_depth_one_regraft(tmp_path):
     check=False,
   ).returncode != 0
 
-  assert app_git.fetch_upstream(repo, "main") == poisoned_tip
+  fetched = app_git.fetch_upstream(repo, "main")
+  assert fetched.sha == poisoned_tip
+  assert fetched.allow_unrelated_histories is False
   assert app_git._run(
     repo, "merge-base", app_git.LOCAL_BRANCH, app_git.UPSTREAM_BRANCH,
   ).stdout.strip()

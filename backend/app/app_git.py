@@ -212,6 +212,8 @@ class MergeResult:
   proves a newer semantic base but a later genuine conflict remains, it names
   that synthetic base tree so the owner-gated resolver can materialize only the
   residual conflicts instead of repeating Git's older historical conflict set.
+  `unrelated_histories` records the other explicit merge mode so the resolver
+  can ask Git to materialize the same verdict.
 
   There is one path for one and many files: a single-file app is just a tree
   with one source key (`index.jsx`), so the caller always reads the merged tree
@@ -221,10 +223,25 @@ class MergeResult:
   conflict_paths: list[str] = field(default_factory=list)
   merged_tree_oid: str | None = None
   merge_base_oid: str | None = None
+  unrelated_histories: bool = False
   equivalent_change_refs: tuple[str, ...] = ()
   reconciliation: ReconciliationReceipt = field(
     default_factory=ReconciliationReceipt,
   )
+
+
+@dataclass(frozen=True)
+class FetchUpstreamResult:
+  """Fetched origin tip plus the narrow proof needed for legacy adoption.
+
+  ``allow_unrelated_histories`` is true only when the caller identified the
+  configured origin as trusted and Git proved that its complete tree equals
+  local ``main``.  Keeping the proof beside the fetched SHA prevents later
+  merge callers from widening unrelated-history handling by accident.
+  """
+
+  sha: str
+  allow_unrelated_histories: bool = False
 
 
 @dataclass(frozen=True)
@@ -595,6 +612,7 @@ def merge_refs(
   right: str,
   *,
   merge_base: str | None = None,
+  allow_unrelated_histories: bool = False,
 ) -> MergeResult:
   """Off-tree three-way merge of two refs, optionally with an explicit base.
 
@@ -606,6 +624,8 @@ def merge_refs(
   args = ["merge-tree", "--write-tree", "--name-only"]
   if merge_base is not None:
     args.extend(("--merge-base", merge_base))
+  if allow_unrelated_histories:
+    args.append("--allow-unrelated-histories")
   args.extend((left, right))
   proc = _run(repo, *args, check=False)
   if proc.returncode > 1:
@@ -650,7 +670,11 @@ def _change_is_subsumed(
   )
 
 
-def _diff_paths(repo: Path, left: str, right: str) -> set[str] | None:
+def endpoint_diff_paths(
+  source_dir: str | Path, left: str, right: str,
+) -> set[str] | None:
+  """Complete endpoint path differences, or ``None`` when Git cannot answer."""
+  repo = Path(source_dir)
   proc = _run(
     repo, "diff", "--name-only", "--no-renames", "-z", f"{left}..{right}",
     check=False,
@@ -665,27 +689,12 @@ def ref_trees_equal(
 ) -> bool:
   """Whether two refs name the same complete tree, regardless of history."""
   repo = Path(source_dir)
-  left_tree = _tree_oid(repo, left)
-  right_tree = _tree_oid(repo, right)
+  try:
+    left_tree = _tree_oid(repo, left)
+    right_tree = _tree_oid(repo, right)
+  except (OSError, subprocess.SubprocessError):
+    return False
   return bool(left_tree and left_tree == right_tree)
-
-
-def refs_share_history(
-  source_dir: str | Path, left: str, right: str,
-) -> bool:
-  """Whether two refs have a merge base without moving either ref."""
-  proc = _run(
-    Path(source_dir), "merge-base", left, right, check=False,
-  )
-  return proc.returncode == 0 and bool(proc.stdout.strip())
-
-
-def diff_paths(
-  source_dir: str | Path, left: str, right: str,
-) -> tuple[str, ...]:
-  """Complete endpoint path differences, or an empty tuple on Git failure."""
-  paths = _diff_paths(Path(source_dir), left, right)
-  return tuple(sorted(paths)) if paths is not None else ()
 
 
 def describe_reconciliation(
@@ -707,8 +716,10 @@ def describe_reconciliation(
   """
   repo = Path(source_dir)
   proven = tuple(proven_changes)
-  local_paths = (_diff_paths(repo, shared_base, local) if local else set()) or set()
-  new_paths = _diff_paths(repo, shared_base, upstream) or set()
+  local_paths = (
+    endpoint_diff_paths(repo, shared_base, local) if local else set()
+  ) or set()
+  new_paths = endpoint_diff_paths(repo, shared_base, upstream) or set()
   conflicts = set(conflict_paths)
   compatible = local_paths & new_paths - conflicts
   return ReconciliationReceipt(
@@ -750,8 +761,8 @@ def _source_is_resolved_projection(
   if len(parent_line) != 2:
     return False
   source_parent = parent_line[1]
-  reviewed_paths = _diff_paths(repo, reviewed_base, reviewed_head)
-  source_paths = _diff_paths(repo, source_parent, source_sha)
+  reviewed_paths = endpoint_diff_paths(repo, reviewed_base, reviewed_head)
+  source_paths = endpoint_diff_paths(repo, source_parent, source_sha)
   if not reviewed_paths or source_paths != reviewed_paths:
     return False
 
@@ -1267,7 +1278,15 @@ def preview_reconciliation(
     return equivalent.reconciliation
   base = _run(repo, "merge-base", local, upstream, check=False).stdout.strip()
   if not base:
-    return ReconciliationReceipt()
+    try:
+      unrelated = merge_refs(
+        repo, local, upstream, allow_unrelated_histories=True,
+      )
+    except (OSError, subprocess.SubprocessError, RuntimeError):
+      return ReconciliationReceipt()
+    return ReconciliationReceipt(
+      unresolved_conflict_paths=tuple(sorted(unrelated.conflict_paths)),
+    )
   try:
     ordinary = merge_refs(repo, local, upstream)
     conflicts = ordinary.conflict_paths
@@ -1416,7 +1435,12 @@ def clone_upstream(
     return sha
 
 
-def fetch_upstream(source_dir: str | Path, ref: str) -> str:
+def fetch_upstream(
+  source_dir: str | Path,
+  ref: str,
+  *,
+  adopt_equal_local_tree: bool = False,
+) -> FetchUpstreamResult:
   """Fetch `origin/<ref>` and advance local `upstream` to that real commit.
 
   This is the cloned-app update analogue of `record_upstream`: the catalog's
@@ -1426,8 +1450,15 @@ def fetch_upstream(source_dir: str | Path, ref: str) -> str:
   when that happens, unshallow so Git can prove ancestry and the existing merge
   path can compute a real merge base.
 
+  ``adopt_equal_local_tree`` is the narrow legacy-adoption exception. The
+  caller must first prove that this repo's configured origin is the trusted
+  package identity. When the fetched origin commit has the exact same complete
+  tree as local ``main``, moving the old synthetic ``upstream`` ref cannot
+  overwrite a local byte; rebinding it to the real origin repairs provenance
+  without asking the owner to resolve unrelated installer history.
+
   Returns:
-    The fetched `origin/<ref>` commit sha.
+    The fetched commit and any trusted equal-tree adoption proof.
   """
   repo = Path(source_dir)
   previous = _run(
@@ -1440,18 +1471,25 @@ def fetch_upstream(source_dir: str | Path, ref: str) -> str:
   # A depth-one fetch can re-graft even an unchanged tip. Repair based on the
   # relationship the installer actually needs (local main ↔ fetched tip), not
   # only on whether the remote SHA string changed.
-  _unshallow_if_no_merge_base(repo, LOCAL_BRANCH, remote_ref)
+  _restore_shallow_history_if_needed(repo, LOCAL_BRANCH, remote_ref)
+  equal_local_adoption = (
+    adopt_equal_local_tree
+    and ref_trees_equal(repo, LOCAL_BRANCH, remote_ref)
+  )
   if previous_sha and previous_sha != sha:
     related = _run(
       repo, "merge-base", "--is-ancestor", previous_sha, sha, check=False,
     )
-    if related.returncode != 0:
+    if related.returncode != 0 and not equal_local_adoption:
       raise RuntimeError(
         f"origin/{ref} is unrelated to recorded upstream {previous_sha}; "
         "falling back to manifest-source update"
       )
   _run(repo, "branch", "-f", UPSTREAM_BRANCH, remote_ref)
-  return sha
+  return FetchUpstreamResult(
+    sha=sha,
+    allow_unrelated_histories=equal_local_adoption,
+  )
 
 
 def ensure_repo(source_dir: str | Path) -> None:
@@ -1906,18 +1944,20 @@ def local_diverged_from(source_dir: str | Path, base_commit: str) -> bool:
   return proc.returncode != 0
 
 
-def _unshallow_if_no_merge_base(
+def _restore_shallow_history_if_needed(
   source_dir: str | Path,
   left: str = LOCAL_BRANCH,
   right: str = UPSTREAM_BRANCH,
 ) -> None:
-  """Restore remote history when a shallow graft hides a real merge base.
+  """Restore remote history when a shallow graft may hide a merge base.
 
   Depth-one app fetches can make ``main`` and ``upstream`` appear unrelated
   even though both came from the same origin. The update verdict and the
   resolver's real merge both require that base, so they self-heal at their
-  entry points. A failed/offline fetch is best-effort and leaves refs and the
-  working tree untouched; the subsequent merge reports its normal error.
+  entry points. A failed/offline fetch raises without moving refs or the
+  working tree. If unshallowing proves the histories are genuinely unrelated,
+  return normally: the merge seam handles that valid legacy-adoption shape
+  with Git's empty-base semantics.
   """
   repo = Path(source_dir)
   shallow_raw = _run(repo, "rev-parse", "--git-path", "shallow").stdout.strip()
@@ -1941,15 +1981,13 @@ def _unshallow_if_no_merge_base(
   if fetched.returncode != 0:
     detail = fetched.stderr.strip() or fetched.stdout.strip()
     raise RuntimeError(f"failed to restore app git history: {detail}")
-  base = _run(repo, "merge-base", left, right, check=False)
-  if base.returncode != 0 or not base.stdout.strip():
-    raise RuntimeError(
-      f"unrelated histories: no merge base between {left} and {right} "
-      "after unshallow"
-    )
 
 
-def merge_upstream(source_dir: str | Path) -> MergeResult:
+def merge_upstream(
+  source_dir: str | Path,
+  *,
+  allow_unrelated_histories: bool = False,
+) -> MergeResult:
   """Merges `upstream` into `main` and returns the verdict.
 
   Uses `git merge-tree --write-tree` to perform the three-way merge in
@@ -1970,11 +2008,23 @@ def merge_upstream(source_dir: str | Path) -> MergeResult:
   """
   repo = Path(source_dir)
   ensure_repo(repo)
-  _unshallow_if_no_merge_base(repo)
-  ordinary = merge_refs(repo, LOCAL_BRANCH, UPSTREAM_BRANCH)
+  _restore_shallow_history_if_needed(repo)
   ordinary_base = _run(
     repo, "merge-base", LOCAL_BRANCH, UPSTREAM_BRANCH, check=False,
   ).stdout.strip()
+  if ordinary_base:
+    ordinary = merge_refs(repo, LOCAL_BRANCH, UPSTREAM_BRANCH)
+  else:
+    if not allow_unrelated_histories:
+      raise RuntimeError(
+        "local main and recorded upstream have unrelated histories"
+      )
+    # A rewritten legacy checkout and its explicitly proven catalog origin can
+    # have no common commit. The empty tree is the only honest shared state.
+    ordinary = merge_refs(
+      repo, LOCAL_BRANCH, UPSTREAM_BRANCH, allow_unrelated_histories=True,
+    )
+    ordinary.unrelated_histories = True
   if ordinary_base:
     ordinary.reconciliation = describe_reconciliation(
       repo,
@@ -1982,6 +2032,10 @@ def merge_upstream(source_dir: str | Path) -> MergeResult:
       UPSTREAM_BRANCH,
       local=LOCAL_BRANCH,
       conflict_paths=ordinary.conflict_paths,
+    )
+  elif ordinary.conflict_paths:
+    ordinary.reconciliation = ReconciliationReceipt(
+      unresolved_conflict_paths=tuple(sorted(ordinary.conflict_paths)),
     )
   if ordinary.status == "clean":
     return ordinary
@@ -2119,6 +2173,7 @@ def start_conflict_merge(
   source_dir: str | Path,
   *,
   merge_base: str | None = None,
+  allow_unrelated_histories: bool = False,
   local_branch: str = LOCAL_BRANCH,
   upstream_branch: str = UPSTREAM_BRANCH,
 ) -> list[str]:
@@ -2145,20 +2200,28 @@ def start_conflict_merge(
   same as an ordinary merge while already-landed contribution conflicts stay
   eliminated for both platform and app resolvers.
 
+  When ``allow_unrelated_histories`` is true, Git owns the corresponding
+  empty-base merge directly. This is reserved for legacy source whose catalog
+  identity is proven even though an earlier apply rewrote its commit history.
+
   Returns the conflicting repo-relative paths. In the pathological case where
   the materialized merge resolves clean, it resets to the committed local state
   and returns an empty list so the caller never strands a half-merge.
   """
   repo = Path(source_dir)
   ensure_repo(repo)
-  _unshallow_if_no_merge_base(repo, local_branch, upstream_branch)
+  _restore_shallow_history_if_needed(repo, local_branch, upstream_branch)
   local_sha = head_sha(repo, local_branch)
   upstream_sha = head_sha(repo, upstream_branch)
   if _run(repo, "status", "--porcelain").stdout.strip():
     raise RuntimeError("cannot start conflict merge with local source edits")
   if merge_base is None:
+    merge_args = ["merge", "--no-commit", "--no-ff"]
+    if allow_unrelated_histories:
+      merge_args.append("--allow-unrelated-histories")
+    merge_args.append(upstream_branch)
     merged = _run(
-      repo, "merge", "--no-commit", "--no-ff", upstream_branch, check=False,
+      repo, *merge_args, check=False,
     )
   else:
     verdict = merge_refs(
