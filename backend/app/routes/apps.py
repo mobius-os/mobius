@@ -21,8 +21,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, defer
 
 from app import (
-  activity, app_activity, app_apply, app_git, app_jobs, app_preview,
-  app_recency, fs_locks, icon_cache,
+  activity, app_activity, app_apply, app_capability_acceptance, app_git,
+  app_jobs, app_preview, app_recency, fs_locks, icon_cache,
   models, providers, schemas,
   source_dirs,
 )
@@ -1625,6 +1625,52 @@ async def resolve_app_update(
       **reconciliation.as_dict(),
     ),
   )
+
+
+class RuntimeCapabilityAcceptanceRequest(BaseModel):
+  accept_digest: str = Field(
+    min_length=64,
+    max_length=64,
+    pattern=r"^[0-9a-f]{64}$",
+  )
+
+
+def _runtime_capability_error(exc) -> HTTPException:
+  return HTTPException(status_code=exc.status_code, detail=str(exc))
+
+
+@router.get("/{app_id}/runtime-capabilities")
+def review_local_runtime_capabilities(
+  app_id: int,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Review the normalized runtime declaration in a Store app's local source."""
+  try:
+    return app_capability_acceptance.review_local_runtime_capabilities(
+      db, app_id,
+    )
+  except app_capability_acceptance.CapabilityAcceptanceError as exc:
+    raise _runtime_capability_error(exc) from exc
+
+
+@router.post(
+  "/{app_id}/runtime-capabilities/accept",
+  dependencies=[Depends(reject_cross_site)],
+)
+def accept_local_runtime_capabilities(
+  app_id: int,
+  body: RuntimeCapabilityAcceptanceRequest,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Accept one reviewed declaration through the live server lifecycle."""
+  try:
+    return app_capability_acceptance.accept_local_runtime_capabilities(
+      db, app_id, body.accept_digest,
+    )
+  except app_capability_acceptance.CapabilityAcceptanceError as exc:
+    raise _runtime_capability_error(exc) from exc
 
 
 @router.get("/{app_id}", response_model=schemas.AppOut)
