@@ -1,44 +1,36 @@
 import { useEffect, useState } from 'react'
 import { api, getToken } from '../../api/client.js'
+import { deploymentKind } from '../../lib/platformUpdateState.js'
 
 export const RECOVERY_CONTROL_URL = 'https://www.mobius.you/'
-
-function deploymentFromStatus(value) {
-  return normalizeDeployment(value?.activation?.deployment)
-}
-
-function normalizeDeployment(deployment) {
-  return deployment === 'railway' || deployment === 'self_hosted'
-    ? deployment
-    : null
-}
 
 /** Recovery is external, so nested errors must navigate the top-level control plane. */
 export default function RecoveryLink({
   className = 'errbound__recovery',
-  deployment = null,
-  detectDeployment = true,
   lead = 'If the problem continues after trying again,',
 }) {
-  const suppliedDeployment = normalizeDeployment(deployment)
-  const [detectedDeployment, setDetectedDeployment] = useState(null)
-  const activeDeployment = suppliedDeployment || detectedDeployment
+  // Every render site is a fallback for a surface that has already failed —
+  // a crashed boundary, a crashed app host, or a startup error — so there is
+  // no healthy app state to inherit a deployment from. This link owns the one
+  // read it needs. `getToken()` is the gate: the status route is owner-only,
+  // so without credentials the read cannot succeed and is not attempted.
+  const [activeDeployment, setActiveDeployment] = useState(null)
 
   useEffect(() => {
-    if (!detectDeployment || suppliedDeployment || !getToken()) return undefined
+    if (!getToken()) return undefined
     let cancelled = false
     api.platform.status()
       .then(async response => {
         if (!response.ok || cancelled) return
-        const detected = deploymentFromStatus(await response.json())
-        if (!cancelled && detected) setDetectedDeployment(detected)
+        const detected = deploymentKind((await response.json())?.activation)
+        if (!cancelled && detected) setActiveDeployment(detected)
       })
       .catch(() => {
         // Recovery guidance must remain usable when the platform-status read
         // is unavailable; the unresolved view keeps both external options.
       })
     return () => { cancelled = true }
-  }, [detectDeployment, suppliedDeployment])
+  }, [])
 
   return (
     <p className={className}>
@@ -55,7 +47,7 @@ export default function RecoveryLink({
         <>
           <span className="recovery-panel__recovery-context">This is a self-hosted Möbius instance.</span>
           <span className="recovery-panel__recovery-action">
-            Ask the server operator to run:
+            Run this on the server:
           </span>
           <code className="recovery-panel__recovery-command">mobiusctl recovery start</code>
         </>
@@ -66,7 +58,7 @@ export default function RecoveryLink({
             Managed hosting: <a href={RECOVERY_CONTROL_URL} target="_top">open Recovery in mobius.you</a>.
           </span>
           <span className="recovery-panel__recovery-action">
-            Self-hosted: ask the server operator to run:
+            Self-hosted — run this on the server:
           </span>
           <code className="recovery-panel__recovery-command">mobiusctl recovery start</code>
         </>

@@ -23,10 +23,20 @@ const REACT_SHIM = new URL(
 // this suite can drive them with renderHook. Opt-in per module rather than
 // blanket: most files here are read as source text, and a global alias would
 // silently swap React out from under anything that later imports for real.
+//
+// RecoveryLink is a component rather than a hook, and is listed for one
+// reason: its only behaviour beyond static markup is the deployment-detection
+// effect, and renderToStaticMarkup never runs effects. Only its `react`
+// import is redirected — JSX still resolves through the real
+// `react/jsx-runtime`, so the tree renderHook returns is an ordinary React
+// tree that react-dom/server can serialize. A test that renders RecoveryLink
+// through a parent (recoveryPanel.test.js) therefore sees the pre-detection
+// render, which is exactly the first frame production paints.
 const REACT_SHIMMED_MODULES = [
   '/components/Shell/useAppIntentNavigation.js',
   '/components/ChatView/useFileUpload.js',
   '/components/ChatView/useScrollMode.js',
+  '/components/ErrorBoundary/RecoveryLink.jsx',
   '/hooks/useNavigation.js',
 ]
 
