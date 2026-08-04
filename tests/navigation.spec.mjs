@@ -497,6 +497,25 @@ test.describe('Desktop sidebar navigation', () => {
     }
   })
 
+  test('rename stays focused after the action menu leaves browser history', async ({ page }) => {
+    await setupDesktop(page)
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    const alpha = navigation.getByRole('button', { name: NAV_CHATS[0].title, exact: true })
+
+    await alpha.focus()
+    await page.keyboard.press('Shift+F10')
+    await expect.poll(() => page.evaluate(() => history.state?.kind)).toBe('dismissible')
+    await page.getByRole('menuitem', { name: 'Rename', exact: true }).click()
+
+    const editor = navigation.getByRole('textbox', { name: 'Rename chat' })
+    await expect.poll(() => page.evaluate(() => history.state?.kind)).not.toBe('dismissible')
+    await expect(editor).toBeFocused()
+    await expect(editor).toHaveValue(NAV_CHATS[0].title)
+
+    await page.keyboard.press('Escape')
+    await expect(alpha).toBeVisible()
+  })
+
   test('28. desktop sidebar reserves workspace width and persists its toggle', async ({ page }) => {
     await setupDesktop(page)
 

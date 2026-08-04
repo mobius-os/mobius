@@ -288,7 +288,7 @@ export default function DrawerItemActionMenu({
                 type="button"
                 role="menuitem"
                 className="drawer__item-action-item"
-                onClick={() => run(onRename, { restoreFocus: false })}
+                onClick={() => run(onRename)}
               >
                 Rename
               </button>
