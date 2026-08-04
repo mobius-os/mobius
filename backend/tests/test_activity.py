@@ -811,9 +811,9 @@ async def test_bootstrap_install_emits_with_source_bootstrap(db, monkeypatch):
   with patch("app.bootstrap.install_from_manifest", _fake_install):
     await ensure_bootstrap_apps_installed(db)
 
-  assert captured == ["bootstrap", "bootstrap", "bootstrap", "bootstrap"]
+  assert captured == ["bootstrap"] * 5
   installs = [l for l in _read_lines() if l["ev"] == "app_install"]
-  assert len(installs) == 4
+  assert len(installs) == 5
   assert all(event["source"] == "bootstrap" for event in installs)
 
 
