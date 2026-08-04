@@ -136,6 +136,28 @@ export function releasedInPlace(dx, dy, limit = RELEASE_IN_PLACE_PX) {
   return hypot(dx, dy) <= limit
 }
 
+// Release velocity (layout px/ms) for the drawer's momentum glide. The pinned
+// rows scroll under our own pointer owner (touch-action reserves them for the
+// hold-to-reorder gesture), so the browser gives us no native fling — we measure
+// one. A thumb DECELERATES in the last moment before it lifts, so reading only
+// the final move reports "no flick" and kills the glide; instead average the
+// travel across the recent window. `samples` are {t (ms), top (scroll offset)}
+// pushed each move. Returns 0 for a paused release (newest sample stale) or a
+// window too short to measure, so a deliberate stop keeps its exact position.
+export function flingReleaseVelocity(samples, now, { maxAgeMs = 110, minSpanMs = 8 } = {}) {
+  if (!Array.isArray(samples) || samples.length < 2) return 0
+  const newest = samples[samples.length - 1]
+  if (!newest || now - newest.t > maxAgeMs) return 0
+  let oldest = newest
+  for (let i = samples.length - 1; i >= 0; i -= 1) {
+    if (now - samples[i].t > maxAgeMs) break
+    oldest = samples[i]
+  }
+  const span = newest.t - oldest.t
+  if (span < minSpanMs) return 0
+  return (newest.top - oldest.top) / span
+}
+
 // Whether the workspace-root-edge drop zone may arm for this pointer + mode: it
 // is fine-pointer only (touch collides with the OS edge-back gesture) and never
 // on a phone (portrait width can't sustain a side split). The single predicate

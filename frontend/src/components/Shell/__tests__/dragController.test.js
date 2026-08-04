@@ -7,6 +7,7 @@ import {
   CHIP_MOUSE_DX, CHIP_MOUSE_DY, CHIP_TOUCH_ABOVE,
   EDGE_BAND_MIN, EDGE_BAND_FRACTION,
   passedSlop, touchTabMoveIntent, drawerRowMoveIntent, releasedInPlace, chipOffset,
+  flingReleaseVelocity,
   crossedDrawerExit, edgeBands, edgePreviewRect, caretZone, edgeZone, centerZone,
   rootEdgeZone, hitTest, zoneTarget, releaseZone, zoneEq, buildScene,
 } from '../dragController.js'
@@ -67,6 +68,32 @@ test('drawerRowMoveIntent resolves one gesture without competing owners', () => 
     'an unpinned row cannot enter the reorder branch')
   assert.equal(drawerRowMoveIntent(0, 6, { pinned: true }), 'reorder',
     'mouse rows use ordinary drag slop without a hold')
+})
+
+test('flingReleaseVelocity uses the swipe window, not the decelerating last move', () => {
+  const now = 1000
+  // A real thumb: fast across the window, then a slow crawl right before lifting.
+  const samples = [
+    { t: 940, top: 0 },
+    { t: 956, top: 40 },
+    { t: 972, top: 80 },
+    { t: 988, top: 118 },
+    { t: 998, top: 120 }, // decelerating final move — 2px in 10ms
+  ]
+  const v = flingReleaseVelocity(samples, now)
+  // 120px across 58ms ≈ 2.07 px/ms — the swipe's speed, not the ~0.2 of the crawl
+  // that an EMA of the final move would have reported (which killed the glide).
+  assert.ok(v > 1.5 && v < 2.5, `expected the swipe speed, got ${v}`)
+})
+
+test('flingReleaseVelocity drops a paused or too-short release to zero', () => {
+  const now = 1000
+  // Newest sample is stale (finger rested ~220ms before lifting) → no glide.
+  assert.equal(flingReleaseVelocity([{ t: 700, top: 0 }, { t: 780, top: 200 }], now), 0)
+  assert.equal(flingReleaseVelocity([{ t: 995, top: 10 }], now), 0, 'one sample cannot form a velocity')
+  assert.equal(flingReleaseVelocity([], now), 0)
+  // Two fresh samples spanning under minSpanMs cannot measure a stable speed.
+  assert.equal(flingReleaseVelocity([{ t: 998, top: 10 }, { t: 999, top: 14 }], now), 0)
 })
 
 test('releasedInPlace is true only within the release radius', () => {
