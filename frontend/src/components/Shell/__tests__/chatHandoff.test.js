@@ -243,11 +243,19 @@ test('direct chat actions hand focus to the destination composer', () => {
   assert.match(shell,
     /if \(!startupChatComposerFocusPendingRef\.current\) return[\s\S]*activeView !== 'chat' \|\| activeChatId == null[\s\S]*startupChatComposerFocusPendingRef\.current = false[\s\S]*focusDesktopChatPaneComposer\(activeChatId\)/,
     'restored chat focus must be one-shot rather than following later mode changes')
-  const ownerNewChatCalls = shell.match(
-    /newChat\(\{ forceNew: true, focusComposer: true, recordHistory: true \}\)/g,
-  ) || []
-  assert.equal(ownerNewChatCalls.length, 2,
-    'desktop rail and mobile drawer must both allocate and focus a fresh chat')
+  const startUserChat = shell.match(
+    /function startUserChat\(\) \{([\s\S]*?)\n  \}/,
+  )?.[1] || ''
+  assert.match(startUserChat,
+    /const forceNew = workspaceStateRef\.current\.ws\.viewMode === 'panes'/,
+    'only Builder makes the owner-facing New chat action additive')
+  assert.match(startUserChat,
+    /newChat\(\{ forceNew, focusComposer: true, recordHistory: true \}\)/,
+    'the mode-scoped action must still focus the destination composer')
+  assert.match(shell, /onClick=\{startUserChat\}/,
+    'the desktop rail must use the shared mode-scoped action')
+  assert.match(shell, /onNewChat=\{startUserChat\}/,
+    'the mobile drawer must use the shared mode-scoped action')
   assert.match(shell,
     /beginTouchComposerFocusLease\([\s\S]*?await resolveNewChatId/,
     'New chat must reserve phone keyboard focus before its first async boundary')

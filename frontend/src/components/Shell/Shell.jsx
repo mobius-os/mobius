@@ -2736,6 +2736,13 @@ export default function Shell() {
     }
   }
 
+  // Single screen owns one compose surface; Builder treats New chat as an
+  // additive tab action in the focused pane.
+  function startUserChat() {
+    const forceNew = workspaceStateRef.current.ws.viewMode === 'panes'
+    return newChat({ forceNew, focusComposer: true, recordHistory: true })
+  }
+
   // Keep the latest-newChat ref current so handleAppError's crash-report
   // fallback starts a chat with this render's live closure.
   newChatRef.current = newChat
@@ -3080,7 +3087,7 @@ export default function Shell() {
             className="shell__rail-action"
             aria-label="New chat shortcut"
             title="New chat"
-            onClick={() => newChat({ forceNew: true, focusComposer: true, recordHistory: true })}
+            onClick={startUserChat}
           >
             <NewChatNavIcon aria-hidden="true" />
           </button>
@@ -3141,7 +3148,7 @@ export default function Shell() {
         activeChatId={activeChatId}
         onChat={selectChat}
         onApp={(id) => navTo('canvas', { appId: id })}
-        onNewChat={() => newChat({ forceNew: true, focusComposer: true, recordHistory: true })}
+        onNewChat={startUserChat}
         onDeleteChat={deleteChat}
         onDeleteApp={deleteApp}
         onDeleteAppData={deleteAppData}
