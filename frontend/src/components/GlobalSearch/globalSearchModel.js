@@ -94,6 +94,35 @@ export function searchInstalledApps(apps, query, limit = 8) {
     .map(({ score: _score, ...result }) => result)
 }
 
+// The dialog unmounts on close (NotificationCenter renders it behind
+// `searchOpen &&`), so component state cannot survive a reopen. The owner's
+// last search lives here instead: type a term, open a result, reopen search,
+// and the term and its results are still there rather than a blank field.
+//
+// Memory-only on purpose. It is owner-authored content, so it must not outlive
+// the session — and because nothing is written to storage, a reload or logout
+// drops it without any explicit clean-up path to keep correct.
+const IDLE_CHAT_STATE = { query: '', status: 'idle', results: [] }
+let lastSearch = { query: '', chatState: IDLE_CHAT_STATE }
+
+export function readLastSearch() {
+  return lastSearch
+}
+
+// Only a settled result set is worth restoring: replaying a `loading` or
+// `error` snapshot would reopen the dialog into a state the owner never saw
+// settle, and the mount effect re-runs the query anyway.
+export function rememberLastSearch(query, chatState) {
+  lastSearch = {
+    query: String(query || ''),
+    chatState: chatState?.status === 'ready' ? chatState : IDLE_CHAT_STATE,
+  }
+}
+
+export function clearLastSearch() {
+  lastSearch = { query: '', chatState: IDLE_CHAT_STATE }
+}
+
 export function visibleChatSearchState(chatState, query) {
   const normalizedQuery = String(query || '').trim()
   if (chatState?.query === normalizedQuery) return chatState
