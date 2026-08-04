@@ -27,6 +27,7 @@ function PaneChatView({
   apps,
   runtimeActive = true,
   keepTranscriptPainted = false,
+  focusedPresentation = false,
   paneContentHeight,
   // Shell selects this chat's stable signal before React.memo compares props.
   // An unrelated chat can replace the global signal Map without crossing this
@@ -107,9 +108,9 @@ function PaneChatView({
     // ChatView reports layout readiness before the transcript's first paint.
     // Prepare that frame beneath the outgoing cover before promotion.
     displayReadyCancelRef.current = scheduleAfterBrowserPaint(
-      () => onDisplayReady(paneId, readyChatId),
+      () => onDisplayReady(paneId, readyChatId, focusedPresentation),
     )
-  }, [onDisplayReady, paneId])
+  }, [focusedPresentation, onDisplayReady, paneId])
 
   useEffect(() => () => displayReadyCancelRef.current(), [])
 

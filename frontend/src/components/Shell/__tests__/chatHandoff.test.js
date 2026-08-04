@@ -45,7 +45,7 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
     'ChatView must report layout readiness before its transcript can be promoted')
   assert.match(
     paneChatView,
-    /scheduleAfterBrowserPaint\(\s*\(\) => onDisplayReady\(paneId, readyChatId\),\s*\)/,
+    /scheduleAfterBrowserPaint\(\s*\(\) => onDisplayReady\(paneId, readyChatId, focusedPresentation\),\s*\)/,
     'the pane boundary must prepare one real destination paint before promotion',
   )
   assert.match(
@@ -195,7 +195,7 @@ test('each pane holds one outgoing chat over one staging chat', () => {
 test('only the painted workspace world can expose its handoff layers', () => {
   assert.match(
     shell,
-    /const paneActiveKey = paneModel\.activeKeyForOwner\(workspace, paneId\) \|\| tabKey/,
+    /const layoutPaneId = presentationPaneId \?\? paneId[\s\S]*const paneActiveKey = paneModel\.activeKeyForOwner\(workspace, layoutPaneId\) \|\| tabKey/,
     'handoff visibility must follow the owner current content, including the synthetic single-screen owner',
   )
   assert.match(

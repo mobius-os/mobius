@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   BUILDER_CHAT_WORLD,
+  FOCUSED_BUILDER_CHAT_SURFACE,
   STANDARD_CHAT_WORLD,
   chatSurfaceKey,
   deriveChatSurfaceLayers,
@@ -27,6 +28,24 @@ function workspace({ slot = 'a', left = 'a', right = 'b' } = {}) {
 }
 
 const projection = { visibleLeaves: ['left', 'right'] }
+
+function focusedBuilderLayers(presentedFocusedId) {
+  const owners = deriveChatSurfaceOwners({
+    workspace: workspace({ slot: 'a', left: 'a', right: 'b' }),
+    baseProjection: projection,
+    projection: {
+      visibleLeaves: ['right'],
+      focusedPaneView: true,
+    },
+  })
+  return deriveChatSurfaceLayers(owners, new Map([
+    ['left', 'a'],
+    ['right', 'b'],
+    [FOCUSED_BUILDER_CHAT_SURFACE, presentedFocusedId],
+  ]), {
+    focusedBuilderPaneId: 'right',
+  })
+}
 
 test('a legacy absent slot retains the focused chat in the Standard world immediately', () => {
   const legacy = workspace()
@@ -117,4 +136,41 @@ test('a Standard duplicate does not suppress Builder chat handoff coverage', () 
       && layer.chatId === 'a'
       && layer.role === 'active'
   )))
+})
+
+test('focused Builder presentation holds the outgoing chat across pane focus changes', () => {
+  const layers = focusedBuilderLayers('a')
+
+  const outgoing = layers.filter(layer => (
+    layer.world === BUILDER_CHAT_WORLD && layer.chatId === 'a'
+  ))
+  assert.equal(outgoing.length, 1, 'the retained ChatView is moved, never duplicated')
+  assert.equal(outgoing[0].role, 'held')
+  assert.equal(outgoing[0].paneId, 'left', 'runtime ownership stays with its pane')
+  assert.equal(outgoing[0].presentationPaneId, 'right',
+    'the cover occupies the newly focused presentation rectangle')
+
+  const incoming = layers.find(layer => (
+    layer.world === BUILDER_CHAT_WORLD && layer.chatId === 'b'
+  ))
+  assert.equal(incoming.role, 'staging')
+  assert.ok(layers.some(layer => (
+    layer.world === STANDARD_CHAT_WORLD
+      && layer.chatId === 'a'
+      && layer.role === 'active'
+  )), 'the parked Standard duplicate remains independent')
+})
+
+test('focused Builder presentation releases the cover after destination readiness', () => {
+  const layers = focusedBuilderLayers('b')
+
+  assert.equal(layers.some(layer => layer.role !== 'active'), false)
+  assert.equal(layers.some(layer => layer.presentationPaneId), false)
+})
+
+test('focused Builder presentation never manufactures a stale outgoing cover', () => {
+  const layers = focusedBuilderLayers('departed')
+
+  assert.equal(layers.some(layer => layer.chatId === 'departed'), false)
+  assert.equal(layers.every(layer => layer.role === 'active'), true)
 })
