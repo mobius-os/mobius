@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import socket
 import tempfile
 import time
 from unittest.mock import AsyncMock
@@ -175,15 +176,77 @@ async def test_handshake_negotiates_session_and_paginates_tools(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_handshake_rejects_a_2026_only_server(monkeypatch):
+async def test_handshake_accepts_a_newer_protocol_version(monkeypatch):
+  """A routine upstream version bump must not become an outage."""
+  methods = []
+
+  def handler(request: httpx.Request) -> httpx.Response:
+    body = json.loads(request.content)
+    methods.append(body["method"])
+    if body["method"] == "initialize":
+      assert body["params"]["protocolVersion"] == "2025-11-25"
+      assert request.headers["mcp-protocol-version"] == "2025-11-25"
+      return httpx.Response(
+        200,
+        request=request,
+        headers={"content-type": "application/json"},
+        json={
+          "jsonrpc": "2.0",
+          "id": 1,
+          "result": {
+            "protocolVersion": "2026-07-28",
+            "serverInfo": {"name": "Future MCP"},
+          },
+        },
+      )
+    assert request.headers["mcp-protocol-version"] == "2026-07-28"
+    if body["method"] == "notifications/initialized":
+      return httpx.Response(202, request=request)
+    return httpx.Response(
+      200,
+      request=request,
+      headers={"content-type": "application/json"},
+      json={
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {"tools": [{"name": "future_tool"}]},
+      },
+    )
+
+  monkeypatch.setattr(
+    core,
+    "_safe_endpoint",
+    lambda _url: ("https://203.0.113.8/mcp", "mcp.example", "mcp.example"),
+  )
+  real_async_client = httpx.AsyncClient
+  monkeypatch.setattr(
+    core.httpx,
+    "AsyncClient",
+    lambda **kwargs: real_async_client(
+      transport=httpx.MockTransport(handler),
+      timeout=kwargs.get("timeout"),
+      follow_redirects=False,
+    ),
+  )
+
+  result = await core.handshake("https://mcp.example/mcp")
+  assert result["name"] == "Future MCP"
+  assert result["tools"] == ["future_tool"]
+  assert result["est_tokens"] > 0
+  assert methods == ["initialize", "notifications/initialized", "tools/list"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("negotiated", ("2024-11-05", "vNext"))
+async def test_handshake_rejects_prefloor_or_malformed_versions(
+  monkeypatch, negotiated,
+):
   methods = []
 
   def handler(request: httpx.Request) -> httpx.Response:
     body = json.loads(request.content)
     methods.append(body["method"])
     assert body["method"] == "initialize"
-    assert body["params"]["protocolVersion"] == "2025-11-25"
-    assert request.headers["mcp-protocol-version"] == "2025-11-25"
     return httpx.Response(
       200,
       request=request,
@@ -192,8 +255,8 @@ async def test_handshake_rejects_a_2026_only_server(monkeypatch):
         "jsonrpc": "2.0",
         "id": 1,
         "result": {
-          "protocolVersion": "2026-07-28",
-          "serverInfo": {"name": "Future MCP"},
+          "protocolVersion": negotiated,
+          "serverInfo": {"name": "Old MCP"},
         },
       },
     )
@@ -294,7 +357,9 @@ async def test_handshake_redacts_secret_echoes_and_rpc_errors(monkeypatch):
   assert result == {
     "name": "[redacted] service",
     "tools": ["[redacted] lookup"],
+    "est_tokens": result["est_tokens"],
   }
+  assert result["est_tokens"] > 0
   assert "inputSchema" not in json.dumps(result)
   assert "echo-secret" not in json.dumps(result)
 
@@ -523,6 +588,7 @@ def test_connector_routes_keep_keys_out_of_responses(
   probe = {
     "name": "Example MCP",
     "tools": ["lookup"],
+    "est_tokens": 5150,
   }
   probe_pool_counts = []
 
@@ -570,8 +636,10 @@ def test_connector_routes_keep_keys_out_of_responses(
   assert body["has_auth"] is True
   assert set(body) == {
     "id", "generation", "name", "url", "enabled", "has_auth",
-    "tool_count", "status", "status_detail",
+    "tools", "tool_count", "est_tokens", "status", "status_detail",
   }
+  assert body["tools"] == ["lookup"]
+  assert body["est_tokens"] == 5150
   assert "top-secret" not in created.text
   assert probe_pool_counts == [add_baseline]
 
@@ -726,6 +794,101 @@ def test_unhealthy_connection_cannot_be_enabled_planned_or_brokered(
   assert denied.status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_dns_blip_is_transient_but_dead_name_is_definitive(monkeypatch):
+  """DNS happens in the SSRF validator, not httpx; classify it there too."""
+
+  def resolver_blip(host, *_args, **_kwargs):
+    raise socket.gaierror(
+      socket.EAI_AGAIN, "Temporary failure in name resolution",
+    )
+
+  monkeypatch.setattr("app.net_utils.socket.getaddrinfo", resolver_blip)
+  with pytest.raises(core.ConnectorError) as blip:
+    await core.handshake("https://mcp.example/mcp")
+  assert blip.value.transient is True
+
+  def dead_name(host, *_args, **_kwargs):
+    raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+  monkeypatch.setattr("app.net_utils.socket.getaddrinfo", dead_name)
+  with pytest.raises(core.ConnectorError) as gone:
+    await core.handshake("https://mcp.example/mcp")
+  assert gone.value.transient is False
+
+
+def test_estimate_tokens_scales_with_schema_size():
+  small = [{"name": "a", "inputSchema": {}}]
+  large = [
+    {
+      "name": f"tool_{index}",
+      "inputSchema": {
+        "properties": {key: {"type": "string"} for key in ("one", "two")},
+      },
+    }
+    for index in range(40)
+  ]
+  assert core.estimate_tokens([]) == 0
+  assert 0 < core.estimate_tokens(small) < core.estimate_tokens(large)
+  assert core.estimate_tokens([object()]) == 0
+
+
+def test_refresh_transient_failure_keeps_last_known_health(
+  client, auth, db, monkeypatch,
+):
+  row = _row(78, "flaky", "https://remote.example/mcp")
+  row.tools_json = ["lookup"]
+  row.est_tokens = 1200
+  db.add(row)
+  db.commit()
+  generation = row.capability_id
+
+  async def transient_probe(*_args, **_kwargs):
+    raise core.ConnectorError(
+      "Could not reach the MCP service.", transient=True,
+    )
+
+  monkeypatch.setattr(core, "handshake", transient_probe)
+  refreshed = client.post(
+    f"/api/connectors/{row.id}/refresh",
+    headers=_owner_headers(auth, generation),
+  )
+  assert refreshed.status_code == 200
+  body = refreshed.json()
+  # One transport blip must not latch the connection out of agent turns.
+  assert body["status"] == "ok"
+  assert "Could not reach" in body["status_detail"]
+  assert body["est_tokens"] == 1200
+  db.expire_all()
+  assert core.build_turn_plan(db, include_owner_connectors=True) is not None
+
+  async def definitive_probe(*_args, **_kwargs):
+    raise core.ConnectorError(
+      "The service rejected the key or requires an OAuth sign-in flow.",
+    )
+
+  monkeypatch.setattr(core, "handshake", definitive_probe)
+  rejected = client.post(
+    f"/api/connectors/{row.id}/refresh",
+    headers=_owner_headers(auth, generation),
+  )
+  assert rejected.status_code == 200
+  assert rejected.json()["status"] == "error"
+  db.expire_all()
+  assert core.build_turn_plan(db, include_owner_connectors=True) is None
+
+  # A blip while already latched keeps the definitive diagnosis so the owner
+  # still sees the real reason, not a generic transport message.
+  monkeypatch.setattr(core, "handshake", transient_probe)
+  still_error = client.post(
+    f"/api/connectors/{row.id}/refresh",
+    headers=_owner_headers(auth, generation),
+  )
+  assert still_error.status_code == 200
+  assert still_error.json()["status"] == "error"
+  assert "rejected the key" in still_error.json()["status_detail"]
+
+
 def test_refresh_cannot_overwrite_reused_connector_id(
   client, auth, db, monkeypatch,
 ):
@@ -748,6 +911,7 @@ def test_refresh_cannot_overwrite_reused_connector_id(
     return {
       "name": "Stale probe",
       "tools": ["stale"],
+      "est_tokens": 3,
     }
 
   monkeypatch.setattr(core, "handshake", replace_during_probe)

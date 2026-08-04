@@ -22,6 +22,16 @@ function displayEndpoint(value) {
   }
 }
 
+/* Same-count catalogs differ severalfold in schema size, and Codex pays that
+   cost on every message, so the count alone is a misleading signal. */
+function schemaCostLabel(estTokens) {
+  if (!estTokens) return ''
+  const value = estTokens >= 1000
+    ? `${(estTokens / 1000).toFixed(estTokens >= 10000 ? 0 : 1)}k`
+    : String(estTokens)
+  return `~${value} tool-schema tokens`
+}
+
 function focusConnectionTarget(root, connectorId = null) {
   const preferred = connectorId === null
     ? null
@@ -204,6 +214,12 @@ export default function ConnectorsSection({ active = true }) {
       const data = await jsonOrThrow(response, label)
       await connectorQueries.list.invalidate(queryClient)
       return data
+    } catch (error) {
+      // A failed action may have committed server-side (lost response) or hit
+      // a stale generation. Resync so the row cannot wedge behind stale state;
+      // fire-and-forget keeps the error surfacing immediately.
+      void connectorQueries.list.invalidate(queryClient)
+      throw error
     } finally {
       mutationPending.current = false
       setPending(false)
@@ -301,8 +317,19 @@ export default function ConnectorsSection({ active = true }) {
                   </span>
                   <span className="settings-connections__meta">
                     {connection.enabled ? 'On' : 'Off'}
-                    {' · '}{unhealthy ? 'Needs attention' : 'Reachable'}
-                    {' · '}{connection.tool_count} tool{connection.tool_count === 1 ? '' : 's'}
+                    {' · '}
+                    {unhealthy
+                      ? 'Needs attention'
+                      : (connection.status_detail
+                        ? 'Unreachable at last check'
+                        : 'Reachable')}
+                    {' · '}
+                    <span title={(connection.tools || []).join(', ') || undefined}>
+                      {connection.tool_count} tool{connection.tool_count === 1 ? '' : 's'}
+                    </span>
+                    {connection.est_tokens
+                      ? ` · ${schemaCostLabel(connection.est_tokens)}`
+                      : ''}
                     {connection.has_auth ? ' · API key saved' : ''}
                   </span>
                   {unhealthy && connection.status_detail && (

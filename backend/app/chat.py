@@ -4240,9 +4240,31 @@ async def _run_chat_impl_with_db(
   # provider's native tools instead of breaking chat.
   try:
     from app.connectors import build_turn_plan
+    # Connections follow the owner's own chats. A delegated child run or an
+    # app-attributed chat (embedded app panels, headless scheduled runs) must
+    # not inherit the owner's remote services; a per-app grant can opt in at
+    # this call site if a background app ever genuinely needs one. When the
+    # run has a chat_id but its row could not be loaded, attribution is
+    # unknown — fail closed rather than grant.
+    include_owner_connectors = (
+      run_policy is None
+      and (
+        not chat_id
+        or (chat_row is not None and chat_row.created_by_app_id is None)
+      )
+    )
+    if not include_owner_connectors:
+      reason = (
+        "delegated run policy" if run_policy is not None
+        else "chat attribution unavailable" if chat_row is None
+        else "app-attributed chat"
+      )
+      log.info(
+        "owner MCP connections withheld (%s) chat_id=%s", reason, chat_id,
+      )
     connector_turn_plan = build_turn_plan(
       db,
-      include_owner_connectors=run_policy is None,
+      include_owner_connectors=include_owner_connectors,
     )
   except Exception:
     log.warning(

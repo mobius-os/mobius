@@ -71,6 +71,7 @@ class RunPolicy:
       "Do not ask the owner an interactive question; if a required decision or "
       "credential is missing, stop and state the blocker precisely. Do not "
       "inspect unrelated chats, Memory, skills, or installed-app instructions. "
+      "Owner-managed MCP connections are not available in this run. "
       "Never read or write /data/cli-auth or /data/.secret-key. "
       f"Working directory: {self.cwd}. {scope_rule}"
     )

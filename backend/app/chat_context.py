@@ -229,6 +229,7 @@ def _build_app_context(
     f"Registered chat id: {app.chat_id or ''}",
     f"Available app scripts: {', '.join(scripts) if scripts else 'none detected'}",
     "When changing this app, edit files under the source directory and use the existing register/build workflow.",
+    "Owner-managed MCP connections are not available in app-attributed chats.",
     "</app_context>",
   ])
   env = {
