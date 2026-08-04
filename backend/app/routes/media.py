@@ -4,7 +4,6 @@ import mimetypes
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi import Path as FastPath
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -64,10 +63,10 @@ def _serve_chat_image(chat_id, filename, token_src, db, *, preview=False):
   return FileResponse(str(file_path), media_type=media_type)
 
 
-@router.get("/{chat_id}/media/{filename}")
+@router.get("/{chat_id}/media/{filename:path}")
 def serve_chat_media(
   chat_id: str,
-  filename: str = FastPath(...),
+  filename: str,
   preview: bool = False,
   token_src: TokenSource = Depends(get_auth_token_source),
   db: Session = Depends(get_db),

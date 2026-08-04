@@ -31,6 +31,24 @@ def test_serve_chat_media(client, auth, chat):
   assert response.headers["content-type"] == "image/png"
 
 
+def test_serve_chat_media_from_nested_report_directory(client, auth, chat):
+  _write_chat_image(
+    chat.id,
+    "media/report/desktop",
+    "contact-sheet.png",
+    b"nested-image-bytes",
+  )
+
+  response = client.get(
+    f"/api/chats/{chat.id}/media/report/desktop/contact-sheet.png",
+    params={"token": _media_token(client, auth, chat.id)},
+  )
+
+  assert response.status_code == 200
+  assert response.content == b"nested-image-bytes"
+  assert response.headers["content-type"] == "image/png"
+
+
 def test_serve_chat_media_uses_safe_raster_content_type(client, auth, chat):
   _write_chat_image(chat.id, "media", "photo.jpg", b"jpeg-bytes")
 
