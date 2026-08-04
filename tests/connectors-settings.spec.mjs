@@ -39,14 +39,12 @@ async function openConnections(page) {
   await expect(page.locator('#settings-connections')).toBeVisible()
 }
 
-test('connection actions clear secrets, serialize changes, and restore focus', async ({ page }) => {
-  await page.setViewportSize({ width: 900, height: 800 })
-  const rows = [connector(1), connector(2)]
-  let addedPayload
-  let addGateResolve
-  const addGate = new Promise(resolve => { addGateResolve = resolve })
-
-  await page.route('**/api/connectors**', async route => {
+// One connection API for every mutating case below, so each keeps the same
+// generation-header contract (`expectGeneration` on PATCH / refresh / DELETE)
+// and the same revoke-on-disable behaviour the single big case used to carry.
+// `addGate` lets a case hold the POST open and observe the in-flight UI.
+function mockConnectorApi(page, { rows, addGate, onAdd } = {}) {
+  return page.route('**/api/connectors**', async route => {
     const request = route.request()
     const url = new URL(request.url())
     const match = url.pathname.match(/^\/api\/connectors\/(\d+)(?:\/(refresh))?$/)
@@ -54,9 +52,10 @@ test('connection actions clear secrets, serialize changes, and restore focus', a
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ connectors: rows }) })
     }
     if (request.method() === 'POST' && url.pathname === '/api/connectors') {
-      await addGate
-      addedPayload = request.postDataJSON()
-      const created = connector(3, { name: addedPayload.name || 'Server 3', has_auth: true })
+      if (addGate) await addGate
+      const payload = request.postDataJSON()
+      onAdd?.(payload)
+      const created = connector(3, { name: payload.name || 'Server 3', has_auth: true })
       rows.push(created)
       return route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify(created) })
     }
@@ -83,6 +82,25 @@ test('connection actions clear secrets, serialize changes, and restore focus', a
     }
     return route.fallback()
   })
+}
+
+// These four cases were one ~50-interaction test asserting seven separate focus
+// outcomes plus payload, secret-hygiene and serialization behaviour. A failure
+// named the line but not the behaviour, and the earlier steps had to survive
+// for the later ones to run at all. Split by BEHAVIOUR, with the assertions and
+// the connection-API contract unchanged.
+
+test('an add clears a removed API key, serializes other changes, and lands focus on Add connection', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 800 })
+  const rows = [connector(1), connector(2)]
+  let addedPayload
+  let addGateResolve
+  const addGate = new Promise(resolve => { addGateResolve = resolve })
+  await mockConnectorApi(page, {
+    rows,
+    addGate,
+    onAdd: payload => { addedPayload = payload },
+  })
 
   await openConnections(page)
   await page.getByRole('button', { name: 'Add connection' }).click()
@@ -103,33 +121,57 @@ test('connection actions clear secrets, serialize changes, and restore focus', a
   await expect(page.getByText('New server', { exact: true })).toBeVisible()
   expect(addedPayload.auth_value).toBe('replacement-value')
   await expect(page.getByRole('button', { name: 'Add connection' })).toBeFocused()
+})
 
+test('a removal confirmation takes focus and hands it back when kept', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 800 })
+  await mockConnectorApi(page, { rows: [connector(1), connector(2)] })
+
+  await openConnections(page)
   const firstRemove = page.getByRole('button', { name: 'Remove Server 1' })
   await firstRemove.focus()
   await firstRemove.click()
-  const confirm = page.getByRole('button', { name: 'Remove', exact: true })
-  await expect(confirm).toBeFocused()
+  await expect(page.getByRole('button', { name: 'Remove', exact: true })).toBeFocused()
   await page.getByRole('button', { name: 'Keep' }).click()
   await expect(firstRemove).toBeFocused()
-  await firstRemove.click()
-  await confirm.click()
-  await expect(page.getByRole('button', { name: 'Remove Server 2' })).toBeFocused()
+})
 
+test('a settled toggle and re-check keep focus on the control that ran them', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 800 })
+  await mockConnectorApi(page, { rows: [connector(1), connector(2)] })
+
+  await openConnections(page)
   const toggle = page.getByRole('switch', { name: 'Server 2 available to agents' })
   await toggle.click()
   await expect(toggle).toHaveAttribute('aria-checked', 'false')
   await expect(toggle).toBeFocused()
+
   const refresh = page.getByRole('button', { name: 'Re-check Server 2' })
   await refresh.click()
   await expect(page.getByText(/3 tools/)).toBeVisible()
   await expect(refresh).toBeFocused()
+})
 
-  await page.getByRole('button', { name: 'Remove New server' }).click()
-  await page.getByRole('button', { name: 'Remove', exact: true }).click()
+test('confirmed removals walk focus to the neighbouring connection, then into the add form', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 800 })
+  await mockConnectorApi(page, { rows: [connector(1), connector(2), connector(3)] })
+  const confirm = page.getByRole('button', { name: 'Remove', exact: true })
+
+  await openConnections(page)
+  // Removing a row that has a successor hands focus forward.
+  await page.getByRole('button', { name: 'Remove Server 1' }).click()
+  await confirm.click()
   await expect(page.getByRole('button', { name: 'Remove Server 2' })).toBeFocused()
+
+  // Removing the LAST row falls back to its predecessor.
+  await page.getByRole('button', { name: 'Remove Server 3' }).click()
+  await confirm.click()
+  await expect(page.getByRole('button', { name: 'Remove Server 2' })).toBeFocused()
+
+  // With no connection left, focus lands on the open add form's endpoint field.
   await page.getByRole('button', { name: 'Add connection' }).click()
   await page.getByRole('button', { name: 'Remove Server 2' }).click()
-  await page.getByRole('button', { name: 'Remove', exact: true }).click()
+  await confirm.click()
   await expect(page.getByLabel('Streamable HTTP endpoint')).toBeFocused()
 })
 

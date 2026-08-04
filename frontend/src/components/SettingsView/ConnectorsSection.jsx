@@ -1,5 +1,5 @@
 /* Owner-managed remote MCP connections shared by both agent providers. */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import {
@@ -32,6 +32,13 @@ function focusConnectionTarget(root, connectorId = null) {
   const target = preferred || fallback
   target?.focus()
 }
+
+// Where focus belongs once the settled DOM exists. `restore` puts the owner
+// back on the control they ran (the element is remembered before the mutation
+// disables it); `target` picks the connection row — or the add affordance — the
+// section wants next.
+const restoreFocusTo = node => ({ kind: 'restore', node })
+const focusConnection = connectorId => ({ kind: 'target', connectorId })
 
 function ConnectorForm({ disabled, onAdd, onCancel }) {
   const [url, setUrl] = useState('')
@@ -169,6 +176,7 @@ export default function ConnectorsSection({ active = true }) {
   const [pending, setPending] = useState(false)
   const [actionError, setActionError] = useState('')
   const [confirmRemove, setConfirmRemove] = useState(null)
+  const [focusIntent, setFocusIntent] = useState(null)
   const mutationPending = useRef(false)
   const section = useRef(null)
   const confirmButton = useRef(null)
@@ -184,10 +192,40 @@ export default function ConnectorsSection({ active = true }) {
     )
     if (current?.generation === confirmRemove.generation) return
     setConfirmRemove(null)
-    requestAnimationFrame(() => {
-      focusConnectionTarget(section.current, current?.id ?? null)
-    })
+    setFocusIntent(focusConnection(current?.id ?? null))
   }, [confirmRemove, connections])
+
+  // Restore focus in the COMMIT that produces the settled DOM, never on the
+  // next animation frame.
+  //
+  // Every action here disables its own control while the mutation is in flight
+  // (`disabled={busy}`), and disabling the focused element drops focus to
+  // <body>. The re-enabling render is a React state update scheduled through
+  // the scheduler (a task), while requestAnimationFrame is a rendering-phase
+  // callback: the two have no guaranteed order, and under load the frame
+  // regularly runs FIRST. The old code then found the control still `:disabled`
+  // — or, for the add form, found `#settings-connections-add` not rendered yet
+  // and `#settings-connections-endpoint` still inside a disabled fieldset — and
+  // its guards silently skipped the focus. Nothing retried, so the owner's
+  // keyboard position was lost to <body> for the rest of the session: every
+  // subsequent Tab restarted at the top of the document. Queuing the intent and
+  // applying it from a layout effect that runs only once `pending` is false
+  // makes "the mutation has settled and the list has re-rendered" the actual
+  // trigger, which is what the restore always meant.
+  useLayoutEffect(() => {
+    if (focusIntent === null || pending) return
+    setFocusIntent(null)
+    if (focusIntent.kind === 'restore') {
+      const previous = focusIntent.node
+      if (
+        previous?.isConnected
+        && document.activeElement === document.body
+        && !previous.matches(':disabled')
+      ) previous.focus()
+      return
+    }
+    focusConnectionTarget(section.current, focusIntent.connectorId ?? null)
+  }, [focusIntent, pending])
 
   async function perform(request, label) {
     if (mutationPending.current) {
@@ -207,15 +245,7 @@ export default function ConnectorsSection({ active = true }) {
     } finally {
       mutationPending.current = false
       setPending(false)
-      requestAnimationFrame(() => {
-        if (
-          focusTarget?.isConnected
-          && document.activeElement === document.body
-          && !focusTarget.matches(':disabled')
-        ) {
-          focusTarget.focus()
-        }
-      })
+      setFocusIntent(restoreFocusTo(focusTarget))
     }
   }
 
@@ -233,17 +263,15 @@ export default function ConnectorsSection({ active = true }) {
       'Could not remove connection',
     ).then(() => {
       setConfirmRemove(null)
-      requestAnimationFrame(() => {
-        focusConnectionTarget(section.current, nextConnection?.id ?? null)
-      })
+      // Queued after perform()'s own restore intent and in the same batch, so
+      // the row-walk wins: the control the owner ran has just been removed.
+      setFocusIntent(focusConnection(nextConnection?.id ?? null))
     }))
   }
 
   function closeAddForm() {
     setAddOpen(false)
-    requestAnimationFrame(() => {
-      section.current?.querySelector('#settings-connections-add')?.focus()
-    })
+    setFocusIntent(focusConnection(null))
   }
 
   const busy = pending
@@ -334,12 +362,7 @@ export default function ConnectorsSection({ active = true }) {
                         disabled={busy}
                         onClick={() => {
                           setConfirmRemove(null)
-                          requestAnimationFrame(() => {
-                            focusConnectionTarget(
-                              section.current,
-                              connection.id,
-                            )
-                          })
+                          setFocusIntent(focusConnection(connection.id))
                         }}
                       >
                         Keep
