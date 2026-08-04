@@ -294,13 +294,10 @@ Start with `inputs/resource-snapshot.json`, the bounded
 - **Repair the cause; leave the system smaller than you found it.** The strongest
   operational signal is usually waste with a fixable owner, not a resource that
   needs managing. When a job overruns, retries, or burns budget, find what it is
-  spending that work *on* before treating the cost as its natural size. Judge a
-  proposed change by what it removes: a fix that deletes a duplicated code path,
-  collapses two mechanisms into one, or makes a guard unnecessary beats one that
-  adds a threshold, a retry, a fallback, or a second system beside the first. If
-  the same brittle logic exists in more than one place, fixing it in one is a
-  patch — move it to the layer both callers already share. Never add machinery to
-  tolerate a defect you have not tried to remove.
+  spending that work *on* before treating the cost as its natural size, and judge
+  any fix by what it removes rather than the threshold, retry, or fallback it adds
+  (the close-or-escalate rule in phase 2 and *Prefer prevention* below say the
+  same thing for skill edits and for leaked residue).
 - **Use trends and thresholds.** Compare the cheap pulse with recent history.
   Inspect the deep inventory only when `deep_scan.ran` and note whether it was
   complete. One large category is a lead, not permission to delete it.
