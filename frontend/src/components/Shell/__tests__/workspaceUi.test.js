@@ -1021,6 +1021,21 @@ test('double-click edits a drawer row name instead of duplicating its context me
   assert.match(drawer, /onDoubleClick=\{event => \{[\s\S]*?actions\.startRename\(kind, id, surface\)/)
 })
 
+test('menu rename survives the history sentinel focus handoff', () => {
+  assert.match(
+    drawer,
+    /onRename=\{\(\) => actions\.startRename\(kind, id, surface, 'menu'\)\}/,
+  )
+  const blurHandoff = drawer.match(
+    /function onRenameBlur\(event\) \{[\s\S]*?\n  \}/,
+  )?.[0] || ''
+  assert.match(blurHandoff, /renaming\.origin === 'menu'/)
+  assert.match(blurHandoff, /event\.relatedTarget === null/)
+  assert.match(blurHandoff, /recoveredMenuBlurRef\.current = true/)
+  assert.match(blurHandoff, /requestAnimationFrame/)
+  assert.equal((drawer.match(/onBlur=\{onRenameBlur\}/g) || []).length, 2)
+})
+
 test('the Settings surface responds to PANE width via a query container', () => {
   const settingsCss = readFileSync(
     new URL('../../SettingsView/SettingsView.css', import.meta.url), 'utf8',

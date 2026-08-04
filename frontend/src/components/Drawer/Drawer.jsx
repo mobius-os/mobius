@@ -415,8 +415,8 @@ export default function Drawer({
       if (next) current.showItemMenu(kind, id, surface, placement)
       else current.closeItemMenu()
     },
-    startRename(kind, id, surface = 'drawer') {
-      rowActionInputsRef.current.setRenaming({ kind, id, surface })
+    startRename(kind, id, surface = 'drawer', origin = 'direct') {
+      rowActionInputsRef.current.setRenaming({ kind, id, surface, origin })
     },
     cancelRename() {
       rowActionInputsRef.current.setRenaming(null)
@@ -1102,10 +1102,12 @@ export default function Drawer({
                         && openMenu.id === item.id
                         ? openMenu.placement
                         : null}
-                      renaming={!!(renaming
+                      renaming={renaming
                         && renaming.surface === 'drawer'
                         && renaming.kind === kind
-                        && renaming.id === item.id)}
+                        && renaming.id === item.id
+                        ? renaming
+                        : null}
                       actions={rowActions}
                       dragActiveRef={dragActiveRef}
                       drawerRowGesturesRef={drawerRowGesturesRef}
@@ -1156,10 +1158,12 @@ export default function Drawer({
                       && openMenu.id === item.id
                       ? openMenu.placement
                       : null}
-                    renaming={!!(renaming
+                    renaming={renaming
                       && renaming.surface === 'drawer'
                       && renaming.kind === kind
-                      && renaming.id === item.id)}
+                      && renaming.id === item.id
+                      ? renaming
+                      : null}
                     actions={rowActions}
                     dragActiveRef={dragActiveRef}
                     drawerRowGesturesRef={drawerRowGesturesRef}
@@ -1256,10 +1260,12 @@ export default function Drawer({
                 && openMenu.id === app.id
                 ? openMenu.placement
                 : null}
-              renaming={!!(renaming
+              renaming={renaming
                 && renaming.surface === 'directory'
                 && renaming.kind === 'app'
-                && renaming.id === app.id)}
+                && renaming.id === app.id
+                ? renaming
+                : null}
               actions={rowActions}
             />
           ))}
@@ -1375,6 +1381,7 @@ const DrawerRow = memo(function DrawerRow({
   // native event cannot open actions before a release. It expires, and keyboard
   // or mouse input clears it, so accessibility and desktop context menus remain.
   const touchMenuPointerAtRef = useRef(0)
+  const recoveredMenuBlurRef = useRef(false)
   // Cancel-on-outside-tap during rename. Capture-phase listeners on
   // pointerdown AND click anywhere outside the rename input normally call
   // preventDefault + stopPropagation so another row, Settings, or New chat
@@ -1441,6 +1448,7 @@ const DrawerRow = memo(function DrawerRow({
   // from scratch or tap into the existing name to edit it.
   useEffect(() => {
     if (renaming && inputRef.current) {
+      recoveredMenuBlurRef.current = false
       inputRef.current.focus()
       inputRef.current.select()
     }
@@ -1453,6 +1461,29 @@ const DrawerRow = memo(function DrawerRow({
     }
     const value = inputRef.current?.value || ''
     actions.submitRename(kind, id, label, value.trim())
+  }
+
+  function onRenameBlur(event) {
+    const input = event.currentTarget
+    if (
+      renaming.origin === 'menu'
+      && !recoveredMenuBlurRef.current
+      && event.relatedTarget === null
+      && input.value === label
+    ) {
+      // Consuming the action menu's Back-stack sentinel can move focus to the
+      // document a few milliseconds after this editor mounts. Recover that one
+      // history-owned blur after the traversal, without mistaking later blurs
+      // (Tab, pointer outside, mobile keyboard) for the same handoff.
+      recoveredMenuBlurRef.current = true
+      requestAnimationFrame(() => {
+        if (inputRef.current !== input || !document.hasFocus()) return
+        input.focus()
+        input.select()
+      })
+      return
+    }
+    commitRename()
   }
 
   function onInputKeyDown(e) {
@@ -1559,7 +1590,7 @@ const DrawerRow = memo(function DrawerRow({
             className="drawer__rename-input"
             defaultValue={label}
             onKeyDown={onInputKeyDown}
-            onBlur={commitRename}
+            onBlur={onRenameBlur}
             aria-label="Rename app"
           />
         </div>
@@ -1572,7 +1603,7 @@ const DrawerRow = memo(function DrawerRow({
           className="drawer__rename-input"
           defaultValue={label}
           onKeyDown={onInputKeyDown}
-          onBlur={commitRename}
+          onBlur={onRenameBlur}
           aria-label={`Rename ${kind}`}
         />
       </div>
@@ -2009,7 +2040,7 @@ function DrawerItemMenu({
       restoreFocusRef={restoreFocusRef}
       onClose={() => actions.toggleMenu(kind, id, false, surface)}
       onPin={() => actions.pin(kind, id, !pinned)}
-      onRename={() => actions.startRename(kind, id, surface)}
+      onRename={() => actions.startRename(kind, id, surface, 'menu')}
       onInstall={() => actions.install(item)}
       onShare={() => actions.share(item)}
       onDelete={() => actions.remove(kind, id)}
