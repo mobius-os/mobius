@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, startTransition } from 'react'
 import {
   dropPopsForEntry,
   isMobiusNavState,
@@ -929,13 +929,24 @@ export default function useNavigation({
       setSettingsOpen(false)
       settingsOpenRef.current = false
     }
+    // SWITCH-PERF CONTRACT (do not make this dispatch synchronous):
+    // applying a destination mounts the target chat/app surface, which is heavy
+    // (a chat transcript is thousands of DOM nodes). A synchronous dispatch here
+    // runs that mount + its layout reads INSIDE the discrete tap, which on a
+    // phone forces a ~90ms style/layout reflow on every switch and blocks the
+    // tap — the "switching is super slow" regression. startTransition marks only
+    // the render as non-urgent, so the mount lands off the tap; the synchronous
+    // workspaceStateRef advance inside dispatchWorkspace still happens
+    // immediately (the callback runs synchronously), and the held cover keeps
+    // the outgoing surface painted until the new one commits. See ARCHITECTURE.md
+    // (useNavigation.js row) and the field probe (perfProbe.js).
     if (mode === 'single') {
       const item = route.view === 'apps'
         ? tabModel.appsTab()
         : (route.view === 'canvas'
           ? (route.appId != null ? { kind: 'app', id: route.appId } : null)
           : (route.chatId != null ? { kind: 'chat', id: route.chatId } : null))
-      dispatchWorkspace({ type: 'SET_SINGLE_SCREEN', item })
+      startTransition(() => dispatchWorkspace({ type: 'SET_SINGLE_SCREEN', item }))
       return
     }
     const targetPaneId = (typeof route.paneId === 'string' && ws.panes[route.paneId])
@@ -946,7 +957,7 @@ export default function useNavigation({
       : (route.view === 'canvas'
         ? tabModel.makeTab('app', route.appId)
         : tabModel.makeTab('chat', route.chatId))
-    dispatchWorkspace({ type: 'OPEN_TAB', paneId: targetPaneId, tab, activate: true })
+    startTransition(() => dispatchWorkspace({ type: 'OPEN_TAB', paneId: targetPaneId, tab, activate: true }))
   }, [applySettingsDestination, dispatchWorkspace, workspaceStateRef])
 
   // Settings is context-independent across a world toggle (two-worlds design):

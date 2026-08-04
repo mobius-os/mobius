@@ -453,7 +453,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 
 | Hook | Role |
 |------|------|
-| `useNavigation.js` | Navigation stack, pushState/popstate, the Navigation API (back-stack contract in *Navigation back-stack + drawer model* below) |
+| `useNavigation.js` | Navigation stack, pushState/popstate, the Navigation API (back-stack contract in *Navigation back-stack + drawer model* below). **Switch-perf contract:** `applyModeDestination` — the single chat/app nav choke point — dispatches the destination inside `startTransition`. This keeps the heavy target-surface mount OFF the discrete tap (a synchronous dispatch there forces a ~90ms layout reflow of the transcript on every switch, measured on-device); the held-cover keeps the outgoing surface painted until the new one commits. Do not make this dispatch synchronous. |
 | `useTheme.js` | Theme CSS fetch, `@import` extraction, CSS-variable injection |
 | `useSystemEventStream.js` | System-event SSE consumed by `Shell` |
 | `useOnlineStatus.js` | Connectivity verdict (page-side `/api/health` probe; feeds SW connectivity) |
