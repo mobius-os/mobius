@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-"""Review or accept a Store app's local runtime declaration via Möbius."""
+"""Review or accept a Store app's local runtime declaration via Möbius.
+
+The running server owns the App row and the ``app_updated`` broadcast, so this
+stays a thin client over the owner API rather than touching the database.
+
+Environment:
+  AGENT_TOKEN    required; owner bearer token for the Möbius API.
+  API_BASE_URL   backend base URL (default http://localhost:8000).
+
+Usage:
+  accept_local_runtime_capabilities.py <app-id>
+  accept_local_runtime_capabilities.py <app-id> --accept-digest <sha256>
+"""
 
 from __future__ import annotations
 

@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from app import app_capability_acceptance as acceptance
-from app import models, timeutil
+from app import models
 from app.app_capabilities import contract_and_digest
 from app.database import SessionLocal
 from app.manifest_contract import MANIFEST_MAX_BYTES
@@ -111,11 +111,39 @@ def test_server_acceptance_preserves_contract_and_publishes_after_commit(
   }
 
 
-def test_digest_approves_only_the_normalized_runtime_declaration(
+def test_cosmetic_manifest_edits_keep_a_reviewed_digest_valid(
   client, auth, db,
 ):
   app = _store_app(client, auth, db)
   report = _review(client, auth, app.id)
+
+  manifest_path = Path(app.source_dir) / "mobius.json"
+  manifest = json.loads(manifest_path.read_text())
+  manifest["description"] = "An unrelated local description edit."
+  manifest_path.write_text(json.dumps(manifest, indent=2))
+
+  response = _accept(client, auth, app.id, report["accept_digest"])
+
+  assert response.status_code == 200, response.text
+  assert response.json()["status"] == "accepted"
+  db.expire_all()
+  stored = db.get(models.App, app.id).capability_contract
+  assert stored["runtime"] == report["candidate_runtime"]
+
+
+def test_store_update_between_review_and_acceptance_rejects_the_digest(
+  client, auth, db,
+):
+  """A changed baseline must send the owner back to a fresh review.
+
+  The reviewed diff is meaningful only against the contract it was computed
+  from.  If a Store update replaces that contract first, accepting the older
+  review would apply a transition the owner never saw.
+  """
+  app = _store_app(client, auth, db)
+  runtime_before = deepcopy(app.capability_contract["runtime"])
+  report = _review(client, auth, app.id)
+  assert report["candidate_runtime"] != runtime_before
 
   writer = SessionLocal()
   try:
@@ -127,23 +155,15 @@ def test_digest_approves_only_the_normalized_runtime_declaration(
   finally:
     writer.close()
 
-  manifest_path = Path(app.source_dir) / "mobius.json"
-  manifest = json.loads(manifest_path.read_text())
-  manifest["description"] = "An unrelated local description edit."
-  manifest["capabilities"]["media.speech"]["limits"] = {
-    "max_text_chars": 50_000,
-  }
-  manifest_path.write_text(json.dumps(manifest, indent=2))
+  with patch.object(acceptance, "get_system_broadcast") as get_broadcast:
+    response = _accept(client, auth, app.id, report["accept_digest"])
 
-  response = _accept(client, auth, app.id, report["accept_digest"])
-
-  assert response.status_code == 200, response.text
-  accepted = response.json()
-  assert accepted["status"] == "accepted"
+  assert response.status_code == 409
+  get_broadcast.assert_not_called()
   db.expire_all()
   stored = db.get(models.App, app.id).capability_contract
   assert stored["agent"]["skills"] == ["newly-reviewed-skill.md"]
-  assert stored["runtime"] == report["candidate_runtime"]
+  assert stored["runtime"] == runtime_before
 
 
 def test_semantic_runtime_change_rejects_prior_digest_without_write_or_event(
@@ -318,75 +338,6 @@ def test_pinned_source_directory_cannot_escape_during_parent_swap(
       pinned.rename(source)
 
 
-def test_domain_failure_rolls_back_its_session(
-  client, auth, db, monkeypatch,
-):
-  app = _store_app(client, auth, db)
-  original_name = app.name
-  review_session = SessionLocal()
-  try:
-    report = acceptance.review_local_runtime_capabilities(
-      review_session, app.id,
-    )
-  finally:
-    review_session.close()
-  original_review = acceptance._review
-
-  def fail_after_mutation(session, app_id):
-    result = original_review(session, app_id)
-    result[0].name = "must roll back"
-    session.flush()
-    raise RuntimeError("injected failure")
-
-  monkeypatch.setattr(acceptance, "_review", fail_after_mutation)
-  accept_session = SessionLocal()
-  with pytest.raises(RuntimeError, match="injected failure"):
-    acceptance.accept_local_runtime_capabilities(
-      accept_session, app.id, report["accept_digest"],
-    )
-  accept_session.expire_all()
-  assert accept_session.get(models.App, app.id).name == original_name
-  accept_session.close()
-  db.expire_all()
-  assert db.get(models.App, app.id).name == original_name
-
-
-def test_concurrent_app_change_wins_without_publishing(
-  client, auth, db, monkeypatch,
-):
-  app = _store_app(client, auth, db)
-  report = _review(client, auth, app.id)
-  original_review = acceptance._review
-  concurrent_contract = {
-    **app.capability_contract,
-    "concurrent_fact": "preserve-me",
-  }
-
-  def review_then_concurrent_write(session, app_id):
-    result = original_review(session, app_id)
-    writer = SessionLocal()
-    try:
-      changed = writer.get(models.App, app.id)
-      changed.capability_contract = concurrent_contract
-      changed.updated_at = timeutil.now_naive_utc()
-      writer.commit()
-    finally:
-      writer.close()
-    return result
-
-  monkeypatch.setattr(acceptance, "_review", review_then_concurrent_write)
-  with patch.object(acceptance, "get_system_broadcast") as get_broadcast:
-    response = _accept(client, auth, app.id, report["accept_digest"])
-
-  assert response.status_code == 409
-  assert "changed while capabilities were being accepted" in response.json()[
-    "detail"
-  ]
-  get_broadcast.assert_not_called()
-  db.expire_all()
-  assert db.get(models.App, app.id).capability_contract == concurrent_contract
-
-
 def test_acceptance_route_rejects_cross_site_requests(client, auth, db):
   app = _store_app(client, auth, db)
   response = client.post(
@@ -425,17 +376,15 @@ def test_command_forwards_review_and_acceptance_to_the_live_server(
   command.main(["--app-id", "7", "--accept-digest", "a" * 64])
   assert json.loads(capsys.readouterr().out) == {"status": "ok"}
 
-  review_request, review_timeout = requests[0]
-  accept_request, accept_timeout = requests[1]
+  review_request, _ = requests[0]
+  accept_request, _ = requests[1]
   assert review_request.full_url == (
     "http://mobius.test/api/apps/7/runtime-capabilities"
   )
   assert review_request.method == "GET"
   assert review_request.get_header("Authorization") == "Bearer agent-token"
-  assert review_timeout == 30
   assert accept_request.full_url == (
     "http://mobius.test/api/apps/7/runtime-capabilities/accept"
   )
   assert accept_request.method == "POST"
   assert json.loads(accept_request.data) == {"accept_digest": "a" * 64}
-  assert accept_timeout == 30

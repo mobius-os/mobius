@@ -1635,10 +1635,6 @@ class RuntimeCapabilityAcceptanceRequest(BaseModel):
   )
 
 
-def _runtime_capability_error(exc) -> HTTPException:
-  return HTTPException(status_code=exc.status_code, detail=str(exc))
-
-
 @router.get("/{app_id}/runtime-capabilities")
 def review_local_runtime_capabilities(
   app_id: int,
@@ -1651,7 +1647,7 @@ def review_local_runtime_capabilities(
       db, app_id,
     )
   except app_capability_acceptance.CapabilityAcceptanceError as exc:
-    raise _runtime_capability_error(exc) from exc
+    raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @router.post(
@@ -1670,7 +1666,7 @@ def accept_local_runtime_capabilities(
       db, app_id, body.accept_digest,
     )
   except app_capability_acceptance.CapabilityAcceptanceError as exc:
-    raise _runtime_capability_error(exc) from exc
+    raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @router.get("/{app_id}", response_model=schemas.AppOut)

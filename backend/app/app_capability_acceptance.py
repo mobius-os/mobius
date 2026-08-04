@@ -3,8 +3,9 @@
 Store installs retain their reviewed package contract when local source is
 applied.  This module owns the narrower exception: after an owner reviews the
 normalized runtime declaration in that source, it can replace only the
-contract's ``runtime`` field.  The acceptance digest identifies those
-normalized runtime semantics, not unrelated manifest bytes or App fields.
+contract's ``runtime`` field.  The acceptance digest covers the entire
+resulting contract, so a Store update that changes the reviewed baseline
+between review and acceptance rejects instead of silently re-granting.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from app import models, timeutil
+from app import models, source_dirs
 from app.app_capabilities import (
   capability_digest,
   contract_with_runtime_capabilities,
@@ -39,12 +40,12 @@ def _manifest_for(app: models.App) -> dict:
   """Read this App's manifest without following source or manifest symlinks."""
   if not app.source_dir:
     raise CapabilityAcceptanceError("App has no local source directory.")
-  data_dir = Path(get_settings().data_dir).resolve()
-  apps_root = (data_dir / "apps").resolve()
+  root = source_dirs.apps_root(get_settings().data_dir)
   # Resolving the stored path would turn a symlink to a sibling app into an
-  # apparently valid direct child and lose the Store app's source identity.
+  # apparently valid direct child and lose the Store app's source identity,
+  # so this stays lexical where source_dirs.source_dir_kind resolves.
   source_dir = Path(os.path.abspath(app.source_dir))
-  if source_dir.parent != apps_root or source_dir.name.isdigit():
+  if source_dir.parent != root or source_dir.name.isdigit():
     raise CapabilityAcceptanceError(
       "App source directory is outside the reviewed apps root."
     )
@@ -56,7 +57,7 @@ def _manifest_for(app: models.App) -> dict:
       os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
       | getattr(os, "O_CLOEXEC", 0)
     )
-    root_descriptor = os.open(apps_root, directory_flags)
+    root_descriptor = os.open(root, directory_flags)
     try:
       source_descriptor = os.open(
         source_dir.name,
@@ -112,7 +113,6 @@ def _review(
 ) -> tuple[models.App, dict, dict]:
   app = (
     db.query(models.App)
-    .populate_existing()
     .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
     .one_or_none()
   )
@@ -135,16 +135,17 @@ def _review(
     raise CapabilityAcceptanceError(
       "The installed app has no reviewed capability contract."
     )
-  candidate_runtime = candidate.get("runtime", {})
   report = {
     "app_id": app.id,
     "app": app.name,
     "current_runtime": app.capability_contract.get("runtime", {}),
-    "candidate_runtime": candidate_runtime,
+    "candidate_runtime": candidate.get("runtime", {}),
     "diff": diff_contracts(app.capability_contract, candidate),
-    # Approval is intentionally scoped to the normalized declaration displayed
-    # above. Formatting and unrelated package facts do not change its meaning.
-    "accept_digest": capability_digest(candidate_runtime),
+    # The digest covers the whole contract this acceptance would store, not
+    # just the runtime projection.  A Store update that lands between review
+    # and acceptance changes the baseline the owner compared against, so the
+    # digest must stop matching and send them back to a fresh review.
+    "accept_digest": capability_digest(candidate),
   }
   return app, candidate, report
 
@@ -162,47 +163,21 @@ def accept_local_runtime_capabilities(
 ) -> dict:
   """Commit a reviewed runtime declaration and notify live app consumers.
 
-  The App-row revision compare-and-swap preserves any concurrent update.  The
-  event is emitted only after the replacement is durable, so a shell refetch
-  can never observe a notification for rolled-back state.
+  The digest is rebuilt from the current App row, so any change to the
+  reviewed contract since the owner looked at it rejects here.  The event is
+  emitted only after the replacement is durable, so a shell refetch can never
+  observe a notification for state that never committed.
   """
-  try:
-    app, candidate, report = _review(db, app_id)
-    if accept_digest != report["accept_digest"]:
-      raise CapabilityAcceptanceError(
-        "Acceptance digest does not match the current local runtime "
-        "capability declaration; review again.",
-        status_code=409,
-      )
+  app, candidate, report = _review(db, app_id)
+  if accept_digest != report["accept_digest"]:
+    raise CapabilityAcceptanceError(
+      "Acceptance digest does not match the current local runtime "
+      "capability declaration; review again.",
+      status_code=409,
+    )
 
-    snapshot_updated_at = app.updated_at
-    current_updated_at = models.App.updated_at
-    revision_match = (
-      current_updated_at.is_(None)
-      if snapshot_updated_at is None
-      else current_updated_at == snapshot_updated_at
-    )
-    changed = (
-      db.query(models.App)
-      .filter(
-        models.App.id == app.id,
-        models.App.deleted_at.is_(None),
-        revision_match,
-      )
-      .update({
-        models.App.capability_contract: candidate,
-        models.App.updated_at: timeutil.now_naive_utc(),
-      }, synchronize_session=False)
-    )
-    if changed != 1:
-      raise CapabilityAcceptanceError(
-        "The app changed while capabilities were being accepted; review again.",
-        status_code=409,
-      )
-    db.commit()
-  except Exception:
-    db.rollback()
-    raise
+  app.capability_contract = candidate
+  db.commit()
 
   get_system_broadcast().publish({
     "type": "app_updated",
