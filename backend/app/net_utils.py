@@ -86,7 +86,7 @@ def validate_url_safe(url: str) -> tuple[str, str, str]:
   try:
     infos = socket.getaddrinfo(host, None)
   except socket.gaierror as exc:
-    raise HTTPException(400, f"Cannot resolve host {host!r}: {exc}")
+    raise HTTPException(400, f"Cannot resolve host {host!r}: {exc}") from exc
   pinned_ip = None
   for info in infos:
     ip_str = info[4][0]

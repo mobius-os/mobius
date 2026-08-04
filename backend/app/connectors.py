@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import socket
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -41,11 +42,15 @@ log = logging.getLogger(__name__)
 # providers. Codex may move ahead independently, but a saved connection must
 # remain usable by Claude as well.
 MCP_PROTOCOL_VERSION = "2025-11-25"
-_SUPPORTED_PROTOCOL_VERSIONS = {
-  MCP_PROTOCOL_VERSION,
-  "2025-06-18",
-  "2025-03-26",
-}
+# MCP protocol revisions are ISO dates, so ordering is lexicographic. Accept
+# anything at or above the floor: the probe only uses initialize,
+# notifications/initialized, and tools/list (stable across revisions) and it
+# echoes the negotiated version afterwards, while each provider negotiates its
+# own session through the broker at turn time. A closed allowlist here would
+# turn a routine upstream version bump into an outage that only a code edit
+# could clear.
+_MIN_PROTOCOL_VERSION = "2025-03-26"
+_PROTOCOL_VERSION_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _HANDSHAKE_TIMEOUT = httpx.Timeout(15.0, connect=8.0)
 _HANDSHAKE_DEADLINE_SECONDS = 22.0
 _MAX_RPC_BYTES = 2 * 1024 * 1024
@@ -85,7 +90,17 @@ _RESERVED_AUTH_HEADERS = {
 
 
 class ConnectorError(Exception):
-  """A connection failure safe to present in the owner-facing Settings UI."""
+  """A connection failure safe to present in the owner-facing Settings UI.
+
+  ``transient`` marks transport-level failures (a timeout, an unreachable
+  host) that say nothing definitive about the saved configuration, so a
+  health re-check may keep the last known status instead of latching the
+  connection out of agent turns.
+  """
+
+  def __init__(self, message: str, *, transient: bool = False):
+    super().__init__(message)
+    self.transient = transient
 
 
 @dataclass(frozen=True)
@@ -194,6 +209,20 @@ def slugify(name: str) -> str:
   return slug[:48] or "connector"
 
 
+def estimate_tokens(tools: list) -> int:
+  """Conservative chars/4 estimate over the full tool definitions.
+
+  Codex pays this schema cost on every message while Claude defers tool
+  loading, and same-count catalogs differ severalfold in size, so the count
+  alone is a misleading cost signal. Computed at handshake time because only
+  bounded tool names are persisted afterwards.
+  """
+  try:
+    return max(0, len(json.dumps(tools, separators=(",", ":"))) // 4)
+  except (TypeError, ValueError):
+    return 0
+
+
 def validate_auth_header(name: str | None) -> str | None:
   value = (name or "").strip()
   if not value:
@@ -256,7 +285,18 @@ def _safe_endpoint(url: str) -> tuple[str, str, str]:
   except ValueError as exc:
     raise ConnectorError("The MCP endpoint URL or port is not valid.") from exc
   except HTTPException as exc:
-    raise ConnectorError(str(exc.detail)) from exc
+    # DNS happens here, not in httpx: the SSRF validator pins the URL to a
+    # resolved IP first. A temporary resolver failure (EAI_AGAIN) says
+    # nothing definitive about the saved endpoint, unlike NXDOMAIN or an
+    # SSRF rejection, so carry the transient marker through.
+    cause = exc.__cause__ or exc.__context__
+    raise ConnectorError(
+      str(exc.detail),
+      transient=(
+        isinstance(cause, socket.gaierror)
+        and cause.errno == socket.EAI_AGAIN
+      ),
+    ) from exc
 
 
 def _matching_payload(payload: object, rpc_id: int) -> dict | None:
@@ -490,7 +530,10 @@ async def handshake(
       ) as client:
         init, session_id = await _initialize_rpc(client, endpoint, headers)
         negotiated = str(init.get("protocolVersion") or "")
-        if negotiated not in _SUPPORTED_PROTOCOL_VERSIONS:
+        if (
+          not _PROTOCOL_VERSION_RE.fullmatch(negotiated)
+          or negotiated < _MIN_PROTOCOL_VERSION
+        ):
           raise ConnectorError(
             "The service negotiated an unsupported MCP version."
           )
@@ -537,10 +580,15 @@ async def handshake(
     raise
   except (TimeoutError, httpx.TimeoutException) as exc:
     raise ConnectorError(
-      "The service did not answer before the connection timed out."
+      "The service did not answer before the connection timed out.",
+      transient=True,
     ) from exc
   except httpx.HTTPError as exc:
-    raise ConnectorError("Could not reach the MCP service.") from exc
+    # HTTP status problems become specific ConnectorErrors inside the RPC
+    # helpers, so only transport-level failures reach this branch.
+    raise ConnectorError(
+      "Could not reach the MCP service.", transient=True,
+    ) from exc
 
   submitted_secrets = tuple(sorted({
     value
@@ -558,6 +606,7 @@ async def handshake(
       128,
     ),
     "tools": _tool_names(tools, submitted_secrets),
+    "est_tokens": estimate_tokens(tools),
   }
 
 
