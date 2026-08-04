@@ -242,12 +242,17 @@ _STAGING_GC_AGE_SECONDS = 3600
 # One install/recovery tree contract. The writer and the recovery reader share
 # these bounds so recovery never accepts or loads a shape the installer could
 # not have published.
-RESOURCE_COUNT_MAX = 24
-RESOURCE_TOTAL_MAX = 2 * 1024 * 1024
-RESOURCE_MAX_DEPTH = 4
+# Modern skill packages can be command-routed toolkits with many small
+# playbooks and helper modules (rather than one SKILL.md plus a handful of
+# references). Keep the tree tightly bounded, but make the bound large enough
+# to preserve those packages whole instead of publishing a silently truncated
+# instruction set.
+RESOURCE_COUNT_MAX = 256
+RESOURCE_TOTAL_MAX = 8 * 1024 * 1024
+RESOURCE_MAX_DEPTH = 8
 RESOURCE_SUFFIXES = frozenset({
-  ".md", ".txt", ".json", ".yaml", ".yml", ".csv", ".py", ".js", ".ts",
-  ".sh", ".toml", ".html", ".css",
+  ".md", ".txt", ".json", ".yaml", ".yml", ".csv", ".py", ".js", ".mjs",
+  ".cjs", ".ts", ".tsx", ".jsx", ".sh", ".toml", ".html", ".css",
 })
 TREE_FILE_COUNT_MAX = 1 + RESOURCE_COUNT_MAX  # root SKILL.md + resources
 TREE_TOTAL_BYTES_MAX = SKILL_MAX_BYTES + RESOURCE_TOTAL_MAX

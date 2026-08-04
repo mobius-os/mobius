@@ -46,6 +46,7 @@ CATALOG_SOURCES: list[dict] = [
   {"label": "Anthropic Knowledge Work", "repo": "anthropics/knowledge-work-plugins", "path": "", "ref": "main"},
   {"label": "Superpowers", "repo": "obra/superpowers", "path": "skills", "ref": "main"},
   {"label": "Trail of Bits Security", "repo": "trailofbits/skills", "path": "", "ref": "main"},
+  {"label": "Impeccable", "repo": "pbakaus/impeccable", "path": ".claude/skills", "ref": "main"},
   {"label": "Cloudflare", "repo": "cloudflare/skills", "path": "skills", "ref": "main"},
   {"label": "Hermes bundled", "repo": "NousResearch/hermes-agent", "path": "skills", "ref": "main"},
   {"label": "Hermes optional", "repo": "NousResearch/hermes-agent", "path": "optional-skills", "ref": "main"},

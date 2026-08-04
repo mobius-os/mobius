@@ -268,7 +268,7 @@ def test_install_repo_dir_fetches_whole_subtree_of_vetted_resources(
     {"type": "tree", "path": "scripts"},
     {"type": "blob", "path": "logo.png", "size": 10},  # unvetted suffix
     {"type": "blob", "path": ".github/ci.yml", "size": 5},  # dot segment
-    {"type": "blob", "path": "a/b/c/d/deep.md", "size": 5},  # over depth cap
+    {"type": "blob", "path": "a/b/c/d/e/f/g/h/deep.md", "size": 5},  # over depth cap
   ]
   _dir_install_mocks(monkeypatch, rs, tree, {
     f"{raw}/SKILL.md": b"---\nname: pdf\ndescription: PDFs.\n---\n",
@@ -344,8 +344,10 @@ def test_resource_rel_ok_contract():
 
   assert _resource_rel_ok("ref.md")
   assert _resource_rel_ok("scripts/run.py")
-  assert _resource_rel_ok("a/b/c/deep.md")  # depth 4 = at the cap
-  assert not _resource_rel_ok("a/b/c/d/deep.md")  # depth 5
+  assert _resource_rel_ok("scripts/context.mjs")
+  assert _resource_rel_ok("scripts/ui/card.tsx")
+  assert _resource_rel_ok("a/b/c/d/e/f/g/deep.md")  # depth 8 = at the cap
+  assert not _resource_rel_ok("a/b/c/d/e/f/g/h/deep.md")  # depth 9
   assert not _resource_rel_ok("../up.md")
   assert not _resource_rel_ok(".hidden.md")
   assert not _resource_rel_ok("dir/.hidden.md")
@@ -353,6 +355,14 @@ def test_resource_rel_ok_contract():
   assert not _resource_rel_ok("win\\path.md")
   assert not _resource_rel_ok("binary.png")
   assert not _resource_rel_ok("")
+
+
+def test_skill_package_bounds_fit_command_routed_toolkits():
+  from app import skills as skills_mod
+
+  assert skills_mod.RESOURCE_COUNT_MAX >= 256
+  assert skills_mod.RESOURCE_TOTAL_MAX >= 8 * 1024 * 1024
+  assert skills_mod.RESOURCE_MAX_DEPTH >= 8
 
 
 def test_install_collision_is_409_with_provenance(
