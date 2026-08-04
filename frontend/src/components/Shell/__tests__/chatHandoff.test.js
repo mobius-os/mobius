@@ -282,6 +282,8 @@ test('direct chat actions hand focus to the destination composer', () => {
 test('the held chat is an opaque layer above staging until the atomic swap', () => {
   assert.match(ruleBody('.shell__chat-view'), /background:\s*var\(--bg\)/,
     'the cover must be opaque so hidden incoming content cannot leak through')
+  assert.match(ruleBody('.shell__chat-view'), /isolation:\s*isolate/,
+    'chat-owned z-index layers must not escape above shell-owned presentations')
   assert.match(ruleBody('.shell__chat-view--staging'), /visibility:\s*visible/)
   assert.match(ruleBody('.shell__chat-view--staging'), /z-index:\s*1/)
   assert.match(ruleBody('.shell__chat-view--held'), /visibility:\s*visible/)
