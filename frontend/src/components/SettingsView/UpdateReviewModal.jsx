@@ -30,7 +30,7 @@ import {
   summarizePreview,
   isTrivialUpdate,
 } from '../../lib/platformUpdatePreview.js'
-import { platformActivationLabel } from '../../lib/platformUpdateState.js'
+import { deploymentKindLabel, platformActivationLabel } from '../../lib/platformUpdateState.js'
 import FileDiffList from '../DiffView/FileDiffList.jsx'
 import './UpdateReviewModal.css'
 
@@ -244,7 +244,7 @@ export default function UpdateReviewModal({
                   {platformActivationLabel(activation)}
                 </h3>
                 <span className="urm__activation-deployment">
-                  {activation.deployment === 'railway' ? 'Railway' : 'Self-hosted'}
+                  {deploymentKindLabel(activation)}
                 </span>
               </div>
               {activationGuidance.map((line) => (

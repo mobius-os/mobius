@@ -10,10 +10,12 @@ import {
 import { flushSync } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
+import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
 import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
+  isNearContentBottom,
   remapSavedReadingAnchor,
   retireSavedReadingPosition,
   savedReadingAnchorHasNestedPart,
@@ -99,6 +101,7 @@ import {
   continuationRowsFromPromotedMessage,
   isContinuationMessage,
   isOwnerUserMessage,
+  jumpToLatestShown,
   openAppCtaViewModel,
   shouldAttachRunningStream,
   shouldRetryStopAfterConfirm,
@@ -154,6 +157,12 @@ _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
 const STOP_RETRY_DELAYS_MS = [0, 250, 700, 1200]
 const CHAT_FETCH_TIMEOUT_MS = 15000
 const MESSAGE_META_VISIBLE_MS = 5000
+// The floating jump-to-latest control appears once the reader holds a position
+// this far above the CONTENT tail (reserved spacer room is phantom, per the
+// send-snapshot bottom rule). Deliberately wider than the 50px near-bottom
+// band: settling a line or two up must not summon a control, a real upward
+// scroll should.
+const JUMP_TO_LATEST_GAP_PX = 200
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -2088,7 +2097,23 @@ export default function ChatView({
       .catch(() => { loadingOlder.current = false })
   }
 
+  // Jump-to-latest visibility (contract R5a): a pure geometry READ — it never
+  // writes scrollTop, so it lives outside the scroll controller's ownership
+  // gates. Recomputed from every scroll event (gesture or programmatic) and
+  // from every commit via the dependency-less layout effect below: a stream
+  // growing beneath a held ANCHOR_AT emits no scroll event, but each growth
+  // tick re-renders this component. The guarded setState keeps those
+  // recomputes render-free until the boolean actually flips.
+  const [awayFromLatest, setAwayFromLatest] = useState(false)
+  const updateJumpToLatest = useCallback(() => {
+    const el = scrollRef.current
+    const away = !!el && !isNearContentBottom(el, JUMP_TO_LATEST_GAP_PX)
+    setAwayFromLatest(prev => (prev === away ? prev : away))
+  }, [])
+  useLayoutEffect(updateJumpToLatest)
+
   function handleScroll() {
+    updateJumpToLatest()
     const el = scrollRef.current
     if (!el || loadingOlder.current || loading) return
     // Gesture guard: applyMode's programmatic scrolls (e.g., PIN_USER_MSG
@@ -4283,6 +4308,26 @@ export default function ChatView({
                 {pendingResumeBlock?.pause?.resets_at
                   ? 'Rate limit reached — tap to resume'
                   : 'Turn paused — tap to resume'}
+              </button>
+            )}
+            {/* Jump-to-latest: same one-shot tail navigation as the nudges
+                (contract R5a — lands as a settled hold, never live-follow),
+                shown once the reader has scrolled away from the end. Yields
+                to a visible nudge, which goes to the same place with more
+                context. */}
+            {jumpToLatestShown({
+              awayFromTail: awayFromLatest,
+              questionNudgeShown: hasPendingQuestion && pendingCardOffscreen,
+              resumeNudgeShown: hasPendingResume && resumeCardOffscreen,
+            }) && (
+              <button
+                type="button"
+                className="chat__jump-latest"
+                aria-label="Jump to the latest message"
+                title="Jump to latest"
+                onClick={revealConversationTail}
+              >
+                <ArrowDown size={18} strokeWidth={2.25} aria-hidden="true" />
               </button>
             )}
           </div>

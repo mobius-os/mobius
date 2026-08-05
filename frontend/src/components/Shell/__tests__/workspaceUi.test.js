@@ -885,6 +885,8 @@ test('large drawer lists memoize ordering and row actions without changing row o
   assert.match(drawer, /visibleRecents\.map\(\(\{ kind, item \}\)[\s\S]*?item=\{item\}[\s\S]*?actions=\{rowActions\}/)
   assert.match(drawer, /item=\{app\}[\s\S]*?actions=\{rowActions\}/)
   assert.doesNotMatch(drawer, /onSelect=\{\(\) => on(?:Chat|App)/)
+  assert.equal((drawer.match(/<DrawerItemMenu/g) || []).length, 1,
+    'the drawer must render one item-menu controller')
 })
 
 test('mixed recents reserve artwork for apps without redundant chat icons', () => {
@@ -953,9 +955,9 @@ test('chat deletion is immediate while app deletion still requires confirmation'
 test('drawer row actions have one opening path without a custom touch hold', () => {
   assert.match(drawer, /import \{ useHistoryDismiss \} from '\.\.\/\.\.\/hooks\/useHistoryDismiss\.jsx'/)
   assert.match(drawer, /open: openItemMenuHistory,[\s\S]*?close: closeItemMenu,[\s\S]*?useHistoryDismiss\(\(\) => setOpenMenu\(null\)\)/)
-  assert.match(drawer, /function showItemMenu\(kind, id, surface, placement\) \{[\s\S]*?openItemMenuHistory\(\)[\s\S]*?setOpenMenu/,
+  assert.match(drawer, /function showItemMenu\(\{ restoreFocusTarget, \.\.\.menu \}\) \{[\s\S]*?openItemMenuHistory\(\)[\s\S]*?setOpenMenu\(menu\)/,
     'Back ownership must be registered before the portaled menu paints')
-  assert.match(drawer, /function openItemMenuAt\(point,[\s\S]*?actions\.toggleMenu\(kind, id, true, surface,/)
+  assert.match(drawer, /function openItemMenuAt\(point,[\s\S]*?actions\.openMenu\(\{[\s\S]*?restoreFocusTarget: trigger,/)
   assert.equal((drawer.match(/onContextMenu=\{openItemMenu\}/g) || []).length, 2,
     'app cards and drawer rows must share one semantic opening function')
   assert.match(drawer, /if \(suppressTouchContextMenu\(event\)\) return/,

@@ -817,6 +817,53 @@ async def test_dns_blip_is_transient_but_dead_name_is_definitive(monkeypatch):
   assert gone.value.transient is False
 
 
+def _app_token(client, auth, *, granted):
+  from test_app_fixtures import create_local_app
+
+  app_id = create_local_app(
+    client, auth, name="connections-test", description="t",
+  )["id"]
+  session = SessionLocal()
+  try:
+    app = session.query(models.App).filter(models.App.id == app_id).first()
+    app.connections_manage = granted
+    session.commit()
+  finally:
+    session.close()
+  minted = client.post(
+    "/api/auth/app-token", json={"app_id": app_id}, headers=auth,
+  )
+  assert minted.status_code == 200, minted.text
+  return {"Authorization": f"Bearer {minted.json()['token']}"}
+
+
+def test_app_token_requires_connections_manage(client, auth, db):
+  row = _row(79, "app_managed", "https://remote.example/mcp")
+  db.add(row)
+  db.commit()
+  generation = row.capability_id
+
+  denied = _app_token(client, auth, granted=False)
+  assert client.get("/api/connectors", headers=denied).status_code == 403
+  assert client.patch(
+    f"/api/connectors/{row.id}",
+    headers={**denied, "X-Mobius-Connector-Generation": generation},
+    json={"enabled": False},
+  ).status_code == 403
+
+  managed = _app_token(client, auth, granted=True)
+  listed = client.get("/api/connectors", headers=managed)
+  assert listed.status_code == 200
+  assert [c["id"] for c in listed.json()["connectors"]] == [row.id]
+  toggled = client.patch(
+    f"/api/connectors/{row.id}",
+    headers={**managed, "X-Mobius-Connector-Generation": generation},
+    json={"enabled": False},
+  )
+  assert toggled.status_code == 200
+  assert toggled.json()["enabled"] is False
+
+
 def test_estimate_tokens_scales_with_schema_size():
   small = [{"name": "a", "inputSchema": {}}]
   large = [

@@ -61,6 +61,7 @@ def fw_dirs(tmp_path, monkeypatch):
   monkeypatch.setattr(fw, "_ATTIC_DIR", dirs["attic"])
   monkeypatch.setattr(fw, "_CACHE_DIR", dirs["cache"])
   monkeypatch.setattr(fw, "_TMP_DIR", dirs["tmp"])
+  monkeypatch.setattr(fw, "_memory_is_tight", lambda: False)
   monkeypatch.setattr(
     fw,
     "_BUILT_GLOBAL_CHECK",
@@ -454,6 +455,73 @@ def test_edit_during_demand_build_requests_one_rerun(fw_dirs, monkeypatch):
     str(fw_dirs["frontend"] / "src" / "first.js"),
     str(fw_dirs["frontend"] / "src" / "second.js"),
   ]
+
+
+def test_memory_pressure_defers_a_demand_build_and_keeps_its_reason(
+  fw_dirs, monkeypatch,
+):
+  """A tight box must not start Vite, and must not forget why it was queued."""
+  src = fw_dirs["frontend"] / "src"
+  src.mkdir()
+  source_file = src / "Shell.jsx"
+  source_file.write_text("export default 1\n", encoding="utf-8")
+  monkeypatch.setattr(fw, "_DEBOUNCE_SECS", 0.01)
+  monkeypatch.setattr(fw, "_ensure_node_modules", lambda: None)
+  tight = threading.Event()
+  tight.set()
+  monkeypatch.setattr(fw, "_memory_is_tight", tight.is_set)
+  vite_calls = []
+  publish_calls = []
+  monkeypatch.setattr(
+    fw.subprocess, "Popen",
+    lambda *args, **kwargs: vite_calls.append(args) or _FakeViteProcess(
+      lambda: _write_build(fw_dirs["staging"], "recovered"),
+    ),
+  )
+  monkeypatch.setattr(
+    fw, "_publish_built_dir",
+    lambda source, reason: publish_calls.append((source, reason)) or True,
+  )
+  monkeypatch.setattr(fw, "_publish_system_event", lambda _event: None)
+  loop = asyncio.new_event_loop()
+  handler = fw._FrontendHandler(loop, start_threads=False)
+  thread = threading.Thread(target=handler._build_loop)
+  try:
+    thread.start()
+    handler._request_build(str(source_file))
+    time.sleep(0.2)
+    assert vite_calls == []
+
+    tight.clear()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and not publish_calls:
+      time.sleep(0.005)
+  finally:
+    handler.close()
+    thread.join(timeout=2)
+    loop.close()
+
+  assert len(vite_calls) == 1
+  assert publish_calls == [(fw_dirs["staging"], f"build:{source_file}")]
+
+
+def test_explicit_rebuild_still_builds_under_memory_pressure(
+  fw_dirs, monkeypatch,
+):
+  """Apply and deploy cannot retry, so pressure must never refuse them."""
+  monkeypatch.setattr(fw, "_memory_is_tight", lambda: True)
+  monkeypatch.setattr(fw, "_ensure_node_modules", lambda: None)
+  runs = []
+
+  def run(*args, **kwargs):
+    runs.append(args)
+    _write_build(fw_dirs["rebuild"], "explicit")
+    return fw.subprocess.CompletedProcess(args, 0, "vite build complete", None)
+
+  monkeypatch.setattr(fw.subprocess, "run", run)
+
+  assert fw._run_vite_build_once(fw_dirs["rebuild"]) == "vite build complete"
+  assert len(runs) == 1
 
 
 def test_conflict_markers_defer_vite_without_touching_generations(

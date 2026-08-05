@@ -2,31 +2,6 @@ const ACTIVE_CHAT_KEY = 'moebius_active_chat'
 const ACTIVE_VIEW_KEY = 'moebius_active_view'
 const ACTIVE_APP_KEY = 'moebius_active_app'
 const RETURN_VIEW_KEY = 'mobius:return-view'
-const RECENT_CHAT_IDS_KEY = 'mobius:recent-chat-ids'
-
-const RECENT_CHAT_HISTORY_LIMIT = 12
-
-export function readRecentlyOpenedChatIds(storage = globalThis.localStorage) {
-  try {
-    const parsed = JSON.parse(storage?.getItem(RECENT_CHAT_IDS_KEY) || '[]')
-    if (!Array.isArray(parsed)) return []
-    return [...new Set(parsed.map(String).filter(Boolean))]
-      .slice(0, RECENT_CHAT_HISTORY_LIMIT)
-  } catch { return [] }
-}
-
-function rememberOpenedChat(storage, chatId) {
-  const normalized = String(chatId || '')
-  if (!normalized) return
-  try {
-    const recent = readRecentlyOpenedChatIds(storage)
-      .filter(id => id !== normalized)
-    storage?.setItem(
-      RECENT_CHAT_IDS_KEY,
-      JSON.stringify([normalized, ...recent].slice(0, RECENT_CHAT_HISTORY_LIMIT)),
-    )
-  } catch { /* private mode / disabled storage: navigation remains live */ }
-}
 
 export function readStoredChatId(storage = globalThis.localStorage) {
   try { return storage?.getItem(ACTIVE_CHAT_KEY) ?? null } catch { return null }
@@ -78,9 +53,6 @@ export function persistActiveNavigation(
 ) {
   try {
     if (activeChatId) storage?.setItem(ACTIVE_CHAT_KEY, activeChatId)
-    if (activeView === 'chat' && activeChatId) {
-      rememberOpenedChat(storage, activeChatId)
-    }
     storage?.setItem(ACTIVE_VIEW_KEY, activeView)
     if (activeView === 'canvas' && activeAppId != null) {
       storage?.setItem(ACTIVE_APP_KEY, String(activeAppId))

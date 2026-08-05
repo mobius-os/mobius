@@ -73,6 +73,9 @@ from app.routes import (
 )
 
 _BOOT_ID = os.environ.get("MOBIUS_BOOT_ID") or f"{os.getpid()}-{time.time_ns()}"
+# ORM-vs-database schema gaps found at startup; non-empty means the process
+# answers but cannot serve turns (see health vs health_strict).
+_SCHEMA_GAPS: list[str] = []
 
 
 def _install_pm_commit_launcher(source: Path, target: Path) -> bool:
@@ -104,6 +107,17 @@ def _init_db():
     try:
       Base.metadata.create_all(bind=engine)
       run_migrations(engine)
+      from app.database import orm_schema_gaps
+      gaps = orm_schema_gaps(engine)
+      if gaps:
+        # A mapped column with no migration fails at first query, not at
+        # boot. Surface it loudly here and through /api/health(+/strict)
+        # instead of letting turns fail one by one.
+        _SCHEMA_GAPS[:] = gaps
+        print(
+          "CRITICAL: database is missing ORM-declared schema: "
+          + ", ".join(gaps)
+        )
       return
     except OperationalError as e:
       if attempt < 9:
@@ -514,6 +528,11 @@ app.add_middleware(
     "X-Mobius-Version",
     "If-Match",
     "If-None-Match",
+    # Connection mutations echo the row generation in this header. The
+    # Connections mini-app runs in a sandboxed (opaque-origin) frame, so
+    # omitting it here fails every toggle/re-check/remove at preflight
+    # ("Failed to fetch") while same-origin shell calls sail through.
+    "X-Mobius-Connector-Generation",
   ],
   # ETag is not CORS-safelisted. Expose it so getWithVersion() can actually
   # return the version token that the storage route intentionally emits.
@@ -646,13 +665,37 @@ def health(response: Response):
   reloading while the old process is still briefly answering before SIGTERM.
   """
   response.headers["Cache-Control"] = "no-store"
-  return {
-    "status": "ok",
+  payload = {
+    "status": "schema_mismatch" if _SCHEMA_GAPS else "ok",
     "target": "mobius",
     "mode": "normal",
     "build_sha": settings.build_sha,
     "boot_id": _BOOT_ID,
   }
+  if _SCHEMA_GAPS:
+    # Still HTTP 200: the shell's reachability probe requires response.ok,
+    # and a schema gap must not masquerade as "device offline". The strict
+    # variant below carries the 5xx for container health.
+    payload["schema_gaps"] = _SCHEMA_GAPS
+  return payload
+
+
+@app.get("/api/health/strict")
+def health_strict(response: Response):
+  """Serviceability probe for the container healthcheck.
+
+  Distinct from `/api/health` (reachability — must stay 200 whenever the
+  process answers, or the shell would flip devices to offline UI): this
+  variant fails when the process is up but cannot serve turns, e.g. the
+  database is missing ORM-declared schema. Docker's HEALTHCHECK uses
+  `curl -f`, so the 503 marks the container unhealthy instead of silently
+  healthy while every turn dies.
+  """
+  response.headers["Cache-Control"] = "no-store"
+  if _SCHEMA_GAPS:
+    response.status_code = 503
+    return {"status": "schema_mismatch", "schema_gaps": _SCHEMA_GAPS}
+  return {"status": "ok", "boot_id": _BOOT_ID}
 
 
 @app.get(

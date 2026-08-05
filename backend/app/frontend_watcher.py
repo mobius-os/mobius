@@ -32,10 +32,12 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserverVFS
 
+from app.build_admission import BuildLeaseUnavailable, build_lease
 from app.process_groups import (
   isolated_process_group_id,
   lower_process_group_priority,
 )
+from app.resource_pressure import assess_memory_pressure
 
 log = logging.getLogger(__name__)
 
@@ -96,6 +98,15 @@ _ACTIVE_LOCK = threading.Lock()
 _START_LOCK = threading.Lock()
 _ACTIVE_WATCHER: "_FrontendHandler | None" = None
 _ACTIVE_SUPERVISOR: "_FrontendSupervisor | None" = None
+
+
+def _memory_is_tight() -> bool:
+  """True when starting another native JS build risks an OOM kill.
+
+  Unmeasurable memory is ``unknown``, which fails open. Only the watcher may
+  act on this: it owns a free retry, so a deferral costs nothing.
+  """
+  return assess_memory_pressure()["state"] in {"constrained", "critical"}
 
 
 def _source_tree_scandir(
@@ -700,19 +711,25 @@ def _publish_built_dir(source_dir: Path, reason: str) -> bool:
 
 
 def _run_vite_build_once(out_dir: Path) -> str:
-  """Run one explicit full Vite build into ``out_dir``."""
-  _ensure_node_modules()
-  if out_dir.exists():
-    shutil.rmtree(out_dir)
-  result = subprocess.run(
-    _vite_build_cmd(out_dir),
-    cwd=str(_FRONTEND_DIR),
-    env=_vite_env(_REBUILD_CACHE_DIR, _REBUILD_TMP_DIR),
-    stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT,
-    text=True,
-    timeout=180,
-  )
+  """Run one explicit full Vite build into ``out_dir``.
+
+  This path has no free retry — owner Apply rolls the source tree back and
+  rebuild_shell.sh aborts a production deploy — so it waits for the lease
+  rather than deferring, and never declines on memory pressure.
+  """
+  with build_lease():
+    _ensure_node_modules()
+    if out_dir.exists():
+      shutil.rmtree(out_dir)
+    result = subprocess.run(
+      _vite_build_cmd(out_dir),
+      cwd=str(_FRONTEND_DIR),
+      env=_vite_env(_REBUILD_CACHE_DIR, _REBUILD_TMP_DIR),
+      stdout=subprocess.PIPE,
+      stderr=subprocess.STDOUT,
+      text=True,
+      timeout=180,
+    )
   if result.returncode != 0:
     if out_dir.exists():
       shutil.rmtree(out_dir)
@@ -983,107 +1000,129 @@ class _FrontendHandler(FileSystemEventHandler):
         })
 
   def _run_demand_build(self, reason: str) -> None:
-    """Run one isolated build and publish it before releasing its heap."""
-    with self._state_lock:
-      blocked_signature = self._blocked_conflict_signature
-    if blocked_signature is not None:
-      current_signature, _ = _source_snapshot()
-      if current_signature == blocked_signature:
-        # The same conflicted snapshot is still present. Stat it cheaply, but
-        # do not reread every text input on each backstop retry.
-        self._queue_build("conflict-marker preflight retry")
-        return
-    preflight = _stable_source_preflight()
-    if preflight is None:
-      self._queue_build("source changed during conflict-marker preflight")
-      return
-    source_signature, conflicts = preflight
-    if conflicts:
-      with self._state_lock:
-        newly_blocked = self._blocked_conflict_signature != source_signature
-        self._blocked_conflict_signature = source_signature
-      if newly_blocked:
-        log.warning(
-          "frontend demand build deferred; conflict markers remain in %s",
-          ", ".join(conflicts),
-        )
-      # Poll the cheap preflight after the normal debounce as a backstop for a
-      # missed/coalesced observer event. Do not make a transient editing state
-      # sticky, and do not emit shell_rebuild_failed while the last good dist
-      # remains served.
-      self._queue_build("conflict-marker preflight retry")
-      return
-    with self._state_lock:
-      conflict_cleared = self._blocked_conflict_signature is not None
-      self._blocked_conflict_signature = None
-    if conflict_cleared:
-      log.info("frontend conflict-marker preflight cleared; resuming build")
-    _ensure_node_modules()
-    if _STAGING_DIST_DIR.exists():
-      shutil.rmtree(_STAGING_DIST_DIR)
-    cmd = _vite_build_cmd(_STAGING_DIST_DIR)
-    proc: subprocess.Popen | None = None
-    rc: int | None = None
-    output = ""
+    """Run one isolated build and publish it before releasing its heap.
+
+    Both admission failures requeue the ORIGINAL reason after the normal
+    debounce, exactly like the conflict-marker retry below. Deferring is only
+    correct here, where a retry is free: the explicit rebuild path cannot
+    retry, so it waits for the lease instead.
+    """
     try:
-      proc = subprocess.Popen(
-        cmd,
-        cwd=str(_FRONTEND_DIR),
-        env=_vite_env(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        start_new_session=True,
-      )
-      lower_process_group_priority(
-        isolated_process_group_id(proc.pid),
-        logger=log,
-        label="Frontend build",
-      )
-      with self._proc_lock:
-        self._watch_proc = proc
-      log.info("frontend demand build started after %s", reason)
-      try:
-        output, _ = proc.communicate(timeout=180)
-      except subprocess.TimeoutExpired as exc:
-        self._terminate_watch_process(signal.SIGTERM)
+      with build_lease(blocking=False):
+        if _memory_is_tight():
+          self._queue_build(reason)
+          return
+        with self._state_lock:
+          blocked_signature = self._blocked_conflict_signature
+        if blocked_signature is not None:
+          current_signature, _ = _source_snapshot()
+          if current_signature == blocked_signature:
+            # The same conflicted snapshot is still present. Stat it
+            # cheaply, but do not reread every text input on each retry.
+            self._queue_build("conflict-marker preflight retry")
+            return
+        preflight = _stable_source_preflight()
+        if preflight is None:
+          self._queue_build("source changed during conflict-marker preflight")
+          return
+        source_signature, conflicts = preflight
+        if conflicts:
+          with self._state_lock:
+            newly_blocked = (
+              self._blocked_conflict_signature != source_signature
+            )
+            self._blocked_conflict_signature = source_signature
+          if newly_blocked:
+            log.warning(
+              "frontend demand build deferred; conflict markers remain in %s",
+              ", ".join(conflicts),
+            )
+          # Poll the cheap preflight after the normal debounce as a
+          # backstop for a missed/coalesced observer event. Do not make a
+          # transient editing state sticky, and do not emit
+          # shell_rebuild_failed while the last good dist remains served.
+          self._queue_build("conflict-marker preflight retry")
+          return
+        with self._state_lock:
+          conflict_cleared = self._blocked_conflict_signature is not None
+          self._blocked_conflict_signature = None
+        if conflict_cleared:
+          log.info(
+            "frontend conflict-marker preflight cleared; resuming build",
+          )
+        _ensure_node_modules()
+        if _STAGING_DIST_DIR.exists():
+          shutil.rmtree(_STAGING_DIST_DIR)
+        cmd = _vite_build_cmd(_STAGING_DIST_DIR)
+        proc: subprocess.Popen | None = None
+        rc: int | None = None
+        output = ""
         try:
-          output, _ = proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-          self._terminate_watch_process(signal.SIGKILL)
-          output, _ = proc.communicate()
-        raise RuntimeError("vite build timed out after 180 seconds") from exc
-      rc = proc.returncode
-    finally:
-      with self._proc_lock:
-        if self._watch_proc is proc:
-          self._watch_proc = None
-    if self._closed.is_set():
-      return
-    if rc != 0:
-      shutil.rmtree(_STAGING_DIST_DIR, ignore_errors=True)
-      detail = _tail(output) or f"vite build exited {rc}"
-      raise RuntimeError(detail)
-    if output.strip():
-      log.info("frontend demand build complete: %s", _tail(output, 1000))
-    current_source_signature, _ = _source_snapshot()
-    if current_source_signature != source_signature:
-      shutil.rmtree(_STAGING_DIST_DIR, ignore_errors=True)
-      log.info(
-        "frontend source changed during demand build; discarding staging",
-      )
-      self._queue_build("source changed during demand build")
-      return
-    if not self._refresh_staging_signature():
-      raise RuntimeError("vite build completed without a staging generation")
-    self._publish_dirty_sync(f"build:{reason}")
-    with self._state_lock:
-      publish_pending = self._staging_dirty
-    if not publish_pending:
-      try:
-        _write_source_stamp(source_signature)
-      except OSError:
-        log.warning("could not persist frontend source signature")
+          proc = subprocess.Popen(
+            cmd,
+            cwd=str(_FRONTEND_DIR),
+            env=_vite_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+          )
+          lower_process_group_priority(
+            isolated_process_group_id(proc.pid),
+            logger=log,
+            label="Frontend build",
+          )
+          with self._proc_lock:
+            self._watch_proc = proc
+          log.info("frontend demand build started after %s", reason)
+          try:
+            output, _ = proc.communicate(timeout=180)
+          except subprocess.TimeoutExpired as exc:
+            self._terminate_watch_process(signal.SIGTERM)
+            try:
+              output, _ = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+              self._terminate_watch_process(signal.SIGKILL)
+              output, _ = proc.communicate()
+            raise RuntimeError(
+              "vite build timed out after 180 seconds",
+            ) from exc
+          rc = proc.returncode
+        finally:
+          with self._proc_lock:
+            if self._watch_proc is proc:
+              self._watch_proc = None
+        if self._closed.is_set():
+          return
+        if rc != 0:
+          shutil.rmtree(_STAGING_DIST_DIR, ignore_errors=True)
+          detail = _tail(output) or f"vite build exited {rc}"
+          raise RuntimeError(detail)
+        if output.strip():
+          log.info("frontend demand build complete: %s", _tail(output, 1000))
+        current_source_signature, _ = _source_snapshot()
+        if current_source_signature != source_signature:
+          shutil.rmtree(_STAGING_DIST_DIR, ignore_errors=True)
+          log.info(
+            "frontend source changed during demand build; discarding staging",
+          )
+          self._queue_build("source changed during demand build")
+          return
+        if not self._refresh_staging_signature():
+          raise RuntimeError(
+            "vite build completed without a staging generation",
+          )
+        self._publish_dirty_sync(f"build:{reason}")
+        with self._state_lock:
+          publish_pending = self._staging_dirty
+        if not publish_pending:
+          try:
+            _write_source_stamp(source_signature)
+          except OSError:
+            log.warning("could not persist frontend source signature")
+    except BuildLeaseUnavailable:
+      # Only the acquisition above can raise this; the body takes no lease.
+      self._queue_build(reason)
 
   def _refresh_staging_signature(self) -> bool:
     sig = _tree_signature(_STAGING_DIST_DIR)

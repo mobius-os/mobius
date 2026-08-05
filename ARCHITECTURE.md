@@ -591,7 +591,7 @@ automatically armed by installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.17 (2026-08-03).** This section is the
+**Owner-authoritative contract — v1.18 (2026-08-04).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -757,7 +757,15 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   control must not manufacture future live-follow intent. Both actions route
   through the scroll controller instead of calling `scrollIntoView`, because
   viewport intersection alone cannot detect that the absolutely-positioned
-  composer is covering the target.
+  composer is covering the target. The floating jump-to-latest control
+  (owner ask, 2026-08-04) is the same explicit one-shot action through the
+  identical controller tail reveal, with the same settled `ANCHOR_AT` outcome.
+  Its visibility is a pure geometry read outside the controller's ownership
+  gates: it renders only while the reader holds a position away from the
+  content tail, where reserved spacer room is phantom per R2's send-snapshot
+  bottom rule — so a fresh live-send reservation never summons it. It yields
+  to a visible attention nudge, which navigates to the same tail with strictly
+  more context.
 - **R5b — One keyboard geometry signal; reservation-responsive resize.** Shell alone
   reconciles a browser's visual viewport into the visible shell frame. The chat
   does not race Shell with a second direct visual-viewport listener: its own

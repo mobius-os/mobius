@@ -211,6 +211,7 @@ The interviews just told you where the skills failed today's agents. Act on it.
 - **Treat the prompt as a distilled procedure, not the learning log.** Edit it only when evidence supports a rule that will generalize across future runs. Prefer replacing or removing a stale rule over appending another exception. Record the finding and why it changed the procedure in the bounded meta-learning log described in phase 6.
 - **Act on your own run-history (`inputs/reflection-run-history.txt`), not just the interviews.** A failure or friction that recurs across nights is a real signal: if the cause is in this skill, make the smallest durable fix and commit it; if it belongs to the wrapper or another owner, put a one-line proposal in the brief instead. Skim your recent self-edits first so you don't re-add a rule a past night removed.
 - **Escalate or close a persistent issue — never a third silent re-note.** Any issue carried across nights (a cross-provider capability gap, a recurring failure, an unapplied fix) gets a first-seen date in the meta-state watchlist. On the 3rd consecutive still-open night it MUST either become a decisive brief card with a concrete proposed fix, or be explicitly closed with a one-line rationale — re-verify it's still open before assuming so. No third silent re-note.
+- **A mitigation is not a close, and recurrence is not proof of structure.** Closing requires that you know the *cause*; a workaround that merely makes the symptom tolerable leaves the issue OPEN with a mitigation noted. Before recording anything as structural, inherent, or accepted, spend one bounded pass on the owning layer — read the code path that produces the symptom, not just the logs that report it. Recurrence usually means the cause is stable and findable, not that it's immovable. Prefer, in order: remove the cause; simplify the primitive that made it possible; then, only if the cause is genuinely owned elsewhere and out of reach, mitigate and say so explicitly. A watchlist entry that reads "accepted" without a named cause is the signature of a missed fix — reopen it.
 - Bar for a skill edit: it must help **any** future run, not just tonight. A one-off quirk goes to Memory (phase 3) or nowhere; a reusable procedure goes to a skill. (Same split the daytime agent uses: general technique → skill; fact about the partner → memory.)
 - **Keep a skill edit general and de-dated.** When a failure earns a skill edit, write the durable *rule plus the check that proves it* ("verify a claimed shell edit landed: `grep` the diff token, `stat` the mtime"), never a fixed-date anecdote ("on 2026-06-11, agent X claimed a fix that…") — generic run-relative phrasing ("tonight," "today's agents") is fine; it's *dated incidents* that rot. The incident itself, if worth keeping, is a Memory note you `[[link]]` (phase 3 owns that note) — the skill stays a clean ruleset a future run reads cold. A skill that accretes dated anecdotes gets longer and slower to read every night, which is exactly the noise this phase exists to remove.
 - Don't rewrite a skill wholesale on one night's evidence. Surgical edits, each tied to an observed failure.
@@ -290,6 +291,13 @@ Start with `inputs/resource-snapshot.json`, the bounded
 `inputs/resource-history.jsonl`, and the recent
 `inputs/resource-decisions.jsonl`; do not begin with shell reconnaissance.
 
+- **Repair the cause; leave the system smaller than you found it.** The strongest
+  operational signal is usually waste with a fixable owner, not a resource that
+  needs managing. When a job overruns, retries, or burns budget, find what it is
+  spending that work *on* before treating the cost as its natural size, and judge
+  any fix by what it removes rather than the threshold, retry, or fallback it adds
+  (the close-or-escalate rule in phase 2 and *Prefer prevention* below say the
+  same thing for skill edits and for leaked residue).
 - **Use trends and thresholds.** Compare the cheap pulse with recent history.
   Inspect the deep inventory only when `deep_scan.ran` and note whether it was
   complete. One large category is a lead, not permission to delete it.

@@ -192,7 +192,25 @@
   color: var(--muted, #a3a3a3);
   font-size: 13px;
   line-height: 1.5;
-  text-align: end;
+  text-align: start;
+}
+
+.recovery-panel__recovery-lead,
+.recovery-panel__recovery-context,
+.recovery-panel__recovery-action {
+  display: block;
+}
+
+.recovery-panel__recovery-context {
+  margin-top: 4px;
+}
+
+.recovery-panel__recovery-command {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  margin-top: 2px;
+  white-space: nowrap;
 }
 
 .recovery-panel__recovery a,
