@@ -929,6 +929,12 @@ export default function useNavigation({
       setSettingsOpen(false)
       settingsOpenRef.current = false
     }
+    // The nav dispatch is SYNCHRONOUS: it commits the workspace route in the same
+    // tick as the tap, so the bootstrap/materialization effects never race a
+    // deferred commit (deferring the whole dispatch double-created starter chats).
+    // Switch cost — a heavy transcript mount + its layout reads — is kept off the
+    // tap INSIDE ChatView, which defers the transcript apply/reflow at the layer
+    // that owns it, rather than out here by deferring all of navigation.
     if (mode === 'single') {
       const item = route.view === 'apps'
         ? tabModel.appsTab()

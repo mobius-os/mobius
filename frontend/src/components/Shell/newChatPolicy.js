@@ -19,8 +19,18 @@ export function newChatPresentationIsCurrent(presentation, {
 } = {}) {
   if (!presentation || presentation.viewMode !== viewMode) return false
   if (presentation.chatId != null) {
-    return activeView === 'chat'
-      && normalizedId(activeChatId) === normalizedId(presentation.chatId)
+    if (activeView !== 'chat') return false
+    // The concrete chat route owns the cover once it exists — but navTo bumps
+    // the epoch and commits `activeChatId` a render later, so the route is still
+    // catching up to the resolved chat for one commit. Treat that in-flight
+    // window as current: `activeChatId` already matches, OR no navigation has
+    // happened since the cover resolved (epoch unchanged). A real supersede
+    // (Back, another chat, an app) bumps the epoch past the resolved value and
+    // retires the cover. Without this the cover retires over the OUTGOING chat
+    // mid-transition, flashing it between the New chat surface and its
+    // destination.
+    return normalizedId(activeChatId) === normalizedId(presentation.chatId)
+      || presentation.navigationEpoch === navigationEpoch
   }
   return presentation.navigationEpoch === navigationEpoch
     && presentation.drawerEntryOpen === !!drawerEntryOpen

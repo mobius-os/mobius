@@ -98,9 +98,43 @@ class ConnectorError(Exception):
   connection out of agent turns.
   """
 
-  def __init__(self, message: str, *, transient: bool = False):
+  def __init__(
+    self,
+    message: str,
+    *,
+    transient: bool = False,
+    auth_rejected: bool = False,
+  ):
     super().__init__(message)
     self.transient = transient
+    # A 401/403 with a credential SUPPLIED. For a static key that is a bad
+    # key; for an OAuth row it means the grant no longer works and the right
+    # latch is signed-out (oauth_required), never a dead-end "error".
+    self.auth_rejected = auth_rejected
+
+
+class OAuthSignInRequired(ConnectorError):
+  """The endpoint is a live MCP server gated by OAuth (spec 2026-07-28).
+
+  Raised by ``handshake`` after a 401 whose challenge (or well-known
+  fallback) yields usable authorization discovery. Not a failure: callers
+  record the row as signed-out with ``discovery`` cached for the sign-in
+  flow. ``discovery`` carries: resource, resource_metadata_url, issuer,
+  authorization_endpoint, token_endpoint, registration_endpoint,
+  revocation_endpoint, scopes, cimd_supported, token_auth_methods.
+  """
+
+  def __init__(self, discovery: dict):
+    super().__init__("The service requires an OAuth sign-in.")
+    self.discovery = discovery
+
+
+class _AuthRejected(Exception):
+  """Internal: initialize answered 401/403; carries the auth challenge."""
+
+  def __init__(self, www_authenticate: str):
+    super().__init__("unauthorized")
+    self.www_authenticate = www_authenticate
 
 
 @dataclass(frozen=True)
@@ -156,6 +190,25 @@ def decrypt_secret(token: str) -> str:
   except (InvalidToken, ValueError) as exc:
     raise ConnectorError(
       "The stored key can no longer be decrypted. Remove and re-add this connection."
+    ) from exc
+
+
+def _oauth_fernet() -> Fernet:
+  material = f"mobius-connector-oauth-v1:{get_settings().secret_key}".encode()
+  key = base64.urlsafe_b64encode(hashlib.sha256(material).digest())
+  return Fernet(key)
+
+
+def encrypt_oauth(value: str) -> str:
+  return _oauth_fernet().encrypt(value.encode()).decode()
+
+
+def decrypt_oauth(token: str) -> str:
+  try:
+    return _oauth_fernet().decrypt(token.encode()).decode()
+  except (InvalidToken, ValueError) as exc:
+    raise ConnectorError(
+      "The stored sign-in can no longer be decrypted. Sign in again."
     ) from exc
 
 
@@ -343,6 +396,11 @@ async def _matching_rpc(response: httpx.Response, rpc_id: int) -> dict:
       return None
     data = "\n".join(data_lines)
     data_lines.clear()
+    # An empty-data event is an SSE keep-alive/ping, not a JSON-RPC message.
+    # Some MCP servers (e.g. Firecrawl) emit one before the real reply; skip
+    # it and keep reading rather than fatally failing to parse "".
+    if not data.strip():
+      return None
     return _decode_rpc_json(data, rpc_id)
 
   try:
@@ -486,9 +544,10 @@ async def _initialize_rpc(
         "The endpoint redirected. Add the final HTTPS MCP address instead."
       )
     if response.status_code in (401, 403):
-      raise ConnectorError(
-        "The service rejected the key or requires an OAuth sign-in flow."
-      )
+      # Not yet a verdict: an OAuth-gated MCP server answers exactly like a
+      # bad key. handshake() runs authorization discovery on this challenge
+      # and only rejects when discovery finds nothing to sign in to.
+      raise _AuthRejected(response.headers.get("www-authenticate") or "")
     if response.status_code >= 400:
       raise ConnectorError(
         f"The service answered HTTP {response.status_code}; check the MCP address."
@@ -502,6 +561,63 @@ async def _initialize_rpc(
     return result, response.headers.get("mcp-session-id")
   finally:
     await response.aclose()
+
+
+async def pinned_json_request(
+  method: str,
+  url: str,
+  *,
+  headers: dict[str, str] | None = None,
+  form: dict[str, str] | None = None,
+  json_body: dict | None = None,
+  timeout_seconds: float = 15.0,
+) -> tuple[int, dict, dict[str, str]]:
+  """One SSRF-pinned HTTPS JSON request; returns (status, body, headers).
+
+  The single transport primitive for every OAuth fetch (metadata, dynamic
+  registration, token exchange, revocation): same DNS-pinning validator and
+  redirect refusal as the MCP probe, bounded read, JSON-or-empty body.
+  """
+  async with asyncio.timeout(timeout_seconds + 7.0):
+    pinned_url, host_header, sni_host = await asyncio.to_thread(
+      _safe_endpoint, url,
+    )
+    async with httpx.AsyncClient(
+      timeout=httpx.Timeout(timeout_seconds, connect=8.0),
+      follow_redirects=False,
+      trust_env=False,
+    ) as client:
+      request = client.build_request(
+        method,
+        pinned_url,
+        headers={"Accept": "application/json", **(headers or {})},
+        data=form,
+        json=json_body,
+      )
+      request.headers["host"] = host_header
+      request.extensions["sni_hostname"] = sni_host
+      # Stream and bound the read: a hostile authorization server (the owner
+      # added its MCP endpoint, which names the AS) must not be able to
+      # exhaust memory with an unbounded token/metadata response.
+      response = await client.send(request, stream=True)
+      try:
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in response.aiter_bytes():
+          total += len(chunk)
+          if total > _MAX_RPC_BYTES:
+            raise ConnectorError("The authorization server response is too large.")
+          chunks.append(chunk)
+        raw = b"".join(chunks)
+      finally:
+        await response.aclose()
+      try:
+        body = json.loads(raw)
+      except ValueError:
+        body = {}
+      if not isinstance(body, dict):
+        body = {}
+      return response.status_code, body, dict(response.headers)
 
 
 async def handshake(
@@ -576,6 +692,19 @@ async def handshake(
         server_info = init.get("serverInfo")
         if not isinstance(server_info, dict):
           server_info = {}
+  except _AuthRejected as rejected:
+    # 401/403 is ambiguous: a bad static key OR an OAuth-gated server. Only
+    # when the caller supplied NO key do we run authorization discovery — a
+    # supplied-key rejection stays a key error. Discovery runs OUTSIDE the
+    # probe deadline (it has its own per-request budget) so a slow well-known
+    # walk can never make a fast 401 look like a timeout.
+    if secret is not None:
+      raise ConnectorError(
+        "The service rejected the key.", auth_rejected=True,
+      ) from rejected
+    from app import connector_oauth
+    discovery = await connector_oauth.discover(url, rejected.www_authenticate)
+    raise OAuthSignInRequired(discovery.as_row_fields()) from rejected
   except ConnectorError:
     raise
   except (TimeoutError, httpx.TimeoutException) as exc:

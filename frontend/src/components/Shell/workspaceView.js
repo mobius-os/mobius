@@ -160,23 +160,13 @@ export function deriveContentVisibility({
   // TWO-WORLDS (codex-modecontext-design.md): in SINGLE mode the active content is
   // the persisted single-screen SLOT — the last item opened IN single mode — NOT
   // the focused builder pane. The slot may be absent from the pane tree entirely;
-  // Shell pins its iframe / chat mount regardless. A null slot is the New Chat landing
-  // (round 4 item 3). BACKWARD-COMPAT: a blob whose slot property is ABSENT is legacy/
-  // uninitialized (the reducer seeds it on the first builder→single switch, using
-  // absence as the migration marker), so single mode falls back to the focused
-  // pane's active tab until the slot is seeded — an older blob still collapses to
-  // the focused surface exactly as before. In BUILDER mode all of this is null and
-  // the focused-pane path runs unchanged.
-  const hasSlot = ('singleScreen' in workspace)
+  // Shell pins its iframe / chat mount regardless. A null OR absent slot is the empty
+  // New Chat landing (singleScreenKey → null): Standard has its OWN memory and never
+  // borrows Builder's focus, so an uninitialized Standard paints the landing rather
+  // than the focused pane. In BUILDER mode all of this is null and the focused-pane
+  // path runs unchanged.
   const focusedPaneKey = workspace.panes[workspace.focusedPaneId]?.activeTabKey ?? null
-  const slotKey = single ? (hasSlot ? paneModel.singleScreenKey(workspace) : focusedPaneKey) : null
-  // An INITIALIZED but empty slot in single mode is the New Chat landing (round 4
-  // item 3): a first-class home:new-chat surface, never the freshest chat. Legacy
-  // absent-slot blobs still fall back to the focused pane (hasSlot false).
-  // A fresh workspace has no persisted slot property yet. When its fallback pane is
-  // also empty, that is still the first-class New Chat destination rather than a
-  // blank full-bleed wrapper. Preserve the legacy focused-pane fallback whenever a
-  // concrete focused tab exists; only the genuinely empty legacy seed paints home.
+  const slotKey = single ? paneModel.singleScreenKey(workspace) : null
   const emptySingleSlot = single && slotKey == null
   // The active tab key that drives the full-bleed surface + AppCanvas `active`
   // prop. Under the Settings overlay it is null (panes hidden behind it). In single
@@ -212,15 +202,11 @@ export function deriveContentVisibility({
   else if (immersive) visibleAppIds = new Set([String(immersiveAppId)])
   else if (single) {
     // The single world paints ONLY the slot; if the slot is an app, that one app
-    // is visible (two-worlds design). A chat/empty slot paints no app. The slot may
-    // be tree-absent, so read it directly. Legacy (absent-slot) blobs fall back to
-    // the focused pane, matching the pre-two-worlds single-mode collapse.
-    if (hasSlot) {
-      const slot = workspace.singleScreen
-      visibleAppIds = (slot && slot.kind === 'app') ? new Set([String(slot.id)]) : new Set()
-    } else {
-      visibleAppIds = paneModel.visibleAppIds(workspace, [workspace.focusedPaneId])
-    }
+    // is visible (two-worlds design). A chat / empty / absent slot paints no app —
+    // Standard never borrows the focused Builder pane's app. The slot may be
+    // tree-absent, so read it directly.
+    const slot = workspace.singleScreen
+    visibleAppIds = (slot && slot.kind === 'app') ? new Set([String(slot.id)]) : new Set()
   } else visibleAppIds = paneModel.visibleAppIds(workspace, projection.visibleLeaves)
   // Chat panes stay MOUNTED (no remount on overlay/view toggle) but hidden while a
   // takeover owns the box. In an ordinary builder world and single-mode they

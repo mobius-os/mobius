@@ -59,6 +59,10 @@ chats_router = _load("chats")
 chats_stream_router = _load("chats_stream")
 chat_logs_router = _load("chat_logs")
 connectors_router = _load("connectors")
+try:
+  from app.routes.connectors import public_router as connectors_public_router
+except Exception:  # pragma: no cover - mirrors _load's stub behavior
+  connectors_public_router = APIRouter()
 proxy_router = _load("proxy")
 local_services_router = _load("local_services")
 notify_router = _load("notify")
@@ -94,6 +98,7 @@ __all__ = [
   "chats_stream_router",
   "chat_logs_router",
   "connectors_router",
+  "connectors_public_router",
   "proxy_router",
   "local_services_router",
   "notify_router",

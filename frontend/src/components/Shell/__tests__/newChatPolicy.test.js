@@ -78,6 +78,19 @@ test('New Chat presentation ownership follows allocation context then destinatio
   assert.equal(newChatPresentationIsCurrent(resolvedPresentation, {
     ...resolvedCurrent, activeChatId: 'other',
   }), false)
+
+  // Route still catching up to the resolved chat: activeChatId has not
+  // committed yet, but no navigation happened since it resolved (epoch
+  // unchanged). The cover stays current so the outgoing chat never flashes
+  // between the New chat surface and its destination.
+  assert.equal(newChatPresentationIsCurrent(resolvedPresentation, {
+    ...resolvedCurrent, navigationEpoch: 4, activeChatId: 'old',
+  }), true)
+  // A genuine supersede in that same window (navigation bumped the epoch and
+  // landed elsewhere) must still retire the cover.
+  assert.equal(newChatPresentationIsCurrent(resolvedPresentation, {
+    ...resolvedCurrent, navigationEpoch: 5, activeChatId: 'old',
+  }), false)
 })
 
 test('empty-single policy fires only on the transition edge', () => {

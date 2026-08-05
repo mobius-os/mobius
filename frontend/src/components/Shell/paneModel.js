@@ -409,6 +409,10 @@ export function seedFromFlatTabs(tabs) {
   const clean = dedupTabs(sanitizeTabs(tabs))
   const paneId = 'p0'
   const keys = clean.map(tabModel.tabKey)
+  // A pure constructor: NO singleScreen slot (absence is the migration marker, and
+  // this same builder is used by fixtures that model a legacy absent-slot blob). The
+  // genuine first-boot seed lives in the RESET_FLAT reducer, which is the only path
+  // that turns a legacy/flat active chat into the live Standard world.
   return {
     v: 1,
     viewMode: coerceViewMode('single'),
@@ -435,9 +439,10 @@ function coerceViewMode(mode) {
 }
 
 function singleScreenTab(ws) {
-  const item = ('singleScreen' in ws)
-    ? sanitizeSingleScreen(ws.singleScreen)
-    : focusedSlotSeed(ws)
+  // Standard's surface is its OWN slot only — an absent (legacy/uninitialized) slot
+  // is the empty home, never the focused Builder pane. sanitizeSingleScreen(undefined)
+  // collapses to null, so Standard never borrows Builder's focus (two-worlds design).
+  const item = sanitizeSingleScreen(ws.singleScreen)
   if (!item) return null
   if (item.kind === 'apps') return tabModel.appsTab()
   return tabModel.makeTab(item.kind, item.id)
@@ -494,11 +499,10 @@ export function singleScreenKey(ws) {
 // selects through its independent slot. Callers that bind lifecycle events to
 // an owner use this instead of assuming every owner exists in ws.panes.
 export function activeKeyForOwner(ws, ownerPaneId) {
-  if (String(ownerPaneId) === SINGLE_SLOT_PANE) {
-    if ('singleScreen' in ws) return singleScreenKey(ws)
-    const seed = focusedSlotSeed(ws)
-    return seed ? tabModel.tabKey(seed) : null
-  }
+  // The single-world slot owner selects through its OWN slot only. An absent slot
+  // is empty (singleScreenKey → null), never the focused Builder pane's tab —
+  // Standard never borrows Builder's focus (two-worlds design).
+  if (String(ownerPaneId) === SINGLE_SLOT_PANE) return singleScreenKey(ws)
   return ws.panes?.[ownerPaneId]?.activeTabKey ?? null
 }
 
@@ -521,7 +525,7 @@ export function setSingleScreen(ws, slot) {
 // back to the most recently positioned concrete tab in that same pane. Otherwise
 // the first-ever builder→single toggle from the common Settings flow paints an
 // empty shell even though the owner's chat is still directly underneath it.
-export function focusedSlotSeed(ws) {
+function focusedSlotSeed(ws) {
   const pane = ws.panes[ws.focusedPaneId]
   const key = pane?.activeTabKey
   if (!pane || !key) return null
@@ -637,12 +641,11 @@ export function singleScreenRoute(ws) {
 // and the reload snapshot — so a single-world reload restores the slot, not the
 // builder focus (design: derive activeView from the current world).
 export function activeContentRoute(ws) {
-  // An absent slot is the migration marker for a fresh/legacy workspace. The
-  // renderer already falls back to the focused pane in that state; route
-  // projection must do the same or first boot paints one surface while
-  // navigation reports the empty home screen. Once singleScreen is initialized
-  // (including explicit null), the independent Standard world is authoritative.
-  if (ws.viewMode === 'single' && 'singleScreen' in ws) return singleScreenRoute(ws)
+  // In single mode the active content is ALWAYS the Standard slot, never the focused
+  // Builder pane. An absent (legacy/uninitialized) slot reports the empty home exactly
+  // like an explicit-null slot — Standard is authoritative and never borrows Builder's
+  // focus (two-worlds design); opening an item in single mode initializes the slot.
+  if (ws.viewMode === 'single') return singleScreenRoute(ws)
   return focusedContentRoute(ws)
 }
 
@@ -1826,6 +1829,16 @@ export function workspaceReducer(state, action) {
       // in which case the shared no-empty-Builder invariant resolves to Standard.
       const candidate = { ...seeded, viewMode: ws.viewMode }
       if ('singleScreen' in ws) candidate.singleScreen = ws.singleScreen
+      else if (candidate.viewMode === 'single') {
+        // First boot of a legacy/flat active chat into Standard: the derivations no
+        // longer borrow Builder focus, so seed the slot from the reset's focused item
+        // or the surface renders the empty New-Chat home instead of that chat. Only
+        // the genuine uninitialized case (no slot on the current ws) seeds here; a
+        // later toggle/close still owns the slot via seedSingleScreenIfAbsent /
+        // completeCloseTransition, and an explicit null slot stays New Chat.
+        const seed = focusedSlotSeed(seeded)
+        if (seed) candidate.singleScreen = seed
+      }
       const next = normalize(candidate)
       if (deepEqual(next, ws) && undo == null) return state
       return { ws: next, undo: null }

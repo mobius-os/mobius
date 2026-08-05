@@ -83,6 +83,24 @@ class _BytesStream(httpx.AsyncByteStream):
 
 
 @pytest.mark.asyncio
+async def test_rpc_parser_skips_empty_keepalive_events():
+  """A leading empty-data keep-alive (Firecrawl) must not fail the parse."""
+  response = httpx.Response(
+    200,
+    headers={"content-type": "text/event-stream"},
+    text=(
+      # An id line then an empty `data:` ping, exactly as Firecrawl sends.
+      'id: ping-1\ndata: \n\n'
+      'event: message\nid: msg-1\n'
+      'data: {"jsonrpc":"2.0","id":3,"result":{"ok":true}}\n\n'
+    ),
+  )
+  matched = await core._matching_rpc(response, 3)
+  assert matched["id"] == 3
+  assert matched["result"] == {"ok": True}
+
+
+@pytest.mark.asyncio
 async def test_rpc_parser_stops_a_live_sse_stream_after_matching_id():
   response = httpx.Response(
     200,
@@ -637,9 +655,14 @@ def test_connector_routes_keep_keys_out_of_responses(
   assert set(body) == {
     "id", "generation", "name", "url", "enabled", "has_auth",
     "tools", "tool_count", "est_tokens", "status", "status_detail",
+    "auth_kind", "signed_in", "scopes",
   }
   assert body["tools"] == ["lookup"]
   assert body["est_tokens"] == 5150
+  # A static-key connection is not OAuth and carries no sign-in.
+  assert body["auth_kind"] == "key"
+  assert body["signed_in"] is False
+  assert body["scopes"] == []
   assert "top-secret" not in created.text
   assert probe_pool_counts == [add_baseline]
 

@@ -2,7 +2,7 @@
 // physically independent layout worlds while preserving one stable mount per
 // chat inside each world.
 
-import { focusedSlotSeed, SINGLE_SLOT_PANE } from './paneModel.js'
+import { SINGLE_SLOT_PANE } from './paneModel.js'
 
 export const STANDARD_CHAT_WORLD = 'standard'
 export const BUILDER_CHAT_WORLD = 'builder'
@@ -45,14 +45,11 @@ export function deriveChatSurfaceOwners({ workspace, baseProjection, projection 
     if (owner) owners.push(owner)
   }
 
-  // Legacy workspaces have no singleScreen migration marker yet. The rest of
-  // the Standard-world projection treats that absence as the focused Builder
-  // item that the first mode transaction will seed, so retain the matching
-  // Standard ChatView on the very first render too. An explicit null remains
-  // the intentional New Chat landing and must not inherit Builder focus.
-  const slot = ('singleScreen' in workspace)
-    ? workspace.singleScreen
-    : focusedSlotSeed(workspace)
+  // Standard retains a ChatView only for its OWN slot. An absent (legacy/
+  // uninitialized) or explicit-null slot is the empty New Chat landing and mounts
+  // no Standard ChatView — Standard never borrows Builder's focused chat (two-worlds
+  // design).
+  const slot = workspace.singleScreen
   if (slot?.kind === 'chat') {
     owners.push({
       world: STANDARD_CHAT_WORLD,

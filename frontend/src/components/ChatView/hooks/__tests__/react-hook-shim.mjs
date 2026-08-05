@@ -125,6 +125,17 @@ export function useSyncExternalStore(subscribe, getSnapshot) {
   return snapshotRef.current
 }
 
+// Faithful to React: the callback runs SYNCHRONOUSLY — startTransition only
+// marks the state updates it schedules as non-urgent, it does not defer the
+// callback itself. This shim has no concurrent scheduler, so running fn() inline
+// (its updates commit through the same synchronous _rerender path as any other)
+// is the honest model for the hooks under test. Without this export, a hook that
+// imports `startTransition` (useNavigation) fails to load: the shimmed `react`
+// module has no such named export.
+export function startTransition(fn) {
+  fn()
+}
+
 function _scheduleEffect(fn, deps) {
   const i = _slotIndex++
   if (_slots[i] === undefined) {

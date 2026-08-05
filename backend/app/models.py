@@ -912,6 +912,57 @@ class Connector(Base):
   last_checked_at = Column(DateTime, nullable=True)
 
 
+class ConnectorOAuth(Base):
+  """OAuth grant state for one connector (MCP authorization, spec 2026-07-28).
+
+  Discovery fields are cached from the probe's 401 challenge so sign-in and
+  refresh never re-walk the well-known chain on the hot path. Token fields
+  are Fernet-encrypted with their own salt and are write-only: they never
+  appear in any API response — the registry exposes only ``signed_in`` and
+  the granted scopes. Rows are keyed 1:1 to the connector and die with it.
+  """
+
+  __tablename__ = "connector_oauth"
+
+  connector_id = Column(
+    Integer,
+    ForeignKey("connectors.id", ondelete="CASCADE"),
+    primary_key=True,
+  )
+  # Discovery (RFC 9728 protected-resource metadata → RFC 8414/OIDC).
+  resource = Column(String(2048), nullable=False)  # canonical MCP URL (RFC 8707)
+  issuer = Column(String(512), nullable=False)
+  authorization_endpoint = Column(String(2048), nullable=False)
+  token_endpoint = Column(String(2048), nullable=False)
+  registration_endpoint = Column(String(2048), nullable=True)
+  revocation_endpoint = Column(String(2048), nullable=True)
+  scopes_advertised = Column(JSON, nullable=False, default=list)
+  # Grant state (all write-only; encrypted with the oauth Fernet salt).
+  access_token_encrypted = Column(Text, nullable=True)
+  refresh_token_encrypted = Column(Text, nullable=True)
+  access_expires_at = Column(DateTime, nullable=True)
+  scopes_granted = Column(JSON, nullable=False, default=list)
+  connected_at = Column(DateTime, nullable=True)
+
+
+class OAuthClientRegistration(Base):
+  """This instance's OAuth client identity at one authorization server.
+
+  The spec requires client credentials to be keyed by AS issuer and never
+  reused across servers. ``mode`` records how the identity was obtained:
+  ``cimd`` (the instance's client-metadata URL — no stored secret) or
+  ``dcr`` (RFC 7591 registration; secret encrypted when one was issued).
+  """
+
+  __tablename__ = "oauth_client_registrations"
+
+  issuer = Column(String(512), primary_key=True)
+  mode = Column(String(16), nullable=False)
+  client_id = Column(String(512), nullable=False)
+  client_secret_encrypted = Column(Text, nullable=True)
+  registered_at = Column(DateTime, default=lambda: now_naive_utc())
+
+
 class ThinkingTrace(Base):
   """Full reasoning text stored outside the bounded chat transcript.
 
