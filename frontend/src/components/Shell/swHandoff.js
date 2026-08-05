@@ -105,6 +105,48 @@ export function shouldRearmShellApply({
   return false
 }
 
+// Error-recovery reload that ESCAPES a stale service-worker generation.
+//
+// The error boundary's refresh used a blind location.reload(). On an installed
+// PWA a blind reload is answered by the CURRENTLY-CONTROLLING worker's precache,
+// so a crash caused by a stale bundle reloads straight back into the same broken
+// generation — recovery loops out to an agent instead of self-healing. Every
+// other reload in the shell escapes this through reloadWhenWorkerTakesOver
+// (performReload); this is the error-recovery analogue. It forces a fresh sw.js
+// fetch (so a just-shipped worker is discovered), then hands control to a waiting
+// worker before reloading, so recovery lands on the NEWEST generation.
+//
+// Reloads ONLY when a newer generation actually exists, reusing the same "newer
+// generation available?" predicate the foreground watcher uses
+// (shouldRearmShellApply); returns whether it did. The auto-heal caller keeps a
+// false as "genuine bug on the newest build → show the recovery panel, never
+// reload-loop"; the manual-refresh caller treats a false as "already newest →
+// honor the refresh with a plain reload". Deps are injected so the wiring is
+// unit-testable without a live worker.
+export async function reloadIfGenerationStale({
+  serviceWorker,
+  reload,
+  readStaleFlag = () => false,
+  handoff = reloadWhenWorkerTakesOver,
+} = {}) {
+  if (!serviceWorker || typeof serviceWorker.getRegistration !== 'function') return false
+  let registration = null
+  try { registration = await serviceWorker.getRegistration() } catch { return false }
+  if (!registration) return false
+  if (typeof registration.update === 'function') {
+    try { await registration.update() } catch { /* offline / transient — decide on what we have */ }
+  }
+  const stale = shouldRearmShellApply({
+    stalePrecacheFlagged: readStaleFlag(),
+    waiting: registration.waiting || null,
+    active: registration.active || null,
+    controller: serviceWorker.controller || null,
+  })
+  if (!stale) return false
+  handoff({ registration, serviceWorker, reload })
+  return true
+}
+
 // Foreground/online shell-update watch — the APPLY trigger that lets a deploy
 // reach an ALREADY-INSTALLED PWA promptly, closing the "still broken after the
 // deploy" gap for a warm install.
