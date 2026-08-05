@@ -569,6 +569,17 @@ def _due_park(
             initiated_by_app_id=initiated_by_app_id)
 
 
+def _set_pending_question(cid: str, question_id: str | None) -> None:
+  """Set the chat's durable open-question marker (what QuestionCommit does)."""
+  db = SessionLocal()
+  try:
+    chat = db.query(models.Chat).filter(models.Chat.id == cid).first()
+    chat.pending_question_id = question_id
+    db.commit()
+  finally:
+    db.close()
+
+
 def _run_sweep_result():
   db = SessionLocal()
   try:
@@ -1033,12 +1044,17 @@ def test_restart_park_waiting_on_question_stays_manual(
           },
           {
             "type": "question",
+            "question_id": "restart-q",
             "questions": [{"question": "Which one?"}],
           },
         ],
       },
     ],
   )
+  # A parked turn waiting on a question carries the durable open-question marker
+  # (QuestionCommit set it; ParkRun kept it across the restart). That marker is
+  # what keeps auto-resume manual — the answer is the continuation.
+  _set_pending_question(cid, "restart-q")
 
   assert _run_sweep() == [cid]
   assert resumes == []

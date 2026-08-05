@@ -1480,36 +1480,15 @@ def _claim_limit_auto_resume_slot(now: float | None = None) -> bool:
 
 
 def _has_unanswered_question(chat: models.Chat | None) -> bool:
-  """Whether the durable tail is waiting for an owner answer.
+  """Whether the chat is parked on an open AskUserQuestion.
 
-  A restart pause is appended after the question while draining, so ignore that
-  one product-owned tail block before applying the same tail-question invariant
-  as the transcript UI. This is read-only and bounded to the latest assistant
-  row; it never scans tool output or historical questions.
+  Reads the durable `pending_question_id` marker (models.Chat) — the
+  position-independent source of truth, set when the card is asked and cleared
+  when it is answered or the turn ends. A resumable pause (provider limit /
+  planned restart) keeps it, so an interrupted-but-open question still blocks
+  auto-resume here instead of being resumed past and orphaned.
   """
-  if chat is None:
-    return False
-  try:
-    from app.chat_transcript import materialized_messages
-    messages = materialized_messages(chat)
-  except Exception:
-    messages = list(chat.messages or [])
-  if not messages or messages[-1].get("role") != "assistant":
-    return False
-  blocks = list(messages[-1].get("blocks") or [])
-  while blocks:
-    tail = blocks[-1]
-    if not (
-      tail.get("type") == "error"
-      and (tail.get("pause") or {}).get("kind") == "restart"
-    ):
-      break
-    blocks.pop()
-  return bool(
-    blocks
-    and blocks[-1].get("type") == "question"
-    and not blocks[-1].get("answers")
-  )
+  return chat is not None and chat.pending_question_id is not None
 
 
 async def _auto_resume_chat(

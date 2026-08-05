@@ -127,6 +127,14 @@ class Chat(Base):
   # streaming update never rewrites every prior message. Finalize and startup
   # recovery merge this bounded value into `messages`.
   live_assistant = Column(JSON, nullable=True, default=None)
+  # The AskUserQuestion this chat is currently parked on, or NULL. The single
+  # durable source of truth for "a question is open": set when the card is
+  # committed, cleared when it is answered or the turn ends, and KEPT across a
+  # resumable pause (provider limit / planned restart). Position-independent, so
+  # parallel tool/subagent output or a terminal error after the card never
+  # hides that it is still open. Every read surface — including the lightweight
+  # /runtime poll that never loads the transcript — trusts this column.
+  pending_question_id = Column(String(64), nullable=True, default=None)
   pending_messages = Column(JSON, nullable=False, default=list)
   uploads = Column(JSON, nullable=False, default=list)
   deleted_at = Column(DateTime, nullable=True, default=None)

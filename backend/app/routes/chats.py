@@ -58,6 +58,20 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chats", tags=["chats"])
 
+
+def _open_question_id_for(chat: models.Chat) -> str | None:
+  """The chat's open AskUserQuestion id, for the read APIs.
+
+  The durable `pending_question_id` marker is the source of truth (survives
+  restart, position-independent). The in-memory registry covers only the brief
+  live window before QuestionCommit persists the marker. Reads `chat.id` and the
+  scalar column, so it is safe on the lightweight /runtime load too.
+  """
+  if chat.pending_question_id is not None:
+    return chat.pending_question_id
+  pending = questions.get(chat.id)
+  return pending.question_id if pending is not None else None
+
 # Separate router for the app-attributed chat contract (design §1). It
 # lives under its own /api/app-chats prefix so the owner-only /api/chats
 # surface stays unambiguously owner-only — the app path is additive and
@@ -186,6 +200,14 @@ class ChatCreate(ChatUpdate):
   # It is owner-scoped by the route and derives an opaque UUID rather than being
   # stored as user-visible chat metadata.
   recovery_request_id: str | None = Field(default=None, min_length=1, max_length=128)
+  # A client-minted chat id. A brand-new chat runs live on the client the instant
+  # it is opened and is only persisted on its first send, so the client owns the
+  # id from birth: the surface (keyed by chat id) never has to be renamed or
+  # remounted when the row lands. Create is idempotent on it — a retried first
+  # send returns the same row instead of duplicating it — exactly like
+  # recovery_request_id. Validated as a real UUID below so it matches the shape
+  # the server otherwise mints and cannot be an arbitrary primary key.
+  id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 def _chat_create_response(chat: models.Chat, db: Session) -> dict:
@@ -397,7 +419,6 @@ def _chat_detail_response(
 
   all_msgs = materialized_messages(chat)
   running = is_chat_running(chat.id) or has_running_run(db, chat.id)
-  pending_question = questions.get(chat.id)
   live_snapshot = chat.live_assistant
   live_message = (
     all_msgs[-1]
@@ -485,9 +506,7 @@ def _chat_detail_response(
     "offset": start,
     "running": running,
     "active_goal_objective": active_goal_objective,
-    "pending_question_id": (
-      pending_question.question_id if pending_question is not None else None
-    ),
+    "pending_question_id": _open_question_id_for(chat),
     "session_id": chat.session_id if expose_session else None,
     "provider": provider,
     "created_by_app_id": chat.created_by_app_id,
@@ -779,6 +798,16 @@ def create_chat(
       if existing.deleted_at is not None:
         raise HTTPException(status_code=409, detail="repair chat was deleted")
       return _chat_create_response(existing, db)
+  elif body.id:
+    try:
+      chat_id = str(uuid.UUID(str(body.id)))
+    except (ValueError, AttributeError, TypeError):
+      raise HTTPException(status_code=422, detail="invalid chat id")
+    existing = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    if existing is not None:
+      if existing.deleted_at is not None:
+        raise HTTPException(status_code=409, detail="chat id was deleted")
+      return _chat_create_response(existing, db)
 
   owner = db.query(models.Owner).first()
   data_dir = get_settings().data_dir
@@ -804,7 +833,10 @@ def create_chat(
     db.commit()
   except IntegrityError:
     db.rollback()
-    if not body.recovery_request_id:
+    # Both client-supplied identities (recovery id and a client-minted chat id)
+    # make create idempotent: a concurrent/retried create for the same id
+    # returns the row that won the race instead of failing.
+    if not body.recovery_request_id and not body.id:
       raise
     existing = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
     if existing is None or existing.deleted_at is not None:
@@ -1282,17 +1314,15 @@ def get_chat_runtime(
     principal,
     load_fields=(
       models.Chat.pending_messages,
+      models.Chat.pending_question_id,
       models.Chat.updated_at,
     ),
   )
-  pending_question = questions.get(chat.id)
   return {
     "running": is_chat_running(chat.id),
     "active_goal_objective": running_goal_objective(db, chat.id),
     "pending_messages": list(chat.pending_messages or []),
-    "pending_question_id": (
-      pending_question.question_id if pending_question is not None else None
-    ),
+    "pending_question_id": _open_question_id_for(chat),
     "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
   }
 

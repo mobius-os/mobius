@@ -3734,25 +3734,15 @@ export default function ChatView({
   // A pending AskUserQuestion freezes the turn until the user answers,
   // but the card can sit outside the viewport (the user scrolled away,
   // or content streamed in around it) — the chat then just looks hung.
-  // Detect a pending card in whichever surface currently renders it:
-  // the live stream (a question item without answers) or the durable
-  // tail-question invariant on the last visible assistant message (the
-  // same rule MsgContent's blockAnswerable enforces; recovery preserves
-  // that tail question even when the original process was interrupted).
+  // "A question is open" is the chat's durable pending_question_id
+  // (liveQuestionId) — set when the card is asked, cleared when it is answered
+  // or the turn ends, and KEPT across a resumable interruption. Trusting that
+  // marker instead of the card's block position is what lets a still-open card
+  // trailed by parallel output or a terminal error keep blocking the composer.
+  // The live-stream branch covers the window before the question_id persists.
   const pendingQuestionInStream = activeAssistantIsStreaming
     && streamItems.some(it => it.type === 'question' && !it.answers)
-  const pendingQuestionInMessages = (() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].hidden) continue
-      const msg = messages[i]
-      if (msg.role !== 'assistant' || !msg.blocks?.length) return false
-      const tail = msg.blocks[msg.blocks.length - 1]
-      return !!(tail.type === 'question' && !tail.answers
-        && (!liveQuestionId || tail.question_id === liveQuestionId))
-    }
-    return false
-  })()
-  const hasPendingQuestion = pendingQuestionInStream || pendingQuestionInMessages
+  const hasPendingQuestion = pendingQuestionInStream || !!liveQuestionId
 
   // A live question parks Codex's JSON-RPC reader inside request_user_input.
   // turn/steer cannot be acknowledged until that question is released, so a
@@ -3780,7 +3770,9 @@ export default function ChatView({
   // nudge + SR status can name the recovery. A pause is terminal (the turn has
   // ended), so it only ever lives in `messages`, never in a live stream item.
   const pendingResumeBlock = tailResumableBlock(messages)
-  const hasPendingResume = !!pendingResumeBlock
+  // An open question is the single blocker: answering it IS the continuation,
+  // so don't surface a competing Resume (which the backend would now refuse).
+  const hasPendingResume = !!pendingResumeBlock && !hasPendingQuestion
   const pendingLimitResetAt = pendingResumeBlock?.pause?.resets_at || null
   useEffect(() => {
     if (!embedded || !autoResumeEnabled || !pendingLimitResetAt) {

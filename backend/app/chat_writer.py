@@ -1433,6 +1433,17 @@ class ChatWriterActor:
       )
       if outcome is not _WriteOutcome.APPLIED:
         raise _PersistFailed(f"QuestionCommit did not persist ({outcome.value})")
+      # Record which question the chat is now parked on — the durable, position-
+      # independent openness marker every read surface trusts (models.Chat).
+      qid = next(
+        (
+          block.get("question_id")
+          for block in reversed(cmd.snapshot.get("blocks") or [])
+          if block.get("type") == "question" and not block.get("answers")
+        ),
+        None,
+      )
+      self._mark_pending_question(db, cmd.chat_id, qid)
       return True
     if isinstance(cmd, Finalize):
       # Must-persist terminal write: a NOOP (missing row / empty transcript /
@@ -1444,6 +1455,10 @@ class ChatWriterActor:
       )
       if outcome is not _WriteOutcome.APPLIED:
         raise _PersistFailed(f"Finalize did not persist ({outcome.value})")
+      # A terminal turn closes any open question. A resumable pause keeps it
+      # open, but that is ParkRun, not Finalize — so clearing here is correct
+      # (and a no-op when the turn had no question).
+      self._mark_pending_question(db, cmd.chat_id, None)
       return True
     if isinstance(cmd, AnswerQuestion):
       return self._answer_question(db, cmd)
@@ -1615,6 +1630,9 @@ class ChatWriterActor:
     )
     if not applied:
       raise _PersistFailed("AnswerQuestion: no matching question block")
+    # The question is answered — clear the durable open-question marker in the
+    # same commit so every read surface unblocks atomically with the answer.
+    chat.pending_question_id = None
     # Answering an interactive question is an owner action just like a visible
     # send. Keep drawer recency separate from generic transcript writes, but do
     # advance it here so a parked chat returns to the top as soon as the answer
@@ -1624,6 +1642,26 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("AnswerQuestion did not persist")
     return True
+
+  def _mark_pending_question(
+    self, db, chat_id: str, question_id: str | None,
+  ) -> None:
+    """Set or clear the chat's durable open-question marker (models.Chat).
+
+    The position-independent source of truth for an open AskUserQuestion:
+    QuestionCommit sets it, AnswerQuestion and every terminal write clear it,
+    and a resumable ParkRun deliberately leaves it in place. Its own tiny
+    scalar commit (like `_persist_session_id`); the serialized actor makes the
+    back-to-back write with the message/terminal commit race-free.
+    """
+    if hasattr(db, "record_commit"):
+      # DB-free mechanics stub: the message/terminal write already recorded.
+      return
+    chat = _active_chat(db, chat_id)
+    if chat is None or chat.pending_question_id == question_id:
+      return
+    chat.pending_question_id = question_id
+    _commit_or_rollback(db)
 
   def _persist_session_id(self, db, cmd: PersistSessionId) -> bool:
     """Save the chat's provider session/thread id without touching transcript.
@@ -2691,6 +2729,12 @@ class ChatWriterActor:
       ) or changed
     if changed and not _commit_or_rollback(db):
       raise _PersistFailed("FinishRun did not persist")
+    # A genuinely ended turn closes any open question — including the
+    # orphaned-run-after-restart Stop, which finishes the run with no Finalize.
+    # Only "interrupted" may still be recoverable (crash recovery can re-offer
+    # the card), so leave the marker for that one; ParkRun owns resumable pauses.
+    if cmd.terminal_status != "interrupted":
+      self._mark_pending_question(db, cmd.chat_id, None)
     if not cmd.run_token or owner == cmd.run_token:
       self._run_token_owner.pop(cmd.chat_id, None)
     return None
