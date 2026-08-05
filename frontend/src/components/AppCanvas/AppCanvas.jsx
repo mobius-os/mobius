@@ -75,8 +75,10 @@ function appFrameRequestUrl(appId, version, frameRev) {
 //
 //   2. {type: 'moebius:frame-mounted', appId}              frame → parent
 //      Fired by the frame AFTER its first render COMMITS (MountSignal's
-//      passive effect in app-frame.html — NOT right after
-//      `createRoot.render()` returns, which only schedules the render).
+//      stable DOM ref in app-frame.html — NOT right after
+//      `createRoot.render()` returns, which only schedules the render). The
+//      commit callback runs before app layout effects, so a mount-time
+//      capability request cannot overtake promotion of its own frame.
 //      Parent hides the loading overlay / promotes a buffered version swap
 //      only on this signal — `iframe.onLoad` is too early (document loaded
 //      ≠ React rendered), and a render()-returned post would be too early
@@ -170,6 +172,7 @@ function appFrameRequestUrl(appId, version, frameRev) {
 // is only meaningfully invoked client-side from the iframe onLoad / immersive
 // effect, so the probe is never needed before the DOM exists.
 let _insetProbe = null
+
 function readDeviceInsets() {
   if (typeof document === 'undefined') return zeroInsets()
   if (!_insetProbe) {

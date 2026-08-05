@@ -62,6 +62,25 @@ export function platformUpdateStatusLabel(platform) {
   return 'Up to date'
 }
 
+/**
+ * The single frontend reading of the backend's deployment classifier.
+ *
+ * `platform_activation.deployment_kind` is binary — it returns exactly
+ * 'railway' or 'self_hosted' — so the frontend must not invent a third kind.
+ * `null` means "not read yet, or unreadable", which callers render as
+ * guidance that covers both deployments rather than guessing one.
+ */
+export function deploymentKind(activation) {
+  const deployment = activation?.deployment
+  return deployment === 'railway' || deployment === 'self_hosted'
+    ? deployment
+    : null
+}
+
+export function deploymentKindLabel(activation) {
+  return deploymentKind(activation) === 'railway' ? 'Railway' : 'Self-hosted'
+}
+
 export function platformActivationLabel(activation) {
   const labels = {
     live: 'Live refresh',

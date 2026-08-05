@@ -40,6 +40,7 @@ import DrawerItemActionMenu from './DrawerItemActionMenu.jsx'
 import {
   buildDrawerSections,
   filterInstalledApps,
+  findDrawerMenuItem,
 } from './drawerInformationArchitecture.js'
 import ShareAppSheet from './ShareAppSheet.jsx'
 import { isDrawerAppShareEligible } from './appShareState.js'
@@ -310,30 +311,25 @@ export default function Drawer({
     recentWindow,
   ])
 
-  // One row at a time can be in rename or open-menu mode. Tracking the
-  // active id (rather than per-row state) lets a click on another row's
-  // context action replace any open menu without a global listener per row.
-  const [openMenu, setOpenMenu] = useState(null) // { kind, id, surface, placement } | null
+  // The drawer owns one action menu. Rows provide item identity, placement,
+  // and a focus-return target without mounting their own controllers.
+  const [openMenu, setOpenMenu] = useState(null)
+  const menuRestoreFocusRef = useRef(null)
+  const activeMenuItem = findDrawerMenuItem(openMenu, chats, apps)
   const {
     open: openItemMenuHistory,
     close: closeItemMenu,
   } = useHistoryDismiss(() => setOpenMenu(null))
 
-  function showItemMenu(kind, id, surface, placement) {
+  function showItemMenu({ restoreFocusTarget, ...menu }) {
     openItemMenuHistory()
-    setOpenMenu({ kind, id, surface, placement })
+    menuRestoreFocusRef.current = restoreFocusTarget
+    setOpenMenu(menu)
   }
-  // Belt-and-braces orphan cleanup: if the row whose menu was open
-  // disappears from the list (delete, chat soft-delete, agent-side
-  // removal), openMenu would still reference a dead id and the next
-  // row to occupy that slot can look "pressed". Drop the reference
-  // the moment its id is no longer in the relevant collection.
+  // A deleted row cannot keep owning the shared menu.
   useEffect(() => {
-    if (!openMenu) return
-    const collection = openMenu.kind === 'chat' ? (chats || []) : (apps || [])
-    const stillThere = collection.some(item => item.id === openMenu.id)
-    if (!stillThere) closeItemMenu()
-  }, [openMenu, chats, apps, closeItemMenu])
+    if (openMenu && !activeMenuItem) closeItemMenu()
+  }, [openMenu, activeMenuItem, closeItemMenu])
   const [renamingState, setRenamingState] = useState(null) // { kind, id } | null
   // Mirrors `renaming` synchronously (not via useEffect — that's one render
   // behind) so outside-tap cancellation sees the current edit immediately.
@@ -404,13 +400,24 @@ export default function Drawer({
       if (kind === 'chat') current.onChat(id)
       else current.onApp(id)
     },
-    toggleMenu(kind, id, next, surface = 'drawer', placement = null) {
-      const current = rowActionInputsRef.current
-      if (next) current.showItemMenu(kind, id, surface, placement)
-      else current.closeItemMenu()
+    openMenu(menu) {
+      rowActionInputsRef.current.showItemMenu(menu)
+    },
+    closeMenu() {
+      rowActionInputsRef.current.closeItemMenu()
     },
     startRename(kind, id, surface = 'drawer') {
       rowActionInputsRef.current.setRenaming({ kind, id, surface })
+    },
+    // Closing the menu consumes its Back-stack sentinel, and the traversal that
+    // follows drops focus to the document a few milliseconds later. The menu's
+    // post-close animation frame is the one place that focus is reclaimed, so
+    // its target has to be whatever the action left behind. Rename replaces the
+    // row trigger with an editor, and reasserting focus onto the now-unmounted
+    // trigger does nothing at all — the editor stays blurred, and its own blur
+    // handler then commits and unmounts it before the user can type.
+    claimMenuFocusReturn(element) {
+      rowActionInputsRef.current.menuRestoreFocusRef.current = element
     },
     cancelRename() {
       rowActionInputsRef.current.setRenaming(null)
@@ -954,6 +961,7 @@ export default function Drawer({
     onDeleteAppData,
     showItemMenu,
     closeItemMenu,
+    menuRestoreFocusRef,
     setRenaming,
     setInstallingApp,
     resetAppsSurfaceUi,
@@ -1086,16 +1094,6 @@ export default function Drawer({
                           ? activeView === 'chat' && activeChatId === item.id
                           : activeView === 'canvas' && Number(activeAppId) === Number(item.id)
                       )}
-                      menuOpen={!!(openMenu
-                        && openMenu.surface === 'drawer'
-                        && openMenu.kind === kind
-                        && openMenu.id === item.id)}
-                      menuPlacement={openMenu
-                        && openMenu.surface === 'drawer'
-                        && openMenu.kind === kind
-                        && openMenu.id === item.id
-                        ? openMenu.placement
-                        : null}
                       renaming={!!(renaming
                         && renaming.surface === 'drawer'
                         && renaming.kind === kind
@@ -1140,16 +1138,6 @@ export default function Drawer({
                         ? activeView === 'chat' && activeChatId === item.id
                         : activeView === 'canvas' && Number(activeAppId) === Number(item.id)
                     )}
-                    menuOpen={!!(openMenu
-                      && openMenu.surface === 'drawer'
-                      && openMenu.kind === kind
-                      && openMenu.id === item.id)}
-                    menuPlacement={openMenu
-                      && openMenu.surface === 'drawer'
-                      && openMenu.kind === kind
-                      && openMenu.id === item.id
-                      ? openMenu.placement
-                      : null}
                     renaming={!!(renaming
                       && renaming.surface === 'drawer'
                       && renaming.kind === kind
@@ -1240,16 +1228,6 @@ export default function Drawer({
               building={!!(app.chat_id && streamingSet.has(app.chat_id))}
               attention={newAppSet.has(Number(app.id))}
               active={activeView === 'canvas' && Number(activeAppId) === Number(app.id)}
-              menuOpen={!!(openMenu
-                && openMenu.surface === 'directory'
-                && openMenu.kind === 'app'
-                && openMenu.id === app.id)}
-              menuPlacement={openMenu
-                && openMenu.surface === 'directory'
-                && openMenu.kind === 'app'
-                && openMenu.id === app.id
-                ? openMenu.placement
-                : null}
               renaming={!!(renaming
                 && renaming.surface === 'directory'
                 && renaming.kind === 'app'
@@ -1259,6 +1237,12 @@ export default function Drawer({
           ))}
         </AppsDirectory>
       ), appsHost)}
+      <DrawerItemMenu
+        menu={openMenu}
+        item={activeMenuItem}
+        actions={rowActions}
+        restoreFocusRef={menuRestoreFocusRef}
+      />
       {installingApp && (
         <InstallSheet
           app={installingApp}
@@ -1336,8 +1320,6 @@ const DrawerRow = memo(function DrawerRow({
   // pulses the same way an active chat does.
   building,
   attention,
-  menuOpen,
-  menuPlacement,
   renaming,
   actions,
   dragActiveRef,
@@ -1352,7 +1334,6 @@ const DrawerRow = memo(function DrawerRow({
   const holdTimerRef = useRef(null)
   const holdOriginRef = useRef(null)
   const itemButtonRef = useRef(null)
-  const menuRestoreFocusRef = useRef(null)
   const suppressCardClickRef = useRef(false)
   const suppressRowClickRef = useRef(false)
   const reorderCleanupRef = useRef(null)
@@ -1429,11 +1410,11 @@ const DrawerRow = memo(function DrawerRow({
   // from scratch or tap into the existing name to edit it.
   useEffect(() => {
     if (renaming && inputRef.current) {
-      menuRestoreFocusRef.current = inputRef.current
+      actions.claimMenuFocusReturn(inputRef.current)
       inputRef.current.focus()
       inputRef.current.select()
     }
-  }, [renaming])
+  }, [actions, renaming])
 
   function commitRename() {
     if (cancelingRef.current) {
@@ -1471,8 +1452,13 @@ const DrawerRow = memo(function DrawerRow({
   }
 
   function openItemMenuAt(point, trigger = itemButtonRef.current) {
-    menuRestoreFocusRef.current = trigger
-    actions.toggleMenu(kind, id, true, surface, itemMenuPlacement(point))
+    actions.openMenu({
+      kind,
+      id,
+      surface,
+      placement: itemMenuPlacement(point),
+      restoreFocusTarget: trigger,
+    })
   }
 
   function suppressTouchContextMenu(event) {
@@ -1546,19 +1532,6 @@ const DrawerRow = memo(function DrawerRow({
     return true
   }
 
-  const itemMenu = (
-    <DrawerItemMenu
-      kind={kind}
-      item={item}
-      surface={surface}
-      pinned={pinned}
-      menuOpen={menuOpen}
-      actions={actions}
-      menuPlacement={menuPlacement}
-      restoreFocusRef={menuRestoreFocusRef}
-    />
-  )
-
   if (renaming) {
     if (variant === 'card') {
       return (
@@ -1571,7 +1544,6 @@ const DrawerRow = memo(function DrawerRow({
             onBlur={onRenameBlur}
             aria-label="Rename app"
           />
-          {itemMenu}
         </div>
       )
     }
@@ -1585,7 +1557,6 @@ const DrawerRow = memo(function DrawerRow({
           onBlur={onRenameBlur}
           aria-label={`Rename ${kind}`}
         />
-        {itemMenu}
       </div>
     )
   }
@@ -1651,7 +1622,6 @@ const DrawerRow = memo(function DrawerRow({
             <span className="apps-directory__card-name">{label}</span>
           </span>
         </button>
-        {itemMenu}
       </div>
     )
   }
@@ -1935,35 +1905,33 @@ const DrawerRow = memo(function DrawerRow({
         ) : null}
         <span className="drawer__item-text">{label}</span>
       </button>
-      {itemMenu}
     </div>
   )
 })
 
-function DrawerItemMenu({
-  kind,
+const DrawerItemMenu = memo(function DrawerItemMenu({
+  menu,
   item,
-  surface,
-  pinned,
-  menuOpen,
-  menuPlacement,
-  restoreFocusRef,
   actions,
+  restoreFocusRef,
 }) {
-  const id = item.id
-  const label = kind === 'chat' ? item.title : item.name
+  const kind = menu?.kind || 'chat'
+  const id = menu?.id
+  const surface = menu?.surface || 'drawer'
+  const pinned = !!item?.pinned_at
+  const label = item ? (kind === 'chat' ? item.title : item.name) : ''
 
   return (
     <DrawerItemActionMenu
-      open={menuOpen}
+      open={Boolean(menu && item)}
       itemKind={kind}
       itemName={label}
       pinned={pinned}
-      canInstall={kind === 'app' && Boolean(item.slug)}
+      canInstall={kind === 'app' && Boolean(item?.slug)}
       canShare={kind === 'app' && isDrawerAppShareEligible(item)}
-      placement={menuPlacement}
+      placement={menu?.placement}
       restoreFocusRef={restoreFocusRef}
-      onClose={() => actions.toggleMenu(kind, id, false, surface)}
+      onClose={actions.closeMenu}
       onPin={() => actions.pin(kind, id, !pinned)}
       onRename={() => actions.startRename(kind, id, surface)}
       onInstall={() => actions.install(item)}
@@ -1972,4 +1940,4 @@ function DrawerItemMenu({
       onDeleteData={() => actions.removeData(id)}
     />
   )
-}
+})

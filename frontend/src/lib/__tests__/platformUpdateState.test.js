@@ -1,10 +1,28 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  deploymentKind,
+  deploymentKindLabel,
   platformActivationLabel,
   platformStatusFromApply,
   platformUpdateStatusLabel,
 } from '../platformUpdateState.js'
+
+test('the deployment classifier stays as binary as the backend that emits it', () => {
+  assert.equal(deploymentKind({ deployment: 'railway' }), 'railway')
+  assert.equal(deploymentKind({ deployment: 'self_hosted' }), 'self_hosted')
+  // deployment_kind() returns only those two, so anything else is unknown
+  // rather than a third kind the UI may render guidance for.
+  for (const unknown of [undefined, null, {}, { deployment: null }, { deployment: 'fly' }]) {
+    assert.equal(deploymentKind(unknown), null)
+  }
+})
+
+test('the deployment badge names an unresolved deployment self-hosted', () => {
+  assert.equal(deploymentKindLabel({ deployment: 'railway' }), 'Railway')
+  assert.equal(deploymentKindLabel({ deployment: 'self_hosted' }), 'Self-hosted')
+  assert.equal(deploymentKindLabel(null), 'Self-hosted')
+})
 
 test('a clean apply consumes the reviewed target but preserves restart readiness', () => {
   const projected = platformStatusFromApply(

@@ -39,6 +39,23 @@ export default function useShellReloadController(inputs) {
   const passiveRef = useRef(false)
   const timerRef = useRef(null)
   const lastInteractionAtRef = useRef(0)
+  const heldSinceRef = useRef(0)
+
+  // The recent-interaction window is a POLITENESS debounce, not a safety
+  // invariant: it exists so an apply does not land in the same breath as the
+  // owner's click. It must therefore be able to delay a pending reload by at
+  // most one recheck cycle. Left unbounded it is a starvation channel — any
+  // source that re-arms `lastInteractionAt` faster than RECENT_SHELL_INTERACTION_MS
+  // (a page whose own focus/pointer churn never settles) makes every recheck
+  // read "the owner just did something" and the new shell generation NEVER
+  // lands, silently and forever. The invariants that actually protect work in
+  // progress — a live turn, a visible canvas or multi-pane Builder, a composer
+  // holding text, live dictation, a hidden page — are unaffected and keep
+  // holding the reload for as long as they are true.
+  function interactionGraceSpent() {
+    return heldSinceRef.current > 0
+      && Date.now() - heldSinceRef.current >= RECHECK_MS
+  }
 
   function hasStableVisibleHold(passive) {
     const { doc, multiPaneBuilderVisibleRef, activeViewRef, activeChatIdRef } = inputsRef.current
@@ -66,7 +83,9 @@ export default function useShellReloadController(inputs) {
       streamingChatIds: streamingChatIdsRef.current,
       passiveRebuild: passive,
       voiceDictationActive: voiceDictationActiveRef.current,
-      lastUserInteractionAt: lastInteractionAtRef.current,
+      lastUserInteractionAt: interactionGraceSpent()
+        ? 0
+        : lastInteractionAtRef.current,
       visibilityState: doc.visibilityState,
     })
   }
@@ -81,9 +100,14 @@ export default function useShellReloadController(inputs) {
   }
 
   function deferReload({ passive = false } = {}) {
-    passiveRef.current = pendingRef.current
+    const alreadyPending = pendingRef.current
+    passiveRef.current = alreadyPending
       ? (passiveRef.current && passive)
       : passive
+    // Stamp when this generation first went on hold, so the politeness window
+    // above is measured against the reload's age rather than being restarted
+    // by every later interaction.
+    if (!alreadyPending) heldSinceRef.current = Date.now()
     pendingRef.current = true
     if (!hasStableVisibleHold(passiveRef.current)) scheduleCheck()
   }
@@ -107,6 +131,7 @@ export default function useShellReloadController(inputs) {
     }
     pendingRef.current = false
     passiveRef.current = false
+    heldSinceRef.current = 0
     if (timerRef.current) {
       win.clearTimeout(timerRef.current)
       timerRef.current = null
@@ -172,19 +197,25 @@ export default function useShellReloadController(inputs) {
     const releaseWhenHidden = () => {
       if (doc.visibilityState === 'hidden') checkPendingImpl()
     }
+    // `focusin` is deliberately NOT recorded. It fires identically for a real
+    // focus change and for the shell's own programmatic `.focus()` calls — the
+    // composer focus restore, pane selection, drawer and dialog focus traps,
+    // the Settings connection-row restore — so recording it let the page re-arm
+    // its own "the owner just did something" window on its own account. Nothing
+    // is lost: a user cannot move focus without a pointerdown, a touchstart or
+    // a keydown, all of which are still recorded, and typing is separately
+    // protected by hasProtectedEditingContent.
     const opts = { capture: true, passive: true }
     win.addEventListener('pointerdown', record, opts)
     win.addEventListener('touchstart', record, opts)
     win.addEventListener('keydown', record, opts)
     win.addEventListener('input', record, opts)
-    win.addEventListener('focusin', record, opts)
     doc.addEventListener('visibilitychange', releaseWhenHidden)
     return () => {
       win.removeEventListener('pointerdown', record, opts)
       win.removeEventListener('touchstart', record, opts)
       win.removeEventListener('keydown', record, opts)
       win.removeEventListener('input', record, opts)
-      win.removeEventListener('focusin', record, opts)
       doc.removeEventListener('visibilitychange', releaseWhenHidden)
       if (timerRef.current) win.clearTimeout(timerRef.current)
     }
