@@ -409,7 +409,7 @@ export function seedFromFlatTabs(tabs) {
   const clean = dedupTabs(sanitizeTabs(tabs))
   const paneId = 'p0'
   const keys = clean.map(tabModel.tabKey)
-  return {
+  const ws = {
     v: 1,
     viewMode: coerceViewMode('single'),
     layout: paneId,
@@ -423,6 +423,18 @@ export function seedFromFlatTabs(tabs) {
     focusedPaneId: paneId,
     nextId: 1,
   }
+  // Seed the Standard single-screen slot from the DEPARTING (last-active) item so a
+  // fresh/fallback boot in single mode paints that item through its OWN slot — the
+  // derivations are borrow-free, so an unseeded slot would resolve to the empty New-
+  // Chat home instead of the active chat (first-boot regression). This writes the
+  // same concrete { kind, id } shape that seedSingleScreenIfAbsent / completeClose-
+  // Transition seed via focusedSlotSeed. An EMPTY seed has no departing item, so the
+  // slot stays ABSENT: the migration marker survives (normalize preserves absence),
+  // and RESET_FLAT's slot-preservation clause then carries a real seeded slot forward
+  // instead of clobbering it with a would-be empty null.
+  const seed = focusedSlotSeed(ws)
+  if (seed) ws.singleScreen = seed
+  return ws
 }
 
 // The two view-modes. 'panes' is the tiled default; 'single' collapses a

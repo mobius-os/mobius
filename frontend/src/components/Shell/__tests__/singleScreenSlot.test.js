@@ -31,26 +31,33 @@ function tiledBuilder() {
 // ── Forgiving parse / normalize (design: forward-compat, no v2 bump) ─────────
 
 test('normalize preserves property ABSENCE as the migration marker', () => {
+  // A legacy/uninitialized blob has NO singleScreen property. A fresh seed now writes
+  // a concrete slot from its departing item, so strip it to model the legacy shape
+  // whose ABSENCE normalize must preserve as the migration marker.
   const ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
-  assert.equal('singleScreen' in ws, false, 'a fresh seed has no slot (uninitialized)')
+  delete ws.singleScreen
+  assert.equal('singleScreen' in ws, false, 'a legacy blob has no slot (uninitialized)')
   const n = paneModel.normalize(ws)
   assert.equal('singleScreen' in n, false, 'absence survives normalize')
 })
 
-test('a fresh standard seed reports the empty home until its slot initializes — never Builder focus', () => {
-  // Two-worlds: an uninitialized Standard (absent slot) is its OWN empty home; it
-  // never borrows the focused Builder pane (the first item opened initializes it).
+test('a fresh standard seed initializes its slot to the departing item — via the SLOT, not a borrow', () => {
+  // Two-worlds: a fresh/fallback seed writes a CONCRETE single-screen slot from the
+  // departing (last-active) item, so single mode paints that item through its OWN slot
+  // — first boot lands on the active chat, not the empty home. The derivations stay
+  // borrow-free: a genuinely absent slot is still the home (tested elsewhere).
   const chat = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
-  assert.equal('singleScreen' in chat, false)
+  assert.deepEqual(chat.singleScreen, { kind: 'chat', id: '5' }, 'seeded from the departing item')
   assert.equal(chat.viewMode, 'single')
-  assert.equal(paneModel.activeContentRoute(chat).chatId, null, 'absent slot is home, not the focused chat')
+  assert.equal(paneModel.activeContentRoute(chat).chatId, '5', 'the seeded slot is the active chat')
 
   const app = paneModel.seedFromFlatTabs([makeTab('chat', '5'), makeTab('app', '42')])
-  assert.equal('singleScreen' in app, false)
-  assert.equal(paneModel.activeContentRoute(app).appId, null, 'never borrows the focused app')
+  assert.deepEqual(app.singleScreen, { kind: 'app', id: '42' }, 'the last-active tab seeds the slot')
+  assert.equal(paneModel.activeContentRoute(app).appId, 42)
   assert.equal(paneModel.activeContentRoute(app).chatId, null)
 
   const empty = paneModel.seedFromFlatTabs([])
+  assert.equal('singleScreen' in empty, false, 'an empty seed has no departing item — slot stays absent')
   assert.equal(paneModel.activeContentRoute(empty).chatId, null, 'an empty first boot starts at home')
 })
 
@@ -116,6 +123,8 @@ test('activeKeyForOwner treats a legacy absent slot as empty — never the focus
   const legacy = paneModel.seedFromFlatTabs([
     { kind: 'chat', id: '5', title: 'Five' },
   ])
+  // Strip the seeded slot to model an uninitialized legacy blob (absent marker).
+  delete legacy.singleScreen
   assert.equal('singleScreen' in legacy, false)
   // Two-worlds: the Standard owner selects through its OWN slot only. An absent slot
   // is empty (null), never the focused Builder pane's chat.
@@ -135,6 +144,9 @@ test('activeKeyForOwner treats a legacy absent slot as empty — never the focus
 
 test('SET_VIEW_MODE to single seeds the slot from the focused item, once', () => {
   const ws = tiledBuilder() // focused chat 5
+  // Model a legacy uninitialized builder (no slot) so the first builder→single toggle
+  // must seed from focus — a fresh seed now pre-fills the slot, which would bypass it.
+  delete ws.singleScreen
   const s1 = reduce(init(ws), { type: 'SET_VIEW_MODE', mode: 'single' })
   assert.deepEqual(s1.ws.singleScreen, { kind: 'chat', id: '5' }, 'seeded from focus')
   // Back to panes, focus the app, back to single: the slot is NOT reseeded.
@@ -148,6 +160,9 @@ test('SET_VIEW_MODE to single seeds the slot from the focused item, once', () =>
 
 test('seeding a Settings-focused builder pane uses its underlying concrete tab', () => {
   let ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
+  // Model a legacy uninitialized builder (no slot) so the toggle seeds from focus and
+  // exercises the Settings-skip in focusedSlotSeed rather than the pre-seeded slot.
+  delete ws.singleScreen
   ws = paneModel.openTab(ws, tabModel.settingsTab(), { paneId: ws.focusedPaneId, activate: true })
   const s = reduce(init(ws), { type: 'SET_VIEW_MODE', mode: 'single' })
   assert.deepEqual(s.ws.singleScreen, { kind: 'chat', id: '5' },

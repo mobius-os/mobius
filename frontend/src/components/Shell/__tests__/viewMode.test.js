@@ -23,14 +23,18 @@ function twoPanes() {
 
 // ── viewMode field + persistence (design: view-mode toggle, forgiving parse) ──
 
-test('first boot workspaces default to an empty standard single-screen mode', () => {
-  // Two-worlds: an uninitialized Standard (absent slot) is its OWN empty home — it
-  // never borrows the focused Builder pane, even when the tree already holds a chat.
+test('first boot workspaces default to standard single-screen mode on the active item', () => {
+  // Two-worlds: a fresh non-empty seed initializes its OWN single-screen slot from the
+  // departing (last-active) item, so single mode paints that item THROUGH the slot —
+  // not a borrow of the focused Builder pane. A genuinely empty first boot has no
+  // departing item, so its slot stays absent and it starts at the New-Chat home.
   assert.equal(freshWorkspace().viewMode, 'single')
-  assert.equal(paneModel.activeContentRoute(freshWorkspace()).chatId, null, 'absent slot is home, never the tree chat')
+  assert.deepEqual(freshWorkspace().singleScreen, { kind: 'chat', id: '5' }, 'seeded from the last-active item')
+  assert.equal(paneModel.activeContentRoute(freshWorkspace()).chatId, '5', 'the seeded slot is the active chat')
   const firstBoot = paneModel.parseWorkspace(null)
   assert.equal(firstBoot.viewMode, 'single')
-  assert.equal(paneModel.activeContentRoute(firstBoot).chatId, null)
+  assert.equal('singleScreen' in firstBoot, false, 'an empty first boot has no departing item — slot absent')
+  assert.equal(paneModel.activeContentRoute(firstBoot).chatId, null, 'empty first boot starts at home')
 })
 
 test('setViewMode sets the mode and is same-reference on a no-op', () => {

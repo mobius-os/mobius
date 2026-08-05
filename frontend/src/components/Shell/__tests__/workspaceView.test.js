@@ -433,6 +433,9 @@ test('legacy (ABSENT slot) single mode paints the New Chat landing — never the
   // focused Builder pane; an uninitialized slot is the empty home until an item is
   // opened in single mode.
   let ws = twoPaneChatAndApp() // app 42 focused in Builder
+  // Strip the seeded slot to model an uninitialized legacy blob (absent marker); the
+  // fresh seed now writes a concrete slot, but a genuinely absent one stays home.
+  delete ws.singleScreen
   assert.equal('singleScreen' in ws, false)
   const v = singleView(ws)
   assert.equal(v.fullBleedKey, EMPTY_SINGLE_SURFACE_KEY, 'the New Chat landing, not the focused app')
