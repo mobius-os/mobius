@@ -3373,6 +3373,43 @@ async def run_chat(
       run_token=run_token,
     )
     runtime_settled = True
+  except asyncio.CancelledError:
+    raise
+  except Exception as exc:
+    # A setup-time exception in this detached task previously vanished
+    # ("Task exception was never retrieved"): the run row stayed 'running',
+    # the broadcast never settled, and every send presented as an eternal
+    # spinner while the container reported healthy — the 2026-08-04
+    # missing-column outage. Surface the terminal failure exactly like the
+    # other failure paths and durably fail the run. The queue marker keeps
+    # its FAILED_LEAVE_MARKER default above, so reconciliation still sees
+    # the evidence it needs.
+    _get_logger().exception(
+      "chat turn failed before the agent started chat_id=%s", chat_id,
+    )
+    bc = get_broadcast(chat_id) if chat_id else None
+    if bc is not None:
+      bc.publish({
+        "type": "error",
+        "message": (
+          "This turn failed before the agent could start "
+          f"({type(exc).__name__}). Your message is saved; the full error "
+          "is in the server log."
+        ),
+      })
+      bc.publish({"type": "done"})
+      bc.mark_completed()
+    if chat_id:
+      _publish_chat_run_finished(chat_id)
+      try:
+        await _finish_run_strict(
+          chat_id, run_token or "", terminal_status="failed",
+        )
+      except Exception:
+        _get_logger().warning(
+          "setup-failure FinishRun did not persist chat_id=%s "
+          "(reconciliation will repair)", chat_id, exc_info=True,
+        )
   finally:
     stopped_gen = _clear_after_terminal_generation.get(chat_id)
     clear_stopped_run = run_gen is not None and stopped_gen == run_gen

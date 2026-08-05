@@ -7,21 +7,33 @@ import RecoveryLink, {
   RECOVERY_CONTROL_URL,
 } from '../../components/ErrorBoundary/RecoveryLink.jsx'
 
-test('recovery points outside the Mobius container with self-host guidance', () => {
-  assert.equal(RECOVERY_CONTROL_URL, 'https://www.mobius.you/')
-  const defaultHtml = renderToStaticMarkup(createElement(RecoveryLink))
-  assert.match(defaultHtml, /class="errbound__recovery"/)
-  assert.match(defaultHtml, /If the problem continues after trying again/)
-  assert.match(defaultHtml, new RegExp(`href="${RECOVERY_CONTROL_URL}"`))
-  assert.match(defaultHtml, /target="_top"/)
-  assert.match(defaultHtml, /mobiusctl recovery start/)
-  assert.doesNotMatch(defaultHtml, /href="\/recover/)
+function renderLink(props = {}) {
+  return renderToStaticMarkup(createElement(RecoveryLink, props))
+}
 
-  const standaloneHtml = renderToStaticMarkup(createElement(RecoveryLink, {
+test('the recovery link always offers both external recovery routes', () => {
+  assert.equal(RECOVERY_CONTROL_URL, 'https://www.mobius.you/')
+  const html = renderLink()
+  assert.match(html, /class="errbound__recovery"/)
+  assert.match(html, /If the problem continues after trying again/)
+  assert.match(html, /Managed hosting:/)
+  assert.match(html, new RegExp(`href="${RECOVERY_CONTROL_URL}"`))
+  assert.match(html, /target="_top"/)
+  assert.match(html, />open Recovery in mobius\.you<\/a>/)
+  assert.match(html, /Self-hosted — run this on the server:/)
+  assert.match(html, /<code[^>]*>mobiusctl recovery start<\/code>/)
+  // It is a fallback for a surface that already failed, so it must never point
+  // back at an in-app recovery route.
+  assert.doesNotMatch(html, /href="\/recover/)
+})
+
+test('the link takes its host surface class and lead', () => {
+  const html = renderLink({
     className: 'standalone-app__recovery',
     lead: 'If the app still won’t open,',
-  }))
-  assert.match(standaloneHtml, /class="standalone-app__recovery"/)
-  assert.match(standaloneHtml, /If the app still won’t open/)
-  assert.match(standaloneHtml, />open Recovery in mobius\.you<\/a>/)
+  })
+  assert.match(html, /class="standalone-app__recovery"/)
+  assert.match(html, /If the app still won’t open/)
+  assert.match(html, /Managed hosting:/)
+  assert.match(html, /<code[^>]*>mobiusctl recovery start<\/code>/)
 })

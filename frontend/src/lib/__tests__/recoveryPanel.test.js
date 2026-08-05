@@ -55,7 +55,7 @@ test('recovery panel exposes last resorts only after repair fails', () => {
   assert.match(failed, /href="https:\/\/www\.mobius\.you\/"/)
   assert.match(failed, /target="_top"/)
   assert.match(failed, /open Recovery in mobius\.you/i)
-  assert.match(failed, /<code>mobiusctl recovery start<\/code>/)
+  assert.match(failed, /<code[^>]*>mobiusctl recovery start<\/code>/)
 
   const restricted = renderPanel({
     attempt: { phase: 'refreshed' },
@@ -63,5 +63,39 @@ test('recovery panel exposes last resorts only after repair fails', () => {
   })
   assert.doesNotMatch(restricted, /Start repair chat|Retry repair chat/)
   assert.match(restricted, /open Recovery in mobius\.you/i)
-  assert.match(restricted, /<code>mobiusctl recovery start<\/code>/)
+  assert.match(restricted, /<code[^>]*>mobiusctl recovery start<\/code>/)
+})
+
+test('a directed repair keeps the live repair chat reachable while it works', () => {
+  // 'agent-directed' is written only once the prompt was delivered, so the
+  // chat exists and the agent may be mid-work or waiting on an answer.
+  // Telling the owner to wait must never be the only thing they can do.
+  const directed = renderPanel({
+    attempt: { phase: 'agent-directed', chatId: 'repair/chat' },
+  })
+  assert.match(directed, /repair request was sent/i)
+  assert.match(directed, /Give the agent a few minutes/i)
+  assert.match(directed, /open the repair chat to follow along/i)
+  assert.match(directed, />Refresh again</)
+  assert.match(directed, />Open repair chat</)
+  assert.match(directed, /chat=repair%2Fchat/)
+})
+
+test('a directed repair with no recorded chat only offers the refresh', () => {
+  const directed = renderPanel({ attempt: { phase: 'agent-directed' } })
+  assert.match(directed, /repair request was sent/i)
+  assert.match(directed, /Give the agent a few minutes/i)
+  assert.doesNotMatch(directed, /open the repair chat/i)
+  assert.doesNotMatch(directed, />Open repair chat</)
+})
+
+test('a failed dispatch does not deny a repair chat it can still link to', () => {
+  // The chat is created before the prompt is sent, so a send failure leaves a
+  // real chat behind. The copy must not contradict the link beside it.
+  const failed = renderPanel({
+    attempt: { phase: 'agent-failed', chatId: 'repair/chat' },
+  })
+  assert.match(failed, /repair request didn’t go through/i)
+  assert.doesNotMatch(failed, /couldn’t start/i)
+  assert.match(failed, />Open repair chat</)
 })

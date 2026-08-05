@@ -741,6 +741,36 @@ def get_owner_or_app_with_github_access(
   )
 
 
+def get_owner_or_app_with_connections_manage(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Owner JWT, OR an app-scoped JWT whose App row has connections_manage=true.
+
+  The connection-registry grant: list/add/re-check/toggle/remove on
+  /api/connectors. Stored keys and broker capabilities never cross that
+  surface (responses omit them; the broker keeps its own loopback gate), so
+  the grant manages rows without ever holding what they protect. Like
+  github_access, permission is read from the App row at request time, so a
+  reinstall from a manifest without the grant revokes it on the next request.
+  """
+  owner = principal.owner
+  if principal.app_id is None:
+    return owner
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  if bool(app.connections_manage):
+    return owner
+  raise HTTPException(
+    status_code=403,
+    detail=(
+      "This app needs permissions.connections_manage=true in its manifest "
+      "to manage MCP connections on your behalf."
+    ),
+  )
+
+
 def get_owner_or_app_with_github_connect(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),

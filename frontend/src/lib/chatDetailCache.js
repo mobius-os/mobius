@@ -1,6 +1,6 @@
-// Canonical cache projection for GET /api/chats/{id}. ChatView and the shell's
-// bounded idle prefetch must agree on this shape so a prefetched chat mounts as
-// a real warm chat rather than through a second, parallel cache convention.
+// Canonical cache projection for GET /api/chats/{id}: the shape ChatView mounts
+// from on activation, kept as one cache convention rather than a second,
+// parallel one.
 
 // Ordinary background persistence keeps the same recent page a cold activation
 // asks the server for. The explicit reload handoff deliberately bypasses this

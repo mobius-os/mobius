@@ -1011,8 +1011,62 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0006_connector_capability_identity",
     "0007_chat_has_messages",
     "0008_chat_search_documents",
+    "0009_app_connections_manage",
   ]
   assert second == first
+
+
+def test_connections_manage_reaches_a_ledgered_database(tmp_path):
+  """The 2026-08-04 outage: a column added only to recorded 0001 never
+  arrives on a database whose ledger already contains 0001. A numbered,
+  schema-gated migration must add it — including on a hand-patched table."""
+  eng = create_engine(f"sqlite:///{tmp_path / 'ledgered-apps.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps ("
+      "id INTEGER PRIMARY KEY, name VARCHAR(255), slug VARCHAR(128), "
+      "token_nonce VARCHAR(32), capability_contract JSON)"
+    ))
+    conn.execute(text(
+      "CREATE TABLE schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    # The ledger says every pre-0009 migration ran cleanly — exactly the
+    # production state where the ORM expected a column the DB lacked.
+    for version in (
+      "0001_legacy_schema_convergence",
+      "0002_chat_run_goal_objective",
+      "0003_chat_run_root_identity",
+      "0004_app_identity_required",
+      "0005_connectors",
+      "0006_connector_capability_identity",
+      "0007_chat_has_messages",
+      "0008_chat_search_documents",
+    ):
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) "
+        "VALUES (:version, '2026-08-04 00:00:00')"
+      ), {"version": version})
+
+  run_migrations(eng)
+  columns = {c["name"] for c in inspect(eng).get_columns("apps")}
+  assert "connections_manage" in columns
+  # Idempotent over the hand-patched production shape too.
+  run_migrations(eng)
+  assert "0009_app_connections_manage" in {
+    entry["version"] for entry in schema_migration_history(eng)
+  }
+
+
+def test_orm_schema_gaps_reports_missing_columns(tmp_path):
+  from app.database import Base, orm_schema_gaps
+
+  eng = create_engine(f"sqlite:///{tmp_path / 'parity.db'}")
+  Base.metadata.create_all(bind=eng)
+  assert orm_schema_gaps(eng) == []
+  with eng.begin() as conn:
+    conn.execute(text("ALTER TABLE apps DROP COLUMN connections_manage"))
+  assert "apps.connections_manage" in orm_schema_gaps(eng)
 
 
 def test_connectors_migration_preserves_preview_era_rows(tmp_path):

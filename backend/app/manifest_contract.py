@@ -220,6 +220,7 @@ def validate_manifest_contract(manifest) -> None:
     "github_access",
     "github_connect",
     "filesystem_access",
+    "connections_manage",
   ):
     if field in permissions and not isinstance(permissions[field], bool):
       _fail(f"Manifest `permissions.{field}` must be a boolean.")

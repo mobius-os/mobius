@@ -7,7 +7,7 @@ import {
 import RecoveryLink from './RecoveryLink.jsx'
 import './RecoveryPanel.css'
 
-function recoveryMessage({ phase, attemptPhase, canAskAgent, subject }) {
+function recoveryMessage({ phase, attemptPhase, canAskAgent, hasRepairChat, subject }) {
   const currentSubject = subject === 'screen' ? 'this screen' : 'the app'
   if (phase === 'refresh') {
     return `This ${subject} hit an unexpected error. Refreshing won’t delete your chats.`
@@ -19,9 +19,15 @@ function recoveryMessage({ phase, attemptPhase, canAskAgent, subject }) {
     return `Refreshing didn’t fix ${currentSubject}. Use system recovery to diagnose the problem without relying on this embedded chat.`
   }
   if (attemptPhase === 'agent-directed') {
-    return `The repair chat started, but ${currentSubject} still can’t open. System recovery is the remaining fallback.`
+    // The agent may already be mid-work or waiting on a clarifying question,
+    // so waiting is a suggestion, never the only route.
+    return hasRepairChat
+      ? `The repair request was sent. Give the agent a few minutes, then refresh ${currentSubject} — or open the repair chat to follow along and answer any questions.`
+      : `The repair request was sent. Give the agent a few minutes, then refresh ${currentSubject}.`
   }
-  return 'The repair chat couldn’t start. You can retry it or use system recovery as a last resort.'
+  // The chat itself may exist — delivery is what failed — so this must not
+  // claim otherwise while an "Open repair chat" link sits beside it.
+  return 'The repair request didn’t go through. You can retry it, or use system recovery as a last resort.'
 }
 
 export default function RecoveryPanel({
@@ -73,7 +79,13 @@ export default function RecoveryPanel({
         {title}
       </h1>
       <p className="recovery-panel__body">
-        {recoveryMessage({ phase, attemptPhase, canAskAgent, subject })}
+        {recoveryMessage({
+          phase,
+          attemptPhase,
+          canAskAgent,
+          hasRepairChat: !!repairChatId,
+          subject,
+        })}
       </p>
       <details className="recovery-panel__details">
         <summary>Technical details</summary>

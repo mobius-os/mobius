@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   buildDrawerSections,
   filterInstalledApps,
+  findDrawerMenuItem,
 } from '../../components/Drawer/drawerInformationArchitecture.js'
 
 test('drawer separates mixed pins from mixed recents ordered by activity', () => {
@@ -117,4 +118,14 @@ test('app search covers names, descriptions, and slugs without reordering', () =
   assert.equal(filterInstalledApps(apps, 'places')[0].id, 2)
   assert.equal(filterInstalledApps(apps, 'missing').length, 0)
   assert.equal(filterInstalledApps(apps, ''), apps)
+})
+
+test('a drawer menu item becomes ordinary absence when its row disappears', () => {
+  const chat = { id: 'chat-a', title: 'Chat A' }
+  const app = { id: 7, name: 'Atlas' }
+
+  assert.equal(findDrawerMenuItem({ kind: 'chat', id: chat.id }, [chat], [app]), chat)
+  assert.equal(findDrawerMenuItem({ kind: 'app', id: app.id }, [chat], [app]), app)
+  assert.equal(findDrawerMenuItem({ kind: 'chat', id: chat.id }, [], [app]), null)
+  assert.equal(findDrawerMenuItem(null, [chat], [app]), null)
 })

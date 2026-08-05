@@ -1452,6 +1452,56 @@ def _add_connector_capability_identity(eng) -> None:
       ))
 
 
+def orm_schema_gaps(eng) -> list[str]:
+  """ORM-mapped columns/tables the live database lacks (``table.column``).
+
+  Runs after ``create_all`` + migrations, so any gap is a written-code bug
+  (a declared column with no migration), not a pending upgrade. Such a gap
+  is invisible at boot and fatal at first query — the 2026-08-04 outage
+  hung every chat turn on one missing ``apps`` column while the container
+  reported healthy.
+  """
+  from sqlalchemy import inspect as sa_inspect
+
+  inspector = sa_inspect(eng)
+  live_tables = set(inspector.get_table_names())
+  gaps: list[str] = []
+  for table in Base.metadata.sorted_tables:
+    if table.name not in live_tables:
+      gaps.append(f"{table.name} (missing table)")
+      continue
+    live = {column["name"] for column in inspector.get_columns(table.name)}
+    gaps.extend(
+      f"{table.name}.{column.name}"
+      for column in table.columns
+      if column.name not in live
+    )
+  return gaps
+
+
+def _add_app_connections_manage(eng) -> None:
+  """Grant column for the Connections mini-app's registry access.
+
+  Numbered migration, NOT a ``_converge_legacy_schema`` ALTER: 0001 is a
+  recorded one-shot, so a column added there never reaches a database that
+  already ran it — the exact gap behind the 2026-08-04 silent-turn outage.
+  Schema-gated for the hand-patched production database and for fresh
+  installs whose tables are created from ORM metadata.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  columns = {
+    column["name"] for column in sa_inspect(eng).get_columns("apps")
+  }
+  if "connections_manage" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE apps ADD COLUMN connections_manage BOOLEAN "
+      "NOT NULL DEFAULT FALSE"
+    ))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -1461,6 +1511,7 @@ _SCHEMA_MIGRATIONS = (
   ("0006_connector_capability_identity", _add_connector_capability_identity),
   ("0007_chat_has_messages", _add_chat_has_messages),
   ("0008_chat_search_documents", _create_chat_search_tables),
+  ("0009_app_connections_manage", _add_app_connections_manage),
 )
 
 

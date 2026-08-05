@@ -468,9 +468,9 @@
     // fetch/storage save failing at Snake's game-over — would otherwise
     // destroy the whole app to a blank/error screen. So once mounted we
     // keep the app on screen and only LOG the error; pre-mount errors
-    // still surface the panel. `window.__frameMounted` is set by a
-    // passive effect after React commits the first render (see
-    // MountSignal in the module script below) — NOT right after
+    // still surface the panel. `window.__frameMounted` is set by a stable
+    // DOM ref while React commits the first render (see MountSignal in the
+    // module script below) — NOT right after
     // createRoot().render(), because render() only schedules the first
     // render and a component that throws during it reports the error
     // asynchronously, after render() returns.
@@ -543,10 +543,11 @@
     //      cache offline; this opaque frame cannot. The parent transfers only
     //      the exact source-attributed app/version bytes back.
     //   4. iframe imports those bytes from a short-lived blob URL and mounts.
-    //   5. iframe posts {type:'moebius:frame-mounted', appId} AFTER the
-    //      first render COMMITS (MountSignal's effect, not render()-
-    //      returned) — parent hides the loading overlay / promotes the
-    //      buffered frame in a version swap.
+    //   5. iframe posts {type:'moebius:frame-mounted', appId} as the first
+    //      render COMMITS (MountSignal's stable ref, not render()-returned).
+    //      Ref attachment precedes app layout effects, so their mount-time host
+    //      requests cannot overtake promotion of this frame. The parent then
+    //      hides the loading overlay / promotes the buffered version swap.
     //   5b. on a terminal load failure instead of (5), iframe posts
     //      {type:'moebius:frame-error', appId} so the parent hides the
     //      overlay and this frame's error panel becomes visible.
@@ -576,7 +577,6 @@
     let createRoot = null;
     let createElement = null;
     let Fragment = null;
-    let useEffect = null;
     const COMPILED_RUNTIME_ABI = 1;
     let suspendedScrollFrame = null;
     let nextModuleRequest = 0;
@@ -870,33 +870,25 @@
     }
 
     // Flips the post-mount error guard (handleFrameError above) AND tells the
-    // parent the app is mounted. Rendered as the FIRST sibling of the app
-    // component, so its passive effect is the first thing React runs after
-    // COMMITTING the initial render — i.e. the app's DOM is actually on
-    // screen. A component that throws DURING its first render aborts the
-    // commit, this effect never runs, and the error panel still shows (the
-    // pre-mount path). A throw in the app's own mount effects happens with
-    // committed, visible DOM, so counting it as post-mount (suppressed +
-    // logged) is correct.
-    //
-    // frame-mounted MUST be posted here and not after createRoot().render()
-    // in loadModule: render() only SCHEDULES the first render, so posting
-    // there claims "mounted" for a component that may still throw during
-    // that render. The parent's double-buffered swap (AppCanvas) PROMOTES
-    // the new frame and unmounts the old working one on this signal — a
-    // premature post would swap in a frame whose commit then aborts,
-    // stranding the owner on an error panel with the working frame already
-    // gone. Posting at commit makes "mounted" mean visible DOM for both the
-    // parent's overlay and the swap.
+    // parent the app is mounted. This stable ref is attached during React's
+    // commit, before app layout effects can invoke a host capability. A render
+    // failure never commits the marker, while an effect failure happens after
+    // visible DOM exists and correctly counts as post-mount.
+    function signalFrameMounted(node) {
+      if (!node || window.__frameMounted) return;
+      window.__frameMounted = true;
+      window.parent.postMessage(
+        { type: 'moebius:frame-mounted', appId: _FRAME_APP_ID },
+        window.location.origin
+      );
+    }
+
     function MountSignal() {
-      useEffect(() => {
-        window.__frameMounted = true;
-        window.parent.postMessage(
-          { type: 'moebius:frame-mounted', appId: _FRAME_APP_ID },
-          window.location.origin
-        );
-      }, []);
-      return null;
+      return createElement('span', {
+        hidden: true,
+        'aria-hidden': 'true',
+        ref: signalFrameMounted,
+      });
     }
 
     // Immersive safe-area passthrough. env(safe-area-inset-*) reads 0 inside
@@ -1121,14 +1113,12 @@
         if (!compiledRuntime ||
             compiledRuntime.abi !== COMPILED_RUNTIME_ABI ||
             typeof compiledRuntime.createRoot !== 'function' ||
-            typeof compiledRuntime.createElement !== 'function' ||
-            typeof compiledRuntime.useEffect !== 'function') {
+            typeof compiledRuntime.createElement !== 'function') {
           throw new Error('The app bundle is missing the compiled runtime.');
         }
         createRoot = compiledRuntime.createRoot;
         createElement = compiledRuntime.createElement;
         Fragment = compiledRuntime.Fragment;
-        useEffect = compiledRuntime.useEffect;
         const Component = mod.default;
         if (!Component) {
           showErr('Module error', 'The app module has no default export.');
@@ -1137,12 +1127,10 @@
         mountedRoot = createRoot(document.getElementById('root'));
         mountedComponent = Component;
         renderMountedComponent();
-        // frame-mounted is posted by MountSignal's passive effect (above),
-        // which runs only after React COMMITS this first render. Posting
-        // here would be premature: render() has merely been scheduled, and
-        // a component that throws during its first render would have
-        // already claimed "mounted" — the parent's double-buffered swap
-        // would promote a dead frame on that lie. See MountSignal.
+        // frame-mounted is posted by MountSignal's commit ref (above).
+        // Posting here would be premature: render() has merely been scheduled,
+        // and a component that throws during its first render would have already
+        // claimed "mounted". See MountSignal.
       } catch (err) {
         showErr('Failed to load app', err.stack || err.message);
       } finally {

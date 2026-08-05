@@ -7,10 +7,12 @@ monkeypatching `install._http_get` / `_github_contents` with canned bytes,
 the same spirit as test_apps_install's mocked AsyncClient.
 """
 
+import asyncio
 import json
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
 from app import skills as skills_mod
 from app.config import get_settings
@@ -197,6 +199,14 @@ def test_list_skills_route(client, auth, skills_dir):
   assert row["id"] == "cron"
   assert row["description"] == "Recurring jobs."
   assert "uses_30d" in row
+  # Callers can read the install bounds instead of hard-coding them.
+  assert r.json()["install_contract"] == {
+    "version": 1,
+    "max_resources": skills_mod.RESOURCE_COUNT_MAX,
+    "max_total_resource_bytes": skills_mod.RESOURCE_TOTAL_MAX,
+    "max_depth": skills_mod.RESOURCE_MAX_DEPTH,
+    "max_skill_bytes": 256 * 1024,
+  }
 
 
 def test_install_from_raw_url(client, auth, skills_dir, monkeypatch):
@@ -236,6 +246,8 @@ def _dir_install_mocks(monkeypatch, rs, tree, raw_files):
 
   `tree` entries are subtree-relative (the `<ref>:<path>` trees call); raw
   bytes are served from raw.githubusercontent.com URLs at the PINNED OID.
+  Blob entries default to a regular-file mode so each case can state only the
+  attribute it is about.
   """
 
   async def fake_resolve(client_, repo, ref):
@@ -247,7 +259,10 @@ def _dir_install_mocks(monkeypatch, rs, tree, raw_files):
 
   async def fake_tree(client_, repo, path, ref):
     assert ref == PINNED
-    return tree
+    return [
+      {"mode": "100644", **entry} if entry.get("type") == "blob" else entry
+      for entry in tree
+    ]
 
   monkeypatch.setattr(rs, "_resolve_commit", fake_resolve)
   monkeypatch.setattr(rs, "_github_contents", fake_contents)
@@ -266,9 +281,6 @@ def test_install_repo_dir_fetches_whole_subtree_of_vetted_resources(
     {"type": "blob", "path": "ref.md", "size": 9},
     {"type": "blob", "path": "scripts/helper.py", "size": 12},
     {"type": "tree", "path": "scripts"},
-    {"type": "blob", "path": "logo.png", "size": 10},  # unvetted suffix
-    {"type": "blob", "path": ".github/ci.yml", "size": 5},  # dot segment
-    {"type": "blob", "path": "a/b/c/d/e/f/g/h/deep.md", "size": 5},  # over depth cap
   ]
   _dir_install_mocks(monkeypatch, rs, tree, {
     f"{raw}/SKILL.md": b"---\nname: pdf\ndescription: PDFs.\n---\n",
@@ -284,11 +296,164 @@ def test_install_repo_dir_fetches_whole_subtree_of_vetted_resources(
   # Subdirectory structure is preserved on disk.
   assert (skills_dir / "pdf" / "scripts" / "helper.py").read_text() == "print('hi')\n"
   assert (skills_dir / "pdf" / "ref.md").read_text() == "reference"
-  # Unvetted suffix, dot segments, and over-depth paths were never fetched
-  # (_fake_fetch would have raised) and never materialized.
-  assert not (skills_dir / "pdf" / "logo.png").exists()
-  assert not (skills_dir / "pdf" / ".github").exists()
-  assert not (skills_dir / "pdf" / "a").exists()
+
+
+@pytest.mark.parametrize(
+  "entry",
+  [
+    {"type": "blob", "path": "logo.png", "size": 10},  # unvetted suffix
+    {"type": "blob", "path": ".github/ci.yml", "size": 5},  # dot segment
+    {"type": "blob", "path": "a/b/c/d/e/f/g/h/deep.md", "size": 5},  # over depth
+    {"type": "blob", "path": "link.md", "size": 9, "mode": "120000"},  # symlink
+    {"type": "blob", "path": "gitlink.md", "size": 9, "mode": None},  # no mode
+    {"type": "commit", "path": "nested-repo", "size": 0},  # submodule
+  ],
+)
+def test_install_repo_dir_rejects_unsupported_entries_without_truncating(
+  client, auth, skills_dir, monkeypatch, entry,
+):
+  """An unsupported entry fails the whole install rather than dropping a file.
+
+  A skill package is one reviewed instruction tree. Publishing it minus the
+  parts the installer could not carry hands the caller a skill whose SKILL.md
+  references files that are not there — so the install is refused instead, and
+  no resource is fetched (`_dir_install_mocks` serves no raw bytes here, so any
+  fetch attempt would raise).
+  """
+  from app.routes import skills as rs
+
+  tree = [
+    {"type": "blob", "path": "SKILL.md", "size": 9},
+    entry,
+  ]
+  _dir_install_mocks(monkeypatch, rs, tree, {})
+
+  response = client.post(
+    "/api/skills/install", headers=auth,
+    json={"repo": "o/r", "path": "strict", "ref": "main"},
+  )
+
+  assert response.status_code == 400, response.text
+  assert "nothing was installed" in response.json()["detail"]
+  assert not (skills_dir / "strict").exists()
+  assert not (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).exists()
+
+
+def test_install_repo_dir_rejects_duplicate_case_variants_of_skill_md(
+  client, auth, skills_dir, monkeypatch,
+):
+  """Two case-variants make "the" SKILL.md ambiguous; pick neither."""
+  from app.routes import skills as rs
+
+  tree = [
+    {"type": "blob", "path": "SKILL.md", "size": 9},
+    {"type": "blob", "path": "skill.md", "size": 9},
+  ]
+  _dir_install_mocks(monkeypatch, rs, tree, {})
+
+  response = client.post(
+    "/api/skills/install", headers=auth,
+    json={"repo": "o/r", "path": "ambiguous", "ref": "main"},
+  )
+
+  assert response.status_code == 400, response.text
+  assert "more than one" in response.json()["detail"]
+  assert not (skills_dir / "ambiguous").exists()
+
+
+def test_install_repo_dir_rejects_duplicate_tree_entries(
+  client, auth, skills_dir, monkeypatch,
+):
+  """A path listed twice means the listing is not the tree it claims to be."""
+  from app.routes import skills as rs
+
+  tree = [
+    {"type": "blob", "path": "SKILL.md", "size": 9},
+    {"type": "blob", "path": "ref.md", "size": 5},
+    {"type": "blob", "path": "ref.md", "size": 5},
+  ]
+  _dir_install_mocks(monkeypatch, rs, tree, {})
+
+  response = client.post(
+    "/api/skills/install", headers=auth,
+    json={"repo": "o/r", "path": "dupe", "ref": "main"},
+  )
+
+  assert response.status_code == 502, response.text
+  assert "more than once" in response.json()["detail"]
+  assert not (skills_dir / "dupe").exists()
+
+
+def test_install_repo_dir_preserves_a_large_command_routed_package(
+  client, auth, skills_dir, monkeypatch,
+):
+  """A many-file toolkit installs whole, fetched under a concurrency cap."""
+  from app.routes import skills as rs
+
+  raw = f"https://raw.githubusercontent.com/o/r/{PINNED}/toolkit"
+  resources = {
+    **{
+      f"commands/command-{index:02d}.mjs": f"export default {index}\n".encode()
+      for index in range(30)
+    },
+    "components/card.tsx": b"export const Card = () => null\n",
+    "components/panel.jsx": b"export const Panel = () => null\n",
+    "scripts/load.cjs": b"module.exports = {}\n",
+  }
+  skill = b"---\nname: toolkit\ndescription: Complete toolkit.\n---\n"
+  tree = [
+    {"type": "blob", "path": "SKILL.md", "size": len(skill)},
+    *(
+      {"type": "blob", "path": rel, "size": len(data)}
+      for rel, data in resources.items()
+    ),
+  ]
+  raw_files = {
+    f"{raw}/SKILL.md": skill,
+    **{f"{raw}/{rel}": data for rel, data in resources.items()},
+  }
+  _dir_install_mocks(monkeypatch, rs, tree, raw_files)
+  active_fetches = 0
+  peak_fetches = 0
+
+  async def tracked_fetch(client_, url, max_bytes, _hops=0):
+    nonlocal active_fetches, peak_fetches
+    if url not in raw_files:
+      raise AssertionError(f"unexpected fetch: {url}")
+    if url.endswith("/SKILL.md"):
+      return raw_files[url]
+    # Each resource is capped at its own declared blob size, not the whole
+    # package budget, so N concurrent fetches cannot allocate N × the budget.
+    assert max_bytes == len(raw_files[url])
+    active_fetches += 1
+    peak_fetches = max(peak_fetches, active_fetches)
+    try:
+      await asyncio.sleep(0)
+      return raw_files[url]
+    finally:
+      active_fetches -= 1
+
+  monkeypatch.setattr(rs.install, "_http_get", tracked_fetch)
+
+  response = client.post(
+    "/api/skills/install", headers=auth,
+    json={"repo": "o/r", "path": "toolkit", "ref": "main"},
+  )
+
+  assert response.status_code == 201, response.text
+  expected_files = ["SKILL.md", *resources]
+  assert sorted(response.json()["skill"]["files"]) == sorted(expected_files)
+  for rel, data in resources.items():
+    assert (skills_dir / "toolkit" / rel).read_bytes() == data
+  record = json.loads(
+    (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).read_text(),
+  )["toolkit"]
+  assert record["files"] == sorted(expected_files)
+  assert record["tree_digest"] == skills_mod.tree_digest_from_files({
+    "SKILL.md": skill,
+    **resources,
+  })
+  assert 1 < peak_fetches <= rs._RESOURCE_FETCH_CONCURRENCY
 
 
 def test_install_repo_dir_rejects_traversal_paths_in_tree(
@@ -296,28 +461,27 @@ def test_install_repo_dir_rejects_traversal_paths_in_tree(
 ):
   from app.routes import skills as rs
 
-  raw = f"https://raw.githubusercontent.com/o/r/{PINNED}/sk"
   tree = [
     {"type": "blob", "path": "SKILL.md", "size": 10},
     {"type": "blob", "path": "../escape.md", "size": 5},
     {"type": "blob", "path": "ok/../../escape2.md", "size": 5},
   ]
-  _dir_install_mocks(monkeypatch, rs, tree, {
-    f"{raw}/SKILL.md": b"# sk\n",
-  })
+  _dir_install_mocks(monkeypatch, rs, tree, {})
   r = client.post(
     "/api/skills/install", headers=auth,
     json={"repo": "o/r", "path": "sk", "ref": "main"},
   )
-  assert r.status_code == 201, r.text
-  assert r.json()["skill"]["files"] == ["SKILL.md"]
+  assert r.status_code == 400, r.text
+  assert "nothing was installed" in r.json()["detail"]
+  assert not (skills_dir / "sk").exists()
   assert not (skills_dir / "escape.md").exists()
   assert not (skills_dir / "escape2.md").exists()
 
 
-def test_install_repo_dir_skips_over_budget_files_by_declared_size(
+def test_install_repo_dir_rejects_over_budget_tree_without_publishing_a_subset(
   client, auth, skills_dir, monkeypatch,
 ):
+  """The byte budget is checked against the tree before anything is fetched."""
   from app.routes import skills as rs
 
   raw = f"https://raw.githubusercontent.com/o/r/{PINNED}/sk"
@@ -328,15 +492,113 @@ def test_install_repo_dir_skips_over_budget_files_by_declared_size(
   ]
   _dir_install_mocks(monkeypatch, rs, tree, {
     f"{raw}/SKILL.md": b"# sk\n",
-    f"{raw}/small.md": b"small",
   })
   r = client.post(
     "/api/skills/install", headers=auth,
     json={"repo": "o/r", "path": "sk", "ref": "main"},
   )
-  assert r.status_code == 201, r.text
-  # huge.md was skipped WITHOUT being fetched; the smaller file still landed.
-  assert sorted(r.json()["skill"]["files"]) == ["SKILL.md", "small.md"]
+  assert r.status_code == 413, r.text
+  assert "total" in r.json()["detail"]
+  # small.md was NOT published on its own; the package is all-or-nothing.
+  assert not (skills_dir / "sk").exists()
+  assert not (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).exists()
+
+
+def test_install_repo_dir_rejects_over_count_tree_before_resource_fetch(
+  client, auth, skills_dir, monkeypatch,
+):
+  from app.routes import skills as rs
+
+  raw = f"https://raw.githubusercontent.com/o/r/{PINNED}/many"
+  tree = [
+    {"type": "blob", "path": "SKILL.md", "size": 7},
+    *(
+      {"type": "blob", "path": f"commands/{index}.mjs", "size": 1}
+      for index in range(rs._RESOURCE_COUNT_MAX + 1)
+    ),
+  ]
+  _dir_install_mocks(monkeypatch, rs, tree, {
+    f"{raw}/SKILL.md": b"# many\n",
+  })
+
+  response = client.post(
+    "/api/skills/install", headers=auth,
+    json={"repo": "o/r", "path": "many", "ref": "main"},
+  )
+
+  assert response.status_code == 413, response.text
+  assert "resources" in response.json()["detail"]
+  assert not (skills_dir / "many").exists()
+  assert not (skills_dir / skills_mod.INSTALLED_SKILLS_SIDECAR).exists()
+
+
+def test_install_repo_dir_rejects_a_tree_entry_without_a_usable_size(
+  client, auth, skills_dir, monkeypatch,
+):
+  """No declared size means no way to pre-check the budget — refuse."""
+  from app.routes import skills as rs
+
+  tree = [
+    {"type": "blob", "path": "SKILL.md", "size": 9},
+    {"type": "blob", "path": "ref.md"},
+  ]
+  _dir_install_mocks(monkeypatch, rs, tree, {})
+
+  response = client.post(
+    "/api/skills/install", headers=auth,
+    json={"repo": "o/r", "path": "sizeless", "ref": "main"},
+  )
+
+  assert response.status_code == 502, response.text
+  assert "byte size" in response.json()["detail"]
+  assert not (skills_dir / "sizeless").exists()
+
+
+def test_install_repo_dir_settles_parallel_fetches_before_returning_failure(
+  client, auth, skills_dir, monkeypatch,
+):
+  """One failed resource cancels the rest; no request outlives the response."""
+  from app.routes import skills as rs
+
+  tree = [
+    {"type": "blob", "path": "SKILL.md", "size": 9},
+    *(
+      {"type": "blob", "path": f"files/{index}.md", "size": 1}
+      for index in range(rs._RESOURCE_FETCH_CONCURRENCY + 4)
+    ),
+  ]
+  _dir_install_mocks(monkeypatch, rs, tree, {})
+  active = 0
+  started = []
+
+  async def failing_fetch(client_, url, max_bytes, _hops=0):
+    nonlocal active
+    if url.endswith("/SKILL.md"):
+      return b"# broken\n"
+    index = int(url.rsplit("/", 1)[1].split(".", 1)[0])
+    active += 1
+    started.append(index)
+    try:
+      if index == 0:
+        await asyncio.sleep(0)
+        raise HTTPException(502, "injected resource failure")
+      await asyncio.Event().wait()
+    finally:
+      active -= 1
+
+  monkeypatch.setattr(rs.install, "_http_get", failing_fetch)
+
+  response = client.post(
+    "/api/skills/install", headers=auth,
+    json={"repo": "o/r", "path": "broken", "ref": "main"},
+  )
+
+  assert response.status_code == 502
+  # Every in-flight fetch was cancelled and awaited before the handler returned,
+  # and the concurrency cap held so no extra request started after the failure.
+  assert active == 0
+  assert started == list(range(rs._RESOURCE_FETCH_CONCURRENCY))
+  assert not (skills_dir / "broken").exists()
 
 
 def test_resource_rel_ok_contract():
@@ -600,7 +862,11 @@ def test_install_pins_every_fetch_to_the_resolved_commit(
     f"https://api.github.com/repos/o/r/contents/sk?ref={PINNED}":
       json.dumps([{"type": "dir", "name": "marker"}]).encode(),
     f"https://api.github.com/repos/o/r/git/trees/{spec}?recursive=1":
-      json.dumps({"tree": [{"type": "blob", "path": "SKILL.md", "size": 4}]}).encode(),
+      json.dumps({
+        "tree": [{
+          "type": "blob", "mode": "100644", "path": "SKILL.md", "size": 4,
+        }],
+      }).encode(),
     f"https://raw.githubusercontent.com/o/r/{PINNED}/sk/SKILL.md":
       b"# sk\n",
   }
@@ -629,7 +895,9 @@ def test_install_rejects_truncated_tree(client, auth, skills_dir, monkeypatch):
     f"https://api.github.com/repos/o/r/git/trees/{spec}?recursive=1":
       json.dumps({
         "truncated": True,
-        "tree": [{"type": "blob", "path": "SKILL.md", "size": 4}],
+        "tree": [{
+          "type": "blob", "mode": "100644", "path": "SKILL.md", "size": 4,
+        }],
       }).encode(),
   }
   monkeypatch.setattr(rs.install, "_http_get", _fake_fetch(canned))

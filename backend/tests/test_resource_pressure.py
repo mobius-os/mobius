@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from app.resource_pressure import (
   MIB,
+  assess_memory_pressure,
   assess_resource_pressure,
   resource_facts,
   resource_status,
@@ -128,6 +129,30 @@ def test_memory_ratio_and_sustained_psi_raise_pressure():
   assert constrained["memory"]["state"] == "constrained"
   assert critical["state"] == "critical"
   assert critical["memory"]["reason"]["full_avg60"] == 2.5
+
+
+def test_finite_memory_exposes_current_headroom():
+  pressure = assess_memory_pressure({
+    "available": True,
+    "working_set_bytes": 400 * MIB,
+    "limit_bytes": 1024 * MIB,
+    "pressure": {},
+  })
+
+  assert pressure["state"] == "normal"
+  assert pressure["headroom_bytes"] == 624 * MIB
+
+
+def test_memory_without_a_cgroup_limit_stays_unknown():
+  """An unlimited cgroup has no ratio, so nothing may be inferred from PSI."""
+  pressure = assess_memory_pressure({
+    "available": True,
+    "working_set_bytes": 400 * MIB,
+    "limit_bytes": None,
+    "pressure": {"some": {"avg60": 1.25}},
+  })
+
+  assert pressure["state"] == "unknown"
 
 
 def test_unknown_resource_does_not_hide_known_pressure():
