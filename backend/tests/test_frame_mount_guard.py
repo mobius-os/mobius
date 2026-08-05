@@ -5,10 +5,12 @@ handleFrameError in app-frame.html suppresses the error panel when
 RUNNING mini-app (e.g. an offline fetch failing at game-over) doesn't blank
 a working UI. The guard shipped once with NOTHING ever setting the flag —
 read-but-never-assigned made it dead code and every post-mount error still
-destroyed the app. These tests lock the read and the write together, and
-pin the write to a passive effect: createRoot().render() only SCHEDULES the
-first render, so a synchronous assignment after it would also swallow
-errors thrown during the initial render (which must still show the panel).
+destroyed the app. These tests lock the read and the write together, and pin the write to a
+commit-time ref callback: createRoot().render() only SCHEDULES the first
+render, so a synchronous assignment after it would also swallow errors thrown
+during the initial render (which must still show the panel). A ref runs during
+commit — after the DOM is attached, before layout effects, and never on a
+render that throws — so the flag means "committed, visible DOM".
 """
 
 import re
@@ -49,18 +51,42 @@ def test_error_guard_reads_mounted_flag():
   )
 
 
-def test_mounted_flag_is_set_inside_an_effect():
+def test_mounted_flag_is_set_by_a_commit_ref():
   html = _frame_html()
-  # The assignment must exist (the original bug: guard read a flag nothing
-  # set) and must live inside a useEffect callback so it only flips after
-  # React COMMITS the first render — a synchronous set after render() would
-  # suppress the panel for components that throw during their first render.
+  # The assignment must exist (the original bug: the guard read a flag nothing
+  # set) and must flip only when React COMMITS the first render. The signal is a
+  # commit-time ref callback, not a synchronous set after createRoot().render()
+  # (which only SCHEDULES the render and would suppress the panel for a component
+  # that throws during it).
   assignment = re.search(
-    r"useEffect\(\(\)\s*=>\s*\{\s*window\.__frameMounted\s*=\s*true", html
+    r"function signalFrameMounted\([^)]*\)\s*\{[^}]*window\.__frameMounted\s*=\s*true",
+    html,
+    re.DOTALL,
   )
   assert assignment, (
-    "window.__frameMounted is never set inside a useEffect — the post-mount "
-    "error guard is dead code (or fires before the first render commits)."
+    "window.__frameMounted is no longer assigned in signalFrameMounted — the "
+    "post-mount error guard would read a flag nothing sets (dead code)."
+  )
+  # The setter ignores ref detach (a null node) and never flips twice, so a
+  # re-attach cannot re-post 'mounted'.
+  assert re.search(
+    r"function signalFrameMounted\([^)]*\)\s*\{\s*if\s*\(!node\s*\|\|\s*"
+    r"window\.__frameMounted\)\s*return",
+    html,
+  ), "signalFrameMounted no longer guards against a null node / double flip."
+  # MountSignal must attach the setter as a commit ref, not a passive effect: a
+  # ref runs during commit (DOM attached, before layout effects), never on an
+  # aborted first render.
+  mount_signal = html[
+    html.index("function MountSignal"):
+    html.index("// Immersive safe-area passthrough")
+  ]
+  assert re.search(r"ref:\s*signalFrameMounted", mount_signal), (
+    "MountSignal no longer wires signalFrameMounted as a commit ref."
+  )
+  assert "useEffect" not in mount_signal, (
+    "MountSignal sets the mount flag from an effect again — use the commit ref "
+    "so 'mounted' means committed, visible DOM."
   )
 
 

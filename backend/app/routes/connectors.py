@@ -20,7 +20,10 @@ from sqlalchemy.orm import Session
 from app import connectors as core
 from app import models
 from app.database import get_db
-from app.deps import get_current_owner, reject_cross_site
+from app.deps import (
+  get_owner_or_app_with_connections_manage,
+  reject_cross_site,
+)
 from app.timeutil import now_naive_utc
 
 log = logging.getLogger(__name__)
@@ -85,6 +88,12 @@ class ConnectorPatch(BaseModel):
 
 def _public(row: models.Connector) -> dict:
   tools = row.tools_json if isinstance(row.tools_json, list) else []
+  # Legacy rows persisted full tool metadata dicts; present bounded names.
+  names = [
+    tool.get("name") if isinstance(tool, dict) else tool
+    for tool in tools
+  ]
+  names = [name for name in names if isinstance(name, str) and name]
   return {
     "id": row.id,
     # This generation changes at revocation boundaries. Owner mutations must
@@ -94,7 +103,9 @@ def _public(row: models.Connector) -> dict:
     "url": row.url,
     "enabled": row.enabled,
     "has_auth": bool(row.auth_header and row.auth_value_encrypted),
+    "tools": names,
     "tool_count": len(tools),
+    "est_tokens": row.est_tokens or 0,
     "status": row.status,
     "status_detail": row.status_detail,
   }
@@ -395,7 +406,7 @@ async def broker_connector(
 
 @router.get("")
 async def list_connectors(
-  _owner: models.Owner = Depends(get_current_owner),
+  _owner: models.Owner = Depends(get_owner_or_app_with_connections_manage),
   db: Session = Depends(get_db),
 ):
   rows = db.query(models.Connector).order_by(models.Connector.id).all()
@@ -405,7 +416,7 @@ async def list_connectors(
 @router.post("", status_code=201)
 async def add_connector(
   body: ConnectorCreate,
-  _owner: models.Owner = Depends(get_current_owner),
+  _owner: models.Owner = Depends(get_owner_or_app_with_connections_manage),
   db: Session = Depends(get_db),
 ):
   url = body.url.strip()
@@ -453,7 +464,7 @@ async def add_connector(
       ),
       enabled=True,
       tools_json=probe["tools"],
-      est_tokens=0,
+      est_tokens=probe["est_tokens"],
       status="ok",
       status_detail=None,
       last_checked_at=now_naive_utc(),
@@ -477,17 +488,12 @@ async def patch_connector(
   connector_id: int,
   body: ConnectorPatch,
   generation: str = Depends(_require_generation),
-  _owner: models.Owner = Depends(get_current_owner),
+  _owner: models.Owner = Depends(get_owner_or_app_with_connections_manage),
   db: Session = Depends(get_db),
 ):
   row = _get_row(db, connector_id, generation)
   values: dict[str, object] = {}
   if body.enabled is not None:
-    if body.enabled and row.status != "ok":
-      raise HTTPException(
-        status_code=409,
-        detail="Re-check this connection successfully before enabling it.",
-      )
     if row.enabled and not body.enabled:
       # Disabling is a revocation boundary. Give a later re-enable a fresh
       # identity so a capability minted before the disable cannot revive.
@@ -497,6 +503,9 @@ async def patch_connector(
     values["name"] = body.name
   if not values:
     return _public(row)
+  # The conditional UPDATE is the single enforcement point: filters express
+  # every precondition, so the miss branch below is the real (and only)
+  # rejection path rather than a dead backstop behind a pre-check.
   target = db.query(models.Connector).filter(
     models.Connector.id == connector_id,
     models.Connector.capability_id == generation,
@@ -506,7 +515,7 @@ async def patch_connector(
   updated = target.update(values, synchronize_session=False)
   if updated != 1:
     db.rollback()
-    if body.enabled:
+    if body.enabled and row.status != "ok":
       raise HTTPException(
         status_code=409,
         detail="Re-check this connection successfully before enabling it.",
@@ -525,7 +534,7 @@ async def patch_connector(
 async def refresh_connector(
   connector_id: int,
   generation: str = Depends(_require_generation),
-  _owner: models.Owner = Depends(get_current_owner),
+  _owner: models.Owner = Depends(get_owner_or_app_with_connections_manage),
   db: Session = Depends(get_db),
 ):
   stored = _get_row(db, connector_id, generation)
@@ -544,6 +553,7 @@ async def refresh_connector(
     except core.ConnectorError as exc:
       raise HTTPException(status_code=409, detail=str(exc)) from exc
   url = str(stored.url)
+  prior_status = str(stored.status)
   # Do not lease a DB connection while waiting on DNS or a remote service.
   # Re-fetch after the probe so a concurrent disable/delete remains decisive.
   db.close()
@@ -551,15 +561,23 @@ async def refresh_connector(
     probe = await core.handshake(url, auth_header, secret)
     values = {
       "tools_json": probe["tools"],
-      "est_tokens": 0,
+      "est_tokens": probe["est_tokens"],
       "status": "ok",
       "status_detail": None,
     }
   except core.ConnectorError as exc:
-    values = {
-      "status": "error",
-      "status_detail": str(exc),
-    }
+    if exc.transient:
+      # A transport blip says nothing definitive about the configuration.
+      # Keep the last known health so one flaky moment cannot silently
+      # remove the connection from later agent turns. Annotate only healthy
+      # rows: an already-latched row keeps its definitive diagnosis instead
+      # of having it overwritten by a generic transport message.
+      values = {"status_detail": str(exc)} if prior_status == "ok" else {}
+    else:
+      values = {
+        "status": "error",
+        "status_detail": str(exc),
+      }
   values["last_checked_at"] = now_naive_utc()
   identity = db.query(models.Connector).filter(
     models.Connector.id == connector_id,
@@ -589,7 +607,7 @@ async def refresh_connector(
 async def delete_connector(
   connector_id: int,
   generation: str = Depends(_require_generation),
-  _owner: models.Owner = Depends(get_current_owner),
+  _owner: models.Owner = Depends(get_owner_or_app_with_connections_manage),
   db: Session = Depends(get_db),
 ):
   deleted = db.query(models.Connector).filter(

@@ -1,6 +1,7 @@
 """The app validator uses the same compile contract as installation."""
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -38,6 +39,25 @@ def _run(tmp_path: Path):
 def test_validator_accepts_an_installable_app(tmp_path):
   _write_app(tmp_path, "export default function App(){ return <div /> }")
   result = _run(tmp_path)
+  assert result.returncode == 0, result.stderr
+  assert "OK" in result.stdout
+
+
+def test_validator_stays_zero_configuration_outside_a_runtime(tmp_path):
+  """A developer checkout has no settings; the build lease must not need any."""
+  _write_app(tmp_path, "export default function App(){ return <div /> }")
+  env = os.environ.copy()
+  for key in ("DATA_DIR", "SECRET_KEY"):
+    env.pop(key, None)
+
+  result = subprocess.run(
+    [sys.executable, str(SCRIPT), str(tmp_path)],
+    capture_output=True,
+    text=True,
+    check=False,
+    env=env,
+  )
+
   assert result.returncode == 0, result.stderr
   assert "OK" in result.stdout
 

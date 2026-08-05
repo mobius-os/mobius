@@ -62,7 +62,14 @@ def runtime_node_path() -> Path:
     Path("/app/shell-src/node_modules"),
     Path(__file__).resolve().parents[2] / "frontend" / "node_modules",
   ]
-  return next((path for path in candidates if path.is_dir()), candidates[-1])
+  # A tree qualifies only if it holds the bundler itself: the baked image's
+  # tree can predate a dependency (it exists but cannot compile), while the
+  # live platform clone's tree tracks the current lockfile. Preferring
+  # bare existence turned every app compile into a hard failure there.
+  return next(
+    (path for path in candidates if (path / "rolldown").is_dir()),
+    next((path for path in candidates if path.is_dir()), candidates[-1]),
+  )
 
 
 def mobius_runtime_path() -> Path:

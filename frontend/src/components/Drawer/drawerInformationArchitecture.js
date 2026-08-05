@@ -89,3 +89,12 @@ export function filterInstalledApps(apps = [], query = '') {
       .includes(needle)
   ))
 }
+
+// The shared menu names a row by identity, so it must survive that row
+// disappearing mid-render (deleted, filtered, or refreshed away) as ordinary
+// absence rather than a crash.
+export function findDrawerMenuItem(menu, chats = [], apps = []) {
+  if (!menu) return null
+  const items = menu.kind === 'chat' ? (chats || []) : (apps || [])
+  return items.find(item => item?.id === menu.id) || null
+}

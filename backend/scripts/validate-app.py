@@ -39,6 +39,7 @@ from app.app_compile_contract import (  # noqa: E402
   rolldown_command,
   rolldown_report_contract_error,
 )
+from app.build_admission import build_lease  # noqa: E402
 from app.manifest_contract import (  # noqa: E402
   ENTRY_MAX_BYTES,
   ICON_MAX_BYTES,
@@ -100,10 +101,14 @@ def _compile(
       staged_root / entry, Path(tmp) / "app.js", report=report_path,
     )
     try:
-      result = subprocess.run(
-        command, capture_output=True, text=True,
-        timeout=ROLLDOWN_TIMEOUT_SECS, check=False,
-      )
+      # In a running container this is the same lease shell Vite and mini-app
+      # compilation take; without a runtime directory it is a no-op, so the
+      # CLI stays zero-configuration in a developer checkout.
+      with build_lease():
+        result = subprocess.run(
+          command, capture_output=True, text=True,
+          timeout=ROLLDOWN_TIMEOUT_SECS, check=False,
+        )
     except FileNotFoundError:
       return (
         "Node.js is not installed or not on PATH; install it before validating "

@@ -152,6 +152,10 @@ for (const scenario of SCENARIOS) {
     })
     const nudge = page.locator(scenario.nudgeSelector)
     await expect(nudge).toBeVisible({ timeout: 5000 })
+    // R5a exclusivity: the reader is far above the tail, but the visible
+    // attention nudge owns the slot — jump-to-latest goes to the same place
+    // with more context and must not stack beneath it.
+    await expect(page.locator('.chat__jump-latest')).toHaveCount(0)
     const rail = page.locator('[data-chat-surface="painted"] .chat__progress-rail')
     const composer = page.locator('[data-chat-surface="painted"] .chat__pill')
     await expect(rail).toBeVisible({ timeout: 5000 })
@@ -197,3 +201,118 @@ for (const scenario of SCENARIOS) {
     expect(geometry.modeKind).toBe('ANCHOR_AT')
   })
 }
+
+// R5a jump-to-latest (contract v1.18): the floating control renders only while
+// the reader holds a position away from the content tail; tapping it is the
+// same one-shot controller tail reveal as the nudges and lands a settled
+// ANCHOR_AT hold — never live-follow — after which the control retires itself.
+test('jump-to-latest appears only away from the tail and lands a settled hold', async ({ page }) => {
+  await page.setViewportSize({ width: 1512, height: 861 })
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+  await page.waitForFunction(
+    () => !!(document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
+      || document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      || document.querySelector('[data-chat-surface="painted"] .chat__form')),
+    { timeout: 10000 },
+  )
+
+  const chat = await createTaggedChat(page, 'jump-to-latest-tail')
+  expect(chat?.id).toBeTruthy()
+
+  const paragraphs = Array.from({ length: 42 }, (_, i) => ({
+    type: 'text',
+    content: `Jump history ${i + 1}. ${'Enough content to overflow the viewport. '.repeat(8)}`,
+  }))
+  const messages = [
+    {
+      role: 'user',
+      content: 'Please write the long review.',
+      ts: 1700000300000,
+      cid: 'jump-to-latest-user',
+      blocks: [{ type: 'text', content: 'Please write the long review.' }],
+    },
+    {
+      role: 'assistant',
+      content: '',
+      ts: 1700000300001,
+      blocks: paragraphs,
+    },
+  ]
+
+  await page.route(new RegExp(`/api/chats/${chat.id}\\?limit=`), route => {
+    if (route.request().method() !== 'GET') return route.continue()
+    return route.fulfill({
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages,
+        total: messages.length,
+        offset: 0,
+        running: false,
+        pending_messages: [],
+      }),
+    })
+  })
+  await page.route(new RegExp(`/api/chats/${chat.id}/stream$`), route =>
+    route.fulfill({
+      status: 200,
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+      },
+      body: 'data: {"type":"catch_up_done"}\n\ndata: {"type":"done"}\n\n',
+    }))
+
+  await page.evaluate(chatId => {
+    localStorage.setItem('moebius_active_chat', chatId)
+  }, chat.id)
+  await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
+
+  await expect(page.locator('[data-chat-surface="painted"] .chat__scroll')).toBeVisible({ timeout: 15000 })
+  await page.waitForFunction(() => {
+    const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+    return !!scroll && scroll.scrollHeight > scroll.clientHeight + 1000
+  }, { timeout: 5000 })
+
+  // R4's fallback lands the restored chat at the latest content. Wait for the
+  // settled near-tail restore, then require the control absent: at the end of
+  // the chat there is nothing to jump to.
+  const jump = page.locator('.chat__jump-latest')
+  await page.waitForFunction(() => {
+    const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+    return !!scroll
+      && scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop < 200
+  }, { timeout: 5000 })
+  await expect(jump).toHaveCount(0)
+
+  // Scroll well above the tail with the same gesture signal the controller
+  // receives from a human scroll.
+  await page.evaluate(() => {
+    const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+    if (!scroll) return
+    scroll.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+    scroll.scrollTop = Math.max(
+      0,
+      scroll.scrollHeight - scroll.clientHeight - 1200,
+    )
+  })
+  await expect(jump).toBeVisible({ timeout: 5000 })
+
+  await jump.click()
+
+  // Landing is the physical tail, and the control retires itself there.
+  await page.waitForFunction(() => {
+    const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+    if (!scroll || document.querySelector('.chat__jump-latest')) return false
+    return Math.abs(scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop) <= 1
+  }, { timeout: 5000 })
+
+  const modeKind = await page.evaluate(chatId => {
+    try {
+      return JSON.parse(
+        localStorage.getItem('chat-reading-position') || '{}',
+      )[chatId]?.kind ?? null
+    } catch { return null }
+  }, chat.id)
+  expect(modeKind).toBe('ANCHOR_AT')
+})

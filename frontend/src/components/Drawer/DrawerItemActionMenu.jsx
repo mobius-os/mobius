@@ -1,5 +1,5 @@
-/* DrawerItemActionMenu gives app launcher cards and drawer rows one compact,
-   pointer-accurate contextual menu across mouse, keyboard, and touch. */
+/* Drawer mounts one retargetable action-menu controller so virtualized rows
+   stay free of dormant menu hooks while scrolling. */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'

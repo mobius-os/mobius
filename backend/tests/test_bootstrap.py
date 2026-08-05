@@ -13,6 +13,7 @@ from fastapi import HTTPException
 
 from app import app_git, models
 from app.bootstrap import (
+  BOOTSTRAP_CONNECTIONS_MANIFEST_URL,
   BOOTSTRAP_MEMORY_MANIFEST_URL,
   BOOTSTRAP_REFLECTION_MANIFEST_URL,
   BOOTSTRAP_SKILLS_MANIFEST_URL,
@@ -47,6 +48,7 @@ def _bootstrap_urls():
     BOOTSTRAP_SKILLS_MANIFEST_URL,
     BOOTSTRAP_MEMORY_MANIFEST_URL,
     BOOTSTRAP_REFLECTION_MANIFEST_URL,
+    BOOTSTRAP_CONNECTIONS_MANIFEST_URL,
   ]
 
 
@@ -60,14 +62,14 @@ def test_recovery_store_bootstrap_is_pinned_to_an_immutable_commit():
 
 @pytest.mark.asyncio
 async def test_bootstrap_installs_all_apps_in_order_when_absent(db, monkeypatch):
-  """A fresh database installs the store first, then Memory and Reflection."""
+  """A fresh database installs the store first, then the other core apps."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
   install_mock = AsyncMock(return_value=_install_result())
 
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_bootstrap_apps_installed(db)
 
-  assert install_mock.await_count == 4
+  assert install_mock.await_count == 5
   assert [
     call.kwargs["manifest_url"] for call in install_mock.await_args_list
   ] == _bootstrap_urls()
@@ -98,7 +100,8 @@ async def test_bootstrap_releases_identity_transaction_before_install(
 
 @pytest.mark.asyncio
 async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
-  """Store returns after uninstall; Skills/Memory stay gone; live Reflection skips."""
+  """Store returns after uninstall; Skills/Memory/Connections stay gone;
+  live Reflection skips."""
   monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
   from app.install import _canonical_identity_key
 
@@ -147,6 +150,17 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
         BOOTSTRAP_REFLECTION_MANIFEST_URL, "reflection",
       ),
     ),
+    models.App(
+      source_dir="/tmp/mobius-tests/connections",
+      name="Connections",
+      description="owner uninstalled",
+      jsx_source="export default function App() {}",
+      slug="connections",
+      manifest_url=_canonical_identity_key(
+        BOOTSTRAP_CONNECTIONS_MANIFEST_URL, "connections",
+      ),
+      deleted_at=deleted_at,
+    ),
   ])
   db.commit()
 
@@ -155,7 +169,8 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
     await ensure_bootstrap_apps_installed(db)
 
   # Only the Store (the recovery surface) returns after an owner uninstall;
-  # Skills and Memory (policy False) stay gone; live Reflection is skipped.
+  # Skills, Memory, and Connections (policy False) stay gone; live
+  # Reflection is skipped.
   assert install_mock.await_count == 1
   assert [
     call.kwargs["manifest_url"] for call in install_mock.await_args_list
@@ -207,6 +222,16 @@ async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
         BOOTSTRAP_REFLECTION_MANIFEST_URL, "reflection",
       ),
     ),
+    models.App(
+      source_dir="/tmp/mobius-tests/connections-custom",
+      name="Connections",
+      description="already here",
+      jsx_source="export default function App() {}",
+      slug="connections-custom",
+      manifest_url=_canonical_identity_key(
+        BOOTSTRAP_CONNECTIONS_MANIFEST_URL, "connections",
+      ),
+    ),
   ])
   db.commit()
 
@@ -254,11 +279,12 @@ async def test_bootstrap_failure_doesnt_block_remaining_apps(
     _install_result("Skills", "skills", app_id=4),
     _install_result("Memory", "memory", app_id=2),
     _install_result("Reflection", "reflection", app_id=3),
+    _install_result("Connections", "connections", app_id=5),
   ])
   with patch("app.bootstrap.install_from_manifest", install_mock):
     await ensure_bootstrap_apps_installed(db)
 
-  assert install_mock.await_count == 4
+  assert install_mock.await_count == 5
   assert [
     call.kwargs["manifest_url"] for call in install_mock.await_args_list
   ] == _bootstrap_urls()
