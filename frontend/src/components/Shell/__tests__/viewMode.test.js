@@ -23,14 +23,14 @@ function twoPanes() {
 
 // ── viewMode field + persistence (design: view-mode toggle, forgiving parse) ──
 
-test('first boot workspaces default to standard single-screen mode on the active item', () => {
-  // Two-worlds: a fresh non-empty seed initializes its OWN single-screen slot from the
-  // departing (last-active) item, so single mode paints that item THROUGH the slot —
-  // not a borrow of the focused Builder pane. A genuinely empty first boot has no
-  // departing item, so its slot stays absent and it starts at the New-Chat home.
+test('the fresh seed defaults to single mode with no slot (the seed lives in RESET_FLAT)', () => {
+  // Two-worlds: seedFromFlatTabs is a PURE constructor — single mode, but NO
+  // single-screen slot. An absent slot is the empty New-Chat home, never a borrow of
+  // the focused Builder pane. The real first-boot seed (legacy/flat active chat →
+  // Standard) lives in the RESET_FLAT reducer; see singleScreenSlot.test.js.
   assert.equal(freshWorkspace().viewMode, 'single')
-  assert.deepEqual(freshWorkspace().singleScreen, { kind: 'chat', id: '5' }, 'seeded from the last-active item')
-  assert.equal(paneModel.activeContentRoute(freshWorkspace()).chatId, '5', 'the seeded slot is the active chat')
+  assert.equal('singleScreen' in freshWorkspace(), false, 'the constructor writes no slot')
+  assert.equal(paneModel.activeContentRoute(freshWorkspace()).chatId, null, 'an unseeded slot is the home')
   const firstBoot = paneModel.parseWorkspace(null)
   assert.equal(firstBoot.viewMode, 'single')
   assert.equal('singleScreen' in firstBoot, false, 'an empty first boot has no departing item — slot absent')

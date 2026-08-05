@@ -31,30 +31,35 @@ function tiledBuilder() {
 // ── Forgiving parse / normalize (design: forward-compat, no v2 bump) ─────────
 
 test('normalize preserves property ABSENCE as the migration marker', () => {
-  // A legacy/uninitialized blob has NO singleScreen property. A fresh seed now writes
-  // a concrete slot from its departing item, so strip it to model the legacy shape
-  // whose ABSENCE normalize must preserve as the migration marker.
+  // A legacy/uninitialized blob has NO singleScreen property, and the seedFromFlatTabs
+  // constructor writes none either — so its ABSENCE (the migration marker) is exactly
+  // what normalize must preserve.
   const ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
-  delete ws.singleScreen
   assert.equal('singleScreen' in ws, false, 'a legacy blob has no slot (uninitialized)')
   const n = paneModel.normalize(ws)
   assert.equal('singleScreen' in n, false, 'absence survives normalize')
 })
 
-test('a fresh standard seed initializes its slot to the departing item — via the SLOT, not a borrow', () => {
-  // Two-worlds: a fresh/fallback seed writes a CONCRETE single-screen slot from the
-  // departing (last-active) item, so single mode paints that item through its OWN slot
-  // — first boot lands on the active chat, not the empty home. The derivations stay
-  // borrow-free: a genuinely absent slot is still the home (tested elsewhere).
+test('the fresh seed has no slot; RESET_FLAT seeds first boot from the active item', () => {
+  // Two-worlds: seedFromFlatTabs is a PURE constructor — no single-screen slot
+  // (absence is the migration marker, reused by fixtures modelling a legacy blob).
+  // The derivations stay borrow-free: a genuinely absent slot is the empty home. The
+  // real first-boot seed lives in the RESET_FLAT reducer — the only path that turns a
+  // legacy/flat active chat into the live Standard world.
   const chat = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
-  assert.deepEqual(chat.singleScreen, { kind: 'chat', id: '5' }, 'seeded from the departing item')
+  assert.equal('singleScreen' in chat, false, 'the constructor writes no slot')
   assert.equal(chat.viewMode, 'single')
-  assert.equal(paneModel.activeContentRoute(chat).chatId, '5', 'the seeded slot is the active chat')
+  assert.equal(paneModel.activeContentRoute(chat).chatId, null, 'an unseeded slot is the empty home')
 
-  const app = paneModel.seedFromFlatTabs([makeTab('chat', '5'), makeTab('app', '42')])
-  assert.deepEqual(app.singleScreen, { kind: 'app', id: '42' }, 'the last-active tab seeds the slot')
-  assert.equal(paneModel.activeContentRoute(app).appId, 42)
-  assert.equal(paneModel.activeContentRoute(app).chatId, null)
+  const booted = reduce(init(chat), { type: 'RESET_FLAT', tabs: [makeTab('chat', '5')] }).ws
+  assert.deepEqual(booted.singleScreen, { kind: 'chat', id: '5' }, 'RESET_FLAT seeds the active chat')
+  assert.equal(paneModel.activeContentRoute(booted).chatId, '5', 'first boot lands on the active chat')
+
+  const bootedApp = reduce(init(paneModel.seedFromFlatTabs([])), {
+    type: 'RESET_FLAT', tabs: [makeTab('chat', '5'), makeTab('app', '42')],
+  }).ws
+  assert.deepEqual(bootedApp.singleScreen, { kind: 'app', id: '42' }, 'the last-active tab seeds the slot')
+  assert.equal(paneModel.activeContentRoute(bootedApp).appId, 42)
 
   const empty = paneModel.seedFromFlatTabs([])
   assert.equal('singleScreen' in empty, false, 'an empty seed has no departing item — slot stays absent')
