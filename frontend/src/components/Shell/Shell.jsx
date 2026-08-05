@@ -2745,6 +2745,11 @@ export default function Shell() {
         const resolvedPresentation = {
           ...presentation,
           chatId: String(chatId),
+          // Adopt the epoch of the navigation that owns this destination (navTo
+          // above bumped it). newChatPresentationIsCurrent keeps the cover while
+          // this epoch still holds, bridging the render before `activeChatId`
+          // commits so the outgoing chat never flashes through.
+          navigationEpoch: navigationEpochRef.current,
         }
         newChatPresentationRef.current = resolvedPresentation
         setNewChatPresentation(current => (
