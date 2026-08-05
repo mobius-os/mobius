@@ -3049,24 +3049,8 @@ export default function Shell() {
     // failed. When the user later opens chat, activeView flips to
     // 'chat' and this effect re-runs (activeView is in deps) to create
     // the starter chat then.
-    //
-    // Gate on the SYNCHRONOUS workspace route, not the deferred committed
-    // activeChatId/activeView. applyModeDestination now dispatches the chat/app
-    // switch inside startTransition, which advances workspaceStateRef.current
-    // immediately but leaves the committed projection (activeChatId/activeView)
-    // deferred. A create's slot is therefore visible here synchronously, while
-    // committed activeChatId is still null for a beat. Reading committed state let
-    // a re-fire in that deferral window pass the guard AND fall to the singleScreen
-    // != null branch (else newChat()), POSTing a SECOND starter chat — the "two
-    // empty chats on first boot" regression. The single-mode Settings takeover is
-    // an overlay flag, not part of the workspace route, so keep the committed
-    // activeView check for that one skip.
-    const ws = workspaceStateRef.current.ws
-    const liveRoute = paneModel.activeContentRoute(ws)
-    if (chats.length === 0
-        && liveRoute.chatId == null
-        && liveRoute.view === 'chat'
-        && activeView !== 'settings') {
+    if (chats.length === 0 && activeChatId === null && activeView === 'chat') {
+      const ws = workspaceStateRef.current.ws
       const single = ws.viewMode === 'single'
       if (single && ws.singleScreen == null) requestEmptySingleNewChat()
       else newChat()

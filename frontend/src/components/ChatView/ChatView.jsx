@@ -1917,12 +1917,22 @@ export default function ChatView({
       })
 
       // A return with a complete local window is a warm restoration even when
-      // the version changed while away. Apply the authoritative replacement
-      // and readiness in the same React batch; the cold prefix scheduler must
-      // never turn a warm return into a delayed all-at-once burst.
+      // the version changed while away. Apply the authoritative replacement and
+      // readiness in the SAME React batch (the transition callback runs
+      // synchronously); the cold prefix scheduler must never turn a warm return
+      // into a delayed all-at-once burst.
+      //
+      // SWITCH-PERF: defer this apply the same way the cold path below does.
+      // startTransition marks only the render non-urgent, so the heavy transcript
+      // reflow lands OFF the discrete switch tap instead of blocking it (the
+      // ~90ms on-device reflow). This keeps switching responsive at the layer that
+      // owns the transcript, without deferring the shell's nav dispatch — which
+      // raced chat bootstrap/materialization and double-created starter chats.
       if (activationCache && cacheCoversSavedAnchor && !anchorRetired) {
-        applyMessagesToView(refreshed.messages, refreshed.offset)
-        settleRuntime(runtime, refreshed.messages)
+        startTransition(() => {
+          applyMessagesToView(refreshed.messages, refreshed.offset)
+          settleRuntime(runtime, refreshed.messages)
+        })
         return
       }
 
