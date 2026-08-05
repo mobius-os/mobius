@@ -20,7 +20,10 @@ from sqlalchemy.orm import Session
 from app import connectors as core
 from app import models
 from app.database import get_db
-from app.deps import get_current_owner, reject_cross_site
+from app.deps import (
+  get_owner_or_app_with_connections_manage,
+  reject_cross_site,
+)
 from app.timeutil import now_naive_utc
 
 log = logging.getLogger(__name__)
@@ -403,7 +406,7 @@ async def broker_connector(
 
 @router.get("")
 async def list_connectors(
-  _owner: models.Owner = Depends(get_current_owner),
+  _owner: models.Owner = Depends(get_owner_or_app_with_connections_manage),
   db: Session = Depends(get_db),
 ):
   rows = db.query(models.Connector).order_by(models.Connector.id).all()
@@ -413,7 +416,7 @@ async def list_connectors(
 @router.post("", status_code=201)
 async def add_connector(
   body: ConnectorCreate,
-  _owner: models.Owner = Depends(get_current_owner),
+  _owner: models.Owner = Depends(get_owner_or_app_with_connections_manage),
   db: Session = Depends(get_db),
 ):
   url = body.url.strip()
@@ -485,7 +488,7 @@ async def patch_connector(
   connector_id: int,
   body: ConnectorPatch,
   generation: str = Depends(_require_generation),
-  _owner: models.Owner = Depends(get_current_owner),
+  _owner: models.Owner = Depends(get_owner_or_app_with_connections_manage),
   db: Session = Depends(get_db),
 ):
   row = _get_row(db, connector_id, generation)
@@ -531,7 +534,7 @@ async def patch_connector(
 async def refresh_connector(
   connector_id: int,
   generation: str = Depends(_require_generation),
-  _owner: models.Owner = Depends(get_current_owner),
+  _owner: models.Owner = Depends(get_owner_or_app_with_connections_manage),
   db: Session = Depends(get_db),
 ):
   stored = _get_row(db, connector_id, generation)
@@ -604,7 +607,7 @@ async def refresh_connector(
 async def delete_connector(
   connector_id: int,
   generation: str = Depends(_require_generation),
-  _owner: models.Owner = Depends(get_current_owner),
+  _owner: models.Owner = Depends(get_owner_or_app_with_connections_manage),
   db: Session = Depends(get_db),
 ):
   deleted = db.query(models.Connector).filter(

@@ -465,30 +465,6 @@ export const api = {
       'chats', `/chats/${chatId}/recover`, { method: 'POST' },
     ),
   },
-  connectors: {
-    list: (options = {}) => apiFetch('/connectors', options),
-    add: (payload, options = {}) => apiFetch('/connectors', {
-      ...options,
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
-    update: (connectorId, generation, payload) => apiFetch(`/connectors/${connectorId}`, {
-      method: 'PATCH',
-      headers: { 'X-Mobius-Connector-Generation': generation },
-      body: JSON.stringify(payload),
-      timeoutMs: 15000,
-    }),
-    refresh: (connectorId, generation) => apiFetch(`/connectors/${connectorId}/refresh`, {
-      method: 'POST',
-      headers: { 'X-Mobius-Connector-Generation': generation },
-      timeoutMs: 25000,
-    }),
-    remove: (connectorId, generation) => apiFetch(`/connectors/${connectorId}`, {
-      method: 'DELETE',
-      headers: { 'X-Mobius-Connector-Generation': generation },
-      timeoutMs: 15000,
-    }),
-  },
   apps: {
     list: () => apiFetch('/apps/'),
     markOpened: (appId) => apiFetch(`/apps/${appId}/opened`, {

@@ -267,12 +267,26 @@ def _memory_pressure(memory: dict[str, Any]) -> dict[str, Any]:
   return {
     "state": state,
     "working_set_ratio": ratio,
+    "headroom_bytes": max(0, limit - working_set),
     "some_avg60": some_avg60,
     "full_avg60": full_avg60,
     "constrained_at_ratio": _MEMORY_CONSTRAINED_RATIO,
     "critical_at_ratio": _MEMORY_CRITICAL_RATIO,
     "reason": reason,
   }
+
+
+def assess_memory_pressure(
+  memory: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+  """Assess memory alone, for callers that must not react to disk pressure.
+
+  Without a cgroup limit there is nothing to be constrained relative to, so
+  the result is ``unknown`` and callers fail open rather than treating missing
+  telemetry as pressure.
+  """
+  snapshot = cgroup_memory_snapshot() if memory is None else memory
+  return _memory_pressure(_memory_facts(snapshot))
 
 
 def assess_resource_pressure(facts: dict[str, Any]) -> dict[str, Any]:

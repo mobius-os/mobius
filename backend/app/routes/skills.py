@@ -78,9 +78,13 @@ _SKILL_NAME_OK = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _RESOURCE_COUNT_MAX = skills.RESOURCE_COUNT_MAX
 _RESOURCE_TOTAL_MAX = skills.RESOURCE_TOTAL_MAX
 _RESOURCE_MAX_DEPTH = skills.RESOURCE_MAX_DEPTH
-# Only text/reference file types are stored; anything else is skipped with a
-# warning rather than materialized into the skills tree.
+# Only text/reference file types are stored; a package carrying anything else
+# is rejected outright rather than materialized into the skills tree minus the
+# files it declared.
 _RESOURCE_SUFFIXES = skills.RESOURCE_SUFFIXES
+# Resources are fetched in parallel under this cap so a large package installs
+# in bounded wall-clock time without opening one connection per file.
+_RESOURCE_FETCH_CONCURRENCY = 8
 
 _GITHUB_API = "https://api.github.com"
 _USAGE_WINDOW_DAYS = 30
@@ -346,43 +350,134 @@ async def _fetch_files(
       f"{body.repo}/{commit}/{prefix}{quote(rel, safe='/')}"
     )
 
-  skill_rel = next(
-    (
-      str(e.get("path"))
-      for e in tree
-      if e.get("type") == "blob" and str(e.get("path", "")).upper() == "SKILL.MD"
-    ),
-    None,
-  )
-  if skill_rel is None:
+  skill_entries = [
+    entry for entry in tree
+    if entry.get("type") == "blob"
+    and str(entry.get("path", "")).upper() == "SKILL.MD"
+  ]
+  if not skill_entries:
     raise HTTPException(
       400,
       f"No SKILL.md in {body.repo}/{body.path} — not a skill directory.",
     )
+  if len(skill_entries) != 1:
+    raise HTTPException(
+      400,
+      "The skill directory contains more than one case-variant of SKILL.md; "
+      "nothing was installed.",
+    )
+  skill_rel = str(skill_entries[0]["path"])
+
+  resources: list[tuple[str, int]] = []
+  seen_resources: set[str] = set()
+  for entry in tree:
+    entry_type = entry.get("type")
+    if entry_type == "tree":
+      continue
+    if entry_type != "blob":
+      raise HTTPException(
+        400,
+        f"Skill package entry {entry.get('path')!r} is not a regular file; "
+        "nothing was installed.",
+      )
+    rel = str(entry.get("path", ""))
+    mode = entry.get("mode")
+    if mode not in {"100644", "100755"}:
+      raise HTTPException(
+        400,
+        f"Skill package entry {rel!r} is not a regular file; nothing was installed.",
+      )
+    declared = entry.get("size")
+    if type(declared) is not int or declared < 0:
+      raise HTTPException(
+        502,
+        f"GitHub tree entry for {rel!r} has no valid byte size; nothing was installed.",
+      )
+    if rel == skill_rel:
+      if declared > SKILL_MAX_BYTES:
+        raise HTTPException(
+          413,
+          f"SKILL.md is {declared} bytes; the limit is {SKILL_MAX_BYTES}. "
+          "Nothing was installed.",
+        )
+      continue
+    if not rel or not _resource_rel_ok(rel):
+      raise HTTPException(
+        400,
+        f"Skill package path {rel!r} is not an installable resource — "
+        "unsupported file type, unsafe path, or deeper than "
+        f"{_RESOURCE_MAX_DEPTH} segments; nothing was installed.",
+      )
+    if rel in seen_resources:
+      raise HTTPException(
+        502,
+        f"GitHub tree listed {rel!r} more than once; nothing was installed.",
+      )
+    seen_resources.add(rel)
+    resources.append((rel, declared))
+
+  # A skill package is one reviewed instruction tree, not a best-effort bag of
+  # files. Reject an unsupported or over-budget tree before fetching any
+  # resource so callers never receive a successful install whose playbooks,
+  # assets, or helpers were silently truncated.
+  if len(resources) > _RESOURCE_COUNT_MAX:
+    raise HTTPException(
+      413,
+      f"Skill package has {len(resources)} resources; the limit is "
+      f"{_RESOURCE_COUNT_MAX}. Nothing was installed.",
+    )
+  declared_total = sum(size for _, size in resources)
+  if declared_total > _RESOURCE_TOTAL_MAX:
+    raise HTTPException(
+      413,
+      f"Skill package resources total {declared_total} bytes; the limit is "
+      f"{_RESOURCE_TOTAL_MAX}. Nothing was installed.",
+    )
+
   files["SKILL.md"] = await install._http_get(
     client, _raw_url(skill_rel), max_bytes=SKILL_MAX_BYTES,
   )
 
-  resource_count = 0
-  resource_total = 0
-  for entry in tree:
-    if entry.get("type") != "blob":
-      continue
-    rel = str(entry.get("path", ""))
-    if not rel or rel == skill_rel or not _resource_rel_ok(rel):
-      continue
-    if resource_count >= _RESOURCE_COUNT_MAX:
-      break
-    remaining = _RESOURCE_TOTAL_MAX - resource_total
-    if remaining <= 0:
-      break
-    declared = entry.get("size")
-    if isinstance(declared, int) and declared > remaining:
-      continue  # skip an over-budget file, smaller ones may still fit
-    data = await install._http_get(client, _raw_url(rel), max_bytes=remaining)
-    files[rel] = data
-    resource_total += len(data)
-    resource_count += 1
+  fetch_slots = asyncio.Semaphore(_RESOURCE_FETCH_CONCURRENCY)
+  fetch_failed = asyncio.Event()
+
+  async def fetch_resource(
+    rel: str,
+    declared: int,
+  ) -> tuple[str, bytes] | None:
+    async with fetch_slots:
+      if fetch_failed.is_set():
+        return None
+      try:
+        data = await install._http_get(
+          client,
+          _raw_url(rel),
+          # The immutable Git tree supplies the exact blob size. Capping each
+          # response to that value keeps concurrent fetch memory within the
+          # already-approved aggregate package budget.
+          max_bytes=declared,
+        )
+      except BaseException:
+        # Signal before releasing the semaphore so a queued task that acquires
+        # this slot cannot begin another request during gather's error handoff.
+        # (test_install_repo_dir_settles_parallel_fetches_before_returning_failure
+        # pins that no request starts beyond the in-flight batch once one fails.)
+        fetch_failed.set()
+        raise
+    return rel, data
+
+  tasks = [
+    asyncio.create_task(fetch_resource(rel, declared))
+    for rel, declared in resources
+  ]
+  try:
+    fetched = await asyncio.gather(*tasks)
+  except BaseException:
+    for task in tasks:
+      task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    raise
+  files.update(item for item in fetched if item is not None)
 
   return name, files, _source_label(body.repo), commit
 
@@ -472,7 +567,16 @@ def list_skills(principal=Depends(get_principal)) -> dict:
     _skill_row(skill, installed_records, counts, is_owner=is_owner)
     for skill in skills.enumerate_skills(skills_dir)
   ]
-  return {"skills": out}
+  return {
+    "skills": out,
+    "install_contract": {
+      "version": 1,
+      "max_resources": _RESOURCE_COUNT_MAX,
+      "max_total_resource_bytes": _RESOURCE_TOTAL_MAX,
+      "max_depth": _RESOURCE_MAX_DEPTH,
+      "max_skill_bytes": SKILL_MAX_BYTES,
+    },
+  }
 
 
 @router.post("/install", status_code=201, dependencies=[Depends(reject_cross_site)])

@@ -25,9 +25,9 @@ test('Apps is a single drawer destination and the old full app list is gone', ()
   assert.match(drawer, /pinnedItems\.map\(\(\{ kind, item \}\)/)
 })
 
-test('the directory preserves app management on every card', () => {
-  assert.match(drawer, /variant="card"/)
-  assert.match(drawer, /<DrawerItemMenu[\s\S]*?surface=\{surface\}/)
+test('directory cards preserve app management through shared row actions', () => {
+  assert.match(drawer, /variant="card"[\s\S]*?actions=\{rowActions\}/,
+    'app cards must keep the shared row action surface')
   for (const action of ['Install to home screen', 'Share app', 'Delete data', 'Rename']) {
     assert.match(itemActionMenu, new RegExp(action))
   }
@@ -49,7 +49,7 @@ test('phone and web share one searchable launcher tab', () => {
   assert.match(dragImports, /PRE_HOLD_MOVE_PX/)
   assert.match(drawer, /setTimeout\(\(\) => \{[\s\S]*?openItemMenuAt[\s\S]*?DRAWER_MENU_HOLD_MS\)/)
   assert.doesNotMatch(drawer, /520/)
-  assert.match(drawer, /menuPlacement=\{openMenu/)
+  assert.match(drawer, /placement=\{menu\?\.placement\}/)
   assert.match(itemActionMenu, /placeContextMenu/)
   assert.match(itemActionMenu, /stopImmediatePropagation/)
   const phoneMenu = drawerCss.match(
