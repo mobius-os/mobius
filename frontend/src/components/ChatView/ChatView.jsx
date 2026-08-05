@@ -103,6 +103,7 @@ import {
   isOwnerUserMessage,
   jumpToLatestShown,
   openAppCtaViewModel,
+  shouldShowOpenAppCta,
   shouldAttachRunningStream,
   shouldRetryStopAfterConfirm,
   stopConfirmedIdle,
@@ -157,6 +158,10 @@ _touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
 const STOP_RETRY_DELAYS_MS = [0, 250, 700, 1200]
 const CHAT_FETCH_TIMEOUT_MS = 15000
 const MESSAGE_META_VISIBLE_MS = 5000
+// How long the settled "Open <app>" CTA lingers after a turn ends before it
+// auto-dismisses itself (a durable "final" acknowledgement). An ephemeral nudge,
+// not a permanent chat-foot fixture.
+const OPEN_APP_CTA_AUTO_DISMISS_MS = 8000
 // The floating jump-to-latest control appears once the reader holds a position
 // this far above the CONTENT tail (reserved spacer room is phantom, per the
 // send-snapshot bottom rule). Deliberately wider than the 50px near-bottom
@@ -261,6 +266,7 @@ export default function ChatView({
   onChatMissing,
   builtApps = NO_BUILT_APPS,
   onOpenApp,
+  onDismissApp,
   onInternalNav,
   onMessageStart,
   onOwnerActivity,
@@ -3458,6 +3464,26 @@ export default function ChatView({
   // re-enter FOLLOW_BOTTOM. No-op when the turn isn't active or the tab is hidden.
   // (The fast-forward identity/readiness gates are computed separately below.)
   const turnActive = sending || isStreaming || serverRunning
+
+  // Auto-dismiss the settled "Open <app>" CTA a few seconds after the turn
+  // ends, so it reads as an ephemeral nudge rather than a permanent chat-foot
+  // fixture. Only the settled (post-turn) CTA times out; a live in-turn preview
+  // link stays put while the app is still being built. Dismissal is the same
+  // durable "final" acknowledgement that opening performs — minus the
+  // navigation — so the button never reappears on a later refetch, and a click
+  // that lands first simply advances the same server truth and cancels this.
+  // (Declared here, after `turnActive`, so its dep array is out of the TDZ.)
+  useEffect(() => {
+    if (turnActive || !onDismissApp) return
+    const timers = builtApps
+      .filter(app => shouldShowOpenAppCta(app, false))
+      .map(app => setTimeout(
+        () => onDismissApp(app), OPEN_APP_CTA_AUTO_DISMISS_MS,
+      ))
+    if (timers.length === 0) return
+    return () => timers.forEach(clearTimeout)
+  }, [builtApps, turnActive, onDismissApp])
+
   useEffect(() => {
     if (!turnActive) return
     // Ordinary live turns set this synchronously at their run-start seam. This
