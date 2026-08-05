@@ -191,6 +191,26 @@ def _usage_event(usage: dict[str, Any]) -> dict:
   }
 
 
+def _claude_text_item_id(message_id: str | None, index: object) -> str | None:
+  """A turn-unique id for a Claude text content block.
+
+  Claude streams a text block's deltas and then re-sends its authoritative full
+  text (the AssistantMessage TextBlock) to repair any dropped delta — but with
+  no provider item id, so events.py could only pair delta and final
+  POSITIONALLY. When one message carries several text blocks, that pairing
+  lands the earlier block's authoritative text on the wrong (trailing) slot, so
+  a leading chunk dropped from an earlier block is never repaired. The Anthropic
+  message id plus the content-block index names the exact block on both sides,
+  so the reducer repairs by identity. The index resets per message, so the
+  message id is required to stay turn-unique. Returns None when either part is
+  missing, so the reducer keeps its positional fallback (no regression) instead
+  of minting a colliding id.
+  """
+  if message_id is None or index is None:
+    return None
+  return f"{message_id}:{index}"
+
+
 def dispatch_sdk_message(
   sdk_msg: Any,
   bc,
@@ -305,13 +325,27 @@ def dispatch_sdk_message(
       current_session_id = sdk_msg.session_id
     event = sdk_msg.event
     event_type = event.get("type")
+    if event_type == "message_start":
+      # Capture the Anthropic message id so this message's text deltas can be
+      # stamped with a turn-unique id that the AssistantMessage's authoritative
+      # text_final matches by identity (see _claude_text_item_id). The id is not
+      # on the content_block events themselves, only here.
+      message = event.get("message") or {}
+      bc.current_message_id = message.get("id")
+      return current_session_id, None
     if event_type == "content_block_delta":
       delta = event.get("delta", {})
       delta_type = delta.get("type")
       if delta_type == "text_delta":
         text = delta.get("text")
         if text:
-          bc.publish({"type": "text", "content": text})
+          item_id = _claude_text_item_id(
+            getattr(bc, "current_message_id", None), event.get("index"),
+          )
+          bc.publish({
+            "type": "text", "content": text,
+            **({"text_item_id": item_id} if item_id else {}),
+          })
         return current_session_id, None
       if delta_type == "thinking_delta":
         thinking = delta.get("thinking") or delta.get("text") or ""
@@ -346,7 +380,7 @@ def dispatch_sdk_message(
     if sdk_msg.session_id:
       current_session_id = sdk_msg.session_id
     server_tools: dict[str, str] = {}
-    for block in sdk_msg.content:
+    for content_index, block in enumerate(sdk_msg.content):
       if isinstance(block, ToolUseBlock):
         # block.id is the canonical tool_use_id; the matching ToolResultBlock
         # carries it as .tool_use_id. Thread it through so a large tool output
@@ -428,8 +462,16 @@ def dispatch_sdk_message(
         # same message object and so were always durable — this closes the gap
         # for text. Replace, never append: the reducer concatenates plain
         # "text" events, so re-emitting as "text" would double the prose.
+        # The item id (message id + content-block index) matches the streamed
+        # deltas' id, so events.py replaces THIS block by identity instead of
+        # guessing the trailing text block — the fix for an earlier text block
+        # keeping a dropped leading chunk when a message has several.
         if block.text:
-          bc.publish({"type": "text_final", "content": block.text})
+          item_id = _claude_text_item_id(sdk_msg.message_id, content_index)
+          bc.publish({
+            "type": "text_final", "content": block.text,
+            **({"text_item_id": item_id} if item_id else {}),
+          })
         continue
       _emit_unknown(
         bc, f"assistant_block:{type(block).__name__}", block,
