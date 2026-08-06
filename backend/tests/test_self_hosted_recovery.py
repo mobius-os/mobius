@@ -120,7 +120,9 @@ def test_linked_worktree_lifecycle_targets_the_live_compose_project(tmp_path):
   scripts.mkdir(parents=True)
   copied = scripts / "mobiusctl"
   shutil.copy2(ROOT / "scripts" / "mobiusctl", copied)
-  state = tmp_path / "recovery.env"
+  state_home = tmp_path / "state"
+  state = state_home / "mobius" / "mobius" / "recovery.env"
+  state.parent.mkdir(parents=True)
   _write_recovery_state(state)
   fake_env, log = _fake_docker(tmp_path)
 
@@ -130,8 +132,7 @@ def test_linked_worktree_lifecycle_targets_the_live_compose_project(tmp_path):
     env={
       **os.environ,
       **fake_env,
-      "MOBIUS_RECOVERY_STATE_FILE": str(state),
-      "MOBIUS_RECOVERY_LOCK_DIR": str(tmp_path),
+      "XDG_STATE_HOME": str(state_home),
     },
     text=True,
     capture_output=True,
