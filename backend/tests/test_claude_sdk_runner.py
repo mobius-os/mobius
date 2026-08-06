@@ -1999,3 +1999,85 @@ def test_precompact_log_trigger_extracts_and_is_defensive():
   assert _precompact_log_trigger({"trigger": 123}) is None
   assert _precompact_log_trigger(None) is None
   assert _precompact_log_trigger("not-a-dict") is None
+
+
+def _stream_message_start(message_id: str) -> StreamEvent:
+  return StreamEvent(
+    uuid="evt-ms", session_id="sess-1",
+    event={"type": "message_start", "message": {"id": message_id}},
+  )
+
+
+def _stream_text_delta_at(index: int, text: str) -> StreamEvent:
+  return StreamEvent(
+    uuid="evt-td", session_id="sess-1",
+    event={
+      "type": "content_block_delta", "index": index,
+      "delta": {"type": "text_delta", "text": text},
+    },
+  )
+
+
+def _stream_text_block_start(index: int) -> StreamEvent:
+  return StreamEvent(
+    uuid="evt-cbs", session_id="sess-1",
+    event={
+      "type": "content_block_start", "index": index,
+      "content_block": {"type": "text"},
+    },
+  )
+
+
+def test_claude_text_final_repairs_earlier_block_by_id():
+  """A dropped leading delta on the FIRST of two text blocks in one message is
+  repaired by the authoritative text_final, matched by (message id + index).
+
+  Before the id was threaded, text_final for the first block landed on the
+  trailing (second) block positionally, so the first block kept its truncated
+  delta accumulation forever (the dropped-leading-token bug).
+  """
+  from app.events import process_event
+
+  bus = _ChatBus()
+  # One message, TWO text blocks (indices 0 and 1). Block 0's leading delta
+  # ("Al") was dropped, so it accumulates truncated ("pha text here").
+  dispatch_sdk_message(_stream_message_start("msg_abc"), bus, None)
+  dispatch_sdk_message(_stream_text_delta_at(0, "pha text here"), bus, None)
+  dispatch_sdk_message(_stream_text_block_start(1), bus, None)
+  dispatch_sdk_message(_stream_text_delta_at(1, "Beta text"), bus, None)
+  dispatch_sdk_message(
+    AssistantMessage(
+      content=[TextBlock(text="Alpha text here"), TextBlock(text="Beta text")],
+      model="claude-opus",
+      message_id="msg_abc",
+    ),
+    bus, None,
+  )
+
+  # Delta and final events carry matching, turn-unique ids.
+  text_events = [e for e in bus.events if e["type"] == "text"]
+  final_events = [e for e in bus.events if e["type"] == "text_final"]
+  assert text_events[0]["text_item_id"] == "msg_abc:0"
+  assert final_events[0]["text_item_id"] == "msg_abc:0"
+  assert final_events[1]["text_item_id"] == "msg_abc:1"
+
+  # Reduce the emitted events the way the sink does; the first block is repaired.
+  blocks: list[dict] = []
+  for event in bus.events:
+    process_event(event, blocks)
+  texts = [b["content"] for b in blocks if b.get("type") == "text"]
+  assert texts == ["Alpha text here", "Beta text"]
+
+
+def test_claude_text_events_have_no_id_without_message_id():
+  """No message id (no message_start, or a message_id-less AssistantMessage)
+  means no text_item_id — the reducer keeps its positional fallback, so nothing
+  regresses for paths that do not supply the id."""
+  bus = _ChatBus()
+  dispatch_sdk_message(_stream_text_delta_at(0, "hello"), bus, None)
+  dispatch_sdk_message(
+    AssistantMessage(content=[TextBlock(text="hello")], model="claude-opus"),
+    bus, None,
+  )
+  emitted = [e for e in bus.events if e["type"] in ("text", "text_final")]
+  assert emitted and all("text_item_id" not in e for e in emitted)
