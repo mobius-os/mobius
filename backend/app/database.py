@@ -1479,6 +1479,38 @@ def orm_schema_gaps(eng) -> list[str]:
   return gaps
 
 
+def _add_connector_oauth_gcloud_fields(eng) -> None:
+  """Add the Google-account (gcloud) sign-in fields to ``connector_oauth``.
+
+  Additive and idempotent: each column is inspector-gated so a re-run no-ops,
+  and existing browser-flow grants keep working unchanged (auth_mode defaults
+  to ``browser``). ``connector_oauth`` may not exist yet on an install that has
+  never added an OAuth connection; ``create_all`` builds it with these columns
+  already present, so skip the ALTERs entirely in that case.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "connector_oauth" not in inspector.get_table_names():
+    return
+  columns = {c["name"] for c in inspector.get_columns("connector_oauth")}
+  additions = (
+    ("auth_mode",
+     "ALTER TABLE connector_oauth ADD COLUMN auth_mode VARCHAR(16) "
+     "NOT NULL DEFAULT 'browser'"),
+    ("client_id",
+     "ALTER TABLE connector_oauth ADD COLUMN client_id VARCHAR(512) NULL"),
+    ("client_secret_encrypted",
+     "ALTER TABLE connector_oauth ADD COLUMN client_secret_encrypted TEXT NULL"),
+    ("user_project",
+     "ALTER TABLE connector_oauth ADD COLUMN user_project VARCHAR(256) NULL"),
+  )
+  with eng.begin() as conn:
+    for name, ddl in additions:
+      if name not in columns:
+        conn.execute(text(ddl))
+
+
 def _add_app_connections_manage(eng) -> None:
   """Grant column for the Connections mini-app's registry access.
 
@@ -1609,6 +1641,7 @@ _SCHEMA_MIGRATIONS = (
   ("0009_app_connections_manage", _add_app_connections_manage),
   ("0010_chat_pending_question_id", _add_chat_pending_question_id),
   ("0011_delegation_parent_wake", _add_delegation_parent_wake),
+  ("0012_connector_oauth_gcloud", _add_connector_oauth_gcloud_fields),
 )
 
 

@@ -961,6 +961,25 @@ class ConnectorOAuth(Base):
   access_expires_at = Column(DateTime, nullable=True)
   scopes_granted = Column(JSON, nullable=False, default=list)
   connected_at = Column(DateTime, nullable=True)
+  # How this grant was obtained. ``browser`` is the standard spec flow (an
+  # authorization-server redirect back to this instance's callback). ``gcloud``
+  # is the Google-account path: the redirect is Google's own hosted code-display
+  # page and the client identity is the Cloud SDK's published installed-app
+  # client, so the owner needs no Google Cloud console app. The flavor steers
+  # sign-in only; refresh is identical once tokens are sealed.
+  auth_mode = Column(
+    String(16), nullable=False, default="browser", server_default="browser",
+  )
+  # Per-connection client identity, used only when the client is NOT the
+  # issuer-shared registration — currently the gcloud installed-app client.
+  # Preferred over ``OAuthClientRegistration`` at refresh time when present, so
+  # a later bring-your-own Google client on the same issuer cannot collide.
+  client_id = Column(String(512), nullable=True)
+  client_secret_encrypted = Column(Text, nullable=True)
+  # Google Cloud requires the caller to name a billing/quota project on every
+  # request via the ``x-goog-user-project`` header; stored plainly (a project
+  # id is not a secret) and attached by the broker for gcloud-mode grants.
+  user_project = Column(String(256), nullable=True)
 
 
 class OAuthClientRegistration(Base):

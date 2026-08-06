@@ -26,7 +26,8 @@ _REAL_ASYNC_CLIENT = httpx.AsyncClient
 class MockProvider:
   """Resource server + authorization server for one MCP endpoint."""
 
-  def __init__(self, *, cimd=False, issue_secret=False):
+  def __init__(self, *, cimd=False, issue_secret=False, no_register=False,
+               anon_open=False, slash_issuer=False):
     self.registered = 0
     self.codes = {}          # code -> {"challenge": ..., "resource": ...}
     self.refresh_tokens = {}  # refresh_token -> generation counter
@@ -35,7 +36,11 @@ class MockProvider:
     self.revoked = set()
     self.cimd = cimd                  # advertise Client ID Metadata Documents
     self.issue_secret = issue_secret  # DCR returns a client_secret (confidential)
+    self.no_register = no_register    # pre-registered-camp: no DCR, no CIMD (BYO)
+    self.anon_open = anon_open        # Google shape: handshake open, calls gated
+    self.slash_issuer = slash_issuer  # Google shape: PRM issuer has trailing "/"
     self.secrets_seen = []            # client_secret values the token endpoint got
+    self.client_ids_seen = []         # client_id values the token endpoint got
 
   def handler(self, request: httpx.Request) -> httpx.Response:
     url = str(request.url)
@@ -56,15 +61,18 @@ class MockProvider:
       auth = request.headers.get("authorization", "")
       token = auth[7:] if auth.lower().startswith("bearer ") else ""
       if not token or token not in self.access_tokens or not self.access_tokens[token]:
-        return httpx.Response(
-          401,
-          headers={
-            "www-authenticate":
-              'Bearer resource_metadata='
-              '"https://mcp.test/.well-known/oauth-protected-resource/mcp"',
-          },
-          json={"error": "invalid_token"},
-        )
+        if not self.anon_open:
+          return httpx.Response(
+            401,
+            headers={
+              "www-authenticate":
+                'Bearer resource_metadata='
+                '"https://mcp.test/.well-known/oauth-protected-resource/mcp"',
+            },
+            json={"error": "invalid_token"},
+          )
+        # anon_open (Google shape): initialize and tools/list answer without
+        # auth; only actual tool calls are gated — fall through to serving.
       # Signed in: normal MCP handshake.
       if body.get("method") == "initialize":
         return httpx.Response(200, headers={"content-type": "application/json"}, json={
@@ -86,7 +94,9 @@ class MockProvider:
     if path == "/.well-known/oauth-protected-resource/mcp":
       return httpx.Response(200, json={
         "resource": "https://mcp.test/mcp",
-        "authorization_servers": [AS_ISSUER],
+        "authorization_servers": [
+          AS_ISSUER + "/" if self.slash_issuer else AS_ISSUER,
+        ],
         "scopes_supported": ["read", "write"],
       })
 
@@ -105,6 +115,10 @@ class MockProvider:
       }
       if self.cimd:
         meta["client_id_metadata_document_supported"] = True
+      if self.no_register:
+        # Pre-registered camp (Google/GitHub/…): discovery + PKCE, but no way
+        # to self-register — the owner must bring their own client.
+        meta.pop("registration_endpoint")
       return httpx.Response(200, json=meta)
 
     # ── dynamic client registration (RFC 7591) ──
@@ -118,6 +132,7 @@ class MockProvider:
     # ── token endpoint ──
     if path == "/token":
       self.secrets_seen.append(form.get("client_secret"))
+      self.client_ids_seen.append(form.get("client_id"))
       if form.get("grant_type") == "authorization_code":
         return self._issue(form.get("code"))
       if form.get("grant_type") == "refresh_token":
@@ -538,6 +553,222 @@ def test_registration_is_reused_across_connectors_on_one_issuer(
   assert a["id"] != b["id"]
   assert provider.registered == 1  # cached per issuer, not re-registered
   assert db.query(models.OAuthClientRegistration).count() == 1
+
+
+def test_clear_client_does_not_remove_automatic_registration(
+  client, auth, db, provider,
+):
+  created = client.post(
+    "/api/connectors", headers=auth, json={"url": MCP_URL},
+  ).json()
+  client.post(
+    f"/api/connectors/{created['id']}/oauth/start",
+    headers=_headers(auth, created["generation"]),
+  )
+  reg = db.query(models.OAuthClientRegistration).one()
+  assert reg.mode == "dcr"
+
+  cleared = client.request(
+    "DELETE", f"/api/connectors/{created['id']}/oauth/client",
+    headers=_headers(auth, created["generation"]),
+  )
+  assert cleared.status_code == 200
+  assert cleared.json() == {"ok": True, "removed": False}
+  db.expire_all()
+  assert db.query(models.OAuthClientRegistration).filter_by(
+    issuer=AS_ISSUER, mode="dcr",
+  ).count() == 1
+
+
+def test_byo_setup_signin_and_recovery(client, auth, db, monkeypatch):
+  """A pre-registered-camp provider: no DCR/CIMD. Sign-in first asks for the
+  owner's client, then works end to end; credentials are recoverable."""
+  mock = _wire(monkeypatch, MockProvider(no_register=True))
+  created = client.post("/api/connectors", headers=auth, json={"url": MCP_URL}).json()
+  cid, generation = created["id"], created["generation"]
+  assert created["status"] == "oauth_required"
+
+  # 1. Start sign-in → not a 422; a structured "needs setup" with the issuer
+  #    and the server's authoritative redirect URI.
+  started = client.post(
+    f"/api/connectors/{cid}/oauth/start", headers=_headers(auth, generation),
+  )
+  assert started.status_code == 200, started.text
+  body = started.json()
+  assert body["needs_client_setup"] is True
+  assert body["issuer"] == AS_ISSUER
+  assert body["redirect_uri"].endswith("/api/connectors/oauth/callback")
+  assert mock.registered == 0  # never tried to self-register
+
+  # 2. Save the owner's client. Issuer is server-derived — a body issuer is
+  #    ignored — and the secret never comes back.
+  saved = client.post(
+    f"/api/connectors/{cid}/oauth/client", headers=_headers(auth, generation),
+    json={"client_id": "owner-client-42", "client_secret": "owner-secret",
+          "issuer": "https://evil.test"},
+  )
+  assert saved.status_code == 200, saved.text
+  assert "owner-secret" not in saved.text
+  reg = db.query(models.OAuthClientRegistration).filter_by(issuer=AS_ISSUER).one()
+  assert reg.mode == "byo" and reg.client_id == "owner-client-42"
+  assert reg.client_secret_encrypted and "owner-secret" not in reg.client_secret_encrypted
+  assert core.decrypt_oauth(reg.client_secret_encrypted) == "owner-secret"
+
+  # 3. Now start returns a real authorize URL carrying the owner's client_id.
+  started2 = client.post(
+    f"/api/connectors/{cid}/oauth/start", headers=_headers(auth, generation),
+  ).json()
+  from urllib.parse import parse_qs, urlparse
+  q = parse_qs(urlparse(started2["authorize_url"]).query)
+  assert q["client_id"] == ["owner-client-42"]
+  state = q["state"][0]
+
+  # 4. Callback exchanges with the owner's client_id + secret and signs in.
+  cb = client.get("/api/connectors/oauth/callback",
+                  params={"code": "c1", "state": state, "iss": AS_ISSUER})
+  assert "connected" in cb.text
+  assert "owner-client-42" in mock.client_ids_seen
+  assert "owner-secret" in mock.secrets_seen
+  listed = client.get("/api/connectors", headers=auth).json()["connectors"]
+  assert next(c for c in listed if c["id"] == cid)["signed_in"] is True
+
+  # 5. Re-saving a rotated secret upserts (no IntegrityError), and delete
+  #    clears the shared credential.
+  rotate = client.post(
+    f"/api/connectors/{cid}/oauth/client", headers=_headers(auth, generation),
+    json={"client_id": "owner-client-42", "client_secret": "rotated-secret"},
+  )
+  assert rotate.status_code == 200
+  db.expire_all()
+  reg = db.query(models.OAuthClientRegistration).filter_by(issuer=AS_ISSUER).one()
+  assert core.decrypt_oauth(reg.client_secret_encrypted) == "rotated-secret"
+  cleared = client.request(
+    "DELETE", f"/api/connectors/{cid}/oauth/client",
+    headers=_headers(auth, generation),
+  )
+  assert cleared.status_code == 200 and cleared.json()["removed"] is True
+  assert db.query(models.OAuthClientRegistration).filter_by(issuer=AS_ISSUER).count() == 0
+
+
+def test_anon_open_gate_detected_and_slash_issuer_normalized(
+  client, auth, db, monkeypatch,
+):
+  """Google's exact shape: the whole anonymous handshake succeeds (initialize
+  and tools/list are open; only tool calls are gated) and the protected-
+  resource metadata names the issuer with a bare trailing slash. The add must
+  classify this as a signed-out OAuth connection — not a healthy keyless one
+  that would start failing mid-conversation — and store the issuer in its
+  canonical slash-free form so one credential row serves every connection to
+  that authority."""
+  _wire(monkeypatch, MockProvider(
+    anon_open=True, slash_issuer=True, no_register=True,
+  ))
+  created = client.post("/api/connectors", headers=auth, json={"url": MCP_URL})
+  assert created.status_code == 201, created.text
+  row = created.json()
+  assert row["status"] == "oauth_required"
+  assert row["auth_kind"] == "oauth"
+  assert row["signed_in"] is False
+  db.expire_all()
+  oauth = db.query(models.ConnectorOAuth).filter_by(connector_id=row["id"]).one()
+  assert oauth.issuer == AS_ISSUER  # "…/" in the metadata, normalized here
+
+
+def test_keyless_open_server_without_prm_stays_keyless(
+  client, auth, monkeypatch,
+):
+  """The add-time gate check must not reclassify a genuinely open server: no
+  protected-resource document → plain keyless add with its tool catalog."""
+  base = MockProvider(anon_open=True)
+  def no_prm(request):
+    if request.url.path.startswith("/.well-known/"):
+      return httpx.Response(404, json={})
+    return base.handler(request)
+  monkeypatch.setattr(
+    core, "_safe_endpoint",
+    lambda url: (url, httpx.URL(url).host, httpx.URL(url).host),
+  )
+  monkeypatch.setattr(
+    core.httpx, "AsyncClient",
+    lambda **kw: _REAL_ASYNC_CLIENT(
+      transport=httpx.MockTransport(no_prm),
+      timeout=kw.get("timeout"), follow_redirects=False),
+  )
+  created = client.post("/api/connectors", headers=auth, json={"url": MCP_URL})
+  assert created.status_code == 201, created.text
+  row = created.json()
+  assert row["status"] == "ok"
+  assert row["auth_kind"] != "oauth"
+  assert row["tools"] == ["search"]
+
+
+def test_keyless_open_server_survives_unavailable_prm(
+  client, auth, monkeypatch,
+):
+  """The opportunistic anonymous-gate discovery is not allowed to turn a
+  healthy keyless add into a 500 when its well-known route is unavailable."""
+  base = MockProvider(anon_open=True)
+
+  def unavailable_prm(request):
+    if request.url.path.startswith("/.well-known/"):
+      raise httpx.ConnectError("metadata unavailable", request=request)
+    return base.handler(request)
+
+  monkeypatch.setattr(
+    core, "_safe_endpoint",
+    lambda url: (url, httpx.URL(url).host, httpx.URL(url).host),
+  )
+  monkeypatch.setattr(
+    core.httpx, "AsyncClient",
+    lambda **kw: _REAL_ASYNC_CLIENT(
+      transport=httpx.MockTransport(unavailable_prm),
+      timeout=kw.get("timeout"), follow_redirects=False,
+    ),
+  )
+  created = client.post("/api/connectors", headers=auth, json={"url": MCP_URL})
+  assert created.status_code == 201, created.text
+  row = created.json()
+  assert row["status"] == "ok"
+  assert row["auth_kind"] != "oauth"
+
+
+def test_byo_client_secret_never_echoed_in_422(client, auth, db, monkeypatch):
+  """A non-string secret is rejected value-free — pydantic must not echo it."""
+  _wire(monkeypatch, MockProvider(no_register=True))
+  created = client.post("/api/connectors", headers=auth, json={"url": MCP_URL}).json()
+  cid, generation = created["id"], created["generation"]
+  bad = client.post(
+    f"/api/connectors/{cid}/oauth/client", headers=_headers(auth, generation),
+    json={"client_id": "x", "client_secret": {"leak": "never-echo-secret"}},
+  )
+  assert bad.status_code == 400
+  assert "never-echo-secret" not in bad.text
+
+
+def test_google_issuer_requests_offline_access():
+  """Google needs access_type=offline to return a refresh token; gated on the
+  issuer host and applied to no one else."""
+  from app import connector_oauth as cox
+  from urllib.parse import parse_qs, urlparse
+
+  google = cox.Discovery(
+    resource="https://bigquery.googleapis.com/mcp",
+    issuer="https://accounts.google.com",
+    authorization_endpoint="https://accounts.google.com/o/oauth2/v2/auth",
+    token_endpoint="https://oauth2.googleapis.com/token",
+    scopes=["https://www.googleapis.com/auth/bigquery"],
+  )
+  q = parse_qs(urlparse(cox.authorization_url(google, "cid", "chal", "st")).query)
+  assert q["access_type"] == ["offline"]
+  assert q["prompt"] == ["consent"]
+
+  other = cox.Discovery(
+    resource="https://mcp.test/mcp", issuer="https://as.test",
+    authorization_endpoint="https://as.test/authorize",
+    token_endpoint="https://as.test/token", scopes=["read"],
+  )
+  q2 = parse_qs(urlparse(cox.authorization_url(other, "cid", "chal", "st")).query)
+  assert "access_type" not in q2 and "prompt" not in q2
 
 
 def test_callback_rejects_forged_state(client, auth, db, provider):

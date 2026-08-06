@@ -1015,6 +1015,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0009_app_connections_manage",
     "0010_chat_pending_question_id",
     "0011_delegation_parent_wake",
+    "0012_connector_oauth_gcloud",
   ]
   assert second == first
 
@@ -1114,6 +1115,95 @@ def test_connections_manage_reaches_a_ledgered_database(tmp_path):
   # Idempotent over the hand-patched production shape too.
   run_migrations(eng)
   assert "0009_app_connections_manage" in {
+    entry["version"] for entry in schema_migration_history(eng)
+  }
+
+
+def test_connector_oauth_gcloud_migration_upgrades_legacy_rows_idempotently(
+  tmp_path,
+):
+  """An existing OAuth grant gains Google fields without losing its mode.
+
+  Deleting the ledger marker after the first run simulates a crash after the
+  ALTER statements committed but before the migration was recorded. The retry
+  must see the columns, preserve the legacy row, and complete normally.
+  """
+  eng = create_engine(f"sqlite:///{tmp_path / 'legacy-connector-oauth.db'}")
+  previous_versions = (
+    "0001_legacy_schema_convergence",
+    "0002_chat_run_goal_objective",
+    "0003_chat_run_root_identity",
+    "0004_app_identity_required",
+    "0005_connectors",
+    "0006_connector_capability_identity",
+    "0007_chat_has_messages",
+    "0008_chat_search_documents",
+    "0009_app_connections_manage",
+    "0010_chat_pending_question_id",
+    "0011_delegation_parent_wake",
+  )
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps (id INTEGER PRIMARY KEY, name VARCHAR(255))"
+    ))
+    conn.execute(text(
+      "CREATE TABLE connector_oauth ("
+      "connector_id INTEGER PRIMARY KEY, resource VARCHAR(2048) NOT NULL, "
+      "issuer VARCHAR(512) NOT NULL, "
+      "authorization_endpoint VARCHAR(2048) NOT NULL, "
+      "token_endpoint VARCHAR(2048) NOT NULL, "
+      "registration_endpoint VARCHAR(2048), "
+      "revocation_endpoint VARCHAR(2048), "
+      "scopes_advertised JSON NOT NULL, access_token_encrypted TEXT, "
+      "refresh_token_encrypted TEXT, access_expires_at DATETIME, "
+      "scopes_granted JSON NOT NULL, connected_at DATETIME)"
+    ))
+    conn.execute(text(
+      "INSERT INTO connector_oauth "
+      "(connector_id, resource, issuer, authorization_endpoint, "
+      "token_endpoint, scopes_advertised, access_token_encrypted, "
+      "refresh_token_encrypted, scopes_granted) VALUES "
+      "(7, 'https://mcp.example/mcp', 'https://issuer.example', "
+      "'https://issuer.example/auth', 'https://issuer.example/token', "
+      "'[]', 'sealed-access', 'sealed-refresh', '[]')"
+    ))
+    conn.execute(text(
+      "CREATE TABLE schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version in previous_versions:
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) "
+        "VALUES (:version, '2026-08-06 00:00:00')"
+      ), {"version": version})
+
+  run_migrations(eng)
+  with eng.begin() as conn:
+    conn.execute(text(
+      "DELETE FROM schema_migrations "
+      "WHERE version = '0012_connector_oauth_gcloud'"
+    ))
+  run_migrations(eng)
+
+  columns = {
+    column["name"]: column
+    for column in inspect(eng).get_columns("connector_oauth")
+  }
+  assert set((
+    "auth_mode", "client_id", "client_secret_encrypted", "user_project",
+  )).issubset(columns)
+  assert columns["auth_mode"]["nullable"] is False
+  assert columns["auth_mode"]["default"] is not None
+  with eng.connect() as conn:
+    row = conn.execute(text(
+      "SELECT auth_mode, client_id, client_secret_encrypted, user_project, "
+      "access_token_encrypted, refresh_token_encrypted "
+      "FROM connector_oauth WHERE connector_id = 7"
+    )).one()
+  assert tuple(row) == (
+    "browser", None, None, None, "sealed-access", "sealed-refresh",
+  )
+  assert "0012_connector_oauth_gcloud" in {
     entry["version"] for entry in schema_migration_history(eng)
   }
 
