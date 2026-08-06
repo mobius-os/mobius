@@ -32,12 +32,16 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserverVFS
 
-from app.build_admission import BuildLeaseUnavailable, build_lease
+from app.build_admission import (
+  BuildLeaseUnavailable,
+  build_lease,
+  require_vite_build_admission,
+  vite_build_admitted,
+)
 from app.process_groups import (
   isolated_process_group_id,
   lower_process_group_priority,
 )
-from app.resource_pressure import assess_memory_pressure
 
 log = logging.getLogger(__name__)
 
@@ -103,10 +107,10 @@ _ACTIVE_SUPERVISOR: "_FrontendSupervisor | None" = None
 def _memory_is_tight() -> bool:
   """True when starting another native JS build risks an OOM kill.
 
-  Unmeasurable memory is ``unknown``, which fails open. Only the watcher may
-  act on this: it owns a free retry, so a deferral costs nothing.
+  Unmeasurable memory is ``unknown``, which fails open. The shared Vite policy
+  combines ratio/PSI pressure with the absolute reserve small cgroups need.
   """
-  return assess_memory_pressure()["state"] in {"constrained", "critical"}
+  return not vite_build_admitted()
 
 
 def _source_tree_scandir(
@@ -713,11 +717,12 @@ def _publish_built_dir(source_dir: Path, reason: str) -> bool:
 def _run_vite_build_once(out_dir: Path) -> str:
   """Run one explicit full Vite build into ``out_dir``.
 
-  This path has no free retry — owner Apply rolls the source tree back and
-  rebuild_shell.sh aborts a production deploy — so it waits for the lease
-  rather than deferring, and never declines on memory pressure.
+  This path waits for the shared lease. If the cgroup is still unsafe once it
+  owns the lease, owner Apply rolls its source change back and rebuild_shell.sh
+  aborts cleanly; either operation can be retried without risking an OOM kill.
   """
   with build_lease():
+    require_vite_build_admission()
     _ensure_node_modules()
     if out_dir.exists():
       shutil.rmtree(out_dir)

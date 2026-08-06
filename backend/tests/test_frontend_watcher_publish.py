@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 import app.frontend_watcher as fw
+from app.build_admission import ViteBuildDeferred
 
 
 def _write_build(root, marker):
@@ -62,6 +63,7 @@ def fw_dirs(tmp_path, monkeypatch):
   monkeypatch.setattr(fw, "_CACHE_DIR", dirs["cache"])
   monkeypatch.setattr(fw, "_TMP_DIR", dirs["tmp"])
   monkeypatch.setattr(fw, "_memory_is_tight", lambda: False)
+  monkeypatch.setattr(fw, "require_vite_build_admission", lambda: None)
   monkeypatch.setattr(
     fw,
     "_BUILT_GLOBAL_CHECK",
@@ -505,11 +507,9 @@ def test_memory_pressure_defers_a_demand_build_and_keeps_its_reason(
   assert publish_calls == [(fw_dirs["staging"], f"build:{source_file}")]
 
 
-def test_explicit_rebuild_still_builds_under_memory_pressure(
+def test_explicit_rebuild_builds_after_admission(
   fw_dirs, monkeypatch,
 ):
-  """Apply and deploy cannot retry, so pressure must never refuse them."""
-  monkeypatch.setattr(fw, "_memory_is_tight", lambda: True)
   monkeypatch.setattr(fw, "_ensure_node_modules", lambda: None)
   runs = []
 
@@ -522,6 +522,33 @@ def test_explicit_rebuild_still_builds_under_memory_pressure(
 
   assert fw._run_vite_build_once(fw_dirs["rebuild"]) == "vite build complete"
   assert len(runs) == 1
+
+
+def test_explicit_rebuild_defers_before_mutating_or_starting_vite(
+  fw_dirs, monkeypatch,
+):
+  """Apply/deploy stay retryable and preserve prior output under pressure."""
+  fw_dirs["rebuild"].mkdir()
+  previous = fw_dirs["rebuild"] / "previous.txt"
+  previous.write_text("keep", encoding="utf-8")
+
+  def defer():
+    raise ViteBuildDeferred("retry after memory pressure falls")
+
+  monkeypatch.setattr(fw, "require_vite_build_admission", defer)
+  monkeypatch.setattr(
+    fw, "_ensure_node_modules",
+    lambda: pytest.fail("admission must run before frontend setup"),
+  )
+  monkeypatch.setattr(
+    fw.subprocess, "run",
+    lambda *args, **kwargs: pytest.fail("deferred build must not start Vite"),
+  )
+
+  with pytest.raises(ViteBuildDeferred, match="retry after memory pressure"):
+    fw._run_vite_build_once(fw_dirs["rebuild"])
+
+  assert previous.read_text(encoding="utf-8") == "keep"
 
 
 def test_conflict_markers_defer_vite_without_touching_generations(

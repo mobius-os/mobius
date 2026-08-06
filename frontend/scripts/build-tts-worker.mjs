@@ -3,6 +3,11 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { enterBuildAdmission } from './build-admission.mjs'
+
+
+enterBuildAdmission()
+
 // The speech worker is served from public/speech/ as an ordinary same-origin
 // script, alongside the Wasm binary it loads. Shipping it as a JavaScript
 // string that the page turns into a blob: URL would need `blob:` in the

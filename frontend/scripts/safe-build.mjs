@@ -4,8 +4,11 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
+import { enterBuildAdmission } from './build-admission.mjs'
 import { resolveBuildOutput } from './build-output-policy.mjs'
 
+
+enterBuildAdmission({ vite: true })
 
 const frontendDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const watcherLeasePath = path.join(frontendDir, '.watch.lock')

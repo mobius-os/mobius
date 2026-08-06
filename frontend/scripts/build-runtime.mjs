@@ -3,6 +3,10 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { rolldown } from 'rolldown'
+import { enterBuildAdmission } from './build-admission.mjs'
+
+
+enterBuildAdmission()
 
 const frontendDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const outputPath = path.join(frontendDir, 'public', 'mobius-runtime.js')

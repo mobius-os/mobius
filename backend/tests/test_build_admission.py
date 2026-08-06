@@ -1,6 +1,8 @@
 """One cross-process lease admits one Mobius-owned JavaScript build."""
 
 import asyncio
+import fcntl
+import os
 import subprocess
 import sys
 import textwrap
@@ -11,8 +13,12 @@ import pytest
 
 from app.build_admission import (
   BuildLeaseUnavailable,
+  VITE_BUILD_MIN_HEADROOM_BYTES,
+  ViteBuildDeferred,
   build_lease,
   build_lease_async,
+  require_vite_build_admission,
+  vite_build_admitted,
 )
 
 
@@ -84,3 +90,108 @@ def test_no_reachable_runtime_directory_admits_every_build(
   with build_lease(blocking=False):
     with build_lease(blocking=False):
       pass
+
+
+def _memory(*, working_set: int, limit: int | None) -> dict:
+  return {
+    "available": True,
+    "working_set_bytes": working_set,
+    "limit_bytes": limit,
+    "pressure": {
+      "some": {"avg60": 0.0},
+      "full": {"avg60": 0.0},
+    },
+  }
+
+
+def test_vite_admission_needs_absolute_headroom_even_at_a_normal_ratio():
+  one_gib = 1024 * 1024 * 1024
+  just_below = _memory(
+    working_set=one_gib - VITE_BUILD_MIN_HEADROOM_BYTES + 1,
+    limit=one_gib,
+  )
+
+  assert vite_build_admitted(just_below) is False
+  with pytest.raises(ViteBuildDeferred, match="511 MiB cgroup headroom"):
+    require_vite_build_admission(just_below)
+
+  at_reserve = _memory(
+    working_set=one_gib - VITE_BUILD_MIN_HEADROOM_BYTES,
+    limit=one_gib,
+  )
+  assert vite_build_admitted(at_reserve) is True
+  require_vite_build_admission(at_reserve)
+
+
+def test_vite_admission_fails_open_without_a_finite_cgroup_limit():
+  unknown = _memory(working_set=128 * 1024 * 1024, limit=None)
+
+  assert vite_build_admitted(unknown) is True
+  require_vite_build_admission(unknown)
+
+
+def test_frontend_node_entrypoint_uses_the_python_lease_without_nesting(
+  tmp_path,
+):
+  """One outer lease covers a nested build script without self-deadlocking."""
+  repo = Path(__file__).resolve().parents[2]
+  helper = repo / "frontend" / "scripts" / "build-admission.mjs"
+  child = tmp_path / "child.mjs"
+  marker = tmp_path / "entered"
+  child.write_text(
+    "\n".join((
+      "import fs from 'node:fs'",
+      f"import {{ enterBuildAdmission }} from {helper.as_uri()!r}",
+      "enterBuildAdmission()",
+      f"fs.writeFileSync({str(marker)!r}, 'entered')",
+    )),
+    encoding="utf-8",
+  )
+  outer = tmp_path / "outer.mjs"
+  outer.write_text(
+    "\n".join((
+      "import { spawnSync } from 'node:child_process'",
+      f"import {{ enterBuildAdmission }} from {helper.as_uri()!r}",
+      "enterBuildAdmission()",
+      f"const result = spawnSync(process.execPath, [{str(child)!r}], "
+      "{ stdio: 'inherit', env: process.env })",
+      "if (result.error) throw result.error",
+      "process.exitCode = result.status ?? 1",
+    )),
+    encoding="utf-8",
+  )
+  runtime = tmp_path / "runtime"
+  lock_path = runtime / "run" / "build.lock"
+  lock_path.parent.mkdir(parents=True)
+  lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+  fcntl.flock(lock_fd, fcntl.LOCK_EX)
+  env = {
+    **os.environ,
+    "DATA_DIR": str(runtime),
+    "SECRET_KEY": "x" * 32,
+  }
+  proc = subprocess.Popen(["node", str(outer)], env=env)
+  try:
+    # If the Node entrypoint bypasses the Python lease, the marker appears.
+    with pytest.raises(subprocess.TimeoutExpired):
+      proc.wait(timeout=0.4)
+    assert not marker.exists()
+    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    assert proc.wait(timeout=10) == 0
+  finally:
+    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    os.close(lock_fd)
+    if proc.poll() is None:
+      proc.kill()
+      proc.wait(timeout=10)
+
+  assert marker.read_text(encoding="utf-8") == "entered"
+
+
+def test_all_frontend_native_build_entrypoints_enter_admission():
+  scripts = Path(__file__).resolve().parents[2] / "frontend" / "scripts"
+
+  for name in ("safe-build.mjs", "build-runtime.mjs", "build-tts-worker.mjs"):
+    source = (scripts / name).read_text(encoding="utf-8")
+    assert "from './build-admission.mjs'" in source
+    assert "enterBuildAdmission(" in source
