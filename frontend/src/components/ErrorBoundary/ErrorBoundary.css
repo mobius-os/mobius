@@ -37,3 +37,17 @@
   border-radius: 8px;
   box-shadow: 0 4px 8px rgba(0, 0, 0, 0.32);
 }
+
+/* Quiet status shown while a stale-generation crash reloads onto the fixed
+   build — no alarming "Something broke" flash for a self-healing update. */
+.errbound__updating {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  color: var(--text-muted, rgba(236, 236, 236, 0.72));
+}
+
+.errbound__updating-text {
+  outline: none;
+}

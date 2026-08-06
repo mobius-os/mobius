@@ -9,8 +9,13 @@ import {
   runAgentRepair,
   writeRefreshedRecoveryAttempt,
 } from '../../lib/errorRecovery.js'
+import { reloadIfGenerationStale } from '../Shell/swHandoff.js'
 import RecoveryPanel from './RecoveryPanel.jsx'
 import './ErrorBoundary.css'
+
+function readStalePrecacheFlag() {
+  try { return sessionStorage.getItem('sw-stale-precache-pending') === '1' } catch { return false }
+}
 
 /**
  * App-level error boundary. Without one, a render throw anywhere below
@@ -38,6 +43,7 @@ export default class ErrorBoundary extends Component {
     error: null,
     attempt: null,
     repairActive: false,
+    selfHealing: false,
   }
 
   crashContext = null
@@ -72,7 +78,67 @@ export default class ErrorBoundary extends Component {
       attempt,
     }
     this.listenForPageShow()
-    this.setState({ attempt, repairActive: false }, () => this.headingRef?.focus())
+    if (attempt) {
+      // A recovery attempt for THIS exact crash is already on record — the
+      // stale-generation self-heal (or a manual refresh) has already run once
+      // and it still failed. Do not auto-reload again; show the recovery panel
+      // so the escalation (refresh → ask agent) proceeds. This ledger is the
+      // loop guard that keeps a genuine bug from reload-looping.
+      this.setState({ attempt, repairActive: false }, () => this.headingRef?.focus())
+    } else {
+      // First occurrence: if a newer shell generation exists this is a
+      // stale-bundle crash — silently reload onto the fixed generation.
+      // Otherwise fall through to the panel (genuine failure on the newest build).
+      this.setState({ selfHealing: true }, () => this.headingRef?.focus())
+      this.selfHealIfStale()
+    }
+  }
+
+  // Recovery reload shared by auto-heal and the manual refresh: escape a stale
+  // generation through the SW handoff, reloading via applyRecoveryReload.
+  // Resolves true when a newer generation was found and a reload was initiated.
+  recoverReload = (context) => reloadIfGenerationStale({
+    serviceWorker: typeof navigator !== 'undefined' ? navigator.serviceWorker : null,
+    readStaleFlag: readStalePrecacheFlag,
+    reload: () => this.applyRecoveryReload(context),
+  })
+
+  selfHealIfStale = async () => {
+    const context = this.crashContext
+    let healing = false
+    try {
+      healing = await this.recoverReload(context)
+    } catch {
+      healing = false
+    }
+    // No newer generation: the running build itself is broken. Drop the
+    // "updating" state and show the recovery panel (manual refresh + ask agent).
+    // The identity guard skips this if a newer crash has since replaced context.
+    if (!healing && this.crashContext === context) {
+      this.setState(
+        { selfHealing: false, attempt: context.attempt, repairActive: false },
+        () => this.headingRef?.focus(),
+      )
+    }
+  }
+
+  // Single reload executor for both auto-heal and the manual refresh button:
+  // record the attempt (loop guard for a repeat crash), notify the owning
+  // surface, mark the reload so App.jsx skips the splash, then reload.
+  applyRecoveryReload = (context) => {
+    if (context) {
+      writeRefreshedRecoveryAttempt({
+        surfaceKey: context.surfaceKey,
+        fingerprint: context.fingerprint,
+      })
+    }
+    this.props.onReset?.()
+    try {
+      sessionStorage.setItem('shell-reload', '1')
+    } catch {
+      /* ignore */
+    }
+    window.location.reload()
   }
 
   componentWillUnmount() {
@@ -104,23 +170,13 @@ export default class ErrorBoundary extends Component {
     this.setState({ attempt, repairActive: false })
   }
 
-  handleRefresh = () => {
+  handleRefresh = async () => {
     if (this.repairController) return
     const context = this.crashContext
-    if (context) {
-      writeRefreshedRecoveryAttempt({
-        surfaceKey: context.surfaceKey,
-        fingerprint: context.fingerprint,
-      })
-    }
-    this.props.onReset?.()
-    // Mirror App.jsx's shell-reload path so a full refresh skips the splash.
-    try {
-      sessionStorage.setItem('shell-reload', '1')
-    } catch {
-      /* ignore */
-    }
-    window.location.reload()
+    // Escape a stale generation if one exists; otherwise honor the refresh with a
+    // plain reload. A blind reload alone can be answered by the outgoing worker's
+    // precache and land back on the same stale bundle.
+    if (!(await this.recoverReload(context))) this.applyRecoveryReload(context)
   }
 
   handleAgentRepair = async () => {
@@ -161,8 +217,25 @@ export default class ErrorBoundary extends Component {
 
   render() {
     if (!this.state.error) return this.props.children
-    const message = redactDiagnosticText(this.state.error?.message || this.state.error)
     const cls = this.props.variant === 'inline' ? 'errbound errbound--inline' : 'errbound'
+    if (this.state.selfHealing) {
+      // Stale-generation self-heal in flight: the page is reloading onto the
+      // fixed build, so show a quiet status instead of flashing "Something broke".
+      return (
+        <div className={cls}>
+          <div className="errbound__card errbound__updating" role="status" aria-live="polite">
+            <span
+              className="errbound__updating-text"
+              tabIndex={-1}
+              ref={node => { this.headingRef = node }}
+            >
+              Updating to the latest version…
+            </span>
+          </div>
+        </div>
+      )
+    }
+    const message = redactDiagnosticText(this.state.error?.message || this.state.error)
     return (
       <div className={cls}>
         <RecoveryPanel

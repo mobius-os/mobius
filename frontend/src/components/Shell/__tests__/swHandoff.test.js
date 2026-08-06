@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  reloadIfGenerationStale,
   reloadWhenWorkerTakesOver,
   shouldRearmShellApply,
   watchForShellUpdateOnForeground,
@@ -397,4 +398,70 @@ test('shouldRearmShellApply: an active worker newer than the controller re-arms 
   assert.equal(shouldRearmShellApply({
     waiting: null, active: newWorker, controller: oldWorker,
   }), true)
+})
+
+// --- reloadIfGenerationStale (recovery reload) ------------------------------
+
+test('reloadIfGenerationStale: forces reg.update() before deciding staleness', async () => {
+  let updated = 0
+  const active = { id: 'a' }
+  const reg = makeReg({ waiting: { id: 'w' }, active, onUpdate: () => { updated += 1 } })
+  const sw = makeSwWith(reg, { controller: active })
+  await reloadIfGenerationStale({ serviceWorker: sw, reload: () => {}, handoff: () => {} })
+  assert.equal(updated, 1, 'a fresh sw.js fetch is forced so a just-shipped worker is discovered')
+})
+
+test('reloadIfGenerationStale: newer generation waiting → hands off and returns true', async () => {
+  const active = { id: 'a' }
+  const reg = makeReg({ waiting: { id: 'w' }, active })
+  const sw = makeSwWith(reg, { controller: active })
+  let handedOff = 0
+  const healed = await reloadIfGenerationStale({
+    serviceWorker: sw,
+    reload: () => {},
+    handoff: () => { handedOff += 1 },
+  })
+  assert.equal(healed, true, 'a waiting worker means a stale bundle → self-heal')
+  assert.equal(handedOff, 1)
+})
+
+test('reloadIfGenerationStale: already newest generation → no reload, returns false', async () => {
+  const controller = { id: 'a' }
+  // active === controller, nothing waiting, no stale flag → current generation.
+  const reg = makeReg({ waiting: null, active: controller })
+  const sw = makeSwWith(reg, { controller })
+  let handedOff = 0
+  const healed = await reloadIfGenerationStale({
+    serviceWorker: sw,
+    reload: () => {},
+    handoff: () => { handedOff += 1 },
+  })
+  assert.equal(healed, false, 'a genuine bug on the newest build must not auto-reload')
+  assert.equal(handedOff, 0)
+})
+
+test('reloadIfGenerationStale: stale-precache flag alone triggers self-heal', async () => {
+  const controller = { id: 'a' }
+  const reg = makeReg({ waiting: null, active: controller })
+  const sw = makeSwWith(reg, { controller })
+  let handedOff = 0
+  const healed = await reloadIfGenerationStale({
+    serviceWorker: sw,
+    reload: () => {},
+    readStaleFlag: () => true,
+    handoff: () => { handedOff += 1 },
+  })
+  assert.equal(healed, true, 'the Chromium stale-precache flag is a stale generation')
+  assert.equal(handedOff, 1)
+})
+
+test('reloadIfGenerationStale: no service worker → returns false (no reload)', async () => {
+  let handedOff = 0
+  const healed = await reloadIfGenerationStale({
+    serviceWorker: null,
+    reload: () => {},
+    handoff: () => { handedOff += 1 },
+  })
+  assert.equal(healed, false)
+  assert.equal(handedOff, 0)
 })

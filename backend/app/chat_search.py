@@ -282,6 +282,19 @@ def _candidate_rows(db: Session, tokens: list[str]):
   )
 
 
+def _iso_timestamp(stored: str) -> str | None:
+  """Convert a CAST-to-text timestamp to ISO 8601, or None when absent.
+
+  Both backends serialize the naive-UTC datetime space-separated
+  ('YYYY-MM-DD HH:MM:SS.ffffff'); the shell's relative-time formatter — and
+  Safari's stricter ``Date.parse`` — need the 'T' separator. Empty text means
+  the chat carried neither an ``activity_at`` nor an ``updated_at`` value.
+  """
+  if not stored:
+    return None
+  return stored.replace(" ", "T", 1)
+
+
 def _rank_results(rows, tokens: list[str], limit: int) -> list[dict]:
   """Rank a complete chat-grouped row stream with memory bounded by ``limit``."""
   patterns = _token_patterns(tokens)
@@ -345,6 +358,7 @@ def _rank_results(rows, tokens: list[str], limit: int) -> list[dict]:
       "title": result["title"],
       "snippet": snippet,
       "anchor_key": anchor_key,
+      "last_active": _iso_timestamp(result["last_active"]),
     })
   return output
 
