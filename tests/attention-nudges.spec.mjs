@@ -68,6 +68,7 @@ for (const scenario of SCENARIOS) {
     const chat = await createTaggedChat(page, scenario.label)
     expect(chat?.id).toBeTruthy()
 
+    const goalObjective = 'Keep the guarded service boundary stable'
     const paragraphs = Array.from({ length: 42 }, (_, i) => ({
       type: 'text',
       content: `Attention history ${i + 1}. ${'Enough content to overflow the viewport. '.repeat(8)}`,
@@ -75,12 +76,12 @@ for (const scenario of SCENARIOS) {
     const messages = [
       {
         role: 'user',
-        content: 'Please continue after the long review.',
+        content: `/goal ${goalObjective}`,
         ts: 1700000200000,
         cid: `${scenario.label}-user`,
         blocks: [{
           type: 'text',
-          content: 'Please continue after the long review.',
+          content: `/goal ${goalObjective}`,
         }],
       },
       {
@@ -104,9 +105,10 @@ for (const scenario of SCENARIOS) {
           total: messages.length,
           offset: 0,
           // The build-phase rail is a live-run surface. Keep the fixture's
-          // stream active so the mocked build_phase event below is actually
-          // consumed before we assert its layout beside the nudge.
+          // turn active; a durable question intentionally does not reattach
+          // its stream, so its active goal owns the same progress rail.
           running: true,
+          active_goal_objective: goalObjective,
           pending_question_id: pendingQuestionId,
           pending_messages: [],
         }),
@@ -119,7 +121,7 @@ for (const scenario of SCENARIOS) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           running: true,
-          active_goal_objective: null,
+          active_goal_objective: goalObjective,
           pending_messages: [],
           pending_question_id: pendingQuestionId,
         }),
