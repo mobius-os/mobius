@@ -48,7 +48,16 @@ def test_result_carries_reveal_anchor_of_matching_message(db):
   )
   hit = next(r for r in chat_search.search(db, "wombat") if r["id"] == c.id)
   assert hit["anchor_key"] == "user-1001"
-  assert set(hit) == {"id", "title", "snippet", "anchor_key"}
+  assert set(hit) == {"id", "title", "snippet", "anchor_key", "last_active"}
+
+
+def test_result_carries_iso_last_active_timestamp(db):
+  # The shell shows recency on each hit; the value must be an ISO-8601 string
+  # (T-separated) so the browser's Date.parse — including Safari's — accepts it.
+  c = _make_chat(db, "Recency notes", ["a quetzal sighting near the ridge"])
+  hit = next(r for r in chat_search.search(db, "quetzal") if r["id"] == c.id)
+  assert hit["last_active"]
+  assert "T" in hit["last_active"] and " " not in hit["last_active"]
 
 
 def test_result_falls_back_to_role_index_anchor_without_timestamp(db):

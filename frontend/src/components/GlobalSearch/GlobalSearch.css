@@ -292,10 +292,26 @@
   background: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
-.global-search__match-kind {
+.global-search__result-meta {
   flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 3px;
+  text-align: right;
+}
+
+.global-search__match-kind {
   color: var(--muted);
   font-size: 11px;
+}
+
+.global-search__result-time {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .global-search__status {

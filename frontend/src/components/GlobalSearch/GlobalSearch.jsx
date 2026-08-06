@@ -16,6 +16,7 @@ import {
   shortcutLabel,
 } from '../../lib/keyboardShortcuts.js'
 import { searchSnippetPresentation } from '../../lib/searchTermHighlight.js'
+import { formatRelativeTime } from '../../lib/relativeTime.js'
 import {
   chatSearchOpenTarget,
   chatSearchResultIsCurrent,
@@ -270,35 +271,49 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
                 )}
                 {visibleChats.results.length > 0 && (
                   <div className="global-search__results">
-                    {visibleChats.results.map(result => (
-                      <button
-                        key={result.id}
-                        type="button"
-                        className="global-search__result"
-                        onClick={() => openChat(result)}
-                      >
-                        <span className="global-search__result-icon" aria-hidden="true">
-                          <Chat width={18} height={18} />
-                        </span>
-                        <span className="global-search__result-main">
-                          <span className="global-search__result-title">
-                            {result.title || 'Untitled chat'}
+                    {visibleChats.results.map((result) => {
+                      const lastActive = formatRelativeTime(result.last_active)
+                      return (
+                        <button
+                          key={result.id}
+                          type="button"
+                          className="global-search__result"
+                          onClick={() => openChat(result)}
+                        >
+                          <span className="global-search__result-icon" aria-hidden="true">
+                            <Chat width={18} height={18} />
                           </span>
-                          {result.snippet && (
-                            <span className="global-search__result-detail">
-                              {result.snippetParts.map((part, index) => (
-                                part.marked
-                                  ? <mark key={index}>{part.text}</mark>
-                                  : <span key={index}>{part.text}</span>
-                              ))}
+                          <span className="global-search__result-main">
+                            <span className="global-search__result-title">
+                              {result.title || 'Untitled chat'}
                             </span>
-                          )}
-                        </span>
-                        <span className="global-search__match-kind">
-                          {result.anchor_key ? 'Conversation' : 'Title'}
-                        </span>
-                      </button>
-                    ))}
+                            {result.snippet && (
+                              <span className="global-search__result-detail">
+                                {result.snippetParts.map((part, index) => (
+                                  part.marked
+                                    ? <mark key={index}>{part.text}</mark>
+                                    : <span key={index}>{part.text}</span>
+                                ))}
+                              </span>
+                            )}
+                          </span>
+                          <span className="global-search__result-meta">
+                            <span className="global-search__match-kind">
+                              {result.anchor_key ? 'Conversation' : 'Title'}
+                            </span>
+                            {lastActive && (
+                              <time
+                                className="global-search__result-time"
+                                dateTime={result.last_active}
+                                title={`Last active ${new Date(result.last_active).toLocaleString()}`}
+                              >
+                                {lastActive}
+                              </time>
+                            )}
+                          </span>
+                        </button>
+                      )
+                    })}
                   </div>
                 )}
               </section>

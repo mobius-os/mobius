@@ -116,7 +116,7 @@ test('activation holds an unchanged running transcript until stream catch-up', (
     /cacheIsSafeFallback[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND[\s\S]*applyMessagesToView\(\[\], 0\)[\s\S]*setLoadError\(!cacheIsSafeFallback\)/,
     'an incomplete or contradictory cache must be cleared before the error surface paints')
   assert.match(scrollMode,
-    /modeRef\.current\.kind === 'INITIAL'[\s\S]*initialEntryPhaseRef\.current === 'cache-validating'[\s\S]*const saved = _scrollModes\[chatId\][\s\S]*const resolved =[\s\S]*onCachedCoordinateReady\?\.\(\)/,
+    /mode\?\.kind !== 'INITIAL'[\s\S]*phase === 'cache-validating' && !resolved[\s\S]*action: 'wait'[\s\S]*initialEntryPhaseRef\.current === 'cache-validating'[\s\S]*onCachedCoordinateReady\?\.\(\)/,
     'the scroll controller admits a nested cache only after the exact DOM part resolves')
   assert.match(scrollMode,
     /savedLocationUnresolvedRef\.current[\s\S]*Object\.hasOwn\(_scrollModes, chatId\)/,

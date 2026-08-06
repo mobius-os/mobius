@@ -698,6 +698,48 @@ export function _validateSavedMode(saved, messages, scrollEl) {
 }
 
 
+/** Decide how the entry (restore) gate should act for the current mode.
+ *
+ * The gate converts the neutral INITIAL mode into a concrete reading
+ * coordinate exactly once per activation. `_validateSavedMode` only yields
+ * INITIAL when there is no content row to address yet — its tail fallback
+ * needs at least one `.chat__msg[data-key]` in the DOM. Committing that
+ * INITIAL would resolve the coordinate to a no-op and reveal the transcript at
+ * scrollTop 0 (the physical top) with no later re-resolution, which is the
+ * reported "keep being taken to the top of a chat". So a not-yet-addressable
+ * transcript returns `wait`: hold INITIAL and let a later paint (effect re-run,
+ * ResizeObserver, or reveal) resolve it against real rows.
+ *
+ * Returns one of:
+ *   { action: 'idle' }                     — not in a restore position
+ *   { action: 'wait', resolved, savedPresent }
+ *                                          — cannot resolve yet; keep waiting
+ *   { action: 'commit', mode, resolved, savedPresent }
+ *                                          — concrete restore coordinate
+ */
+export function entryRestoreDecision({ mode, saved, messages, scrollEl, phase }) {
+  const savedPresent = !!saved
+  const restorePhase = phase === 'cache-validating'
+    || phase === 'cached'
+    || phase === 'ready'
+  if (mode?.kind !== 'INITIAL' || !restorePhase) {
+    return { action: 'idle', resolved: false, savedPresent }
+  }
+  const restored = _validateSavedMode(saved, messages, scrollEl)
+  // No addressable row yet — revealing now would strand the reader at the top.
+  if (restored.kind === 'INITIAL') {
+    return { action: 'wait', resolved: false, savedPresent }
+  }
+  const resolved = savedPresent && !restored.defaultTail
+  // cache-validating reveals only on an authoritative saved coordinate; a
+  // manufactured tail fallback must wait for the validated window.
+  if (phase === 'cache-validating' && !resolved) {
+    return { action: 'wait', resolved, savedPresent }
+  }
+  return { action: 'commit', mode: restored, resolved, savedPresent }
+}
+
+
 /** Normalize durable reader locations without collapsing live mode state.
  *
  * FOLLOW_BOTTOM and PIN_USER_MSG are useful while this mount is active and
@@ -1777,31 +1819,37 @@ export default function useScrollMode({
     // address or authoritative activation repairs/retires that address. The
     // same gate keeps a progressive cold prefix from rejecting a valid
     // deep-in-row part path.
-    if (
-      modeRef.current.kind === 'INITIAL'
-      && (
-        initialEntryPhaseRef.current === 'cache-validating'
-        || initialEntryPhaseRef.current === 'cached'
-        || initialEntryPhaseRef.current === 'ready'
-      )
-    ) {
-      const saved = _scrollModes[chatId]
-      const restored = _validateSavedMode(saved, messagesRef.current, scrollEl)
-      const resolved = !!saved
-        && restored?.kind !== 'INITIAL'
-        && !restored?.defaultTail
-      readerLocationExplicitRef.current = resolved
-      savedLocationUnresolvedRef.current = !!saved && !resolved
-      if (initialEntryPhaseRef.current !== 'cache-validating' || resolved) {
-        transitionMode(
-          restored,
-          'lifecycle:restore',
-        )
-        if (initialEntryPhaseRef.current === 'cache-validating') {
-          onCachedCoordinateReady?.()
-        }
+    // Resolve the entry coordinate from the live transcript. A neutral INITIAL
+    // mode means "not yet restored"; this converts it into the saved location
+    // (or the validated tail fallback) — but only once at least one content row
+    // exists to address. When rows have not painted yet the decision is `wait`,
+    // so INITIAL is held rather than committed: committing the no-op would
+    // reveal the transcript at the physical top. Progressive hidden-slice fills
+    // add rows without changing `messageCount`, so this effect body's single
+    // pass is not enough; the ResizeObserver and the reveal commit below call
+    // this again so every path that can paint rows also re-resolves.
+    const attemptEntryRestore = () => {
+      const decision = entryRestoreDecision({
+        mode: modeRef.current,
+        saved: _scrollModes[chatId],
+        messages: messagesRef.current,
+        scrollEl,
+        phase: initialEntryPhaseRef.current,
+      })
+      if (decision.action === 'idle') return
+      if (decision.action === 'wait') {
+        readerLocationExplicitRef.current = false
+        savedLocationUnresolvedRef.current = decision.savedPresent
+        return
+      }
+      readerLocationExplicitRef.current = decision.resolved
+      savedLocationUnresolvedRef.current = decision.savedPresent && !decision.resolved
+      transitionMode(decision.mode, 'lifecycle:restore')
+      if (initialEntryPhaseRef.current === 'cache-validating') {
+        onCachedCoordinateReady?.()
       }
     }
+    attemptEntryRestore()
     // Semantic transitions use a fresh mode object. Identity therefore keeps
     // steady streaming from rewriting scrollTop, while the ref survives effect
     // re-runs and development-time double invocation.
@@ -2058,6 +2106,16 @@ export default function useScrollMode({
       const authorityVersion = currentAuthority()
       revealTimer = setTimeout(() => {
         if (scrollRef.current !== scrollEl || !entryReady()) return
+        // Authority-gate before resolving: if a reader gesture somehow owns the
+        // scroll, skip both the coordinate resolve and the reveal and let a
+        // later pass retry — a live gesture must never have its mode rewritten
+        // underneath it. (syncLayout re-checks the same gate; this only moves
+        // the skip ahead of the mode write, and the outcome when unowned — no
+        // reveal — is unchanged.)
+        if (!layoutOwnsScroll(authorityVersion)) return
+        // Rows may have finished painting only now; resolve the entry
+        // coordinate from them so reveal never commits at the physical top.
+        attemptEntryRestore()
         if (!syncLayout({ authorityVersion })) return
         revealedRef.current = true
         mountStabilizingRef.current = initialEntryPhaseRef.current !== 'ready'
@@ -2068,6 +2126,9 @@ export default function useScrollMode({
     const forceReveal = () => {
       if (revealedRef.current || scrollRef.current !== scrollEl) return
       if (!entryReady()) return
+      // Even the safety-cap reveal resolves the coordinate first, so a forced
+      // reveal with rows present still lands on the saved location, not the top.
+      attemptEntryRestore()
       syncLayout({ authorityVersion: currentAuthority() })
       mountStabilizingRef.current = false
       revealedRef.current = true
@@ -2121,6 +2182,11 @@ export default function useScrollMode({
         return
       }
       sizeSpacer(authorityVersion)
+      // A still-neutral entry coordinate means rows painted after the initial
+      // restore pass (progressive hidden slices leave `messageCount` unchanged,
+      // so this effect never re-ran). Resolve it now that content exists, then
+      // let the branches below apply the resulting anchor while still hidden.
+      if (modeRef.current.kind === 'INITIAL') attemptEntryRestore()
       const k = modeRef.current.kind
       if (
         k === 'FOLLOW_BOTTOM'
