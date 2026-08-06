@@ -763,7 +763,7 @@ export default function ChatSettingsPanel({
                       onClick={handleConfirmProviderSwitch}
                       disabled={switchBusy}
                     >
-                      Switch provider
+                      {switchBusy ? 'Preparing…' : 'Switch provider'}
                     </button>
                     <button
                       type="button"
@@ -774,6 +774,9 @@ export default function ChatSettingsPanel({
                       Cancel
                     </button>
                   </div>
+                  {error && (
+                    <p className="csp__error" role="alert">{error}</p>
+                  )}
                 </div>
               )}
             </div>
@@ -834,7 +837,12 @@ export default function ChatSettingsPanel({
           )}
         </div>
       )}
-      {(appProviderLocked || codexSwitchWarning || switchBusy || error) && (
+      {(
+        appProviderLocked
+        || codexSwitchWarning
+        || switchBusy
+        || (error && !pendingSwitch)
+      ) && (
         <div className="csp__foot" aria-live="polite">
           {appProviderLocked && (
             <p className="csp__note">
@@ -853,7 +861,9 @@ export default function ChatSettingsPanel({
               reply — may briefly affect that turn.
             </p>
           )}
-          {error && <p className="csp__error" role="alert">{error}</p>}
+          {error && !pendingSwitch && (
+            <p className="csp__error" role="alert">{error}</p>
+          )}
         </div>
       )}
     </div>

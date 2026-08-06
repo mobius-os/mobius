@@ -573,6 +573,36 @@ def test_switch_requires_coherent_target_settings(client, auth):
   assert response.status_code == 422
 
 
+@pytest.mark.parametrize("effort", ["max", "ultra"])
+def test_switch_accepts_newer_codex_catalog_efforts(
+  client, auth, monkeypatch, effort,
+):
+  """A picker-valid Sol effort must reach synthesis instead of 422ing."""
+  _connect_codex(monkeypatch)
+
+  async def _stub(_messages, **_kwargs):
+    return "portable Sol handoff"
+
+  monkeypatch.setattr(compaction, "summarize_chat", _stub)
+  chat_id = _make_chat_with_messages(client, auth, [
+    {"role": "user", "content": "hi"},
+    {"role": "assistant", "content": "hello"},
+  ])
+  payload = _payload(switch_id=f"sol-{effort}")
+  payload["agent_settings_json"].update({
+    "model": "gpt-5.6-sol",
+    "effort": effort,
+    "effort_by_provider": {"claude": "ultracode", "codex": effort},
+  })
+
+  response = client.post(
+    f"/api/chats/{chat_id}/provider-switch", headers=auth, json=payload,
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["effective"]["effort"] == effort
+
+
 def test_build_transcript_text_skips_handoffs_and_tail_caps():
   messages = [
     {"role": "user", "content": "first"},
