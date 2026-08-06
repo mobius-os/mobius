@@ -246,6 +246,27 @@ def _notify_reconciled_chats(context: StartupContext) -> None:
     notify_after_reconcile(db, context.manual_reconciled_chats)
 
 
+async def _wake_completed_delegation_parents(context: StartupContext) -> None:
+  """Wake parents whose delegation child settled while the process was down.
+
+  Runs after reconcile so a child that will auto-resume is still `resuming`/
+  `running` (not wake-eligible) and is skipped; a child that genuinely
+  completed while away wakes its parent exactly once. Best-effort.
+  """
+  from app.delegations import wake_parents_for_completed_delegations
+
+  try:
+    woken = await wake_parents_for_completed_delegations()
+    if woken:
+      context.logger.info(
+        "woke %d parent chat(s) for completed-while-away delegations", woken,
+      )
+  except Exception:
+    context.logger.warning(
+      "delegation parent-wake reconcile skipped", exc_info=True,
+    )
+
+
 async def _install_bootstrap_apps(context: StartupContext) -> None:
   from app.bootstrap import ensure_bootstrap_apps_installed
 
@@ -325,6 +346,10 @@ STARTUP_TASKS = (
   ),
   StartupTask("initialize push", _initialize_push),
   StartupTask("notify reconciled chats", _notify_reconciled_chats),
+  StartupTask(
+    "wake completed delegation parents",
+    _wake_completed_delegation_parents,
+  ),
   StartupTask(
     "install bootstrap apps",
     _install_bootstrap_apps,

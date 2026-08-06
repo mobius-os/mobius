@@ -235,3 +235,291 @@ def test_delegated_codex_config_has_no_questions_or_nested_agents():
   assert "features.default_mode_request_user_input=true" not in overrides
   assert not any("multi_agent" in item for item in overrides)
   assert "features.goals=true" not in overrides
+
+
+# --- Parent auto-wake on child completion ------------------------------------
+
+import asyncio
+
+import app.chat as chat_mod
+import app.chat_start as chat_start_mod
+import app.delegations as delegations_mod
+from app.chat_writer import PromotePending
+from app.timeutil import now_naive_utc
+
+
+def _seed_delegation(
+  db,
+  *,
+  suffix,
+  parent_id=None,
+  child_status="completed",
+  result_blocks=None,
+  notify=True,
+  cancelled=False,
+  parent_messages=None,
+):
+  """Create a parent chat, a child chat (+ its ChatRun at child_status), and a
+  Delegation row. Returns (parent_id, child_id, delegation_id)."""
+  app = models.App(
+    slug=f"wake-app-{suffix}",
+    source_dir=f"/tmp/mobius-tests/wake-app-{suffix}",
+    name="Subagents", description="", jsx_source="",
+  )
+  db.add(app)
+  db.flush()
+  if parent_id is None:
+    parent_id = f"parent-{suffix}"
+    db.add(models.Chat(
+      id=parent_id, title="Parent",
+      messages=parent_messages or [], provider="claude",
+    ))
+  child_id = f"child-{suffix}"
+  messages = [{"role": "user", "content": "Do the bounded task."}]
+  if result_blocks is not None:
+    messages.append({"role": "assistant", "blocks": result_blocks})
+  db.add(models.Chat(
+    id=child_id, title="Child", messages=messages,
+    provider="claude", created_by_app_id=app.id,
+  ))
+  db.flush()
+  delegation_id = f"delegation-{suffix}"
+  db.add(models.Delegation(
+    id=delegation_id,
+    app_id=app.id,
+    parent_chat_id=parent_id,
+    parent_root_run_id=f"root-{suffix}",
+    task_key=f"task-{suffix}",
+    child_chat_id=child_id,
+    provider="claude",
+    model="claude-sonnet-4-6",
+    effort="high",
+    scope="read",
+    cwd="/data/platform",
+    prompt_sha256=hashlib.sha256(b"Do the bounded task.").hexdigest(),
+    max_budget_usd=5.0,
+    notify_parent_on_complete=notify,
+    parent_woken_at=None,
+    cancelled_at=now_naive_utc() if cancelled else None,
+  ))
+  if child_status is not None:
+    db.add(models.ChatRun(
+      id=f"child-run-{suffix}", root_run_id=f"child-run-{suffix}",
+      chat_id=child_id, status=child_status, provider="claude",
+      started_at=now_naive_utc(),
+    ))
+  db.commit()
+  return parent_id, child_id, delegation_id
+
+
+def _capture_starts(monkeypatch, *, running=False):
+  """Stub start_programmatic_chat_turn + is_chat_running; return the start log."""
+  starts = []
+
+  async def fake_start(**kwargs):
+    starts.append(kwargs)
+    return True
+
+  monkeypatch.setattr(chat_start_mod, "start_programmatic_chat_turn", fake_start)
+  monkeypatch.setattr(chat_mod, "is_chat_running", lambda _cid: running)
+  return starts
+
+
+def test_child_completion_wakes_idle_parent_once(db, monkeypatch):
+  parent_id, child_id, delegation_id = _seed_delegation(
+    db, suffix="idle",
+    result_blocks=[{"type": "text", "content": "All 3 checks passed."}],
+  )
+  starts = _capture_starts(monkeypatch, running=False)
+
+  asyncio.run(delegations_mod.wake_parent_after_child_settled(child_id))
+
+  assert len(starts) == 1
+  assert starts[0]["chat_id"] == parent_id
+  assert "task-idle" in starts[0]["content"]
+  assert "All 3 checks passed." in starts[0]["content"]
+  assert starts[0]["initiated_by_app_id"] is None
+  db.expire_all()
+  assert db.get(models.Delegation, delegation_id).parent_woken_at is not None
+
+  # Second settle is a no-op — the latch holds.
+  asyncio.run(delegations_mod.wake_parent_after_child_settled(child_id))
+  assert len(starts) == 1
+
+
+def test_two_finishes_coalesce_into_one_wake(db, monkeypatch):
+  parent_id, child_a, del_a = _seed_delegation(
+    db, suffix="coa", result_blocks=[{"type": "text", "content": "A done"}],
+  )
+  # Second delegation shares the same parent chat.
+  _, child_b, del_b = _seed_delegation(
+    db, suffix="cob", parent_id=parent_id,
+    result_blocks=[{"type": "text", "content": "B done"}],
+  )
+  starts = _capture_starts(monkeypatch, running=False)
+
+  asyncio.run(delegations_mod.wake_parent_after_child_settled(child_a))
+
+  assert len(starts) == 1
+  content = starts[0]["content"]
+  assert "task-coa" in content and "task-cob" in content
+  db.expire_all()
+  assert db.get(models.Delegation, del_a).parent_woken_at is not None
+  assert db.get(models.Delegation, del_b).parent_woken_at is not None
+
+  # The other child settling now finds nothing eligible → no second wake.
+  asyncio.run(delegations_mod.wake_parent_after_child_settled(child_b))
+  assert len(starts) == 1
+
+
+def test_running_parent_gets_appended_not_started(db, monkeypatch):
+  parent_id, child_id, delegation_id = _seed_delegation(
+    db, suffix="run",
+    result_blocks=[{"type": "text", "content": "Result while busy."}],
+  )
+  starts = _capture_starts(monkeypatch, running=True)
+
+  asyncio.run(delegations_mod.wake_parent_after_child_settled(child_id))
+
+  assert starts == []  # never starts a competing turn
+  db.expire_all()
+  parent = db.get(models.Chat, parent_id)
+  pending = parent.pending_messages or []
+  assert any(
+    "task-run" in (m.get("content") or "") for m in pending
+  ), pending
+  assert db.get(models.Delegation, delegation_id).parent_woken_at is not None
+
+  # The queued notice survives the parent's own drain into a continuation.
+  get_writer().submit(PromotePending(
+    chat_id=parent_id, run_token="parent-next",
+  )).result(timeout=5)
+  get_writer().submit(Barrier()).result(timeout=5)
+  db.expire_all()
+  parent = db.get(models.Chat, parent_id)
+  promoted = " ".join(
+    (m.get("content") or "") for m in (parent.messages or [])
+  )
+  assert "task-run" in promoted
+
+
+def test_stopped_and_cancelled_children_do_not_wake(db, monkeypatch):
+  _, stopped_child, stopped_id = _seed_delegation(
+    db, suffix="stop", child_status="stopped",
+  )
+  _, cancelled_child, cancelled_id = _seed_delegation(
+    db, suffix="canc", child_status="completed", cancelled=True,
+  )
+  starts = _capture_starts(monkeypatch, running=False)
+
+  asyncio.run(delegations_mod.wake_parent_after_child_settled(stopped_child))
+  asyncio.run(delegations_mod.wake_parent_after_child_settled(cancelled_child))
+
+  assert starts == []
+  db.expire_all()
+  assert db.get(models.Delegation, stopped_id).parent_woken_at is None
+  assert db.get(models.Delegation, cancelled_id).parent_woken_at is None
+
+
+def test_interrupted_child_does_not_wake_it_resumes(db, monkeypatch):
+  _, child_id, delegation_id = _seed_delegation(
+    db, suffix="intr", child_status="interrupted",
+  )
+  starts = _capture_starts(monkeypatch, running=False)
+
+  asyncio.run(delegations_mod.wake_parent_after_child_settled(child_id))
+
+  assert starts == []
+  db.expire_all()
+  assert db.get(models.Delegation, delegation_id).parent_woken_at is None
+
+
+def test_needs_review_is_reported(db, monkeypatch):
+  _, child_id, _ = _seed_delegation(
+    db, suffix="rev", child_status="failed",
+    result_blocks=[{
+      "type": "error",
+      "message": "DELEGATION_WRITE_REVIEW_REQUIRED: Look before replay.",
+    }],
+  )
+  starts = _capture_starts(monkeypatch, running=False)
+
+  asyncio.run(delegations_mod.wake_parent_after_child_settled(child_id))
+
+  assert len(starts) == 1
+  content = starts[0]["content"]
+  assert "needs_review" in content
+  assert "Look before replay." in content
+  assert "DELEGATION_WRITE_REVIEW_REQUIRED" not in content
+
+
+def test_notify_flag_false_never_wakes(db, monkeypatch):
+  _, child_id, delegation_id = _seed_delegation(
+    db, suffix="off", notify=False,
+    result_blocks=[{"type": "text", "content": "done"}],
+  )
+  starts = _capture_starts(monkeypatch, running=False)
+
+  asyncio.run(delegations_mod.wake_parent_after_child_settled(child_id))
+
+  assert starts == []
+  db.expire_all()
+  assert db.get(models.Delegation, delegation_id).parent_woken_at is None
+
+
+def test_reconcile_wakes_parent_for_completed_while_away(db, monkeypatch):
+  _, _child, delegation_id = _seed_delegation(
+    db, suffix="away",
+    result_blocks=[{"type": "text", "content": "Finished during downtime."}],
+  )
+  starts = _capture_starts(monkeypatch, running=False)
+
+  woken = asyncio.run(
+    delegations_mod.wake_parents_for_completed_delegations()
+  )
+  assert woken == 1
+  assert len(starts) == 1
+  db.expire_all()
+  assert db.get(models.Delegation, delegation_id).parent_woken_at is not None
+
+  # Idempotent: a second boot pass wakes nobody.
+  woken_again = asyncio.run(
+    delegations_mod.wake_parents_for_completed_delegations()
+  )
+  assert woken_again == 0
+  assert len(starts) == 1
+
+
+def test_wake_disposition_gate_excludes_non_durable_terminals():
+  import app.chat_queue as chat_queue
+  from app.chat import _DELEGATION_WAKE_DISPOSITIONS
+
+  assert (
+    chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
+    in _DELEGATION_WAKE_DISPOSITIONS
+  )
+  assert (
+    chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED
+    in _DELEGATION_WAKE_DISPOSITIONS
+  )
+  for excluded in (
+    chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER,
+    chat_queue.TerminalDisposition.LIMIT_PARKED,
+    chat_queue.TerminalDisposition.CONTINUATION_PROMOTED,
+    chat_queue.TerminalDisposition.STALE_NO_ACTION,
+    chat_queue.TerminalDisposition.DRAINED_FOR_RESTART,
+  ):
+    assert excluded not in _DELEGATION_WAKE_DISPOSITIONS
+
+
+def test_migration_adds_wake_columns_idempotently(db):
+  from sqlalchemy import inspect as sa_inspect
+
+  from app.database import _add_delegation_parent_wake, engine
+
+  # Safe to re-run against the live (already-migrated) schema.
+  _add_delegation_parent_wake(engine)
+  _add_delegation_parent_wake(engine)
+  cols = {c["name"] for c in sa_inspect(engine).get_columns("delegations")}
+  assert "notify_parent_on_complete" in cols
+  assert "parent_woken_at" in cols

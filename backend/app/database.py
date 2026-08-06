@@ -1572,6 +1572,31 @@ def _add_chat_pending_question_id(eng) -> None:
         ), {"chat_id": chat_id, "question_id": question_id})
 
 
+def _add_delegation_parent_wake(eng) -> None:
+  """Add the delegation parent auto-wake columns (models.Delegation).
+
+  ``notify_parent_on_complete`` (opt-in, default FALSE) and ``parent_woken_at``
+  (nullable exactly-once latch). Existing rows keep the safe defaults: no wake
+  fires for delegations created before the upgrade.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "delegations" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("delegations")}
+  with eng.begin() as conn:
+    if "notify_parent_on_complete" not in columns:
+      conn.execute(text(
+        "ALTER TABLE delegations ADD COLUMN notify_parent_on_complete "
+        "BOOLEAN NOT NULL DEFAULT FALSE"
+      ))
+    if "parent_woken_at" not in columns:
+      conn.execute(text(
+        "ALTER TABLE delegations ADD COLUMN parent_woken_at DATETIME NULL"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -1583,6 +1608,7 @@ _SCHEMA_MIGRATIONS = (
   ("0008_chat_search_documents", _create_chat_search_tables),
   ("0009_app_connections_manage", _add_app_connections_manage),
   ("0010_chat_pending_question_id", _add_chat_pending_question_id),
+  ("0011_delegation_parent_wake", _add_delegation_parent_wake),
 )
 
 

@@ -3522,6 +3522,27 @@ async def run_chat(
     except Exception:
       _get_logger().debug("chat-note guarantee skipped", exc_info=True)
 
+    # Auto-wake a delegation's parent chat when the child subagent settles.
+    # Gated to durable, non-resuming terminals; runs after the reply is sent and
+    # is best-effort (like the chat-note guarantee above) so it can never affect
+    # this turn. A non-delegation chat is a single indexed miss and returns fast.
+    try:
+      if chat_id and disposition in _DELEGATION_WAKE_DISPOSITIONS:
+        from app.delegations import wake_parent_after_child_settled
+        await wake_parent_after_child_settled(chat_id)
+    except Exception:
+      _get_logger().debug("delegation parent-wake skipped", exc_info=True)
+
+
+# The durable, settled, non-resuming terminals where a delegation child's
+# result is final and its ChatRun terminal status has committed (FinishRun ran
+# inside drain_and_release before the disposition returned). FAILED_LEAVE_MARKER
+# is excluded — the terminal isn't durable there; the boot reconcile covers it.
+_DELEGATION_WAKE_DISPOSITIONS = frozenset({
+  chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED,
+  chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED,
+})
+
 
 def _chat_note_mtime(data_dir: str, chat_id: str) -> float:
   """Return a chat-note mtime for diagnostics and older callers."""

@@ -40,6 +40,9 @@ class DelegationSubmit(BaseModel):
   effort: str | None = Field(default=None, max_length=32)
   scope: str
   cwd: str | None = Field(default=None, max_length=1024)
+  # Wake the parent chat with the result when the child settles. Defaults on for
+  # the owner-agent subagent path; a pure-poll caller can pass False.
+  notify_parent_on_complete: bool = True
 
   @field_validator("task_key")
   @classmethod
@@ -205,6 +208,7 @@ async def submit_or_attach(
       cwd=cwd,
       prompt_sha256=hashlib.sha256(body.prompt.encode("utf-8")).hexdigest(),
       max_budget_usd=5.0 if body.provider == "claude" else None,
+      notify_parent_on_complete=body.notify_parent_on_complete,
     )
     child = models.Chat(
       id=child_id,
