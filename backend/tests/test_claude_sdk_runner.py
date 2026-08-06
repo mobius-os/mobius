@@ -256,11 +256,12 @@ def _stream_delta(delta_type: str, **fields: Any) -> StreamEvent:
 
 
 @pytest.mark.asyncio
-async def test_steer_into_active_turn_buffers_without_interrupting():
-  """A registered Claude handle BUFFERS steer text + flags the request,
-  but does NOT interrupt mid-token. The cut happens at the next
-  content-block boundary in the runner loop (see the boundary tests
-  below), so `steer()` itself never touches live IO."""
+async def test_steer_into_active_turn_interrupts_immediately():
+  """A registered Claude handle buffers the steer text AND fires the
+  interrupt immediately (a soft interrupt on the same connected client),
+  rather than deferring the cut to the next content-block boundary — a
+  steer during a long-running tool call must land now, not whenever the
+  tool happens to finish."""
   calls = []
 
   class _Client:
@@ -272,17 +273,16 @@ async def test_steer_into_active_turn_buffers_without_interrupting():
   try:
     assert await steer_into_active_turn("claude-steer", "use blue") is True
     assert handle.pending_steer == ["use blue"]
-    assert handle._steer_requested is True
-    # Buffering must NOT interrupt — the old behavior cut mid-token and
-    # lost in-flight text; the boundary-fire design defers the cut.
-    assert calls == []
+    # The steer interrupts the live turn right away.
+    assert calls == ["interrupt"]
     # A second rapid steer must QUEUE behind the first (FIFO), not overwrite it
     # — both texts are already persisted to the transcript, so both must reach
-    # Claude when the runner drains the mailbox.
+    # Claude when the runner drains the mailbox. It must NOT fire a second
+    # interrupt: `_interrupt_in_flight` guards the single cut until the first
+    # interrupt's terminal result drains the whole buffer together.
     assert await steer_into_active_turn("claude-steer", "and bold") is True
     assert handle.pending_steer == ["use blue", "and bold"]
-    assert handle._steer_requested is True
-    assert calls == []
+    assert calls == ["interrupt"]
   finally:
     registry.unregister("claude-steer", handle.kind)
 
@@ -306,14 +306,14 @@ async def test_steer_into_active_turn_missing_or_finished_is_false():
 
 
 @pytest.mark.asyncio
-async def test_resteer_requeries_when_terminal_precedes_boundary(monkeypatch):
-  """A steer buffered after a StreamEvent (no AssistantMessage boundary)
-  before a natural ResultMessage still re-queries on the SAME client.
+async def test_steer_requeries_on_interrupt_terminal(monkeypatch):
+  """A steer fired mid-delta interrupts immediately and re-queries on the
+  SAME client when the interrupt's terminal ResultMessage arrives.
 
-  This is edge (a) of the boundary design: a very short turn whose
-  ResultMessage arrives before any completed content block. The boundary
-  cut never fires (interrupts == 0), but the existing pending_steer →
-  requery path on the terminal result MUST still deliver the steer."""
+  The steer fires its soft interrupt as soon as it is requested (interrupts
+  == 1), even though no completed content block preceded the terminal; the
+  pending_steer -> requery path on the terminal result then delivers the
+  steer text on the same session."""
   from app import claude_sdk_runner
 
   class _FakeClient:
@@ -389,9 +389,9 @@ async def test_resteer_requeries_when_terminal_precedes_boundary(monkeypatch):
   )
 
   client = clients[0]
-  # No AssistantMessage boundary preceded the terminal ResultMessage, so
-  # the boundary cut never fired — the steer rode the natural terminal.
-  assert client.interrupts == 0
+  # The steer fired its interrupt immediately when requested; the terminal
+  # ResultMessage then drove the requery.
+  assert client.interrupts == 1
   assert client.disconnected is True
   assert client.queries[0] == "start task"
   assert client.queries[1].startswith(
@@ -633,15 +633,18 @@ async def test_owner_stop_does_not_hide_other_claude_process_failure(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_steer_fires_at_assistant_boundary_not_on_deltas(monkeypatch):
-  """THE core contract: a steer requested mid-turn does NOT interrupt
-  while token deltas (StreamEvent) stream — it waits for the next
-  COMPLETED content block (an AssistantMessage), interrupts exactly once
-  THERE, then re-queries exactly once on the same client.
+async def test_steer_interrupts_immediately_not_deferred_to_boundary(
+  monkeypatch,
+):
+  """THE core contract: a steer requested mid-turn interrupts the live turn
+  IMMEDIATELY — it does NOT wait for the next completed content block. The
+  cut lands as soon as the steer is requested (matching Codex's immediate
+  steer), then the interrupt's terminal result re-queries exactly once on
+  the same client.
 
   The fake stream records the interrupt-call count at the moment each
-  message is dispatched, so the test can assert interrupt fired AFTER the
-  AssistantMessage and NOT on any preceding StreamEvent delta."""
+  message is dispatched, so the test can assert the interrupt fired the
+  instant the steer arrived (mid-delta), not at a later boundary."""
   from app import claude_sdk_runner
 
   # (message_label, interrupts_observed_when_this_message_was_yielded)
@@ -668,17 +671,17 @@ async def test_steer_fires_at_assistant_boundary_not_on_deltas(monkeypatch):
 
     async def receive_response(self):
       if len(self.queries) == 1:
-        # First turn: deltas stream, the user steers mid-block, MORE
-        # deltas stream (interrupt must NOT have fired yet), then a
-        # COMPLETED text block arrives — that is where the cut fires.
+        # First turn: deltas stream, the user steers mid-block — the
+        # interrupt fires RIGHT THEN, so the count is already 1 on the
+        # very next delta (no waiting for a completed block).
         yield _stream_delta("text_delta", text="thinking ")
         interrupt_trace.append(("delta-1", self.interrupts))
         assert await steer_into_active_turn("boundary-chat", "use blue") \
           is True
         yield _stream_delta("text_delta", text="about it")
         interrupt_trace.append(("delta-2-after-steer", self.interrupts))
-        # The completed block — boundary. The runner interrupts right
-        # after dispatching THIS message.
+        # A completed block still arrives (a few tokens can stream before
+        # the interrupt takes effect); it must NOT fire a second interrupt.
         yield _assistant_text("thinking about it")
         interrupt_trace.append(("assistant-boundary", self.interrupts))
         # The interrupt's terminal result. The runner's drain-then-
@@ -713,11 +716,12 @@ async def test_steer_fires_at_assistant_boundary_not_on_deltas(monkeypatch):
 
   client = clients[0]
   trace = dict(interrupt_trace)
-  # No interrupt while deltas were streaming — the half-sentence was NOT
-  # cut mid-token (this is the whole point of the change).
+  # No interrupt before the steer was requested.
   assert trace["delta-1"] == 0
-  assert trace["delta-2-after-steer"] == 0
-  # The interrupt fired AT the AssistantMessage boundary, exactly once.
+  # The interrupt fired the instant the steer arrived — the next delta
+  # already sees it (this is the whole point of the change).
+  assert trace["delta-2-after-steer"] == 1
+  # Exactly once — the later completed block did not double-interrupt.
   assert client.interrupts == 1
   # Exactly one re-query with the buffered steer (no double).
   assert client.queries[0] == "start task"
@@ -738,11 +742,11 @@ async def test_steer_fires_at_assistant_boundary_not_on_deltas(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_steer_interrupts_once_despite_multiple_boundaries(monkeypatch):
-  """A second AssistantMessage arriving in the drain window (after the
-  boundary interrupt, before its terminal ResultMessage) must NOT fire a
-  SECOND interrupt. `_interrupt_in_flight` guards the single cut. Two
-  buffered steers must both ride the single requery (FIFO, exactly once)."""
+async def test_steer_interrupts_once_despite_two_rapid_steers(monkeypatch):
+  """Two rapid steers before the interrupt's terminal ResultMessage must
+  fire only ONE interrupt — `_interrupt_in_flight` guards the single cut —
+  and both buffered steers ride the single requery (FIFO, exactly once).
+  Later completed blocks arriving in the drain window must not re-interrupt."""
   from app import claude_sdk_runner
 
   class _FakeClient:
@@ -766,13 +770,13 @@ async def test_steer_interrupts_once_despite_multiple_boundaries(monkeypatch):
 
     async def receive_response(self):
       if len(self.queries) == 1:
-        # Two rapid steers buffer before any boundary.
+        # Two rapid steers: the first fires the interrupt, the second is
+        # guarded by _interrupt_in_flight and only buffers its text.
         assert await steer_into_active_turn("multi-chat", "use blue") is True
         assert await steer_into_active_turn("multi-chat", "and bold") is True
-        # First completed block — the single boundary cut fires here.
         yield _assistant_text("first block")
-        # The SDK may still emit a trailing completed block in the drain
-        # window before the interrupt's terminal lands. It must NOT cause
+        # The SDK may still emit trailing completed blocks in the drain
+        # window before the interrupt's terminal lands. They must NOT cause
         # a second interrupt.
         yield _assistant_text("straggler block")
         yield _interrupt_result()
@@ -803,7 +807,7 @@ async def test_steer_interrupts_once_despite_multiple_boundaries(monkeypatch):
   )
 
   client = clients[0]
-  # Exactly one interrupt despite two AssistantMessage boundaries in the
+  # Exactly one interrupt despite two steers and two completed blocks in the
   # drain window — the in-flight guard held.
   assert client.interrupts == 1
   # Exactly one requery, carrying BOTH buffered steers in FIFO order.
@@ -817,10 +821,9 @@ async def test_steer_interrupts_once_despite_multiple_boundaries(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_steer_after_assistant_boundary_already_passed(monkeypatch):
-  """A steer buffered AFTER the only AssistantMessage already streamed,
-  with a fresh boundary still to come, fires the cut on that next
-  boundary — proving the flag (not a one-time event) drives the cut."""
+async def test_steer_after_content_already_streamed(monkeypatch):
+  """A steer requested after some content has already streamed still
+  interrupts immediately and re-queries once on the same client."""
   from app import claude_sdk_runner
 
   class _FakeClient:
@@ -845,9 +848,8 @@ async def test_steer_after_assistant_boundary_already_passed(monkeypatch):
     async def receive_response(self):
       if len(self.queries) == 1:
         yield _assistant_text("first block")
-        # Steer arrives only now — no boundary cut yet because the flag
-        # is checked when a message is dispatched, and the next message
-        # is the boundary we cut on.
+        # Steer arrives after the first block already streamed; it fires
+        # the interrupt immediately all the same.
         assert await steer_into_active_turn("late-chat", "pivot") is True
         yield _assistant_text("second block")
         yield _interrupt_result()
@@ -885,10 +887,10 @@ async def test_steer_after_assistant_boundary_already_passed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stop_drops_buffered_steer_and_clears_flags(monkeypatch):
-  """Stop is the hard immediate-cut path: it must drop a buffered steer
-  (no boundary cut, no requery for abandoned work) and clear both steer
-  flags. Distinct from steer's deferred boundary cut."""
+async def test_stop_drops_buffered_steer(monkeypatch):
+  """Stop is the hard teardown path: after a steer has already fired its own
+  soft interrupt, a Stop drops the buffered steer entirely (no requery for
+  abandoned work) and fires its own immediate interrupt on top."""
   del monkeypatch  # this handle-level test needs no SDK patching
 
   calls: list[str] = []
@@ -900,18 +902,19 @@ async def test_stop_drops_buffered_steer_and_clears_flags(monkeypatch):
   handle = ActiveClaudeClient(_Client(), chat_id="stop-chat")
   registry.register(handle)
   try:
-    # Buffer a steer, then Stop.
+    # Steer buffers the text and fires its soft interrupt immediately.
     assert await steer_into_active_turn("stop-chat", "use blue") is True
     assert handle.pending_steer == ["use blue"]
-    assert handle._steer_requested is True
+    assert calls == ["interrupt"]
 
     # mark_finished so interrupt()'s _finished wait returns immediately.
     handle.mark_finished()
     await handle.interrupt()
 
-    assert calls == ["interrupt"]
+    # Stop always cuts immediately — a second interrupt on top of the
+    # steer's — and clears the buffer so no requery fires.
+    assert calls == ["interrupt", "interrupt"]
     assert handle.pending_steer == []
-    assert handle._steer_requested is False
   finally:
     registry.unregister("stop-chat", handle.kind)
 
@@ -1999,3 +2002,85 @@ def test_precompact_log_trigger_extracts_and_is_defensive():
   assert _precompact_log_trigger({"trigger": 123}) is None
   assert _precompact_log_trigger(None) is None
   assert _precompact_log_trigger("not-a-dict") is None
+
+
+def _stream_message_start(message_id: str) -> StreamEvent:
+  return StreamEvent(
+    uuid="evt-ms", session_id="sess-1",
+    event={"type": "message_start", "message": {"id": message_id}},
+  )
+
+
+def _stream_text_delta_at(index: int, text: str) -> StreamEvent:
+  return StreamEvent(
+    uuid="evt-td", session_id="sess-1",
+    event={
+      "type": "content_block_delta", "index": index,
+      "delta": {"type": "text_delta", "text": text},
+    },
+  )
+
+
+def _stream_text_block_start(index: int) -> StreamEvent:
+  return StreamEvent(
+    uuid="evt-cbs", session_id="sess-1",
+    event={
+      "type": "content_block_start", "index": index,
+      "content_block": {"type": "text"},
+    },
+  )
+
+
+def test_claude_text_final_repairs_earlier_block_by_id():
+  """A dropped leading delta on the FIRST of two text blocks in one message is
+  repaired by the authoritative text_final, matched by (message id + index).
+
+  Before the id was threaded, text_final for the first block landed on the
+  trailing (second) block positionally, so the first block kept its truncated
+  delta accumulation forever (the dropped-leading-token bug).
+  """
+  from app.events import process_event
+
+  bus = _ChatBus()
+  # One message, TWO text blocks (indices 0 and 1). Block 0's leading delta
+  # ("Al") was dropped, so it accumulates truncated ("pha text here").
+  dispatch_sdk_message(_stream_message_start("msg_abc"), bus, None)
+  dispatch_sdk_message(_stream_text_delta_at(0, "pha text here"), bus, None)
+  dispatch_sdk_message(_stream_text_block_start(1), bus, None)
+  dispatch_sdk_message(_stream_text_delta_at(1, "Beta text"), bus, None)
+  dispatch_sdk_message(
+    AssistantMessage(
+      content=[TextBlock(text="Alpha text here"), TextBlock(text="Beta text")],
+      model="claude-opus",
+      message_id="msg_abc",
+    ),
+    bus, None,
+  )
+
+  # Delta and final events carry matching, turn-unique ids.
+  text_events = [e for e in bus.events if e["type"] == "text"]
+  final_events = [e for e in bus.events if e["type"] == "text_final"]
+  assert text_events[0]["text_item_id"] == "msg_abc:0"
+  assert final_events[0]["text_item_id"] == "msg_abc:0"
+  assert final_events[1]["text_item_id"] == "msg_abc:1"
+
+  # Reduce the emitted events the way the sink does; the first block is repaired.
+  blocks: list[dict] = []
+  for event in bus.events:
+    process_event(event, blocks)
+  texts = [b["content"] for b in blocks if b.get("type") == "text"]
+  assert texts == ["Alpha text here", "Beta text"]
+
+
+def test_claude_text_events_have_no_id_without_message_id():
+  """No message id (no message_start, or a message_id-less AssistantMessage)
+  means no text_item_id — the reducer keeps its positional fallback, so nothing
+  regresses for paths that do not supply the id."""
+  bus = _ChatBus()
+  dispatch_sdk_message(_stream_text_delta_at(0, "hello"), bus, None)
+  dispatch_sdk_message(
+    AssistantMessage(content=[TextBlock(text="hello")], model="claude-opus"),
+    bus, None,
+  )
+  emitted = [e for e in bus.events if e["type"] in ("text", "text_final")]
+  assert emitted and all("text_item_id" not in e for e in emitted)

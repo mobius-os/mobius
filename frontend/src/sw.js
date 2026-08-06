@@ -123,9 +123,45 @@ const opaqueFramePublicAssetCorsPlugin = {
 // this same worker's global scope). On an UPDATE we never reach activate until
 // the page posted SKIP_WAITING at its idle boundary; the reload Shell then
 // drives adopts the freshly-active worker without any spontaneous claim.
+// POLICY OVERRIDE OF THE UPDATE LEASH.
+//
+// The leash above assumes waiting costs nothing but freshness. For one class of
+// change it costs a working feature: a document's Content-Security-Policy also
+// governs every worker it spawns, and a precached document keeps serving the
+// headers it was stored with. So while the outgoing generation stays in charge,
+// the shell runs under a policy the server has already replaced, and any
+// capability that policy forbids stays broken no matter how many times the
+// owner relaunches. On an installed PWA there is no way to escape that by hand.
+//
+// The service worker script itself is always revalidated against the network
+// (`updateViaCache: 'none'`), so this is the only code path that can reach such
+// an installation. When the policy the server now sends differs from the one the
+// outgoing generation serves, take over immediately instead of waiting for an
+// idle boundary that may never come. Read the outgoing document at module
+// evaluation, before Workbox's install writes the new precache entry, so the
+// comparison cannot race its own replacement.
+const outgoingDocumentPolicy = caches.match('/index.html', { ignoreSearch: true })
+  .then(response => (response ? response.headers.get('content-security-policy') || '' : null))
+  .catch(() => null)
+
+async function documentPolicyChanged() {
+  const [outgoing, fresh] = await Promise.all([
+    outgoingDocumentPolicy,
+    fetch('/index.html', { cache: 'reload', credentials: 'same-origin' })
+      .then(response => response.headers.get('content-security-policy') || '')
+      .catch(() => ''),
+  ])
+  // No cached document, or offline: leave the leash in place.
+  return outgoing !== null && fresh !== '' && fresh !== outgoing
+}
+
 let isFirstInstall = false
-self.addEventListener('install', () => {
+self.addEventListener('install', (event) => {
   isFirstInstall = !self.registration.active
+  if (isFirstInstall) return
+  event.waitUntil(documentPolicyChanged().then(async (changed) => {
+    if (changed) await self.skipWaiting()
+  }).catch(() => {}))
 })
 self.addEventListener('message', (event) => {
   // The page reached its idle apply-boundary and asked us to take over.

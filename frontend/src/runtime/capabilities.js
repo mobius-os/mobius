@@ -1,3 +1,5 @@
+const SPEECH_CAPABILITY = 'media.speech'
+
 export class CapabilityError extends Error {
   constructor(code, message, fields = {}) {
     super(message || 'Capability request failed.')
@@ -125,6 +127,7 @@ export function makeCapabilities({ declarations = {}, hostWindow, selfWindow } =
       },
       control(action, value) {
         if (internal.settled || typeof action !== 'string') return result
+        if (internal.localControl) return result
         parentWindow.postMessage({
           type: 'moebius:capability-control', requestId, capability, action, value,
         }, ownWindow.location.origin)
@@ -133,6 +136,10 @@ export function makeCapabilities({ declarations = {}, hostWindow, selfWindow } =
       finish() { return this.control('finish') },
       cancel() {
         if (internal.settled) return
+        if (internal.localControl) {
+          internal.localControl.cancel()
+          return
+        }
         parentWindow.postMessage({
           type: 'moebius:capability-control', requestId, capability, action: 'cancel',
         }, ownWindow.location.origin)
@@ -142,11 +149,77 @@ export function makeCapabilities({ declarations = {}, hostWindow, selfWindow } =
       },
     }
 
+    // `media.speech` synthesis is answered here rather than by the shell: a
+    // worker runs under the policy of the document that spawned it, and only
+    // this frame's policy reliably permits WebAssembly. The shell still owns
+    // the model and streams it over a `model-stream` request on the same
+    // capability, so this needs no extra permission and no app-side engine.
+    if (capability === SPEECH_CAPABILITY && (input.operation || 'synthesize') === 'synthesize') {
+      runSpeechInFrame({ internal, input, declaration, open })
+      return session
+    }
+
     parentWindow.postMessage({
       type: 'moebius:capability-open', requestId, capability,
       version: declaration.version, input,
     }, ownWindow.location.origin)
     return session
+  }
+
+  function runSpeechInFrame({ internal, input, declaration, open: openBridge }) {
+    // A shell older than this runtime does not serve `model-stream`; it still
+    // synthesises itself. The two update on different channels, so fall back to
+    // asking it rather than failing on a protocol the host has not learned yet.
+    let usedFallback = false
+    const fallbackToShell = () => {
+      if (usedFallback || internal.settled) return
+      usedFallback = true
+      internal.localControl?.cancel?.()
+      internal.localControl = null
+      parentWindow.postMessage({
+        type: 'moebius:capability-open',
+        requestId: internal.requestId,
+        capability: internal.capability,
+        version: declaration.version,
+        input,
+      }, ownWindow.location.origin)
+    }
+
+    const emit = (event, value) => {
+      if (internal.settled) return
+      for (const listener of internal.listeners.get(event) || []) {
+        try { listener(value) } catch { /* an app listener must not break speech */ }
+      }
+    }
+    import('./speech.js').then(({ synthesizeInFrame }) => {
+      if (internal.settled) return
+      const engine = synthesizeInFrame({
+        input,
+        maxTextChars: Number(declaration?.limits?.max_text_chars) || 50_000,
+        channel: { event: emit },
+        openModelStream({ modelId, engineId, onManifest, onChunk, onProgress, onComplete, onError }) {
+          const stream = openBridge(SPEECH_CAPABILITY, { operation: 'model-stream', modelId, engineId })
+          stream.on('manifest', onManifest)
+          stream.on('chunk', onChunk)
+          stream.on('progress', onProgress)
+          stream.result.then(onComplete).catch((error) => {
+            if (error?.name === 'AbortError') return
+            if (error?.code === 'invalid_request') fallbackToShell()
+            else onError(error)
+          })
+          return stream
+        },
+      })
+      internal.localControl = engine
+      if (!internal.readySettled) {
+        internal.readySettled = true
+        internal.readyResolve({ state: 'starting' })
+      }
+      engine.result.then(
+        (value) => settle(internal, 'result', value),
+        (error) => { if (!usedFallback) settle(internal, 'error', error) },
+      )
+    }).catch((error) => settle(internal, 'error', error))
   }
 
   return {

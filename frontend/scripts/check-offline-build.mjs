@@ -9,6 +9,7 @@
 // window.mobius offline.
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
+import { DOCUMENT_REVISION_MARK, UNPRECACHED_WORKERS } from './precache-policy.mjs'
 
 const buildDir = path.resolve(process.argv[2] || 'dist')
 const sw = readFileSync(path.join(buildDir, 'sw.js'), 'utf8')
@@ -28,12 +29,28 @@ for (const f of required) {
 // this is the only place it can be caught. Derive the expected scope from the
 // real manifest and prove the shipped bundle registers exactly that.
 const pushWorker = 'sw-push.js'
-if (!existsSync(path.join(buildDir, pushWorker))) {
-  throw new Error(`missing ${path.join(buildDir, pushWorker)} — push is dead`)
+// Workers run under the CSP of their own response and a precached response
+// freezes its headers, so none of them may be precached. See
+// scripts/precache-policy.mjs for the full reasoning.
+for (const worker of UNPRECACHED_WORKERS) {
+  if (!existsSync(path.join(buildDir, worker))) {
+    throw new Error(`missing ${path.join(buildDir, worker)} — that feature is dead`)
+  }
+  if (sw.includes(worker)) {
+    throw new Error(`${worker} must NOT be precached in dist/sw.js`)
+  }
 }
-// A precached worker script can never be updated afterwards.
-if (sw.includes(pushWorker)) {
-  throw new Error(`${pushWorker} must NOT be precached in dist/sw.js`)
+
+// Documents carry the CSP that also governs the workers they spawn, so their
+// precache revision must change every build or a policy fix can never reach an
+// installed PWA.
+const unstampedDocument = [...sw.matchAll(/"revision":"([^"]*)","url":"([^"]+\.html)"/g)]
+  .find(([, revision]) => !revision.includes(DOCUMENT_REVISION_MARK))
+if (unstampedDocument) {
+  throw new Error(
+    `precached document ${unstampedDocument[2]} has an unstamped revision — `
+    + 'its headers would freeze at install time',
+  )
 }
 const manifest = JSON.parse(
   readFileSync(path.join(buildDir, 'manifest.webmanifest'), 'utf8'),
@@ -51,4 +68,5 @@ if (!registersPushScope) {
 }
 
 console.log('offline build OK:', required.join(', '), 'present + precached')
-console.log(`push worker OK: ${pushWorker} shipped, unprecached, scoped ${pushScope}`)
+console.log(`push worker OK: scoped ${pushScope}`)
+console.log(`workers OK: ${UNPRECACHED_WORKERS.join(', ')} shipped, unprecached`)
