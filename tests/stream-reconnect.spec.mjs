@@ -971,8 +971,8 @@ test.describe('Stream reconnection', () => {
     // through the normal messages.map path, and `liveQuestionId` is
     // never set by the stream. Pre-fix that path disabled the card
     // (`!sending` was false because the load set sending:true). Post-fix
-    // it is answerable, derived from the durable persisted block + the
-    // running stream (isStreaming), and answering MUST POST the answer.
+    // it is answerable, keyed by the durable pending-question marker,
+    // and answering MUST POST the answer.
     const CHAT_ID = '11111111-1111-1111-1111-111111111111'
     const QUESTION_ID = 'q-frozen-1'
     const TURN_TS = 1700000000000
@@ -982,9 +982,9 @@ test.describe('Stream reconnection', () => {
     let streamRequestCount = 0
 
     // Initial chat load: a running chat whose last assistant message is
-    // frozen on an unanswered question. Crucially `pending_question_id`
-    // is null (the live in-process registry hint is absent — the path
-    // that used to wedge), forcing the durable fallback.
+    // frozen on an unanswered question. The durable marker was restored by
+    // QuestionCommit (or the one-time migration for an in-flight old turn),
+    // so the card stays answerable without an SSE question replay.
     const updatedAt = '2026-07-30T18:00:00'
     const detail = {
       id: CHAT_ID,
@@ -1015,7 +1015,7 @@ test.describe('Stream reconnection', () => {
       offset: 0,
       running: true,
       active_goal_objective: GOAL,
-      pending_question_id: null,
+      pending_question_id: QUESTION_ID,
       session_id: 'sess-1',
       provider: 'claude',
     }
@@ -1036,7 +1036,7 @@ test.describe('Stream reconnection', () => {
           running: true,
           active_goal_objective: GOAL,
           pending_messages: [],
-          pending_question_id: null,
+          pending_question_id: QUESTION_ID,
           updated_at: updatedAt,
         }),
       })

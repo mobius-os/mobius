@@ -1505,10 +1505,9 @@ def _add_app_connections_manage(eng) -> None:
 def _add_chat_pending_question_id(eng) -> None:
   """Add the durable open-AskUserQuestion marker (models.Chat).
 
-  Nullable, defaults NULL. Existing installs start with no marker; it becomes
-  authoritative from the next asked question onward (the writer sets it on
-  QuestionCommit). No backfill is attempted for a chat parked at upgrade time —
-  that transient resolves on the next answer/ask.
+  Backfill only chats with a nonterminal durable run and an unanswered question
+  in their latest visible assistant message. That preserves a question parked
+  at upgrade without reviving historical cards on completed chats.
   """
   from sqlalchemy import inspect as sa_inspect, text
 
@@ -1522,6 +1521,55 @@ def _add_chat_pending_question_id(eng) -> None:
     conn.execute(text(
       "ALTER TABLE chats ADD COLUMN pending_question_id VARCHAR(64) NULL"
     ))
+    tables = set(inspector.get_table_names())
+    if "chat_runs" not in tables or not {"id", "messages"}.issubset(columns):
+      return
+    run_columns = {
+      column["name"] for column in inspector.get_columns("chat_runs")
+    }
+    if not {"chat_id", "status"}.issubset(run_columns):
+      return
+    active_rows = conn.execute(text(
+      "SELECT c.id, c.messages FROM chats c "
+      "WHERE c.pending_question_id IS NULL "
+      + ("AND c.deleted_at IS NULL " if "deleted_at" in columns else "")
+      + "AND EXISTS ("
+      "SELECT 1 FROM chat_runs r WHERE r.chat_id = c.id "
+      "AND r.status IN ('running', 'parked', 'resume_pending'))"
+    )).all()
+    for chat_id, raw_messages in active_rows:
+      try:
+        messages = (
+          json.loads(raw_messages)
+          if isinstance(raw_messages, str)
+          else list(raw_messages or [])
+        )
+      except (TypeError, ValueError, json.JSONDecodeError):
+        continue
+      question_id = None
+      for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("hidden"):
+          continue
+        if message.get("role") != "assistant":
+          break
+        for block in reversed(message.get("blocks") or []):
+          if not isinstance(block, dict):
+            continue
+          candidate = block.get("question_id")
+          if (
+            block.get("type") == "question"
+            and not block.get("answers")
+            and isinstance(candidate, str)
+            and 0 < len(candidate) <= 64
+          ):
+            question_id = candidate
+            break
+        break
+      if question_id is not None:
+        conn.execute(text(
+          "UPDATE chats SET pending_question_id = :question_id "
+          "WHERE id = :chat_id AND pending_question_id IS NULL"
+        ), {"chat_id": chat_id, "question_id": question_id})
 
 
 _SCHEMA_MIGRATIONS = (

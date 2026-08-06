@@ -45,7 +45,13 @@ from app.database import SessionLocal
 
 
 # -- fixtures + helpers ---------------------------------------------------
-def _seed_chat(chat_id="c1", messages=None, pending=None, session_id="sess-1"):
+def _seed_chat(
+  chat_id="c1",
+  messages=None,
+  pending=None,
+  session_id="sess-1",
+  pending_question_id=None,
+):
   """Insert a Chat row and return its id, committed via a throwaway session."""
   db = SessionLocal()
   try:
@@ -56,6 +62,7 @@ def _seed_chat(chat_id="c1", messages=None, pending=None, session_id="sess-1"):
       pending_messages=pending if pending is not None else [],
       session_id=session_id,
       provider="claude",
+      pending_question_id=pending_question_id,
     )
     db.add(chat)
     db.commit()
@@ -102,6 +109,7 @@ def _load_chat(chat_id="c1"):
       "messages": list(chat.messages or []),
       "live_assistant": chat.live_assistant,
       "pending_messages": list(chat.pending_messages or []),
+      "pending_question_id": chat.pending_question_id,
       "session_id": chat.session_id,
       "provider": chat.provider,
       "title": chat.title,
@@ -215,6 +223,7 @@ def test_question_commit_commits_before_ack(actor):
   # The ack has resolved; the row MUST already carry the question block.
   chat = _load_chat()
   assert chat["messages"][-1]["blocks"][0]["question_id"] == "q1"
+  assert chat["pending_question_id"] == "q1"
 
 
 # -- 3. question not broadcast on QuestionCommit fail ----------------------
@@ -272,6 +281,9 @@ def test_question_commit_failure_raises_so_card_is_not_broadcast():
       _await(fut)
   finally:
     a.stop(timeout=5)
+  # The card and marker share one transaction, so the dropped commit exposed
+  # neither half to a fresh session.
+  assert _load_chat()["pending_question_id"] is None
 
 
 # -- 4. Finalize ack only after commit ------------------------------------
@@ -282,7 +294,8 @@ def test_finalize_ack_only_after_commit(actor):
     messages=[
       {"role": "user", "content": "hi", "ts": 1},
       _assistant_msg([{"type": "text", "content": "partial"}]),
-    ]
+    ],
+    pending_question_id="q-open",
   )
   fut = actor.submit(
     Finalize(
@@ -302,6 +315,7 @@ def test_finalize_ack_only_after_commit(actor):
   # finalize_blocks force-completed the running tool block.
   tool = next(b for b in blocks if b.get("type") == "tool")
   assert tool["status"] != "running"
+  assert chat["pending_question_id"] is None
 
 
 # -- BLOCKING 2: must-persist commands fail (not falsely ack) on a no-op ---
@@ -1000,7 +1014,11 @@ def test_legacy_answer_without_question_id_broad_fences_other_tokens(actor):
         chat_id="c1",
         run_token="rt-stream",
         snapshot=_assistant_msg(
-          [{"type": "question", "questions": [{"question": "Color?"}]}]
+          [{
+            "type": "question",
+            "question_id": "q-legacy-answer",
+            "questions": [{"question": "Color?"}],
+          }]
         ),
       )
     )
@@ -1228,6 +1246,43 @@ def test_finish_run_closes_durable_run(actor):
   chat = _load_chat()
   assert chat["running_status"] is None
   assert chat["running_started_at"] is None
+
+
+def test_stale_finish_run_cannot_clear_successor_question(actor):
+  """A delayed terminal command from run A cannot erase run B's marker."""
+  _seed_chat(messages=[])
+  _await(actor.submit(StartTurn(
+    chat_id="c1",
+    run_token="old-run",
+    user_msg={"role": "user", "content": "old", "ts": 1, "cid": "old"},
+    title_source="old",
+  )))
+  _await(actor.submit(StartTurn(
+    chat_id="c1",
+    run_token="new-run",
+    user_msg={"role": "user", "content": "new", "ts": 2, "cid": "new"},
+    title_source="new",
+  )))
+  _await(actor.submit(QuestionCommit(
+    chat_id="c1",
+    run_token="new-run",
+    snapshot=_question_msg("new-question"),
+  )))
+
+  _await(actor.submit(FinishRun(
+    chat_id="c1", run_token="old-run", terminal_status="completed",
+  )))
+
+  chat = _load_chat()
+  assert chat["pending_question_id"] == "new-question"
+  assert chat["running_status"] == "running"
+  assert _load_run("old-run")["status"] == "interrupted"
+  assert _load_run("new-run")["status"] == "running"
+
+  _await(actor.submit(FinishRun(
+    chat_id="c1", run_token="new-run", terminal_status="completed",
+  )))
+  assert _load_chat()["pending_question_id"] is None
 
 
 def test_stale_wedged_recovery_cannot_clobber_new_run(actor):

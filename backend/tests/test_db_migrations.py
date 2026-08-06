@@ -1,6 +1,7 @@
 import ast
 import asyncio
 import hashlib
+import json
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -1015,6 +1016,63 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0010_chat_pending_question_id",
   ]
   assert second == first
+
+
+def test_pending_question_migration_backfills_only_active_latest_question(
+  tmp_path,
+):
+  eng = create_engine(f"sqlite:///{tmp_path / 'pending-question.db'}")
+  question = {
+    "type": "question",
+    "question_id": "q-active",
+    "questions": [{"id": "choice", "question": "Choose"}],
+  }
+  transcript = [
+    {"role": "user", "content": "start"},
+    {
+      "role": "assistant",
+      # Output after the card is why the marker must be position-independent.
+      "blocks": [question, {"type": "text", "content": "parallel output"}],
+    },
+  ]
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE chats ("
+      "id VARCHAR(64) PRIMARY KEY, messages JSON, deleted_at DATETIME NULL)"
+    ))
+    conn.execute(text(
+      "CREATE TABLE chat_runs ("
+      "id VARCHAR(64) PRIMARY KEY, chat_id VARCHAR(64), status VARCHAR(32))"
+    ))
+    for chat_id in ("active", "completed", "superseded"):
+      messages = transcript
+      if chat_id == "superseded":
+        messages = [*transcript, {"role": "user", "content": "move on"}]
+      conn.execute(text(
+        "INSERT INTO chats (id, messages) VALUES (:id, :messages)"
+      ), {"id": chat_id, "messages": json.dumps(messages)})
+    conn.execute(text(
+      "INSERT INTO chat_runs (id, chat_id, status) VALUES "
+      "('r-active', 'active', 'running'), "
+      "('r-completed', 'completed', 'completed'), "
+      "('r-superseded', 'superseded', 'running')"
+    ))
+
+  database._add_chat_pending_question_id(eng)
+  database._add_chat_pending_question_id(eng)
+
+  assert "pending_question_id" in {
+    column["name"] for column in inspect(eng).get_columns("chats")
+  }
+  with eng.connect() as conn:
+    markers = dict(conn.execute(text(
+      "SELECT id, pending_question_id FROM chats ORDER BY id"
+    )).all())
+  assert markers == {
+    "active": "q-active",
+    "completed": None,
+    "superseded": None,
+  }
 
 
 def test_connections_manage_reaches_a_ledgered_database(tmp_path):
