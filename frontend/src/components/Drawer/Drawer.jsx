@@ -31,7 +31,7 @@ import {
   clearDrawerGestureStyles,
 } from '../../lib/drawerLifecycle.js'
 import {
-  DRAWER_MENU_HOLD_MS,
+  PRESS_MENU_HOLD_MS,
   PRE_HOLD_MOVE_PX,
 } from '../Shell/dragController.js'
 import InstallSheet from './InstallSheet.jsx'
@@ -1570,7 +1570,7 @@ const DrawerRow = memo(function DrawerRow({
         holdTimerRef.current = null
         suppressCardClickRef.current = true
         openItemMenuAt(holdOriginRef.current)
-      }, DRAWER_MENU_HOLD_MS)
+      }, PRESS_MENU_HOLD_MS)
     }
     function cancelCardHold() {
       if (holdTimerRef.current) clearTimeout(holdTimerRef.current)

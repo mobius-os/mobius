@@ -33,21 +33,23 @@ import { tabKey } from './tabModel.js'
 // A mouse drag arms once the pointer travels past this from the press point;
 // below it, the press is still a plain click (tab activate / row open).
 export const POINTER_SLOP = 5
-// Touch lift is a long-press. Drawer rows have two deliberate stages: movement
-// can become a drag quickly, while a stationary press must continue longer
-// before opening actions. Keeping both timings here prevents the live pointer
-// owner and launcher cards from inventing their own thresholds.
-export const TAB_HOLD_MS = 350
-export const DRAWER_DRAG_HOLD_MS = 180
+// A touch press-and-hold resolves in two deliberate stages, shared by drawer
+// rows, launcher cards, and workspace tabs so no surface invents its own
+// timing. After the first (short) stage the item becomes draggable — movement
+// picks it up as a reorder/workspace/strip drag — while a press that stays
+// still through the second stage opens that item's actions. A short hold moves,
+// a long hold opens actions, identically everywhere. (Tabs previously diverged
+// with one longer hold whose RELEASE opened the menu; they now share this.)
+export const PRESS_DRAG_HOLD_MS = 180
 // Stay ahead of the platform's own long-press takeover. Some touch browsers
 // cancel the pointer around their native context-menu threshold; opening first
 // keeps the menu on our single Pointer Events path instead of a release-time
 // native contextmenu fallback.
-export const DRAWER_MENU_HOLD_MS = 400
+export const PRESS_MENU_HOLD_MS = 400
 // Movement past this before a hold resolves yields to the source scroller.
 export const PRE_HOLD_MOVE_PX = 8
-// After a touch lift, a release that never moved past this is not a drop. Tabs
-// use that stationary outcome for actions; movement after the hold drags.
+// After a touch lift, a release that never moved past this is not a drop; the
+// menu opens from the hold timer while still held, never from this release.
 export const RELEASE_IN_PLACE_PX = 5
 
 // ── Zone geometry (design §3.2 / §3.3) ───────────────────────────────────────

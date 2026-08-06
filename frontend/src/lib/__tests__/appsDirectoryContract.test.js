@@ -45,9 +45,9 @@ test('phone and web share one searchable launcher tab', () => {
   const dragImports = drawer.match(
     /import \{([\s\S]*?)\} from '\.\.\/Shell\/dragController\.js'/,
   )?.[1] || ''
-  assert.match(dragImports, /DRAWER_MENU_HOLD_MS/)
+  assert.match(dragImports, /PRESS_MENU_HOLD_MS/)
   assert.match(dragImports, /PRE_HOLD_MOVE_PX/)
-  assert.match(drawer, /setTimeout\(\(\) => \{[\s\S]*?openItemMenuAt[\s\S]*?DRAWER_MENU_HOLD_MS\)/)
+  assert.match(drawer, /setTimeout\(\(\) => \{[\s\S]*?openItemMenuAt[\s\S]*?PRESS_MENU_HOLD_MS\)/)
   assert.doesNotMatch(drawer, /520/)
   assert.match(drawer, /placement=\{menu\?\.placement\}/)
   assert.match(itemActionMenu, /placeContextMenu/)
