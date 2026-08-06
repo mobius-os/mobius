@@ -90,6 +90,9 @@ for (const scenario of SCENARIOS) {
         blocks: [...paragraphs, scenario.tailBlock],
       },
     ]
+    const pendingQuestionId = scenario.tailBlock.type === 'question'
+      ? scenario.tailBlock.question_id
+      : null
 
     await page.route(new RegExp(`/api/chats/${chat.id}\\?limit=`), route => {
       if (route.request().method() !== 'GET') return route.continue()
@@ -104,10 +107,21 @@ for (const scenario of SCENARIOS) {
           // stream active so the mocked build_phase event below is actually
           // consumed before we assert its layout beside the nudge.
           running: true,
-          pending_question_id: scenario.tailBlock.type === 'question'
-            ? scenario.tailBlock.question_id
-            : null,
+          pending_question_id: pendingQuestionId,
           pending_messages: [],
+        }),
+      })
+    })
+    await page.route(new RegExp(`/api/chats/${chat.id}/runtime$`), route => {
+      if (route.request().method() !== 'GET') return route.continue()
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          running: true,
+          active_goal_objective: null,
+          pending_messages: [],
+          pending_question_id: pendingQuestionId,
         }),
       })
     })
