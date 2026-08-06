@@ -338,9 +338,9 @@ class Delegation(Base):
   notify_parent_on_complete = Column(
     Boolean, nullable=False, default=False
   )
-  # Exactly-once latch for the parent wake: stamped when the completion notice is
-  # delivered (a started parent turn or a queued pending row), claimed with a
-  # conditional UPDATE so concurrent child finishes cannot double-deliver.
+  # Retry latch for the parent wake, stamped after the completion notice starts
+  # or queues. Delivery is intentionally at-least-once across a crash between
+  # those two transactions so a child result is never silently lost.
   parent_woken_at = Column(DateTime, nullable=True, default=None)
 
 

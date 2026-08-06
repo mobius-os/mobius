@@ -251,7 +251,7 @@ async def _wake_completed_delegation_parents(context: StartupContext) -> None:
 
   Runs after reconcile so a child that will auto-resume is still `resuming`/
   `running` (not wake-eligible) and is skipped; a child that genuinely
-  completed while away wakes its parent exactly once. Best-effort.
+  completed while away wakes its parent. Best-effort and retry-latched.
   """
   from app.delegations import wake_parents_for_completed_delegations
 

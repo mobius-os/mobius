@@ -110,6 +110,7 @@ def _same_intent(row: models.Delegation, body: DelegationSubmit, cwd: str) -> bo
     row.effort == body.effort,
     row.scope == body.scope,
     row.cwd == cwd,
+    row.notify_parent_on_complete == body.notify_parent_on_complete,
     row.prompt_sha256 == hashlib.sha256(body.prompt.encode("utf-8")).hexdigest(),
   ))
 

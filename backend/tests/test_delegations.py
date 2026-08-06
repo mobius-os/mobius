@@ -74,6 +74,13 @@ def test_submit_is_idempotent_per_parent_root_and_task_key(
   )
   assert conflict.status_code == 409
 
+  wake_policy_conflict = client.post(
+    "/api/delegations",
+    json={**body, "notify_parent_on_complete": False},
+    headers=auth,
+  )
+  assert wake_policy_conflict.status_code == 409
+
 
 def test_app_token_can_observe_own_work_but_cannot_submit_spend(
   client, owner_token, db, monkeypatch,
@@ -258,6 +265,7 @@ def _seed_delegation(
   notify=True,
   cancelled=False,
   parent_messages=None,
+  parent_pending_question_id=None,
 ):
   """Create a parent chat, a child chat (+ its ChatRun at child_status), and a
   Delegation row. Returns (parent_id, child_id, delegation_id)."""
@@ -273,6 +281,7 @@ def _seed_delegation(
     db.add(models.Chat(
       id=parent_id, title="Parent",
       messages=parent_messages or [], provider="claude",
+      pending_question_id=parent_pending_question_id,
     ))
   child_id = f"child-{suffix}"
   messages = [{"role": "user", "content": "Do the bounded task."}]
@@ -401,6 +410,29 @@ def test_running_parent_gets_appended_not_started(db, monkeypatch):
     (m.get("content") or "") for m in (parent.messages or [])
   )
   assert "task-run" in promoted
+
+
+def test_question_blocked_parent_gets_appended_not_started(db, monkeypatch):
+  """A durable owner question is a busy parent even without a live runner."""
+  parent_id, child_id, delegation_id = _seed_delegation(
+    db,
+    suffix="question",
+    result_blocks=[{"type": "text", "content": "Result while blocked."}],
+    parent_pending_question_id="owner-decision",
+  )
+  starts = _capture_starts(monkeypatch, running=False)
+
+  asyncio.run(delegations_mod.wake_parent_after_child_settled(child_id))
+
+  assert starts == []
+  db.expire_all()
+  parent = db.get(models.Chat, parent_id)
+  assert parent.pending_question_id == "owner-decision"
+  assert any(
+    "task-question" in (message.get("content") or "")
+    for message in (parent.pending_messages or [])
+  )
+  assert db.get(models.Delegation, delegation_id).parent_woken_at is not None
 
 
 def test_stopped_and_cancelled_children_do_not_wake(db, monkeypatch):

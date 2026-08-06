@@ -1576,7 +1576,7 @@ def _add_delegation_parent_wake(eng) -> None:
   """Add the delegation parent auto-wake columns (models.Delegation).
 
   ``notify_parent_on_complete`` (opt-in, default FALSE) and ``parent_woken_at``
-  (nullable exactly-once latch). Existing rows keep the safe defaults: no wake
+  (nullable retry latch). Existing rows keep the safe defaults: no wake
   fires for delegations created before the upgrade.
   """
   from sqlalchemy import inspect as sa_inspect, text

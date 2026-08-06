@@ -451,15 +451,15 @@ async def _append_wake_pending(content: str, parent_chat_id: str) -> bool:
     return False
 
 
-async def _deliver_parent_wake(parent_chat_id: str) -> None:
+async def _deliver_parent_wake(parent_chat_id: str) -> bool:
   """Coalesce every wake-eligible child for one parent into a single notice and
-  deliver it exactly once, all under the parent's queue lock.
+  deliver it under the parent's queue lock.
 
-  Idle parent -> start a fresh turn; running parent -> queue the notice so its
-  own drain promotes it. The `parent_woken_at` latch is claimed with a
-  conditional UPDATE only after delivery succeeds, so a failed delivery is
-  retried by a later child finish or the boot reconcile, and two concurrent
-  finishes can't double-deliver.
+  Idle parent -> start a fresh turn; running or question-blocked parent -> queue
+  the notice so its own next continuation promotes it. The `parent_woken_at`
+  retry latch is stamped only after delivery succeeds. A crash between those
+  transactions can redeliver, which is preferable to silently losing a child
+  result; the ordinary in-process path is serialized by the queue lock.
   """
   import app.chat_queue as chat_queue
   from app.chat import is_chat_running
@@ -470,7 +470,7 @@ async def _deliver_parent_wake(parent_chat_id: str) -> None:
     with SessionLocal() as db:
       rows = _wake_eligible_rows_for_parent(db, parent_chat_id)
       if not rows:
-        return
+        return False
       ids = [row.id for row in rows]
       content = _compose_wake_notice(db, rows)
       parent_chat = (
@@ -479,11 +479,12 @@ async def _deliver_parent_wake(parent_chat_id: str) -> None:
         .first()
       )
       if parent_chat is None:
-        return
+        return False
       provider = parent_chat.provider or "claude"
+      has_pending_question = parent_chat.pending_question_id is not None
 
     delivered = False
-    if is_chat_running(parent_chat_id):
+    if has_pending_question or is_chat_running(parent_chat_id):
       delivered = await _append_wake_pending(content, parent_chat_id)
     else:
       delivered = await start_programmatic_chat_turn(
@@ -499,7 +500,7 @@ async def _deliver_parent_wake(parent_chat_id: str) -> None:
         delivered = await _append_wake_pending(content, parent_chat_id)
 
     if not delivered:
-      return
+      return False
     with SessionLocal() as db:
       db.query(models.Delegation).filter(
         models.Delegation.id.in_(ids),
@@ -509,6 +510,7 @@ async def _deliver_parent_wake(parent_chat_id: str) -> None:
         synchronize_session=False,
       )
       db.commit()
+    return True
 
 
 async def wake_parent_after_child_settled(child_chat_id: str) -> None:
@@ -571,8 +573,8 @@ async def wake_parents_for_completed_delegations() -> int:
   woken = 0
   for parent_chat_id in parent_ids:
     try:
-      await _deliver_parent_wake(parent_chat_id)
-      woken += 1
+      if await _deliver_parent_wake(parent_chat_id):
+        woken += 1
     except Exception:
       _LOG.warning(
         "boot delegation parent-wake failed parent=%s",
