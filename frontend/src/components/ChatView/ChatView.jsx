@@ -3770,6 +3770,18 @@ export default function ChatView({
     && streamItems.some(it => it.type === 'question' && !it.answers)
   const hasPendingQuestion = pendingQuestionInStream || !!liveQuestionId
 
+  // Answerability id: prefer the durable pending_question_id marker; during the
+  // streaming window BEFORE that marker persists (or reaches the client via a
+  // runtime poll), fall back to the live streamed question's own id so its card
+  // is answerable immediately. This mirrors the composer lock, which already
+  // trusts pendingQuestionInStream. Without it, a freshly-streamed question is
+  // un-answerable until the marker lands — the regression that broke the
+  // AskUserQuestion / Q&A e2e flows.
+  const answerableQuestionId = liveQuestionId
+    || (pendingQuestionInStream
+      ? streamItems.find(it => it.type === 'question' && !it.answers)?.question_id ?? null
+      : null)
+
   // A live question parks Codex's JSON-RPC reader inside request_user_input.
   // turn/steer cannot be acknowledged until that question is released, so a
   // steer button here is a dead end. Keep the existing deterministic Stop path
@@ -4194,7 +4206,7 @@ export default function ChatView({
                 }
                 submissionBlocked={providerSwitching}
                 isLastMsg={isLastMsg}
-                liveQuestionId={liveQuestionId}
+                liveQuestionId={answerableQuestionId}
                 suppressedQuestionKeys={streamItemQuestionKeys}
                 pendingQuestionRef={pendingQuestionRef}
                 resumeCardRef={resumeCardRef}
@@ -4230,7 +4242,7 @@ export default function ChatView({
               }
               onAutoResumeChange={handleAutoResumeChange}
               submissionBlocked={providerSwitching}
-              liveQuestionId={liveQuestionId}
+              liveQuestionId={answerableQuestionId}
               // Same publication channel as the durable rows above: while the
               // turn is live THIS surface owns the pending question card, so
               // the offscreen observer follows the handoff automatically.
