@@ -203,29 +203,33 @@ def _has_unanswered_question(
   chat: models.Chat,
   question_id: str | None,
 ) -> bool:
-  """Whether the durable tail prompt is the question being answered."""
-  msgs = list(chat.messages or [])
-  tail_questions: list[dict] = []
-  for msg in reversed(msgs):
+  """Whether an answer to `question_id` should be accepted for this chat.
+
+  Primary signal is the durable `pending_question_id` marker, so an answer
+  lands even when parallel tool/subagent output or a terminal error trails the
+  card, and across a restart. Fallback: a *targeted* answer (a specific
+  question_id) is still honored when the marker has cleared but that exact card
+  is unanswered in the latest turn — answering the card after a Stop is a fresh
+  continuation request, not a stale race. Position-independent; a later user
+  turn (the decision was superseded) is not eligible.
+  """
+  open_id = chat.pending_question_id
+  if open_id is not None:
+    return question_id is None or question_id == open_id
+  if not question_id:
+    return False
+  for msg in reversed(chat.messages or []):
     if msg.get("hidden"):
       continue
     if msg.get("role") != "assistant":
       return False
-    blocks = list(msg.get("blocks") or [])
-    while blocks:
-      block = blocks.pop()
-      if block.get("type") != "question" or block.get("answers"):
-        break
-      tail_questions.append(block)
-    break
-
-  if not tail_questions:
-    return False
-  if question_id:
     return any(
-      block.get("question_id") == question_id for block in tail_questions
+      block.get("type") == "question"
+      and block.get("question_id") == question_id
+      and not block.get("answers")
+      for block in (msg.get("blocks") or [])
     )
-  return True
+  return False
 
 
 def _queued_response(
@@ -720,6 +724,19 @@ async def send_message(
           "message": started_message,
         },
       )
+
+  # A durable open question parks the turn on the owner's decision. Only an
+  # answer (handled above) or Stop advances it; a plain send must not slip past
+  # and orphan it. That was the pre-fix bug: once the parked turn hit a terminal
+  # error, a follow-up send started a fresh turn and stranded the still-open
+  # card. The composer is disabled client-side while a question is open — this
+  # is the authoritative guard for API clients and post-restart races. Answers
+  # short-circuit above; force_steer keeps its own refusal below.
+  if not body.force_steer and chat.pending_question_id is not None:
+    raise HTTPException(
+      status_code=409,
+      detail="Answer the pending question, or Stop the turn, before sending.",
+    )
 
   # A pending question parks the provider's control channel inside the
   # synchronous request_user_input bridge. A force-steer cannot be accepted

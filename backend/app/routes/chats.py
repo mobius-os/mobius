@@ -58,6 +58,7 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chats", tags=["chats"])
 
+
 # Separate router for the app-attributed chat contract (design §1). It
 # lives under its own /api/app-chats prefix so the owner-only /api/chats
 # surface stays unambiguously owner-only — the app path is additive and
@@ -397,7 +398,6 @@ def _chat_detail_response(
 
   all_msgs = materialized_messages(chat)
   running = is_chat_running(chat.id) or has_running_run(db, chat.id)
-  pending_question = questions.get(chat.id)
   live_snapshot = chat.live_assistant
   live_message = (
     all_msgs[-1]
@@ -485,9 +485,7 @@ def _chat_detail_response(
     "offset": start,
     "running": running,
     "active_goal_objective": active_goal_objective,
-    "pending_question_id": (
-      pending_question.question_id if pending_question is not None else None
-    ),
+    "pending_question_id": chat.pending_question_id,
     "session_id": chat.session_id if expose_session else None,
     "provider": provider,
     "created_by_app_id": chat.created_by_app_id,
@@ -1282,17 +1280,15 @@ def get_chat_runtime(
     principal,
     load_fields=(
       models.Chat.pending_messages,
+      models.Chat.pending_question_id,
       models.Chat.updated_at,
     ),
   )
-  pending_question = questions.get(chat.id)
   return {
     "running": is_chat_running(chat.id),
     "active_goal_objective": running_goal_objective(db, chat.id),
     "pending_messages": list(chat.pending_messages or []),
-    "pending_question_id": (
-      pending_question.question_id if pending_question is not None else None
-    ),
+    "pending_question_id": chat.pending_question_id,
     "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
   }
 

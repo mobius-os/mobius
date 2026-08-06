@@ -273,6 +273,9 @@ def test_compact_route_folds_settled_activity_while_live_turn_waits_for_answer(
       {"type": "question", "question_id": "question-1", "questions": []},
     ],
   }
+  # A live parked question carries the durable marker (QuestionCommit sets it);
+  # the read APIs report it straight from the column.
+  chat.pending_question_id = "question-1"
   db.commit()
   question_loop = asyncio.new_event_loop()
   pending = PendingQuestion(

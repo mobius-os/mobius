@@ -1502,6 +1502,28 @@ def _add_app_connections_manage(eng) -> None:
     ))
 
 
+def _add_chat_pending_question_id(eng) -> None:
+  """Add the durable open-AskUserQuestion marker (models.Chat).
+
+  Nullable, defaults NULL. Existing installs start with no marker; it becomes
+  authoritative from the next asked question onward (the writer sets it on
+  QuestionCommit). No backfill is attempted for a chat parked at upgrade time —
+  that transient resolves on the next answer/ask.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chats" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chats")}
+  if "pending_question_id" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE chats ADD COLUMN pending_question_id VARCHAR(64) NULL"
+    ))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -1512,6 +1534,7 @@ _SCHEMA_MIGRATIONS = (
   ("0007_chat_has_messages", _add_chat_has_messages),
   ("0008_chat_search_documents", _create_chat_search_tables),
   ("0009_app_connections_manage", _add_app_connections_manage),
+  ("0010_chat_pending_question_id", _add_chat_pending_question_id),
 )
 
 

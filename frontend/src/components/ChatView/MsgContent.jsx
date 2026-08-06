@@ -25,13 +25,19 @@ import { assistantBlockKey } from './streamPromotion.js'
 // tick — the only message that changes during streaming is the streaming <li>
 // itself, not the static history above it.
 function blockAnswerable(block, { msg, isLastMsg, liveQuestionId, onQuestionAnswer }) {
+  // Answerable iff this block IS the chat's durable open question
+  // (liveQuestionId = pending_question_id) and still unanswered — matched by id,
+  // not by block position, so a card trailed by parallel output or a terminal
+  // error stays answerable. liveQuestionId clears when the question is answered
+  // or the turn ends, so nothing is answerable once it's null.
   return !!(
     onQuestionAnswer
     && msg.role === 'assistant'
     && block?.type === 'question'
     && isLastMsg
     && !block.answers
-    && (!liveQuestionId || block.question_id === liveQuestionId)
+    && liveQuestionId
+    && block.question_id === liveQuestionId
   )
 }
 
@@ -205,13 +211,13 @@ function MsgContentInner({
         // streamItems simultaneously.
         if (suppressedQuestionKeys?.has(questionKey(block))) return null
         const answers = block.answers
-        // Only the LAST block's question is answerable (see
-        // isQuestionAnswerable in ChatView). Recovery keeps a still-open
-        // question at the tail; if anything later follows it, the turn has
-        // moved on and the card is transcript history.
-        const isTailBlock = i === lastEntryIdx
+        // Answerable when it is the open question on the latest turn —
+        // position-independent. A still-open card can be trailed by parallel
+        // tool/subagent output or a terminal error; openness is identity, not
+        // tail position. blockAnswerable scopes to isLastMsg + the live id,
+        // which mirrors the backend's durable pending_question_id marker.
         const answerable = !!(
-          onQuestionAnswer && isTailBlock && isQuestionAnswerable?.(block)
+          onQuestionAnswer && isQuestionAnswerable?.(block)
         )
         return (
           <div key={assistantBlockKey(block, i)}>

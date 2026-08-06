@@ -508,3 +508,56 @@ def test_answer_returns_410_after_grace_when_nothing_registers(
     assert questions.get(chat.id) is None
 
   asyncio.run(go())
+
+
+def test_open_question_survives_trailing_output_and_blocks_plain_send(
+  client, auth, chat,
+):
+  """The reported bug: a still-open card buried behind later output.
+
+  A parked question followed by parallel/subagent output and a terminal error
+  is NOT the tail block, yet it is still open. The durable `pending_question_id`
+  marker — not block position — decides that, so the read API reports it and a
+  plain follow-up is refused (409) instead of silently orphaning the card.
+  """
+  qid = "q-buried-behind-error"
+  db = SessionLocal()
+  try:
+    row = db.query(models.Chat).filter(models.Chat.id == chat.id).first()
+    row.messages = [
+      {"role": "user", "content": "clean up the new-chat debt", "ts": 1},
+      {
+        "role": "assistant",
+        "content": "",
+        "ts": 2,
+        "blocks": [
+          {
+            "type": "question",
+            "question_id": qid,
+            "questions": [
+              {"id": "q1", "question": "How far?", "options": ["a", "b"]}
+            ],
+          },
+          {"type": "text", "content": "subagent findings streamed in after"},
+          {"type": "error", "message": "You've hit your session limit"},
+        ],
+      },
+    ]
+    row.pending_question_id = qid
+    db.commit()
+  finally:
+    db.close()
+
+  # The read API reports the open question though it is not the tail block.
+  detail = client.get(f"/api/chats/{chat.id}?limit=20", headers=auth)
+  assert detail.status_code == 200
+  assert detail.json()["pending_question_id"] == qid
+
+  # A plain follow-up is refused while the question is open (no silent orphan);
+  # only an answer (or Stop) may advance the turn.
+  blocked = client.post(
+    f"/api/chats/{chat.id}/messages",
+    json={"content": "never mind - do this other thing instead"},
+    headers=auth,
+  )
+  assert blocked.status_code == 409, blocked.text
