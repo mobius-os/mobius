@@ -1,8 +1,6 @@
-import { POCKET_TTS_WORKER_SOURCE } from './pocketTtsWorkerSource.js'
-import { XN_PTTS_MODULE_SOURCE, XN_PTTS_WASM_BYTES } from './pocketTtsXnModule.js'
-import { XN_PTTS_WASM_BASE64_1 } from './pocketTtsXnWasm1.js'
-import { XN_PTTS_WASM_BASE64_2 } from './pocketTtsXnWasm2.js'
 import { streamSpeechModel } from './speechModelStore.js'
+import { speechModelLoadSnapshot } from './speechModels.js'
+import { SPEECH_WORKER_URL } from './speechWorkerAsset.js'
 
 const START_TIMEOUT_MS = 20_000
 const CHUNK_TIMEOUT_MS = 180_000
@@ -14,6 +12,16 @@ function restoredError(value, fallback = 'Speech stopped unexpectedly.') {
   error.name = value?.name || 'Error'
   return error
 }
+// A worker `error` event only carries a message when the script ran and threw.
+// When the script never loaded — blocked by Content-Security-Policy, missing
+// from the build, or unreachable — browsers fire a bare Event with no message.
+// Those are different failures, so never report one as the other.
+function workerStartError(event) {
+  return new Error(event?.message
+    || `The speech engine could not start: ${SPEECH_WORKER_URL} did not load. `
+      + 'It is missing from this build or blocked by this page\'s security policy.')
+}
+
 function within(promise, milliseconds, message) {
   let timer
   return Promise.race([
@@ -25,7 +33,6 @@ function within(promise, milliseconds, message) {
 export class PocketTtsWorkerRuntime {
   constructor() {
     this.worker = null
-    this.workerUrl = ''
     this.loadPending = null
     this.chunks = new Map()
     this.generations = new Map()
@@ -35,18 +42,30 @@ export class PocketTtsWorkerRuntime {
 
   ensureWorker() {
     if (this.worker) return this.worker
-    if (typeof Worker === 'undefined' || typeof Blob === 'undefined') {
+    if (typeof Worker === 'undefined') {
       throw new Error('This browser cannot run the speech model away from the page.')
     }
-    this.workerUrl = URL.createObjectURL(new Blob([POCKET_TTS_WORKER_SOURCE], { type: 'text/javascript' }))
-    // Keep the outer bootstrap classic so the same runtime works from both the
-    // shell and sandboxed app hosts. The XN Wasm-bindgen module is still
-    // imported inside the worker after it starts.
-    const worker = new Worker(this.workerUrl)
+    // Classic worker: the XN runtime is bundled into this script at build time,
+    // so it needs neither module-worker support nor a dynamic import.
+    const worker = new Worker(SPEECH_WORKER_URL)
     worker.onmessage = (event) => this.onMessage(event.data)
-    worker.onerror = (event) => this.failAll(new Error(event.message || 'The speech worker stopped.'))
+    worker.onerror = (event) => {
+      if (this.worker !== worker) return
+      this.retireWorker(worker)
+      this.failAll(workerStartError(event))
+    }
     this.worker = worker
     return worker
+  }
+
+  retireWorker(worker = this.worker) {
+    if (worker && this.worker !== worker) return
+    if (worker) {
+      worker.onmessage = null
+      worker.onerror = null
+      try { worker.terminate() } catch {}
+    }
+    this.worker = null
   }
 
   onMessage(message) {
@@ -68,20 +87,19 @@ export class PocketTtsWorkerRuntime {
     if (message.type === 'load-complete') {
       const pending = this.loadPending
       this.loadPending = null
-      if (this.workerUrl) URL.revokeObjectURL(this.workerUrl)
-      this.workerUrl = ''
       pending?.resolve()
       return
     }
     if (message.type === 'audio') {
       const generation = this.generations.get(message.requestId)
       if (!generation) return
-      Promise.resolve(generation.onChunk?.(message.samples)).catch((error) => {
-        this.worker?.postMessage({ type: 'cancel-generate' })
-        this.generations.delete(message.requestId)
-        generation.cleanup()
-        generation.reject(error)
-      })
+      try {
+        // Audio delivery is synchronous so completion cannot race a rejected
+        // consumer promise after the generation has already settled.
+        generation.onChunkSync?.(message.samples)
+      } catch (error) {
+        this.failGeneration(message.requestId, generation, error)
+      }
       return
     }
     if (message.type === 'generate-complete') {
@@ -107,6 +125,14 @@ export class PocketTtsWorkerRuntime {
         generation.reject(error)
       } else this.failAll(error)
     }
+  }
+
+  failGeneration(requestId, generation, error) {
+    if (this.generations.get(requestId) !== generation) return
+    try { this.worker?.postMessage({ type: 'cancel-generate' }) } catch {}
+    this.generations.delete(requestId)
+    generation.cleanup()
+    generation.reject(error)
   }
 
   failAll(error) {
@@ -139,7 +165,8 @@ export class PocketTtsWorkerRuntime {
     return within(accepted, CHUNK_TIMEOUT_MS, 'The speech worker took too long to open the saved model.')
   }
 
-  async load({ modelId, signal, onProgress } = {}) {
+  async load({ snapshot, signal, onProgress } = {}) {
+    if (signal?.aborted) throw abortError()
     if (this.loadPending) throw new Error('The speech model is already loading.')
     const worker = this.ensureWorker()
     let resolveLoad; let rejectLoad; let readyResolve; let readyReject
@@ -153,13 +180,13 @@ export class PocketTtsWorkerRuntime {
       onProgress?.({ stage: 'starting', percent: 0 })
       worker.postMessage({
         type: 'load-start',
-        runtimeModuleSource: XN_PTTS_MODULE_SOURCE,
-        runtimeWasmBase64Parts: [XN_PTTS_WASM_BASE64_1, XN_PTTS_WASM_BASE64_2],
-        runtimeWasmBytes: XN_PTTS_WASM_BYTES,
+        assetBytes: snapshot.assetBytes,
+        temperature: snapshot.temperature,
+        clonedVoiceSamples: snapshot.clonedVoiceSamples,
       })
       await within(ready, START_TIMEOUT_MS, 'The speech worker did not start.')
       onProgress?.({ stage: 'checking', percent: 0 })
-      await streamSpeechModel(modelId, {
+      await streamSpeechModel(snapshot, {
         signal,
         onChunk: (value) => this.sendChunk(value),
         onProgress: (percent) => {
@@ -176,7 +203,7 @@ export class PocketTtsWorkerRuntime {
     } finally { signal?.removeEventListener('abort', cancel) }
   }
 
-  generate(text, { signal, onChunk } = {}) {
+  generate(text, { signal, onChunkSync } = {}) {
     if (signal?.aborted) return Promise.reject(abortError())
     const requestId = `speech-${this.nextRequestId++}`
     return new Promise((resolve, reject) => {
@@ -187,7 +214,7 @@ export class PocketTtsWorkerRuntime {
       }
       signal?.addEventListener('abort', cancel, { once: true })
       this.generations.set(requestId, {
-        resolve, reject, onChunk,
+        resolve, reject, onChunkSync,
         cleanup: () => signal?.removeEventListener('abort', cancel),
       })
       this.worker.postMessage({ type: 'generate', requestId, text })
@@ -197,10 +224,7 @@ export class PocketTtsWorkerRuntime {
   dispose() {
     const error = abortError()
     try { this.worker?.postMessage({ type: 'dispose' }) } catch {}
-    this.worker?.terminate()
-    this.worker = null
-    if (this.workerUrl) URL.revokeObjectURL(this.workerUrl)
-    this.workerUrl = ''
+    this.retireWorker()
     this.failAll(error)
   }
 }
@@ -211,25 +235,38 @@ class BrowserPocketTts {
     this.loaded = false
     this.loading = null
     this.modelId = null
+    this.loadIdentity = null
   }
   async load(options = {}) {
-    if (this.loaded && this.modelId === options.modelId) return
-    if (this.loaded && this.modelId !== options.modelId) this.dispose()
-    if (!this.loading) this.loading = this.runtime.load(options).then(() => {
+    if (this.loading) {
+      await this.loading
+      return this.load(options)
+    }
+    const snapshot = speechModelLoadSnapshot(options.modelId, options.storage)
+    if (!snapshot) throw new Error('The selected speech model is unavailable.')
+    if (this.loaded && this.loadIdentity === snapshot.identity) return
+    if (this.loaded) this.dispose()
+    if (!this.loading) this.loading = this.runtime.load({
+      snapshot,
+      signal: options.signal,
+      onProgress: options.onProgress,
+    }).then(() => {
       this.loaded = true
-      this.modelId = options.modelId
+      this.modelId = snapshot.modelId
+      this.loadIdentity = snapshot.identity
     }).finally(() => { this.loading = null })
     return this.loading
   }
-  generate(text, options) {
+  generate(text, { onChunk, ...options } = {}) {
     if (!this.loaded) throw new Error('The speech model is not ready.')
-    return this.runtime.generate(text, options)
+    return this.runtime.generate(text, { ...options, onChunkSync: onChunk })
   }
   dispose() {
     this.runtime.dispose()
     this.loaded = false
     this.loading = null
     this.modelId = null
+    this.loadIdentity = null
   }
 }
 

@@ -1,0 +1,333 @@
+diff --git a/ptts-wasm/src/lib.rs b/ptts-wasm/src/lib.rs
+index ad14898..97127e7 100644
+--- a/ptts-wasm/src/lib.rs
++++ b/ptts-wasm/src/lib.rs
+@@ -14,7 +14,7 @@ macro_rules! console_log {
+ use ptts::flow_lm::{self, FlowLMState};
+ use ptts::mimi::MimiDecoderState;
+ use ptts::transformer::{LayerAttentionState, StreamingMHAState, StreamingTransformerState};
+-use ptts::tts_model::{TTSConfig, TTSModel, TTSState, prepare_text_prompt};
++use ptts::tts_model::{MimiEnc, TTSConfig, TTSModel, TTSState, prepare_text_prompt};
+ use xn::nn::VB;
+ use xn::quantized::Q80F32;
+ use xn::{BackendQ, CPU, CpuDevice, Tensor, TypedTensor, Unquantized};
+@@ -168,6 +168,11 @@ enum ModelInner {
+     Q8(TTSModel<Q80F32>),
+ }
+ 
++enum EncoderInner {
++    F32(MimiEnc<Unquantized<f32, CpuDevice>>),
++    Q8(MimiEnc<Q80F32>),
++}
++
+ enum StateInner {
+     F32(TTSState<Unquantized<f32, CpuDevice>>),
+     Q8(TTSState<Q80F32>),
+@@ -199,6 +204,7 @@ struct GenState {
+ #[wasm_bindgen]
+ pub struct Model {
+     inner: ModelInner,
++    encoder: Option<EncoderInner>,
+     tokenizer: std::sync::Arc<PresetTokenizer>,
+     cfg: TTSConfig,
+     gen_state: Option<GenState>,
+@@ -207,18 +213,22 @@ pub struct Model {
+ 
+ impl Model {
+     pub fn new_(model_weights: &[u8], quant: &str) -> xn::Result<Model> {
++        Self::new_owned_(model_weights.to_vec(), quant, true)
++    }
++
++    fn new_owned_(model_weights: Vec<u8>, quant: &str, enable_cloning: bool) -> xn::Result<Model> {
+         let quant = Quant::parse(quant)?;
+         console_log!("[new] loading model with quant={quant:?}");
+-        let cfg = TTSConfig::v202601(0.7);
++        let cfg = TTSConfig::v202604(0.3);
+ 
+         let is_gguf = model_weights.len() >= 4 && &model_weights[..4] == b"GGUF";
+         let vb = if is_gguf {
+             console_log!("[new] detected gguf format");
+-            let cursor = std::io::Cursor::new(model_weights.to_vec());
++            let cursor = std::io::Cursor::new(model_weights);
+             VB::load_gguf_with_key_map(cursor, CPU, remap_key)?
+         } else {
+             console_log!("[new] detected safetensors format");
+-            VB::from_bytes_with_key_map(vec![model_weights.to_vec()], CPU, remap_key)?
++            VB::from_bytes_with_key_map(vec![model_weights], CPU, remap_key)?
+         };
+         let root = vb.root();
+         let tokenizer = std::sync::Arc::new(PresetTokenizer::new());
+@@ -233,8 +243,50 @@ impl Model {
+             )?),
+             Quant::Q8 => ModelInner::Q8(TTSModel::<Q80F32>::load(&root, tokenizer_box, &cfg)?),
+         };
++        let encoder = if enable_cloning {
++            Some(match quant {
++                Quant::F32 => {
++                    EncoderInner::F32(MimiEnc::<Unquantized<f32, CpuDevice>>::load(&root, &cfg)?)
++                }
++                Quant::Q8 => EncoderInner::Q8(MimiEnc::<Q80F32>::load(&root, &cfg)?),
++            })
++        } else {
++            None
++        };
++
++        Ok(Model { inner, encoder, tokenizer, cfg, gen_state: None, voice_states: Vec::new() })
++    }
+ 
+-        Ok(Model { inner, tokenizer, cfg, gen_state: None, voice_states: Vec::new() })
++    pub fn clone_voice_(&mut self, pcm: &[f32]) -> xn::Result<usize> {
++        let sample_rate = self.cfg.mimi.sample_rate;
++        if pcm.len() < sample_rate * 2 {
++            xn::bail!("voice sample must be at least 2 seconds");
++        }
++        if pcm.len() > sample_rate * 30 {
++            xn::bail!("voice sample cannot exceed 30 seconds");
++        }
++        let audio = Tensor::from_vec(pcm.to_vec(), (1, 1, ()), &CPU)?;
++        let Some(encoder) = self.encoder.as_ref() else {
++            xn::bail!("voice cloning was not enabled for this model")
++        };
++        let raw = match (&self.inner, encoder) {
++            (ModelInner::F32(model), EncoderInner::F32(encoder)) => {
++                let prompt = model.prepare_voice_prompt(&encoder.encode_audio(&audio)?)?;
++                let mut state = model.init_flow_lm_state(1, prompt.dim(1usize)? + 8)?;
++                model.prompt_audio(&mut state, &prompt)?;
++                state.flow_lm_state.transformer_state
++            }
++            (ModelInner::Q8(model), EncoderInner::Q8(encoder)) => {
++                let prompt = model.prepare_voice_prompt(&encoder.encode_audio(&audio)?)?;
++                let mut state = model.init_flow_lm_state(1, prompt.dim(1usize)? + 8)?;
++                model.prompt_audio(&mut state, &prompt)?;
++                state.flow_lm_state.transformer_state
++            }
++            _ => xn::bail!("model/encoder quantization mismatch"),
++        };
++        let index = self.voice_states.len();
++        self.voice_states.push(raw);
++        Ok(index)
+     }
+ 
+     /// Load a pre-computed KV cache state from a safetensors buffer.
+@@ -394,6 +446,24 @@ impl Model {
+         Self::new_(model_weights, quant).map_err(|e| JsError::new(&e.to_string()))
+     }
+ 
++    /// Take ownership of a model buffer already allocated in Wasm memory.
++    /// The caller must allocate it with `__wbindgen_malloc`, fill exactly
++    /// `length` bytes, and transfer it here exactly once.
++    #[wasm_bindgen(js_name = fromRawModelWeights)]
++    pub fn from_raw_model_weights(
++        pointer: usize,
++        length: usize,
++        quant: &str,
++        enable_cloning: bool,
++    ) -> Result<Model, JsError> {
++        if pointer == 0 || length == 0 {
++            return Err(JsError::new("model allocation is empty"));
++        }
++        let model_weights = unsafe { Vec::from_raw_parts(pointer as *mut u8, length, length) };
++        Self::new_owned_(model_weights, quant, enable_cloning)
++            .map_err(|e| JsError::new(&e.to_string()))
++    }
++
+     pub fn add_voice(&mut self, voice_weights: &[u8]) -> Result<usize, JsError> {
+         self.add_voice_(voice_weights).map_err(|e| JsError::new(&e.to_string()))
+     }
+@@ -423,6 +493,11 @@ impl Model {
+         self.generation_step_().map_err(|e| JsError::new(&e.to_string()))
+     }
+ 
++    /// Build a reusable in-memory voice state from 24 kHz mono PCM.
++    pub fn clone_voice(&mut self, pcm: &[f32]) -> Result<usize, JsError> {
++        self.clone_voice_(pcm).map_err(|e| JsError::new(&e.to_string()))
++    }
++
+     pub fn sample_rate(&self) -> usize {
+         match &self.inner {
+             ModelInner::F32(m) => m.sample_rate(),
+diff --git a/ptts/src/flow_lm.rs b/ptts/src/flow_lm.rs
+index 73146a2..0c3b9e4 100644
+--- a/ptts/src/flow_lm.rs
++++ b/ptts/src/flow_lm.rs
+@@ -59,6 +59,7 @@ pub struct FlowLM<Q: BackendQ> {
+     pub emb_std: Tensor<Q::T, Q::B>,
+     pub emb_mean: Tensor<Q::T, Q::B>,
+     bos_emb: Tensor<Q::T, Q::B>,
++    bos_before_voice: Option<Tensor<Q::T, Q::B>>,
+     pub input_linear: Linear<Q::T, Q::B>,
+     out_norm_weight: Tensor<Q::T, Q::B>,
+     out_norm_bias: Tensor<Q::T, Q::B>,
+@@ -121,6 +122,11 @@ impl<Q: BackendQ> FlowLM<Q> {
+         let emb_std = vb.tensor("emb_std", (cfg.ldim,))?;
+         let emb_mean = vb.tensor("emb_mean", (cfg.ldim,))?;
+         let bos_emb = vb.tensor("bos_emb", (cfg.ldim,))?;
++        let bos_before_voice = if vb.contains("bos_before_voice") {
++            Some(vb.tensor("bos_before_voice", (1, 1, cfg.d_model))?)
++        } else {
++            None
++        };
+         let input_linear = Linear::load(vb.pp("input_linear"), cfg.ldim, cfg.d_model)?;
+         let out_norm_weight = vb.pp("out_norm").tensor("weight", (cfg.d_model,))?;
+         let out_norm_bias = vb.pp("out_norm").tensor("bias", (cfg.d_model,))?;
+@@ -134,6 +140,7 @@ impl<Q: BackendQ> FlowLM<Q> {
+             emb_std,
+             emb_mean,
+             bos_emb,
++            bos_before_voice,
+             input_linear,
+             out_norm_weight,
+             out_norm_bias,
+@@ -143,6 +150,13 @@ impl<Q: BackendQ> FlowLM<Q> {
+         })
+     }
+ 
++    pub fn prepare_voice_prompt(&self, prompt: &Tensor<Q::T, Q::B>) -> Result<Tensor<Q::T, Q::B>> {
++        match self.bos_before_voice.as_ref() {
++            Some(bos) => Tensor::cat(&[bos, prompt], 1),
++            None => Ok(prompt.clone()),
++        }
++    }
++
+     pub fn init_state(&self, batch_size: usize, sequence_length: usize) -> Result<FlowLMState<Q>> {
+         let transformer_state = self.transformer.init_state(batch_size, sequence_length)?;
+         Ok(FlowLMState { transformer_state })
+diff --git a/ptts/src/mimi.rs b/ptts/src/mimi.rs
+index bdf4b55..fbfac64 100644
+--- a/ptts/src/mimi.rs
++++ b/ptts/src/mimi.rs
+@@ -13,6 +13,10 @@ pub struct MimiConfig {
+     pub sample_rate: usize,
+     pub frame_rate: f64,
+     pub dimension: usize,
++    #[serde(default)]
++    pub inner_dimension: Option<usize>,
++    #[serde(default)]
++    pub outer_dimension: Option<usize>,
+     pub quantizer_dimension: usize,
+     pub quantizer_output_dimension: usize,
+     pub n_filters: usize,
+@@ -119,6 +123,7 @@ impl<Q: BackendQ> MimiEncoder<Q> {
+                 &vb.pp("downsample"),
+                 downsample_stride,
+                 cfg.dimension,
++                cfg.inner_dimension.unwrap_or(cfg.dimension),
+                 cfg.downsample_channel_wise,
+             )?;
+             Some(ds)
+@@ -227,7 +232,12 @@ impl<Q: BackendQ> MimiDecoder<Q> {
+ 
+         let upsample = if (encoder_frame_rate - cfg.frame_rate).abs() > 0.01 {
+             let downsample_stride = (encoder_frame_rate / cfg.frame_rate) as usize;
+-            let us = ConvTrUpsample1d::load(&vb.pp("upsample"), downsample_stride, cfg.dimension)?;
++            let us = ConvTrUpsample1d::load(
++                &vb.pp("upsample"),
++                downsample_stride,
++                cfg.outer_dimension.unwrap_or(cfg.dimension),
++                cfg.dimension,
++            )?;
+             Some(us)
+         } else {
+             None
+diff --git a/ptts/src/resample.rs b/ptts/src/resample.rs
+index e729a9a..81b7b25 100644
+--- a/ptts/src/resample.rs
++++ b/ptts/src/resample.rs
+@@ -10,12 +10,18 @@ pub struct ConvDownsample1d<T: WithDTypeF, B: Backend> {
+ }
+ 
+ impl<T: WithDTypeF, B: Backend> ConvDownsample1d<T, B> {
+-    pub fn load(vb: &Path<B>, stride: usize, dimension: usize, depthwise: bool) -> Result<Self> {
+-        let groups = if depthwise { dimension } else { 1 };
++    pub fn load(
++        vb: &Path<B>,
++        stride: usize,
++        in_dimension: usize,
++        out_dimension: usize,
++        depthwise: bool,
++    ) -> Result<Self> {
++        let groups = if depthwise { in_dimension } else { 1 };
+         let conv = StreamingConv1d::load(
+             &vb.pp("conv"),
+-            dimension,
+-            dimension,
++            in_dimension,
++            out_dimension,
+             2 * stride,
+             stride,
+             1,
+@@ -51,14 +57,19 @@ pub struct ConvTrUpsample1d<T: WithDTypeF, B: Backend> {
+ }
+ 
+ impl<T: WithDTypeF, B: Backend> ConvTrUpsample1d<T, B> {
+-    pub fn load(vb: &Path<B>, stride: usize, dimension: usize) -> Result<Self> {
++    pub fn load(
++        vb: &Path<B>,
++        stride: usize,
++        in_dimension: usize,
++        out_dimension: usize,
++    ) -> Result<Self> {
+         let convtr = StreamingConvTranspose1d::load(
+             &vb.pp("convtr"),
+-            dimension,
+-            dimension,
++            in_dimension,
++            out_dimension,
+             2 * stride,
+             stride,
+-            dimension, // groups = dimension (depthwise)
++            in_dimension, // grouped by the input channels
+             false,
+         )?;
+         Ok(Self { convtr })
+diff --git a/ptts/src/tts_model.rs b/ptts/src/tts_model.rs
+index 88f2a86..fda0894 100644
+--- a/ptts/src/tts_model.rs
++++ b/ptts/src/tts_model.rs
+@@ -96,6 +96,8 @@ impl TTSConfig {
+                 sample_rate: 24000,
+                 frame_rate: 12.5,
+                 dimension: 512,
++                inner_dimension: None,
++                outer_dimension: None,
+                 quantizer_dimension: 32,
+                 quantizer_output_dimension: 512,
+                 n_filters: 64,
+@@ -132,6 +134,13 @@ impl TTSConfig {
+         }
+     }
+ 
++    pub fn v202604(temp: f32) -> Self {
++        let mut config = Self::v202601(temp);
++        config.mimi.inner_dimension = Some(32);
++        config.mimi.outer_dimension = Some(512);
++        config
++    }
++
+     pub fn model_ext(&self) -> Option<String> {
+         self.model_id.as_ref().map(|id| format!("{}@{}", id.sig, id.epoch))
+     }
+@@ -243,6 +252,10 @@ impl<Q: BackendQ> TTSModel<Q> {
+         Ok(())
+     }
+ 
++    pub fn prepare_voice_prompt(&self, prompt: &Tensor<Q::T, Q::B>) -> Result<Tensor<Q::T, Q::B>> {
++        self.flow_lm.prepare_voice_prompt(prompt)
++    }
++
+     /// Run one autoregressive generation step.
+     /// Returns (next_latent [B, 1, ldim], is_eos).
+     #[allow(clippy::type_complexity)]
+@@ -346,8 +359,10 @@ impl<Q: BackendQ> MimiEnc<Q> {
+     pub fn load(vb: &Path<Q::B>, cfg: &TTSConfig) -> Result<Self> {
+         let mimi = MimiEncoder::load(&vb.pp("mimi"), &cfg.mimi)?;
+         let speaker_proj = if vb.contains("flow_lm.speaker_proj_weight") {
+-            let weights = vb
+-                .tensor("flow_lm.speaker_proj_weight", (cfg.flow_lm.d_model, cfg.mimi.dimension))?;
++            let weights = vb.tensor(
++                "flow_lm.speaker_proj_weight",
++                (cfg.flow_lm.d_model, cfg.mimi.inner_dimension.unwrap_or(cfg.mimi.dimension)),
++            )?;
+             Some(Linear::new(weights))
+         } else {
+             None

@@ -902,7 +902,6 @@ def test_stop_drops_the_buffered_steer_instead_of_appending_it():
     handle = ActiveClaudeClient(_Client(), chat_id="stopsteer")
     handle.mark_finished()
     handle.pending_steer = ["Q2"]
-    handle._steer_requested = True
     handle._steer_user_msgs = [
       {"role": "user", "content": "Q2", "ts": 10, "cid": "c-q2"}
     ]
@@ -911,7 +910,6 @@ def test_stop_drops_the_buffered_steer_instead_of_appending_it():
     await handle.interrupt()
 
     assert handle.pending_steer == []
-    assert handle._steer_requested is False
     assert handle._steer_user_msgs == []
     assert handle._steer_consume_cids == []
 

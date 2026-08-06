@@ -1,43 +1,55 @@
 import { SpeechGenerationOwnership } from './speechGenerationOwnership.js'
+import initXnRuntime, {
+  allocate_model_weights as allocateModelWeights,
+  free_allocated_model_weights as freeAllocatedModelWeights,
+  model_from_allocated_weights as modelFromAllocatedWeights,
+} from './pocketTtsXnRuntime.js'
 
-// XN's Q8 Pocket TTS runtime, isolated in a dedicated worker. Model assets
-// arrive from Möbius's checksum-verified device cache; the worker never fetches.
+// XN's Q8 Pocket TTS runtime, isolated in a dedicated worker. The XN runtime is
+// bundled into this script at build time and its Wasm binary is fetched from
+// public/speech/. Model assets arrive from Möbius's checksum-verified device
+// cache; the worker never fetches those.
 
-const ASSET_BYTES = Object.freeze({
-  // Keep the original runtime entries in the package handshake so existing
-  // 154 MB XN downloads remain valid. The reader uses the app-bundled,
-  // baseline-SIMD runtime below; these two small cached values are ignored.
-  'runtime-module': 12_706,
-  'runtime-wasm': 952_895,
-  tokenizer: 59_339,
-  model: 146_499_264,
-  voice: 6_148_328,
-})
+const REQUIRED_ASSETS = Object.freeze(['tokenizer', 'model', 'voice'])
+const MAX_ASSET_BYTES = 256 * 1024 * 1024
+// Resolved against this script's own URL when it is served normally. A consumer
+// running the engine inside an opaque-origin app frame must build the worker
+// from a Blob (a sandboxed document cannot construct a Worker from a URL), and
+// a blob: script has no useful base to resolve against — so such a caller sends
+// the absolute binary URL in `load-start` instead.
+const XN_WASM_URL = './pocket-tts-xn.wasm'
+let xnWasmUrl = null
 
 const chunksByAsset = new Map()
 const completedAssets = new Map()
-let runtimeModuleUrl = ''
 let model = null
 let tokenizer = null
 let voiceIndex = 0
 let sampleRate = 24_000
 const generation = new SpeechGenerationOwnership()
-let embeddedRuntime = null
+let modelAllocation = null
+let expectedAssetBytes = null
+let generationTemperature = 0.3
+let clonedVoiceSamples = null
 
-function decodeEmbeddedWasm(parts, expectedBytes) {
-  const bytes = new Uint8Array(expectedBytes)
-  let offset = 0
-  for (const part of parts) {
-    const decoded = globalThis.atob(part)
-    for (let index = 0; index < decoded.length; index += 1) {
-      bytes[offset + index] = decoded.charCodeAt(index)
+function reviewedAssetBytes(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || ![2, 3].includes(Object.keys(value).length)) {
+    throw new Error('The speech model manifest is invalid.')
+  }
+  const result = {}
+  const required = Object.hasOwn(value, 'voice') ? REQUIRED_ASSETS : REQUIRED_ASSETS.slice(0, 2)
+  if (Object.keys(value).some((id) => !required.includes(id))) {
+    throw new Error('The speech model manifest is invalid.')
+  }
+  for (const id of required) {
+    const bytes = value[id]
+    if (!Number.isSafeInteger(bytes) || bytes < 1 || bytes > MAX_ASSET_BYTES) {
+      throw new Error('The speech model manifest is invalid.')
     }
-    offset += decoded.length
+    result[id] = bytes
   }
-  if (offset !== expectedBytes) {
-    throw new Error('The built-in speech reader is incomplete.')
-  }
-  return bytes
+  return Object.freeze(result)
 }
 
 function post(type, value = {}, transfer = []) {
@@ -49,14 +61,16 @@ function errorValue(error) {
 }
 
 function acceptChunk(message) {
-  const expected = ASSET_BYTES[message.assetId]
+  const expected = expectedAssetBytes?.[message.assetId]
   if (!expected || !(message.bytes instanceof ArrayBuffer)) {
     throw new Error('The speech cache returned an invalid chunk.')
   }
   const offset = Number(message.offset)
-  const state = chunksByAsset.get(message.assetId) || {
-    bytes: new Uint8Array(expected),
-    received: 0,
+  const state = chunksByAsset.get(message.assetId) || (message.assetId === 'model'
+    ? { bytes: modelAllocation?.bytes, received: 0, allocation: modelAllocation }
+    : { bytes: new Uint8Array(expected), received: 0 })
+  if (!(state.bytes instanceof Uint8Array) || state.bytes.byteLength !== expected) {
+    throw new Error(`The ${message.assetId} speech asset could not be allocated.`)
   }
   const bytes = new Uint8Array(message.bytes)
   if (!Number.isSafeInteger(offset) || offset !== state.received) {
@@ -71,7 +85,7 @@ function acceptChunk(message) {
   state.received += bytes.byteLength
   if (state.received === expected) {
     chunksByAsset.delete(message.assetId)
-    completedAssets.set(message.assetId, state.bytes)
+    completedAssets.set(message.assetId, state.allocation || state.bytes)
   } else chunksByAsset.set(message.assetId, state)
 }
 
@@ -172,28 +186,41 @@ class UnigramTokenizer {
   }
 }
 
+async function prepareRuntime() {
+  try {
+    // Idempotent: wasm-bindgen's init returns the existing instance once bound.
+    await initXnRuntime(xnWasmUrl || new URL(XN_WASM_URL, globalThis.location.href))
+  } catch (error) {
+    // A CSP that forbids WebAssembly and a browser lacking the SIMD
+    // instructions Pocket TTS needs both surface as a CompileError. Naming
+    // either as the cause would be a guess, so keep the browser's own reason.
+    const detail = error?.message || String(error)
+    throw new Error(/content security policy/i.test(detail)
+      ? 'This page\'s security policy does not allow WebAssembly, so the speech engine cannot start.'
+      : `The speech engine could not start: ${detail}`)
+  }
+  modelAllocation = allocateModelWeights(expectedAssetBytes.model)
+}
+
 async function finishLoad() {
-  if (chunksByAsset.size || Object.keys(ASSET_BYTES).some((id) => !completedAssets.has(id))) {
+  const required = clonedVoiceSamples ? REQUIRED_ASSETS.slice(0, 2) : REQUIRED_ASSETS
+  if (chunksByAsset.size || required.some((id) => !completedAssets.has(id))) {
     throw new Error('The saved speech model is incomplete.')
   }
-  if (!embeddedRuntime) throw new Error('The built-in speech reader is missing.')
   post('load-progress', { stage: 'preparing' })
-  runtimeModuleUrl = URL.createObjectURL(new Blob([embeddedRuntime.moduleSource], { type: 'text/javascript' }))
-  const runtime = await import(runtimeModuleUrl)
-  const wasmBytes = decodeEmbeddedWasm(embeddedRuntime.wasmBase64Parts, embeddedRuntime.wasmBytes)
-  embeddedRuntime = null
-  if (!WebAssembly.validate(wasmBytes)) {
-    throw new Error('This browser needs WebAssembly SIMD to use listening.')
-  }
-  const wasmModule = await WebAssembly.compile(wasmBytes)
-  await runtime.default(wasmModule)
   tokenizer = new UnigramTokenizer(decodeSentencepieceModel(completedAssets.get('tokenizer')))
-  model = new runtime.Model(completedAssets.get('model'), 'q8')
-  voiceIndex = model.add_voice(completedAssets.get('voice'))
+  model = modelFromAllocatedWeights(
+    completedAssets.get('model'),
+    'q8',
+    Boolean(clonedVoiceSamples),
+  )
+  modelAllocation = null
+  voiceIndex = clonedVoiceSamples
+    ? model.clone_voice(clonedVoiceSamples)
+    : model.add_voice(completedAssets.get('voice'))
+  clonedVoiceSamples = null
   sampleRate = model.sample_rate()
   completedAssets.clear()
-  URL.revokeObjectURL(runtimeModuleUrl)
-  runtimeModuleUrl = ''
   post('load-complete', { backend: 'wasm-xn-q8-worker', sampleRate })
 }
 
@@ -203,11 +230,22 @@ async function generate(text, requestId) {
   let steps = 0
   try {
     const [processedText, framesAfterEos] = model.prepare_text(text)
-    model.start_generation(voiceIndex, tokenizer.encode(processedText), framesAfterEos, 0.7)
+    const tokens = tokenizer.encode(processedText)
+    model.start_generation(voiceIndex, tokens, framesAfterEos, generationTemperature)
+    // Reference guardrail (pocket_tts tts_model.py): a generation should last at
+    // most (tokens / 3 + 2) seconds of audio. Past that the decoder is no longer
+    // tracking the text — it has failed to emit EOS and is sustaining a resonant
+    // tail. Stop there instead of letting it ramble. tokens/sec estimate = 3,
+    // padding = 2 s. Expressed in samples so it is frame-rate independent.
+    const tokenCount = tokens.length || 1
+    const maxSamples = Math.ceil((tokenCount / 3 + 2) * sampleRate)
+    let emittedSamples = 0
     while (generation.owns(requestId)) {
       const chunk = model.generation_step()
       if (!chunk) break
+      emittedSamples += chunk.length
       post('audio', { requestId, samples: chunk }, [chunk.buffer])
+      if (emittedSamples >= maxSamples) break
       steps += 1
       // Yield between small groups of model frames so cancellation and worker
       // control messages are observed without involving the page thread.
@@ -233,25 +271,21 @@ globalThis.onmessage = ({ data: message }) => {
   if (message.type === 'dispose') {
     generation.cancel()
     try { model?.free?.() } catch {}
-    if (runtimeModuleUrl) URL.revokeObjectURL(runtimeModuleUrl)
+    try { freeAllocatedModelWeights(modelAllocation) } catch {}
     globalThis.close()
     return
   }
   Promise.resolve().then(async () => {
     if (message.type === 'load-start') {
-      const parts = message.runtimeWasmBase64Parts
-      if (typeof message.runtimeModuleSource !== 'string'
-        || !Array.isArray(parts)
-        || parts.length !== 2
-        || parts.some((part) => typeof part !== 'string')
-        || !Number.isSafeInteger(message.runtimeWasmBytes)) {
-        throw new Error('The built-in speech reader is missing.')
-      }
-      embeddedRuntime = {
-        moduleSource: message.runtimeModuleSource,
-        wasmBase64Parts: parts,
-        wasmBytes: message.runtimeWasmBytes,
-      }
+      xnWasmUrl = typeof message.wasmUrl === 'string' && message.wasmUrl ? message.wasmUrl : null
+      generationTemperature = Number.isFinite(message.temperature)
+        ? Math.max(0.05, Math.min(1.5, message.temperature))
+        : 0.3
+      expectedAssetBytes = reviewedAssetBytes(message.assetBytes)
+      clonedVoiceSamples = message.clonedVoiceSamples instanceof Float32Array
+        ? message.clonedVoiceSamples
+        : null
+      await prepareRuntime()
       post('load-ready')
     }
     else if (message.type === 'asset-chunk') {

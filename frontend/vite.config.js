@@ -6,6 +6,11 @@ import { webcrypto, createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { dirname, resolve as pathResolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {
+  buildStamp, stampDocumentRevisions, UNPRECACHED_WORKERS,
+} from './scripts/precache-policy.mjs'
+
+const DOCUMENT_STAMP = buildStamp()
 
 if (!globalThis.crypto) {
   globalThis.crypto = webcrypto
@@ -103,12 +108,14 @@ export default defineConfig({
         // rewritten to the active --bg, so precaching it would freeze gesture/
         // system-UI color hints to whatever theme existed at build time.
         globPatterns: ['**/*.{js,css,html,svg,png,ico,webmanifest}'],
-        // `sw-push.js` is itself a service worker (see public/sw-push.js).
-        // Precaching a worker script would let the shell SW serve a cached
-        // copy back to the browser's update check, freezing push behaviour at
-        // whatever shipped first.
+        // Worker scripts are never precached, and documents revalidate every
+        // build. scripts/precache-policy.mjs owns both rules and why.
         globIgnores: [
-          'vendor/**', 'app-frame.html', 'manifest.webmanifest', 'sw-push.js',
+          'vendor/**', 'app-frame.html', 'manifest.webmanifest',
+          ...UNPRECACHED_WORKERS,
+        ],
+        manifestTransforms: [
+          (entries) => ({ manifest: stampDocumentRevisions(entries, DOCUMENT_STAMP) }),
         ],
         // ROOT FIX for stale installed PWAs: give EVERY precache
         // entry a real content-hash revision.

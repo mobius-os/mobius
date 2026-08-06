@@ -97,6 +97,13 @@ function PaneChatView({
     acknowledgeAppPreview?.(app, final)
   }, [navTo, paneId, acknowledgeAppPreview])
 
+  // Auto-dismiss (the settled CTA timing out) is the same durable "final"
+  // acknowledgement opening performs, minus the navigation — the button retires
+  // without stealing the pane the partner is actually using.
+  const handleDismissApp = useCallback((app) => {
+    acknowledgeAppPreview?.(app, true)
+  }, [acknowledgeAppPreview])
+
   const handleChatMissing = useCallback((missingId) => {
     onChatMissing?.(missingId, chatId)
   }, [chatId, onChatMissing])
@@ -134,6 +141,7 @@ function PaneChatView({
         onChatMissing={handleChatMissing}
         builtApps={builtApps}
         onOpenApp={handleOpenApp}
+        onDismissApp={handleDismissApp}
         onInternalNav={onInternalNav}
         onMessageStart={handleMessageStart}
         onOwnerActivity={handleOwnerActivity}
