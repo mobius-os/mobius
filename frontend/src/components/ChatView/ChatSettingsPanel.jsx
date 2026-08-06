@@ -90,6 +90,7 @@ import {
   resolveProviderAvailability,
   visibleProviderModels,
 } from '../../lib/providerAvailability.js'
+import { detailToMessage } from '../../lib/errorDetail.js'
 import './ChatSettingsPanel.css'
 
 /** Claude product mark — four-petal flower / starburst silhouette,
@@ -396,8 +397,11 @@ export default function ChatSettingsPanel({
         })),
       })
       if (!res.ok) {
+        // A validation failure (incompatible target model/effort) returns a
+        // Pydantic `detail` ARRAY; normalize it to a string so it can never
+        // reach `<p>{error}</p>` and crash the shell with React error #31.
         let detail = ''
-        try { detail = (await res.json()).detail || '' } catch {}
+        try { detail = detailToMessage((await res.json())?.detail) } catch {}
         failProviderSwitch(
           chatId,
           request,
