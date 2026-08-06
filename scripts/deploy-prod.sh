@@ -348,6 +348,24 @@ resolve_prod_service_gateway_origin() {
   export MOBIUS_SERVICE_GATEWAY_ORIGIN
 }
 
+resolve_prod_image_override() {
+  [ "$TARGET" = "prod" ] || return 0
+  [ -n "${MOBIUS_IMAGE:-}" ] && return 0
+
+  local canonical_env="" file candidate
+  canonical_env=$(canonical_env_path || true)
+  for file in "$REPO_ROOT/.env" "$canonical_env"; do
+    [ -n "$file" ] || continue
+    candidate=$(env_value_from_file "$file" MOBIUS_IMAGE || true)
+    if [ -n "$candidate" ]; then
+      MOBIUS_IMAGE="$candidate"
+      export MOBIUS_IMAGE
+      info "loaded deploy image from $file"
+      return 0
+    fi
+  done
+}
+
 resolve_platform_release_ref() {
   local value="${MOBIUS_PLATFORM_RELEASE_REF:-}" source="environment"
   local file candidate canonical_env=""
@@ -375,6 +393,7 @@ resolve_platform_release_ref() {
 # ── end prod environment resolution ──────────────────────────────
 
 ensure_prod_env
+resolve_prod_image_override
 resolve_prod_service_gateway_origin
 resolve_platform_release_ref
 
@@ -944,12 +963,29 @@ PREV_IMAGE=$(docker inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || echo "")
 RUNNING_IMAGE_REF=$(
   docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null || echo ""
 )
-# Keep this identical to docker-compose.yml's image expression, then export it
-# so Compose cannot implicitly load a different .env value after the preflight
-# and rollback target has been chosen.
-IMAGE_TAG=${MOBIUS_IMAGE:-mobius}
+# Ask Compose once instead of duplicating the prod and test defaults here. This
+# also honors an image configured in .env before we freeze the result for the
+# preflight, cutover, and rollback paths.
+if ! IMAGE_TAG=$(docker compose "${COMPOSE_ARGS[@]}" config --images app); then
+  fail "could not resolve the app image from the rendered Compose configuration"
+  exit 1
+fi
+if [ -z "$IMAGE_TAG" ] || [[ "$IMAGE_TAG" == *$'\n'* ]]; then
+  fail "Compose resolved an invalid app image: ${IMAGE_TAG:-<empty>}"
+  exit 1
+fi
 export MOBIUS_IMAGE="$IMAGE_TAG"
 info "deploy image: ${IMAGE_TAG}; rollback source: ${PREV_IMAGE:0:19}… (running ref: ${RUNNING_IMAGE_REF:-<unknown>})"
+
+# --skip-build means reuse what is serving now. Refuse to repoint Compose at a
+# stale same-named tag when the live container was created under an older tag.
+if [ "$SKIP_BUILD" = "1" ]; then
+  TARGET_IMAGE=$(docker image inspect -f '{{.Id}}' "$IMAGE_TAG" 2>/dev/null || true)
+  if [ -z "$PREV_IMAGE" ] || [ "$TARGET_IMAGE" != "$PREV_IMAGE" ]; then
+    fail "--skip-build target ${IMAGE_TAG} is not the image serving in ${CONTAINER}; run the normal build"
+    exit 1
+  fi
+fi
 # ── end deploy image identity
 ROLLBACK_TAG=""
 PREVIOUS_ROLLBACK_IMAGE=""

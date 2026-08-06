@@ -33,11 +33,14 @@ def test_mismatched_running_reference_migrates_to_compose_image():
       case "$*" in
         *"{{.Image}}"*) printf 'sha256:old-image\\n' ;;
         *"{{.Config.Image}}"*) printf 'mobius:selfhost-old-sha\\n' ;;
+        *"config --images app"*) printf 'mobius:prod\\n' ;;
         *) return 99 ;;
       esac
     }
     CONTAINER=mobius
+    COMPOSE_ARGS=(-p mobius)
     MOBIUS_IMAGE=mobius:prod
+    SKIP_BUILD=0
   """)
   assertions = textwrap.dedent("""\
     compose_value=$(sh -c 'printf %s "$MOBIUS_IMAGE"')
@@ -59,7 +62,7 @@ def test_mismatched_running_reference_migrates_to_compose_image():
   )
 
 
-def test_compose_image_default_is_stable():
+def test_compose_image_comes_from_rendered_prod_config():
   setup = textwrap.dedent("""\
     unset MOBIUS_IMAGE
     info() { :; }
@@ -67,9 +70,12 @@ def test_compose_image_default_is_stable():
       case "$*" in
         *"{{.Image}}"*) printf 'sha256:old-image\\n' ;;
         *"{{.Config.Image}}"*) printf 'mobius:selfhost-old-sha\\n' ;;
+        *"config --images app"*) printf 'mobius\\n' ;;
       esac
     }
     CONTAINER=mobius
+    COMPOSE_ARGS=(-p mobius)
+    SKIP_BUILD=0
   """)
   harness = setup + _identity_block() + "printf '%s\\n' \"$IMAGE_TAG\"\n"
   result = subprocess.run(
@@ -78,6 +84,87 @@ def test_compose_image_default_is_stable():
 
   assert result.returncode == 0, result.stderr
   assert result.stdout == "mobius\n"
+
+
+def test_test_target_uses_its_rendered_image_not_the_prod_default(tmp_path):
+  docker_log = tmp_path / "docker.log"
+  setup = textwrap.dedent(f"""\
+    unset MOBIUS_IMAGE
+    info() {{ :; }}
+    docker() {{
+      printf '%s\\n' "$*" >> {str(docker_log)!r}
+      case "$*" in
+        *"{{{{.Image}}}}"*) printf 'sha256:test-image\\n' ;;
+        *"{{{{.Config.Image}}}}"*) printf 'mobius-test:ci\\n' ;;
+        *"config --images app"*) printf 'mobius-test:ci\\n' ;;
+      esac
+    }}
+    CONTAINER=mobius-test
+    COMPOSE_ARGS=(-p mobius-test -f docker-compose.test.yml)
+    SKIP_BUILD=0
+  """)
+  harness = setup + _identity_block() + "printf '%s\\n' \"$IMAGE_TAG\"\n"
+
+  result = subprocess.run(
+    ["bash", "-c", harness], capture_output=True, text=True,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert result.stdout == "mobius-test:ci\n"
+  assert "compose -p mobius-test -f docker-compose.test.yml config --images app" in (
+    docker_log.read_text(encoding="utf-8").splitlines()
+  )
+
+
+def test_skip_build_refuses_a_stale_compose_tag():
+  setup = textwrap.dedent("""\
+    info() { :; }
+    fail() { printf '%s\\n' "$1" >&2; }
+    docker() {
+      case "$*" in
+        *"{{.Image}}"*) printf 'sha256:serving\\n' ;;
+        *"{{.Config.Image}}"*) printf 'mobius:selfhost-old-sha\\n' ;;
+        *"config --images app"*) printf 'mobius\\n' ;;
+        *"image inspect"*) printf 'sha256:stale\\n' ;;
+      esac
+    }
+    CONTAINER=mobius
+    COMPOSE_ARGS=(-p mobius)
+    SKIP_BUILD=1
+  """)
+
+  result = subprocess.run(
+    ["bash", "-c", setup + _identity_block()],
+    capture_output=True,
+    text=True,
+  )
+
+  assert result.returncode == 1
+  assert "--skip-build target mobius is not the image serving" in result.stderr
+
+
+def test_prod_image_override_loads_from_worktree_env(tmp_path):
+  (tmp_path / ".env").write_text("MOBIUS_IMAGE=mobius:from-env\n", encoding="utf-8")
+  env_reader = _function_source("env_value_from_file", "ensure_prod_env()")
+  resolver = _function_source(
+    "resolve_prod_image_override", "resolve_platform_release_ref()",
+  )
+  harness = env_reader + resolver + textwrap.dedent(f"""\
+    unset MOBIUS_IMAGE
+    TARGET=prod
+    REPO_ROOT={str(tmp_path)!r}
+    canonical_env_path() {{ return 1; }}
+    info() {{ :; }}
+    resolve_prod_image_override
+    printf '%s\\n' "$MOBIUS_IMAGE"
+  """)
+
+  result = subprocess.run(
+    ["bash", "-c", harness], capture_output=True, text=True,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert result.stdout == "mobius:from-env\n"
 
 
 def test_scratch_preflight_runs_the_compose_image_not_the_old_reference():
