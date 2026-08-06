@@ -7,6 +7,9 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_DIR=$(dirname "$SCRIPT_DIR")
+# Pin the installation identity just like deploy-prod.sh. A linked worktree's
+# directory name must never select a fresh project/volume or miss the live app.
+COMPOSE_PROJECT=${MOBIUS_COMPOSE_PROJECT:-mobius}
 STATE_FILE=${MOBIUS_RECOVERY_STATE_FILE:-"$PROJECT_DIR/.mobius-recovery.env"}
 RECOVERY_TARGET_MIN_TTL_SECONDS=300
 RECOVERY_TARGET_MAX_TTL_SECONDS=86400
@@ -73,9 +76,9 @@ normal_compose() {
   (
     cd "$PROJECT_DIR"
     if [ -f .env ]; then
-      docker compose --env-file .env "$@"
+      docker compose -p "$COMPOSE_PROJECT" --env-file .env "$@"
     else
-      docker compose "$@"
+      docker compose -p "$COMPOSE_PROJECT" "$@"
     fi
   )
 }
@@ -85,15 +88,17 @@ compose() {
     cd "$PROJECT_DIR"
     if [ -f .env ]; then
       if [ -f "$STATE_FILE" ]; then
-        docker compose --profile recovery \
+        docker compose -p "$COMPOSE_PROJECT" --profile recovery \
           --env-file .env --env-file "$STATE_FILE" "$@"
       else
-        docker compose --profile recovery --env-file .env "$@"
+        docker compose -p "$COMPOSE_PROJECT" --profile recovery \
+          --env-file .env "$@"
       fi
     elif [ -f "$STATE_FILE" ]; then
-      docker compose --profile recovery --env-file "$STATE_FILE" "$@"
+      docker compose -p "$COMPOSE_PROJECT" --profile recovery \
+        --env-file "$STATE_FILE" "$@"
     else
-      docker compose --profile recovery "$@"
+      docker compose -p "$COMPOSE_PROJECT" --profile recovery "$@"
     fi
   )
 }

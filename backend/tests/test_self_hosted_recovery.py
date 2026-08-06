@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -111,6 +112,49 @@ def test_mobiusctl_is_recovery_only(tmp_path):
   )
   assert result.returncode == 64
   assert "Usage: scripts/mobiusctl recovery" in result.stderr
+
+
+def test_linked_worktree_lifecycle_targets_the_live_compose_project(tmp_path):
+  linked = tmp_path / "some-linked-worktree"
+  scripts = linked / "scripts"
+  scripts.mkdir(parents=True)
+  copied = scripts / "mobiusctl"
+  shutil.copy2(ROOT / "scripts" / "mobiusctl", copied)
+  state = tmp_path / "recovery.env"
+  _write_recovery_state(state)
+  fake_env, log = _fake_docker(tmp_path)
+
+  result = subprocess.run(
+    [str(copied), "recovery", "finish"],
+    cwd=linked,
+    env={
+      **os.environ,
+      **fake_env,
+      "MOBIUS_RECOVERY_STATE_FILE": str(state),
+      "MOBIUS_RECOVERY_LOCK_DIR": str(tmp_path),
+    },
+    text=True,
+    capture_output=True,
+    timeout=10,
+  )
+
+  assert result.returncode == 0, result.stderr
+  commands = log.read_text().splitlines()
+  assert commands[:3] == [
+    "compose -p mobius --profile recovery "
+    f"--env-file {state} stop recovery recovery-target",
+    "compose -p mobius --profile recovery "
+    f"--env-file {state} rm -f recovery recovery-target",
+    "compose -p mobius --profile recovery "
+    f"--env-file {state} ps -aq recovery recovery-target",
+  ]
+  assert "compose -p mobius up -d --force-recreate app" in commands
+  assert "compose -p mobius ps -q app" in commands
+  assert all("some-linked-worktree" not in command for command in commands)
+  # The pinned project and the compose volume key resolve to the live volume,
+  # independent of the linked worktree's basename.
+  target_volume = _compose()["services"]["recovery-target"]["volumes"][0]
+  assert f"mobius_{target_volume.split(':')[0]}" == "mobius_app_data"
 
 
 def test_app_sudo_is_full_root_by_default_with_operator_kill_switch():
