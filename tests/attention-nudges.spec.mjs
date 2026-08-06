@@ -104,6 +104,9 @@ for (const scenario of SCENARIOS) {
           // stream active so the mocked build_phase event below is actually
           // consumed before we assert its layout beside the nudge.
           running: true,
+          pending_question_id: scenario.tailBlock.type === 'question'
+            ? scenario.tailBlock.question_id
+            : null,
           pending_messages: [],
         }),
       })
