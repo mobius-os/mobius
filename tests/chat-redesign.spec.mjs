@@ -79,6 +79,7 @@ async function newChat(page) {
   )
   if (!hasEmpty) await page.goto(BASE)
   await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
+  return page.evaluate(() => localStorage.getItem('moebius_active_chat'))
 }
 
 
@@ -132,7 +133,24 @@ test.describe('Bug 1: AskUserQuestion', () => {
       'data: {"type":"done"}\n\n',
     ].join('')
     await setupWithStreamMock(page, streamBody)
-    await newChat(page)
+    const chatId = await newChat(page)
+    expect(chatId).toBeTruthy()
+    // QuestionCommit publishes this marker with the question. Keep the mocked
+    // runtime endpoint on the same protocol so its poll cannot erase the SSE
+    // question with the real empty chat row.
+    await page.route(new RegExp(`/api/chats/${chatId}/runtime$`), route => {
+      if (route.request().method() !== 'GET') return route.continue()
+      return route.fulfill({
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          running: true,
+          active_goal_objective: null,
+          pending_messages: [],
+          pending_question_id: 'q-pick-one',
+        }),
+      })
+    })
     await sendMessage(page, 'Ask me a question')
 
     await expect(page.locator('[data-chat-surface="painted"] .qcard')).toBeVisible({ timeout: 5000 })
