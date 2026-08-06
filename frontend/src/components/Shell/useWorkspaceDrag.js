@@ -4,7 +4,7 @@ import {
   buildScene, hitTest, zoneTarget, releaseZone, chipOffset, STRIP_CARET_PAD,
   passedSlop, touchTabMoveIntent, drawerRowMoveIntent, releasedInPlace,
   flingReleaseVelocity,
-  TAB_HOLD_MS, DRAWER_DRAG_HOLD_MS, DRAWER_MENU_HOLD_MS,
+  PRESS_DRAG_HOLD_MS, PRESS_MENU_HOLD_MS,
   crossedDrawerExit,
   rootEdgeAllowed,
 } from './dragController.js'
@@ -406,36 +406,44 @@ export default function useWorkspaceDrag({
         }
       }
 
-      // Tabs and drawer rows share this ONE pointer owner. A tab hold resolves
-      // intent without lifting immediately: movement then drags it, while a
-      // stationary release opens its actions. Drawer rows become draggable after the brief first
-      // stage; if the pointer stays still through the second stage, actions open
-      // immediately. Movement clears the same timer before handing off to reorder,
-      // workspace drag, or scrolling, so no competing gesture lifecycle exists.
+      // Tabs and drawer rows share this ONE pointer owner AND one two-stage
+      // press-and-hold. After the first stage the row/tab becomes draggable, so
+      // movement picks it up (reorder, workspace drag, or a strip drag); if the
+      // pointer instead stays still through the second stage, that item's actions
+      // open immediately, while still held. Movement clears the same timer before
+      // handing off to a drag or to scrolling, so no competing gesture lifecycle
+      // exists — a short hold moves and a long hold opens actions everywhere.
       if (isTouch) {
         holdTimer = setTimeout(() => {
           if (cancelled || cleaned) return
           held = true
           if (navigator.vibrate) { try { navigator.vibrate(8) } catch { /* unsupported */ } }
-          if (sourceKind !== 'drawer') {
-            return
-          }
           holdTimer = setTimeout(() => {
             if (cancelled || cleaned || armed || scrolling) return
-            const handler = drawerGesture()
-            if (!handler?.openMenu) {
-              cleanup()
-              return
-            }
             const point = { ...lastPoint }
             // Keep this pointer session alive until the contact actually ends.
             // Restoring body selection here leaves a small window in which the
             // platform long-press can select whichever menu item appeared under
             // the still-held finger (notably Android's text-selection handles).
-            menuOpened = true
-            handler.openMenu(point)
-          }, DRAWER_MENU_HOLD_MS - DRAWER_DRAG_HOLD_MS)
-        }, sourceKind === 'drawer' ? DRAWER_DRAG_HOLD_MS : TAB_HOLD_MS)
+            if (sourceKind === 'drawer') {
+              const handler = drawerGesture()
+              if (!handler?.openMenu) {
+                cleanup()
+                return
+              }
+              menuOpened = true
+              handler.openMenu(point)
+            } else {
+              const openTabMenu = openTabMenuAtRef?.current
+              if (!openTabMenu) {
+                cleanup()
+                return
+              }
+              menuOpened = true
+              openTabMenu(point.x, point.y, tabFromKey(key), paneId)
+            }
+          }, PRESS_MENU_HOLD_MS - PRESS_DRAG_HOLD_MS)
+        }, PRESS_DRAG_HOLD_MS)
       }
 
       function stopAutoScroll() {
@@ -690,18 +698,6 @@ export default function useWorkspaceDrag({
               startFling(scrollEl, flingReleaseVelocity(scrollSamples, performance.now()))
             }
             cleanup({ suppressClick: true })
-          } else if (isTouch && held && sourceKind === 'tab') {
-            const dx = ev.clientX - start.x
-            const dy = ev.clientY - start.y
-            if (releasedInPlace(dx, dy)) {
-              openTabMenuAtRef?.current?.(
-                ev.clientX,
-                ev.clientY,
-                tabFromKey(key),
-                paneId,
-              )
-            }
-            cleanup({ suppressClick: true })
           } else cleanup()
           return
         }
@@ -718,16 +714,8 @@ export default function useWorkspaceDrag({
         const backOverDrawer = sourceKind === 'drawer' && drawerEdgeX != null
           && ev.clientX <= drawerEdgeX && !(isTouch && glided)
         if (isTouch && releasedInPlace(dx, dy)) {
-          // Pointer jitter can lift a held tab without becoming an intentional
-          // move. Keep the stationary-hold contract in that narrow case too.
-          if (sourceKind === 'tab') {
-            openTabMenuAtRef?.current?.(
-              ev.clientX,
-              ev.clientY,
-              tabFromKey(key),
-              paneId,
-            )
-          }
+          // An armed drag lifted essentially in place is a cancel, not a drop —
+          // and never a menu: actions open from the hold timer while still held.
           cleanup({ suppressClick: true })
         } else if (backOverDrawer) {
           // Released back over the drawer = cancel; cleanup reopens it if glided.

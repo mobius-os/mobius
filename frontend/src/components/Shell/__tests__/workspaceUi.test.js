@@ -685,9 +685,12 @@ test('one held drawer-row gesture resolves menu, reorder, or workspace drag', ()
     /sourceKind === 'drawer' && e\.pointerType !== 'mouse'\) return/,
     'touch drawer rows must remain available to the workspace drag controller',
   )
-  assert.match(dragBinding, /sourceKind === 'drawer' \? DRAWER_DRAG_HOLD_MS : TAB_HOLD_MS/)
-  assert.match(dragBinding, /DRAWER_MENU_HOLD_MS - DRAWER_DRAG_HOLD_MS/,
-    'one sequential timer owns both drawer hold stages')
+  assert.match(dragBinding, /\}, PRESS_DRAG_HOLD_MS\)/,
+    'tabs and drawer rows share one first hold stage — no divergent tab timing')
+  assert.doesNotMatch(dragBinding, /TAB_HOLD_MS/,
+    'the separate longer tab hold is gone; a short hold moves a tab too')
+  assert.match(dragBinding, /PRESS_MENU_HOLD_MS - PRESS_DRAG_HOLD_MS/,
+    'one sequential timer owns both hold stages for drawer rows and tabs')
   assert.match(dragBinding, /drawerRowMoveIntent\(dx, dy, \{[\s\S]*?held,[\s\S]*?isTouch,[\s\S]*?data-pinned-key/,
     'one pure decision boundary owns the held row directions')
   assert.match(dragBinding, /intent === 'reorder'[\s\S]*?beginReorder/,
@@ -713,8 +716,10 @@ test('one held drawer-row gesture resolves menu, reorder, or workspace drag', ()
     'releasing a shorter stationary hold remains a normal tap')
   assert.match(drawerPointerUp, /if \(menuOpened\)[\s\S]*?cleanup\(\{ suppressClick: true \}\)/,
     'the menu-opening gesture restores selection only when its pointer ends')
-  assert.match(dragBinding, /held && sourceKind === 'tab'[\s\S]*?openTabMenuAtRef\?\.current\?\./,
-    'a stationary tab hold opens the same actions on touch')
+  assert.match(dragBinding, /const openTabMenu = openTabMenuAtRef\?\.current[\s\S]*?openTabMenu\(point\.x, point\.y, tabFromKey\(key\), paneId\)/,
+    'a stationary tab hold opens actions from the shared hold timer, while still held')
+  assert.doesNotMatch(drawerPointerUp, /openTabMenuAtRef/,
+    'releasing a tab hold no longer opens actions — the hold timer does, like the drawer')
   assert.doesNotMatch(dragBinding, /addEventListener\('touchmove'/)
   assert.match(shell, /const drawerRowGesturesRef = useRef\(new Map\(\)\)/)
   assert.match(drawer, /const registry = drawerRowGesturesRef\.current[\s\S]*?registry\.set\(key, drawerGestureHandlerRef\)/)
@@ -1006,14 +1011,15 @@ test('launcher cards and drawer rows share the stationary menu threshold', () =>
   const dragImports = drawer.match(
     /import \{([\s\S]*?)\} from '\.\.\/Shell\/dragController\.js'/,
   )?.[1] || ''
-  assert.match(dragImports, /DRAWER_MENU_HOLD_MS/)
+  assert.match(dragImports, /PRESS_MENU_HOLD_MS/)
   assert.match(dragImports, /PRE_HOLD_MOVE_PX/)
-  assert.match(drawer, /\}, DRAWER_MENU_HOLD_MS\)/)
+  assert.match(drawer, /\}, PRESS_MENU_HOLD_MS\)/)
   assert.match(drawer, /> PRE_HOLD_MOVE_PX/)
-  assert.match(dragBinding, /sourceKind === 'drawer' \? DRAWER_DRAG_HOLD_MS : TAB_HOLD_MS/)
+  assert.match(dragBinding, /\}, PRESS_DRAG_HOLD_MS\)/,
+    'the drag stage timing is shared across drawer rows and tabs')
   assert.doesNotMatch(
     drawer.match(/function beginPinnedReorder\([\s\S]*?\n  function onRowPointerDown/)?.[0] || '',
-    /DRAWER_(?:DRAG|MENU)_HOLD_MS/,
+    /PRESS_(?:DRAG|MENU)_HOLD_MS/,
     'the shared controller, not the reorder implementation, owns hold timing',
   )
   assert.doesNotMatch(drawer, /520/)
