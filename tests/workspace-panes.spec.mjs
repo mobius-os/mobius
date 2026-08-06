@@ -1110,7 +1110,10 @@ test.describe('Workspace drag (PR3)', () => {
     const target = await page.locator(`[data-tab-key="chat:${b.id}"]`).boundingBox()
     const src = page.locator(`[data-pane-strip="p0"] .shell__tab-open[data-drag-key="chat:${c.id}"]`)
     await touchDrag(page, src, target.x + target.width / 2, target.y + target.height / 2, {
-      holdMs: 450,
+      // Move after the shared 180ms drag stage but before the 400ms stationary
+      // menu stage. Waiting through the menu threshold correctly opens actions
+      // and therefore must not be used to model this short-hold drag.
+      holdMs: 250,
     })
     await expect.poll(
       async () => whichPaneHas(await readWs(page), `chat:${c.id}`),
@@ -1129,7 +1132,7 @@ test.describe('Workspace drag (PR3)', () => {
     )
     await expect(page.locator('.shell__tab-drag-handle')).toHaveCount(0)
     await touchDrag(page, src, target.x + 2, target.y + target.height / 2, {
-      firstDx: -12, firstDy: 0, holdMs: 450,
+      firstDx: -12, firstDy: 0, holdMs: 250,
     })
     await expect.poll(async () => (await readWs(page)).panes.p0.tabs
       .map(t => `${t.kind}:${t.id}`), {
