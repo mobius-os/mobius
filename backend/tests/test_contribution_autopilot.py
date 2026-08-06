@@ -366,6 +366,60 @@ def test_followup_chat_hidden_on_close_out(db):
   assert _visible_in_owner_drawer(_chat()) is False
 
 
+@pytest.mark.asyncio
+async def test_round_turn_does_not_bypass_pending_owner_question(
+  db, monkeypatch,
+):
+  """An escalated Autopilot chat stays parked until its owner answers."""
+  from app import chat as chat_mod
+
+  question = {
+    "role": "assistant",
+    "content": "Choose a direction.",
+    "blocks": [{
+      "type": "question",
+      "question_id": "owner-decision",
+      "questions": [{
+        "id": "owner-decision", "question": "Which direction?",
+      }],
+    }],
+  }
+  chat = models.Chat(
+    id="autopilot-question-blocked",
+    title="Autopilot follow-up",
+    messages=[question],
+    pending_messages=[],
+    provider="claude",
+    pending_question_id="owner-decision",
+  )
+  db.add(chat)
+  db.commit()
+  monkeypatch.setattr(chat_mod, "is_chat_running", lambda _chat_id: False)
+  starts = []
+
+  async def blocked_start(**kwargs):
+    starts.append(kwargs)
+    return False
+
+  monkeypatch.setattr(autopilot, "start_programmatic_chat_turn", blocked_start)
+
+  started = await autopilot.spawn_round_turn(
+    db,
+    chat.id,
+    title="Autopilot follow-up",
+    content="Continue automatically",
+    provider="claude",
+  )
+
+  assert started is False
+  assert [start["chat_id"] for start in starts] == [chat.id]
+  db.expire_all()
+  parked = db.get(models.Chat, chat.id)
+  assert parked.messages == [question]
+  assert parked.pending_question_id == "owner-decision"
+  assert db.query(models.ChatRun).filter_by(chat_id=chat.id).count() == 0
+
+
 def test_failed_surfacing_leaves_escalation_retryable(db):
   """A crash while surfacing must not consume the one-shot escalate latch.
 

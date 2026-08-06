@@ -413,25 +413,37 @@ def test_running_parent_gets_appended_not_started(db, monkeypatch):
 
 
 def test_question_blocked_parent_gets_appended_not_started(db, monkeypatch):
-  """A durable owner question is a busy parent even without a live runner."""
+  """The actor rejects the start and delegation falls back to the queue."""
   parent_id, child_id, delegation_id = _seed_delegation(
     db,
     suffix="question",
     result_blocks=[{"type": "text", "content": "Result while blocked."}],
     parent_pending_question_id="owner-decision",
   )
-  starts = _capture_starts(monkeypatch, running=False)
+  monkeypatch.setattr(chat_mod, "is_chat_running", lambda _cid: False)
+  starts = []
+  queued = []
+
+  async def blocked_start(**kwargs):
+    starts.append(kwargs)
+    return False
+
+  async def append_pending(content, chat_id):
+    queued.append((content, chat_id))
+    return True
+
+  monkeypatch.setattr(chat_start_mod, "start_programmatic_chat_turn", blocked_start)
+  monkeypatch.setattr(delegations_mod, "_append_wake_pending", append_pending)
 
   asyncio.run(delegations_mod.wake_parent_after_child_settled(child_id))
 
-  assert starts == []
+  assert [start["chat_id"] for start in starts] == [parent_id]
+  assert len(queued) == 1
+  assert queued[0][1] == parent_id
+  assert "task-question" in queued[0][0]
   db.expire_all()
   parent = db.get(models.Chat, parent_id)
   assert parent.pending_question_id == "owner-decision"
-  assert any(
-    "task-question" in (message.get("content") or "")
-    for message in (parent.pending_messages or [])
-  )
   assert db.get(models.Delegation, delegation_id).parent_woken_at is not None
 
 
