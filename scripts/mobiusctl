@@ -17,7 +17,19 @@ USER_STATE_HOME=${XDG_STATE_HOME:-"$HOME/.local/state"}
 RECOVERY_STATE_DIR=${MOBIUS_RECOVERY_STATE_DIR:-"$USER_STATE_HOME/mobius/$COMPOSE_PROJECT"}
 mkdir -p "$RECOVERY_STATE_DIR"
 chmod 0700 "$RECOVERY_STATE_DIR"
-STATE_FILE=${MOBIUS_RECOVERY_STATE_FILE:-"$RECOVERY_STATE_DIR/recovery.env"}
+if [ -n "${MOBIUS_RECOVERY_STATE_FILE:-}" ]; then
+  STATE_FILE=$MOBIUS_RECOVERY_STATE_FILE
+else
+  STATE_FILE="$RECOVERY_STATE_DIR/recovery.env"
+  # Releases before installation-scoped state kept an active recovery beside
+  # the checkout. Continue that recovery from the legacy file until `finish`
+  # removes it; the next `start` will create state in the XDG location.
+  LEGACY_STATE_FILE="$PROJECT_DIR/.mobius-recovery.env"
+  if [ ! -e "$STATE_FILE" ] && [ ! -L "$STATE_FILE" ] &&
+     { [ -e "$LEGACY_STATE_FILE" ] || [ -L "$LEGACY_STATE_FILE" ]; }; then
+    STATE_FILE=$LEGACY_STATE_FILE
+  fi
+fi
 RECOVERY_TARGET_MIN_TTL_SECONDS=300
 RECOVERY_TARGET_MAX_TTL_SECONDS=86400
 RECOVERY_TARGET_DEFAULT_TTL_SECONDS=3600
