@@ -655,7 +655,7 @@ def test_connector_routes_keep_keys_out_of_responses(
   assert set(body) == {
     "id", "generation", "name", "url", "enabled", "has_auth",
     "tools", "tool_count", "est_tokens", "status", "status_detail",
-    "auth_kind", "signed_in", "scopes",
+    "auth_kind", "signed_in", "scopes", "oauth_flavor", "user_project",
   }
   assert body["tools"] == ["lookup"]
   assert body["est_tokens"] == 5150

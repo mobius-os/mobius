@@ -521,7 +521,13 @@ class ChatProviderSwitch(BaseModel):
       raise ValueError("target model does not belong to target provider")
     self.agent_settings_json.model = model
     allowed_efforts = {
-      "codex": {"none", "minimal", "low", "medium", "high", "xhigh"},
+      # Codex's newer model catalogs extend the original ReasoningEffort
+      # scale with max/ultra. AgentSettingsOverride already accepts both and
+      # the model picker only offers levels advertised by the selected model,
+      # so the atomic provider-switch boundary must accept them too.
+      "codex": {
+        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+      },
       "claude": {"low", "medium", "high", "xhigh", "max", "ultracode"},
     }
     if effort not in allowed_efforts[self.provider]:

@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { authQueries } from '../../hooks/queries.js'
 import { closeAuthWindow, navigateAuthWindow, reserveAuthWindow } from '../../utils/authWindow.js'
+import { detailToMessage } from '../../lib/errorDetail.js'
 
 const CHATGPT_SECURITY_URL = 'https://chatgpt.com/#settings/Security'
 const OPENAI_DATA_CONTROLS_URL = 'https://help.openai.com/en/articles/7730893-data-controls-faq'
@@ -154,7 +155,7 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
       }
       if (!res.ok) {
         const data = await res.json()
-        setError(data.detail || 'Could not start Codex login.')
+        setError(detailToMessage(data.detail, 'Could not start Codex login.'))
         setStatus('idle')
         releaseAuthWindow()
         return
