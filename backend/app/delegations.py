@@ -455,8 +455,9 @@ async def _deliver_parent_wake(parent_chat_id: str) -> bool:
   """Coalesce every wake-eligible child for one parent into a single notice and
   deliver it under the parent's queue lock.
 
-  Idle parent -> start a fresh turn; running or question-blocked parent -> queue
-  the notice so its own next continuation promotes it. The `parent_woken_at`
+  Idle parent -> try a fresh turn; running parent -> queue the notice. If the
+  actor rejects the start (including for an open owner question), queue it so
+  the parent's next continuation promotes it. The `parent_woken_at`
   retry latch is stamped only after delivery succeeds. A crash between those
   transactions can redeliver, which is preferable to silently losing a child
   result; the ordinary in-process path is serialized by the queue lock.
@@ -481,10 +482,9 @@ async def _deliver_parent_wake(parent_chat_id: str) -> bool:
       if parent_chat is None:
         return False
       provider = parent_chat.provider or "claude"
-      has_pending_question = parent_chat.pending_question_id is not None
 
     delivered = False
-    if has_pending_question or is_chat_running(parent_chat_id):
+    if is_chat_running(parent_chat_id):
       delivered = await _append_wake_pending(content, parent_chat_id)
     else:
       delivered = await start_programmatic_chat_turn(
@@ -495,8 +495,8 @@ async def _deliver_parent_wake(parent_chat_id: str) -> bool:
         initiated_by_app_id=None,
       )
       if not delivered:
-        # A real turn claimed the parent in the check->start window; queue the
-        # notice so it rides that turn's drain instead of being lost.
+        # The actor refused the start (for example, an owner question opened or
+        # a real turn claimed the parent); queue the notice instead.
         delivered = await _append_wake_pending(content, parent_chat_id)
 
     if not delivered:

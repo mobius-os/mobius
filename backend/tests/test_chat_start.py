@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app import chat_start
-from app.chat_writer import StartTurn
+from app.chat_writer import StartTurn, StartTurnBlockedByPendingQuestion
 
 
 class _Writer:
@@ -18,7 +18,9 @@ class _Writer:
     return "ack"
 
 
-def _install_start_fakes(monkeypatch, *, generations=(7, 7)):
+def _install_start_fakes(
+  monkeypatch, *, generations=(7, 7), ack_result=None,
+):
   writer = _Writer()
   generation_values = iter(generations)
   discarded = []
@@ -42,7 +44,7 @@ def _install_start_fakes(monkeypatch, *, generations=(7, 7)):
 
   async def fake_await_ack(ack):
     assert ack == "ack"
-    return {
+    return ack_result if ack_result is not None else {
       "history": ["prepared-message"],
       "session_id": "session-1",
       "provider": "claude",
@@ -147,6 +149,25 @@ async def test_programmatic_start_does_nothing_when_claim_is_busy(monkeypatch):
   assert await chat_start.start_programmatic_chat_turn(
     chat_id="busy", title="t", content="c", provider="codex",
   ) is False
+
+
+@pytest.mark.asyncio
+async def test_programmatic_start_yields_to_pending_owner_question(monkeypatch):
+  state = _install_start_fakes(
+    monkeypatch,
+    ack_result=StartTurnBlockedByPendingQuestion("owner-decision"),
+  )
+
+  started = await chat_start.start_programmatic_chat_turn(
+    chat_id="blocked", title="t", content="c", provider="codex",
+  )
+
+  assert started is False
+  assert len(state.writer.commands) == 1
+  assert state.created_broadcasts == []
+  assert state.scheduled == []
+  assert state.system_events == []
+  assert state.discarded == ["blocked"]
 
 
 @pytest.mark.asyncio
