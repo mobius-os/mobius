@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { authQueries } from '../../hooks/queries.js'
 import { closeAuthWindow, navigateAuthWindow, reserveAuthWindow } from '../../utils/authWindow.js'
+import { detailToMessage } from '../../lib/errorDetail.js'
 import './ProviderAuth.css'
 
 /**
@@ -54,7 +55,7 @@ export default function ProviderAuth({ authenticated, onDone, compact = false, c
       const res = await api.auth.provider.claude.startLogin()
       if (!res.ok) {
         const data = await res.json()
-        setError(data.detail || 'Could not start auth.')
+        setError(detailToMessage(data.detail, 'Could not start auth.'))
         releaseAuthWindow()
         return
       }
@@ -83,7 +84,7 @@ export default function ProviderAuth({ authenticated, onDone, compact = false, c
       const res = await api.auth.provider.claude.submitCode(authCode.trim())
       if (!res.ok) {
         const data = await res.json()
-        setError(data.detail || 'Failed to submit code.')
+        setError(detailToMessage(data.detail, 'Failed to submit code.'))
         return
       }
       // A 200 from /provider/code is authoritative: the backend only returns

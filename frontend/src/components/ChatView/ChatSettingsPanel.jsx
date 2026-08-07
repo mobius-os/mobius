@@ -90,6 +90,7 @@ import {
   resolveProviderAvailability,
   visibleProviderModels,
 } from '../../lib/providerAvailability.js'
+import { detailToMessage } from '../../lib/errorDetail.js'
 import './ChatSettingsPanel.css'
 
 /** Claude product mark — four-petal flower / starburst silhouette,
@@ -396,8 +397,11 @@ export default function ChatSettingsPanel({
         })),
       })
       if (!res.ok) {
+        // A validation failure (incompatible target model/effort) returns a
+        // Pydantic `detail` ARRAY; normalize it to a string so it can never
+        // reach `<p>{error}</p>` and crash the shell with React error #31.
         let detail = ''
-        try { detail = (await res.json()).detail || '' } catch {}
+        try { detail = detailToMessage((await res.json())?.detail) } catch {}
         failProviderSwitch(
           chatId,
           request,
@@ -759,7 +763,7 @@ export default function ChatSettingsPanel({
                       onClick={handleConfirmProviderSwitch}
                       disabled={switchBusy}
                     >
-                      Switch provider
+                      {switchBusy ? 'Preparing…' : 'Switch provider'}
                     </button>
                     <button
                       type="button"
@@ -770,6 +774,9 @@ export default function ChatSettingsPanel({
                       Cancel
                     </button>
                   </div>
+                  {error && (
+                    <p className="csp__error" role="alert">{error}</p>
+                  )}
                 </div>
               )}
             </div>
@@ -830,7 +837,12 @@ export default function ChatSettingsPanel({
           )}
         </div>
       )}
-      {(appProviderLocked || codexSwitchWarning || switchBusy || error) && (
+      {(
+        appProviderLocked
+        || codexSwitchWarning
+        || switchBusy
+        || (error && !pendingSwitch)
+      ) && (
         <div className="csp__foot" aria-live="polite">
           {appProviderLocked && (
             <p className="csp__note">
@@ -849,7 +861,9 @@ export default function ChatSettingsPanel({
               reply — may briefly affect that turn.
             </p>
           )}
-          {error && <p className="csp__error" role="alert">{error}</p>}
+          {error && !pendingSwitch && (
+            <p className="csp__error" role="alert">{error}</p>
+          )}
         </div>
       )}
     </div>

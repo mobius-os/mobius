@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { api, setToken } from '../../api/client.js'
+import { detailToMessage } from '../../lib/errorDetail.js'
 import './LoginForm.css'
 
 export default function LoginForm({ onLogin }) {
@@ -26,7 +27,7 @@ export default function LoginForm({ onLogin }) {
       const res = await api.auth.login({ username, password })
       if (!res.ok) {
         let detail = ''
-        try { detail = (await res.json())?.detail || '' } catch {}
+        try { detail = detailToMessage((await res.json())?.detail) } catch {}
         setError(res.status === 401
           ? 'Incorrect username or password.'
           : (detail || 'Sign-in is unavailable. Please try again.'))
