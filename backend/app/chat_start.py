@@ -23,6 +23,7 @@ from app.chat import (
 )
 from app.chat_writer import (
   StartTurn,
+  StartTurnBlockedByPendingQuestion,
   alloc_run_token,
   await_ack,
   get_writer,
@@ -40,9 +41,10 @@ async def start_programmatic_chat_turn(
   boundary owns the claim, writer command, Stop-generation fence, broadcast,
   task creation, and failure cleanup so those steps cannot drift by caller.
 
-  Returns ``False`` when the claim fails or a Stop wins while ``StartTurn`` is
-  committing.  Unexpected failures propagate after releasing the transient
-  claim; the durable run remains available to normal reconciliation.
+  Returns ``False`` when the claim fails, an owner question is pending, or a
+  Stop wins while ``StartTurn`` is committing. Unexpected failures propagate
+  after releasing the transient claim; the durable run remains available to
+  normal reconciliation.
   """
   if not mark_starting(chat_id):
     return False
@@ -63,6 +65,10 @@ async def start_programmatic_chat_turn(
       default_provider=provider,
       initiated_by_app_id=initiated_by_app_id,
     )))
+
+    if isinstance(result, StartTurnBlockedByPendingQuestion):
+      discard_starting(chat_id)
+      return False
 
     if current_run_generation(chat_id) != start_gen:
       discard_starting(chat_id)

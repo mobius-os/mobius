@@ -28,6 +28,7 @@ from app.chat_writer import (
   AppendPending,
   CancelPending,
   StartTurn,
+  StartTurnBlockedByPendingQuestion,
   alloc_run_token,
   await_ack,
   cid_of,
@@ -53,6 +54,10 @@ from app.resource_access import (
 router = APIRouter(prefix="/api/chats", tags=["chats"])
 
 log = logging.getLogger(__name__)
+
+_PENDING_QUESTION_SEND_DETAIL = (
+  "Answer the pending question, or Stop the turn, before sending."
+)
 
 # Keepalive interval for the SSE stream to prevent proxy timeouts.
 _KEEPALIVE_INTERVAL = 30  # seconds
@@ -735,7 +740,7 @@ async def send_message(
   if not body.force_steer and chat.pending_question_id is not None:
     raise HTTPException(
       status_code=409,
-      detail="Answer the pending question, or Stop the turn, before sending.",
+      detail=_PENDING_QUESTION_SEND_DETAIL,
     )
 
   # A pending question parks the provider's control channel inside the
@@ -1051,6 +1056,10 @@ async def _send_message_locked(
       result = await await_ack(ack)
     except Exception as exc:
       raise _message_persist_unavailable(exc, chat_id=chat_id) from exc
+    if isinstance(result, StartTurnBlockedByPendingQuestion):
+      # The question opened after the route's early check but before the
+      # actor-owned transition. The outer cleanup releases this route's claim.
+      raise HTTPException(status_code=409, detail=_PENDING_QUESTION_SEND_DETAIL)
     if result.get("duplicate"):
       # The first POST committed but its acknowledgement was lost. The actor
       # found this cid in durable state, so the retry is complete without a

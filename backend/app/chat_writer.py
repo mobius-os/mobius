@@ -386,6 +386,13 @@ class ReconcileStartupChat(_Command):
 # (chat_id, run_token) key on submit.
 
 
+@dataclass(frozen=True)
+class StartTurnBlockedByPendingQuestion:
+  """Expected non-start when the chat is waiting for its owner."""
+
+  question_id: str
+
+
 @dataclass
 class StartTurn(_Command):
   """Initial send: append the user message, set title/provider, mark run.
@@ -395,7 +402,8 @@ class StartTurn(_Command):
   first message, sets `provider` when the chat had no messages, stamps
   `updated_at`, and sets the durable run marker — all in one commit.
   Returns `{"history", "session_id", "provider"}` for the caller to spawn
-  the runner; `history` is a list of `schemas.ChatMessage` (run_chat reads
+  the runner, or ``StartTurnBlockedByPendingQuestion`` when an owner question
+  is open. `history` is a list of `schemas.ChatMessage` (run_chat reads
   `messages[-1].content`), built exactly as the production initial-send path.
   """
 
@@ -2047,7 +2055,9 @@ class ChatWriterActor:
           f"thinking_id={thinking_id}"
         )
 
-  def _start_turn(self, db, cmd: StartTurn) -> dict:
+  def _start_turn(
+    self, db, cmd: StartTurn,
+  ) -> dict | StartTurnBlockedByPendingQuestion:
     """Append the initial user message, set title/provider, mark the run.
 
     Replicates the fresh-start branch of `send_message`: builds the agent
@@ -2094,6 +2104,13 @@ class ChatWriterActor:
             "session_id": chat.session_id,
             "provider": chat.provider,
           }
+    # The actor owns the durable StartTurn transition, so every caller gets
+    # the same question gate and a question cannot open in a caller's
+    # check-to-commit window. Duplicate retries above remain acknowledgements.
+    if chat.pending_question_id is not None:
+      question_id = chat.pending_question_id
+      db.rollback()  # End the actor's read transaction on this non-write path.
+      return StartTurnBlockedByPendingQuestion(question_id)
     if not existing:
       chat.provider = cmd.default_provider or "claude"
     # Build the agent history as schemas.ChatMessage objects, exactly as the
