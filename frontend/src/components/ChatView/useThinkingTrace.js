@@ -81,9 +81,16 @@ export function useThinkingTrace({ open, thought, chatId }) {
     }
   }, [open, deferred, chatId, thought.thinking_id, fullRequested, refreshNonce])
 
+  const content = deferred ? loadedContent : (thought.content || '')
   return {
-    content: deferred ? loadedContent : (thought.content || ''),
-    loadState,
+    content,
+    // A deferred thought re-fetches while it is still streaming (a debounced
+    // reload on every revision burst) and again on "Load full thought", and each
+    // reload flips the internal state back to 'loading' even though the text is
+    // still in hand. Surfacing that would blank an expanded, in-progress thought
+    // and flash "Loading…" on every token. The spinner and error only make sense
+    // on a COLD load, so once there is content the effective state is 'ready'.
+    loadState: content ? 'ready' : loadState,
     previewComplete: !deferred || previewComplete,
     // Persisted snapshots carry this flag, and final live-stream promotion
     // stamps it locally. This makes the explicit full-load action available
