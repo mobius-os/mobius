@@ -105,6 +105,10 @@ jobs:
           caddy validate --config /etc/caddy/Caddyfile
       - name: Run pytest
         working-directory: backend
+        # Skip the full suite on pull_request — it is the expensive half of this
+        # job and the merge_group run (the authoritative gate) runs it in full.
+        # See the merge-queue rationale on the e2e job below.
+        if: github.event_name != 'pull_request'
         # -n auto parallelizes across the runner's CPUs — safe because the suite
         # is already process-isolated (each xdist worker imports conftest and
         # gets its own tempdir DATA_DIR + SQLite engine). pytest-cov combines
@@ -155,6 +159,13 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    # Skip the browser suite on pull_request: it is the most expensive gate and
+    # the merge_group run (the authoritative pre-merge check) runs it in full, so
+    # a PR need not pay two full suite-lengths before it can land. This assumes
+    # branch protection treats a job skipped via `if:` as a satisfied required
+    # check on the PR; if it instead blocks on the skip, drop backend + e2e from
+    # the PR-required set and let the merge queue be the gate.
+    if: github.event_name != 'pull_request'
     # A cold hosted build can spend roughly 20 minutes populating the GHA cache
     # before Playwright starts. Leave enough room for the complete browser suite
     # and its diagnostic uploads instead of cancelling a healthy run mid-test.
