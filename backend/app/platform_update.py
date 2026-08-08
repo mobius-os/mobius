@@ -248,6 +248,12 @@ class PlatformStatus(TypedDict):
   # the owner straight to it. None unless ``state == "conflict"`` AND the id was
   # recorded.
   conflict_chat_id: str | None
+  # True only while ``state == "conflict"`` and origin/main has advanced past the
+  # version this conflict is pinned to — i.e. more updates stacked up behind the
+  # one being resolved. Lets Settings offer "review all & resolve together" so a
+  # backlog is reviewed once and resolved once, instead of one resolve per
+  # release. Fetch-free like the rest of status: reflects the last fetch.
+  newer_updates_available: bool
 
 
 class PlatformApplyResult(TypedDict):
@@ -1754,6 +1760,14 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
   if conflict:
     flag = _read_conflict_flag() or {}
     paths = flag.get("paths") or _unmerged_paths(repo)
+    # `target` is the last-fetched origin/main. If it strictly descends the
+    # version this conflict is pinned to, newer releases stacked up behind the
+    # one being resolved — Settings can then offer one combined review+resolve.
+    conflict_target = flag.get("upstream")
+    newer_available = bool(
+      target and conflict_target and target != conflict_target
+      and _is_ancestor(repo, conflict_target, target)
+    )
     return PlatformStatus(
       state=PlatformUpdateState.CONFLICT.value, available=False,
       needs_restart=restart_needed, activation=activation,
@@ -1762,6 +1776,7 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
       contained_upstream_sha=contained_upstream_sha,
       seed_required=False,
       conflict_paths=paths, conflict_chat_id=flag.get("chat_id"),
+      newer_updates_available=newer_available,
     )
 
   available = bool(target) and not target_contained
@@ -1783,6 +1798,7 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
     current_build_sha=image_sha, recorded_upstream_sha=upstream_sha,
     contained_upstream_sha=contained_upstream_sha,
     seed_required=False, conflict_paths=[], conflict_chat_id=None,
+    newer_updates_available=False,
   )
 
 

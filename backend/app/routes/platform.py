@@ -69,7 +69,7 @@ async def get_platform_status(
       current_build_sha=None,
       recorded_upstream_sha=None, contained_upstream_sha=None,
       seed_required=False, conflict_paths=[],
-      conflict_chat_id=None,
+      conflict_chat_id=None, newer_updates_available=False,
     )
 
 

@@ -298,6 +298,31 @@ def test_conflict_serves_old_and_flags(clone_env):
   status = pu.platform_status(platform)
   assert status["state"] == pu.PlatformUpdateState.CONFLICT.value
   assert any("main.py" in p for p in status["conflict_paths"])
+  # Freshly pinned: origin/main IS the conflicting target, nothing newer yet.
+  assert status["newer_updates_available"] is False
+
+
+def test_conflict_flags_newer_updates_when_origin_advances(clone_env):
+  """A pinned conflict reports ``newer_updates_available`` once origin/main moves
+  past the version it is pinned to, so Settings can offer one combined
+  review+resolve instead of forcing a resolve per stacked release."""
+  origin, platform = clone_env
+  _local_commit(platform, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LOCAL'")})
+  _advance_origin(origin, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'UPSTREAM'")})
+
+  assert pu.reconcile_clone(platform, at_boot=True).status == "conflict"
+  assert pu.platform_status(platform)["newer_updates_available"] is False
+
+  # A later deploy lands upstream; the owner's fetch advances origin/main past
+  # the version the conflict is pinned to.
+  _advance_origin(origin, edits={"docs/RELEASE.md": "note\n"}, msg="later deploy")
+  _git(platform, "fetch", "-q", "origin")
+
+  status = pu.platform_status(platform)
+  assert status["state"] == pu.PlatformUpdateState.CONFLICT.value
+  assert status["newer_updates_available"] is True
 
 
 def test_contributed_squash_uses_provenance_for_both_histories(clone_env):

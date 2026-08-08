@@ -1198,7 +1198,13 @@ export default function SettingsView({
   // so the owner sees the incoming changes first. Apply happens from inside the
   // sheet (which then advances the row to "Restart to finish").
   function openUpdateReview() {
-    if (platformPhase !== 'idle' || !platform?.available) return
+    // Also reachable from a conflict that has newer releases stacked behind it:
+    // the review sheet then previews the FULL combined diff to the latest tip,
+    // and its Apply re-targets the pinned conflict so one Resolve covers all.
+    if (
+      platformPhase !== 'idle'
+      || !(platform?.available || platform?.newer_updates_available)
+    ) return
     setPlatformError('')
     setReviewOpen(true)
   }
@@ -1679,19 +1685,41 @@ export default function SettingsView({
             </div>
             {platformConflict ? (
               onOpenChat ? (
-                <button
-                  ref={platformActionRef}
-                  className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
-                  type="button"
-                  onClick={resolvePlatformConflict}
-                  disabled={platformPhase === 'resolving'}
+                // A conflict is always resolvable in chat. When newer releases
+                // have stacked up behind it, prepend a primary "Review all" that
+                // previews the full combined diff and re-targets on Apply, so a
+                // single resolve covers the whole backlog.
+                <div
+                  className="settings__update-actions"
+                  role="group"
+                  aria-label="Resolve update conflict actions"
                 >
-                  {platformPhase === 'resolving'
-                    ? 'Opening…'
-                    : platform?.conflict_chat_id
-                      ? 'Open chat'
-                      : 'Resolve in chat'}
-                </button>
+                  {platform?.newer_updates_available && (
+                    <button
+                      className="settings__btn settings__btn--sm settings__btn--nowrap"
+                      type="button"
+                      onClick={openUpdateReview}
+                      disabled={mobiusUpdating || platformPhase !== 'idle'}
+                    >
+                      {mobiusUpdating ? 'Updating…' : 'Review all updates'}
+                    </button>
+                  )}
+                  <button
+                    ref={platformActionRef}
+                    className="settings__btn settings__btn--outline settings__btn--sm settings__btn--nowrap"
+                    type="button"
+                    onClick={resolvePlatformConflict}
+                    disabled={platformPhase === 'resolving'}
+                  >
+                    {platformPhase === 'resolving'
+                      ? 'Opening…'
+                      : platform?.conflict_chat_id
+                        ? 'Open chat'
+                        : platform?.newer_updates_available
+                          ? 'Resolve just this'
+                          : 'Resolve in chat'}
+                  </button>
+                </div>
               ) : null
             ) : platformExternalActivation ? (
               updateAvailable ? (
@@ -1794,6 +1822,13 @@ export default function SettingsView({
                 <span key={line}>{line}</span>
               ))}
               <span>A server restart alone will not complete this update.</span>
+            </div>
+          )}
+          {platformConflict && platform?.newer_updates_available && (
+            <div className="settings__notice" role="status">
+              More updates have arrived since the one that conflicted — review
+              them all together and resolve in one pass, or resolve just this one
+              now.
             </div>
           )}
           {platformError && (
