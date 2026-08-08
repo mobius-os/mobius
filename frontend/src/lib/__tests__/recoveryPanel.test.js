@@ -21,12 +21,12 @@ function renderPanel(overrides = {}) {
 test('recovery panel advances from refresh to agent repair', () => {
   const refresh = renderPanel()
   assert.match(refresh, />Refresh screen</)
-  assert.doesNotMatch(refresh, /repair chat|open Recovery in mobius\.you|mobiusctl recovery start/i)
+  assert.doesNotMatch(refresh, /repair chat|open Recovery in mobius\.you|mobiusctl recovery/i)
 
   const agent = renderPanel({ attempt: { phase: 'refreshed' } })
   assert.match(agent, />Refresh again</)
   assert.match(agent, />Start repair chat</)
-  assert.doesNotMatch(agent, /open Recovery in mobius\.you|mobiusctl recovery start/i)
+  assert.doesNotMatch(agent, /open Recovery in mobius\.you|mobiusctl recovery/i)
 })
 
 test('recovery panel distinguishes an active repair from an interrupted one', () => {
@@ -55,7 +55,7 @@ test('recovery panel exposes last resorts only after repair fails', () => {
   assert.match(failed, /href="https:\/\/www\.mobius\.you\/"/)
   assert.match(failed, /target="_top"/)
   assert.match(failed, /open Recovery in mobius\.you/i)
-  assert.match(failed, /<code[^>]*>mobiusctl recovery start<\/code>/)
+  assert.match(failed, /<code[^>]*>mobiusctl recovery<\/code>/)
 
   const restricted = renderPanel({
     attempt: { phase: 'refreshed' },
@@ -63,7 +63,7 @@ test('recovery panel exposes last resorts only after repair fails', () => {
   })
   assert.doesNotMatch(restricted, /Start repair chat|Retry repair chat/)
   assert.match(restricted, /open Recovery in mobius\.you/i)
-  assert.match(restricted, /<code[^>]*>mobiusctl recovery start<\/code>/)
+  assert.match(restricted, /<code[^>]*>mobiusctl recovery<\/code>/)
 })
 
 test('a directed repair keeps the live repair chat reachable while it works', () => {

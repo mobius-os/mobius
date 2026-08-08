@@ -131,8 +131,10 @@ clone. `MOBIUS_BOOT_MODE=recovery` execs the target with `python -I` before the
 entrypoint touches `/data`; normal mode never starts that listener.
 
 The external worker is not present in this repository or image. CI publishes a
-tested worker image, and the control plane or `mobiusctl` replaces the whole
-worker container to update it. There is no in-process recovery updater.
+tested worker image, and the managed control plane creates and replaces that
+worker container. There is no in-process recovery updater. Self-hosted recovery
+does not run a worker — the operator repairs the live container directly with
+`scripts/mobiusctl recovery` (see below).
 
 ### Where each surface stands
 
@@ -236,16 +238,13 @@ expiry/timeout/output-limit cleanup freezes, kills, and reaps the whole tree.
 The reasoning worker is a separate non-root, read-only image. It has no sudo,
 Docker socket, Railway credential, persistent code volume, or update endpoint;
 only its fixed target URL and one-time token. Managed deployments create or
-wake it inside the instance's Railway project. Self-hosted deployments use the
-Compose `recovery` profile through `scripts/mobiusctl`, which stops `app`, pulls
-the newest approved worker image, starts the target against `app_data`, and
-publishes the worker only on `127.0.0.1:18003`.
-If the worker or browser session is lost, `scripts/mobiusctl recovery reopen`
-keeps the app stopped, removes both isolated containers, rotates the target and
-browser credentials atomically, pulls the latest worker, and prints a new
-one-time code. Self-hosted target authority lasts one hour by default (the
-launcher accepts an explicit 300–86400 second TTL); `reopen` mints a fresh
-deadline after expiry. Normal boot deletes the retired `.recovery-secret`,
+wake it inside the instance's Railway project, and its target authority lasts
+one hour by default (the launcher accepts an explicit 300–86400 second TTL).
+
+Self-hosted deployments do not run this worker. The operator already has host
+and Docker root, so `scripts/mobiusctl recovery` opens a root shell
+(`docker exec -u 0`) in the live app container to repair `/data/platform` in
+place; the app is never stopped or recreated. Normal boot deletes the retired `.recovery-secret`,
 `.recovery-owner.json`, and `.recover-pending` authority before importing
 persisted code; a legacy user-authored `recovery_chat.jsonl` is retained and
 included in ordinary backup/restore.
@@ -559,25 +558,21 @@ platform-core tree; no app snapshot is baked into the platform image.
 
 **Recovery and self-heal.** Recovery is deliberately outside both the editable
 platform and the normal app process. The managed control plane launches the
-latest promoted worker image on demand; the self-hosted lifecycle pulls that
-same image every time. Updating means replacing the container from outside,
+latest promoted worker image on demand. Updating means replacing the container from outside,
 never letting the recovery agent modify itself.
 
-The normal app and recovery target are mutually exclusive boot modes. Managed
-recovery clean-redeploys the target service with a one-time token and reaches it
-over the project's private network. Self-hosted recovery stops the app before
-mounting `app_data` into `recovery-target`. The worker can perform arbitrary
-root repair through the authenticated target but cannot access the host control
-plane. Finishing recovery removes both recovery containers, recreates normal
-Mobius, and verifies `/api/health`.
+The normal app and recovery target are mutually exclusive boot modes only on
+managed. Managed recovery clean-redeploys the target service with a one-time
+token and reaches it over the project's private network; the worker can perform
+arbitrary root repair through the authenticated target but cannot access the
+host control plane. Finishing managed recovery clean-redeploys the normal app.
 
-Every self-host recovery action takes one bounded installation lock. Start and
-reopen pull the latest worker, keep the ordinary app stopped, and retire an old
-embedded `mobius-recoveryd` before launching the isolated services. Cleanup is
-never a broad orphan sweep: it removes only that exact name with the current
-Compose project's matching `recoveryd` service label. An identity mismatch
-leaves the old container untouched. Finish removes both isolated services,
-recreates the ordinary app, and verifies its health.
+Self-hosted recovery is not a separate boot mode at all. The operator already
+has host and Docker root, so `scripts/mobiusctl recovery` opens a root shell
+(`docker exec -u 0`) in the live app container and repairs `/data/platform` in
+place; the app is never stopped or recreated. Self-heal makes this reliable: a
+broken clone falls back to the baked backend (below), so the container stays
+reachable to repair.
 
 Normal platform boot serves `/data/platform/backend` directly after an import
 probe. It fetches `origin/main`, commits stray local edits, and merges that target

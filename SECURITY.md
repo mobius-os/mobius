@@ -95,12 +95,12 @@ a restart loop. Repair commands retain root over the stopped `/data` instance
 but cannot inspect target PID1, survive their request, or modify the recovery
 worker itself.
 
-Self-hosted recovery containers never restart automatically. A worker restart
-would reconstruct its tmpfs-backed one-time-code state from unchanged
-environment credentials, while a target restart would retain the same bearer.
-If either exits, use `scripts/mobiusctl recovery reopen`; it removes both
-containers, rotates both credentials, pulls the latest worker, and recreates a
-clean pair while keeping the ordinary app stopped.
+Managed recovery containers never restart automatically. A worker restart would
+reconstruct its tmpfs-backed one-time-code state from unchanged environment
+credentials, while a target restart would retain the same bearer; the managed
+control plane therefore removes and recreates them with rotated credentials
+rather than restarting. Self-hosted recovery runs no such containers — the
+operator repairs the live app container in place with `scripts/mobiusctl recovery`.
 
 ## Opaque embedded-chat contract
 

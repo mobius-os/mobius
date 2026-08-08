@@ -21,7 +21,7 @@ test('the recovery link always offers both external recovery routes', () => {
   assert.match(html, /target="_top"/)
   assert.match(html, />open Recovery in mobius\.you<\/a>/)
   assert.match(html, /Self-hosted — run this on the server:/)
-  assert.match(html, /<code[^>]*>mobiusctl recovery start<\/code>/)
+  assert.match(html, /<code[^>]*>mobiusctl recovery<\/code>/)
   // It is a fallback for a surface that already failed, so it must never point
   // back at an in-app recovery route.
   assert.doesNotMatch(html, /href="\/recover/)
@@ -35,5 +35,5 @@ test('the link takes its host surface class and lead', () => {
   assert.match(html, /class="standalone-app__recovery"/)
   assert.match(html, /If the app still won’t open/)
   assert.match(html, /Managed hosting:/)
-  assert.match(html, /<code[^>]*>mobiusctl recovery start<\/code>/)
+  assert.match(html, /<code[^>]*>mobiusctl recovery<\/code>/)
 })

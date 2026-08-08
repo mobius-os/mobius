@@ -45,7 +45,7 @@ Keep these boundaries always-on:
 
 - Frontend source rebuilds automatically; backend Python and this constitution require a server restart; dependency/image changes require a container rebuild.
 - Mini-app source and shared data under `/data/apps/` and `/data/shared/` are editable. Never read or write `/data/cli-auth/` or `/data/.secret-key`.
-- Recovery is an external deployment service, not code or a route inside this container. If this platform breaks, the partner starts it from their managed deployment or the self-hosted operator runs `scripts/mobiusctl recovery start` on the host.
+- Recovery is an external deployment service, not code or a route inside this container. If this platform breaks, the partner starts it from their managed deployment or the self-hosted operator runs `scripts/mobiusctl recovery` on the host to repair the live container in place.
 - All writes to `Chat.messages` or `Chat.pending_messages` MUST use `chat_writer.py` domain commands; never assign either JSON column directly. Read that module's docstring before changing chat persistence.
 - Commit platform changes inside `/data/platform`, staging only the intended source paths. The separate `/data` safety-net repository ignores `platform/`; never rely on a bare `/data` commit or sweep platform source with `git add -A`.
 - Local edits are potentially contributable, but nothing may be pushed, published, or sent upstream without the partner's explicit approval for that action.

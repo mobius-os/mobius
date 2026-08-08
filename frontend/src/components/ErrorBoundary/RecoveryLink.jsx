@@ -18,7 +18,7 @@ export default function RecoveryLink({
       <span className="recovery-panel__recovery-action">
         Self-hosted — run this on the server:
       </span>
-      <code className="recovery-panel__recovery-command">mobiusctl recovery start</code>
+      <code className="recovery-panel__recovery-command">mobiusctl recovery</code>
     </p>
   )
 }

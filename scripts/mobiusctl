@@ -1,97 +1,58 @@
 #!/bin/sh
 set -eu
 
-# Host-side lifecycle for the external self-hosted recovery worker. The worker
-# has no Docker socket: this small operator command owns every container state
-# transition, while the root target owns only the stopped instance's /data.
+# Host-side recovery for self-hosted Mobius.
+#
+# The operator already has host and Docker root, so "recovery" is simply a root
+# shell inside the LIVE app container: fix /data/platform (or anything else) in
+# place, then restart in place. The app is never stopped or recreated, no
+# isolated services or credentials are involved, and the container overlay and
+# /data volume are preserved.
+#
+# When the container is up at all it boots the baked floor automatically if your
+# platform edits are broken (see backend/scripts/entrypoint.sh), so the normal
+# in-container agent is available to repair /data/platform from ordinary Mobius
+# too — this shell is the direct, no-UI path to the same place.
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_DIR=$(dirname "$SCRIPT_DIR")
-# Pin the installation identity just like deploy-prod.sh. A linked worktree's
-# directory name must never select a fresh project/volume or miss the live app.
+# Pin the installation identity like deploy-prod.sh so a linked worktree's
+# directory name never selects a different Compose project/container.
 COMPOSE_PROJECT=${MOBIUS_COMPOSE_PROJECT:-mobius}
-# Credentials and the lifecycle lock belong to the Compose installation, not
-# whichever checkout invokes this command. This keeps start/reopen/finish one
-# coherent lifecycle across linked worktrees.
-USER_STATE_HOME=${XDG_STATE_HOME:-"$HOME/.local/state"}
-RECOVERY_STATE_DIR=${MOBIUS_RECOVERY_STATE_DIR:-"$USER_STATE_HOME/mobius/$COMPOSE_PROJECT"}
-mkdir -p "$RECOVERY_STATE_DIR"
-chmod 0700 "$RECOVERY_STATE_DIR"
-if [ -n "${MOBIUS_RECOVERY_STATE_FILE:-}" ]; then
-  STATE_FILE=$MOBIUS_RECOVERY_STATE_FILE
-else
-  STATE_FILE="$RECOVERY_STATE_DIR/recovery.env"
-  # Releases before installation-scoped state kept an active recovery beside
-  # the checkout. Continue that recovery from the legacy file until `finish`
-  # removes it; the next `start` will create state in the XDG location.
-  LEGACY_STATE_FILE="$PROJECT_DIR/.mobius-recovery.env"
-  if [ ! -e "$STATE_FILE" ] && [ ! -L "$STATE_FILE" ] &&
-     { [ -e "$LEGACY_STATE_FILE" ] || [ -L "$LEGACY_STATE_FILE" ]; }; then
-    STATE_FILE=$LEGACY_STATE_FILE
-  fi
-fi
-RECOVERY_TARGET_MIN_TTL_SECONDS=300
-RECOVERY_TARGET_MAX_TTL_SECONDS=86400
-RECOVERY_TARGET_DEFAULT_TTL_SECONDS=3600
 
 usage() {
   cat >&2 <<'EOF'
-Usage: scripts/mobiusctl recovery start|reopen|status|finish
+Usage: scripts/mobiusctl recovery
 
-  start   stop Mobius, pull the latest approved recovery image, and expose the
-          recovery UI on loopback (default http://127.0.0.1:18003)
-  reopen  keep Mobius stopped, rotate both credentials, and recreate a clean
-          recovery target + latest worker with a new one-time sign-in code;
-          required after either isolated service exits
-  status  show the isolated recovery services
-  finish  remove recovery services, restart Mobius, and verify app health
+  recovery  Open a root shell in the running Mobius app container to repair it
+            in place (edit /data/platform, read logs, adjust /data), then
+            restart from Settings -> Server or `docker restart`. The app is
+            never stopped or recreated; your container overlay is preserved.
 EOF
   exit 64
 }
 
-case "$#:${1:-}:${2:-}" in
-  2:recovery:start) action=start ;;
-  2:recovery:reopen) action=reopen ;;
-  2:recovery:status) action=status ;;
-  2:recovery:finish) action=finish ;;
+case "${1:-}" in
+  recovery) ;;
   *) usage ;;
 esac
 
-# Serialize every host-side state transition. In particular, `finish` and
-# `reopen` must never interleave into a state where the ordinary app and root
-# target both mount /data. Lock the installation directory itself (no
-# attacker-replaceable lock file), and bound contention so automation fails
-# loudly instead of hanging forever.
-LOCK_DIR=${MOBIUS_RECOVERY_LOCK_DIR:-$RECOVERY_STATE_DIR}
-LOCK_WAIT=${MOBIUS_RECOVERY_LOCK_WAIT_SECONDS:-30}
-[ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ] || {
-  echo "Invalid recovery lock directory: $LOCK_DIR" >&2
-  exit 1
-}
-case "$LOCK_WAIT" in
-  ""|*[!0-9]*)
-    echo "MOBIUS_RECOVERY_LOCK_WAIT_SECONDS must be an integer from 0 to 300" >&2
+case "${2:-}" in
+  "") ;;
+  start | reopen | status | finish)
+    cat >&2 <<EOF
+'recovery $2' is retired: recovery no longer stops or recreates the container,
+and there are no isolated services or one-time codes to manage.
+
+Run 'scripts/mobiusctl recovery' to open a root shell in the live app instead,
+fix things in place, then restart from Settings -> Server (or 'docker restart').
+EOF
     exit 64
     ;;
+  *) usage ;;
 esac
-[ "$LOCK_WAIT" -le 300 ] || {
-  echo "MOBIUS_RECOVERY_LOCK_WAIT_SECONDS must be an integer from 0 to 300" >&2
-  exit 64
-}
-command -v flock >/dev/null 2>&1 || {
-  echo "The host 'flock' command is required for safe recovery lifecycle changes." >&2
-  exit 69
-}
-exec 9< "$LOCK_DIR" || {
-  echo "Could not open the recovery lifecycle lock for $LOCK_DIR" >&2
-  exit 1
-}
-if ! flock -w "$LOCK_WAIT" 9; then
-  echo "Another Mobius recovery lifecycle is active; try again shortly." >&2
-  exit 75
-fi
 
-normal_compose() {
+compose() {
   (
     cd "$PROJECT_DIR"
     if [ -f .env ]; then
@@ -102,498 +63,41 @@ normal_compose() {
   )
 }
 
-compose() {
-  (
-    cd "$PROJECT_DIR"
-    if [ -f .env ]; then
-      if [ -f "$STATE_FILE" ]; then
-        docker compose -p "$COMPOSE_PROJECT" --profile recovery \
-          --env-file .env --env-file "$STATE_FILE" "$@"
-      else
-        docker compose -p "$COMPOSE_PROJECT" --profile recovery \
-          --env-file .env "$@"
-      fi
-    elif [ -f "$STATE_FILE" ]; then
-      docker compose -p "$COMPOSE_PROJECT" --profile recovery \
-        --env-file "$STATE_FILE" "$@"
-    else
-      docker compose -p "$COMPOSE_PROJECT" --profile recovery "$@"
-    fi
-  )
-}
+container_id=$(compose ps -q app 2>/dev/null || true)
 
-new_token() {
-  if command -v openssl >/dev/null 2>&1; then
-    openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n'
-  else
-    python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
+if [ -n "$container_id" ]; then
+  echo "Opening a root shell in the running Mobius container ($container_id)."
+  echo "You are root in the LIVE app. Edit /data/platform to fix broken source,"
+  echo "then restart in place (Settings -> Server, or: docker restart $container_id)."
+  shell=sh
+  if docker exec "$container_id" sh -c 'command -v bash >/dev/null 2>&1'; then
+    shell=bash
   fi
-}
+  exec docker exec -u 0 -it "$container_id" "$shell"
+fi
 
-die_state() {
-  echo "Invalid recovery state: $*" >&2
-  exit 1
-}
+# Not running: it must be started before there is anything to attach to. Booting
+# re-runs the entrypoint, which falls back to the baked floor when /data/platform
+# is broken, so the normal in-container agent comes back to repair it.
+cat >&2 <<EOF
+The Mobius app container is not running, so there is nothing to attach to yet.
+First try to start it (it boots the baked floor automatically if /data/platform
+is broken, bringing the normal in-container agent back to repair it), then
+re-run this command:
 
-validate_port() {
-  case "$1" in
-    ""|*[!0-9]*) die_state "port must be an integer from 1 to 65535" ;;
-  esac
-  [ "$1" -ge 1 ] && [ "$1" -le 65535 ] ||
-    die_state "port must be an integer from 1 to 65535"
-}
+  cd "$PROJECT_DIR" && docker compose -p "$COMPOSE_PROJECT" up -d app
+  scripts/mobiusctl recovery
 
-validate_ttl() {
-  case "$1" in
-    ""|*[!0-9]*)
-      die_state "MOBIUS_RECOVERY_TTL_SECONDS must be an integer from 300 to 86400"
-      ;;
-  esac
-  case "$1" in
-    0*)
-      die_state "MOBIUS_RECOVERY_TTL_SECONDS must be an integer from 300 to 86400"
-      ;;
-  esac
-  [ "$1" -ge "$RECOVERY_TARGET_MIN_TTL_SECONDS" ] &&
-    [ "$1" -le "$RECOVERY_TARGET_MAX_TTL_SECONDS" ] ||
-    die_state "MOBIUS_RECOVERY_TTL_SECONDS must be an integer from 300 to 86400"
-}
+If it will NOT stay up -- e.g. the baked fallback was removed too, so no boot
+ever completes -- get a root shell on your data directly. This starts a
+throwaway one-off container with the same image and your /data volume mounted,
+and does NOT touch the app service, so it works even when nothing boots:
 
-validate_target_expiry() {
-  case "$1" in
-    ""|*[!0-9]*) die_state "target expiry must be an epoch integer" ;;
-  esac
-  case "$1" in
-    0*) die_state "target expiry must be an epoch integer" ;;
-  esac
-  [ "${#1}" -le 10 ] && [ "$1" -gt 0 ] ||
-    die_state "target expiry must be an epoch integer"
-  [ "$1" -le "$(( $2 + RECOVERY_TARGET_MAX_TTL_SECONDS ))" ] ||
-    die_state "target expiry exceeds the maximum 24-hour lifetime"
-}
+  cd "$PROJECT_DIR" && docker compose -p "$COMPOSE_PROJECT" run --rm -u 0 --entrypoint sh app
 
-validate_image() {
-  # Deliberately narrower than the full OCI grammar. Every accepted character
-  # is inert in both an env file and a shell assignment, while ordinary
-  # registry/repository/tag/digest references remain supported.
-  [ "${#1}" -le 512 ] || die_state "recovery image reference is too long"
-  case "$1" in
-    [A-Za-z0-9]*) ;;
-    *) die_state "recovery image must start with a letter or number" ;;
-  esac
-  case "$1" in
-    *[!A-Za-z0-9._/@:+-]*)
-      die_state "recovery image contains unsafe characters"
-      ;;
-  esac
-}
+Fix /data/platform (or restore the baked floor) there, exit, then start the app
+again. To inspect why it will not stay up:
 
-validate_token() {
-  [ "${#1}" -ge 32 ] && [ "${#1}" -le 512 ] ||
-    die_state "recovery token length is invalid"
-  case "$1" in
-    *[!A-Za-z0-9_-]*) die_state "recovery token contains unsafe characters" ;;
-  esac
-}
-
-generate_state() {
-  recovery_target_token=$(new_token)
-  recovery_local_token=$(new_token)
-  recovery_port=${MOBIUS_RECOVERY_PORT:-18003}
-  recovery_image=${MOBIUS_RECOVERY_IMAGE:-ghcr.io/mobius-os/mobius-recovery:stable}
-  recovery_ttl=${MOBIUS_RECOVERY_TTL_SECONDS:-$RECOVERY_TARGET_DEFAULT_TTL_SECONDS}
-  validate_ttl "$recovery_ttl"
-  recovery_now=$(date -u +%s 2>/dev/null) ||
-    die_state "could not read the current epoch time"
-  case "$recovery_now" in
-    ""|*[!0-9]*) die_state "could not read the current epoch time" ;;
-  esac
-  recovery_target_expires_at=$((recovery_now + recovery_ttl))
-  validate_token "$recovery_target_token"
-  validate_token "$recovery_local_token"
-  validate_port "$recovery_port"
-  validate_image "$recovery_image"
-  validate_target_expiry "$recovery_target_expires_at" "$recovery_now"
-  unset recovery_now recovery_ttl
-}
-
-emit_state() {
-  printf 'MOBIUS_RECOVERY_TARGET_TOKEN=%s\n' "$recovery_target_token"
-  printf 'MOBIUS_RECOVERY_TARGET_EXPIRES_AT=%s\n' "$recovery_target_expires_at"
-  printf 'MOBIUS_RECOVERY_LOCAL_TOKEN=%s\n' "$recovery_local_token"
-  printf 'MOBIUS_RECOVERY_PORT=%s\n' "$recovery_port"
-  printf 'MOBIUS_RECOVERY_IMAGE=%s\n' "$recovery_image"
-}
-
-write_state() {
-  generate_state
-
-  # Noclobber closes the symlink/existing-file race around state creation.
-  # A later load independently verifies type, ownership, link count, and mode.
-  if ! (
-    umask 077
-    set -C
-    emit_state > "$STATE_FILE"
-  ); then
-    die_state "could not create $STATE_FILE exclusively"
-  fi
-}
-
-rotate_state() {
-  old_target_token=$recovery_target_token
-  old_local_token=$recovery_local_token
-  rotation_attempt=0
-  while [ "$rotation_attempt" -lt 3 ]; do
-    generate_state
-    if [ "$recovery_target_token" != "$old_target_token" ] &&
-       [ "$recovery_local_token" != "$old_local_token" ]; then
-      break
-    fi
-    rotation_attempt=$((rotation_attempt + 1))
-  done
-  [ "$recovery_target_token" != "$old_target_token" ] &&
-    [ "$recovery_local_token" != "$old_local_token" ] ||
-    die_state "could not rotate recovery credentials"
-
-  # Replace the already-validated single-link state atomically. A crash before
-  # rename leaves the old valid state; a crash after rename leaves the new one,
-  # so `reopen` is always safely retryable while the ordinary app stays down.
-  state_tmp=$(mktemp "${STATE_FILE}.tmp.XXXXXX") ||
-    die_state "could not create temporary recovery state"
-  chmod 600 "$state_tmp" || {
-    rm -f -- "$state_tmp"
-    die_state "could not secure temporary recovery state"
-  }
-  if ! emit_state > "$state_tmp" || ! mv -f -- "$state_tmp" "$STATE_FILE"; then
-    rm -f -- "$state_tmp"
-    die_state "could not atomically rotate recovery state"
-  fi
-  unset state_tmp old_target_token old_local_token rotation_attempt
-}
-
-load_state() {
-  if [ ! -e "$STATE_FILE" ] && [ ! -L "$STATE_FILE" ]; then
-    return 1
-  fi
-  [ ! -L "$STATE_FILE" ] || die_state "$STATE_FILE must not be a symlink"
-  [ -f "$STATE_FILE" ] || die_state "$STATE_FILE must be a regular file"
-  state_metadata=$(stat -c '%h %a %u' -- "$STATE_FILE" 2>/dev/null) ||
-    die_state "could not inspect $STATE_FILE"
-  set -- $state_metadata
-  [ "$#" -eq 3 ] || die_state "could not inspect $STATE_FILE"
-  [ "$1" -eq 1 ] || die_state "$STATE_FILE must have exactly one hard link"
-  case "$2" in
-    400|600) ;;
-    *) die_state "$STATE_FILE permissions must be 0600 or 0400" ;;
-  esac
-  [ "$3" -eq "$(id -u)" ] ||
-    die_state "$STATE_FILE must be owned by the current user"
-
-  recovery_target_token=
-  recovery_target_expires_at=
-  recovery_local_token=
-  recovery_port=
-  recovery_image=
-  seen_target=0
-  seen_expiry=0
-  seen_local=0
-  seen_port=0
-  seen_image=0
-  while IFS= read -r state_line || [ -n "$state_line" ]; do
-    case "$state_line" in
-      MOBIUS_RECOVERY_TARGET_TOKEN=*)
-        [ "$seen_target" -eq 0 ] || die_state "duplicate target token"
-        recovery_target_token=${state_line#MOBIUS_RECOVERY_TARGET_TOKEN=}
-        seen_target=1
-        ;;
-      MOBIUS_RECOVERY_TARGET_EXPIRES_AT=*)
-        [ "$seen_expiry" -eq 0 ] || die_state "duplicate target expiry"
-        recovery_target_expires_at=${state_line#MOBIUS_RECOVERY_TARGET_EXPIRES_AT=}
-        seen_expiry=1
-        ;;
-      MOBIUS_RECOVERY_LOCAL_TOKEN=*)
-        [ "$seen_local" -eq 0 ] || die_state "duplicate local token"
-        recovery_local_token=${state_line#MOBIUS_RECOVERY_LOCAL_TOKEN=}
-        seen_local=1
-        ;;
-      MOBIUS_RECOVERY_PORT=*)
-        [ "$seen_port" -eq 0 ] || die_state "duplicate port"
-        recovery_port=${state_line#MOBIUS_RECOVERY_PORT=}
-        seen_port=1
-        ;;
-      MOBIUS_RECOVERY_IMAGE=*)
-        [ "$seen_image" -eq 0 ] || die_state "duplicate image"
-        recovery_image=${state_line#MOBIUS_RECOVERY_IMAGE=}
-        seen_image=1
-        ;;
-      *) die_state "unexpected or malformed line" ;;
-    esac
-  done < "$STATE_FILE"
-  [ "$seen_target$seen_expiry$seen_local$seen_port$seen_image" = "11111" ] ||
-    die_state "required values are missing"
-  validate_token "$recovery_target_token"
-  validate_token "$recovery_local_token"
-  validate_port "$recovery_port"
-  validate_image "$recovery_image"
-  recovery_now=$(date -u +%s 2>/dev/null) ||
-    die_state "could not read the current epoch time"
-  case "$recovery_now" in
-    ""|*[!0-9]*) die_state "could not read the current epoch time" ;;
-  esac
-  validate_target_expiry "$recovery_target_expires_at" "$recovery_now"
-  unset recovery_now
-
-  MOBIUS_RECOVERY_TARGET_TOKEN=$recovery_target_token
-  MOBIUS_RECOVERY_TARGET_EXPIRES_AT=$recovery_target_expires_at
-  MOBIUS_RECOVERY_LOCAL_TOKEN=$recovery_local_token
-  MOBIUS_RECOVERY_PORT=$recovery_port
-  MOBIUS_RECOVERY_IMAGE=$recovery_image
-  export MOBIUS_RECOVERY_TARGET_TOKEN MOBIUS_RECOVERY_TARGET_EXPIRES_AT
-  export MOBIUS_RECOVERY_LOCAL_TOKEN
-  export MOBIUS_RECOVERY_PORT MOBIUS_RECOVERY_IMAGE
-}
-
-recovery_down() {
-  compose stop recovery recovery-target >/dev/null 2>&1 || true
-  compose rm -f recovery recovery-target >/dev/null 2>&1 || true
-}
-
-recovery_down_strict() {
-  compose stop recovery recovery-target || return $?
-  compose rm -f recovery recovery-target || return $?
-  remaining=$(compose ps -aq recovery recovery-target) || return $?
-  if [ -n "$remaining" ]; then
-    echo "Recovery services are still present after removal; the app stays stopped." >&2
-    return 1
-  fi
-  return 0
-}
-
-wait_for_normal_app() {
-  container_id=$(normal_compose ps -q app)
-  [ -n "$container_id" ] || {
-    echo "Mobius app container was not created." >&2
-    return 1
-  }
-  echo "Waiting for Mobius health..."
-  attempt=0
-  while [ "$attempt" -lt 120 ]; do
-    health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_id" 2>/dev/null || true)
-    case "$health" in
-      healthy|running)
-        echo "Mobius is back and healthy."
-        return 0
-        ;;
-      unhealthy|exited|dead)
-        echo "Mobius did not recover cleanly (state: $health)." >&2
-        return 1
-        ;;
-    esac
-    attempt=$((attempt + 1))
-    sleep 1
-  done
-  echo "Timed out waiting for Mobius health." >&2
-  return 1
-}
-
-retire_legacy_recoveryd() {
-  # Old self-hosted releases fixed both this name and the Compose service
-  # label. Resolve the current app's project first, then require all three
-  # legacy identity fields. Never use `--remove-orphans` on a shared host.
-  legacy_name=mobius-recoveryd
-  app_ids=$(normal_compose ps -aq app) || return $?
-  set -- $app_ids
-  if [ "$#" -ne 1 ]; then
-    echo "Could not resolve exactly one current Mobius app container; refusing legacy cleanup." >&2
-    return 1
-  fi
-  app_id=$1
-  app_identity=$(docker inspect -f \
-    '{{.Name}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' \
-    "$app_id") || {
-    echo "Could not verify the current Mobius app Compose identity." >&2
-    return 1
-  }
-  app_identity_rest=${app_identity#*|}
-  app_project=${app_identity_rest%%|*}
-  app_service=${app_identity_rest#*|}
-  if [ -z "$app_project" ] || [ "$app_service" != "app" ]; then
-    echo "Current Mobius app has an unexpected Compose identity; refusing legacy cleanup." >&2
-    return 1
-  fi
-
-  legacy_ids=$(docker container ls -aq \
-    --filter "name=^/${legacy_name}$") || {
-    echo "Could not inspect the retired $legacy_name container." >&2
-    return 1
-  }
-  if [ -z "$legacy_ids" ]; then
-    unset legacy_name app_ids app_id app_identity app_identity_rest
-    unset app_project app_service legacy_ids
-    return 0
-  fi
-  set -- $legacy_ids
-  if [ "$#" -ne 1 ]; then
-    echo "Multiple containers matched the exact retired $legacy_name name; refusing cleanup." >&2
-    return 1
-  fi
-  legacy_id=$1
-  legacy_identity=$(docker inspect -f \
-    '{{.Name}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' \
-    "$legacy_id") || {
-    echo "Could not verify the retired $legacy_name Compose identity." >&2
-    return 1
-  }
-  expected_legacy_identity="/$legacy_name|$app_project|recoveryd"
-  if [ "$legacy_identity" != "$expected_legacy_identity" ]; then
-    echo "Refusing to remove $legacy_name: unexpected identity '$legacy_identity'." >&2
-    return 1
-  fi
-
-  echo "Removing exact label-verified legacy recovery container ($legacy_name)..."
-  docker rm -f "$legacy_id" >/dev/null || return $?
-  if docker inspect "$legacy_id" >/dev/null 2>&1; then
-    echo "The retired $legacy_name container still exists after removal." >&2
-    return 1
-  fi
-  legacy_ids=$(docker container ls -aq \
-    --filter "name=^/${legacy_name}$") || return $?
-  if [ -n "$legacy_ids" ]; then
-    echo "A container still owns the retired $legacy_name name after removal." >&2
-    return 1
-  fi
-  unset legacy_name app_ids app_id app_identity app_identity_rest
-  unset app_project app_service legacy_ids legacy_id legacy_identity
-  unset expected_legacy_identity
-}
-
-show_recovery_access() {
-  echo "Recovery is isolated from the stopped app and available only on loopback:"
-  printf '  http://127.0.0.1:%s/\n' "$MOBIUS_RECOVERY_PORT"
-  echo "Paste this one-time code into the Recovery sign-in form:"
-  printf '  %s\n' "$MOBIUS_RECOVERY_LOCAL_TOKEN"
-  printf 'Root repair authority expires at Unix epoch %s.\n' \
-    "$MOBIUS_RECOVERY_TARGET_EXPIRES_AT"
-  echo "If either recovery service exits, do not restart it; rotate both credentials with:"
-  echo "  scripts/mobiusctl recovery reopen"
-  echo "When repair is complete: scripts/mobiusctl recovery finish"
-}
-
-start_recovery() {
-  if [ -f "$STATE_FILE" ]; then
-    echo "Recovery state already exists. Run 'scripts/mobiusctl recovery reopen' for a new code, or finish it first." >&2
-    exit 1
-  fi
-  write_state
-  load_state
-
-  app_was_stopped=0
-  cleanup_failed_start() {
-    status=$?
-    if [ "$status" -ne 0 ]; then
-      echo "Recovery start failed; retiring partial recovery services." >&2
-      if recovery_down_strict; then
-        if [ "$app_was_stopped" -eq 0 ] || normal_compose up -d app; then
-          rm -f -- "$STATE_FILE"
-          echo "The ordinary Mobius app is restored." >&2
-        else
-          echo "The ordinary Mobius app could not be restored; recovery state was retained." >&2
-        fi
-      else
-        echo "Partial recovery services could not be removed; the app remains stopped and recovery state was retained." >&2
-      fi
-    fi
-    exit "$status"
-  }
-  trap cleanup_failed_start EXIT HUP INT TERM
-
-  echo "Pulling the latest approved recovery worker..."
-  compose pull recovery
-  echo "Stopping the ordinary Mobius app..."
-  compose stop app
-  app_was_stopped=1
-  retire_legacy_recoveryd
-  compose up -d --force-recreate recovery-target recovery
-
-  trap - EXIT HUP INT TERM
-  show_recovery_access
-  : "$app_was_stopped"
-}
-
-reopen_recovery() {
-  if ! load_state; then
-    echo "Recovery is not active; run 'scripts/mobiusctl recovery start' first." >&2
-    exit 1
-  fi
-
-  services_stopped=0
-  cleanup_failed_reopen() {
-    status=$?
-    if [ "$status" -ne 0 ]; then
-      echo "Recovery reopen failed; the ordinary Mobius app remains stopped." >&2
-      if [ "$services_stopped" -eq 1 ]; then
-        recovery_down
-      fi
-    fi
-    exit "$status"
-  }
-  trap cleanup_failed_reopen EXIT HUP INT TERM
-
-  echo "Ensuring the ordinary Mobius app stays stopped..."
-  compose stop app
-  echo "Pulling the latest approved recovery worker..."
-  compose pull recovery
-  echo "Removing the previous isolated recovery services..."
-  recovery_down_strict
-  services_stopped=1
-  rotate_state
-  load_state
-  retire_legacy_recoveryd
-  compose up -d --force-recreate recovery-target recovery
-
-  trap - EXIT HUP INT TERM
-  echo "Previous recovery credentials were revoked."
-  show_recovery_access
-}
-
-status_recovery() {
-  if ! load_state; then
-    echo "Recovery is not active."
-    exit 0
-  fi
-  compose ps recovery-target recovery
-  printf 'Loopback URL: http://127.0.0.1:%s/\n' "$MOBIUS_RECOVERY_PORT"
-  printf 'Root target expiry (Unix epoch): %s\n' \
-    "$MOBIUS_RECOVERY_TARGET_EXPIRES_AT"
-  echo "If either service exited, do not restart it; rotate both credentials with:"
-  echo "  scripts/mobiusctl recovery reopen"
-}
-
-finish_recovery() {
-  if ! load_state; then
-    echo "No recovery state found; verifying isolated services are absent."
-  fi
-  echo "Stopping and removing the isolated recovery services..."
-  # This is the mutual-exclusion gate: never discard the credentials or start
-  # the ordinary app unless Compose proves both isolated services are gone.
-  recovery_down_strict
-  if [ -e "$STATE_FILE" ] || [ -L "$STATE_FILE" ]; then
-    rm -f -- "$STATE_FILE"
-  fi
-  [ ! -e "$STATE_FILE" ] && [ ! -L "$STATE_FILE" ] ||
-    die_state "could not remove recovery state after service teardown"
-
-  # Recreate rather than restart the stopped container. Full sudo can mutate
-  # its writable overlay; only a new container from the configured image makes
-  # the external recovery boundary meaningful after repair or sudo revocation.
-  normal_compose up -d --force-recreate app
-  wait_for_normal_app
-}
-
-case "$action" in
-  start) start_recovery ;;
-  reopen) reopen_recovery ;;
-  status) status_recovery ;;
-  finish) finish_recovery ;;
-  *) usage ;;
-esac
+  cd "$PROJECT_DIR" && docker compose -p "$COMPOSE_PROJECT" logs --tail=100 app
+EOF
+exit 1

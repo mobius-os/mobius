@@ -144,32 +144,19 @@ The initial build stamps the exact commit from the fresh checkout. An unstamped
 production `docker build` or `docker compose up --build` fails closed instead
 of silently claiming an unknown release.
 
-If the instance cannot boot, start the latest isolated recovery worker without
-custom proxy configuration:
+If the instance is broken, open a root shell in the live app container and fix
+it in place — no downtime, no isolated services:
 
 ```bash
-scripts/mobiusctl recovery start
-# if the worker/browser restarts, rotate both credentials and print a new code:
-scripts/mobiusctl recovery reopen
-scripts/mobiusctl recovery finish
+scripts/mobiusctl recovery
 ```
 
-When the server is remote, run this on the owner's computer while recovery is
-active, then open the printed loopback URL locally:
-
-```bash
-ssh -N -L 18003:127.0.0.1:18003 user@server
-```
-
-The command stops the ordinary app, mounts its data into a clean root target,
-and starts a read-only, unprivileged recovery worker on loopback. The worker has
-no Docker socket and cannot modify its own code.
-`reopen` never boots the ordinary app: it revokes both old credentials, pulls
-the latest approved worker, recreates the isolated services, and prints a new
-one-time code. The root target also enforces its own one-hour absolute deadline
-and closes its private listener when it expires; run `reopen` to mint a fresh
-deadline. Operators who need a different bounded window can prefix `start` or
-`reopen` with `MOBIUS_RECOVERY_TTL_SECONDS=<seconds>` (300–86400).
+This runs `docker exec -u 0` into the running container. Repair `/data/platform`
+(or anything under `/data`), then restart in place from Settings -> Server or
+with `docker restart mobius`; the app is never stopped or recreated. If the
+container is not running, start it first (`docker compose up -d app`) — it boots
+the baked floor automatically when `/data/platform` is broken — then re-run the
+command.
 
 Update a self-hosted instance inside Möbius: open Settings, find the Möbius
 section, and select **Check for updates**. Review the exact incoming commit,
@@ -179,9 +166,9 @@ do not require a host-side Git pull or image rebuild.
 
 The in-product agent has passwordless full root inside its Mobius container by
 default. To use the operator kill switch, set `MOBIUS_AGENT_SUDO=0` in `.env`
-and recreate the app with `docker compose up -d --force-recreate app`. The
-external recovery worker remains non-root and read-only, and recovery boot
-never installs the agent sudo rule.
+and recreate the app with `docker compose up -d --force-recreate app`. Recovery
+boot (`MOBIUS_BOOT_MODE=recovery`, used by managed deployments) never installs
+the agent sudo rule.
 
 To connect a full web service such as Tandoor, point a sibling DNS name at the same server. For example, use `services.mobius.example.com`, then set it as `MOBIUS_SERVICE_GATEWAY_ORIGIN` in `.env`. Caddy serves integrations below `/services/<slug>`, so you do not need wildcard DNS or a new record for each service. See [.env.example](.env.example) for setup and [ARCHITECTURE.md](ARCHITECTURE.md#app-execution-tiers) for the trust boundaries.
 

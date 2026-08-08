@@ -309,9 +309,9 @@ print(json.dumps({
 PY
 
 # A crash must leave the root target exited. Reconstructing it automatically
-# from the container config would replay the same still-live bearer; the host
-# lifecycle must instead remove both services and rotate both credentials via
-# `mobiusctl recovery reopen`.
+# from the container config would replay the same still-live bearer; the managed
+# control plane must instead remove both services and rotate both credentials
+# rather than restarting them.
 restart_policy=$(docker inspect \
   -f '{{.HostConfig.RestartPolicy.Name}}' "$CONTAINER")
 [ "$restart_policy" = "no" ] || {
@@ -331,7 +331,7 @@ crashed_state=$(docker inspect \
 # A retained bearer must become inert at the target's own absolute deadline,
 # independently of worker/session state. The target closes its listener and
 # parks PID1; expiry therefore remains final even if an operator inspects the
-# still-running container before using `mobiusctl recovery reopen`.
+# still-running container before the control plane rotates and recreates it.
 TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')
 EXPIRES_AT=$(($(date -u +%s) + 8))
 ENV_FILE=$(mktemp /tmp/mobius-recovery-target-expiry.XXXXXX)

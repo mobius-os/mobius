@@ -31,7 +31,7 @@ All chat-persistence writes must route through the `chat_writer` actor — never
 
 1. Edit `/data/platform/backend/app/...py` in place; `py_compile` it.
 2. If the main shell is healthy, ask the partner to open Settings -> Server and click **"Restart server"** (POSTs `/api/admin/restart`).
-3. If the main shell is broken, ask the partner to open Recovery from their managed deployment. A self-hosted server operator runs `scripts/mobiusctl recovery start` in the installation checkout. Do not invent or link to an in-app `/recover` route; recovery is deliberately outside this container.
+3. If the main shell is broken, ask the partner to open Recovery from their managed deployment. A self-hosted operator runs `scripts/mobiusctl recovery` to open a root shell in the live app container and repairs `/data/platform` in place. Do not invent or link to an in-app `/recover` route; recovery is deliberately outside this container.
 4. Restart takes ~5–15s; the page auto-reloads when healthy.
 5. Verify the fix in the original chat (still open, full history intact).
 
@@ -85,39 +85,34 @@ git -C /data checkout <sha> -- shared/<path>  # restore just that file
 
 ## The external recovery boundary
 
-Recovery does not run beside this agent. Managed deployments create or wake a
-separate Serverless recovery service inside the same deployment project.
-Self-hosted operators start the same worker with:
+Recovery does not run beside this agent.
+
+**Managed deployments** create or wake a separate Serverless recovery service
+inside the same deployment project — a fresh reasoning agent that inspects and
+repairs all of `/data` through a private root target, or quarantines and reseeds
+the platform clone when that is the correct diagnosis. This running agent never
+receives that target's one-time token and cannot start, update, or modify it.
+
+**Self-hosted operators** already have host and Docker root, so recovery is just
+a root shell in the *live* app container — no isolated worker, credentials, or
+downtime:
 
 ```sh
-scripts/mobiusctl recovery start
+scripts/mobiusctl recovery
 ```
 
-That lifecycle stops the ordinary app first, pulls the latest approved recovery
-image, starts a clean baked root target over the `/data` volume, and exposes the
-unprivileged recovery worker only on loopback. The worker has no Docker socket,
-Railway credential, sudo, or writable copy of its own code. When repair is done,
-the operator runs `scripts/mobiusctl recovery finish`; managed deployments offer
-the equivalent action in their control plane.
-
-If the worker restarts or the browser loses its signed-in session, the operator
-runs `scripts/mobiusctl recovery reopen`. It keeps the ordinary app stopped,
-revokes both old credentials, recreates clean target and worker containers from
-the latest approved image, and prints a new one-time sign-in code.
-
-Recovery is a fresh reasoning agent, not a fixed menu of restore scripts. It can
-inspect and repair all of `/data` through the target, or quarantine and reseed
-the platform clone when that is the correct diagnosis. This running agent never
-receives the one-time recovery target token and cannot start, update, or modify
-the recovery worker.
+It runs `docker exec -u 0` in the running container. Repair `/data/platform` (or
+anything under `/data`) in place, then restart in place (Settings -> Server, or
+`docker restart`); the app is never stopped or recreated and the container
+overlay is preserved. If the container is not running, start it first — boot
+falls back to the baked floor when `/data/platform` is broken, so the normal
+in-container agent returns to repair it — then re-run the command.
 
 | Situation | Action |
 |---|---|
 | Backend edit, main shell healthy | Settings -> Server -> Restart |
-| Main shell or backend broken | Partner opens the deployment's Recovery action |
-| Self-hosted instance broken | Operator runs `scripts/mobiusctl recovery start` |
-| Self-hosted recovery session lost | Operator runs `scripts/mobiusctl recovery reopen` |
-| Repair finished | Deployment finishes recovery, or operator runs `scripts/mobiusctl recovery finish` |
+| Main shell or backend broken (managed) | Partner opens the deployment's Recovery action |
+| Self-hosted instance broken | Operator runs `scripts/mobiusctl recovery`, repairs `/data/platform` in place, restarts |
 
 ---
 
