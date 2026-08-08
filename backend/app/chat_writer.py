@@ -1607,9 +1607,12 @@ class ChatWriterActor:
     chat = _active_chat(db, chat_id)
     if chat is None:
       return _WriteOutcome.NOOP
-    # Finalize is terminal; unlike ParkRun it cannot leave an open question.
-    # Stage the clear before the transcript helper commits so both facts become
-    # durable together. A failed/no-op transcript write rolls the clear back.
+    # Finalize persists the turn's terminal blocks and assumes the turn is
+    # ending, so it clears the open-question marker. A resumable pause is NOT
+    # Finalize's concern — ParkRun runs after this in the restart drain and
+    # re-derives the marker from the parked transcript. Staged before the
+    # transcript helper commits so both facts become durable together; a
+    # failed/no-op transcript write rolls the clear back.
     chat.pending_question_id = None
     if thinking_stashes:
       self._stage_thinking_stashes(db, thinking_stashes)
@@ -2905,6 +2908,14 @@ class ChatWriterActor:
       if changed and not _commit_or_rollback(db):
         raise _PersistFailed("ParkRun did not persist")
       return False
+    # A resumable pause preserves an open AskUserQuestion — the answer IS the
+    # continuation. Re-derive the durable marker from the transcript being
+    # parked so it holds even though the drain's preceding Finalize cleared it
+    # (and self-heals a restart that preempted QuestionCommit). Committed with
+    # the park so the run status and the marker land together.
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is not None:
+      chat.pending_question_id = _tail_open_question_id(chat.messages)
     if changed and not _commit_or_rollback(db):
       raise _PersistFailed("ParkRun did not persist")
     if owner is None or owner == cmd.run_token:
@@ -3671,6 +3682,36 @@ class _WriteOutcome(enum.Enum):
   APPLIED = "applied"  # found a row + assistant slot, committed cleanly
   NOOP = "noop"  # no chat_id / missing row / no messages to write into
   DROPPED = "dropped"  # write attempted but the commit dropped (lock)
+
+
+def _tail_open_question_id(messages) -> str | None:
+  """question_id of the last assistant message's open AskUserQuestion, else None.
+
+  The durable `pending_question_id` marker is, by definition, "the transcript
+  tail is an unanswered question." Deriving it from the messages is the single
+  rule every writer that needs to (re)establish the marker can share, so the
+  marker cannot drift from the transcript. This mirrors the one-time boot
+  backfill in database._add_chat_pending_question_id and applies the same
+  1..64-char id validation the column accepts.
+  """
+  for message in reversed(messages or []):
+    if not isinstance(message, dict) or message.get("hidden"):
+      continue
+    if message.get("role") != "assistant":
+      break
+    for block in reversed(message.get("blocks") or []):
+      if not isinstance(block, dict):
+        continue
+      candidate = block.get("question_id")
+      if (
+        block.get("type") == "question"
+        and not block.get("answers")
+        and isinstance(candidate, str)
+        and 0 < len(candidate) <= 64
+      ):
+        return candidate
+    break
+  return None
 
 
 def _active_chat(db, chat_id: str):
