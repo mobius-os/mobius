@@ -814,4 +814,12 @@
   .shell--immersive > .shell__content {
     margin-left: 0;
   }
+
+  /* Immersive zeroes the content margin so the canvas spans full width, but the
+     desktop left-rail backdrop (.shell::before) sits above the content at
+     z-index 2 and would keep painting var(--bg) over the canvas — a black column
+     on a dark theme. Suppress it while immersive, as we do for .shell--immersive::after. */
+  .shell--immersive::before {
+    display: none;
+  }
 }
