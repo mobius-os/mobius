@@ -84,11 +84,7 @@ from claude_agent_sdk.types import (
 )
 
 from app import activity
-from app.claude_events import (
-  _clip_task_text,
-  dispatch_sdk_message,
-  update_inflight_tasks,
-)
+from app.claude_events import _clip_task_text, dispatch_sdk_message
 from app.claude_sdk_contract import transport_exit_error, transport_process_pid
 from app.process_groups import (
   isolated_process_group_id,
@@ -132,16 +128,15 @@ async def _drain_background_tasks(client, bc, inflight, session_id, chat_id):
   task finishes; then the caller returns into the normal reap.
 
   Wait for the real work, not an arbitrary clock. Only drainable delegated-agent
-  tasks are tracked (see ``update_inflight_tasks``), and those reliably reach a
-  terminal status, so this returns as soon as the subagents actually settle —
-  there is deliberately no time cap. Fail-safe: on ANY stream error it returns so
-  the reap proceeds; a real Stop raises CancelledError (BaseException), which
-  propagates untouched and aborts the wait at once.
+  tasks are tracked (``dispatch_sdk_message`` maintains ``inflight``), and those
+  reliably reach a terminal status, so this returns as soon as the subagents
+  actually settle — there is deliberately no time cap. Fail-safe: on ANY stream
+  error it returns so the reap proceeds; a real Stop raises CancelledError
+  (BaseException), which propagates untouched and aborts the wait at once.
   """
   try:
     async for sdk_msg in client.receive_messages():
-      dispatch_sdk_message(sdk_msg, bc, session_id)
-      update_inflight_tasks(sdk_msg, inflight)
+      dispatch_sdk_message(sdk_msg, bc, session_id, inflight)
       if not inflight:
         return
   except Exception as exc:
@@ -1160,9 +1155,8 @@ async def run_claude_sdk_turn(
             if _resets is not None:
               rate_limit_resets_at = _resets
           current_session_id, terminal = dispatch_sdk_message(
-            sdk_msg, bc, current_session_id,
+            sdk_msg, bc, current_session_id, inflight_tasks,
           )
-          update_inflight_tasks(sdk_msg, inflight_tasks)
           if terminal is None:
             # A steer fires its interrupt synchronously in
             # ActiveClaudeClient.steer() (a soft interrupt on the same

@@ -225,43 +225,11 @@ def _claude_text_item_id(message_id: str | None, index: object) -> str | None:
   return f"{message_id}:{index}"
 
 
-def update_inflight_tasks(sdk_msg: Any, inflight: set) -> None:
-  """Maintain the set of *drainable* background task_ids still running, keyed on
-  the SAME message types ``dispatch_sdk_message`` translates. A task_id is added
-  when a TaskStartedMessage for a DEFERRING_TASK_TYPES agent (``local_agent`` /
-  ``local_workflow`` — Task-tool subagents and Workflows) arrives, and removed on
-  its terminal signal — a TaskNotificationMessage (dispatch's ``task_done``), or a
-  TaskUpdatedMessage patch carrying a TERMINAL_TASK_STATUSES status (the path a
-  TaskStop-killed task reports through). The runner uses this set to decide
-  whether background work is still live at the turn's terminal result, so it can
-  drain it before reaping instead of killing it.
-
-  Only delegated-agent tasks are tracked: background shells and Monitors run
-  indefinitely by design and never emit a terminal frame, so adding one would
-  make the drain block until its bounded timeout rather than returning promptly.
-  The SDK gates its own tracker on the same set for exactly this reason. Purely
-  observational — never raises on shape drift.
-  """
-  if isinstance(sdk_msg, TaskStartedMessage):
-    if getattr(sdk_msg, "task_type", None) not in DEFERRING_TASK_TYPES:
-      return
-    task_id = getattr(sdk_msg, "task_id", None)
-    if task_id is not None:
-      inflight.add(task_id)
-  elif isinstance(sdk_msg, TaskNotificationMessage):
-    inflight.discard(getattr(sdk_msg, "task_id", None))
-  elif (
-    TaskUpdatedMessage is not None
-    and isinstance(sdk_msg, TaskUpdatedMessage)
-    and getattr(sdk_msg, "status", None) in TERMINAL_TASK_STATUSES
-  ):
-    inflight.discard(getattr(sdk_msg, "task_id", None))
-
-
 def dispatch_sdk_message(
   sdk_msg: Any,
   bc,
   current_session_id: str | None,
+  inflight: set | None = None,
 ) -> tuple[str | None, dict | None]:
   """Translates one SDK message into broadcast events.
 
@@ -270,6 +238,13 @@ def dispatch_sdk_message(
   dict and stops draining the SDK stream. For every other message
   type the caller updates ``current_session_id`` from the first
   return value and keeps reading.
+
+  When ``inflight`` is passed, this also maintains it as the set of
+  *drainable* background task_ids still running — added when a
+  DEFERRING_TASK_TYPES agent starts, discarded on its terminal frame —
+  from the very branches that already classify those task messages. The
+  runner keeps a live client draining until that set empties so
+  parallel subagents finish instead of being reaped at turn end.
 
   Extracted from the runner loop so unit tests can exercise the
   full dispatch matrix (named events, unknown fallthrough, usage
@@ -301,6 +276,12 @@ def dispatch_sdk_message(
           "source_event_id": getattr(sdk_msg, "uuid", None),
         })
       bc.publish(public_event)
+      if (
+        inflight is not None
+        and getattr(sdk_msg, "task_type", None) in DEFERRING_TASK_TYPES
+        and sdk_msg.task_id is not None
+      ):
+        inflight.add(sdk_msg.task_id)
       return current_session_id, None
     if isinstance(sdk_msg, TaskProgressMessage):
       bc.publish({
@@ -328,6 +309,8 @@ def dispatch_sdk_message(
           "source_event_id": getattr(sdk_msg, "uuid", None),
         })
       bc.publish(public_event)
+      if inflight is not None:
+        inflight.discard(sdk_msg.task_id)
       return current_session_id, None
     if TaskUpdatedMessage is not None and isinstance(sdk_msg, TaskUpdatedMessage):
       # A background task's terminal state can arrive ONLY as a task_updated
@@ -360,6 +343,8 @@ def dispatch_sdk_message(
           recorder(private_event)
         bc.publish({key: private_event.get(key) for key in (
           "type", "task_id", "status", "summary", "tool_use_id")})
+        if inflight is not None:
+          inflight.discard(sdk_msg.task_id)
       return current_session_id, None
     if sdk_msg.subtype == "init":
       # Setup metadata only — no Möbius-side render.
