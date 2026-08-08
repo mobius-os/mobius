@@ -1,6 +1,10 @@
 // Generated from the locally quantized Pocket TTS v2 assets.
 // The shell verifies every chunk before retaining it in the device cache.
-const LOCAL_SPEECH_ROOT = 'https://mobius.local/speech-models/pocket-tts-v2'
+// Voice models are published as a public GitHub Release on the Voice app repo
+// and fetched through the reviewed device-asset relay (which follows the
+// release redirect and verifies each chunk's SHA-256). This works on any
+// deployment, unlike the former mobius.local local-only host.
+const LOCAL_SPEECH_ROOT = 'https://github.com/mobius-os/app-voice/releases/download/models-v2'
 
 export const POCKET_TTS_V2_ASSETS = Object.freeze({
   "english-alba.safetensors": Object.freeze({
