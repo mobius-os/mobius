@@ -67,6 +67,32 @@ test('an image-required apply projects the external activation contract', () => 
   assert.equal(platformUpdateStatusLabel(projected), 'Image rebuild required')
 })
 
+test('a dependency apply projects an in-place restart, not a rebuild', () => {
+  const activation = {
+    level: 'dependency_sync',
+    guidance: [
+      'Apply installs the new Python dependencies in place, then restart.',
+    ],
+  }
+  const projected = platformStatusFromApply(
+    { state: 'available', available: true, needs_restart: false },
+    {
+      state: 'restart_needed',
+      needs_restart: true,
+      activation,
+      upstream_commit: 'applied',
+    },
+  )
+
+  assert.equal(projected.available, false)
+  assert.equal(projected.needs_restart, true)
+  assert.equal(projected.activation, activation)
+  assert.equal(
+    platformActivationLabel(projected.activation), 'Dependency update',
+  )
+  assert.equal(platformUpdateStatusLabel(projected), 'Ready to restart')
+})
+
 test('a failed newer release does not forget an earlier staged update', () => {
   const projected = platformStatusFromApply(
     {

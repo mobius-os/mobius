@@ -20,6 +20,9 @@ class ActivationLevel(str, Enum):
 
   LIVE = "live"
   SERVER_RESTART = "server_restart"
+  # In-place dependency install (pip) plus a server restart to load them. More
+  # than a bare restart, but still completable in-product — no image rebuild.
+  DEPENDENCY_SYNC = "dependency_sync"
   PROXY_RELOAD = "proxy_reload"
   CONTAINER_RECREATE = "container_recreate"
   IMAGE_REBUILD = "image_rebuild"
@@ -95,8 +98,8 @@ _RULES = (
   ),
   _Rule(
     "python_dependencies",
-    ActivationLevel.IMAGE_REBUILD,
-    "Python dependencies changed and must be installed into a new image.",
+    ActivationLevel.DEPENDENCY_SYNC,
+    "Python dependencies changed; Apply installs them in place, then restart.",
     exact=("backend/requirements.txt", "backend/requirements.lock"),
     dependency_fingerprint=True,
   ),
@@ -194,7 +197,10 @@ def backend_import_probe_required(paths: Iterable[str]) -> bool:
     rule = _rule_for_path(normalized)
     if (
       rule
-      and rule.level is ActivationLevel.SERVER_RESTART
+      and rule.level in (
+        ActivationLevel.SERVER_RESTART,
+        ActivationLevel.DEPENDENCY_SYNC,
+      )
       and normalized != "skill/core.md"
     ):
       return True
@@ -210,6 +216,11 @@ def _guidance(level: ActivationLevel, deployment: DeploymentKind) -> str:
     return "No deployment action is required; live source is rebuilt or read on demand."
   if level is ActivationLevel.SERVER_RESTART:
     return "Restart Möbius after Apply so the running server loads the new source."
+  if level is ActivationLevel.DEPENDENCY_SYNC:
+    return (
+      "Apply installs the new Python dependencies in place, then restart to load "
+      "them — no image rebuild needed."
+    )
   if deployment == "railway":
     if level is ActivationLevel.CONTAINER_RECREATE:
       return (

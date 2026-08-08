@@ -1258,7 +1258,7 @@ def test_platform_update_uses_explicit_activation_levels():
   assert classify(["skill/core.md"])["level"] == \
     "server_restart"
   assert classify(["backend/requirements.txt"])["level"] == \
-    "image_rebuild"
+    "dependency_sync"
   assert classify(["backend/scripts/entrypoint.sh"])["level"] == \
     "image_rebuild"
   assert classify(["Caddyfile"])["level"] == "proxy_reload"
@@ -1359,7 +1359,7 @@ def test_status_no_restart_when_only_tests_changed(clone_env):
   assert status["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
 
 
-def test_status_requires_image_instead_of_offering_restart_for_dependencies(
+def test_status_offers_in_place_restart_for_dependency_changes(
   clone_env,
 ):
   _, platform = clone_env
@@ -1370,12 +1370,34 @@ def test_status_requires_image_instead_of_offering_restart_for_dependencies(
 
   status = pu.platform_status(platform)
 
-  assert status["state"] == pu.PlatformUpdateState.ACTIVATION_NEEDED.value
-  assert status["needs_restart"] is False
-  assert status["activation"]["level"] == "image_rebuild"
+  # A Python dependency change is installed in place by Apply and then loaded by
+  # a restart — no image rebuild — so it is offered as an in-product restart.
+  assert status["state"] == pu.PlatformUpdateState.RESTART_NEEDED.value
+  assert status["needs_restart"] is True
+  assert status["activation"]["level"] == "dependency_sync"
 
 
 def test_boot_clears_restart_but_preserves_unverified_image_work(clone_env):
+  _, platform = clone_env
+  target = _served_sha(platform)
+  pu.mark_activation_needed(
+    target,
+    ["backend/app/main.py", "frontend/package-lock.json"],
+  )
+
+  res = pu.reconcile_clone(platform, at_boot=True)
+
+  assert res.status == "up_to_date"
+  assert pu._read_activation_marker() == {
+    "target_sha": target,
+    "paths": ["frontend/package-lock.json"],
+  }
+
+
+def test_boot_retires_in_place_python_dependency_sync(clone_env):
+  # Owner Apply installs the locked Python deps in place BEFORE writing this
+  # marker, so a fresh boot that loads the target already has them — retire like
+  # a restart, not preserved as unverified image work.
   _, platform = clone_env
   target = _served_sha(platform)
   pu.mark_activation_needed(
@@ -1386,10 +1408,56 @@ def test_boot_clears_restart_but_preserves_unverified_image_work(clone_env):
   res = pu.reconcile_clone(platform, at_boot=True)
 
   assert res.status == "up_to_date"
-  assert pu._read_activation_marker() == {
-    "target_sha": target,
-    "paths": ["backend/requirements.lock"],
-  }
+  # Every path retired (deps like a restart, code by the restart) -> no pending
+  # activation work at all.
+  assert pu._read_activation_marker() is None
+
+
+def test_apply_installs_python_dependencies_in_place(clone_env, monkeypatch):
+  origin, platform = clone_env
+  target = _advance_origin(
+    origin,
+    edits={"backend/requirements.lock": "new-locked-deps\n"},
+    msg="bump python deps",
+  )
+  pu._fetch(platform)
+
+  synced = {}
+
+  def fake_sync(repo):
+    synced["ran"] = True
+    return True, ""
+
+  monkeypatch.setattr(pu, "_sync_python_dependencies", fake_sync)
+
+  res = pu.reconcile_clone(platform, target_ref=target, fetch_remote=False)
+
+  assert res.status == "updated"
+  assert synced.get("ran") is True  # the in-place install ran during Apply
+  assert _served_sha(platform) == target
+
+
+def test_apply_rolls_back_when_dependency_install_fails(clone_env, monkeypatch):
+  origin, platform = clone_env
+  pre = pu._rev(platform, pu._local_branch(platform))
+  target = _advance_origin(
+    origin,
+    edits={"backend/requirements.lock": "new-locked-deps\n"},
+    msg="bump python deps",
+  )
+  pu._fetch(platform)
+
+  monkeypatch.setattr(
+    pu, "_sync_python_dependencies", lambda repo: (False, "boom"),
+  )
+
+  res = pu.reconcile_clone(platform, target_ref=target, fetch_remote=False)
+
+  # A dependency install failure is fail-closed: reset to the pre-reconcile
+  # commit and serve the old tree, exactly like a failed import probe.
+  assert res.status == "rolled_back"
+  assert "boom" in (res.error or "")
+  assert pu._rev(platform, pu._local_branch(platform)) == pre
 
 
 # --- restart flag lifecycle -------------------------------------------------
@@ -1561,20 +1629,21 @@ def test_update_preview_clean_fast_forward(clone_env):
   assert preview["activation"]["level"] == "server_restart"
 
 
-def test_update_preview_warns_before_dependency_update_is_applied(clone_env):
+def test_update_preview_shows_dependency_change_applies_in_place(clone_env):
   origin, platform = clone_env
   _advance_origin(
     origin,
     edits={"backend/requirements.lock": "locked dependency bytes\n"},
-    msg="change image dependency",
+    msg="change dependency",
   )
   pu._fetch(platform)
 
   preview = pu.platform_update_preview(platform)
 
-  assert preview["activation"]["level"] == "image_rebuild"
-  assert "Restart cannot" not in " ".join(preview["activation"]["guidance"])
-  assert "rebuild the image" in " ".join(preview["activation"]["guidance"])
+  assert preview["activation"]["level"] == "dependency_sync"
+  guidance = " ".join(preview["activation"]["guidance"])
+  assert "in place" in guidance
+  assert "rebuild the image" not in guidance
 
 
 def test_update_preview_excludes_local_edits(clone_env):

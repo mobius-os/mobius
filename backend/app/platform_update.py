@@ -1020,6 +1020,11 @@ def _complete_boot_activation(repo: Path) -> None:
     if level in {
       platform_activation.ActivationLevel.LIVE.value,
       platform_activation.ActivationLevel.SERVER_RESTART.value,
+      # Owner Apply installed the locked deps in place before writing this
+      # marker, so a fresh boot that loads the target already has them — retire
+      # like a restart. A rebuild that bakes them instead retires via
+      # build_contains_target below.
+      platform_activation.ActivationLevel.DEPENDENCY_SYNC.value,
     }:
       continue
     if build_contains_target and level in completed_by_image:
@@ -1054,6 +1059,49 @@ def _touched_frontend(repo: Path, before: str | None, after: str | None) -> bool
     path == "frontend" or path.startswith("frontend/")
     for path in (_changed_paths(repo, before, after) or [])
   )
+
+
+# pip can be slow on a small self-hosted box fetching wheels; keep the bound
+# generous but finite so a wedged install still fails closed.
+_DEP_SYNC_TIMEOUT = 900
+
+
+def _requirements_changed(
+  repo: Path, before: str | None, after: str | None
+) -> bool:
+  """Whether the locked Python dependency inputs changed between two commits."""
+  return any(
+    path in ("backend/requirements.lock", "backend/requirements.txt")
+    for path in (_changed_paths(repo, before, after) or [])
+  )
+
+
+def _sync_python_dependencies(repo: Path) -> tuple[bool, str]:
+  """Install the locked Python deps in place — the SAME command the image build
+  runs — so an owner Apply lands a dependency bump without a container rebuild.
+
+  Returns ``(ok, error_tail)`` and never raises for an operational failure.
+  """
+  lock = repo / "backend" / "requirements.lock"
+  if not lock.is_file():
+    return True, ""
+  try:
+    proc = subprocess.run(
+      [
+        sys.executable, "-m", "pip", "install", "--no-cache-dir",
+        "--require-hashes", "-r", "requirements.lock",
+      ],
+      cwd=str(repo / "backend"),
+      capture_output=True,
+      text=True,
+      timeout=_DEP_SYNC_TIMEOUT,
+    )
+  except (subprocess.TimeoutExpired, OSError) as exc:
+    return False, repr(exc)[-500:]
+  if proc.returncode != 0:
+    detail = (proc.stderr or proc.stdout or "pip install failed").strip()
+    return False, detail[-500:]
+  return True, ""
 
 
 def _hook_git(repo: Path, *args: str) -> subprocess.CompletedProcess:
@@ -1515,6 +1563,25 @@ def reconcile_clone(
             ),
           )
 
+    # Dependency sync (owner Apply only): install the newly locked Python deps
+    # in place — the same command the image build runs — so the merged code can
+    # import them and this update lands with no container rebuild. Boot never
+    # does this: a fresh image already has them, boot must stay fast/offline, and
+    # a boot that merged a dep bump instead fails the probe below and rolls back
+    # (correct — the deps are not installed until an owner Apply). A pip failure
+    # is fail-closed exactly like a failed probe: reset to PRE and serve the old
+    # tree.
+    if not at_boot and _requirements_changed(repo, pre, _rev(repo, local)):
+      if progress:
+        progress(PlatformUpdatePhase.BUILDING)
+      deps_ok, deps_err = _sync_python_dependencies(repo)
+      if not deps_ok:
+        _reset_hard_to(repo, local, pre)
+        _write_rolled_back_flag(target, f"dependency_install_failed: {deps_err}")
+        CONFLICT_FLAG.unlink(missing_ok=True)
+        _clear_reconcile_pre()
+        return ReconcileResult("rolled_back", pre, pre, target, error=deps_err)
+
     # Post-reconcile import probe: a text-clean ff/merge can still produce a
     # tree that fails to import (upstream dropped a module a local edit imports;
     # a bad deploy). Roll back to the previous served commit rather than serve it
@@ -1710,7 +1777,11 @@ def _state_for_activation(
   impact: PlatformActivationImpact,
 ) -> PlatformUpdateState:
   level = impact["level"]
-  if level == platform_activation.ActivationLevel.SERVER_RESTART.value:
+  if level in {
+    platform_activation.ActivationLevel.SERVER_RESTART.value,
+    # Deps were installed in place during Apply; only the restart remains.
+    platform_activation.ActivationLevel.DEPENDENCY_SYNC.value,
+  }:
     return PlatformUpdateState.RESTART_NEEDED
   if level == platform_activation.ActivationLevel.LIVE.value:
     return PlatformUpdateState.UP_TO_DATE
@@ -1742,10 +1813,10 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
   rolled_back = ROLLED_BACK_FLAG.exists()
   activation = _platform_activation_impact(repo)
   activation_state = _state_for_activation(activation)
-  restart_needed = (
-    activation["level"]
-    == platform_activation.ActivationLevel.SERVER_RESTART.value
-  )
+  restart_needed = activation["level"] in {
+    platform_activation.ActivationLevel.SERVER_RESTART.value,
+    platform_activation.ActivationLevel.DEPENDENCY_SYNC.value,
+  }
   local = _local_branch(repo)
   target = _rev(repo, DEFAULT_TARGET_REF)
   target_contained = bool(target) and _is_ancestor(repo, target, local)
