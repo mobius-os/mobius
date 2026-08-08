@@ -2255,9 +2255,24 @@ export default function Shell() {
       })
     } else if (ev.type === 'chat_run_started') {
       if (ev.chatId) {
+        // Capture drawer membership BEFORE the mark* projections below: those
+        // only patch an existing row, never insert one, so this stays a true
+        // read of whether the drawer already knows this chat.
+        const knownInDrawer = chatsRef.current.some(
+          c => String(c.id) === String(ev.chatId),
+        )
         markChatRunActivity(ev.chatId)
         markStreamingStart(ev.chatId)
         markChatRunState(ev.chatId, true)
+        // A run can be the drawer's FIRST evidence of a chat created entirely
+        // server-side — the platform/app conflict resolver, a background or
+        // morning agent, autopilot. selectChat only navigates; it never
+        // inserts a row, so such a chat is invisible in recents until some
+        // unrelated refresh happens to run. When the started chat isn't in the
+        // cached list yet, pull server truth so it appears immediately.
+        if (!knownInDrawer) {
+          void invalidateShellListCache('chats').then(refreshChats)
+        }
       }
     } else if (ev.type === 'chat_run_finished') {
       const chatId = ev.chatId
