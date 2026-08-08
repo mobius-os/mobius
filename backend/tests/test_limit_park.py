@@ -40,6 +40,7 @@ from app.chat_writer import (
   ResolvePark,
   RollbackAutoResume,
   StartTurn,
+  _tail_open_question_id,
   get_writer,
 )
 from app.database import SessionLocal
@@ -302,6 +303,97 @@ def test_park_run_parks_row_and_clears_marker():
   assert row["ended_at"] is not None
   # The per-chat marker is cleared: the turn is over, the chat is not busy.
   assert _chat_row(cid)["running_status"] is None
+
+
+def _pending_question_id(chat_id: str):
+  db = SessionLocal()
+  try:
+    return db.query(models.Chat).filter(
+      models.Chat.id == chat_id
+    ).first().pending_question_id
+  finally:
+    db.close()
+
+
+def _open_question_transcript(qid: str):
+  return [
+    {"role": "user", "content": "help me choose", "ts": 1},
+    {"role": "assistant", "ts": 2, "blocks": [
+      {"type": "text", "content": "Here are the options."},
+      {"type": "question", "question_id": qid,
+       "questions": [{"question": "Which one?"}]},
+    ]},
+  ]
+
+
+def test_restart_park_restores_open_question_marker_from_transcript():
+  """A resumable park re-establishes the open-question marker from the parked
+  transcript.
+
+  Regression for the restart-resume-past-an-unanswered-question bug (chat
+  0f08c0c3): drain-for-restart calls Finalize (which clears the marker) and
+  THEN ParkRun. ParkRun owns the "resumable pause keeps the open question"
+  invariant, so it must re-derive the marker even though it enters with the
+  marker already None. Without it the resume gate saw None and continued past
+  the grayed-out card.
+  """
+  cid = "park-restore-open-q"
+  token = "rt-park-restore-open-q"
+  _seed_chat(cid, messages=_open_question_transcript("restart-q"))
+  _seed_run(cid, token)
+  assert _pending_question_id(cid) is None  # the post-Finalize state
+
+  get_writer().submit(ParkRun(
+    chat_id=cid, run_token=token,
+    parked_until=datetime(2026, 7, 11, 1, 40),
+    park_reason="restart", restart_nonce="nonce-restore-1234",
+  )).result(timeout=5)
+
+  assert _run_row(token)["status"] == "parked"
+  assert _pending_question_id(cid) == "restart-q"
+
+
+def test_park_run_leaves_marker_none_when_transcript_has_no_open_question():
+  """An ordinary park (tail is normal output) must not invent a marker."""
+  cid = "park-no-open-q"
+  token = "rt-park-no-open-q"
+  _seed_chat(cid, messages=[
+    {"role": "user", "content": "do work", "ts": 1},
+    {"role": "assistant", "ts": 2,
+     "blocks": [{"type": "text", "content": "All done."}]},
+  ])
+  _seed_run(cid, token)
+
+  get_writer().submit(ParkRun(
+    chat_id=cid, run_token=token,
+    parked_until=datetime(2026, 7, 11, 1, 40),
+    park_reason="restart", restart_nonce="nonce-noq-1234",
+  )).result(timeout=5)
+
+  assert _run_row(token)["status"] == "parked"
+  assert _pending_question_id(cid) is None
+
+
+def test_tail_open_question_id_derivation():
+  """The shared rule ParkRun and the boot backfill both use."""
+  qid = "q-tail"
+  assert _tail_open_question_id(_open_question_transcript(qid)) == qid
+  # Answered -> not open.
+  assert _tail_open_question_id([
+    {"role": "assistant", "blocks": [
+      {"type": "question", "question_id": qid, "answers": {"Which one?": "A"}}]},
+  ]) is None
+  # A trailing user message means the assistant is no longer the tail.
+  assert _tail_open_question_id(
+    _open_question_transcript(qid) + [{"role": "user", "content": "hi"}]
+  ) is None
+  # Oversized id rejected (the column is VARCHAR(64)).
+  assert _tail_open_question_id([
+    {"role": "assistant", "blocks": [
+      {"type": "question", "question_id": "x" * 65}]},
+  ]) is None
+  assert _tail_open_question_id([]) is None
+  assert _tail_open_question_id(None) is None
 
 
 def test_restart_park_carries_one_shot_intent_nonce():
