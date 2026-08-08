@@ -409,16 +409,6 @@ export default function Drawer({
     startRename(kind, id, surface = 'drawer') {
       rowActionInputsRef.current.setRenaming({ kind, id, surface })
     },
-    // Closing the menu consumes its Back-stack sentinel, and the traversal that
-    // follows drops focus to the document a few milliseconds later. The menu's
-    // post-close animation frame is the one place that focus is reclaimed, so
-    // its target has to be whatever the action left behind. Rename replaces the
-    // row trigger with an editor, and reasserting focus onto the now-unmounted
-    // trigger does nothing at all — the editor stays blurred, and its own blur
-    // handler then commits and unmounts it before the user can type.
-    claimMenuFocusReturn(element) {
-      rowActionInputsRef.current.menuRestoreFocusRef.current = element
-    },
     cancelRename() {
       rowActionInputsRef.current.setRenaming(null)
     },
@@ -1406,15 +1396,21 @@ const DrawerRow = memo(function DrawerRow({
     }
   }, [drawerRowGesturesRef, id, kind, variant])
 
-  // Autofocus + select-all on rename open so the user can either retype
-  // from scratch or tap into the existing name to edit it.
+  // Autofocus + select-all on rename open so the user can either retype from
+  // scratch or tap into the existing name to edit it. Defer one frame: opening
+  // rename tears down the action menu, and focusing synchronously here races
+  // the browser moving focus off the just-unmounted menu item, which overrides
+  // the editor focus. A frame later the teardown has settled and focus sticks.
   useEffect(() => {
-    if (renaming && inputRef.current) {
-      actions.claimMenuFocusReturn(inputRef.current)
-      inputRef.current.focus()
-      inputRef.current.select()
-    }
-  }, [actions, renaming])
+    if (!renaming) return undefined
+    const frame = requestAnimationFrame(() => {
+      const input = inputRef.current
+      if (!input) return
+      input.focus()
+      input.select()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [renaming])
 
   function commitRename() {
     if (cancelingRef.current) {
@@ -1428,7 +1424,22 @@ const DrawerRow = memo(function DrawerRow({
   function onRenameBlur() {
     const input = inputRef.current
     requestAnimationFrame(() => {
-      if (document.activeElement !== input) commitRename()
+      const active = document.activeElement
+      if (active === input) return
+      // Closing the action menu calls history.back() to release its Back-stack
+      // entry; that popstate drops focus to <body> a frame later. That is the
+      // app moving focus, not the user leaving the field, so reclaim it instead
+      // of committing — otherwise the just-opened editor blur-commits and
+      // vanishes. A real exit tabs to another control; outside-pointer and
+      // Escape cancel through their own paths (cancelingRef).
+      const focusDropped = !active
+        || active === document.body
+        || active === document.documentElement
+      if (focusDropped && input?.isConnected && !cancelingRef.current) {
+        input.focus()
+        return
+      }
+      commitRename()
     })
   }
 

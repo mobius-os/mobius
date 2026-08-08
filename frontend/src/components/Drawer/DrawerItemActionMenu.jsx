@@ -288,7 +288,9 @@ export default function DrawerItemActionMenu({
                 type="button"
                 role="menuitem"
                 className="drawer__item-action-item"
-                onClick={() => run(onRename)}
+                // Rename opens an inline editor that focuses itself, so the menu
+                // must not restore focus to the (now-unmounted) row trigger.
+                onClick={() => run(onRename, { restoreFocus: false })}
               >
                 Rename
               </button>
