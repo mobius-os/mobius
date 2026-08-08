@@ -814,4 +814,14 @@
   .shell--immersive > .shell__content {
     margin-left: 0;
   }
+
+  /* The left rail/sidebar backdrop (--desktop-rail-width, or the full
+     --desktop-sidebar-width when docked) is painted by .shell::before at
+     z-index 2, ABOVE the z-index:1 content. Immersive zeroes the content
+     margin so the canvas spans full width, but this strip would keep painting
+     var(--bg) over the game's left edge — a black column on a dark theme.
+     Suppress it while immersive, mirroring .shell--immersive::after (line 63). */
+  .shell--immersive::before {
+    display: none;
+  }
 }
