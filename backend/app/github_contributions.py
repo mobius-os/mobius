@@ -1403,13 +1403,14 @@ def _github_remote_slug(remote_url: str) -> str | None:
 
 def _ensure_owner_fork_remote(repo: Path, upstream_repo: str, login: str) -> str:
   """Make local remote `fork` point at the approving owner's fork."""
-  existing = _git_ops._git(repo, "remote", "get-url", "fork", check=False)
-  if existing.returncode == 0:
-    actual_slug = _github_remote_slug(existing.stdout)
-    if actual_slug and actual_slug.split("/", 1)[0].lower() == login.lower():
-      return actual_slug
-    # The staged contribution checkout is disposable. Replacing a stale
-    # remote is safer than pushing reviewed code to an ambient `fork` URL.
+  # A cached `fork` remote is never trusted on its own: it can name a fork the
+  # owner has since deleted on GitHub, and pushing reviewed code at a missing
+  # repository fails with an opaque error. Drop any existing remote and always
+  # re-resolve through `gh repo fork`, which is idempotent — it reuses the
+  # owner's fork or creates one — so a stale, ambient, or deleted remote all
+  # heal the same way. The staged contribution checkout is disposable, so
+  # replacing the remote is safe.
+  if _git_ops._git(repo, "remote", "get-url", "fork", check=False).returncode == 0:
     _git_ops._git(repo, "remote", "remove", "fork", check=False)
 
   origin = _git_ops._git(repo, "remote", "get-url", "origin", check=False)

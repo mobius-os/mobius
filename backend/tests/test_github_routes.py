@@ -2807,6 +2807,49 @@ def test_ensure_owner_fork_remote_runs_in_repo_after_pinning_origin(
   assert all("mobius-os/app-demo" not in call for call in gh_calls)
 
 
+def test_ensure_owner_fork_remote_never_trusts_a_cached_remote(
+  tmp_path, monkeypatch,
+):
+  from app.routes.github import _ensure_owner_fork_remote
+
+  repo = tmp_path / "repo"
+  repo.mkdir()
+  git_calls = []
+  gh_calls = []
+  reforked = False
+
+  def fake_git(repo_path, *args, check=True):
+    nonlocal reforked
+    git_calls.append(args)
+    if args == ("remote", "get-url", "fork"):
+      # A cached remote is present but names a fork the owner deleted; after
+      # re-resolving, the remote points at the live fork.
+      if reforked:
+        return _cp("https://github.com/octocat/mobius.git\n")
+      return _cp("https://github.com/octocat/stale-fork.git\n")
+    if args == ("remote", "get-url", "origin"):
+      return _cp("https://github.com/mobius-os/mobius.git\n")
+    return _cp("")
+
+  def fake_gh(repo_path, *args, check=True):
+    nonlocal reforked
+    gh_calls.append(args)
+    if args == ("repo", "fork", "--remote", "--remote-name", "fork"):
+      reforked = True
+    return _cp("")
+
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
+
+  fork_slug = _ensure_owner_fork_remote(repo, "mobius-os/mobius", "octocat")
+
+  assert fork_slug == "octocat/mobius"
+  # The cached remote is dropped and re-resolved through gh, never returned
+  # directly — so a deleted fork heals instead of failing the push.
+  assert ("remote", "remove", "fork") in git_calls
+  assert ("repo", "fork", "--remote", "--remote-name", "fork") in gh_calls
+
+
 def _commit_metadata(
   sha,
   *,
