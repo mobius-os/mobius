@@ -127,6 +127,13 @@ export default function Drawer({
   const streamingSet = streamingChatIds || EMPTY_SET
   const attentionSet = attentionChatIds || EMPTY_SET
   const newAppSet = newAppIds || EMPTY_SET
+  // One source of truth for which row the focused pane is showing, so a chat
+  // and an app are selected by the same rule wherever the row is rendered.
+  const isRowActive = ({ kind, item }) => (
+    kind === 'chat'
+      ? activeView === 'chat' && activeChatId === item.id
+      : activeView === 'canvas' && Number(activeAppId) === Number(item.id)
+  )
   const resizeRef = useRef(null)
   const pinnedReorderGenerationRef = useRef(0)
   const [pinnedOrderHandoff, setPinnedOrderHandoff] = useState(null)
@@ -1054,8 +1061,8 @@ export default function Drawer({
               <button
                 ref={appsButtonRef}
                 type="button"
-                className={`drawer__item drawer__item--apps${appsActive ? ' drawer__item--active' : ''}`}
-                aria-current={appsActive ? 'page' : undefined}
+                className={`drawer__item drawer__item--apps${activeView === 'apps' ? ' drawer__item--active' : ''}`}
+                aria-current={activeView === 'apps' ? 'page' : undefined}
                 onClick={openApps}
               >
                 <span className="drawer__item-icon" aria-hidden="true">
@@ -1089,11 +1096,7 @@ export default function Drawer({
                       attention={kind === 'chat'
                         ? attentionSet.has(item.id)
                         : newAppSet.has(Number(item.id))}
-                      active={!appsActive && (
-                        kind === 'chat'
-                          ? activeView === 'chat' && activeChatId === item.id
-                          : activeView === 'canvas' && Number(activeAppId) === Number(item.id)
-                      )}
+                      active={isRowActive({ kind, item })}
                       renaming={!!(renaming
                         && renaming.surface === 'drawer'
                         && renaming.kind === kind
@@ -1133,11 +1136,7 @@ export default function Drawer({
                     attention={kind === 'chat'
                       ? attentionSet.has(item.id)
                       : newAppSet.has(Number(item.id))}
-                    active={!appsActive && (
-                      kind === 'chat'
-                        ? activeView === 'chat' && activeChatId === item.id
-                        : activeView === 'canvas' && Number(activeAppId) === Number(item.id)
-                    )}
+                    active={isRowActive({ kind, item })}
                     renaming={!!(renaming
                       && renaming.surface === 'drawer'
                       && renaming.kind === kind

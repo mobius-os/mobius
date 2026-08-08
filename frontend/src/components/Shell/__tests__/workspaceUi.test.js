@@ -827,7 +827,8 @@ test('the Apps tab never disables the mobile drawer layered above it', () => {
     'workspace content is inert while the drawer is open; the drawer must stay interactive')
   assert.doesNotMatch(drawer, /interactionLocked \|\| appsActive/,
     'Apps is a tab underneath navigation, not a modal owner of Escape')
-  assert.match(drawer, /appsActive \? ' drawer__item--active'/)
+  assert.match(drawer, /activeView === 'apps' \? ' drawer__item--active'/,
+    'the Apps entry highlights from the focused-pane route, matching how chats do')
   assert.match(shell, /appsActive=\{appsVisibleAsTab\}/)
 })
 
