@@ -1054,8 +1054,8 @@ export default function Drawer({
               <button
                 ref={appsButtonRef}
                 type="button"
-                className={`drawer__item drawer__item--apps${appsActive ? ' drawer__item--active' : ''}`}
-                aria-current={appsActive ? 'page' : undefined}
+                className={`drawer__item drawer__item--apps${activeView === 'apps' ? ' drawer__item--active' : ''}`}
+                aria-current={activeView === 'apps' ? 'page' : undefined}
                 onClick={openApps}
               >
                 <span className="drawer__item-icon" aria-hidden="true">
@@ -1089,11 +1089,11 @@ export default function Drawer({
                       attention={kind === 'chat'
                         ? attentionSet.has(item.id)
                         : newAppSet.has(Number(item.id))}
-                      active={!appsActive && (
+                      active={
                         kind === 'chat'
                           ? activeView === 'chat' && activeChatId === item.id
                           : activeView === 'canvas' && Number(activeAppId) === Number(item.id)
-                      )}
+                      }
                       renaming={!!(renaming
                         && renaming.surface === 'drawer'
                         && renaming.kind === kind
@@ -1133,11 +1133,11 @@ export default function Drawer({
                     attention={kind === 'chat'
                       ? attentionSet.has(item.id)
                       : newAppSet.has(Number(item.id))}
-                    active={!appsActive && (
+                    active={
                       kind === 'chat'
                         ? activeView === 'chat' && activeChatId === item.id
                         : activeView === 'canvas' && Number(activeAppId) === Number(item.id)
-                    )}
+                    }
                     renaming={!!(renaming
                       && renaming.surface === 'drawer'
                       && renaming.kind === kind
