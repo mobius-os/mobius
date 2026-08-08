@@ -534,6 +534,16 @@ def test_reconcile_wakes_parent_for_completed_while_away(db, monkeypatch):
   assert len(starts) == 1
 
 
+def test_is_delegation_child_detects_child_and_ignores_others(db):
+  from app.delegations import is_delegation_child
+
+  _, child_id, _ = _seed_delegation(db, suffix="isc")
+  assert is_delegation_child(child_id) is True
+  assert is_delegation_child("parent-isc") is False
+  assert is_delegation_child("no-such-chat") is False
+  assert is_delegation_child("") is False
+
+
 def test_wake_disposition_gate_excludes_non_durable_terminals():
   import app.chat_queue as chat_queue
   from app.chat import _DELEGATION_WAKE_DISPOSITIONS
