@@ -380,8 +380,10 @@ test('the docked sidebar offsets only direct shell layout rows', () => {
   // from the pane rectangle that owns it.
   assert.match(shellCss, /\.shell--drawer-docked > \.shell__tabstrip,/)
   assert.match(shellCss, /\.shell--drawer-docked > \.shell__content/)
-  assert.match(shellCss, /\.shell--immersive\.shell--drawer-docked > \.shell__tabstrip,/)
-  assert.match(shellCss, /\.shell--immersive\.shell--drawer-docked > \.shell__content/)
+  // Both full-bleed games and app-owned bar collapse use the shared hidden-bar
+  // layout owner; either must release the docked drawer's reserved width.
+  assert.match(shellCss, /\.shell--barhidden\.shell--drawer-docked > \.shell__tabstrip,/)
+  assert.match(shellCss, /\.shell--barhidden\.shell--drawer-docked > \.shell__content/)
   assert.doesNotMatch(shellCss, /\.shell--drawer-docked \.shell__tabstrip/)
 })
 

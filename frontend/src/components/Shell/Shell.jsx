@@ -329,6 +329,12 @@ export default function Shell() {
   // immersive can solo its pane over the whole workspace (§4/§9). Full contract:
   // lib/immersive.js.
   const [immersiveAppId, dispatchImmersive] = useReducer(immersiveReducer, null)
+  // Which flavor of hidden-bar the current holder asked for: 'full' (games —
+  // full-bleed under the notch) or 'bar' (general apps — hide the toolbar but
+  // keep the status-bar strip, so the app looks like a standalone PWA). Only a
+  // real-time request carries a mode; a lifecycle replay (in-place app update)
+  // omits it and leaves the last mode intact.
+  const [immersiveMode, setImmersiveMode] = useState('full')
   const [nowPlaying, setNowPlaying] = useState(null)
   const mediaSessionOwnerRef = useRef(null)
   if (!mediaSessionOwnerRef.current) {
@@ -341,8 +347,9 @@ export default function Shell() {
     mediaSessionOwnerRef.current.control(action)
   }, [])
   // Stable identity — AppCanvas's message-listener effect depends on it.
-  const handleImmersive = useCallback((appId, value) => {
+  const handleImmersive = useCallback((appId, value, mode) => {
     dispatchImmersive({ type: 'request', appId, value })
+    if (value && (mode === 'bar' || mode === 'full')) setImmersiveMode(mode)
   }, [])
   // Immersive is a temporary overlay lease, independent of the durable builder /
   // single worlds. A verified request from the focused app may therefore solo
@@ -3072,7 +3079,7 @@ export default function Shell() {
       data-mode-phase={modeView.active?.phase || modeState.transition?.phase || 'idle'}
       data-mode-epoch={modeView.active?.id || modeState.transition?.id || undefined}
       data-workspace-visual-state={workspaceVisualState}
-      className={`shell${immersiveActive ? ' shell--immersive' : ''}${desktopSidebarReserved ? ' shell--drawer-docked' : ''}`}>
+      className={`shell${immersiveActive ? ` shell--barhidden ${immersiveMode === 'bar' ? 'shell--barcollapsed' : 'shell--immersive'}` : ''}${desktopSidebarReserved ? ' shell--drawer-docked' : ''}`}>
       <a
         className="shell__skip-link"
         href="#main-content"
@@ -3358,7 +3365,8 @@ export default function Shell() {
               offlineCapable={!!app?.offline_capable}
               capabilityContract={app?.capability_contract || null}
               pendingIntent={appIntents[String(id)] || null}
-              immersive={immersiveActive && String(immersiveAppId) === String(id)}
+              immersive={immersiveActive && immersiveMode === 'full' && String(immersiveAppId) === String(id)}
+              barCollapsed={immersiveActive && immersiveMode === 'bar' && String(immersiveAppId) === String(id)}
               onNavPush={appNavPush}
               onNavPop={appNavPop}
               onNavReset={appNavReset}
@@ -3663,12 +3671,9 @@ export default function Shell() {
           />
         )}
       </main>
-      {/* SHELL-provided immersive exit. With the top bar gone the drawer
-          toggle is unreachable, so this floating button is the guaranteed
-          way back — an app can never trap the user in immersive mode.
-          Exit only clears the shell-side request; re-entry requires another
-          explicit app post, so the user remains in control. */}
-      {immersiveActive && (
+      {/* Full-bleed apps need the shell exit. Bar-collapse apps retain their own
+          header/logo, whose hold gesture is the way back. */}
+      {immersiveActive && immersiveMode !== 'bar' && (
         <button
           ref={immersiveExitRef}
           type="button"

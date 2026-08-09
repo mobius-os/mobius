@@ -240,6 +240,12 @@ const AppCanvas = forwardRef(function AppCanvas({
   appId, version = 0, appName, appSlug, offlineCapable = false,
   capabilityContract = null,
   immersive = false,
+  // The lighter "look like a standalone app" collapse (mode:'bar'): the shell
+  // hides its toolbar but keeps the status-bar strip, so unlike `immersive`
+  // (full-bleed) the app is NOT painted under the notch and needs no safe-area
+  // insets. It still counts as "chrome hidden" for the app's immersive helper
+  // echo, so the app's toggle()/`.hidden` stay correct.
+  barCollapsed = false,
   // Whether this app is the currently-visible canvas (canvas view + active
   // app). One prop, two consumers:
   //   - `moebius:frame-visibility` — the shell keeps recently-used apps
@@ -724,9 +730,14 @@ const AppCanvas = forwardRef(function AppCanvas({
       // garbage reads as a release, the safe direction).
       if (msg.type === 'moebius:immersive') {
         const value = msg.value === true
+        // 'bar' is the general-app standalone-look collapse; anything else
+        // (including absent) is the game full-bleed default. Identity comes
+        // from the verified source, never the payload — but the mode is a
+        // harmless presentation hint the frame may choose.
+        const mode = msg.mode === 'bar' ? 'bar' : 'full'
         frameImmersiveRef.current.set(srcVersion, value)
         if (srcVersion === liveVersionRef.current && activeRef.current) {
-          onImmersive?.(appId, value)
+          onImmersive?.(appId, value, mode)
         }
         return
       }
@@ -1070,6 +1081,21 @@ const AppCanvas = forwardRef(function AppCanvas({
     postToFrame(v, { type: 'moebius:frame-insets', insets })
   }
 
+  // Echo the shell's APPLIED immersive verdict for this app so the runtime's
+  // window.mobius.immersive helper stays authoritative — toggle()/`.hidden`
+  // must reflect a release the shell made on its own (the floating exit button,
+  // or an app switch that dropped the lease), not just the app's last request.
+  // The `immersive` prop is exactly that applied verdict (active canvas AND this
+  // app holds the lease). Only the live frame is the immersive holder, so a
+  // hidden/incoming buffered frame always learns `false`.
+  function sendImmersiveState(v) {
+    postToFrame(v, {
+      type: 'moebius:immersive-state',
+      // Either flavor of hidden bar counts as "hidden" for the app helper.
+      value: v === liveVersionRef.current ? (immersive || barCollapsed) : false,
+    })
+  }
+
   // ── In-shell foreground/background signal ────────────────────────
   // Forward whether THIS app is the visible canvas. The shell keeps recently-
   // used apps mounted and hides the inactive ones with `visibility:hidden` on a
@@ -1126,6 +1152,15 @@ const AppCanvas = forwardRef(function AppCanvas({
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [immersive, swap.liveVersion])
+
+  // Keep the app's window.mobius.immersive helper in sync with the shell's
+  // applied verdict (see sendImmersiveState). Same triggers as the insets echo.
+  useEffect(() => {
+    for (const v of framesRef.current.keys()) {
+      if (loadedDocsRef.current.has(v)) sendImmersiveState(v)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [immersive, barCollapsed, swap.liveVersion])
 
   // Re-forward insets on viewport geometry change WHILE immersive. Rotating the
   // device or a window resize moves the notch/home-indicator (landscape puts
@@ -1298,6 +1333,7 @@ const AppCanvas = forwardRef(function AppCanvas({
     sendInit(v)
     sendOnlineStatus(v)
     sendInsets(v)
+    sendImmersiveState(v)
     // A booting incoming frame is invisible by construction and must not
     // start audio/rAF work before promotion, so it learns `visible:false`
     // here; the live frame gets the real visible verdict. Promotion re-sends

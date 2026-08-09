@@ -46,6 +46,11 @@
 //   window.mobius.nav.open(label, onBack)        -> { ready, outcome, close }
 //     outcome distinguishes host ownership from request failures; see
 //     building-apps.md.
+//   window.mobius.immersive.toggle() / set(hidden) -> hides/shows the Möbius top
+//     bar so an app with its own header takes the full pane (no two toolbars).
+//     .hidden getter, .subscribe(cb), and .holdToToggle(el) (long-press an
+//     element — e.g. the app's own logo — to toggle). Sessional; standalone
+//     ignores it. See src/lib/immersive.js + AppCanvas.jsx.
 //   window.mobius.capabilities.available(name, version?)
 //   window.mobius.capabilities.open(name, input)  -> capability session
 //     session.ready, session.result, session.on(event, cb), finish(), cancel()
@@ -75,6 +80,7 @@ import { makeSignal } from './signal.js'
 import { makeChat } from './chat.js'
 import { makeNav, makeSplit } from './navigation.js'
 import { makeCapabilities } from './capabilities.js'
+import { makeImmersive } from './immersive.js'
 import { tokenMatchesRuntime } from './token.js'
 
 export * from './storage.js'
@@ -82,6 +88,7 @@ export * from './signal.js'
 export * from './chat.js'
 export * from './navigation.js'
 export * from './capabilities.js'
+export * from './immersive.js'
 
 
 // ── P1-A: probed-online reactive backing ─────────────────────────────────────
@@ -200,6 +207,7 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
     chat: makeChat({ appId, getToken: scopedToken, storage }),
     nav: makeNav(),
     split: makeSplit(),
+    immersive: makeImmersive({ appId }),
   }
   window.mobius = api
   _runtimeContext = { identityKey, tokenRef, storage, signal, capabilities, api }

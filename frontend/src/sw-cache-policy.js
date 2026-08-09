@@ -43,7 +43,12 @@ export const SHELL_DATA_CACHE = 'mobius-shell-data'
 // changing the backend header leaves existing devices serving v5 indefinitely
 // on this cache-first route. Activation evicts that response before News (or
 // any other Wasm app) opens under the revised policy.
-export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v6'
+// Bumped -v6 → -v7 (2026-08-08): a cache-first app frame/module cached before a
+// runtime change keeps serving the OLD bundled runtime indefinitely — a device
+// holding it never sees a new window.mobius capability even after the app is
+// recompiled and the shell restarts. Activation evicts v6 so every client
+// refetches the current versioned module (with the current compiled runtime).
+export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v7'
 // Bumped -v2 → -v3 (2026-07-30): v2 standalone documents executed app-authored
 // modules directly at owner origin. The secure host now mounts the shared
 // opaque AppCanvas frame; activation must evict every cached v2 document so an

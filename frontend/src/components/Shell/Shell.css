@@ -60,7 +60,10 @@
   transform: translateY(0);
 }
 
-.shell--immersive::after {
+/* Both hidden-bar modes span the full content area; suppress the bottom chrome
+   for either. `shell--barhidden` is applied whenever the top toolbar is hidden
+   (full immersive OR the lighter bar-collapse). */
+.shell--barhidden::after {
   display: none;
 }
 
@@ -180,6 +183,36 @@
   display: none;
 }
 
+/* ── Bar-collapse mode (general apps: "look like a standalone app") ──
+   Unlike full immersive, the Möbius toolbar is hidden but the top
+   status-bar/notch strip is KEPT: the bar shrinks to exactly the safe-area
+   inset (its themed background stays), so the app's own header sits just below
+   the status bar like an installed/standalone PWA — never under the notch. On
+   a device with no top inset (desktop) the strip collapses to 0, so the app
+   header simply reaches the top. */
+.shell--barcollapsed .shell__bar {
+  height: env(safe-area-inset-top, 0px);
+  min-height: 0;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: 0;
+  border-bottom: none;
+  overflow: hidden;
+}
+.shell--barcollapsed .shell__bar > * {
+  display: none;
+}
+/* The safety-net exit floats top-RIGHT in bar-collapse so it never sits over
+   the app's own top-left logo (which is itself the toggle-back handle). */
+.shell--barcollapsed .shell__immersive-exit {
+  left: auto;
+  right: calc(env(safe-area-inset-right, 0px) + 10px);
+}
+
+/* Full standalone look: hide the nav drawer/sidebar too while the bar is
+   hidden (either mode), so the app owns the entire viewport with no Möbius
+   chrome. The floating exit restores everything. */
+.shell--barhidden #navigation-drawer { display: none !important; }
+
 /* Floating exit affordance, provided by the SHELL (never the app) so
    immersive mode can't trap the user — with the bar hidden this is the
    only chrome on screen. Safe-area-inset so the notch/punch-hole can't
@@ -235,8 +268,8 @@
 
 /* Immersive apps own the full viewport without overwriting the saved sidebar
    preference; the reserved width returns when immersive mode exits. */
-.shell--immersive.shell--drawer-docked > .shell__tabstrip,
-.shell--immersive.shell--drawer-docked > .shell__content {
+.shell--barhidden.shell--drawer-docked > .shell__tabstrip,
+.shell--barhidden.shell--drawer-docked > .shell__content {
   margin-left: 0;
 }
 
@@ -731,6 +764,15 @@
     border-bottom: 0;
   }
 
+  /* Bar-collapse (full standalone look) removes the rail/header entirely on
+     desktop — there is no notch here, so no status strip is needed and the
+     app owns the whole viewport. (Mobile keeps its safe-area strip via the
+     base .shell--barcollapsed rule.) This must live inside the desktop media
+     query to beat the .shell--drawer-docked height:58px rule above. */
+  .shell--barcollapsed .shell__bar {
+    display: none;
+  }
+
   .shell--drawer-docked .shell__bar-actions {
     position: absolute;
     top: 7px;
@@ -810,16 +852,18 @@
     margin-left: var(--desktop-sidebar-width);
   }
 
-  .shell--immersive > .shell__tabstrip,
-  .shell--immersive > .shell__content {
+  .shell--barhidden > .shell__tabstrip,
+  .shell--barhidden > .shell__content {
     margin-left: 0;
   }
 
-  /* Immersive zeroes the content margin so the canvas spans full width, but the
-     desktop left-rail backdrop (.shell::before) sits above the content at
-     z-index 2 and would keep painting var(--bg) over the canvas — a black column
-     on a dark theme. Suppress it while immersive, as we do for .shell--immersive::after. */
-  .shell--immersive::before {
+  /* The left rail/sidebar backdrop (--desktop-rail-width, or the full
+     --desktop-sidebar-width when docked) is painted by .shell::before at
+     z-index 2, ABOVE the z-index:1 content. Immersive zeroes the content
+     margin so the canvas spans full width, but this strip would keep painting
+     var(--bg) over the game's left edge — a black column on a dark theme.
+     Suppress it whenever the bar is hidden, mirroring .shell--barhidden::after. */
+  .shell--barhidden::before {
     display: none;
   }
 }
