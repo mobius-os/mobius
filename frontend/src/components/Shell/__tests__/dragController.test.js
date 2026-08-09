@@ -103,7 +103,7 @@ test('releasedInPlace is true only within the release radius', () => {
 
 test('a press exposes drag before a stationary hold opens actions', () => {
   assert.equal(PRESS_DRAG_HOLD_MS, 180)
-  assert.equal(PRESS_MENU_HOLD_MS, 400)
+  assert.equal(PRESS_MENU_HOLD_MS, 600)
   // The drag stage must precede the menu stage, so a short hold moves and only a
   // longer stationary hold opens actions — the single contract drawer rows,
   // launcher cards, and workspace tabs all share.

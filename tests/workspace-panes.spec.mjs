@@ -22,6 +22,7 @@ import { test, expect } from '@playwright/test'
 import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
 import { mockAcceptedMessages } from './_mockAcceptedMessages.mjs'
 import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
+import { PRESS_MENU_HOLD_MS } from '../frontend/src/components/Shell/dragController.js'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const DESKTOP_SIDEBAR_STORAGE_KEY = 'mobius:desktop-sidebar-open:v1'
@@ -659,7 +660,7 @@ test.describe('Workspace panes (PR2 gate)', () => {
       clientX: touchPoint.x,
       clientY: touchPoint.y,
     })
-    await page.waitForTimeout(450)
+    await page.waitForTimeout(PRESS_MENU_HOLD_MS + 50)
     await activeTab.dispatchEvent('pointerup', {
       pointerId: 41,
       pointerType: 'touch',

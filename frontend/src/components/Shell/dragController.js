@@ -41,11 +41,14 @@ export const POINTER_SLOP = 5
 // a long hold opens actions, identically everywhere. (Tabs previously diverged
 // with one longer hold whose RELEASE opened the menu; they now share this.)
 export const PRESS_DRAG_HOLD_MS = 180
-// Stay ahead of the platform's own long-press takeover. Some touch browsers
-// cancel the pointer around their native context-menu threshold; opening first
-// keeps the menu on our single Pointer Events path instead of a release-time
-// native contextmenu fallback.
-export const PRESS_MENU_HOLD_MS = 400
+// The menu wants a deliberate long hold, clearly separated from the short drag
+// grab above, so a hold-to-MOVE gesture has room to begin moving after the grab
+// haptic before this would fire — at 400ms the ~220ms window after the grab was
+// too tight and the menu kept stealing move attempts. The native long-press is
+// held off for the whole window by active suppression (the capture-phase
+// `contextmenu` preventDefault plus callout/selection disable in the binding),
+// not by staying under the browser's own threshold, so this can sit past it.
+export const PRESS_MENU_HOLD_MS = 600
 // Movement past this before a hold resolves yields to the source scroller.
 export const PRE_HOLD_MOVE_PX = 8
 // After a touch lift, a release that never moved past this is not a drop; the
