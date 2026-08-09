@@ -3,10 +3,11 @@ import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client
 import { QueryClientProvider, useIsRestoring } from '@tanstack/react-query'
 import ErrorBoundary from './components/ErrorBoundary/ErrorBoundary.jsx'
 import RecoveryLink from './components/ErrorBoundary/RecoveryLink.jsx'
+import PlatformDegradedNotice from './components/ErrorBoundary/PlatformDegradedNotice.jsx'
 import './components/ErrorBoundary/RecoveryPanel.css'
 import { api, beginEphemeralAuth, getToken, setToken, BASE } from './api/client.js'
 import * as setupSession from './lib/setupSession.js'
-import { setupQueries } from './hooks/queries.js'
+import { setupQueries, versionQueries } from './hooks/queries.js'
 import { queryClient, persistOptions } from './queryClient.js'
 import { shellReload } from './lib/shellReloadState.js'
 import { beginEmbedBootstrap } from './lib/chatEmbedBootstrap.js'
@@ -118,8 +119,19 @@ function AppRoot() {
                 ? 'sso'
                 : (ssoSignal === 'error' ? 'sso-error' : 'loading'))))
   const [status, setStatus] = useState(initialStatus)
+  // "Continue to the built-in version" hides the notice for THIS mount so the
+  // owner can use the working fallback. Deliberately not persisted: any reload
+  // re-surfaces it while the platform is still degraded, so it never hides.
+  const [degradedDismissed, setDegradedDismissed] = useState(false)
   const setupStatusQuery = setupQueries.status.useQuery({
     enabled: !hasToken && !ssoSignal && status !== 'install-pass',
+  })
+  // `/api/version` already owns the identity of the tree actually being served
+  // (`platform` vs the image-baked floor). Read it once the authenticated shell
+  // is selected instead of repurposing the setup-status request: managed SSO
+  // handoff deliberately skips that separate account-setup path.
+  const servedVersionQuery = versionQueries.current.useQuery({
+    enabled: hasToken && status === 'shell' && !STANDALONE_APP,
   })
   useEffect(() => {
     if (installPass && hasToken) clearInstallPassFromUrl()
@@ -298,6 +310,18 @@ function AppRoot() {
       }} />
     </Suspense>
   )
+  // The platform failed to import and we are serving the built-in copy. Surface
+  // it before the shell instead of running silently; "Continue" dismisses to the
+  // working fallback. Shell only (a standalone mini-app is not the repair owner).
+  if (
+    hasToken &&
+    status === 'shell' &&
+    !STANDALONE_APP &&
+    servedVersionQuery.data?.serving_source === 'baked' &&
+    !degradedDismissed
+  ) {
+    return <PlatformDegradedNotice onContinue={() => setDegradedDismissed(true)} />
+  }
   return (
     <Suspense fallback={<RouteLoading />}>
       {STANDALONE_APP
