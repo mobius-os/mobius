@@ -561,17 +561,14 @@ class ChatEventSink:
     # save is due (immediate for save-triggering types, throttled
     # otherwise).
     accumulated = process_event(event, self.assistant_blocks)
-    if event_type == "thinking" and self.assistant_blocks:
-      thought = self.assistant_blocks[-1]
-      content = str(thought.get("content") or "")
-      if len(content) > THINKING_INLINE_THRESHOLD:
-        # The reducer keeps the full run privately for persistence. The public
-        # event log/SSE gets only stable identity + version after the cutoff;
-        # this crossing event tells the client to discard its <=1KB prefix.
-        event["content"] = ""
-        event["thinking_deferred"] = True
-        event["thinking_revision"] = len(content)
-        event["duration_ms"] = thought.get("duration_ms", 0)
+    # Thinking streams live like answer text: the raw delta goes out on every
+    # event so a connected client appends it token-by-token (see
+    # streamReducers.appendThinkingChunk). We deliberately do NOT blank the delta
+    # past a size cutoff. The broadcaster coalesces thinking in its replay log
+    # the same way it coalesces text (see ChatBroadcast.publish), so the log
+    # stays bounded even as deltas flow; and persistence still stashes the full
+    # trace out-of-band as a deferred sidecar (see _deferred_snapshot), so the
+    # durable transcript stays lean and a reopened thought is fetched on demand.
     # `not self._steering`: a snapshot submitted mid-split would replace the
     # still-trailing pre-steer assistant message (A1) with continuation text
     # before A1 is sealed and the steered user row is appended. The split's

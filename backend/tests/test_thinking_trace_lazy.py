@@ -33,7 +33,7 @@ def test_thinking_stash_is_revision_monotonic(db):
     assert row.complete is True
 
 
-def test_sink_bounds_wire_and_snapshot_after_cutoff(db):
+def test_sink_streams_thinking_live_and_defers_only_persistence(db):
     bus = _Bus()
     sink = _ChatEventSink(bus, "trace-chat", run_token="rt", recall_binding=EMPTY_RECALL_BINDING)
     # Keep this unit test off the periodic transcript path; exercise the
@@ -44,13 +44,18 @@ def test_sink_bounds_wire_and_snapshot_after_cutoff(db):
     sink.publish({"type": "thinking", "content": first, "ts": 1000})
     sink.publish({"type": "thinking", "content": second, "ts": 1100})
 
+    # The live wire streams the raw deltas token-by-token, even past the size
+    # cutoff — never blanked, never flagged deferred. The client appends them the
+    # same way it appends answer-text deltas (the typewriter).
     assert bus.events[0]["content"] == first
-    assert bus.events[1]["content"] == ""
-    assert bus.events[1]["thinking_deferred"] is True
-    assert bus.events[1]["thinking_revision"] == len(first + second)
+    assert bus.events[1]["content"] == second
+    assert "thinking_deferred" not in bus.events[1]
     assert bus.events[0]["thinking_id"] == bus.events[1]["thinking_id"]
     assert sink.assistant_blocks[0]["content"] == first + second
 
+    # Persistence still defers past the cutoff: the durable transcript carries a
+    # bounded reference and the full trace is stashed out-of-band, so the
+    # transcript stays lean and a reopened thought is fetched on demand.
     snapshot, stashes = sink._deferred_snapshot(sink.assistant_blocks)
     block = snapshot["blocks"][0]
     assert "content" not in block
@@ -61,6 +66,24 @@ def test_sink_bounds_wire_and_snapshot_after_cutoff(db):
     get_writer().submit(Barrier()).result(timeout=5)
     row = db.query(models.ThinkingTrace).one()
     assert row.content == first + second
+
+
+def test_broadcast_coalesces_thinking_deltas_in_replay_log():
+    from app.broadcast import ChatBroadcast
+
+    bc = ChatBroadcast("coalesce-chat")
+    # Same thought + same segment: deltas merge into ONE bounded log entry, so a
+    # long thought is a handful of entries instead of thousands on reconnect.
+    bc.publish({"type": "thinking", "content": "aa", "thinking_id": "t1", "segment_id": "s1"})
+    bc.publish({"type": "thinking", "content": "bb", "thinking_id": "t1", "segment_id": "s1"})
+    # A new segment of the same thought stays a separate entry so replayed
+    # reasoning keeps its paragraph breaks.
+    bc.publish({"type": "thinking", "content": "cc", "thinking_id": "t1", "segment_id": "s2"})
+    # A different thought is its own entry.
+    bc.publish({"type": "thinking", "content": "dd", "thinking_id": "t2", "segment_id": "s1"})
+
+    thinking = [e["content"] for e in bc.event_log if e.get("type") == "thinking"]
+    assert thinking == ["aabb", "cc", "dd"]
 
 
 def test_thinking_trace_endpoint_serves_exact_full_text(client, auth, db):

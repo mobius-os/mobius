@@ -160,6 +160,26 @@ class ChatBroadcast:
       self.event_log[-1] = dict(
         prev, content=(prev.get("content") or "") + (event.get("content") or "")
       )
+    elif (
+      event_type == "thinking"
+      and self.event_log
+      and self.event_log[-1].get("type") == "thinking"
+      and self.event_log[-1].get("thinking_id") == event.get("thinking_id")
+      and self.event_log[-1].get("segment_id") == event.get("segment_id")
+      and len(self.event_log[-1].get("content") or "")
+        + len(event.get("content") or "") <= _TEXT_LOG_SEGMENT_MAX
+    ):
+      # Reasoning now streams as deltas like text (the sink no longer blanks it),
+      # so coalesce it in the replay log the same way: merge deltas of the same
+      # thinking segment in place, keeping distinct segments (and distinct
+      # thoughts) as separate entries so a reconnecting client replays the same
+      # paragraph structure. Live subscribers already received each raw delta
+      # below; this only bounds the log so a long thought is a handful of entries
+      # instead of thousands.
+      prev = self.event_log[-1]
+      self.event_log[-1] = dict(
+        prev, content=(prev.get("content") or "") + (event.get("content") or "")
+      )
     elif event_type == "task_progress" and self._coalesce_task_progress(event):
       # The invariant is that the coalescer already appended the newest tick.
       pass

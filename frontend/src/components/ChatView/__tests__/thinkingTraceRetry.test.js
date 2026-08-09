@@ -27,13 +27,22 @@ test('missing Retry-After falls back to capped exponential backoff', () => {
   assert.equal(pendingTraceRetryDelay(undefined, 8), 5000)
 })
 
-test('thinking expansion is bounded until full content is explicitly requested', () => {
-  assert.match(source, /\+ \(fullRequested \? '' : '&preview=1'\)/)
-  assert.match(source, /loadFull: \(\) => \{\s*setFullRequested\(true\)/)
-  assert.match(source, /setFullRequested\(false\)[\s\S]*setRefreshNonce/,
-    'a growing live trace returns to previews instead of repeatedly loading full text')
+test('an open thought shows its full text and never blanks', () => {
+  // No bounded preview and no exact-revision pin: pull the whole trace the
+  // server has now, so there is never a "bounded preview" and a live thought
+  // cannot hang on "Loading…" waiting for a revision the server hasn't written.
+  assert.doesNotMatch(source, /preview=1/, 'no bounded-preview fetch')
+  assert.doesNotMatch(source, /[?&]revision=/, 'no exact-revision pin that could 202-hang')
+  assert.doesNotMatch(source, /loadFull/, 'full is the default; no explicit full-load step')
+  assert.match(source, /thinking-trace\/\$\{encodeURIComponent\(thought\.thinking_id\)\}/)
+  // Inline bridge + honest load state keep text on screen across the
+  // inline->deferred crossover and through background re-fetches / failures.
+  assert.match(source, /bridgeRef\.current = thought\.content/,
+    'captures the inline prefix before the server defers the thought')
+  assert.match(source, /loadedContent \|\| bridgeRef\.current/,
+    'shows the bridge until the first full fetch lands')
+  assert.match(source, /loadState: content \? 'ready' : loadState/,
+    'a re-fetch or transient failure never blanks text already on screen')
   assert.match(source, /if \(!open && deferred\) \{[\s\S]*setLoadedContent\(''\)/,
-    'closing the thought releases its loaded payload')
-  assert.match(source, /traceComplete \|\| !!thought\.thinking_complete/,
-    'final promotion unlocks explicit full loading without a background completion fetch')
+    'closing drops the fetched copy — no persistent local copy')
 })

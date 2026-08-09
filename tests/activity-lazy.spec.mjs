@@ -384,8 +384,8 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
   const toolUseId = 'tool-ui-contract'
   const excerpt = 'EXCERPT_SENTINEL: bounded output already on the transcript'
   const fullOutput = 'FULL_OUTPUT_SENTINEL: lazily fetched command output'
-  const thoughtPreview = 'THINKING_PREVIEW_SENTINEL: bounded reasoning preview'
-  const thoughtText = `${thoughtPreview}\nTHINKING_FULL_SENTINEL: explicit full trace`
+  const thoughtPreview = 'THINKING_PREFIX_SENTINEL: start of reasoning'
+  const thoughtText = `${thoughtPreview}\nTHINKING_FULL_SENTINEL: complete trace`
   const blocks = [
     {
       type: 'thinking',
@@ -431,13 +431,7 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
     route.fulfill({ status: 204, body: '' }))
 
   let thinkingRequests = 0
-  let thinkingFullRequests = 0
   await page.route(new RegExp(`/api/chats/${chat.id}/thinking-trace/${thinkingId}`), route => {
-    const preview = new URL(route.request().url()).searchParams.get('preview') === '1'
-    if (!preview) {
-      thinkingFullRequests += 1
-      return route.fulfill({ status: 200, contentType: 'text/plain', body: thoughtText })
-    }
     thinkingRequests += 1
     if (thinkingRequests === 3) {
       return route.fulfill({ status: 503, contentType: 'text/plain', body: 'offline' })
@@ -445,11 +439,7 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
     return route.fulfill({
       status: 200,
       contentType: 'text/plain',
-      headers: {
-        'X-Thinking-Complete': '1',
-        'X-Thinking-Preview-Complete': '0',
-      },
-      body: thoughtPreview,
+      body: thoughtText,
     })
   })
 
@@ -506,7 +496,6 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
   await expect(activity.locator(`[id="${timelineId}"]`)).toHaveCount(1)
   await page.waitForTimeout(250)
   expect(thinkingRequests).toBe(0)
-  expect(thinkingFullRequests).toBe(0)
   expect(toolPreviewRequests).toBe(0)
   expect(toolCopyRequests).toBe(0)
 
@@ -520,7 +509,6 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
   await expect(toolToggle).toHaveAttribute('aria-expanded', 'false')
   await expect(toolToggle).toHaveAttribute('aria-controls', /.+/)
   expect(thinkingRequests).toBe(0)
-  expect(thinkingFullRequests).toBe(0)
   expect(toolPreviewRequests).toBe(0)
   expect(toolCopyRequests).toBe(0)
   for (const toggle of [thoughtToggle, toolToggle]) {
@@ -550,12 +538,8 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
   }
 
   await thoughtToggle.click()
-  await expect(page.locator('[data-chat-surface="painted"]').getByText(thoughtPreview)).toBeVisible()
-  expect(thinkingRequests).toBe(1)
-  await expect(page.locator('[data-chat-surface="painted"]').getByText('THINKING_FULL_SENTINEL', { exact: false })).toHaveCount(0)
-  await page.getByRole('button', { name: 'Load full thought' }).click()
   await expect(page.locator('[data-chat-surface="painted"]').getByText('THINKING_FULL_SENTINEL', { exact: false })).toBeVisible()
-  expect(thinkingFullRequests).toBe(1)
+  expect(thinkingRequests).toBe(1)
   await thoughtToggle.click()
   await expect(page.locator('[data-chat-surface="painted"]').getByText(thoughtPreview)).toHaveCount(0)
   await thoughtToggle.click()
@@ -632,7 +616,6 @@ test('activity stays nested and lazy, aborts on close, and copies exact tool out
   await expect(activity.locator('.chat__tool-header')).toHaveAttribute('aria-expanded', 'true')
   await expect(page.locator('[data-chat-surface="painted"]').getByText(fullOutput)).toBeVisible()
   expect(thinkingRequests).toBe(4)
-  expect(thinkingFullRequests).toBe(1)
   expect(toolPreviewRequests).toBe(6)
   expect(toolCopyRequests).toBe(0)
 })

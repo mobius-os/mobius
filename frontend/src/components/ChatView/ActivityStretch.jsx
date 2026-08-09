@@ -119,24 +119,6 @@ function TimelineThought({ label, thought, chatId, disclosureKey, direct = false
       )}
       <div ref={bodyRef} id={bodyId} className="chat__reasoning-body" hidden={!open}>
         {open && body}
-        {open && loadState === 'ready' && !trace.previewComplete && (
-          <div className="chat__lazy-status chat__reasoning-preview-status">
-            <span>
-              {trace.traceComplete
-                ? 'Showing a bounded preview to keep this chat responsive.'
-                : 'Showing a bounded preview while this thought is in progress.'}
-            </span>
-            {trace.traceComplete && (
-              <button
-                type="button"
-                className="chat__lazy-retry"
-                onClick={trace.loadFull}
-              >
-                Load full thought
-              </button>
-            )}
-          </div>
-        )}
       </div>
     </div>
   )
