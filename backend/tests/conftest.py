@@ -219,13 +219,17 @@ def fresh_db():
   # also got app_id N, so order-dependent listing assertions see a
   # sibling test's files (this is what made test_list_pagination pass in
   # isolation but fail in the full suite). Clear the per-app and shared
-  # file trees so the filesystem matches the freshly-recreated DB.
+  # file trees so the filesystem matches the freshly-recreated DB. Provider
+  # credentials are test fixtures too: several chat-run tests seed Claude auth,
+  # and without clearing cli-auth a later provider-default test can inherit it.
+  # Serial collection happened to hide that dependency; xdist correctly makes
+  # function order nondeterministic within each worker.
   import shutil as _shutil
   _data_dir = _os.environ.get("DATA_DIR", "/tmp")
   # Content-addressed app bundles no longer overwrite app-<id>.js between
   # tests. Clear compiled too, otherwise the per-test id reset leaves the next
   # test seeing an earlier test's immutable artifact for the same numeric id.
-  for _sub in ("apps", "app-secrets", "shared", "compiled"):
+  for _sub in ("apps", "app-secrets", "shared", "compiled", "cli-auth"):
     _shutil.rmtree(_os.path.join(_data_dir, _sub), ignore_errors=True)
 
   yield
