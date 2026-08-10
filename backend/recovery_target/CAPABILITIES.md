@@ -40,6 +40,11 @@ all tokens from the previous process even if Railway retains its deployment id.
 Missing or invalid local identity disables the live target without blocking the
 normal Möbius app.
 
+Existing managed services receive the instance id and verification key only
+through a digest-bound core rollout. Keep live-session admission disabled until
+every eligible service has restarted on that rollout and proved its exact
+deployment and boot identity; quarantined services remain fail-closed.
+
 The entrypoint spawns the target early, best-effort, and never probes or waits
 for it, so target initialization or bind failure cannot delay the normal app.
 A unique root-owned `mktemp` file keeps normal target endpoints at
