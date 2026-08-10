@@ -29,6 +29,11 @@ def test_mobius_has_no_recovery_runtime_or_boot_mode():
   ):
     assert retired not in runtime
 
+  deployment = (ROOT / "scripts/deploy-prod.sh").read_text(encoding="utf-8")
+  architecture = (ROOT / "ARCHITECTURE.md").read_text(encoding="utf-8")
+  assert "recoveryd" not in deployment.lower()
+  assert "recovery profile" not in architecture.lower()
+
 
 def test_boot_fallback_never_moves_or_prunes_owner_platform_source():
   entrypoint = (ROOT / "backend/scripts/entrypoint.sh").read_text(

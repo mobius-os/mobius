@@ -43,10 +43,9 @@ This split is why a section can read either "this is intentionally hackable, don
 
 ```
 Dockerfile (root)     Single-container image: frontend build + backend + CLI tools
-docker-compose.yml    Self-hosted: Caddy (TLS) + app; on-demand recovery profile
+docker-compose.yml    Self-hosted: Caddy (TLS) + app
 ├── caddy             HTTPS reverse proxy — forwards everything to app:8000
-├── app               FastAPI serves the API + the frontend static files
-└── recovery profile  stopped-app root target + read-only worker on loopback
+└── app               FastAPI serves the API + the frontend static files
 ```
 
 The image bundles everything the agent needs at runtime (the Claude and Codex CLIs, Rolldown, Node) so the platform works out of the box. To join an existing Caddy setup instead of the bundled one, use `docker-compose.override.example.yml`.

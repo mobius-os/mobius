@@ -15,8 +15,6 @@ deploy_support = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(deploy_support)
 HELPERS_START = "# ── deploy disk policy helpers"
 HELPERS_END = "# ── end deploy disk policy helpers"
-LEGACY_HELPER_START = "# ── legacy embedded-recovery retirement helper"
-LEGACY_HELPER_END = "# ── end legacy embedded-recovery retirement helper"
 
 
 def _read() -> str:
@@ -27,13 +25,6 @@ def _helpers() -> str:
   text = _read()
   start = text.index(HELPERS_START)
   end = text.index(HELPERS_END, start)
-  return text[start:end]
-
-
-def _legacy_helper() -> str:
-  text = _read()
-  start = text.index(LEGACY_HELPER_START)
-  end = text.index(LEGACY_HELPER_END, start)
   return text[start:end]
 
 
@@ -267,69 +258,6 @@ def test_reflection_refresh_is_cheap_and_runs_after_success_cache_cleanup():
 
   assert "REFLECTION_RESOURCE_DEEP_SCAN=skip" in text
   assert success_notification < cache_cleanup < refresh_call < deploy_complete
-
-
-def _run_legacy_cleanup(tmp_path, identity):
-  docker_log = tmp_path / "legacy-docker.log"
-  harness = _legacy_helper() + textwrap.dedent(f"""\
-    info() {{ printf 'INFO %s\n' "$1"; }}
-    ok() {{ printf 'OK %s\n' "$1"; }}
-    fail() {{ printf 'FAIL %s\n' "$1" >&2; }}
-    intent() {{ printf 'INTENT %s\n' "$1"; }}
-    docker() {{
-      printf '%s\n' "$*" >>{str(docker_log)!r}
-      if [ "$1" = container ] && [ "$2" = ls ]; then
-        printf 'legacy-id\n'
-      elif [ "$1" = inspect ]; then
-        printf '%s\n' {identity!r}
-      elif [ "$1" = rm ] && [ "$2" = -f ]; then
-        return 0
-      else
-        return 1
-      fi
-    }}
-    TARGET=prod
-    retire_legacy_recoveryd
-  """)
-  result = subprocess.run(
-    ["bash", "-c", harness], capture_output=True, text=True,
-  )
-  return result, docker_log.read_text(encoding="utf-8")
-
-
-def test_legacy_recovery_cleanup_verifies_exact_identity_before_remove(tmp_path):
-  result, calls = _run_legacy_cleanup(
-    tmp_path, "/mobius-recoveryd|mobius|recoveryd",
-  )
-
-  assert result.returncode == 0, result.stderr
-  lines = calls.splitlines()
-  discover = next(i for i, line in enumerate(lines) if line.startswith("container ls"))
-  inspect = next(i for i, line in enumerate(lines) if line.startswith("inspect -f"))
-  remove = next(i for i, line in enumerate(lines) if line == "rm -f mobius-recoveryd")
-  assert "name=^/mobius-recoveryd$" in lines[discover]
-  assert discover < inspect < remove
-
-
-def test_legacy_recovery_cleanup_refuses_label_mismatch(tmp_path):
-  result, calls = _run_legacy_cleanup(
-    tmp_path, "/mobius-recoveryd|another-project|recoveryd",
-  )
-
-  assert result.returncode != 0
-  assert "unexpected identity" in result.stderr
-  assert "rm -f mobius-recoveryd" not in calls
-
-
-def test_legacy_recovery_cleanup_is_post_success_and_never_rolls_back_app():
-  text = _read()
-  public_verification = text.rindex("# Tell open PWAs to reload")
-  cleanup_call = text.rindex("retire_legacy_recoveryd")
-  cache_cleanup = text.rindex("prune_old_build_cache")
-
-  assert public_verification < cleanup_call < cache_cleanup
-  assert "outside attempt_rollback()" in text[public_verification:cleanup_call]
-  assert text.count("retire_legacy_recoveryd") == 2  # definition + one call
 
 
 def test_deploy_script_still_parses():

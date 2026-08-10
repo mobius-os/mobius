@@ -421,51 +421,6 @@ external_prod_caddy_running() {
   [ "$TARGET" = "prod" ] && [ "$EDGE_TOPOLOGY" = "edge" ]
 }
 
-# ── legacy embedded-recovery retirement helper ────────────────────────
-# Old releases gave recoveryd a fixed name and Compose identity. Do not use a
-# broad orphan sweep here: this host carries sibling services, and a rollback
-# may still need their containers. Inspect the exact retired identity, then
-# remove only that one container after the replacement app has passed every
-# health/public verification gate.
-retire_legacy_recoveryd() {
-  [ "$TARGET" = "prod" ] || return 0
-  local legacy_name="mobius-recoveryd"
-  local legacy_ids=""
-  local identity=""
-
-  if ! legacy_ids=$(docker container ls -aq \
-    --filter "name=^/${legacy_name}$"); then
-    fail "could not inspect the retired ${legacy_name} container"
-    return 1
-  fi
-  if [ -z "$legacy_ids" ]; then
-    info "legacy embedded recovery container already absent"
-    return 0
-  fi
-  if [[ "$legacy_ids" == *$'\n'* ]]; then
-    fail "multiple containers matched the exact retired ${legacy_name} name; refusing cleanup"
-    return 1
-  fi
-  if ! identity=$(docker inspect -f \
-    '{{.Name}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' \
-    "$legacy_name"); then
-    fail "could not verify the retired ${legacy_name} Compose identity"
-    return 1
-  fi
-  if [ "$identity" != "/mobius-recoveryd|mobius|recoveryd" ]; then
-    fail "refusing to remove ${legacy_name}: unexpected identity '${identity}'"
-    return 1
-  fi
-
-  intent "docker rm -f ${legacy_name}  # exact name + mobius/recoveryd labels verified"
-  if ! docker rm -f "$legacy_name" >/dev/null; then
-    fail "could not remove retired ${legacy_name}; the healthy app remains deployed"
-    return 1
-  fi
-  ok "retired legacy embedded recovery container (${legacy_name})"
-}
-# ── end legacy embedded-recovery retirement helper ────────────────────
-
 # External networks referenced by the overlay must exist before compose up.
 # Creation is idempotent and safe: the edge stack declares the same name as
 # external, so whichever side runs first wins and both attach to one network.
@@ -1610,15 +1565,6 @@ if broadcast_shell_rebuilt; then
 else
   warn "could not broadcast shell_rebuilt (no service token, or /api/notify"
   warn "unreachable). Deploy is healthy; open PWAs reload on next manual open."
-fi
-
-# This is intentionally post-success and outside attempt_rollback(): removal of
-# the retired lifeboat must never influence which app image is served. A label
-# mismatch/removal failure exits nonzero for operator attention but leaves the
-# already-verified healthy app in place.
-if [ "$TARGET" = "prod" ]; then
-  step "[4c/4] retire legacy embedded recovery container"
-  retire_legacy_recoveryd
 fi
 
 # The rollback set was bounded before the build. After a fully successful
