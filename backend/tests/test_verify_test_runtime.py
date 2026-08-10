@@ -607,6 +607,7 @@ def test_manual_and_pull_request_runs_cover_suites_and_main_image():
   assert "workflow_dispatch:\n" in image_triggers
   assert "packages: write" in image_workflow
   assert "push: true" in image_workflow
+  assert "BUILD_SHA=${{ github.sha }}" in image_workflow
   assert "MOBIUS_IMAGE_REPOSITORY }}:sha-${{ github.sha }}" in image_workflow
   assert "MOBIUS_IMAGE_REPOSITORY }}:main" in image_workflow
   assert "recovery" not in image_workflow.lower()
