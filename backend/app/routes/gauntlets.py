@@ -53,7 +53,10 @@ def _default_roles() -> list[CriticRole]:
   return [
     CriticRole(
       key="visual-direction",
-      focus="visual hierarchy, reference fidelity, readability, and finish",
+      focus=(
+        "visual hierarchy, fidelity to any named references, readability, "
+        "and finish"
+      ),
     ),
     CriticRole(
       key="interaction-feel",
@@ -72,7 +75,7 @@ class GauntletCreate(BaseModel):
   parent_chat_id: str = Field(min_length=1, max_length=64)
   target: str = Field(min_length=1, max_length=256)
   target_path: str = Field(min_length=1, max_length=1024)
-  references: list[str] = Field(min_length=1, max_length=12)
+  references: list[str] = Field(default_factory=list, max_length=12)
   core_test: str = Field(min_length=1, max_length=4000)
   constraints: list[str] = Field(default_factory=list, max_length=20)
   critic_roles: list[CriticRole] = Field(
@@ -109,8 +112,6 @@ class GauntletCreate(BaseModel):
   @classmethod
   def _clean_references(cls, values: list[str]) -> list[str]:
     cleaned = [value.strip() for value in values if value.strip()]
-    if not cleaned:
-      raise ValueError("at least one reference is required")
     if any(len(value) > 2000 for value in cleaned):
       raise ValueError("each reference must be at most 2000 characters")
     return cleaned

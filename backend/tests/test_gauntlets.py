@@ -199,6 +199,37 @@ def test_create_is_owner_only_and_reserves_only_read_critic_slots(
   assert db.query(models.Delegation).count() == 2
 
 
+@pytest.mark.parametrize(
+  "references",
+  [None, [], [" ", "\n"]],
+  ids=["omitted", "empty", "blank-only"],
+)
+def test_create_allows_goal_without_named_reference(
+  client, owner_token, db, monkeypatch, references,
+):
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  app_id = create_local_app(client, auth, name="Gauntlet")["id"]
+  parent_id, _ = _controller(
+    client, auth, db, app_id, suffix="no-reference",
+  )
+
+  async def fake_start(**_kwargs):
+    return True
+
+  monkeypatch.setattr("app.gauntlets.start_programmatic_chat_turn", fake_start)
+  body = _body(app_id, parent_id, run_id="no-reference")
+  if references is None:
+    body.pop("references")
+  else:
+    body["references"] = references
+
+  created = client.post("/api/gauntlets", json=body, headers=auth)
+
+  assert created.status_code == 201, created.text
+  db.expire_all()
+  assert db.get(models.GauntletRun, body["run_id"]).contract_json["references"] == []
+
+
 def test_active_target_lease_conflicts_then_releases_on_stop(
   client, owner_token, db, monkeypatch,
 ):
