@@ -15,7 +15,9 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+import uuid
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import auth, models
@@ -78,6 +80,116 @@ class RunPolicy:
     )
 
 
+@dataclass(frozen=True)
+class DelegationIntent:
+  """Validated immutable fields needed to create or attach one child task."""
+
+  app_id: int
+  parent_chat_id: str
+  parent_root_run_id: str
+  task_key: str
+  prompt: str
+  provider: str
+  model: str | None
+  effort: str | None
+  scope: str
+  cwd: str
+  max_budget_usd: float | None
+  notify_parent_on_complete: bool = True
+
+
+def same_delegation_intent(
+  row: models.Delegation, intent: DelegationIntent,
+) -> bool:
+  """Whether a durable row is the exact immutable task being retried."""
+  return all((
+    row.app_id == intent.app_id,
+    row.parent_chat_id == intent.parent_chat_id,
+    row.parent_root_run_id == intent.parent_root_run_id,
+    row.task_key == intent.task_key,
+    row.provider == intent.provider,
+    row.model == intent.model,
+    row.effort == intent.effort,
+    row.scope == intent.scope,
+    row.cwd == intent.cwd,
+    row.max_budget_usd == intent.max_budget_usd,
+    row.notify_parent_on_complete == intent.notify_parent_on_complete,
+    row.prompt_sha256 == hashlib.sha256(
+      intent.prompt.encode("utf-8")
+    ).hexdigest(),
+  ))
+
+
+def create_or_attach_delegation(
+  db: Session, intent: DelegationIntent,
+) -> tuple[models.Delegation, bool]:
+  """Persist one child intent idempotently under its parent logical run.
+
+  Execution is intentionally separate: callers commit the control/chat rows
+  here, then start the ordinary programmatic ChatRun.  A crash between those
+  steps leaves a discoverable ``starting`` delegation that reconciliation can
+  safely start with the same immutable prompt.
+  """
+  row = db.query(models.Delegation).filter(
+    models.Delegation.parent_root_run_id == intent.parent_root_run_id,
+    models.Delegation.task_key == intent.task_key,
+  ).first()
+  if row is not None:
+    if not same_delegation_intent(row, intent):
+      raise ValueError(
+        "task key is already attached to different immutable work"
+      )
+    return row, True
+
+  child_id = str(uuid.uuid4())
+  row = models.Delegation(
+    id=str(uuid.uuid4()),
+    app_id=intent.app_id,
+    parent_chat_id=intent.parent_chat_id,
+    parent_root_run_id=intent.parent_root_run_id,
+    task_key=intent.task_key,
+    child_chat_id=child_id,
+    provider=intent.provider,
+    model=intent.model,
+    effort=intent.effort,
+    scope=intent.scope,
+    cwd=intent.cwd,
+    prompt_sha256=hashlib.sha256(intent.prompt.encode("utf-8")).hexdigest(),
+    max_budget_usd=intent.max_budget_usd,
+    notify_parent_on_complete=intent.notify_parent_on_complete,
+  )
+  child = models.Chat(
+    id=child_id,
+    title=f"Delegation · {intent.task_key}",
+    messages=[],
+    provider=intent.provider,
+    agent_settings_json={
+      "model": intent.model,
+      "effort": intent.effort,
+      "drawer_hidden": True,
+      "owner_visible": False,
+    },
+    auto_resume_on_restart=True,
+    auto_resume_on_limit=False,
+    created_by_app_id=intent.app_id,
+  )
+  db.add_all((child, row))
+  try:
+    db.commit()
+  except IntegrityError:
+    db.rollback()
+    row = db.query(models.Delegation).filter(
+      models.Delegation.parent_root_run_id == intent.parent_root_run_id,
+      models.Delegation.task_key == intent.task_key,
+    ).first()
+    if row is None or not same_delegation_intent(row, intent):
+      raise ValueError(
+        "different delegation claimed the task key"
+      )
+    return row, True
+  return row, False
+
+
 def normalize_cwd(raw: str | None) -> str:
   """Return a confined absolute workdir without touching the filesystem."""
   candidate = Path(raw or "/data").expanduser()
@@ -118,6 +230,14 @@ def policy_for_chat(db: Session, chat_id: str) -> RunPolicy | None:
     digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     if digest != row.prompt_sha256:
       raise RuntimeError("delegation prompt no longer matches immutable intent")
+  remaining_budget = row.max_budget_usd
+  if remaining_budget is not None:
+    known_prior_cost = float(sum(
+      float(value or 0.0) for (value,) in db.query(
+        models.ChatRun.cost_usd,
+      ).filter(models.ChatRun.chat_id == chat_id).all()
+    ))
+    remaining_budget = max(0.001, remaining_budget - known_prior_cost)
   return RunPolicy(
     delegation_id=row.id,
     app_id=row.app_id,
@@ -126,7 +246,7 @@ def policy_for_chat(db: Session, chat_id: str) -> RunPolicy | None:
     effort=row.effort,
     scope=row.scope,
     cwd=row.cwd,
-    max_budget_usd=row.max_budget_usd,
+    max_budget_usd=remaining_budget,
   )
 
 
@@ -321,7 +441,20 @@ def active_parent_context(
   )
 
 
-def mint_app_token(db: Session, policy: RunPolicy) -> str:
+def delegation_execution_token(db: Session, policy: RunPolicy) -> str | None:
+  """Return the app bearer only for an explicitly write-scoped child.
+
+  A read delegation may still execute local inspection commands in the
+  provider sandbox. Giving that process a normal app bearer would let a
+  prompt-injected critic mutate app storage or call other app-owned write
+  routes over HTTP, bypassing the filesystem policy entirely. Read children
+  therefore receive no ``AGENT_TOKEN`` at all; write children retain the
+  app-attributed authority their contract promises.
+  """
+  if policy.scope == "read":
+    return None
+  if policy.scope != "write":
+    raise RuntimeError(f"unknown delegation scope: {policy.scope}")
   owner = db.query(models.Owner).first()
   app = db.query(models.App).filter(
     models.App.id == policy.app_id,
@@ -339,19 +472,89 @@ def mint_app_token(db: Session, policy: RunPolicy) -> str:
 
 
 def mark_cancelled(db: Session, row: models.Delegation) -> None:
+  """Latch cancellation and its Workflows terminal projection idempotently."""
   child = db.query(models.Chat).filter(
     models.Chat.id == row.child_chat_id,
   ).first()
-  changed = False
   if child is not None:
     child.auto_resume_on_restart = False
     child.auto_resume_on_limit = False
-    changed = True
   if row.cancelled_at is None:
     row.cancelled_at = now_naive_utc()
-    changed = True
-  if changed:
-    db.commit()
+  # Stage cancellation before recording the terminal lifecycle fact.
+  # ``record_event`` commits both when the event is new; the explicit commit
+  # covers an idempotent replay where that deterministic event already exists.
+  _record_lifecycle(db, row, "cancelled")
+  db.commit()
+
+
+def _delegation_is_active(db: Session, row: models.Delegation) -> bool:
+  """Whether control/runtime state still reserves this delegated execution."""
+  from app.chat import is_chat_running
+
+  status, _physical, _result = derived_status(db, row, load_result=False)
+  return status in {"starting", "running", "resuming", "paused"} or (
+    is_chat_running(row.child_chat_id)
+  )
+
+
+def active_delegation_ids_for_app(db: Session, app_id: int) -> list[str]:
+  rows = db.query(models.Delegation).filter(
+    models.Delegation.app_id == app_id,
+  ).order_by(models.Delegation.created_at.asc()).all()
+  return [row.id for row in rows if _delegation_is_active(db, row)]
+
+
+def active_delegation_ids_for_chat(db: Session, chat_id: str) -> list[str]:
+  rows = db.query(models.Delegation).filter(
+    (models.Delegation.parent_chat_id == chat_id)
+    | (models.Delegation.child_chat_id == chat_id)
+  ).order_by(models.Delegation.created_at.asc()).all()
+  return [row.id for row in rows if _delegation_is_active(db, row)]
+
+
+async def cancel_delegation_execution(delegation_id: str) -> bool:
+  """Stop one child and latch cancellation only after it is quiescent.
+
+  This owns the reusable cancellation boundary for the direct API, app/chat
+  deletion, and future lifecycle callers. A timed-out provider remains active
+  and returns ``False`` so no caller can tombstone or purge rows under it.
+  """
+  from app.chat import _finish_run, is_chat_running, stop_chat_for
+  from app.database import SessionLocal
+
+  with SessionLocal() as db:
+    row = db.query(models.Delegation).filter(
+      models.Delegation.id == delegation_id,
+    ).first()
+    if row is None:
+      return True
+    child_id = row.child_chat_id
+    active = _delegation_is_active(db, row)
+  if not active:
+    return True
+
+  if is_chat_running(child_id):
+    stopped, _ = await stop_chat_for(child_id)
+    if not stopped:
+      return False
+  if not is_chat_running(child_id):
+    await _finish_run(child_id, terminal_status="stopped")
+
+  with SessionLocal() as db:
+    row = db.query(models.Delegation).filter(
+      models.Delegation.id == delegation_id,
+    ).first()
+    if row is None:
+      return True
+    durable_active = db.query(models.ChatRun.id).filter(
+      models.ChatRun.chat_id == row.child_chat_id,
+      models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+    ).first() is not None
+    if durable_active or is_chat_running(row.child_chat_id):
+      return False
+    mark_cancelled(db, row)
+  return True
 
 
 # --- Parent auto-wake on child completion ------------------------------------

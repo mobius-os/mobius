@@ -798,6 +798,8 @@ async def run_claude_sdk_turn(
   skills_enabled: bool = False,
   run_policy=None,
   connector_plan=None,
+  gauntlet_writer: bool = False,
+  gauntlet_max_budget_usd: float | None = None,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
@@ -845,9 +847,11 @@ async def run_claude_sdk_turn(
     input_data: dict[str, Any],
     context,
   ) -> PermissionResultAllow | PermissionResultDeny:
-    if run_policy is not None:
+    del context
+    if run_policy is not None or gauntlet_writer:
       nested_tools = {
         "Task", "TaskOutput", "TaskStop", "Workflow", "Workflows", "Agent",
+        "create_goal", "update_goal", "get_goal", "request_user_input",
       }
       if tool_name in nested_tools:
         return PermissionResultDeny(
@@ -860,7 +864,7 @@ async def run_claude_sdk_turn(
             "blocker to the parent instead."
           )
         )
-      if run_policy.scope == "read" and tool_name in {
+      if run_policy is not None and run_policy.scope == "read" and tool_name in {
         "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
       }:
         return PermissionResultDeny(
@@ -979,7 +983,9 @@ async def run_claude_sdk_turn(
   # The "ultracode" tier maps to xhigh effort for the SDK flag (which only
   # accepts low/medium/high/xhigh/max) and arms the Workflow-tool
   # orchestration via the keyword trigger appended to this turn's prompt.
-  _ultracode = _effort == "ultracode" and run_policy is None
+  _ultracode = (
+    _effort == "ultracode" and run_policy is None and not gauntlet_writer
+  )
   if _effort == "ultracode":
     _effort = "xhigh"
   turn_message = user_message + _ULTRACODE_REMINDER if _ultracode else user_message
@@ -1049,18 +1055,25 @@ async def run_claude_sdk_turn(
         ],
       },
     }
-    if run_policy is not None:
-      options_kwargs.update({
+    if run_policy is not None or gauntlet_writer:
+      restricted_options = {
+        "disallowed_tools": [
+          "AskUserQuestion", "Task", "TaskOutput", "TaskStop",
+          "Workflow", "Workflows", "Agent", "create_goal",
+          "update_goal", "get_goal", "request_user_input",
+        ],
+        "agents": {},
+      }
+      if run_policy is not None:
+        restricted_options.update({
         "permission_mode": (
           "plan" if run_policy.scope == "read" else "acceptEdits"
         ),
         "max_budget_usd": run_policy.max_budget_usd,
-        "disallowed_tools": [
-          "AskUserQuestion", "Task", "TaskOutput", "TaskStop",
-          "Workflow", "Workflows", "Agent",
-        ],
-        "agents": {},
-      })
+        })
+      elif gauntlet_max_budget_usd is not None:
+        restricted_options["max_budget_usd"] = gauntlet_max_budget_usd
+      options_kwargs.update(restricted_options)
     if skills_enabled:
       options_kwargs["skills"] = "all"
     if model_override:

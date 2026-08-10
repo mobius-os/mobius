@@ -66,7 +66,8 @@ from app.routes import (
   chat_embed_router, chat_logs_router, chat_router, chats_router, chats_stream_router,
   secure_inputs_router,
   connectors_router, connectors_public_router,
-  debug_router, delegations_router, fs_router, github_router, media_router,
+  debug_router, delegations_router, fs_router, gauntlets_router, github_router,
+  media_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
   secrets_router, self_reminders_router, settings_router, skills_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
@@ -642,6 +643,7 @@ app.include_router(chats_router)
 app.include_router(chats_stream_router)
 app.include_router(secure_inputs_router)
 app.include_router(delegations_router)
+app.include_router(gauntlets_router)
 app.include_router(chat_logs_router)
 app.include_router(connectors_router)
 app.include_router(connectors_public_router)

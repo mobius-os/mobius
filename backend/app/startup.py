@@ -267,6 +267,26 @@ async def _wake_completed_delegation_parents(context: StartupContext) -> None:
     )
 
 
+async def _reconcile_running_gauntlets(context: StartupContext) -> None:
+  """Repair missing slots and release barriers committed before restart."""
+  from app.gauntlets import (
+    reconcile_running_gauntlets,
+    repair_terminal_gauntlet_projections,
+  )
+
+  try:
+    count = await reconcile_running_gauntlets()
+    if count:
+      context.logger.info("reconciled %d running Gauntlet(s)", count)
+    repaired = await repair_terminal_gauntlet_projections()
+    if repaired:
+      context.logger.info(
+        "repaired %d terminal Gauntlet projection(s)", repaired,
+      )
+  except Exception:
+    context.logger.warning("Gauntlet boot reconcile skipped", exc_info=True)
+
+
 async def _install_bootstrap_apps(context: StartupContext) -> None:
   from app.bootstrap import ensure_bootstrap_apps_installed
 
@@ -346,6 +366,7 @@ STARTUP_TASKS = (
   ),
   StartupTask("initialize push", _initialize_push),
   StartupTask("notify reconciled chats", _notify_reconciled_chats),
+  StartupTask("reconcile running Gauntlets", _reconcile_running_gauntlets),
   StartupTask(
     "wake completed delegation parents",
     _wake_completed_delegation_parents,

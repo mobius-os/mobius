@@ -536,7 +536,15 @@ async def send_message(
   """
   require_chat_embed_operation(principal, "chat:send")
   chat = get_active_chat_for_principal(db, chat_id, principal)
-
+  from app.delegations import is_delegation_child
+  if is_delegation_child(chat_id):
+    raise HTTPException(
+      status_code=409,
+      detail={
+        "code": "delegation_managed",
+        "message": "This evaluator chat is managed by its parent workflow.",
+      },
+    )
   # AskUserQuestion answer delivery. If a live SDK turn is blocked waiting for
   # the answer (held in `questions._pending[chat_id]`), persist through the
   # writer actor, then resolve the future in-place and return — the SDK
@@ -767,7 +775,11 @@ async def send_message(
   # Lock order is transition then queue; all send predicates refresh inside.
   async with chat_queue.get_transition_lock(chat_id):
     async with chat_queue.get_lock(chat_id):
-      db.expire(chat)
+      # End the pre-lock read snapshot, then evaluate all admission predicates
+      # against state committed by a concurrent Gauntlet creator/provider
+      # switch that may have won the transition lock first.
+      db.rollback()
+      chat = get_active_chat_for_principal(db, chat_id, principal)
       return await _send_message_locked(body, chat_id, principal, db, chat)
 
 
@@ -783,6 +795,32 @@ async def _send_message_locked(
   duplicate = _duplicate_send_response(chat_id, chat, body.cid)
   if duplicate is not None:
     return duplicate
+
+  from app.gauntlets import active_controller_gauntlet
+  active_gauntlet = active_controller_gauntlet(db, chat_id)
+  if active_gauntlet is not None:
+    raise HTTPException(
+      status_code=409,
+      detail={
+        "code": "gauntlet_active",
+        "run_id": active_gauntlet.id,
+        "message": (
+          "This controller is owned by an active Gauntlet. Stop the "
+          "Gauntlet before sending or steering another message."
+        ),
+      },
+    )
+
+  from app.delegations import is_delegation_child
+  if is_delegation_child(chat_id):
+    raise HTTPException(
+      status_code=409,
+      detail={
+        "code": "delegation_managed",
+        "message": "This evaluator chat is managed by its parent workflow.",
+      },
+    )
+
   if body.continuation == "manual" and principal.app_id is not None:
     raise HTTPException(
       status_code=403,

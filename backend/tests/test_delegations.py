@@ -7,7 +7,13 @@ from app.chat_writer import (
   AppendPending, Barrier, PromotePending, StartTurn, get_writer,
 )
 from app.codex_sdk_runner import _codex_config_overrides
-from app.delegations import derived_status, mark_cancelled, policy_for_chat
+from app.delegations import (
+  RunPolicy,
+  delegation_execution_token,
+  derived_status,
+  mark_cancelled,
+  policy_for_chat,
+)
 from test_app_fixtures import create_local_app
 
 
@@ -25,6 +31,27 @@ def _parent_with_run(client, owner_token, db):
   ))
   db.commit()
   return chat_id
+
+
+def test_read_delegation_receives_no_http_bearer(client, owner_token, db):
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  app_id = create_local_app(client, auth, name="Read policy")['id']
+  base = dict(
+    delegation_id="read-policy",
+    app_id=app_id,
+    provider="codex",
+    model=None,
+    effort=None,
+    cwd="/data/platform",
+    max_budget_usd=None,
+  )
+
+  assert delegation_execution_token(
+    db, RunPolicy(scope="read", **base),
+  ) is None
+  assert delegation_execution_token(
+    db, RunPolicy(scope="write", **base),
+  )
 
 
 def test_submit_is_idempotent_per_parent_root_and_task_key(
@@ -185,9 +212,18 @@ def test_child_policy_is_integrity_checked_and_write_loss_needs_review(db):
   assert result == "Review before replaying."
 
   mark_cancelled(db, row)
+  mark_cancelled(db, row)
   db.expire_all()
   assert db.get(models.Chat, child.id).auto_resume_on_restart is False
   assert db.get(models.Chat, child.id).auto_resume_on_limit is False
+  lifecycle = db.query(models.AgentLifecycleEvent).filter(
+    models.AgentLifecycleEvent.provider_agent_id == row.id,
+    models.AgentLifecycleEvent.source_event_id
+      == f"delegation:{row.id}:terminal:cancelled",
+  ).all()
+  assert len(lifecycle) == 1
+  assert lifecycle[0].event_type == "agent_terminal"
+  assert lifecycle[0].state == "stopped"
 
 
 def test_continuation_physical_runs_inherit_one_logical_root(db):

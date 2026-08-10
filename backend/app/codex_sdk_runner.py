@@ -1449,6 +1449,7 @@ async def run_codex_sdk_turn(
   fallback_goal_objective: str | None = None,
   run_policy=None,
   connector_plan=None,
+  gauntlet_writer: bool = False,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -1560,10 +1561,11 @@ async def run_codex_sdk_turn(
   # Delegated children disable those optional tools at this provider-owned seam.
   codex_bin = shutil.which("codex")
   delegated = run_policy is not None
+  restricted = delegated or gauntlet_writer
   config_overrides = _codex_config_overrides(
-    allow_questions=not delegated,
-    allow_multi_agent=not delegated,
-    allow_goals=not delegated,
+    allow_questions=not restricted,
+    allow_multi_agent=not restricted,
+    allow_goals=not restricted,
   )
   launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
   config_kwargs: dict[str, Any] = dict(
@@ -1707,7 +1709,7 @@ async def run_codex_sdk_turn(
       # resulting concurrent.futures.Future. That keeps the JSON-RPC
       # round-trip blocked (correct — the app-server is waiting for our
       # response) while letting asyncio handle the user's answer POST.
-      if not delegated:
+      if not restricted:
         _install_request_user_input_handler(
           codex,
           loop=asyncio.get_running_loop(),

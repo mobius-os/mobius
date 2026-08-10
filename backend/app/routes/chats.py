@@ -952,15 +952,28 @@ async def update_chat(
 
   get_active_chat_or_404(db, chat_id)
   if body.messages is not None:
-    ack = get_writer().submit(
-      ReplaceTranscript(
-        chat_id=chat_id,
-        run_token="",
-        messages=body.messages,
-        title=body.title,  # None leaves the title unchanged
+    from app.chat_queue import get_transition_lock
+    from app.gauntlets import active_controller_gauntlet
+
+    async with get_transition_lock(chat_id):
+      db.rollback()
+      get_active_chat_or_404(db, chat_id)
+      if active_controller_gauntlet(db, chat_id) is not None:
+        raise HTTPException(
+          status_code=409,
+          detail=(
+            "The Gauntlet owns this controller transcript until it finishes."
+          ),
+        )
+      ack = get_writer().submit(
+        ReplaceTranscript(
+          chat_id=chat_id,
+          run_token="",
+          messages=body.messages,
+          title=body.title,  # None leaves the title unchanged
+        )
       )
-    )
-    await await_ack(ack)
+      await await_ack(ack)
     return {"ok": True}
 
   # Title-only update — direct write (no transcript mutation).
@@ -1020,6 +1033,20 @@ async def patch_chat(
 
   async with get_transition_lock(chat_id):
     chat = get_active_chat_for_principal(db, chat_id, principal)
+    if (
+      body.provider is not None
+      or body.clear_agent_settings
+      or body.agent_settings_json is not None
+    ):
+      from app.gauntlets import active_controller_gauntlet
+      if active_controller_gauntlet(db, chat_id) is not None:
+        raise HTTPException(
+          status_code=409,
+          detail=(
+            "The Gauntlet has frozen this controller's provider and agent "
+            "settings until it finishes."
+          ),
+        )
     agent_settings_patch = (
       body.agent_settings_json.model_dump(exclude_unset=True)
       if body.agent_settings_json is not None else {}
@@ -1752,6 +1779,36 @@ async def delete_chat(
   db: Session = Depends(get_db),
 ):
   """Soft-deletes a chat and stops any running agent for it."""
+  from app.gauntlets import active_gauntlet_ids_for_chat, stop_gauntlet
+  for gauntlet_id in active_gauntlet_ids_for_chat(db, chat_id):
+    stopped_gauntlet = await stop_gauntlet(gauntlet_id)
+    if (
+      stopped_gauntlet is not None
+      and stopped_gauntlet.get("status") == "stopping"
+    ):
+      raise HTTPException(
+        status_code=409,
+        detail=(
+          "Could not stop all Gauntlet work yet; retry chat deletion after "
+          "the active provider process exits."
+        ),
+      )
+  from app.delegations import (
+    active_delegation_ids_for_chat,
+    cancel_delegation_execution,
+  )
+  db.rollback()
+  for delegation_id in active_delegation_ids_for_chat(db, chat_id):
+    if not await cancel_delegation_execution(delegation_id):
+      raise HTTPException(
+        status_code=409,
+        detail=(
+          "Could not stop delegated work yet; retry chat deletion after the "
+          "active provider process exits."
+        ),
+      )
+  db.rollback()
+  db.expire_all()
   # Only attempt to stop if the chat is actually running. An idle chat
   # has no proc/SDK client/session to interrupt, so calling
   # stop_chat_for would be a no-op — but a transient error during the
@@ -1770,22 +1827,39 @@ async def delete_chat(
         status_code=409,
         detail="Could not stop active agent; retry",
       )
-  # Bump generation BEFORE the soft-delete commit so that any run
-  # that started in the TOCTOU window between the is_chat_running
-  # check above and now sees `we_own_gen == False` on its next gen
-  # check and skips auto-promote / continuation. Otherwise a runner
-  # racing the delete could write to the just-deleted row.
-  bump_run_generation(chat_id)
-  chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-  if chat:
-    chat.deleted_at = now_naive_utc()
-    db.commit()
-    # Publish the committed tombstone before best-effort run cleanup. If that
-    # cleanup fails after the commit, every live shell must still project the
-    # durable deletion rather than retain a stale drawer row.
-    get_system_broadcast().publish(
-      {"type": "chat_deleted", "chatId": str(chat_id)}
-    )
+  # Create and delete share the controller transition lock. Recheck after all
+  # potentially blocking stop I/O: a Gauntlet that won the gap must prevent the
+  # tombstone, while a tombstone that wins here makes the creator's own locked
+  # active-chat recheck fail.
+  from app import chat_queue
+  async with chat_queue.get_transition_lock(chat_id):
+    db.rollback()
+    late_gauntlets = active_gauntlet_ids_for_chat(db, chat_id)
+    if late_gauntlets:
+      raise HTTPException(
+        status_code=409,
+        detail="A Gauntlet started while deletion was waiting; retry deletion.",
+      )
+    if active_delegation_ids_for_chat(db, chat_id):
+      raise HTTPException(
+        status_code=409,
+        detail=(
+          "Delegated work started while deletion was waiting; retry deletion."
+        ),
+      )
+    # Bump generation BEFORE the soft-delete commit so a run that raced the
+    # earlier liveness check bows out instead of writing onto the tombstone.
+    bump_run_generation(chat_id)
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    if chat:
+      chat.deleted_at = now_naive_utc()
+      db.commit()
+      # Publish the committed tombstone before best-effort run cleanup. If that
+      # cleanup fails after the commit, every live shell must still project the
+      # durable deletion rather than retain a stale drawer row.
+      get_system_broadcast().publish(
+        {"type": "chat_deleted", "chatId": str(chat_id)}
+      )
   # Flag the chat soft-deleted in the registry (NOT forget_chat, which resets
   # the generation counter to a reusable 0). mark_chat_deleted preserves the
   # finite counter and makes `current_run_generation` return +inf, so a run
@@ -2492,6 +2566,17 @@ async def patch_app_chat(
 
   async with get_transition_lock(chat_id):
     chat = get_active_chat_for_principal(db, chat_id, principal)
+    if any((body.system_prompt is not None, body.model is not None,
+            body.provider is not None)):
+      from app.gauntlets import active_controller_gauntlet
+      if active_controller_gauntlet(db, chat_id) is not None:
+        raise HTTPException(
+          status_code=409,
+          detail=(
+            "The Gauntlet has frozen this controller's provider, model, and "
+            "prompt until it finishes."
+          ),
+        )
     if body.system_prompt is not None:
       if (
         chat.system_prompt_snapshot_id

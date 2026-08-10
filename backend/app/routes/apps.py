@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session, defer
 
 from app import (
   activity, app_activity, app_apply, app_capability_acceptance, app_git,
-  app_jobs, app_preview, app_recency, fs_locks, icon_cache,
+  app_jobs, app_preview, app_recency, chat_queue, fs_locks, icon_cache,
   models, providers, schemas,
   source_dirs,
 )
@@ -196,6 +196,19 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   deleted_app_id = app.id
   settings = get_settings()
 
+  if db.query(models.GauntletRun.id).filter(
+    models.GauntletRun.app_id == deleted_app_id,
+    models.GauntletRun.status.in_(("running", "stopping")),
+  ).first() is not None:
+    raise RuntimeError(
+      "active Gauntlet must quiesce before permanent app deletion"
+    )
+  from app.delegations import active_delegation_ids_for_app
+  if active_delegation_ids_for_app(db, deleted_app_id):
+    raise RuntimeError(
+      "active delegated work must quiesce before permanent app deletion"
+    )
+
   # Registry state is the revocation boundary; physical cleanup may fail.
   await _revoke_app_publish_tokens(
     settings, deleted_app_id, app.token_nonce,
@@ -224,6 +237,64 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   # missing files (a 404) is the acceptable failure, not data exposure.
   # The activity marker is id-keyed too; remove it before the reusable app id
   # is freed so a future unrelated app never inherits the old app's dot.
+  delegation_ids = [row[0] for row in db.query(models.Delegation.id).filter(
+    models.Delegation.app_id == deleted_app_id,
+  ).all()]
+  critic_chat_ids = [row[0] for row in db.query(
+    models.Delegation.child_chat_id,
+  ).filter(models.Delegation.app_id == deleted_app_id).all()]
+  gauntlet_ids = {row[0] for row in db.query(models.GauntletRun.id).filter(
+    models.GauntletRun.app_id == deleted_app_id,
+  ).all()}
+  if delegation_ids:
+    gauntlet_ids.update(row[0] for row in db.query(
+      models.GauntletTask.gauntlet_run_id,
+    ).filter(
+      models.GauntletTask.delegation_id.in_(delegation_ids),
+    ).all())
+  task_query = db.query(models.GauntletTask)
+  task_filters = []
+  if gauntlet_ids:
+    task_filters.append(models.GauntletTask.gauntlet_run_id.in_(gauntlet_ids))
+  if delegation_ids:
+    task_filters.append(models.GauntletTask.delegation_id.in_(delegation_ids))
+  if task_filters:
+    from sqlalchemy import or_
+    task_query.filter(or_(*task_filters)).delete(synchronize_session=False)
+  if gauntlet_ids:
+    db.query(models.GauntletRun).filter(
+      models.GauntletRun.id.in_(gauntlet_ids),
+    ).delete(synchronize_session=False)
+  if delegation_ids:
+    db.query(models.Delegation).filter(
+      models.Delegation.id.in_(delegation_ids),
+    ).delete(synchronize_session=False)
+
+  # Critic chats are implementation-owned and have no value after their app's
+  # seven-day recovery window closes. Hand them to the ordinary hard-purge
+  # lifecycle; preserve other app-created chats as owner history by removing
+  # only their now-invalid app attribution.
+  if critic_chat_ids:
+    db.query(models.Chat).filter(
+      models.Chat.id.in_(critic_chat_ids),
+    ).update({models.Chat.deleted_at: app.deleted_at}, synchronize_session=False)
+    from app.chat_retention import purge_expired_chat_tombstones
+    purge_expired_chat_tombstones(db)
+  db.query(models.Chat).filter(
+    models.Chat.created_by_app_id == deleted_app_id,
+  ).update({models.Chat.created_by_app_id: None}, synchronize_session=False)
+  db.query(models.ChatRun).filter(
+    models.ChatRun.initiated_by_app_id == deleted_app_id,
+  ).update({models.ChatRun.initiated_by_app_id: None}, synchronize_session=False)
+  db.query(models.ChatEmbedGrant).filter(
+    models.ChatEmbedGrant.app_id == deleted_app_id,
+  ).delete(synchronize_session=False)
+  db.query(models.InstallPassGrant).filter(
+    models.InstallPassGrant.app_id == deleted_app_id,
+  ).delete(synchronize_session=False)
+  db.query(models.ContributionAutopilot).filter(
+    models.ContributionAutopilot.app_id == deleted_app_id,
+  ).delete(synchronize_session=False)
   db.query(models.AppActivityState).filter(
     models.AppActivityState.app_id == deleted_app_id,
   ).delete(synchronize_session=False)
@@ -2431,22 +2502,84 @@ async def delete_app(
     if not app:
       raise HTTPException(status_code=404, detail="App not found.")
 
-    await _revoke_app_publish_tokens(
-      settings=get_settings(), app_id=app_id, app_gen=app.token_nonce,
+    # A Gauntlet may still own an owner-authority writer plus hidden critics
+    # for this app. Latch and cancel those executions before the app's token and
+    # runtime disappear; cancellation remains durable/retryable if an SDK stop
+    # itself times out.
+    from app.gauntlets import stop_gauntlet
+    active_gauntlet_ids = [row[0] for row in db.query(
+      models.GauntletRun.id,
+    ).filter(
+      models.GauntletRun.app_id == app_id,
+      models.GauntletRun.status.in_(("running", "stopping")),
+    ).all()]
+    for gauntlet_id in active_gauntlet_ids:
+      stopped_gauntlet = await stop_gauntlet(gauntlet_id)
+      if (
+        stopped_gauntlet is not None
+        and stopped_gauntlet.get("status") == "stopping"
+      ):
+        raise HTTPException(
+          status_code=409,
+          detail=(
+            "Could not stop all Gauntlet work yet; retry app deletion after "
+            "the active provider process exits."
+          ),
+        )
+    from app.delegations import (
+      active_delegation_ids_for_app,
+      cancel_delegation_execution,
     )
+    db.rollback()
+    for delegation_id in active_delegation_ids_for_app(db, app_id):
+      if not await cancel_delegation_execution(delegation_id):
+        raise HTTPException(
+          status_code=409,
+          detail=(
+            "Could not stop all delegated work yet; retry app deletion after "
+            "the active provider process exits."
+          ),
+        )
+    async with chat_queue.get_transition_lock(f"app-lifecycle:{app_id}"):
+      db.rollback()
+      if db.query(models.GauntletRun.id).filter(
+        models.GauntletRun.app_id == app_id,
+        models.GauntletRun.status.in_(("running", "stopping")),
+      ).first() is not None:
+        raise HTTPException(
+          status_code=409,
+          detail="A Gauntlet started while deletion was waiting; retry deletion.",
+        )
+      if active_delegation_ids_for_app(db, app_id):
+        raise HTTPException(
+          status_code=409,
+          detail=(
+            "Delegated work started while deletion was waiting; retry deletion."
+          ),
+        )
+      app = db.query(models.App).filter(
+        models.App.id == app_id,
+        models.App.deleted_at.is_(None),
+      ).first()
+      if app is None:
+        raise HTTPException(status_code=404, detail="App not found.")
 
-    # Naive UTC to match SQLite's naive storage + the naive TTL comparison in
-    # list_apps / recover_app (same contract chats.py documents). Avoids a
-    # platform-dependent aware/naive round-trip mismatch.
-    app.deleted_at = now_naive_utc()
-    # Tombstoning is a permanent credential boundary, even if the same row is
-    # later recovered. Without this rotation, an app token rejected while the
-    # row is deleted becomes valid again as soon as recovery clears deleted_at.
-    app.token_nonce = secrets.token_hex(16)
-    app_name = app.name
-    app_slug = app.slug
-    app_source_dir = app.source_dir
-    db.commit()
+      await _revoke_app_publish_tokens(
+        settings=get_settings(), app_id=app_id, app_gen=app.token_nonce,
+      )
+
+      # Naive UTC to match SQLite's naive storage + the naive TTL comparison in
+      # list_apps / recover_app (same contract chats.py documents). Avoids a
+      # platform-dependent aware/naive round-trip mismatch.
+      app.deleted_at = now_naive_utc()
+      # Tombstoning is a permanent credential boundary, even if the same row is
+      # later recovered. Without this rotation, an app token rejected while the
+      # row is deleted becomes valid again as soon as recovery clears deleted_at.
+      app.token_nonce = secrets.token_hex(16)
+      app_name = app.name
+      app_slug = app.slug
+      app_source_dir = app.source_dir
+      db.commit()
     # Publish the durable tombstone before best-effort job/skill/cron cleanup.
     # Cleanup errors must not leave live shells projecting a row the database
     # has already removed from the drawer.
