@@ -1053,23 +1053,14 @@ fi
 ln -sf /data/.pm-commit /usr/local/bin/pm-commit
 
 
-# Install the codex-plugin-cc into the agent's CLAUDE_CONFIG_DIR if
-# not yet present. Source is baked into the image at /opt/codex-plugin-cc
-# (pinned in the Dockerfile via `git clone --branch v1.0.4`). The install
-# writes settings.json + plugins/ under /data/cli-auth/claude/, which
-# is volume-backed — so we re-install automatically if the volume is
-# wiped. Runs as mobius so all resulting files are mobius-owned and
-# the agent's CLI can update them if it ever runs `plugin update`.
-# A failure here is non-fatal: the agent still works without the
-# plugin, the user just doesn't get the /codex:* slash commands or
-# codex:codex-rescue subagent.
-if [ ! -f /data/cli-auth/claude/plugins/installed_plugins.json ]; then
-  mkdir -p /data/cli-auth/claude
-  chown mobius:mobius /data/cli-auth /data/cli-auth/claude 2>/dev/null || true
-  su -s /bin/sh mobius -c "CLAUDE_CONFIG_DIR=/data/cli-auth/claude claude plugin marketplace add /opt/codex-plugin-cc" \
-    && su -s /bin/sh mobius -c "CLAUDE_CONFIG_DIR=/data/cli-auth/claude claude plugin install codex@openai-codex" \
-    || echo "WARNING: codex-plugin-cc install failed (non-fatal)" >&2
-fi
+# The codex-plugin-cc (codex:codex-rescue subagent + /codex:* commands) is no
+# longer auto-installed. Codex delegation is owned by the installable Subagents
+# app (slug `codex`/`subagents`): its `subagents.py run --background` creates a
+# durable child chat that survives the turn and auto-wakes the parent when it
+# finishes. The in-CLI plugin path had no such wake — a backgrounded consult
+# silently died at turn end, which is exactly the "spawned Codex, never came
+# back" failure. Retiring the plugin leaves one coherent, waking Codex door.
+# (See the "unifying Claude and Codex into an optional Subagents app" work.)
 
 # Drop to non-root user and start the server.
 # umask 022: newly created files default to 644 (rw-r--r--) so the
