@@ -23,6 +23,7 @@ import signal
 import tempfile
 from pathlib import Path
 
+from app.chat_notes import extract_cumulative_summary
 from app.continuations import (
   continuation_actor_label,
   is_continuation_message,
@@ -92,23 +93,10 @@ def load_cumulative_summary(data_dir: str, chat_id: str) -> str | None:
   """Read the chat-maintained unbounded ``## Summary`` section, if present."""
   path = Path(data_dir) / "shared" / "memory" / "chats" / chat_id / "index.md"
   try:
-    lines = path.read_text(encoding="utf-8").splitlines()
+    text = path.read_text(encoding="utf-8")
   except OSError:
     return None
-  start: int | None = None
-  for index, line in enumerate(lines):
-    if line.strip().lower() == "## summary":
-      start = index + 1
-      break
-  if start is None:
-    return None
-  body: list[str] = []
-  for line in lines[start:]:
-    if line.strip().startswith("## "):
-      break
-    body.append(line)
-  summary = "\n".join(body).strip()
-  return summary or None
+  return extract_cumulative_summary(text)
 
 
 def build_transcript_text(

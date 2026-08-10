@@ -12,6 +12,47 @@ export function chatSurfaceKey(world, chatId) {
   return `${world}:chat:${chatId}`
 }
 
+/**
+ * Describe the item currently occupying Standard's full-bleed content
+ * surface. Settings and the New Chat landing intentionally return null: they
+ * are their own presentation surfaces and never retain an app as a cover.
+ */
+export function standardContentSurface({ single, fullBleedKey }) {
+  if (!single) return null
+  const match = /^(app|chat):(.+)$/.exec(String(fullBleedKey || ''))
+  if (!match) return null
+  return {
+    kind: match[1],
+    id: match[2],
+  }
+}
+
+/**
+ * Keep an app visible only while the next Standard chat reaches display-ready.
+ *
+ * Chat-to-chat transitions already have a retained ChatView cover. A direct
+ * app-to-chat transition has no outgoing ChatView to hold, which otherwise
+ * exposes ChatView's deliberate first-frame transcript settlement. Retarget a
+ * live cover on rapid chat changes so an app never drops away between A -> B.
+ */
+export function deriveAppToChatCover(previousSurface, currentSurface, cover) {
+  if (currentSurface?.kind !== 'chat') return null
+
+  if (cover) {
+    return {
+      ...cover,
+      chatId: currentSurface.id,
+    }
+  }
+
+  if (previousSurface?.kind !== 'app') return null
+
+  return {
+    appId: previousSurface.id,
+    chatId: currentSurface.id,
+  }
+}
+
 function activeChatOwner(workspace, paneId) {
   const pane = workspace.panes[paneId]
   const active = pane?.tabs.find(tab => `chat:${tab.id}` === pane.activeTabKey)

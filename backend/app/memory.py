@@ -18,6 +18,8 @@ from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.chat_notes import extract_section
+
 # Budget for the always-injected recent-chat digest portion.
 DEFAULT_BUDGET_BYTES = 25_000
 DEFAULT_MAX_NOTES = 12
@@ -117,7 +119,7 @@ def load_chat_summary_metadata(
   if not text.strip():
     return {"description": None, "digest": None}
   description = str(parse_frontmatter(text).get("description", "")).strip()
-  digest = _extract_section(text, "Digest")
+  digest = _note_section(text, "Digest")
   return {
     "description": description or None,
     "digest": digest.strip() if digest and digest.strip() else None,
@@ -145,6 +147,7 @@ def build_memory_block(
   budget_bytes: int = DEFAULT_BUDGET_BYTES,
   max_notes: int = DEFAULT_MAX_NOTES,
   eligible_chat_ids: Collection[str] | None = None,
+  ordered_chat_ids: Collection[str] | None = None,
 ) -> MemoryBlock:
   """Assembles the injected memory context.
 
@@ -172,7 +175,9 @@ def build_memory_block(
   # an unusually long newest note cannot hide every older short digest.
   note_limit = min(RECENT_CHAT_NOTES, max(0, max_notes))
   for note in _recent_chat_notes(
-    root, note_limit, eligible_chat_ids=eligible_chat_ids,
+    root, note_limit,
+    eligible_chat_ids=eligible_chat_ids,
+    ordered_chat_ids=ordered_chat_ids,
   ):
     name, digest = _chat_digest_parts(note)
     if not name and not digest:
@@ -211,14 +216,31 @@ def _recent_chat_notes(
   limit: int,
   *,
   eligible_chat_ids: Collection[str] | None = None,
+  ordered_chat_ids: Collection[str] | None = None,
 ) -> list[Path]:
-  """The per-chat note files (`chats/<id>/index.md`), most-recently-modified
-  first, capped at `limit`. Their bounded digests are injected at
-  session start. Tolerates a missing `chats/` dir (returns [])."""
+  """Return bounded chat notes in explicit activity order when supplied.
+
+  The mtime fallback serves legacy callers that only provide eligibility.
+  Tolerates a missing ``chats/`` directory.
+  """
   chats = root / "chats"
   if not chats.is_dir():
     return []
   eligible = set(eligible_chat_ids) if eligible_chat_ids is not None else None
+  if ordered_chat_ids is not None:
+    ordered: list[Path] = []
+    for chat_id in ordered_chat_ids:
+      if eligible is not None and chat_id not in eligible:
+        continue
+      path = chats / chat_id / "index.md"
+      try:
+        if path.is_file():
+          ordered.append(path)
+      except OSError:
+        continue
+      if len(ordered) >= limit:
+        break
+    return ordered
   candidates: list[tuple[float, Path]] = []
   try:
     paths = chats.glob("*/index.md")
@@ -251,25 +273,9 @@ def _strip_frontmatter(text: str) -> str:
   return rest[nl + 1:] if nl != -1 else ""
 
 
-def _extract_section(text: str, heading: str) -> str | None:
-  """Body under a level-2 `## <heading>` section, up to the next level-2
-  heading or EOF. Case-insensitive on the heading; None when it is absent."""
-  lines = _strip_frontmatter(text).splitlines()
-  target = heading.strip().lower()
-  start = None
-  for i, line in enumerate(lines):
-    s = line.strip()
-    if s.startswith("## ") and s[3:].strip().lower() == target:
-      start = i + 1
-      break
-  if start is None:
-    return None
-  collected: list[str] = []
-  for line in lines[start:]:
-    if line.strip().startswith("## "):
-      break
-    collected.append(line)
-  return "\n".join(collected).strip()
+def _note_section(text: str, heading: str) -> str | None:
+  """Read a section from the body of a platform-owned continuity note."""
+  return extract_section(_strip_frontmatter(text), heading)
 
 
 def _chat_digest_parts(note: Path) -> tuple[str, str]:
@@ -283,9 +289,9 @@ def _chat_digest_parts(note: Path) -> tuple[str, str]:
   if not text.strip():
     return "", ""
   desc = str(parse_frontmatter(text).get("description", "")).strip()
-  digest = _extract_section(text, "Digest")
+  digest = _note_section(text, "Digest")
   if digest is None:
-    digest = _extract_section(text, "Summary")
+    digest = _note_section(text, "Summary")
   if digest is None:
     digest = _strip_frontmatter(text).strip()
   return desc, _truncate_bytes(digest.strip(), DIGEST_MAX_BYTES).strip()

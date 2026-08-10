@@ -87,22 +87,59 @@ export function currentReusableEmptyChat(chats, {
 }
 
 /**
- * Find the concrete chat route the single-screen world most recently left.
- *
- * The navigation stack is newest-last. Home seed entries intentionally carry
- * no concrete id, so they are skipped along with app/settings routes. This is
- * only a candidate source: callers must still run the normal empty-chat checks
- * and authoritative detail probe before reusing the row.
+ * Choose the Standard compose surface without applying Builder's add-new rule.
+ * Only the currently open untouched blank is eligible. Saved drafts belong to
+ * their original chats and must never turn New chat into history navigation.
  */
-export function mostRecentConcreteChatId(routes) {
-  const rows = Array.isArray(routes) ? routes : []
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const route = rows[index]
-    if (route?.view !== 'chat' || route.chatId == null) continue
-    const id = String(route.chatId).trim()
-    if (id) return id
+export function standardNewChatCandidate(chats, draft, {
+  activeChatId,
+  exclude = null,
+  recoveredChatIds = new Set(),
+  streamingChatIds = new Set(),
+} = {}) {
+  const reuseOptions = {
+    exclude,
+    recoveredChatIds,
+    streamingChatIds,
   }
-  return null
+  const active = currentReusableEmptyChat(chats, {
+    ...reuseOptions,
+    activeChatId,
+  })
+  if (!active) return null
+
+  const activeDraft = draft
+    && normalizedId(draft.chatId) === normalizedId(active.id)
+    && (draft.input || draft.attachments?.length)
+    ? draft
+    : null
+  return {
+    chatId: active.id,
+    source: activeDraft ? 'draft' : 'active',
+    draft: activeDraft || null,
+  }
+}
+
+/** Decide whether candidate provenance is enough without a server round-trip. */
+export function newChatCandidateResolution(candidate, { online } = {}) {
+  if (!candidate) return 'reject'
+  if (candidate.source === 'draft') return 'reuse'
+  if (candidate.source !== 'active') return 'reject'
+  return online ? 'probe' : 'reuse'
+}
+
+/** Keep an early fresh edit separate when durable discovery arrives late. */
+export function reconcileHydratedNewChatCandidate(
+  currentCandidate,
+  hydratedCandidate,
+  { leaseWasEdited = false } = {},
+) {
+  if (!hydratedCandidate) return { candidate: currentCandidate, primeLease: false }
+  if (!leaseWasEdited) return { candidate: hydratedCandidate, primeLease: true }
+  if (hydratedCandidate.source === 'draft' && !currentCandidate?.draft) {
+    return { candidate: null, primeLease: false }
+  }
+  return { candidate: currentCandidate, primeLease: false }
 }
 
 /**

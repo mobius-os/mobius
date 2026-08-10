@@ -1184,11 +1184,19 @@ def test_no_connected_agent_streams_and_persists_guidance(
   _seed_run("rt-12", "t12")
 
   note_modes = []
+  settlement_order = []
+
+  async def capture_wake(_chat_id):
+    settlement_order.append("wake")
 
   async def capture_note(_data_dir, _chat_id, *, deterministic=False):
+    settlement_order.append("note")
     note_modes.append(deterministic)
 
   monkeypatch.setattr(chat_mod, "_ensure_chat_note", capture_note)
+  monkeypatch.setattr(
+    "app.delegations.wake_parent_after_child_settled", capture_wake,
+  )
 
   chat_mod.mark_starting("t12")
   gen = chat_mod.current_run_generation("t12")
@@ -1216,6 +1224,7 @@ def test_no_connected_agent_streams_and_persists_guidance(
     "usage_json": chat_mod._NO_AGENT_USAGE_METRICS,
   }
   assert note_modes == [True]
+  assert settlement_order == ["wake", "note"]
   assert not chat_mod.registry.is_alive("t12"), "registry released"
 
 

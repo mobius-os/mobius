@@ -296,24 +296,17 @@ export function clearComposerDraft(chatId, storage) {
  * a chance to remove the composer.
  */
 export function persistComposerDraft(chatId, input, attachments = [], storage) {
-  // Backward compatibility for callers of the former
-  // persistComposerDraft(chatId, input, storage) signature.
-  const legacyStorage = !Array.isArray(attachments) && storage === undefined
-    ? attachments
-    : undefined
-  const draftAttachments = Array.isArray(attachments) ? attachments : []
-  const storageOverride = storage ?? legacyStorage
-  const useDurableStore = storageOverride === undefined
+  const useDurableStore = storage === undefined
   if (chatId == null) return false
   const key = `draft:${chatId}`
-  const value = encodeDraft(input, draftAttachments)
+  const value = encodeDraft(input, attachments)
 
   if (useDurableStore) {
     rememberLiveDraft(chatId, value, 'live', { advance: true })
     queueDurableDraftWrite(chatId, value)
   }
 
-  const target = availableStorage(storageOverride)
+  const target = availableStorage(storage)
   // Dedicated memory + IndexedDB ownership does not depend on Web Storage
   // being exposed (private/opaque contexts can deny it altogether).
   if (!target) return useDurableStore
@@ -355,10 +348,12 @@ export function persistComposerDraft(chatId, input, attachments = [], storage) {
 export function stageComposerHandoff(
   chatId,
   input,
-  { autoSend = false, storage } = {},
+  { allowEmpty = false, attachments = [], autoSend = false, storage } = {},
 ) {
-  if (chatId == null || typeof input !== 'string' || input.length === 0) return false
-  const persisted = persistComposerDraft(chatId, input, [], storage)
+  if (chatId == null || typeof input !== 'string') return false
+  const hasAttachments = Array.isArray(attachments) && attachments.length > 0
+  if (input.length === 0 && !hasAttachments && !allowEmpty) return false
+  const persisted = persistComposerDraft(chatId, input, attachments, storage)
   const target = availableStorage(storage)
   if (!target) return persisted
 
@@ -366,7 +361,8 @@ export function stageComposerHandoff(
     // A session has one navigation handoff at a time. Retire abandoned keyed
     // autosends before staging the replacement so visiting an older chat later
     // cannot unexpectedly submit a stale approval.
-    const keepAutoSendKey = autoSend
+    const shouldAutoSend = !!input && autoSend
+    const keepAutoSendKey = shouldAutoSend
       ? `${HANDOFF_AUTOSEND_PREFIX}${chatId}`
       : null
     const staleAutoSendKeys = []
@@ -378,8 +374,9 @@ export function stageComposerHandoff(
     }
     for (const key of staleAutoSendKeys) target.removeItem(key)
 
-    target.setItem(PENDING_HANDOFF_KEY, input)
-    if (autoSend) {
+    if (input) target.setItem(PENDING_HANDOFF_KEY, input)
+    else target.removeItem(PENDING_HANDOFF_KEY)
+    if (shouldAutoSend) {
       target.setItem(PENDING_HANDOFF_AUTOSEND_KEY, input)
       target.setItem(`${HANDOFF_AUTOSEND_PREFIX}${chatId}`, input)
     } else {

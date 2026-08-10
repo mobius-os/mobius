@@ -13,6 +13,7 @@ import {
   isOwnerUserMessage,
   jumpToLatestShown,
   openAppCtaViewModel,
+  pendingQuestionIsHydrated,
   previewReadyAnnouncement,
   previewUpdatedAnnouncement,
   serverSnapshotBehindLocal,
@@ -134,6 +135,22 @@ test('a parked owner question uses compact history until its answer resumes the 
     running: false,
     pendingQuestionId: null,
   }), false)
+})
+
+test('a runtime question marker requires its durable card in the transcript', () => {
+  const pendingQuestionId = 'question-1'
+  const messages = [{
+    role: 'assistant',
+    blocks: [{ type: 'question', question_id: pendingQuestionId, questions: [] }],
+  }]
+
+  assert.equal(pendingQuestionIsHydrated(messages, pendingQuestionId), true)
+  assert.equal(pendingQuestionIsHydrated([], pendingQuestionId), false)
+  assert.equal(pendingQuestionIsHydrated([{
+    ...messages[0],
+    blocks: [{ ...messages[0].blocks[0], answers: { pick: 'yes' } }],
+  }], pendingQuestionId), false)
+  assert.equal(pendingQuestionIsHydrated(messages, 'question-2'), false)
 })
 
 test('a pathological cold transcript is prepared as stable prefix frames', () => {

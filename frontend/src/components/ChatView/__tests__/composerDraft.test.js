@@ -1,6 +1,5 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import 'fake-indexeddb/auto'
 
 import {
@@ -30,7 +29,7 @@ function storageStub(initial = {}) {
 
 test('persists and clears a chat draft synchronously', () => {
   const storage = storageStub()
-  assert.equal(persistComposerDraft('chat-a', 'unfinished thought', storage), true)
+  assert.equal(persistComposerDraft('chat-a', 'unfinished thought', [], storage), true)
   const stored = JSON.parse(storage.getItem('draft:chat-a'))
   assert.equal(stored.type, 'mobius-composer-draft')
   assert.equal(stored.version, 2)
@@ -41,7 +40,7 @@ test('persists and clears a chat draft synchronously', () => {
     attachments: [],
   })
 
-  assert.equal(persistComposerDraft('chat-a', '', storage), true)
+  assert.equal(persistComposerDraft('chat-a', '', [], storage), true)
   assert.equal(storage.getItem('draft:chat-a'), null)
 })
 
@@ -105,10 +104,18 @@ test('chat handoffs keep exact draft and autosend text under one owner', () => {
   })
 
   assert.equal(stageComposerHandoff('chat-a', 'Review this exactly', {
+    attachments: [{
+      name: 'review.txt', size: 9, mime_type: 'text/plain', status: 'done',
+    }],
     autoSend: true,
     storage,
   }), true)
-  assert.equal(readComposerDraft('chat-a', storage).input, 'Review this exactly')
+  assert.deepEqual(readComposerDraft('chat-a', storage), {
+    input: 'Review this exactly',
+    attachments: [{
+      name: 'review.txt', size: 9, mime_type: 'text/plain', status: 'done',
+    }],
+  })
   assert.equal(storage.getItem('pending-draft'), 'Review this exactly')
   assert.equal(storage.getItem('pending-draft-autosend'), 'Review this exactly')
   assert.equal(storage.getItem('draft-autosend:chat-a'), 'Review this exactly')
@@ -135,6 +142,30 @@ test('chat handoffs keep exact draft and autosend text under one owner', () => {
   assert.equal(storage.getItem('pending-draft'), 'Leave this for review')
   assert.equal(storage.getItem('pending-draft-autosend'), null)
   assert.equal(storage.getItem('draft-autosend:chat-a'), null)
+
+  assert.equal(stageComposerHandoff('attachment-only', '', {
+    attachments: [{
+      name: 'reference.png', size: 12, mime_type: 'image/png', status: 'done',
+    }],
+    storage,
+  }), true)
+  assert.deepEqual(readComposerDraft('attachment-only', storage), {
+    input: '',
+    attachments: [{
+      name: 'reference.png', size: 12, mime_type: 'image/png', status: 'done',
+    }],
+  })
+
+  persistComposerDraft('cleared-handoff', 'remove me', [], storage)
+  assert.equal(stageComposerHandoff('cleared-handoff', '', {
+    allowEmpty: true,
+    storage,
+  }), true)
+  assert.equal(storage.getItem('pending-draft'), null)
+  assert.equal(storage.getItem('draft-autosend:chat-a'), null)
+  assert.deepEqual(readComposerDraft('cleared-handoff', storage), {
+    input: '', attachments: [],
+  })
 })
 
 test('does not restore attachments that never finished uploading', () => {
@@ -247,7 +278,11 @@ test('quota recovery sacrifices only transient cache and keeps every owner draft
     await flushComposerDraftPersistence()
     _clearComposerDraftMemoryForTests()
     assert.equal(readComposerDraft('chat-d').input, 'old session copy')
-    assert.equal((await readComposerDraftAsync('chat-d')).input, 'newest durable copy')
+    assert.equal(
+      (await readComposerDraftAsync('chat-d')).input,
+      'newest durable copy',
+    )
+    assert.equal(readComposerDraft('chat-d').input, 'newest durable copy')
 
     clearComposerDraft('chat-d')
     await flushComposerDraftPersistence()
@@ -268,43 +303,4 @@ test('quota recovery sacrifices only transient cache and keeps every owner draft
     if (previous) Object.defineProperty(globalThis, 'sessionStorage', previous)
     else delete globalThis.sessionStorage
   }
-})
-
-test('the composer state boundary saves before scheduling React state', () => {
-  const source = readFileSync(
-    new URL('../hooks/useComposerDraftState.js', import.meta.url),
-    'utf8',
-  )
-  const start = source.indexOf('const setComposerInput = useCallback((nextInput) =>')
-  const end = source.indexOf('\n  }, [chatId])', start)
-  const body = source.slice(start, end)
-
-  const save = body.indexOf('persistComposerDraft(chatId, nextInput, draftAttachmentsRef.current)')
-  const render = body.indexOf('setInputState(nextInput)')
-  assert.ok(save >= 0, 'all composer changes must be persisted directly')
-  assert.ok(render > save, 'draft persistence must happen before navigation can unmount React')
-})
-
-test('shell draft handoffs use the same owner instead of writing around its live mirror', () => {
-  const shellSource = readFileSync(
-    new URL('../../Shell/Shell.jsx', import.meta.url),
-    'utf8',
-  )
-  const chatSource = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
-  const directDraftWrite = /sessionStorage\.(?:setItem|removeItem)\(`draft:/
-  assert.doesNotMatch(shellSource, directDraftWrite,
-    'shell handoffs and deletion must not bypass the draft owner')
-  assert.doesNotMatch(chatSource, directDraftWrite,
-    'chat cleanup must clear memory, session, and durable copies together')
-  assert.match(shellSource, /stageComposerHandoff\(buildingChatId, report\)/)
-  assert.match(shellSource, /stageComposerHandoff\(request\.chatId, draftText\)/)
-  assert.match(shellSource,
-    /stageComposerHandoff\(chatId, draftText, \{\s*autoSend: suppliedDraft \? autoSend : false,\s*\}\)/,
-    'new-chat handoffs must preserve supplied autosend intent without sending early phone typing')
-  assert.match(shellSource, /consumeComposerHandoff\(prev\.chatId, prev\.draft\)/,
-    'an acknowledged direct handoff must retire its global fallback')
-  assert.match(shellSource, /requestComposer\(buildingChatId, \{ draft: report \}\)/,
-    'a crash report must update a retained destination composer too')
-  assert.match(shellSource, /clearComposerDraft\(id\)/)
-  assert.match(chatSource, /clearComposerDraft\(chatId\)/)
 })

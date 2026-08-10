@@ -1635,15 +1635,18 @@ def get_chat_agent_context(
   compaction_brief = _latest_compaction_brief(chat)
   chat_summary = load_cumulative_summary(data_dir, chat_id)
   chat_summary_metadata = memory.load_chat_summary_metadata(data_dir, chat_id)
-  eligible_chat_ids = {
+  ordered_chat_ids = [
     row[0]
     for row in db.query(models.Chat.id).filter(
       models.Chat.deleted_at.is_(None),
+    ).order_by(
+      func.coalesce(models.Chat.activity_at, models.Chat.updated_at).desc(),
+      models.Chat.id.desc(),
     ).all()
-  }
+  ]
   recent_chat_block = memory.build_memory_block(
     data_dir,
-    eligible_chat_ids=eligible_chat_ids,
+    ordered_chat_ids=ordered_chat_ids,
   )
   recent_chats = recent_chat_block.text or None
   return {

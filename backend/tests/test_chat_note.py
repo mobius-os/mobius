@@ -208,6 +208,18 @@ def test_deterministic_note_preserves_an_existing_generated_name():
   assert "description: unrelated raw prompt text" not in note
 
 
+def test_deterministic_note_preserves_summary_with_internal_h2():
+  cn = _load_chat_note()
+  existing = (
+    "---\ntype: chat\ndescription: Useful name\n---\n"
+    "## Digest\nold\n\n## Summary\nDecision\n\n## Design\nDetail\n\n"
+    "## Facts & intent\n- intent: ship\n"
+  )
+  note = cn._deterministic_note("user: new evidence", existing)
+  assert "Decision\n\n## Design\nDetail" in note
+  assert "### Undistilled latest transcript\n\nuser: new evidence" in note
+
+
 def test_read_transcript_excludes_derived_provider_handoffs(tmp_path):
   cn = _load_chat_note()
   database = tmp_path / "chat.db"
@@ -236,7 +248,7 @@ def test_read_transcript_excludes_derived_provider_handoffs(tmp_path):
   con.close()
   cn.DB = database
 
-  transcript = cn._read_transcript("c1")
+  transcript = cn._read_chat_snapshot("c1").transcript
   assert "original request" in transcript
   assert "real response" in transcript
   assert "derived handoff" not in transcript
@@ -496,7 +508,9 @@ def test_first_summary_publication_replaces_the_opening_message_title(
   cn = _load_chat_note()
   monkeypatch.setattr(cn, "MEMORY_DIR", tmp_path / "memory")
   monkeypatch.setattr(
-    cn, "_read_chat_snapshot", lambda _cid: ("transcript", "r1"),
+    cn,
+    "_read_chat_snapshot",
+    lambda _cid: cn.ChatSnapshot("transcript", "r1", []),
   )
   monkeypatch.setattr(cn, "_read_note_snapshot", lambda _note: ("", "missing"))
   monkeypatch.setattr(
@@ -513,10 +527,79 @@ def test_first_summary_publication_replaces_the_opening_message_title(
   assert patched == [("c1", "Current work")]
 
 
+def test_incremental_cursor_prevents_repeated_fallback_transcripts():
+  cn = _load_chat_note()
+  messages = [
+    {"role": "user", "content": "old request"},
+    {"role": "assistant", "content": "old answer"},
+    {"role": "user", "content": "new request"},
+    {"role": "assistant", "content": "new answer"},
+  ]
+  snapshot = cn.ChatSnapshot(
+    cn._render_transcript(json.dumps(messages)), "r1", messages,
+  )
+  existing = cn._set_source_cursor(
+    _valid_note(summary="curated"), snapshot.cursor(2),
+  )
+
+  previous_cursor = cn._source_cursor(existing)
+  delta = snapshot.transcript_after(
+    cn._incremental_start(snapshot, previous_cursor),
+  )
+  note = cn._set_source_cursor(
+    cn._deterministic_note(delta, existing), snapshot.cursor(),
+  )
+
+  summary = cn._existing_section(note, "Summary")
+  assert summary.count("curated") == 1
+  assert summary.count("new request") == 1
+  assert "old request" not in summary
+  assert cn._source_cursor(note) == snapshot.cursor()
+  assert snapshot.transcript_after(cn._source_cursor(note).message_count) == ""
+
+
+def test_source_cursor_is_host_owned_frontmatter():
+  cn = _load_chat_note()
+  cursor = cn.SourceCursor(12, "a" * 64)
+  note = cn._set_source_cursor(
+    _valid_note(summary="source_message_count: 999"), cursor,
+  )
+  assert "source_message_count: 12" in note.split("---", 2)[1]
+  assert "source_messages_sha256: " + "a" * 64 in note.split("---", 2)[1]
+  assert "source_message_count: 999" in cn._existing_section(note, "Summary")
+  assert cn._source_cursor(note) == cursor
+  updated = cn._set_source_cursor(note, cn.SourceCursor(14, "b" * 64))
+  assert updated.split("---", 2)[1].count("source_message_count:") == 1
+  assert updated.split("---", 2)[1].count("source_messages_sha256:") == 1
+  assert cn._source_cursor(updated) == cn.SourceCursor(14, "b" * 64)
+
+
+def test_cursor_requires_an_unchanged_prefix_before_incremental_summary():
+  cn = _load_chat_note()
+  original = [
+    {"role": "user", "content": "request"},
+    {"role": "assistant", "content": "answer"},
+  ]
+  cursor = cn.ChatSnapshot("", "r1", original).cursor()
+  edited = cn.ChatSnapshot("", "r2", [
+    {"role": "user", "content": "edited request"},
+    {"role": "assistant", "content": "answer"},
+    {"role": "user", "content": "follow-up"},
+  ])
+  same_count_edit = cn.ChatSnapshot("", "r2", [
+    {"role": "user", "content": "edited request"},
+    {"role": "assistant", "content": "answer"},
+  ])
+
+  assert cn._incremental_start(edited, cursor) is None
+  assert same_count_edit.cursor() != cursor
+
+
 def test_two_backstops_publish_only_one_revision(tmp_path):
   cn = _load_chat_note()
   _snapshot_db(cn, tmp_path)
-  transcript, revision = cn._read_chat_snapshot("c1")
+  snapshot = cn._read_chat_snapshot("c1")
+  revision = snapshot.updated_at
   note = cn._note_path("c1")
   _existing, note_revision = cn._read_note_snapshot(note)
 
@@ -532,7 +615,7 @@ def test_two_backstops_publish_only_one_revision(tmp_path):
 def test_new_turn_or_delete_makes_summary_publication_stale(tmp_path):
   cn = _load_chat_note()
   db_path = _snapshot_db(cn, tmp_path)
-  _transcript, revision = cn._read_chat_snapshot("c1")
+  revision = cn._read_chat_snapshot("c1").updated_at
   note = cn._note_path("c1")
   _existing, note_revision = cn._read_note_snapshot(note)
   con = sqlite3.connect(db_path)
@@ -569,7 +652,7 @@ def test_new_turn_or_delete_makes_summary_publication_stale(tmp_path):
 def test_note_hash_cas_detects_same_mtime_replacement(tmp_path):
   cn = _load_chat_note()
   _snapshot_db(cn, tmp_path)
-  _transcript, revision = cn._read_chat_snapshot("c1")
+  revision = cn._read_chat_snapshot("c1").updated_at
   note = cn._note_path("c1")
   note.parent.mkdir(parents=True)
   note.write_text(_valid_note("old"))
@@ -589,7 +672,7 @@ def test_note_write_failure_does_not_advance_chat_revision(
 ):
   cn = _load_chat_note()
   db_path = _snapshot_db(cn, tmp_path)
-  _transcript, revision = cn._read_chat_snapshot("c1")
+  revision = cn._read_chat_snapshot("c1").updated_at
   note = cn._note_path("c1")
   _old, note_revision = cn._read_note_snapshot(note)
 

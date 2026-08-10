@@ -339,6 +339,15 @@
   z-index: 2;
 }
 
+/* An app can be the outgoing visual surface too. Keep its already-painted frame
+   above a settling ChatView until display-ready, while AppCanvas remains an
+   inactive runtime for this short, inert handoff. */
+.shell__app-view--held {
+  visibility: visible;
+  pointer-events: none;
+  z-index: 2;
+}
+
 /* While New chat is allocating, the ordinary landing covers the outgoing
    ChatView and its z:2 handoff cover. */
 .shell__new-chat-presentation {

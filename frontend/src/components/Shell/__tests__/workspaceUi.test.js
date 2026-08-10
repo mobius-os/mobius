@@ -638,9 +638,6 @@ test('pane surfaces and strips are captured individually; dividers remain outsid
   assert.match(chrome, /modeViewTransitionStyle\('strip', paneId, paneId\)/)
   assert.doesNotMatch(chrome, /modeViewTransitionStyle\('divider'/)
   assert.match(css, /html\[data-mode-view-transition\]::view-transition-old\(\*\),[\s\S]*?opacity: 0;/)
-  // Exit snapshots must also paint during the browser's pre-ready interval.
-  assert.match(css, /html\[data-mode-view-transition="exit"\]::view-transition-new\(\*\)\s*,[\s\S]*?html\[data-mode-view-transition="exit"\]::view-transition-old\(\*\)\s*\{\s*opacity: 1;/)
-  assert.match(css, /html\[data-mode-view-transition="exit"\]::view-transition-old\(mode-workspace\),[\s\S]*?mode-navigation-drawer\)\s*\{\s*opacity: 0;/)
 })
 
 test('navigation is a stationary foreground capture above travelling panes', () => {

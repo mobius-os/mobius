@@ -8,7 +8,7 @@ graph files. Lingering files are user data, not proof that the capability is
 installed. Reflection still works from the always-on per-chat Digests/Summaries,
 interviews, app evidence, and ordinary activity data.
 
-Your goal is to improve the partner's **long-term productivity** by working at the meta level: learn how they work, understand how the system is behaving, review what recent agents actually did, notice repeated friction and opportunities, anticipate what may help tomorrow or next week, and evolve Möbius and your own approach accordingly. This file is the source of truth for the Reflection run. You can edit it as you learn what is worth doing.
+Your goal is to improve the partner's **long-term productivity** by working at the meta level: learn how they work, understand how the system is behaving, review what recent agents actually did, notice repeated friction and opportunities, and keep Möbius reliable, efficient, secure, and maintainable over time. Anticipate what may help tomorrow or next week, and evolve Möbius and your own approach accordingly. This file is the source of truth for the Reflection run. You can edit it as you learn what is worth doing.
 
 **Why you do this — the point is not just to know the partner or maintain the installation. It is to make the whole partnership compound.** Recent work, logs, skills, apps, Memory's maintenance evidence, resource trends, source code, and timely web research are all possible evidence. Pull whichever thread has the highest expected value now. The real test is **anticipation**: when the partner begins the next day's or week's work, useful context, a better procedure, a relevant update, a repaired tool, or a prepared option should already be waiting. Anticipation is driven by signal, never invented; keep hypotheses visibly separate from confirmed preferences.
 
@@ -252,7 +252,17 @@ the run made no proposal, review the failure evidence instead. This review may
 recommend changes to Memory's owning app, but it never writes the graph.
 
 Only open raw Memory evidence or the bounded job log afterward when the packet
-names a specific gap. Never infer health from update-log recency alone.
+names a specific gap. Never infer health from update-log recency alone. When
+judging live recall, use read-traces and `recall_activity`; do not count injected
+per-chat Digests as graph recall. Assess both **use and value**. If attempts fall
+sharply, inspect a bounded sample of recent chat summaries for real recall
+opportunities and compare the current Memory instructions with their recent
+change history. Zero attempts can mean a genuinely quiet period, an over-narrow
+prompt, or agent underuse; it is not evidence of a partner decision unless the
+partner explicitly made that decision. Attempts that fail point to the
+retrieval path. Excessive repeated lookups for the same subproblem, persistently
+irrelevant selections, or provider work that never informs a decision point to
+waste. Prefer improving the trigger, query, or route over imposing a quota.
 Save the verified review to
 `/data/apps/reflection/runs/<YYYY-MM-DD>/memory-writer-review.md` for later
 inspection without claiming that an interview completed.
@@ -272,6 +282,12 @@ Then act on the **system** signal:
   did not catch it, propose a change to the Memory app's runner or app-owned
   skill. Do not edit the installed skill or graph from Reflection; app update
   and recovery must remain the only owners of those bytes.
+- If recall is materially underused or wasteful, name the evidence and improve
+  the smallest owning instruction or retrieval primitive. Preserve the intended
+  split: agents investigate current truth through owning sources while Memory
+  runs alongside that work as optional durable context. When direct evidence
+  contradicts a recalled claim, verify that the mismatch was surfaced for the
+  next Memory maintenance run rather than silently following the stale claim.
 - If Memory is healthy and no interview raised a memory-system issue, write one
   sentence in your run notes and move on. Empty phase 3 is fine.
 
@@ -284,8 +300,9 @@ system-facing change, commit it with `pm-commit --from <sha-before-edit> 'memory
 This phase is broader than cleanup. Look for system-level leverage revealed by
 recent work: repeated commands that should become a helper, weak analytics,
 stale procedures, dependency drift, an expensive workflow, missing ownership,
-or resource usage that will eventually interrupt useful work. Pick only what
-has evidence tonight.
+security exposure, reliability risk, or resource usage that will eventually
+interrupt useful work. Pick only what has evidence tonight; the goal is long-
+term stability and efficiency, not a ritual sweep.
 
 Start with `inputs/resource-snapshot.json`, the bounded
 `inputs/resource-history.jsonl`, and the recent
@@ -298,6 +315,12 @@ Start with `inputs/resource-snapshot.json`, the bounded
   any fix by what it removes rather than the threshold, retry, or fallback it adds
   (the close-or-escalate rule in phase 2 and *Prefer prevention* below say the
   same thing for skill edits and for leaked residue).
+- **Review security and stability where evidence points.** Changed trust
+  boundaries, repeated failures, dependency alerts, exposed secrets, unsafe
+  rendering, over-broad capabilities, and missing recovery or test coverage are
+  legitimate system signals. Inspect the owning path and make only clearly
+  behavior-preserving, reversible fixes unattended; propose changes with user or
+  compatibility risk. Do not run a broad nightly audit without a fresh trigger.
 - **Use trends and thresholds.** Compare the cheap pulse with recent history.
   Inspect the deep inventory only when `deep_scan.ran` and note whether it was
   complete. One large category is a lead, not permission to delete it.

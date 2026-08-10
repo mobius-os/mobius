@@ -22,9 +22,9 @@ of notes silently stopping.
 
 from __future__ import annotations
 
-import json
-import hashlib
 import asyncio
+import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -34,6 +34,7 @@ import tempfile
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NamedTuple
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 DB = DATA_DIR / "db" / "ultimate.db"
@@ -42,6 +43,11 @@ CLAUDE_CONFIG_DIR = DATA_DIR / "cli-auth" / "claude"
 CLI_PATH = "/usr/local/bin/claude"
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000")
 SERVICE_TOKEN_FILE = DATA_DIR / "service-token.txt"
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR) not in sys.path:
+  sys.path.insert(0, str(BACKEND_DIR))
+
+from app.chat_notes import extract_cumulative_summary, extract_section
 
 # When the configured provider has a demonstrably tool-free text mode we may
 # use it to distill the note.  There is always an extractive local fallback, so
@@ -103,28 +109,25 @@ Rules:
 """
 
 
-def _render_transcript(raw: str) -> str:
-  """Render the complete user-visible transcript as role-prefixed text.
-
-  Persisted assistant messages normally carry a flattened ``content`` string,
-  but question/error-only messages can have meaningful blocks with empty
-  content. Preserve those visible handoffs. Tool inputs/outputs and thinking
-  stay excluded: they can contain credentials or huge opaque payloads and are
-  not part of the conversational handoff.
-  """
-  if not raw:
-    return ""
+def _parsed_messages(raw: str) -> list[dict] | None:
   try:
-    msgs = json.loads(raw)
+    value = json.loads(raw)
   except (ValueError, TypeError):
-    return raw
+    return None
+  if not isinstance(value, list):
+    return None
+  return [item for item in value if isinstance(item, dict)]
+
+
+def _render_messages(msgs: list[dict], *, start_index: int = 0) -> str:
+  """Render user-visible messages as role-prefixed transcript text."""
   lines: list[str] = []
-  for m in msgs if isinstance(msgs, list) else []:
+  for m in msgs[max(0, start_index):]:
     # Provider handoffs are derived from this note. Re-ingesting them would
     # recursively duplicate the same context on every later re-switch.
-    if isinstance(m, dict) and m.get("kind") == "compaction":
+    if m.get("kind") == "compaction":
       continue
-    if isinstance(m, dict) and m.get("kind") in {
+    if m.get("kind") in {
       "continuation", "auto_continuation",
     }:
       reason = str(m.get("continuation_reason") or "automatic recovery")
@@ -134,8 +137,8 @@ def _render_transcript(raw: str) -> str:
         else f"automatic continuation ({reason})"
       )
     else:
-      role = m.get("role", "?") if isinstance(m, dict) else "?"
-    content = m.get("content") if isinstance(m, dict) else None
+      role = m.get("role", "?")
+    content = m.get("content")
     if isinstance(content, list):
       text = " ".join(
         str(b.get("text") or b.get("content") or "")
@@ -146,7 +149,7 @@ def _render_transcript(raw: str) -> str:
       text = content
     else:
       text = ""
-    if not text.strip() and isinstance(m, dict):
+    if not text.strip():
       visible: list[str] = []
       blocks = m.get("blocks") if isinstance(m.get("blocks"), list) else []
       for block in blocks:
@@ -176,6 +179,16 @@ def _render_transcript(raw: str) -> str:
   return "\n\n".join(lines)
 
 
+def _render_transcript(raw: str, *, start_index: int = 0) -> str:
+  """Render a persisted transcript without exposing tool or thinking data."""
+  if not raw:
+    return ""
+  messages = _parsed_messages(raw)
+  if messages is None:
+    return raw
+  return _render_messages(messages, start_index=start_index)
+
+
 def _apply_sqlite_policy(con: sqlite3.Connection) -> None:
   """Apply the runtime's shared SQLite policy to a raw connection.
 
@@ -199,7 +212,49 @@ def _apply_sqlite_policy(con: sqlite3.Connection) -> None:
     con.execute(pragma)
 
 
-def _read_chat_snapshot(chat_id: str) -> tuple[str, str] | None:
+class SourceCursor(NamedTuple):
+  message_count: int
+  messages_sha256: str
+
+
+class ChatSnapshot(NamedTuple):
+  transcript: str
+  updated_at: str
+  messages: list[dict] | None
+
+  @property
+  def message_count(self) -> int | None:
+    return len(self.messages) if self.messages is not None else None
+
+  def transcript_after(self, message_count: int) -> str:
+    if self.messages is None:
+      return self.transcript
+    return _render_messages(self.messages, start_index=message_count)
+
+  def cursor(self, message_count: int | None = None) -> SourceCursor | None:
+    if self.messages is None:
+      return None
+    count = len(self.messages) if message_count is None else message_count
+    if count < 0 or count > len(self.messages):
+      return None
+    return SourceCursor(count, _messages_sha256(self.messages[:count]))
+
+
+def _messages_sha256(messages: list[dict]) -> str:
+  digest = hashlib.sha256()
+  for message in messages:
+    encoded = json.dumps(
+      message,
+      ensure_ascii=False,
+      separators=(",", ":"),
+      sort_keys=True,
+    ).encode("utf-8")
+    digest.update(len(encoded).to_bytes(8, "big"))
+    digest.update(encoded)
+  return digest.hexdigest()
+
+
+def _read_chat_snapshot(chat_id: str) -> ChatSnapshot | None:
   """Return complete transcript + durable revision for one idle live chat."""
   try:
     con = sqlite3.connect(str(DB))
@@ -217,13 +272,13 @@ def _read_chat_snapshot(chat_id: str) -> tuple[str, str] | None:
     return None
   if not row or not row[0] or row[1] is None:
     return None
-  return _render_transcript(row[0]), str(row[1])
-
-
-def _read_transcript(chat_id: str) -> str:
-  """Compatibility wrapper used by tests and operator diagnostics."""
-  snapshot = _read_chat_snapshot(chat_id)
-  return snapshot[0] if snapshot else ""
+  raw = str(row[0])
+  messages = _parsed_messages(raw)
+  return ChatSnapshot(
+    transcript=_render_transcript(raw),
+    updated_at=str(row[1]),
+    messages=messages,
+  )
 
 
 def _note_path(chat_id: str) -> Path:
@@ -362,11 +417,72 @@ def _run_codex_tool_free(prompt: str) -> str:
 
 
 def _existing_section(existing: str, heading: str) -> str:
-  match = re.search(
-    rf"(?ims)^## {re.escape(heading)}\s*\n(.*?)(?=^## |\Z)",
-    existing,
+  value = (
+    extract_cumulative_summary(existing)
+    if heading.strip().lower() == "summary"
+    else extract_section(existing, heading)
   )
-  return match.group(1).strip() if match else ""
+  return value or ""
+
+
+def _frontmatter_bounds(note: str) -> tuple[int, int] | None:
+  if not note.startswith("---\n"):
+    return None
+  end = note.find("\n---", 4)
+  return (4, end) if end >= 0 else None
+
+
+def _source_cursor(note: str) -> SourceCursor | None:
+  bounds = _frontmatter_bounds(note)
+  if bounds is None:
+    return None
+  frontmatter = note[bounds[0]:bounds[1]]
+  count = re.search(r"(?m)^source_message_count:\s*(\d+)\s*$", frontmatter)
+  digest = re.search(
+    r"(?mi)^source_messages_sha256:\s*([a-f0-9]{64})\s*$",
+    frontmatter,
+  )
+  if count is None or digest is None:
+    return None
+  return SourceCursor(
+    int(count.group(1)),
+    digest.group(1).lower(),
+  )
+
+
+def _set_source_cursor(note: str, cursor: SourceCursor | None) -> str:
+  bounds = _frontmatter_bounds(note)
+  if bounds is None:
+    return note
+  frontmatter = [
+    line
+    for line in note[bounds[0]:bounds[1]].splitlines()
+    if not re.match(r"(?i)^source_(?:message_count|messages_sha256):", line)
+  ]
+  if cursor is not None:
+    frontmatter.extend([
+      f"source_message_count: {cursor.message_count}",
+      f"source_messages_sha256: {cursor.messages_sha256}",
+    ])
+  return note[:bounds[0]] + "\n".join(frontmatter) + note[bounds[1]:]
+
+
+def _incremental_start(
+  snapshot: ChatSnapshot,
+  cursor: SourceCursor | None,
+) -> int | None:
+  if (
+    cursor is None
+    or snapshot.message_count is None
+    or not 0 <= cursor.message_count < snapshot.message_count
+  ):
+    return None
+  prefix = snapshot.cursor(cursor.message_count)
+  return (
+    cursor.message_count
+    if prefix is not None and prefix.messages_sha256 == cursor.messages_sha256
+    else None
+  )
 
 
 def _deterministic_note(transcript: str, existing: str) -> str:
@@ -392,11 +508,19 @@ def _deterministic_note(transcript: str, existing: str) -> str:
     seed = user_entries[0] if user_entries else (entries[0] if entries else "chat")
     description = re.sub(r"\s+", " ", seed).strip()[:160] or "chat"
   recent = " ".join(entries[-4:])
-  digest = re.sub(r"\s+", " ", recent).strip()[:600]
+  digest = re.sub(r"\s+", " ", f"{description}. {recent}").strip()[:600]
   facts = _existing_section(existing, "Facts & intent")
   if not facts:
     facts = "- intent: continue the work and decisions captured in this chat"
   related = _existing_section(existing, "Related")
+  previous_summary = _existing_section(existing, "Summary")
+  summary = transcript.strip()
+  if previous_summary:
+    summary = (
+      f"{previous_summary}\n\n"
+      "### Undistilled latest transcript\n\n"
+      f"{transcript.strip()}"
+    )
   note = (
     "---\n"
     "type: chat\n"
@@ -405,8 +529,7 @@ def _deterministic_note(transcript: str, existing: str) -> str:
     "## Digest\n"
     f"{digest}\n\n"
     "## Summary\n"
-    "Complete transcript handoff (platform-generated; newest state last):\n\n"
-    f"{transcript.strip()}\n\n"
+    f"{summary}\n\n"
     "## Facts & intent\n"
     f"{facts}"
   )
@@ -583,8 +706,7 @@ def run() -> int:
   snapshot = _read_chat_snapshot(chat_id)
   if snapshot is None:
     return 0  # missing, deleted, or currently running
-  transcript, expected_updated_at = snapshot
-  if not transcript:
+  if not snapshot.transcript:
     return 0  # nothing to summarize yet
   note = _note_path(chat_id)
   try:
@@ -592,7 +714,22 @@ def run() -> int:
   except (OSError, UnicodeError) as exc:
     sys.stderr.write(f"note snapshot failed: {exc!r}\n")
     return 3
-  out = _clean_note_output(_summarize(transcript, existing))
+  previous_cursor = _source_cursor(existing)
+  current_cursor = snapshot.cursor()
+  if previous_cursor is not None and previous_cursor == current_cursor:
+    return 0
+  start_index = _incremental_start(snapshot, previous_cursor)
+  transcript = (
+    snapshot.transcript_after(start_index)
+    if start_index is not None
+    else snapshot.transcript
+  )
+  out = (
+    existing
+    if start_index is not None and not transcript
+    else _clean_note_output(_summarize(transcript, existing))
+  )
+  out = _set_source_cursor(out, current_cursor)
   if not _looks_like_note(out):
     sys.stderr.write("summarizer output is not a note\n")
     return 3
@@ -600,7 +737,7 @@ def run() -> int:
   try:
     published = _publish_if_current(
       chat_id,
-      expected_updated_at,
+      snapshot.updated_at,
       expected_note_revision,
       note,
       out,

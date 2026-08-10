@@ -653,6 +653,19 @@ def test_cumulative_chat_summary_is_unbounded_compaction_source(tmp_path):
   assert "private fact" not in summary
 
 
+def test_cumulative_summary_keeps_markdown_h2_inside_handoff(tmp_path):
+  note = tmp_path / "shared" / "memory" / "chats" / "c1" / "index.md"
+  note.parent.mkdir(parents=True)
+  note.write_text(
+    "## Summary\nOpening\n\n## Implementation\nKept detail\n\n"
+    "## Facts & intent\n- private\n",
+    encoding="utf-8",
+  )
+  assert compaction.load_cumulative_summary(str(tmp_path), "c1") == (
+    "Opening\n\n## Implementation\nKept detail"
+  )
+
+
 def test_codex_agent_text_reads_completed_message():
   stdout = (
     b'{"type":"thread.started","thread_id":"t"}\n'

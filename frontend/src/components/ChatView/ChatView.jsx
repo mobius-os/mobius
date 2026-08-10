@@ -102,6 +102,7 @@ import {
   isOwnerUserMessage,
   jumpToLatestShown,
   openAppCtaViewModel,
+  pendingQuestionIsHydrated,
   shouldShowOpenAppCta,
   shouldAttachRunningStream,
   shouldRetryStopAfterConfirm,
@@ -485,6 +486,10 @@ export default function ChatView({
   // read is forward-compat: harmlessly null today, it would pick up a
   // persisted pending_question_id if one is ever added.)
   const [liveQuestionId, setLiveQuestionId] = useState(() => cached?.pending_question_id ?? null)
+  // Runtime polling stays small, but a parked question is a transcript-owned
+  // control. Keep its necessary detail refresh single-flight per exact owner;
+  // the invariant below retries naturally after an honest fetch failure.
+  const parkedQuestionHydrationRef = useRef(null)
   // The pending-question and resume "tap to jump to it" nudges each track
   // whether their card is scrolled out of the viewport. Both use one shared
   // observer hook (useOffscreenNudge, below); their booleans are computed near
@@ -1034,12 +1039,13 @@ export default function ChatView({
         data, cachedGoalObjective,
       )
       setActiveGoalObjective(runtimeGoalObjective)
-      setLiveQuestionId(data.pending_question_id || null)
+      const pendingQuestionId = data.pending_question_id || null
+      setLiveQuestionId(pendingQuestionId)
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
         activeGoalObjective: runtimeGoalObjective,
         pending_messages: serverPending,
-        pending_question_id: data.pending_question_id || null,
+        pending_question_id: pendingQuestionId,
       })
       // Don't let the fallback poll add/clobber the queue while a turn is live
       // (localAuthoritative, above) — the optimistic queue + confirmQueued
@@ -1047,9 +1053,27 @@ export default function ChatView({
       if (!localAuthoritative) {
         pendingQueue.hydrate(serverPending)
       }
+      // A question closes SSE replay by design: nothing can arrive before the
+      // owner answers. If this view missed that event, read the compact detail
+      // page that owns the card rather than inventing a runtime-only card.
+      const hydrationKey = pendingQuestionId ? `${chatId}:${pendingQuestionId}` : null
+      if (
+        hydrationKey
+        && !pendingQuestionIsHydrated(messagesRef.current, pendingQuestionId)
+        && parkedQuestionHydrationRef.current !== hydrationKey
+      ) {
+        parkedQuestionHydrationRef.current = hydrationKey
+        fetchMessages({ force: true }).finally(() => {
+          if (parkedQuestionHydrationRef.current === hydrationKey) {
+            parkedQuestionHydrationRef.current = null
+          }
+        })
+      }
     } catch { /* background reconciliation is best-effort */ }
   }, [
     chatId,
+    fetchMessages,
+    messagesRef,
     pendingQueue.hydrate,
     queryClient,
   ])

@@ -129,6 +129,22 @@ export function shouldAttachRunningStream({
   return !!running && !pendingQuestionId
 }
 
+/**
+ * The runtime endpoint deliberately omits transcript blocks, but an open
+ * question is only actionable when its durable card is in the mounted
+ * transcript. A runtime marker without that card means a live viewer missed
+ * the question event and must refresh the compact detail page.
+ */
+export function pendingQuestionIsHydrated(messages, pendingQuestionId) {
+  if (!pendingQuestionId || !Array.isArray(messages)) return false
+  return messages.some(message => message?.role === 'assistant'
+    && (message.blocks || []).some(block => (
+      block?.type === 'question'
+      && block.question_id === pendingQuestionId
+      && !block.answers
+    )))
+}
+
 function coldBlockRenderCost(block) {
   if (block?.type !== 'text') return 1
   // Markdown reports create work roughly in proportion to their source size,

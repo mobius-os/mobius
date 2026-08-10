@@ -58,6 +58,21 @@ def test_chat_digests_are_newest_first_and_budget_bounded(tmp_path):
   assert len(block.text.encode("utf-8")) <= 600
 
 
+def test_explicit_activity_order_beats_backfill_mtime(tmp_path):
+  root = tmp_path / "shared" / "memory"
+  older = _chat_note(root, "older", Digest="older activity")
+  newer = _chat_note(root, "newer", Digest="newer activity")
+  os.utime(older, (3000, 3000))
+  os.utime(newer, (1000, 1000))
+
+  block = memory.build_memory_block(
+    tmp_path,
+    ordered_chat_ids=["newer", "older"],
+  )
+
+  assert block.text.index("newer activity") < block.text.index("older activity")
+
+
 def test_chat_digest_entries_have_name_location_and_digest_without_repeated_copy(
   tmp_path,
 ):

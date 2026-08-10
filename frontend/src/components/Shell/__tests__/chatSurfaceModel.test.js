@@ -6,8 +6,10 @@ import {
   FOCUSED_BUILDER_CHAT_SURFACE,
   STANDARD_CHAT_WORLD,
   chatSurfaceKey,
+  deriveAppToChatCover,
   deriveChatSurfaceLayers,
   deriveChatSurfaceOwners,
+  standardContentSurface,
 } from '../chatSurfaceModel.js'
 import { SINGLE_SLOT_PANE } from '../paneModel.js'
 
@@ -176,4 +178,63 @@ test('focused Builder presentation never manufactures a stale outgoing cover', (
 
   assert.equal(layers.some(layer => layer.chatId === 'departed'), false)
   assert.equal(layers.every(layer => layer.role === 'active'), true)
+})
+
+test('an app remains a Standard cover until the destination chat is display-ready', () => {
+  const cover = deriveAppToChatCover(
+    standardContentSurface({ single: true, fullBleedKey: 'app:39' }),
+    standardContentSurface({ single: true, fullBleedKey: 'chat:audit' }),
+    null,
+  )
+
+  assert.deepEqual(cover, {
+    appId: '39',
+    chatId: 'audit',
+  })
+})
+
+test('an app-to-chat cover follows rapid chat navigation without a blank frame', () => {
+  const cover = deriveAppToChatCover(
+    standardContentSurface({ single: true, fullBleedKey: 'chat:first' }),
+    standardContentSurface({ single: true, fullBleedKey: 'chat:second' }),
+    {
+      appId: '39',
+      chatId: 'first',
+    },
+  )
+
+  assert.deepEqual(cover, {
+    appId: '39',
+    chatId: 'second',
+  })
+})
+
+test('only an app-to-chat Standard transition creates this cover', () => {
+  assert.equal(
+    deriveAppToChatCover(
+      standardContentSurface({ single: true, fullBleedKey: 'chat:a' }),
+      standardContentSurface({ single: true, fullBleedKey: 'chat:b' }),
+      null,
+    ),
+    null,
+  )
+  assert.equal(
+    deriveAppToChatCover(
+      standardContentSurface({ single: true, fullBleedKey: 'app:39' }),
+      standardContentSurface({ single: true, fullBleedKey: 'app:40' }),
+      null,
+    ),
+    null,
+  )
+})
+
+test('a Builder full-bleed item never enters the Standard app-to-chat handoff', () => {
+  assert.equal(
+    standardContentSurface({ single: false, fullBleedKey: 'app:39' }),
+    null,
+  )
+  assert.equal(
+    standardContentSurface({ single: false, fullBleedKey: 'chat:audit' }),
+    null,
+  )
 })
