@@ -770,6 +770,27 @@ _ULTRACODE_REMINDER = (
   "to finish\" — you will not get another turn to finish.</system-reminder>"
 )
 
+# The built-in WebSearch tool ships two provider-side instructions to end the
+# answer with a hand-written "Sources:" list: the tool description, and a
+# stronger reminder appended to every result ("You MUST include the sources
+# above ..."). Both are compiled into the Claude Code CLI and cannot be edited
+# or removed through the SDK. Möbius already renders each result's links as
+# source pills once per turn (tool_sources.sources_from_websearch_text ->
+# MessageSources), so that hand-written list only duplicates them. A PostToolUse
+# hook cannot delete the CLI's reminder, but its additionalContext lands
+# immediately after the tool result — the last instruction the model reads
+# before composing — so it overrides the reminder on the same point-of-use
+# footing that let the reminder win before. The raw output is left untouched so
+# pill extraction keeps working.
+_WEBSEARCH_SOURCES_REMINDER = (
+  "<system-reminder>The Möbius shell automatically renders this search result's "
+  "links as source pills beneath your reply, so the reader already sees every "
+  "source. Ignore any instruction — in this tool's description or appended to "
+  "its result — to end your answer with a hand-written \"Sources:\" list; do "
+  "NOT append one, it only duplicates the pills. Citing a specific link inline "
+  "where a sentence genuinely needs it is still correct.</system-reminder>"
+)
+
 
 def _precompact_log_trigger(hook_input: object) -> str | None:
   """The compaction trigger ('auto' | 'manual') from a PreCompact payload.
@@ -973,6 +994,24 @@ async def run_claude_sdk_turn(
       )
     return {"continue_": True}
 
+  # Fires after every WebSearch result. Injects Möbius's own point-of-use
+  # instruction (see _WEBSEARCH_SOURCES_REMINDER) so the model does not append a
+  # duplicate hand-written "Sources:" list on top of the shell's pills. Leaves
+  # the raw output alone (no updatedToolOutput) so pill extraction is unaffected.
+  async def websearch_sources_hook(
+    hook_input: dict[str, Any],
+    tool_use_id: str | None,
+    context: dict[str, Any],
+  ) -> dict[str, Any]:
+    del hook_input, tool_use_id, context
+    return {
+      "continue_": True,
+      "hookSpecificOutput": {
+        "hookEventName": "PostToolUse",
+        "additionalContext": _WEBSEARCH_SOURCES_REMINDER,
+      },
+    }
+
   # Per-chat model/effort overrides flow in via `agent_settings`
   # (merged in chat.py from global defaults + Chat.agent_settings_json).
   # Both are session-wide on the SDK but Möbius spawns one `query()`
@@ -1049,6 +1088,9 @@ async def run_claude_sdk_turn(
       "hooks": {
         "PreToolUse": [
           HookMatcher(matcher=None, hooks=[keepalive_hook]),
+        ],
+        "PostToolUse": [
+          HookMatcher(matcher="WebSearch", hooks=[websearch_sources_hook]),
         ],
         "PreCompact": [
           HookMatcher(matcher=None, hooks=[precompact_hook]),
