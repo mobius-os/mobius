@@ -1,6 +1,4 @@
 """Focused coverage for resource facts and pressure interpretation."""
-
-import json
 from types import SimpleNamespace
 
 from app.resource_pressure import (
@@ -194,32 +192,3 @@ def test_resource_status_keeps_facts_and_pressure_separate():
 
   assert set(status) == {"facts", "pressure"}
   assert status["pressure"]["state"] == "normal"
-
-
-def test_resource_status_surfaces_cached_volume_breakdown(tmp_path):
-  (tmp_path / "run").mkdir()
-  (tmp_path / "run/data-volume-status.json").write_text(json.dumps({
-    "captured_at": "2026-08-09T12:00:00+00:00",
-    "top_level": {
-      "entries": [{"name": "platform", "bytes": 123, "complete": True}],
-      "complete": True,
-      "entry_budget": 10,
-      "time_budget_seconds": 1,
-    },
-    "last_crashloop_admission": {"admitted": False},
-  }))
-
-  status = resource_status(
-    tmp_path,
-    disk_usage=lambda _path: SimpleNamespace(total=1000, used=700, free=300),
-    memory={
-      "available": True,
-      "working_set_bytes": 400,
-      "limit_bytes": 1000,
-      "pressure": {},
-    },
-  )
-
-  disk = status["facts"]["disk"]
-  assert disk["top_level_breakdown"]["entries"][0]["name"] == "platform"
-  assert disk["last_crashloop_admission"] == {"admitted": False}

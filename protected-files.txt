@@ -8,9 +8,7 @@
 # The whole-repo model un-freezes the backend: the SERVED code is
 # /data/platform/backend/app (mobius-owned, editable in place), so the old
 # /app/app/* freeze protected the baked FALLBACK, not the live code — moot now.
-# The externally launched recovery target starts through the baked entrypoint
-# before /data is touched. Ordinary restart authorization remains baked too.
+# Boot and restart authorization remain baked and owner read-only.
 /app/scripts/entrypoint.sh
-/app/scripts/boot_attempt_counter.py
 /app/scripts/agent_sudo.sh
 /app/runtime/restart_ledger.py

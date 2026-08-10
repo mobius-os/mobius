@@ -335,32 +335,17 @@ def test_test_runtime_seed_precedes_selection_and_skips_reconcile():
   ) in entrypoint
 
 
-def test_managed_release_boot_uses_the_baked_updater():
+def test_platform_boot_has_one_main_reconcile_path():
   entrypoint = (
     ROOT / "backend" / "scripts" / "entrypoint.sh"
   ).read_text(encoding="utf-8")
 
-  assert 'if [ -n "${MOBIUS_PLATFORM_RELEASE_REF:-}" ]; then' in entrypoint
-  assert "_platform_reconciler_backend=/app/platform-baked/backend" in entrypoint
-  assert '_platform_reconciler_prefix="env PYTHONDONTWRITEBYTECODE=1"' in entrypoint
-  assert "cd '$_platform_reconciler_backend'" in entrypoint
-
-
-def test_managed_release_boot_falls_back_when_exact_target_is_not_integrated():
-  entrypoint = (
-    ROOT / "backend" / "scripts" / "entrypoint.sh"
-  ).read_text(encoding="utf-8")
-  reconcile = entrypoint.index("platform_update.reconcile_clone_sync()")
-  guard = entrypoint.index("platform_update.boot_guard_sync()", reconcile)
-  proof = entrypoint.index("platform_update.managed_release_ready_sync()", guard)
-  fallback = entrypoint.index("_platform_use_baked", proof)
-  markers = entrypoint.index(
-    "# Write the markers only after the managed exact-release gate",
-    fallback,
+  assert "MOBIUS_PLATFORM_RELEASE_REF" not in entrypoint
+  assert "managed_release" not in entrypoint
+  assert "_platform_reconciler_backend=/data/platform/backend" in entrypoint
+  assert entrypoint.index("platform_update.reconcile_clone_sync()") < entrypoint.index(
+    "platform_update.boot_guard_sync()"
   )
-
-  assert reconcile < guard < proof < fallback < markers
-  assert "/data/platform is preserved for recovery" in entrypoint
 
 
 def test_browser_setup_fails_closed_before_auth_and_never_wipes_chats():
@@ -586,21 +571,19 @@ def test_documented_browser_commands_use_disposable_runner():
   assert '/home/' not in test_script
 
 
-def test_manual_and_pull_request_runs_cover_suites_and_cutover_image():
+def test_manual_and_pull_request_runs_cover_suites_and_main_image():
   test_workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
     encoding="utf-8"
   )
   image_workflow = (
-    ROOT / ".github" / "workflows" / "external-recovery-image.yml"
+    ROOT / ".github" / "workflows" / "main-image.yml"
   ).read_text(encoding="utf-8")
-  digest_workflow = (
-    ROOT / ".github" / "workflows" / "core-digest-image.yml"
-  ).read_text(encoding="utf-8")
-  assert not (ROOT / ".github" / "workflows" / "main-image.yml").exists()
   assert not (
-    ROOT / ".github" / "workflows" / "compatibility-bootstrap.yml"
+    ROOT / ".github" / "workflows" / "external-recovery-image.yml"
   ).exists()
-  assert not (ROOT / "scripts" / "compatibility_bootstrap.py").exists()
+  assert not (
+    ROOT / ".github" / "workflows" / "core-digest-image.yml"
+  ).exists()
   test_triggers = test_workflow.split("\npermissions:\n", 1)[0]
   image_triggers = image_workflow.split("\npermissions:\n", 1)[0]
   backend = test_workflow.split("\n  backend:\n", 1)[1].split(
@@ -611,8 +594,6 @@ def test_manual_and_pull_request_runs_cover_suites_and_cutover_image():
   assert "pull_request:\n" in test_triggers
   assert "workflow_dispatch:\n" in test_triggers
   assert "push:\n" not in test_triggers
-  assert "'feat/**'" not in test_triggers
-  assert "'fix/**'" not in test_triggers
   for job in (backend, e2e):
     assert "github.event_name == 'pull_request'" not in job
     assert "refs/heads/integration/" not in job
@@ -622,178 +603,19 @@ def test_manual_and_pull_request_runs_cover_suites_and_cutover_image():
   assert "cache-to:" not in e2e
 
   assert "push:\n" in image_triggers
-  assert "    branches: [stack/external-recovery-v1]\n" in image_triggers
-  assert "schedule:\n" not in image_triggers
-  assert "workflow_dispatch:\n" not in image_triggers
-  assert "pull_request:\n" not in image_triggers
+  assert "    branches: [main]\n" in image_triggers
+  assert "workflow_dispatch:\n" in image_triggers
   assert "packages: write" in image_workflow
   assert "push: true" in image_workflow
-  immutable_tag = (
-    "tags: ${{ env.MOBIUS_IMAGE_REPOSITORY }}:sha-${{ github.sha }}-"
-    "run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
-  )
-  prepublish = image_workflow.index("/internal/core-releases/prepublish")
-  identity_head_guard = image_workflow.index(
-    'test "$release_head" = "$GITHUB_SHA"'
-  )
-  gate_head_guard_contract = (
-    "          current_sha=$(git ls-remote --exit-code origin "
-    '"$MOBIUS_PLATFORM_RELEASE_REF" | awk \'NR == 1 { print $1 }\')\n'
-    '          test "$current_sha" = "$GITHUB_SHA"\n'
-    "          while true; do\n"
-    "            http_status=$(curl"
-  )
-  gate_head_guard = image_workflow.index(gate_head_guard_contract)
-  registry_login = image_workflow.index("docker/login-action@")
-  build = image_workflow.index("docker/build-push-action@")
-  bind = image_workflow.index("/internal/core-releases/bind")
-  redeploy = image_workflow.index("/internal/core-releases/postpublish")
-  assert immutable_tag in image_workflow
-  assert identity_head_guard < gate_head_guard < prepublish
-  assert image_workflow.count('test "$release_head" = "$GITHUB_SHA"') == 1
-  assert image_workflow.count('test "$current_sha" = "$GITHUB_SHA"') == 1
-  assert 'echo "release_head=$release_head"' not in image_workflow
-  assert prepublish < registry_login < build < bind < redeploy
-  between_bind_and_redeploy = image_workflow[bind:redeploy]
-  assert "docker buildx imagetools create" not in between_bind_and_redeploy
-  assert "finalization starts" in between_bind_and_redeploy
-  assert "completed_replay" in image_workflow
-  assert "steps.gate.outputs.mode != 'completed_replay'" in image_workflow
-  assert "MOBIUS_RECOVERY_IMAGE_REPOSITORY" in image_workflow
-  assert "steps.gate.outputs.current_recovery_digest" in image_workflow
-  assert "steps.gate.outputs.current_recovery_sha" in image_workflow
-  assert "steps.gate.outputs.frozen_recovery_digest" in image_workflow
-  assert "group: mobius-core-image-publication" in image_workflow
-  assert "cancel-in-progress: false" in image_workflow
-  assert "MOBIUS_EXTERNAL_RECOVERY_RELEASE_ENABLED == 'true'" in image_workflow
-  assert "environment: external-recovery-release" in image_workflow
-  assert "RECOVERY_CUTOVER_PREREQUISITE_SHA:" in image_workflow
-  assert "RECOVERY_CUTOVER_PREREQUISITE_DIGEST:" in image_workflow
-  assert 'test "$GITHUB_REPOSITORY" = mobius-os/mobius' in image_workflow
-  assert 'test "$GITHUB_EVENT_NAME" = push' in image_workflow
-  assert 'test "$GITHUB_REF" = "$MOBIUS_PLATFORM_RELEASE_REF"' in image_workflow
-  assert image_workflow.count(
-    "git fetch --quiet --no-tags origin refs/heads/main"
-  ) == 4
-  assert image_workflow.count(
-    'git merge-base --is-ancestor "$RECOVERY_CUTOVER_PREREQUISITE_SHA" "$main_sha"'
-  ) == 4
-  assert image_workflow.count(
-    'git cat-file -e "$main_sha:backend/recovery/recoveryd.py"'
-  ) == 4
-  assert "git rev-list --first-parent --reverse" in image_workflow
-  assert 'git rev-parse "${removal_root_sha}^1"' in image_workflow
-  assert image_workflow.count(
-    "Refusing a removal lineage already contained by main"
-  ) == 4
-  assert image_workflow.count(
-    'git merge-base --is-ancestor "$REMOVAL_ROOT_SHA" "$main_sha"'
-  ) == 3
-  assert (
-    'git merge-base --is-ancestor "$removal_root_sha" "$main_sha"'
-    in image_workflow
-  )
-  assert "Refusing to bind or publish a stale unbound release" in image_workflow
-  assert 'if [ "$RELEASE_MODE" = resume_cutover ]' in image_workflow
+  assert "MOBIUS_IMAGE_REPOSITORY }}:sha-${{ github.sha }}" in image_workflow
+  assert "MOBIUS_IMAGE_REPOSITORY }}:main" in image_workflow
+  assert "recovery" not in image_workflow.lower()
+  assert "core-releases" not in image_workflow
   assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in image_workflow
-  assert "persist-credentials: false" in image_workflow
   assert "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c" in image_workflow
   assert "docker/login-action@dbcb813823bdd20940b903addbd779551569679f" in image_workflow
   assert "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a" in image_workflow
-  assert "ghcr.io/mobius-os/mobius:daily" not in image_workflow
-  assert '--tag "$MOBIUS_IMAGE_REPOSITORY:main"' not in image_workflow
-  assert '--tag "$MOBIUS_IMAGE_REPOSITORY:daily"' not in image_workflow
-  assert '--tag "$MOBIUS_RELEASE_CHANNEL"' not in image_workflow
-  assert "docker buildx imagetools create" not in image_workflow
-  assert "normal_release" not in image_workflow
-  assert "prewrite" not in image_workflow
-  assert "cache-to: type=gha,mode=max,ignore-error=true" in image_workflow
-  assert "load: true" not in image_workflow
-
-  workflows = test_workflow + image_workflow + digest_workflow
-  assert workflows.count("DOCKER_BUILD_RECORD_UPLOAD: 'false'") == 3
-  assert "actions/checkout@v5" not in workflows
-  assert "actions/setup-node@v5" not in workflows
-  assert "actions/setup-python@v5" not in workflows
-
-
-def test_recurring_core_digest_workflow_keeps_dynamic_and_frozen_identity_separate():
-  workflow = (
-    ROOT / ".github" / "workflows" / "core-digest-image.yml"
-  ).read_text(encoding="utf-8")
-  triggers = workflow.split("\npermissions:\n", 1)[0]
-  assert "push:\n" in triggers
-  assert "workflow_dispatch:\n" in triggers
-  assert "    branches: [stack/external-recovery-v1]\n" in triggers
-  assert "pull_request:\n" not in triggers
-
-  current = workflow.index("/internal/core-releases/current")
-  prepublish = workflow.index("/internal/core-releases/prepublish")
-  registry_login = workflow.index("docker/login-action@")
-  build = workflow.index("docker/build-push-action@")
-  ownership_recheck = workflow.index(
-    "Recheck protected-branch ownership before binding"
-  )
-  bind = workflow.index("/internal/core-releases/bind")
-  postpublish = workflow.index("/internal/core-releases/postpublish")
-  final_current = workflow.rindex("/internal/core-releases/current")
-  assert (
-    current < prepublish < registry_login < build < ownership_recheck
-    < bind < postpublish
-  )
-  assert postpublish < final_current
-
-  # The publisher dispatches its governed follow-on workflow, so it needs
-  # Actions write in addition to the read-only repository and registry grants.
-  assert (
-    "permissions:\n  actions: write\n  contents: read\n  packages: write\n"
-    in workflow
-  )
-  assert "environment: external-recovery-release" in workflow
-  assert "group: mobius-core-image-publication" in workflow
-  assert "cancel-in-progress: false" in workflow
-  assert "MOBIUS_MANAGED_CORE_RELEASE_ENABLED == 'true'" in workflow
-  assert "MOBIUS_MANAGED_CORE_PREREQUISITE_SHA" in workflow
-  assert "MOBIUS_MANAGED_CORE_PREREQUISITE_DIGEST" in workflow
-  assert "FROZEN_COMPATIBILITY_SHA" in workflow
-  assert "FROZEN_COMPATIBILITY_DIGEST" in workflow
-  assert "CORE_PREREQUISITE_SHA" in workflow
-  assert "CORE_PREREQUISITE_DIGEST" in workflow
-  assert "scripts/core_digest_release.py current" in workflow
-  assert "scripts/external_recovery_release.py" in workflow
-  assert "inventory" in workflow
-  assert "exact-current replay" in workflow
-  assert "steps.current.outputs.mode == 'replay'" in workflow
-  assert "steps.current.outputs.active_digest" in workflow
-  assert "The active controller digest changed before prepublish" in workflow
-  assert "steps.gate.outputs.mode == 'resume_cutover'" in workflow
-  assert "steps.gate.outputs.mode == 'completed_replay'" not in workflow
-  assert "candidate_sha:" in triggers
-  assert "ref: ${{ env.CANDIDATE_SHA }}" in workflow
-  assert 'test "$release_head" = "$CANDIDATE_SHA"' in workflow
-  assert 'git merge-base --is-ancestor "$CANDIDATE_SHA" "$release_head"' in workflow
-  assert workflow.count(
-    'if [ "$release_head" != "$CANDIDATE_SHA" ]; then'
-  ) == 1
-  assert "Refusing to bind a candidate that no longer owns" in workflow
-  assert "persist-credentials: false" in workflow
-  assert "cache-to: type=gha,mode=max,ignore-error=true" in workflow
-
-  immutable_tag = (
-    "tags: ${{ env.MOBIUS_IMAGE_REPOSITORY }}:sha-${{ env.CANDIDATE_SHA }}-"
-    "run-${{ github.run_id }}-attempt-${{ github.run_attempt }}"
-  )
-  assert immutable_tag in workflow
-  assert '--tag "$MOBIUS_RELEASE_CHANNEL"' not in workflow
-  assert 'tags: ${{ env.MOBIUS_RELEASE_CHANNEL }}' not in workflow
-  assert '--tag "$MOBIUS_IMAGE_REPOSITORY:main"' not in workflow
-  assert '--tag "$MOBIUS_IMAGE_REPOSITORY:daily"' not in workflow
-  assert "docker buildx imagetools create" not in workflow
-
-  assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in workflow
-  assert "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c" in workflow
-  assert "docker/login-action@dbcb813823bdd20940b903addbd779551569679f" in workflow
-  assert "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a" in workflow
+  assert "DOCKER_BUILD_RECORD_UPLOAD: 'false'" in image_workflow
 
 
 def test_hosted_concurrency_is_scoped_to_the_pull_request():

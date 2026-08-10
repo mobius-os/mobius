@@ -92,7 +92,7 @@ Möbius is an open-source AGI app platform that grows with the needs of its user
 
 Build for a real need, make it yours, improve what gets in the way, then share what generalizes. Community review can turn that work into a building block that makes the whole ecosystem more capable.
 
-Möbius deliberately supports coding agents that can work across a real repository. Today, that means OpenAI Codex and Claude Code. The owner chat agent can edit the frontend and backend, while git history and an isolated deployment-level recovery service keep those changes reversible.
+Möbius deliberately supports coding agents that can work across a real repository. Today, that means OpenAI Codex and Claude Code. The owner chat agent can edit the frontend and backend, while git history keeps those changes reversible.
 
 No autonomous rewrite ships without a person in the loop. Agents can prepare changes, run tests, and explain their reasoning. People still decide what becomes part of the shared platform.
 
@@ -139,36 +139,17 @@ BUILD_DATE="$(git show -s --format=%cs HEAD)" \
 docker compose up -d --build
 ```
 
-Caddy configures HTTPS. Open `https://mobius.example.com` and follow the setup wizard.
-The initial build stamps the exact commit from the fresh checkout. An unstamped
-production `docker build` or `docker compose up --build` fails closed instead
-of silently claiming an unknown release.
-
-If the instance is broken, open a root shell in the live app container and fix
-it in place — no downtime, no isolated services:
+Caddy configures HTTPS. Open `https://mobius.example.com` and follow setup. Use
+Settings → Möbius to review and apply updates. For host-level maintenance, open
+a root shell in the running container without recreating it:
 
 ```bash
-scripts/mobiusctl recovery
+docker compose exec -u 0 app bash
 ```
-
-This runs `docker exec -u 0` into the running container. Repair `/data/platform`
-(or anything under `/data`), then restart in place from Settings -> Server or
-with `docker restart mobius`; the app is never stopped or recreated. If the
-container is not running, start it first (`docker compose up -d app`) — it boots
-the baked floor automatically when `/data/platform` is broken — then re-run the
-command.
-
-Update a self-hosted instance inside Möbius: open Settings, find the Möbius
-section, and select **Check for updates**. Review the exact incoming commit,
-apply it, then select **Restart to finish**. The updater follows `origin/main`,
-preserves local platform changes, and keeps data under `/data`; normal updates
-do not require a host-side Git pull or image rebuild.
 
 The in-product agent has passwordless full root inside its Mobius container by
 default. To use the operator kill switch, set `MOBIUS_AGENT_SUDO=0` in `.env`
-and recreate the app with `docker compose up -d --force-recreate app`. Recovery
-boot (`MOBIUS_BOOT_MODE=recovery`, used by managed deployments) never installs
-the agent sudo rule.
+and recreate the app with `docker compose up -d --force-recreate app`.
 
 To connect a full web service such as Tandoor, point a sibling DNS name at the same server. For example, use `services.mobius.example.com`, then set it as `MOBIUS_SERVICE_GATEWAY_ORIGIN` in `.env`. Caddy serves integrations below `/services/<slug>`, so you do not need wildcard DNS or a new record for each service. See [.env.example](.env.example) for setup and [ARCHITECTURE.md](ARCHITECTURE.md#app-execution-tiers) for the trust boundaries.
 

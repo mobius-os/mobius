@@ -1002,9 +1002,9 @@ async def write_shared_file(
 
   Auto-snapshots the prior `theme.css` to `theme.css.bak-<unix-ts>`
   on every overwrite, so a theme that breaks the UI can always be
-  rolled back by external recovery or via `?reset-theme=1`. The
+  rolled back from an operator shell or via `?reset-theme=1`. The
   snapshot is BEST-EFFORT — a snapshot failure must not block the
-  agent's write, since the write itself is the recovery target.
+  agent's write, since the write itself is the fault source.
 
   Also emits a `storage_write` activity event with `app_id=0` and
   `scope="shared"` so the reflection agent sees theme + experience-file

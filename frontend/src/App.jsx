@@ -2,7 +2,6 @@ import { lazy, Suspense, useState, useEffect } from 'react'
 import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client'
 import { QueryClientProvider, useIsRestoring } from '@tanstack/react-query'
 import ErrorBoundary from './components/ErrorBoundary/ErrorBoundary.jsx'
-import RecoveryLink from './components/ErrorBoundary/RecoveryLink.jsx'
 import PlatformDegradedNotice from './components/ErrorBoundary/PlatformDegradedNotice.jsx'
 import './components/ErrorBoundary/RecoveryPanel.css'
 import { api, beginEphemeralAuth, getToken, setToken, BASE } from './api/client.js'
@@ -354,7 +353,6 @@ function StartupError({ title, message, retrying = false, onRetry }) {
             {retrying ? 'Trying again…' : 'Try again'}
           </button>
         </div>
-        <RecoveryLink />
       </section>
     </div>
   )

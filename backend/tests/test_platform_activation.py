@@ -41,7 +41,6 @@ def test_dependency_and_baked_runtime_never_degrade_to_restart_only():
     "frontend/package-lock.json": "image_rebuild",
     "backend/scripts/entrypoint.sh": "image_rebuild",
     "backend/runtime/restart_ledger.py": "image_rebuild",
-    "backend/recovery_target/targetd.py": "image_rebuild",
     "protected-files.txt": "image_rebuild",
   }
   for path, level in expected.items():

@@ -24,7 +24,6 @@ Two kinds of test here:
 
 import os
 import re
-import shutil
 import subprocess
 import textwrap
 from pathlib import Path
@@ -53,17 +52,6 @@ def _guard_source() -> str:
   block = text[start:end]
   # The guard opens with `if [ -n "$release_sha" ] && ...` and closes with `fi`;
   # slice up to and including that closing `fi` so we eval a complete statement.
-  fi = block.rindex("\n    fi")
-  return block[: fi + len("\n    fi")]
-
-
-def _fetch_and_guards_source() -> str:
-  """The exact-ref fetch plus both ancestry guards from the shipped script."""
-  text = _read()
-  source_guard = text.index("prod source-safety guard")
-  start = text.index("    fetch_ok=0", source_guard)
-  end = text.index(GUARD_END, start)
-  block = text[start:end]
   fi = block.rindex("\n    fi")
   return block[: fi + len("\n    fi")]
 
@@ -138,24 +126,15 @@ def test_deploy_script_still_parses():
   assert result.returncode == 0, result.stderr
 
 
-def test_managed_release_ref_is_shared_by_host_and_container_proofs():
+def test_host_and_container_freshness_proofs_are_fixed_to_main():
   text = _read()
-  assert (
-    'MOBIUS_PLATFORM_RELEASE_REF="${MOBIUS_PLATFORM_RELEASE_REF:-refs/heads/main}"'
-    in text
-  )
-  assert "resolve_platform_release_ref" in text
-  assert "env_value_from_file \"$file\" MOBIUS_PLATFORM_RELEASE_REF" in text
-  assert 'git check-ref-format --branch "$PLATFORM_RELEASE_BRANCH"' in text
-  assert '"+$MOBIUS_PLATFORM_RELEASE_REF:$PLATFORM_RELEASE_TRACKING_REF"' in text
+  assert "MOBIUS_PLATFORM_RELEASE_REF" not in text
+  assert "PLATFORM_RELEASE_BRANCH=main" in text
+  assert "PLATFORM_RELEASE_TRACKING_REF=refs/remotes/origin/main" in text
+  assert '"+refs/heads/main:$PLATFORM_RELEASE_TRACKING_REF"' in text
   assert '--no-tags origin -q' in text
-  assert '-e MOBIUS_DEPLOY_RELEASE_REF="$MOBIUS_PLATFORM_RELEASE_REF"' in text
-  assert '[ "${MOBIUS_PLATFORM_RELEASE_REF:-}" = "$ref" ]' in text
-  assert text.index('[ "${MOBIUS_PLATFORM_RELEASE_REF:-}" = "$ref" ]') < text.index(
-    '[ -f /data/.platform-conflict ]'
-  )
-  assert "fetched managed release ${MOBIUS_PLATFORM_RELEASE_REF} did not resolve" in text
-  assert 'Refusing to trust a cached non-main release ref.' in text
+  assert "ref=refs/heads/main" in text
+  assert "tracking=refs/remotes/origin/main" in text
 
 
 # ── behavioral tests against a real temp git repo ─────────────────────────
@@ -196,7 +175,6 @@ def _run_guard(
     REPO_ROOT={repo}
     ALLOW_STALE={1 if allow_stale else 0}
     fetch_ok={1 if fetch_ok else 0}
-    MOBIUS_PLATFORM_RELEASE_REF=refs/heads/main
     PLATFORM_RELEASE_BRANCH=main
     PLATFORM_RELEASE_TRACKING_REF=refs/remotes/origin/main
     PLATFORM_RELEASE_LABEL=origin/main
@@ -316,7 +294,6 @@ def _run_both_guards(
   *,
   allow_unpushed: bool,
   allow_stale: bool,
-  release_branch: str = "main",
 ) -> subprocess.CompletedProcess:
   harness = textwrap.dedent(f"""\
     set -euo pipefail
@@ -327,10 +304,9 @@ def _run_both_guards(
     ALLOW_UNPUSHED={1 if allow_unpushed else 0}
     ALLOW_STALE={1 if allow_stale else 0}
     fetch_ok=1
-    MOBIUS_PLATFORM_RELEASE_REF=refs/heads/{release_branch}
-    PLATFORM_RELEASE_BRANCH={release_branch}
-    PLATFORM_RELEASE_TRACKING_REF=refs/remotes/origin/{release_branch}
-    PLATFORM_RELEASE_LABEL=origin/{release_branch}
+    PLATFORM_RELEASE_BRANCH=main
+    PLATFORM_RELEASE_TRACKING_REF=refs/remotes/origin/main
+    PLATFORM_RELEASE_LABEL=origin/main
     head_sha=$(git -C "$REPO_ROOT" rev-parse HEAD)
     release_sha=$(git -C "$REPO_ROOT" rev-parse "$PLATFORM_RELEASE_TRACKING_REF")
     """) + _both_guards_source() + "\n"
@@ -381,52 +357,3 @@ def test_combined_head_ahead_passes_both(repo_with_origin):
   _commit(local, "local-only feature")
   r = _run_both_guards(local, allow_unpushed=True, allow_stale=False)
   assert r.returncode == 0, f"HEAD ahead + --allow-unpushed should pass, got {r.returncode}: {r.stderr}"
-
-
-def test_combined_exact_stack_release_passes_while_main_is_divergent(repo_with_origin):
-  local, remote, _base = repo_with_origin
-  release_branch = "stack/external-recovery-v1"
-  _git(remote, "checkout", "-q", "-b", release_branch)
-  stack_sha = _commit(remote, "stack removal release")
-  _git(remote, "checkout", "-q", "main")
-  _commit(remote, "main-only advance")
-  _git(local, "fetch", "-q", "origin")
-  _git(local, "checkout", "-q", "--detach", stack_sha)
-
-  r = _run_both_guards(
-    local,
-    allow_unpushed=False,
-    allow_stale=False,
-    release_branch=release_branch,
-  )
-  assert r.returncode == 0, r.stderr
-
-
-def test_deleted_stack_release_never_falls_back_to_stale_cached_ref(repo_with_origin):
-  local, remote, _base = repo_with_origin
-  release_branch = "stack/external-recovery-v1"
-  _git(remote, "checkout", "-q", "-b", release_branch)
-  stack_sha = _commit(remote, "stack removal release")
-  _git(local, "fetch", "-q", "origin")
-  _git(local, "checkout", "-q", "--detach", stack_sha)
-  _git(remote, "checkout", "-q", "main")
-  _git(remote, "branch", "-D", release_branch)
-
-  harness = textwrap.dedent(f"""\
-    set -euo pipefail
-    warn() {{ printf 'WARN %s\\n' "$1"; }}
-    fail() {{ printf 'FAIL %s\\n' "$1" >&2; }}
-    info() {{ printf 'INFO %s\\n' "$1"; }}
-    REPO_ROOT={local}
-    MOBIUS_PLATFORM_RELEASE_REF=refs/heads/{release_branch}
-    PLATFORM_RELEASE_BRANCH={release_branch}
-    PLATFORM_RELEASE_TRACKING_REF=refs/remotes/origin/{release_branch}
-    PLATFORM_RELEASE_LABEL=origin/{release_branch}
-    ALLOW_UNPUSHED=0
-    ALLOW_STALE=0
-    """) + _fetch_and_guards_source() + "\n"
-  result = subprocess.run(
-    ["bash", "-c", harness], capture_output=True, text=True
-  )
-  assert result.returncode == 1
-  assert "could not fetch the managed release" in result.stderr

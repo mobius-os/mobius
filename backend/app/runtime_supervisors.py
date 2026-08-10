@@ -185,15 +185,6 @@ class RuntimeSupervisors:
           )
 
     async def browser_profile_loop():
-      from app.data_volume import refresh_data_volume_status
-      try:
-        await asyncio.to_thread(
-          refresh_data_volume_status, self.settings.data_dir,
-        )
-      except Exception as exc:
-        self.log.error(
-          "initial data-volume scan failed: %s", exc, exc_info=True,
-        )
       await asyncio.sleep(300)
       while True:
         sweep_seconds = 60 * 60
@@ -218,14 +209,11 @@ class RuntimeSupervisors:
               "agent-browser profile quota reclaimed %d bytes",
               result["reclaimed_bytes"],
             )
-          await asyncio.to_thread(
-            refresh_data_volume_status, self.settings.data_dir,
-          )
         except asyncio.CancelledError:
           raise
         except Exception as exc:
           self.log.error(
-            "browser-profile and volume sweep failed: %s", exc, exc_info=True,
+            "agent-browser profile quota failed: %s", exc, exc_info=True,
           )
         await asyncio.sleep(sweep_seconds)
 

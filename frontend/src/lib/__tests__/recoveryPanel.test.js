@@ -45,25 +45,21 @@ test('recovery panel distinguishes an active repair from an interrupted one', ()
   assert.match(interrupted, />Refresh again</)
 })
 
-test('recovery panel exposes last resorts only after repair fails', () => {
+test('recovery panel keeps repair actions available after a failure', () => {
   const failed = renderPanel({
     attempt: { phase: 'agent-failed', chatId: 'repair/chat' },
   })
   assert.match(failed, />Retry repair chat</)
   assert.match(failed, />Open repair chat</)
   assert.match(failed, /chat=repair%2Fchat/)
-  assert.match(failed, /href="https:\/\/www\.mobius\.you\/"/)
-  assert.match(failed, /target="_top"/)
-  assert.match(failed, /open Recovery in mobius\.you/i)
-  assert.match(failed, /<code[^>]*>mobiusctl recovery<\/code>/)
+  assert.doesNotMatch(failed, /open Recovery in mobius\.you|mobiusctl recovery/i)
 
   const restricted = renderPanel({
     attempt: { phase: 'refreshed' },
     canAskAgent: false,
   })
   assert.doesNotMatch(restricted, /Start repair chat|Retry repair chat/)
-  assert.match(restricted, /open Recovery in mobius\.you/i)
-  assert.match(restricted, /<code[^>]*>mobiusctl recovery<\/code>/)
+  assert.match(restricted, /open Möbius directly and ask the agent/i)
 })
 
 test('a directed repair keeps the live repair chat reachable while it works', () => {

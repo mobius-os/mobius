@@ -63,9 +63,9 @@ docker compose -p mobius-test -f docker-compose.test.yml run --rm pytest
 CI runs the equivalent natively: install `frontend/package-lock.json`, put its
 locked `node_modules/.bin` on `PATH`, install the hashed
 `backend/requirements.lock` plus `backend/requirements-static.txt`, run Ruff,
-then run the platform suite with an 83% coverage floor. The external recovery
-worker is tested and released from its own repository; this repository tests
-only the immutable target protocol and self-host lifecycle. Edit
+then run the platform suite with an 83% coverage floor. Recovery is a separate
+service; this repository asserts that no recovery runtime or alternate boot
+mode enters the Möbius image. Edit
 `requirements.txt` as the human-readable input and regenerate the lock with:
 
 ```bash

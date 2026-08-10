@@ -366,56 +366,14 @@ resolve_prod_image_override() {
   done
 }
 
-resolve_platform_release_ref() {
-  local value="${MOBIUS_PLATFORM_RELEASE_REF:-}" source="environment"
-  local file candidate canonical_env=""
-
-  # DOMAIN is often exported explicitly for a worktree deployment, which means
-  # ensure_prod_env does not source the checkout's .env. Resolve this setting
-  # independently so the managed channel still comes from deployment config
-  # rather than from a repository-wide temporary default.
-  if [ -z "$value" ]; then
-    canonical_env=$(canonical_env_path || true)
-    for file in "$REPO_ROOT/.env" "$canonical_env"; do
-      [ -n "$file" ] || continue
-      candidate=$(env_value_from_file "$file" MOBIUS_PLATFORM_RELEASE_REF || true)
-      if [ -n "$candidate" ]; then
-        value="$candidate"
-        source="$file"
-        break
-      fi
-    done
-  fi
-  MOBIUS_PLATFORM_RELEASE_REF="${value:-refs/heads/main}"
-  [ "$source" = "environment" ] || info "loaded platform release ref from $source"
-  export MOBIUS_PLATFORM_RELEASE_REF
-}
 # ── end prod environment resolution ──────────────────────────────
 
 ensure_prod_env
 resolve_prod_image_override
 resolve_prod_service_gateway_origin
-resolve_platform_release_ref
-
-# The same full branch ref drives both the image's boot reconciler and this
-# deploy's pushed-source/freshness proofs. Normal installations follow main;
-# a managed stack channel is an explicit environment or .env choice.
-MOBIUS_PLATFORM_RELEASE_REF="${MOBIUS_PLATFORM_RELEASE_REF:-refs/heads/main}"
-case "$MOBIUS_PLATFORM_RELEASE_REF" in
-  refs/heads/*) ;;
-  *)
-    fail "MOBIUS_PLATFORM_RELEASE_REF must be a full refs/heads/... ref."
-    exit 2
-    ;;
-esac
-PLATFORM_RELEASE_BRANCH=${MOBIUS_PLATFORM_RELEASE_REF#refs/heads/}
-if ! git check-ref-format --branch "$PLATFORM_RELEASE_BRANCH" >/dev/null 2>&1; then
-  fail "MOBIUS_PLATFORM_RELEASE_REF is invalid."
-  exit 2
-fi
-PLATFORM_RELEASE_TRACKING_REF="refs/remotes/origin/$PLATFORM_RELEASE_BRANCH"
-PLATFORM_RELEASE_LABEL="origin/$PLATFORM_RELEASE_BRANCH"
-export MOBIUS_PLATFORM_RELEASE_REF
+PLATFORM_RELEASE_BRANCH=main
+PLATFORM_RELEASE_TRACKING_REF=refs/remotes/origin/main
+PLATFORM_RELEASE_LABEL=origin/main
 
 # ── proxy topology — sampled ONCE, then frozen ──────────────────────────
 # The shared edge proxy (its own compose stack; see the edge repo's README)
@@ -1101,7 +1059,7 @@ wait_for_cutover() {
 # ── prod source-safety guard ────────────────────────────────────────────
 # The project pin above stops worktree junk, but a worktree (or a stale
 # checkout) builds ITS branch. Warn + confirm so prod always ships the
-# deliberate release selected by MOBIUS_PLATFORM_RELEASE_REF.
+# deliberate release on origin/main.
 if [ "$TARGET" = "prod" ]; then
   if [ -f "$REPO_ROOT/.git" ]; then
     warn "running from a git worktree (${REPO_ROOT})."
@@ -1109,18 +1067,15 @@ if [ "$TARGET" = "prod" ]; then
     confirm_yes "deploy prod from this worktree anyway?" || { fail "aborted — use the main checkout"; exit 1; }
   fi
   if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-    # Pull the selected remote release forward so the ancestor + tip
+    # Pull origin/main forward so the ancestor + tip
     # comparisons below see the real remote state, not a stale local ref.
     # Best-effort: an offline fetch leaves the prior tracking ref. Record
     # whether it succeeded so the behind-release guard never treats a cached
     # ref as fresh.
     fetch_ok=0
     if git -C "$REPO_ROOT" fetch --no-tags origin -q \
-      "+$MOBIUS_PLATFORM_RELEASE_REF:$PLATFORM_RELEASE_TRACKING_REF" 2>/dev/null; then
+      "+refs/heads/main:$PLATFORM_RELEASE_TRACKING_REF" 2>/dev/null; then
       fetch_ok=1
-    elif [ "$MOBIUS_PLATFORM_RELEASE_REF" != "refs/heads/main" ]; then
-      fail "could not fetch the managed release ${MOBIUS_PLATFORM_RELEASE_REF}; refusing to trust a cached ref."
-      exit 1
     fi
 
     # ── unpushed-commit guard (the headline structural fix) ───────────────
@@ -1134,10 +1089,6 @@ if [ "$TARGET" = "prod" ]; then
     head_sha=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "")
     release_sha=$(git -C "$REPO_ROOT" rev-parse "${PLATFORM_RELEASE_TRACKING_REF}^{commit}" 2>/dev/null || echo "")
     if [ -z "$release_sha" ]; then
-      if [ "$MOBIUS_PLATFORM_RELEASE_REF" != "refs/heads/main" ]; then
-        fail "fetched managed release ${MOBIUS_PLATFORM_RELEASE_REF} did not resolve to a commit."
-        exit 1
-      fi
       warn "couldn't resolve ${PLATFORM_RELEASE_LABEL} (no network/remote?) — skipping the"
       warn "unpushed-commit guard; confirm you're on the current pushed release."
     elif ! git -C "$REPO_ROOT" merge-base --is-ancestor HEAD "$PLATFORM_RELEASE_TRACKING_REF" 2>/dev/null; then
@@ -1503,26 +1454,21 @@ fi
 # ── served PLATFORM ancestry assertion (prod only) ─────────────────────
 # The backend-sha block above reads the IMAGE build sha. Under the clone model,
 # the deployed backend is the served /data/platform HEAD after boot reconcile.
-# Assert freshness by ancestry: the configured release must be contained in
+# Assert freshness by ancestry: origin/main must be contained in
 # that served HEAD (exact equality is fine; local agent commits replayed on top
 # are also fine).
 # Reconcile conflict/rollback states remain explicit exceptions because they
-# intentionally keep the previous working tree live. Only legacy main retains
-# the prior offline-warning exception; a managed non-main release fails closed.
+# intentionally keep the previous working tree live. Offline verification is
+# a warning because boot reconciliation retries when origin becomes reachable.
 if [ "$TARGET" = "prod" ]; then
   serving_source=$(served_version_field serving_source)
   platform_sha=$(served_version_field platform_sha)
   case "$platform_sha" in null|unknown) platform_sha="" ;; esac
 
   platform_freshness=$(docker exec -u mobius \
-    -e MOBIUS_DEPLOY_RELEASE_REF="$MOBIUS_PLATFORM_RELEASE_REF" \
     "$CONTAINER" bash -c '
-    ref=${MOBIUS_DEPLOY_RELEASE_REF:-}
-    [ "${MOBIUS_PLATFORM_RELEASE_REF:-}" = "$ref" ] || { echo ref_mismatch; exit 0; }
-    case "$ref" in refs/heads/*) ;; *) echo invalid_ref; exit 0 ;; esac
-    branch=${ref#refs/heads/}
-    git check-ref-format --branch "$branch" >/dev/null 2>&1 || { echo invalid_ref; exit 0; }
-    tracking="refs/remotes/origin/$branch"
+    ref=refs/heads/main
+    tracking=refs/remotes/origin/main
     cd /data/platform 2>/dev/null || { echo missing; exit 0; }
     [ -f /data/.platform-conflict ] && { echo conflict; exit 0; }
     [ -f /data/.platform-rolled-back ] && { echo rolled_back; exit 0; }
@@ -1551,21 +1497,8 @@ if [ "$TARGET" = "prod" ]; then
       warn "Boot reconcile rejected the update and kept the previous working platform live."
       ;;
     offline|offline_flag)
-      if [ "$MOBIUS_PLATFORM_RELEASE_REF" != "refs/heads/main" ]; then
-        fail "served platform freshness could not refresh managed release ${PLATFORM_RELEASE_LABEL}."
-        fail "Refusing to trust a cached non-main release ref."
-        exit 1
-      fi
       warn "served platform freshness skipped: ${PLATFORM_RELEASE_LABEL} could not be refreshed in the container."
       warn "Boot reconcile will retry when origin is reachable."
-      ;;
-    invalid_ref)
-      fail "served platform freshness rejected the configured release ref."
-      exit 1
-      ;;
-    ref_mismatch)
-      fail "live MOBIUS_PLATFORM_RELEASE_REF does not match the deploy verifier."
-      exit 1
       ;;
     exact:*)
       head_sha=${platform_freshness#exact:}

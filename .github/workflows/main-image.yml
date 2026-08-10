@@ -1,0 +1,41 @@
+name: Publish main Möbius image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: mobius-main-image
+  cancel-in-progress: false
+
+env:
+  DOCKER_BUILD_RECORD_UPLOAD: 'false'
+  MOBIUS_IMAGE_REPOSITORY: ghcr.io/mobius-os/mobius
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.MOBIUS_IMAGE_REPOSITORY }}:sha-${{ github.sha }}
+            ${{ env.MOBIUS_IMAGE_REPOSITORY }}:main
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,ignore-error=true

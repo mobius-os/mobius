@@ -2,8 +2,8 @@
 
 Served from the editable platform checkout. main.py imports this at module load
 to set up the engine and migrations; if a local edit breaks it, normal boot
-falls back to the baked platform and external recovery can repair the preserved
-checkout. For ad-hoc DB queries use raw stdlib `sqlite3` instead of changing
+falls back to the baked platform while preserving the checkout for operator
+repair. For ad-hoc DB queries use raw stdlib `sqlite3` instead of changing
 this module.
 """
 

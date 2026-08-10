@@ -86,8 +86,8 @@ security migration, not a routine cache-name bump.
 - A missing/deleted app remains a 404 at the backend route; a deletion observed
   after launch becomes an explicit recovery handoff in `StandaloneApp`.
 - Backend Python is syntax-checked before restart. Platform changes are
-  committed as exact paths and can be repaired independently through the
-  deployment's external Recovery service.
+  committed as exact paths and remain repairable through an external root
+  attachment.
 
 ## Verification contract
 

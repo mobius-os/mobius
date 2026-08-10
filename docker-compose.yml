@@ -49,8 +49,8 @@ services:
       - GITHUB_OAUTH_CLIENT_ID=${GITHUB_OAUTH_CLIENT_ID:-Ov23liMpOLS6qp5YV8Vk}
       - DATABASE_URL=sqlite:////data/db/ultimate.db
       - DATA_DIR=/data
-      # The normal in-product agent has full root by default. Set this to 0 as
-      # an operator kill switch; recovery mode never installs the sudo rule.
+      # The in-product agent has full root by default. Set this to 0 as an
+      # operator kill switch.
       - MOBIUS_AGENT_SUDO=${MOBIUS_AGENT_SUDO:-1}
     volumes:
       - app_data:/data

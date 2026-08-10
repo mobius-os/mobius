@@ -156,15 +156,12 @@
   opacity: 0.58;
 }
 
-.recovery-panel__button:focus-visible,
-.recovery-panel__recovery a:focus-visible,
-.errbound__recovery a:focus-visible {
+.recovery-panel__button:focus-visible {
   outline: 2px solid var(--accent, #8b6cf7);
   outline-offset: 3px;
 }
 
-.recovery-panel--standalone .recovery-panel__button:focus-visible,
-.recovery-panel--standalone .recovery-panel__recovery a:focus-visible {
+.recovery-panel--standalone .recovery-panel__button:focus-visible {
   outline-color: var(--accent, #a78bfa);
 }
 
@@ -183,47 +180,6 @@
   .recovery-panel__button--primary:hover {
     border-color: color-mix(in srgb, var(--accent, #8b6cf7) 74%, #000);
     background: color-mix(in srgb, var(--accent, #8b6cf7) 74%, #000);
-  }
-}
-
-.recovery-panel__recovery,
-.errbound__recovery {
-  margin: 14px 0 0;
-  color: var(--muted, #a3a3a3);
-  font-size: 13px;
-  line-height: 1.5;
-  text-align: start;
-}
-
-.recovery-panel__recovery-lead,
-.recovery-panel__recovery-context,
-.recovery-panel__recovery-action {
-  display: block;
-}
-
-.recovery-panel__recovery-context {
-  margin-top: 4px;
-}
-
-.recovery-panel__recovery-command {
-  display: block;
-  width: max-content;
-  max-width: 100%;
-  margin-top: 2px;
-  white-space: nowrap;
-}
-
-.recovery-panel__recovery a,
-.errbound__recovery a {
-  color: inherit;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .recovery-panel__recovery a:hover,
-  .errbound__recovery a:hover {
-    color: var(--text, #ececec);
   }
 }
 

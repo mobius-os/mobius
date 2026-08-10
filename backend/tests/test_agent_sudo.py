@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import os
 import subprocess
 from pathlib import Path
@@ -51,13 +50,3 @@ def test_sudo_mode_fails_closed_on_unknown_value(tmp_path):
   assert result.returncode == 64
   assert "must be 0 or 1" in result.stderr
   assert list(tmp_path.iterdir()) == []
-
-
-def test_recovery_mode_precedes_data_initialization_and_sudo_configuration():
-  entrypoint = (
-    Path(__file__).resolve().parents[1] / "scripts" / "entrypoint.sh"
-  ).read_text()
-  recovery_exec = entrypoint.index("exec python3 -I /app/recovery-target/targetd.py")
-  sudo_config = entrypoint.index("configure_agent_sudo")
-  data_init = entrypoint.index("mkdir -p /data/db")
-  assert recovery_exec < sudo_config < data_init

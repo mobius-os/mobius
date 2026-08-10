@@ -1,8 +1,8 @@
 """Application settings loaded from environment variables.
 
 Served from the editable platform checkout. main.py imports this at module load;
-if a local edit breaks it, normal boot falls back to the baked platform and the
-deployment's external recovery service can repair the preserved checkout.
+if a local edit breaks it, normal boot falls back to the baked platform and
+preserves the checkout for operator repair.
 
 Use /data/shared/agent-settings.json for per-instance settings that do not need
 code changes. Source edits require a restart and should be committed in the

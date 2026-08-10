@@ -394,28 +394,6 @@ def test_quota_prunes_regenerable_cache_before_profile(tmp_path):
   assert result["profiles_pruned"] == 0
 
 
-def test_cache_only_admission_never_removes_durable_profile_state(tmp_path):
-  closed = "10101010-1010-1010-1010-101010101010"
-  active = "20202020-2020-2020-2020-202020202020"
-  closed_profile = _profile(tmp_path, closed, cache_bytes=80, durable_bytes=20)
-  active_profile = _profile(tmp_path, active, cache_bytes=80, durable_bytes=20)
-
-  result = enforce_browser_profile_quota(
-    tmp_path,
-    {},
-    {active},
-    max_bytes=0,
-    low_water_bytes=0,
-    cache_only=True,
-  )
-
-  assert closed_profile.exists()
-  assert not (closed_profile / "Default" / "Cache").exists()
-  assert (closed_profile / "Default" / "IndexedDB" / "state.bin").exists()
-  assert (active_profile / "Default" / "Cache" / "cache.bin").exists()
-  assert result["profiles_pruned"] == 0
-
-
 def test_quota_never_prunes_a_live_chat_profile(tmp_path):
   live = "22222222-2222-2222-2222-222222222222"
   profile = _profile(tmp_path, live, cache_bytes=100, durable_bytes=20)

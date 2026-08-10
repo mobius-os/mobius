@@ -92,8 +92,7 @@ export default function LoginForm({ onLogin }) {
           </button>
         </form>
         <p className="login__hint">
-          If you've forgotten your password, use your deployment's Recovery
-          action or ask the self-hosted server operator to start recovery.
+          If you've forgotten your password, ask the server operator for help.
         </p>
       </div>
     </div>

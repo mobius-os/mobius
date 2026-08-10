@@ -332,16 +332,6 @@ def resource_status(
     disk_usage=disk_usage,
     memory=memory,
   )
-  from app.data_volume import read_data_volume_status
-  volume_status = read_data_volume_status(data_dir)
-  if volume_status is not None:
-    facts["disk"]["top_level_breakdown"] = {
-      "captured_at": volume_status.get("captured_at"),
-      **volume_status["top_level"],
-    }
-    for key in ("last_crashloop_admission", "last_crashloop_retention"):
-      if key in volume_status:
-        facts["disk"][key] = volume_status[key]
   return {
     "facts": facts,
     "pressure": assess_resource_pressure(facts),

@@ -79,8 +79,8 @@ _RULES = (
   _Rule(
     "host_operator_tooling",
     ActivationLevel.HOST_MAINTENANCE,
-    "Host-operated deployment or recovery tooling changed.",
-    exact=("scripts/mobiusctl", "scripts/deploy-prod.sh"),
+    "Host-operated deployment tooling changed.",
+    exact=("scripts/deploy-prod.sh",),
     deployment="self_hosted",
   ),
   _Rule(
@@ -120,12 +120,11 @@ _RULES = (
   _Rule(
     "baked_runtime",
     ActivationLevel.IMAGE_REBUILD,
-    "Baked scripts, supervisors, recovery code, or protected-file rules changed.",
+    "Baked scripts, supervisors, or protected-file rules changed.",
     exact=("protected-files.txt",),
     prefixes=(
       "backend/scripts/",
       "backend/runtime/",
-      "backend/recovery_target/",
       "backend/static/",
     ),
   ),

@@ -173,7 +173,7 @@ def get_theme_mode(data_dir: str) -> str:
 # 99999, etc.) traps the user inside a broken UI. The recovery
 # story is: (a) the prior theme.css is snapshotted automatically
 # before every overwrite, so the agent never silently destroys
-# work; (b) external recovery can move theme.css aside so
+# work; (b) an operator root shell can move theme.css aside so
 # DEFAULT_THEME paints again; (c) the main shell honors
 # `?reset-theme=1` in the URL for cases where
 # the user can reach `/` from the address bar but can't click
@@ -181,7 +181,7 @@ def get_theme_mode(data_dir: str) -> str:
 #
 # This is the "build for reversibility, not prevention" lever from
 # the design philosophy. The theme is allowed to break the UI;
-# recovery is trivial and reachable from outside the broken state.
+# repair is trivial and reachable from outside the broken state.
 
 
 def snapshot_theme_if_present(data_dir: str) -> str | None:

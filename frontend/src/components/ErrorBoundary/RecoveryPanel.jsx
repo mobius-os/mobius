@@ -4,7 +4,6 @@ import {
   recoveryPhaseForAttempt,
   repairChatPath,
 } from '../../lib/errorRecovery.js'
-import RecoveryLink from './RecoveryLink.jsx'
 import './RecoveryPanel.css'
 
 function recoveryMessage({ phase, attemptPhase, canAskAgent, hasRepairChat, subject }) {
@@ -16,7 +15,7 @@ function recoveryMessage({ phase, attemptPhase, canAskAgent, hasRepairChat, subj
     return `Refreshing didn’t fix ${currentSubject}. Möbius can start a new repair chat and share these technical details with your agent to investigate and fix it.`
   }
   if (!canAskAgent) {
-    return `Refreshing didn’t fix ${currentSubject}. Use system recovery to diagnose the problem without relying on this embedded chat.`
+    return `Refreshing didn’t fix ${currentSubject}. Open Möbius directly and ask the agent to diagnose it.`
   }
   if (attemptPhase === 'agent-directed') {
     // The agent may already be mid-work or waiting on a clarifying question,
@@ -27,7 +26,7 @@ function recoveryMessage({ phase, attemptPhase, canAskAgent, hasRepairChat, subj
   }
   // The chat itself may exist — delivery is what failed — so this must not
   // claim otherwise while an "Open repair chat" link sits beside it.
-  return 'The repair request didn’t go through. You can retry it, or use system recovery as a last resort.'
+  return 'The repair request didn’t go through. You can retry it or open the repair chat.'
 }
 
 export default function RecoveryPanel({
@@ -132,12 +131,6 @@ export default function RecoveryPanel({
           </button>
         )}
       </div>
-      {phase === 'recovery' && (
-        <RecoveryLink
-          className="recovery-panel__recovery"
-          lead="If the repair chat can’t get you back in,"
-        />
-      )}
     </section>
   )
 }

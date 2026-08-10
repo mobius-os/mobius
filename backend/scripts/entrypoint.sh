@@ -3,48 +3,10 @@
 # the 'mobius' user for the actual server.  The non-root user allows
 # --dangerously-skip-permissions in the Claude CLI.
 
-# Recovery target mode is an immutable, early boot path. It must run before
-# touching /data or importing any agent-editable platform code. The separate
-# recovery worker reaches this private listener with a one-time bearer token
-# whose canonical base-10 epoch deadline is enforced by targetd itself.
-case "${MOBIUS_BOOT_MODE:-normal}" in
-  normal) ;;
-  recovery)
-    # Never exec the target with its bearer in the process environment. Linux
-    # exposes the original exec environment through /proc even after unsetenv,
-    # so move the secret through an unlinked, inherited descriptor and build a
-    # fresh Python environment without it. The target closes fd 3 before it
-    # starts listening and refuses to run unless it is container pid 1.
-    _recovery_target_token=${MOBIUS_RECOVERY_TARGET_TOKEN:-}
-    unset MOBIUS_RECOVERY_TARGET_TOKEN
-    umask 077
-    _recovery_token_file=$(mktemp /tmp/mobius-recovery-target-token.XXXXXX) || {
-      echo "FATAL: could not allocate recovery target secret descriptor." >&2
-      exit 70
-    }
-    if ! printf '%s' "$_recovery_target_token" > "$_recovery_token_file"; then
-      rm -f "$_recovery_token_file"
-      echo "FATAL: could not stage recovery target secret." >&2
-      exit 70
-    fi
-    exec 3< "$_recovery_token_file"
-    rm -f "$_recovery_token_file"
-    unset _recovery_target_token _recovery_token_file
-    MOBIUS_RECOVERY_TARGET_TOKEN_FD=3
-    export MOBIUS_RECOVERY_TARGET_TOKEN_FD
-    exec python3 -I /app/recovery-target/targetd.py
-    ;;
-  *)
-    echo "FATAL: MOBIUS_BOOT_MODE must be normal or recovery." >&2
-    exit 64
-    ;;
-esac
-
-# Normal Mobius boots give the in-product agent honest, unrestricted root by
+# Mobius gives the in-product agent honest, unrestricted root by
 # default. There is deliberately no partial apt/dpkg rule: package maintainer
 # scripts already make that rule equivalent to arbitrary root. Operators can
-# still set MOBIUS_AGENT_SUDO=0 as a coarse kill switch. Recovery mode execs
-# above this point and therefore never installs the agent sudo rule.
+# still set MOBIUS_AGENT_SUDO=0 as a coarse kill switch.
 . /app/scripts/agent_sudo.sh
 configure_agent_sudo "${MOBIUS_AGENT_SUDO:-1}" || exit $?
 
@@ -52,12 +14,6 @@ configure_agent_sudo "${MOBIUS_AGENT_SUDO:-1}" || exit $?
 # hands pid 1 to the application server.
 cleanup() {
   kill "$(cat /var/run/crond.pid 2>/dev/null)" 2>/dev/null
-  if [ -n "${_live_recovery_target_pid:-}" ]; then
-    kill "$_live_recovery_target_pid" 2>/dev/null
-  fi
-  if [ -n "${_live_recovery_attach_ready_file:-}" ]; then
-    rm -f -- "$_live_recovery_attach_ready_file"
-  fi
 }
 trap cleanup TERM INT
 
@@ -66,98 +22,6 @@ trap cleanup TERM INT
 # root — the dirs from the Dockerfile are replaced by the empty mount.
 mkdir -p /data/db /data/apps /data/app-secrets /data/compiled /data/shared /data/logs /data/cron-logs /data/cli-auth /data/agent-browser-profiles /data/platform /data/run
 
-# When the launcher provisions its Ed25519 verifier, attach the immutable
-# recovery target to this normal boot on the private target port. The ordinary
-# Mobius app continues booting below; signed, short-lived request capabilities
-# authorize recovery without changing MOBIUS_BOOT_MODE or restarting it into a
-# mutually exclusive recovery container.
-if [ -n "${MOBIUS_RECOVERY_CAPABILITY_PUBLIC_KEY:-}" ]; then
-  _live_recovery_target_port=${MOBIUS_RECOVERY_TARGET_PORT:-18002}
-  _live_recovery_target_enabled=1
-  _live_recovery_target_disable_reason="invalid or public-conflicting port"
-  case "$_live_recovery_target_port" in
-    ''|*[!0-9]*) _live_recovery_target_enabled=0 ;;
-    *)
-      if [ "${#_live_recovery_target_port}" -gt 5 ]; then
-        _live_recovery_target_enabled=0
-      elif [ "$_live_recovery_target_port" -lt 1 ] \
-        || [ "$_live_recovery_target_port" -gt 65535 ]; then
-        _live_recovery_target_enabled=0
-      elif [ "$_live_recovery_target_port" -eq "${PORT:-8000}" ] 2>/dev/null \
-        || { [ -n "${MOBIUS_PORT:-}" ] \
-          && [ "$_live_recovery_target_port" -eq "$MOBIUS_PORT" ] 2>/dev/null; }; then
-        _live_recovery_target_enabled=0
-      fi
-      ;;
-  esac
-  if [ "$_live_recovery_target_enabled" -eq 1 ]; then
-    _live_recovery_boot_id=$(python3 -I -c \
-      'import secrets; print(secrets.token_urlsafe(24))') \
-      || _live_recovery_target_enabled=0
-    case "${_live_recovery_boot_id:-}" in
-      *[!A-Za-z0-9_-]*|'') _live_recovery_target_enabled=0 ;;
-    esac
-    if [ "${#_live_recovery_boot_id}" -ne 32 ]; then
-      _live_recovery_target_enabled=0
-    fi
-    if [ "$_live_recovery_target_enabled" -eq 1 ]; then
-      _live_recovery_attach_ready_file=$(mktemp \
-        /tmp/mobius-recovery-attach-ready.XXXXXX) \
-        || _live_recovery_target_enabled=0
-    fi
-    if [ "$_live_recovery_target_enabled" -ne 1 ]; then
-      _live_recovery_target_disable_reason="could not allocate boot attachment identity"
-    fi
-  fi
-  # The verifier is public, but the application and agent do not need it.
-  # Retain it only until the target has inherited its startup environment.
-  if [ "$_live_recovery_target_enabled" -eq 1 ]; then
-    # Do not leak app/SSO/provider secrets (or restored empty legacy recovery
-    # variables) into the privileged target's initial /proc environment.
-    env -i \
-      HOME=/root \
-      PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-      LANG="${LANG:-C.UTF-8}" \
-      DATA_DIR=/data \
-      MOBIUS_BOOT_MODE=normal \
-      MOBIUS_RECOVERY_CAPABILITY_PUBLIC_KEY="$MOBIUS_RECOVERY_CAPABILITY_PUBLIC_KEY" \
-      MOBIUS_RECOVERY_TARGET_PORT="$_live_recovery_target_port" \
-      MOBIUS_RECOVERY_BOOT_ID="$_live_recovery_boot_id" \
-      MOBIUS_RECOVERY_ATTACH_READY_FILE="$_live_recovery_attach_ready_file" \
-      MOBIUS_INSTANCE_ID="${MOBIUS_INSTANCE_ID:-}" \
-      RAILWAY_DEPLOYMENT_ID="${RAILWAY_DEPLOYMENT_ID:-}" \
-      python3 -I /app/recovery-target/targetd.py &
-    _live_recovery_target_pid=$!
-  else
-    if [ -n "${_live_recovery_attach_ready_file:-}" ]; then
-      rm -f -- "$_live_recovery_attach_ready_file"
-      unset _live_recovery_attach_ready_file
-    fi
-    unset _live_recovery_boot_id
-    echo "WARNING: live recovery target disabled: ${_live_recovery_target_disable_reason}; normal Möbius boot will continue." >&2
-  fi
-  unset MOBIUS_RECOVERY_CAPABILITY_PUBLIC_KEY MOBIUS_RECOVERY_BOOT_ID
-  unset MOBIUS_RECOVERY_ATTACH_READY_FILE
-  unset _live_recovery_target_disable_reason _live_recovery_target_enabled
-  unset _live_recovery_target_port
-fi
-
-# Retire embedded-recovery authority before any persisted platform code can be
-# imported. These credentials and the pending sentinel have no consumer after
-# the external cutover; preserving them would leave dormant authority on old
-# volumes. The old user-authored recovery_chat.jsonl transcript is deliberately
-# retained and covered by ordinary backup/restore instead.
-for _retired_recovery_state in \
-  /data/.recovery-secret \
-  /data/.recovery-owner.json \
-  /data/.recover-pending
-do
-  if ! rm -f -- "$_retired_recovery_state"; then
-    echo "FATAL: could not remove retired recovery state: $_retired_recovery_state" >&2
-    exit 70
-  fi
-done
-unset _retired_recovery_state
 # Per-boot fail-closed proof. FastAPI lifespan recreates this only after every
 # discovered managed schedule has been converged through the common runner.
 rm -f /data/run/app-cron-supervision-ready
@@ -192,124 +56,9 @@ fi
 # Fallback invariant: if /data/platform/backend/app exists but cannot import,
 # or the repo is missing/corrupt, preserve it untouched and serve the baked
 # backend floor from /app/platform-baked/backend/app via a degraded /app/app
-# symlink. External recovery can still replace or repair /data while normal
-# boot keeps a clean baked fallback.
+# symlink. The owner can repair /data/platform while the normal app keeps
+# serving the clean baked fallback.
 # -----------------------------------------------------------------------
-
-# PHASE 3: Boot-attempt counter. Written BEFORE starting uvicorn so a
-# crash during startup (or a SIGKILL before the health probe writes the
-# success sentinel) increments the count on the next boot. The first field in
-# /data/.boot-attempt is the count. On >=3 failures without an
-# intervening /data/.last-successful-boot reset, we trigger a
-# platform-baked restore and reset the counter, then log a flag that
-# /api/debug/status surfaces.
-#
-# The frozen helper serializes this writer with the health reset and Railway's
-# component-aware rollback. It accepts legacy "N TIMESTAMP" records, then adds
-# this boot id so a delayed writer from another boot cannot overwrite us.
-_boot_counter_enabled=1
-_boot_counter_helper=/app/scripts/boot_attempt_counter.py
-_boot_counter_state=$(
-  python3 -P /app/scripts/boot_attempt_counter.py \
-    begin /data/.boot-attempt "$MOBIUS_BOOT_ID"
-) || _boot_counter_state=""
-set -- $_boot_counter_state
-if [ "$#" -eq 2 ]; then
-  _boot_counter_prior=$1
-  _boot_counter=$2
-  _boot_counter_charged=$2
-else
-  # Disable only counter-based auto-restore when this optional self-heal ledger
-  # is unavailable; the external recovery path does not depend on it.
-  echo "WARNING: platform boot-attempt ledger unavailable; automatic crash-loop restore is disabled for this boot." >&2
-  _boot_counter_enabled=0
-  _boot_counter_helper=""
-  _boot_counter_prior=0
-  _boot_counter=0
-  _boot_counter_charged=0
-fi
-# chown deferred until after the broad /data chown below; done explicitly
-# here only if that chown is not going to happen (Railway fallback path).
-
-# If the counter reached the threshold, trigger automatic platform-baked
-# restore so a broken platform doesn't brick the container in a crash
-# loop. Threshold = 3 because a transient OOM or SIGKILL can cause 1-2
-# false failures; three consecutive failures without a health success
-# strongly implies the platform code itself is broken.
-_crashloop_force_baked=0
-_crashloop_clone_ready=0
-if [ "$_boot_counter_enabled" -eq 1 ] &&
-   [ "$_boot_counter" -ge 3 ] &&
-   [ -f /data/.last-successful-boot ]; then
-  echo "PLATFORM-RESTORE: boot-attempt counter = $_boot_counter, evaluating re-clone capacity..." >&2
-  # Crash-loop escape hatch: the platform imported OK (else the probe would
-  # have already fallen back to baked) but keeps crashing at runtime. Move the
-  # broken tree ASIDE so the next boot re-clones a fresh canonical
-  # /data/platform. Non-destructive: the broken tree is preserved at a
-  # TIMESTAMPED /data/platform.crashloop-prev.<ts> for inspection/recovery, not
-  # deleted. A one-slot .crashloop-prev would let a SECOND crash-loop delete the
-  # first preserved tree before the owner could inspect it, so we timestamp each
-  # quarantine. Capacity policy always preserves the newest point and keeps
-  # older redundant history only while its byte budget permits.
-  _cl_ts=$(date -u +%Y%m%dT%H%M%SZ)
-  _cl_admitted=0
-  if [ -e /data/platform ] && [ -n "$(ls -A /data/platform 2>/dev/null)" ] &&
-     PYTHONPATH=/app python3 -P -m app.data_volume \
-       admit-crashloop --data-dir /data --platform-dir /data/platform; then
-    _cl_admitted=1
-  fi
-  if [ "$_cl_admitted" -eq 1 ] &&
-     mv /data/platform "/data/platform.crashloop-prev.$_cl_ts" 2>/dev/null; then
-    echo "PLATFORM-RESTORE: broken tree moved to /data/platform.crashloop-prev.$_cl_ts; next boot re-clones." >&2
-    echo "crashloop-reclone /data/platform.crashloop-prev.$_cl_ts $(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.platform-restore-active
-    chown mobius:mobius /data/.platform-restore-active 2>/dev/null || true
-    # Re-apply the byte budget after the just-moved tree becomes the newest
-    # recovery point. The helper never prunes that newest point.
-    if ! PYTHONPATH=/app python3 -P -m app.data_volume \
-      record-crashloop --data-dir /data; then
-      echo "WARNING: crash-loop recovery could not create safe clone headroom; serving baked floor." >&2
-      _crashloop_force_baked=1
-    else
-      _crashloop_clone_ready=1
-    fi
-  else
-    if [ "$_cl_admitted" -eq 1 ]; then
-      echo "PLATFORM-RESTORE: platform move failed; live tree left in place and baked floor will serve." >&2
-      _crashloop_force_baked=1
-    else
-      echo "PLATFORM-RESTORE: re-clone not admitted; live tree left in place and baked floor will serve." >&2
-      if [ -e /data/platform ] && [ -n "$(ls -A /data/platform 2>/dev/null)" ]; then
-        _crashloop_force_baked=1
-      fi
-    fi
-  fi
-  # Reset counter after the restore attempt regardless of success, so
-  # the next boot gets a clean slate. If the restore fixed things, the
-  # health probe will write last-successful-boot and suppress further
-  # auto-restores. If it didn't fix things, we'll restore again after 3
-  # more attempts (an explicit loop so the operator can see what's
-  # happening via the counter file).
-  python3 -P /app/scripts/boot_attempt_counter.py \
-    reset /data/.boot-attempt "$MOBIUS_BOOT_ID" >/dev/null || {
-    echo "WARNING: could not reset the platform boot-attempt ledger." >&2
-    _boot_counter_enabled=0
-    _boot_counter_helper=""
-  }
-  _boot_counter=0
-elif [ "$_boot_counter_enabled" -eq 1 ] &&
-     [ "$_boot_counter" -ge 3 ] &&
-     [ ! -f /data/.last-successful-boot ]; then
-  # Fresh volume or first-ever boot — last-successful-boot not yet written.
-  # Don't trigger restore on what is literally the first few boots.
-  # Reset counter so it doesn't grow forever on a slow-starting instance.
-  python3 -P /app/scripts/boot_attempt_counter.py \
-    reset /data/.boot-attempt "$MOBIUS_BOOT_ID" >/dev/null || {
-    echo "WARNING: could not reset the platform boot-attempt ledger." >&2
-    _boot_counter_enabled=0
-    _boot_counter_helper=""
-  }
-  _boot_counter=0
-fi
 
 if ! chown -R mobius:mobius /data 2>/dev/null; then
   echo "WARNING: chown -R mobius:mobius /data failed (likely a managed-volume platform like Railway)." >&2
@@ -433,40 +182,6 @@ _use_platform=0
 _serve_workdir=/app
 _serve_source=baked
 _served_sha="${BUILD_SHA:-unknown}"
-_managed_release=0
-_managed_baked_sha=
-
-# A requested release channel is a boot-time trust boundary, not a best-effort
-# updater hint. Validate both the full branch ref and the immutable image-owned
-# SHA before inspecting the persistent checkout. Runtime BUILD_SHA is
-# deliberately ignored here because a deployment can override it.
-if [ -n "${MOBIUS_PLATFORM_RELEASE_REF:-}" ]; then
-  case "$MOBIUS_PLATFORM_RELEASE_REF" in
-    refs/heads/*) ;;
-    *)
-      echo "FATAL: MOBIUS_PLATFORM_RELEASE_REF must be a full refs/heads/... ref." >&2
-      exit 70
-      ;;
-  esac
-  _managed_release_branch=${MOBIUS_PLATFORM_RELEASE_REF#refs/heads/}
-  if ! git check-ref-format --branch "$_managed_release_branch" >/dev/null 2>&1; then
-    echo "FATAL: MOBIUS_PLATFORM_RELEASE_REF is invalid." >&2
-    exit 70
-  fi
-  unset _managed_release_branch
-  _managed_baked_sha=$(python3 -I -c '
-import json, re
-value = json.load(open("/app/build-info.json", encoding="utf-8")).get("sha", "")
-if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", value):
-  raise SystemExit(1)
-print(value.lower())
-') || {
-    echo "FATAL: managed release image has no valid immutable build SHA." >&2
-    exit 70
-  }
-  _managed_release=1
-  _served_sha=$_managed_baked_sha
-fi
 
 # Env scrub shared by the import probe and the uvicorn exec so probe and serve
 # stay identical. Drops ONLY inherited GIT_*/PYTHONPATH: a GIT_DIR/GIT_WORK_TREE
@@ -495,7 +210,7 @@ _platform_import_probe_dir() {
   #
   # `timeout 60` bounds the probe: a module-level infinite loop or blocking
   # network call in agent-edited code would otherwise wedge boot forever (before
-  # uvicorn, before crash-loop recovery can advance). A timeout-kill exits 124,
+  # uvicorn and before the baked fallback can serve). A timeout-kill exits 124,
   # which counts as probe-fail -> serve baked. `$_env_scrub` drops the inherited
   # GIT_*/PYTHONPATH (see its definition); the uvicorn exec below applies the
   # IDENTICAL scrub so probe and serve stay byte-for-byte the same environment.
@@ -609,15 +324,6 @@ _platform_bootstrap() {
       echo "PLATFORM LAYER WARNING: baked platform seed copy failed; trying network clone." >&2
     fi
     rm -rf "$_seeding" 2>/dev/null || true
-  fi
-
-  # A managed stack image must never recover its editable checkout by cloning
-  # the repository's default branch: public main can intentionally remain on an
-  # older compatibility release. Its immutable baked tree is the only safe
-  # first-boot/fallback source for this image.
-  if [ "$_managed_release" -eq 1 ]; then
-    echo "PLATFORM LAYER WARNING: managed baked seed failed; refusing default-branch clone." >&2
-    return 1
   fi
 
   echo "Platform layer: cloning $_origin -> /data/platform (first boot fallback)."
@@ -773,15 +479,11 @@ _platform_use_baked() {
   _use_platform=0
   _serve_source=baked
   _serve_workdir=/app
-  if [ "$_managed_release" -eq 1 ]; then
-    _served_sha=$_managed_baked_sha
-  else
-    _served_sha="${BUILD_SHA:-unknown}"
-  fi
+  _served_sha="${BUILD_SHA:-unknown}"
   export PYTHONDONTWRITEBYTECODE=1
   echo "PLATFORM LAYER WARNING: serving baked floor from $_baked_app." >&2
   echo "  /data/platform is preserved untouched and is NOT served." >&2
-  echo "  Fix /data/platform or start the deployment's external Recovery service." >&2
+  echo "  Refresh Möbius and ask the agent to inspect or repair /data/platform." >&2
   if [ -e /app/app ] && [ ! -L /app/app ]; then
     find /app/app -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
     rm -rf /app/app
@@ -799,19 +501,8 @@ fi
 
 chown -R mobius:mobius /data/platform 2>/dev/null || true
 
-if [ "$_crashloop_force_baked" -eq 1 ]; then
-  _platform_use_baked
-elif [ ! -d "$_platform_app" ]; then
-  _restore_capacity_ready=1
-  if [ "$_crashloop_clone_ready" -ne 1 ] &&
-     [ -f /data/.platform-restore-active ] &&
-     ! PYTHONPATH=/app python3 -P -m app.data_volume \
-       record-crashloop --data-dir /data; then
-    _restore_capacity_ready=0
-    echo "PLATFORM LAYER WARNING: crash-loop restore still lacks safe clone headroom." >&2
-  fi
-  if [ "$_restore_capacity_ready" -eq 1 ] &&
-     _platform_bootstrap && _platform_git_valid && _platform_import_probe; then
+if [ ! -d "$_platform_app" ]; then
+  if _platform_bootstrap && _platform_git_valid && _platform_import_probe; then
     _platform_use_direct
   else
     echo "PLATFORM LAYER WARNING: bootstrap did not produce an importable repo." >&2
@@ -833,22 +524,9 @@ else
 fi
 
 if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
-  # A managed release image must not import the updater from the persistent
-  # checkout it is about to repair. That checkout may predate release-channel
-  # support and still follow origin/main. Import the root-owned updater baked
-  # into this exact image instead; it fetches the configured release ref but
-  # reconciles /data/platform only to /app/build-info.json's immutable SHA.
-  # Normal installations keep the historical persistent-updater path.
   _platform_reconciler_backend=/data/platform/backend
-  _platform_reconciler_prefix=
-  if [ "$_managed_release" -eq 1 ]; then
-    _platform_reconciler_backend=/app/platform-baked/backend
-    _platform_reconciler_prefix="env PYTHONDONTWRITEBYTECODE=1"
-  fi
-  # Deploy=merge reconcile. A normal deploy advances origin/main; a managed
-  # deploy fetches its configured channel and selects the image's baked SHA.
-  # Merge that selected version once with local edits before uvicorn imports it,
-  # so the update goes live this
+  # Deploy=merge reconcile. Fetch origin/main and merge it once with local
+  # edits before uvicorn imports the result, so the update goes live this
   # boot with no restart. Runs as mobius (writes /data; root would poison /data
   # ownership + hit git "dubious ownership"), cwd the served backend so `app`
   # imports resolve from the clone, under the IDENTICAL GIT_*/PYTHONPATH scrub
@@ -859,44 +537,24 @@ if [ "$_use_platform" -eq 1 ] && [ "${MOBIUS_TEST_RUNTIME:-0}" != "1" ]; then
   # ABOVE the reconcile's bounded operations: fetch 120 + unshallow 120 + merge
   # 120 + probe 60 = 420, plus commit_local's own bounded git calls. Keep this
   # comfortably higher so internal timeouts fire FIRST; the post-timeout guard
-  # below still cleans the tree if the outer kill ever wins. External recovery
-  # remains available even if normal boot cannot reconcile the tree.
+  # below still cleans the tree if the outer kill ever wins.
   echo "Platform layer: reconciling /data/platform with its configured release target..." >&2
   su -s /bin/sh mobius -c \
-    "cd '$_platform_reconciler_backend' && $_env_scrub $_platform_reconciler_prefix timeout 900 python3 -c \
+    "cd '$_platform_reconciler_backend' && $_env_scrub timeout 900 python3 -c \
      'from app import platform_update; print(platform_update.reconcile_clone_sync())'" \
     2>&1 || true
   # Reconcile itself is best-effort, but the post-reconcile guard is the final
   # safety boundary: if it cannot prove/reset the tree to a clean committed
   # state, do not import that tree. Exiting lets container policy retry instead
-  # of serving possibly half-applied code; external recovery can repair /data.
+  # of serving possibly half-applied code.
   if ! su -s /bin/sh mobius -c \
-    "cd '$_platform_reconciler_backend' && $_env_scrub $_platform_reconciler_prefix python3 -c \
+    "cd '$_platform_reconciler_backend' && $_env_scrub python3 -c \
      'from app import platform_update; print(platform_update.boot_guard_sync())'" \
     2>&1; then
     echo "Platform layer: boot guard failed; refusing to serve the platform tree." >&2
     exit 1
   fi
-  # Best-effort reconcile exits zero for offline/conflict/invalid-channel
-  # outcomes. That is fine on ordinary main, but a managed B image must not
-  # serve an A-prime/main-only persistent tree. Import the strict proof from the
-  # immutable baked backend and fall back to the exact baked release unless
-  # persistent HEAD contains this image's baked SHA. Local commits on top pass.
-  if [ "$_managed_release" -eq 1 ]; then
-    if ! _managed_release_proof=$(su -s /bin/sh mobius -c \
-      "cd '$_platform_reconciler_backend' && $_env_scrub $_platform_reconciler_prefix python3 -c \
-       'from app import platform_update; print(platform_update.managed_release_ready_sync())'" \
-      2>&1); then
-      echo "PLATFORM RELEASE WARNING: persistent checkout is not at this image's release." >&2
-      echo "  ${_managed_release_proof}" >&2
-      echo "  Serving the baked floor; /data/platform is preserved for recovery." >&2
-      _platform_use_baked
-    else
-      echo "Platform layer: ${_managed_release_proof}" >&2
-    fi
-  fi
-  # A successful reconcile may have advanced main. Report persistent HEAD only
-  # when that tree remains the selected source after the managed proof.
+  # A successful reconcile may have advanced main. Report persistent HEAD.
   if [ "$_use_platform" -eq 1 ]; then
     _served_sha=$(su -s /bin/sh mobius -c \
       'git -C /data/platform rev-parse HEAD' 2>/dev/null || echo "$_served_sha")
@@ -1227,8 +885,6 @@ push/*.json
 push/*.txt
 service-token.txt
 .secret-key
-.recovery-secret
-.recovery-owner.json
 .pm-commit
 compiled/
 db/
@@ -1242,8 +898,6 @@ backups-external/
 *.bak-*
 apps/*/data/
 apps/*/.git/
-recovery_chat.jsonl
-.recover-pending
 agent-browser-profiles/
 generated/
 logs/
@@ -1263,12 +917,6 @@ platform.seeding.*
 platform.reseeding.*
 platform.reseed-prev.*
 platform.pre-clone.*
-platform.crashloop-prev.*
-# Phase 3 boot-state files — runtime counters, not content the agent manages.
-.boot-attempt
-.boot-attempt.lock
-.last-successful-boot
-.platform-restore-active
 .platform-upgrade-available
 .platform-pre-clone-active
 # Transient platform-update markers — runtime signals, never user data. If the
@@ -1296,10 +944,9 @@ chown mobius:mobius /data/.gitignore 2>/dev/null || true
 # intentional durable repos too: prepared review cards point at their exact
 # commits and the approved Send path re-verifies that history before pushing.
 #
-# The .pre-clone.<ts> / .crashloop-prev.<ts> quarantines are also preserved
-# WHOLE (including their .git): they hold the agent's migrated-aside platform
-# tree, and the whole point of the move-aside was to keep those edits AND their
-# git history recoverable — this pruner must not silently eat that history.
+# The .pre-clone.<ts> quarantines are also preserved WHOLE (including their
+# .git): they hold the agent's migrated-aside platform tree, and the whole point
+# of the move-aside was to keep those edits and their history recoverable.
 find /data -regextype posix-extended -mindepth 2 -maxdepth 4 \
   -type d -name '.git' \
   ! -regex '/data/apps/[^/]+/\.git' \
@@ -1308,7 +955,6 @@ find /data -regextype posix-extended -mindepth 2 -maxdepth 4 \
   ! -path '/data/contrib/*' \
   ! -path '/data/contributions/*' \
   ! -regex '/data/platform\.pre-clone\..*' \
-  ! -regex '/data/platform\.crashloop-prev\..*' \
   -prune -exec rm -rf {} + 2>/dev/null || true
 
 # Idempotent re-chown of /data/.git BEFORE the if/else below — git
@@ -1437,19 +1083,12 @@ umask 022
 
 # Root-owned half of the ordinary Settings restart handshake. The app publishes
 # a nonce-bound request; this poller accepts it and terminates pid 1 so Docker or
-# Railway recreates the service. It remains independent of external recovery.
+# Railway recreates the service. It is part of the ordinary app lifecycle.
 _start_platform_restart_poller
 
-# PHASE 3: Background health probe — writes /data/.last-successful-boot
-# and resets the boot-attempt counter once the server is confirmed
-# healthy. This is the "success" signal that prevents false-positive
-# crash-loop detection.
-#
 # The probe polls the app's /api/health (127.0.0.1, never routed outside the
 # container) with a 90-second timeout (generous for slow first-boots with DB
-# migrations). On success it writes the sentinel and zeroes the counter. It
-# does NOT restart uvicorn or take any other action — it is purely the signal
-# that "this boot succeeded."
+# migrations). It starts cron only after FastAPI lifespan has completed.
 #
 # pgrep self-match trap: we do NOT use `until ! pgrep -f uvicorn` or
 # similar — the probe waits on the outcome (/api/health 200), not on a
@@ -1469,24 +1108,13 @@ _health_url="http://127.0.0.1:${_public_port}/api/health"
       else
         echo "WARNING: app cron supervision did not complete; cron remains disabled (fail closed)" >&2
       fi
-      # Health probe passed — record the success sentinel and reset counter.
-      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /data/.last-successful-boot
-      if [ "$_boot_counter_enabled" -eq 1 ]; then
-        python3 -P /app/scripts/boot_attempt_counter.py \
-          reset /data/.boot-attempt "$MOBIUS_BOOT_ID" >/dev/null || {
-          echo "WARNING: platform health passed but the boot-attempt ledger could not be reset." >&2
-        }
-      fi
-      # Remove the restore-active flag if set — the server is healthy now.
-      rm -f /data/.platform-restore-active 2>/dev/null || true
-      echo "Platform health probe: /api/health OK — boot success recorded."
+      echo "Platform health probe: /api/health OK."
       exit 0
     fi
     sleep 1
   done
   # 90 seconds elapsed without a 200 — uvicorn failed to start.
   echo "Platform health probe: /api/health did not return 200 within 90s — boot failure." >&2
-  # Leave .boot-attempt in place (already incremented before uvicorn).
   exit 1
 ) &
 
@@ -1509,17 +1137,6 @@ else
   _start_cmd="umask 022 && export PYTHONDONTWRITEBYTECODE=1"
   _start_cmd="$_start_cmd && cd $_serve_workdir"
   _start_cmd="$_start_cmd && exec $_env_scrub uvicorn app.main:app $_uvicorn_flags"
-fi
-
-# Entrypoint initialization is complete. Publish the exact per-container boot
-# identity immediately before handing pid 1 to uvicorn. This releases repair
-# attachment even if the application later starts degraded or fails its health
-# endpoint, while still preventing repair from racing boot-time mutations.
-if [ -n "${_live_recovery_attach_ready_file:-}" ]; then
-  if ! printf 'ready:%s\n' "$_live_recovery_boot_id" \
-    > "$_live_recovery_attach_ready_file"; then
-    echo "WARNING: live recovery attach readiness could not be published." >&2
-  fi
 fi
 
 exec su -s /bin/sh mobius -c \

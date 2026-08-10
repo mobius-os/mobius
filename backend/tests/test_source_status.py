@@ -55,12 +55,12 @@ def _app(repo: Path, *, app_id: int = 7) -> dict:
   }
 
 
-def test_platform_source_status_ignores_the_boot_release_channel(
+def test_platform_source_status_ignores_unrelated_environment(
   monkeypatch, tmp_path,
 ):
   monkeypatch.setenv(
-    "MOBIUS_PLATFORM_RELEASE_REF",
-    "refs/heads/release/external-recovery",
+    "MOBIUS_UNUSED_SETTING",
+    "ignored",
   )
 
   result = source_status._project_status(

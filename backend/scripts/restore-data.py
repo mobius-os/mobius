@@ -33,12 +33,14 @@ filesystem, so each rename is atomic and yields a new inode — a process
 holding an old DB fd cannot corrupt the restored file. Run with the app
 STOPPED and start it after; the restored DB is opened fresh.
 
-External recovery can drive this with the app stopped: Python + tar + (for
-encrypted secrets) age and the identity file, writing only under /data.
-Modern backups omit retired embedded-recovery credentials and sentinels while
-preserving a legacy `recovery_chat.jsonl` transcript as owner data. Restoring
-an older artifact may temporarily recreate the retired files; the next normal
-boot removes them before importing persisted platform code.
+Cold restore is an operator action run from a maintenance container: Python +
+tar + (for encrypted secrets) age and the identity file, writing only under
+/data. Managed Recovery attaches to one live Railway service instance and is
+not a cold-restore transport. Modern backups omit retired embedded-recovery
+credentials and sentinels while preserving a legacy `recovery_chat.jsonl`
+transcript as owner data. Restoring an older artifact may temporarily recreate
+the retired files; the next normal boot removes them before importing persisted
+platform code.
 
 The rehearsed restore drill (proven end to end, per-slug throwaway
 container)

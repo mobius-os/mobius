@@ -2,7 +2,7 @@
 
 Served from the editable platform checkout. main.py and many route modules
 import these at module load; if a local edit breaks them, normal boot falls back
-to the baked platform and external recovery can repair the preserved checkout.
+to the baked platform and preserves the checkout for operator repair.
 
 To add a column to an existing table, edit and restart. For per-chat fields you
 can usually skip a migration by

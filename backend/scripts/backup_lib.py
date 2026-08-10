@@ -252,8 +252,8 @@ class RollbackError(Exception):
   """The forward restore failed AND rolling the originals back also
   failed for at least one entry.
 
-  Carries what is where so the operator or external recovery worker can finish
-  the recovery by hand. The invariant this exception exists to signal: the
+  Carries what is where so the operator can finish the rollback by hand. The
+  invariant this exception exists to signal: the
   originals it names are STILL in ``rollback_dir`` and were NEVER
   deleted — the caller MUST NOT delete that directory.
   """

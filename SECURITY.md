@@ -49,7 +49,7 @@ These are intentional design decisions appropriate for a single-owner app:
 - **Server-side app jobs:** owner-installed, reviewed job scripts run with the
   operating-system authority of the Möbius process. Their short-lived app token
   still limits API calls, but it is not a filesystem sandbox. This matches the
-  primary agent trust model; install review and recovery are the safety net.
+  primary agent trust model; install review and git history are the safety net.
 - **Owner JWT in shell localStorage:** opaque mini-app frames cannot read it,
   but script execution in the shell document itself remains equivalent to the
   owner. Moving the shell session to an HttpOnly cookie would further reduce
@@ -70,37 +70,17 @@ These are intentional design decisions appropriate for a single-owner app:
 
 The agent runs as the `mobius` user with full write access to `/data/`, including
 the live platform checkout. Security against agent mistakes is primarily
-prompt- and review-based; a separate recovery service stays reachable if the
-editable platform is broken. This is appropriate because:
+prompt- and review-based. This is appropriate because:
 
 1. The agent is a frontier AI model that follows instructions reliably.
 2. The owner chose to give the agent control — restricting it defeats
    the purpose.
-3. Recovery is isolated from the editable production process and provides the
-   rollback boundary.
+3. Git history and the read-only baked application provide rollback and a
+   visible repair surface without mutating owner source automatically.
 
 Full agent root is the default normal-instance capability. The root-owned baked
 entrypoint creates an unrestricted sudo rule unless an operator sets
 `MOBIUS_AGENT_SUDO=0`; changing that boundary requires recreating the container.
-Recovery mode branches before the rule is installed. The recovery worker never
-shares the normal container: it is non-root/read-only and reaches a separate
-root target through a one-time authenticated, bounded protocol. The target removes the bearer from
-its exec environment, wipes it after deriving a one-way verifier, blocks child
-access to its memory and descriptors, drops packet-capture/ptrace/mount
-capabilities, and confines its own file helpers to explicit roots with Linux
-`openat2`. It independently requires a base-10 Unix-epoch expiry no more than
-24 hours ahead, rejects authority at that deadline, kills/reaps active repair
-process trees, discards the verifier, and closes the listener without entering
-a restart loop. Repair commands retain root over the stopped `/data` instance
-but cannot inspect target PID1, survive their request, or modify the recovery
-worker itself.
-
-Managed recovery containers never restart automatically. A worker restart would
-reconstruct its tmpfs-backed one-time-code state from unchanged environment
-credentials, while a target restart would retain the same bearer; the managed
-control plane therefore removes and recreates them with rotated credentials
-rather than restarting. Self-hosted recovery runs no such containers — the
-operator repairs the live app container in place with `scripts/mobiusctl recovery`.
 
 ## Opaque embedded-chat contract
 

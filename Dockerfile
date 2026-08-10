@@ -330,16 +330,12 @@ RUN mkdir -p /data/db /data/apps /data/compiled /data/shared \
 # the browser, CLI, Python, vendor, and platform-seed layers above.
 COPY backend/app ./app/
 COPY backend/scripts ./scripts/
-COPY backend/recovery_target ./recovery-target/
 COPY backend/runtime ./runtime/
 COPY skill/ ./skill/
 COPY protected-files.txt ./protected-files.txt
 
-# Neither the early recovery target nor the restart supervisor imports mutable
-# platform code. Stamp target identity from the actual baked checkout (never a
-# runtime-overridable env value), then keep both root-owned and non-writable.
-RUN cp /app/platform-baked/.baked-sha /app/recovery-target/BUILD_REVISION \
-    && chmod -R a-w /app/recovery-target /app/runtime
+# The restart supervisor imports no mutable platform code.
+RUN chmod -R a-w /app/runtime
 RUN chmod +x ./scripts/entrypoint.sh
 
 # Build identity — passed at `docker compose build` time (deploy-prod.sh

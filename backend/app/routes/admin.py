@@ -221,7 +221,7 @@ def restart_server(
   """Soft restart for the normal Settings surface.
 
   This owner-auth route is the everyday path for applying backend code/config
-  changes. A broken main app is handled by the external recovery service.
+  changes. A broken main app is repaired from outside this process.
   """
   return JSONResponse(
     {"status": "restarting"},

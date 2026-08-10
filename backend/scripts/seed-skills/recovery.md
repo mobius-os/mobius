@@ -1,6 +1,6 @@
 # Recovery, backend edits, and data layout
 
-How backend edits load (restart, not live-reload), how to make them permanent, the SQLite migration gotcha, `/data`-as-a-git-repo, file locations, soft-delete recovery, and the external recovery boundary. `Read` this before editing backend Python or doing anything you might need to undo.
+How backend edits load, how to make them permanent, the SQLite migration gotcha, `/data`-as-a-git-repo, file locations, and soft-delete recovery. `Read` this before editing backend Python or doing anything you might need to undo.
 
 ---
 
@@ -31,7 +31,7 @@ All chat-persistence writes must route through the `chat_writer` actor — never
 
 1. Edit `/data/platform/backend/app/...py` in place; `py_compile` it.
 2. If the main shell is healthy, ask the partner to open Settings -> Server and click **"Restart server"** (POSTs `/api/admin/restart`).
-3. If the main shell is broken, ask the partner to open Recovery from their managed deployment. A self-hosted operator runs `scripts/mobiusctl recovery` to open a root shell in the live app container and repairs `/data/platform` in place. Do not invent or link to an in-app `/recover` route; recovery is deliberately outside this container.
+3. If the edited tree fails to import, the baked shell stays available. Ask the partner to refresh and use the repair chat to diagnose `/data/platform`.
 4. Restart takes ~5–15s; the page auto-reloads when healthy.
 5. Verify the fix in the original chat (still open, full history intact).
 
@@ -83,36 +83,11 @@ git -C /data checkout <sha> -- shared/<path>  # restore just that file
 
 ---
 
-## The external recovery boundary
-
-Recovery does not run beside this agent.
-
-**Managed deployments** create or wake a separate Serverless recovery service
-inside the same deployment project — a fresh reasoning agent that inspects and
-repairs all of `/data` through a private root target, or quarantines and reseeds
-the platform clone when that is the correct diagnosis. This running agent never
-receives that target's one-time token and cannot start, update, or modify it.
-
-**Self-hosted operators** already have host and Docker root, so recovery is just
-a root shell in the *live* app container — no isolated worker, credentials, or
-downtime:
-
-```sh
-scripts/mobiusctl recovery
-```
-
-It runs `docker exec -u 0` in the running container. Repair `/data/platform` (or
-anything under `/data`) in place, then restart in place (Settings -> Server, or
-`docker restart`); the app is never stopped or recreated and the container
-overlay is preserved. If the container is not running, start it first — boot
-falls back to the baked floor when `/data/platform` is broken, so the normal
-in-container agent returns to repair it — then re-run the command.
-
 | Situation | Action |
 |---|---|
 | Backend edit, main shell healthy | Settings -> Server -> Restart |
-| Main shell or backend broken (managed) | Partner opens the deployment's Recovery action |
-| Self-hosted instance broken | Operator runs `scripts/mobiusctl recovery`, repairs `/data/platform` in place, restarts |
+| Edited backend fails to import | Refresh, then use the repair chat from the baked shell |
+| Host-level maintenance | Operator runs `docker compose exec -u 0 app bash` |
 
 ---
 
