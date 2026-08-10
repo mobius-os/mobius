@@ -46,11 +46,11 @@ default). Routed into two archives:
   secrets.tar.*   cli-auth/, app-secrets/, push/, service-token.txt,
                   .secret-key.
 
-Retired embedded-recovery credentials/sentinels are never captured. Normal
-boot removes `.recovery-secret`, `.recovery-owner.json`, and `.recover-pending`
-before importing persisted code. The user-authored legacy
-`recovery_chat.jsonl` transcript is retained as ordinary owner data and is
-included in `data.tar.gz` when present.
+Retired embedded-recovery credentials/sentinels are never captured. Older
+volumes may still contain `.recovery-secret`, `.recovery-owner.json`, or
+`.recover-pending`, but the current runtime neither reads nor writes them. The
+user-authored legacy `recovery_chat.jsonl` transcript is retained as ordinary
+owner data and is included in `data.tar.gz` when present.
 
 Encryption policy (secrets never plaintext-offsite)
 ---------------------------------------------------

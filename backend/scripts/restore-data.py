@@ -39,8 +39,8 @@ tar + (for encrypted secrets) age and the identity file, writing only under
 not a cold-restore transport. Modern backups omit retired embedded-recovery
 credentials and sentinels while preserving a legacy `recovery_chat.jsonl`
 transcript as owner data. Restoring an older artifact may temporarily recreate
-the retired files; the next normal boot removes them before importing persisted
-platform code.
+the retired files. The current runtime does not consume them, the file API keeps
+historic credential names inaccessible, and subsequent backups omit them.
 
 The rehearsed restore drill (proven end to end, per-slug throwaway
 container)

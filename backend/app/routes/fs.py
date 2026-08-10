@@ -100,8 +100,9 @@ _DENY_RELPATHS = (
 )
 # Defense in depth: a secret-shaped filename anywhere in the tree is denied,
 # in case one is copied outside its canonical home. The two `.recovery-*`
-# entries are retired legacy credentials and remain denied until old instances
-# have naturally removed them.
+# entries are retired credentials but remain denied because an upgraded or
+# restored volume may still contain them. This protects old data; no current
+# runtime code consumes either file.
 _SECRET_NAMES = {
   ".env", ".secret-key", ".recovery-secret", ".recovery-owner.json",
   ".credentials.json", "service-token.txt",

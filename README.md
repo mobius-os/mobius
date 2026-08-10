@@ -123,7 +123,9 @@ Möbius uses provider sign-in, so the default setup does not require a separate 
 
 ![Möbius Launch showing workspace health, included Railway credit, and live resource usage](assets/product/mobius-launch-deployment.png)
 
-Your chats, files, apps, credentials, and agent activity stay inside that deployment. Möbius Launch stores only the account and infrastructure data needed to create and manage it.
+During normal use, your chats, files, apps, credentials, and agent activity stay inside that deployment. Möbius Launch stores the account and infrastructure data needed to manage it.
+
+If the Möbius interface is unavailable, open its deployment card in Möbius Launch and choose **Open Recovery**. The launcher creates a separate temporary worker, where you connect Codex or Claude and work on the exact live container through Railway's native Secure Shell (SSH) endpoint. Recovery does not restart or redeploy Möbius, and the worker is removed when you finish or the session expires.
 
 ### Deploy on your own server
 
@@ -147,7 +149,7 @@ a root shell in the running container without recreating it:
 docker compose exec -u 0 app bash
 ```
 
-The in-product agent has passwordless full root inside its Mobius container by
+The in-product agent has passwordless full root inside its Möbius container by
 default. To use the operator kill switch, set `MOBIUS_AGENT_SUDO=0` in `.env`
 and recreate the app with `docker compose up -d --force-recreate app`.
 
