@@ -133,3 +133,16 @@ def test_no_settings_file_falls_back_to_provider_default(tmp_path):
   # No agent-settings.json at all → system default (claude, SDK-default model).
   out = bg.resolve_background_agents(str(tmp_path), None)
   assert out["primary"]["provider"] == "claude"
+
+
+def test_no_settings_file_uses_the_only_connected_provider(tmp_path):
+  codex_home = tmp_path / "cli-auth" / "codex"
+  codex_home.mkdir(parents=True)
+  (codex_home / "auth.json").write_text("{}")
+
+  out = bg.resolve_background_agents(str(tmp_path), None)
+
+  assert out["primary"] == {
+    "provider": "codex", "model": None, "effort": None,
+  }
+  assert out["fallback"] is None

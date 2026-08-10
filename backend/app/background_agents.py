@@ -82,6 +82,7 @@ def _same_choice(a: dict | None, b: dict | None) -> bool:
 
 def _system_choices(data_dir: str) -> list[dict]:
   """The ordered, de-duplicated system provider choices from Settings."""
+  default_provider = providers.resolve_default_provider(data_dir)
   global_settings = providers._load_agent_settings(data_dir)
   raw = global_settings.get("background_agents")
   background = raw if isinstance(raw, dict) else {}
@@ -96,7 +97,7 @@ def _system_choices(data_dir: str) -> list[dict]:
 
   if not choices:
     primary = _clean_choice(background.get("primary"),
-                            default_provider=DEFAULT_PROVIDER, label="system primary")
+                            default_provider=default_provider, label="system primary")
     fallback = _clean_choice(background.get("fallback"), label="system fallback")
     if primary:
       choices.append(primary)
@@ -105,14 +106,14 @@ def _system_choices(data_dir: str) -> list[dict]:
 
   if not choices:
     primary = _clean_choice(
-      {"provider": DEFAULT_PROVIDER, "model": global_settings.get("model"),
+      {"provider": default_provider, "model": global_settings.get("model"),
        "effort": global_settings.get("effort")},
-      default_provider=DEFAULT_PROVIDER, label="system default")
+      default_provider=default_provider, label="system default")
     if primary:
       choices.append(primary)
 
   if not choices:
-    choices.append({"provider": DEFAULT_PROVIDER, "model": None, "effort": None})
+    choices.append({"provider": default_provider, "model": None, "effort": None})
   return choices
 
 
