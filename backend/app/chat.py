@@ -4142,7 +4142,7 @@ async def _run_chat_impl_with_db(
   else:
     agent_token = auth.create_access_token(
       {"sub": owner.username},
-      expires_delta=timedelta(hours=2),
+      expires_delta=auth.AGENT_RUN_TOKEN_TTL,
       token_epoch=owner.token_epoch,
     )
 

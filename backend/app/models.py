@@ -77,7 +77,7 @@ class Owner(Base):
   # other onboarding signals later — same shape as a SCD type 1 row.
   walkthrough_completed_at = Column(DateTime, nullable=True, default=None)
   # Monotonic JWT-validity generation. Every owner-derived token (the
-  # 30-day login token, the 8h app token, the 2h agent token, the
+  # 30-day login token, the 8h app token, the 26h agent-run token, the
   # 90-day service token) is stamped with the owner's token_epoch at
   # mint time; the owner-resolving dependency in deps.py rejects any
   # token whose stamped epoch is behind this value. Incrementing it is

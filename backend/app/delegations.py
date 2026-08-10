@@ -334,7 +334,7 @@ def mint_app_token(db: Session, policy: RunPolicy) -> str:
     owner.username,
     owner.token_epoch,
     app_nonce=app.token_nonce,
-    expires_delta=timedelta(hours=2),
+    expires_delta=auth.AGENT_RUN_TOKEN_TTL,
   )
 
 

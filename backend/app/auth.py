@@ -11,6 +11,15 @@ from jwt.exceptions import InvalidTokenError
 from app.config import get_settings
 
 
+# A tool-using turn can legitimately stay alive for many hours: long builds,
+# local model runs, and restart-gated platform work all keep the same provider
+# subprocess and therefore the same injected token.  Two hours stranded those
+# turns mid-build even though the owner session and logical chat run were still
+# valid.  Keep this much shorter than the 30-day login token, but long enough
+# for a full-day agent run plus ordinary scheduling/cleanup overhead.
+AGENT_RUN_TOKEN_TTL = timedelta(hours=26)
+
+
 # bcrypt ignores bytes after the first 72. Pre-hashing new passwords makes the
 # full UTF-8 input significant while retaining bcrypt's salt and work factor.
 # The prefix makes the format self-describing so hashes created by older Mobius
