@@ -147,7 +147,7 @@ def test_prod_image_override_loads_from_worktree_env(tmp_path):
   (tmp_path / ".env").write_text("MOBIUS_IMAGE=mobius:from-env\n", encoding="utf-8")
   env_reader = _function_source("env_value_from_file", "ensure_prod_env()")
   resolver = _function_source(
-    "resolve_prod_image_override", "resolve_platform_release_ref()",
+    "resolve_prod_image_override", "# ── end prod environment resolution",
   )
   harness = env_reader + resolver + textwrap.dedent(f"""\
     unset MOBIUS_IMAGE
