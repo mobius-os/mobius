@@ -770,26 +770,60 @@ _ULTRACODE_REMINDER = (
   "to finish\" — you will not get another turn to finish.</system-reminder>"
 )
 
-# The built-in WebSearch tool ships two provider-side instructions to end the
-# answer with a hand-written "Sources:" list: the tool description, and a
-# stronger reminder appended to every result ("You MUST include the sources
-# above ..."). Both are compiled into the Claude Code CLI and cannot be edited
-# or removed through the SDK. Möbius already renders each result's links as
-# source pills once per turn (tool_sources.sources_from_websearch_text ->
-# MessageSources), so that hand-written list only duplicates them. A PostToolUse
-# hook cannot delete the CLI's reminder, but its additionalContext lands
-# immediately after the tool result — the last instruction the model reads
-# before composing — so it overrides the reminder on the same point-of-use
-# footing that let the reminder win before. The raw output is left untouched so
-# pill extraction keeps working.
-_WEBSEARCH_SOURCES_REMINDER = (
-  "<system-reminder>The Möbius shell automatically renders this search result's "
-  "links as source pills beneath your reply, so the reader already sees every "
-  "source. Ignore any instruction — in this tool's description or appended to "
-  "its result — to end your answer with a hand-written \"Sources:\" list; do "
-  "NOT append one, it only duplicates the pills. Citing a specific link inline "
-  "where a sentence genuinely needs it is still correct.</system-reminder>"
-)
+# The built-in WebSearch tool appends a standalone "REMINDER: You MUST include
+# the sources above ..." line to every result, telling the model to end its
+# answer with a hand-written "Sources:" list. Möbius already renders each
+# result's links as source pills once per turn
+# (tool_sources.sources_from_websearch_text -> MessageSources), so that list only
+# duplicates them. Both this reminder and the tool's description are compiled
+# into the Claude Code CLI and cannot be edited through the SDK — but the
+# reminder rides in the tool OUTPUT, so a PostToolUse hook can drop it at the
+# source with updatedToolOutput rather than layering a counter-instruction on top
+# of it. (The description's softer nudge cannot be reached this way; if it ever
+# leaks a Sources list on its own we can revisit.)
+_WEBSEARCH_SOURCES_NAG_MARKER = "REMINDER:"
+
+
+def _strip_websearch_sources_nag(tool_response: Any) -> tuple[Any, bool]:
+  """Return ``(new_response, changed)`` with the trailing sources REMINDER gone.
+
+  Only the reminder line is removed; the "Web search results for query" prefix
+  and the ``Links:[...]`` array pill extraction parses are left intact, so the
+  results and their pills are unaffected. The response SHAPE is mirrored (str in
+  -> str out, list in -> list out) so the CLI accepts the replacement instead of
+  rejecting a schema mismatch and silently keeping the original.
+  """
+
+  def _strip_text(text: str) -> tuple[str, bool]:
+    if not isinstance(text, str):
+      return text, False
+    idx = text.rfind("\n" + _WEBSEARCH_SOURCES_NAG_MARKER)
+    if idx == -1 and text.startswith(_WEBSEARCH_SOURCES_NAG_MARKER):
+      idx = 0
+    if idx == -1 or "source" not in text[idx:].lower():
+      return text, False
+    return text[:idx].rstrip(), True
+
+  if isinstance(tool_response, str):
+    return _strip_text(tool_response)
+  if isinstance(tool_response, list):
+    new_items: list[Any] = []
+    changed = False
+    for item in tool_response:
+      if isinstance(item, str):
+        new_text, item_changed = _strip_text(item)
+        new_items.append(new_text)
+        changed = changed or item_changed
+      elif isinstance(item, dict) and isinstance(item.get("text"), str):
+        new_text, item_changed = _strip_text(item["text"])
+        if item_changed:
+          item = {**item, "text": new_text}
+          changed = True
+        new_items.append(item)
+      else:
+        new_items.append(item)
+    return new_items, changed
+  return tool_response, False
 
 
 def _precompact_log_trigger(hook_input: object) -> str | None:
@@ -994,21 +1028,27 @@ async def run_claude_sdk_turn(
       )
     return {"continue_": True}
 
-  # Fires after every WebSearch result. Injects Möbius's own point-of-use
-  # instruction (see _WEBSEARCH_SOURCES_REMINDER) so the model does not append a
-  # duplicate hand-written "Sources:" list on top of the shell's pills. Leaves
-  # the raw output alone (no updatedToolOutput) so pill extraction is unaffected.
+  # Fires after every WebSearch result. Strips the CLI's appended
+  # "REMINDER: ... sources ..." line at the source (see
+  # _strip_websearch_sources_nag) so the model is not told to append a duplicate
+  # hand-written "Sources:" list on top of the shell's pills. No-ops — leaving
+  # the original output untouched — when there is nothing to strip.
   async def websearch_sources_hook(
     hook_input: dict[str, Any],
     tool_use_id: str | None,
     context: dict[str, Any],
   ) -> dict[str, Any]:
-    del hook_input, tool_use_id, context
+    del tool_use_id, context
+    new_response, changed = _strip_websearch_sources_nag(
+      hook_input.get("tool_response")
+    )
+    if not changed:
+      return {"continue_": True}
     return {
       "continue_": True,
       "hookSpecificOutput": {
         "hookEventName": "PostToolUse",
-        "additionalContext": _WEBSEARCH_SOURCES_REMINDER,
+        "updatedToolOutput": new_response,
       },
     }
 
