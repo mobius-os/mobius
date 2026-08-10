@@ -107,18 +107,25 @@ CHAT_EMBED_CSP = (
 )
 
 
-def static_embed_csp(frontend_origin: str) -> str:
-  origin = _validated_frontend_origin(frontend_origin)
+def static_embed_csp(
+  frontend_origin: str, *additional_origins: str,
+) -> str:
+  origins = [_validated_frontend_origin(frontend_origin)]
+  for candidate in additional_origins:
+    origin = _validated_frontend_origin(candidate)
+    if origin not in origins:
+      origins.append(origin)
+  source = " ".join(origins)
   return (
     "sandbox allow-scripts allow-forms allow-pointer-lock; "
-    f"default-src {origin}; "
-    f"script-src {origin} 'unsafe-inline'; "
-    f"style-src {origin} 'unsafe-inline'; "
-    f"font-src {origin} data:; "
-    f"connect-src {origin}; "
-    f"img-src {origin} data: blob:; "
-    f"media-src {origin} blob:; "
-    f"worker-src {origin} blob:"
+    f"default-src {source}; "
+    f"script-src {source} 'unsafe-inline'; "
+    f"style-src {source} 'unsafe-inline'; "
+    f"font-src {source} data:; "
+    f"connect-src {source}; "
+    f"img-src {source} data: blob:; "
+    f"media-src {source} blob:; "
+    f"worker-src {source} blob:"
   )
 
 

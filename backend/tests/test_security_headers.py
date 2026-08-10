@@ -127,6 +127,23 @@ def test_static_embed_policy_authoritatively_replaces_route_headers(monkeypatch)
   assert "x-frame-options" not in response.headers
 
 
+def test_static_embed_names_loopback_delivery_origin_for_local_tools(monkeypatch):
+  monkeypatch.setattr(
+    main,
+    "_serve_app_static_asset",
+    lambda *_args, **_kwargs: Response(status_code=200),
+  )
+
+  response = TestClient(app, base_url="http://127.0.0.1:8123").get(
+    "/app-embeds/by-id/999/index.html",
+  )
+
+  policy = response.headers["content-security-policy"]
+  assert "http://127.0.0.1:8123" in policy
+  assert main.settings.frontend_origin.rstrip("/") in policy
+  assert "allow-same-origin" not in policy
+
+
 def test_static_embed_policy_survives_unhandled_route_exception(monkeypatch):
   def _raise(*_args, **_kwargs):
     raise RuntimeError("static asset failure")

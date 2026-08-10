@@ -5,6 +5,7 @@ static files.  API routes are registered first; the frontend SPA is
 mounted last as a catch-all so that client-side routing works.
 """
 
+import ipaddress
 import logging
 import mimetypes
 import os
@@ -322,6 +323,30 @@ _APP_FRAME_CSP = app_frame_csp(
   os.environ.get("API_BASE_URL", ""),
 )
 
+
+def _static_embed_csp_for_scope(scope) -> str:
+  """Allow packaged games to run on the loopback origin that served them.
+
+  Production documents remain pinned to ``frontend_origin``. Local operator
+  tools and the authenticated screenshot harness deliberately reach uvicorn
+  over loopback; an opaque sandbox cannot use CSP ``'self'`` for its own
+  modules, so name that loopback delivery origin for this response only.
+  """
+  headers = dict(scope.get("headers") or ())
+  try:
+    authority = headers.get(b"host", b"").decode("ascii")
+    hostname = authority.rsplit("@", 1)[-1].rsplit(":", 1)[0].strip("[]")
+    is_loopback = (
+      hostname == "localhost"
+      or ipaddress.ip_address(hostname).is_loopback
+    )
+  except (UnicodeDecodeError, ValueError):
+    return _STATIC_EMBED_CSP
+  if not is_loopback:
+    return _STATIC_EMBED_CSP
+  scheme = str(scope.get("scheme") or "http")
+  return static_embed_csp(settings.frontend_origin, f"{scheme}://{authority}")
+
 # Published sites (`/sites/<token>/`) are public snapshots of the owner's own
 # agent-authored artifacts and Web Studio builds. The `sandbox` directive
 # (WITHOUT allow-same-origin) forces the top-level document into an opaque
@@ -384,7 +409,7 @@ class _SecurityHeadersMiddleware:
       ]
     if not service_surface:
       if opaque_static_embed:
-        csp = _STATIC_EMBED_CSP
+        csp = _static_embed_csp_for_scope(scope)
       elif published_site:
         csp = _PUBLISHED_SITE_CSP
       elif chat_embed:
