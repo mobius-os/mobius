@@ -164,6 +164,7 @@ def _codex_config_overrides(
   allow_questions: bool = True,
   allow_multi_agent: bool = True,
   allow_goals: bool = True,
+  delegated_read_sandbox: bool = False,
 ) -> list[str]:
   """Assemble the Codex ``CodexConfig.config_overrides`` for a turn.
 
@@ -207,6 +208,14 @@ def _codex_config_overrides(
       "features.multi_agent_v2.tool_namespace=agents",
       "suppress_unstable_features_warning=true",
     ]
+  if delegated_read_sandbox:
+    # The production container blocks the user/mount namespaces required by
+    # Codex's default bubblewrap backend. Read Delegations still need a real
+    # filesystem boundary, so use Codex's own Landlock backend rather than
+    # retrying a failed command outside the sandbox. Do not use this legacy
+    # backend for workspace-write policies: the pinned CLI rejects that
+    # combination instead of enforcing it.
+    overrides.append("features.use_legacy_landlock=true")
   return overrides
 
 
@@ -1429,6 +1438,31 @@ def _install_request_user_input_handler(
   )
 
 
+def _install_delegated_approval_handler(codex: Any, *, chat_id: str) -> None:
+  """Decline any sandbox-bypass request from a delegated child.
+
+  Delegations use ``ApprovalMode.deny_all``, so the app-server should resolve
+  escalation internally without calling its client. Keep this handler as the
+  fail-closed side of that contract: the Python SDK's default callback accepts
+  both request types, which would turn a future wire regression into an
+  unsandboxed child.
+  """
+  def handler(method: str, _params: dict | None) -> dict:
+    if method in {
+      "item/commandExecution/requestApproval",
+      "item/fileChange/requestApproval",
+    }:
+      return {"decision": "decline"}
+    return {}
+
+  if not install_approval_handler(codex, handler):
+    log.warning(
+      "Codex SDK has no _client._sync chain — delegated approval guard "
+      "NOT installed for chat_id=%s (likely a unit-test fake).",
+      chat_id,
+    )
+
+
 async def run_codex_sdk_turn(
   user_message: str,
   session_id: str | None,
@@ -1566,6 +1600,9 @@ async def run_codex_sdk_turn(
     allow_questions=not restricted,
     allow_multi_agent=not restricted,
     allow_goals=not restricted,
+    delegated_read_sandbox=(
+      delegated and run_policy.scope == "read"
+    ),
   )
   launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
   config_kwargs: dict[str, Any] = dict(
@@ -1709,7 +1746,9 @@ async def run_codex_sdk_turn(
       # resulting concurrent.futures.Future. That keeps the JSON-RPC
       # round-trip blocked (correct — the app-server is waiting for our
       # response) while letting asyncio handle the user's answer POST.
-      if not restricted:
+      if delegated:
+        _install_delegated_approval_handler(codex, chat_id=chat_id)
+      elif not restricted:
         _install_request_user_input_handler(
           codex,
           loop=asyncio.get_running_loop(),
@@ -1719,12 +1758,19 @@ async def run_codex_sdk_turn(
           db=db,
         )
 
-      # We use the SDK's `ApprovalMode.auto_review`, which maps to
-      # `approvalPolicy=on_request` with `approvalsReviewer=auto_review`
-      # (rather than an unconditional `approvalPolicy=never`). That may
-      # still surface a human approval prompt in some cases; see
-      # `.pm/features/_003-tech-debt-and-test-gaps.md` OQ-5 for the
-      # required live equivalence check.
+      # Ordinary owner turns use the SDK's `ApprovalMode.auto_review`, which
+      # maps to `approvalPolicy=on_request` with an automatic reviewer.
+      # Delegations instead deny every escalation: accepting an unsandboxed
+      # retry would erase the read/workspace boundary their durable policy
+      # promises. Read-only app-servers use the Landlock override above, so
+      # sandboxed inspection remains available in this namespace-restricted
+      # container. A write Delegation whose workspace sandbox cannot start
+      # fails closed rather than escaping its scope.
+      approval_mode = (
+        sdk["ApprovalMode"].deny_all
+        if delegated
+        else sdk["ApprovalMode"].auto_review
+      )
 
       # Sandbox.full_access maps to wire SandboxMode.danger_full_access
       # and disables bwrap. Möbius runs
@@ -1783,7 +1829,7 @@ async def run_codex_sdk_turn(
 
       if session_id is None:
         thread = await codex.thread_start(
-          approval_mode=sdk["ApprovalMode"].auto_review,
+          approval_mode=approval_mode,
           sandbox=_sandbox,
           base_instructions=base_instructions,
           developer_instructions="",
@@ -1802,7 +1848,7 @@ async def run_codex_sdk_turn(
         # history), so a native parse is a straight pass-through here.
         thread = await codex.thread_resume(
           session_id,
-          approval_mode=sdk["ApprovalMode"].auto_review,
+          approval_mode=approval_mode,
           sandbox=_sandbox,
           base_instructions=base_instructions,
           developer_instructions="",

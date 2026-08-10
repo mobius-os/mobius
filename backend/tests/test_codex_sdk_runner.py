@@ -63,6 +63,7 @@ class _FakeCodexConfig:
 
 class _FakeApprovalMode:
   auto_review = "auto_review"
+  deny_all = "deny_all"
 
 
 class _FakeSandbox:
@@ -3246,6 +3247,110 @@ def test_codex_config_overrides_kill_switch(monkeypatch):
 def test_codex_config_overrides_enable_native_goal_runtime(monkeypatch):
   monkeypatch.delenv("MOEBIUS_CODEX_MULTI_AGENT", raising=False)
   assert "features.goals=true" in codex_sdk_runner._codex_config_overrides()
+
+
+def test_read_delegation_config_selects_container_safe_landlock():
+  ordinary = codex_sdk_runner._codex_config_overrides(
+    allow_questions=False, allow_multi_agent=False, allow_goals=False,
+  )
+  delegated = codex_sdk_runner._codex_config_overrides(
+    allow_questions=False,
+    allow_multi_agent=False,
+    allow_goals=False,
+    delegated_read_sandbox=True,
+  )
+
+  assert "features.use_legacy_landlock=true" not in ordinary
+  assert "features.use_legacy_landlock=true" in delegated
+
+
+def test_delegated_codex_approval_guard_fails_closed():
+  sync = SimpleNamespace(_approval_handler=None)
+  codex = SimpleNamespace(_client=SimpleNamespace(_sync=sync))
+
+  codex_sdk_runner._install_delegated_approval_handler(
+    codex, chat_id="delegated-child",
+  )
+
+  assert sync._approval_handler(
+    "item/commandExecution/requestApproval", {"command": ["touch", "x"]},
+  ) == {"decision": "decline"}
+  assert sync._approval_handler(
+    "item/fileChange/requestApproval", {"reason": "edit"},
+  ) == {"decision": "decline"}
+  assert sync._approval_handler("unknown/method", {}) == {}
+
+
+@pytest.mark.parametrize(
+  "scope, expected_sandbox, expected_approval, expects_landlock",
+  [
+    (None, "full-access", "auto_review", False),
+    ("read", "read-only", "deny_all", True),
+    ("write", "workspace-write", "deny_all", False),
+  ],
+)
+@pytest.mark.parametrize("session_id", [None, "thread-policy"])
+def test_codex_delegation_policy_reaches_the_provider_boundary(
+  monkeypatch,
+  scope,
+  expected_sandbox,
+  expected_approval,
+  expects_landlock,
+  session_id,
+):
+  completed = SimpleNamespace(id="turn-policy", usage=None, error=None)
+  thread = _FakeThread(
+    "thread-policy",
+    _FakeTurnHandle([SimpleNamespace(
+      method="turn/completed",
+      payload=_FakeTurnCompletedNotification(completed),
+    )]),
+  )
+  captured = {}
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      captured["config"] = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def thread_start(self, **kwargs):
+      captured["thread"] = kwargs
+      return thread
+
+    async def thread_resume(self, requested, **kwargs):
+      assert requested == "thread-policy"
+      captured["thread"] = kwargs
+      return thread
+
+  monkeypatch.setattr(
+    codex_sdk_runner, "_sdk_imports", lambda: _fake_sdk(FakeAsyncCodex),
+  )
+  policy = None if scope is None else SimpleNamespace(scope=scope)
+
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="inspect",
+    session_id=session_id,
+    base_env={},
+    cwd="/tmp",
+    chat_id=f"policy-{scope or 'owner'}",
+    bc=_FakeBroadcast(),
+    pending_questions={},
+    db=None,
+    run_policy=policy,
+  ))
+
+  overrides = captured["config"].kwargs["config_overrides"]
+  assert captured["thread"]["sandbox"] == expected_sandbox
+  assert captured["thread"]["approval_mode"] == expected_approval
+  assert (
+    "features.use_legacy_landlock=true" in overrides
+  ) is expects_landlock
+  assert result["error"] is None
 
 
 def test_codex_app_server_launch_args_preserve_overrides_under_setsid(
