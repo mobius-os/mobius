@@ -86,6 +86,21 @@ RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
     "default_limits": {"max_duration_ms": 30_000},
     "hard_limits": {"max_duration_ms": (100, 60_000)},
   },
+  "workspace.screen-control": {
+    "version": 1,
+    "kind": "session",
+    "title": "Control this M\u00f6bius screen",
+    "description": (
+      "Let this app's support chat inspect and control the current M\u00f6bius tab."
+    ),
+    "risk": "device",
+    # The owner may navigate away from the control app while the exact app-owned
+    # support chat continues investigating. The browser's capture indicator and
+    # M\u00f6bius's active-session stop affordance remain authoritative.
+    "lifecycle": "background",
+    "default_limits": {},
+    "hard_limits": {},
+  },
 }
 
 

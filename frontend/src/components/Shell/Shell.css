@@ -92,27 +92,34 @@
 }
 
 .screen-control-button {
-  position: relative;
+  position: fixed;
+  top: max(12px, env(safe-area-inset-top));
+  left: 50%;
+  z-index: 1200;
+  transform: translateX(-50%);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
-  min-width: 44px;
-  height: 40px;
-  padding: 0 11px;
-  border: 1px solid transparent;
-  border-radius: 10px;
-  background: transparent;
-  color: var(--text);
+  gap: 8px;
+  min-height: 42px;
+  padding: 7px 8px 7px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  color: var(--accent);
   font: inherit;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 680;
   cursor: pointer;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.24);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
   -webkit-tap-highlight-color: transparent;
 }
 
 .screen-control-button:hover {
   background: var(--surface);
+  border-color: var(--accent);
 }
 
 .screen-control-button:focus-visible {
@@ -122,13 +129,7 @@
 
 .screen-control-button:disabled {
   cursor: wait;
-  opacity: 0.65;
-}
-
-.screen-control-button--active {
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
-  background: color-mix(in srgb, var(--accent) 13%, var(--bg));
-  color: var(--accent);
+  opacity: 0.78;
 }
 
 .screen-control-button__live {
@@ -140,21 +141,24 @@
   animation: screen-control-live 1.8s ease-in-out infinite;
 }
 
+.screen-control-button__stop {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--text);
+}
+
 @keyframes screen-control-live {
   50% { opacity: 0.48; }
 }
 
 @media (max-width: 620px) {
   .screen-control-button {
-    width: 44px;
-    height: 44px;
-    padding: 0;
-  }
-  .screen-control-button__label { display: none; }
-  .screen-control-button__live {
-    position: absolute;
-    top: 5px;
-    right: 4px;
+    top: max(8px, env(safe-area-inset-top));
+    max-width: calc(100vw - 24px);
   }
 }
 

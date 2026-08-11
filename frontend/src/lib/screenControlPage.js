@@ -338,7 +338,9 @@ async function executePageCommand(command) {
 
 export async function requestCurrentTabCapture() {
   if (!navigator.mediaDevices?.getDisplayMedia) {
-    throw new Error('Live screen sharing is not supported by this browser.')
+    const error = new Error('Live screen sharing is not supported by this browser.')
+    error.name = 'NotSupportedError'
+    throw error
   }
   const stream = await navigator.mediaDevices.getDisplayMedia({
     video: { frameRate: { ideal: 2, max: 5 } },
@@ -378,7 +380,7 @@ function captureVideoFrame(video) {
   }
 }
 
-export function createScreenControlClient({ sessionId, capture, onEnded }) {
+export function createScreenControlClient({ sessionId, capture, onConnected, onEnded }) {
   const controller = new AbortController()
   let stopped = false
   let stopPromise = null
@@ -435,6 +437,10 @@ export function createScreenControlClient({ sessionId, capture, onEnded }) {
           for (const line of block.split('\n')) {
             if (!line.startsWith('data: ')) continue
             const event = JSON.parse(line.slice(6))
+            if (event.type === 'screen-control-open') {
+              onConnected?.()
+              continue
+            }
             if (event.type === 'screen-control-stop') {
               await stop({ notifyServer: false })
               onEnded?.('stopped')

@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from app import auth as auth_module
 from app.routes.screen_control import AgentCommandBody
 from app.screen_control import ScreenControlRegistry
+from test_app_fixtures import create_local_app
 
 
 def _agent_headers(chat_id: str) -> dict[str, str]:
@@ -15,11 +16,15 @@ def _agent_headers(chat_id: str) -> dict[str, str]:
   return {"Authorization": f"Bearer {token}"}
 
 
-def test_owner_can_start_but_only_exact_chat_agent_can_inspect(client, auth, chat):
+def test_owner_can_start_only_for_the_invoking_apps_chat(client, auth, chat, db):
+  app = create_local_app(client, auth, name="Screen Control Test")
+  chat.created_by_app_id = app["id"]
+  db.commit()
   started = client.post(
     "/api/screen-control/sessions",
     headers=auth,
     json={
+      "appId": app["id"],
       "chatId": chat.id,
       "route": f"/chat/{chat.id}",
       "viewport": {"width": 1170, "height": 2532, "pixelRatio": 2.625},
@@ -27,6 +32,7 @@ def test_owner_can_start_but_only_exact_chat_agent_can_inspect(client, auth, cha
   )
   assert started.status_code == 200, started.text
   assert started.json()["active"] is True
+  assert started.json()["appId"] == app["id"]
 
   # A broad browser login is the wrong role at the chat-side boundary.
   owner_status = client.get(f"/api/screen-control/chats/{chat.id}", headers=auth)
@@ -47,11 +53,35 @@ def test_owner_can_start_but_only_exact_chat_agent_can_inspect(client, auth, cha
   }
 
 
+def test_owner_cannot_bind_control_to_an_unattributed_or_foreign_app_chat(
+  client, auth, chat, db,
+):
+  app = create_local_app(client, auth, name="Owning Control App")
+  other = create_local_app(client, auth, name="Other Control App")
+
+  unattributed = client.post(
+    "/api/screen-control/sessions",
+    headers=auth,
+    json={"appId": app["id"], "chatId": chat.id},
+  )
+  assert unattributed.status_code == 404
+
+  chat.created_by_app_id = other["id"]
+  db.commit()
+  foreign = client.post(
+    "/api/screen-control/sessions",
+    headers=auth,
+    json={"appId": app["id"], "chatId": chat.id},
+  )
+  assert foreign.status_code == 404
+
+
 @pytest.mark.asyncio
 async def test_relay_returns_only_the_browser_answer_to_the_waiting_command():
   registry = ScreenControlRegistry()
   session = await registry.start(
     owner_username="owner",
+    app_id=7,
     chat_id="chat-a",
     route="/chat/chat-a",
     viewport={"width": 1280, "height": 720, "pixelRatio": 1},
@@ -74,6 +104,23 @@ async def test_relay_returns_only_the_browser_answer_to_the_waiting_command():
   }
   assert await registry.answer(session, command["commandId"], {"ok": True}) is False
   await registry.stop(session)
+
+
+@pytest.mark.asyncio
+async def test_last_browser_disconnect_retires_the_unusable_session():
+  registry = ScreenControlRegistry()
+  session = await registry.start(
+    owner_username="owner",
+    app_id=7,
+    chat_id="chat-a",
+    route="/chat/chat-a",
+    viewport={"width": 1280, "height": 720, "pixelRatio": 1},
+  )
+  await registry.connect_browser(session.id, "owner")
+  await registry.disconnect_browser(session.id)
+
+  assert session.active is False
+  assert await registry.get_for_chat("chat-a", "owner") is None
 
 
 @pytest.mark.parametrize("payload", [

@@ -38,6 +38,7 @@ _PRESS_KEYS = frozenset({
 class SessionStartBody(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
+  appId: int = Field(gt=0)
   chatId: str = Field(min_length=1, max_length=128)
   route: str = Field(default="/", max_length=512)
   viewport: dict[str, float] = Field(default_factory=dict)
@@ -131,6 +132,7 @@ def _session_wire(session) -> dict[str, Any]:
   return {
     "active": session.active,
     "sessionId": session.id,
+    "appId": session.app_id,
     "chatId": session.chat_id,
     "route": session.route,
     "viewport": session.viewport,
@@ -147,12 +149,14 @@ async def start_session(
 ):
   chat = db.query(models.Chat).filter(
     models.Chat.id == body.chatId,
+    models.Chat.created_by_app_id == body.appId,
     models.Chat.deleted_at.is_(None),
   ).first()
   if chat is None:
     raise HTTPException(status_code=404, detail="Chat not found.")
   session = await registry.start(
     owner_username=owner.username,
+    app_id=body.appId,
     chat_id=body.chatId,
     route=body.route,
     viewport=body.viewport,

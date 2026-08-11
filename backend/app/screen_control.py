@@ -24,6 +24,7 @@ COMMAND_TIMEOUT_SECONDS = 45
 class ScreenControlSession:
   id: str
   owner_username: str
+  app_id: int
   chat_id: str
   route: str
   viewport: dict[str, float]
@@ -80,6 +81,7 @@ class ScreenControlRegistry:
     self,
     *,
     owner_username: str,
+    app_id: int,
     chat_id: str,
     route: str,
     viewport: dict[str, float],
@@ -95,6 +97,7 @@ class ScreenControlRegistry:
       session = ScreenControlSession(
         id=secrets.token_urlsafe(24),
         owner_username=owner_username,
+        app_id=app_id,
         chat_id=chat_id,
         route=route,
         viewport=viewport,
@@ -144,14 +147,10 @@ class ScreenControlRegistry:
         return
       session.browser_connections = max(0, session.browser_connections - 1)
       if session.browser_connections == 0:
-        outcome = {
-          "ok": False,
-          "error": "The shared browser disconnected before answering.",
-        }
-        for future in session.pending.values():
-          if not future.done():
-            future.set_result(outcome)
-        session.pending.clear()
+        # The browser client does not reconnect a capture stream after its
+        # event channel disappears. Retaining the session as active here made
+        # agents see a live-looking but permanently unusable grant until TTL.
+        self._close_locked(session, "The shared browser disconnected.")
 
   async def stop(
     self, session: ScreenControlSession, reason: str = "Screen sharing stopped.",

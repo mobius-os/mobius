@@ -3,9 +3,11 @@ import assert from 'node:assert/strict'
 
 import {
   createMicrophoneProvider,
+  builtInCapabilityProviders,
   createSpeechModelsProvider,
   createSpeechProvider,
 } from '../capabilityProviders.js'
+import { SCREEN_CONTROL } from '../screenControlHost.js'
 import { createCapabilityHost } from '../capabilityHost.js'
 
 test('microphone provider clamps app input to the reviewed manifest ceiling', async () => {
@@ -129,4 +131,61 @@ test('speech providers lazy-load the runtime and preserve the invoking app ident
     ['speech', { text: 'Hello' }],
     ['models', 61, { operation: 'catalog' }],
   ])
+})
+
+test('screen control provider binds the app chat, survives detach, and reattaches', async () => {
+  const sent = []
+  const capture = {
+    stream: { getTracks: () => [{ stop() {} }] },
+    video: { srcObject: {} },
+  }
+  let clientOptions
+  let stopCalls = 0
+  const provider = builtInCapabilityProviders({
+    screenControl: {
+      appId: 91,
+      requestCapture: async () => capture,
+      startSession: async (payload) => {
+        sent.push(payload)
+        return { sessionId: 'session-1', expiresAt: 12345 }
+      },
+      makeClient(options) {
+        clientOptions = options
+        return { async stop() { stopCalls += 1 } }
+      },
+    },
+  })[SCREEN_CONTROL]
+  const messages = []
+  const control = await provider.open({
+    input: { chatId: 'chat-1' },
+    channel: {
+      ready(value) { messages.push(['ready', value]) },
+      result(value) { messages.push(['result', value]) },
+      error(error) { throw error },
+    },
+  })
+
+  assert.equal(sent[0].appId, 91)
+  assert.equal(sent[0].chatId, 'chat-1')
+  clientOptions.onConnected()
+  assert.deepEqual(messages, [['ready', { expiresAt: 12345 }]])
+
+  control.control('detach')
+  assert.equal(stopCalls, 0)
+
+  const resumedMessages = []
+  const resumed = await provider.open({
+    input: { chatId: 'chat-1', resume: true },
+    channel: {
+      ready(value) { resumedMessages.push(['ready', value]) },
+      result(value) { resumedMessages.push(['result', value]) },
+      error(error) { throw error },
+    },
+  })
+  assert.deepEqual(resumedMessages, [['ready', { expiresAt: 12345 }]])
+
+  resumed.control('finish')
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(stopCalls, 1)
+  assert.deepEqual(resumedMessages.at(-1), ['result', { reason: 'owner' }])
 })

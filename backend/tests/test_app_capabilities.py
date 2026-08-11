@@ -106,6 +106,29 @@ def test_runtime_capability_is_independently_versioned_and_bounded():
   }
 
 
+def test_screen_control_is_reviewed_as_an_app_owned_background_session():
+  runtime = normalize_runtime_capabilities(_manifest(capabilities={
+    "workspace.screen-control": {
+      "version": 1,
+      "reason": "Investigate problems in this M\u00f6bius tab.",
+    },
+  }))
+  assert runtime == {
+    "workspace.screen-control": {
+      "version": 1,
+      "kind": "session",
+      "title": "Control this M\u00f6bius screen",
+      "description": (
+        "Let this app's support chat inspect and control the current M\u00f6bius tab."
+      ),
+      "risk": "device",
+      "lifecycle": "background",
+      "reason": "Investigate problems in this M\u00f6bius tab.",
+      "limits": {},
+    },
+  }
+
+
 def test_device_asset_cache_is_client_only_and_reviewed_by_size():
   runtime = normalize_runtime_capabilities(_manifest(capabilities={
     "device.asset-cache": {
