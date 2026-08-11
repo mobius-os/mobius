@@ -143,7 +143,8 @@ test('screen control provider binds the app chat, survives detach, and reattache
   let stopCalls = 0
   const provider = builtInCapabilityProviders({
     screenControl: {
-      appId: 91,
+      // App route params reach the canvas as strings.
+      appId: '91',
       requestCapture: async () => capture,
       startSession: async (payload) => {
         sent.push(payload)

@@ -62,6 +62,7 @@ export function createScreenControlProvider({
   stopSession = (sessionId) => api.screenControl.stop(sessionId),
   makeClient = createScreenControlClient,
 } = {}) {
+  const boundAppId = Number(appId)
   return {
     version: 1,
     exclusive: true,
@@ -71,13 +72,13 @@ export function createScreenControlProvider({
     preserveOnDetach: true,
     async open({ input, channel }) {
       const store = hostStore()
-      if (!Number.isInteger(appId) || appId < 1) {
+      if (!Number.isInteger(boundAppId) || boundAppId < 1) {
         throw capabilityError('TypeError', 'The control app identity is unavailable.', 'invalid_request')
       }
       const chatId = validatedChatId(input?.chatId)
       if (store.current) {
         if (input?.resume === true
-            && store.current.appId === appId
+            && store.current.appId === boundAppId
             && store.current.chatId === chatId) {
           store.current.channel = channel
           channel.ready({ expiresAt: store.current.expiresAt })
@@ -109,7 +110,7 @@ export function createScreenControlProvider({
       let client
       let finishing = null
       const current = {
-        appId,
+        appId: boundAppId,
         chatId,
         channel,
         client: null,
@@ -135,7 +136,7 @@ export function createScreenControlProvider({
         const page = globalThis.location
         const view = globalThis.window
         session = await startSession({
-          appId,
+          appId: boundAppId,
           chatId,
           route: page ? `${page.pathname}${page.search}${page.hash}` : '/',
           viewport: {
@@ -152,7 +153,7 @@ export function createScreenControlProvider({
             if (hostStore().current !== current) return
             publish({
               phase: 'active',
-              appId,
+              appId: boundAppId,
               chatId,
               expiresAt: session.expiresAt,
             })
@@ -172,7 +173,7 @@ export function createScreenControlProvider({
         })
         current.client = client
         store.current = current
-        publish({ phase: 'starting', appId, chatId })
+        publish({ phase: 'starting', appId: boundAppId, chatId })
       } catch (error) {
         capture.stream.getTracks().forEach(track => track.stop())
         if (session?.sessionId) void stopSession(session.sessionId).catch(() => {})
