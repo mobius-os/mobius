@@ -67,6 +67,7 @@ except Exception:  # pragma: no cover - mirrors _load's stub behavior
 proxy_router = _load("proxy")
 local_services_router = _load("local_services")
 notify_router = _load("notify")
+screen_control_router = _load("screen_control")
 settings_router = _load("settings")
 storage_router = _load("storage")
 fs_router = _load("fs")
@@ -105,6 +106,7 @@ __all__ = [
   "proxy_router",
   "local_services_router",
   "notify_router",
+  "screen_control_router",
   "settings_router",
   "uploads_router",
   "media_router",

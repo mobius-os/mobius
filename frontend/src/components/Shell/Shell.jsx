@@ -147,6 +147,7 @@ import useShellReloadController from './useShellReloadController.js'
 import useAppFrameCache from './useAppFrameCache.js'
 import useShellVisualViewport from './useShellVisualViewport.js'
 import ShellBrand from './ShellBrand.jsx'
+import ScreenControlButton from './ScreenControlButton.jsx'
 import { createMediaSessionOwner } from './mediaSessionOwner.js'
 import { HistoryDismissProvider } from '../../hooks/useHistoryDismiss.jsx'
 
@@ -3579,6 +3580,7 @@ export default function Shell({ onInitialVisualReady }) {
               Offline
             </span>
           )}
+          <ScreenControlButton chatId={activeChatId} onNotice={showToast} />
           <NotificationCenter
             ref={notificationCenterActionsRef}
             onOpenTarget={handleNotificationOpen}

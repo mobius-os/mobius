@@ -587,6 +587,205 @@
     // well as the document scroller, without walking every node when the drawer
     // opens. Nested third-party frames stay covered by the outer iframe guard.
     const gestureScrollers = new Set();
+    const SCREEN_CONTROL_SELECTOR = [
+      'button', 'a[href]', 'input:not([type="hidden"])', 'textarea', 'select',
+      '[role="button"]', '[role="link"]', '[role="checkbox"]', '[role="tab"]',
+      '[contenteditable="true"]', '[tabindex]:not([tabindex="-1"])'
+    ].join(',');
+    const SCREEN_SENSITIVE_AUTOCOMPLETE = new Set([
+      'current-password', 'new-password', 'one-time-code',
+      'cc-number', 'cc-csc', 'cc-exp', 'cc-exp-month', 'cc-exp-year'
+    ]);
+    let screenControlRefs = new Map();
+
+    function screenConcise(value, max) {
+      return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max || 180);
+    }
+
+    function screenVisible(element) {
+      if (!element || !element.getBoundingClientRect) return false;
+      const rect = element.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) return false;
+      const style = getComputedStyle(element);
+      return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'
+        && rect.bottom > 0 && rect.right > 0
+        && rect.top < innerHeight && rect.left < innerWidth;
+    }
+
+    function screenRole(element) {
+      const explicit = screenConcise(element.getAttribute('role'), 40);
+      if (explicit) return explicit;
+      const tag = element.tagName.toLowerCase();
+      if (tag === 'a') return 'link';
+      if (tag === 'button') return 'button';
+      if (tag === 'textarea') return 'textbox';
+      if (tag === 'select') return 'combobox';
+      if (tag === 'input') {
+        const type = (element.type || 'text').toLowerCase();
+        if (type === 'checkbox') return 'checkbox';
+        if (type === 'radio') return 'radio';
+        if (['button', 'submit', 'reset'].includes(type)) return 'button';
+        return 'textbox';
+      }
+      return 'control';
+    }
+
+    function screenLabelledBy(element) {
+      const ids = screenConcise(element.getAttribute('aria-labelledby'), 300);
+      if (!ids) return '';
+      return ids.split(/\s+/).map(function (id) {
+        const label = document.getElementById(id);
+        return label ? label.textContent : '';
+      }).join(' ');
+    }
+
+    function screenName(element) {
+      const label = element.labels && element.labels[0] && element.labels[0].textContent;
+      return screenConcise(
+        element.getAttribute('aria-label') || screenLabelledBy(element) || label
+        || element.getAttribute('alt') || element.getAttribute('title')
+        || element.getAttribute('placeholder') || element.textContent
+      );
+    }
+
+    function screenSensitive(element) {
+      if (!element || element.tagName.toLowerCase() !== 'input') return false;
+      if ((element.type || '').toLowerCase() === 'password') return true;
+      return String(element.autocomplete || '').split(/\s+/).some(function (token) {
+        return SCREEN_SENSITIVE_AUTOCOMPLETE.has(token.toLowerCase());
+      });
+    }
+
+    function screenSnapshot() {
+      const refs = new Map();
+      const elements = [];
+      for (const element of Array.from(document.querySelectorAll(SCREEN_CONTROL_SELECTOR))) {
+        if (!screenVisible(element) || element.closest('[inert]')) continue;
+        const ref = 'e' + (elements.length + 1);
+        const rect = element.getBoundingClientRect();
+        const item = {
+          ref: ref,
+          role: screenRole(element),
+          name: screenName(element),
+          disabled: !!element.disabled || element.getAttribute('aria-disabled') === 'true',
+          bounds: {
+            x: Math.round(rect.x), y: Math.round(rect.y),
+            width: Math.round(rect.width), height: Math.round(rect.height)
+          }
+        };
+        if ('value' in element) {
+          item.value = screenSensitive(element) ? '[masked]' : screenConcise(element.value);
+        }
+        refs.set(ref, element);
+        elements.push(item);
+      }
+      screenControlRefs = refs;
+      return { elements: elements };
+    }
+
+    function screenActionTarget(element) {
+      return element && (element.closest(SCREEN_CONTROL_SELECTOR) || element);
+    }
+
+    function screenSetValue(element, value) {
+      const prototype = element.tagName.toLowerCase() === 'textarea'
+        ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(prototype, 'value');
+      if (setter && setter.set) setter.set.call(element, value);
+      else element.value = value;
+    }
+
+    function screenInputEvent(type, options) {
+      try { return new InputEvent(type, options); }
+      catch (_) { return new Event(type, { bubbles: true }); }
+    }
+
+    function screenType(element, text, replace) {
+      if (!element) throw new Error('No field is focused.');
+      if (screenSensitive(element)) throw new Error('Sensitive fields stay under your control.');
+      const tag = element.tagName.toLowerCase();
+      if (tag === 'input' || tag === 'textarea') {
+        if (element.disabled || element.readOnly) throw new Error('The field is not editable.');
+        element.focus({ preventScroll: true });
+        const next = replace ? text : String(element.value || '') + text;
+        screenSetValue(element, next);
+        element.dispatchEvent(screenInputEvent('input', {
+          bubbles: true, data: text,
+          inputType: replace ? 'insertReplacementText' : 'insertText'
+        }));
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+        return;
+      }
+      if (element.isContentEditable) {
+        element.focus({ preventScroll: true });
+        if (replace) element.textContent = text;
+        else element.append(document.createTextNode(text));
+        element.dispatchEvent(screenInputEvent('input', { bubbles: true, data: text }));
+        return;
+      }
+      throw new Error('The focused element is not editable.');
+    }
+
+    function screenScrollOwner(x, y) {
+      let element = document.elementFromPoint(x, y);
+      while (element && element !== document.body) {
+        const style = getComputedStyle(element);
+        const scrollable = /(auto|scroll)/.test(style.overflowY + ' ' + style.overflowX)
+          && (element.scrollHeight > element.clientHeight || element.scrollWidth > element.clientWidth);
+        if (scrollable) return element;
+        element = element.parentElement;
+      }
+      return document.scrollingElement || document.documentElement;
+    }
+
+    function screenPress(key) {
+      const target = document.activeElement || document.body;
+      target.dispatchEvent(new KeyboardEvent('keydown', { key: key, bubbles: true, cancelable: true }));
+      if (key === 'Enter') {
+        if (target.tagName && target.tagName.toLowerCase() === 'button') target.click();
+        else if (target.form && target.form.requestSubmit) target.form.requestSubmit();
+      } else if (key === ' ') {
+        const action = screenActionTarget(target);
+        if (action && action.click) action.click();
+      }
+      target.dispatchEvent(new KeyboardEvent('keyup', { key: key, bubbles: true, cancelable: true }));
+    }
+
+    function executeScreenControl(command) {
+      if (document.documentElement.hasAttribute('data-mobius-frame-suspended')) {
+        throw new Error('The app is behind another screen and cannot be controlled.');
+      }
+      if (command.action === 'snapshot') return screenSnapshot();
+      const point = command.x != null && command.y != null
+        ? document.elementFromPoint(command.x, command.y) : null;
+      if (command.action === 'click') {
+        const target = command.ref ? screenControlRefs.get(command.ref) : screenActionTarget(point);
+        if (!target || !screenVisible(target)) throw new Error('That control is no longer available.');
+        if (target.disabled || target.getAttribute('aria-disabled') === 'true') {
+          throw new Error('That control is disabled.');
+        }
+        if (target.focus) target.focus({ preventScroll: true });
+        if (target.click) target.click();
+        return { clicked: command.ref || { x: command.x, y: command.y } };
+      }
+      if (command.action === 'type') {
+        screenType(command.ref ? screenControlRefs.get(command.ref) : document.activeElement,
+          command.text, command.replace !== false);
+        return { typed: command.text.length };
+      }
+      if (command.action === 'scroll') {
+        const x = command.x == null ? Math.round(innerWidth / 2) : command.x;
+        const y = command.y == null ? Math.round(innerHeight / 2) : command.y;
+        const target = screenScrollOwner(x, y);
+        target.scrollBy({ left: command.deltaX || 0, top: command.deltaY || 0, behavior: 'auto' });
+        return { scrolled: true };
+      }
+      if (command.action === 'press') {
+        screenPress(command.key);
+        return { pressed: command.key };
+      }
+      throw new Error('Unsupported screen-control action.');
+    }
 
     // App intent listeners live in app code, alongside this runtime listener.
     // The parent keeps an opaque cover over the frame until we acknowledge.
@@ -1200,6 +1399,24 @@
         acknowledgeAppIntent(msg.nonce);
         // Returning from this runtime listener does not stop the message event:
         // the app's own listener still receives the same intent synchronously.
+        return;
+      }
+      if (msg.type === 'moebius:screen-control-command') {
+        const requestId = typeof msg.requestId === 'string' ? msg.requestId : '';
+        if (!requestId || requestId.length > 160 || !msg.command || typeof msg.command !== 'object') return;
+        Promise.resolve().then(function () {
+          return executeScreenControl(msg.command);
+        }).then(function (result) {
+          window.parent.postMessage({
+            type: 'moebius:screen-control-result', requestId: requestId,
+            ok: true, result: result
+          }, window.location.origin);
+        }).catch(function (error) {
+          window.parent.postMessage({
+            type: 'moebius:screen-control-result', requestId: requestId,
+            ok: false, error: String(error && error.message || error).slice(0, 1000)
+          }, window.location.origin);
+        });
         return;
       }
       if (msg.type === 'moebius:frame-init') {

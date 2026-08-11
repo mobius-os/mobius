@@ -91,6 +91,77 @@
   gap: 8px;
 }
 
+.screen-control-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 44px;
+  height: 40px;
+  padding: 0 11px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.screen-control-button:hover {
+  background: var(--surface);
+}
+
+.screen-control-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.screen-control-button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.screen-control-button--active {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 13%, var(--bg));
+  color: var(--accent);
+}
+
+.screen-control-button__live {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 17%, transparent);
+  animation: screen-control-live 1.8s ease-in-out infinite;
+}
+
+@keyframes screen-control-live {
+  50% { opacity: 0.48; }
+}
+
+@media (max-width: 620px) {
+  .screen-control-button {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+  }
+  .screen-control-button__label { display: none; }
+  .screen-control-button__live {
+    position: absolute;
+    top: 5px;
+    right: 4px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .screen-control-button__live { animation: none; }
+}
+
 /* Desktop-only quick actions. Declare the closed state outside the media query
    so adding this shared markup can never leak controls into the phone header. */
 .shell__rail-actions {

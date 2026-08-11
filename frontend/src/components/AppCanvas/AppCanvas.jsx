@@ -148,6 +148,13 @@ function appFrameRequestUrl(appId, version, frameRev) {
 //      shell wrapper. The live frame signals the parent so its pane becomes the
 //      focused owner of keyboard and immersive state.
 //
+//   9. moebius:screen-control-command/result                bidirectional
+//      The owner-granted shell session may inspect or operate the VISIBLE app
+//      through the same closed semantic command set as shell controls. The
+//      frame never evaluates agent-authored script, never exposes credentials,
+//      masks sensitive fields, and rejects commands while shell interactivity
+//      is suspended by a modal surface.
+//
 // Host-level messages (attributed and narrowed here, outcomes owned by the
 // `onHostRequest` callback):
 //   - {type: 'moebius:new-chat', draft?, autoSend?}          frame → host

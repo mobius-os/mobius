@@ -4254,10 +4254,10 @@ async def _run_chat_impl_with_db(
     from app.delegations import delegation_execution_token
     agent_token = delegation_execution_token(db, run_policy)
   else:
-    agent_token = auth.create_access_token(
-      {"sub": owner.username},
-      expires_delta=auth.AGENT_RUN_TOKEN_TTL,
-      token_epoch=owner.token_epoch,
+    agent_token = auth.create_agent_token(
+      chat_id,
+      owner.username,
+      owner.token_epoch,
     )
 
   # Build the base environment shared by all providers.

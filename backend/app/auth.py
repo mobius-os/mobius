@@ -88,6 +88,29 @@ def create_access_token(
   )
 
 
+def create_agent_token(
+  chat_id: str,
+  owner_username: str,
+  token_epoch: int,
+  *,
+  expires_delta: timedelta = AGENT_RUN_TOKEN_TTL,
+) -> str:
+  """Create the owner bearer used by one ordinary interactive chat agent.
+
+  The token deliberately remains owner-scoped for the platform's existing
+  agent API surface.  ``agent_chat`` is an additional binding used only by
+  capabilities where the browser grants authority to the agent in one exact
+  chat, such as live screen control.  A normal owner login or service token
+  lacks that claim and therefore cannot impersonate the chat-side participant
+  at those narrow routes.
+  """
+  return create_access_token(
+    {"sub": owner_username, "agent_chat": chat_id},
+    expires_delta=expires_delta,
+    token_epoch=token_epoch,
+  )
+
+
 def create_app_token(
   app_id: int,
   owner_username: str,

@@ -271,6 +271,45 @@ def get_current_owner(
   return resolve_owner_only(token, db)
 
 
+def get_agent_principal(
+  token: str = Depends(_oauth2),
+  db: Session = Depends(get_db),
+) -> Principal:
+  """Resolve an ordinary owner-scoped token bound to one chat agent run.
+
+  Login and service tokens intentionally fail here: possession of broad owner
+  authority is not the same as being the agent process for the chat whose
+  owner explicitly shared a live browser surface.  The ordinary agent token
+  keeps ``scope`` unset so existing owner APIs remain compatible; this extra
+  claim is consumed only by capability routes that need the distinction.
+  """
+  owner, payload = _resolve_owner(token, db)
+  chat_id = payload.get("agent_chat")
+  if payload.get("scope") is not None or not isinstance(chat_id, str) or not chat_id:
+    raise HTTPException(
+      status_code=403,
+      detail="This endpoint requires a chat-bound agent token.",
+    )
+  return Principal(owner=owner, app_id=None, scope="owner", chat_id=chat_id)
+
+
+def authorize_current_owner_detached(
+  token: str = Depends(_oauth2),
+) -> str:
+  """Authenticate an unscoped owner token without retaining a DB session.
+
+  Long-lived owner-only streams use the returned username to bind their
+  transient in-memory resource while releasing the pooled connection before
+  response iteration begins.
+  """
+  db = SessionLocal()
+  try:
+    owner = resolve_owner_only(token, db)
+    return owner.username
+  finally:
+    db.close()
+
+
 def _enforce_app_scope(payload: dict, db: Session) -> int | None:
   """Validates an app-scoped token's app identity; returns its app_id.
 
