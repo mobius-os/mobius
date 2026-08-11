@@ -226,15 +226,15 @@ def test_read_transcript_excludes_derived_provider_handoffs(tmp_path):
   con = sqlite3.connect(database)
   con.execute(
     "create table chats (id text primary key, messages text, "
-    "updated_at text, deleted_at text)"
+    "updated_at text, provider text, deleted_at text)"
   )
   con.execute(
     "create table chat_runs ("
     "id text primary key, chat_id text, status text, started_at text)"
   )
   con.execute(
-    "insert into chats (id, messages, updated_at, deleted_at) "
-    "values (?, ?, ?, null)",
+    "insert into chats (id, messages, updated_at, provider, deleted_at) "
+    "values (?, ?, ?, 'codex', null)",
     ("c1", json.dumps([
       {"role": "user", "content": "original request"},
       {
@@ -300,7 +300,7 @@ def test_render_transcript_labels_automatic_continuation_as_product_event():
 
 def test_claude_summary_prompt_receives_complete_transcript(monkeypatch):
   cn = _load_chat_note()
-  monkeypatch.setattr(cn, "_configured_provider", lambda: "claude")
+  monkeypatch.setattr(cn, "_configured_provider", lambda _provider=None: "claude")
   captured = {}
   valid = (
     "---\ntype: chat\ndescription: long chat\n---\n"
@@ -395,7 +395,7 @@ def test_sync_title_only_noop_when_note_absent(tmp_path, monkeypatch):
 
 def test_dead_claude_falls_back_to_complete_local_note(tmp_path, monkeypatch):
   cn = _load_chat_note()
-  monkeypatch.setattr(cn, "_configured_provider", lambda: "claude")
+  monkeypatch.setattr(cn, "_configured_provider", lambda _provider=None: "claude")
   junk = types.SimpleNamespace(
     stdout="no note here", stderr="Credit balance is too low", returncode=1
   )
@@ -408,7 +408,7 @@ def test_dead_claude_falls_back_to_complete_local_note(tmp_path, monkeypatch):
 
 def test_codex_uses_hardened_tool_free_summarizer(monkeypatch):
   cn = _load_chat_note()
-  monkeypatch.setattr(cn, "_configured_provider", lambda: "codex")
+  monkeypatch.setattr(cn, "_configured_provider", lambda _provider=None: "codex")
   captured = {}
 
   def summarize(prompt):
@@ -449,7 +449,7 @@ def test_codex_wrapper_reuses_compaction_runner(tmp_path, monkeypatch):
 
 def test_dead_codex_falls_back_to_complete_local_note(monkeypatch):
   cn = _load_chat_note()
-  monkeypatch.setattr(cn, "_configured_provider", lambda: "codex")
+  monkeypatch.setattr(cn, "_configured_provider", lambda _provider=None: "codex")
 
   def fail(_prompt):
     raise RuntimeError("provider unavailable")
@@ -466,7 +466,7 @@ def _snapshot_db(cn, tmp_path):
   con = sqlite3.connect(db_path)
   con.execute(
     "create table chats ("
-    "id text primary key, messages text, updated_at text, "
+    "id text primary key, messages text, updated_at text, provider text, "
     "deleted_at text)"
   )
   con.execute(
@@ -474,9 +474,9 @@ def _snapshot_db(cn, tmp_path):
     "id text primary key, chat_id text, status text, started_at text)"
   )
   con.execute("create table owner (provider text)")
-  con.execute("insert into owner values ('codex')")
+  con.execute("insert into owner values ('claude')")
   con.execute(
-    "insert into chats values (?, ?, ?, null)",
+    "insert into chats values (?, ?, ?, 'codex', null)",
     (
       "c1",
       json.dumps([
@@ -489,6 +489,7 @@ def _snapshot_db(cn, tmp_path):
   con.commit()
   con.close()
   cn.DB = db_path
+  cn.DATA_DIR = tmp_path
   cn.MEMORY_DIR = tmp_path / "memory"
   return db_path
 
@@ -501,6 +502,39 @@ def _valid_note(description="ours", summary="current"):
   )
 
 
+def test_authenticated_chat_provider_wins_over_stale_owner_default(tmp_path):
+  cn = _load_chat_note()
+  db_path = _snapshot_db(cn, tmp_path)
+  codex_home = tmp_path / "cli-auth" / "codex"
+  codex_home.mkdir(parents=True)
+  (codex_home / "auth.json").write_text("{}")
+
+  con = sqlite3.connect(db_path)
+  assert con.execute("select provider from owner").fetchone()[0] == "claude"
+  con.close()
+  snapshot = cn._read_chat_snapshot("c1")
+
+  assert snapshot.provider == "codex"
+  assert cn._configured_provider(snapshot.provider) == "codex"
+
+
+def test_unauthenticated_claude_falls_back_without_spawning(
+  tmp_path, monkeypatch,
+):
+  cn = _load_chat_note()
+  monkeypatch.setattr(cn, "DATA_DIR", tmp_path)
+
+  def unexpected_spawn(*_args, **_kwargs):
+    pytest.fail("unauthenticated Claude CLI must not be spawned")
+
+  monkeypatch.setattr(cn.subprocess, "run", unexpected_spawn)
+  note = cn._summarize("user: hi\n\nassistant: hello", "", "claude")
+
+  assert cn._looks_like_note(note)
+  assert "user: hi" in note
+  assert "assistant: hello" in note
+
+
 def test_first_summary_publication_replaces_the_opening_message_title(
   tmp_path, monkeypatch,
 ):
@@ -510,12 +544,16 @@ def test_first_summary_publication_replaces_the_opening_message_title(
   monkeypatch.setattr(
     cn,
     "_read_chat_snapshot",
-    lambda _cid: cn.ChatSnapshot("transcript", "r1", []),
+    lambda _cid: cn.ChatSnapshot("transcript", "r1", [], "codex"),
   )
   monkeypatch.setattr(cn, "_read_note_snapshot", lambda _note: ("", "missing"))
-  monkeypatch.setattr(
-    cn, "_summarize", lambda _transcript, _existing: _valid_note("Current work"),
-  )
+  summarized = {}
+
+  def summarize(_transcript, _existing, provider):
+    summarized["provider"] = provider
+    return _valid_note("Current work")
+
+  monkeypatch.setattr(cn, "_summarize", summarize)
   monkeypatch.setattr(cn, "_publish_if_current", lambda *args: True)
   patched = []
   monkeypatch.setattr(
@@ -525,6 +563,7 @@ def test_first_summary_publication_replaces_the_opening_message_title(
 
   assert cn.run() == 0
   assert patched == [("c1", "Current work")]
+  assert summarized["provider"] == "codex"
 
 
 def test_incremental_cursor_prevents_repeated_fallback_transcripts():
