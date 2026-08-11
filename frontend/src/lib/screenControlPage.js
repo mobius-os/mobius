@@ -14,6 +14,15 @@ const FRAME_TIMEOUT_MS = 2500
 
 let rootRefs = new Map()
 let nextFrameRequest = 0
+let latestOwnerInputAt = 0
+
+if (typeof document !== 'undefined') {
+  for (const type of ['pointerdown', 'keydown', 'input', 'wheel', 'touchstart']) {
+    document.addEventListener(type, event => {
+      if (event.isTrusted) latestOwnerInputAt = Date.now()
+    }, { capture: true, passive: true })
+  }
+}
 
 function concise(value, max = 180) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max)
@@ -73,8 +82,12 @@ function elementName(element) {
 
 function sensitiveField(element) {
   if (element?.tagName?.toLowerCase() !== 'input') return false
-  if ((element.type || '').toLowerCase() === 'password') return true
-  return String(element.autocomplete || '').split(/\s+/).some(
+  return isSensitiveScreenControlField(element.type, element.autocomplete)
+}
+
+export function isSensitiveScreenControlField(type, autocomplete) {
+  if (String(type || '').toLowerCase() === 'password') return true
+  return String(autocomplete || '').split(/\s+/).some(
     token => SENSITIVE_AUTOCOMPLETE.has(token.toLowerCase()),
   )
 }
@@ -121,6 +134,11 @@ function nativeValueSetter(element, value) {
   else element.value = value
 }
 
+function screenInputEvent(type, options) {
+  try { return new globalThis.InputEvent(type, options) }
+  catch { return new globalThis.Event(type, { bubbles: true }) }
+}
+
 function typeInto(element, text, replace = true) {
   if (!element) throw new Error('No field is focused.')
   if (sensitiveField(element)) {
@@ -132,7 +150,7 @@ function typeInto(element, text, replace = true) {
     element.focus({ preventScroll: true })
     const next = replace ? text : `${element.value || ''}${text}`
     nativeValueSetter(element, next)
-    element.dispatchEvent(new InputEvent('input', {
+    element.dispatchEvent(screenInputEvent('input', {
       bubbles: true, inputType: replace ? 'insertReplacementText' : 'insertText',
       data: text,
     }))
@@ -143,7 +161,7 @@ function typeInto(element, text, replace = true) {
     element.focus({ preventScroll: true })
     if (replace) element.textContent = text
     else element.append(docTextNode(element.ownerDocument, text))
-    element.dispatchEvent(new InputEvent('input', { bubbles: true, data: text }))
+    element.dispatchEvent(screenInputEvent('input', { bubbles: true, data: text }))
     return
   }
   throw new Error('The focused element is not editable.')
@@ -167,17 +185,21 @@ function scrollOwnerAt(doc, x, y) {
 
 function dispatchPress(doc, key) {
   const target = doc.activeElement || doc.body
-  target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+  const Keyboard = doc.defaultView?.KeyboardEvent || globalThis.KeyboardEvent
+  target.dispatchEvent(new Keyboard('keydown', { key, bubbles: true, cancelable: true }))
   if (key === 'Enter') {
     if (target?.tagName?.toLowerCase() === 'button') target.click()
     else target?.form?.requestSubmit?.()
   } else if (key === ' ' && nearestActionTarget(target)?.click) {
     nearestActionTarget(target).click()
   }
-  target.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true, cancelable: true }))
+  target.dispatchEvent(new Keyboard('keyup', { key, bubbles: true, cancelable: true }))
 }
 
 function localCommand(command, doc = document) {
+  if (command.action !== 'snapshot' && Date.now() - latestOwnerInputAt < 750) {
+    throw new Error('Your input took priority; inspect the screen and try again.')
+  }
   const pointTarget = command.x != null && command.y != null
     ? doc.elementFromPoint(command.x, command.y)
     : null
@@ -239,9 +261,19 @@ function requestFrame(frame, command) {
   })
 }
 
-function parseFrameRef(ref) {
+export function parseScreenControlFrameRef(ref) {
   const match = /^app:([^:]+):(e\d+)$/.exec(String(ref || ''))
   return match ? { appId: match[1], ref: match[2] } : null
+}
+
+export function boundedScreenCaptureSize(sourceWidth, sourceHeight, maxEdge = 2560) {
+  if (!Number.isFinite(sourceWidth) || !Number.isFinite(sourceHeight)
+      || sourceWidth <= 0 || sourceHeight <= 0 || maxEdge <= 0) return null
+  const scale = Math.min(1, maxEdge / Math.max(sourceWidth, sourceHeight))
+  return {
+    width: Math.max(1, Math.round(sourceWidth * scale)),
+    height: Math.max(1, Math.round(sourceHeight * scale)),
+  }
 }
 
 async function snapshotPage() {
@@ -279,7 +311,7 @@ async function snapshotPage() {
 
 async function executePageCommand(command) {
   if (command.action === 'snapshot') return snapshotPage()
-  const frameRef = parseFrameRef(command.ref)
+  const frameRef = parseScreenControlFrameRef(command.ref)
   if (frameRef) {
     const frame = frameForApp(frameRef.appId)
     if (!frame) throw new Error('That app frame is no longer visible.')
@@ -332,9 +364,8 @@ function captureVideoFrame(video) {
   const sourceWidth = video.videoWidth
   const sourceHeight = video.videoHeight
   if (!sourceWidth || !sourceHeight) throw new Error('The shared screen has no video frame yet.')
-  const scale = Math.min(1, 2560 / Math.max(sourceWidth, sourceHeight))
-  const width = Math.max(1, Math.round(sourceWidth * scale))
-  const height = Math.max(1, Math.round(sourceHeight * scale))
+  const size = boundedScreenCaptureSize(sourceWidth, sourceHeight)
+  const { width, height } = size
   const canvas = document.createElement('canvas')
   canvas.width = width
   canvas.height = height
@@ -429,7 +460,7 @@ export function createScreenControlClient({ sessionId, capture, onEnded }) {
       capture.stream.getTracks().forEach(item => item.stop())
       capture.video.srcObject = null
       if (notifyServer) {
-        await fetch(
+        void fetch(
           `${BASE}/api/screen-control/sessions/${encodeURIComponent(sessionId)}`,
           {
             method: 'DELETE',

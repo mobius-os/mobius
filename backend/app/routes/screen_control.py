@@ -40,7 +40,7 @@ class SessionStartBody(BaseModel):
 
   chatId: str = Field(min_length=1, max_length=128)
   route: str = Field(default="/", max_length=512)
-  viewport: dict[str, int] = Field(default_factory=dict)
+  viewport: dict[str, float] = Field(default_factory=dict)
 
   @model_validator(mode="after")
   def validate_viewport(self) -> "SessionStartBody":
@@ -49,7 +49,7 @@ class SessionStartBody(BaseModel):
       raise ValueError("viewport contains an unknown field")
     for key, value in self.viewport.items():
       ceiling = 8 if key == "pixelRatio" else 10000
-      if not isinstance(value, int) or value < 1 or value > ceiling:
+      if not math.isfinite(value) or value < 1 or value > ceiling:
         raise ValueError(f"viewport {key} is outside the supported range")
     return self
 
@@ -171,11 +171,14 @@ async def browser_events(
   # One-owner product today. Authentication is detached before streaming so a
   # live screen does not pin a database connection for its whole 15-minute
   # consent window; the unguessable session id is additionally bound at start.
-  session = await registry.connect_browser(session_id, owner_username)
+  session = await registry.get_for_browser(session_id, owner_username)
   if session is None:
     raise HTTPException(status_code=404, detail="Shared-screen session not found.")
 
   async def generate():
+    connected = await registry.connect_browser(session_id, owner_username)
+    if connected is None:
+      return
     try:
       yield f"data: {json.dumps({'type': 'screen-control-open'})}\n\n"
       while session.active:
@@ -266,7 +269,7 @@ async def agent_command(
     raise HTTPException(status_code=409, detail="No active shared-screen session.")
   outcome = await registry.issue_command(
     session,
-    body.model_dump(exclude_none=True),
+    body.model_dump(exclude_none=True, exclude_defaults=True),
   )
   if not outcome.get("ok"):
     raise HTTPException(status_code=409, detail=outcome.get("error") or "Command failed.")

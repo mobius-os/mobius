@@ -597,6 +597,13 @@
       'cc-number', 'cc-csc', 'cc-exp', 'cc-exp-month', 'cc-exp-year'
     ]);
     let screenControlRefs = new Map();
+    let latestOwnerScreenInputAt = 0;
+
+    ['pointerdown', 'keydown', 'input', 'wheel', 'touchstart'].forEach(function (type) {
+      document.addEventListener(type, function (event) {
+        if (event.isTrusted) latestOwnerScreenInputAt = Date.now();
+      }, { capture: true, passive: true });
+    });
 
     function screenConcise(value, max) {
       return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max || 180);
@@ -756,6 +763,9 @@
         throw new Error('The app is behind another screen and cannot be controlled.');
       }
       if (command.action === 'snapshot') return screenSnapshot();
+      if (Date.now() - latestOwnerScreenInputAt < 750) {
+        throw new Error('Your input took priority; inspect the screen and try again.');
+      }
       const point = command.x != null && command.y != null
         ? document.elementFromPoint(command.x, command.y) : null;
       if (command.action === 'click') {

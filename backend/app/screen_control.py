@@ -26,7 +26,7 @@ class ScreenControlSession:
   owner_username: str
   chat_id: str
   route: str
-  viewport: dict[str, int]
+  viewport: dict[str, float]
   created_at: float
   expires_at: float
   commands: asyncio.Queue[dict[str, Any] | None] = field(
@@ -82,7 +82,7 @@ class ScreenControlRegistry:
     owner_username: str,
     chat_id: str,
     route: str,
-    viewport: dict[str, int],
+    viewport: dict[str, float],
   ) -> ScreenControlSession:
     async with self._lock:
       self._prune_locked()

@@ -10,10 +10,15 @@ import {
 export default function ScreenControlButton({ chatId, onNotice }) {
   const [phase, setPhase] = useState('idle')
   const clientRef = useRef(null)
+  const mountedRef = useRef(true)
 
-  useEffect(() => () => {
-    void clientRef.current?.stop?.()
-    clientRef.current = null
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      void clientRef.current?.stop?.()
+      clientRef.current = null
+    }
   }, [])
 
   async function stopControl() {
@@ -34,7 +39,12 @@ export default function ScreenControlButton({ chatId, onNotice }) {
     setPhase('starting')
     let capture
     try {
+      onNotice?.('In the browser prompt, choose This Tab')
       capture = await requestCurrentTabCapture()
+      if (!mountedRef.current) {
+        capture.stream.getTracks().forEach(track => track.stop())
+        return
+      }
       const session = await api.screenControl.start({
         chatId: String(chatId),
         route: `${location.pathname}${location.search}${location.hash}`,
@@ -44,6 +54,11 @@ export default function ScreenControlButton({ chatId, onNotice }) {
           pixelRatio: window.devicePixelRatio || 1,
         },
       })
+      if (!mountedRef.current) {
+        capture.stream.getTracks().forEach(track => track.stop())
+        void api.screenControl.stop(session.sessionId).catch(() => {})
+        return
+      }
       const client = createScreenControlClient({
         sessionId: session.sessionId,
         capture,
@@ -63,6 +78,7 @@ export default function ScreenControlButton({ chatId, onNotice }) {
       onNotice?.('Agent can now inspect and control this screen for 15 minutes')
     } catch (error) {
       capture?.stream?.getTracks?.().forEach(track => track.stop())
+      if (!mountedRef.current) return
       setPhase('idle')
       if (error?.name === 'NotAllowedError') {
         onNotice?.('Screen sharing was cancelled', { variant: 'error' })
@@ -88,7 +104,7 @@ export default function ScreenControlButton({ chatId, onNotice }) {
     >
       <Icon width={20} height={20} aria-hidden="true" />
       <span className="screen-control-button__label">
-        {pending ? (phase === 'starting' ? 'Sharing…' : 'Stopping…') : (active ? 'Agent control' : 'Share screen')}
+        {pending ? (phase === 'starting' ? 'Sharing…' : 'Stopping…') : (active ? 'Control active' : 'Agent control')}
       </span>
       {active && <span className="screen-control-button__live" aria-hidden="true" />}
     </button>
