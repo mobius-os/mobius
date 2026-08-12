@@ -17,6 +17,8 @@ import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
   FOLLOW_STICK_BAND_PX,
   isNearContentBottom,
+  olderHistoryRetryShown,
+  olderHistoryShouldLoad,
   remapSavedReadingAnchor,
   retireSavedReadingPosition,
   savedReadingAnchorHasNestedPart,
@@ -750,6 +752,7 @@ export default function ChatView({
   // gates the scroll-handler in useScrollMode from misclassifying
   // post-prepend scroll-clamps as user gestures.
   const loadingOlder = useRef(false)
+  const [olderHistoryError, setOlderHistoryError] = useState(false)
 
   // ── Scroll subsystem ─────────────────────────────────────────────
   //
@@ -2072,10 +2075,11 @@ export default function ChatView({
   // lands the user at the same visual position.
   // (loadingOlder ref is declared earlier alongside the useScrollMode
   // hook call — it's passed to the hook to gate the scroll handler.)
-  function loadOlderMessages() {
+  function loadOlderMessages(before = offset) {
     const el = scrollRef.current
-    if (!el || loadingOlder.current || loading || offset <= 0) return
+    if (!el || loadingOlder.current || loading || before <= 0) return
     loadingOlder.current = true
+    setOlderHistoryError(false)
     // Snapshot the topmost rendered msg + its current offset for
     // post-prepend restore. The anchor key/offset is stable: after
     // the prepend, the SAME message has a larger offsetTop (older
@@ -2093,7 +2097,7 @@ export default function ChatView({
     // them at the new anchor; the next gesture (or send) writes a
     // fresh mode.
     apiFetch(
-      `/chats/${chatId}?limit=20&before=${offset}&compact=1`,
+      `/chats/${chatId}?limit=20&before=${before}&compact=1`,
       { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
     )
       .then(r => jsonOrThrow(r, 'Earlier messages failed to load'))
@@ -2118,7 +2122,8 @@ export default function ChatView({
         if (anchorKey) {
           anchorPagination(anchorKey, anchorOffset)
         }
-        commitMessages(prev => [...older, ...prev], data.offset || 0)
+        const nextOffset = data.offset || 0
+        commitMessages(prev => [...older, ...prev], nextOffset)
         requestAnimationFrame(() => {
           // The layout effect has run with ANCHOR_AT — applyMode
           // landed the topmost-pre-prepend msg at the same visual
@@ -2128,10 +2133,31 @@ export default function ChatView({
           // subsequent layout events (incoming tokens, etc). Their
           // next gesture (or send) writes a fresh mode.
           loadingOlder.current = false
+          const scrollEl = scrollRef.current
+          if (
+            scrollEl
+            && nextOffset > 0
+            && nextOffset < before
+            && olderHistoryShouldLoad(scrollEl)
+          ) {
+            loadOlderMessages(nextOffset)
+          }
         })
       })
-      .catch(() => { loadingOlder.current = false })
+      .catch(() => {
+        loadingOlder.current = false
+        setOlderHistoryError(true)
+      })
   }
+
+  // A tall viewport or an unusually compact page can have older history but no
+  // scroll range. Fill only until scrolling becomes possible; subsequent pages
+  // remain user-driven and bounded.
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (!el || loadingOlder.current || loading || offset <= 0) return
+    if (olderHistoryShouldLoad(el)) loadOlderMessages()
+  })
 
   // Jump-to-latest visibility (contract R5a): a pure geometry READ — it never
   // writes scrollTop, so it lives outside the scroll controller's ownership
@@ -2152,16 +2178,11 @@ export default function ChatView({
     updateJumpToLatest()
     const el = scrollRef.current
     if (!el || loadingOlder.current || loading) return
-    // Gesture guard: applyMode's programmatic scrolls (e.g., PIN_USER_MSG
-    // landing near scrollTop=0 when the user msg is high in the list,
-    // or FOLLOW_BOTTOM after a pagination prepend) can satisfy
-    // `scrollTop < 5 && offset > 0` and trigger an unwanted pagination
-    // load. Only paginate while the shared controller says the reader owns
-    // scrolling: from pointer/wheel/touch/key input through its first scroll,
-    // then through the short momentum window.
+    // Programmatic scrolls can land near the top, so the shared gesture window
+    // still owns intent. Prefetch before the loaded-page boundary can become a
+    // visible interruption instead of waiting for the absolute top.
     const userDriven = performance.now() < gestureWindowUntilRef.current
-    if (!userDriven) return
-    if (el.scrollTop < 5 && offset > 0) {
+    if (offset > 0 && olderHistoryShouldLoad(el, { userDriven })) {
       loadOlderMessages()
     }
   }
@@ -3684,7 +3705,6 @@ export default function ChatView({
     }
   }, [ensureRuntimeStreamConnected, hidden, reconcileRuntimeState])
 
-  const hasMore = offset > 0
   // Empty-state is the "I have nothing to show because nothing happened
   // yet" view. If the initial chat fetch errored, we have no idea
   // whether the chat is empty — surfacing that branch separately keeps
@@ -3979,7 +3999,8 @@ export default function ChatView({
     questionNudgeShown,
     resumeNudgeShown,
   })
-  const offscreenControlsVisible = questionNudgeShown
+  const offscreenControlsVisible = olderHistoryError
+    || questionNudgeShown
     || resumeNudgeShown
     || jumpToLatestVisible
 
@@ -4180,12 +4201,6 @@ export default function ChatView({
             non-empty chat, including after unmount/remount. Keep the list's
             elastic min-height out of the spacer formula at all times. */}
         <ul className="chat__list" style={{ minHeight: 0 }}>
-          {hasMore && (
-            <li className="chat__older">
-              <button onClick={loadOlderMessages}>Load earlier messages</button>
-            </li>
-          )}
-
           {messages.map((msg, i) => {
             if (msg.hidden) return null
             const continuationMarker = isContinuationMessage(msg)
@@ -4376,6 +4391,15 @@ export default function ChatView({
             <>
               {offscreenControlsVisible && (
                 <div className="chat__offscreen-nudges">
+                  {olderHistoryRetryShown(olderHistoryError, offset) && (
+                    <button
+                      type="button"
+                      className="chat__history-retry"
+                      onClick={() => loadOlderMessages()}
+                    >
+                      Earlier messages didn’t load — retry
+                    </button>
+                  )}
                   {questionNudgeShown && (
                     <button
                       type="button"

@@ -171,26 +171,6 @@
   min-height: calc(100% + 1px);
 }
 
-/* ── Load earlier ──────────────────────────────────── */
-
-.chat__older { text-align: center; }
-
-.chat__older button {
-  background: none;
-  border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
-  border-radius: 20px;
-  color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
-  font-size: 12px;
-  padding: 5px 16px;
-  cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
-}
-
-.chat__older button:hover {
-  color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
-  border-color: var(--border); /* CONTRACT: 1px line on top of the inherited opaque fill */
-}
-
 /* ── Empty state ───────────────────────────────────── */
 
 .chat__empty {
@@ -2423,12 +2403,26 @@
   transition: background 0.15s, color 0.15s, transform 0.08s;
 }
 .chat__question-nudge:hover,
-.chat__resume-nudge:hover {
+.chat__resume-nudge:hover,
+.chat__history-retry:hover {
   background: var(--accent); /* CONTRACT: vivid opaque accent fill */
   color: #fff;
 }
 .chat__question-nudge:active,
-.chat__resume-nudge:active { transform: scale(0.96); }
+.chat__resume-nudge:active,
+.chat__history-retry:active { transform: scale(0.96); }
+
+.chat__history-retry {
+  min-height: 36px;
+  margin: 0 auto;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font: 600 12px/1.2 var(--font);
+  cursor: pointer;
+}
 
 .chat__offscreen-nudges > button + button { margin-top: 8px; }
 

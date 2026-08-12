@@ -93,6 +93,22 @@ const PENDING_GESTURE_CAP_MS = 2000
 // clamp" follow claims, NOT for retaining follow once engaged.
 const PHYSICAL_BOTTOM_EPSILON_PX = 4
 
+// Start the next bounded history read before the loaded-page boundary can
+// enter the viewport. A non-scrollable page also needs one immediately because
+// the browser cannot emit the scroll event that normally drives pagination.
+export const HISTORY_PREFETCH_PX = 240
+
+
+export function olderHistoryRetryShown(error, offset) {
+  return Boolean(error) && Number(offset) > 0
+}
+
+export function olderHistoryShouldLoad(scrollEl, { userDriven = false } = {}) {
+  if (!scrollEl) return false
+  return scrollEl.scrollHeight <= scrollEl.clientHeight + 1
+    || (userDriven && scrollEl.scrollTop <= HISTORY_PREFETCH_PX)
+}
+
 // Follow-stick band. Adopted from use-stick-to-bottom's STICK_TO_BOTTOM_OFFSET_PX
 // (https://github.com/stackblitz-labs/use-stick-to-bottom): a reader counts as
 // "at the bottom" while within this many pixels of the tail. This replaces the
