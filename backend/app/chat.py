@@ -2255,8 +2255,19 @@ async def stop_chat_for(
   `cleared_pending_cids`, which closes the natural-finish-races-Stop
   double-send (PM 115).
 
-  Waits for the process to die with a bounded timeout.
+  Waits for the process to die with a bounded timeout. The complete stop owns
+  the same per-chat transition gate as sends, settings changes, and provider
+  handoffs: once Stop wins that gate, a racing send cannot observe the old
+  handle, queue behind it, and then be stranded when Stop releases ownership.
   """
+  async with chat_queue.get_transition_lock(chat_id):
+    return await _stop_chat_for_locked(chat_id, db=db)
+
+
+async def _stop_chat_for_locked(
+  chat_id: str, db: Session = None,
+) -> tuple[bool, list[str]]:
+  """Stop one chat while its per-chat lifecycle transition is exclusive."""
   stopped_gen = current_run_generation(chat_id)
   bump_run_generation(chat_id)
   # Stop is also a deliberate plan decision. Stamp it before interrupting the
