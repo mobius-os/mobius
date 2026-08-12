@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import * as paneModel from '../paneModel.js'
 import * as tabModel from '../tabModel.js'
 import { modeReducer } from '../modeMachine.js'
+import { softStripKeyframes } from '../useModeViewTransition.js'
 
 // Permanent regression locks for Codex's flagship review round 2 (15 findings).
 // Each fix is pinned here — a grep-level lock on the sanctioned funnels plus
@@ -266,4 +267,17 @@ test('finding 13: reduced motion bypasses capture; the brand has no perpetual rA
   assert.match(scene, /!prefersReducedMotion\(\)/)
   assert.match(scene, /if \(!supported\) \{\s*\n\s*flushSync\(update\)/)
   assert.doesNotMatch(brand, /requestAnimationFrame|useLivingHalo|logo-halo/)
+  assert.deepEqual(softStripKeyframes('enter', 34), [
+    { opacity: 1, transform: 'translate3d(0, -34px, 0)' },
+    { opacity: 1, transform: 'translate3d(0, 0, 0)' },
+  ])
+  assert.deepEqual(softStripKeyframes('exit', 34), [
+    { opacity: 1, transform: 'translate3d(0, 0, 0)' },
+    { opacity: 1, transform: 'translate3d(0, -34px, 0)' },
+  ])
+  assert.deepEqual(softStripKeyframes('enter', 0), [
+    { opacity: 1, transform: 'translate3d(0, -1px, 0)' },
+    { opacity: 1, transform: 'translate3d(0, 0, 0)' },
+  ])
 })
+

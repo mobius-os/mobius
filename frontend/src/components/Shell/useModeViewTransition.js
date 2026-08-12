@@ -36,14 +36,35 @@ function participantSnapshots(root, offsets) {
     if (!offset) continue
     const name = getComputedStyle(element).viewTransitionName
     if (!name || name === 'none') continue
+    const softEntry = element.hasAttribute('data-mode-strip-soft-entry')
     out.push({
       name,
       offset,
       // Tiled strips stay attached to pane travel; only the single strip opts in.
-      softEntry: element.hasAttribute('data-mode-strip-soft-entry'),
+      softEntry,
+      // Capture rendered geometry rather than duplicating paneModel.STRIP_H in
+      // the animation owner. The travel stays correct if the shared token changes.
+      softEntryDistance: softEntry
+        ? Math.max(1, Math.ceil(element.getBoundingClientRect().height))
+        : null,
     })
   }
   return out
+}
+
+export function softStripKeyframes(direction, distancePx) {
+  const distance = Math.max(1, Math.ceil(Number(distancePx) || 0))
+  const above = `translate3d(0, -${distance}px, 0)`
+  const settled = 'translate3d(0, 0, 0)'
+  return direction === 'exit'
+    ? [
+        { opacity: 1, transform: settled },
+        { opacity: 1, transform: above },
+      ]
+    : [
+        { opacity: 1, transform: above },
+        { opacity: 1, transform: settled },
+      ]
 }
 
 function stationarySnapshotNames(root) {
@@ -172,16 +193,11 @@ export default function useModeViewTransition({ rootRef, durationMs }) {
         ))
       }
       const paneSide = direction === 'enter' ? 'new' : 'old'
-      for (const { name, offset, softEntry } of snapshots) {
+      for (const { name, offset, softEntry, softEntryDistance } of snapshots) {
         const away = `translate3d(${offset.x}px, ${offset.y}px, 0)`
-        const softStripEntering = direction === 'enter' && softEntry
         let keyframes
-        if (softStripEntering) {
-          keyframes = [
-            { opacity: 0, transform: 'translate3d(0, 12px, 0)', offset: 0 },
-            { opacity: 1, transform: 'translate3d(0, 0, 0)', offset: 0.55 },
-            { opacity: 1, transform: 'translate3d(0, 0, 0)', offset: 1 },
-          ]
+        if (softEntry) {
+          keyframes = softStripKeyframes(direction, softEntryDistance)
         } else if (direction === 'enter') {
           keyframes = [
             { opacity: 1, transform: away },
