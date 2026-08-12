@@ -52,7 +52,12 @@ export const SHELL_DATA_CACHE = 'mobius-shell-data'
 // CSP source, but a device that retained a prior frame response reports that
 // local speech is blocked. Evict every v7 entry so its next refresh fetches
 // the current response headers instead of retaining a stale reader policy.
-export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v8'
+// Bumped -v8 → -v9 (2026-08-12): cache eviction only happens after a new
+// worker activates. The normal update leash intentionally leaves workers
+// waiting, so an affected device can otherwise keep its blocked v7 frame
+// forever. The worker now detects that stale frame policy and activates for
+// this narrow repair; v9 is the one-time cache namespace it then replaces.
+export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v9'
 // Bumped -v2 → -v3 (2026-07-30): v2 standalone documents executed app-authored
 // modules directly at owner origin. The secure host now mounts the shared
 // opaque AppCanvas frame; activation must evict every cached v2 document so an
@@ -106,6 +111,15 @@ export function isCacheableAssetResponse(response) {
   if (!response || response.status !== 200) return false
   const ct = (response.headers.get('content-type') || '').toLowerCase()
   return CACHEABLE_ASSET_TYPES.some(t => ct.includes(t))
+}
+
+// Cached app-frame documents carry their own CSP headers. This narrow source
+// is required to compile the on-device speech engine's WebAssembly, while still
+// leaving JavaScript eval prohibited. An absent or older header needs a cache
+// refresh before the frame can use local speech.
+export function cachedAppFrameNeedsWasmPolicyRefresh(response) {
+  const policy = response?.headers?.get?.('content-security-policy') || ''
+  return !policy.includes("'wasm-unsafe-eval'")
 }
 
 // Public assets executed by an opaque app frame or its nested chat embed. Keep
