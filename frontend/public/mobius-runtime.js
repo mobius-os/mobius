@@ -3462,10 +3462,11 @@ function makeCapabilities({ declarations = {}, hostWindow, selfWindow } = {}) {
 			},
 			cancel() {
 				if (internal.settled) return;
-				if (internal.localControl) try {
+				if (internal.localControl) {
 					internal.localControl.cancel();
-				} catch {}
-				else parentWindow.postMessage({
+					return;
+				}
+				parentWindow.postMessage({
 					type: "moebius:capability-control",
 					requestId,
 					capability,
