@@ -79,14 +79,21 @@ def app_frame_csp(
 
 
 def shell_csp(gateway_origin: str = "") -> str:
-  """Policy for ordinary shell/API documents, independent of proxy syntax."""
+  """Policy for ordinary shell/API documents, independent of proxy syntax.
+
+  ``'wasm-unsafe-eval'`` permits WebAssembly and nothing else. On-device
+  speech runs Pocket TTS as Wasm in a shell-owned worker, which cannot compile
+  without it. ``worker-src 'self'`` keeps that worker restricted to the real
+  same-origin asset rather than allowing generated or third-party workers.
+  """
   frame_sources = ["'self'"]
   gateway = absolute_csp_origin(gateway_origin)
   if gateway is not None:
     frame_sources.append(gateway)
   return (
     "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline' https://esm.sh; "
+    "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://esm.sh; "
+    "worker-src 'self'; "
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
     "font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; "
     "connect-src 'self'; "

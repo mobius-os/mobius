@@ -19,6 +19,13 @@ export const ESM_CACHE = 'mobius-esm-v2'
 // list-affecting write, the page evicts the corresponding cached GET so a
 // NetworkFirst fallback cannot resurrect the pre-mutation projection.
 export const SHELL_DATA_CACHE = 'mobius-shell-data'
+
+// This value deliberately participates in the built service-worker bytes.
+// Bump it whenever the server-owned shell document policy changes without an
+// accompanying shell asset change, so installed PWAs discover the new worker;
+// the install-time policy comparison below then replaces the cached document
+// atomically. The host speech engine needs the 2026-08 Wasm policy revision.
+export const SHELL_DOCUMENT_POLICY_REVISION = '2026-08-wasm-host-v1'
 // Bumped -v2 → -v3 (2026-06-18): a one-time eviction of app-frame entries
 // cached under the pre-fix, un-revved key (`?v=<updated_at>` with NO
 // `-<frameRev>` suffix, because the SW-precached index.html lacked the

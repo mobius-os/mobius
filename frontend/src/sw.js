@@ -49,6 +49,7 @@ import {
 import {
   VENDOR_CACHE,
   ESM_CACHE,
+  SHELL_DOCUMENT_POLICY_REVISION,
   OFFLINE_APPS_CACHE,
   STANDALONE_APPS_CACHE,
   APP_ASSETS_CACHE,
@@ -147,7 +148,9 @@ const outgoingDocumentPolicy = caches.match('/index.html', { ignoreSearch: true 
 async function documentPolicyChanged() {
   const [outgoing, fresh] = await Promise.all([
     outgoingDocumentPolicy,
-    fetch('/index.html', { cache: 'reload', credentials: 'same-origin' })
+    fetch(`/index.html?policy=${SHELL_DOCUMENT_POLICY_REVISION}`, {
+      cache: 'reload', credentials: 'same-origin',
+    })
       .then(response => response.headers.get('content-security-policy') || '')
       .catch(() => ''),
   ])

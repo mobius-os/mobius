@@ -7,6 +7,7 @@ import {
   cachesToDeleteOnLogout,
   ESM_CACHE,
   OFFLINE_APPS_CACHE,
+  SHELL_DOCUMENT_POLICY_REVISION,
   STANDALONE_APPS_CACHE,
   VENDOR_CACHE,
   appCodeCacheKey,
@@ -26,6 +27,10 @@ import {
   supersededVersionKeys,
   withOpaqueFramePublicAssetCors,
 } from '../../sw-cache-policy.js'
+
+test('shell document policy revision is explicit in the service-worker build', () => {
+  assert.equal(SHELL_DOCUMENT_POLICY_REVISION, '2026-08-wasm-host-v1')
+})
 
 test('logout clears owner runtime caches without deleting the installed shell', () => {
   assert.deepEqual(cachesToDeleteOnLogout([
