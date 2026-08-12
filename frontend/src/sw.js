@@ -54,7 +54,7 @@ import {
   APP_ASSETS_CACHE,
   APP_ASSETS_MAX_ENTRIES,
   isCacheableAssetResponse,
-  cachedAppFrameNeedsWasmPolicyRefresh,
+  cachedAppFrameNeedsSpeechPolicyRefresh,
   isOpaqueFramePublicAssetPath,
   withOpaqueFramePublicAssetCors,
   isCacheableAppAssetResponse,
@@ -181,7 +181,7 @@ async function cachedAppFramePolicyChanged() {
     for (const request of requests) {
       if (!isCachedAppFrame(request)) continue
       const response = await cache.match(request)
-      if (cachedAppFrameNeedsWasmPolicyRefresh(response)) return true
+      if (cachedAppFrameNeedsSpeechPolicyRefresh(response)) return true
     }
   }
   return false
