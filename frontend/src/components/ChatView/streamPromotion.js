@@ -306,6 +306,21 @@ export function chooseActiveAssistantSurface(msg, items) {
   ))
   if (streamMissesDurableQuestion) {
     return { hideMessage: false, suppressStream: true }
+  // Compact durable messages deliberately collapse thinking/tool runs into
+  // activity blocks, so their block arrays cannot prove ordinary prefix
+  // coverage against the detailed replay stream. Visible assistant prose is
+  // still monotonic: when one related surface strictly extends the other's
+  // text, keep the longer answer instead of letting private activity weight
+  // hide a saved final paragraph behind a stale live replay.
+  const msgText = normalizeMirrorText(assistantMessageText(msg))
+  const streamText = normalizeMirrorText(streamPayload.content)
+  if (msgText && streamText && msgText.length !== streamText.length) {
+    if (msgText.startsWith(streamText)) {
+      return { hideMessage: false, suppressStream: true }
+    }
+    if (streamText.startsWith(msgText)) {
+      return { hideMessage: true, suppressStream: false }
+    }
   }
 
   const msgPayload = {

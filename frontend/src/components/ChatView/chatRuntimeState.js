@@ -149,6 +149,40 @@ export function shouldRetireRestoredQuestionSnapshot({
     && item.question_id === pendingQuestionId
     && !item.answers
   ))
+/**
+ * A durable running -> idle transition settles a live transport that missed
+ * its terminal event. Requiring the prior server-running observation avoids
+ * mistaking the short optimistic send window (before StartTurn is persisted)
+ * for a completed turn.
+ */
+export function shouldRecoverSettledRuntime({
+  serverWasRunning = false,
+  runtimeRunning = false,
+  pendingCount = 0,
+  streamStillActive = false,
+  stopInFlight = false,
+} = {}) {
+  return !!serverWasRunning
+    && runtimeRunning === false
+    && pendingCount === 0
+    && !!streamStillActive
+    && !stopInFlight
+}
+
+/**
+ * The runtime endpoint deliberately omits transcript blocks, but an open
+ * question is only actionable when its durable card is in the mounted
+ * transcript. A runtime marker without that card means a live viewer missed
+ * the question event and must refresh the compact detail page.
+ */
+export function pendingQuestionIsHydrated(messages, pendingQuestionId) {
+  if (!pendingQuestionId || !Array.isArray(messages)) return false
+  return messages.some(message => message?.role === 'assistant'
+    && (message.blocks || []).some(block => (
+      block?.type === 'question'
+      && block.question_id === pendingQuestionId
+      && !block.answers
+    )))
 }
 
 function coldBlockRenderCost(block) {

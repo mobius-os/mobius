@@ -116,6 +116,7 @@ import {
   openAppCtaViewModel,
   shouldRetireRestoredQuestionSnapshot,
   shouldAttachRunningStream,
+  shouldRecoverSettledRuntime,
   shouldRetryStopAfterConfirm,
   stopConfirmedIdle,
   stopRequestSucceeded,
@@ -495,6 +496,7 @@ export default function ChatView({
   // control. Keep its necessary detail refresh single-flight per exact owner;
   // the invariant below retries naturally after an honest fetch failure.
   const parkedQuestionHydrationRef = useRef(null)
+  const retireSettledStreamRef = useRef(null)
   // The pending-question and resume "tap to jump to it" nudges each track
   // whether their card is scrolled out of the viewport. Both use one shared
   // observer hook (useOffscreenNudge, below); their booleans are computed near
@@ -1059,6 +1061,28 @@ export default function ChatView({
       // docs/architecture.md "determinism".
       const localAuthoritative =
         handlingStopRef.current || isStreamingRef.current
+      if (shouldRecoverSettledRuntime({
+        serverWasRunning: serverRunningRef.current,
+        runtimeRunning: !!data.running,
+        pendingCount: serverPending.length,
+        streamStillActive: isStreamingRef.current,
+        stopInFlight: handlingStopRef.current,
+      })) {
+        // The backend has durably finalized a run but this browser missed its
+        // terminal SSE event. Re-read the transcript before retiring the stale
+        // transport so a saved final reply can never remain hidden behind the
+        // cached in-flight surface. A failed refresh leaves serverRunning
+        // latched, so the next runtime poll retries instead of declaring idle.
+        const settled = await fetchMessages({
+          force: true,
+          terminal204: true,
+          authoritative: true,
+        })
+        if (settled?.running === false) {
+          retireSettledStreamRef.current?.()
+        }
+        return
+      }
       if (data.running) {
         setSending(true)
       } else if (serverPending.length === 0 && !localAuthoritative) {
@@ -1379,6 +1403,11 @@ export default function ChatView({
       fetchMessages({ force: true })
     },
   })
+
+  retireSettledStreamRef.current = () => {
+    disconnect({ clearStreaming: true })
+    clearStreamItems()
+  }
 
   // useScrollMode's layout effect is registered before this one. At a steer
   // cut it therefore commits the new row's PIN_USER_MSG/ANCHOR_AT position

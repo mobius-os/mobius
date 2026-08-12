@@ -456,6 +456,33 @@ test('a stream carrying the same question may expose newer parallel output', () 
     hideMessage: true,
     suppressStream: false,
   })
+test('saved final prose wins over a detailed stale replay after compact activity grouping', () => {
+  const msg = {
+    role: 'assistant',
+    ts: 2,
+    blocks: [
+      { type: 'thinking', thinking_deferred: true, thinking_revision: 20 },
+      { type: 'text', content: 'I’ll inspect the broken article.' },
+      { type: 'activity', count: 12 },
+      { type: 'text', content: 'I found the blocked embed.' },
+      { type: 'activity', count: 8 },
+      { type: 'text', content: 'It is fixed now, and the fallback is visible.' },
+    ],
+  }
+  const staleReplay = [
+    { type: 'thinking', content: 'A long private trace that adds weight.' },
+    { type: 'text', content: 'I’ll inspect the broken article.' },
+    { type: 'tool', tool: 'Bash', status: 'done', output: 'x'.repeat(200) },
+    { type: 'text', content: 'I found the blocked embed.' },
+    { type: 'tool', tool: 'Bash', status: 'done', output: 'y'.repeat(200) },
+  ]
+
+  assert.equal(assistantStreamCoversMessage(msg, staleReplay), false)
+  assert.equal(messageCoversAssistantStream(msg, staleReplay), false)
+  assert.deepEqual(chooseActiveAssistantSurface(msg, staleReplay), {
+    hideMessage: false,
+    suppressStream: true,
+  })
 })
 
 test('chooseActiveAssistantSurface does not collapse unrelated assistant and stream surfaces', () => {

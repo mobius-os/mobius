@@ -18,6 +18,7 @@ import {
   serverSnapshotBehindLocal,
   shouldAttachRunningStream,
   shouldRetireRestoredQuestionSnapshot,
+  shouldRecoverSettledRuntime,
   shouldRetryStopAfterConfirm,
   shouldShowOpenAppCta,
   startedMessagesFromResponse,
@@ -138,6 +139,38 @@ test('a parked owner question uses compact history until its answer resumes the 
 })
 
 test('only a cold stream prefix missing the durable question is retired', () => {
+test('a known server run settling recovers a live stream that missed its terminal event', () => {
+  assert.equal(shouldRecoverSettledRuntime({
+    serverWasRunning: true,
+    runtimeRunning: false,
+    pendingCount: 0,
+    streamStillActive: true,
+  }), true)
+
+  assert.equal(shouldRecoverSettledRuntime({
+    serverWasRunning: false,
+    runtimeRunning: false,
+    pendingCount: 0,
+    streamStillActive: true,
+  }), false, 'the optimistic send window is not mistaken for a settled turn')
+
+  assert.equal(shouldRecoverSettledRuntime({
+    serverWasRunning: true,
+    runtimeRunning: false,
+    pendingCount: 1,
+    streamStillActive: true,
+  }), false, 'a queued continuation still owns the handoff')
+
+  assert.equal(shouldRecoverSettledRuntime({
+    serverWasRunning: true,
+    runtimeRunning: false,
+    pendingCount: 0,
+    streamStillActive: true,
+    stopInFlight: true,
+  }), false, 'the explicit stop flow owns its own settlement')
+})
+
+test('a runtime question marker requires its durable card in the transcript', () => {
   const pendingQuestionId = 'question-1'
   const messages = [{
     role: 'assistant',
