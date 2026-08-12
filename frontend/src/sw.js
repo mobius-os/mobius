@@ -49,12 +49,12 @@ import {
 import {
   VENDOR_CACHE,
   ESM_CACHE,
-  SHELL_DOCUMENT_POLICY_REVISION,
   OFFLINE_APPS_CACHE,
   STANDALONE_APPS_CACHE,
   APP_ASSETS_CACHE,
   APP_ASSETS_MAX_ENTRIES,
   isCacheableAssetResponse,
+  cachedAppFrameNeedsSpeechPolicyRefresh,
   isOpaqueFramePublicAssetPath,
   withOpaqueFramePublicAssetCors,
   isCacheableAppAssetResponse,
@@ -148,9 +148,7 @@ const outgoingDocumentPolicy = caches.match('/index.html', { ignoreSearch: true 
 async function documentPolicyChanged() {
   const [outgoing, fresh] = await Promise.all([
     outgoingDocumentPolicy,
-    fetch(`/index.html?policy=${SHELL_DOCUMENT_POLICY_REVISION}`, {
-      cache: 'reload', credentials: 'same-origin',
-    })
+    fetch('/index.html', { cache: 'reload', credentials: 'same-origin' })
       .then(response => response.headers.get('content-security-policy') || '')
       .catch(() => ''),
   ])
@@ -158,12 +156,46 @@ async function documentPolicyChanged() {
   return outgoing !== null && fresh !== '' && fresh !== outgoing
 }
 
+// App frames are cache-first documents as well, but they are not part of the
+// shell precache checked above. Look only at outgoing app-frame documents (not
+// their modules) and only trigger the exceptional activation when one carries
+// the known policy that blocks local speech. This keeps the ordinary update
+// leash intact for every code/content change while making a CSP repair reach
+// the people whose cached response is the actual fault.
+const OUTGOING_APPS_CACHE = /^mobius-offline-apps(?:-v\d+)?$/
+
+function isCachedAppFrame(request) {
+  try {
+    return /^\/api\/apps\/\d+\/frame$/.test(new URL(request.url).pathname)
+  } catch {
+    return false
+  }
+}
+
+async function cachedAppFramePolicyChanged() {
+  const cacheNames = await caches.keys()
+  for (const cacheName of cacheNames) {
+    if (cacheName === OFFLINE_APPS_CACHE || !OUTGOING_APPS_CACHE.test(cacheName)) continue
+    const cache = await caches.open(cacheName)
+    const requests = await cache.keys()
+    for (const request of requests) {
+      if (!isCachedAppFrame(request)) continue
+      const response = await cache.match(request)
+      if (cachedAppFrameNeedsSpeechPolicyRefresh(response)) return true
+    }
+  }
+  return false
+}
+
 let isFirstInstall = false
 self.addEventListener('install', (event) => {
   isFirstInstall = !self.registration.active
   if (isFirstInstall) return
-  event.waitUntil(documentPolicyChanged().then(async (changed) => {
-    if (changed) await self.skipWaiting()
+  event.waitUntil(Promise.all([
+    documentPolicyChanged(),
+    cachedAppFramePolicyChanged(),
+  ]).then(async ([shellPolicyChanged, appFramePolicyChanged]) => {
+    if (shellPolicyChanged || appFramePolicyChanged) await self.skipWaiting()
   }).catch(() => {}))
 })
 self.addEventListener('message', (event) => {

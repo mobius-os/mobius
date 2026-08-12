@@ -67,7 +67,12 @@ def app_frame_csp(
     "allow-popups-to-escape-sandbox "
     "allow-top-navigation-by-user-activation; "
     f"default-src {origin}; "
-    f"script-src {origin} 'unsafe-inline' 'wasm-unsafe-eval' "
+    # `wasm-unsafe-eval` is the narrow modern source, but older WebKit-based
+    # installed apps ignore it and still gate WebAssembly on `unsafe-eval`.
+    # Mini-app code already runs inside this opaque, credential-isolated
+    # sandbox; keep the compatibility fallback here rather than weakening the
+    # owner-origin shell policy.
+    f"script-src {origin} 'unsafe-inline' 'wasm-unsafe-eval' 'unsafe-eval' "
     "blob: https://esm.sh; "
     f"style-src {origin} 'unsafe-inline' https://fonts.googleapis.com; "
     f"font-src {origin} https://fonts.gstatic.com https://cdn.openai.com; "
@@ -79,21 +84,14 @@ def app_frame_csp(
 
 
 def shell_csp(gateway_origin: str = "") -> str:
-  """Policy for ordinary shell/API documents, independent of proxy syntax.
-
-  ``'wasm-unsafe-eval'`` permits WebAssembly and nothing else. On-device
-  speech runs Pocket TTS as Wasm in a shell-owned worker, which cannot compile
-  without it. ``worker-src 'self'`` keeps that worker restricted to the real
-  same-origin asset rather than allowing generated or third-party workers.
-  """
+  """Policy for ordinary shell/API documents, independent of proxy syntax."""
   frame_sources = ["'self'"]
   gateway = absolute_csp_origin(gateway_origin)
   if gateway is not None:
     frame_sources.append(gateway)
   return (
     "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://esm.sh; "
-    "worker-src 'self'; "
+    "script-src 'self' 'unsafe-inline' https://esm.sh; "
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
     "font-src 'self' https://fonts.gstatic.com https://cdn.openai.com; "
     "connect-src 'self'; "

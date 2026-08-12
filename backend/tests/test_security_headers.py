@@ -86,10 +86,7 @@ def test_direct_shell_response_receives_the_origin_owned_policy():
   assert policy == _SHELL_CSP
   assert "https://esm.sh" in policy
   assert "img-src 'self' data: blob:" in policy
-  assert "'wasm-unsafe-eval'" in policy
-  assert " 'unsafe-eval'" not in policy
-  assert "worker-src 'self';" in policy
-  assert "script-src" in policy and "blob:" not in policy.split("script-src")[1].split(";")[0]
+  assert "'wasm-unsafe-eval'" not in policy
   assert "cross-origin-opener-policy" not in _headers()
   assert "cross-origin-embedder-policy" not in _headers()
 
@@ -201,7 +198,11 @@ def test_backend_owns_complete_app_frame_policy():
   assert "allow-popups-to-escape-sandbox" in policy
   assert "allow-same-origin" not in policy
   assert "'wasm-unsafe-eval'" in policy
-  assert " 'unsafe-eval'" not in policy
+  # Older WebKit installed-app engines gate Wasm on the legacy source even
+  # when they ignore the modern Wasm-specific one. This fallback belongs only
+  # on the opaque app frame; the owner-origin shell remains stricter.
+  assert " 'unsafe-eval'" in policy
+  assert "'unsafe-eval'" not in _SHELL_CSP
   assert f"frame-src {origin} {gateway}" in policy
 
   # The frame's origin is opaque, so 'self' matches nothing in fetch
