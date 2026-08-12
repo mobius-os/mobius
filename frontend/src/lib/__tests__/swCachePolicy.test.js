@@ -55,6 +55,10 @@ test('runtime cache cleanup evicts old offline app caches', () => {
   // Those response headers must not keep blocking Wasm compilation after the
   // server policy changes.
   assert.equal(isStaleRuntimeCache('mobius-offline-apps-v5'), true)
+  // v6 and v7 may both retain a frame response with an older reader policy.
+  // The cached response includes CSP headers, so this must refresh atomically.
+  assert.equal(isStaleRuntimeCache('mobius-offline-apps-v6'), true)
+  assert.equal(isStaleRuntimeCache('mobius-offline-apps-v7'), true)
   assert.equal(isStaleRuntimeCache(OFFLINE_APPS_CACHE), false)
   assert.equal(isStaleRuntimeCache('mobius-standalone'), true)
   assert.equal(isStaleRuntimeCache('mobius-standalone-v1'), true)
