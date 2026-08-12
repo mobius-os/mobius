@@ -317,6 +317,7 @@ test('a focused growing inline editor survives keyboard resize but yields to a r
     ownsReadingPosition: true,
   }
   const editor = {
+    offsetHeight: 38,
     matches: selector => selector === 'textarea.qcard__input',
     closest: () => null,
   }
@@ -326,14 +327,6 @@ test('a focused growing inline editor survives keyboard resize but yields to a r
     assert.equal(typeof scrollListeners.get('beforeinput'), 'function')
     assert.equal(typeof scrollListeners.get('input'), 'function')
 
-    const beforeTyping = scroll.scrollTop
-    scrollListeners.get('beforeinput')({ target: editor })
-    scroll.scrollTop = 120 // Native caret reveal races the growing textarea.
-    scrollListeners.get('input')({ target: editor })
-    frames.at(-1)()
-    assert.equal(scroll.scrollTop, beforeTyping,
-      'typing restores the exact row position captured before the field grew')
-
     globalThis.document.activeElement = editor
     scroll.clientHeight = 300
     scroll.scrollTop = 140 // Native keyboard caret reveal moves the transcript.
@@ -342,6 +335,23 @@ test('a focused growing inline editor survives keyboard resize but yields to a r
       'keyboard resize adopts the focused field’s caret-visible position')
 
     scrollListeners.get('beforeinput')({ target: editor })
+    scroll.scrollTop = 160 // The keyboard completes its caret reveal on first input.
+    scrollListeners.get('input')({ target: editor })
+    frames.at(-1)()
+    assert.equal(scroll.scrollTop, 160,
+      'a first letter that does not grow the field keeps the visible caret')
+
+    const beforeGrowth = scroll.scrollTop
+    scrollListeners.get('beforeinput')({ target: editor })
+    editor.offsetHeight = 72
+    scroll.scrollTop = 220 // Native caret reveal races the growing textarea.
+    scrollListeners.get('input')({ target: editor })
+    frames.at(-1)()
+    assert.equal(scroll.scrollTop, beforeGrowth,
+      'real field growth restores the exact pre-growth row position')
+
+    scrollListeners.get('beforeinput')({ target: editor })
+    editor.offsetHeight = 100
     scrollListeners.get('input')({ target: editor })
     const staleGrowthFrame = frames.at(-1)
     scrollListeners.get('pointerdown')({

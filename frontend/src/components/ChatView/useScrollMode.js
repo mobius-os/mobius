@@ -2826,7 +2826,10 @@ export default function useScrollMode({
         persistMode()
       }
       pendingInlineEditorAnchor = {
+        editor: event.target,
+        height: event.target.offsetHeight,
         mode: nextMode,
+        scrollTop: scrollEl.scrollTop,
         authorityVersion: currentAuthority(),
       }
     }
@@ -2838,6 +2841,29 @@ export default function useScrollMode({
       cancelAnimationFrame(inlineEditorRaf)
       inlineEditorRaf = requestAnimationFrame(() => {
         inlineEditorRaf = 0
+        const fieldGrew = plan.editor === event.target
+          && Math.abs(event.target.offsetHeight - plan.height) >= 1
+        if (!fieldGrew) {
+          // The first letter often lands while the phone is completing its
+          // keyboard caret reveal. A correction meant for textarea growth must
+          // not replay the pre-keyboard anchor when the field stayed one line.
+          // Rebase only when the transcript actually moved; ordinary letters
+          // then do no geometry work at all.
+          if (Math.abs(scrollEl.scrollTop - plan.scrollTop) <= 0.5
+              || !layoutOwnsScroll(plan.authorityVersion)) return
+          const caretMode = modeForQuestionEditingViewportChange(
+            modeRef.current,
+            anchorModeFromScroll(scrollEl),
+          )
+          if (caretMode === modeRef.current) return
+          readerLocationExplicitRef.current = true
+          transitionMode(caretMode, 'reader:inline-editor-caret')
+          persistMode()
+          // Native caret reveal already performed the physical write. Record
+          // that committed position as applied instead of writing it again.
+          rememberAppliedMode()
+          return
+        }
         writeMode(
           scrollEl,
           plan.mode,
