@@ -1,7 +1,6 @@
 """Contracts for durable delegated tasks and restrictive child policy."""
 
 import hashlib
-from datetime import timedelta
 
 from app import models
 from app.chat_writer import (
@@ -85,18 +84,6 @@ def test_submit_is_idempotent_per_parent_root_and_task_key(
   assert first.json()["attached"] is False
   assert first.json()["parent_root_run_id"] == "parent-root"
   assert first.json()["status"] == "starting"
-  assert first.json()["execution_mode"] == "durable"
-  assert first.json()["resource_receipt"] == {
-    "process_model": "separate_provider_session",
-    "duration_ms": None,
-    "input_tokens": None,
-    "output_tokens": None,
-    "cache_read_input_tokens": None,
-    "cache_creation_input_tokens": None,
-    "reasoning_output_tokens": None,
-    "total_tokens": None,
-    "cost_usd": None,
-  }
 
   second = client.post("/api/delegations", json=body, headers=auth)
   assert second.status_code == 201, second.text
@@ -381,37 +368,6 @@ def _capture_starts(monkeypatch, *, running=False):
   monkeypatch.setattr(chat_start_mod, "start_programmatic_chat_turn", fake_start)
   monkeypatch.setattr(chat_mod, "is_chat_running", lambda _cid: running)
   return starts
-
-
-def test_durable_delegation_reports_comparable_resource_receipt(db):
-  _, child_id, delegation_id = _seed_delegation(
-    db, suffix="resource-receipt",
-  )
-  run = db.query(models.ChatRun).filter_by(chat_id=child_id).one()
-  run.ended_at = run.started_at + timedelta(seconds=12, milliseconds=345)
-  run.input_tokens = 1200
-  run.output_tokens = 300
-  run.cache_read_input_tokens = 800
-  run.cache_creation_input_tokens = 40
-  run.reasoning_output_tokens = 25
-  run.total_tokens = 1500
-  run.cost_usd = 0.12
-  db.commit()
-
-  row = db.get(models.Delegation, delegation_id)
-  payload = delegations_mod.serialize_delegation(db, row)
-  assert payload["execution_mode"] == "durable"
-  assert payload["resource_receipt"] == {
-    "process_model": "separate_provider_session",
-    "duration_ms": 12345,
-    "input_tokens": 1200,
-    "output_tokens": 300,
-    "cache_read_input_tokens": 800,
-    "cache_creation_input_tokens": 40,
-    "reasoning_output_tokens": 25,
-    "total_tokens": 1500,
-    "cost_usd": 0.12,
-  }
 
 
 def test_child_completion_wakes_idle_parent_once(db, monkeypatch):

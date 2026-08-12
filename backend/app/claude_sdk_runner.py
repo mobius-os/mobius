@@ -116,34 +116,36 @@ def _claude_cli_path() -> str:
   return _CLAUDE_CLI
 
 
-async def _drain_background_tasks(client, bc, inflight, session_id, chat_id):
-  """Let still-running background subagents/tasks finish before the turn reaps.
+async def _drain_background_tasks(
+  client, bc, inflight, monitor_waits, session_id, chat_id,
+):
+  """Carry Claude's native background wake through its follow-up result.
 
   The main agent's terminal ResultMessage ends the TURN, not the background
-  tasks it spawned — the SDK keeps the channel open past the result frame
-  ("result frame ends one turn, not necessarily the run"). The turn-end
-  process-group reap would kill any task still running and lose its work. So at a
-  genuine terminal we keep the connected client and keep reading its stream,
-  dispatching each event and clearing tasks as they settle, until every tracked
-  task finishes; then the caller returns into the normal reap.
+  work it spawned. Claude Code completes a native child or receives a Monitor
+  event, wakes the parent itself, and emits a later ResultMessage for that
+  follow-up turn. Keep the same client open until that later result; a
+  task_done notification alone is too early because reaping there discards the
+  parent's synthesis.
 
-  Wait for the real work, not an arbitrary clock. Only drainable delegated-agent
-  tasks are tracked (``dispatch_sdk_message`` maintains ``inflight``), and those
-  reliably reach a terminal status, so this returns as soon as the subagents
-  actually settle — there is deliberately no time cap. Fail-safe: on ANY stream
-  error it returns so the reap proceeds; a real Stop raises CancelledError
-  (BaseException), which propagates untouched and aborts the wait at once.
+  There is no timer or second scheduler: the provider's real follow-up result is
+  the boundary. Stop/restart still interrupts the existing process normally. A
+  stream error fails safe into the ordinary reap.
   """
   try:
     async for sdk_msg in client.receive_messages():
-      dispatch_sdk_message(sdk_msg, bc, session_id, inflight)
-      if not inflight:
-        return
+      session_id, terminal = dispatch_sdk_message(
+        sdk_msg, bc, session_id, inflight, monitor_waits,
+      )
+      if terminal is None or inflight or monitor_waits:
+        continue
+      return session_id, terminal
   except Exception as exc:
     log.warning(
-      "background-task drain ended early chat_id=%s inflight=%d: %s",
-      chat_id, len(inflight), exc,
+      "background-task drain ended early chat_id=%s inflight=%d monitors=%d: %s",
+      chat_id, len(inflight), len(monitor_waits), exc,
     )
+  return session_id, None
 
 
 def _claude_process_group_id(client: ClaudeSDKClient) -> int | None:
@@ -740,34 +742,16 @@ def observe_skill_file_read(
 # turn the owner never opted into (the observed "$32 for a restaurant question").
 # We disable the keyword trigger and drive ultracode purely by the flag, so this
 # reminder carries only behavioural guidance and deliberately contains NO arming
-# keyword. Möbius's turn is one-shot (no post-turn re-invoke), so the agent must
-# await its Workflow within the turn or the fleet's work is lost when the turn ends.
+# keyword. Claude's own background completion wakes the parent inside this same
+# provider session; the runner preserves that follow-up result before teardown.
 _ULTRACODE_REMINDER = (
   "\n\n<system-reminder>You have the Workflow tool for dynamic multi-agent "
   "orchestration this turn. Use it for substantial multi-step work; answer "
-  "trivial turns directly.\n\n"
-  "This runtime gives you exactly ONE turn per message and CANNOT wake you "
-  "after it ends — there is no background notification and no follow-up turn. "
-  "So any Workflow (or background task) you launch must be fully awaited AND its "
-  "result delivered WITHIN this same turn, or the work is lost and the partner "
-  "is left with a dead turn. Concretely: right after launching a Workflow, block "
-  "on it here — call TaskOutput(task_id=..., block=True, timeout=600000) (run "
-  "ToolSearch \"select:TaskOutput\" first if it is not loaded). If that returns "
-  "retrieval_status: timeout while the workflow is still running, call it again "
-  "and keep re-blocking until it finishes — verifying between checks that it is "
-  "still making progress (if it is genuinely stuck, say so and deliver what you "
-  "have rather than silently abandoning it). Then synthesize the result and give "
-  "the full answer in this turn.\n\n"
-  "All of this waiting is invisible harness mechanics. Never tell the partner "
-  "you are waiting, blocking, or polling, and never mention Workflow, "
-  "TaskOutput, subagents, or background tasks in chat. Before you first block, "
-  "write ONE partner-facing sentence about what is being worked on (e.g. "
-  "\"Reviewing all 13 apps now — this takes a few minutes.\"). While blocked, "
-  "write nothing; when TaskOutput returns retrieval_status: timeout, call it "
-  "again immediately with no text in between. Add prose only when you have a new "
-  "finding to report — phrased as progress, not mechanism. NEVER let your final "
-  "output be \"I'll let you know when it's done\" or \"waiting for the workflow "
-  "to finish\" — you will not get another turn to finish.</system-reminder>"
+  "trivial turns directly. Claude's native completion notification returns you "
+  "to this conversation after background work settles; synthesize that result "
+  "before finishing. Never promise a later continuation unless a native "
+  "Workflow, subagent, Monitor, or finite background command is actually "
+  "running.</system-reminder>"
 )
 
 # The built-in WebSearch tool appends a standalone "REMINDER: You MUST include
@@ -1059,18 +1043,12 @@ async def run_claude_sdk_turn(
   # exactly the "apply on next turn" semantics the slash picker promises.
   _model = (agent_settings or {}).get("model") or None
   _effort = (agent_settings or {}).get("effort") or None
-  from app.delegation_runtime import (
-    NATIVE_AGENT_TOOLS,
-    native_subagents_enabled,
-  )
-  native_agents_enabled = (
-    run_policy is None and native_subagents_enabled("claude")
-  )
   # The "ultracode" tier maps to xhigh effort for the SDK flag (which only
   # accepts low/medium/high/xhigh/max) and arms the Workflow-tool
   # orchestration via the keyword trigger appended to this turn's prompt.
-  native_agents_enabled = native_agents_enabled and not gauntlet_writer
-  _ultracode = _effort == "ultracode" and native_agents_enabled
+  _ultracode = (
+    _effort == "ultracode" and run_policy is None and not gauntlet_writer
+  )
   if _effort == "ultracode":
     _effort = "xhigh"
   turn_message = user_message + _ULTRACODE_REMINDER if _ultracode else user_message
@@ -1162,11 +1140,6 @@ async def run_claude_sdk_turn(
       elif gauntlet_max_budget_usd is not None:
         restricted_options["max_budget_usd"] = gauntlet_max_budget_usd
       options_kwargs.update(restricted_options)
-    elif not native_agents_enabled:
-      options_kwargs.update({
-        "disallowed_tools": list(NATIVE_AGENT_TOOLS),
-        "agents": {},
-      })
     if skills_enabled:
       options_kwargs["skills"] = "all"
     if model_override:
@@ -1256,6 +1229,9 @@ async def run_claude_sdk_turn(
       # task_ids of background subagents/tasks still running, tracked across the
       # requery loop so a terminal result knows whether to drain before reaping.
       inflight_tasks: set = set()
+      # Monitor tasks also wake Claude's parent natively, but ordinary
+      # background shells are intentionally absent: a dev server may never end.
+      monitor_waits: set = set()
       while True:
         async for sdk_msg in client.receive_response():
           # Persist the session id ONLY from real conversation messages.
@@ -1279,7 +1255,7 @@ async def run_claude_sdk_turn(
             if _resets is not None:
               rate_limit_resets_at = _resets
           current_session_id, terminal = dispatch_sdk_message(
-            sdk_msg, bc, current_session_id, inflight_tasks,
+            sdk_msg, bc, current_session_id, inflight_tasks, monitor_waits,
           )
           if terminal is None:
             # A steer fires its interrupt synchronously in
@@ -1346,16 +1322,20 @@ async def run_claude_sdk_turn(
           cost_usd = terminal.get("cost_usd")
           if rate_limit_resets_at is not None:
             terminal.setdefault("rate_limit_resets_at", rate_limit_resets_at)
-          # Background subagents/tasks the agent launched but did not block on
-          # are still live at this terminal result. The turn-end reap would kill
-          # them mid-work; keep the connected client and drain until they finish,
-          # THEN return into the reap. Skipped on a Stop — the owner asked to
-          # stop, so honor it immediately. Fail-safe: on any stream error the
-          # drain returns and the reap proceeds exactly as before.
-          if inflight_tasks and not active_client.interrupt_requested:
-            await _drain_background_tasks(
-              client, bc, inflight_tasks, current_session_id, chat_id,
+          # Claude itself wakes the parent when native work completes. Keep the
+          # connected client through that follow-up ResultMessage; stopping at
+          # task_done is one message too early and loses the parent's synthesis.
+          if (
+            (inflight_tasks or monitor_waits)
+            and not active_client.interrupt_requested
+          ):
+            current_session_id, followup = await _drain_background_tasks(
+              client, bc, inflight_tasks, monitor_waits,
+              current_session_id, chat_id,
             )
+            if followup is not None:
+              terminal = followup
+              cost_usd = terminal.get("cost_usd")
           return terminal
         else:
           # The stream ended without a terminal ResultMessage. Any buffered

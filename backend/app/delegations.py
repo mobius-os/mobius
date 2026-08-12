@@ -382,28 +382,6 @@ def serialize_delegation(
     db, row, load_result=include_result,
   )
   _record_lifecycle(db, row, status)
-  duration_ms = None
-  if run is not None and run.started_at is not None and run.ended_at is not None:
-    duration_ms = max(0, int(
-      (run.ended_at - run.started_at).total_seconds() * 1000
-    ))
-  resource_receipt = {
-    "process_model": "separate_provider_session",
-    "duration_ms": duration_ms,
-    "input_tokens": run.input_tokens if run is not None else None,
-    "output_tokens": run.output_tokens if run is not None else None,
-    "cache_read_input_tokens": (
-      run.cache_read_input_tokens if run is not None else None
-    ),
-    "cache_creation_input_tokens": (
-      run.cache_creation_input_tokens if run is not None else None
-    ),
-    "reasoning_output_tokens": (
-      run.reasoning_output_tokens if run is not None else None
-    ),
-    "total_tokens": run.total_tokens if run is not None else None,
-    "cost_usd": run.cost_usd if run is not None else None,
-  }
   return {
     "id": row.id,
     "app_id": row.app_id,
@@ -417,10 +395,6 @@ def serialize_delegation(
     "scope": row.scope,
     "cwd": row.cwd,
     "max_budget_usd": row.max_budget_usd,
-    # Stable contract fields let callers compare or replace executors without
-    # inferring the implementation from provider-specific identifiers.
-    "execution_mode": "durable",
-    "resource_receipt": resource_receipt,
     "status": status,
     "physical_run_id": run.id if run is not None else None,
     "provider_session_id": run.provider_session_id if run is not None else None,

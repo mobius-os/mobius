@@ -37,15 +37,10 @@ except ImportError:
   TERMINAL_TASK_STATUSES = frozenset()
   TaskUpdatedMessage = None
 
-# Only *delegated agent* tasks reliably reach a terminal status, so only these
-# are safe to wait on before the turn-end reap. The SDK gates its own
-# task-lifecycle tracker on this exact set (claude_agent_sdk/_internal/query.py)
-# and warns that tracking anything else "will hang the query": a background shell
-# or Monitor is a long-running watch that by design never emits a terminal frame,
-# so adding it to the in-flight set would make the drain block to its full
-# timeout instead of returning. The constant lives in the SDK's private
-# internals (not exported from types), so mirror it with a best-effort import and
-# a hardcoded fallback that matches the current SDK value.
+# The SDK's generic task ledger admits only finite delegated-agent work. Mirror
+# that exact private constant here; Monitor is handled separately and only when
+# an explicit Monitor tool call identifies the matching local_bash task. This
+# keeps an unrelated background dev server from holding a chat turn forever.
 try:
   from claude_agent_sdk._internal.query import DEFERRING_TASK_TYPES
 except ImportError:
@@ -231,6 +226,7 @@ def dispatch_sdk_message(
   bc,
   current_session_id: str | None,
   inflight: set | None = None,
+  monitor_waits: set | None = None,
 ) -> tuple[str | None, dict | None]:
   """Translates one SDK message into broadcast events.
 
@@ -244,8 +240,12 @@ def dispatch_sdk_message(
   *drainable* background task_ids still running — added when a
   DEFERRING_TASK_TYPES agent starts, discarded on its terminal frame —
   from the very branches that already classify those task messages. The
-  runner keeps a live client draining until that set empties so
-  parallel subagents finish instead of being reaped at turn end.
+  runner keeps a live client draining through Claude's follow-up result so
+  parallel subagents finish and the parent reacts before the process is reaped.
+
+  ``monitor_waits`` follows a Monitor call from its tool-use id to the
+  ``local_bash`` task id emitted by Claude. This deliberately does not track
+  ordinary background shells, which may be dev servers that never finish.
 
   Extracted from the runner loop so unit tests can exercise the
   full dispatch matrix (named events, unknown fallthrough, usage
@@ -283,6 +283,14 @@ def dispatch_sdk_message(
         and sdk_msg.task_id is not None
       ):
         inflight.add(sdk_msg.task_id)
+      if (
+        monitor_waits is not None
+        and getattr(sdk_msg, "task_type", None) == "local_bash"
+        and getattr(sdk_msg, "tool_use_id", None) in monitor_waits
+        and sdk_msg.task_id is not None
+      ):
+        monitor_waits.discard(sdk_msg.tool_use_id)
+        monitor_waits.add(sdk_msg.task_id)
       return current_session_id, None
     if isinstance(sdk_msg, TaskProgressMessage):
       bc.publish({
@@ -312,6 +320,8 @@ def dispatch_sdk_message(
       bc.publish(public_event)
       if inflight is not None:
         inflight.discard(sdk_msg.task_id)
+      if monitor_waits is not None:
+        monitor_waits.discard(sdk_msg.task_id)
       return current_session_id, None
     if TaskUpdatedMessage is not None and isinstance(sdk_msg, TaskUpdatedMessage):
       # A background task's terminal state can arrive ONLY as a task_updated
@@ -346,6 +356,8 @@ def dispatch_sdk_message(
           "type", "task_id", "status", "summary", "tool_use_id")})
         if inflight is not None:
           inflight.discard(sdk_msg.task_id)
+        if monitor_waits is not None:
+          monitor_waits.discard(sdk_msg.task_id)
       return current_session_id, None
     if sdk_msg.subtype == "init":
       # Setup metadata only — no Möbius-side render.
@@ -424,6 +436,8 @@ def dispatch_sdk_message(
           "input": "",
           "tool_use_id": block.id,
         })
+        if monitor_waits is not None and block.name == "Monitor":
+          monitor_waits.add(block.id)
         summary = summarize_tool_input(block.name, block.input)
         edit_preview = claude_edit_preview(block.name, block.input)
         if summary or edit_preview:
@@ -529,6 +543,15 @@ def dispatch_sdk_message(
     for block in content:
       if isinstance(block, ToolResultBlock):
         output = _format_tool_output(block.content)
+        # A rejected/failed Monitor never emits the local_bash task-start that
+        # normally replaces its tool-use id. Do not leave that failed launch
+        # armed as a wait with no possible wake-up.
+        if (
+          monitor_waits is not None
+          and block.is_error
+          and block.tool_use_id in monitor_waits
+        ):
+          monitor_waits.discard(block.tool_use_id)
         # Carry the tool_use_id (matches the ToolUseBlock's .id) so the sink can
         # key a stash of the full output and the block can fetch it by id.
         bc.publish({

@@ -150,6 +150,15 @@ _CODEX_PROMPT_CONTROL_OVERRIDES = [
 ]
 
 
+def _env_flag_on(name: str, *, default: bool) -> bool:
+  """Read a boolean env var: ``off``/``0``/``false``/``no``/empty disable it;
+  anything else enables; unset falls back to ``default``."""
+  raw = os.environ.get(name)
+  if raw is None:
+    return default
+  return raw.strip().lower() not in ("off", "0", "false", "no", "")
+
+
 def _codex_config_overrides(
   *,
   allow_questions: bool = True,
@@ -190,8 +199,10 @@ def _codex_config_overrides(
     # extension lets a new app-server resume the logical operation after
     # Möbius deliberately tears the previous process down for a restart.
     overrides.append("features.goals=true")
-  from app.delegation_runtime import native_subagents_enabled
-  if allow_multi_agent and native_subagents_enabled("codex"):
+  if (
+    allow_multi_agent
+    and _env_flag_on("MOEBIUS_CODEX_MULTI_AGENT", default=True)
+  ):
     overrides += [
       "features.multi_agent_v2.enabled=true",
       "features.multi_agent_v2.tool_namespace=agents",

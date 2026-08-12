@@ -435,6 +435,230 @@ def _success_result(
   )
 
 
+@pytest.mark.asyncio
+async def test_native_agent_completion_is_drained_through_parent_followup(
+  monkeypatch,
+):
+  """A task_done frame is not the run boundary: Claude still follows it with
+  the parent turn that synthesizes the child result."""
+  captured: dict = {}
+
+  async def _ignore_session_persistence(*_args):
+    return None
+
+  class _FakeClient:
+    def __init__(self, _options):
+      captured["client"] = self
+      self.drained: list[object] = []
+
+    async def connect(self):
+      return None
+
+    async def query(self, _message):
+      return None
+
+    async def disconnect(self):
+      return None
+
+    async def receive_response(self):
+      yield TaskStartedMessage(
+        subtype="task_started",
+        data={},
+        task_id="agent-1",
+        description="inspect the implementation",
+        uuid="task-start-1",
+        session_id="sess-native",
+        tool_use_id="spawn-1",
+        task_type="local_agent",
+      )
+      yield _success_result("sess-native", cost=0.01)
+
+    async def receive_messages(self):
+      messages = [
+        TaskNotificationMessage(
+          subtype="task_notification",
+          data={},
+          task_id="agent-1",
+          status="completed",
+          output_file="/tmp/agent-1",
+          summary="inspection complete",
+          uuid="task-done-1",
+          session_id="sess-native",
+          tool_use_id="spawn-1",
+        ),
+        AssistantMessage(
+          content=[TextBlock(text="Parent synthesized the native result.")],
+          model="claude-sonnet",
+          session_id="sess-native",
+        ),
+        _success_result("sess-native", cost=0.03),
+      ]
+      for message in messages:
+        self.drained.append(message)
+        yield message
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+  monkeypatch.setattr(
+    claude_sdk_runner, "_persist_session_id", _ignore_session_persistence,
+  )
+  bus = _Bus()
+
+  result = await run_claude_sdk_turn(
+    "delegate this inspection",
+    session_id=None,
+    base_env={},
+    cwd="/data",
+    chat_id="native-followup",
+    skill_text="system",
+    bc=bus,
+    pending_questions={},
+    db=None,
+  )
+
+  assert result["cost_usd"] == 0.03
+  assert len(captured["client"].drained) == 3
+  event_types = [event["type"] for event in bus.events]
+  assert event_types.index("task_done") < event_types.index("text_final")
+  text_final = next(
+    event for event in bus.events if event["type"] == "text_final"
+  )
+  assert text_final["content"] == "Parent synthesized the native result."
+
+
+@pytest.mark.asyncio
+async def test_monitor_launch_is_drained_through_claude_followup(monkeypatch):
+  """Monitor's next event wakes Claude even though it is intentionally absent
+  from the SDK's finite-task ledger."""
+  captured: dict = {}
+
+  async def _ignore_session_persistence(*_args):
+    return None
+
+  class _FakeClient:
+    def __init__(self, _options):
+      captured["client"] = self
+      self.drained: list[object] = []
+
+    async def connect(self):
+      return None
+
+    async def query(self, _message):
+      return None
+
+    async def disconnect(self):
+      return None
+
+    async def receive_response(self):
+      yield AssistantMessage(
+        content=[ToolUseBlock(
+          id="monitor-1",
+          name="Monitor",
+          input={"command": "sleep 1; echo READY", "persistent": False},
+        )],
+        model="claude-sonnet",
+        session_id="sess-monitor",
+      )
+      yield TaskStartedMessage(
+        subtype="task_started",
+        data={},
+        task_id="monitor-task-1",
+        description="watch for READY",
+        uuid="monitor-start-1",
+        session_id="sess-monitor",
+        tool_use_id="monitor-1",
+        task_type="local_bash",
+      )
+      yield _success_result("sess-monitor", cost=0.01)
+
+    async def receive_messages(self):
+      messages = [
+        TaskNotificationMessage(
+          subtype="task_notification",
+          data={},
+          task_id="monitor-task-1",
+          status="completed",
+          output_file="/tmp/monitor-task-1",
+          summary="MONITOR_READY",
+          uuid="monitor-done-1",
+          session_id="sess-monitor",
+          tool_use_id="monitor-1",
+        ),
+        AssistantMessage(
+          content=[TextBlock(text="Monitor fired; continuing now.")],
+          model="claude-sonnet",
+          session_id="sess-monitor",
+        ),
+        _success_result("sess-monitor", cost=0.02),
+      ]
+      for message in messages:
+        self.drained.append(message)
+        yield message
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+  monkeypatch.setattr(
+    claude_sdk_runner, "_persist_session_id", _ignore_session_persistence,
+  )
+  bus = _Bus()
+
+  result = await run_claude_sdk_turn(
+    "continue when READY appears",
+    session_id=None,
+    base_env={},
+    cwd="/data",
+    chat_id="monitor-followup",
+    skill_text="system",
+    bc=bus,
+    pending_questions={},
+    db=None,
+  )
+
+  assert result["cost_usd"] == 0.02
+  assert len(captured["client"].drained) == 3
+  assert next(
+    event for event in bus.events if event["type"] == "text_final"
+  ) == {
+    "type": "text_final",
+    "content": "Monitor fired; continuing now.",
+  }
+
+
+def test_plain_background_shell_does_not_arm_monitor_wait():
+  monitor_waits: set = set()
+  dispatch_sdk_message(
+    AssistantMessage(
+      content=[ToolUseBlock(
+        id="server-1",
+        name="Bash",
+        input={"command": "npm run dev", "run_in_background": True},
+      )],
+      model="claude-sonnet",
+    ),
+    _Bus(),
+    None,
+    set(),
+    monitor_waits,
+  )
+  assert monitor_waits == set()
+
+
+def test_failed_monitor_launch_does_not_leave_an_unreachable_wait():
+  monitor_waits = {"monitor-failed"}
+  dispatch_sdk_message(
+    UserMessage(
+      content=[ToolResultBlock(
+        tool_use_id="monitor-failed",
+        content="Monitor is unavailable",
+        is_error=True,
+      )],
+    ),
+    _Bus(),
+    None,
+    set(),
+    monitor_waits,
+  )
+  assert monitor_waits == set()
+
+
 def _interrupt_result(session_id: str = "sess-1") -> ResultMessage:
   """The terminal an SDK interrupt produces — error_during_execution."""
   return ResultMessage(
@@ -1142,51 +1366,6 @@ async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
     "type": "adaptive",
     "display": "summarized",
   }
-
-
-@pytest.mark.asyncio
-async def test_shared_native_subagent_switch_removes_claude_agent_tools(
-  monkeypatch,
-):
-  captured = {}
-
-  class _FakeClient:
-    def __init__(self, options):
-      captured["options"] = options
-
-    async def connect(self):
-      return None
-
-    async def query(self, _message):
-      return None
-
-    async def disconnect(self):
-      return None
-
-    async def receive_response(self):
-      yield _success_result("native-switch")
-
-  monkeypatch.setenv("MOEBIUS_NATIVE_SUBAGENTS", "off")
-  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
-  await run_claude_sdk_turn(
-    "hello",
-    session_id=None,
-    base_env={},
-    cwd="/data",
-    chat_id="native-switch",
-    skill_text="system",
-    bc=_Bus(),
-    pending_questions={},
-    db=None,
-    agent_settings={"effort": "ultracode"},
-  )
-
-  options = captured["options"]
-  assert set(options.disallowed_tools) == {
-    "Task", "TaskOutput", "TaskStop", "Workflow", "Workflows", "Agent",
-  }
-  assert options.agents == {}
-  assert options.extra_args["settings"] == '{"disableWorkflows": true}'
 
 
 @pytest.mark.asyncio

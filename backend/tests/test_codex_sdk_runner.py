@@ -3244,13 +3244,6 @@ def test_codex_config_overrides_kill_switch(monkeypatch):
   assert not any("multi_agent_v2" in o for o in ov)
 
 
-def test_shared_native_subagent_switch_removes_codex_agents(monkeypatch):
-  monkeypatch.setenv("MOEBIUS_NATIVE_SUBAGENTS", "off")
-  monkeypatch.delenv("MOEBIUS_CODEX_MULTI_AGENT", raising=False)
-  ov = codex_sdk_runner._codex_config_overrides()
-  assert not any("multi_agent_v2" in item for item in ov)
-
-
 def test_codex_config_overrides_enable_native_goal_runtime(monkeypatch):
   monkeypatch.delenv("MOEBIUS_CODEX_MULTI_AGENT", raising=False)
   assert "features.goals=true" in codex_sdk_runner._codex_config_overrides()
