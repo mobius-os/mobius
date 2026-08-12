@@ -313,7 +313,12 @@ test('a focused inline editor keeps one current owner across keyboard and growth
     spacerRef: { current: fakeElement() },
     lastUserMsgRef: { current: lastUser },
     chatRef: { current: fakeElement() },
-    footRef: { current: fakeElement({ offsetHeight: 80 }) },
+    footRef: { current: fakeElement({
+      offsetHeight: 70,
+      getBoundingClientRect() {
+        return { top: scroll.clientHeight - 70, bottom: scroll.clientHeight }
+      },
+    }) },
     messages,
     messagesRef: { current: messages },
     loadingOlderRef: { current: false },
@@ -323,11 +328,16 @@ test('a focused inline editor keeps one current owner across keyboard and growth
   }
   let editorHeight = 38
   let editorHeightReads = 0
+  const editorContentTop = 320
   const editor = {
     dataset: { chatInlineEditor: 'question-answer' },
     get offsetHeight() {
       editorHeightReads += 1
       return editorHeight
+    },
+    getBoundingClientRect() {
+      const top = editorContentTop - scroll.scrollTop
+      return { top, bottom: top + editorHeight, height: editorHeight }
     },
     closest: () => null,
   }
@@ -348,8 +358,8 @@ test('a focused inline editor keeps one current owner across keyboard and growth
     assert.equal(observers.length, 1,
       'the focused editor joins the chat’s existing resize transaction')
     assert.equal(observers[0].observed.has(editor), true)
-    assert.equal(editorHeightReads, 1,
-      'focus takes one size baseline instead of measuring every key')
+    assert.equal(editorHeightReads, 0,
+      'focus does not synchronously measure the editor')
     scroll.clientHeight = 300
     scroll.scrollTop = 140 // Native keyboard caret reveal moves the transcript.
     observers[0].callback()
@@ -362,34 +372,34 @@ test('a focused inline editor keeps one current owner across keyboard and growth
     flushFrames()
     assert.equal(scroll.scrollTop, 160,
       'a first letter that does not grow the field keeps the visible caret')
-    assert.equal(editorHeightReads, 1,
+    assert.equal(editorHeightReads, 0,
       'ordinary text input performs no synchronous field-size reads')
 
     const beforeGrowth = scroll.scrollTop
     scrollListeners.get('beforeinput')({ target: editor })
     editorHeight = 72
-    scroll.scrollTop = 220 // Native caret reveal races the growing textarea.
     scrollListeners.get('input')({ target: editor })
     observers[0].callback([{
       target: editor,
       borderBoxSize: [{ blockSize: editorHeight }],
     }])
-    assert.equal(scroll.scrollTop, beforeGrowth,
-      'real field growth restores the exact pre-growth row position')
+    assert.equal(scroll.scrollTop > beforeGrowth, true,
+      'field growth moves the answer upward instead of extending below the composer')
+    assert.equal(editor.getBoundingClientRect().bottom <= 222, true,
+      'the whole multiline writing surface remains in the usable viewport')
     flushFrames()
 
     scrollListeners.get('beforeinput')({ target: editor })
     editorHeight = 100
-    scroll.scrollTop = 220
     scrollListeners.get('input')({ target: editor })
     scroll.clientHeight = 260
-    scroll.scrollTop = 240 // A later keyboard frame selects a newer caret hold.
+    scroll.scrollTop = 200 // A later keyboard frame selects a newer caret hold.
     observers[0].callback([{
       target: editor,
       borderBoxSize: [{ blockSize: editorHeight }],
     }])
-    assert.equal(scroll.scrollTop, 240,
-      'delayed field growth cannot replay an anchor older than a viewport rebase')
+    assert.equal(editor.getBoundingClientRect().bottom <= 182, true,
+      'a combined keyboard and growth frame reveals above the resized composer edge')
     flushFrames()
 
     scrollListeners.get('beforeinput')({ target: editor })

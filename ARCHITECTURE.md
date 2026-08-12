@@ -689,15 +689,16 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   typing cannot scroll": changing its value can grow the field and cause the
   browser to move the transcript to keep the native caret visible. Only an
   ordinary `ANCHOR_AT` reading hold may adopt that native caret reveal. While
-  the field is focused, its own `ResizeObserver` distinguishes an actual field
-  resize from ordinary typing without reading layout on every key. `beforeinput`
-  captures the exact pre-mutation hold together with both reader-intent and
-  semantic-mode generations. A real field resize may restore that hold only
-  while both generations remain current; a later keyboard viewport rebase or
-  reader gesture permanently invalidates it. If the field does not resize but
-  the browser moved the transcript, the same caret-adoption operation used by
-  keyboard viewport changes records the visible position without writing it a
-  second time. Stronger location contracts keep layout ownership:
+  the field is focused it joins the chat's existing `ResizeObserver`, so a
+  keyboard viewport change and field growth resolve in one layout transaction.
+  The usable bottom is the overlaid composer's top, not the scroll box's hidden
+  physical bottom: multiline growth moves the field upward until the complete
+  writing surface is visible there, then records that position as the new hold.
+  Ordinary characters read only `scrollTop`; geometry is consulted only after
+  the browser actually moves or the field resizes. The same reveal operation
+  owns keyboard resize, native first-letter caret movement, and multiline
+  growth, so none can replay a position chosen by another. Stronger location
+  contracts keep layout ownership:
   `FOLLOW_BOTTOM` absorbs the new line in its normal ResizeObserver pass, while
   pins, reserved-tail holds, and the question-submission overlay remain fixed.
 - **R5a — Attention nudges reveal the usable tail.** Tapping an offscreen question
