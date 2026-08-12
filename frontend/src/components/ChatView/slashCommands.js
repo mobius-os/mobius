@@ -34,6 +34,13 @@ export const SLASH_COMMANDS = [
     detail: 'Runs until the goal holds. /goal clear stops it.',
     providers: ['claude', 'codex'],
   },
+  {
+    name: 'goals',
+    args: '<outcome> + one stage per line',
+    summary: 'Work through ordered goals under one outcome',
+    detail: 'Put the outcome on this line, then add two or more bullet stages below it.',
+    providers: ['claude', 'codex'],
+  },
 ]
 
 /**

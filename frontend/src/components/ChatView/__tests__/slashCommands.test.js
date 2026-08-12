@@ -60,6 +60,13 @@ test('goal is selectable on Claude', () => {
   assert.equal(slashCommandUnavailableReason(goal, 'claude'), '')
 })
 
+test('goals exposes the ordered-plan command on both goal-capable providers', () => {
+  const plan = matchSlashCommands('/goals').find((command) => command.name === 'goals')
+  assert.ok(plan)
+  assert.equal(slashCommandIsAvailable(plan, 'claude'), true)
+  assert.equal(slashCommandIsAvailable(plan, 'codex'), true)
+})
+
 test('goal is selectable on Codex, which exposes the same durable goal controls', () => {
   const [goal] = matchSlashCommands('/go')
   assert.equal(slashCommandIsAvailable(goal, 'codex'), true)
@@ -77,7 +84,7 @@ test('provider-specific commands fail closed while provider metadata loads', () 
 
 test('matching commands are visible only while the composer owns focus', () => {
   const commands = matchSlashCommands('/')
-  assert.equal(visibleSlashCommands(commands, { focused: true }).length, 1)
+  assert.equal(visibleSlashCommands(commands, { focused: true }).length, 2)
   assert.deepEqual(visibleSlashCommands(commands, { focused: false }), [])
   assert.deepEqual(visibleSlashCommands(commands, {
     focused: true,

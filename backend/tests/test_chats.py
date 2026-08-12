@@ -159,6 +159,17 @@ def test_chat_reads_keep_goal_identity_after_a_mid_turn_question(
     goal_objective="finish the review",
     started_at=started_at,
   ))
+  db.add(models.GoalPlan(
+    id="active-goal-plan",
+    chat_id=chat.id,
+    overall_objective="Ship the review",
+    stages=["Inspect the change", "Finish the review"],
+    current_stage=1,
+    current_run_token="active-goal-run",
+    status="active",
+    created_at=started_at,
+    updated_at=started_at,
+  ))
   db.commit()
 
   detail = client.get(f"/api/chats/{chat.id}", headers=auth)
@@ -168,6 +179,16 @@ def test_chat_reads_keep_goal_identity_after_a_mid_turn_question(
   assert runtime.status_code == 200
   assert detail.json()["active_goal_objective"] == "finish the review"
   assert runtime.json()["active_goal_objective"] == "finish the review"
+  expected_plan = {
+    "id": "active-goal-plan",
+    "overall_objective": "Ship the review",
+    "stage_index": 1,
+    "stage_count": 2,
+    "stage_objective": "Finish the review",
+    "stage_label": "Ship the review · Stage 2/2 · Finish the review",
+  }
+  assert detail.json()["active_goal_plan"] == expected_plan
+  assert runtime.json()["active_goal_plan"] == expected_plan
 
 
 def test_chat_usage_reports_totals_and_historic_coverage(

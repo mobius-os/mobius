@@ -1629,6 +1629,49 @@ def _add_delegation_parent_wake(eng) -> None:
       ))
 
 
+def _create_goal_plans_and_add_delegation_goal_mode(eng) -> None:
+  """Create sequential goal plans and opt-in child goal execution."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  tables = set(inspector.get_table_names())
+  with eng.begin() as conn:
+    if "goal_plans" not in tables:
+      conn.execute(text(
+        "CREATE TABLE goal_plans ("
+        "id VARCHAR(64) NOT NULL PRIMARY KEY, "
+        "chat_id VARCHAR(64) NOT NULL, "
+        "overall_objective TEXT NOT NULL, "
+        "stages JSON NOT NULL, "
+        "current_stage INTEGER NOT NULL DEFAULT 0, "
+        "current_run_token VARCHAR(64) NULL, "
+        "status VARCHAR(16) NOT NULL DEFAULT 'active', "
+        "created_at DATETIME NOT NULL, "
+        "updated_at DATETIME NOT NULL, "
+        "FOREIGN KEY(chat_id) REFERENCES chats(id)"
+        ")"
+      ))
+      conn.execute(text(
+        "CREATE INDEX ix_goal_plans_chat_id ON goal_plans (chat_id)"
+      ))
+      conn.execute(text(
+        "CREATE INDEX ix_goal_plans_current_run_token "
+        "ON goal_plans (current_run_token)"
+      ))
+      conn.execute(text(
+        "CREATE INDEX ix_goal_plans_status ON goal_plans (status)"
+      ))
+    if "delegations" in tables:
+      columns = {
+        column["name"] for column in inspector.get_columns("delegations")
+      }
+      if "goal_mode" not in columns:
+        conn.execute(text(
+          "ALTER TABLE delegations ADD COLUMN goal_mode "
+          "BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -1642,6 +1685,7 @@ _SCHEMA_MIGRATIONS = (
   ("0010_chat_pending_question_id", _add_chat_pending_question_id),
   ("0011_delegation_parent_wake", _add_delegation_parent_wake),
   ("0012_connector_oauth_gcloud", _add_connector_oauth_gcloud_fields),
+  ("0013_goal_plans_and_delegation_goal_mode", _create_goal_plans_and_add_delegation_goal_mode),
 )
 
 

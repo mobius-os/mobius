@@ -77,6 +77,7 @@ def test_submit_is_idempotent_per_parent_root_and_task_key(
     "provider": "codex",
     "scope": "read",
     "cwd": "/data/platform",
+    "goal_mode": True,
   }
 
   first = client.post("/api/delegations", json=body, headers=auth)
@@ -84,6 +85,7 @@ def test_submit_is_idempotent_per_parent_root_and_task_key(
   assert first.json()["attached"] is False
   assert first.json()["parent_root_run_id"] == "parent-root"
   assert first.json()["status"] == "starting"
+  assert first.json()["goal_mode"] is True
 
   second = client.post("/api/delegations", json=body, headers=auth)
   assert second.status_code == 201, second.text
@@ -93,6 +95,9 @@ def test_submit_is_idempotent_per_parent_root_and_task_key(
   # the same child claim rather than creating another control/chat row.
   assert len(starts) == 2
   assert db.query(models.Delegation).count() == 1
+  policy = policy_for_chat(db, first.json()["child_chat_id"])
+  assert policy is not None and policy.goal_mode is True
+  assert "one fixed native goal" in policy.system_prompt
 
   conflict = client.post(
     "/api/delegations",
@@ -271,13 +276,13 @@ def test_continuation_physical_runs_inherit_one_logical_root(db):
   assert third.root_run_id == "physical-3"
 
 
-def test_delegated_codex_config_has_no_questions_or_nested_agents():
+def test_delegated_codex_goal_config_has_no_questions_or_nested_agents():
   overrides = _codex_config_overrides(
-    allow_questions=False, allow_multi_agent=False, allow_goals=False,
+    allow_questions=False, allow_multi_agent=False, allow_goals=True,
   )
   assert "features.default_mode_request_user_input=true" not in overrides
   assert not any("multi_agent" in item for item in overrides)
-  assert "features.goals=true" not in overrides
+  assert "features.goals=true" in overrides
 
 
 # --- Parent auto-wake on child completion ------------------------------------

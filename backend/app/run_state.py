@@ -18,6 +18,7 @@ def goal_objective_for_run_start(
   db: Session,
   chat_id: str,
   message: Mapping[str, Any] | None,
+  run_token: str | None = None,
 ) -> str | None:
   """Resolve the goal metadata for a newly opened durable run.
 
@@ -27,6 +28,16 @@ def goal_objective_for_run_start(
   """
   from app.chat_context import _goal_objective
   from app.continuations import is_continuation_message
+
+  # A goal-plan stage owns its exact run identity.  The writer claims retries
+  # and hidden stage continuations before reaching this read, so this lookup
+  # can never accidentally revive a completed plan on an ordinary later turn.
+  if run_token is not None:
+    from app.goal_plans import active_plan_for_run, stage_label
+
+    plan = active_plan_for_run(db, chat_id, run_token)
+    if plan is not None:
+      return stage_label(plan)
 
   content = message.get("content") if message is not None else ""
   objective = _goal_objective(content if isinstance(content, str) else "")
@@ -116,6 +127,15 @@ def running_goal_objective(db: Session, chat_id: str) -> str | None:
     .first()
   )
   return row[0] if row is not None else None
+
+
+def running_goal_plan(db: Session, chat_id: str) -> dict | None:
+  """Return plan progress only while its exact current stage is running."""
+  row = running_run(db, chat_id)
+  if row is None:
+    return None
+  from app.goal_plans import active_plan_summary
+  return active_plan_summary(db, chat_id, row.id)
 
 
 def running_chat_ids(

@@ -38,6 +38,9 @@ class DelegationSubmit(BaseModel):
   effort: str | None = Field(default=None, max_length=32)
   scope: str
   cwd: str | None = Field(default=None, max_length=1024)
+  # Native goal mode remains opt-in because it may let one child use multiple
+  # physical provider turns before it returns its bounded result.
+  goal_mode: bool = False
   # Wake the parent chat with the result when the child settles. Defaults on for
   # the owner-agent subagent path; a pure-poll caller can pass False.
   notify_parent_on_complete: bool = True
@@ -198,6 +201,7 @@ async def submit_or_attach(
       scope=body.scope,
       cwd=cwd,
       max_budget_usd=5.0 if body.provider == "claude" else None,
+      goal_mode=body.goal_mode,
       notify_parent_on_complete=body.notify_parent_on_complete,
     )
     try:

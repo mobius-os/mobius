@@ -1592,14 +1592,15 @@ async def run_codex_sdk_turn(
 
   # config_overrides always isolates the prompt stack, then carries the
   # request_user_input (AskUserQuestion parity), goal, and multi-agent flags.
-  # Delegated children disable those optional tools at this provider-owned seam.
+  # Delegated children still disable questions and recursive multi-agent work;
+  # only an opt-in child goal receives the provider's goal extension.
   codex_bin = shutil.which("codex")
   delegated = run_policy is not None
   restricted = delegated or gauntlet_writer
   config_overrides = _codex_config_overrides(
     allow_questions=not restricted,
     allow_multi_agent=not restricted,
-    allow_goals=not restricted,
+    allow_goals=not restricted or (delegated and bool(run_policy.goal_mode)),
     delegated_read_sandbox=(
       delegated and run_policy.scope == "read"
     ),

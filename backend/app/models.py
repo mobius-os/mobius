@@ -292,6 +292,34 @@ class ChatRun(Base):
   restart_nonce = Column(String(128), nullable=True, default=None)
 
 
+class GoalPlan(Base):
+  """One ordered set of durable goals for a chat.
+
+  A plan is deliberately not a second kind of chat runner.  Its current stage
+  points at the ordinary ChatRun that owns the provider goal; the chat writer
+  advances it atomically with the hidden continuation that starts the next
+  stage.  That leaves every stage with the same restart, stop, and transcript
+  semantics as a normal turn while keeping the overall outcome durable.
+  """
+
+  __tablename__ = "goal_plans"
+
+  id = Column(String(64), primary_key=True)
+  chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=False, index=True
+  )
+  overall_objective = Column(Text, nullable=False)
+  stages = Column(JSON, nullable=False, default=list)
+  current_stage = Column(Integer, nullable=False, default=0)
+  # The exact ChatRun allowed to complete or advance this plan.  Never infer
+  # ownership from the transcript tail: a queued owner message can arrive
+  # between stages without becoming permission to start two goals at once.
+  current_run_token = Column(String(64), nullable=True, index=True)
+  status = Column(String(16), nullable=False, default="active", index=True)
+  created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+  updated_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+
+
 class Delegation(Base):
   """Immutable control plane for one durable delegated task.
 
@@ -330,6 +358,10 @@ class Delegation(Base):
   cwd = Column(String(1024), nullable=False)
   prompt_sha256 = Column(String(64), nullable=False)
   max_budget_usd = Column(Float, nullable=True)
+  # Opt-in native goal execution for this one bounded child task.  The child
+  # still cannot ask the owner or delegate further; this only lets its own
+  # provider keep working across physical turns until that task is complete.
+  goal_mode = Column(Boolean, nullable=False, default=False)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
   cancelled_at = Column(DateTime, nullable=True, default=None)
   # Opt-in: wake the parent chat with the result when this child settles. Off by
