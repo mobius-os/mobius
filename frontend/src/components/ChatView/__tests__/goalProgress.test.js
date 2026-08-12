@@ -172,7 +172,7 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
   )
   assert.match(
     chatView,
-    /disconnect\(\{ clearStreaming: true \}\)\s*promoteStreamToMessages\(\)\s*setSending\(false\)\s*setServerRunningState\(false\)\s*setActiveGoalState\(''\)/,
+    /disconnect\(\{ clearStreaming: true \}\)\s*promoteStreamToMessages\(\)\s*setSending\(false\)\s*setServerRunningLocalState\(false\)[\s\S]{0,500}setActiveGoalObjective\(''\)/,
     'a confirmed Stop must retire its goal indication',
   )
   assert.match(

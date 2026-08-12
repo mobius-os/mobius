@@ -32,6 +32,47 @@ test('a live-only answer selects the streaming surface', () => {
   assert.equal(result.useDbActivePayload, false)
 })
 
+test('a durable pending question outranks a richer stale stream snapshot', () => {
+  const pendingQuestionId = 'question-restart'
+  const durableReply = {
+    role: 'assistant',
+    ts: 2,
+    content: 'I checked the packaged game.',
+    blocks: [
+      { type: 'text', content: 'I checked the packaged game.' },
+      {
+        type: 'question',
+        question_id: pendingQuestionId,
+        questions: [{ question: 'Restart now?', options: [{ label: 'Restarted' }] }],
+      },
+    ],
+  }
+  const staleStreamItems = [
+    { type: 'text', content: 'I checked the packaged game.' },
+    {
+      type: 'tool',
+      tool: 'Bash',
+      status: 'done',
+      input: 'run a long pre-question inspection',
+      output: 'detailed output that made the raw snapshot look richer',
+    },
+  ]
+
+  const result = deriveActiveAssistantSelection({
+    turnActive: true,
+    messages: [
+      { role: 'user', content: 'test the game', ts: 1 },
+      durableReply,
+    ],
+    streamItems: staleStreamItems,
+    findBridgeIndex: () => 1,
+  })
+
+  assert.equal(result.activeMirrorMsg, durableReply)
+  assert.equal(result.useDbActivePayload, true)
+  assert.equal(result.showActiveAssistantSurface, true)
+})
+
 test('a source-rich promoted answer is not painted again from its retired live array', () => {
   const messages = [
     { role: 'user', content: 'initial request', ts: 1 },

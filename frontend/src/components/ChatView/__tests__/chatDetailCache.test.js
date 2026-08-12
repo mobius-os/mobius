@@ -9,6 +9,7 @@ import {
   messageKey,
   messageMatchesKey,
   optimisticHandoffWindow,
+  hasPendingQuestionMessage,
 } from '../../../lib/chatDetailCache.js'
 
 test('cache first paint requires the saved reading coordinate when one exists', () => {
@@ -53,8 +54,18 @@ test('a running cache waits for subscribe-time replay', () => {
     messages: [{ id: 'owner-row', role: 'user', ts: 1 }],
   }
   assert.equal(chatCacheEntryState(running), 'stream-catchup')
-  assert.equal(chatCacheEntryState({ ...running, pending_question_id: 'question-1' }), 'paintable',
+  const parked = {
+    ...running,
+    pending_question_id: 'question-1',
+    messages: [{
+      role: 'assistant',
+      blocks: [{ type: 'question', question_id: 'question-1', questions: [] }],
+    }],
+  }
+  assert.equal(chatCacheEntryState(parked), 'paintable',
     'a parked question has no possible stream output')
+  assert.equal(chatCacheEntryState({ ...parked, messages: running.messages }), 'missing',
+    'a pending marker cannot make a cache paintable without its card')
   assert.equal(chatCacheEntryState(running, 'missing-row'), 'missing',
     'missing saved history remains stronger than the stream gate')
 })
@@ -157,18 +168,62 @@ test('optimistic handoff fills an empty cache without replacing a concurrent tra
   'a legacy concurrent publication cannot inherit provenance from the server response')
 })
 
-test('a retained snapshot is reusable only at the same explicit row version', () => {
-  const cached = { updated_at: '2026-07-30T12:00:00Z' }
+test('a retained snapshot requires both the row version and pending card', () => {
+  const updated_at = '2026-07-30T12:00:00Z'
+  const question = {
+    role: 'assistant',
+    blocks: [{ type: 'question', question_id: 'question-1', questions: [] }],
+  }
+  const cached = { updated_at, messages: [question] }
   assert.equal(chatSnapshotMatchesRuntime(cached, {
-    updated_at: '2026-07-30T12:00:00Z',
+    updated_at,
   }), true)
   assert.equal(chatSnapshotMatchesRuntime(cached, {
     updated_at: '2026-07-30T12:00:01Z',
   }), false)
   assert.equal(chatSnapshotMatchesRuntime(cached, {}), false)
   assert.equal(chatSnapshotMatchesRuntime({}, {
-    updated_at: '2026-07-30T12:00:00Z',
+    updated_at,
   }), false)
+  assert.equal(chatSnapshotMatchesRuntime(cached, {
+    updated_at,
+    pending_question_id: 'question-1',
+  }), true)
+  assert.equal(chatSnapshotMatchesRuntime({ ...cached, messages: [] }, {
+    updated_at,
+    pending_question_id: 'question-1',
+  }), false)
+  assert.equal(chatSnapshotMatchesRuntime({
+    ...cached,
+    messages: [{
+      ...question,
+      blocks: [{ ...question.blocks[0], answers: { pick: 'yes' } }],
+    }],
+  }, {
+    updated_at,
+    pending_question_id: 'question-1',
+  }), false)
+  assert.equal(chatSnapshotMatchesRuntime(cached, {
+    updated_at,
+    pending_question_id: 'question-2',
+  }), false)
+})
+
+test('pending question lookup requires the exact unanswered owner row', () => {
+  const messages = [
+    { role: 'user', content: 'choose' },
+    {
+      role: 'assistant',
+      blocks: [{ type: 'question', question_id: 'question-1', questions: [] }],
+    },
+  ]
+  assert.equal(hasPendingQuestionMessage(messages, 'question-1'), true)
+  assert.equal(hasPendingQuestionMessage(messages, 'question-2'), false)
+  assert.equal(hasPendingQuestionMessage([], 'question-1'), false)
+  assert.equal(hasPendingQuestionMessage([{
+    ...messages[1],
+    blocks: [{ ...messages[1].blocks[0], answers: { pick: 'yes' } }],
+  }], 'question-1'), false)
 })
 
 test('a tail refresh retains every verified older row needed by a saved address', () => {

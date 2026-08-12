@@ -13,11 +13,11 @@ import {
   isOwnerUserMessage,
   jumpToLatestShown,
   openAppCtaViewModel,
-  pendingQuestionIsHydrated,
   previewReadyAnnouncement,
   previewUpdatedAnnouncement,
   serverSnapshotBehindLocal,
   shouldAttachRunningStream,
+  shouldRetireRestoredQuestionSnapshot,
   shouldRetryStopAfterConfirm,
   shouldShowOpenAppCta,
   startedMessagesFromResponse,
@@ -137,20 +137,39 @@ test('a parked owner question uses compact history until its answer resumes the 
   }), false)
 })
 
-test('a runtime question marker requires its durable card in the transcript', () => {
+test('only a cold stream prefix missing the durable question is retired', () => {
   const pendingQuestionId = 'question-1'
   const messages = [{
     role: 'assistant',
     blocks: [{ type: 'question', question_id: pendingQuestionId, questions: [] }],
   }]
+  const stalePrefix = [{ type: 'text', content: 'older prefix' }]
+  const completeSnapshot = [
+    ...stalePrefix,
+    { type: 'question', question_id: pendingQuestionId, questions: [] },
+  ]
 
-  assert.equal(pendingQuestionIsHydrated(messages, pendingQuestionId), true)
-  assert.equal(pendingQuestionIsHydrated([], pendingQuestionId), false)
-  assert.equal(pendingQuestionIsHydrated([{
-    ...messages[0],
-    blocks: [{ ...messages[0].blocks[0], answers: { pick: 'yes' } }],
-  }], pendingQuestionId), false)
-  assert.equal(pendingQuestionIsHydrated(messages, 'question-2'), false)
+  assert.equal(shouldRetireRestoredQuestionSnapshot({
+    messages,
+    streamItems: stalePrefix,
+    pendingQuestionId,
+  }), true)
+  assert.equal(shouldRetireRestoredQuestionSnapshot({
+    isStreaming: true,
+    messages,
+    streamItems: stalePrefix,
+    pendingQuestionId,
+  }), false, 'a live socket keeps the buffer needed by same-turn continuation')
+  assert.equal(shouldRetireRestoredQuestionSnapshot({
+    messages,
+    streamItems: completeSnapshot,
+    pendingQuestionId,
+  }), false)
+  assert.equal(shouldRetireRestoredQuestionSnapshot({
+    messages: [],
+    streamItems: stalePrefix,
+    pendingQuestionId,
+  }), false)
 })
 
 test('a pathological cold transcript is prepared as stable prefix frames', () => {

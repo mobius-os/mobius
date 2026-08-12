@@ -1,3 +1,8 @@
+export function isPendingQuestionSendFailure(error) {
+  return Number(error?.status) === 409
+    && error?.code === 'pending_question_open'
+}
+
 export function sendFailureMessage(error, { online = true } = {}) {
   if (!online) {
     return 'You’re offline. Your message is back in the composer—send it when you reconnect.'
@@ -17,6 +22,9 @@ export function sendFailureMessage(error, { online = true } = {}) {
   }
   if (status === 401 || status === 403) {
     return 'Möbius needs you to sign in again before sending. Your message is safe in the composer.'
+  }
+  if (isPendingQuestionSendFailure(error)) {
+    return 'Answer the pending question above, or Stop the turn. Your message is safe in the composer.'
   }
   return 'Möbius couldn’t send the message. It’s back in the composer—try again.'
 }

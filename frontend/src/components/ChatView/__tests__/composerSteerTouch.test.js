@@ -21,7 +21,7 @@ test('composer fast-forward dispatches immediately without an incidental blur', 
 test('Send, Steer, and Stop reuse one continuously visible primary action', () => {
   assert.match(
     inputBar,
-    /if \(sending && !hasInput && showSteer\)[\s\S]*?key="primary"[\s\S]*?disabled=\{!steerReady\}/,
+    /if \(!questionBlocked && sending && !hasInput && showSteer\)[\s\S]*?key="primary"[\s\S]*?disabled=\{!steerReady\}/,
     'the semantic Steer identity must not wait for serverTs confirmation',
   )
   assert.match(
@@ -35,10 +35,10 @@ test('Send, Steer, and Stop reuse one continuously visible primary action', () =
     'an early Steer tap must await the queue write before reading steerable rows',
   )
   const steerBlock = inputBar.match(
-    /if \(sending && !hasInput && showSteer\)[\s\S]*?<button[\s\S]*?<\/button>/,
+    /if \(!questionBlocked && sending && !hasInput && showSteer\)[\s\S]*?<button[\s\S]*?<\/button>/,
   )?.[0] || ''
   const stopBlock = inputBar.match(
-    /if \(sending && !hasInput\)[\s\S]*?<button[\s\S]*?<\/button>/,
+    /if \(questionBlocked \|\| \(sending && !hasInput\)\)[\s\S]*?<button[\s\S]*?<\/button>/,
   )?.[0] || ''
   const sendBlock = inputBar.match(
     /if \(hasInput && !listening\)[\s\S]*?<button[\s\S]*?<\/button>/,

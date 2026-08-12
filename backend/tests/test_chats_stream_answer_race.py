@@ -633,3 +633,4 @@ def test_open_question_survives_trailing_output_and_blocks_plain_send(
     headers=auth,
   )
   assert blocked.status_code == 409, blocked.text
+  assert blocked.json()["detail"]["code"] == "pending_question_open"

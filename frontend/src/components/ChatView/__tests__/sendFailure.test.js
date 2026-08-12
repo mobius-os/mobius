@@ -1,7 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { sendFailureMessage } from '../sendFailure.js'
+import {
+  isPendingQuestionSendFailure,
+  sendFailureMessage,
+} from '../sendFailure.js'
 import {
   ChatHttpError,
   ChatTransportError,
@@ -44,9 +47,23 @@ test('known offline state wins over the transport error shape', () => {
 test('HTTP failures retain a safe server detail for diagnostics', async () => {
   const error = await chatHttpError({
     status: 503,
-    async json() { return { detail: { message: 'writer unavailable' } } },
+    async json() {
+      return { detail: { code: 'writer_unavailable', message: 'writer unavailable' } }
+    },
   })
   assert.equal(error instanceof ChatHttpError, true)
   assert.equal(error.status, 503)
+  assert.equal(error.code, 'writer_unavailable')
   assert.equal(error.detail, 'writer unavailable')
+})
+
+test('a pending-question conflict explains the recovery instead of reporting a generic failure', () => {
+  const error = new ChatHttpError(409, { code: 'pending_question_open' })
+
+  assert.equal(isPendingQuestionSendFailure(error), true)
+  assert.match(sendFailureMessage(error), /Answer the pending question above/)
+  assert.match(sendFailureMessage(error), /safe in the composer/)
+  assert.equal(isPendingQuestionSendFailure(new ChatHttpError(409, {
+    code: 'another_conflict',
+  })), false)
 })

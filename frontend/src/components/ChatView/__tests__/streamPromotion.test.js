@@ -345,6 +345,67 @@ test('chooseActiveAssistantSurface suppresses under-caught-up stream when DB par
   })
 })
 
+test('a durable question cannot be hidden by a source-rich older stream prefix', () => {
+  const question = {
+    type: 'question',
+    question_id: 'question-1',
+    questions: [{ question: 'Which path?' }],
+  }
+  const msg = {
+    role: 'assistant',
+    content: 'I checked the current state.',
+    blocks: [
+      { type: 'text', content: 'I checked the current state.' },
+      question,
+    ],
+  }
+  const stalePrefix = [
+    { type: 'text', content: 'I checked the current state.' },
+    {
+      type: 'tool', tool: 'Bash', status: 'done',
+      input: 'inspect everything', output: 'large but older output',
+    },
+  ]
+
+  assert.deepEqual(chooseActiveAssistantSurface(msg, stalePrefix), {
+    hideMessage: false,
+    suppressStream: true,
+  })
+  assert.deepEqual(chooseActiveAssistantSurface({
+    ...msg,
+    blocks: [msg.blocks[0], { ...question, answers: { pick: 'A' } }],
+  }, stalePrefix), {
+    hideMessage: false,
+    suppressStream: true,
+  }, 'the answered durable row stays visible until catch-up carries the card')
+})
+
+test('a stream carrying the same question may expose newer parallel output', () => {
+  const question = {
+    type: 'question',
+    question_id: 'question-1',
+    questions: [{ question: 'Which path?' }],
+  }
+  const msg = {
+    role: 'assistant',
+    content: 'I checked the current state.',
+    blocks: [
+      { type: 'text', content: 'I checked the current state.' },
+      question,
+    ],
+  }
+  const newerStream = [
+    { type: 'text', content: 'I checked the current state.' },
+    question,
+    { type: 'text', content: 'A parallel helper also finished.' },
+  ]
+
+  assert.deepEqual(chooseActiveAssistantSurface(msg, newerStream), {
+    hideMessage: true,
+    suppressStream: false,
+  })
+})
+
 test('chooseActiveAssistantSurface does not collapse unrelated assistant and stream surfaces', () => {
   const msg = {
     role: 'assistant',

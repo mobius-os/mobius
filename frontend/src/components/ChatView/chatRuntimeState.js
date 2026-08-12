@@ -4,6 +4,7 @@
  */
 
 import { groupActivityRuns } from './activityGrouping.js'
+import { hasPendingQuestionMessage } from '../../lib/chatDetailCache.js'
 
 export function isContinuationMessage(message) {
   return message?.kind === 'continuation'
@@ -129,20 +130,22 @@ export function shouldAttachRunningStream({
   return !!running && !pendingQuestionId
 }
 
-/**
- * The runtime endpoint deliberately omits transcript blocks, but an open
- * question is only actionable when its durable card is in the mounted
- * transcript. A runtime marker without that card means a live viewer missed
- * the question event and must refresh the compact detail page.
- */
-export function pendingQuestionIsHydrated(messages, pendingQuestionId) {
-  if (!pendingQuestionId || !Array.isArray(messages)) return false
-  return messages.some(message => message?.role === 'assistant'
-    && (message.blocks || []).some(block => (
-      block?.type === 'question'
-      && block.question_id === pendingQuestionId
-      && !block.answers
-    )))
+/** Retire only a cold restored prefix proven older than the durable card. */
+export function shouldRetireRestoredQuestionSnapshot({
+  isStreaming = false,
+  messages,
+  streamItems,
+  pendingQuestionId,
+} = {}) {
+  if (isStreaming || !Array.isArray(streamItems) || streamItems.length === 0) {
+    return false
+  }
+  if (!hasPendingQuestionMessage(messages, pendingQuestionId)) return false
+  return !streamItems.some(item => (
+    item?.type === 'question'
+    && item.question_id === pendingQuestionId
+    && !item.answers
+  ))
 }
 
 function coldBlockRenderCost(block) {

@@ -289,6 +289,24 @@ export function chooseActiveAssistantSurface(msg, items) {
     return { hideMessage: false, suppressStream: false }
   }
 
+  // Interaction identity outranks render-weight heuristics. A durable question
+  // missing from an otherwise related live surface proves that surface is an
+  // older prefix; raw tool metadata must never hide the actionable/answered
+  // card. When the stream carries the same question, normal coverage/weight
+  // rules remain free to select newer parallel output.
+  const streamQuestionKeys = new Set(
+    streamPayload.blocks
+      .filter(block => block?.type === 'question')
+      .map(questionKey),
+  )
+  const streamMissesDurableQuestion = (msg.blocks || []).some(block => (
+    block?.type === 'question'
+    && !streamQuestionKeys.has(questionKey(block))
+  ))
+  if (streamMissesDurableQuestion) {
+    return { hideMessage: false, suppressStream: true }
+  }
+
   const msgPayload = {
     content: assistantMessageText(msg),
     blocks: Array.isArray(msg.blocks) ? msg.blocks.filter(Boolean) : [],

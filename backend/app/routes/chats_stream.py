@@ -55,9 +55,14 @@ router = APIRouter(prefix="/api/chats", tags=["chats"])
 
 log = logging.getLogger(__name__)
 
-_PENDING_QUESTION_SEND_DETAIL = (
-  "Answer the pending question, or Stop the turn, before sending."
-)
+def _pending_question_open_conflict() -> HTTPException:
+  return HTTPException(
+    status_code=409,
+    detail={
+      "code": "pending_question_open",
+      "message": "Answer the pending question, or Stop the turn, before sending.",
+    },
+  )
 
 # Keepalive interval for the SSE stream to prevent proxy timeouts.
 _KEEPALIVE_INTERVAL = 30  # seconds
@@ -738,10 +743,7 @@ async def send_message(
   # is the authoritative guard for API clients and post-restart races. Answers
   # short-circuit above; force_steer keeps its own refusal below.
   if not body.force_steer and chat.pending_question_id is not None:
-    raise HTTPException(
-      status_code=409,
-      detail=_PENDING_QUESTION_SEND_DETAIL,
-    )
+    raise _pending_question_open_conflict()
 
   # A pending question parks the provider's control channel inside the
   # synchronous request_user_input bridge. A force-steer cannot be accepted
@@ -1069,7 +1071,7 @@ async def _send_message_locked(
     if isinstance(result, StartTurnBlockedByPendingQuestion):
       # The question opened after the route's early check but before the
       # actor-owned transition. The outer cleanup releases this route's claim.
-      raise HTTPException(status_code=409, detail=_PENDING_QUESTION_SEND_DETAIL)
+      raise _pending_question_open_conflict()
     if result.get("duplicate"):
       # The first POST committed but its acknowledgement was lost. The actor
       # found this cid in durable state, so the retry is complete without a

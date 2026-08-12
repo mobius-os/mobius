@@ -11,6 +11,7 @@
  * Run: scripts/playwright-local.sh --allow-local-e2e tests/stream-reconnect.spec.mjs
  */
 import { test, expect } from '@playwright/test'
+import { streamSnapshotKey } from '../frontend/src/components/ChatView/streamSnapshotCache.js'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -962,17 +963,10 @@ test.describe('Stream reconnection', () => {
     // (prod symptom: GET /chats + /stream reconnects but never a POST
     // carrying answers).
     //
-    // This test models the prod symptom faithfully: the /stream
-    // catch-up is EMPTY (no text, no `question` event — just the
-    // catch_up_done marker) and the connection holds open. So
-    // `streamItems` stays empty (the bridge suppression that hides the
-    // persisted last-assistant message never fires — it requires
-    // streamItems.length > 0), the persisted question block renders
-    // through the normal messages.map path, and `liveQuestionId` is
-    // never set by the stream. Pre-fix that path disabled the card
-    // (`!sending` was false because the load set sending:true). Post-fix
-    // it is answerable, keyed by the durable pending-question marker,
-    // and answering MUST POST the answer.
+    // This test also carries the exact later regression: sessionStorage has a
+    // source-rich pre-question stream prefix. Raw surface scoring used to let
+    // that regenerable prefix hide the durable row, leaving no card or nudge
+    // while the durable pending-question marker still blocked every send.
     const CHAT_ID = '11111111-1111-1111-1111-111111111111'
     const QUESTION_ID = 'q-frozen-1'
     const TURN_TS = 1700000000000
@@ -986,10 +980,26 @@ test.describe('Stream reconnection', () => {
     // QuestionCommit (or the one-time migration for an in-flight old turn),
     // so the card stays answerable without an SSE question replay.
     const updatedAt = '2026-07-30T18:00:00'
+    const staleStreamSnapshot = [
+      { type: 'text', content: 'A couple of choices:' },
+      {
+        type: 'tool',
+        tool: 'Bash',
+        status: 'done',
+        input: 'inspect the full pre-question state',
+        output: 'source-rich output that is still only an older prefix',
+      },
+    ]
+    const runtimeState = {
+      running: true,
+      active_goal_objective: GOAL,
+      pending_messages: [],
+      pending_question_id: QUESTION_ID,
+      updated_at: updatedAt,
+    }
     const detail = {
       id: CHAT_ID,
       title: 'frozen chat',
-      updated_at: updatedAt,
       messages: [
         { role: 'user', content: `/goal ${GOAL}`, ts: TURN_TS - 1000 },
         {
@@ -1010,14 +1020,11 @@ test.describe('Stream reconnection', () => {
           ],
         },
       ],
-      pending_messages: [],
       total: 2,
       offset: 0,
-      running: true,
-      active_goal_objective: GOAL,
-      pending_question_id: QUESTION_ID,
       session_id: 'sess-1',
       provider: 'claude',
+      ...runtimeState,
     }
     await page.route(/\/api\/chats\/[0-9a-f-]+\?limit=(?:1|20&compact=1)$/, route => {
       if (route.request().method() !== 'GET') { route.continue(); return }
@@ -1032,21 +1039,14 @@ test.describe('Stream reconnection', () => {
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          running: true,
-          active_goal_objective: GOAL,
-          pending_messages: [],
-          pending_question_id: QUESTION_ID,
-          updated_at: updatedAt,
-        }),
+        body: JSON.stringify(runtimeState),
       })
     })
 
-    // The first /stream catch-up is EMPTY (just catch_up_done), matching a
-    // turn parked on the question future: no `done` and no `question` event.
-    // `streamItems` stays empty (no live card, no bridge suppression),
-    // and `liveQuestionId` is never set by the stream. Later reattachments
-    // fail so the same test reaches retry exhaustion after the answer handoff.
+    // A parked question intentionally skips SSE attachment until its answer.
+    // The first post-answer catch-up is empty (just catch_up_done), then later
+    // reattachments fail so this test still reaches retry exhaustion without
+    // inventing a second question event.
     await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
       streamRequestCount++
       if (streamRequestCount > 1) {
@@ -1075,8 +1075,19 @@ test.describe('Stream reconnection', () => {
       route.fulfill({
         status: 202,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'answer_delivered', chat_id: CHAT_ID }),
+        body: JSON.stringify({
+          status: 'answer_delivered',
+          answer_turn: 'same',
+          chat_id: CHAT_ID,
+        }),
       })
+    })
+
+    await page.addInitScript(({ key, items }) => {
+      sessionStorage.setItem(key, JSON.stringify(items))
+    }, {
+      key: streamSnapshotKey(CHAT_ID),
+      items: staleStreamSnapshot,
     })
 
     await page.setViewportSize({ width: 412, height: 915 })
@@ -1085,9 +1096,21 @@ test.describe('Stream reconnection', () => {
     })
 
     // The persisted question card renders.
-    await expect(page.locator('[data-chat-surface="painted"] .qcard')).toBeVisible({ timeout: 10000 })
+    const questionCard = page.locator('[data-chat-surface="painted"] .qcard')
+    await expect(questionCard).toHaveCount(1, { timeout: 10000 })
+    await expect(questionCard).toBeVisible()
+    await expect(page.locator('[data-chat-surface="painted"] .chat__scroll'))
+      .toContainText('A couple of choices:')
     const goalRail = page.getByRole('group', { name: 'Goal progress' })
     await expect(goalRail).toContainText(`Goal · ${GOAL}`)
+
+    // A preserved draft remains editable, but the question barrier owns the
+    // action slot: offer Stop rather than a Send that can only receive 409.
+    const activeComposer = page.locator('[data-chat-surface="painted"]')
+      .getByLabel('Message Möbius…')
+    await activeComposer.fill('keep this draft safe')
+    await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Send' })).toHaveCount(0)
 
     // The option buttons must be ENABLED (the bug rendered them
     // disabled). Pick an answer + submit.
@@ -1111,5 +1134,14 @@ test.describe('Stream reconnection', () => {
     expect(answerPosted.answers).toBeTruthy()
     expect(answerPosted.question_id).toBe(QUESTION_ID)
     expect(JSON.stringify(answerPosted.answers)).toContain('Red')
+    await expect(questionCard).toHaveCount(1)
+    await expect(questionCard.locator('.qcard__submit')).toHaveText('Submitted')
+    await expect(activeComposer)
+      .toHaveValue('keep this draft safe')
+    // The answer unfreezes the turn, but the authoritative runtime above still
+    // reports `running:true`; reconnect loss must not invent an idle composer.
+    // Keep the draft safe behind Stop until a later runtime snapshot settles.
+    await expect(page.getByRole('button', { name: 'Stop' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Send' })).toHaveCount(0)
   })
 })
