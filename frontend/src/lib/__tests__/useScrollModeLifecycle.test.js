@@ -48,7 +48,8 @@ function installBrowserEnvironment({ observers = [], frames = null } = {}) {
     removeEventListener() {},
   }
   globalThis.ResizeObserver = class {
-    constructor() {
+    constructor(callback) {
+      this.callback = callback
       this.disconnected = false
       observers.push(this)
     }
@@ -252,10 +253,11 @@ test('a no-scroll tail relatch preserves the queued send-time pin decision', () 
   }
 })
 
-test('a growing inline editor restores its pre-input anchor but yields to a real scroll', () => {
+test('a focused growing inline editor survives keyboard resize but yields to a real scroll', () => {
   const scrollListeners = new Map()
   const frames = []
-  const restoreBrowser = installBrowserEnvironment({ frames })
+  const observers = []
+  const restoreBrowser = installBrowserEnvironment({ observers, frames })
 
   let scroll
   const row = fakeElement({
@@ -292,6 +294,7 @@ test('a growing inline editor restores its pre-input anchor but yields to a real
       if (selector === '.chat__msg--user[data-cid]') return [lastUser]
       return []
     },
+    contains(node) { return node === editor },
   })
   scroll.parentElement = fakeElement()
   const scrollRef = { current: scroll }
@@ -330,6 +333,13 @@ test('a growing inline editor restores its pre-input anchor but yields to a real
     frames.at(-1)()
     assert.equal(scroll.scrollTop, beforeTyping,
       'typing restores the exact row position captured before the field grew')
+
+    globalThis.document.activeElement = editor
+    scroll.clientHeight = 300
+    scroll.scrollTop = 140 // Native keyboard caret reveal moves the transcript.
+    observers[0].callback()
+    assert.equal(scroll.scrollTop, 140,
+      'keyboard resize adopts the focused field’s caret-visible position')
 
     scrollListeners.get('beforeinput')({ target: editor })
     scrollListeners.get('input')({ target: editor })

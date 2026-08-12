@@ -652,6 +652,22 @@ export function releaseQuestionSubmissionForViewport(mode, viewportHeight) {
     || _durableQuestionSubmissionMode(mode)
 }
 
+
+/** A focused custom Q&A answer gives the browser one narrow exception to the
+ * ordinary viewport-resize rule: native caret reveal becomes the new exact
+ * reading hold instead of being overwritten by the pre-keyboard anchor.
+ * Stronger send pins, live following, and the question-submission overlay keep
+ * their existing ownership contracts. */
+export function modeForQuestionEditingViewportChange(mode, caretAnchor = null) {
+  if (mode?.kind !== 'ANCHOR_AT'
+      || Number.isFinite(mode.questionSubmitViewportH)
+      || !caretAnchor) return mode
+  if (mode.key === caretAnchor.key
+      && Math.abs(mode.offset - caretAnchor.offset) <= 0.5) return mode
+  return caretAnchor
+}
+
+
 /** The ANCHOR_AT twin of `_pinReapplyNeeded` — the SAME two-case repair. A
  *  settled anchor drifts off its reader-chosen position when either the anchor
  *  element's offsetTop SHIFTED (content grew above it) or scrollTop was CLAMPED
@@ -1975,6 +1991,14 @@ export default function useScrollMode({
     const spacerEl = spacerRef.current
     if (!scrollEl || !spacerEl) return
     const chatEl = chatRef.current
+    const isQuestionEditor = target => target?.matches?.(
+      'textarea.qcard__input',
+    ) === true
+    const questionEditorIsFocused = () => {
+      if (typeof document === 'undefined') return false
+      const target = document.activeElement
+      return isQuestionEditor(target) && scrollEl.contains?.(target) === true
+    }
 
     if (observedScrollViewportRef.current.element !== scrollEl) {
       observedScrollViewportRef.current = {
@@ -2179,6 +2203,9 @@ export default function useScrollMode({
       viewportChange = false,
       authorityVersion = currentAuthority(),
     } = {}) {
+      const questionSubmissionWasActive = viewportChange
+        && modeRef.current?.kind === 'ANCHOR_AT'
+        && Number.isFinite(modeRef.current.questionSubmitViewportH)
       // Question submission freezes the card-to-stream handoff, not the
       // keyboard. Restore the unanswered card's mode before sizing a changed
       // viewport so its ordinary reservation and clamp remain authoritative.
@@ -2202,9 +2229,23 @@ export default function useScrollMode({
       }
       sizeSpacer(authorityVersion)
       if (viewportChange) {
+        const caretAnchor = questionEditorIsFocused()
+          && !questionSubmissionWasActive
+          ? anchorModeFromScroll(scrollEl)
+          : null
+        const viewportMode = modeForQuestionEditingViewportChange(
+          modeRef.current,
+          caretAnchor,
+        )
+        if (viewportMode !== modeRef.current) {
+          readerLocationExplicitRef.current = true
+          transitionMode(viewportMode, 'layout:question-edit-viewport')
+          persistMode()
+        }
         // A viewport resize is geometry, not reading intent. Reapply the mode
         // that already owns the chat instead of deriving a different mode from
-        // the browser's intermediate clamp.
+        // the browser's intermediate clamp. The focused Q&A exception above
+        // adopts a native caret reveal before this write can undo it.
         applyLayoutMode('layout:viewport-change', authorityVersion)
       } else if (forceApply) {
         writeMode(
@@ -2760,11 +2801,8 @@ export default function useScrollMode({
 
     let pendingInlineEditorAnchor = null
     let inlineEditorRaf = 0
-    const isGrowingInlineEditor = target => target?.matches?.(
-      'textarea.qcard__input',
-    ) === true
     const captureInlineEditorAnchor = (event) => {
-      if (!isGrowingInlineEditor(event.target)) return
+      if (!isQuestionEditor(event.target)) return
       // Capture before the browser changes the textarea/caret. Typing is a
       // newer semantic action than a half-settled reader gesture, but it is not
       // new scroll intent, so the exact current anchor becomes layout owner.
@@ -2793,7 +2831,7 @@ export default function useScrollMode({
       }
     }
     const restoreInlineEditorAnchor = (event) => {
-      if (!isGrowingInlineEditor(event.target)) return
+      if (!isQuestionEditor(event.target)) return
       const plan = pendingInlineEditorAnchor
       pendingInlineEditorAnchor = null
       if (!plan) return

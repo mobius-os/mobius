@@ -22,6 +22,7 @@ import {
   modeForChatExit,
   modeForDisclosureToggle,
   modeForForegroundReturn,
+  modeForQuestionEditingViewportChange,
   modeForQuestionSubmission,
   modeForQueuedSubmission,
   modeAfterReaderGesture,
@@ -744,7 +745,7 @@ test('anchor reapply is inert for non-anchor modes and unresolved keys', () => {
   )
 })
 
-test('viewport resize reapplies the current mode without reclassifying it', () => {
+test('viewport resize preserves the current mode except for focused Q&A caret reveal', () => {
   assert.match(
     scrollModeSource,
     /applyLayoutMode\('layout:viewport-change', authorityVersion\)/,
@@ -764,6 +765,43 @@ test('viewport resize reapplies the current mode without reclassifying it', () =
     scrollModeSource,
     /visualViewport\.addEventListener/,
     'chat observes its actual resized box instead of racing Shell for the browser event',
+  )
+  assert.match(
+    scrollModeSource,
+    /questionEditorIsFocused\(\)[\s\S]*?modeForQuestionEditingViewportChange/,
+    'a focused custom answer adopts the browser’s caret-visible position',
+  )
+})
+
+test('question editing rebases only an ordinary held viewport to native caret movement', () => {
+  const staleHold = { kind: 'ANCHOR_AT', key: 'before-edit', offset: 20 }
+  const caretHold = { kind: 'ANCHOR_AT', key: 'question-row', offset: 84 }
+  assert.equal(
+    modeForQuestionEditingViewportChange(staleHold, caretHold),
+    caretHold,
+  )
+
+  for (const strongerMode of [
+    { kind: 'PIN_USER_MSG', cid: 'c-1' },
+    { kind: 'FOLLOW_BOTTOM' },
+    {
+      kind: 'ANCHOR_AT',
+      key: 'question-row',
+      offset: 84,
+      questionSubmitViewportH: 600,
+      questionSubmitBaseMode: { kind: 'FOLLOW_BOTTOM' },
+    },
+  ]) {
+    assert.equal(
+      modeForQuestionEditingViewportChange(strongerMode, caretHold),
+      strongerMode,
+    )
+  }
+  assert.equal(modeForQuestionEditingViewportChange(staleHold, null), staleHold)
+  assert.equal(
+    modeForQuestionEditingViewportChange(caretHold, { ...caretHold }),
+    caretHold,
+    'an unchanged caret hold does not manufacture a mode transition',
   )
 })
 
