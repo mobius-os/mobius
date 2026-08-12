@@ -77,7 +77,7 @@ test('question card css has no stale styling hook', () => {
     'expiration status styling should not come back')
   assert.match(css, /\.qcard__input:disabled,\s*\.qcard__input\[readonly\]\s*\{[\s\S]*?color:\s*var\(--muted\);[\s\S]*?-webkit-text-fill-color:\s*var\(--muted\);[\s\S]*?\}/,
     'a submitted custom answer should visibly gray out in every browser')
-  assert.match(css, /\.qcard__input\s*\{[\s\S]*?width:\s*100%;[\s\S]*?min-height:\s*38px;[\s\S]*?font-size:\s*16px;[\s\S]*?field-sizing:\s*content;[\s\S]*?max-height:\s*180px;[\s\S]*?overflow-y:\s*auto;[\s\S]*?resize:\s*none;/,
+  assert.match(css, /\.qcard__input\s*\{[\s\S]*?width:\s*100%;[\s\S]*?min-height:\s*38px;[\s\S]*?font-size:\s*13px;[\s\S]*?field-sizing:\s*content;[\s\S]*?max-height:\s*180px;[\s\S]*?overflow-y:\s*auto;[\s\S]*?resize:\s*none;/,
     'the custom answer should expand inline to a bounded, internally scrollable height')
   assert.match(css, /\.qcard__submit-error\s*\{/,
     'a failed answer should keep its retry notice attached to the card')
