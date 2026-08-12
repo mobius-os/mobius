@@ -15,6 +15,7 @@ import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
+  FOLLOW_STICK_BAND_PX,
   isNearContentBottom,
   remapSavedReadingAnchor,
   retireSavedReadingPosition,
@@ -162,12 +163,13 @@ const MESSAGE_META_VISIBLE_MS = 5000
 // auto-dismisses itself (a durable "final" acknowledgement). An ephemeral nudge,
 // not a permanent chat-foot fixture.
 const OPEN_APP_CTA_AUTO_DISMISS_MS = 8000
-// The floating jump-to-latest control appears once the reader holds a position
-// this far above the CONTENT tail (reserved spacer room is phantom, per the
-// send-snapshot bottom rule). Deliberately wider than the 50px near-bottom
-// band: settling a line or two up must not summon a control, a real upward
-// scroll should.
-const JUMP_TO_LATEST_GAP_PX = 200
+// The floating jump-to-latest control is driven by follow-state, not a raw
+// pixel distance (use-stick-to-bottom's `!isAtBottom`): it shows whenever the
+// reader is NOT following AND sits beyond the shared follow-stick band above the
+// CONTENT tail (reserved spacer room is phantom, per the send-snapshot bottom
+// rule). Using the SAME band the controller sticks within removes the old dead
+// zone where a dropped follow left the reader with neither autoscroll nor a
+// button between the band and the previous 200px threshold.
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -789,6 +791,8 @@ export default function ChatView({
     settleStreamingPin,
     composerEdited,
     paneResized,
+    following,
+    followLatest,
   } = useScrollMode({
     chatId,
     scrollRef,
@@ -2134,7 +2138,7 @@ export default function ChatView({
   const [awayFromLatest, setAwayFromLatest] = useState(false)
   const updateJumpToLatest = useCallback(() => {
     const el = scrollRef.current
-    const away = !!el && !isNearContentBottom(el, JUMP_TO_LATEST_GAP_PX)
+    const away = !!el && !isNearContentBottom(el, FOLLOW_STICK_BAND_PX)
     setAwayFromLatest(prev => (prev === away ? prev : away))
   }, [])
   useLayoutEffect(updateJumpToLatest)
@@ -3917,7 +3921,7 @@ export default function ChatView({
   const questionNudgeShown = hasPendingQuestion && pendingCardOffscreen
   const resumeNudgeShown = hasPendingResume && resumeCardOffscreen
   const jumpToLatestVisible = jumpToLatestShown({
-    awayFromTail: awayFromLatest,
+    awayFromTail: awayFromLatest && !following,
     questionNudgeShown,
     resumeNudgeShown,
   })
@@ -4344,7 +4348,7 @@ export default function ChatView({
                       className="chat__jump-latest"
                       aria-label="Jump to the latest message"
                       title="Jump to latest"
-                      onClick={revealConversationTail}
+                      onClick={followLatest}
                     >
                       <ArrowDown size={18} strokeWidth={2.25} aria-hidden="true" />
                     </button>
@@ -4370,8 +4374,7 @@ export default function ChatView({
               )}
             </>
           )}
-        </div>
-        <ProgressRail
+        </div>        <ProgressRail
           items={progressRail}
           ariaLabel={visibleGoalObjective ? 'Goal progress' : 'Build progress'}
         />

@@ -319,7 +319,9 @@ test('jump-to-latest appears only away from the tail and lands a settled hold', 
 
   await jump.click()
 
-  // Landing is the physical tail, and the control retires itself there.
+  // Landing is the physical tail, and the control retires itself there. This
+  // explicit jump also re-engages the bottom-follow latch, matching the control
+  // label: new output should remain visible after "Jump to latest".
   await page.waitForFunction(() => {
     const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     if (!scroll || document.querySelector('.chat__jump-latest')) return false
@@ -333,5 +335,5 @@ test('jump-to-latest appears only away from the tail and lands a settled hold', 
       )[chatId]?.kind ?? null
     } catch { return null }
   }, chat.id)
-  expect(modeKind).toBe('ANCHOR_AT')
+  expect(modeKind).toBe('FOLLOW_BOTTOM')
 })

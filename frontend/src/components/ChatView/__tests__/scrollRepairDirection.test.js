@@ -86,7 +86,9 @@ test('reserved-bottom reader settlement enters follow without moving backward', 
     offset: -700,
   })
   const settledMode = modeAfterReaderGesture({
-    reachedBottom: true,
+    escaped: false,
+    reachedNearBottom: true,
+    wasFollowing: false,
     holdMode,
   })
   assert.deepEqual(settledMode, { kind: 'FOLLOW_BOTTOM' })
@@ -99,11 +101,15 @@ test('reserved-bottom reader settlement enters follow without moving backward', 
 test('physical reader bottom creates follow without a reservation branch', () => {
   const hold = { kind: 'ANCHOR_AT', key: 'a-1', offset: -300 }
   assert.deepEqual(modeAfterReaderGesture({
-    reachedBottom: true,
+    escaped: false,
+    reachedNearBottom: true,
+    wasFollowing: false,
     holdMode: hold,
   }), { kind: 'FOLLOW_BOTTOM' })
   assert.equal(modeAfterReaderGesture({
-    reachedBottom: false,
+    escaped: false,
+    reachedNearBottom: false,
+    wasFollowing: false,
     holdMode: hold,
   }), hold)
 })

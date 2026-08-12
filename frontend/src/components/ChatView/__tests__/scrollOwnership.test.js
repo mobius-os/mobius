@@ -90,8 +90,10 @@ test('gesture scroll frames defer anchor, spacer, and persistence work until set
     /addEventListener\('scrollend', settleReaderScroll/,
     'native scrollend should complete the same settlement path early',
   )
-  assert.match(hotPath, /atBottom:\s*distanceToBottom\s*<\s*PHYSICAL_BOTTOM_EPSILON_PX/,
-    'the intent reducer must receive each scroll frame\'s physical-tail geometry')
+  assert.match(hotPath, /atBottom:\s*distanceToBottom\s*<=\s*FOLLOW_STICK_BAND_PX/,
+    'the intent reducer must latch the follow-stick band, not a pixel-exact tail')
+  assert.match(hotPath, /readerScrollEscapeDirection\(/,
+    'directionless native scrollbar movement must update the escape latch')
 
   const settleStart = ownerSource.indexOf('const settleReaderScroll = () => {')
   const settleEnd = ownerSource.indexOf(
@@ -103,7 +105,9 @@ test('gesture scroll frames defer anchor, spacer, and persistence work until set
     'reader settlement path must remain discoverable')
   assert.match(settlePath, /anchorModeFromScroll/)
   assert.match(settlePath, /modeAfterReaderGesture/)
-  assert.match(settlePath, /reachedBottom:\s*settledAtBottom/)
+  assert.match(settlePath, /escaped:\s*settledEscaped/)
+  assert.match(settlePath, /reachedNearBottom:\s*settledReachedNearBottom/)
+  assert.match(settlePath, /wasFollowing/)
   assert.doesNotMatch(settlePath, /spacerH|hasReservedTail/,
     'physical-bottom intent must not branch on invisible reservation')
   assert.match(settlePath, /persistMode\(\)/)

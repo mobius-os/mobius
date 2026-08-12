@@ -28,9 +28,11 @@ import {
   modeAfterSpacerResize,
   modeAfterTerminalLayout,
   physicalBottomAnchorModeFromScroll,
+  readerInputEscapeDirection,
   readerInputActivatesDisclosure,
   readerInputMayScroll,
   readerInputNeedsFrameRelease,
+  readerScrollEscapeDirection,
   releaseQuestionSubmissionForViewport,
   settledPinMode,
   shouldPinSend,
@@ -761,12 +763,33 @@ test('reader settlement follows the physical tail even while reservation remains
   const exactHold = {
     kind: 'ANCHOR_AT', key: 'user-c-123', offset: -320,
   }
+  // Not following, but the gesture reached the bottom band → enter follow.
   assert.deepEqual(modeAfterReaderGesture({
-    reachedBottom: true,
+    escaped: false,
+    reachedNearBottom: true,
+    wasFollowing: false,
     holdMode: exactHold,
   }), { kind: 'FOLLOW_BOTTOM' })
+  // Not following and never reached the band → hold exactly where the reader is.
   assert.equal(modeAfterReaderGesture({
-    reachedBottom: false,
+    escaped: false,
+    reachedNearBottom: false,
+    wasFollowing: false,
+    holdMode: exactHold,
+  }), exactHold)
+  // Already following and the reader did NOT scroll up → stay glued, even if
+  // streamed content pushed the tail out of the band during the gesture.
+  assert.deepEqual(modeAfterReaderGesture({
+    escaped: false,
+    reachedNearBottom: false,
+    wasFollowing: true,
+    holdMode: exactHold,
+  }), { kind: 'FOLLOW_BOTTOM' })
+  // An explicit scroll UP is the only thing that breaks an engaged follow.
+  assert.equal(modeAfterReaderGesture({
+    escaped: true,
+    reachedNearBottom: true,
+    wasFollowing: true,
     holdMode: exactHold,
   }), exactHold)
 
@@ -780,6 +803,38 @@ test('reader settlement follows the physical tail even while reservation remains
   assert.equal(scrollEl.scrollTop, 1440,
     'follow owns the one physical tail instead of jumping back before reservation')
 })
+
+// Direction helpers are part of the same bottom-follow contract exercised above.
+{
+  // Wheel up escapes the bottom lock; wheel down re-engages it; no vertical
+  // delta is neutral.
+  assert.equal(readerInputEscapeDirection('wheel', { deltaY: -20 }), 'up')
+  assert.equal(readerInputEscapeDirection('wheel', { deltaY: 20 }), 'down')
+  assert.equal(readerInputEscapeDirection('wheel', { deltaY: 0 }), null)
+  // Scroll keys carry a stable direction.
+  assert.equal(readerInputEscapeDirection('keydown', { key: 'ArrowUp' }), 'up')
+  assert.equal(readerInputEscapeDirection('keydown', { key: 'PageUp' }), 'up')
+  assert.equal(readerInputEscapeDirection('keydown', { key: 'Home' }), 'up')
+  assert.equal(readerInputEscapeDirection('keydown', { key: 'ArrowDown' }), 'down')
+  assert.equal(readerInputEscapeDirection('keydown', { key: 'End' }), 'down')
+  // Space pages down; Shift+Space pages up.
+  assert.equal(readerInputEscapeDirection('keydown', { key: ' ' }), 'down')
+  assert.equal(
+    readerInputEscapeDirection('keydown', { key: ' ', shiftKey: true }), 'up',
+  )
+  // A non-directional key and pointer input never move the latch.
+  assert.equal(readerInputEscapeDirection('keydown', { key: 'Tab' }), null)
+  assert.equal(readerInputEscapeDirection('pointerdown', {}), null)
+}
+
+{
+  assert.equal(readerScrollEscapeDirection(1400, 1200), 'up')
+  assert.equal(readerScrollEscapeDirection(1200, 1400), 'down')
+  assert.equal(readerScrollEscapeDirection(1200, 1200.4), null,
+    'subpixel jitter must not flip the escape latch')
+  assert.equal(readerScrollEscapeDirection(null, 1200), null,
+    'a scroll without a pre-input position carries no invented direction')
+}
 
 test('a short settled pin retires automatic follow but keeps its identity', () => {
   const livePin = {
