@@ -490,7 +490,7 @@ def _build_resumed_context(chat_row) -> str | None:
 # together. Without that pin the menu could offer a command this dispatch check
 # does not know, and picking it would degrade into ordinary prose with no error
 # shown anywhere.
-CLI_SLASH_COMMANDS = frozenset({"/goal", "/goals"})
+CLI_SLASH_COMMANDS = frozenset({"/goal"})
 
 
 def _goal_argument(text: str) -> str | None:
@@ -517,7 +517,7 @@ def _chat_has_goal_intent(messages: list[schemas.ChatMessage]) -> bool:
   """Whether this durable transcript has ever requested native goal mode."""
   return any(
     message.role == "user"
-    and re.match(r"^\s*/goals?(?:\s|$)", message.content or "") is not None
+    and re.match(r"^\s*/goal(?:\s|$)", message.content or "") is not None
     for message in messages
   )
 

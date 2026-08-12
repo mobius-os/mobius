@@ -11,17 +11,6 @@
 export function goalObjectiveFromText(text) {
   if (typeof text !== 'string') return ''
   const normalized = text.replace(/^\n+/, '')
-  const plan = normalized.match(/^\/goals[ \t]+([^\n]+)\n([\s\S]*)$/)
-  if (plan) {
-    const stages = plan[2]
-      .split('\n')
-      .map((line) => line.trim().match(/^(?:[-*]|\d+[.)])[ \t]+(.+)$/)?.[1])
-      .filter(Boolean)
-      .map((stage) => stage.trim().replace(/\s+/g, ' '))
-    if (stages.length >= 2) {
-      return `${plan[1].trim().replace(/\s+/g, ' ')} · Stage 1/${stages.length} · ${stages[0]}`
-    }
-  }
   const match = normalized.match(/^\/goal(?:[ \t]+([\s\S]*))?$/)
   if (!match) return ''
   const objective = (match[1] || '').trim().replace(/\s+/g, ' ')

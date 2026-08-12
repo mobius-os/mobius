@@ -453,41 +453,6 @@ class StartContinuation(_Command):
 
 
 @dataclass
-class StartGoalPlan(_Command):
-  """Attach an explicit ordered plan to an already-started first stage.
-
-  The route has already committed the owner's ``/goals`` message and opened
-  its ChatRun.  This command atomically records the plan and labels that exact
-  run, keeping the normal start transition as the sole writer of messages.
-  """
-
-  chat_id: str = ""
-  run_token: str = ""
-  overall_objective: str = ""
-  stages: list[str] = field(default_factory=list)
-
-
-@dataclass
-class AdvanceGoalPlan(_Command):
-  """Advance one completed stage and queue its hidden successor atomically."""
-
-  chat_id: str = ""
-  # Current-run identity for the writer's snapshot fence.  It is the same
-  # value as ``completed_run_token`` but follows every other pending-message
-  # command's normal `(chat_id, run_token)` contract.
-  run_token: str = ""
-  completed_run_token: str = ""
-  next_run_token: str = ""
-
-
-@dataclass
-class StopGoalPlan(_Command):
-  """Stop the active plan for one chat without touching its history."""
-
-  chat_id: str = ""
-
-
-@dataclass
 class AppendPending(_Command):
   """Queue a send behind an active turn (or stale pending).
 
@@ -835,7 +800,6 @@ _FENCE_COMMANDS = (
   StartTurn,
   StartContinuation,
   AppendPending,
-  AdvanceGoalPlan,
   AppendSteeredUserMessage,
   PromotePending,
   CancelPending,
@@ -1564,12 +1528,6 @@ class ChatWriterActor:
       return self._start_turn(db, cmd)
     if isinstance(cmd, StartContinuation):
       return self._start_continuation(db, cmd)
-    if isinstance(cmd, StartGoalPlan):
-      return self._start_goal_plan(db, cmd)
-    if isinstance(cmd, AdvanceGoalPlan):
-      return self._advance_goal_plan(db, cmd)
-    if isinstance(cmd, StopGoalPlan):
-      return self._stop_goal_plan(db, cmd)
     if isinstance(cmd, AppendPending):
       return self._append_pending(db, cmd)
     if isinstance(cmd, AppendSteeredUserMessage):
@@ -2244,14 +2202,9 @@ class ChatWriterActor:
     # so any still-running row is a prior run whose clear was dropped — mark it
     # interrupted before opening this one (at most one run is ever live).
     from app.models import ChatRun
-    from app.goal_plans import claim_active_plan_run
     from app.run_state import goal_objective_for_run_start
-    claim_active_plan_run(
-      db, chat_id=cmd.chat_id, run_token=cmd.run_token,
-      message=cmd.user_msg,
-    )
     goal_objective = goal_objective_for_run_start(
-      db, cmd.chat_id, cmd.user_msg, cmd.run_token,
+      db, cmd.chat_id, cmd.user_msg,
     )
     self._close_nonterminal_runs(db, cmd.chat_id, "interrupted")
     db.add(ChatRun(
@@ -2423,123 +2376,6 @@ class ChatWriterActor:
       "session_id": chat.session_id,
       "provider": provider,
     }
-  def _start_goal_plan(self, db, cmd: StartGoalPlan) -> dict:
-    """Persist an owner-authored plan alongside its first-stage run label."""
-    from app.goal_plans import GoalPlanSpec, stage_label, start_plan
-    from app.models import ChatRun
-
-    spec = GoalPlanSpec(
-      overall_objective=cmd.overall_objective,
-      stages=tuple(cmd.stages),
-    )
-    plan = start_plan(
-      db, chat_id=cmd.chat_id, run_token=cmd.run_token, spec=spec,
-    )
-    run = db.query(ChatRun).filter(
-      ChatRun.id == cmd.run_token,
-      ChatRun.chat_id == cmd.chat_id,
-      ChatRun.status == "running",
-    ).first()
-    label = stage_label(plan)
-    if run is None or label is None:
-      db.rollback()
-      raise _PersistFailed("StartGoalPlan: initial run is unavailable")
-    run.goal_objective = label
-    if not _commit_or_rollback(db):
-      raise _PersistFailed("StartGoalPlan did not persist")
-    return {"id": plan.id, "stage_label": label}
-
-  def _advance_goal_plan(self, db, cmd: AdvanceGoalPlan) -> dict:
-    """Move exactly one active plan to its next hidden stage trigger.
-
-    The status update and pending-message prepend share this transaction.  A
-    crash can therefore leave either the current stage runnable or the next
-    one durably queued, but never advance the plan without work to start.
-    """
-    from datetime import UTC, datetime
-
-    from app.goal_plans import stages_for
-
-    plan = (
-      db.query(models.GoalPlan)
-      .filter(
-        models.GoalPlan.chat_id == cmd.chat_id,
-        models.GoalPlan.status == "active",
-        models.GoalPlan.current_run_token == cmd.completed_run_token,
-      )
-      .order_by(models.GoalPlan.created_at.desc(), models.GoalPlan.id.desc())
-      .first()
-    )
-    if plan is None:
-      db.rollback()
-      return {"advanced": False}
-    stages = stages_for(plan)
-    if not 0 <= plan.current_stage < len(stages):
-      plan.status = "failed"
-      plan.current_run_token = None
-      plan.updated_at = datetime.now(UTC)
-      if not _commit_or_rollback(db):
-        raise _PersistFailed("AdvanceGoalPlan did not persist invalid plan")
-      return {"advanced": False, "invalid": True}
-    if plan.current_stage + 1 >= len(stages):
-      plan.status = "completed"
-      plan.current_run_token = None
-      plan.updated_at = datetime.now(UTC)
-      if not _commit_or_rollback(db):
-        raise _PersistFailed("AdvanceGoalPlan did not complete")
-      return {"advanced": True, "completed": True}
-
-    chat = _active_chat(db, cmd.chat_id)
-    if chat is None:
-      db.rollback()
-      raise _PersistFailed("AdvanceGoalPlan: chat not found or deleted")
-    # A queued `/goal clear` is an explicit owner stop instruction. It must
-    # win before a hidden plan stage is prepended, otherwise the next stage
-    # could start merely because the current one settled a moment first.
-    from app.chat_context import _goal_clear_requested
-    if any(
-      isinstance(item, dict)
-      and _goal_clear_requested(str(item.get("content") or ""))
-      for item in list(chat.pending_messages or [])
-    ):
-      plan.status = "stopped"
-      plan.current_run_token = None
-      plan.updated_at = datetime.now(UTC)
-      if not _commit_or_rollback(db):
-        raise _PersistFailed("AdvanceGoalPlan did not stop for owner clear")
-      return {"advanced": False, "stopped": True}
-    plan.current_stage += 1
-    plan.current_run_token = cmd.next_run_token
-    plan.updated_at = datetime.now(UTC)
-    pending = list(chat.pending_messages or [])
-    stage_message = {
-      "role": "user",
-      "content": "Continue the active goal plan.",
-      "hidden": True,
-      "kind": "goal_plan_step",
-      "continuation_reason": "goal_plan",
-      "cid": f"goal-plan-{plan.id}-{plan.current_stage}",
-    }
-    ensure_user_cid(stage_message)
-    _ensure_unique_ts(stage_message, pending + list(chat.messages or []))
-    pending.insert(0, stage_message)
-    chat.pending_messages = pending
-    chat.updated_at = datetime.now(UTC)
-    chat.activity_at = datetime.now(UTC)
-    if not _commit_or_rollback(db):
-      raise _PersistFailed("AdvanceGoalPlan did not persist")
-    return {"advanced": True, "completed": False, "pending": pending}
-
-  def _stop_goal_plan(self, db, cmd: StopGoalPlan) -> dict:
-    from app.goal_plans import stop_active_plan
-
-    stopped = stop_active_plan(db, cmd.chat_id)
-    if stopped and not _commit_or_rollback(db):
-      raise _PersistFailed("StopGoalPlan did not persist")
-    if not stopped:
-      db.rollback()
-    return {"stopped": stopped}
-
   def _append_pending(self, db, cmd: AppendPending) -> dict:
     """Queue `user_msg` behind the active turn; optionally apply answers.
 
@@ -2935,14 +2771,9 @@ class ChatWriterActor:
     # SAME commit as the queue handoff.
     from app.models import ChatRun
     from app.continuations import is_continuation_message
-    from app.goal_plans import claim_active_plan_run
     from app.run_state import goal_objective_for_run_start
-    claim_active_plan_run(
-      db, chat_id=cmd.chat_id, run_token=cmd.run_token,
-      message=agent_pending,
-    )
     goal_objective = goal_objective_for_run_start(
-      db, cmd.chat_id, agent_pending, cmd.run_token,
+      db, cmd.chat_id, agent_pending,
     )
     prior_run = (
       db.query(ChatRun)

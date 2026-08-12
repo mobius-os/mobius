@@ -44,7 +44,6 @@ class RunPolicy:
   scope: str
   cwd: str
   max_budget_usd: float | None
-  goal_mode: bool = False
 
   @property
   def delegated(self) -> bool:
@@ -67,7 +66,7 @@ class RunPolicy:
         "durable change that completes the bounded task."
       )
     )
-    prompt = (
+    return (
       "You are a delegated subagent running as a durable child task inside "
       "Möbius. Complete only the bounded user task in this child conversation "
       "and return a clear result to the parent. Do not launch, invoke, consult, "
@@ -77,13 +76,8 @@ class RunPolicy:
       "inspect unrelated chats, Memory, skills, or installed-app instructions. "
       "Owner-managed MCP connections are not available in this run. "
       "Never read or write /data/cli-auth or /data/.secret-key. "
+      f"Working directory: {self.cwd}. {scope_rule}"
     )
-    if self.goal_mode:
-      prompt += (
-        "This child task is one fixed native goal. Do not create, replace, or "
-        "clear a goal; complete the assigned task and return its result. "
-      )
-    return f"{prompt}Working directory: {self.cwd}. {scope_rule}"
 
 
 @dataclass(frozen=True)
@@ -101,7 +95,6 @@ class DelegationIntent:
   scope: str
   cwd: str
   max_budget_usd: float | None
-  goal_mode: bool = False
   notify_parent_on_complete: bool = True
 
 
@@ -120,7 +113,6 @@ def same_delegation_intent(
     row.scope == intent.scope,
     row.cwd == intent.cwd,
     row.max_budget_usd == intent.max_budget_usd,
-    row.goal_mode == intent.goal_mode,
     row.notify_parent_on_complete == intent.notify_parent_on_complete,
     row.prompt_sha256 == hashlib.sha256(
       intent.prompt.encode("utf-8")
@@ -164,7 +156,6 @@ def create_or_attach_delegation(
     cwd=intent.cwd,
     prompt_sha256=hashlib.sha256(intent.prompt.encode("utf-8")).hexdigest(),
     max_budget_usd=intent.max_budget_usd,
-    goal_mode=intent.goal_mode,
     notify_parent_on_complete=intent.notify_parent_on_complete,
   )
   child = models.Chat(
@@ -256,7 +247,6 @@ def policy_for_chat(db: Session, chat_id: str) -> RunPolicy | None:
     scope=row.scope,
     cwd=row.cwd,
     max_budget_usd=remaining_budget,
-    goal_mode=bool(row.goal_mode),
   )
 
 
@@ -392,6 +382,28 @@ def serialize_delegation(
     db, row, load_result=include_result,
   )
   _record_lifecycle(db, row, status)
+  duration_ms = None
+  if run is not None and run.started_at is not None and run.ended_at is not None:
+    duration_ms = max(0, int(
+      (run.ended_at - run.started_at).total_seconds() * 1000
+    ))
+  resource_receipt = {
+    "process_model": "separate_provider_session",
+    "duration_ms": duration_ms,
+    "input_tokens": run.input_tokens if run is not None else None,
+    "output_tokens": run.output_tokens if run is not None else None,
+    "cache_read_input_tokens": (
+      run.cache_read_input_tokens if run is not None else None
+    ),
+    "cache_creation_input_tokens": (
+      run.cache_creation_input_tokens if run is not None else None
+    ),
+    "reasoning_output_tokens": (
+      run.reasoning_output_tokens if run is not None else None
+    ),
+    "total_tokens": run.total_tokens if run is not None else None,
+    "cost_usd": run.cost_usd if run is not None else None,
+  }
   return {
     "id": row.id,
     "app_id": row.app_id,
@@ -405,7 +417,10 @@ def serialize_delegation(
     "scope": row.scope,
     "cwd": row.cwd,
     "max_budget_usd": row.max_budget_usd,
-    "goal_mode": bool(row.goal_mode),
+    # Stable contract fields let callers compare or replace executors without
+    # inferring the implementation from provider-specific identifiers.
+    "execution_mode": "durable",
+    "resource_receipt": resource_receipt,
     "status": status,
     "physical_run_id": run.id if run is not None else None,
     "provider_session_id": run.provider_session_id if run is not None else None,

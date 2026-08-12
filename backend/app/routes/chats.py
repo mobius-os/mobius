@@ -45,7 +45,6 @@ from app.run_state import (
   has_running_run,
   running_chat_ids,
   running_goal_objective,
-  running_goal_plan,
 )
 from app.schemas import ChatPatch, ChatProviderSwitch
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
@@ -499,7 +498,6 @@ def _chat_detail_response(
   active_goal_objective = (
     running_goal_objective(db, chat.id) if running else None
   )
-  active_goal_plan = running_goal_plan(db, chat.id) if running else None
   response = {
     "id": chat.id,
     "title": chat.title,
@@ -513,7 +511,6 @@ def _chat_detail_response(
     "offset": start,
     "running": running,
     "active_goal_objective": active_goal_objective,
-    "active_goal_plan": active_goal_plan,
     "pending_question_id": _open_question_id_for(chat),
     "session_id": chat.session_id if expose_session else None,
     "provider": provider,
@@ -1360,7 +1357,6 @@ def get_chat_runtime(
   return {
     "running": is_chat_running(chat.id),
     "active_goal_objective": running_goal_objective(db, chat.id),
-    "active_goal_plan": running_goal_plan(db, chat.id),
     "pending_messages": list(chat.pending_messages or []),
     "pending_question_id": _open_question_id_for(chat),
     "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,

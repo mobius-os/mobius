@@ -29,18 +29,6 @@ test('goalObjectiveFromText follows the backend command boundary', () => {
   assert.equal(goalObjectiveFromText('/data/apps/x'), '')
 })
 
-test('goalObjectiveFromText previews the first valid ordered plan stage', () => {
-  assert.equal(goalObjectiveFromText(
-    '/goals Ship a coherent release\n- Map the lifecycle\n- Build the flow\n3. Verify it',
-  ), 'Ship a coherent release · Stage 1/3 · Map the lifecycle')
-  assert.equal(goalObjectiveFromText(
-    '/goals Missing stages\n- Only one',
-  ), '')
-  assert.equal(goalObjectiveFromText(
-    '/goals Bad list\nfirst stage\nsecond stage',
-  ), '')
-})
-
 test('goalObjectiveFromText does not present clear or an empty command as active', () => {
   assert.equal(goalObjectiveFromText('/goal'), '')
   assert.equal(goalObjectiveFromText('/goal   '), '')

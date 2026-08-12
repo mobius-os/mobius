@@ -1145,6 +1145,51 @@ async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_shared_native_subagent_switch_removes_claude_agent_tools(
+  monkeypatch,
+):
+  captured = {}
+
+  class _FakeClient:
+    def __init__(self, options):
+      captured["options"] = options
+
+    async def connect(self):
+      return None
+
+    async def query(self, _message):
+      return None
+
+    async def disconnect(self):
+      return None
+
+    async def receive_response(self):
+      yield _success_result("native-switch")
+
+  monkeypatch.setenv("MOEBIUS_NATIVE_SUBAGENTS", "off")
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+  await run_claude_sdk_turn(
+    "hello",
+    session_id=None,
+    base_env={},
+    cwd="/data",
+    chat_id="native-switch",
+    skill_text="system",
+    bc=_Bus(),
+    pending_questions={},
+    db=None,
+    agent_settings={"effort": "ultracode"},
+  )
+
+  options = captured["options"]
+  assert set(options.disallowed_tools) == {
+    "Task", "TaskOutput", "TaskStop", "Workflow", "Workflows", "Agent",
+  }
+  assert options.agents == {}
+  assert options.extra_args["settings"] == '{"disableWorkflows": true}'
+
+
+@pytest.mark.asyncio
 async def test_precompact_hook_publishes_context_compaction_marker(monkeypatch):
   captured: dict = {}
 

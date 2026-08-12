@@ -1016,7 +1016,6 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0010_chat_pending_question_id",
     "0011_delegation_parent_wake",
     "0012_connector_oauth_gcloud",
-    "0013_goal_plans_and_delegation_goal_mode",
   ]
   assert second == first
 
@@ -1510,31 +1509,6 @@ def test_goal_migration_backfills_only_the_running_turns_initiating_goal(
       "SELECT goal_objective FROM chat_runs WHERE id = 'goal-run'"
     )).scalar_one()
   assert objective == "finish the migration"
-
-
-def test_goal_plan_migration_adds_the_plan_table_and_child_goal_mode(tmp_path):
-  eng = create_engine(f"sqlite:///{tmp_path / 'goal-plan.db'}")
-  models.Base.metadata.create_all(eng)
-  with eng.begin() as conn:
-    conn.execute(text("DROP TABLE goal_plans"))
-    conn.execute(text("ALTER TABLE delegations DROP COLUMN goal_mode"))
-
-  database._create_goal_plans_and_add_delegation_goal_mode(eng)
-  # The migration must be safe when an interrupted restart retries it.
-  database._create_goal_plans_and_add_delegation_goal_mode(eng)
-
-  inspector = inspect(eng)
-  goal_columns = {
-    column["name"] for column in inspector.get_columns("goal_plans")
-  }
-  delegation_columns = {
-    column["name"] for column in inspector.get_columns("delegations")
-  }
-  assert {
-    "id", "chat_id", "overall_objective", "stages", "current_stage",
-    "current_run_token", "status", "created_at", "updated_at",
-  } <= goal_columns
-  assert "goal_mode" in delegation_columns
 
 
 def test_applied_legacy_schema_migration_is_immutable():

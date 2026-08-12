@@ -150,15 +150,6 @@ _CODEX_PROMPT_CONTROL_OVERRIDES = [
 ]
 
 
-def _env_flag_on(name: str, *, default: bool) -> bool:
-  """Read a boolean env var: ``off``/``0``/``false``/``no``/empty disable it;
-  anything else enables; unset falls back to ``default``."""
-  raw = os.environ.get(name)
-  if raw is None:
-    return default
-  return raw.strip().lower() not in ("off", "0", "false", "no", "")
-
-
 def _codex_config_overrides(
   *,
   allow_questions: bool = True,
@@ -199,10 +190,8 @@ def _codex_config_overrides(
     # extension lets a new app-server resume the logical operation after
     # Möbius deliberately tears the previous process down for a restart.
     overrides.append("features.goals=true")
-  if (
-    allow_multi_agent
-    and _env_flag_on("MOEBIUS_CODEX_MULTI_AGENT", default=True)
-  ):
+  from app.delegation_runtime import native_subagents_enabled
+  if allow_multi_agent and native_subagents_enabled("codex"):
     overrides += [
       "features.multi_agent_v2.enabled=true",
       "features.multi_agent_v2.tool_namespace=agents",
@@ -1592,15 +1581,14 @@ async def run_codex_sdk_turn(
 
   # config_overrides always isolates the prompt stack, then carries the
   # request_user_input (AskUserQuestion parity), goal, and multi-agent flags.
-  # Delegated children still disable questions and recursive multi-agent work;
-  # only an opt-in child goal receives the provider's goal extension.
+  # Delegated children disable those optional tools at this provider-owned seam.
   codex_bin = shutil.which("codex")
   delegated = run_policy is not None
   restricted = delegated or gauntlet_writer
   config_overrides = _codex_config_overrides(
     allow_questions=not restricted,
     allow_multi_agent=not restricted,
-    allow_goals=not restricted or (delegated and bool(run_policy.goal_mode)),
+    allow_goals=not restricted,
     delegated_read_sandbox=(
       delegated and run_policy.scope == "read"
     ),

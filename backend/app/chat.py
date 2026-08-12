@@ -78,9 +78,6 @@ from app.chat_writer import (
   Barrier,
   ClearPending,
   FinishRun,
-  AdvanceGoalPlan,
-  StartGoalPlan,
-  StopGoalPlan,
   Finalize,
   ParkRun,
   PrepareAutoResume,
@@ -2270,15 +2267,6 @@ async def _stop_chat_for_locked(
   """Stop one chat while its per-chat lifecycle transition is exclusive."""
   stopped_gen = current_run_generation(chat_id)
   bump_run_generation(chat_id)
-  # Stop is also a deliberate plan decision. Stamp it before interrupting the
-  # provider so a just-finishing stage cannot enqueue the next hidden stage in
-  # the narrow cancellation race.
-  try:
-    await _await_ack(get_writer().submit(StopGoalPlan(chat_id=chat_id)))
-  except Exception:
-    _get_logger().warning(
-      "goal plan stop did not persist chat_id=%s", chat_id, exc_info=True,
-    )
   handles = registry.get_handles(chat_id)
   if handles:
     _clear_after_terminal_generation[chat_id] = stopped_gen
@@ -3319,31 +3307,11 @@ async def _complete_turn(
       await _close_browser_session(chat_id)
     db.close()
     return chat_queue.TerminalDisposition.LIMIT_PARKED
-  # The continuation is a fresh turn — give it its own run_token. A completed
-  # plan stage consumes that token first, atomically prepending its hidden
-  # successor before the ordinary queue drain. Consequently a user message
-  # queued during stage one can never overtake stage two.
+  # The continuation is a fresh turn — give it its own run_token. The
+  # turn-end drain's PromotePending sets the next turn's run marker under
+  # this token, and _schedule_continuation hands the SAME token to the
+  # spawned runner so its sink keys on it.
   next_run_token = alloc_run_token()
-  if ending_status == "completed" and not provider_free:
-    try:
-      await _await_ack(get_writer().submit(AdvanceGoalPlan(
-        chat_id=chat_id,
-        run_token=sink.run_token or "",
-        completed_run_token=sink.run_token or "",
-        next_run_token=next_run_token,
-      )))
-    except Exception:
-      # The completed reply is already durably final. Do not lie by running a
-      # later stage after its plan transition failed; retain the active plan so
-      # the owner can explicitly continue it after persistence recovers.
-      _get_logger().warning(
-        "goal plan advance did not persist chat_id=%s", chat_id,
-        exc_info=True,
-      )
-
-  # The turn-end drain's PromotePending sets the next run marker under this
-  # token, and _schedule_continuation hands the SAME token to the spawned
-  # runner so its sink keys on it.
   try:
     next_user, next_messages, next_session_id, disposition = (
       await _drain_and_release(
@@ -4015,8 +3983,6 @@ async def _run_chat_impl_with_db(
   settings = get_settings()
   raw_user_message = messages[-1].content
   user_message = raw_user_message
-  from app.goal_plans import parse_goal_plan
-  goal_plan_spec = parse_goal_plan(raw_user_message)
   goal_objective = _goal_objective(raw_user_message)
   goal_clear = _goal_clear_requested(raw_user_message)
   goal_mode = _chat_has_goal_intent(messages)
@@ -4079,25 +4045,13 @@ async def _run_chat_impl_with_db(
       db, chat_id, settings.data_dir,
     )
   else:
-    # A delegated child may opt into its own native goal loop, but never into
-    # questions, nested delegation, or the parent's plan.  Its immutable task
-    # prompt becomes the one objective; a later durable ``continue`` resumes
-    # that same provider-owned goal rather than creating a second child task.
-    if run_policy.goal_mode:
-      goal_objective = (
-        raw_user_message.strip() if not goal_continue else None
-      )
-      goal_mode = True
-      if goal_objective:
-        user_message = f"/goal {goal_objective}"
-        is_slash_command = True
-    else:
-      goal_objective = None
-      goal_mode = False
+    # Delegation prompts are plain bounded tasks even if their text happens to
+    # begin with an owner-only slash command.
+    goal_objective = None
     goal_clear = False
-    if not run_policy.goal_mode:
-      goal_continue = False
-      is_slash_command = False
+    goal_mode = False
+    goal_continue = False
+    is_slash_command = False
 
   if gauntlet_writer_policy is not None:
     # The platform owns the barrier. Preserve the controller's owner token,
@@ -4112,36 +4066,6 @@ async def _run_chat_impl_with_db(
     # picker may be changed for a later ordinary turn, but it cannot silently
     # switch the model/provider under a reserved writer slot.
     provider_id = gauntlet_writer_policy.provider
-  goal_plan = None
-  if run_policy is None and chat_id:
-    if goal_plan_spec is not None:
-      await _await_ack(get_writer().submit(StartGoalPlan(
-        chat_id=chat_id,
-        run_token=run_token,
-        overall_objective=goal_plan_spec.overall_objective,
-        stages=list(goal_plan_spec.stages),
-      )))
-      # The writer owns the plan+run update. End this request session's older
-      # snapshot before reading it back for the provider objective.
-      db.rollback()
-    elif goal_clear:
-      await _await_ack(get_writer().submit(StopGoalPlan(chat_id=chat_id)))
-      db.rollback()
-    from app.goal_plans import active_plan_for_run, stage_prompt
-    goal_plan = active_plan_for_run(db, chat_id, run_token)
-    if goal_plan is not None:
-      plan_prompt = stage_prompt(goal_plan)
-      if plan_prompt is None:
-        raise RuntimeError("active goal plan has no current stage")
-      goal_objective = plan_prompt
-      goal_mode = True
-      goal_clear = False
-      goal_continue = False
-      # Claude's native goal control is command-shaped; Codex receives the
-      # same objective through its SDK goal operation.  Keeping one agent-copy
-      # form preserves slash-command context ordering for both providers.
-      user_message = f"/goal {plan_prompt}"
-      is_slash_command = True
 
   # Chats created before native Codex goal handling have the /goal objective in
   # their durable transcript but no provider-side ThreadGoal yet.  Either the
@@ -4159,17 +4083,6 @@ async def _run_chat_impl_with_db(
     )
     else None
   )
-  if run_policy is not None and run_policy.goal_mode and goal_continue:
-    # Read-only children may reseed after a provider thread disappears. Their
-    # original immutable task is the first non-continuation owner message.
-    fallback_goal_objective = next((
-      message.content.strip()
-      for message in messages
-      if message.role == "user"
-      and message.content
-      and message.content.strip().lower() != "continue"
-    ), None)
-
   # Durable run identity: the turn's StartTurn (initial send) or
   # PromotePending (continuation / stale-pending drain) writer-actor
   # command ALREADY inserted ChatRun(status="running") atomically with the

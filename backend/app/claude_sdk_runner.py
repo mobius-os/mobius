@@ -1059,12 +1059,18 @@ async def run_claude_sdk_turn(
   # exactly the "apply on next turn" semantics the slash picker promises.
   _model = (agent_settings or {}).get("model") or None
   _effort = (agent_settings or {}).get("effort") or None
+  from app.delegation_runtime import (
+    NATIVE_AGENT_TOOLS,
+    native_subagents_enabled,
+  )
+  native_agents_enabled = (
+    run_policy is None and native_subagents_enabled("claude")
+  )
   # The "ultracode" tier maps to xhigh effort for the SDK flag (which only
   # accepts low/medium/high/xhigh/max) and arms the Workflow-tool
   # orchestration via the keyword trigger appended to this turn's prompt.
-  _ultracode = (
-    _effort == "ultracode" and run_policy is None and not gauntlet_writer
-  )
+  native_agents_enabled = native_agents_enabled and not gauntlet_writer
+  _ultracode = _effort == "ultracode" and native_agents_enabled
   if _effort == "ultracode":
     _effort = "xhigh"
   turn_message = user_message + _ULTRACODE_REMINDER if _ultracode else user_message
@@ -1156,6 +1162,11 @@ async def run_claude_sdk_turn(
       elif gauntlet_max_budget_usd is not None:
         restricted_options["max_budget_usd"] = gauntlet_max_budget_usd
       options_kwargs.update(restricted_options)
+    elif not native_agents_enabled:
+      options_kwargs.update({
+        "disallowed_tools": list(NATIVE_AGENT_TOOLS),
+        "agents": {},
+      })
     if skills_enabled:
       options_kwargs["skills"] = "all"
     if model_override:
