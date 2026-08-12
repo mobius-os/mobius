@@ -234,7 +234,9 @@
   border: 1px solid var(--border);
   background: var(--surface2, rgba(128,128,128,.1));
   color: var(--text);
-  font-size: 13px;
+  /* Match the main composer’s mobile-safe editing floor. A custom answer is a
+     primary text surface, not compact supporting copy. */
+  font-size: 16px;
   font-family: inherit;
   line-height: 1.45;
   outline: none;

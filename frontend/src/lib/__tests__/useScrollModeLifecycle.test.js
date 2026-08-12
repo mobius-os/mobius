@@ -51,9 +51,11 @@ function installBrowserEnvironment({ observers = [], frames = null } = {}) {
     constructor(callback) {
       this.callback = callback
       this.disconnected = false
+      this.observed = new Set()
       observers.push(this)
     }
-    observe() {}
+    observe(target) { this.observed.add(target) }
+    unobserve(target) { this.observed.delete(target) }
     disconnect() { this.disconnected = true }
   }
   globalThis.MutationObserver = class {
@@ -253,7 +255,10 @@ test('a no-scroll tail relatch preserves the queued send-time pin decision', () 
   }
 })
 
-test('a focused growing inline editor survives keyboard resize but yields to a real scroll', () => {
+test('a focused inline editor keeps one current owner across keyboard and growth races', () => {
+=======
+test('a focused inline editor keeps one current owner across keyboard and growth races', () => {
+>>>>>>> 5c050d54 (platform: local edits before reconcile)
   const scrollListeners = new Map()
   const frames = []
   const observers = []
@@ -316,18 +321,35 @@ test('a focused growing inline editor survives keyboard resize but yields to a r
     hasTranscript: true,
     ownsReadingPosition: true,
   }
+  let editorHeight = 38
+  let editorHeightReads = 0
   const editor = {
-    offsetHeight: 38,
-    matches: selector => selector === 'textarea.qcard__input',
+    dataset: { chatInlineEditor: 'question-answer' },
+    get offsetHeight() {
+      editorHeightReads += 1
+      return editorHeight
+    },
     closest: () => null,
+  }
+
+  const flushFrames = () => {
+    while (frames.length) frames.shift()()
   }
 
   try {
     const hook = renderHook(useScrollMode, hookArgs)
     assert.equal(typeof scrollListeners.get('beforeinput'), 'function')
     assert.equal(typeof scrollListeners.get('input'), 'function')
+    assert.equal(observers.length, 1,
+      'an unfocused chat installs no editor-specific observer')
 
     globalThis.document.activeElement = editor
+    scrollListeners.get('focusin')({ target: editor })
+    assert.equal(observers.length, 1,
+      'the focused editor joins the chat’s existing resize transaction')
+    assert.equal(observers[0].observed.has(editor), true)
+    assert.equal(editorHeightReads, 1,
+      'focus takes one size baseline instead of measuring every key')
     scroll.clientHeight = 300
     scroll.scrollTop = 140 // Native keyboard caret reveal moves the transcript.
     observers[0].callback()
@@ -337,29 +359,52 @@ test('a focused growing inline editor survives keyboard resize but yields to a r
     scrollListeners.get('beforeinput')({ target: editor })
     scroll.scrollTop = 160 // The keyboard completes its caret reveal on first input.
     scrollListeners.get('input')({ target: editor })
-    frames.at(-1)()
+    flushFrames()
     assert.equal(scroll.scrollTop, 160,
       'a first letter that does not grow the field keeps the visible caret')
+    assert.equal(editorHeightReads, 1,
+      'ordinary text input performs no synchronous field-size reads')
 
     const beforeGrowth = scroll.scrollTop
     scrollListeners.get('beforeinput')({ target: editor })
-    editor.offsetHeight = 72
+    editorHeight = 72
     scroll.scrollTop = 220 // Native caret reveal races the growing textarea.
     scrollListeners.get('input')({ target: editor })
-    frames.at(-1)()
+    observers[0].callback([{
+      target: editor,
+      borderBoxSize: [{ blockSize: editorHeight }],
+    }])
     assert.equal(scroll.scrollTop, beforeGrowth,
       'real field growth restores the exact pre-growth row position')
+    flushFrames()
 
     scrollListeners.get('beforeinput')({ target: editor })
-    editor.offsetHeight = 100
+    editorHeight = 100
+    scroll.scrollTop = 220
     scrollListeners.get('input')({ target: editor })
-    const staleGrowthFrame = frames.at(-1)
+    scroll.clientHeight = 260
+    scroll.scrollTop = 240 // A later keyboard frame selects a newer caret hold.
+    observers[0].callback([{
+      target: editor,
+      borderBoxSize: [{ blockSize: editorHeight }],
+    }])
+    assert.equal(scroll.scrollTop, 240,
+      'delayed field growth cannot replay an anchor older than a viewport rebase')
+    flushFrames()
+
+    scrollListeners.get('beforeinput')({ target: editor })
+    editorHeight = 120
+    scrollListeners.get('input')({ target: editor })
     scrollListeners.get('pointerdown')({
       type: 'pointerdown', pointerType: 'mouse', button: 0, target: editor,
     })
     scroll.scrollTop = 90
     scrollListeners.get('scroll')()
-    staleGrowthFrame()
+    observers[0].callback([{
+      target: editor,
+      borderBoxSize: [{ blockSize: editorHeight }],
+    }])
+    flushFrames()
     assert.equal(scroll.scrollTop, 90,
       'a newer reader gesture owns the viewport instead of the edit correction')
 

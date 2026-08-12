@@ -766,11 +766,6 @@ test('viewport resize preserves the current mode except for focused Q&A caret re
     /visualViewport\.addEventListener/,
     'chat observes its actual resized box instead of racing Shell for the browser event',
   )
-  assert.match(
-    scrollModeSource,
-    /questionEditorIsFocused\(\)[\s\S]*?modeForQuestionEditingViewportChange/,
-    'a focused custom answer adopts the browser’s caret-visible position',
-  )
 })
 
 test('question editing rebases only an ordinary held viewport to native caret movement', () => {

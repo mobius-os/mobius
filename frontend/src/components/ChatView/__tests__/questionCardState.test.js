@@ -40,6 +40,8 @@ test('unanswered question cards do not have a stale gray state', () => {
     'the custom answer should stay mounted and retain submitted custom text')
   assert.match(component, /rows=\{1\}/,
     'the custom answer should begin as one compact writing line')
+  assert.match(component, /data-chat-inline-editor="question-answer"/,
+    'the scroll controller should recognize the editor through a semantic marker')
   assert.match(component, /onFocus=\{e => placeCaretAtTextEnd\(e\.currentTarget\)\}/,
     'returning to a custom answer should put the caret after its saved text')
   assert.match(component, /readOnly=\{answered\}[\s\S]*?disabled=\{disabled && !answered\}/,
@@ -75,7 +77,7 @@ test('question card css has no stale styling hook', () => {
     'expiration status styling should not come back')
   assert.match(css, /\.qcard__input:disabled,\s*\.qcard__input\[readonly\]\s*\{[\s\S]*?color:\s*var\(--muted\);[\s\S]*?-webkit-text-fill-color:\s*var\(--muted\);[\s\S]*?\}/,
     'a submitted custom answer should visibly gray out in every browser')
-  assert.match(css, /\.qcard__input\s*\{[\s\S]*?width:\s*100%;[\s\S]*?min-height:\s*38px;[\s\S]*?field-sizing:\s*content;[\s\S]*?max-height:\s*180px;[\s\S]*?overflow-y:\s*auto;[\s\S]*?resize:\s*none;/,
+  assert.match(css, /\.qcard__input\s*\{[\s\S]*?width:\s*100%;[\s\S]*?min-height:\s*38px;[\s\S]*?font-size:\s*16px;[\s\S]*?field-sizing:\s*content;[\s\S]*?max-height:\s*180px;[\s\S]*?overflow-y:\s*auto;[\s\S]*?resize:\s*none;/,
     'the custom answer should expand inline to a bounded, internally scrollable height')
   assert.match(css, /\.qcard__submit-error\s*\{/,
     'a failed answer should keep its retry notice attached to the card')

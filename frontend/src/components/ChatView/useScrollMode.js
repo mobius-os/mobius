@@ -1481,6 +1481,12 @@ export default function useScrollMode({
   // once a newer gesture lands, older work can never regain ownership merely
   // because the gesture timing window later closes.
   const readerIntentVersionRef = useRef(0)
+  // Monotonic generation for semantic mode ownership. Reader intent answers
+  // "did the person scroll?"; this answers the independent question "did a
+  // newer location win?". Inline-editor growth captures both so a delayed
+  // resize notification can never replay a pre-keyboard anchor over a newer
+  // caret-visible hold.
+  const modeTransitionVersionRef = useRef(0)
   // The chat reacts to the size of its actual scroll viewport, after Shell has
   // reconciled any visual-viewport overlay. Keeping the last observed height
   // across effect re-runs makes ResizeObserver the one keyboard/layout signal
@@ -1599,6 +1605,7 @@ export default function useScrollMode({
     if (!nextMode) return previousMode
     if (nextMode === previousMode) return previousMode
     modeRef.current = nextMode
+    modeTransitionVersionRef.current += 1
     const pinOwnedBefore = previousMode?.kind === 'PIN_USER_MSG'
     const pinOwnedAfter = nextMode?.kind === 'PIN_USER_MSG'
     if (pinOwnedBefore !== pinOwnedAfter) {
@@ -1991,13 +1998,15 @@ export default function useScrollMode({
     const spacerEl = spacerRef.current
     if (!scrollEl || !spacerEl) return
     const chatEl = chatRef.current
-    const isQuestionEditor = target => target?.matches?.(
-      'textarea.qcard__input',
-    ) === true
-    const questionEditorIsFocused = () => {
-      if (typeof document === 'undefined') return false
+    const isQuestionEditor = target => (
+      target?.dataset?.chatInlineEditor === 'question-answer'
+    )
+    const focusedQuestionEditor = () => {
+      if (typeof document === 'undefined') return null
       const target = document.activeElement
       return isQuestionEditor(target) && scrollEl.contains?.(target) === true
+        ? target
+        : null
     }
 
     if (observedScrollViewportRef.current.element !== scrollEl) {
@@ -2162,6 +2171,27 @@ export default function useScrollMode({
         : null
     }
 
+    /** Adopt a browser-provided caret reveal through the same narrow policy
+     * for both keyboard viewport changes and no-resize text input. When the
+     * browser already performed the physical movement, record it rather than
+     * writing scrollTop again. */
+    function adoptFocusedQuestionEditorCaret(event, {
+      editor = focusedQuestionEditor(),
+      nativePositionAlreadyApplied = false,
+    } = {}) {
+      if (!editor || focusedQuestionEditor() !== editor) return false
+      const nextMode = modeForQuestionEditingViewportChange(
+        modeRef.current,
+        anchorModeFromScroll(scrollEl),
+      )
+      if (nextMode === modeRef.current) return false
+      readerLocationExplicitRef.current = true
+      transitionMode(nextMode, event)
+      persistMode()
+      if (nativePositionAlreadyApplied) rememberAppliedMode()
+      return true
+    }
+
     function applyLayoutMode(event, authorityVersion) {
       if (!writeMode(scrollEl, modeRef.current, event, authorityVersion)) {
         return false
@@ -2229,18 +2259,8 @@ export default function useScrollMode({
       }
       sizeSpacer(authorityVersion)
       if (viewportChange) {
-        const caretAnchor = questionEditorIsFocused()
-          && !questionSubmissionWasActive
-          ? anchorModeFromScroll(scrollEl)
-          : null
-        const viewportMode = modeForQuestionEditingViewportChange(
-          modeRef.current,
-          caretAnchor,
-        )
-        if (viewportMode !== modeRef.current) {
-          readerLocationExplicitRef.current = true
-          transitionMode(viewportMode, 'layout:question-edit-viewport')
-          persistMode()
+        if (!questionSubmissionWasActive) {
+          adoptFocusedQuestionEditorCaret('layout:question-edit-viewport')
         }
         // A viewport resize is geometry, not reading intent. Reapply the mode
         // that already owns the chat instead of deriving a different mode from
@@ -2348,6 +2368,152 @@ export default function useScrollMode({
     }
     forceRevealRef.current = forceReveal
 
+    // Inline Q&A editing is part of this same layout transaction. The editor
+    // joins the existing observer only while focused, so a delivery containing
+    // both keyboard viewport and field-size changes can resolve viewport
+    // ownership first instead of depending on callback order between observers.
+    let pendingInlineEditorAnchor = null
+    let inlineEditorRaf = 0
+    let observedQuestionEditor = null
+    let observedQuestionEditorHeight = 0
+    let questionEditorResizeVersion = 0
+
+    const recordQuestionEditorResize = (entries) => {
+      let changed = false
+      for (const entry of entries) {
+        if (entry.target !== observedQuestionEditor) continue
+        const box = Array.isArray(entry.borderBoxSize)
+          ? entry.borderBoxSize[0]
+          : entry.borderBoxSize
+        // offsetHeight is only the compatibility fallback inside an actual
+        // resize notification, never an ordinary-keystroke read.
+        const height = Number.isFinite(box?.blockSize)
+          ? box.blockSize
+          : entry.target.offsetHeight
+        if (Math.abs(height - observedQuestionEditorHeight) < 1) continue
+        observedQuestionEditorHeight = height
+        questionEditorResizeVersion += 1
+        changed = true
+      }
+      return changed
+    }
+
+    const observeQuestionEditor = (editor) => {
+      if (!isQuestionEditor(editor) || observedQuestionEditor === editor) return
+      if (observedQuestionEditor) ro.unobserve?.(observedQuestionEditor)
+      observedQuestionEditor = editor
+      // One focus-time baseline replaces two forced layout reads per key.
+      observedQuestionEditorHeight = editor.offsetHeight
+      questionEditorResizeVersion = 0
+      ro.observe(editor, { box: 'border-box' })
+    }
+
+    const stopObservingQuestionEditor = (editor) => {
+      if (observedQuestionEditor !== editor) return
+      ro.unobserve?.(editor)
+      observedQuestionEditor = null
+      observedQuestionEditorHeight = 0
+      questionEditorResizeVersion = 0
+    }
+
+    const clearInlineEditorPlan = (plan) => {
+      if (pendingInlineEditorAnchor !== plan) return
+      pendingInlineEditorAnchor = null
+      cancelAnimationFrame(inlineEditorRaf)
+      inlineEditorRaf = 0
+    }
+
+    const finishInlineEditorInput = (plan) => {
+      if (pendingInlineEditorAnchor !== plan) return
+      const planIsCurrent = modeTransitionVersionRef.current === plan.modeVersion
+        && layoutOwnsScroll(plan.authorityVersion)
+      if (!planIsCurrent) {
+        clearInlineEditorPlan(plan)
+        return
+      }
+      if (plan.resizeVersion !== questionEditorResizeVersion) {
+        // The field changed size. Restore the pre-mutation reading row only if
+        // no newer semantic location (not merely reader intent) has won.
+        writeMode(
+          scrollEl,
+          plan.mode,
+          'layout:inline-editor-resize',
+          plan.authorityVersion,
+        )
+        rememberAppliedMode()
+        clearInlineEditorPlan(plan)
+        return
+      }
+      if (Math.abs(scrollEl.scrollTop - plan.scrollTop) > 0.5) {
+        adoptFocusedQuestionEditorCaret('reader:inline-editor-caret', {
+          editor: plan.editor,
+          nativePositionAlreadyApplied: true,
+        })
+      }
+      clearInlineEditorPlan(plan)
+    }
+
+    const captureInlineEditorAnchor = (event) => {
+      if (!isQuestionEditor(event.target)) return
+      // Rapid input can arrive before the two-frame no-resize settle. Commit
+      // that already-rendered character before replacing its plan so its
+      // native caret movement cannot disappear from semantic state.
+      if (pendingInlineEditorAnchor?.inputComplete) {
+        finishInlineEditorInput(pendingInlineEditorAnchor)
+      }
+      observeQuestionEditor(event.target)
+      // Capture before the browser changes the textarea/caret. Typing is a
+      // newer semantic action than a half-settled reader gesture, but it is not
+      // new scroll intent, so the exact current anchor becomes layout owner.
+      const readerGesturePending = !layoutMayOwnScroll(
+        gestureWindowUntilRef.current,
+        performance.now(),
+      )
+      const needsFreshAnchor = !readerLocationExplicitRef.current
+        || modeRef.current?.kind !== 'ANCHOR_AT'
+        || readerGesturePending
+      // Once typing has retired FOLLOW/PIN, the current anchor is already the
+      // exact contract to replay. Avoid measuring the transcript again on
+      // every character unless a newer reader gesture made it stale.
+      const nextMode = needsFreshAnchor
+        ? anchorModeFromScroll(scrollEl) || modeRef.current
+        : modeRef.current
+      supersedePendingReaderGesture()
+      if (needsFreshAnchor) {
+        readerLocationExplicitRef.current = true
+        transitionMode(nextMode, 'reader:inline-editor-growth')
+        persistMode()
+      }
+      pendingInlineEditorAnchor = {
+        editor: event.target,
+        mode: nextMode,
+        scrollTop: scrollEl.scrollTop,
+        authorityVersion: currentAuthority(),
+        modeVersion: modeTransitionVersionRef.current,
+        resizeVersion: questionEditorResizeVersion,
+        inputComplete: false,
+      }
+    }
+
+    const settleInlineEditorInput = (event) => {
+      if (!isQuestionEditor(event.target)) return
+      const plan = pendingInlineEditorAnchor
+      if (!plan || plan.editor !== event.target) return
+      plan.inputComplete = true
+      cancelAnimationFrame(inlineEditorRaf)
+      inlineEditorRaf = requestAnimationFrame(() => {
+        // ResizeObserver delivery follows layout and may run after this first
+        // rAF. The second frame distinguishes a stable one-line input without
+        // measuring the field on every key.
+        inlineEditorRaf = requestAnimationFrame(() => {
+          inlineEditorRaf = 0
+          finishInlineEditorInput(plan)
+        })
+      })
+    }
+    const onInlineEditorFocus = (event) => observeQuestionEditor(event.target)
+    const onInlineEditorBlur = (event) => stopObservingQuestionEditor(event.target)
+
     // ResizeObserver — re-runs spacer sizing on content size changes.
     // Re-applies content-tracking modes:
     //   FOLLOW_BOTTOM — every firing, so streaming keeps the user
@@ -2364,7 +2530,8 @@ export default function useScrollMode({
     //   PIN_USER_MSG  — conditional two-case repair only (settlePinnedMode);
     //                   never re-applied unconditionally (jitter risk).
     //
-    const ro = new ResizeObserver(() => {
+    const ro = new ResizeObserver((entries = []) => {
+      const questionEditorResized = recordQuestionEditorResize(entries)
       const authorityVersion = currentAuthority()
       // Streaming content can resize on every reveal frame while the reader is
       // actively scrolling. Defer the whole geometry transaction here: even a
@@ -2390,6 +2557,9 @@ export default function useScrollMode({
           viewportChange: true,
           authorityVersion,
         })
+        if (questionEditorResized && pendingInlineEditorAnchor?.inputComplete) {
+          finishInlineEditorInput(pendingInlineEditorAnchor)
+        }
         requestRevealOnQuiet()
         return
       }
@@ -2424,6 +2594,9 @@ export default function useScrollMode({
         // Post-reveal anchors use the same shift-or-clamp repair as pins;
         // steady output below an unchanged anchor remains a no-op.
         settleAnchoredMode(authorityVersion)
+      }
+      if (questionEditorResized && pendingInlineEditorAnchor?.inputComplete) {
+        finishInlineEditorInput(pendingInlineEditorAnchor)
       }
       requestRevealOnQuiet()  // each RO firing pushes the reveal back
     })
@@ -2799,79 +2972,6 @@ export default function useScrollMode({
     const onComposerPointerDown = (event) => runComposerTailIntent(event)
     composerEditRunRef.current = runComposerTailIntent
 
-    let pendingInlineEditorAnchor = null
-    let inlineEditorRaf = 0
-    const captureInlineEditorAnchor = (event) => {
-      if (!isQuestionEditor(event.target)) return
-      // Capture before the browser changes the textarea/caret. Typing is a
-      // newer semantic action than a half-settled reader gesture, but it is not
-      // new scroll intent, so the exact current anchor becomes layout owner.
-      const readerGesturePending = !layoutMayOwnScroll(
-        gestureWindowUntilRef.current,
-        performance.now(),
-      )
-      const needsFreshAnchor = !readerLocationExplicitRef.current
-        || modeRef.current?.kind !== 'ANCHOR_AT'
-        || readerGesturePending
-      // Once typing has retired FOLLOW/PIN, the current anchor is already the
-      // exact contract to replay. Avoid measuring the transcript again on
-      // every character unless a newer reader gesture made it stale.
-      const nextMode = needsFreshAnchor
-        ? anchorModeFromScroll(scrollEl) || modeRef.current
-        : modeRef.current
-      supersedePendingReaderGesture()
-      if (needsFreshAnchor) {
-        readerLocationExplicitRef.current = true
-        transitionMode(nextMode, 'reader:inline-editor-growth')
-        persistMode()
-      }
-      pendingInlineEditorAnchor = {
-        editor: event.target,
-        height: event.target.offsetHeight,
-        mode: nextMode,
-        scrollTop: scrollEl.scrollTop,
-        authorityVersion: currentAuthority(),
-      }
-    }
-    const restoreInlineEditorAnchor = (event) => {
-      if (!isQuestionEditor(event.target)) return
-      const plan = pendingInlineEditorAnchor
-      pendingInlineEditorAnchor = null
-      if (!plan) return
-      cancelAnimationFrame(inlineEditorRaf)
-      inlineEditorRaf = requestAnimationFrame(() => {
-        inlineEditorRaf = 0
-        const fieldGrew = plan.editor === event.target
-          && Math.abs(event.target.offsetHeight - plan.height) >= 1
-        if (!fieldGrew) {
-          // The first letter often lands while the phone is completing its
-          // keyboard caret reveal. A correction meant for textarea growth must
-          // not replay the pre-keyboard anchor when the field stayed one line.
-          // Rebase only when the transcript actually moved; ordinary letters
-          // then do no geometry work at all.
-          if (Math.abs(scrollEl.scrollTop - plan.scrollTop) <= 0.5
-              || !layoutOwnsScroll(plan.authorityVersion)) return
-          const caretMode = modeForQuestionEditingViewportChange(
-            modeRef.current,
-            anchorModeFromScroll(scrollEl),
-          )
-          if (caretMode === modeRef.current) return
-          readerLocationExplicitRef.current = true
-          transitionMode(caretMode, 'reader:inline-editor-caret')
-          persistMode()
-          // Native caret reveal already performed the physical write. Record
-          // that committed position as applied instead of writing it again.
-          rememberAppliedMode()
-          return
-        }
-        writeMode(
-          scrollEl,
-          plan.mode,
-          'layout:inline-editor-growth',
-          plan.authorityVersion,
-        )
-      })
-    }
     const noteScrollStart = () => {
       if (!pendingGestureStart) return
       perfMark('scroll.startLatency', performance.now() - pendingGestureStart)
@@ -2882,8 +2982,10 @@ export default function useScrollMode({
     scrollEl.addEventListener('pointermove', onPointerMoveInput, { passive: true })
     scrollEl.addEventListener('wheel', onWheelInput, { passive: true })
     scrollEl.addEventListener('keydown', onUserInput, { passive: true })
+    scrollEl.addEventListener('focusin', onInlineEditorFocus, { passive: true })
+    scrollEl.addEventListener('focusout', onInlineEditorBlur, { passive: true })
     scrollEl.addEventListener('beforeinput', captureInlineEditorAnchor, { passive: true })
-    scrollEl.addEventListener('input', restoreInlineEditorAnchor, { passive: true })
+    scrollEl.addEventListener('input', settleInlineEditorInput, { passive: true })
     scrollEl.addEventListener('pointerup', onPointerUpInput, { passive: true })
     scrollEl.addEventListener('pointercancel', onPointerCancelInput, { passive: true })
     chatEl?.addEventListener('pointerdown', onComposerPointerDown, { passive: true })
@@ -2996,8 +3098,10 @@ export default function useScrollMode({
       scrollEl.removeEventListener('pointermove', onPointerMoveInput)
       scrollEl.removeEventListener('wheel', onWheelInput)
       scrollEl.removeEventListener('keydown', onUserInput)
+      scrollEl.removeEventListener('focusin', onInlineEditorFocus)
+      scrollEl.removeEventListener('focusout', onInlineEditorBlur)
       scrollEl.removeEventListener('beforeinput', captureInlineEditorAnchor)
-      scrollEl.removeEventListener('input', restoreInlineEditorAnchor)
+      scrollEl.removeEventListener('input', settleInlineEditorInput)
       scrollEl.removeEventListener('pointerup', onPointerUpInput)
       scrollEl.removeEventListener('pointercancel', onPointerCancelInput)
       chatEl?.removeEventListener('pointerdown', onComposerPointerDown)
