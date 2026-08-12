@@ -1016,6 +1016,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0010_chat_pending_question_id",
     "0011_delegation_parent_wake",
     "0012_connector_oauth_gcloud",
+    "0013_goal_plans_and_delegation_goal_mode",
   ]
   assert second == first
 
