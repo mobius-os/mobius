@@ -10,7 +10,10 @@ import { clearOwnerDraftStorage } from '../lib/ownerDraftStorage.js'
 import { clearReadingPositions } from '../components/ChatView/useScrollMode.js'
 import { clearDurableComposerDrafts } from '../components/ChatView/composerDraft.js'
 import { verifyConnectivity } from '../lib/connectivityStore.js'
-import { SHELL_DATA_CACHE } from '../sw-cache-policy.js'
+import {
+  cachesToDeleteOnLogout,
+  SHELL_DATA_CACHE,
+} from '../sw-cache-policy.js'
 
 export const BASE = (import.meta.env.BASE_URL || '/').replace(/\/$/, '')
 
@@ -112,15 +115,11 @@ export function clearToken() {
 
 // Wipes persisted client state on logout / token expiry: the
 // TanStack Query cache (IndexedDB) AND the SW Cache Storage
-// entries. Two cache-name prefixes need clearing now:
-//   - `mobius-*` — runtime caches registered in src/sw.js
-//     (`mobius-vendor`, `mobius-esm`, `mobius-proxy`) plus any
-//     pre-vite-plugin-pwa legacy names that lingered.
-//   - `workbox-*` — precache entries injected by vite-plugin-pwa
-//     (`workbox-precache-v2-<scope>`) plus the workbox-runtime
-//     bucket. These hold the shell bundle, manifest, and icons —
-//     not owner-scoped data but worth purging so the next owner
-//     on a shared device gets a clean install on next visit.
+// entries. `mobius-*` runtime caches are cleared because they include
+// owner-projected shell data and private app responses. Workbox's public shell
+// precache is deliberately retained: deleting it underneath an active worker
+// leaves that worker installed but unable to serve `/index.html` or its bundle,
+// so the next launch can fail before login even appears.
 // The TanStack Query cache (IDB) holds owner-scoped chat/app
 // lists; that's the primary privacy reason for the wipe. Returns
 // a promise so callers can `await` it before reloading the page
@@ -203,9 +202,7 @@ async function wipeSwCaches() {
   if (typeof caches === 'undefined') return
   const keys = await caches.keys()
   await Promise.all(
-    keys
-      .filter(k => k.startsWith('mobius-') || k.startsWith('workbox-'))
-      .map(k => caches.delete(k))
+    cachesToDeleteOnLogout(keys).map(k => caches.delete(k))
   )
 }
 

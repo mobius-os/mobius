@@ -14,8 +14,10 @@
  *
  * `defaultOptions` are tuned to "cached but not stale": staleTime 30s
  * means data is considered fresh for 30s (no refetch on remount in
- * that window), gcTime 24h means it's kept on disk for a day after
- * last use. Tweak per-query via the queryKey/queryFn config.
+ * that window), while gcTime 24h bounds inactive queries during a live
+ * session. The last persisted snapshot itself does not expire by age: it is
+ * the shell's durable offline fallback and is explicitly erased on logout.
+ * Tweak per-query via the queryKey/queryFn config.
  */
 import { QueryClient, dehydrate } from '@tanstack/react-query'
 import { createAsyncStoragePersister } from '@tanstack/query-async-storage-persister'
@@ -89,7 +91,10 @@ export const queryPersister = createAsyncStoragePersister({
 
 export const persistOptions = {
   persister: queryPersister,
-  maxAge: 24 * 60 * 60 * 1000,
+  // Last-known owner state is more useful than a blank shell after a long
+  // offline stretch. Every restored query revalidates normally when the server
+  // returns, and logout explicitly deletes this owner-scoped database.
+  maxAge: Infinity,
   buster: QUERY_CACHE_BUSTER,
   dehydrateOptions: {
     shouldDehydrateQuery: (query) => shouldPersistQueryKey(query.queryKey),

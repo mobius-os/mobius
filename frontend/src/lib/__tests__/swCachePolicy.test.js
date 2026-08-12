@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   APP_ASSETS_CACHE,
   APP_ASSETS_MAX_ENTRIES,
+  cachesToDeleteOnLogout,
   ESM_CACHE,
   OFFLINE_APPS_CACHE,
   STANDALONE_APPS_CACHE,
@@ -25,6 +26,20 @@ import {
   supersededVersionKeys,
   withOpaqueFramePublicAssetCors,
 } from '../../sw-cache-policy.js'
+
+test('logout clears owner runtime caches without deleting the installed shell', () => {
+  assert.deepEqual(cachesToDeleteOnLogout([
+    'mobius-shell-data',
+    OFFLINE_APPS_CACHE,
+    'mobius-proxy',
+    'workbox-precache-v2-https://mobius.test/',
+    'unrelated-cache',
+  ]), [
+    'mobius-shell-data',
+    OFFLINE_APPS_CACHE,
+    'mobius-proxy',
+  ])
+})
 
 test('runtime cache cleanup keeps current cache names', () => {
   for (const name of [

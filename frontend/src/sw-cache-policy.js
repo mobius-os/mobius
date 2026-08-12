@@ -100,6 +100,18 @@ const KEEP_RUNTIME_CACHES = new Set([
   APP_ASSETS_CACHE,
 ])
 
+// Logout removes every cache that may contain owner-projected data or private
+// app code, but it must leave Workbox's public shell precache intact. An active
+// service worker whose own precache was deleted keeps intercepting navigations;
+// because the same worker does not reinstall, deleting `workbox-*` here leaves
+// the installed PWA with no `/index.html` or bundle to serve on its next open.
+// The retained Workbox entries contain only build-owned public assets. Owner
+// data remains covered by the `mobius-*` runtime caches plus the IndexedDB
+// stores cleared at the same logout boundary.
+export function cachesToDeleteOnLogout(cacheNames) {
+  return (cacheNames || []).filter(name => name.startsWith('mobius-'))
+}
+
 // Content types we're willing to store in a cache-first asset cache.
 // An SPA-fallback HTML body or an esm.sh `text/plain` error page is NOT
 // in this list, so it's refused rather than cached.
