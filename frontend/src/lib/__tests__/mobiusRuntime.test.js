@@ -356,6 +356,29 @@ test('microphone capability can cancel while permission is still pending', async
   })
 })
 
+test('stopping locally generated speech settles before worker startup completes', async () => {
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = () => new Promise(() => {})
+  try {
+    await withFakeWindow(async ({ parent }) => {
+      const capabilities = makeCapabilities({
+        declarations: {
+          'media.speech': { version: 1, limits: { max_text_chars: 1_000 } },
+        },
+      })
+      const session = capabilities.open('media.speech', { text: 'Hello.' })
+      await new Promise((resolve) => setImmediate(resolve))
+      session.cancel()
+      await assert.rejects(session.result, { name: 'AbortError' })
+      assert.equal(parent.messages.at(-1).data.action, 'cancel',
+        'stopping the reader must also stop the model-byte stream')
+      capabilities._destroy()
+    })
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})
+
 test('capabilities reject direct top-level use instead of bypassing the host', async () => {
   const previousWindow = globalThis.window
   const topLevel = {

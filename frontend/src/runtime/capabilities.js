@@ -137,12 +137,16 @@ export function makeCapabilities({ declarations = {}, hostWindow, selfWindow } =
       cancel() {
         if (internal.settled) return
         if (internal.localControl) {
-          internal.localControl.cancel()
-          return
+          // The frame engine owns its worker and model-stream cancellation.
+          // Settle the caller here too: a stop is final immediately, even if a
+          // browser delays its worker teardown. Waiting on that teardown used
+          // to leave a stopped reader exposed to its startup timeout.
+          try { internal.localControl.cancel() } catch {}
+        } else {
+          parentWindow.postMessage({
+            type: 'moebius:capability-control', requestId, capability, action: 'cancel',
+          }, ownWindow.location.origin)
         }
-        parentWindow.postMessage({
-          type: 'moebius:capability-control', requestId, capability, action: 'cancel',
-        }, ownWindow.location.origin)
         settle(internal, 'error', new CapabilityError('aborted', 'Capability request cancelled.', {
           name: 'AbortError', capability,
         }))
