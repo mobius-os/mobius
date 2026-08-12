@@ -356,27 +356,26 @@ test('microphone capability can cancel while permission is still pending', async
   })
 })
 
-test('stopping locally generated speech settles before worker startup completes', async () => {
-  const previousFetch = globalThis.fetch
-  globalThis.fetch = () => new Promise(() => {})
-  try {
-    await withFakeWindow(async ({ parent }) => {
-      const capabilities = makeCapabilities({
-        declarations: {
-          'media.speech': { version: 1, limits: { max_text_chars: 1_000 } },
-        },
-      })
-      const session = capabilities.open('media.speech', { text: 'Hello.' })
-      await new Promise((resolve) => setImmediate(resolve))
-      session.cancel()
-      await assert.rejects(session.result, { name: 'AbortError' })
-      assert.equal(parent.messages.at(-1).data.action, 'cancel',
-        'stopping the reader must also stop the model-byte stream')
-      capabilities._destroy()
+test('speech synthesis runs through the host and stops without waiting for startup', async () => {
+  await withFakeWindow(async ({ parent }) => {
+    const capabilities = makeCapabilities({
+      declarations: {
+        'media.speech': { version: 1, limits: { max_text_chars: 1_000 } },
+      },
     })
-  } finally {
-    globalThis.fetch = previousFetch
-  }
+    const session = capabilities.open('media.speech', { text: 'Hello.' })
+    const start = parent.messages.at(-1).data
+    assert.equal(start.type, 'moebius:capability-open')
+    assert.equal(start.capability, 'media.speech')
+    assert.deepEqual(start.input, { text: 'Hello.' })
+
+    session.cancel()
+    assert.equal(parent.messages.at(-1).data.type, 'moebius:capability-control')
+    assert.equal(parent.messages.at(-1).data.action, 'cancel')
+    await assert.rejects(session.ready, { name: 'AbortError' })
+    await assert.rejects(session.result, { name: 'AbortError' })
+    capabilities._destroy()
+  })
 })
 
 test('capabilities reject direct top-level use instead of bypassing the host', async () => {
