@@ -61,7 +61,11 @@ export const SHELL_DATA_CACHE = 'mobius-shell-data'
 // `wasm-unsafe-eval` and require the legacy `unsafe-eval` source before they
 // compile WebAssembly. Evict the modern-only frame response so those devices
 // receive the compatibility policy rather than retaining the blocked one.
-export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v10'
+// Bumped -v10 → -v11 (2026-08-12): speech synthesis returned to the host-owned
+// engine, so app frames no longer need the temporary broad JavaScript-eval
+// fallback. Evict v10 responses that retain that header and restore the narrow
+// WebAssembly-only policy for apps that genuinely compile Wasm themselves.
+export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v11'
 // Bumped -v2 → -v3 (2026-07-30): v2 standalone documents executed app-authored
 // modules directly at owner origin. The secure host now mounts the shared
 // opaque AppCanvas frame; activation must evict every cached v2 document so an
@@ -115,15 +119,6 @@ export function isCacheableAssetResponse(response) {
   if (!response || response.status !== 200) return false
   const ct = (response.headers.get('content-type') || '').toLowerCase()
   return CACHEABLE_ASSET_TYPES.some(t => ct.includes(t))
-}
-
-// Cached app-frame documents carry their own CSP headers. Older WebKit-based
-// installed apps ignore the Wasm-specific source and need this exact fallback
-// token. Match it as a standalone CSP source so `wasm-unsafe-eval` cannot be
-// mistaken for the compatibility source it contains as a suffix.
-export function cachedAppFrameNeedsSpeechPolicyRefresh(response) {
-  const policy = response?.headers?.get?.('content-security-policy') || ''
-  return !/(?:^|[\s;])'unsafe-eval'(?=[\s;]|$)/.test(policy)
 }
 
 // Public assets executed by an opaque app frame or its nested chat embed. Keep

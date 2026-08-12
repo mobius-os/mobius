@@ -4,7 +4,6 @@ import assert from 'node:assert/strict'
 import {
   APP_ASSETS_CACHE,
   APP_ASSETS_MAX_ENTRIES,
-  cachedAppFrameNeedsSpeechPolicyRefresh,
   ESM_CACHE,
   OFFLINE_APPS_CACHE,
   STANDALONE_APPS_CACHE,
@@ -62,31 +61,12 @@ test('runtime cache cleanup evicts old offline app caches', () => {
   assert.equal(isStaleRuntimeCache('mobius-offline-apps-v7'), true)
   assert.equal(isStaleRuntimeCache('mobius-offline-apps-v8'), true)
   assert.equal(isStaleRuntimeCache('mobius-offline-apps-v9'), true)
+  assert.equal(isStaleRuntimeCache('mobius-offline-apps-v10'), true)
   assert.equal(isStaleRuntimeCache(OFFLINE_APPS_CACHE), false)
   assert.equal(isStaleRuntimeCache('mobius-standalone'), true)
   assert.equal(isStaleRuntimeCache('mobius-standalone-v1'), true)
   // v2 contains the retired direct-at-owner-origin standalone document.
   assert.equal(isStaleRuntimeCache('mobius-standalone-v2'), true)
-})
-
-test('a cached app frame missing the WebKit WebAssembly fallback is refreshed', () => {
-  assert.equal(
-    cachedAppFrameNeedsSpeechPolicyRefresh(new Response('', {
-      headers: {
-        'Content-Security-Policy': "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'",
-      },
-    })),
-    true,
-  )
-  assert.equal(
-    cachedAppFrameNeedsSpeechPolicyRefresh(new Response('', {
-      headers: {
-        'Content-Security-Policy': "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'",
-      },
-    })),
-    false,
-  )
-  assert.equal(cachedAppFrameNeedsSpeechPolicyRefresh(null), true)
 })
 
 test('only public executable assets cross the opaque app-frame origin', () => {

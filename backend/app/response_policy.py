@@ -67,12 +67,7 @@ def app_frame_csp(
     "allow-popups-to-escape-sandbox "
     "allow-top-navigation-by-user-activation; "
     f"default-src {origin}; "
-    # `wasm-unsafe-eval` is the narrow modern source, but older WebKit-based
-    # installed apps ignore it and still gate WebAssembly on `unsafe-eval`.
-    # Mini-app code already runs inside this opaque, credential-isolated
-    # sandbox; keep the compatibility fallback here rather than weakening the
-    # owner-origin shell policy.
-    f"script-src {origin} 'unsafe-inline' 'wasm-unsafe-eval' 'unsafe-eval' "
+    f"script-src {origin} 'unsafe-inline' 'wasm-unsafe-eval' "
     "blob: https://esm.sh; "
     f"style-src {origin} 'unsafe-inline' https://fonts.googleapis.com; "
     f"font-src {origin} https://fonts.gstatic.com https://cdn.openai.com; "
