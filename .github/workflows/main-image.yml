@@ -9,10 +9,6 @@ permissions:
   contents: read
   packages: write
 
-concurrency:
-  group: mobius-main-image
-  cancel-in-progress: false
-
 env:
   DOCKER_BUILD_RECORD_UPLOAD: 'false'
   MOBIUS_IMAGE_REPOSITORY: ghcr.io/mobius-os/mobius
@@ -20,6 +16,8 @@ env:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -30,7 +28,8 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+      - id: publish
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
         with:
           context: .
           push: true
@@ -40,6 +39,76 @@ jobs:
             BUILD_SHA=${{ github.sha }}
           tags: |
             ${{ env.MOBIUS_IMAGE_REPOSITORY }}:sha-${{ github.sha }}
-            ${{ env.MOBIUS_IMAGE_REPOSITORY }}:main
           cache-from: type=gha
           cache-to: type=gha,mode=max,ignore-error=true
+      - name: Verify immutable tag resolves to this build
+        env:
+          EXPECTED_DIGEST: ${{ steps.publish.outputs.digest }}
+          SHA_IMAGE: ${{ env.MOBIUS_IMAGE_REPOSITORY }}:sha-${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          resolve_digest() {
+            local image_ref="$1"
+            local manifest=""
+            local attempt
+            for attempt in $(seq 1 12); do
+              if manifest="$(
+                docker buildx imagetools inspect "$image_ref" \
+                  --format '{{json .Manifest}}' 2>/dev/null
+              )" && [ -n "$manifest" ]; then
+                jq -er '.digest' <<<"$manifest"
+                return
+              fi
+              sleep 5
+            done
+            echo "GHCR did not resolve $image_ref after publication." >&2
+            return 1
+          }
+
+          sha_digest="$(resolve_digest "$SHA_IMAGE")"
+          if [ "$sha_digest" != "$EXPECTED_DIGEST" ]; then
+            echo "Immutable SHA tag resolved to $sha_digest, expected $EXPECTED_DIGEST." >&2
+            exit 1
+          fi
+
+  promote-main:
+    needs: publish
+    runs-on: ubuntu-latest
+    concurrency:
+      group: mobius-main-image-promotion
+      cancel-in-progress: false
+    steps:
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote the current branch head to main
+        env:
+          EXPECTED_DIGEST: ${{ needs.publish.outputs.digest }}
+          GH_TOKEN: ${{ github.token }}
+          SHA_IMAGE: ${{ env.MOBIUS_IMAGE_REPOSITORY }}:sha-${{ github.sha }}
+          MAIN_IMAGE: ${{ env.MOBIUS_IMAGE_REPOSITORY }}:main
+        run: |
+          set -euo pipefail
+
+          current_sha="$(
+            gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq '.sha'
+          )"
+          if [ "$current_sha" != "$GITHUB_SHA" ]; then
+            echo "Skipping main promotion: $GITHUB_SHA is no longer branch head $current_sha."
+            exit 0
+          fi
+
+          docker buildx imagetools create --tag "$MAIN_IMAGE" "$SHA_IMAGE"
+          main_manifest="$(
+            docker buildx imagetools inspect "$MAIN_IMAGE" \
+              --format '{{json .Manifest}}'
+          )"
+          main_digest="$(jq -er '.digest' <<<"$main_manifest")"
+          if [ "$main_digest" != "$EXPECTED_DIGEST" ]; then
+            echo "Moving main tag resolved to $main_digest, expected $EXPECTED_DIGEST." >&2
+            exit 1
+          fi
