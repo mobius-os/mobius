@@ -178,9 +178,10 @@ def test_controlled_skills_have_fix_forward_migrations():
     "5db160b2d796d54ec320119cbdbbb2860a78cfd703cfe37667626d23abc8e4d9",
     "bf58243aeb1779eb0a94d5404a99c2132e55d60542cbb555fc50bc5cf65349fe",
   }
+  assert "recovery.md" not in module._UNMODIFIED_MIGRATIONS
   assert (
-    "6e6e82e02287e8bb38195fb021ea25cee2dc4e27da1a6ce1e2a0143fb1d82d87"
-    in module._UNMODIFIED_MIGRATIONS["recovery.md"]
+    "59af11e6f1313f1e0df4fc7905cf018786eb648116aaf7e8bcafea7aa7a4c9fe"
+    in module._RETIRED_UNMODIFIED_SKILLS["recovery.md"]
   )
 
 
@@ -206,6 +207,81 @@ def test_migration_digests_are_wellformed_and_never_the_current_seed():
         f"{name}: registers the digest of the seed it currently ships, which "
         "would replace the file with itself instead of migrating a predecessor"
       )
+
+
+def test_retired_skill_digests_are_wellformed_and_have_no_active_seed():
+  module = _load("init_skills")
+  seed_dir = SCRIPTS / "seed-skills"
+
+  for name, digests in module._RETIRED_UNMODIFIED_SKILLS.items():
+    assert not (seed_dir / name).exists()
+    assert digests
+    assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in digests)
+  assert (seed_dir / "platform-maintenance.md").is_file()
+  assert (seed_dir / "undo-and-restore.md").is_file()
+
+
+def test_warm_boot_removes_unmodified_retired_skill_after_adding_replacements(
+  tmp_path, monkeypatch,
+):
+  module = _load("init_skills")
+  seed = tmp_path / "seed"
+  skills = tmp_path / "skills"
+  archive = tmp_path / "retired-skills"
+  seed.mkdir()
+  skills.mkdir()
+  legacy = b"known legacy seed skill"
+  (seed / "platform-maintenance.md").write_text("maintenance", encoding="utf-8")
+  (seed / "undo-and-restore.md").write_text("undo", encoding="utf-8")
+  (skills / "recovery.md").write_bytes(legacy)
+  monkeypatch.setattr(module, "_SEED_CANDIDATES", [seed])
+  monkeypatch.setattr(module, "SKILLS", skills)
+  monkeypatch.setattr(module, "RETIRED_SKILLS", archive)
+  monkeypatch.setattr(module, "_chown_mobius", lambda _path: None)
+  monkeypatch.setattr(module, "_write_index", lambda: None)
+  monkeypatch.setattr(module, "_UNMODIFIED_MIGRATIONS", {})
+  monkeypatch.setattr(module, "_RETIRED_UNMODIFIED_SKILLS", {
+    "recovery.md": {hashlib.sha256(legacy).hexdigest()},
+  })
+
+  module.init()
+
+  assert not (skills / "recovery.md").exists()
+  assert (skills / "platform-maintenance.md").read_text() == "maintenance"
+  assert (skills / "undo-and-restore.md").read_text() == "undo"
+  assert not archive.exists()
+
+
+def test_warm_boot_archives_customized_retired_skill_outside_discovery(
+  tmp_path, monkeypatch,
+):
+  module = _load("init_skills")
+  seed = tmp_path / "seed"
+  skills = tmp_path / "skills"
+  archive = tmp_path / "retired-skills"
+  seed.mkdir()
+  skills.mkdir()
+  custom = b"owner-specific recovery notes\n"
+  (seed / "platform-maintenance.md").write_text("maintenance", encoding="utf-8")
+  (seed / "undo-and-restore.md").write_text("undo", encoding="utf-8")
+  (skills / "recovery.md").write_bytes(custom)
+  monkeypatch.setattr(module, "_SEED_CANDIDATES", [seed])
+  monkeypatch.setattr(module, "SKILLS", skills)
+  monkeypatch.setattr(module, "RETIRED_SKILLS", archive)
+  monkeypatch.setattr(module, "_chown_mobius", lambda _path: None)
+  monkeypatch.setattr(module, "_write_index", lambda: None)
+  monkeypatch.setattr(module, "_UNMODIFIED_MIGRATIONS", {})
+  monkeypatch.setattr(module, "_RETIRED_UNMODIFIED_SKILLS", {
+    "recovery.md": {hashlib.sha256(b"baked").hexdigest()},
+  })
+
+  module.init()
+  module.init()  # retirement is idempotent after a boot interruption/retry
+
+  digest = hashlib.sha256(custom).hexdigest()
+  assert not (skills / "recovery.md").exists()
+  assert (archive / f"recovery-{digest}.md").read_bytes() == custom
+  assert list(archive.glob("*.md")) == [archive / f"recovery-{digest}.md"]
 
 
 def test_seeded_cron_jobs_use_only_app_scoped_credentials():

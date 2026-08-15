@@ -101,13 +101,20 @@ jobs:
             exit 0
           fi
 
-          docker buildx imagetools create --tag "$MAIN_IMAGE" "$SHA_IMAGE"
-          main_manifest="$(
-            docker buildx imagetools inspect "$MAIN_IMAGE" \
-              --format '{{json .Manifest}}'
-          )"
-          main_digest="$(jq -er '.digest' <<<"$main_manifest")"
-          if [ "$main_digest" != "$EXPECTED_DIGEST" ]; then
-            echo "Moving main tag resolved to $main_digest, expected $EXPECTED_DIGEST." >&2
-            exit 1
-          fi
+          docker buildx imagetools create --prefer-index=false \
+            --tag "$MAIN_IMAGE" "$SHA_IMAGE"
+
+          main_digest=""
+          for _ in $(seq 1 12); do
+            if main_manifest="$(
+              docker buildx imagetools inspect "$MAIN_IMAGE" \
+                --format '{{json .Manifest}}' 2>/dev/null
+            )" && main_digest="$(jq -er '.digest' <<<"$main_manifest")"; then
+              if [ "$main_digest" = "$EXPECTED_DIGEST" ]; then
+                exit 0
+              fi
+            fi
+            sleep 5
+          done
+          echo "Moving main tag resolved to ${main_digest:-nothing}, expected $EXPECTED_DIGEST." >&2
+          exit 1

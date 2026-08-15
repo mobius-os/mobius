@@ -35,6 +35,32 @@ def test_mobius_has_no_recovery_runtime_or_boot_mode():
   assert "recovery profile" not in architecture.lower()
 
 
+def test_normal_agent_owns_full_root_without_a_recovery_co_process():
+  compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+  entrypoint = (ROOT / "backend/scripts/entrypoint.sh").read_text(
+    encoding="utf-8",
+  )
+  sudo_config = (ROOT / "backend/scripts/agent_sudo.sh").read_text(
+    encoding="utf-8",
+  )
+  protected = (ROOT / "protected-files.txt").read_text(encoding="utf-8")
+
+  assert "MOBIUS_AGENT_SUDO=${MOBIUS_AGENT_SUDO:-1}" in compose
+  assert 'configure_agent_sudo "${MOBIUS_AGENT_SUDO:-1}"' in entrypoint
+  assert "mobius ALL=(root) NOPASSWD: ALL" in sudo_config
+  assert "/app/scripts/agent_sudo.sh" in protected
+  assert "recovery" not in sudo_config.lower()
+
+
+def test_legacy_recovery_skill_is_not_seeded_or_referenced():
+  seed = ROOT / "backend/scripts/seed-skills"
+  assert not (seed / "recovery.md").exists()
+  assert (seed / "platform-maintenance.md").is_file()
+  assert (seed / "undo-and-restore.md").is_file()
+  for path in seed.glob("*.md"):
+    assert "`recovery.md`" not in path.read_text(encoding="utf-8")
+
+
 def test_boot_fallback_never_moves_or_prunes_owner_platform_source():
   entrypoint = (ROOT / "backend/scripts/entrypoint.sh").read_text(
     encoding="utf-8",

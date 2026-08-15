@@ -238,7 +238,7 @@ python "$SCRIPTS_DIR/delete_app.py" <id> --confirm
 
 Delete is a **soft delete**: the app is tombstoned and its saved data is kept for
 7 days, then purged. Recover within the window with `POST /api/apps/{id}/recover`
-(or, for a store app, just reinstall it) — see `recovery.md`. Before deleting:
+(or, for a store app, just reinstall it) — see `undo-and-restore.md`. Before deleting:
 verify the app exists, tell the partner which one (name, id, description), and
 ask for confirmation ("Delete [name]? You can recover it for 7 days."), then
 delete. Exact-name lookup can return several apps; choose by numeric ID and

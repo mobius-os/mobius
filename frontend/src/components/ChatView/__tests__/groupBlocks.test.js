@@ -84,7 +84,7 @@ test('a read-based skill receipt joins the surrounding activity stretch', () => 
     { item: tool({ tool: 'Read', tool_use_id: 'read-1' }), idx: 3 },
     {
       item: tool({
-        tool: 'Bash', tool_use_id: 'cmd-1', skills: ['recovery', 'theming'],
+        tool: 'Bash', tool_use_id: 'cmd-1', skills: ['platform-maintenance', 'theming'],
       }),
       idx: 4,
     },
@@ -176,7 +176,7 @@ test('activity memo identity changes when a command becomes a skill read', async
   const { activityMemoSig } = await import('../groupBlocks.js')
   const command = [{ item: tool({ tool: 'Bash', status: 'running' }) }]
   const skillRead = [{
-    item: tool({ tool: 'Bash', status: 'running', skills: ['recovery'] }),
+    item: tool({ tool: 'Bash', status: 'running', skills: ['platform-maintenance'] }),
   }]
   assert.notEqual(activityMemoSig(command), activityMemoSig(skillRead))
 })
@@ -248,13 +248,13 @@ test('toolCallLabel names the concrete nested step in progressive and past tense
   )
   assert.equal(
     toolCallLabel({
-      tool: 'Bash', skills: ['recovery'], status: 'done',
+      tool: 'Bash', skills: ['platform-maintenance'], status: 'done',
     }),
-    'Read the recovery skill',
+    'Read the platform-maintenance skill',
   )
   assert.equal(
     toolCallLabel({
-      tool: 'Bash', skills: ['recovery', 'theming'], status: 'running',
+      tool: 'Bash', skills: ['platform-maintenance', 'theming'], status: 'running',
     }),
     'Reading 2 skills',
   )

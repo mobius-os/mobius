@@ -610,6 +610,15 @@ def test_manual_and_pull_request_runs_cover_suites_and_main_image():
   assert "BUILD_SHA=${{ github.sha }}" in image_workflow
   assert "MOBIUS_IMAGE_REPOSITORY }}:sha-${{ github.sha }}" in image_workflow
   assert "MOBIUS_IMAGE_REPOSITORY }}:main" in image_workflow
+  assert "mobius-main-image-promotion" in image_workflow
+  assert "gh api \"repos/$GITHUB_REPOSITORY/commits/main\"" in image_workflow
+  assert (
+    "docker buildx imagetools create --prefer-index=false"
+    in image_workflow
+  )
+  assert '--tag "$MAIN_IMAGE" "$SHA_IMAGE"' in image_workflow
+  assert image_workflow.count("--format '{{json .Manifest}}'") == 2
+  assert image_workflow.count("for _ in $(seq 1 12)") == 2
   assert "recovery" not in image_workflow.lower()
   assert "core-releases" not in image_workflow
   assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in image_workflow

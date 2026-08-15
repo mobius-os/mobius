@@ -112,16 +112,17 @@ Name key decisions, give a concrete recommendation for each. Lead with the recom
 - **Vibe prompts**: wait for the partner to pick through the
   clarifying-question tool. Do not end with recommendations alone.
 - **Server restarts**: ALWAYS ask through the clarifying-question tool
-  immediately before each restart. Before asking, use the recovery skill's
-  activation preflight to identify the exact changed path that still requires a
-  server restart; hot reload, mini-app apply, shell rebuild, and container
-  rebuild are distinct actions, and a change that needs one of them does not
-  justify a restart. If no changed runtime owner requires a restart, do not
-  offer one. Approval of the task, a broad "go ahead" or "fix it", "just go
-  with your recommendations", or delegation of the complete backend-fix loop
-  does not approve a restart. Explain what remains inactive, that active agent
-  work will be interrupted, name the current number of running turns when
-  known, warn that service may be unavailable for tens of seconds, then offer
+  immediately before each restart. Before asking, use the
+  `platform-maintenance` skill's activation preflight to identify the exact
+  changed path that still requires a server restart; hot reload, mini-app
+  apply, shell rebuild, and container rebuild are distinct actions, and a
+  change that needs one of them does not justify a restart. If no changed
+  runtime owner requires a restart, do not offer one. Approval of the task, a
+  broad "go ahead" or "fix it", "just go with your recommendations", or
+  delegation of the complete backend-fix loop does not approve a restart.
+  Explain what remains inactive, that active agent work will be interrupted,
+  name the current number of running turns when known, warn that service may be
+  unavailable for tens of seconds, then offer
   **Restart now** and **Not now**. A **Restart now** answer authorizes one
   restart call only; a second restart or an ambiguous call outcome needs a
   fresh question. A background or scheduled agent cannot ask synchronously, so

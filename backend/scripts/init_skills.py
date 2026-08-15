@@ -15,6 +15,13 @@ while every owner/agent-edited copy is preserved. A normal baked-seed edit does
 not propagate until its predecessor hash is deliberately registered below; this
 keeps urgent fix-forward migrations possible without blind overwrites.
 
+Retired flat seed skills use a separate one-way contract. Every known baked
+generation is removed from the active skills directory. A customized copy is
+not discarded: its exact bytes are moved to `/data/shared/retired-skills/`,
+outside runtime discovery, before the active legacy path is removed. This lets
+one overloaded skill id disappear without erasing owner notes or leaving stale
+instructions active forever.
+
 One narrow exception, and it is deliberate: a registered digest may name a
 known-bad OWNER-CURATED generation rather than a baked one, when that exact
 content is unsafe to leave in place (today: a `cron.md` copy that tells app
@@ -49,6 +56,7 @@ if _APP_IMPORT_ROOT not in sys.path:
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
+RETIRED_SKILLS = DATA_DIR / "shared" / "retired-skills"
 # Update only byte-for-byte baked copies; an owner/agent-edited file is never
 # touched. A set preserves every known unmodified predecessor when one skill
 # needs more than one fix-forward migration over its lifetime.
@@ -83,12 +91,6 @@ _UNMODIFIED_MIGRATIONS = {
   "embedded-app-agent.md": {
     # Pre-#612 baked copy: clarify that an accepted overlapping run may skip.
     "e58970bb7357030b9ac9c72e3b547d3bc93cdb75a1442dc5bb92db6174beebad",
-  },
-  "recovery.md": {
-    "ef62abb0d03d740f99add1b6f3938f780b34439cb0025616cb9dc5f74f779633",
-    "6e6e82e02287e8bb38195fb021ea25cee2dc4e27da1a6ce1e2a0143fb1d82d87",
-    # v22 baked copy: remove the retired in-container maintenance surface.
-    "c679f6e1f1cee15f18704e21b88c6ef1acdb67ca10ca0e80757987a1d935465b",
   },
   "theming.md": {
     # v22 baked copy: point shell-break guidance at the operator reset path.
@@ -151,6 +153,38 @@ _UNMODIFIED_MIGRATIONS = {
   },
 }
 
+# Every distinct recovery.md shipped on main. This legacy file mixed external
+# emergency access with ordinary maintenance, Git undo, and soft-delete APIs.
+# The focused replacement skills are platform-maintenance.md and
+# undo-and-restore.md. Current-seed hashes belong here by design: retirement,
+# unlike a fix-forward replacement, must also remove the latest untouched copy.
+_RETIRED_UNMODIFIED_SKILLS = {
+  "recovery.md": {
+    "0a028cfea8427d9c7b7cd9522da64caf196554f268957e305dc521bb7d6faa3d",
+    "0e68863722e977c2ca78754fb2699ac0c19906062bbc63acc3a1aab41b4ea260",
+    "0f58a4b5d83dfab083549cc1209d3f7835c973b61928752543be286fad360017",
+    "0fbd53e4ac9d67ed7c2731271f5f4ccf5a74bb8348bd5885605bc3c2b5a2b7f4",
+    "109cc54c47595a2b9f7d09bbfbfc0f7b6be919ef3ca2a2c16cd2d8fc5d6533e7",
+    "157700e43f17cf81ef0cb993c8bbc887ae5dc1303508778382f136e7f80c3d8c",
+    "3c4db1828fd893738f0e241bcecb7da218159656ea3a2b63c35c16d4d771febe",
+    "467542740b110e6fbd21e86bfbd247551c676385a46d64a5130a2a648c47346a",
+    "4805da9cc334d5a1c0e0d5e30d0b2655bd4a4de3e1d1f470b73a01092d8d18cb",
+    "5fbf576db34553b5552e83383590435a8e96dbfcdf71837dbe3de4f4ca1c1d45",
+    "59af11e6f1313f1e0df4fc7905cf018786eb648116aaf7e8bcafea7aa7a4c9fe",
+    "6e6e82e02287e8bb38195fb021ea25cee2dc4e27da1a6ce1e2a0143fb1d82d87",
+    "79d4a1ff10cf2a28d8e74123aa95e1ba006f1ede299d64c619b2b15d0c89ce57",
+    "8cda43c1637cdb66702a70c53d1682629e6923ccf157676faf09582109b8e570",
+    "a27e02e948b417dddecf0f7d81c6d00e3c7a044e7901cd3c026031a2f05eb978",
+    "b4b634e93d43b635cf46ed37a12f3f419d3bee4d926cb912e42f9ddb1098dd94",
+    "c679f6e1f1cee15f18704e21b88c6ef1acdb67ca10ca0e80757987a1d935465b",
+    "cb283d498f55a188f9e8bed0664afb0472ec76f2ddfd421a007f844b720679f5",
+    "e4b2866319e5aa59f688e32f2e5ff3ddf262f339c1404ce6e451fa0857c3f995",
+    "e648e1d45b43c3a0360a244521f1387f52ee5c5e48eb7d5d2db9bddcdf86ae0e",
+    "ef62abb0d03d740f99add1b6f3938f780b34439cb0025616cb9dc5f74f779633",
+    "f72a51b41f1cde7ca9b7bf00029a33bc90203a5f252d274381fccddf2040a4a0",
+  },
+}
+
 _SEED_CANDIDATES = [
   Path("/app/scripts/seed-skills"),
   Path(__file__).resolve().parent / "seed-skills",
@@ -197,6 +231,50 @@ def _write_index() -> None:
     print("init_skills: skills-index.md regenerated")
   except Exception as exc:  # noqa: BLE001 - boot must not fail on the index
     print(f"init_skills: index generation skipped ({exc})")
+
+
+def _retire_legacy_skills() -> tuple[int, int]:
+  """Remove baked legacy seeds and archive customized flat copies exactly."""
+  removed = 0
+  archived = 0
+  for name, baked_digests in _RETIRED_UNMODIFIED_SKILLS.items():
+    path = SKILLS / name
+    if not path.is_file():
+      continue
+    try:
+      content = path.read_bytes()
+    except OSError as exc:
+      print(f"init_skills: could not inspect retired {name} ({exc})")
+      continue
+    digest = hashlib.sha256(content).hexdigest()
+    if digest in baked_digests:
+      try:
+        path.unlink()
+      except OSError as exc:
+        print(f"init_skills: could not remove retired {name} ({exc})")
+        continue
+      removed += 1
+      continue
+
+    # A content-addressed archive is idempotent across a crash between writing
+    # the archive and unlinking the active path. Never overwrite different
+    # owner bytes, even under an astronomically unlikely digest collision.
+    archive = RETIRED_SKILLS / f"{path.stem}-{digest}.md"
+    try:
+      RETIRED_SKILLS.mkdir(parents=True, exist_ok=True)
+      if archive.exists():
+        if archive.read_bytes() != content:
+          raise OSError("archive digest collision")
+      else:
+        archive.write_bytes(content)
+        if archive.read_bytes() != content:
+          raise OSError("archive verification failed")
+      path.unlink()
+    except OSError as exc:
+      print(f"init_skills: could not archive customized {name} ({exc})")
+      continue
+    archived += 1
+  return removed, archived
 
 
 def init() -> None:
@@ -249,6 +327,7 @@ def init() -> None:
     if not dst.exists():
       shutil.copy2(src, dst)
       added += 1
+  retired, archived = _retire_legacy_skills()
   if skipped:
     print(f"init_skills: skipped {skipped} seed skill(s) colliding with an "
           "installed directory skill of the same id")
@@ -256,7 +335,13 @@ def init() -> None:
     print(f"init_skills: added {added} new seed skill(s) (existing kept)")
   if migrated:
     print(f"init_skills: migrated {migrated} unmodified base skill(s)")
+  if retired:
+    print(f"init_skills: removed {retired} retired base skill(s)")
+  if archived:
+    print(f"init_skills: archived {archived} customized retired skill(s)")
   _chown_mobius(SKILLS)
+  if RETIRED_SKILLS.exists():
+    _chown_mobius(RETIRED_SKILLS)
   _write_index()
 
 

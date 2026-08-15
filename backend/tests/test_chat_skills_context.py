@@ -160,11 +160,11 @@ def test_core_prompt_owns_freshness_and_source_policy():
 def test_restart_guidance_requires_activation_proof_and_fresh_approval():
   repo = Path(__file__).resolve().parents[2]
   core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
-  recovery = (
-    repo / "backend" / "scripts" / "seed-skills" / "recovery.md"
+  maintenance = (
+    repo / "backend" / "scripts" / "seed-skills" / "platform-maintenance.md"
   ).read_text(encoding="utf-8")
   normalized_core = " ".join(core.split())
-  normalized_recovery = " ".join(recovery.split())
+  normalized_maintenance = " ".join(maintenance.split())
 
   assert "**Server restarts**: ALWAYS ask" in core
   assert "If no changed runtime owner requires a restart, do not offer one" in (
@@ -172,39 +172,39 @@ def test_restart_guidance_requires_activation_proof_and_fresh_approval():
   )
   assert "immediately before each restart" in normalized_core
   assert "authorizes one restart call only" in normalized_core
-  assert "## Choose the smallest activation action" in recovery
-  assert "No shell rebuild or server restart" in recovery
-  assert "No server restart" in recovery
-  assert "### Dependencies — live first, durable second" in recovery
-  assert "install only the named dependency" in recovery
+  assert "## Choose the smallest activation action" in maintenance
+  assert "No shell rebuild or server restart" in maintenance
+  assert "No server restart" in maintenance
+  assert "### Dependencies — live first, durable second" in maintenance
+  assert "install only the named dependency" in maintenance
   assert "Do not run blanket upgrades or ad-hoc remote installers" in (
-    normalized_recovery
+    normalized_maintenance
   )
   assert "a global Node install does not satisfy a project's imports" in (
-    normalized_recovery
+    normalized_maintenance
   )
-  assert "not for ordinary writes under `/data`" in recovery
-  assert "the owning manifest and lockfile" in recovery
+  assert "not for ordinary writes under `/data`" in maintenance
+  assert "the owning manifest and lockfile" in maintenance
   assert "These declarations are durability metadata, not an activation action" in (
-    normalized_recovery
+    normalized_maintenance
   )
-  assert "Treat a container rebuild as a last resort" in recovery
-  assert "do not require an immediate rebuild" in recovery
-  assert "Do not restart between iterations" in recovery
+  assert "Treat a container rebuild as a last resort" in maintenance
+  assert "do not require an immediate rebuild" in maintenance
+  assert "Do not restart between iterations" in maintenance
   assert "For a constitution-only change, default to leaving it pending" in (
-    normalized_recovery
+    normalized_maintenance
   )
   assert (
     "A **Restart now** answer authorizes exactly one safe restart call"
-    in recovery
+    in maintenance
   )
-  assert "A second restart" in recovery
-  assert "service may be unavailable for tens of seconds" in normalized_recovery
+  assert "A second restart" in maintenance
+  assert "service may be unavailable for tens of seconds" in normalized_maintenance
   assert "delegation of the complete backend-fix loop does not approve" in (
-    normalized_recovery
+    normalized_maintenance
   )
   assert "explicitly delegated the restart or the complete backend-fix loop" not in (
-    core + recovery
+    core + maintenance
   )
 
 
