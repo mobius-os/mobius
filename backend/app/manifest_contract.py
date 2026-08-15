@@ -228,6 +228,11 @@ def validate_manifest_contract(manifest) -> None:
   # Runtime capabilities are normalized by the same canonical registry used
   # to build the owner-reviewable install contract. Keep a single definition
   # of names, versions, limits, and failure semantics.
+  from app.app_capabilities import normalize_public_access
+  try:
+    normalize_public_access(dict(manifest))
+  except ValueError as exc:
+    _fail(str(exc))
   from app.app_capabilities import normalize_runtime_capabilities
   try:
     normalize_runtime_capabilities(dict(manifest))

@@ -230,7 +230,10 @@ async def _first_supported_icon(
 
 
 async def _capped_response(
-  client: httpx.AsyncClient, req: httpx.Request
+  client: httpx.AsyncClient,
+  req: httpx.Request,
+  *,
+  forward_cache_headers: bool = False,
 ) -> Response:
   """Sends `req` streaming and reads at most `_MAX_BYTES` into memory. The prior
   code read the FULL body (`r.content`) before slicing, so a huge or malicious
@@ -254,6 +257,10 @@ async def _capped_response(
       for name in _FORWARDED_RESPONSE_HEADERS
       if name in r.headers
     }
+    if forward_cache_headers:
+      for name in ("cache-control", "etag", "expires", "last-modified"):
+        if name in r.headers:
+          headers[name] = r.headers[name]
     return Response(
       content=bytes(buf),
       status_code=r.status_code,

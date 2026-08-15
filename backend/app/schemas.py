@@ -137,6 +137,9 @@ class AppUpdate(BaseModel):
   # string clears it; None means omitted. This is deliberately separate from
   # App.manifest_url, which controls Store install/update identity.
   share_manifest_url: str | None = Field(default=None, max_length=1024)
+  # Owner-controlled anonymous runtime publication. Source apply/install never
+  # changes this flag; manifests only declare the public network allowlist.
+  public_enabled: bool | None = None
   # Owner-only DOWNGRADE of skills authority: False revokes immediately (the
   # request gate reads the live row, so already-minted app JWTs lose access on
   # their next call). Granting (True) is rejected — that path stays with the
@@ -207,6 +210,8 @@ class AppOut(BaseModel):
   # Optional public install manifest attached to a locally-built app after
   # publication. Drawer sharing prefers this without changing Store identity.
   share_manifest_url: str | None = None
+  # Anonymous use at /<slug>. Private by default and immediately revocable.
+  public_enabled: bool = False
   # The manifest version currently installed (e.g. "1.7.0"). Null for
   # user-built apps and for rows installed before the column existed
   # (they backfill on their next update). The store reads this to show

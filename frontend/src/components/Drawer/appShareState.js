@@ -8,11 +8,10 @@ function appBySlug(apps, slug) {
   return (apps || []).find(app => app?.slug === slug) || null
 }
 
-// Store-installed apps are already discoverable in App Store, so the drawer
-// only offers Share for locally-built apps. A local app stays eligible after
-// the owner attaches a public share manifest.
+// Every app can be shared for anonymous use, independently from whether its
+// package also has an install link.
 export function isDrawerAppShareEligible(app) {
-  return !app?.manifest_url
+  return !!app
 }
 
 export function appInstallManifestUrl(app) {

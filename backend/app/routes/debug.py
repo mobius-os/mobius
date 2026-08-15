@@ -189,6 +189,11 @@ def debug_status(
     memory=memory["cgroup"],
   )
   result["runtime_memory"] = _runtime_memory_ownership(include_payloads=False)
+  try:
+    from app.routes.public_apps import public_app_usage_snapshot
+    result["public_apps"] = public_app_usage_snapshot()
+  except Exception:
+    result["public_apps"] = {}
   if reconciliation_failed:
     result["reconciliation_failed"] = True
   if media_migration_failed:

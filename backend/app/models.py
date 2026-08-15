@@ -745,6 +745,11 @@ class App(Base):
   # while a locally-built app may be published later without becoming a
   # Store-managed install or changing how its source updates are reconciled.
   share_manifest_url = Column(String(1024), nullable=True, default=None)
+  # Anonymous runtime publication at the app's stable top-level slug. This is
+  # owner-controlled state, never a manifest permission: installed and local
+  # apps remain private until the owner explicitly enables them, and flipping
+  # it off revokes every outstanding public-app session on its next request.
+  public_enabled = Column(Boolean, nullable=False, default=False)
   # Soft-delete tombstone. Uninstall sets this instead of dropping the row, so
   # the source tree AND the id-keyed runtime storage tree survive — a reinstall
   # (matched by manifest_url) or POST /{id}/recover then revives the SAME id +

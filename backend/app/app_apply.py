@@ -333,7 +333,9 @@ async def apply_source_revision(
         if "offline_capable" in runtime_fields:
           app.offline_capable = runtime_fields["offline_capable"]
         app.capability_contract = contract_from_app_state(
-          app, capabilities=runtime_fields["capabilities"],
+          app,
+          capabilities=runtime_fields["capabilities"],
+          public_access=runtime_fields["public_access"],
         )
       if chat_id is not None:
         app.chat_id = chat_id

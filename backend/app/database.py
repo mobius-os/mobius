@@ -199,7 +199,7 @@ def _agent_lifecycle_width_migrations(
 
 
 def _upgrade_app_capability_contract(value):
-  """Drop the retired job-authority fields from known contract versions."""
+  """Advance known contracts and drop retired job-authority fields."""
   if isinstance(value, str):
     try:
       value = json.loads(value)
@@ -208,11 +208,11 @@ def _upgrade_app_capability_contract(value):
   if not isinstance(value, dict):
     return None
   schema = value.get("schema")
-  if type(schema) is not int or schema not in (1, 2, 3, 4):
+  if type(schema) is not int or schema not in (1, 2, 3, 4, 5):
     return None
 
   upgraded = dict(value)
-  changed = schema != 4
+  changed = schema != 5
   background = value.get("background")
   if isinstance(background, dict):
     next_background = {
@@ -222,9 +222,12 @@ def _upgrade_app_capability_contract(value):
     if next_background != background:
       upgraded["background"] = next_background
       changed = True
+  if not isinstance(value.get("public"), dict):
+    upgraded["public"] = {"network": []}
+    changed = True
   if not changed:
     return None
-  upgraded["schema"] = 4
+  upgraded["schema"] = 5
   return upgraded
 
 
@@ -1629,6 +1632,35 @@ def _add_delegation_parent_wake(eng) -> None:
       ))
 
 
+def _add_app_public_runtime(eng) -> None:
+  """Add opt-in anonymous app state and advance reviewed contracts to v5."""
+  from sqlalchemy import JSON as SAJSON, bindparam, inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "apps" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("apps")}
+  with eng.begin() as conn:
+    if "public_enabled" not in columns:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN public_enabled BOOLEAN "
+        "NOT NULL DEFAULT FALSE"
+      ))
+    if "capability_contract" not in columns:
+      return
+    rows = conn.execute(text(
+      "SELECT id, capability_contract FROM apps "
+      "WHERE capability_contract IS NOT NULL"
+    )).fetchall()
+    update_contract = text(
+      "UPDATE apps SET capability_contract = :contract WHERE id = :app_id"
+    ).bindparams(bindparam("contract", type_=SAJSON))
+    for app_id, contract in rows:
+      upgraded = _upgrade_app_capability_contract(contract)
+      if upgraded is not None:
+        conn.execute(update_contract, {"contract": upgraded, "app_id": app_id})
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -1642,6 +1674,7 @@ _SCHEMA_MIGRATIONS = (
   ("0010_chat_pending_question_id", _add_chat_pending_question_id),
   ("0011_delegation_parent_wake", _add_delegation_parent_wake),
   ("0012_connector_oauth_gcloud", _add_connector_oauth_gcloud_fields),
+  ("0013_app_public_runtime", _add_app_public_runtime),
 )
 
 

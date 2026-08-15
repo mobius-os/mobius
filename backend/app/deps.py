@@ -97,6 +97,24 @@ class Principal:
   operations: frozenset[str] = frozenset()
 
 
+@dataclass(frozen=True)
+class PublicAppAccess:
+  """One live, anonymous, exact-app capability."""
+
+  app: models.App
+
+  @property
+  def app_id(self) -> int:
+    return self.app.id
+
+  @property
+  def network(self) -> list[dict]:
+    contract = self.app.capability_contract
+    public = contract.get("public") if isinstance(contract, dict) else None
+    rules = public.get("network") if isinstance(public, dict) else None
+    return rules if isinstance(rules, list) else []
+
+
 def chat_embed_grant_is_latest_consumed(
   db: Session,
   grant: models.ChatEmbedGrant | None,
@@ -447,6 +465,55 @@ def resolve_owner_or_app(token: str, db: Session) -> models.Owner:
     raise HTTPException(status_code=403, detail="Token scope is not valid here.")
   _enforce_app_scope(payload, db)
   return owner
+
+
+def resolve_public_app_token(
+  token: str,
+  db: Session,
+  *,
+  expected_app_id: int | None = None,
+) -> PublicAppAccess:
+  """Resolve a low-privilege public token against current app state."""
+  payload = auth.decode_access_token(token)
+  if not payload or payload.get("scope") != "public_app":
+    raise HTTPException(status_code=401, detail="Valid public app token required.")
+  app_id = payload.get("app_id")
+  nonce = payload.get("app_nonce")
+  if (
+    not isinstance(app_id, int)
+    or not isinstance(nonce, str)
+    or (expected_app_id is not None and app_id != expected_app_id)
+  ):
+    raise HTTPException(status_code=401, detail="Malformed public app token.")
+  app = (
+    db.query(models.App)
+    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+    .first()
+  )
+  if (
+    app is None
+    or not app.public_enabled
+    or not app.token_nonce
+    or nonce != app.token_nonce
+  ):
+    raise HTTPException(status_code=401, detail="Public app session is no longer valid.")
+  return PublicAppAccess(app=app)
+
+
+def authorize_app_module_token(
+  token: str,
+  db: Session,
+  *,
+  target_app_id: int,
+) -> None:
+  """Authorize module reads without widening anonymous cross-app access."""
+  payload = auth.decode_access_token(token)
+  if payload and payload.get("scope") == "public_app":
+    resolve_public_app_token(token, db, expected_app_id=target_app_id)
+    return
+  # Owner and ordinary app tokens retain the established same-owner module
+  # interop contract; only anonymous sessions are exact-app confined.
+  resolve_owner_or_app(token, db)
 
 
 def get_current_owner_or_app(

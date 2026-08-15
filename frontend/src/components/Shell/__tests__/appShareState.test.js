@@ -22,18 +22,19 @@ test('explicit share manifest publishes a local app without changing install ide
   })
 })
 
-test('store-installed apps are omitted from drawer sharing', () => {
+test('every installed app can expose its independent public-use control', () => {
   const app = {
     name: 'News',
     manifest_url: 'https://raw.example/news/mobius.json#manifest-id=news',
   }
-  assert.equal(isDrawerAppShareEligible(app), false)
+  assert.equal(isDrawerAppShareEligible(app), true)
   assert.equal(appInstallManifestUrl(app), app.manifest_url)
   assert.equal(isDrawerAppShareEligible({ manifest_url: null }), true)
   assert.equal(
     isDrawerAppShareEligible({ share_manifest_url: 'https://raw.example/app' }),
     true,
   )
+  assert.equal(isDrawerAppShareEligible(null), false)
 })
 
 test('local apps route through installed Contribute before the App Store', () => {

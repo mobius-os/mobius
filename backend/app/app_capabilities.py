@@ -12,9 +12,100 @@ import hashlib
 import json
 from copy import deepcopy
 from typing import Any
+from urllib.parse import urlsplit
 
 
-CONTRACT_SCHEMA = 4
+CONTRACT_SCHEMA = 5
+
+_PUBLIC_NETWORK_RULE_LIMIT = 16
+
+
+def normalize_public_access(manifest: dict[str, Any]) -> dict[str, Any]:
+  """Normalize the network surface available to anonymous app sessions.
+
+  Publication itself is owner state and deliberately does not live in the
+  manifest. The package may only declare a bounded set of exact HTTPS origins
+  and path prefixes that the public, GET-only fetch capability may reach.
+  """
+  raw = manifest.get("public_access")
+  if raw is None:
+    return {"network": []}
+  if not isinstance(raw, dict) or set(raw) - {"network"}:
+    raise ValueError(
+      "Manifest `public_access` must be an object containing only `network`."
+    )
+  network = raw.get("network", [])
+  if not isinstance(network, list):
+    raise ValueError("Manifest `public_access.network` must be an array.")
+  if len(network) > _PUBLIC_NETWORK_RULE_LIMIT:
+    raise ValueError(
+      f"Manifest `public_access.network` may contain at most "
+      f"{_PUBLIC_NETWORK_RULE_LIMIT} rules."
+    )
+
+  normalized: list[dict[str, str]] = []
+  seen: set[tuple[str, str]] = set()
+  for index, rule in enumerate(network):
+    if not isinstance(rule, dict) or set(rule) != {"origin", "path_prefix"}:
+      raise ValueError(
+        "Each `public_access.network` rule must contain exactly `origin` and "
+        "`path_prefix`."
+      )
+    origin = rule.get("origin")
+    prefix = rule.get("path_prefix")
+    if not isinstance(origin, str) or not isinstance(prefix, str):
+      raise ValueError(
+        f"Manifest public network rule {index + 1} must use string values."
+      )
+    try:
+      parsed = urlsplit(origin.strip())
+      port = parsed.port
+    except ValueError as exc:
+      raise ValueError(
+        f"Manifest public network rule {index + 1} has an invalid origin."
+      ) from exc
+    if (
+      parsed.scheme != "https"
+      or not parsed.hostname
+      or parsed.username is not None
+      or parsed.password is not None
+      or parsed.path not in ("", "/")
+      or parsed.query
+      or parsed.fragment
+    ):
+      raise ValueError(
+        f"Manifest public network rule {index + 1} origin must be an exact "
+        "HTTPS origin."
+      )
+    host = parsed.hostname.lower()
+    authority = host if port in (None, 443) else f"{host}:{port}"
+    normalized_origin = f"https://{authority}"
+    if (
+      not prefix.startswith("/")
+      or "?" in prefix
+      or "#" in prefix
+      or len(prefix) > 512
+    ):
+      raise ValueError(
+        f"Manifest public network rule {index + 1} path_prefix must be a "
+        "plain absolute path."
+      )
+    key = (normalized_origin, prefix)
+    if key not in seen:
+      seen.add(key)
+      normalized.append({"origin": normalized_origin, "path_prefix": prefix})
+  return {"network": normalized}
+
+
+def public_access_declaration_from_contract(
+  contract: dict[str, Any] | None,
+) -> dict[str, Any]:
+  """Recover the normalized public declaration from a stored contract."""
+  value = contract.get("public") if isinstance(contract, dict) else None
+  network = value.get("network") if isinstance(value, dict) else None
+  if not isinstance(network, list):
+    return {"network": []}
+  return {"network": deepcopy(network)}
 
 
 # Host-mediated browser capabilities. These are deliberately separate from
@@ -199,7 +290,10 @@ def local_manifest_runtime_fields(manifest: dict[str, Any]) -> dict[str, Any]:
   # Validate names, versions, reasons, and limits now; callers still need the
   # author declaration rather than the host-enriched normalized contract.
   normalize_runtime_capabilities(manifest)
-  fields: dict[str, Any] = {"capabilities": capabilities}
+  fields: dict[str, Any] = {
+    "capabilities": capabilities,
+    "public_access": normalize_public_access(manifest),
+  }
   if "offline_capable" in manifest:
     offline_capable = manifest["offline_capable"]
     if not isinstance(offline_capable, bool):
@@ -272,6 +366,7 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "contract": manifest.get("offline") or None,
     },
     "runtime": normalize_runtime_capabilities(manifest),
+    "public": normalize_public_access(manifest),
   }
 
 
@@ -304,6 +399,7 @@ def contract_from_app_state(
   app: Any,
   *,
   capabilities: dict[str, Any] | None = None,
+  public_access: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
   """Build an accurate contract for an owner-authored local app.
 
@@ -314,6 +410,10 @@ def contract_from_app_state(
   """
   if capabilities is None:
     capabilities = runtime_declaration_from_contract(
+      getattr(app, "capability_contract", None),
+    )
+  if public_access is None:
+    public_access = public_access_declaration_from_contract(
       getattr(app, "capability_contract", None),
     )
   manifest = {
@@ -334,6 +434,7 @@ def contract_from_app_state(
     "offline_capable": bool(getattr(app, "offline_capable", False)),
     "offline": getattr(app, "offline_contract", None),
     "capabilities": capabilities,
+    "public_access": public_access,
   }
   return contract_from_manifest(manifest)
 

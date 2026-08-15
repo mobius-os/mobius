@@ -2235,6 +2235,15 @@ async def update_app(
             },
           )
       app.share_manifest_url = body.share_manifest_url or None
+    if body.public_enabled is not None:
+      if body.public_enabled:
+        from app.routes.public_apps import public_slug_is_available
+        if not public_slug_is_available(app.slug):
+          raise HTTPException(
+            status_code=400,
+            detail="This app slug is reserved and cannot be published.",
+          )
+      app.public_enabled = body.public_enabled
     if body.manage_skills is not None:
       # Downgrade-only: the owner can revoke skills authority here (effective
       # on the app's next request — the gate reads the live row), but a grant
@@ -2282,7 +2291,7 @@ async def update_app(
       for field in (
         body.name, body.description, body.chat_id, body.share_with_apps,
         body.cross_app_access, body.chat_log_access, body.share_manifest_url,
-        body.manage_skills,
+        body.public_enabled, body.manage_skills,
       )
     )
     if not pin_only:

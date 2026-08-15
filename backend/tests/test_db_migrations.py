@@ -78,12 +78,13 @@ def test_run_migrations_removes_retired_job_authority_receipts(
   with Session(eng) as session:
     contract = session.get(models.App, app_id).capability_contract
   assert contract == {
-    "schema": 4,
+    "schema": 5,
     "data": {"shared_memory": "write"},
     "background": {
       "job": "fetch.sh",
       "mode": "scheduled",
     },
+    "public": {"network": []},
   }
 
 
@@ -1016,6 +1017,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0010_chat_pending_question_id",
     "0011_delegation_parent_wake",
     "0012_connector_oauth_gcloud",
+    "0013_app_public_runtime",
   ]
   assert second == first
 
@@ -1115,6 +1117,45 @@ def test_connections_manage_reaches_a_ledgered_database(tmp_path):
   # Idempotent over the hand-patched production shape too.
   run_migrations(eng)
   assert "0009_app_connections_manage" in {
+    entry["version"] for entry in schema_migration_history(eng)
+  }
+
+
+def test_public_runtime_reaches_a_fully_ledgered_private_app(tmp_path):
+  """0013 adds the opt-in flag and a closed public contract to old rows."""
+  eng = create_engine(f"sqlite:///{tmp_path / 'ledgered-public-apps.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps ("
+      "id INTEGER PRIMARY KEY, name VARCHAR(255), slug VARCHAR(128), "
+      "token_nonce VARCHAR(32), capability_contract JSON)"
+    ))
+    conn.execute(text(
+      "INSERT INTO apps VALUES "
+      "(1, 'Old app', 'old-app', 'nonce', :contract)"
+    ), {"contract": json.dumps({"schema": 4, "runtime": {}})})
+    conn.execute(text(
+      "CREATE TABLE schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version, _migration in database._SCHEMA_MIGRATIONS[:-1]:
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) "
+        "VALUES (:version, '2026-08-15 00:00:00')"
+      ), {"version": version})
+
+  run_migrations(eng)
+  columns = {c["name"] for c in inspect(eng).get_columns("apps")}
+  assert "public_enabled" in columns
+  with eng.connect() as conn:
+    enabled, raw_contract = conn.execute(text(
+      "SELECT public_enabled, capability_contract FROM apps WHERE id = 1"
+    )).one()
+  contract = json.loads(raw_contract) if isinstance(raw_contract, str) else raw_contract
+  assert enabled in (False, 0)
+  assert contract["schema"] == 5
+  assert contract["public"] == {"network": []}
+  assert "0013_app_public_runtime" in {
     entry["version"] for entry in schema_migration_history(eng)
   }
 

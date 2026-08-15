@@ -70,6 +70,7 @@ from app.routes import (
   media_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
   screen_control_router,
+  public_apps_router,
   secrets_router, self_reminders_router, settings_router, skills_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
   theme_router, uploads_router, platform_router,
@@ -663,6 +664,7 @@ except Exception as _exc:  # pragma: no cover - defensive boot guard
 app.include_router(notify_router)
 app.include_router(screen_control_router)
 app.include_router(proxy_router)
+app.include_router(public_apps_router)
 app.include_router(local_services_router)
 app.include_router(client_error_router)
 app.include_router(client_signal_router)
@@ -1338,6 +1340,19 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
     # Resolve which build serves THIS request (live dist if complete, else the
     # baked floor) once, up front — per request, never a module-load snapshot.
     static_dir = _resolve_static_dir()
+    # An explicitly public app owns its exact top-level slug. It still runs in
+    # the ordinary opaque sandbox, but the tiny parent host carries only a
+    # short-lived exact-app public capability — never the owner's session.
+    try:
+      from app.routes.public_apps import public_app_page_for_path
+      public_page = await run_in_threadpool(public_app_page_for_path, path)
+    except Exception:
+      logging.getLogger(__name__).exception(
+        "public app host resolution failed for path=%s", path,
+      )
+      public_page = None
+    if public_page is not None:
+      return public_page
     app_slug = await run_in_threadpool(_top_level_app_slug_alias, path)
     if app_slug:
       from fastapi.responses import RedirectResponse

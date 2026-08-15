@@ -142,6 +142,29 @@ def create_app_token(
   )
 
 
+def create_public_app_token(
+  app_id: int,
+  app_nonce: str,
+  *,
+  expires_delta: timedelta = timedelta(hours=8),
+) -> str:
+  """Create a short-lived anonymous capability for one published app.
+
+  It intentionally carries no owner identity or epoch: the bearer can only
+  fetch the matching app module and its manifest-declared public GET targets.
+  The live ``public_enabled`` flag and app nonce are rechecked on every use, so
+  unpublishing or replacing the row revokes an outstanding token immediately.
+  """
+  return create_access_token(
+    {
+      "scope": "public_app",
+      "app_id": app_id,
+      "app_nonce": app_nonce,
+    },
+    expires_delta=expires_delta,
+  )
+
+
 def create_media_token(chat_id: str, owner_username: str, token_epoch: int) -> str:
   """Creates a short-lived JWT scoped to uploads and media for one chat.
 

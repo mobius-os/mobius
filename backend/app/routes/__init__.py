@@ -65,6 +65,7 @@ try:
 except Exception:  # pragma: no cover - mirrors _load's stub behavior
   connectors_public_router = APIRouter()
 proxy_router = _load("proxy")
+public_apps_router = _load("public_apps")
 local_services_router = _load("local_services")
 notify_router = _load("notify")
 screen_control_router = _load("screen_control")
@@ -104,6 +105,7 @@ __all__ = [
   "connectors_router",
   "connectors_public_router",
   "proxy_router",
+  "public_apps_router",
   "local_services_router",
   "notify_router",
   "screen_control_router",

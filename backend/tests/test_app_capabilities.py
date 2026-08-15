@@ -79,8 +79,9 @@ def test_preview_returns_server_derived_contract_and_digest(
     "user_configurable": False,
     "initialize_on_install": True,
   }
-  assert body["capability_contract"]["schema"] == 4
+  assert body["capability_contract"]["schema"] == 5
   assert body["capability_contract"]["runtime"] == {}
+  assert body["capability_contract"]["public"] == {"network": []}
 
 
 def test_runtime_capability_is_independently_versioned_and_bounded():
