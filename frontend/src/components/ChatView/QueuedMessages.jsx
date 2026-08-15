@@ -1,5 +1,11 @@
 import { useRef, useState } from 'react'
-import { ChevronDown, DoubleChevronRight, X } from '@openai/apps-sdk-ui/components/Icon'
+import {
+  Check,
+  ChevronDown,
+  DoubleChevronRight,
+  Pencil,
+  X,
+} from '@openai/apps-sdk-ui/components/Icon'
 import { stripAugmentation } from './msgText.js'
 import { cidOf } from './messageIdentity.js'
 import {
@@ -25,10 +31,14 @@ const TRUNCATE_AT = 80
  * the chat list and the input form. Empty queue → nothing rendered.
  */
 export default function QueuedMessages({
-  items, onCancel, onSteerOne, steerActive, steerBusy = false,
+  items, onCancel, onEdit, onSteerOne, steerActive, steerBusy = false,
 }) {
   const [expanded, setExpanded] = useState(() => new Set())
   const [collapsed, setCollapsed] = useState(false)
+  const [editingCid, setEditingCid] = useState(null)
+  const [editDraft, setEditDraft] = useState('')
+  const [editSaving, setEditSaving] = useState(false)
+  const [editError, setEditError] = useState('')
   const pointerSelectionRef = useRef(null)
 
   if (!items || items.length === 0) return null
@@ -52,6 +62,44 @@ export default function QueuedMessages({
 
   function toggleCollapsed() {
     setCollapsed(c => !c)
+  }
+
+  function beginEdit(msg) {
+    const cid = cidOf(msg)
+    setEditingCid(cid)
+    setEditDraft(stripAugmentation(msg.content || ''))
+    setEditError('')
+    setExpanded(prev => new Set(prev).add(cid))
+  }
+
+  function cancelEdit() {
+    if (editSaving) return
+    setEditingCid(null)
+    setEditDraft('')
+    setEditError('')
+  }
+
+  async function saveEdit(msg) {
+    if (editSaving) return
+    const content = editDraft.trim()
+    if (!content) {
+      setEditError('Queued message cannot be empty.')
+      return
+    }
+    if (content === stripAugmentation(msg.content || '').trim()) {
+      cancelEdit()
+      return
+    }
+    setEditSaving(true)
+    setEditError('')
+    const saved = await onEdit?.(cidOf(msg), content)
+    setEditSaving(false)
+    if (saved) {
+      setEditingCid(null)
+      setEditDraft('')
+    } else {
+      setEditError('Couldn’t save this edit. Try again.')
+    }
   }
 
   function onHdrKeyDown(e) {
@@ -107,13 +155,67 @@ export default function QueuedMessages({
               ? firstLine.slice(0, TRUNCATE_AT) + '…'
               : firstLine + (text.includes('\n') ? ' …' : '')
             const MessageSurface = needsTruncation ? 'button' : 'div'
+            const isEditing = editingCid === key
 
             return (
               <div
                 key={key}
-                className={`queued__row${isExpanded ? ' queued__row--expanded' : ''}`}
+                className={`queued__row${isExpanded ? ' queued__row--expanded' : ''}${isEditing ? ' queued__row--editing' : ''}`}
                 role="listitem"
               >
+                {isEditing ? (
+                  <div className="queued__editor">
+                    <textarea
+                      className="queued__editor-input"
+                      value={editDraft}
+                      onChange={(event) => {
+                        setEditDraft(event.target.value)
+                        setEditError('')
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Escape') {
+                          event.preventDefault()
+                          cancelEdit()
+                        } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                          event.preventDefault()
+                          void saveEdit(msg)
+                        }
+                      }}
+                      aria-label="Edit queued message"
+                      rows={2}
+                      autoFocus
+                      disabled={editSaving}
+                    />
+                    <div className="queued__editor-actions">
+                      <button
+                        type="button"
+                        className="queued__action queued__edit-save"
+                        onClick={() => void saveEdit(msg)}
+                        aria-label="Save queued message edit"
+                        title="Save edit"
+                        disabled={editSaving || !editDraft.trim()}
+                      >
+                        <Check width={16} height={16} aria-hidden="true" />
+                      </button>
+                      <button
+                        type="button"
+                        className="queued__action queued__edit-cancel"
+                        onClick={cancelEdit}
+                        aria-label="Discard queued message edit"
+                        title="Discard edit"
+                        disabled={editSaving}
+                      >
+                        <X width={16} height={16} aria-hidden="true" />
+                      </button>
+                    </div>
+                    {editError && (
+                      <div className="queued__editor-error" role="status">
+                        {editError}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <>
                 <MessageSurface
                   type={needsTruncation ? 'button' : undefined}
                   className={`queued__toggle${needsTruncation ? '' : ' queued__toggle--static'}`}
@@ -149,6 +251,16 @@ export default function QueuedMessages({
                     {isExpanded ? text : preview}
                   </span>
                 </MessageSurface>
+                <button
+                  type="button"
+                  className="queued__action queued__edit"
+                  onPointerDown={(e) => e.preventDefault()}
+                  onClick={() => beginEdit(msg)}
+                  aria-label="Edit queued message"
+                  title="Edit"
+                >
+                  <Pencil width={16} height={16} aria-hidden="true" />
+                </button>
                 {steerActive && (
                   // Per-row fast-forward (owner ask, 2026-07-17): the same
                   // double-chevron as the composer's steer button, in the
@@ -183,6 +295,8 @@ export default function QueuedMessages({
                 >
                   <X width={16} height={16} aria-hidden="true" />
                 </button>
+                  </>
+                )}
               </div>
             )
           })}

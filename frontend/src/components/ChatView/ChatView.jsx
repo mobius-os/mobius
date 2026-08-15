@@ -3096,6 +3096,29 @@ export default function ChatView({
     }
   }, [chatId, pendingQueue])
 
+  const handleUpdatePending = useCallback(async (cid, content) => {
+    const queueWrite = queuedSendRequestsRef.current.get(cid)
+    if (queueWrite) await Promise.allSettled([queueWrite])
+    try {
+      const res = await apiFetch(
+        `/chats/${chatId}/pending/${encodeURIComponent(cid)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content }),
+          timeoutMs: CHAT_FETCH_TIMEOUT_MS,
+        },
+      )
+      const data = await jsonOrThrow(res, 'Queued-message edit failed')
+      if (Array.isArray(data.pending_messages)) {
+        pendingQueue.hydrate(data.pending_messages)
+      }
+      return true
+    } catch {
+      return false
+    }
+  }, [chatId, pendingQueue])
+
   async function handleStop() {
     // Re-entry guard. Without this, two rapid Stop clicks would both
     // snapshot the same pending queue (the snapshot happens BEFORE
@@ -4534,6 +4557,7 @@ export default function ChatView({
           <QueuedMessages
             items={pendingQueue.visiblePendingMessages}
             onCancel={handleCancelPending}
+            onEdit={handleUpdatePending}
             onSteerOne={handleSteerOne}
             steerActive={turnActive && !hasPendingQuestion}
             steerBusy={steerBusy}
