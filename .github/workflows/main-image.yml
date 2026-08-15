@@ -51,8 +51,7 @@ jobs:
           resolve_digest() {
             local image_ref="$1"
             local manifest=""
-            local attempt
-            for attempt in $(seq 1 12); do
+            for _ in $(seq 1 12); do
               if manifest="$(
                 docker buildx imagetools inspect "$image_ref" \
                   --format '{{json .Manifest}}' 2>/dev/null
