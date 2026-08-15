@@ -1734,6 +1734,45 @@ async def preview_manifest_capabilities(
   return loaded, normalized_base, contract, digest
 
 
+def candidate_install_bytes(candidate: "InstallCandidate") -> int:
+  """Conservative on-disk estimate for one fully fetched app candidate.
+
+  Installed bytes are represented more than once (editable source, compiled
+  output, and git objects).  Triple the fetched payload and keep a 1 MiB floor
+  so tiny manifests still budget for repository and bundle metadata.
+  """
+  manifest_bytes = len(json.dumps(
+    candidate.manifest, ensure_ascii=False, sort_keys=True,
+  ).encode("utf-8"))
+  payload = manifest_bytes + len(candidate.entry_bytes)
+  payload += len(candidate.icon_processed or b"")
+  payload += len(candidate.bundled_job or b"")
+  payload += sum(len(value) for value in candidate.static_assets.values())
+  payload += sum(len(value) for value in candidate.source_files.values())
+  payload += sum(len(value) for value in candidate.seeds.values())
+  return max(1024 * 1024, payload * 3)
+
+
+async def preview_install_candidate(
+  *,
+  manifest_url: str | None,
+  manifest: dict | None,
+  raw_base: str | None,
+) -> tuple["InstallCandidate", int]:
+  """Fetch the exact install inputs read-only and return their disk estimate."""
+  candidate = await _fetch_install_candidate(
+    manifest_url=manifest_url,
+    manifest=manifest,
+    raw_base=raw_base,
+    reviewed_capability_digest=None,
+    reviewed_source_digest=None,
+    expected_app_id=None,
+    expected_upstream_commit=None,
+    expected_candidate_digest=None,
+  )
+  return candidate, candidate_install_bytes(candidate)
+
+
 @dataclass(frozen=True)
 class InstallCandidate:
   """Fully fetched, review-bound inputs for one install attempt.
@@ -2506,6 +2545,28 @@ async def install_from_manifest(
     expected_upstream_commit=expected_upstream_commit,
     expected_candidate_digest=expected_candidate_digest,
   )
+  # Enforce the same shared-disk boundary the Store previews.  The UI is only
+  # advisory; this final check runs on freshly fetched bytes immediately before
+  # any database or filesystem mutation, so stale tabs and concurrent installs
+  # cannot consume the database's safety margin.
+  from app.config import get_settings
+  from app.resource_pressure import app_install_storage_budget
+  estimated_install_bytes = candidate_install_bytes(candidate)
+  budget = app_install_storage_budget(get_settings().data_dir)
+  if estimated_install_bytes > budget["available_bytes"]:
+    raise HTTPException(
+      507,
+      {
+        "code": "app_install_quota_exceeded",
+        "message": (
+          "This app needs more install space than is currently available. "
+          "Free some storage and try again."
+        ),
+        "required_bytes": estimated_install_bytes,
+        "available_bytes": budget["available_bytes"],
+        "reserve_bytes": budget["reserve_bytes"],
+      },
+    )
   manifest = candidate.manifest
   raw_base = candidate.raw_base
   entry_bytes = candidate.entry_bytes

@@ -350,22 +350,34 @@ async def preview_app_install(
   db: Session = Depends(get_db),
   _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
 ):
-  """Validate and normalize the capabilities an install would apply.
-
-  This intentionally fetches only the manifest.  The install endpoint repeats
-  the fetch and binds it to ``reviewed_capability_digest`` before fetching app
-  code or mutating durable state, closing the catalog-preview/install race.
-  """
+  """Validate capabilities and estimate the complete candidate's disk cost."""
   from app import install
+  from app.resource_pressure import app_install_storage_budget
 
-  manifest, raw_base, contract, digest = (
-    await install.preview_manifest_capabilities(
+  if body.include_install_size:
+    candidate, estimated_install_bytes = await install.preview_install_candidate(
       manifest_url=body.manifest_url,
       manifest=body.manifest,
       raw_base=body.raw_base,
     )
+    manifest = candidate.manifest
+    raw_base = candidate.raw_base
+    contract = candidate.capability_contract
+    digest = candidate.capability_digest
+    storage_budget = app_install_storage_budget(get_settings().data_dir)
+  else:
+    manifest, raw_base, contract, digest = (
+      await install.preview_manifest_capabilities(
+        manifest_url=body.manifest_url,
+        manifest=body.manifest,
+        raw_base=body.raw_base,
+      )
+    )
+    estimated_install_bytes = None
+    storage_budget = None
+  source = (
+    body.manifest_url if body.manifest_url is not None else raw_base
   )
-  source = body.manifest_url if body.manifest_url is not None else raw_base
   existing = install._find_install_identity_row(
     db, source_url=source, manifest_id=manifest["id"],
   )
@@ -378,6 +390,8 @@ async def preview_app_install(
     capability_digest=digest,
     installed_contract=installed_contract,
     capability_diff=diff_contracts(installed_contract, contract),
+    estimated_install_bytes=estimated_install_bytes,
+    storage_budget=storage_budget,
   )
 
 

@@ -270,6 +270,9 @@ class AppInstall(BaseModel):
   reviewed_source_digest: str | None = Field(
     default=None, min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$",
   )
+  # Preview-only opt-in. Capability review stays manifest-fast by default;
+  # batch installers request a complete read-only fetch when they need a size.
+  include_install_size: bool = False
 
 
 class AppPreviewOut(BaseModel):
@@ -278,6 +281,8 @@ class AppPreviewOut(BaseModel):
   capability_digest: str
   installed_contract: dict | None = None
   capability_diff: dict
+  estimated_install_bytes: int | None = None
+  storage_budget: dict[str, int] | None = None
 
 
 class ReconciliationReceiptOut(BaseModel):
