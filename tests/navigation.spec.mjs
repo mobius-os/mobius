@@ -2167,25 +2167,37 @@ test.describe('Drawer close paths converge through handleBack', () => {
         layout: element.offsetWidth,
       }
     })
-    const box = await handle.boundingBox()
-    expect(box).not.toBeNull()
-
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await handle.evaluate((element) => {
+      element.addEventListener('pointerdown', (event) => {
+        element.dataset.testPointerId = String(event.pointerId)
+        element.dataset.testPointerX = String(event.clientX)
+        element.dataset.testPointerY = String(event.clientY)
+      }, { once: true })
+    })
+    // Ask Playwright to resolve and hit-test the live handle after moving the
+    // drawer. A cached bounding box can lag that style change under CI load.
+    await handle.hover()
     await page.mouse.down()
-    await page.mouse.move(box.x + box.width / 2 + 48, box.y + box.height / 2)
+    const pointer = await handle.evaluate((element) => ({
+      id: Number(element.dataset.testPointerId),
+      x: Number(element.dataset.testPointerX),
+      y: Number(element.dataset.testPointerY),
+    }))
+    expect(Number.isInteger(pointer.id)).toBe(true)
+    expect(Number.isFinite(pointer.x)).toBe(true)
+    expect(Number.isFinite(pointer.y)).toBe(true)
+    await page.mouse.move(pointer.x + 48, pointer.y)
     const released = await handle.evaluate((element) => {
-      for (let pointerId = 1; pointerId <= 5; pointerId += 1) {
-        if (!element.hasPointerCapture(pointerId)) continue
-        // A programmatic releasePointerCapture() only flushes lostpointercapture
-        // on the next pointer-event dispatch, so dispatch the capture-loss event
-        // the browser itself delivers when a drag's capture is interrupted.
-        element.dispatchEvent(new PointerEvent('lostpointercapture', {
-          pointerId,
-          bubbles: true,
-        }))
-        return true
-      }
-      return false
+      const pointerId = Number(element.dataset.testPointerId)
+      if (!Number.isInteger(pointerId) || !element.hasPointerCapture(pointerId)) return false
+      // A programmatic releasePointerCapture() only flushes lostpointercapture
+      // on the next pointer-event dispatch, so dispatch the capture-loss event
+      // the browser itself delivers when a drag's capture is interrupted.
+      element.dispatchEvent(new PointerEvent('lostpointercapture', {
+        pointerId,
+        bubbles: true,
+      }))
+      return true
     })
     expect(released).toBe(true)
 
