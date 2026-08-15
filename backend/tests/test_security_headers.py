@@ -72,6 +72,28 @@ def test_bundled_caddy_does_not_override_published_site_sandbox():
   assert "default-src" not in _PUBLISHED_SITE_CSP
 
 
+def test_speech_worker_revalidates_so_its_csp_cannot_go_stale():
+  # A worker runs under the CSP of its OWN response. The speech worker carries
+  # shell_csp (now with 'wasm-unsafe-eval'); if the browser cached it under
+  # heuristic freshness, a device that fetched it before the WASM policy was
+  # restored would keep running the stale, WASM-blocked policy. Force revalidation
+  # like sw.js so the current CSP always applies.
+  import os
+
+  # The runtime serves this from the live Vite dist; the test floor is the baked
+  # stub dir conftest seeds. Provide the worker there so the serving path — not a
+  # 404 — is exercised.
+  static = Path(os.environ["MOBIUS_BAKED_STATIC_DIR"])
+  worker = static / "speech" / "pocket-tts-worker.js"
+  worker.parent.mkdir(parents=True, exist_ok=True)
+  if not worker.exists():
+    worker.write_text("// test stub speech worker\n", encoding="utf-8")
+  r = TestClient(app).get("/speech/pocket-tts-worker.js")
+  assert r.status_code == 200
+  assert r.headers.get("cache-control") == "no-cache, must-revalidate"
+  assert "'wasm-unsafe-eval'" in (r.headers.get("content-security-policy") or "")
+
+
 def test_standard_security_headers_present():
   h = _headers()
   assert h.get("x-content-type-options") == "nosniff"

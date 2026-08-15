@@ -987,6 +987,15 @@ def _resolve_asset_file(asset_path: str) -> Path | None:
 # site below.
 _SERVICE_WORKER_SCRIPTS = frozenset({"sw.js", "sw-push.js"})
 
+# Small, same-origin worker scripts that are deliberately NOT precached (mirrors
+# the frontend precache-policy.mjs UNPRECACHED_WORKERS list). A worker runs under
+# the Content-Security-Policy of its OWN response, so — exactly like sw.js — it
+# must revalidate on every load. Without this the browser caches the worker by
+# HTTP heuristic freshness, and a device that fetched it under an earlier policy
+# keeps executing under that stale CSP: this is how on-device Pocket TTS stayed
+# WebAssembly-blocked even after shell_csp restored the 'wasm-unsafe-eval' source.
+_UNPRECACHED_WORKER_SCRIPTS = frozenset({"speech/pocket-tts-worker.js"})
+
 # The push worker's scope. It exists only to name a URL prefix inside the
 # shell's PWA scope, and must never resolve to a document — a page here would
 # be controlled by a worker with no fetch handler, so it would boot the shell
@@ -1388,7 +1397,7 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
       # If-None-Match on every request, so a 304 keeps the
       # download cheap when nothing changed.
       headers = _public_static_headers(path)
-      if path in _SERVICE_WORKER_SCRIPTS:
+      if path in _SERVICE_WORKER_SCRIPTS or path in _UNPRECACHED_WORKER_SCRIPTS:
         headers["Cache-Control"] = "no-cache, must-revalidate"
         # A worker script is a REVALIDATING response (no-cache + the mtime ETag
         # FileResponse sets), so it must never answer a 206. A
