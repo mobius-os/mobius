@@ -15,6 +15,7 @@ const scrollMode = readFileSync(new URL('../../ChatView/useScrollMode.js', impor
 const detailCache = readFileSync(new URL('../../../lib/chatDetailCache.js', import.meta.url), 'utf8')
 const searchTermHighlight = readFileSync(new URL('../../../lib/searchTermHighlight.js', import.meta.url), 'utf8')
 const apiClient = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
+const navigationSource = readFileSync(new URL('../../../hooks/useNavigation.js', import.meta.url), 'utf8')
 
 function ruleBody(selector, source = shellCss) {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -322,8 +323,20 @@ test('direct chat actions hand focus to the destination composer', () => {
     /composerDraftWantsKeyboard\(saved\)[\s\S]*beginTouchComposerFocusLease\([\s\S]*initialValue: saved\.input[\s\S]*requestComposer\(chatId, \{ focus: true, restoreExistingDraft: true \}\)/,
     'a selected touch chat with an unsent draft must reserve the keyboard until its real composer takes focus')
   assert.match(shell,
-    /beforeRestoreRouteRef\.current = \(route\) => \{[\s\S]*route\?\.view !== 'chat'[\s\S]*focusSelectedChatComposer\(route\.chatId, \{ touchDraftOnly: true \}\)/,
+    /beforeRestoreRouteRef\.current = \(route\) => \{[\s\S]*route\?\.view !== 'chat'[\s\S]*reserveTouchDraftComposer\(route\.chatId\)/,
     'Back and Forward must use the same draft-only touch focus handoff')
+  assert.match(shell, /const beforeRestoreRouteRef = useRef\(null\)/)
+  assert.match(shell, /beforeRestoreRouteRef,\s*\}\)/)
+  assert.match(
+    navigationSource,
+    /if \(itemRoute\) \{\s*beforeRestoreRouteRef\?\.current\?\.\(itemRoute\)\s*applyModeDestination\(itemRoute\)/,
+    'Back and Forward must reserve the draft keyboard before restoring the destination',
+  )
+  assert.match(
+    navigationSource,
+    /function closeDrawer[\s\S]*beforeRestoreRouteRef\?\.current\?\.\(snapshotRoute\(\)\)[\s\S]*const userBackTraversal = !drawerClosePendingRef\.current[\s\S]*if \(drawerOpenRef\.current && drawerPushedRef\.current\)[\s\S]*beforeRestoreRouteRef\?\.current\?\.\(returnRoute\)/,
+    'both explicit and Back-driven drawer closes must reserve the restored draft keyboard',
+  )
 })
 
 test('the held chat is an opaque layer above staging until the atomic swap', () => {

@@ -692,7 +692,7 @@ export default function Shell({ onInitialVisualReady }) {
     requestComposer(chatId, { focus: true })
   }
 
-  function focusSelectedChatComposer(chatId, { touchDraftOnly = false } = {}) {
+  function reserveTouchDraftComposer(chatId) {
     if (chatId == null) return false
     const saved = readComposerDraft(chatId)
     if (composerDraftWantsKeyboard(saved)) {
@@ -706,7 +706,12 @@ export default function Shell({ onInitialVisualReady }) {
         return true
       }
     }
-    if (touchDraftOnly) return false
+    return false
+  }
+
+  function focusSelectedChatComposer(chatId) {
+    if (chatId == null) return false
+    if (reserveTouchDraftComposer(chatId)) return true
     focusDesktopChatPaneComposer(chatId)
     return true
   }
@@ -716,7 +721,7 @@ export default function Shell({ onInitialVisualReady }) {
   // the outgoing chat or app can become inert.
   beforeRestoreRouteRef.current = (route) => {
     if (route?.view !== 'chat' || route.chatId == null) return
-    focusSelectedChatComposer(route.chatId, { touchDraftOnly: true })
+    reserveTouchDraftComposer(route.chatId)
   }
 
   // A restored single-screen chat has no click handler to request focus. Keep

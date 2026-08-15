@@ -54,22 +54,9 @@ test('a claimed destination runs before navigation history or view mutation', ()
 
 test('Shell connects navigation to the current reload claimant through one ref', () => {
   assert.match(shellSource, /const beforeNavigateRef = useRef\(null\)/)
-  assert.match(
-    shellSource,
-    /beforeNavigateRef,\s*beforeRestoreRouteRef,\s*\}\)/,
-  )
+  assert.match(shellSource, /beforeNavigateRef,\s*/)
   assert.match(
     shellSource,
     /beforeNavigateRef\.current = claimPendingShellReloadNavigation/,
-  )
-  assert.match(shellSource, /const beforeRestoreRouteRef = useRef\(null\)/)
-  assert.match(shellSource, /beforeRestoreRouteRef,\s*\}\)/)
-  assert.match(
-    navigationSource,
-    /if \(itemRoute\) \{\s*beforeRestoreRouteRef\?\.current\?\.\(itemRoute\)\s*applyModeDestination\(itemRoute\)/,
-  )
-  assert.match(
-    navigationSource,
-    /function closeDrawer[\s\S]*beforeRestoreRouteRef\?\.current\?\.\(snapshotRoute\(\)\)[\s\S]*const userBackTraversal = !drawerClosePendingRef\.current[\s\S]*if \(drawerOpenRef\.current && drawerPushedRef\.current\)[\s\S]*beforeRestoreRouteRef\?\.current\?\.\(returnRoute\)/,
   )
 })
