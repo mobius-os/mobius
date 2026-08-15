@@ -728,9 +728,9 @@
   white-space: nowrap;
   border: 0;
 }
-/* A real text control is required to reserve the software keyboard during the
-   async New-chat handoff. It stays mounted outside the modal drawer's inert
-   subtree and never participates in layout or pointer hit-testing. */
+/* A real text control is required to reserve the software keyboard while one
+   chat composer hands focus to another. It stays mounted outside the modal
+   drawer's inert subtree and never participates in layout or pointer input. */
 .shell__composer-focus-lease {
   position: fixed;
   left: 0;

@@ -96,6 +96,7 @@ import {
 } from '../ChatView/composerDraft.js'
 import {
   beginTouchComposerFocusLease,
+  composerDraftWantsKeyboard,
   releaseComposerFocusLease,
 } from './composerFocusLease.js'
 import {
@@ -200,6 +201,10 @@ export default function Shell({ onInitialVisualReady }) {
   // Navigation reads the current claimant synchronously without closing over
   // reload-controller state declared later in this component.
   const beforeNavigateRef = useRef(null)
+  // Back/Forward can reserve a draft's mobile writing session before the
+  // outgoing surface becomes inert. The callback is filled after the shared
+  // composer handoff exists below.
+  const beforeRestoreRouteRef = useRef(null)
 
   const {
     activeView,
@@ -223,6 +228,7 @@ export default function Shell({ onInitialVisualReady }) {
     replaceImplicitBootTab,
     dragActiveRef,
     beforeNavigateRef,
+    beforeRestoreRouteRef,
   })
 
   // A mobile drawer is a history-backed virtual route. A desktop sidebar is a
@@ -684,6 +690,33 @@ export default function Shell({ onInitialVisualReady }) {
   function focusDesktopChatPaneComposer(chatId) {
     if (!supportsDesktopPaneComposerFocus()) return
     requestComposer(chatId, { focus: true })
+  }
+
+  function focusSelectedChatComposer(chatId, { touchDraftOnly = false } = {}) {
+    if (chatId == null) return false
+    const saved = readComposerDraft(chatId)
+    if (composerDraftWantsKeyboard(saved)) {
+      const leased = beginTouchComposerFocusLease(composerFocusLeaseRef.current, {
+        initialValue: saved.input,
+      })
+      if (leased) {
+        composerFocusLeaseDraftIdRef.current = String(chatId)
+        composerFocusLeaseDirtyRef.current = false
+        requestComposer(chatId, { focus: true, restoreExistingDraft: true })
+        return true
+      }
+    }
+    if (touchDraftOnly) return false
+    focusDesktopChatPaneComposer(chatId)
+    return true
+  }
+
+  // Browser traversal bypasses the drawer and tab selection handlers. Reserve
+  // the touch keyboard at useNavigation's validated restore boundary, before
+  // the outgoing chat or app can become inert.
+  beforeRestoreRouteRef.current = (route) => {
+    if (route?.view !== 'chat' || route.chatId == null) return
+    focusSelectedChatComposer(route.chatId, { touchDraftOnly: true })
   }
 
   // A restored single-screen chat has no click handler to request focus. Keep
@@ -3211,7 +3244,7 @@ export default function Shell({ onInitialVisualReady }) {
       && !destinationAlreadyPainted
     clearChatAttention(id)
     navTo('chat', { chatId: id, preserveDrawerPresentation })
-    if (focusComposer) focusDesktopChatPaneComposer(id)
+    if (focusComposer) focusSelectedChatComposer(id)
   }
 
   async function deleteChat(id) {
@@ -3488,7 +3521,7 @@ export default function Shell({ onInitialVisualReady }) {
         ref={composerFocusLeaseRef}
         className="shell__composer-focus-lease"
         tabIndex={-1}
-        aria-label="New chat message"
+        aria-label="Message Möbius…"
         autoComplete="off"
         onInput={(event) => {
           const draftId = composerFocusLeaseDraftIdRef.current
@@ -3706,7 +3739,7 @@ export default function Shell({ onInitialVisualReady }) {
                 onActivate={() => {
                   const { view, opts } = tabModel.tabNavTarget(tab)
                   navTo(view, opts)
-                  if (tab.kind === 'chat') focusDesktopChatPaneComposer(tab.id)
+                  if (tab.kind === 'chat') focusSelectedChatComposer(tab.id)
                 }}
                 onClose={() => closeTab(tab)}
                 onContextMenu={(event) => openTabMenu(event, tab, null)}
@@ -4155,7 +4188,7 @@ export default function Shell({ onInitialVisualReady }) {
             onCloseTab={closeTab}
             focusedPaneViewId={focusedPaneViewId}
             onTogglePaneFocus={toggleFocusedPaneView}
-            onChatPaneSelected={focusDesktopChatPaneComposer}
+            onChatPaneSelected={focusSelectedChatComposer}
             revealKey={tabRevealRevision}
           />
         )}
