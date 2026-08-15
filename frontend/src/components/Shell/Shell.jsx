@@ -1585,6 +1585,19 @@ export default function Shell({ onInitialVisualReady }) {
     }
     return next
   }, [localStreamingChatIds, chats])
+  // A parked question still owns a durable runner, but Möbius is waiting for
+  // the owner rather than thinking. Keep that runtime fact for reload policy
+  // while withholding the animated "working" promise from title surfaces.
+  const workingChatIds = useMemo(() => new Set(
+    [...streamingChatIds].filter(id => {
+      const chat = chatById.get(String(id))
+      return !chat || chat.pending_question_id == null
+    }),
+  ), [streamingChatIds, chatById])
+  const workingChatIdStrings = useMemo(
+    () => new Set([...workingChatIds].map(id => String(id))),
+    [workingChatIds],
+  )
   const streamingChatIdsRef = useRef(streamingChatIds)
   useEffect(() => { streamingChatIdsRef.current = streamingChatIds }, [streamingChatIds])
   // Whether the chat the owner is looking at is parked on an AskUserQuestion
@@ -3620,7 +3633,7 @@ export default function Shell({ onInitialVisualReady }) {
         nowPlaying={nowPlaying}
         onNowPlayingOpen={handleNowPlayingOpen}
         onNowPlayingControl={handleNowPlayingControl}
-        streamingChatIds={streamingChatIds}
+        streamingChatIds={workingChatIds}
         attentionChatIds={attentionChatIds}
         newAppIds={appAttentionSet}
         settingsWarning={providerAuth.needsAttention}
@@ -3697,6 +3710,7 @@ export default function Shell({ onInitialVisualReady }) {
                 key={key}
                 tab={tab}
                 label={labelForTab(tab)}
+                working={tab.kind === 'chat' && workingChatIdStrings.has(String(tab.id))}
                 active={active}
                 revealKey={tabRevealRevision}
                 tabIndex={active ? 0 : -1}
@@ -4146,6 +4160,7 @@ export default function Shell({ onInitialVisualReady }) {
             dispatchWorkspace={dispatchWorkspace}
             navTo={navTo}
             labelForTab={labelForTab}
+            workingChatIds={workingChatIdStrings}
             onTabContextMenu={openTabMenu}
             // The ONE shared user-close action — WorkspaceChrome owns no private
             // close dispatcher or transition timing.

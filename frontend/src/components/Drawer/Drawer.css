@@ -770,24 +770,18 @@
 
 /* ── Row status dots ───────────────────────────────── */
 
-/* 6px accent dot in front of a row label. Marks chats whose agent
+/* Shared animated mark in front of a row label. Marks chats whose agent
    is mid-turn so a user switching to another chat still sees the
-   background build progressing in the drawer.
+   background work progressing in the drawer. The shared indicator animates
+   only while a real chat turn is active and falls back to a static ring for
+   reduced-motion users. */
+.drawer__working-indicator {
+  flex-shrink: 0;
+  margin-right: 2px;
+}
 
-   Deliberately static. This dot used to pulse on a 1.5s infinite loop,
-   but the drawer is always mounted and a long-running agent keeps its
-   row on screen for hours, so the animation never ended — which kept
-   the compositor producing 60 frames a second even with the app fully
-   idle, and every one of those frames paid for the composer's
-   backdrop-filter. Measured: disabling this animation (with the tab
-   title marquee) took DrawFrame, BeginFrame and render passes to zero
-   at idle. The reduced-motion path below already settled that a steady
-   dot is an acceptable representation and that "streaming" surfaces via
-   aria-label + presence; this generalises that decision to everyone.
-
-   If motion is ever wanted back here, it must be bounded — a few
-   iterations re-armed when the row's status CHANGES, never `infinite`
-   on always-mounted chrome. */
+/* App-building rows retain their compact static dot; chat work uses the
+   more explicit shared indicator above. */
 .drawer__streaming-dot {
   flex-shrink: 0;
   width: 6px;

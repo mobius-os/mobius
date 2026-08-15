@@ -114,10 +114,9 @@ function ruleBody(selector) {
   return rule[1].trim()
 }
 
-test('always-mounted streaming chrome has no infinite animation', () => {
+test('the retired drawer pulse does not return', () => {
   assert.doesNotMatch(ruleBody('.drawer__streaming-dot'), /animation\s*:/)
   assert.doesNotMatch(drawerCss, /@keyframes\s+drawer-streaming-pulse/)
-  assert.doesNotMatch(drawerCss, /animation[^;}]*\binfinite\b/)
 })
 
 test('streaming and attention rows stay tellable apart without motion', () => {

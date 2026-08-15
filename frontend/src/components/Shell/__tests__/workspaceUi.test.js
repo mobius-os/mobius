@@ -24,6 +24,14 @@ const workspaceViewSrc = readFileSync(new URL('../workspaceView.js', import.meta
 const modeViewTransitionSrc = readFileSync(new URL('../useModeViewTransition.js', import.meta.url), 'utf8')
 const modeControllerSrc = readFileSync(new URL('../useModeController.js', import.meta.url), 'utf8')
 const drawer = readFileSync(new URL('../../Drawer/Drawer.jsx', import.meta.url), 'utf8')
+const workingIndicator = readFileSync(
+  new URL('../../ui/ChatWorkingIndicator.jsx', import.meta.url),
+  'utf8',
+)
+const workingIndicatorCss = readFileSync(
+  new URL('../../ui/ChatWorkingIndicator.css', import.meta.url),
+  'utf8',
+)
 const drawerItemActionMenu = readFileSync(
   new URL('../../Drawer/DrawerItemActionMenu.jsx', import.meta.url),
   'utf8',
@@ -858,7 +866,7 @@ test('opening navigation is presentation-only and never refetches whole lists', 
     'a run started in another live client must still advance drawer recency')
 })
 
-test('chat drawer dots distinguish active work from unseen completion', () => {
+test('chat titles distinguish active work from unseen completion', () => {
   assert.match(
     shell,
     /ev\.type === 'chat_run_started'[\s\S]*?markStreamingStart\(ev\.chatId\)/,
@@ -876,8 +884,26 @@ test('chat drawer dots distinguish active work from unseen completion', () => {
   )
   assert.match(
     drawer,
-    /streaming \? \([\s\S]*?drawer__streaming-dot[\s\S]*?: attention \? \([\s\S]*?drawer__attention-dot/,
+    /streaming \? \([\s\S]*?ChatWorkingIndicator[\s\S]*?: building \? \([\s\S]*?: attention \? \([\s\S]*?drawer__attention-dot/,
     'active work must take precedence over unseen completion in a row',
+  )
+  assert.match(workingIndicator, /aria-label="Möbius is working"/)
+  assert.match(workingIndicatorCss, /animation:\s*chat-working-orbit[^;]*infinite/)
+  assert.match(workingIndicatorCss, /prefers-reduced-motion:[\s\S]*?animation:\s*none/)
+  assert.match(
+    paneStrip,
+    /\{working && <ChatWorkingIndicator className="shell__tab-working" \/>\}/,
+    'the shared working mark must sit beside the main-panel tab title',
+  )
+  assert.match(
+    shell,
+    /working=\{tab\.kind === 'chat' && workingChatIdStrings\.has\(String\(tab\.id\)\)\}/,
+    'single-pane tabs must derive the mark from the shell working set',
+  )
+  assert.match(
+    paneStrip,
+    /working=\{tab\.kind === 'chat' && workingChatIds\?\.has\(String\(tab\.id\)\)\}/,
+    'tiled-pane tabs must derive the same mark from the same working set',
   )
   assert.match(drawerCss, /\.drawer__streaming-dot\s*\{[\s\S]*?background:\s*var\(--accent\)/)
   assert.match(drawerCss, /\.drawer__attention-dot\s*\{[\s\S]*?border:\s*1\.5px solid var\(--green\)/)

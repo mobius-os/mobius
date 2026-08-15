@@ -12,6 +12,7 @@ import {
   SettingsNavIcon,
 } from '../navigationIcons.js'
 import AppIcon from '../AppIcon.jsx'
+import ChatWorkingIndicator from '../ui/ChatWorkingIndicator.jsx'
 import { preloadAppIcons } from '../appIcon.js'
 import {
   computePinnedDrag,
@@ -1889,15 +1890,11 @@ const DrawerRow = memo(function DrawerRow({
         {kind === 'app' && (
           <AppIcon item={item} label={label} className="drawer__app-icon" />
         )}
-        {/* Status dot. Sits before the text so the user's eye
+        {/* Status mark. Sits before the text so the user's eye
             picks it up alongside the label rather than at the row's
             edge (where the pin lives). aria-label exposes the state. */}
         {streaming ? (
-          <span
-            className="drawer__streaming-dot"
-            aria-label="Currently streaming"
-            title="Currently streaming"
-          />
+          <ChatWorkingIndicator className="drawer__working-indicator" />
         ) : building ? (
           <span
             className="drawer__streaming-dot"

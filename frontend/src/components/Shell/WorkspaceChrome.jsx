@@ -88,6 +88,7 @@ export default function WorkspaceChrome({
   dispatchWorkspace,
   navTo,
   labelForTab,
+  workingChatIds,
   onTabContextMenu,
   // The ONE shared user-close action (INV 13) — Shell owns it, this layer no longer
   // dispatches CLOSE_TAB itself. Called with a tab object.
@@ -266,6 +267,7 @@ export default function WorkspaceChrome({
             paneRect={rect}
             focused={paneId === workspace.focusedPaneId}
             labelForTab={labelForTab}
+            workingChatIds={workingChatIds}
             onActivate={activateTab}
             onClose={onCloseTab}
             onFocus={focusPane}

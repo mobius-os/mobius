@@ -447,6 +447,9 @@
   display: inline-block;
   min-width: max-content;
 }
+.shell__tab-working {
+  margin-left: 6px;
+}
 /* Only the newly-active title in the focused strip makes one bounded reveal.
    It rests at the beginning, travels far enough to expose the tail, rests there,
    then returns to the beginning and stays idle. Other panes never start competing

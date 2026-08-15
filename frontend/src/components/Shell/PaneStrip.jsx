@@ -3,6 +3,7 @@ import { CollapseSm, ExpandSm, X } from '@openai/apps-sdk-ui/components/Icon'
 import * as tabModel from './tabModel.js'
 import { STRIP_H } from './paneModel.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
+import ChatWorkingIndicator from '../ui/ChatWorkingIndicator.jsx'
 
 // Each direction owns 40% of the one-shot cycle, so 1000/12 ms per clipped pixel
 // keeps travel at a readable 30px/s. The cycle runs once, returns to the beginning,
@@ -78,6 +79,7 @@ export function scrollStripWheel(e) {
 // (tabIndex 0); the rest and every close button are reached via stripKeyDown.
 export function PaneTab({
   tab, label, active, focused = true, revealKey = 0,
+  working = false,
   tabIndex, dragKey, role, tabId, controlsId,
   onActivate, onClose, onContextMenu,
 }) {
@@ -161,6 +163,7 @@ export function PaneTab({
         <span ref={titleRef} className="shell__tab-text">
           <span className="shell__tab-text-inner">{label}</span>
         </span>
+        {working && <ChatWorkingIndicator className="shell__tab-working" />}
       </button>
       <button
         type="button"
@@ -197,6 +200,7 @@ export function PaneFocusButton({ paneId, focused, onToggle }) {
 // before navTo snapshots the source route (see WorkspaceChrome.activateTab).
 export function PaneStrip({
   pane, paneRect, focused, labelForTab,
+  workingChatIds,
   onActivate, onClose, onFocus, onTabContextMenu,
   viewTransitionStyle = null,
   canFocusPane = false, paneFocused = false, onTogglePaneFocus,
@@ -231,6 +235,7 @@ export function PaneStrip({
             key={key}
             tab={tab}
             label={labelForTab(tab)}
+            working={tab.kind === 'chat' && workingChatIds?.has(String(tab.id))}
             active={active}
             focused={focused}
             revealKey={revealKey}
