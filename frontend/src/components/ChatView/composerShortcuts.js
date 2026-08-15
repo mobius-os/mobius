@@ -17,3 +17,25 @@ export function resolveComposerEnterAction(event, {
   if (canRequestSteer) return 'steer'
   return 'noop'
 }
+
+export const DOUBLE_ESCAPE_STOP_WINDOW_MS = 700
+
+export function resolveDoubleEscapeStop(event, {
+  lastEscapeAt = 0,
+  now = 0,
+} = {}) {
+  if (
+    !event
+    || event.defaultPrevented
+    || event.key !== 'Escape'
+    || event.repeat
+    || event.altKey
+    || event.ctrlKey
+    || event.metaKey
+    || event.shiftKey
+  ) return { stop: false, lastEscapeAt }
+
+  const stop = lastEscapeAt > 0
+    && now - lastEscapeAt <= DOUBLE_ESCAPE_STOP_WINDOW_MS
+  return { stop, lastEscapeAt: stop ? 0 : now }
+}

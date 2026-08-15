@@ -990,6 +990,53 @@ def test_stop_handoff_clear_does_not_erase_racing_fresh_start_turn_marker(
   assert chat_mod.is_chat_running("t10")
 
 
+def test_in_progress_stop_closes_partial_with_a_continuation_question():
+  """A live turn stopped after producing content ends unambiguously and asks
+  the owner what should happen next; a text boundary keeps the note separate
+  from the model's interrupted sentence."""
+  from app import broadcast as bc_mod
+
+  _seed_chat(
+    "t-stop-note",
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[], running="running",
+  )
+  _seed_run("rt-stop-note", "t-stop-note")
+  chat_mod.mark_starting("t-stop-note")
+  gen = chat_mod.current_run_generation("t-stop-note")
+  chat_mod._clear_after_terminal_generation["t-stop-note"] = gen
+  chat_mod.bump_run_generation("t-stop-note")
+  chat_mod.discard_starting("t-stop-note")
+
+  bc = create_broadcast("t-stop-note")
+  bc_mod.set_active_broadcast(bc)
+  sink = chat_mod._ChatEventSink(
+    bc, "t-stop-note", run_token="rt-stop-note",
+    recall_binding=EMPTY_RECALL_BINDING,
+  )
+  sink.publish({"type": "text", "content": "Partial answer."})
+
+  db = SessionLocal()
+  try:
+    asyncio.run(chat_mod._complete_turn(
+      bc=bc, sink=sink, db=db, chat_id="t-stop-note", run_gen=gen,
+      provider_id="claude", cost_usd=0.0, close_browser=False,
+    ))
+    _drain_actor()
+  finally:
+    bc_mod.set_active_broadcast(None)
+
+  assistant = _load("t-stop-note")["messages"][-1]
+  assert assistant["role"] == "assistant"
+  assert assistant["blocks"] == [
+    {"type": "text", "content": "Partial answer."},
+    {
+      "type": "text",
+      "content": "Interrupted. How would you like to continue?",
+    },
+  ]
+
+
 # -- 10b. stale finalize must NOT append after a fresh turn's user msg -------
 def test_stale_dying_run_does_not_finalize_after_fresh_turn_claimed(monkeypatch):
   """The bug the corrected fix closes: a Stop-superseded dying run reaches

@@ -36,6 +36,7 @@ import useChatRuntimePolicy from './hooks/useChatRuntimePolicy.js'
 import useOffscreenNudge, { useNudgeTargetRef } from './hooks/useOffscreenNudge.js'
 import ChatInputBar from './ChatInputBar.jsx'
 import { hasSendablePayload } from './composerSubmission.js'
+import { resolveDoubleEscapeStop } from './composerShortcuts.js'
 import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
 import ComposerPopover from './ComposerPopover.jsx'
@@ -3593,6 +3594,31 @@ export default function ChatView({
   // (The fast-forward identity/readiness gates are computed separately below.)
   const turnActive = sending || isStreaming || serverRunning
 
+  // A quiet, discoverable keyboard counterpart to the visible Stop control.
+  // Listen only while this mounted chat owns a live turn; hidden workspace
+  // panes must never react to a shortcut intended for the active pane. The
+  // first Escape remains available to dismiss transient composer surfaces,
+  // while a second unclaimed Escape inside the short window stops the turn.
+  const lastStopEscapeAtRef = useRef(0)
+  useEffect(() => {
+    if (hidden || !turnActive) {
+      lastStopEscapeAtRef.current = 0
+      return undefined
+    }
+    function onDoubleEscape(event) {
+      const resolution = resolveDoubleEscapeStop(event, {
+        lastEscapeAt: lastStopEscapeAtRef.current,
+        now: performance.now(),
+      })
+      lastStopEscapeAtRef.current = resolution.lastEscapeAt
+      if (!resolution.stop) return
+      event.preventDefault()
+      void handleStop()
+    }
+    window.addEventListener('keydown', onDoubleEscape)
+    return () => window.removeEventListener('keydown', onDoubleEscape)
+  }, [hidden, turnActive])
+
   // Auto-dismiss the settled "Open <app>" CTA a few seconds after the turn
   // ends, so it reads as an ephemeral nudge rather than a permanent chat-foot
   // fixture. Only the settled (post-turn) CTA times out; a live in-turn preview
@@ -4512,6 +4538,11 @@ export default function ChatView({
             steerActive={turnActive && !hasPendingQuestion}
             steerBusy={steerBusy}
           />
+        )}
+        {turnActive && (
+          <div className="chat__stop-hint" role="status">
+            Double Esc to stop the current task
+          </div>
         )}
         <ChatInputBar
           chatId={chatId}

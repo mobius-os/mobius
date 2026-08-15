@@ -2097,6 +2097,18 @@
   gap: 0;
 }
 
+.chat__stop-hint {
+  width: fit-content;
+  max-width: calc(100% - 24px);
+  margin: 0 auto 4px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+  text-align: center;
+  pointer-events: none;
+}
+
 .chat__offline-note {
   box-sizing: border-box;
   width: fit-content;

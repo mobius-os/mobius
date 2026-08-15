@@ -3103,6 +3103,19 @@ async def _complete_turn(
     else "completed"
   )
 
+  # An intentional Stop should close in the assistant's own voice rather than
+  # leaving a partial sentence as the final, ambiguous state. Publishing into
+  # the existing sink keeps the note in the same durable assistant turn and
+  # lets the ordinary Finalize command persist it; this is not a second chat
+  # write path. Restart interruptions already carry their own resumable pause
+  # note and must not receive this user-Stop wording.
+  if stop_handoff_successor and ending_status == "stopped":
+    sink.publish({"type": "text_boundary"})
+    sink.publish({
+      "type": "text",
+      "content": "Interrupted. How would you like to continue?",
+    })
+
   try:
     await sink.finalize()
   except Exception as exc:
