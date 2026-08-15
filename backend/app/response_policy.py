@@ -67,7 +67,14 @@ def app_frame_csp(
     "allow-popups-to-escape-sandbox "
     "allow-top-navigation-by-user-activation; "
     f"default-src {origin}; "
-    f"script-src {origin} 'unsafe-inline' 'wasm-unsafe-eval' "
+    # `'wasm-unsafe-eval'` is the narrow modern source for WebAssembly, but older
+    # WebKit-based installed apps (older iOS Safari / installed-PWA engines)
+    # ignore it and still gate WebAssembly compilation on `'unsafe-eval'`.
+    # On-device Pocket TTS runs as Wasm inside these opaque, sandboxed mini-app
+    # frames, so both sources are required for it to start on those browsers.
+    # The permission stays confined to the isolated app-frame policy; the shell
+    # and other documents keep only the narrow modern source.
+    f"script-src {origin} 'unsafe-inline' 'wasm-unsafe-eval' 'unsafe-eval' "
     "blob: https://esm.sh; "
     f"style-src {origin} 'unsafe-inline' https://fonts.googleapis.com; "
     f"font-src {origin} https://fonts.gstatic.com https://cdn.openai.com; "

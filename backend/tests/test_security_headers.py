@@ -222,7 +222,10 @@ def test_backend_owns_complete_app_frame_policy():
   assert "allow-popups-to-escape-sandbox" in policy
   assert "allow-same-origin" not in policy
   assert "'wasm-unsafe-eval'" in policy
-  assert " 'unsafe-eval'" not in policy
+  # Older WebKit-based installed apps ignore 'wasm-unsafe-eval' and gate Wasm on
+  # 'unsafe-eval'; the isolated app-frame policy carries both so on-device speech
+  # (Pocket TTS) can compile on those engines.
+  assert "'unsafe-eval'" in policy
   assert f"frame-src {origin} {gateway}" in policy
 
   # The frame's origin is opaque, so 'self' matches nothing in fetch
