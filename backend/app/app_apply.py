@@ -80,11 +80,20 @@ async def _git_operation(label: str, fn, *args):
     ) from exc
 
 
-def _read_manifest(snapshot_dir: Path) -> dict:
+def _read_manifest(
+  snapshot_dir: Path, *, allow_store_managed_missing: bool = False,
+) -> dict:
   path = snapshot_dir / "mobius.json"
   try:
     raw = path.read_bytes()
   except FileNotFoundError as exc:
+    if allow_store_managed_missing:
+      # Store installs deliberately keep mobius.json out of per-app Git
+      # history: the reviewed package metadata and capabilities remain owned
+      # by the installer/App row, while this apply path accepts only editable
+      # source. The manifest contract fixes the entry at index.jsx, so this is
+      # the complete source-facing fact needed to compile a local edit.
+      return {"entry": "index.jsx"}
     raise AppApplyError(
       "manifest_missing",
       "mobius.json is required before applying a local app.",
@@ -266,7 +275,12 @@ async def apply_source_revision(
         candidate.tree_oid,
         snapshot_dir,
       )
-      manifest = _read_manifest(snapshot_dir)
+      manifest = _read_manifest(
+        snapshot_dir,
+        allow_store_managed_missing=(
+          app is not None and app.manifest_url is not None
+        ),
+      )
       if app is None or app.manifest_url is None:
         _validate_local_identity(source_path, manifest)
       source = _entry_source(snapshot_dir, manifest)
