@@ -486,6 +486,57 @@ def test_sealed_consumer_exception_settles_without_reflecting_values(
   )]
 
 
+def test_sealed_consumer_exception_settles_without_reflecting_values(
+  monkeypatch, capsys,
+):
+  script_path = (
+    Path(__file__).resolve().parents[1] / "scripts" / "secure-input.py"
+  )
+  spec = importlib.util.spec_from_file_location("secure_input_helper", script_path)
+  helper = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(helper)
+
+  secret = "consumer-exception-secret"
+  monkeypatch.setattr(sys, "argv", [
+    "secure-input.py",
+    "run",
+    "--title", "Private connection",
+    "--field", "password:password:Password",
+    "--", "consumer",
+  ])
+  monkeypatch.setattr(
+    helper,
+    "_request_and_consume",
+    lambda _spec: ("request-id", "capability", {"password": secret}),
+  )
+
+  def fail_consumer(_command, _values):
+    raise RuntimeError(f"consumer failed with {secret}")
+
+  settled = []
+  monkeypatch.setattr(helper, "_run_consumer", fail_consumer)
+  monkeypatch.setattr(
+    helper,
+    "_settle",
+    lambda request_id, capability, **outcome: settled.append(
+      (request_id, capability, outcome),
+    ),
+  )
+
+  assert helper.main() == 1
+  output = capsys.readouterr().out
+  assert secret not in output
+  assert output == "Secure input failed; submitted values were discarded.\n"
+  assert settled == [(
+    "request-id",
+    "capability",
+    {
+      "ok": False,
+      "message": "The sealed consumer failed; submitted values were discarded.",
+    },
+  )]
+
+
 def test_owner_credentials_consumer_changes_login_without_printing_values(
   owner_token, db, monkeypatch, capsys,
 ):
