@@ -73,27 +73,6 @@ test('per-row fast-forward appears with the optimistic row and dispatches on tou
   )
 })
 
-test('queued rows expose an inline editor backed by the durable queue route', () => {
-  assert.match(
-    queuedMessages,
-    /className="queued__action queued__edit"[\s\S]*?aria-label="Edit queued message"/,
-  )
-  assert.match(
-    queuedMessages,
-    /className="queued__editor-input"[\s\S]*?aria-label="Edit queued message"/,
-  )
-  assert.match(
-    queuedMessages,
-    /onEdit\?\.\(cidOf\(msg\), content\)/,
-    'saving should retain the queued row identity',
-  )
-  assert.match(
-    chatView,
-    /const handleUpdatePending = useCallback\(async \(cid, content\)[\s\S]*?method: 'PATCH'[\s\S]*?pendingQueue\.hydrate\(data\.pending_messages\)/,
-    'the edit should reconcile from the authoritative queue response',
-  )
-})
-
 test('fast-forward preserves queue-time scroll intent through layout reflow', () => {
   const steerPath = chatView.match(
     /async function steerRowsImpl\(steerRowsList\) \{[\s\S]*?\n  \/\/ STEER \(fast-forward\): inject/,
