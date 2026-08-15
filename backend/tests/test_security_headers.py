@@ -86,7 +86,9 @@ def test_direct_shell_response_receives_the_origin_owned_policy():
   assert policy == _SHELL_CSP
   assert "https://esm.sh" in policy
   assert "img-src 'self' data: blob:" in policy
-  assert "'wasm-unsafe-eval'" not in policy
+  assert "'wasm-unsafe-eval'" in policy
+  assert " 'unsafe-eval'" not in policy
+  assert "worker-src 'self';" in policy
   assert "cross-origin-opener-policy" not in _headers()
   assert "cross-origin-embedder-policy" not in _headers()
 
