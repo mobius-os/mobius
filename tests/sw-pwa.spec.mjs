@@ -146,8 +146,8 @@ test.describe('Service worker — vite-plugin-pwa contract', () => {
       '/vendor/pdfjs/pdf.worker.mjs',
       '/vendor/katex/katex.min.css',
       '/vendor/katex/fonts/KaTeX_Main-Regular.woff2',
-      '/vendor/katex@0.18.1/katex.min.css',
-      '/vendor/katex@0.18.1/fonts/KaTeX_Main-Regular.woff2',
+      '/vendor/katex@0.18.4/katex.min.css',
+      '/vendor/katex@0.18.4/fonts/KaTeX_Main-Regular.woff2',
     ]
 
     await context.setOffline(true)
