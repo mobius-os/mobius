@@ -2073,7 +2073,6 @@ async def _run_post_commit_effects(
   *,
   app: models.App,
   mode: str,
-  source: str,
   candidate: InstallCandidate,
   warnings: list[str],
 ) -> None:
@@ -2159,17 +2158,16 @@ async def _run_post_commit_effects(
       from app.app_jobs import launch_app_job
 
       source_dir = Path(app.source_dir)
-      wait_for_ready = source == "bootstrap"
-      launch_app_job(
-        app.id,
-        source_dir / job_name,
-        source_dir,
-        wait_for_ready=wait_for_ready,
-      )
-      warnings.append(
-        "initialization waiting for startup readiness"
-        if wait_for_ready else "initialization started"
-      )
+      if db.query(models.Owner.id).first() is None:
+        warnings.append("initialization waiting for owner setup")
+      else:
+        launch_app_job(
+          app.id,
+          source_dir / job_name,
+          source_dir,
+          wait_for_ready=True,
+        )
+        warnings.append("initialization waiting for startup readiness")
     except Exception as exc:
       log.exception("install: initialization job failed to start")
       warnings.append(f"initialization failed to start — {exc!r}")
@@ -3168,7 +3166,6 @@ async def install_from_manifest(
     db,
     app=app,
     mode=mode,
-    source=source,
     candidate=candidate,
     warnings=warnings,
   )

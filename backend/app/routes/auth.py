@@ -166,6 +166,17 @@ def _write_service_token(username: str, token_epoch: int) -> None:
     f.write(token)
 
 
+def _launch_first_owner_initializations(db: Session) -> None:
+  """Resume bootstrap app initialization once its credential can be minted."""
+  from app.app_jobs import launch_deferred_initializations
+
+  try:
+    launch_deferred_initializations(db)
+  except Exception:
+    # Owner creation must remain usable even if one app's source tree is bad.
+    log.exception("Could not launch deferred app initializations")
+
+
 # Self-hosted ownership contract: without managed SSO, possession of the
 # instance URL is the security boundary for the short first-setup window. A
 # Railway-managed instance never reaches this path: injected SSO configuration
@@ -198,6 +209,7 @@ def setup(
   db.refresh(owner)
   try:
     _write_service_token(owner.username, owner.token_epoch)
+    _launch_first_owner_initializations(db)
   except OSError as exc:
     log.warning("Could not write service token: %s", exc)
   token = auth.create_access_token(
@@ -360,6 +372,7 @@ async def complete_managed_sso(
   if created_owner:
     try:
       _write_service_token(owner.username, owner.token_epoch)
+      _launch_first_owner_initializations(db)
     except OSError as exc:
       log.warning("Could not write service token: %s", exc)
 

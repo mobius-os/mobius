@@ -9,6 +9,7 @@ live check fail.  PID reuse is guarded by Linux ``/proc`` start ticks.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -17,6 +18,9 @@ import time
 from pathlib import Path
 
 from app.config import get_settings
+
+
+log = logging.getLogger(__name__)
 
 
 def runner_script() -> Path:
@@ -31,10 +35,10 @@ def runner_command(
 ) -> list[str]:
   """Build the common supervisor command for one app job.
 
-  Bootstrap installs happen inside FastAPI's lifespan, before the server can
-  answer the capability calls the supervisor makes.  Only that launch path
-  needs to wait for the already-defined readiness contract; ordinary cron and
-  manual jobs run against an already-serving backend.
+  First-install jobs may be launched during FastAPI's lifespan, before the
+  server can answer the capability calls the supervisor makes. They use the
+  readiness option; ordinary cron and manual jobs run against an already-
+  serving backend.
   """
   command = [sys.executable, str(runner_script())]
   if wait_for_ready:
@@ -61,6 +65,55 @@ def launch_app_job(
     close_fds=True,
     start_new_session=True,
   )
+
+
+def _initialization_job(source_dir: Path) -> Path | None:
+  """Return a manifest-declared first-install job, if the tree has one."""
+  try:
+    manifest = json.loads((source_dir / "mobius.json").read_text())
+  except (OSError, ValueError):
+    return None
+  schedule = manifest.get("schedule") if isinstance(manifest, dict) else None
+  if not isinstance(schedule, dict):
+    return None
+  if schedule.get("initialize_on_install") is not True:
+    return None
+  job_name = schedule.get("job")
+  if (
+    not isinstance(job_name, str)
+    or not job_name.strip()
+    or "/" in job_name
+    or "\\" in job_name
+  ):
+    return None
+  job = source_dir / job_name
+  return job if job.is_file() and not job.is_symlink() else None
+
+
+def launch_deferred_initializations(db) -> list[int]:
+  """Launch initialization jobs installed before the first owner existed.
+
+  Bootstrap installs run inside application startup, before a brand-new owner
+  can sign in and create the service credential the common job supervisor
+  needs. The first-owner auth path calls this immediately after that credential
+  is written. It runs once at that boundary; ordinary installs launch directly.
+  """
+  from app import models
+
+  launched = []
+  apps = db.query(models.App).filter(models.App.deleted_at.is_(None)).all()
+  for app in apps:
+    source_dir = Path(app.source_dir)
+    job = _initialization_job(source_dir)
+    if job is None:
+      continue
+    try:
+      launch_app_job(app.id, job, source_dir, wait_for_ready=True)
+    except Exception:
+      log.exception("Could not launch deferred initialization for app %s", app.id)
+      continue
+    launched.append(app.id)
+  return launched
 
 
 def _start_ticks(pid: int) -> int | None:
