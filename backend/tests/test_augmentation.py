@@ -877,6 +877,63 @@ def test_cancel_pending_message_by_cid(client, db, auth):
   assert [m["ts"] for m in c.pending_messages] == [100, 300]
 
 
+def test_update_pending_message_preserves_identity_order_and_attachments(
+  client, db, auth,
+):
+  """PATCH changes only queued text; delivery identity and files stay put."""
+  from app import models
+
+  c = models.Chat(
+    id="edit-pending",
+    title="t",
+    messages=[],
+    pending_messages=[
+      {
+        "role": "user", "content": "before", "ts": 100, "cid": "c-edit",
+        "position": 1, "attachments": [{"name": "notes.txt"}],
+      },
+      {"role": "user", "content": "second", "ts": 200, "cid": "c-next"},
+    ],
+  )
+  db.add(c)
+  db.commit()
+
+  resp = client.patch(
+    "/api/chats/edit-pending/pending/c-edit",
+    headers=auth,
+    json={"content": "  after  "},
+  )
+  assert resp.status_code == 200, resp.text
+  data = resp.json()
+  assert data["updated"] is True
+  assert [row["cid"] for row in data["pending_messages"]] == ["c-edit", "c-next"]
+  edited = data["pending_messages"][0]
+  assert edited == {
+    "role": "user", "content": "after", "ts": 100, "cid": "c-edit",
+    "position": 1, "attachments": [{"name": "notes.txt"}],
+  }
+
+  db.refresh(c)
+  assert c.pending_messages == data["pending_messages"]
+
+
+def test_update_pending_message_reports_a_racing_promotion(client, db, auth):
+  """A row that already left the queue is not recreated by a late edit."""
+  from app import models
+
+  c = models.Chat(id="edit-gone", title="t", messages=[], pending_messages=[])
+  db.add(c)
+  db.commit()
+
+  resp = client.patch(
+    "/api/chats/edit-gone/pending/c-gone",
+    headers=auth,
+    json={"content": "too late"},
+  )
+  assert resp.status_code == 200
+  assert resp.json() == {"updated": False, "pending_messages": []}
+
+
 def test_cancel_pending_row_by_backfilled_legacy_cid(client, db, auth):
   """A card-221-backfilled row carries an explicit `legacy-<ts>` cid; cancelling
   by that value removes it (the value is stored now, not derived at read time)."""

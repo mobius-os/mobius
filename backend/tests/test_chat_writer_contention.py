@@ -41,6 +41,7 @@ from app.chat_writer import (
   ReplaceTranscript,
   StartTurn,
   StartTurnBlockedByPendingQuestion,
+  UpdatePending,
 )
 from app.database import SessionLocal
 
@@ -511,6 +512,27 @@ def test_concurrent_append_cancel_promote_preserve_order(actor):
   assert chat["pending_messages"] == []
   assert "m0" in promoted["promoted"]["content"]
   assert "m3" not in promoted["promoted"]["content"]
+
+
+def test_update_pending_preserves_non_text_fields(actor):
+  _seed_chat(pending=[
+    {
+      "role": "user", "content": "before", "ts": 10, "cid": "c-edit",
+      "position": 1, "attachments": [{"name": "notes.txt"}],
+    },
+    {"role": "user", "content": "next", "ts": 20, "cid": "c-next"},
+  ])
+  result = _await(actor.submit(UpdatePending(
+    chat_id="c1", run_token="", cid="c-edit", content="after",
+  )))
+  assert result["updated"] is True
+  assert result["pending"] == [
+    {
+      "role": "user", "content": "after", "ts": 10, "cid": "c-edit",
+      "position": 1, "attachments": [{"name": "notes.txt"}],
+    },
+    {"role": "user", "content": "next", "ts": 20, "cid": "c-next"},
+  ]
 
 
 # -- cid identity: dedup + idempotency ------------------------------------

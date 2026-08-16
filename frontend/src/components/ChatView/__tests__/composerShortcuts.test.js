@@ -1,9 +1,45 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { resolveComposerEnterAction } from '../composerShortcuts.js'
+import {
+  resolveComposerEnterAction,
+  resolveDoubleEscapeStop,
+} from '../composerShortcuts.js'
 
 const enter = (overrides = {}) => ({ key: 'Enter', ...overrides })
+
+test('two plain Escape presses in the hint window stop the live task', () => {
+  const first = resolveDoubleEscapeStop({ key: 'Escape' }, { now: 1000 })
+  assert.deepEqual(first, { stop: false, lastEscapeAt: 1000 })
+  assert.deepEqual(
+    resolveDoubleEscapeStop(
+      { key: 'Escape' },
+      { lastEscapeAt: first.lastEscapeAt, now: 1600 },
+    ),
+    { stop: true, lastEscapeAt: 0 },
+  )
+})
+
+test('claimed, modified, repeated, or slow Escape presses never stop a task', () => {
+  for (const event of [
+    { key: 'Escape', defaultPrevented: true },
+    { key: 'Escape', metaKey: true },
+    { key: 'Escape', repeat: true },
+    { key: 'Enter' },
+  ]) {
+    assert.equal(
+      resolveDoubleEscapeStop(event, { lastEscapeAt: 1000, now: 1200 }).stop,
+      false,
+    )
+  }
+  assert.deepEqual(
+    resolveDoubleEscapeStop(
+      { key: 'Escape' },
+      { lastEscapeAt: 1000, now: 1800 },
+    ),
+    { stop: false, lastEscapeAt: 1800 },
+  )
+})
 
 test('Cmd+Enter steers composer text when a live turn can accept it', () => {
   assert.equal(

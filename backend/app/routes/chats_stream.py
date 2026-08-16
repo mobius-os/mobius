@@ -8,6 +8,7 @@ from pathlib import Path as FilePath
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel
 from starlette.responses import Response
 from sqlalchemy.orm import Session
 
@@ -29,6 +30,7 @@ from app.chat_writer import (
   CancelPending,
   StartTurn,
   StartTurnBlockedByPendingQuestion,
+  UpdatePending,
   alloc_run_token,
   await_ack,
   cid_of,
@@ -54,6 +56,10 @@ from app.resource_access import (
 router = APIRouter(prefix="/api/chats", tags=["chats"])
 
 log = logging.getLogger(__name__)
+
+
+class PendingMessageUpdate(BaseModel):
+  content: str
 
 def _pending_question_open_conflict() -> HTTPException:
   return HTTPException(
@@ -1175,6 +1181,37 @@ async def cancel_pending_message(
   )
   result = await await_ack(ack)
   return {"pending_messages": result["pending"]}
+
+
+@router.patch(
+  "/{chat_id}/pending/{cid}",
+  status_code=200,
+  dependencies=[Depends(reject_cross_site)],
+)
+async def update_pending_message(
+  chat_id: str,
+  cid: str,
+  body: PendingMessageUpdate,
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+):
+  """Edit one queued message if it has not started yet."""
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:send")
+  require_active_chat_access(db, chat_id, principal)
+  content = body.content.strip()
+  if not content:
+    raise HTTPException(status_code=422, detail="Queued message cannot be empty.")
+  result = await await_ack(get_writer().submit(
+    UpdatePending(
+      chat_id=chat_id, run_token="", cid=cid, content=content,
+    )
+  ))
+  return {
+    "updated": result["updated"],
+    "pending_messages": result["pending"],
+  }
 
 
 @router.get("/{chat_id}/stream")
