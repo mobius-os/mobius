@@ -578,6 +578,7 @@ def test_manual_and_pull_request_runs_cover_suites_and_main_image():
   image_workflow = (
     ROOT / ".github" / "workflows" / "main-image.yml"
   ).read_text(encoding="utf-8")
+  dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
   assert not (
     ROOT / ".github" / "workflows" / "external-recovery-image.yml"
   ).exists()
@@ -618,6 +619,14 @@ def test_manual_and_pull_request_runs_cover_suites_and_main_image():
   )
   assert '--tag "$MAIN_IMAGE" "$SHA_IMAGE"' in image_workflow
   assert image_workflow.count("--format '{{json .Manifest}}'") == 2
+  assert "--format '{{json .Image.Config.Labels}}'" in image_workflow
+  assert '."org.opencontainers.image.revision"' in image_workflow
+  assert '."org.opencontainers.image.source"' in image_workflow
+  assert 'org.opencontainers.image.revision="${BUILD_SHA}"' in dockerfile
+  assert (
+    'org.opencontainers.image.source="https://github.com/mobius-os/mobius"'
+    in dockerfile
+  )
   assert image_workflow.count("for _ in $(seq 1 12)") == 2
   assert "recovery" not in image_workflow.lower()
   assert "core-releases" not in image_workflow

@@ -670,7 +670,7 @@ if not owner:
 # AND not revoked. A "sign out everywhere" bumps owner.token_epoch, which
 # strands the on-disk service token even though it hasn't expired — so we
 # re-mint when the stored token's epoch is behind the owner's current one.
-# This restart is the documented recovery path for the service token after
+# This restart is the documented refresh path for the service token after
 # revocation (see routes/admin.py:sign_out_everywhere).
 token_file = '/data/service-token.txt'
 if os.path.exists(token_file):
@@ -961,9 +961,9 @@ find /data -regextype posix-extended -mindepth 2 -maxdepth 4 \
 # refuses cross-owner operations with "dubious ownership", so any git
 # command we run as mobius (the else branch's untrack loop) needs the
 # repo mobius-owned first. A `docker pull` plus a recreated volume can
-# leave a previously-mobius-owned /data/.git root-owned again (e.g.
-# some recovery installs bake /data/.git into the image layer); without
-# this the agent's commits also fail. No-op via `|| true` if /data/.git
+# leave a previously-mobius-owned /data/.git root-owned again (e.g. some
+# historical images or install paths bake /data/.git into the image layer);
+# without this the agent's commits also fail. No-op via `|| true` if /data/.git
 # doesn't exist yet — the fresh-init branch below creates it and
 # re-chowns in that case.
 chown -R mobius:mobius /data/.git 2>/dev/null || true

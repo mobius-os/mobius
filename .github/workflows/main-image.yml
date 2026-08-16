@@ -71,6 +71,21 @@ jobs:
             exit 1
           fi
 
+          labels="$(
+            docker buildx imagetools inspect "$SHA_IMAGE" \
+              --format '{{json .Image.Config.Labels}}'
+          )"
+          revision="$(jq -er '."org.opencontainers.image.revision"' <<<"$labels")"
+          source="$(jq -er '."org.opencontainers.image.source"' <<<"$labels")"
+          if [ "$revision" != "$GITHUB_SHA" ]; then
+            echo "Immutable SHA image reports revision $revision, expected $GITHUB_SHA." >&2
+            exit 1
+          fi
+          if [ "$source" != "https://github.com/mobius-os/mobius" ]; then
+            echo "Immutable SHA image reports unexpected source $source." >&2
+            exit 1
+          fi
+
   promote-main:
     needs: publish
     runs-on: ubuntu-latest

@@ -348,6 +348,8 @@ ENV BUILD_SHA=${BUILD_SHA}
 # deploy-prod.sh. Managed Docker builders that do not pass BUILD_DATE use
 # /app/build-info.json, written above, so Settings can still show a date.
 ENV BUILD_DATE=${BUILD_DATE}
+LABEL org.opencontainers.image.source="https://github.com/mobius-os/mobius" \
+      org.opencontainers.image.revision="${BUILD_SHA}"
 
 EXPOSE 8000
 
