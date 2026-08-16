@@ -285,6 +285,18 @@ class AppPreviewOut(BaseModel):
   storage_budget: dict[str, int] | None = None
 
 
+class AppFootprintOut(BaseModel):
+  app_id: int
+  bytes: int
+
+
+class AppInstallBudgetOut(BaseModel):
+  total_bytes: int
+  free_bytes: int
+  reserve_bytes: int
+  available_bytes: int
+
+
 class ReconciliationReceiptOut(BaseModel):
   proven_present: list[str] = Field(default_factory=list)
   local_only_paths: list[str] = Field(default_factory=list)

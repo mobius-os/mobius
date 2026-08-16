@@ -395,6 +395,16 @@ async def preview_app_install(
   )
 
 
+@router.get("/install-budget", response_model=schemas.AppInstallBudgetOut)
+def get_app_install_budget(
+  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+):
+  """Return the local install allowance without fetching any app package."""
+  from app.resource_pressure import app_install_storage_budget
+
+  return app_install_storage_budget(get_settings().data_dir)
+
+
 @router.post(
   "/install",
   response_model=schemas.AppInstallOut,
@@ -2008,6 +2018,29 @@ def get_app(
       db, app_activity.annotate_apps(db, [app])
     )
   )[0]
+
+
+@router.get("/{app_id}/footprint", response_model=schemas.AppFootprintOut)
+def get_app_footprint(
+  app_id: int,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+):
+  """Measure one installed app locally for a fast uninstall preview."""
+  from app.config import get_settings
+  from app.app_footprint import app_footprint_bytes
+
+  app = live_app_or_404(db, app_id)
+  return schemas.AppFootprintOut(
+    app_id=app.id,
+    bytes=app_footprint_bytes(get_settings().data_dir, {
+      "id": app.id,
+      "name": app.name,
+      "source_dir": app.source_dir,
+      "compiled_path": app.compiled_path,
+      "deleted_at": app.deleted_at,
+    }),
+  )
 
 
 @router.post(

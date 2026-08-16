@@ -1592,6 +1592,65 @@ async def test_http_get_passes_sni_hostname_as_text(monkeypatch):
   assert await install._http_get(_Client(), "https://example.test/file", 10) == b"ok"
 
 
+@pytest.mark.asyncio
+async def test_install_candidate_fetches_independent_files_with_bounded_concurrency(
+  monkeypatch,
+):
+  """Large app previews pay batches of latency, not one round trip per file."""
+  from app import install
+
+  manifest = {
+    "id": "parallel-preview",
+    "name": "Parallel preview",
+    "version": "1.0.0",
+    "description": "test",
+    "entry": "index.jsx",
+    "permissions": {},
+    "source_files": [f"source-{index}.js" for index in range(9)],
+  }
+
+  async def fake_manifest(*_args, **_kwargs):
+    return manifest, "https://preview.test/app/"
+
+  active = 0
+  peak = 0
+
+  async def fake_get(_client, url, _limit):
+    nonlocal active, peak
+    active += 1
+    peak = max(peak, active)
+    try:
+      await asyncio.sleep(0.01)
+      return url.encode()
+    finally:
+      active -= 1
+
+  class FakeClient:
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_exc):
+      return False
+
+  monkeypatch.setattr(install, "_fetch_and_validate_manifest", fake_manifest)
+  monkeypatch.setattr(install, "_http_get", fake_get)
+  monkeypatch.setattr(install.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+
+  candidate = await install._fetch_install_candidate(
+    manifest_url="https://preview.test/app/mobius.json",
+    manifest=None,
+    raw_base=None,
+    reviewed_capability_digest=None,
+    reviewed_source_digest=None,
+    expected_app_id=None,
+    expected_upstream_commit=None,
+    expected_candidate_digest=None,
+  )
+
+  assert peak == 6
+  assert len(candidate.source_files) == 9
+
+
 def test_install_aborts_when_stream_exceeds_cap(client, auth, bypass_url_validation):
   """Fix 3: `_http_get` now reads via `client.stream()` and tracks
   bytes per chunk, aborting once the running total crosses the cap.

@@ -345,6 +345,15 @@ def test_list_apps_does_not_hydrate_source_or_icon_payloads(client, auth, db):
   assert "apps.icon_override_png AS apps_icon_override_png" not in projection
 
 
+def test_app_footprint_is_a_fast_manage_apps_projection(client, auth):
+  app = create_local_app(client, auth, name="Measured app")
+  with patch("app.app_footprint.app_footprint_bytes", return_value=123_456):
+    response = client.get(f"/api/apps/{app['id']}/footprint", headers=auth)
+
+  assert response.status_code == 200, response.text
+  assert response.json() == {"app_id": app["id"], "bytes": 123_456}
+
+
 def test_delete_then_purge_removes_non_slug_source_dir(client, auth, db):
   """Delete is soft (the source tree survives for recovery); the TTL purge
   removes it, using the stored source_dir rather than the display-name slug.
