@@ -190,6 +190,30 @@ def _disk_pressure(disk: dict[str, Any]) -> dict[str, Any]:
   }
 
 
+def app_install_storage_budget(data_dir: str | Path) -> dict[str, int]:
+  """Return writable app-install headroom while preserving the disk margin.
+
+  App packages share the data volume with the database and owner content.  The
+  constrained-pressure threshold is therefore the quota boundary: installers
+  may consume currently free bytes above it, but never the safety margin itself.
+  This is a cheap statvfs snapshot, not a directory walk.
+  """
+  usage = shutil.disk_usage(data_dir)
+  reserve = _bounded_headroom(
+    int(usage.total),
+    fraction=_DISK_CONSTRAINED_FRACTION,
+    floor_bytes=_DISK_CONSTRAINED_FLOOR,
+    ceiling_bytes=_DISK_CONSTRAINED_CEILING,
+  )
+  free = int(usage.free)
+  return {
+    "total_bytes": int(usage.total),
+    "free_bytes": free,
+    "reserve_bytes": reserve,
+    "available_bytes": max(0, free - reserve),
+  }
+
+
 def _float(value: Any) -> float:
   try:
     return float(value)

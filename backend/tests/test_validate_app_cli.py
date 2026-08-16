@@ -112,6 +112,14 @@ def test_validator_rejects_manifest_type_holes_and_missing_package_files(tmp_pat
   {"system_prompt": "prompt.md"},
   {"entry": "src/index.jsx"},
   {"entry": "main.jsx"},
+  {"package_footprint": {"schema": 2}},
+  {"package_footprint": {
+    "schema": 1,
+    "version": "different",
+    "payload_bytes": 10,
+    "estimated_install_bytes": 100,
+    "content_sha256": "a" * 64,
+  }},
 ])
 def test_shared_contract_and_installer_reject_the_same_manifest(update, tmp_path):
   _write_app(tmp_path, "export default function App(){ return <div /> }")

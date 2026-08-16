@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from app.resource_pressure import (
   MIB,
+  app_install_storage_budget,
   assess_memory_pressure,
   assess_resource_pressure,
   resource_facts,
@@ -60,6 +61,35 @@ def test_resource_facts_reuses_existing_memory_snapshot():
   assert facts["memory"]["inactive_file_bytes"] == 500
   assert "internal_field" not in facts["memory"]
   assert facts["captured_at"]
+
+
+def test_app_install_budget_preserves_constrained_disk_margin(monkeypatch):
+  monkeypatch.setattr(
+    "app.resource_pressure.shutil.disk_usage",
+    lambda _path: SimpleNamespace(
+      total=512 * MIB, used=312 * MIB, free=200 * MIB,
+    ),
+  )
+
+  budget = app_install_storage_budget("/data")
+
+  assert budget == {
+    "total_bytes": 512 * MIB,
+    "free_bytes": 200 * MIB,
+    "reserve_bytes": 64 * MIB,
+    "available_bytes": 136 * MIB,
+  }
+
+
+def test_app_install_budget_never_reports_negative_headroom(monkeypatch):
+  monkeypatch.setattr(
+    "app.resource_pressure.shutil.disk_usage",
+    lambda _path: SimpleNamespace(
+      total=512 * MIB, used=500 * MIB, free=12 * MIB,
+    ),
+  )
+
+  assert app_install_storage_budget("/data")["available_bytes"] == 0
 
 
 def test_small_volume_is_critical_below_absolute_floor():

@@ -29,6 +29,7 @@ _SOURCE_FILES_MANAGED_EXACT = frozenset((
 ))
 _CRON_FIELD_OK = re.compile(r"^[\d\*/,\- ]+$")
 _SKILL_FILENAME_OK = re.compile(r"^[a-z0-9][a-z0-9._-]*\.md$")
+_SHA256_OK = re.compile(r"^[0-9a-f]{64}$")
 
 
 class ManifestContractError(ValueError):
@@ -134,6 +135,26 @@ def validate_manifest_offline(offline) -> None:
       validate_repo_relative_path(path, f"offline.precache[{index}]")
 
 
+def validate_package_footprint(value, manifest_version: str) -> None:
+  """Validate release-time package metadata used for instant Store estimates."""
+  if value is None:
+    return
+  if not isinstance(value, Mapping):
+    _fail("Manifest `package_footprint` must be an object.")
+  if value.get("schema") != 1:
+    _fail("Manifest `package_footprint.schema` must be 1.")
+  if value.get("version") != manifest_version:
+    _fail(
+      "Manifest `package_footprint.version` must match manifest `version`."
+    )
+  for field in ("payload_bytes", "estimated_install_bytes"):
+    number = value.get(field)
+    if not isinstance(number, int) or isinstance(number, bool) or number < 0:
+      _fail(f"Manifest `package_footprint.{field}` must be a non-negative integer.")
+  if not _SHA256_OK.fullmatch(str(value.get("content_sha256") or "")):
+    _fail("Manifest `package_footprint.content_sha256` must be a SHA-256 hex digest.")
+
+
 def static_asset_entries(value) -> dict[str, str]:
   if not value:
     return {}
@@ -235,6 +256,9 @@ def validate_manifest_contract(manifest) -> None:
     _fail(str(exc))
 
   validate_manifest_offline(manifest.get("offline"))
+  validate_package_footprint(
+    manifest.get("package_footprint"), manifest["version"],
+  )
 
   seeds = manifest.get("storage_seeds", {})
   if seeds is not None and not isinstance(seeds, Mapping):

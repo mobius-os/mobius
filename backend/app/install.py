@@ -1840,6 +1840,51 @@ async def preview_manifest_capabilities(
   return loaded, normalized_base, contract, digest
 
 
+def candidate_install_bytes(candidate: "InstallCandidate") -> int:
+  """Conservative on-disk estimate for one fully fetched app candidate.
+
+  Installed bytes are represented more than once (editable source, compiled
+  output, and git objects).  Triple the fetched payload and keep a 1 MiB floor
+  so tiny manifests still budget for repository and bundle metadata.
+  """
+  manifest_bytes = len(json.dumps(
+    candidate.manifest, ensure_ascii=False, sort_keys=True,
+  ).encode("utf-8"))
+  payload = manifest_bytes + len(candidate.entry_bytes)
+  icon_source_bytes = int(getattr(candidate, "icon_source_bytes", 0) or 0)
+  payload += icon_source_bytes or len(candidate.icon_processed or b"")
+  if candidate.manifest.get("icon"):
+    # Normalizing a compressed source icon to a square PNG can expand it.
+    # Reserve 256 KiB before the existing source/bundle/git multiplier so the
+    # package-time estimate stays conservative without reproducing Pillow.
+    payload += 256 * 1024
+  payload += len(candidate.bundled_job or b"")
+  payload += sum(len(value) for value in candidate.static_assets.values())
+  payload += sum(len(value) for value in candidate.source_files.values())
+  payload += sum(len(value) for value in candidate.seeds.values())
+  return max(1024 * 1024, payload * 3)
+
+
+async def preview_install_candidate(
+  *,
+  manifest_url: str | None,
+  manifest: dict | None,
+  raw_base: str | None,
+) -> tuple["InstallCandidate", int]:
+  """Fetch the exact install inputs read-only and return their disk estimate."""
+  candidate = await _fetch_install_candidate(
+    manifest_url=manifest_url,
+    manifest=manifest,
+    raw_base=raw_base,
+    reviewed_capability_digest=None,
+    reviewed_source_digest=None,
+    expected_app_id=None,
+    expected_upstream_commit=None,
+    expected_candidate_digest=None,
+  )
+  return candidate, candidate_install_bytes(candidate)
+
+
 @dataclass(frozen=True)
 class InstallCandidate:
   """Fully fetched, review-bound inputs for one install attempt.
@@ -1862,6 +1907,7 @@ class InstallCandidate:
   capability_digest: str
   candidate_digest: str
   source_review_digest: str
+  icon_source_bytes: int = 0
 
 
 def install_candidate_content_digest(candidate: InstallCandidate) -> str:
@@ -1974,89 +2020,129 @@ async def _fetch_install_candidate(
         },
       )
 
-    entry_bytes = await _http_get(
-      cli, raw_base + manifest["entry"], _ENTRY_MAX_BYTES,
+    schedule = manifest.get("schedule")
+    static_entries = static_asset_entries(
+      manifest.get("static_assets") or {},
     )
+    if len(static_entries) > _STATIC_ASSETS_COUNT_MAX:
+      raise HTTPException(
+        400,
+        "Manifest has too many static_assets "
+        f"(max {_STATIC_ASSETS_COUNT_MAX}).",
+      )
+    seed_entries = manifest.get("storage_seeds") or {}
+    if len(seed_entries) > _SEEDS_COUNT_MAX:
+      raise HTTPException(
+        400,
+        f"Manifest has too many storage_seeds (max {_SEEDS_COUNT_MAX}).",
+      )
 
-    icon_processed: bytes | None = None
-    icon_warning: str | None = None
-    if manifest.get("icon"):
+    # Every path below is an immutable, independently bounded package input.
+    # Fetching them serially made a capability/size preview pay one full
+    # network round trip per source file (several seconds for larger apps).
+    # A small per-candidate pool preserves every byte/count/SSRF boundary while
+    # making the wait roughly the duration of the slowest few files instead of
+    # the sum of every file's latency.
+    fetch_slots = asyncio.Semaphore(6)
+
+    async def fetch_input(path: str, limit: int) -> bytes:
+      async with fetch_slots:
+        return await _http_get(cli, raw_base + path, limit)
+
+    async def fetch_optional_icon(
+      path: str,
+    ) -> tuple[bytes | None, str | None, int]:
       try:
-        icon_raw = await _http_get(
-          cli, raw_base + manifest["icon"], _ICON_MAX_BYTES,
-        )
-        icon_processed = icon_assets.normalize_icon(icon_raw)
+        icon_raw = await fetch_input(path, _ICON_MAX_BYTES)
+        return icon_assets.normalize_icon(icon_raw), None, len(icon_raw)
       except icon_assets.InvalidIcon as exc:
-        icon_warning = f"icon: {exc}"
         log.info("install: icon skipped — %s", exc)
+        return None, f"icon: {exc}", len(icon_raw)
       except HTTPException as exc:
         # A broken optional icon must not block an otherwise valid app.
-        icon_warning = f"icon: {exc.detail}"
         log.info("install: icon skipped — %s", exc.detail)
+        return None, f"icon: {exc.detail}", 0
 
-    schedule = manifest.get("schedule")
-    bundled_job = None
-    if schedule and schedule.get("job"):
-      bundled_job = await _http_get(
-        cli, raw_base + schedule["job"], _ENTRY_MAX_BYTES,
+    inline_seeds = {
+      sub: json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+      ).encode("utf-8")
+      for sub, value in seed_entries.items()
+      if _seed_value_is_inline(value)
+    }
+    entry_task = asyncio.create_task(
+      fetch_input(manifest["entry"], _ENTRY_MAX_BYTES),
+    )
+    icon_task = (
+      asyncio.create_task(fetch_optional_icon(manifest["icon"]))
+      if manifest.get("icon") else None
+    )
+    job_task = (
+      asyncio.create_task(fetch_input(schedule["job"], _ENTRY_MAX_BYTES))
+      if schedule and schedule.get("job") else None
+    )
+    static_tasks = {
+      dest: asyncio.create_task(fetch_input(src, _STATIC_ASSET_MAX_BYTES))
+      for dest, src in static_entries.items()
+    }
+    source_tasks = {
+      rel: asyncio.create_task(fetch_input(rel, _ENTRY_MAX_BYTES))
+      for rel in manifest.get("source_files") or []
+    }
+    seed_tasks = {
+      sub: asyncio.create_task(fetch_input(value, _SEED_MAX_BYTES))
+      for sub, value in seed_entries.items()
+      if not _seed_value_is_inline(value)
+    }
+    fetch_tasks = [
+      entry_task,
+      *([icon_task] if icon_task is not None else []),
+      *([job_task] if job_task is not None else []),
+      *static_tasks.values(),
+      *source_tasks.values(),
+      *seed_tasks.values(),
+    ]
+    try:
+      await asyncio.gather(*fetch_tasks)
+    except BaseException:
+      # Preserve the original HTTPException rather than wrapping it in an
+      # ExceptionGroup, and never leave sibling fetches using a closing client.
+      for task in fetch_tasks:
+        task.cancel()
+      await asyncio.gather(*fetch_tasks, return_exceptions=True)
+      raise
+
+    entry_bytes = entry_task.result()
+    icon_processed, icon_warning, icon_source_bytes = (
+      icon_task.result() if icon_task is not None else (None, None, 0)
+    )
+    bundled_job = job_task.result() if job_task is not None else None
+    static_assets = {
+      dest: task.result() for dest, task in static_tasks.items()
+    }
+    if sum(map(len, static_assets.values())) > _STATIC_ASSETS_TOTAL_MAX:
+      raise HTTPException(
+        400,
+        "Manifest static_assets exceed "
+        f"{_STATIC_ASSETS_TOTAL_MAX} bytes total.",
       )
-
-    static_assets: dict[str, bytes] = {}
-    static_assets_total = 0
-    for dest, src in static_asset_entries(
-      manifest.get("static_assets") or {},
-    ).items():
-      if len(static_assets) >= _STATIC_ASSETS_COUNT_MAX:
-        raise HTTPException(
-          400,
-          "Manifest has too many static_assets "
-          f"(max {_STATIC_ASSETS_COUNT_MAX}).",
-        )
-      data = await _http_get(
-        cli, raw_base + src, _STATIC_ASSET_MAX_BYTES,
+    source_files = {
+      rel: task.result() for rel, task in source_tasks.items()
+    }
+    if sum(map(len, source_files.values())) > _SOURCE_FILES_TOTAL_MAX:
+      raise HTTPException(
+        400,
+        f"Manifest source_files exceed {_SOURCE_FILES_TOTAL_MAX} bytes total.",
       )
-      static_assets_total += len(data)
-      if static_assets_total > _STATIC_ASSETS_TOTAL_MAX:
-        raise HTTPException(
-          400,
-          "Manifest static_assets exceed "
-          f"{_STATIC_ASSETS_TOTAL_MAX} bytes total.",
-        )
-      static_assets[dest] = data
-
-    source_files: dict[str, bytes] = {}
-    source_files_total = 0
-    for rel in manifest.get("source_files") or []:
-      data = await _http_get(cli, raw_base + rel, _ENTRY_MAX_BYTES)
-      source_files_total += len(data)
-      if source_files_total > _SOURCE_FILES_TOTAL_MAX:
-        raise HTTPException(
-          400,
-          f"Manifest source_files exceed {_SOURCE_FILES_TOTAL_MAX} bytes total.",
-        )
-      source_files[rel] = data
-
-    seeds: dict[str, bytes] = {}
-    seeds_total = 0
-    for sub, value in (manifest.get("storage_seeds") or {}).items():
-      if len(seeds) >= _SEEDS_COUNT_MAX:
-        raise HTTPException(
-          400,
-          f"Manifest has too many storage_seeds (max {_SEEDS_COUNT_MAX}).",
-        )
-      if _seed_value_is_inline(value):
-        data = json.dumps(
-          value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
-        ).encode("utf-8")
-      else:
-        data = await _http_get(cli, raw_base + value, _SEED_MAX_BYTES)
-      seeds_total += len(data)
-      if seeds_total > _SEEDS_TOTAL_MAX:
-        raise HTTPException(
-          400,
-          f"Manifest storage_seeds exceed {_SEEDS_TOTAL_MAX} bytes total.",
-        )
-      seeds[sub] = data
+    seeds = {
+      **inline_seeds,
+      **{sub: task.result() for sub, task in seed_tasks.items()},
+    }
+    if sum(map(len, seeds.values())) > _SEEDS_TOTAL_MAX:
+      raise HTTPException(
+        400,
+        f"Manifest storage_seeds exceed {_SEEDS_TOTAL_MAX} bytes total.",
+      )
 
   candidate_digest = _install_candidate_digest(
     manifest=manifest,
@@ -2126,6 +2212,7 @@ async def _fetch_install_candidate(
     capability_digest=capability_digest,
     candidate_digest=candidate_digest,
     source_review_digest=source_review_digest,
+    icon_source_bytes=icon_source_bytes,
   )
 
 
@@ -2639,6 +2726,28 @@ async def install_from_manifest(
     expected_upstream_commit=expected_upstream_commit,
     expected_candidate_digest=expected_candidate_digest,
   )
+  # Enforce the same shared-disk boundary the Store previews.  The UI is only
+  # advisory; this final check runs on freshly fetched bytes immediately before
+  # any database or filesystem mutation, so stale tabs and concurrent installs
+  # cannot consume the database's safety margin.
+  from app.config import get_settings
+  from app.resource_pressure import app_install_storage_budget
+  estimated_install_bytes = candidate_install_bytes(candidate)
+  budget = app_install_storage_budget(get_settings().data_dir)
+  if estimated_install_bytes > budget["available_bytes"]:
+    raise HTTPException(
+      507,
+      {
+        "code": "app_install_quota_exceeded",
+        "message": (
+          "This app needs more install space than is currently available. "
+          "Free some storage and try again."
+        ),
+        "required_bytes": estimated_install_bytes,
+        "available_bytes": budget["available_bytes"],
+        "reserve_bytes": budget["reserve_bytes"],
+      },
+    )
   manifest = candidate.manifest
   raw_base = candidate.raw_base
   entry_bytes = candidate.entry_bytes
