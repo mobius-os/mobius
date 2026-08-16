@@ -97,6 +97,14 @@ Source-text assertions are reserved for generated artifacts, packaging,
 security boundaries, and other build-time contracts that cannot execute as
 ordinary unit behavior.
 
+**Regression guards.** Treat a failing existing test as evidence about the
+contract, not an obstacle to a green build. Before weakening or removing it,
+determine whether it checks incidental implementation or an intentional
+invariant. Preserve or generalize intentional guards when implementation
+changes. A contribution that changes the contract must name the affected
+invariant and justify the change; replacing a behavioral guard with a narrower
+implementation-name check is not equivalent coverage.
+
 **Chat scroll contract.** Before changing `ChatView`, read `ARCHITECTURE.md`
 "Chat scroll + steer contract" and run the send/spacer browser specs. The first
 visible user message always pins. A later direct, queued, promoted, or steered

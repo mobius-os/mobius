@@ -157,6 +157,19 @@ def test_core_prompt_owns_freshness_and_source_policy():
   assert "Cite the supporting link close to the claim" in core
 
 
+def test_core_prompt_requires_approval_before_changing_guarded_invariants():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
+  normalized = " ".join(core.split())
+
+  assert "**Treat guards as evidence, not obstacles.**" in core
+  assert "first determine why that guard exists" in normalized
+  assert "Do not relax it merely to make the new behavior pass" in normalized
+  assert "explain the conflict and its user impact" in normalized
+  assert "ask the partner before changing it" in normalized
+  assert "preserves the same contract does not require escalation" in normalized
+
+
 def test_restart_guidance_requires_activation_proof_and_fresh_approval():
   repo = Path(__file__).resolve().parents[2]
   core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
