@@ -159,6 +159,12 @@ class AppUpdate(BaseModel):
   # their next call). Granting (True) is rejected — that path stays with the
   # reviewed manifest install.
   manage_skills: bool | None = None
+  # Pause/resume for "activation" kind runtime capabilities the app currently
+  # holds (e.g. workspace.shortcuts), keyed by capability id -> paused bool.
+  # Merged into models.App.paused_capabilities rather than replacing it, so
+  # toggling one capability never clobbers another. The route rejects any key
+  # the app does not currently hold, or whose kind is not "activation".
+  capability_pause: dict[str, bool] | None = Field(default=None, max_length=8)
 
   @field_validator("published_manifest_url")
   @classmethod
@@ -256,6 +262,10 @@ class AppOut(BaseModel):
   system_app: bool = False
   chat_log_access: ChatLogAccess = "none"
   capability_contract: dict | None = None
+  # Owner-controlled pause state for "activation" kind runtime capabilities,
+  # keyed by capability id -> bool. Absent/false means active. See
+  # models.App.paused_capabilities.
+  paused_capabilities: dict[str, bool] | None = None
   created_at: datetime
   updated_at: datetime
 

@@ -6,6 +6,7 @@ export const WORKSPACE_SHORTCUT_CAPABILITY = 'workspace.shortcuts'
 export function hasWorkspaceShortcutProvider(apps) {
   return Array.isArray(apps) && apps.some(app => (
     app?.capability_contract?.runtime?.[WORKSPACE_SHORTCUT_CAPABILITY]?.version === 1
+    && app?.paused_capabilities?.[WORKSPACE_SHORTCUT_CAPABILITY] !== true
   ))
 }
 

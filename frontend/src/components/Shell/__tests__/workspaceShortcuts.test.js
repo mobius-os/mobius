@@ -18,6 +18,17 @@ test('workspace shortcut provider is activated only by reviewed capability v1', 
   }]), false)
 })
 
+test('workspace shortcut provider is disabled while paused', () => {
+  assert.equal(hasWorkspaceShortcutProvider([{
+    capability_contract: { runtime: { 'workspace.shortcuts': { version: 1 } } },
+    paused_capabilities: { 'workspace.shortcuts': true },
+  }]), false)
+  assert.equal(hasWorkspaceShortcutProvider([{
+    capability_contract: { runtime: { 'workspace.shortcuts': { version: 1 } } },
+    paused_capabilities: { 'workspace.shortcuts': false },
+  }]), true)
+})
+
 test('Windows shortcut mapping ignores AltGraph and unrelated modifiers', () => {
   assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, key: 't' }, 'Win32'), 'open')
   assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, shiftKey: true, key: 'T' }, 'Win32'), 'restore')

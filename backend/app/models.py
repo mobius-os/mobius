@@ -800,6 +800,14 @@ class App(Base):
   # Server-derived, versioned capability contract reviewed at install time.
   # Null is a legitimate legacy state for apps installed before contracts.
   capability_contract = Column(JSON, nullable=True, default=None)
+  # Owner-controlled pause state for "activation" kind runtime capabilities
+  # (e.g. workspace.shortcuts), keyed by capability id -> bool. Deliberately
+  # separate from capability_contract: a local app's contract is wholesale
+  # regenerated from its manifest on every PATCH/apply, which would silently
+  # discard a paused flag stored inside it. This column survives both. Absent
+  # or false means active; only a capability the app currently holds is
+  # meaningful here (see PATCH /api/apps/{id}).
+  paused_capabilities = Column(JSON, nullable=True, default=None)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)

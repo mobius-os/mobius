@@ -3765,7 +3765,7 @@ function _setOnline(next) {
 }
 if (typeof window !== "undefined") {
 	window.addEventListener("message", (e) => {
-		if (e.origin !== window.location.origin) return;
+		if (e.source !== window.parent) return;
 		const msg = e.data;
 		if (!msg || typeof msg !== "object") return;
 		if (msg.type === "moebius:online-status" && typeof msg.online === "boolean") _setOnline(msg.online);

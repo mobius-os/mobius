@@ -133,7 +133,14 @@ function _setOnline(next) {
 // Listen for the probed verdict from AppCanvas.
 if (typeof window !== 'undefined') {
   window.addEventListener('message', (e) => {
-    if (e.origin !== window.location.origin) return
+    // The default mount is a sandboxed opaque-origin frame (see the module
+    // doc above), so window.location.origin here is the literal string
+    // "null" and can never equal the shell's real origin — an origin-string
+    // check silently drops every trusted message from the parent, including
+    // the online-status seed and (newly, loudly) the workspace-shortcuts
+    // enable signal. Verify sender identity instead, matching the pattern
+    // immersive.js and navigation.js already use for the same opaque frame.
+    if (e.source !== window.parent) return
     const msg = e.data
     if (!msg || typeof msg !== 'object') return
     if (msg.type === 'moebius:online-status' && typeof msg.online === 'boolean') {

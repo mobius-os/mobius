@@ -7,6 +7,7 @@ import {
 export const MICROPHONE_CAPTURE = 'media.microphone.capture'
 export const SPEECH = 'media.speech'
 export const SPEECH_MODELS = 'device.speech-models'
+export const WORKSPACE_SHORTCUTS = 'workspace.shortcuts'
 
 export function createSpeechProvider({
   loadRuntime = () => import('./speech/speechProviderRuntime.js'),
@@ -78,6 +79,35 @@ export function createMicrophoneProvider({ startCapture = startMicrophoneCapture
   }
 }
 
+// The app that DECLARES workspace.shortcuts is also the only reasonable
+// caller of its pause/resume action (it owns the toggle UI), but the write
+// belongs entirely to the shell: an opaque app frame cannot itself call
+// PATCH /api/apps/{id} (no origin-authenticated fetch is exposed to it, by
+// design — see runtime/index.js's module doc), so this provider does the
+// authenticated update.apps.update() on the app's behalf and lets its
+// existing list-cache invalidation carry the new paused state back to
+// hasWorkspaceShortcutProvider() in useWorkspaceShortcuts.js.
+export function createWorkspaceShortcutsPauseProvider({ appId, api }) {
+  return {
+    version: 1,
+    async open({ input, channel }) {
+      const paused = input?.paused === true
+      try {
+        const response = await api.apps.update(appId, {
+          capability_pause: { [WORKSPACE_SHORTCUTS]: paused },
+        })
+        if (!response.ok) {
+          throw new Error(`Could not update shortcut state (${response.status}).`)
+        }
+        channel.result({ paused })
+      } catch (error) {
+        channel.error(error)
+      }
+      return { control() {} }
+    },
+  }
+}
+
 export function builtInCapabilityProviders(options = {}) {
   return {
     [DEVICE_ASSET_CACHE]: createDeviceAssetCacheProvider(options.deviceAssets),
@@ -86,6 +116,10 @@ export function builtInCapabilityProviders(options = {}) {
     [SPEECH_MODELS]: createSpeechModelsProvider({
       appId: options.deviceAssets?.appId,
       ...options.speechModels,
+    }),
+    [WORKSPACE_SHORTCUTS]: createWorkspaceShortcutsPauseProvider({
+      appId: options.deviceAssets?.appId,
+      ...options.workspaceShortcuts,
     }),
   }
 }
