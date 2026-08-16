@@ -266,10 +266,11 @@ const AppCanvas = forwardRef(function AppCanvas({
   // the scrim, but compositor momentum inside its iframe must be cancelled so
   // background content cannot keep coasting beneath the drawer.
   interactive = visible,
+  workspaceShortcutsEnabled = false,
   pendingIntent = null,
   onNavPush, onNavPop, onNavReset, onNavForwardResult,
   onAppFocus, onImmersive, onIntentDelivered, onAppError, onHostRequest,
-  onMediaSession,
+  onMediaSession, onWorkspaceShortcut,
 }, hostRef) {
   const queryClient = useQueryClient()
   const [serviceSurface, setServiceSurface] = useState(null)
@@ -791,6 +792,22 @@ const AppCanvas = forwardRef(function AppCanvas({
         return
       }
 
+      if (msg.type === 'moebius:workspace-shortcut') {
+        if (!activeRef.current || !workspaceShortcutsEnabled) return
+        const key = typeof msg.key === 'string' ? msg.key : ''
+        if (!key) return
+        onWorkspaceShortcut?.({
+          key,
+          ctrlKey: msg.ctrlKey === true,
+          altKey: msg.altKey === true,
+          shiftKey: msg.shiftKey === true,
+          metaKey: msg.metaKey === true,
+          editable: msg.editable === true,
+          preventDefault() {},
+        })
+        return
+      }
+
       // Navigation outside the app belongs to its trusted host. Keep source
       // attribution and wire-format narrowing here, beside every other frame
       // request, so no host needs to rediscover iframe identity.
@@ -887,7 +904,7 @@ const AppCanvas = forwardRef(function AppCanvas({
   }, [
     appId, appSlug, onNavPush, onNavPop, onNavForwardResult,
     onAppFocus, onImmersive, onIntentDelivered, onAppError, onHostRequest,
-    queryClient,
+    onWorkspaceShortcut, workspaceShortcutsEnabled, queryClient,
   ])
 
   // Capabilities belong to a visible workspace pane, not merely the focused
@@ -1052,12 +1069,26 @@ const AppCanvas = forwardRef(function AppCanvas({
     postToFrame(v, { type: 'moebius:online-status', online })
   }
 
+  function sendWorkspaceShortcutStatus(v) {
+    postToFrame(v, {
+      type: 'moebius:workspace-shortcuts-status',
+      enabled: workspaceShortcutsEnabled,
+    })
+  }
+
   useEffect(() => {
     for (const v of framesRef.current.keys()) {
       if (loadedDocsRef.current.has(v)) sendOnlineStatus(v)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [online])
+
+  useEffect(() => {
+    for (const v of framesRef.current.keys()) {
+      if (loadedDocsRef.current.has(v)) sendWorkspaceShortcutStatus(v)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceShortcutsEnabled])
 
   // ── Immersive safe-area passthrough (.pm/128 follow-up) ──────────
   // Forward the device safe-area insets so an immersive (full-bleed) app can
@@ -1331,6 +1362,7 @@ const AppCanvas = forwardRef(function AppCanvas({
     loadedDocsRef.current.add(v)
     sendInit(v)
     sendOnlineStatus(v)
+    sendWorkspaceShortcutStatus(v)
     sendInsets(v)
     sendImmersiveState(v)
     // A booting incoming frame is invisible by construction and must not

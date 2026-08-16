@@ -102,6 +102,25 @@ export * from './immersive.js'
 // ─────────────────────────────────────────────────────────────────────────────
 let _online = typeof navigator !== 'undefined' ? navigator.onLine : true
 const _onlineListeners = new Set()
+let _workspaceShortcutsEnabled = false
+
+function _editableShortcutTarget(target) {
+  if (!target || typeof target !== 'object') return false
+  if (target.isContentEditable) return true
+  return typeof target.closest === 'function'
+    && !!target.closest('input, textarea, select, [contenteditable], [role="textbox"]')
+}
+
+function _workspaceShortcutCandidate(event) {
+  if (!event?.isTrusted || event.isComposing || event.repeat) return false
+  if (!event.ctrlKey || !event.altKey || event.metaKey || event.getModifierState?.('AltGraph')) return false
+  const key = String(event.key || '')
+  const lower = key.toLowerCase()
+  if (lower === 't') return true
+  if (lower === 'w') return !event.shiftKey
+  if (event.shiftKey) return false
+  return key === 'PageDown' || key === 'PageUp' || /^[1-9]$/.test(key)
+}
 
 function _setOnline(next) {
   if (next === _online) return
@@ -119,11 +138,27 @@ if (typeof window !== 'undefined') {
     if (!msg || typeof msg !== 'object') return
     if (msg.type === 'moebius:online-status' && typeof msg.online === 'boolean') {
       _setOnline(msg.online)
+    } else if (msg.type === 'moebius:workspace-shortcuts-status') {
+      _workspaceShortcutsEnabled = msg.enabled === true
     }
   })
   // Keep the seed roughly current before AppCanvas's first probed verdict.
   window.addEventListener('online', () => _setOnline(true))
   window.addEventListener('offline', () => _setOnline(false))
+  window.addEventListener('keydown', event => {
+    if (!_workspaceShortcutsEnabled || _editableShortcutTarget(event.target)) return
+    if (!_workspaceShortcutCandidate(event)) return
+    event.preventDefault()
+    window.parent.postMessage({
+      type: 'moebius:workspace-shortcut',
+      key: event.key,
+      ctrlKey: event.ctrlKey,
+      altKey: event.altKey,
+      shiftKey: event.shiftKey,
+      metaKey: event.metaKey,
+      editable: false,
+    }, '*')
+  }, true)
 }
 // ─────────────────────────────────────────────────────────────────────────────
 

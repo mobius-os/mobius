@@ -107,6 +107,28 @@ def test_runtime_capability_is_independently_versioned_and_bounded():
   }
 
 
+def test_workspace_shortcuts_capability_is_installed_lifecycle_activation():
+  runtime = normalize_runtime_capabilities(_manifest(capabilities={
+    "workspace.shortcuts": {
+      "version": 1,
+      "reason": "Enable tab controls across the focused workspace pane.",
+    },
+  }))
+
+  assert runtime["workspace.shortcuts"] == {
+    "version": 1,
+    "kind": "activation",
+    "title": "Control workspace tabs with keyboard shortcuts",
+    "description": (
+      "Enable reviewed keyboard commands for the focused Möbius workspace pane."
+    ),
+    "risk": "workspace",
+    "lifecycle": "installed",
+    "reason": "Enable tab controls across the focused workspace pane.",
+    "limits": {},
+  }
+
+
 def test_device_asset_cache_is_client_only_and_reviewed_by_size():
   runtime = normalize_runtime_capabilities(_manifest(capabilities={
     "device.asset-cache": {
