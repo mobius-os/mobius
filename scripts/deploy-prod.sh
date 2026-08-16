@@ -1203,7 +1203,7 @@ else
   fi
   # Keep exactly one last-known-good image before compose reuses IMAGE_TAG for
   # the new build. Once the currently-running image is pinned, the superseded
-  # rollback is no longer part of the recovery set and can be removed now. This
+  # rollback is no longer in the retained rollback set and can be removed. This
   # must happen before `docker compose build`: a failed build must not strand an
   # untagged old rollback image whose ID is forgotten on the next run.
   if [ -n "$PREV_IMAGE" ] && [ -n "$ROLLBACK_TAG" ]; then

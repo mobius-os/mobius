@@ -30,8 +30,12 @@ def test_mobius_has_no_recovery_runtime_or_boot_mode():
     assert retired not in runtime
 
   deployment = (ROOT / "scripts/deploy-prod.sh").read_text(encoding="utf-8")
+  test_sync = (ROOT / "scripts/sync-test-backend.sh").read_text(
+    encoding="utf-8",
+  )
   architecture = (ROOT / "ARCHITECTURE.md").read_text(encoding="utf-8")
   assert "recoveryd" not in deployment.lower()
+  assert "recovery island" not in test_sync.lower()
   assert "recovery profile" not in architecture.lower()
 
 
