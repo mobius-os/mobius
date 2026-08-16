@@ -12,7 +12,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
 import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
-import { chatMessagesQueryKey } from '../../hooks/queries.js'
+import { chatMessagesQueryKey, settingsQueries } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
   FOLLOW_STICK_BAND_PX,
@@ -39,6 +39,7 @@ import { hasSendablePayload } from './composerSubmission.js'
 import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
 import ComposerPopover from './ComposerPopover.jsx'
+import BrainUsageButton from './BrainUsageButton.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
 import ProgressRail from './ProgressRail.jsx'
 import ActiveAssistantSurface from './ActiveAssistantSurface.jsx'
@@ -3591,6 +3592,19 @@ export default function ChatView({
   // (The fast-forward identity/readiness gates are computed separately below.)
   const turnActive = sending || isStreaming || serverRunning
 
+  // Refresh the brain-usage gauge (BrainUsageButton) after every completed
+  // task in this conversation. Usage is a shared owner-level snapshot (not
+  // per-chat), so invalidating both providers' cached snapshots on the
+  // false-edge of `turnActive` is enough for every open chat/pane to pick up
+  // the new numbers on next render — no per-chat usage state to reconcile.
+  const wasTurnActiveRef = useRef(turnActive)
+  useEffect(() => {
+    if (wasTurnActiveRef.current && !turnActive) {
+      settingsQueries.providerUsage.invalidate(queryClient)
+    }
+    wasTurnActiveRef.current = turnActive
+  }, [turnActive, queryClient])
+
   // Auto-dismiss the settled "Open <app>" CTA a few seconds after the turn
   // ends, so it reads as an ephemeral nudge rather than a permanent chat-foot
   // fixture. Only the settled (post-turn) CTA times out; a live in-turn preview
@@ -4544,9 +4558,18 @@ export default function ChatView({
           leftButtons={
             <>
               <ComposerPopover
+                showModel={false}
+                triggerAriaLabel={embedded ? 'Attach files' : 'Attach files or view chat info'}
+                dialogAriaLabel="Attach & chat info"
+                onAttachClick={() => attachTriggerRef.current?.()}
+                composerInputRef={inputRef}
+                onOpenInspector={() => setShowInspector(true)}
+                onOpenSummary={() => setShowSummary(true)}
+                embedded={embedded}
+              />
+              <BrainUsageButton
                 chatInfo={showPicker ? chatInfo : null}
                 chatId={chatId}
-                onAttachClick={() => attachTriggerRef.current?.()}
                 /* Derive live — `chatInfo.has_assistant_turns` is set
                    once on mount via the API and never refreshed when
                    the running turn finishes. Without this OR, sending
@@ -4576,9 +4599,6 @@ export default function ChatView({
                 providerSwitchState={providerSwitchState}
                 settingsSaveTailRef={settingsSaveTailRef}
                 composerInputRef={inputRef}
-                onOpenInspector={() => setShowInspector(true)}
-                onOpenSummary={() => setShowSummary(true)}
-                embedded={embedded}
               />
             </>
           }

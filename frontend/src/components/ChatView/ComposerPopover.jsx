@@ -1,31 +1,41 @@
 /**
- * ComposerPopover — the `+` button in the chat composer and the popover
- * it opens. Three sections in one popover:
+ * ComposerPopover — a trigger button in the chat composer and the popover
+ * it opens. Two independent instances share this component (see ChatView's
+ * `leftButtons`): the `+` button (attach files + chat summary/context) and
+ * the brain-shaped model-usage gauge (the model/effort picker only). Each
+ * instance owns its own open/close state, trigger icon, and section
+ * visibility — they are not the same popover. Splitting `showModel` from
+ * `showAttachAndContext` keeps the positioning/focus machinery below
+ * (shared, load-bearing) single-sourced while letting the two triggers open
+ * genuinely different content, per the product decision that model choice
+ * belongs to the usage-gauge icon, not `+`.
  *
  *   1. Attach files  — calls `onAttachClick` (parent owns the hidden
  *      <input type="file"> so it can clear .value after each pick).
- *   2. Model / effort / summary / automation — renders
- *      <ChatSettingsPanel> when a chatInfo is available; omitted on a fresh
- *      empty chat where chatInfo hasn't loaded yet.
+ *      Shown when `showAttachAndContext`.
+ *   2. Model / effort / automation — renders <ChatSettingsPanel> when a
+ *      chatInfo is available; omitted on a fresh empty chat where chatInfo
+ *      hasn't loaded yet. Shown when `showModel`.
  *   3. Chat summary / agent context — opens the two owner-facing continuity
- *      viewers after the picker.
+ *      viewers. Shown when `showAttachAndContext`.
  *
  * Open/close state, outside-click, and Escape live here. The trigger
  * is positioned as a sibling of the pill in `.chat__form`. The popover
  * is absolutely positioned relative to `.composer-plus` (the wrapper
- * around the `+` button), which has `position: relative`. Don't
+ * around the trigger button), which has `position: relative`. Don't
  * remove that `position: relative` thinking `.chat__form` is the
  * anchor — the form is only relative so other absolutely-positioned
  * children (none today) could anchor to it.
  *
- * A draft-first New Chat uses this same component with `pending`. That
- * renders the canonical trigger in its final geometry, but keeps it disabled
- * and omits dialog semantics until the server-backed chat is ready. Keeping
- * the pending state here prevents the provisional composer from maintaining a
- * second lookalike button that can drift from the real control.
+ * A draft-first New Chat uses the `+` instance of this component with
+ * `pending`. That renders the canonical trigger in its final geometry, but
+ * keeps it disabled and omits dialog semantics until the server-backed chat
+ * is ready. Keeping the pending state here prevents the provisional
+ * composer from maintaining a second lookalike button that can drift from
+ * the real control.
  *
  * Soft-keyboard contract: opening or using this popover preserves whether the
- * owning textarea was focused. The + trigger suppresses native button focus
+ * owning textarea was focused. The trigger suppresses native button focus
  * and records that state synchronously. The popover has one bubbling
  * pointer boundary that suppresses descendant focus and restores the textarea
  * on the next frame only when it was focused before opening. That next-frame
@@ -74,6 +84,15 @@ export default function ComposerPopover({
   onOpenSummary,
   embedded = false,
   pending = false,
+  // Which sections this instance renders — see the module docstring.
+  showAttachAndContext = true,
+  showModel = true,
+  // Trigger presentation, overridable so a second instance (the usage
+  // gauge) doesn't have to render `+`.
+  triggerIcon = <Plus width={26} height={26} />,
+  triggerClassName = '',
+  triggerAriaLabel = 'Attach files',
+  dialogAriaLabel = 'Chat options',
 }) {
   const [open, setOpen] = useState(false)
   const wrapRef = useRef(null)
@@ -201,7 +220,8 @@ export default function ComposerPopover({
       <button
         ref={triggerRef}
         type="button"
-        className={`chat__plus${pending ? ' chat__plus--pending' : ''}`
+        className={`chat__plus${triggerClassName ? ` ${triggerClassName}` : ''}`
+          + `${pending ? ' chat__plus--pending' : ''}`
           + `${open && !pending ? ' chat__plus--active' : ''}`}
         disabled={pending}
         // PointerDown preventDefault stops the focus from moving off
@@ -234,20 +254,21 @@ export default function ComposerPopover({
         }}
         aria-label={pending
           ? 'Chat options unavailable until this chat is ready'
-          : 'Attach or change model'}
+          : triggerAriaLabel}
         aria-haspopup={pending ? undefined : 'dialog'}
         aria-expanded={pending ? undefined : open}
       >
-        <Plus width={26} height={26} />
+        {triggerIcon}
       </button>
       {open && !pending && (
         <div
           className="composer-popover"
           role="dialog"
-          aria-label="Chat options"
+          aria-label={dialogAriaLabel}
           onPointerDown={preservePickerInputFocus}
           style={maxHeight !== null ? { maxHeight: `${maxHeight}px` } : undefined}
         >
+          {showAttachAndContext && (
           <div className="composer-popover__section">
             <button
               type="button"
@@ -263,7 +284,8 @@ export default function ComposerPopover({
               </span>
             </button>
           </div>
-          {chatInfo && chatId && (
+          )}
+          {showModel && chatInfo && chatId && (
             <div className="composer-popover__section composer-popover__section--picker">
               <ChatSettingsPanel
                 chatId={chatId}
@@ -285,7 +307,7 @@ export default function ComposerPopover({
               />
             </div>
           )}
-          {!embedded && (
+          {showAttachAndContext && !embedded && (
           <div className="composer-popover__section composer-popover__section--context">
             <button
               type="button"

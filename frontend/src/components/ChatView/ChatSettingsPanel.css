@@ -129,6 +129,11 @@
 }
 [data-theme="light"] .csp-row__icon { border-color: rgba(15, 18, 25, 0.10); }
 
+/* Claude's own mark color (matches the composer's usage-gauge icon, which
+   uses the same orange for Claude's hemisphere) instead of the plain
+   theme-text tint every other provider logo uses. */
+.csp-row__icon--claude { color: #d97757; }
+
 .csp-row--selected .csp-row__icon {
   background: var(--surface2);
 }

@@ -701,7 +701,7 @@ export default function ChatSettingsPanel({
             className="csp-row csp-row--selected csp-row--static"
             aria-label={`Using ${currentProviderLabel}'s default model`}
           >
-            <span className="csp-row__icon"><currentProviderInfo.Logo /></span>
+            <span className={`csp-row__icon${draftProvider === 'claude' ? ' csp-row__icon--claude' : ''}`}><currentProviderInfo.Logo /></span>
             <span className="csp-row__main">
               <span className="csp-row__title">
                 <span>{currentProviderLabel} default model</span>
@@ -756,7 +756,7 @@ export default function ChatSettingsPanel({
                   ? 'App chats keep their original provider. Create a new app chat to use this provider.'
                   : (isCrossProvider ? 'Prepare this chat and switch providers' : undefined)}
               >
-                <span className="csp-row__icon"><info.Logo /></span>
+                <span className={`csp-row__icon${pid === 'claude' ? ' csp-row__icon--claude' : ''}`}><info.Logo /></span>
                 <span className="csp-row__main">
                   <span className="csp-row__title">
                     <span>{m.label}</span>
