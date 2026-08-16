@@ -16,7 +16,7 @@ import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
   FOLLOW_STICK_BAND_PX,
-  isNearContentBottom,
+  isNearPhysicalBottom,
   olderHistoryRetryShown,
   olderHistoryShouldLoad,
   remapSavedReadingAnchor,
@@ -173,13 +173,11 @@ const MESSAGE_META_VISIBLE_MS = 5000
 // auto-dismisses itself (a durable "final" acknowledgement). An ephemeral nudge,
 // not a permanent chat-foot fixture.
 const OPEN_APP_CTA_AUTO_DISMISS_MS = 8000
-// The floating jump-to-latest control is driven by follow-state, not a raw
-// pixel distance (use-stick-to-bottom's `!isAtBottom`): it shows whenever the
-// reader is NOT following AND sits beyond the shared follow-stick band above the
-// CONTENT tail (reserved spacer room is phantom, per the send-snapshot bottom
-// rule). Using the SAME band the controller sticks within removes the old dead
-// zone where a dropped follow left the reader with neither autoscroll nor a
-// button between the band and the previous 200px threshold.
+// The floating jump-to-latest control is driven by follow-state plus physical
+// tail distance. Reserved reply room remains part of that range, so an upward
+// reader escape can reveal the control even while the latest row is visible.
+// Using the same band the controller sticks within removes the old dead zone
+// where a dropped follow left the reader with neither autoscroll nor a button.
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -1198,7 +1196,7 @@ export default function ChatView({
         if (promotedRows.length > 0) {
           // A queued continuation is still a user send becoming the active
           // turn, so it follows the same send rule (see shouldPinSend):
-          // pin only when first-or-at-bottom. Read the first-user check
+          // pin only when first-or-at-physical-tail. Read the first-user check
           // before the append. When not pinning, leave the reader where
           // the previous turn left them — the continuation just appears
           // below without moving the scroll.
@@ -2205,7 +2203,7 @@ export default function ChatView({
   const [awayFromLatest, setAwayFromLatest] = useState(false)
   const updateJumpToLatest = useCallback(() => {
     const el = scrollRef.current
-    const away = !!el && !isNearContentBottom(el, FOLLOW_STICK_BAND_PX)
+    const away = !!el && !isNearPhysicalBottom(el, FOLLOW_STICK_BAND_PX)
     setAwayFromLatest(prev => (prev === away ? prev : away))
   }, [])
   useLayoutEffect(updateJumpToLatest)
@@ -2225,8 +2223,8 @@ export default function ChatView({
 
 
   // `opts.pin` allows the shared submit-time rule to pin the message. Normal
-  // user sends opt in, but still pin only when first-or-already-following at
-  // the bottom. Pass `pin: false` from synthetic-send paths where pinning
+  // user sends opt in, but still pin only when first-or-at-physical-tail.
+  // Pass `pin: false` from synthetic-send paths where pinning
   // would be surprising:
   //   - handleStop's queue-collapse: the user clicked Stop, not Send;
   //     pinning the auto-generated combined message would yank the
@@ -2272,7 +2270,7 @@ export default function ChatView({
     if (listeningRef.current) stopVoiceRef.current?.()
 
     // Resolve the ONE direct/queued/steered pin rule BEFORE blurring the
-    // textarea. The real-content geometry is authoritative; mode can lag a
+    // textarea. Physical-tail geometry is authoritative; mode can lag a
     // gesture/layout by a frame. Mobile blur can resize/clamp the viewport, so
     // capture the complete decision before it.
     const isFirstUserMsgAtSubmit = isFirstVisibleUserMessage()
@@ -2569,7 +2567,7 @@ export default function ChatView({
           // Apply the shared send-intent rule before appending. A message that
           // raced into a started turn
           // is still a new send becoming the active turn, so it pins only
-          // when first-or-at-bottom. The decision was captured at send time.
+          // when first-or-at-physical-tail. The decision was captured at send time.
           const startedMessages = startedMessagesFromResponse(result)
           commitMessages(prev => {
             if (startedMessages) return appendMessageBatch(prev, startedMessages)

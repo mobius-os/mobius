@@ -65,7 +65,7 @@ export function serverSnapshotBehindLocal(serverMsgs, localMsgs) {
 }
 
 /** The floating jump-to-latest control (contract R5a) shows only while the
- * reader holds a position away from the content tail, and yields to any
+ * reader holds a position away from the physical tail, and yields to any
  * visible attention nudge — a nudge navigates to the same tail with strictly
  * more context, so stacking both would be two controls for one action. */
 export function jumpToLatestShown({

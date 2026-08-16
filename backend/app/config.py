@@ -74,17 +74,6 @@ class Settings(BaseSettings):
   # is sent, so it adds no user-facing latency. No chat agent writes these files.
   ensure_chat_note: bool = True
 
-  # Peak concurrent agent turns (each spawns a heavy provider subprocess).
-  # Turn dispatch is otherwise unbounded, so a fan-out of many chats/subagents
-  # can exhaust the container's memory. These ceilings queue excess turns
-  # (holding no subprocess while waiting) instead of spawning without limit.
-  # Two buckets so a parent turn that BLOCKS on a delegated child never
-  # deadlocks against it (they draw from different pools; children are depth-1).
-  # Sized for the default ~6 GB cgroup; owners self-host, so raise on bigger
-  # hosts / lower on smaller ones via env (MAX_CONCURRENT_AGENT_TURNS, etc).
-  max_concurrent_agent_turns: int = 6
-  max_concurrent_delegated_turns: int = 3
-
   # Managed deployments receive this complete triplet from their provisioning
   # layer. When absent, Möbius is an ordinary self-hosted installation and
   # keeps the local username/password setup flow. Partial configuration is a

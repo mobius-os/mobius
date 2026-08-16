@@ -2428,9 +2428,9 @@
 
 /* Jump-to-latest: a round, mostly-transparent control floating in the same
    slot above the composer, shown once the reader has scrolled away from the
-   content tail (ChatView renders it only then). Tapping routes through the
-   controller's tail reveal — contract R5a's one-shot navigation, never
-   live-follow. Kept quieter than the attention nudges: neutral surface tint
+   physical tail (ChatView renders it only then). Tapping routes through the
+   controller's tail reveal and resumes live follow. Kept quieter than the
+   attention nudges: neutral surface tint
    at low opacity over blur, no accent, because it is a convenience, not an
    attention request. */
 .chat__jump-latest {
@@ -2520,6 +2520,17 @@
 .chat__plus:hover {
   background: color-mix(in srgb, var(--surface2) 70%, transparent);
   color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
+}
+
+/* A New Chat already has the same final composer geometry, even during its
+   very short allocation handoff. The options button stays deliberately inert
+   until the row exists, but it must not pop into the layout afterwards. */
+.chat__plus--pending:disabled {
+  cursor: default;
+}
+.chat__plus--pending:disabled:hover {
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  color: var(--muted);
 }
 
 /* Keyboard-only focus ring on the + button. No :focus rule (pointer

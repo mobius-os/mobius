@@ -616,6 +616,9 @@ def build_app_status(app: dict[str, Any]) -> dict[str, Any] | None:
     # A corrupt DB path must not turn this narrow metadata surface into an
     # arbitrary filesystem probe.
     return None
+  repository_manifest_url = (
+    app.get("manifest_url") or app.get("share_manifest_url")
+  )
   return _project_status(
     repo=source_dir,
     kind="app",
@@ -623,7 +626,9 @@ def build_app_status(app: dict[str, Any]) -> dict[str, Any] | None:
     name=str(app.get("name") or app.get("slug") or "Unnamed app"),
     slug=str(app.get("slug") or "") or None,
     version=str(app.get("version") or "") or None,
-    manifest_url=(str(app.get("manifest_url")) if app.get("manifest_url") else None),
+    manifest_url=(
+      str(repository_manifest_url) if repository_manifest_url else None
+    ),
   )
 
 

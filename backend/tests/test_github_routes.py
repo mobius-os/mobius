@@ -866,6 +866,45 @@ def test_source_status_requires_github_access_for_app_tokens(
   assert allowed.status_code == 200, allowed.text
 
 
+def test_source_status_projects_local_share_manifest_identity(
+  client, owner_token, auth, monkeypatch,
+):
+  from app import models
+  from app.database import SessionLocal
+
+  app_id, _ = _app_token(client, owner_token)
+  source_dir = Path(get_settings().data_dir) / "apps" / "published-source"
+  source_dir.mkdir(parents=True, exist_ok=True)
+  share_url = (
+    "https://raw.githubusercontent.com/example/published/main/mobius.json"
+  )
+  session = SessionLocal()
+  try:
+    session.query(models.App).filter(models.App.id == app_id).update({
+      "source_dir": str(source_dir),
+      "share_manifest_url": share_url,
+    })
+    session.commit()
+  finally:
+    session.close()
+
+  monkeypatch.setattr(source_status, "build_platform_status", lambda: {
+    "key": "platform", "available": True,
+  })
+
+  def inspect(app):
+    assert app["manifest_url"] is None
+    assert app["share_manifest_url"] == share_url
+    return {"key": f"app:{app['id']}", "name": app["name"]}
+
+  monkeypatch.setattr(source_status, "build_app_status", inspect)
+
+  response = client.get("/api/github/source-status", headers=auth)
+
+  assert response.status_code == 200, response.text
+  assert response.json()["apps"][0]["key"] == f"app:{app_id}"
+
+
 def test_source_status_keeps_healthy_apps_when_one_checkout_fails(
   client, owner_token, auth, monkeypatch,
 ):

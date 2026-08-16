@@ -3346,31 +3346,13 @@ async def run_chat(
   disposition = chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
   runtime_settled = False
   try:
-    from app import agent_admission
-    from app.delegations import is_delegation_child
-
-    # Bound peak concurrent agent subprocesses. A queued turn parks in
-    # `turn_slot` holding NO subprocess and no registry handle; delegation
-    # children draw from a separate bucket so a parent that blocks in-turn on a
-    # child never deadlocks against it. The bucket is decided before acquiring.
-    delegated = is_delegation_child(chat_id)
-    async with agent_admission.turn_slot(delegated=delegated):
-      # A Stop (or supersede) can bump the generation while this turn was queued
-      # for a slot. stop_chat_for on a not-yet-started turn finds no handle to
-      # cancel (it takes the handleless finalize path), so recheck here and bow
-      # out WITHOUT spawning rather than burn a full agent run. STALE_NO_ACTION
-      # leaves the newer owner's already-finalized run + broadcast untouched.
-      if _run_generation_superseded(chat_id, run_gen):
-        disposition = chat_queue.TerminalDisposition.STALE_NO_ACTION
-        runtime_settled = True
-      else:
-        disposition = await _run_chat_impl(
-          messages, chat_id=chat_id, session_id=session_id,
-          provider_id=provider_id, run_gen=run_gen,
-          attachments=attachments, timezone=timezone, viewport=viewport,
-          run_token=run_token,
-        )
-        runtime_settled = True
+    disposition = await _run_chat_impl(
+      messages, chat_id=chat_id, session_id=session_id,
+      provider_id=provider_id, run_gen=run_gen,
+      attachments=attachments, timezone=timezone, viewport=viewport,
+      run_token=run_token,
+    )
+    runtime_settled = True
   except asyncio.CancelledError:
     raise
   except Exception as exc:
@@ -3847,7 +3829,7 @@ async def _run_chat_impl(
   nothing (STALE_NO_ACTION). `run_chat`'s finally reads the disposition only
   for the Stop-handoff case; every other clear/leave already happened here.
   """
-  # Check if a newer send superseded this one while we were queued.
+  # Stop can supersede a run after scheduling but before its task reaches entry.
   # Do NOT discard _starting here — the newer run owns it, and its marker
   # must NOT be cleared (STALE_NO_ACTION).
   if _run_generation_superseded(chat_id, run_gen):

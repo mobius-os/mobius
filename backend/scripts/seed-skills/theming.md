@@ -92,7 +92,7 @@ import { ArrowUp, ChevronDown, Mic, Paperclip, X } from '@openai/apps-sdk-ui/com
 <button><ArrowUp width={20} height={20} /></button>
 ```
 
-The SDK components accept normal SVG props; set `width` and `height` explicitly at the call site when the surrounding CSS does not own the size. Keep provider logos, brand marks, progress graphics, and purpose-built state illustrations custom when the SDK has no honest semantic match. Inline path data is otherwise brittle, hard to review, and easy to size inconsistently. Dependency additions belong in the repo/image, not as runtime installs.
+The SDK components accept normal SVG props; set `width` and `height` explicitly at the call site when the surrounding CSS does not own the size. Keep provider logos, brand marks, progress graphics, and purpose-built state illustrations custom when the SDK has no honest semantic match. Inline path data is otherwise brittle, hard to review, and easy to size inconsistently. Install a needed dependency into the live runtime first when safe, and declare/lock it in the repo when shipped behavior depends on it; do not require an immediate container rebuild merely because the declaration changed.
 
 ---
 

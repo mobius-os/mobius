@@ -79,18 +79,22 @@ test('original entry metadata is carried through untouched', () => {
   assert.deepEqual(nodes[0].group.map(x => x.idx), [7, 8])
 })
 
-test('a read-based skill receipt reclassifies its owning tool as one block', () => {
-  const items = [{
-    item: tool({
-      tool: 'Bash', tool_use_id: 'cmd-1', skills: ['recovery', 'theming'],
-    }),
-    idx: 4,
-  }]
+test('a read-based skill receipt joins the surrounding activity stretch', () => {
+  const items = [
+    { item: tool({ tool: 'Read', tool_use_id: 'read-1' }), idx: 3 },
+    {
+      item: tool({
+        tool: 'Bash', tool_use_id: 'cmd-1', skills: ['recovery', 'theming'],
+      }),
+      idx: 4,
+    },
+    { item: tool({ tool: 'Bash', tool_use_id: 'cmd-2' }), idx: 5 },
+  ]
   const nodes = groupActivityRuns(items)
   assert.equal(nodes.length, 1)
-  assert.equal(nodes[0].group[0], items[0])
-  assert.equal(effectiveToolName(nodes[0].group[0].item), 'Skill')
-  assert.equal(isDistinctiveActivityTool(nodes[0].group[0].item), true)
+  assert.deepEqual(nodes[0].group, items)
+  assert.equal(effectiveToolName(nodes[0].group[1].item), 'Skill')
+  assert.equal(isDistinctiveActivityTool(nodes[0].group[1].item), false)
 })
 
 test('a native Skill tool is not duplicated by its own receipt', () => {

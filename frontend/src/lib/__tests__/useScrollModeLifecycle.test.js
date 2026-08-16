@@ -69,6 +69,66 @@ function installBrowserEnvironment({ observers = [], frames = null } = {}) {
   return () => Object.assign(globalThis, previous)
 }
 
+function mountTailController(chatId) {
+  const listeners = new Map()
+  const lastUser = fakeElement({
+    dataset: { cid: 'user-1', key: 'user-1' },
+    offsetTop: 0,
+    offsetHeight: 40,
+  })
+  const assistant = fakeElement({
+    dataset: { key: 'assistant-tail' },
+    offsetTop: 100,
+    offsetHeight: 300,
+  })
+  const list = fakeElement({ offsetHeight: 400 })
+  const scroll = fakeElement({
+    scrollTop: 400,
+    scrollHeight: 900,
+    clientHeight: 500,
+    addEventListener(type, listener) { listeners.set(type, listener) },
+    removeEventListener(type, listener) {
+      if (listeners.get(type) === listener) listeners.delete(type)
+    },
+    contains(node) {
+      for (let current = node; current; current = current.parentElement) {
+        if (current === this) return true
+      }
+      return false
+    },
+    querySelector(selector) {
+      if (selector === '.chat__list') return list
+      if (selector.includes('data-key="assistant-tail"')) return assistant
+      if (selector.includes('data-cid="user-1"')) return lastUser
+      return null
+    },
+    querySelectorAll(selector) {
+      if (selector === '.chat__msg[data-key]') return [assistant]
+      if (selector === '.chat__msg--user[data-cid]') return [lastUser]
+      return []
+    },
+  })
+  scroll.parentElement = fakeElement()
+  const messages = [
+    { role: 'user', cid: 'user-1', content: 'Question' },
+    { role: 'assistant', cid: 'assistant-tail', content: 'Answer' },
+  ]
+  const hook = renderHook(useScrollMode, {
+    chatId,
+    scrollRef: { current: scroll },
+    spacerRef: { current: fakeElement() },
+    lastUserMsgRef: { current: lastUser },
+    chatRef: { current: fakeElement() },
+    footRef: { current: fakeElement({ offsetHeight: 80 }) },
+    messages,
+    messagesRef: { current: messages },
+    loadingOlderRef: { current: false },
+    initialEntryPhase: 'ready',
+    ownsReadingPosition: true,
+  })
+  return { hook, listeners, scroll }
+}
+
 
 test('transcript changes keep one scroll owner after the first row mounts', () => {
   const observers = []
@@ -121,6 +181,71 @@ test('transcript changes keep one scroll owner after the first row mounts', () =
     assert.equal(observers.length, 2,
       'adding a transcript row may reinstall the DOM lifecycle')
     assert.equal(observers[0].disconnected, true)
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('nested controls cannot relatch the transcript while they own the input', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, listeners, scroll } = mountTailController('nested-input-owner')
+    assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT')
+
+    const editor = {
+      parentElement: scroll,
+      closest(selector) { return selector.startsWith('textarea,') ? this : null },
+    }
+    listeners.get('keydown')({
+      type: 'keydown', key: 'End', shiftKey: false, target: editor,
+    })
+    assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT',
+      'End moves the inline caret, not the outer conversation')
+
+    const nested = {
+      parentElement: scroll,
+      scrollTop: 10,
+      scrollHeight: 180,
+      clientHeight: 60,
+      closest(selector) {
+        return selector === '[data-chat-scroll-region], .chat__scroll' ? this : null
+      },
+    }
+    listeners.get('wheel')({
+      type: 'wheel', deltaY: 80, shiftKey: false, target: nested,
+    })
+    assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT',
+      'a nested vertical surface keeps the wheel while it can move')
+
+    nested.scrollTop = 120
+    listeners.get('wheel')({
+      type: 'wheel', deltaY: 80, shiftKey: false, target: nested,
+    })
+    assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM',
+      'the same gesture may chain to the transcript at the nested edge')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('a no-scroll tail relatch preserves the queued send-time pin decision', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, listeners, scroll } = mountTailController('queued-pin-owner')
+    const intent = hook.result.current.captureSendIntent({ isFirstUserMsg: false })
+    assert.equal(intent.willPin, true)
+
+    listeners.get('wheel')({
+      type: 'wheel', deltaY: 80, shiftKey: false,
+      target: { parentElement: scroll, closest: () => null },
+    })
+    assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM')
+
+    hook.result.current.commitSendIntent({ cid: 'queued-user-2', intent })
+    assert.equal(scroll.dataset.scrollMode, 'PIN_USER_MSG',
+      'a clamped gesture expresses follow but is not a newer scroll generation')
     hook.unmount()
   } finally {
     restoreBrowser()

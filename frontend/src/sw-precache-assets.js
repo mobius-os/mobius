@@ -4,7 +4,7 @@
 // replaces their precached bytes; versioned URLs are immutable cache keys.
 
 export const PDFJS_ASSET_VERSION = '6.2.108'
-export const KATEX_ASSET_VERSION = '0.18.1'
+export const KATEX_ASSET_VERSION = '0.18.4'
 
 export const KATEX_WOFF2_FILES = [
   'KaTeX_AMS-Regular.woff2',

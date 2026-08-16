@@ -78,6 +78,12 @@ from app.events import (
 log = logging.getLogger("moebius.chat.writer")
 
 
+def _name_chat_from_first_message(chat: models.Chat, content: object) -> None:
+  """Apply the first-message fallback without overriding an owner rename."""
+  if not chat.title_locked:
+    chat.title = first_message_title(content) or "New chat"
+
+
 # Bounded wait for a strict (commit-before-ack) writer-actor command.
 # Every must-persist caller (QuestionCommit / Finalize / AnswerQuestion /
 # StartTurn / PromotePending / ...) awaits the ack before taking the next
@@ -2151,7 +2157,7 @@ class ChatWriterActor:
       "ts": next_message_ts(existing + pending),
     }
     if len(existing) == 1:
-      chat.title = first_message_title(cmd.title_source) or "New chat"
+      _name_chat_from_first_message(chat, cmd.title_source)
     started_at = datetime.now(UTC)
     chat.updated_at = datetime.now(UTC)
     # Owner-send: advance the drawer ordering key (see models.Chat.activity_at).
@@ -2569,6 +2575,11 @@ class ChatWriterActor:
     }
     started_at = datetime.now(UTC)
     chat.updated_at = datetime.now(UTC)
+    # Restart recovery can route the first send through PromotePending instead
+    # of StartTurn, but both paths share the same naming precedence.
+    if not existing and stored_messages:
+      _name_chat_from_first_message(chat, agent_pending.get("content", ""))
+      chat.activity_at = datetime.now(UTC)
     # The prior turn finished (the queue had more) and hands off to this
     # continuation. Close its run record and open the continuation's in the
     # SAME commit as the queue handoff.

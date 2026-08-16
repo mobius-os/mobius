@@ -727,7 +727,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     expect(pinIndex, JSON.stringify(result.transitions)).toBeGreaterThanOrEqual(0)
     expect(
       result.transitions.slice(pinIndex + 1).some(
-        row => row.event === 'reader:physical-bottom',
+        row => row.event === 'reader:scroll-bottom',
       ),
       JSON.stringify(result.transitions),
     ).toBe(false)

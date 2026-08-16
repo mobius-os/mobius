@@ -52,13 +52,16 @@ def _seed_chat(
   pending=None,
   session_id="sess-1",
   pending_question_id=None,
+  title="Test chat",
+  title_locked=False,
 ):
   """Insert a Chat row and return its id, committed via a throwaway session."""
   db = SessionLocal()
   try:
     chat = models.Chat(
       id=chat_id,
-      title="Test chat",
+      title=title,
+      title_locked=title_locked,
       messages=messages if messages is not None else [],
       pending_messages=pending if pending is not None else [],
       session_id=session_id,
@@ -114,6 +117,7 @@ def _load_chat(chat_id="c1"):
       "session_id": chat.session_id,
       "provider": chat.provider,
       "title": chat.title,
+      "title_locked": chat.title_locked,
       "running_status": run.status if run is not None else None,
       "running_started_at": run.started_at if run is not None else None,
     }
@@ -631,6 +635,21 @@ def test_start_turn_keeps_a_useful_first_message_title_preview(actor):
   assert _load_chat()["title"] == first_message[:80]
 
 
+def test_start_turn_preserves_an_owner_title_before_the_first_message(actor):
+  _seed_chat(messages=[], title="My chosen title", title_locked=True)
+
+  _await(actor.submit(StartTurn(
+    chat_id="c1",
+    run_token="rt-owner-title",
+    user_msg={"role": "user", "content": "First message", "ts": 5},
+    title_source="First message",
+  )))
+
+  chat = _load_chat()
+  assert chat["title"] == "My chosen title"
+  assert chat["title_locked"] is True
+
+
 def test_start_turn_retry_after_completion_is_idempotent(actor):
   """A lost response retried after the run settled must not wake the agent."""
   original = {
@@ -724,6 +743,46 @@ def test_promote_pending_collapses_all_followups(actor):
   assert [m["content"] for m in chat["messages"][-2:]] == ["first", "second"]
   assert chat["pending_messages"] == []
   assert chat["running_status"] == "running"
+
+
+def test_promote_pending_names_a_new_chat_recovered_from_the_queue(actor):
+  """A first send queued across restart keeps StartTurn's naming contract."""
+  _seed_chat(
+    messages=[],
+    pending=[{
+      "role": "user",
+      "content": "Fix steering after restart",
+      "ts": 10,
+      "cid": "queued-first",
+    }],
+    title="New chat",
+  )
+
+  _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
+
+  chat = _load_chat()
+  assert chat["title"] == "Fix steering after restart"
+  assert chat["messages"][0]["cid"] == "queued-first"
+
+
+def test_promote_pending_preserves_an_owner_title_on_a_new_chat(actor):
+  _seed_chat(
+    messages=[],
+    pending=[{
+      "role": "user",
+      "content": "First message",
+      "ts": 10,
+      "cid": "queued-first",
+    }],
+    title="My chosen title",
+    title_locked=True,
+  )
+
+  _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
+
+  chat = _load_chat()
+  assert chat["title"] == "My chosen title"
+  assert chat["title_locked"] is True
 
 
 def test_promote_pending_stops_collapse_at_hidden_boundary(actor):

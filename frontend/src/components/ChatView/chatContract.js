@@ -19,8 +19,8 @@
  * module). Individual functions are NOT serializable through a bare
  * page.evaluate(fn) — they close over module scope (constants, helpers).
  *
- * PREDICATE SELECTION is the caller's job, keyed on submit-time intent: an
- * at-bottom send is judged by pinLanded/pinHeld; a not-at-bottom send or
+ * PREDICATE SELECTION is the caller's job, keyed on submit-time intent: a
+ * physical-tail send is judged by pinLanded/pinHeld; a reader-held send or
  * steer by scrollUnmoved. pinLanded deliberately cannot know whether a given
  * send SHOULD have pinned — the caller captures that at submit time.
  *
@@ -45,9 +45,10 @@ export const PIN_OFFSET = 4
 export const PIN_BOTTOM_ROOM = 0
 
 /**
- * The geometry-checkable subset of the architecture contract. Each id is the
- * `id` a predicate stamps on its result, so a violation is traceable back to
- * the owner law it broke.
+ * Machine-readable owner rules from the architecture contract. Geometry
+ * predicates stamp their rule's `id` on results; interaction-only rules are
+ * enforced by focused policy and browser tests instead of duplicating their
+ * state machine here.
  */
 export const CHAT_CONTRACT = [
   {
@@ -55,8 +56,18 @@ export const CHAT_CONTRACT = [
     title: 'Pin eligible sends to top',
     summary:
       'The first user message always pins. A subsequent direct, queued, or '
-      + 'steered message pins when its action-time DOM snapshot is at the '
-      + 'real-content tail; stale internal mode never overrides geometry.',
+      + 'steered message pins only from the physical tail. Reserved '
+      + 'reply room remains part of that distance, so any upward reader escape '
+      + 'keeps the next send at the current reading position.',
+  },
+  {
+    id: 'follow-at-physical-tail',
+    title: 'Re-engage follow at the physical tail',
+    summary:
+      'Nested controls keep input they can consume. Otherwise an end-directed '
+      + 'wheel, scroll key, or touch gesture at the physical tail enters '
+      + 'FOLLOW_BOTTOM even when no scroll event fires, without invalidating '
+      + 'a delayed send decision.',
   },
   {
     id: 'pin-holds-streaming',

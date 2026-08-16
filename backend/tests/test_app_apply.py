@@ -416,6 +416,30 @@ def test_reapply_unchanged_source_has_no_commit_or_timestamp_change(
   assert app_git.head_sha(source, app_git.LOCAL_BRANCH) == head
 
 
+def test_local_source_revision_clears_previously_verified_share_url(
+  client, auth, db,
+):
+  source = _source()
+  created = _apply(client, auth, source)
+  app_id = created.json()["app"]["id"]
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  row.share_manifest_url = (
+    "https://raw.githubusercontent.com/example/demo/main/mobius.json"
+  )
+  db.commit()
+  (source / "index.jsx").write_text(
+    "export default function App() { return <div>second</div> }\n"
+  )
+
+  updated = _apply(client, auth, source)
+
+  assert updated.status_code == 200, updated.text
+  assert updated.json()["mode"] == "updated"
+  assert updated.json()["app"]["share_manifest_url"] is None
+  db.refresh(row)
+  assert row.share_manifest_url is None
+
+
 def test_local_manifest_identity_is_immutable(client, auth, db):
   source = _source()
   created = _apply(client, auth, source)

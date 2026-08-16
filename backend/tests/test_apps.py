@@ -1,10 +1,12 @@
 """App registry lifecycle tests."""
 
+import json
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
-from unittest.mock import call, patch
+from unittest.mock import AsyncMock, call, patch
 
-from app import models
+from app import app_git, install, models
 from app.config import get_settings
 from app.database import engine
 from sqlalchemy import event
@@ -14,6 +16,71 @@ from test_app_fixtures import create_local_app
 def _service_auth():
   token = (Path(get_settings().data_dir) / "service-token.txt").read_text()
   return {"Authorization": f"Bearer {token}"}
+
+
+def _published_candidate(row: models.App) -> install.InstallCandidate:
+  tree = app_git.read_ref_tree(row.source_dir, row.source_commit)
+  manifest = json.loads(tree["mobius.json"])
+  return install.InstallCandidate(
+    manifest=manifest,
+    raw_base="https://raw.githubusercontent.com/example/app/main/",
+    entry_bytes=tree[manifest["entry"]],
+    icon_processed=None,
+    icon_warning=None,
+    bundled_job=None,
+    static_assets={},
+    source_files={},
+    seeds={},
+    capability_contract={},
+    capability_digest="test-capabilities",
+    candidate_digest="test-candidate",
+    source_review_digest="test-source",
+  )
+
+
+def test_package_content_digest_from_tree_covers_declared_package_inputs():
+  manifest = {
+    "id": "package-digest",
+    "name": "Package digest",
+    "version": "1.0.0",
+    "description": "test",
+    "entry": "index.jsx",
+    "permissions": {},
+    "capabilities": {},
+    "source_files": ["helper.js"],
+    "schedule": {"job": "job.sh"},
+    "static_assets": {"logo.txt": "assets/logo.txt"},
+    "storage_seeds": {
+      "settings.json": {"enabled": True},
+      "prompt.md": "prompt.md",
+    },
+  }
+  tree = {
+    "mobius.json": json.dumps(manifest).encode(),
+    "index.jsx": b"export default 1\n",
+    "helper.js": b"export const helper = 1\n",
+    "job.sh": b"#!/bin/sh\n",
+    "assets/logo.txt": b"logo\n",
+    "prompt.md": b"prompt\n",
+  }
+
+  manifest_id, digest = install.package_content_digest_from_tree(tree)
+
+  assert manifest_id == "package-digest"
+  assert digest == install.package_content_digest(
+    manifest=manifest,
+    entry_bytes=tree["index.jsx"],
+    icon_processed=None,
+    bundled_job=tree["job.sh"],
+    static_assets={"logo.txt": tree["assets/logo.txt"]},
+    source_files={"helper.js": tree["helper.js"]},
+    seeds={
+      "settings.json": b'{"enabled":true}',
+      "prompt.md": tree["prompt.md"],
+    },
+  )
+  changed_tree = {**tree, "assets/logo.txt": b"different\n"}
+  assert install.package_content_digest_from_tree(changed_tree)[1] != digest
 
 
 def test_apply_app_rejects_cross_site_request(client, auth):
@@ -62,27 +129,96 @@ def test_update_app_attaches_share_url_without_changing_install_identity(
     client, auth, name="Published later", description="test",
   )
   share_url = "https://raw.githubusercontent.com/example/app/main/mobius.json"
-
-  response = client.patch(
-    f"/api/apps/{app['id']}",
-    json={"share_manifest_url": share_url},
-    headers=auth,
-  )
-
-  assert response.status_code == 200, response.text
-  assert response.json()["share_manifest_url"] == share_url
-  assert response.json()["manifest_url"] is None
   row = db.query(models.App).filter(models.App.id == app["id"]).one()
-  assert row.share_manifest_url == share_url
-  assert row.manifest_url is None
+  candidate = _published_candidate(row)
 
-  cleared = client.patch(
-    f"/api/apps/{app['id']}",
-    json={"share_manifest_url": ""},
-    headers=auth,
+  fetch = AsyncMock(return_value=candidate)
+  with patch("app.install.fetch_install_candidate", new=fetch):
+    response = client.patch(
+      f"/api/apps/{app['id']}",
+      json={"share_manifest_url": share_url},
+      headers=auth,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["share_manifest_url"] == share_url
+    assert response.json()["manifest_url"] is None
+    db.refresh(row)
+    assert row.share_manifest_url == share_url
+    assert row.manifest_url is None
+
+    cleared = client.patch(
+      f"/api/apps/{app['id']}",
+      json={"share_manifest_url": ""},
+      headers=auth,
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["share_manifest_url"] is None
+  fetch.assert_awaited_once_with(share_url)
+
+
+def test_update_app_rejects_share_package_that_is_not_the_accepted_revision(
+  client, auth, db,
+):
+  app = create_local_app(
+    client, auth, name="Stale publication", description="test",
   )
-  assert cleared.status_code == 200, cleared.text
-  assert cleared.json()["share_manifest_url"] is None
+  row = db.query(models.App).filter(models.App.id == app["id"]).one()
+  candidate = _published_candidate(row)
+  candidate = replace(candidate, entry_bytes=b"export default 'stale'\n")
+
+  with patch(
+    "app.install.fetch_install_candidate",
+    new=AsyncMock(return_value=candidate),
+  ):
+    response = client.patch(
+      f"/api/apps/{app['id']}",
+      json={
+        "share_manifest_url": (
+          "https://raw.githubusercontent.com/example/app/main/mobius.json"
+        ),
+      },
+      headers=auth,
+    )
+
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"]["code"] == "share_package_mismatch"
+  db.expire_all()
+  assert (
+    db.query(models.App).filter(models.App.id == app["id"]).one()
+    .share_manifest_url
+  ) is None
+
+
+def test_update_app_rejects_share_manifest_for_a_different_app(
+  client, auth, db,
+):
+  app = create_local_app(
+    client, auth, name="Identity publication", description="test",
+  )
+  row = db.query(models.App).filter(models.App.id == app["id"]).one()
+  candidate = _published_candidate(row)
+  candidate = replace(
+    candidate,
+    manifest={**candidate.manifest, "id": "another-app"},
+  )
+
+  with patch(
+    "app.install.fetch_install_candidate",
+    new=AsyncMock(return_value=candidate),
+  ):
+    response = client.patch(
+      f"/api/apps/{app['id']}",
+      json={
+        "share_manifest_url": (
+          "https://raw.githubusercontent.com/example/app/main/mobius.json"
+        ),
+      },
+      headers=auth,
+    )
+
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"]["code"] == "share_identity_mismatch"
 
 
 def test_update_app_rejects_non_public_share_url(client, auth):

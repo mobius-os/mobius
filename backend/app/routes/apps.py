@@ -627,6 +627,45 @@ def _recorded_runtime_paths(previous_tree: dict[str, bytes]) -> set[str]:
   return paths
 
 
+def _accepted_local_share_package(app: models.App) -> tuple[str, str]:
+  """Return accepted manifest identity + origin-independent package digest.
+
+  A local worktree is a draft. Sharing must compare the public package with the
+  immutable commit that produced the live bundle, not with files an agent may
+  be editing for the next apply. The digest mirrors every installer input:
+  manifest, entry, icon, job, source modules, static assets, and storage seeds.
+  """
+  from app import install
+
+  if not app.source_commit or not app.source_dir:
+    raise HTTPException(
+      409,
+      {
+        "code": "share_source_unavailable",
+        "message": "Apply the local app source before attaching a share URL.",
+      },
+    )
+  try:
+    tree = app_git.read_ref_tree(app.source_dir, app.source_commit)
+    return install.package_content_digest_from_tree(tree)
+  except (
+    install.PackageContentError,
+    OSError,
+    RuntimeError,
+    subprocess.SubprocessError,
+  ) as exc:
+    raise HTTPException(
+      409,
+      {
+        "code": "share_source_unavailable",
+        "message": (
+          "The accepted local package could not be reproduced. Apply its "
+          "complete source again before attaching a share URL."
+        ),
+      },
+    ) from exc
+
+
 def _git_path_exists(repo: Path, name: str) -> bool:
   """Whether git reports an internal path that currently exists."""
   proc = app_git._run(repo, "rev-parse", "--git-path", name, check=False)
@@ -2059,6 +2098,27 @@ async def update_app(
   _: models.Owner = Depends(get_current_owner),
 ):
   """Update owner-controlled app metadata and narrow permission grants."""
+  from app import install
+
+  share_candidate = None
+  if body.share_manifest_url:
+    # Prove the row exists and is local before spending a network fetch. Close
+    # the request session before that I/O so a slow publisher cannot occupy a
+    # database connection or either lifecycle lock.
+    existing = live_app_or_404(db, app_id)
+    if existing.manifest_url is not None:
+      raise HTTPException(
+        409,
+        {
+          "code": "share_requires_local_app",
+          "message": "Only a local app can attach a separate share URL.",
+        },
+      )
+    db.close()
+    share_candidate = await install.fetch_install_candidate(
+      body.share_manifest_url,
+    )
+
   async with (
     fs_locks.install_uninstall_lock(),
     fs_locks.app_storage_lock(app_id),
@@ -2079,6 +2139,44 @@ async def update_app(
     if body.chat_log_access is not None:
       app.chat_log_access = body.chat_log_access
     if body.share_manifest_url is not None:
+      if share_candidate is not None:
+        if app.manifest_url is not None:
+          raise HTTPException(
+            409,
+            {
+              "code": "share_requires_local_app",
+              "message": "Only a local app can attach a separate share URL.",
+            },
+          )
+        accepted_id, accepted_digest = await asyncio.to_thread(
+          _accepted_local_share_package, app,
+        )
+        if share_candidate.manifest["id"] != accepted_id:
+          raise HTTPException(
+            409,
+            {
+              "code": "share_identity_mismatch",
+              "message": (
+                "The published manifest belongs to a different app. Publish "
+                "this app's accepted package before attaching its share URL."
+              ),
+            },
+          )
+        published_digest = install.install_candidate_content_digest(
+          share_candidate,
+        )
+        if published_digest != accepted_digest:
+          raise HTTPException(
+            409,
+            {
+              "code": "share_package_mismatch",
+              "message": (
+                "The published package does not match the app's accepted "
+                "revision. Publish the current package before attaching its "
+                "share URL."
+              ),
+            },
+          )
       app.share_manifest_url = body.share_manifest_url or None
     if body.manage_skills is not None:
       # Downgrade-only: the owner can revoke skills authority here (effective

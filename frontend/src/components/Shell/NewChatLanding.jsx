@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 import ChatInputBar from '../ChatView/ChatInputBar.jsx'
+import ComposerPopover from '../ChatView/ComposerPopover.jsx'
 import {
   composerDraftRevision,
   persistComposerDraft,
@@ -148,6 +149,7 @@ export default function NewChatLanding({
             submissionBlocked
             pendingFiles={attachments}
             onRemoveFile={removeAttachment}
+            leftButtons={<ComposerPopover pending />}
             attachmentsDisabled
           />
         </div>

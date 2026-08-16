@@ -884,7 +884,7 @@ test.describe('Touch navigation', () => {
     await expect(page.locator('[data-chat-surface="painted"] textarea')).toBeFocused()
   })
 
-  test('New chat preserves phone focus and early typing through allocation', async ({ page }) => {
+  test('New chat keeps options geometry, phone focus, and early typing through allocation', async ({ page }) => {
     await setup(page)
     await expect.poll(() => page.evaluate(() => (
       matchMedia('(hover: none) and (pointer: coarse)').matches
@@ -916,8 +916,14 @@ test.describe('Touch navigation', () => {
 
     const presentation = page.locator('[data-new-chat-presentation]')
     const immediateComposer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
+    const pendingOptions = presentation.getByRole('button', {
+      name: 'Chat options unavailable until this chat is ready',
+    })
     await expect(presentation).toBeVisible()
     await expect(presentation.getByText("What's on your mind?", { exact: true })).toBeVisible()
+    await expect(pendingOptions).toBeVisible()
+    await expect(pendingOptions).toBeDisabled()
+    const pendingOptionsBox = await pendingOptions.boundingBox()
     await expect(immediateComposer).toBeFocused()
     await page.keyboard.type('Typed while opening')
     await expect.poll(() => requestedId).toMatch(
@@ -946,6 +952,17 @@ test.describe('Touch navigation', () => {
       end: element.selectionEnd,
       length: element.value.length,
     }))).toEqual({ start: 19, end: 19, length: 19 })
+    const readyOptions = page.locator('[data-chat-surface="painted"]')
+      .getByRole('button', { name: 'Attach or change model' })
+    await expect(readyOptions).toBeVisible()
+    await expect(readyOptions).toBeEnabled()
+    const readyOptionsBox = await readyOptions.boundingBox()
+    expect(pendingOptionsBox).not.toBeNull()
+    expect(readyOptionsBox).not.toBeNull()
+    expect(readyOptionsBox.width).toBe(pendingOptionsBox.width)
+    expect(readyOptionsBox.height).toBe(pendingOptionsBox.height)
+    expect(Math.abs(readyOptionsBox.x - pendingOptionsBox.x)).toBeLessThanOrEqual(1)
+    expect(Math.abs(readyOptionsBox.y - pendingOptionsBox.y)).toBeLessThanOrEqual(1)
     await page.keyboard.type(' after allocation')
     await expect(composer).toHaveValue('Typed while opening after allocation')
   })

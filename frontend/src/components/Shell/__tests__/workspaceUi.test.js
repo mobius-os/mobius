@@ -1254,9 +1254,11 @@ test('round4-3: the New Chat landing renders for a null slot and reuses ChatView
   assert.match(newChatLanding,
     /focusComposerElement\(inputRef\.current\)[\s\S]*placeCaretAtTextEnd\(inputRef\.current\)/,
     'the provisional draft resumes at its text end without changing generic focus policy')
-  assert.doesNotMatch(newChatLanding,
-    /ComposerPopover|leftButtons=|attachTriggerRef/,
-    'the pre-allocation surface must not expose dead server-bound controls')
+  assert.match(newChatLanding,
+    /leftButtons=\{<ComposerPopover pending \/>\}/,
+    'the provisional composer must reuse the real options control in its inert state')
+  assert.doesNotMatch(newChatLanding, /attachTriggerRef/,
+    'the pre-allocation surface must not expose server-bound attachment behavior')
   assert.match(chatInputBar,
     /function handlePaste\(e\) \{\s*if \(attachmentsDisabled\) return/,
     'disabled attachments must leave clipboard paste to the browser')

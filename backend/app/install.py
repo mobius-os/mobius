@@ -1049,6 +1049,112 @@ def _install_candidate_digest(
   return digest.hexdigest()
 
 
+def package_content_digest(
+  *,
+  manifest: dict,
+  entry_bytes: bytes,
+  icon_processed: bytes | None,
+  bundled_job: bytes | None,
+  static_assets: dict[str, bytes],
+  source_files: dict[str, bytes],
+  seeds: dict[str, bytes],
+) -> str:
+  """Bind every installable package byte without binding its public URL.
+
+  Install replay deliberately includes ``raw_base`` because a moved upstream
+  is a different replay input. Publication verification has the opposite
+  requirement: compare an accepted local package with the same bytes fetched
+  from its eventual public location. Reuse the install digest with one stable
+  empty origin so future package fields cannot silently drift between those
+  two comparisons.
+  """
+  return _install_candidate_digest(
+    manifest=manifest,
+    raw_base="",
+    entry_bytes=entry_bytes,
+    icon_processed=icon_processed,
+    bundled_job=bundled_job,
+    static_assets=static_assets,
+    source_files=source_files,
+    seeds=seeds,
+  )
+
+
+class PackageContentError(ValueError):
+  """An accepted source tree cannot reproduce its declared install package."""
+
+
+def package_content_digest_from_tree(
+  tree: dict[str, bytes],
+) -> tuple[str, str]:
+  """Return manifest identity + package digest from an immutable source tree.
+
+  This is the local half of publication verification. Keep it beside the
+  fetch/install implementation so every declared package input has one owner
+  when the manifest contract grows.
+  """
+  try:
+    manifest = json.loads(tree["mobius.json"])
+    validate_manifest_contract(manifest)
+  except (
+    KeyError, UnicodeDecodeError, json.JSONDecodeError, ManifestContractError,
+  ) as exc:
+    raise PackageContentError("invalid or missing mobius.json") from exc
+
+  def required_bytes(relative: str, field: str) -> bytes:
+    try:
+      return tree[relative]
+    except KeyError as exc:
+      raise PackageContentError(
+        f"missing declared {field} file ({relative})",
+      ) from exc
+
+  entry_bytes = required_bytes(manifest["entry"], "entry")
+  source_files = {
+    relative: required_bytes(relative, "source_files")
+    for relative in manifest.get("source_files") or []
+  }
+  schedule = manifest.get("schedule")
+  job_name = schedule.get("job") if isinstance(schedule, dict) else None
+  bundled_job = required_bytes(job_name, "schedule job") if job_name else None
+
+  icon_processed = None
+  icon_name = manifest.get("icon")
+  if icon_name:
+    try:
+      icon_processed = icon_assets.normalize_icon(
+        required_bytes(icon_name, "icon"),
+      )
+    except icon_assets.InvalidIcon as exc:
+      raise PackageContentError("invalid declared icon") from exc
+
+  static_assets = {
+    destination: required_bytes(relative, "static asset")
+    for destination, relative in static_asset_entries(
+      manifest.get("static_assets") or {},
+    ).items()
+  }
+  seeds: dict[str, bytes] = {}
+  for destination, value in (manifest.get("storage_seeds") or {}).items():
+    seeds[destination] = (
+      json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+      ).encode("utf-8")
+      if _seed_value_is_inline(value)
+      else required_bytes(value, "storage seed")
+    )
+
+  return manifest["id"], package_content_digest(
+    manifest=manifest,
+    entry_bytes=entry_bytes,
+    icon_processed=icon_processed,
+    bundled_job=bundled_job,
+    static_assets=static_assets,
+    source_files=source_files,
+    seeds=seeds,
+  )
+
+
 def _source_review_digest(
   *,
   manifest: dict,
@@ -1797,6 +1903,19 @@ class InstallCandidate:
   source_review_digest: str
 
 
+def install_candidate_content_digest(candidate: InstallCandidate) -> str:
+  """Return the origin-independent package digest for one fetched candidate."""
+  return package_content_digest(
+    manifest=candidate.manifest,
+    entry_bytes=candidate.entry_bytes,
+    icon_processed=candidate.icon_processed,
+    bundled_job=candidate.bundled_job,
+    static_assets=candidate.static_assets,
+    source_files=candidate.source_files,
+    seeds=candidate.seeds,
+  )
+
+
 @dataclass(frozen=True)
 class InstallTarget:
   """Identity decision made before any database or filesystem mutation."""
@@ -2046,6 +2165,20 @@ async def _fetch_install_candidate(
     capability_digest=capability_digest,
     candidate_digest=candidate_digest,
     source_review_digest=source_review_digest,
+  )
+
+
+async def fetch_install_candidate(manifest_url: str) -> InstallCandidate:
+  """Fetch the exact package the installer would use, without installing it."""
+  return await _fetch_install_candidate(
+    manifest_url=manifest_url,
+    manifest=None,
+    raw_base=None,
+    reviewed_capability_digest=None,
+    reviewed_source_digest=None,
+    expected_app_id=None,
+    expected_upstream_commit=None,
+    expected_candidate_digest=None,
   )
 
 

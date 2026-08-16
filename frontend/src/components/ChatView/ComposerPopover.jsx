@@ -1,6 +1,6 @@
 /**
  * ComposerPopover — the `+` button in the chat composer and the popover
- * it opens. Two sections in one popover:
+ * it opens. Three sections in one popover:
  *
  *   1. Attach files  — calls `onAttachClick` (parent owns the hidden
  *      <input type="file"> so it can clear .value after each pick).
@@ -17,6 +17,12 @@
  * remove that `position: relative` thinking `.chat__form` is the
  * anchor — the form is only relative so other absolutely-positioned
  * children (none today) could anchor to it.
+ *
+ * A draft-first New Chat uses this same component with `pending`. That
+ * renders the canonical trigger in its final geometry, but keeps it disabled
+ * and omits dialog semantics until the server-backed chat is ready. Keeping
+ * the pending state here prevents the provisional composer from maintaining a
+ * second lookalike button that can drift from the real control.
  *
  * Soft-keyboard contract: opening or using this popover preserves whether the
  * owning textarea was focused. The + trigger suppresses native button focus
@@ -67,6 +73,7 @@ export default function ComposerPopover({
   onOpenInspector,
   onOpenSummary,
   embedded = false,
+  pending = false,
 }) {
   const [open, setOpen] = useState(false)
   const wrapRef = useRef(null)
@@ -194,7 +201,9 @@ export default function ComposerPopover({
       <button
         ref={triggerRef}
         type="button"
-        className={`chat__plus${open ? ' chat__plus--active' : ''}`}
+        className={`chat__plus${pending ? ' chat__plus--pending' : ''}`
+          + `${open && !pending ? ' chat__plus--active' : ''}`}
+        disabled={pending}
         // PointerDown preventDefault stops the focus from moving off
         // the textarea — keeps the soft keyboard open when the user
         // taps `+` mid-typing. Without this, focus shifts to the
@@ -223,13 +232,15 @@ export default function ComposerPopover({
             })
           }
         }}
-        aria-label="Attach or change model"
-        aria-haspopup="dialog"
-        aria-expanded={open}
+        aria-label={pending
+          ? 'Chat options unavailable until this chat is ready'
+          : 'Attach or change model'}
+        aria-haspopup={pending ? undefined : 'dialog'}
+        aria-expanded={pending ? undefined : open}
       >
         <Plus width={26} height={26} />
       </button>
-      {open && (
+      {open && !pending && (
         <div
           className="composer-popover"
           role="dialog"

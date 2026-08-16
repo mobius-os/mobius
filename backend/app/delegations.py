@@ -130,25 +130,6 @@ def policy_for_chat(db: Session, chat_id: str) -> RunPolicy | None:
   )
 
 
-def is_delegation_child(chat_id: str) -> bool:
-  """True if this chat is a delegation's durable child, via one indexed lookup.
-
-  Used by the admission layer to pick the child vs top-level concurrency bucket.
-  Opens its own short-lived session so callers on the hot turn path (run_chat)
-  need no db handle. `child_chat_id` is unique+indexed, so this is a point read.
-  """
-  if not chat_id:
-    return False
-  from app.database import SessionLocal
-
-  with SessionLocal() as db:
-    return db.query(
-      db.query(models.Delegation)
-      .filter(models.Delegation.child_chat_id == chat_id)
-      .exists()
-    ).scalar() or False
-
-
 def latest_run(db: Session, chat_id: str) -> models.ChatRun | None:
   return (
     db.query(models.ChatRun)

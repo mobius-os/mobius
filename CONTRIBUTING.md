@@ -100,9 +100,10 @@ ordinary unit behavior.
 **Chat scroll contract.** Before changing `ChatView`, read `ARCHITECTURE.md`
 "Chat scroll + steer contract" and run the send/spacer browser specs. The first
 visible user message always pins. A later direct, queued, promoted, or steered
-message pins only when it was submitted from gesture-entered auto-scroll at the
-real-content tail; every pin returns to hold until the user manually reaches the
-bottom again. Every visible user message gets a persistent reply-space
+message pins only when it was submitted at the one physical autoscroll tail;
+reserved reply room remains part of that distance, so any upward reader escape
+must keep the next send at the current reading position. Every pin returns to
+hold until the user manually reaches the bottom again. Every visible user message gets a persistent reply-space
 reservation, even after a short reply finishes or the chat remounts. Leaving or
 returning always preserves the exact visible anchor and never restores
 auto-scroll to a newer tail. New send and lifecycle paths must use the shared
