@@ -1883,7 +1883,7 @@ class InstallTarget:
 
   existing: models.App | None
   mode: str
-  renaming: bool
+  adopting_previous_id: bool
   adopting_trusted_origin: bool
   canonical_manifest_url: str
   force_core_store_update: bool
@@ -2167,7 +2167,7 @@ def _select_install_target(
     db, source_url=source_for_key, manifest_id=manifest_id,
   )
 
-  renaming = False
+  adopting_previous_id = False
   if existing is None:
     # A rename is explicit and source-bound: previous_id is looked up under the
     # same canonical package base, never by a globally reusable slug.
@@ -2183,7 +2183,7 @@ def _select_install_target(
         .first()
       )
       if existing:
-        renaming = True
+        adopting_previous_id = True
 
   if expected_app_id is not None and (
     existing is None or existing.id != expected_app_id
@@ -2192,7 +2192,7 @@ def _select_install_target(
   return InstallTarget(
     existing=existing,
     mode="update" if existing else "install",
-    renaming=renaming,
+    adopting_previous_id=adopting_previous_id,
     adopting_trusted_origin=bool(
       existing is not None and existing.manifest_url is None
     ),
@@ -2328,7 +2328,7 @@ async def _prepare_app_row(
   manifest_id = manifest["id"]
   data_dir = Path(get_settings().data_dir)
   existing = target.existing
-  renaming = target.renaming
+  adopting_previous_id = target.adopting_previous_id
   canonical_manifest_url = target.canonical_manifest_url
 
   if existing:
@@ -2338,41 +2338,49 @@ async def _prepare_app_row(
     app.description = manifest.get("description", "")
     db.flush()
 
-    if renaming and manifest_id != app.slug:
+    if adopting_previous_id:
+      old_slug = app.slug
       old_source_dir = app.source_dir
       target_slug = manifest_id
       target_source_dir = str(data_dir / "apps" / target_slug)
-      moved = False
+      converged = False
       if old_source_dir and Path(old_source_dir).is_dir():
-        async with fs_locks.source_dir_lock(old_source_dir):
-          try:
-            _reject_if_source_dir_taken(
-              db, target_source_dir, exclude_id=app.id,
-            )
-            target_taken = False
-          except HTTPException:
-            target_taken = True
-          if not target_taken and not Path(target_source_dir).exists():
-            _unregister_cron(Path(old_source_dir))
-            os.rename(old_source_dir, target_source_dir)
-            moved = True
-            journal.rollback_actions.append(
-              _reconcile_cron_after_install_rollback
-            )
-            journal.rollback_actions.append(
-              lambda o=old_source_dir, n=target_source_dir:
-                os.rename(n, o)
-                if Path(n).is_dir() and not Path(o).exists()
-                else None
-            )
-      if moved:
+        if old_source_dir == target_source_dir:
+          converged = True
+        else:
+          async with fs_locks.source_dir_lock(old_source_dir):
+            try:
+              _reject_if_source_dir_taken(
+                db, target_source_dir, exclude_id=app.id,
+              )
+              target_taken = False
+            except HTTPException:
+              target_taken = True
+            if not target_taken and not Path(target_source_dir).exists():
+              _unregister_cron(Path(old_source_dir))
+              os.rename(old_source_dir, target_source_dir)
+              converged = True
+              journal.rollback_actions.append(
+                _reconcile_cron_after_install_rollback
+              )
+              journal.rollback_actions.append(
+                lambda o=old_source_dir, n=target_source_dir:
+                  os.rename(n, o)
+                  if Path(n).is_dir() and not Path(o).exists()
+                  else None
+              )
+      if converged:
         app.slug = target_slug
         app.source_dir = target_source_dir
         app.manifest_url = canonical_manifest_url
         db.flush()
       elif old_source_dir and Path(old_source_dir).is_dir():
         warnings.append(
-          f"could not rename slug {app.slug}->{manifest_id}: target in use"
+          f"could not rename slug {old_slug}->{manifest_id}: target in use"
+        )
+      else:
+        warnings.append(
+          f"could not rename slug {old_slug}->{manifest_id}: source missing"
         )
     return app
 
