@@ -257,9 +257,9 @@ Use the exact model string from the composer's `+` picker. Effort levels vary by
 
 ### Debugging the platform runtime
 
-Use the recovery skill's authenticated status, memory, and log recipes instead
-of adding temporary endpoints. It owns when the cheap status view is enough and
-when bounded deeper inspection is justified.
+Use the `platform-maintenance` skill's authenticated status, memory, and log
+recipes instead of adding temporary endpoints. It owns when the cheap status
+view is enough and when bounded deeper inspection is justified.
 
 ### The workspace
 

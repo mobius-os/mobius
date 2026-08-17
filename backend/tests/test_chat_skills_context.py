@@ -304,14 +304,14 @@ def test_core_routes_operational_recipes_to_their_owning_skills():
   repo = Path(__file__).resolve().parents[2]
   core = (repo / "skill" / "core.md").read_text()
   seed_dir = repo / "backend" / "scripts" / "seed-skills"
-  recovery = (seed_dir / "recovery.md").read_text()
+  maintenance = (seed_dir / "platform-maintenance.md").read_text()
   notifications = (seed_dir / "notifications.md").read_text()
 
   assert "/api/debug/status" not in core
   assert '"type":"open_item"' not in core
-  assert "/api/debug/status" in recovery
-  assert "/api/debug/memory" in recovery
-  assert "/api/debug/logs" in recovery
+  assert "/api/debug/status" in maintenance
+  assert "/api/debug/memory" in maintenance
+  assert "/api/debug/logs" in maintenance
   assert '"type":"open_item"' in notifications
   assert "Default `activation` to `background`" in notifications
 
