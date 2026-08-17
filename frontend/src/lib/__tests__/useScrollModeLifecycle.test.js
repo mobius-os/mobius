@@ -256,9 +256,6 @@ test('a no-scroll tail relatch preserves the queued send-time pin decision', () 
 })
 
 test('a focused inline editor keeps one current owner across keyboard and growth races', () => {
-=======
-test('a focused inline editor keeps one current owner across keyboard and growth races', () => {
->>>>>>> 5c050d54 (platform: local edits before reconcile)
   const scrollListeners = new Map()
   const frames = []
   const observers = []
