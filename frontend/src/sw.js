@@ -58,6 +58,7 @@ import {
   withOpaqueFramePublicAssetCors,
   isCacheableAppAssetResponse,
   SHELL_DATA_CACHE,
+  SHELL_DOCUMENT_POLICY_REVISION,
   isImmutableAppAsset,
   isPackagedAppAsset,
   packagedAppAssetCacheKey,
@@ -147,7 +148,7 @@ const outgoingDocumentPolicy = caches.match('/index.html', { ignoreSearch: true 
 async function documentPolicyChanged() {
   const [outgoing, fresh] = await Promise.all([
     outgoingDocumentPolicy,
-    fetch('/index.html', { cache: 'reload', credentials: 'same-origin' })
+    fetch(`/index.html?policy=${SHELL_DOCUMENT_POLICY_REVISION}`, { cache: 'reload', credentials: 'same-origin' })
       .then(response => response.headers.get('content-security-policy') || '')
       .catch(() => ''),
   ])

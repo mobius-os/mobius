@@ -7,6 +7,7 @@ import {
   cachesToDeleteOnLogout,
   ESM_CACHE,
   OFFLINE_APPS_CACHE,
+  SHELL_DOCUMENT_POLICY_REVISION,
   STANDALONE_APPS_CACHE,
   VENDOR_CACHE,
   appCodeCacheKey,
@@ -26,6 +27,13 @@ import {
   supersededVersionKeys,
   withOpaqueFramePublicAssetCors,
 } from '../../sw-cache-policy.js'
+
+test('shell document policy revision is explicit so a policy-only change ships a new worker', () => {
+  // A shell/edge document-policy change with no asset change must still produce
+  // byte-different sw.js so installed clients get a new install event and run
+  // documentPolicyChanged(). This constant is that trigger; bump it per change.
+  assert.equal(SHELL_DOCUMENT_POLICY_REVISION, '2026-08-17-edge-wasm-shell-v1')
+})
 
 test('logout clears owner runtime caches without deleting the installed shell', () => {
   assert.deepEqual(cachesToDeleteOnLogout([

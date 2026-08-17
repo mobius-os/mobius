@@ -19,6 +19,18 @@ export const ESM_CACHE = 'mobius-esm-v2'
 // list-affecting write, the page evicts the corresponding cached GET so a
 // NetworkFirst fallback cannot resurrect the pre-mutation projection.
 export const SHELL_DATA_CACHE = 'mobius-shell-data'
+
+// This value deliberately participates in the built service-worker bytes. Bump
+// it whenever the server- OR edge-owned shell DOCUMENT policy changes WITHOUT an
+// accompanying shell asset change, so installed PWAs discover a byte-different
+// worker; the install-time documentPolicyChanged() comparison (sw.js) then
+// takes over and the rebuilt precache serves the new-policy index.html. Without
+// this, an unchanged sw.js never fires a new install event, so a controlled
+// client keeps its old precached shell even though the origin/edge policy moved.
+// 2026-08-17: the host edge began allowing 'wasm-unsafe-eval' + worker-src on
+// the shell document so on-device speech (News read-aloud) can compile
+// WebAssembly; no shell asset changed, so this revision is the update trigger.
+export const SHELL_DOCUMENT_POLICY_REVISION = '2026-08-17-edge-wasm-shell-v1'
 // Bumped -v2 → -v3 (2026-06-18): a one-time eviction of app-frame entries
 // cached under the pre-fix, un-revved key (`?v=<updated_at>` with NO
 // `-<frameRev>` suffix, because the SW-precached index.html lacked the
