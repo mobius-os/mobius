@@ -2346,7 +2346,7 @@ async def _prepare_app_row(
       converged = False
       if old_source_dir and Path(old_source_dir).is_dir():
         if old_source_dir == target_source_dir:
-          converged = True
+          converged = app.slug == target_slug
         else:
           async with fs_locks.source_dir_lock(old_source_dir):
             try:
