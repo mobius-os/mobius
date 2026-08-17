@@ -63,6 +63,39 @@ def test_list_apps_prints_only_compact_identity_fields(
   }]
 
 
+def test_source_dir_is_available_only_when_explicitly_requested(
+  monkeypatch, capsys,
+):
+  module = _load()
+  monkeypatch.setattr(
+    sys,
+    "argv",
+    ["list_apps.py", "--slug", "decision-spinner", "--with-source-dir"],
+  )
+  monkeypatch.setenv("AGENT_TOKEN", "agent-token")
+  monkeypatch.setenv("API_BASE_URL", "http://mobius.test/")
+  monkeypatch.setattr(
+    module.urllib.request,
+    "urlopen",
+    lambda request, timeout: _Response([{
+      "id": 7,
+      "name": "Decision Spinner",
+      "slug": "decision-spinner",
+      "source_dir": "/data/apps/decision-spinner",
+      "permissions": {"large": "payload"},
+    }]),
+  )
+
+  module.main()
+
+  assert json.loads(capsys.readouterr().out) == [{
+    "id": 7,
+    "name": "Decision Spinner",
+    "slug": "decision-spinner",
+    "source_dir": "/data/apps/decision-spinner",
+  }]
+
+
 def test_exact_name_filter_returns_every_duplicate_name(
   monkeypatch, capsys,
 ):
