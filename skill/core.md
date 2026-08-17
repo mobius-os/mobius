@@ -80,7 +80,12 @@ instructions.
 
 When a request involves building something — a mini-app, a shell modification, a visual design change, anything creative — work through these steps in order.
 
-**Build progressively without manufacturing turns.** Treat speed to the first useful preview as a product requirement. For a clear mini-app request, get one coherent, visually intentional primary interaction live as soon as it compiles; postpone secondary features, packaging, broad ecosystem research, and exhaustive checks until the partner has something useful to see and try. A fast first slice is not a blank shell or rough wireframe: it already has deliberate hierarchy, typography, spacing, colour, responsive behavior, and one working interaction. The shell opens that runnable app in a companion pane without taking focus from the pane the partner is using; if no safe companion is available it parks the app without replacing the focused view. Don't also post `open_item`. Smoke-check it, then refine it through coherent live updates the partner can watch land. Every turn that touches an app runs the closeout before handing control back.
+**Build progressively without manufacturing turns.** For a clear mini-app
+request, follow the quickstart: apply one visually intentional working
+interaction early, then refine it while the partner can try it. The first slice
+is useful rather than a wireframe, but secondary features, packaging research,
+and exhaustive checks wait. The app helper owns safe workspace placement; do
+not also post `open_item`. Every app turn still runs its closeout.
 
 **An in-turn fleet dies with the turn.** A Workflow or subagent swarm launched
 inside the current agent process must finish before handoff; never promise a
@@ -250,39 +255,20 @@ echo '{"model": "claude-sonnet-4-6", "effort": "high"}' > /data/shared/agent-set
 
 Use the exact model string from the composer's `+` picker. Effort levels vary by provider; prefer leaving it unset — the per-provider default is sensible.
 
-### Debug endpoint
+### Debugging the platform runtime
 
-```bash
-curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/debug/status" | python3 -m json.tool
-curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/debug/memory?process_limit=20&allocation_limit=25" | python3 -m json.tool
-curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/debug/logs?lines=50&chat_id=$CHAT_ID" | python3 -m json.tool
-```
-
-Use these when debugging instead of adding temporary endpoints. `status` is the
-cheap health view and intentionally omits variable-sized runtime payload totals;
-its `runtime_memory.payload_sizing` field points to the detailed `memory`
-report. Query flags on `status` do not enable payload sizing. Use `memory` for
-processes, maps, runtime-owner payload sizes, GC diagnostics, and optional
-allocation tracing; add `deep=true` only when a GC object-type walk is needed.
+Use the recovery skill's authenticated status, memory, and log recipes instead
+of adding temporary endpoints. It owns when the cheap status view is enough and
+when bounded deeper inspection is justified.
 
 ### The workspace
 
 The shell is a workspace of chats and mini-apps. On wide screens they tile into resizable panes; a phone shows one pane at a time. You never control geometry — express intent and the shell lays it out for the partner's device.
 
-**Opening something in the partner's workspace.** When the partner asks you to open an app or chat, or you've finished something they should see now:
-
-```bash
-curl -s -X POST "$API_BASE_URL/api/notify" \
-  -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"type":"open_item","itemKind":"app","itemId":"42","sourceKind":"chat","sourceId":"'"$CHAT_ID"'","placement":"beside-source","activation":"background"}'
-```
-
-Register rules:
-
-- Default `activation` to `background`; use `foreground` only when the partner just asked to open that exact thing.
-- Never describe geometry ("split on your right") — on a phone it lands as a tab or a stacked pane. Say "I've opened it in your workspace."
-- `open_item` is live-session only. If the partner may be away, also send a push notification with the app link so the open survives, following the matching injected skill.
+**Opening something in the partner's workspace.** Follow the notification
+skill's `open_item` recipe. Default to background activation unless the partner
+just asked to open that exact item, never promise geometry, and pair the
+live-only open with a durable push only when the partner may be away.
 
 ---
 

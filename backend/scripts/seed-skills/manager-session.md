@@ -121,16 +121,13 @@ general forms are:
 /data/apps/reflection/fork-session.sh <session_id> <cwd> "<interview question>"
 ```
 
-**Time-box every fork.** Pass the Bash tool `timeout: 300000` and set the inner
-shell just below it (`timeout 280 ...`) so the inner limit wins and you capture
-partial output instead of an empty file. **Large codex forks are slow to first
-token** — even a modest codex session can blow past the default 120s wall, so
-budget the higher timeout for any codex fork, not just big ones. After the fork,
-check `[ -s <out> ]`: if it came back **empty, stateless, or junk** (an aged-off
-session resumes with no output; a provider out of credits errors), fall back to
-the raw record — read the chat's `messages` JSON from `/data/db/ultimate.db` (or
-the session jsonl) and synthesise from the last several messages. Forks are a
-convenience; the transcript is always there.
+**Time-box each fork and validate the result.** Keep the outer tool timeout
+above the inner shell timeout: use `170000` ms outside and `timeout 150` for an
+ordinary interview, reserving `300000` ms / `timeout 280` for a genuinely giant
+session. Treat empty, very short, provider-error, or structurally wrong output
+as a failed interview. Fall back to the raw transcript or a bounded messages
+tail and label that reconstruction as your evidence review, not the agent's
+testimony.
 
 **What to ask** (specialise per agent — read what it actually did first):
 

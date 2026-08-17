@@ -68,6 +68,9 @@ _UNMODIFIED_MIGRATIONS = {
     "865dd241a99668b026cd9be90c472cfde562210df51f729b2c25929f6b3bd60a",
     # v15 baked copy: route app work through the base + matching extensions.
     "cba6c0c7dd97384bbe3bfa19e78707bfa272085843bab5102279a937467e5d17",
+    # Pre-reconciliation seed: still scanned provider credential caches and
+    # lagged the checkpoint-ordered live Reflection procedure.
+    "1086688efd4dede48ebc95b12b92fb958280e67896a53e52e02cd5def3aa265f",
   },
   "cron.md": {
     "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
@@ -111,6 +114,19 @@ _UNMODIFIED_MIGRATIONS = {
     "248ea31e13d2d2d84a5acfca13526aa8ebfa3d90e9ee4bf55cfb72d47937f7d1",
     # v20 baked copy: publish the exact generated image, never newest-by-time.
     "29039a6fc5c9281794247eda5d0bbf66e969a1a260e9ed56c69ee6e1cd175f7c",
+    # Pre-direct-result seed: sent Codex through a backing file under the
+    # protected credentials tree instead of returning the tool result.
+    "75271f2a704a6db349e2529d76ddfa505f0ceb1a7f33894a6d4bba23dbd317bb",
+  },
+  "manager-session.md": {
+    # Pre-slimming seed: every interview paid the giant-session timeout and
+    # duplicated Reflection's longer failure explanation.
+    "3a3535b7bfa5d8214a5559567c1e7fb4b7218f404e8a8cf1426455cf46af075d",
+  },
+  "notifications.md": {
+    # Pre-slimming seed: open_item mechanics still lived in core.md, leaving
+    # this policy owner without the executable recipe.
+    "309e5969df6f589cc82c17b450e7596a00bae87ef77ab2923a9b0de061ed146e",
   },
   "building-apps.md": {
     "4126b40d209c422184e0135f611bb9f4197ea280fa27e63cd71c806f8b5ebd79",
@@ -120,6 +136,9 @@ _UNMODIFIED_MIGRATIONS = {
     "a8591f03bd5fb6eb0cfcd811d6d6d4309657f2f4e9e8e11ded4cbefbd77facfd",
     # v20 baked copy: delete by exact id and retain its recovery receipt.
     "5a6bafaa654071c4af5a5c7a201e23e4b0294c392ccb2b9afd7c2b18e17ff3fe",
+    # Pre-slimming seed: duplicated the component catalog's full UI skeleton
+    # inside an advanced runtime guide that is always read with quickstart.
+    "294a4a207a2528245b006877ff486aa79fdf401b738afbf43aaf2b67b3e7eead",
   },
   "building-apps-quickstart.md": {
     "7d8af2664b37a69b88e48c2a28140c15556202c3c7ce30d77816c203d1959fcb",

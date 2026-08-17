@@ -130,6 +130,9 @@ def test_later_boot_migrates_only_unmodified_graph_aware_base_skill(
 def test_controlled_skills_have_fix_forward_migrations():
   module = _load("init_skills")
 
+  assert "1086688efd4dede48ebc95b12b92fb958280e67896a53e52e02cd5def3aa265f" in (
+    module._UNMODIFIED_MIGRATIONS["reflection.md"]
+  )
   assert module._UNMODIFIED_MIGRATIONS["cron.md"] == {
     "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
     "ed100cb496b887a7951adc967e92cda1449c4f8594f7859fbd32762221d24914",
@@ -149,6 +152,13 @@ def test_controlled_skills_have_fix_forward_migrations():
   assert module._UNMODIFIED_MIGRATIONS["images.md"] == {
     "248ea31e13d2d2d84a5acfca13526aa8ebfa3d90e9ee4bf55cfb72d47937f7d1",
     "29039a6fc5c9281794247eda5d0bbf66e969a1a260e9ed56c69ee6e1cd175f7c",
+    "75271f2a704a6db349e2529d76ddfa505f0ceb1a7f33894a6d4bba23dbd317bb",
+  }
+  assert module._UNMODIFIED_MIGRATIONS["manager-session.md"] == {
+    "3a3535b7bfa5d8214a5559567c1e7fb4b7218f404e8a8cf1426455cf46af075d",
+  }
+  assert module._UNMODIFIED_MIGRATIONS["notifications.md"] == {
+    "309e5969df6f589cc82c17b450e7596a00bae87ef77ab2923a9b0de061ed146e",
   }
   assert module._UNMODIFIED_MIGRATIONS["building-apps.md"] == {
     "4126b40d209c422184e0135f611bb9f4197ea280fa27e63cd71c806f8b5ebd79",
@@ -156,6 +166,7 @@ def test_controlled_skills_have_fix_forward_migrations():
     "563dcd7bfa1ff7cbad074d98462eb9755a010a15bf340c7f594fc7f6825a6a86",
     "a8591f03bd5fb6eb0cfcd811d6d6d4309657f2f4e9e8e11ded4cbefbd77facfd",
     "5a6bafaa654071c4af5a5c7a201e23e4b0294c392ccb2b9afd7c2b18e17ff3fe",
+    "294a4a207a2528245b006877ff486aa79fdf401b738afbf43aaf2b67b3e7eead",
   }
   assert module._UNMODIFIED_MIGRATIONS["building-apps-quickstart.md"] == {
     "7d8af2664b37a69b88e48c2a28140c15556202c3c7ce30d77816c203d1959fcb",

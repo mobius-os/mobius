@@ -1090,10 +1090,11 @@ def test_seed_skill_reads_deleted_chats_without_reopening_them():
   seed = (
     Path(dr.__file__).resolve().parent / "seed-skills" / "reflection.md"
   ).read_text(encoding="utf-8")
-  assert "deleted_at >= datetime('now','-7 days')" in seed
-  assert "deleted_at is null and session_id is not null" in seed
+  assert "inputs/chats.md" in seed
+  assert "Treat a `[deleted]` row as read-only" in seed
   assert "never fork it, recover it, open it" in seed
   assert "put its id/link in the brief" in seed
+  assert "deleted_at >= datetime('now','-7 days')" not in seed
 
 
 def test_seed_skill_aligns_question_engagement_and_owns_brief_style():
