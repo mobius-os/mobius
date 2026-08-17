@@ -163,10 +163,12 @@ def test_controlled_skills_have_fix_forward_migrations():
     "85a4b5ce5b47c81fa53bec90d530adfe433c0d2f7f31363427b6c792bd332e05",
     "02fda2ea04f3c0ce808ef0db4b1fe4e893924bd019a5bf102a46749ef9142510",
     "68c84158a9255ab53686968ed4ec8f594c460483bec0e90dcfa472682c1d9b70",
+    "c8d1dada4ba2a4ad29da159edf654cf99175a372569f753100398a8a307bc7d6",
   }
   assert module._UNMODIFIED_MIGRATIONS["resolving-app-git.md"] == {
     "6d462f1711891a182c26e212a1ec8fc922eeb02faee45e70ab9b2becfba24f5a",
     "4911c6db2d3d47eb7c3c206b53ca9be9459619f149a78c06c02711422b941127",
+    "6bbfe07a575734c4bc0b1d84e40dbaab9d9689671825e7a42383b4f2e673112a",
   }
   assert module._UNMODIFIED_MIGRATIONS["app-component-shapes.md"] == {
     "0320609ff924a0954c20d5e5db91ed3681d421d76f6804b24552eb6e8fa5eb31",
@@ -177,6 +179,11 @@ def test_controlled_skills_have_fix_forward_migrations():
     "a0648921b9c9ea2423e8abd52aa57e71e7bebfa1736073fcf3bfcaec3749ad19",
     "5db160b2d796d54ec320119cbdbbb2860a78cfd703cfe37667626d23abc8e4d9",
     "bf58243aeb1779eb0a94d5404a99c2132e55d60542cbb555fc50bc5cf65349fe",
+    "2b14caf13f4cc7c76868f9566f2c0789f6e9b8c0fefac897e1d9ebda11dff8bf",
+  }
+  assert module._UNMODIFIED_MIGRATIONS["theming.md"] == {
+    "7fb5ed4c1e29e6822b56394c089984a1a7e5da1bdf552a21ff0cbdc6413bd998",
+    "1d655ec09d7f25c831e105411d59b8428b07defc6f58416f8290a8c1b08ca594",
   }
   assert "recovery.md" not in module._UNMODIFIED_MIGRATIONS
   assert (
