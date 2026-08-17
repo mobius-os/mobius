@@ -402,6 +402,15 @@ def serialize_delegation(
     "ended_at": run.ended_at.isoformat() if run and run.ended_at else None,
     "created_at": row.created_at.isoformat() if row.created_at else None,
     "cancelled_at": row.cancelled_at.isoformat() if row.cancelled_at else None,
+    "usage": ({
+      "input_tokens": run.input_tokens,
+      "output_tokens": run.output_tokens,
+      "cache_read_input_tokens": run.cache_read_input_tokens,
+      "cache_creation_input_tokens": run.cache_creation_input_tokens,
+      "reasoning_output_tokens": run.reasoning_output_tokens,
+      "total_tokens": run.total_tokens,
+      "cost_usd": run.cost_usd,
+    } if run is not None else None),
     "result": result,
     "result_truncated": False,
   }

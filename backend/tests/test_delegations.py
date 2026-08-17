@@ -146,6 +146,55 @@ def test_app_token_can_observe_own_work_but_cannot_submit_spend(
   assert rejected.status_code == 403
 
 
+def test_delegation_listing_exposes_run_usage_without_loading_result(
+  client, owner_token, db, monkeypatch,
+):
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  app_id = create_local_app(client, owner_auth, name="Subagents")['id']
+  app_token = client.post(
+    "/api/auth/app-token", json={"app_id": app_id}, headers=owner_auth,
+  ).json()["token"]
+  parent_chat_id = _parent_with_run(client, owner_token, db)
+
+  async def fake_start(**_kwargs):
+    return True
+
+  monkeypatch.setattr(
+    "app.routes.delegations.start_programmatic_chat_turn", fake_start,
+  )
+  created = client.post("/api/delegations", json={
+    "app_id": app_id,
+    "parent_chat_id": parent_chat_id,
+    "task_key": "usage-visible",
+    "prompt": "Review only.",
+    "provider": "codex",
+    "scope": "read",
+  }, headers=owner_auth).json()
+  db.add(models.ChatRun(
+    id="usage-run", root_run_id="usage-run",
+    chat_id=created["child_chat_id"], status="completed", provider="codex",
+    input_tokens=1200, output_tokens=300, cache_read_input_tokens=800,
+    reasoning_output_tokens=75, total_tokens=1575, cost_usd=0.42,
+  ))
+  db.commit()
+
+  listing = client.get(
+    "/api/delegations", headers={"Authorization": f"Bearer {app_token}"},
+  )
+  assert listing.status_code == 200, listing.text
+  row = listing.json()["items"][0]
+  assert row["result"] == ""
+  assert row["usage"] == {
+    "input_tokens": 1200,
+    "output_tokens": 300,
+    "cache_read_input_tokens": 800,
+    "cache_creation_input_tokens": None,
+    "reasoning_output_tokens": 75,
+    "total_tokens": 1575,
+    "cost_usd": 0.42,
+  }
+
+
 def test_child_policy_is_integrity_checked_and_write_loss_needs_review(db):
   app = models.App(
     slug="test-delegations-116",
