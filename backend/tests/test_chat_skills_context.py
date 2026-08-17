@@ -170,6 +170,19 @@ def test_core_prompt_requires_approval_before_changing_guarded_invariants():
   assert "preserves the same contract does not require escalation" in normalized
 
 
+def test_core_prompt_distinguishes_durable_delegation_and_owner_led_contribution():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
+  normalized = " ".join(core.split())
+
+  assert "An in-turn fleet dies with the turn" in normalized
+  assert "durable background delegation may outlive the turn" in normalized
+  assert "installed capability explicitly owns that lifecycle" in normalized
+  assert "Contribution preparation is owner-initiated" in normalized
+  assert "leave local changes local without adding an approval card" in normalized
+  assert "offer once through the clarifying-question tool" not in core
+
+
 def test_restart_guidance_requires_activation_proof_and_fresh_approval():
   repo = Path(__file__).resolve().parents[2]
   core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
@@ -265,6 +278,26 @@ def test_visual_testing_selector_guidance_requires_observed_evidence():
   assert "an accessible name, not evidence" in visual
   assert 'button[aria-label="..."]' not in visual
   assert '[data-testid="..."]' not in visual
+  assert "**Served before spoken.**" in visual
+  assert "## Close the browser session when you are done" in visual
+
+
+def test_seeded_guidance_uses_current_preview_recovery_and_resolver_contracts():
+  repo = Path(__file__).resolve().parents[2]
+  seed_dir = repo / "backend" / "scripts" / "seed-skills"
+  quickstart = (seed_dir / "building-apps-quickstart.md").read_text()
+  resolving = (seed_dir / "resolving-app-git.md").read_text()
+  theming = (seed_dir / "theming.md").read_text()
+  reflection = (seed_dir / "reflection.md").read_text()
+
+  assert "preview_app.sh" in quickstart
+  assert "--review" in resolving
+  assert "--finalize --reviewed-tree" in resolving
+  assert "deployment's external Recovery action" in theming
+  assert "`/recover` →" not in theming
+  assert "`/recover/chat`" not in theming
+  assert "Reconcile the active instruction with its shipped owner" in reflection
+  assert "Do not turn this trigger into an unconditional nightly diff" in reflection
 
 
 def test_image_skill_publishes_exact_generated_path():
