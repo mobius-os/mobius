@@ -456,6 +456,8 @@ test('a stream carrying the same question may expose newer parallel output', () 
     hideMessage: true,
     suppressStream: false,
   })
+})
+
 test('saved final prose wins over a detailed stale replay after compact activity grouping', () => {
   const msg = {
     role: 'assistant',

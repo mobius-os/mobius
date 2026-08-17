@@ -306,6 +306,8 @@ export function chooseActiveAssistantSurface(msg, items) {
   ))
   if (streamMissesDurableQuestion) {
     return { hideMessage: false, suppressStream: true }
+  }
+
   // Compact durable messages deliberately collapse thinking/tool runs into
   // activity blocks, so their block arrays cannot prove ordinary prefix
   // coverage against the detailed replay stream. Visible assistant prose is

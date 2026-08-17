@@ -138,7 +138,6 @@ test('a parked owner question uses compact history until its answer resumes the 
   }), false)
 })
 
-test('only a cold stream prefix missing the durable question is retired', () => {
 test('a known server run settling recovers a live stream that missed its terminal event', () => {
   assert.equal(shouldRecoverSettledRuntime({
     serverWasRunning: true,
@@ -170,7 +169,7 @@ test('a known server run settling recovers a live stream that missed its termina
   }), false, 'the explicit stop flow owns its own settlement')
 })
 
-test('a runtime question marker requires its durable card in the transcript', () => {
+test('only a cold stream prefix missing the durable question is retired', () => {
   const pendingQuestionId = 'question-1'
   const messages = [{
     role: 'assistant',

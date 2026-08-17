@@ -149,6 +149,8 @@ export function shouldRetireRestoredQuestionSnapshot({
     && item.question_id === pendingQuestionId
     && !item.answers
   ))
+}
+
 /**
  * A durable running -> idle transition settles a live transport that missed
  * its terminal event. Requiring the prior server-running observation avoids
