@@ -648,6 +648,28 @@ def _review_status_problem(
   }
 
 
+def _recent_contribution_record_paths(
+  contribution_dir: Path,
+  *,
+  limit: int = 500,
+) -> list[Path]:
+  """Return the bounded ledger window most likely to contain active work.
+
+  Contribution ids are descriptive, not chronological. Selecting a bounded
+  window by filename can split a freshly prepared stack merely because one
+  layer sorts after the cutoff. Modification time keeps independently named
+  records from the same recent review in the same inspection window.
+  """
+  paths_with_mtime = []
+  for path in contribution_dir.glob("*.json"):
+    try:
+      paths_with_mtime.append((path.stat().st_mtime_ns, path.name, path))
+    except OSError:
+      continue
+  paths_with_mtime.sort(reverse=True)
+  return [path for _mtime, _name, path in paths_with_mtime[:limit]]
+
+
 def _inspect_prepared_review(
   record: dict,
   diff_path: Path,
@@ -731,7 +753,7 @@ async def contribution_review_status(
   async with fs_locks.app_storage_lock(app_id):
     records = []
     if contribution_dir.exists():
-      for path in sorted(contribution_dir.glob("*.json"))[:500]:
+      for path in _recent_contribution_record_paths(contribution_dir):
         record = _read_record_tolerant(path)
         if record is not None and record.get("id"):
           records.append(record)
@@ -983,7 +1005,7 @@ async def refresh_pre_pr_checks(
   async with fs_locks.app_storage_lock(app_id):
     candidates = []
     if contribution_dir.exists():
-      for path in sorted(contribution_dir.glob("*.json"))[:500]:
+      for path in _recent_contribution_record_paths(contribution_dir):
         record = _read_record_tolerant(path)
         if (
           record is not None
@@ -1164,16 +1186,7 @@ async def contributions_for_chat(
   async with fs_locks.app_storage_lock(app_id):
     records = []
     if contribution_dir.exists():
-      # Prefer the most recently changed ledger entries. Record ids are not
-      # chronological, so lexicographic truncation can permanently hide a newly
-      # staged review after a long-lived instance crosses the scan cap.
-      paths_with_mtime = []
-      for path in contribution_dir.glob("*.json"):
-        try:
-          paths_with_mtime.append((path.stat().st_mtime_ns, path))
-        except OSError:
-          continue
-      for _mtime, path in sorted(paths_with_mtime, reverse=True)[:500]:
+      for path in _recent_contribution_record_paths(contribution_dir):
         record = _read_record_tolerant(path)
         if (
           record is not None

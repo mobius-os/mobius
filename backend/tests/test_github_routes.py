@@ -1596,6 +1596,85 @@ def test_review_status_skips_oversized_records_without_loading_them(
   assert response.json()["records"] == []
 
 
+def test_review_status_keeps_recent_stack_together_past_filename_scan_cap(
+  client, owner_token, monkeypatch,
+):
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  contribution_dir = (
+    Path(get_settings().data_dir) / "apps" / str(app_id) / "contributions"
+  )
+  contribution_dir.mkdir(parents=True, exist_ok=True)
+  old_time = time.time() - 3600
+  for index in range(499):
+    path = contribution_dir / f"middle-{index:03d}.json"
+    path.write_text(json.dumps({
+      "id": f"middle-{index:03d}",
+      "type": "pr",
+      "status": "merged",
+    }))
+    os.utime(path, (old_time, old_time))
+
+  stack_id = "recent-stack"
+  parent_id = "aaa-recent-parent"
+  child_id = "zzz-recent-child"
+  parent_branch = f"stack/{stack_id}/01-parent"
+  child_branch = f"stack/{stack_id}/02-child"
+  parent_head = "b" * 40
+  repo_path = str(Path(get_settings().data_dir) / "contrib" / "unused")
+  common = {"type": "pr", "repo": "mobius-os/mobius", "status": "prepared"}
+  parent = {
+    **common,
+    "id": parent_id,
+    "branch": parent_branch,
+    "plan": {
+      "action": "pr", "repo": "mobius-os/mobius",
+      "repo_path": repo_path, "branch": parent_branch,
+      "base_sha": "a" * 40, "head_sha": parent_head,
+      "stack": {
+        "id": stack_id, "position": 1, "total": 2,
+        "parent_record_id": "", "base_branch": "main",
+      },
+    },
+  }
+  child = {
+    **common,
+    "id": child_id,
+    "branch": child_branch,
+    "plan": {
+      "action": "pr", "repo": "mobius-os/mobius",
+      "repo_path": repo_path, "branch": child_branch,
+      "base_sha": parent_head, "head_sha": "c" * 40,
+      "stack": {
+        "id": stack_id, "position": 2, "total": 2,
+        "parent_record_id": parent_id, "base_branch": parent_branch,
+      },
+    },
+  }
+  _write_contribution(app_id, parent_id, parent)
+  _write_contribution(app_id, child_id, child)
+
+  monkeypatch.setattr(
+    github_routes,
+    "_inspect_prepared_review",
+    lambda record, _diff_path, _github_state: {
+      "id": record["id"], "state": "ready", "code": "ready",
+      "message": "Still matches the exact source you reviewed.",
+    },
+  )
+  response = client.get(
+    f"/api/github/contributions/{app_id}/review-status",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["ready"] == 2
+  assert {item["id"] for item in response.json()["records"]} == {
+    parent_id, child_id,
+  }
+
+
 def test_review_status_catches_noncanonical_stored_diff(
   client, owner_token,
 ):
