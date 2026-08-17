@@ -9,6 +9,10 @@ const WORKER_SOURCE = readFileSync(
 const BADGE_PNG = readFileSync(
   new URL('../../../public/icons/notification-badge.png', import.meta.url),
 )
+const BADGE_SVG = readFileSync(
+  new URL('../../../public/icons/notification-badge.svg', import.meta.url),
+  'utf8',
+)
 
 test('push worker uses a dedicated transparent 96px status-bar badge', () => {
   assert.match(
@@ -24,4 +28,9 @@ test('push worker uses a dedicated transparent 96px status-bar badge', () => {
   assert.equal(BADGE_PNG.readUInt32BE(16), 96)
   assert.equal(BADGE_PNG.readUInt32BE(20), 96)
   assert.equal(BADGE_PNG[25], 6, 'badge PNG must retain its RGBA transparency')
+  assert.match(
+    BADGE_SVG,
+    /viewBox="0\.00 0\.00 96\.00 96\.00"/,
+    'the owner-supplied vector remains the editable 96px badge master',
+  )
 })
