@@ -27,6 +27,8 @@ from app import app_git
 from app.config import get_settings
 
 _GIT_TIMEOUT = 8
+_DIFF_PREVIEW_BYTES = 800_000
+_EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # Filenames and numstat counts are safe metadata (never source contents). Keep
 # a generous ceiling so Contribute can offer a truthful "Show all files" for
 # normal projects while still bounding pathological repositories.
@@ -440,6 +442,121 @@ def _working_summary(repo: Path) -> dict[str, Any]:
     "merge_active": merge_active,
     "paths": paths,
     "truncated": files > len(paths),
+  }
+
+
+def _bounded_diff(
+  repo: Path, *args: str, limit: int = _DIFF_PREVIEW_BYTES,
+) -> tuple[bytes, bool]:
+  """Return bounded Git diff bytes without buffering an unbounded patch."""
+  command = [
+    "git", "-C", str(repo), "diff", "--no-ext-diff", "--no-color",
+    "--binary", "--full-index", "--no-renames",
+    "--src-prefix=a/", "--dst-prefix=b/", *args,
+  ]
+  try:
+    process = subprocess.Popen(
+      command,
+      stdout=subprocess.PIPE,
+      stderr=subprocess.DEVNULL,
+      env=_git_env(repo),
+    )
+  except OSError:
+    return b"", False
+  assert process.stdout is not None
+  try:
+    output = process.stdout.read(limit + 1)
+    truncated = len(output) > limit
+    if truncated:
+      output = output[:limit]
+      process.terminate()
+    try:
+      process.wait(timeout=_GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+      process.kill()
+      process.wait()
+      truncated = True
+    return output, truncated
+  finally:
+    process.stdout.close()
+
+
+def _untracked_paths(repo: Path) -> list[str]:
+  proc = _git(
+    repo, "ls-files", "--others", "--exclude-standard", "-z", "--",
+  )
+  if proc.returncode != 0:
+    return []
+  return [path for path in proc.stdout.split("\0") if path]
+
+
+def build_project_diff(
+  repo: Path,
+  project: dict[str, Any],
+  *,
+  expected_head: str,
+  expected_comparison: str | None,
+) -> dict[str, Any]:
+  """Build one bounded working-tree preview for an inspected project.
+
+  The project key chooses the repository at the route boundary; callers never
+  provide a path or ref. ``expected_head`` and ``expected_comparison`` bind the
+  preview to both accepted endpoints from the source-map row, while ordinary
+  working edits are intentionally read at preview time. Ignored files stay
+  excluded by Git's own repository policy.
+  """
+  head = project.get("head_sha")
+  if not isinstance(head, str) or not head:
+    raise ValueError("Source is not available for diff review.")
+  comparison_ref = project.get("comparison_ref") or project.get("base_ref")
+  comparison_sha = project.get("comparison_sha") or project.get("base_sha")
+  if head != expected_head or comparison_sha != expected_comparison:
+    raise RuntimeError("source_snapshot_changed")
+  left = comparison_ref if isinstance(comparison_ref, str) and comparison_ref else _EMPTY_TREE_SHA
+
+  managed_paths: set[str] = set()
+  if project.get("kind") == "app":
+    # Installed app trees deliberately carry installer adaptations that are
+    # useful for runtime but not owner-authored review. Recompute the complete
+    # managed set here rather than trusting the status response's capped path
+    # preview; one explicit diff open can afford the bounded extra inventory.
+    _summary, managed_paths = _diff_inventory(
+      repo, left, "HEAD", classify_install=True,
+    )
+    managed_paths.add(".gitignore")
+  pathspec = ["."] + [
+    f":(exclude,literal){path}" for path in sorted(managed_paths)
+  ]
+
+  patch, truncated = _bounded_diff(
+    repo, left, "--", *pathspec, limit=_DIFF_PREVIEW_BYTES,
+  )
+  remaining = max(0, _DIFF_PREVIEW_BYTES - len(patch))
+  for path in _untracked_paths(repo):
+    if path in managed_paths:
+      continue
+    if remaining <= 0:
+      truncated = True
+      break
+    addition, addition_truncated = _bounded_diff(
+      repo, "--no-index", "--", "/dev/null", path, limit=remaining,
+    )
+    if patch and addition and not patch.endswith(b"\n"):
+      patch += b"\n"
+      remaining -= 1
+    patch += addition
+    remaining = max(0, _DIFF_PREVIEW_BYTES - len(patch))
+    truncated = truncated or addition_truncated
+    if addition_truncated:
+      break
+
+  return {
+    "schema": 1,
+    "project": project.get("key"),
+    "head_sha": head,
+    "comparison_sha": comparison_sha,
+    "diff": patch.decode("utf-8", errors="replace"),
+    "diff_truncated": truncated,
   }
 
 

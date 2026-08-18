@@ -813,8 +813,9 @@ def get_owner_or_app_with_github_access(
   """Owner JWT, OR an app-scoped JWT whose App row has github_access=true.
 
   This is the GitHub data grant: the GET-only REST proxy, mutation-rejecting
-  GraphQL proxy, sanitized local source status, and Contribute's narrow reviewed
-  submit endpoints. Credential management is a separate github_connect grant.
+  GraphQL proxy, sanitized local source status, project-bound bounded source
+  previews, and Contribute's narrow reviewed submit endpoints. Credential
+  management is a separate github_connect grant.
   Neither capability can exfiltrate the stored token (INV1).
 
   Permission is read from the App row at request time (not baked into

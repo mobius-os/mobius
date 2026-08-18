@@ -874,6 +874,77 @@ def test_source_status_requires_github_access_for_app_tokens(
   assert allowed.status_code == 200, allowed.text
 
 
+def test_source_diff_is_project_bound_bounded_and_stale_safe(
+  client, owner_token,
+):
+  from app import models
+  from app.database import SessionLocal
+
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  session = SessionLocal()
+  try:
+    row = session.query(models.App).filter(models.App.id == app_id).one()
+    source = Path(row.source_dir)
+  finally:
+    session.close()
+  head = subprocess.run(
+    ["git", "-C", str(source), "rev-parse", "HEAD"],
+    check=True, capture_output=True, text=True,
+  ).stdout.strip()
+  comparison = subprocess.run(
+    ["git", "-C", str(source), "rev-parse", "upstream"],
+    check=True, capture_output=True, text=True,
+  ).stdout.strip()
+  (source / "new-source.js").write_text(
+    "export const reviewed = true\n", encoding="utf-8",
+  )
+  headers = {"Authorization": f"Bearer {app_token}"}
+
+  response = client.get(
+    "/api/github/source-diff",
+    params={
+      "project": f"app:{app_id}",
+      "head": head,
+      "comparison": comparison,
+    },
+    headers=headers,
+  )
+
+  assert response.status_code == 200, response.text
+  body = response.json()
+  assert body["project"] == f"app:{app_id}"
+  assert body["head_sha"] == head
+  assert "diff --git a/new-source.js b/new-source.js" in body["diff"]
+  assert "+export const reviewed = true" in body["diff"]
+  assert str(source) not in response.text
+
+  stale = client.get(
+    "/api/github/source-diff",
+    params={
+      "project": f"app:{app_id}",
+      "head": "0" * 40,
+      "comparison": comparison,
+    },
+    headers=headers,
+  )
+  assert stale.status_code == 409
+  assert stale.json()["detail"]["code"] == "source_snapshot_changed"
+
+
+def test_source_diff_requires_github_access_for_app_tokens(
+  client, owner_token,
+):
+  _, denied_token = _app_token(client, owner_token, github_access=False)
+  denied = client.get(
+    "/api/github/source-diff",
+    params={"project": "platform", "head": "0" * 40},
+    headers={"Authorization": f"Bearer {denied_token}"},
+  )
+  assert denied.status_code == 403
+
+
 def test_source_status_projects_local_share_manifest_identity(
   client, owner_token, auth, monkeypatch,
 ):

@@ -12,6 +12,7 @@ import FileDiffList, {
   splitPath,
 } from '../FileDiffList.jsx'
 import DiffView from '../DiffView.jsx'
+import UnifiedDiff from '../UnifiedDiff.jsx'
 import {
   DIFF_VIEWER_STYLES,
   ensureDiffViewerStyles,
@@ -26,6 +27,7 @@ test('canonical sources are flat, self-contained, and have no CSS imports', () =
   assert.deepEqual(sourceNames, [
     'DiffView.jsx',
     'FileDiffList.jsx',
+    'UnifiedDiff.jsx',
     'parseUnifiedDiff.js',
     'styles.js',
   ])
@@ -52,6 +54,23 @@ test('canonical sources are flat, self-contained, and have no CSS imports', () =
       `${name} has a non-flat sibling import`,
     )
   }
+})
+
+test('UnifiedDiff owns raw patch parsing for list-based callers', () => {
+  const html = renderToStaticMarkup(createElement(UnifiedDiff, {
+    diff: [
+      'diff --git a/example.js b/example.js',
+      '--- a/example.js',
+      '+++ b/example.js',
+      '@@ -1 +1 @@',
+      '-before',
+      '+after',
+    ].join('\n'),
+  }))
+
+  assert.match(html, />example\.js</)
+  assert.match(html, /aria-expanded="false"/)
+  assert.match(html, /aria-label="1 additions, 1 deletions"/)
 })
 
 test('splitPath and bidi anchoring preserve leading-neutral directories', () => {
