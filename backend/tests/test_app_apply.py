@@ -525,6 +525,64 @@ def test_store_local_apply_preserves_reviewed_manifest_authority(
   assert app_git._run(source, "status", "--porcelain").stdout == ""
 
 
+def test_store_local_apply_accepts_installer_managed_tree_without_manifest(
+  client, auth, db,
+):
+  """Installed app repos intentionally exclude the reviewed mobius.json."""
+  source = Path(get_settings().data_dir) / "apps" / "store-demo"
+  source.mkdir(parents=True)
+  (source / "index.jsx").write_text(
+    "export default function App() { return <div>installed</div> }\n"
+  )
+  app_git.ensure_repo(source)
+  app_git.commit_local(source, "install source")
+  installed_head = app_git.head_sha(source, app_git.LOCAL_BRANCH)
+  row = models.App(
+    name="Reviewed name",
+    description="Reviewed description",
+    jsx_source=(source / "index.jsx").read_text(),
+    compiled_path="",
+    source_dir=str(source),
+    source_commit=installed_head,
+    slug="store-demo",
+    manifest_url="https://store.example/store-demo/mobius.json",
+    offline_capable=True,
+    capability_contract={"schema": 2, "reviewed": "store"},
+  )
+  db.add(row)
+  db.commit()
+  app_id = row.id
+  (source / "index.jsx").write_text(
+    "export default function App() { return <div>local edit</div> }\n"
+  )
+
+  updated = _apply(client, auth, source)
+
+  assert updated.status_code == 200, updated.text
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  assert "local edit" in row.jsx_source
+  assert row.source_commit != installed_head
+  assert row.name == "Reviewed name"
+  assert row.capability_contract == {"schema": 2, "reviewed": "store"}
+  assert "mobius.json" not in app_git.read_ref_tree(
+    source, app_git.LOCAL_BRANCH,
+  )
+  assert app_git._run(source, "status", "--porcelain").stdout == ""
+
+
+def test_local_apply_without_manifest_remains_invalid(client, auth):
+  source = Path(get_settings().data_dir) / "apps" / "local-no-manifest"
+  source.mkdir(parents=True)
+  (source / "index.jsx").write_text(
+    "export default function App() { return <div>local</div> }\n"
+  )
+
+  failed = _apply(client, auth, source)
+
+  assert failed.status_code == 422
+  assert failed.json()["detail"]["code"] == "manifest_missing"
+
+
 def test_legacy_inline_source_mutation_routes_are_retired(client, auth):
   source = _source()
 
