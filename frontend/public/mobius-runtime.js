@@ -3738,6 +3738,7 @@ function makeImmersive({ appId } = {}) {
 //#region src/runtime/index.js
 let _online = typeof navigator !== "undefined" ? navigator.onLine : true;
 const _onlineListeners = /* @__PURE__ */ new Set();
+let _probedVerdictReceived = false;
 function _setOnline(next) {
 	if (next === _online) return;
 	_online = next;
@@ -3745,15 +3746,22 @@ function _setOnline(next) {
 		cb(next);
 	} catch (e) {}
 }
+function _seedOnline(next) {
+	if (_probedVerdictReceived) return;
+	_setOnline(next);
+}
 if (typeof window !== "undefined") {
 	window.addEventListener("message", (e) => {
 		if (e.origin !== window.location.origin) return;
 		const msg = e.data;
 		if (!msg || typeof msg !== "object") return;
-		if (msg.type === "moebius:online-status" && typeof msg.online === "boolean") _setOnline(msg.online);
+		if (msg.type === "moebius:online-status" && typeof msg.online === "boolean") {
+			_probedVerdictReceived = true;
+			_setOnline(msg.online);
+		}
 	});
-	window.addEventListener("online", () => _setOnline(true));
-	window.addEventListener("offline", () => _setOnline(false));
+	window.addEventListener("online", () => _seedOnline(true));
+	window.addEventListener("offline", () => _seedOnline(false));
 }
 let _runtimeContext = null;
 const runtimeFeatures = Object.freeze({ idleDocument: true });

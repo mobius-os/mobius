@@ -102,6 +102,13 @@ export * from './immersive.js'
 // ─────────────────────────────────────────────────────────────────────────────
 let _online = typeof navigator !== 'undefined' ? navigator.onLine : true
 const _onlineListeners = new Set()
+// After AppCanvas posts its first probed verdict (on iframe load, then on every
+// change) the /api/health probe is the SOLE authority for connectivity. The raw
+// navigator online/offline events are only a pre-probe seed: navigator.onLine
+// reads 'true' on captive portals and dead LANs, so letting it keep driving
+// _online after a probe verdict has landed would let a false 'online' override a
+// correct offline verdict (and the reverse) — the two drivers silently contradict.
+let _probedVerdictReceived = false
 
 function _setOnline(next) {
   if (next === _online) return
@@ -111,6 +118,12 @@ function _setOnline(next) {
   }
 }
 
+// Seed connectivity from raw browser events ONLY until the first probed verdict.
+function _seedOnline(next) {
+  if (_probedVerdictReceived) return
+  _setOnline(next)
+}
+
 // Listen for the probed verdict from AppCanvas.
 if (typeof window !== 'undefined') {
   window.addEventListener('message', (e) => {
@@ -118,12 +131,13 @@ if (typeof window !== 'undefined') {
     const msg = e.data
     if (!msg || typeof msg !== 'object') return
     if (msg.type === 'moebius:online-status' && typeof msg.online === 'boolean') {
+      _probedVerdictReceived = true
       _setOnline(msg.online)
     }
   })
-  // Keep the seed roughly current before AppCanvas's first probed verdict.
-  window.addEventListener('online', () => _setOnline(true))
-  window.addEventListener('offline', () => _setOnline(false))
+  // Pre-probe seed only (see _seedOnline): inert once a probed verdict lands.
+  window.addEventListener('online', () => _seedOnline(true))
+  window.addEventListener('offline', () => _seedOnline(false))
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
