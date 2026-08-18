@@ -667,17 +667,10 @@ def _tool_completed_events(item: Any, sdk: dict[str, Any]) -> list[dict[str, Any
     return events
 
   if isinstance(item, sdk["FileChangeThreadItem"]):
-    lines: list[str] = []
-    for change in item.changes:
-      change_dict = _model_dump(change) or {}
-      kind = change_dict.get("kind", "?")
-      path = change_dict.get("path", "")
-      line = f"{kind} {path}".strip()
-      if line:
-        lines.append(line)
     events: list[dict[str, Any]] = []
-    if lines:
-      events.append({"type": "tool_output", "content": "\n".join(lines)})
+    summary = _file_change_patch_summary(item.changes)
+    if summary:
+      events.append({"type": "tool_output", "content": summary})
     events.append({"type": "tool_end"})
     return events
 
@@ -972,13 +965,23 @@ def _observe_skill_reads(
 
 
 def _file_change_patch_summary(changes: list[Any]) -> str:
-  """Summarizes one file-change patch update as `kind path` lines."""
+  """Summarize file changes without exposing provider model reprs."""
   lines: list[str] = []
   for change in changes:
     change_dict = _model_dump(change) or {}
-    kind = change_dict.get("kind", "?")
+    raw_kind = change_dict.get("kind")
+    kind = raw_kind if isinstance(raw_kind, dict) else {}
+    kind_type = str(kind.get("type") or "update")
     path = change_dict.get("path", "")
-    line = f"{kind} {path}".strip()
+    move_path = kind.get("move_path")
+    if kind_type == "add":
+      line = f"Added {path}".strip()
+    elif kind_type == "delete":
+      line = f"Deleted {path}".strip()
+    elif isinstance(move_path, str) and move_path:
+      line = f"Moved {path} → {move_path}".strip()
+    else:
+      line = f"Updated {path}".strip()
     if line:
       lines.append(line)
   return "\n".join(lines)
