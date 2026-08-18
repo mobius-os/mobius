@@ -105,9 +105,9 @@ export default function Drawer({
   // active across the whole app). Defaults to an empty Set so the
   // drawer renders cleanly if no parent supplies the prop.
   streamingChatIds,
-  // Set of chat ids parked on a question that needs the owner's answer.
-  // This state takes visual precedence over streaming because the agent
-  // cannot make progress until the owner acts.
+  // Set of chat ids with an interaction waiting on the owner. This state takes
+  // visual precedence over streaming because the agent cannot make progress
+  // until the owner acts.
   ownerInputChatIds,
   // Set of chat ids whose latest background run finished while the
   // user was elsewhere. Rendered as a green attention dot, distinct by

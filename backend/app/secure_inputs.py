@@ -236,10 +236,6 @@ def _publish(request: SecureInputRequest, event_type: str) -> None:
     chat_event_published = True
   if event_type == "secure_input_request" and not chat_event_published:
     raise RuntimeError("This chat is not running.")
-  publish_owner_input_changed(
-    request.chat_id,
-    "secure_input" if request.status == "pending" else None,
-  )
 
 
 def _clear_values(request: SecureInputRequest) -> None:
@@ -256,12 +252,15 @@ def _settle(
 ) -> None:
   if request.status in {"completed", "failed", "cancelled", "expired"}:
     return
+  was_waiting_for_owner = request.status == "pending"
   _clear_values(request)
   request.status = status
   request.result = result
   request.settled_at = time.monotonic()
   request.event.set()
   _publish(request, "secure_input_settled")
+  if was_waiting_for_owner:
+    publish_owner_input_changed(request.chat_id, None)
 
 
 def _cleanup() -> None:
@@ -346,6 +345,7 @@ def publish_request(request: SecureInputRequest) -> None:
     raise ValueError("Secure input request is no longer open.")
   try:
     _publish(request, "secure_input_request")
+    publish_owner_input_changed(request.chat_id, "secure_input")
   except Exception:
     # No value has been submitted yet. Remove an unpresented request so a
     # failed/racing publish cannot strand the chat behind an invisible card.
@@ -371,6 +371,7 @@ def fill_request(request: SecureInputRequest, values: dict[str, str]) -> None:
   request.filled_at = time.monotonic()
   request.event.set()
   _publish(request, "secure_input_filled")
+  publish_owner_input_changed(request.chat_id, None)
   _schedule_cleanup(FILLED_TTL_SECONDS, request.request_id)
 
 

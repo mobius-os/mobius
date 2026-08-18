@@ -1,7 +1,7 @@
 """Shell-level contract for chats waiting on their owner.
 
 Owner-input events carry state only: the kind of interaction that is waiting
-and, for durable questions, the question id needed by older shell generations.
+and, for durable questions, the exact id used by the question lifecycle.
 Secure field metadata and values stay on the chat-scoped secure-input channel.
 """
 

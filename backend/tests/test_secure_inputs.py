@@ -156,6 +156,24 @@ def test_pending_secure_input_projects_one_generic_owner_input_state(
   row = next(item for item in listed.json() if item["id"] == chat.id)
   assert row["owner_input_kind"] is None
 
+  # Settlement after submission does not repeat the already-cleared shell
+  # transition and trigger another cache reconciliation.
+  secure_inputs.cancel_request(secure_inputs.get_request(created["request_id"]))
+  assert [event["input_kind"] for event in owner_input_events] == [
+    "secure_input", None,
+  ]
+
+  # Cancelling while the card itself is still pending does clear the marker.
+  _, second = _create_request(client, auth, chat)
+  cancelled = client.post(
+    f"/api/secure-inputs/{second['request_id']}/cancel",
+    json={"capability": second["capability"]},
+  )
+  assert cancelled.status_code == 200
+  assert [event["input_kind"] for event in owner_input_events] == [
+    "secure_input", None, "secure_input", None,
+  ]
+
 
 def test_failed_prompt_publish_does_not_leave_an_invisible_open_request(
   client, auth, chat, monkeypatch,
