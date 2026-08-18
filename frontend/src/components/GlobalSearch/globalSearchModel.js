@@ -189,6 +189,12 @@ export function moveSearchSelection(index, key, resultCount) {
   return current
 }
 
+export function pointerPositionChanged(previous, next) {
+  return Boolean(previous && next) && (
+    previous.x !== next.x || previous.y !== next.y
+  )
+}
+
 export function visibleChatSearchState(chatState, query) {
   const normalizedQuery = String(query || '').trim()
   if (chatState?.query === normalizedQuery) return chatState

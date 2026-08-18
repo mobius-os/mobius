@@ -22,6 +22,7 @@ import {
   chatSearchOpenTarget,
   chatSearchResultIsCurrent,
   moveSearchSelection,
+  pointerPositionChanged,
   readRecentSelections,
   rememberRecentSelection,
   resolveRecentSelections,
@@ -37,6 +38,7 @@ function GlobalSearchResult({
   row,
   activeResultIndex,
   onOpen,
+  onPointerActivity,
   onSelect,
 }) {
   const { index } = row
@@ -51,10 +53,11 @@ function GlobalSearchResult({
     'aria-selected': selected,
     'data-search-result-index': index,
     className: resultClass,
-    // Pointer enter can fire when the dialog mounts beneath a stationary
-    // cursor. Pointer move represents deliberate hover intent and therefore
-    // must be the only pointer gesture that changes keyboard selection.
-    onPointerMove: () => onSelect(index),
+    // Some browsers emit pointerenter AND a zero-distance pointermove when the
+    // dialog mounts beneath a stationary cursor. The parent compares actual
+    // coordinates before treating either event as selection intent.
+    onPointerEnter: event => onPointerActivity(index, event),
+    onPointerMove: event => onPointerActivity(index, event),
     onFocus: () => onSelect(index),
     onClick: () => onOpen(row),
   }
@@ -155,6 +158,7 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
     () => readRecentSelections(),
   )
   const [selectionIndex, setSelectionIndex] = useState(0)
+  const pointerPositionRef = useRef(null)
   const appsQuery = appQueries.list.useQuery()
   const chatsQuery = chatQueries.list.useQuery()
 
@@ -328,6 +332,16 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
     setSelectionIndex(0)
   }, [])
 
+  const handleResultPointerActivity = useCallback((index, event) => {
+    const nextPosition = { x: event.clientX, y: event.clientY }
+    const moved = pointerPositionChanged(
+      pointerPositionRef.current,
+      nextPosition,
+    )
+    pointerPositionRef.current = nextPosition
+    if (moved) setSelectionIndex(index)
+  }, [])
+
   const handleSearchKeyDown = useCallback((event) => {
     if (event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -483,6 +497,7 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
                           row={row}
                           activeResultIndex={activeResultIndex}
                           onOpen={openResult}
+                          onPointerActivity={handleResultPointerActivity}
                           onSelect={setSelectionIndex}
                         />
                       ))}
