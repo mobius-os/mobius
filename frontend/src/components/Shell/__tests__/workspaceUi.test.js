@@ -861,8 +861,8 @@ test('opening navigation is presentation-only and never refetches whole lists', 
 test('chat drawer indicators distinguish owner input, active work, and unseen completion', () => {
   assert.match(
     shell,
-    /ev\.type === 'chat_owner_input_changed'[\s\S]*?markChatPendingQuestion\(ev\.chatId, ev\.questionId\)[\s\S]*?ev\.questionId && !knownInDrawer[\s\S]*?refreshChats/,
-    'an owner-input event must project the durable marker and recover a missing background row',
+    /ev\.type === 'chat_owner_input_changed'[\s\S]*?markChatOwnerInput\(ev\.chatId, ownerInputChangeFromEvent\(ev\)\)[\s\S]*?invalidateShellListCache\('chats'\)\.then\(refreshChats\)/,
+    'an owner-input event must project immediately and reconcile the durable PWA cache',
   )
   assert.match(
     shell,
@@ -885,7 +885,7 @@ test('chat drawer indicators distinguish owner input, active work, and unseen co
     'owner input must take precedence over active work and unseen completion',
   )
   assert.match(drawerCss, /\.drawer__owner-input-dot\s*\{[\s\S]*?transform:\s*rotate\(45deg\)/)
-  assert.match(drawerCss, /\.drawer__owner-input-dot\s*\{[\s\S]*?#f59e0b/)
+  assert.match(drawerCss, /\.drawer__owner-input-dot\s*\{[\s\S]*?var\(--owner-input, #f59e0b\)/)
   assert.match(drawerCss, /\.drawer__streaming-dot\s*\{[\s\S]*?background:\s*var\(--accent\)/)
   assert.match(drawerCss, /\.drawer__attention-dot\s*\{[\s\S]*?border:\s*1\.5px solid var\(--green\)/)
 })

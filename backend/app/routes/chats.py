@@ -14,7 +14,9 @@ from sqlalchemy import Text, case, cast, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import activity, auth, chat_search, models, providers, questions
+from app import (
+  activity, auth, chat_search, models, providers, questions, secure_inputs,
+)
 from app.chat_visibility import coerce_agent_settings, visible_in_owner_drawer
 from app.config import get_settings
 from app.chat import (
@@ -30,6 +32,7 @@ from app.chat_retention import purge_expired_chat_tombstones
 from app.chat_titles import first_user_message_title
 from app.database import get_db
 from app.memory_observability import record_memory_checkpoint_once
+from app.owner_input import OwnerInputKind
 from app.deps import (
   Principal, get_owner_or_chat_embed_principal, get_current_owner, get_principal,
   reject_cross_site,
@@ -323,7 +326,12 @@ def issue_media_token(
   return {"token": token, "expires_in": 900}
 
 
-def _owner_chat_summary(chat, *, durable_running: bool = False) -> dict:
+def _owner_chat_summary(
+  chat,
+  *,
+  durable_running: bool = False,
+  transient_owner_input_kind: OwnerInputKind | None = None,
+) -> dict:
   """Canonical owner-list shape for a Chat or its lightweight projection."""
   return {
     "id": chat.id,
@@ -339,6 +347,14 @@ def _owner_chat_summary(chat, *, durable_running: bool = False) -> dict:
     # shell excludes it from the reload-defer's active-turn test. The durable
     # column is the source of truth (see `_open_question_id_for`).
     "pending_question_id": chat.pending_question_id,
+    # The shell only needs to know which non-secret interaction is waiting.
+    # Questions win if a transient interaction somehow overlaps because their
+    # durable id also governs answer routing and restart recovery.
+    "owner_input_kind": (
+      "question"
+      if chat.pending_question_id is not None
+      else transient_owner_input_kind
+    ),
   }
 
 
@@ -582,13 +598,18 @@ def list_chats(
     # owner conversation into the drawer by setting owner_visible at creation.
     chats = [c for c in chats if _visible_in_owner_drawer(c)]
   durable_running = running_chat_ids(db, (chat.id for chat in chats))
+  secure_input_chats = secure_inputs.pending_chat_ids()
   record_memory_checkpoint_once(
     "shell_chat_list_first_response",
     chat_count=len(chats),
   )
   return [
     _owner_chat_summary(
-      chat, durable_running=chat.id in durable_running,
+      chat,
+      durable_running=chat.id in durable_running,
+      transient_owner_input_kind=(
+        "secure_input" if chat.id in secure_input_chats else None
+      ),
     )
     for chat in chats
   ]

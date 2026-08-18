@@ -82,8 +82,9 @@ import {
   withoutConfirmedDeletions,
 } from './confirmedDeletion.js'
 import {
+  ownerInputChangeFromEvent,
   withChatOwnerActivity,
-  withChatPendingQuestion,
+  withChatOwnerInput,
   withChatRename,
   withChatRunState,
 } from './chatListProjection.js'
@@ -1628,7 +1629,11 @@ export default function Shell({ onInitialVisualReady }) {
   const ownerInputChatIds = useMemo(() => {
     const next = new Set()
     for (const chat of chats) {
-      if (chat.pending_question_id != null) next.add(chat.id)
+      if (
+        chat.owner_input_kind != null
+        // Compatibility with the prior list shape during live activation.
+        || chat.pending_question_id != null
+      ) next.add(chat.id)
     }
     return next
   }, [chats])
@@ -1896,8 +1901,8 @@ export default function Shell({ onInitialVisualReady }) {
       running,
     ))
   }, [projectChatList])
-  const markChatPendingQuestion = useCallback((chatId, questionId) => {
-    projectChatList(rows => withChatPendingQuestion(rows, chatId, questionId))
+  const markChatOwnerInput = useCallback((chatId, change) => {
+    projectChatList(rows => withChatOwnerInput(rows, chatId, change))
   }, [projectChatList])
   const applyChatRenameEvent = useCallback((event) => {
     projectChatList(rows => withChatRename(rows, event.chatId, {
@@ -2490,16 +2495,11 @@ export default function Shell({ onInitialVisualReady }) {
       })
     } else if (ev.type === 'chat_owner_input_changed') {
       if (ev.chatId) {
-        const knownInDrawer = chatsRef.current.some(
-          c => String(c.id) === String(ev.chatId),
-        )
-        markChatPendingQuestion(ev.chatId, ev.questionId)
-        // A background/system-created chat can ask before its start-event list
-        // refresh has inserted the row. The question was committed before this
-        // event, so a fresh read is authoritative and cannot lose the marker.
-        if (ev.questionId && !knownInDrawer) {
-          void invalidateShellListCache('chats').then(refreshChats)
-        }
+        markChatOwnerInput(ev.chatId, ownerInputChangeFromEvent(ev))
+        // Patch immediately, then reconcile durable/transient server truth and
+        // refill the PWA's list cache. Input transitions are rare, and always
+        // refreshing avoids stale offline markers and missing background rows.
+        void invalidateShellListCache('chats').then(refreshChats)
       }
     } else if (ev.type === 'chat_run_started') {
       if (ev.chatId) {
@@ -2512,7 +2512,7 @@ export default function Shell({ onInitialVisualReady }) {
         markChatRunActivity(ev.chatId)
         markStreamingStart(ev.chatId)
         markChatRunState(ev.chatId, true)
-        markChatPendingQuestion(ev.chatId, null)
+        markChatOwnerInput(ev.chatId, { kind: null, questionId: null })
         // A run can be the drawer's FIRST evidence of a chat created entirely
         // server-side — the platform/app conflict resolver, a background or
         // morning agent, autopilot. selectChat only navigates; it never
@@ -2532,7 +2532,7 @@ export default function Shell({ onInitialVisualReady }) {
         markChatRunFinished(chatId)
         markStreamingEnd(chatId)
         markChatRunState(chatId, false)
-        markChatPendingQuestion(chatId, null)
+        markChatOwnerInput(chatId, { kind: null, questionId: null })
         // Attention iff the finished chat is NOT visible in ANY pane — membership
         // in the visible set, not equality with one global id, so a chat visible
         // in a background split gets no false dot (finding D-iii).
@@ -2596,7 +2596,7 @@ export default function Shell({ onInitialVisualReady }) {
     confirmAppDeleted, confirmAppIdentityIsLive, confirmAppRecovered,
     confirmChatDeleted, confirmChatIdentityIsLive, confirmChatRecovered,
     loadTheme, markChatRunActivity, markChatRunFinished,
-    markChatPendingQuestion, markChatRunState, markStreamingEnd, markStreamingStart,
+    markChatOwnerInput, markChatRunState, markStreamingEnd, markStreamingStart,
     onNotificationCreated, placeInWorkspace, queryClient,
     refreshApps, refreshChats, warmAppCode,
   ])

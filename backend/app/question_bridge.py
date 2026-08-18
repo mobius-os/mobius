@@ -14,7 +14,7 @@ from collections.abc import MutableMapping, Sequence
 from typing import Any
 from uuid import uuid4
 
-from app.broadcast import get_system_broadcast
+from app.owner_input import publish_owner_input_changed
 from app.pending_questions import PendingQuestion
 
 
@@ -62,11 +62,11 @@ async def park_question(
         "question_id": pending.question_id,
         "questions": payload,
       })
-      get_system_broadcast().publish({
-        "type": "chat_owner_input_changed",
-        "chatId": chat_id,
-        "questionId": pending.question_id,
-      })
+      publish_owner_input_changed(
+        chat_id,
+        "question",
+        question_id=pending.question_id,
+      )
     except Exception as exc:
       raise QuestionPersistenceError(
         "could not save the question"

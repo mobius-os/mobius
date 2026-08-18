@@ -35,13 +35,14 @@ def test_park_question_publishes_before_waiting_and_cleans_exact_entry(
     bus = _Bus()
     system_events = []
 
-    class _SystemEvents:
-      def publish(self, event):
-        system_events.append(event)
-
     monkeypatch.setattr(
-      "app.question_bridge.get_system_broadcast",
-      lambda: _SystemEvents(),
+      "app.question_bridge.publish_owner_input_changed",
+      lambda chat_id, input_kind, *, question_id: system_events.append({
+        "type": "chat_owner_input_changed",
+        "chatId": chat_id,
+        "inputKind": input_kind,
+        "questionId": question_id,
+      }),
     )
     task = asyncio.create_task(park_question(
       chat_id="chat-1",
@@ -61,6 +62,7 @@ def test_park_question_publishes_before_waiting_and_cleans_exact_entry(
     assert system_events == [{
       "type": "chat_owner_input_changed",
       "chatId": "chat-1",
+      "inputKind": "question",
       "questionId": pending.question_id,
     }]
     pending.future.set_result({"Pick": "First"})

@@ -107,6 +107,84 @@ def test_sealed_values_never_enter_events_status_or_chat(
   assert chat.pending_messages == []
 
 
+def test_pending_secure_input_projects_one_generic_owner_input_state(
+  client, auth, chat, monkeypatch,
+):
+  from app import secure_inputs
+
+  owner_input_events = []
+  monkeypatch.setattr(
+    secure_inputs,
+    "publish_owner_input_changed",
+    lambda chat_id, input_kind: owner_input_events.append({
+      "chat_id": chat_id,
+      "input_kind": input_kind,
+    }),
+  )
+
+  _, created = _create_request(client, auth, chat)
+  assert owner_input_events == [{
+    "chat_id": chat.id,
+    "input_kind": "secure_input",
+  }]
+  assert secure_inputs.pending_chat_ids() == frozenset({chat.id})
+
+  listed = client.get("/api/chats", headers=auth)
+  row = next(item for item in listed.json() if item["id"] == chat.id)
+  assert row["owner_input_kind"] == "secure_input"
+  assert row["pending_question_id"] is None
+  assert "capability" not in json.dumps(row)
+
+  submitted = client.post(
+    f"/api/secure-inputs/{chat.id}/{created['request_id']}/submit",
+    headers=auth,
+    json={
+      "fields": {
+        "username": "private-owner@example.test",
+        "password": "still-never-list-this",
+      },
+    },
+  )
+  assert submitted.status_code == 200
+  assert owner_input_events[-1] == {
+    "chat_id": chat.id,
+    "input_kind": None,
+  }
+  assert secure_inputs.pending_chat_ids() == frozenset()
+
+  listed = client.get("/api/chats", headers=auth)
+  row = next(item for item in listed.json() if item["id"] == chat.id)
+  assert row["owner_input_kind"] is None
+
+
+def test_failed_prompt_publish_does_not_leave_an_invisible_open_request(
+  client, auth, chat, monkeypatch,
+):
+  from app import secure_inputs
+  from app.broadcast import create_broadcast
+
+  create_broadcast(chat.id)
+  monkeypatch.setattr(secure_inputs, "get_broadcast", lambda _chat_id: None)
+
+  response = client.post(
+    f"/api/secure-inputs/{chat.id}",
+    headers=auth,
+    json={
+      "mode": "sealed",
+      "title": "Private connection",
+      "description": "Values bypass model context.",
+      "fields": [{
+        "name": "password",
+        "label": "Password",
+        "type": "password",
+      }],
+    },
+  )
+
+  assert response.status_code == 503
+  assert secure_inputs.pending_chat_ids() == frozenset()
+
+
 def test_sink_builds_a_persistable_prompt_only_receipt(client, auth, chat):
   from app.broadcast import create_broadcast
   from app.chat_event_sink import (

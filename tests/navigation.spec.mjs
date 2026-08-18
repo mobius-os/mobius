@@ -358,6 +358,33 @@ test.describe('Navigation basics', () => {
     expect(state.url).toBe('/shell/')
   })
 
+  test('owner-input status is named and outranks the active-work dot', async ({ page }) => {
+    const chats = NAV_CHATS.map((chat, index) => ({
+      ...chat,
+      running: index < 2,
+      owner_input_kind: index === 0 ? 'secure_input' : null,
+      pending_question_id: null,
+    }))
+    await setup(page, { width: 1512, height: 861 }, { chats })
+
+    const navigation = page.getByRole('navigation', {
+      name: 'Primary navigation',
+    })
+    const waiting = navigation.getByRole('button', {
+      name: `Your input is needed ${chats[0].title}`,
+      exact: true,
+    })
+    await expect(waiting.locator('.drawer__owner-input-dot')).toBeVisible()
+    await expect(waiting.locator('.drawer__streaming-dot')).toHaveCount(0)
+
+    const working = navigation.getByRole('button', {
+      name: `Currently streaming ${chats[1].title}`,
+      exact: true,
+    })
+    await expect(working.locator('.drawer__streaming-dot')).toBeVisible()
+    await expect(working.locator('.drawer__owner-input-dot')).toHaveCount(0)
+  })
+
   test('2. Navigate between two chats — back returns to first', async ({ page }) => {
     await setup(page)
     const state1 = await getNavState(page)

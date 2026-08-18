@@ -808,7 +808,7 @@
   height: 6px;
   margin-right: 2px;
   border-radius: 1px;
-  background: color-mix(in srgb, #f59e0b 60%, var(--text));
+  background: color-mix(in srgb, var(--owner-input, #f59e0b) 60%, var(--text));
   transform: rotate(45deg);
 }
 

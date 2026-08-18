@@ -41,6 +41,7 @@ from app.runner_registry import RunnerKind, registry
 from app.config import get_settings
 from app.database import get_db
 from app.memory_observability import record_memory_checkpoint_once
+from app.owner_input import publish_owner_input_changed
 from app.deps import (
   Principal, get_chat_view_principal, get_owner_or_chat_embed_principal,
   get_current_owner, reject_cross_site,
@@ -662,11 +663,7 @@ async def send_message(
             "question_id": body.question_id or pending.question_id,
             "answers": body.answers,
           })
-        get_system_broadcast().publish({
-          "type": "chat_owner_input_changed",
-          "chatId": chat_id,
-          "questionId": None,
-        })
+        publish_owner_input_changed(chat_id, None, question_id=None)
         return _answer_delivered_response(chat_id)
       # No in-memory pending question. If the chat is still alive, this is a
       # stale/foreign card (or Stop cancelled the question) and must not answer

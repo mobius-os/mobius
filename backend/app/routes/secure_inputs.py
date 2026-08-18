@@ -82,19 +82,12 @@ async def create_secure_input(
       description=description,
       fields=fields,
     )
+    secure_inputs.publish_request(pending)
   except ValueError as exc:
     raise HTTPException(409, detail=str(exc)) from exc
   except RuntimeError as exc:
     raise HTTPException(503, detail=str(exc)) from exc
 
-  # Route through the turn's sink when present: it owns both the live event and
-  # the durable safe receipt. The event contains prompt metadata only.
-  from app.chat_event_sink import get_active_sink
-  sink = get_active_sink(chat_id)
-  if sink is not None and sink.bc is bc:
-    sink.publish(pending.public_event())
-  else:
-    bc.publish(pending.public_event())
   return {
     "request_id": pending.request_id,
     "capability": capability,

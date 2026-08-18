@@ -167,14 +167,15 @@ def test_answer_delivers_immediately_when_pending_registered(
   async def go():
     system_events = []
 
-    class _SystemEvents:
-      def publish(self, event):
-        system_events.append(event)
-
     monkeypatch.setattr(
       chats_stream,
-      "get_system_broadcast",
-      lambda: _SystemEvents(),
+      "publish_owner_input_changed",
+      lambda chat_id, input_kind, *, question_id: system_events.append({
+        "type": "chat_owner_input_changed",
+        "chatId": chat_id,
+        "inputKind": input_kind,
+        "questionId": question_id,
+      }),
     )
     loop = asyncio.get_event_loop()
     fut = loop.create_future()
@@ -209,6 +210,7 @@ def test_answer_delivers_immediately_when_pending_registered(
     assert system_events == [{
       "type": "chat_owner_input_changed",
       "chatId": chat.id,
+      "inputKind": None,
       "questionId": None,
     }]
     assert _activity_at(chat.id).replace(tzinfo=UTC) > old_activity

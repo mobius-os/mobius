@@ -1,9 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  ownerInputChangeFromEvent,
   withChatListRowPatch,
   withChatOwnerActivity,
-  withChatPendingQuestion,
+  withChatOwnerInput,
   withChatRename,
   withChatRunState,
 } from '../chatListProjection.js'
@@ -44,11 +45,39 @@ test('run and rename events project only the committed fields they carry', () =>
   assert.equal(renamed[0].updated_at, '2026-08-01T12:30:00Z')
 })
 
-test('pending-question events project the durable owner-input marker', () => {
-  const waiting = withChatPendingQuestion(rows, 'a', 'question-1')
+test('owner-input events project kind while only questions update their durable id', () => {
+  const waiting = withChatOwnerInput(rows, 'a', {
+    kind: 'question',
+    questionId: 'question-1',
+  })
+  assert.equal(waiting[0].owner_input_kind, 'question')
   assert.equal(waiting[0].pending_question_id, 'question-1')
   assert.equal(waiting[1], rows[1])
 
-  const answered = withChatPendingQuestion(waiting, 'a', null)
+  const secure = withChatOwnerInput(waiting, 'a', { kind: 'secure_input' })
+  assert.equal(secure[0].owner_input_kind, 'secure_input')
+  assert.equal(secure[0].pending_question_id, 'question-1')
+
+  const answered = withChatOwnerInput(waiting, 'a', {
+    kind: null,
+    questionId: null,
+  })
+  assert.equal(answered[0].owner_input_kind, null)
   assert.equal(answered[0].pending_question_id, null)
+})
+
+test('owner-input event normalization supports both shell generations', () => {
+  assert.deepEqual(ownerInputChangeFromEvent({
+    inputKind: 'secure_input',
+  }), { kind: 'secure_input' })
+  assert.deepEqual(ownerInputChangeFromEvent({
+    inputKind: 'question',
+    questionId: 'question-1',
+  }), { kind: 'question', questionId: 'question-1' })
+  assert.deepEqual(ownerInputChangeFromEvent({
+    questionId: 'legacy-question',
+  }), { kind: 'question', questionId: 'legacy-question' })
+  assert.deepEqual(ownerInputChangeFromEvent({
+    questionId: null,
+  }), { kind: null, questionId: null })
 })
