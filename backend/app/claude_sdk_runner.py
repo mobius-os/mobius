@@ -886,7 +886,6 @@ async def run_claude_sdk_turn(
     input_data: dict[str, Any],
     context,
   ) -> PermissionResultAllow | PermissionResultDeny:
-    del context
     if run_policy is not None or gauntlet_writer:
       nested_tools = {
         "Task", "TaskOutput", "TaskStop", "Workflow", "Workflows", "Agent",
