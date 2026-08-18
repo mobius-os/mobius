@@ -182,6 +182,11 @@ async def lifespan(app):
     yield
   finally:
     record_memory_checkpoint("shutdown_begin")
+    try:
+      from app.public_app_transport import close_public_fetch_clients
+      await close_public_fetch_clients()
+    except Exception as exc:
+      _log.error("public fetch client shutdown failed: %s", exc, exc_info=True)
     # Preserve the final partial request-error windows across graceful restarts.
     # This is one bounded batch append, not one write per response.
     activity.flush_request_errors()

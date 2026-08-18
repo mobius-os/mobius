@@ -190,7 +190,7 @@ def debug_status(
   )
   result["runtime_memory"] = _runtime_memory_ownership(include_payloads=False)
   try:
-    from app.routes.public_apps import public_app_usage_snapshot
+    from app.public_app_transport import public_app_usage_snapshot
     result["public_apps"] = public_app_usage_snapshot()
   except Exception:
     result["public_apps"] = {}

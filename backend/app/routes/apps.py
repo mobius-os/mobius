@@ -48,9 +48,12 @@ from app.storage_io import (
 from app.app_capabilities import diff_contracts
 from app.broadcast import get_system_broadcast
 from app.compiler import (
+  app_bundle_digest,
   app_bundle_uses_current_compile_contract,
   CompileError,
+  publish_public_bundle,
   recompile_app_bundle,
+  unlink_public_bundle,
 )
 from app.chat_start import start_programmatic_chat_turn
 from app.config import get_settings
@@ -536,6 +539,14 @@ async def install_app(
     filesystem_access=app.filesystem_access,
     slug=app.slug,
     manifest_url=app.manifest_url,
+    published_manifest_url=app.published_manifest_url,
+    public_name=app.public_name,
+    public_bundle_path=app.public_bundle_path,
+    public_bundle_digest=app.public_bundle_digest,
+    public_source_commit=app.public_source_commit,
+    public_access_contract=app.public_access_contract,
+    public_access_digest=app.public_access_digest,
+    public_published_at=app.public_published_at,
     theme_color=app.theme_color,
     background_color=app.background_color,
     display=app.display,
@@ -684,10 +695,10 @@ def _recorded_runtime_paths(previous_tree: dict[str, bytes]) -> set[str]:
   return paths
 
 
-def _accepted_local_share_package(app: models.App) -> tuple[str, str]:
+def _accepted_local_distribution_package(app: models.App) -> tuple[str, str]:
   """Return accepted manifest identity + origin-independent package digest.
 
-  A local worktree is a draft. Sharing must compare the public package with the
+  A local worktree is a draft. Distribution must compare the public package with the
   immutable commit that produced the live bundle, not with files an agent may
   be editing for the next apply. The digest mirrors every installer input:
   manifest, entry, icon, job, source modules, static assets, and storage seeds.
@@ -698,8 +709,10 @@ def _accepted_local_share_package(app: models.App) -> tuple[str, str]:
     raise HTTPException(
       409,
       {
-        "code": "share_source_unavailable",
-        "message": "Apply the local app source before attaching a share URL.",
+        "code": "distribution_source_unavailable",
+        "message": (
+          "Apply the local app source before attaching a distribution manifest."
+        ),
       },
     )
   try:
@@ -714,10 +727,10 @@ def _accepted_local_share_package(app: models.App) -> tuple[str, str]:
     raise HTTPException(
       409,
       {
-        "code": "share_source_unavailable",
+        "code": "distribution_source_unavailable",
         "message": (
           "The accepted local package could not be reproduced. Apply its "
-          "complete source again before attaching a share URL."
+          "complete source again before attaching a distribution manifest."
         ),
       },
     ) from exc
@@ -2157,8 +2170,8 @@ async def update_app(
   """Update owner-controlled app metadata and narrow permission grants."""
   from app import install
 
-  share_candidate = None
-  if body.share_manifest_url:
+  distribution_candidate = None
+  if body.published_manifest_url:
     # Prove the row exists and is local before spending a network fetch. Close
     # the request session before that I/O so a slow publisher cannot occupy a
     # database connection or either lifecycle lock.
@@ -2167,13 +2180,13 @@ async def update_app(
       raise HTTPException(
         409,
         {
-          "code": "share_requires_local_app",
-          "message": "Only a local app can attach a separate share URL.",
+          "code": "distribution_requires_local_app",
+          "message": "Only a local app can attach a separate distribution manifest.",
         },
       )
     db.close()
-    share_candidate = await install.fetch_install_candidate(
-      body.share_manifest_url,
+    distribution_candidate = await install.fetch_install_candidate(
+      body.published_manifest_url,
     )
 
   async with (
@@ -2195,55 +2208,47 @@ async def update_app(
       app.cross_app_access = body.cross_app_access
     if body.chat_log_access is not None:
       app.chat_log_access = body.chat_log_access
-    if body.share_manifest_url is not None:
-      if share_candidate is not None:
+    if body.published_manifest_url is not None:
+      if distribution_candidate is not None:
         if app.manifest_url is not None:
           raise HTTPException(
             409,
             {
-              "code": "share_requires_local_app",
-              "message": "Only a local app can attach a separate share URL.",
+              "code": "distribution_requires_local_app",
+              "message": "Only a local app can attach a separate distribution manifest.",
             },
           )
         accepted_id, accepted_digest = await asyncio.to_thread(
-          _accepted_local_share_package, app,
+          _accepted_local_distribution_package, app,
         )
-        if share_candidate.manifest["id"] != accepted_id:
+        if distribution_candidate.manifest["id"] != accepted_id:
           raise HTTPException(
             409,
             {
-              "code": "share_identity_mismatch",
+              "code": "distribution_identity_mismatch",
               "message": (
                 "The published manifest belongs to a different app. Publish "
-                "this app's accepted package before attaching its share URL."
+                "this app's accepted package before attaching its distribution "
+                "manifest."
               ),
             },
           )
         published_digest = install.install_candidate_content_digest(
-          share_candidate,
+          distribution_candidate,
         )
         if published_digest != accepted_digest:
           raise HTTPException(
             409,
             {
-              "code": "share_package_mismatch",
+              "code": "distribution_package_mismatch",
               "message": (
                 "The published package does not match the app's accepted "
                 "revision. Publish the current package before attaching its "
-                "share URL."
+                "distribution manifest."
               ),
             },
           )
-      app.share_manifest_url = body.share_manifest_url or None
-    if body.public_enabled is not None:
-      if body.public_enabled:
-        from app.routes.public_apps import public_slug_is_available
-        if not public_slug_is_available(app.slug):
-          raise HTTPException(
-            status_code=400,
-            detail="This app slug is reserved and cannot be published.",
-          )
-      app.public_enabled = body.public_enabled
+      app.published_manifest_url = body.published_manifest_url or None
     if body.manage_skills is not None:
       # Downgrade-only: the owner can revoke skills authority here (effective
       # on the app's next request — the gate reads the live row), but a grant
@@ -2290,8 +2295,8 @@ async def update_app(
       field is None
       for field in (
         body.name, body.description, body.chat_id, body.share_with_apps,
-        body.cross_app_access, body.chat_log_access, body.share_manifest_url,
-        body.public_enabled, body.manage_skills,
+        body.cross_app_access, body.chat_log_access, body.published_manifest_url,
+        body.manage_skills,
       )
     )
     if not pin_only:
@@ -2302,6 +2307,105 @@ async def update_app(
     # query's chat_id + updated_at, so app_updated alone surfaces it in the
     # owning chat. A metadata-only PATCH still bumps updated_at; the wire carries
     # no source-only version key to gate on.
+  return app
+
+
+@router.put(
+  "/{app_id}/hosted-publication",
+  response_model=schemas.AppOut,
+  dependencies=[Depends(reject_cross_site)],
+)
+async def publish_hosted_app(
+  app_id: int,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Publish the app's exact current module and anonymous network contract."""
+  from app.app_capabilities import (
+    capability_digest,
+    public_access_declaration_from_contract,
+  )
+  from app.routes.public_apps import public_slug_is_available
+
+  new_bundle = None
+  previous_bundle = None
+  async with (
+    fs_locks.install_uninstall_lock(),
+    fs_locks.app_storage_lock(app_id),
+  ):
+    app = live_app_or_404(db, app_id, populate=True)
+    if not public_slug_is_available(app.slug):
+      raise HTTPException(
+        status_code=400,
+        detail="This app slug is reserved and cannot be published.",
+      )
+    current_digest = app_bundle_digest(app.id, app.compiled_path)
+    if current_digest is None:
+      raise HTTPException(
+        status_code=409,
+        detail="The current app build is not ready to publish.",
+      )
+    previous_bundle = app.public_bundle_path
+    try:
+      new_bundle, bundle_digest = await asyncio.to_thread(
+        publish_public_bundle, app.id, app.compiled_path,
+      )
+      if bundle_digest != current_digest:
+        raise RuntimeError("The app build changed while publication was prepared.")
+      public_access = public_access_declaration_from_contract(
+        app.capability_contract,
+      )
+      app.public_name = app.name
+      app.public_bundle_path = str(new_bundle)
+      app.public_bundle_digest = bundle_digest
+      app.public_source_commit = app.source_commit
+      app.public_access_contract = public_access
+      app.public_access_digest = capability_digest(public_access)
+      app.public_token_nonce = secrets.token_hex(16)
+      app.public_published_at = now_naive_utc()
+      db.commit()
+    except Exception:
+      db.rollback()
+      if new_bundle is not None and str(new_bundle) != previous_bundle:
+        unlink_public_bundle(app_id, new_bundle)
+      raise
+    if previous_bundle and previous_bundle != str(new_bundle):
+      unlink_public_bundle(app_id, previous_bundle)
+    db.refresh(app)
+  get_system_broadcast().publish({"type": "app_updated", "appId": str(app.id)})
+  return app
+
+
+@router.delete(
+  "/{app_id}/hosted-publication",
+  response_model=schemas.AppOut,
+  dependencies=[Depends(reject_cross_site)],
+)
+async def stop_hosted_app(
+  app_id: int,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Revoke the active anonymous snapshot and every token minted for it."""
+  previous_bundle = None
+  async with (
+    fs_locks.install_uninstall_lock(),
+    fs_locks.app_storage_lock(app_id),
+  ):
+    app = live_app_or_404(db, app_id, populate=True)
+    previous_bundle = app.public_bundle_path
+    app.public_name = None
+    app.public_bundle_path = None
+    app.public_bundle_digest = None
+    app.public_source_commit = None
+    app.public_access_contract = None
+    app.public_access_digest = None
+    app.public_token_nonce = None
+    app.public_published_at = None
+    db.commit()
+    unlink_public_bundle(app_id, previous_bundle)
+    db.refresh(app)
+  get_system_broadcast().publish({"type": "app_updated", "appId": str(app.id)})
   return app
 
 

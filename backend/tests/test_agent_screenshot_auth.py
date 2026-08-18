@@ -530,7 +530,7 @@ def test_public_app_host_uses_its_mounted_frame_readiness_contract(tmp_path: Pat
   result, output, marker, browser_log = _run_helper(
     tmp_path,
     auth_ok=True,
-    route="/ra-event-map",
+    route="/published-map",
     public_app=True,
     loaded_asset="index-stale.js",
   )

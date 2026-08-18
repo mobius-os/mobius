@@ -1,5 +1,5 @@
-/* Pure Smart Share state: published apps expose an install URL; local apps
-   route through Contribute, or the App Store when Contribute is absent. */
+/* Pure publication state: hosted use is independent; install/remix handoffs
+   use a typed distribution manifest or route through Contribute. */
 
 const CONTRIBUTE_SLUG = 'contribute'
 const APP_STORE_SLUG = 'app-store'
@@ -15,7 +15,7 @@ export function isDrawerAppShareEligible(app) {
 }
 
 export function appInstallManifestUrl(app) {
-  const value = app?.share_manifest_url || app?.manifest_url
+  const value = app?.distribution_manifest?.url
   return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 

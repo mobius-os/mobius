@@ -51,7 +51,7 @@ def _app(repo: Path, *, app_id: int = 7) -> dict:
     "manifest_url": (
       "https://raw.githubusercontent.com/mobius-os/app-demo/main/mobius.json"
     ),
-    "share_manifest_url": None,
+    "published_manifest_url": None,
     "source_dir": str(repo),
   }
 
@@ -78,11 +78,11 @@ def test_platform_source_status_ignores_unrelated_environment(
   assert "release_ref" not in result
 
 
-def test_local_published_app_uses_share_manifest_as_repository_identity():
+def test_local_published_app_uses_distribution_manifest_as_repository_identity():
   repo = _repo("published-demo")
   app = _app(repo)
   app["manifest_url"] = None
-  app["share_manifest_url"] = (
+  app["published_manifest_url"] = (
     "https://raw.githubusercontent.com/example/published-demo/main/mobius.json"
   )
 

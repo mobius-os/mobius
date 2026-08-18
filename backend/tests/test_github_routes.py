@@ -945,7 +945,7 @@ def test_source_diff_requires_github_access_for_app_tokens(
   assert denied.status_code == 403
 
 
-def test_source_status_projects_local_share_manifest_identity(
+def test_source_status_projects_local_distribution_manifest_identity(
   client, owner_token, auth, monkeypatch,
 ):
   from app import models
@@ -954,14 +954,14 @@ def test_source_status_projects_local_share_manifest_identity(
   app_id, _ = _app_token(client, owner_token)
   source_dir = Path(get_settings().data_dir) / "apps" / "published-source"
   source_dir.mkdir(parents=True, exist_ok=True)
-  share_url = (
+  distribution_url = (
     "https://raw.githubusercontent.com/example/published/main/mobius.json"
   )
   session = SessionLocal()
   try:
     session.query(models.App).filter(models.App.id == app_id).update({
       "source_dir": str(source_dir),
-      "share_manifest_url": share_url,
+      "published_manifest_url": distribution_url,
     })
     session.commit()
   finally:
@@ -973,7 +973,7 @@ def test_source_status_projects_local_share_manifest_identity(
 
   def inspect(app):
     assert app["manifest_url"] is None
-    assert app["share_manifest_url"] == share_url
+    assert app["published_manifest_url"] == distribution_url
     return {"key": f"app:{app['id']}", "name": app["name"]}
 
   monkeypatch.setattr(source_status, "build_app_status", inspect)

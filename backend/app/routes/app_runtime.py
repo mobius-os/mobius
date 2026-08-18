@@ -461,7 +461,7 @@ def get_module(
     raise HTTPException(
       status_code=401, detail="Valid token required."
     )
-  authorize_app_module_token(token, db, target_app_id=app_id)
+  authorize_app_module_token(token, db)
   app = live_app(db, app_id)
   if not app or not app.compiled_path:
     raise HTTPException(status_code=404, detail="Module not found.")

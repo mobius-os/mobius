@@ -109,9 +109,8 @@ class PublicAppAccess:
 
   @property
   def network(self) -> list[dict]:
-    contract = self.app.capability_contract
-    public = contract.get("public") if isinstance(contract, dict) else None
-    rules = public.get("network") if isinstance(public, dict) else None
+    contract = self.app.public_access_contract
+    rules = contract.get("network") if isinstance(contract, dict) else None
     return rules if isinstance(rules, list) else []
 
 
@@ -478,7 +477,7 @@ def resolve_public_app_token(
   if not payload or payload.get("scope") != "public_app":
     raise HTTPException(status_code=401, detail="Valid public app token required.")
   app_id = payload.get("app_id")
-  nonce = payload.get("app_nonce")
+  nonce = payload.get("publication_nonce")
   if (
     not isinstance(app_id, int)
     or not isinstance(nonce, str)
@@ -492,9 +491,9 @@ def resolve_public_app_token(
   )
   if (
     app is None
-    or not app.public_enabled
-    or not app.token_nonce
-    or nonce != app.token_nonce
+    or not app.public_bundle_path
+    or not app.public_token_nonce
+    or nonce != app.public_token_nonce
   ):
     raise HTTPException(status_code=401, detail="Public app session is no longer valid.")
   return PublicAppAccess(app=app)
@@ -503,16 +502,8 @@ def resolve_public_app_token(
 def authorize_app_module_token(
   token: str,
   db: Session,
-  *,
-  target_app_id: int,
 ) -> None:
-  """Authorize module reads without widening anonymous cross-app access."""
-  payload = auth.decode_access_token(token)
-  if payload and payload.get("scope") == "public_app":
-    resolve_public_app_token(token, db, expected_app_id=target_app_id)
-    return
-  # Owner and ordinary app tokens retain the established same-owner module
-  # interop contract; only anonymous sessions are exact-app confined.
+  """Authorize owner/app module reads; public snapshots use their own route."""
   resolve_owner_or_app(token, db)
 
 

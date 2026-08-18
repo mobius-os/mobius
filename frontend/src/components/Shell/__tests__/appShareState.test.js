@@ -9,29 +9,34 @@ import {
   isDrawerAppShareEligible,
 } from '../../Drawer/appShareState.js'
 
-test('explicit share manifest publishes a local app without changing install identity', () => {
+test('typed distribution manifest publishes a local app without exposing storage fields', () => {
   const app = {
     name: 'Published later',
-    manifest_url: null,
-    share_manifest_url: 'https://raw.example/published-later/mobius.json',
+    distribution_manifest: {
+      kind: 'published',
+      url: 'https://raw.example/published-later/mobius.json',
+    },
   }
-  assert.equal(appInstallManifestUrl(app), app.share_manifest_url)
+  assert.equal(appInstallManifestUrl(app), app.distribution_manifest.url)
   assert.deepEqual(appShareState(app, []), {
     kind: 'published',
-    installUrl: app.share_manifest_url,
+    installUrl: app.distribution_manifest.url,
   })
 })
 
 test('every installed app can expose its independent public-use control', () => {
   const app = {
     name: 'News',
-    manifest_url: 'https://raw.example/news/mobius.json#manifest-id=news',
+    distribution_manifest: {
+      kind: 'source',
+      url: 'https://raw.example/news/mobius.json',
+    },
   }
   assert.equal(isDrawerAppShareEligible(app), true)
-  assert.equal(appInstallManifestUrl(app), app.manifest_url)
-  assert.equal(isDrawerAppShareEligible({ manifest_url: null }), true)
+  assert.equal(appInstallManifestUrl(app), app.distribution_manifest.url)
+  assert.equal(isDrawerAppShareEligible({ distribution_manifest: null }), true)
   assert.equal(
-    isDrawerAppShareEligible({ share_manifest_url: 'https://raw.example/app' }),
+    isDrawerAppShareEligible({ distribution_manifest: { url: 'https://raw.example/app' } }),
     true,
   )
   assert.equal(isDrawerAppShareEligible(null), false)

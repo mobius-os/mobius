@@ -144,7 +144,7 @@ def create_app_token(
 
 def create_public_app_token(
   app_id: int,
-  app_nonce: str,
+  publication_nonce: str,
   *,
   expires_delta: timedelta = timedelta(hours=8),
 ) -> str:
@@ -152,14 +152,14 @@ def create_public_app_token(
 
   It intentionally carries no owner identity or epoch: the bearer can only
   fetch the matching app module and its manifest-declared public GET targets.
-  The live ``public_enabled`` flag and app nonce are rechecked on every use, so
-  unpublishing or replacing the row revokes an outstanding token immediately.
+  The publication nonce is rechecked on every use, so stopping access or
+  publishing a new snapshot revokes every token for the previous revision.
   """
   return create_access_token(
     {
       "scope": "public_app",
       "app_id": app_id,
-      "app_nonce": app_nonce,
+      "publication_nonce": publication_nonce,
     },
     expires_delta=expires_delta,
   )

@@ -1,5 +1,4 @@
-/* Drawer Smart Share sheet for public install links and local-app publishing
-   handoffs through Contribute. */
+/* One publication surface for hosted use and independently installable copies. */
 
 import { useMemo, useRef, useState } from 'react'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
@@ -20,7 +19,7 @@ async function copyText(value) {
 }
 
 export default function ShareAppSheet({
-  app, apps, onOpenApp, onSetPublic, onClose,
+  app, apps, onOpenApp, onPublish, onStop, onClose,
 }) {
   const cardRef = useRef(null)
   const primaryFocusRef = useRef(null)
@@ -28,21 +27,37 @@ export default function ShareAppSheet({
   const [busy, setBusy] = useState(false)
   const [confirmStop, setConfirmStop] = useState(false)
   const state = useMemo(() => appShareState(app, apps), [app, apps])
+  const publication = app.hosted_publication
+  const hasUnpublishedChanges = !!publication?.has_unpublished_changes
   const canNativeShare = typeof navigator !== 'undefined' &&
     typeof navigator.share === 'function'
   const publicUrl = typeof window !== 'undefined'
-    ? `${window.location.origin}/${encodeURIComponent(app.slug)}`
-    : `/${encodeURIComponent(app.slug)}`
+    ? `${window.location.origin}${publication?.path || `/${encodeURIComponent(app.slug)}`}`
+    : publication?.path || `/${encodeURIComponent(app.slug)}`
 
-  async function setPublic(value) {
+  async function publishHosted() {
     setBusy(true)
     setStatus('')
     try {
-      await onSetPublic?.(app.id, value)
+      await onPublish?.(app.id)
       setConfirmStop(false)
-      setStatus(value ? 'Public link is live.' : 'Public access stopped.')
+      setStatus(hasUnpublishedChanges ? 'Published version updated.' : 'Public link is live.')
     } catch (error) {
       setStatus(error?.message || 'Could not update public access.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function stopHosted() {
+    setBusy(true)
+    setStatus('')
+    try {
+      await onStop?.(app.id)
+      setConfirmStop(false)
+      setStatus('Public access stopped.')
+    } catch (error) {
+      setStatus(error?.message || 'Could not stop public access.')
     } finally {
       setBusy(false)
     }
@@ -121,7 +136,7 @@ export default function ShareAppSheet({
           />
           <div>
             <p className="sas__eyebrow">
-              {app.public_enabled ? 'Public app' : 'Private app'}
+              {publication ? 'Hosted publicly' : 'Private app'}
             </p>
             <h2 id="sas-title" className="sas__title">
               Share {app.name}
@@ -131,14 +146,18 @@ export default function ShareAppSheet({
 
         <section className="sas__section" aria-labelledby="sas-public-title">
           <h3 id="sas-public-title" className="sas__section-title">
-            {app.public_enabled ? 'Public use is on' : 'Private to you'}
+            {publication
+              ? hasUnpublishedChanges ? 'Published version has an update' : 'Public use is on'
+              : 'Private to you'}
           </h3>
           <p className="sas__body">
-            {app.public_enabled
-              ? 'Anyone with this link can use the app without signing in. They cannot access your chats, files, or app data.'
+            {publication
+              ? hasUnpublishedChanges
+                ? 'The existing public version is still live. Publish the update when you are ready; private edits never go live by accident.'
+                : 'Anyone with this link can use this exact published version without signing in. They cannot access your chats, files, or app data.'
               : 'Turn on public use to give people a durable link. The app stays sandboxed and your personal data remains private.'}
           </p>
-          {app.public_enabled && (
+          {publication && (
             <div className="sas__url" tabIndex={0}>{publicUrl}</div>
           )}
           {confirmStop ? (
@@ -156,7 +175,7 @@ export default function ShareAppSheet({
                 <button
                   type="button"
                   className="sas__btn sas__btn--danger"
-                  onClick={() => setPublic(false)}
+                  onClick={stopHosted}
                   disabled={busy}
                 >
                   {busy ? 'Stopping…' : 'Stop public access'}
@@ -165,11 +184,22 @@ export default function ShareAppSheet({
             </div>
           ) : (
             <div className="sas__actions">
-              {app.public_enabled ? (
+              {publication ? (
                 <>
-                  {canNativeShare && (
+                  {hasUnpublishedChanges && (
                     <button
                       ref={primaryFocusRef}
+                      type="button"
+                      className="sas__btn sas__btn--primary"
+                      onClick={publishHosted}
+                      disabled={busy}
+                    >
+                      {busy ? 'Publishing…' : 'Publish update'}
+                    </button>
+                  )}
+                  {canNativeShare && (
+                    <button
+                      ref={hasUnpublishedChanges ? undefined : primaryFocusRef}
                       type="button"
                       className="sas__btn sas__btn--primary"
                       onClick={sharePublicLink}
@@ -178,7 +208,7 @@ export default function ShareAppSheet({
                     </button>
                   )}
                   <button
-                    ref={canNativeShare ? undefined : primaryFocusRef}
+                    ref={canNativeShare || hasUnpublishedChanges ? undefined : primaryFocusRef}
                     type="button"
                     className={`sas__btn ${canNativeShare ? 'sas__btn--secondary' : 'sas__btn--primary'}`}
                     onClick={copyPublicLink}
@@ -198,7 +228,7 @@ export default function ShareAppSheet({
                   ref={primaryFocusRef}
                   type="button"
                   className="sas__btn sas__btn--primary"
-                  onClick={() => setPublic(true)}
+                  onClick={publishHosted}
                   disabled={busy}
                 >
                   {busy ? 'Making public…' : 'Make public'}
@@ -209,12 +239,12 @@ export default function ShareAppSheet({
         </section>
 
         <section className="sas__section sas__section--install" aria-labelledby="sas-install-title">
-          <h3 id="sas-install-title" className="sas__section-title">Install on another Möbius</h3>
+          <h3 id="sas-install-title" className="sas__section-title">Install or remix</h3>
         {installPublished ? (
           <>
             <p className="sas__body">
-              Send this install link to someone who uses Möbius. Their own data
-              starts fresh.
+              Send this to another Möbius owner. They get an editable copy of
+              the app with fresh data of their own.
             </p>
             <div className="sas__url" tabIndex={0}>{state.installUrl}</div>
             <div className="sas__actions">

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from copy import deepcopy
 from typing import Any
 from urllib.parse import urlsplit
@@ -18,6 +19,87 @@ from urllib.parse import urlsplit
 CONTRACT_SCHEMA = 5
 
 _PUBLIC_NETWORK_RULE_LIMIT = 16
+_PUBLIC_QUERY_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _normalize_public_query(value: Any, *, rule_index: int) -> dict[str, Any]:
+  if value is None:
+    return {}
+  if not isinstance(value, dict) or set(value) - {"allow", "exact", "sha256"}:
+    raise ValueError(
+      f"Manifest public network rule {rule_index} query must contain only "
+      "`allow`, `exact`, and `sha256`."
+    )
+  allow = value.get("allow", [])
+  exact = value.get("exact", {})
+  digests = value.get("sha256", {})
+  if not isinstance(allow, list) or not all(
+    isinstance(name, str) and _PUBLIC_QUERY_NAME.fullmatch(name)
+    for name in allow
+  ):
+    raise ValueError(
+      f"Manifest public network rule {rule_index} query.allow must be an "
+      "array of bounded parameter names."
+    )
+  if len(set(allow)) != len(allow):
+    raise ValueError(
+      f"Manifest public network rule {rule_index} query.allow contains duplicates."
+    )
+
+  def normalized_map(raw: Any, *, field: str, digest: bool) -> dict[str, list[str]]:
+    if not isinstance(raw, dict):
+      raise ValueError(
+        f"Manifest public network rule {rule_index} query.{field} must be an object."
+      )
+    result: dict[str, list[str]] = {}
+    for name in sorted(raw):
+      accepted = raw[name]
+      valid_name = isinstance(name, str) and _PUBLIC_QUERY_NAME.fullmatch(name)
+      valid_values = (
+        isinstance(accepted, list)
+        and 1 <= len(accepted) <= 8
+        and all(isinstance(item, str) for item in accepted)
+      )
+      if not valid_name or not valid_values:
+        raise ValueError(
+          f"Manifest public network rule {rule_index} query.{field} entries "
+          "must map bounded parameter names to 1-8 strings."
+        )
+      if digest:
+        if not all(re.fullmatch(r"[0-9a-f]{64}", item) for item in accepted):
+          raise ValueError(
+            f"Manifest public network rule {rule_index} query.sha256 values "
+            "must be lowercase SHA-256 digests."
+          )
+      elif not all(len(item) <= 4096 for item in accepted):
+        raise ValueError(
+          f"Manifest public network rule {rule_index} query.exact values may "
+          "contain at most 4096 characters."
+        )
+      result[name] = sorted(set(accepted))
+    return result
+
+  normalized_exact = normalized_map(exact, field="exact", digest=False)
+  normalized_digests = normalized_map(digests, field="sha256", digest=True)
+  names = set(allow) | set(normalized_exact) | set(normalized_digests)
+  if len(names) > 16:
+    raise ValueError(
+      f"Manifest public network rule {rule_index} may constrain at most 16 "
+      "query parameters."
+    )
+  if len(names) != len(allow) + len(normalized_exact) + len(normalized_digests):
+    raise ValueError(
+      f"Manifest public network rule {rule_index} query parameter names must "
+      "belong to exactly one constraint."
+    )
+  normalized: dict[str, Any] = {}
+  if allow:
+    normalized["allow"] = sorted(allow)
+  if normalized_exact:
+    normalized["exact"] = normalized_exact
+  if normalized_digests:
+    normalized["sha256"] = normalized_digests
+  return normalized
 
 
 def normalize_public_access(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -43,13 +125,17 @@ def normalize_public_access(manifest: dict[str, Any]) -> dict[str, Any]:
       f"{_PUBLIC_NETWORK_RULE_LIMIT} rules."
     )
 
-  normalized: list[dict[str, str]] = []
-  seen: set[tuple[str, str]] = set()
+  normalized: list[dict[str, Any]] = []
+  seen: set[tuple[str, str, str]] = set()
   for index, rule in enumerate(network):
-    if not isinstance(rule, dict) or set(rule) != {"origin", "path_prefix"}:
+    if (
+      not isinstance(rule, dict)
+      or set(rule) - {"origin", "path_prefix", "query"}
+      or not {"origin", "path_prefix"}.issubset(rule)
+    ):
       raise ValueError(
-        "Each `public_access.network` rule must contain exactly `origin` and "
-        "`path_prefix`."
+        "Each `public_access.network` rule must contain `origin` and "
+        "`path_prefix`, with only an optional `query` contract."
       )
     origin = rule.get("origin")
     prefix = rule.get("path_prefix")
@@ -90,10 +176,21 @@ def normalize_public_access(manifest: dict[str, Any]) -> dict[str, Any]:
         f"Manifest public network rule {index + 1} path_prefix must be a "
         "plain absolute path."
       )
-    key = (normalized_origin, prefix)
+    query = _normalize_public_query(rule.get("query"), rule_index=index + 1)
+    key = (
+      normalized_origin,
+      prefix,
+      json.dumps(query, sort_keys=True, separators=(",", ":")),
+    )
     if key not in seen:
       seen.add(key)
-      normalized.append({"origin": normalized_origin, "path_prefix": prefix})
+      normalized_rule: dict[str, Any] = {
+        "origin": normalized_origin,
+        "path_prefix": prefix,
+      }
+      if query:
+        normalized_rule["query"] = query
+      normalized.append(normalized_rule)
   return {"network": normalized}
 
 

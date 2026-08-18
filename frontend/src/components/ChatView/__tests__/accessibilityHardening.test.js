@@ -28,6 +28,19 @@ test('ShareAppSheet uses the shared modal focus contract', () => {
   assert.match(source, /aria-labelledby="sas-title"/)
 })
 
+test('ShareAppSheet presents hosted use and installable copies as separate lifecycles', () => {
+  const source = read('../../Drawer/ShareAppSheet.jsx')
+  const client = read('../../../api/client.js')
+  assert.match(source, /app\.hosted_publication/)
+  assert.match(source, /onPublish\?\.\(app\.id\)/)
+  assert.match(source, /onStop\?\.\(app\.id\)/)
+  assert.match(source, />Install or remix</)
+  assert.match(source, /editable copy/)
+  assert.doesNotMatch(source, /public_enabled|onSetPublic/)
+  assert.match(client, /\/hosted-publication.*method: 'PUT'/)
+  assert.match(client, /\/hosted-publication.*method: 'DELETE'/)
+})
+
 test('full-screen dialogs share one focus, inerting, and Escape contract', () => {
   const dialogs = [
     read('../../ui/ModelSheet.jsx'),

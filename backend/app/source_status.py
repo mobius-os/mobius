@@ -734,7 +734,7 @@ def build_app_status(app: dict[str, Any]) -> dict[str, Any] | None:
     # arbitrary filesystem probe.
     return None
   repository_manifest_url = (
-    app.get("manifest_url") or app.get("share_manifest_url")
+    app.get("manifest_url") or app.get("published_manifest_url")
   )
   return _project_status(
     repo=source_dir,

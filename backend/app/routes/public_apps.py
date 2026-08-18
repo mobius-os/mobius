@@ -9,22 +9,18 @@ from __future__ import annotations
 
 import html
 import json
-import threading
-import time
 from copy import deepcopy
-from datetime import UTC, datetime
-from urllib.parse import urlsplit
+from pathlib import Path
 
-import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from slowapi import Limiter
 
 from app import auth, models
+from app.compiler import owned_public_bundle_path
 from app.database import SessionLocal
 from app.deps import resolve_public_app_token
-from app.net_utils import validate_url_safe
-from app.routes.proxy import _capped_response
+from app.public_app_transport import fetch_public_url
 
 router = APIRouter(prefix="/api/public-apps", tags=["public-apps"])
 
@@ -65,8 +61,8 @@ def _json_for_script(value) -> str:
 
 def _public_host_html(app: models.App, token: str) -> str:
   app_id = app.id
-  frame_version = app.updated_at.isoformat() if app.updated_at else "0"
-  title = html.escape(app.name, quote=True)
+  frame_version = app.public_bundle_digest or "0"
+  title = html.escape(app.public_name, quote=True)
   app_id_json = _json_for_script(app_id)
   token_json = _json_for_script(token)
   version_json = _json_for_script(frame_version)
@@ -130,8 +126,8 @@ def _public_host_html(app: models.App, token: str) -> str:
         if (!message.requestId || String(message.appId) !== String(APP_ID)) return;
         send({{ type: 'moebius:module-ack', requestId: message.requestId, appId: APP_ID }});
         const retry = message.retry === 1 ? '&retry=1' : '';
-        fetch('/api/apps/' + APP_ID + '/module?token=' + encodeURIComponent(TOKEN)
-          + '&v=' + encodeURIComponent(VERSION) + retry, {{ cache: 'no-cache' }})
+        fetch('/api/public-apps/' + APP_ID + '/module?v=' + encodeURIComponent(VERSION)
+          + retry, {{ headers: {{ Authorization: 'Bearer ' + TOKEN }} }})
           .then(async response => {{
             if (!response.ok) {{
               const error = new Error('The app module returned ' + response.status + '.');
@@ -214,13 +210,14 @@ def public_app_page_for_path(path: str) -> HTMLResponse | None:
       .filter(
         models.App.slug == slug,
         models.App.deleted_at.is_(None),
-        models.App.public_enabled.is_(True),
+        models.App.public_name.isnot(None),
+        models.App.public_bundle_path.isnot(None),
       )
       .first()
     )
-    if app is None or not app.token_nonce:
+    if app is None or not app.public_token_nonce:
       return None
-    token = auth.create_public_app_token(app.id, app.token_nonce)
+    token = auth.create_public_app_token(app.id, app.public_token_nonce)
     body = _public_host_html(app, token)
   finally:
     db.close()
@@ -239,32 +236,6 @@ _fetch_limit = _fetch_limiter.shared_limit(
   "3000/minute", scope="public-app-fetch",
 )
 
-_usage_lock = threading.Lock()
-_usage: dict[int, dict] = {}
-
-
-def _record_usage(app_id: int, *, elapsed: float, response_bytes: int, failed: bool):
-  with _usage_lock:
-    row = _usage.setdefault(app_id, {
-      "requests": 0,
-      "failures": 0,
-      "response_bytes": 0,
-      "upstream_seconds": 0.0,
-      "started_at": datetime.now(UTC).isoformat(),
-      "last_request_at": None,
-    })
-    row["requests"] += 1
-    row["failures"] += int(failed)
-    row["response_bytes"] += max(0, response_bytes)
-    row["upstream_seconds"] += max(0.0, elapsed)
-    row["last_request_at"] = datetime.now(UTC).isoformat()
-
-
-def public_app_usage_snapshot() -> dict[str, dict]:
-  """Cheap per-process counters for spotting a public app's server footprint."""
-  with _usage_lock:
-    return {str(app_id): deepcopy(row) for app_id, row in _usage.items()}
-
 
 def _bearer(authorization: str | None) -> str:
   scheme, _, token = (authorization or "").partition(" ")
@@ -273,37 +244,31 @@ def _bearer(authorization: str | None) -> str:
   return token
 
 
-def _target_allowed(url: str, rules: list[dict]) -> bool:
+@router.get("/{app_id}/module")
+async def public_app_module(
+  app_id: int,
+  authorization: str | None = Header(default=None),
+):
+  """Serve the immutable module bound to one active hosted publication."""
+  token = _bearer(authorization)
+  db = SessionLocal()
   try:
-    parsed = urlsplit(url)
-    port = parsed.port
-  except ValueError:
-    return False
-  if parsed.scheme != "https" or not parsed.hostname:
-    return False
-  host = parsed.hostname.lower()
-  origin = f"https://{host if port in (None, 443) else f'{host}:{port}'}"
-  path = parsed.path or "/"
-  lowered_path = path.lower()
-  # Do not let an allowlisted prefix be escaped through a server that decodes
-  # encoded path separators/dot segments before routing the request.
-  if (
-    "\\" in path
-    or any(segment in (".", "..") for segment in path.split("/"))
-    or any(encoded in lowered_path for encoded in ("%2e", "%2f", "%5c"))
-  ):
-    return False
-  for rule in rules:
-    if not isinstance(rule, dict) or rule.get("origin") != origin:
-      continue
-    prefix = rule.get("path_prefix")
-    if not isinstance(prefix, str):
-      continue
-    if path == prefix or prefix == "/" or (
-      prefix.endswith("/") and path.startswith(prefix)
-    ) or path.startswith(prefix + "/"):
-      return True
-  return False
+    access = resolve_public_app_token(token, db, expected_app_id=app_id)
+    path = owned_public_bundle_path(app_id, access.app.public_bundle_path)
+    digest = access.app.public_bundle_digest
+  finally:
+    db.close()
+  if path is None or not path.is_file() or not digest:
+    raise HTTPException(status_code=404, detail="Published module not found.")
+  return FileResponse(
+    Path(path),
+    media_type="text/javascript; charset=utf-8",
+    headers={
+      "Cache-Control": "private, max-age=31536000, immutable",
+      "ETag": f'"{digest}"',
+      "X-Mobius-Offline": "false",
+    },
+  )
 
 
 @router.get("/{app_id}/fetch")
@@ -322,29 +287,4 @@ async def public_app_fetch(
     rules = deepcopy(access.network)
   finally:
     db.close()
-  if not _target_allowed(url, rules):
-    raise HTTPException(status_code=403, detail="URL is not allowed for this public app.")
-
-  pinned_url, host_header, sni_host = validate_url_safe(url)
-  started = time.monotonic()
-  try:
-    async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
-      upstream = client.build_request("GET", pinned_url)
-      upstream.headers["host"] = host_header
-      upstream.extensions["sni_hostname"] = sni_host
-      response = await _capped_response(
-        client, upstream, forward_cache_headers=True,
-      )
-  except Exception:
-    _record_usage(
-      app_id, elapsed=time.monotonic() - started, response_bytes=0, failed=True,
-    )
-    raise
-  body = getattr(response, "body", b"") or b""
-  _record_usage(
-    app_id,
-    elapsed=time.monotonic() - started,
-    response_bytes=len(body),
-    failed=response.status_code >= 400,
-  )
-  return response
+  return await fetch_public_url(app_id, url, rules)

@@ -539,7 +539,7 @@ async def github_source_status(
     "slug": row.slug,
     "version": row.version,
     "manifest_url": row.manifest_url,
-    "share_manifest_url": row.share_manifest_url,
+    "published_manifest_url": row.published_manifest_url,
     "source_dir": row.source_dir,
   } for row in rows]
 
@@ -646,7 +646,7 @@ async def github_source_diff(
     "slug": row.slug,
     "version": row.version,
     "manifest_url": row.manifest_url,
-    "share_manifest_url": row.share_manifest_url,
+    "published_manifest_url": row.published_manifest_url,
     "source_dir": row.source_dir,
   }
   db.close()

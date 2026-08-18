@@ -485,6 +485,12 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(payload),
     }),
+    publishHosted: (appId) => listAffectingMutation(
+      'apps', `/apps/${appId}/hosted-publication`, { method: 'PUT' },
+    ),
+    stopHosted: (appId) => listAffectingMutation(
+      'apps', `/apps/${appId}/hosted-publication`, { method: 'DELETE' },
+    ),
     remove: (appId) => listAffectingMutation(
       'apps', `/apps/${appId}`, { method: 'DELETE' },
     ),

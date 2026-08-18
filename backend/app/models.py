@@ -740,16 +740,23 @@ class App(Base):
   # between user-built apps and store-installed apps are tolerated
   # because allocate_unique_slug just picks the next free suffix.
   manifest_url = Column(String(1024), nullable=True, index=True)
-  # Public manifest URL the owner explicitly attached for sharing this app.
+  # Public manifest URL the owner explicitly attached for distributing this app.
   # Kept separate from `manifest_url`: the latter is install/update identity,
   # while a locally-built app may be published later without becoming a
   # Store-managed install or changing how its source updates are reconciled.
-  share_manifest_url = Column(String(1024), nullable=True, default=None)
-  # Anonymous runtime publication at the app's stable top-level slug. This is
-  # owner-controlled state, never a manifest permission: installed and local
-  # apps remain private until the owner explicitly enables them, and flipping
-  # it off revokes every outstanding public-app session on its next request.
-  public_enabled = Column(Boolean, nullable=False, default=False)
+  published_manifest_url = Column(String(1024), nullable=True, default=None)
+  # Hosted anonymous use is a snapshot, not a live flag. These fields bind the
+  # exact immutable module and reviewed public network contract that the owner
+  # published. Later source/capability changes therefore remain private until
+  # the owner explicitly publishes an update.
+  public_name = Column(String(255), nullable=True, default=None)
+  public_bundle_path = Column(String(512), nullable=True, default=None)
+  public_bundle_digest = Column(String(64), nullable=True, default=None)
+  public_source_commit = Column(String(64), nullable=True, default=None)
+  public_access_contract = Column(JSON, nullable=True, default=None)
+  public_access_digest = Column(String(64), nullable=True, default=None)
+  public_token_nonce = Column(String(32), nullable=True, default=None)
+  public_published_at = Column(DateTime, nullable=True, default=None)
   # Soft-delete tombstone. Uninstall sets this instead of dropping the row, so
   # the source tree AND the id-keyed runtime storage tree survive — a reinstall
   # (matched by manifest_url) or POST /{id}/recover then revives the SAME id +

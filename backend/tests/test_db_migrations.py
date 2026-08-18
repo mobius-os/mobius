@@ -111,7 +111,7 @@ def test_run_migrations_adds_manifest_url_to_existing_apps_table(tmp_path):
   indexes = {i["name"] for i in inspector.get_indexes("apps")}
 
   assert "manifest_url" in cols
-  assert "share_manifest_url" in cols
+  assert "published_manifest_url" in cols
   assert "ix_apps_manifest_url" in indexes
   # Reversible-uninstall tombstone column is added on an existing apps table
   # (feature 110) — the path that runs on a real prod boot, not create_all.
@@ -1017,7 +1017,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0010_chat_pending_question_id",
     "0011_delegation_parent_wake",
     "0012_connector_oauth_gcloud",
-    "0013_app_public_runtime",
+    "0013_app_hosted_publication",
   ]
   assert second == first
 
@@ -1121,8 +1121,8 @@ def test_connections_manage_reaches_a_ledgered_database(tmp_path):
   }
 
 
-def test_public_runtime_reaches_a_fully_ledgered_private_app(tmp_path):
-  """0013 adds the opt-in flag and a closed public contract to old rows."""
+def test_hosted_publication_reaches_a_fully_ledgered_private_app(tmp_path):
+  """0013 adds snapshot fields and a closed public contract to old rows."""
   eng = create_engine(f"sqlite:///{tmp_path / 'ledgered-public-apps.db'}")
   with eng.begin() as conn:
     conn.execute(text(
@@ -1146,18 +1146,88 @@ def test_public_runtime_reaches_a_fully_ledgered_private_app(tmp_path):
 
   run_migrations(eng)
   columns = {c["name"] for c in inspect(eng).get_columns("apps")}
-  assert "public_enabled" in columns
+  assert "public_enabled" not in columns
+  assert "public_bundle_path" in columns
   with eng.connect() as conn:
-    enabled, raw_contract = conn.execute(text(
-      "SELECT public_enabled, capability_contract FROM apps WHERE id = 1"
+    public_bundle, raw_contract = conn.execute(text(
+      "SELECT public_bundle_path, capability_contract FROM apps WHERE id = 1"
     )).one()
   contract = json.loads(raw_contract) if isinstance(raw_contract, str) else raw_contract
-  assert enabled in (False, 0)
+  assert public_bundle is None
   assert contract["schema"] == 5
   assert contract["public"] == {"network": []}
-  assert "0013_app_public_runtime" in {
+  assert "0013_app_hosted_publication" in {
     entry["version"] for entry in schema_migration_history(eng)
   }
+
+
+def test_hosted_publication_migrates_the_unmerged_live_flag_to_a_snapshot(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
+  compiled = tmp_path / "compiled"
+  compiled.mkdir()
+  module = b"export default function App(){return null}\n"
+  digest = hashlib.sha256(module).hexdigest()
+  installed_bundle = compiled / f"app-1-{digest}.js"
+  installed_bundle.write_bytes(module)
+  eng = create_engine(f"sqlite:///{tmp_path / 'flag-to-snapshot.db'}")
+  contract = {"schema": 5, "public": {"network": []}}
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps ("
+      "id INTEGER PRIMARY KEY, name VARCHAR(255), slug VARCHAR(128), "
+      "token_nonce VARCHAR(32), compiled_path VARCHAR(512), "
+      "source_commit VARCHAR(64), capability_contract JSON, "
+      "share_manifest_url VARCHAR(1024), "
+      "public_enabled BOOLEAN NOT NULL DEFAULT FALSE)"
+    ))
+    conn.execute(text(
+      "INSERT INTO apps VALUES "
+      "(1, 'Live app', 'live-app', 'nonce', :bundle, :commit, :contract, "
+      ":manifest, TRUE)"
+    ), {
+      "bundle": str(installed_bundle),
+      "commit": "a" * 40,
+      "contract": json.dumps(contract),
+      "manifest": "https://example.test/live-app/mobius.json",
+    })
+    conn.execute(text(
+      "CREATE TABLE schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version, _migration in database._SCHEMA_MIGRATIONS[:-1]:
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) "
+        "VALUES (:version, '2026-08-15 00:00:00')"
+      ), {"version": version})
+
+  run_migrations(eng)
+
+  columns = {c["name"] for c in inspect(eng).get_columns("apps")}
+  assert "public_enabled" not in columns
+  assert "share_manifest_url" not in columns
+  with eng.connect() as conn:
+    row = conn.execute(text(
+      "SELECT published_manifest_url, public_bundle_path, "
+      "public_name, public_bundle_digest, public_source_commit, "
+      "public_access_contract, "
+      "public_token_nonce "
+      "FROM apps WHERE id = 1"
+    )).one()
+  assert row.published_manifest_url == "https://example.test/live-app/mobius.json"
+  assert row.public_name == "Live app"
+  assert Path(row.public_bundle_path).read_bytes() == module
+  assert Path(row.public_bundle_path) != installed_bundle
+  assert row.public_bundle_digest == digest
+  assert row.public_source_commit == "a" * 40
+  public_access = (
+    json.loads(row.public_access_contract)
+    if isinstance(row.public_access_contract, str)
+    else row.public_access_contract
+  )
+  assert public_access == {"network": []}
+  assert len(row.public_token_nonce) == 32
 
 
 def test_connector_oauth_gcloud_migration_upgrades_legacy_rows_idempotently(
