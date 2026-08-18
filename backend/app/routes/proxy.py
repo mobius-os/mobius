@@ -21,6 +21,14 @@ from app.net_utils import validate_url_safe
 
 router = APIRouter(prefix="/api/proxy", tags=["proxy"])
 
+# Identify outbound proxy requests with a real User-Agent. httpx's default
+# ("python-httpx/x.y") is 403'd by several public APIs that require an
+# identifiable client (OSM Nominatim, Photon and others enforce this per their
+# usage policy, and Nominatim additionally asks for a contact URL). A stable
+# app-identifying UA keeps those endpoints usable for every mini-app; same
+# convention as _FAVICON_USER_AGENT below.
+_PROXY_USER_AGENT = "Mobius/1.0 (app proxy; +https://github.com/mobius-os/mobius)"
+
 # Hard limit on response size to avoid pulling in huge payloads.
 _MAX_BYTES = 2 * 1024 * 1024  # 2 MB
 
@@ -339,6 +347,7 @@ async def proxy_get(
   async with httpx.AsyncClient(follow_redirects=False, timeout=15) as client:
     req = client.build_request("GET", pinned_url)
     req.headers["host"] = host_header
+    req.headers["user-agent"] = _PROXY_USER_AGENT
     # httpcore/anyio require text here. Bytes reach idna2008_resolve(), which
     # calls .encode() itself and turns every real HTTPS proxy request into 502.
     req.extensions["sni_hostname"] = sni_host
@@ -361,5 +370,6 @@ async def proxy_post(
       headers={"Content-Type": body.content_type},
     )
     req.headers["host"] = host_header
+    req.headers["user-agent"] = _PROXY_USER_AGENT
     req.extensions["sni_hostname"] = sni_host
     return await _capped_response(client, req)
