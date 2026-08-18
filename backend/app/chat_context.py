@@ -16,6 +16,11 @@ from app.continuations import (
   continuation_actor_label,
   is_continuation_message,
 )
+from app.goal_commands import (
+  goal_argument as _goal_argument,
+  goal_clear_requested as _goal_clear_requested,
+  goal_objective as _goal_objective,
+)
 
 def _human_elapsed(seconds: float | None) -> str | None:
   """Human 'N ago' for the gap since the user's previous message.
@@ -491,26 +496,6 @@ def _build_resumed_context(chat_row) -> str | None:
 # does not know, and picking it would degrade into ordinary prose with no error
 # shown anywhere.
 CLI_SLASH_COMMANDS = frozenset({"/goal"})
-
-
-def _goal_argument(text: str) -> str | None:
-  match = re.match(r"^\s*/goal(?:\s+([\s\S]+))?\s*$", text or "")
-  if match is None:
-    return None
-  return (match.group(1) or "").strip() or None
-
-
-def _goal_clear_requested(text: str) -> bool:
-  argument = _goal_argument(text)
-  return bool(argument and argument.lower() == "clear")
-
-
-def _goal_objective(text: str) -> str | None:
-  """Return the clean objective from a leading ``/goal`` command."""
-  objective = _goal_argument(text)
-  if objective is None or objective.lower() == "clear":
-    return None
-  return objective
 
 
 def _chat_has_goal_intent(messages: list[schemas.ChatMessage]) -> bool:

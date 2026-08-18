@@ -1,6 +1,17 @@
 """Durable Goal-plan validation, ordering, progress, and route contracts."""
 
+import importlib.util
+from pathlib import Path
+
 from app import models
+
+
+def _goal_plan_script():
+  path = Path(__file__).resolve().parents[1] / "scripts" / "goal_plan.py"
+  spec = importlib.util.spec_from_file_location("goal_plan_script", path)
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  return module
 
 
 def _active_goal(client, owner_token, db):
@@ -37,7 +48,12 @@ def test_parallel_roots_release_dependent_task_only_after_all_complete(
   plan = created.json()["plan"]
   assert plan["revision"] == 1
   assert plan["summary"] == {
-    "completed": 0, "total": 3, "running": [], "ready": ["a", "b"],
+    "completed": 0,
+    "total": 3,
+    "running": [],
+    "ready": ["a", "b"],
+    "can_complete": False,
+    "completion_blockers": ["a", "b", "c"],
   }
 
   a_running = client.patch(
@@ -70,6 +86,8 @@ def test_parallel_roots_release_dependent_task_only_after_all_complete(
   final = response.json()["plan"]
   assert final["summary"]["running"] == ["c"]
   assert final["summary"]["completed"] == 2
+  assert final["summary"]["can_complete"] is False
+  assert final["summary"]["completion_blockers"] == ["c"]
 
 
 def test_repeated_task_needs_full_progress_and_stale_revision_cannot_overwrite(
@@ -123,6 +141,45 @@ def test_repeated_task_needs_full_progress_and_stale_revision_cannot_overwrite(
   )
   assert completed.status_code == 200, completed.text
   assert completed.json()["plan"]["summary"]["completed"] == 1
+  assert completed.json()["plan"]["summary"]["can_complete"] is True
+  assert completed.json()["plan"]["summary"]["completion_blockers"] == []
+
+
+def test_cancelled_work_is_removed_from_the_completion_route(
+  client, owner_token, db,
+):
+  auth, chat_id = _active_goal(client, owner_token, db)
+  created = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={
+      "expected_revision": 0,
+      "tasks": [
+        {"id": "done", "title": "Required work", "status": "completed"},
+        {"id": "removed", "title": "No longer needed", "status": "cancelled"},
+      ],
+    },
+    headers=auth,
+  )
+  assert created.status_code == 200, created.text
+  summary = created.json()["plan"]["summary"]
+  assert summary["can_complete"] is True
+  assert summary["completion_blockers"] == []
+
+
+def test_completion_preflight_names_only_unfinished_required_work():
+  helper = _goal_plan_script()
+  plan = {
+    "tasks": [
+      {"id": "done", "title": "Finished", "status": "completed"},
+      {"id": "removed", "title": "Removed", "status": "cancelled"},
+      {"id": "next", "title": "Run final audit", "status": "pending"},
+      {"id": "blocked", "title": "Resolve blocker", "status": "blocked"},
+    ],
+  }
+  assert helper._completion_blockers(None) == []
+  assert helper._completion_blockers(plan) == [
+    "Run final audit", "Resolve blocker",
+  ]
 
 
 def test_plan_rejects_cycles_missing_dependencies_and_non_goal_runs(

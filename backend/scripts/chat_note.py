@@ -12,7 +12,7 @@ the summarizer subagent gets the transcript in its PROMPT and runs with NO tools
 note file and the title PATCH. So a prompt-injected chat can't make the subagent
 write outside the note or exfiltrate anything.
 
-Usage: chat_note.py <chat_id>
+Usage: chat_note.py <chat_id> [--active-goal-checkpoint]
 Exit 0 ok (or nothing-to-do) · 2 bad args · 3 summarizer failed (one-line
 reason on stderr). Best-effort: never raises into the caller — a failed note
 must never break or slow the turn that triggered it, but the failure exit lets
@@ -207,11 +207,19 @@ class SourceCursor(NamedTuple):
   messages_sha256: str
 
 
+class ActiveGoalCheckpoint(NamedTuple):
+  """The durable question boundary that permits an active-Goal summary."""
+
+  run_id: str
+  pending_question_id: str
+
+
 class ChatSnapshot(NamedTuple):
   transcript: str
   updated_at: str
   messages: list[dict] | None
   provider: str | None = None
+  active_goal_checkpoint: ActiveGoalCheckpoint | None = None
 
   @property
   def message_count(self) -> int | None:
@@ -245,19 +253,36 @@ def _messages_sha256(messages: list[dict]) -> str:
   return digest.hexdigest()
 
 
-def _read_chat_snapshot(chat_id: str) -> ChatSnapshot | None:
-  """Return complete transcript + durable revision for one idle live chat."""
+def _read_chat_snapshot(
+  chat_id: str,
+  *,
+  active_goal_checkpoint: bool = False,
+) -> ChatSnapshot | None:
+  """Return a revision-pinned idle or question-paused Goal transcript."""
   try:
     con = sqlite3.connect(str(DB))
     _apply_sqlite_policy(con)
-    row = con.execute(
-      "select messages, updated_at, provider from chats "
-      "where id=? and deleted_at is null "
-      "and not exists (select 1 from chat_runs "
-      "where chat_runs.chat_id=chats.id "
-      "and status in ('running','parked','resume_pending'))",
-      (chat_id,),
-    ).fetchone()
+    if active_goal_checkpoint:
+      row = con.execute(
+        "select chats.messages, chats.updated_at, chats.provider, "
+        "chat_runs.id, chats.pending_question_id "
+        "from chats join chat_runs on chat_runs.chat_id=chats.id "
+        "where chats.id=? and chats.deleted_at is null "
+        "and chats.pending_question_id is not null "
+        "and chat_runs.status in ('running','parked','resume_pending') "
+        "and chat_runs.goal_objective is not null "
+        "order by chat_runs.started_at desc, chat_runs.id desc limit 1",
+        (chat_id,),
+      ).fetchone()
+    else:
+      row = con.execute(
+        "select messages, updated_at, provider from chats "
+        "where id=? and deleted_at is null "
+        "and not exists (select 1 from chat_runs "
+        "where chat_runs.chat_id=chats.id "
+        "and status in ('running','parked','resume_pending'))",
+        (chat_id,),
+      ).fetchone()
     con.close()
   except sqlite3.Error:
     return None
@@ -270,6 +295,11 @@ def _read_chat_snapshot(chat_id: str) -> ChatSnapshot | None:
     updated_at=str(row[1]),
     messages=messages,
     provider=str(row[2]).strip().lower() if row[2] is not None else None,
+    active_goal_checkpoint=(
+      ActiveGoalCheckpoint(str(row[3]), str(row[4]))
+      if active_goal_checkpoint and row[3] is not None and row[4] is not None
+      else None
+    ),
   )
 
 
@@ -590,20 +620,36 @@ def _publish_if_current(
   expected_note_revision: str,
   note: Path,
   text: str,
+  active_goal_checkpoint: ActiveGoalCheckpoint | None = None,
 ) -> bool:
   """Atomically publish only while both durable snapshots are still current."""
   con = sqlite3.connect(str(DB), timeout=10, isolation_level=None)
   try:
     _apply_sqlite_policy(con)
     con.execute("begin immediate")
-    row = con.execute(
-      "select updated_at from chats "
-      "where id=? and deleted_at is null "
-      "and not exists (select 1 from chat_runs "
-      "where chat_runs.chat_id=chats.id "
-      "and status in ('running','parked','resume_pending'))",
-      (chat_id,),
-    ).fetchone()
+    if active_goal_checkpoint is None:
+      row = con.execute(
+        "select updated_at from chats "
+        "where id=? and deleted_at is null "
+        "and not exists (select 1 from chat_runs "
+        "where chat_runs.chat_id=chats.id "
+        "and status in ('running','parked','resume_pending'))",
+        (chat_id,),
+      ).fetchone()
+    else:
+      row = con.execute(
+        "select chats.updated_at from chats join chat_runs "
+        "on chat_runs.id=? and chat_runs.chat_id=chats.id "
+        "where chats.id=? and chats.deleted_at is null "
+        "and chats.pending_question_id=? "
+        "and chat_runs.status in ('running','parked','resume_pending') "
+        "and chat_runs.goal_objective is not null",
+        (
+          active_goal_checkpoint.run_id,
+          chat_id,
+          active_goal_checkpoint.pending_question_id,
+        ),
+      ).fetchone()
     if (
       row is None
       or str(row[0]) != expected_updated_at
@@ -613,15 +659,33 @@ def _publish_if_current(
       return False
     _atomic_write_text(note, text + ("\n" if not text.endswith("\n") else ""))
     published_at = datetime.now(UTC).replace(tzinfo=None).isoformat(sep=" ")
-    changed = con.execute(
-      "update chats set updated_at=? "
-      "where id=? and deleted_at is null "
-      "and not exists (select 1 from chat_runs "
-      "where chat_runs.chat_id=chats.id "
-      "and status in ('running','parked','resume_pending')) "
-      "and updated_at=?",
-      (published_at, chat_id, expected_updated_at),
-    ).rowcount
+    if active_goal_checkpoint is None:
+      changed = con.execute(
+        "update chats set updated_at=? "
+        "where id=? and deleted_at is null "
+        "and not exists (select 1 from chat_runs "
+        "where chat_runs.chat_id=chats.id "
+        "and status in ('running','parked','resume_pending')) "
+        "and updated_at=?",
+        (published_at, chat_id, expected_updated_at),
+      ).rowcount
+    else:
+      changed = con.execute(
+        "update chats set updated_at=? "
+        "where id=? and deleted_at is null and updated_at=? "
+        "and pending_question_id=? and exists ("
+        "select 1 from chat_runs where chat_runs.id=? "
+        "and chat_runs.chat_id=chats.id "
+        "and chat_runs.status in ('running','parked','resume_pending') "
+        "and chat_runs.goal_objective is not null)",
+        (
+          published_at,
+          chat_id,
+          expected_updated_at,
+          active_goal_checkpoint.pending_question_id,
+          active_goal_checkpoint.run_id,
+        ),
+      ).rowcount
     if changed != 1:
       con.rollback()
       return False
@@ -683,13 +747,23 @@ def _patch_title(chat_id: str, description: str) -> None:
 def run() -> int:
   args = [a for a in sys.argv[1:] if a.strip()]
   sync_title_only = "--sync-title" in args
-  args = [a for a in args if a != "--sync-title"]
+  active_goal_checkpoint = "--active-goal-checkpoint" in args
+  args = [
+    a for a in args
+    if a not in {"--sync-title", "--active-goal-checkpoint"}
+  ]
   if not args:
-    sys.stderr.write("usage: chat_note.py <chat_id> [--sync-title]\n")
+    sys.stderr.write(
+      "usage: chat_note.py <chat_id> "
+      "[--sync-title|--active-goal-checkpoint]\n"
+    )
     return 2
   chat_id = args[0].strip()
   if not re.fullmatch(r"[A-Za-z0-9-]{1,64}", chat_id):
     sys.stderr.write("chat_id must be 1-64 letters, digits, or hyphens\n")
+    return 2
+  if sync_title_only and active_goal_checkpoint:
+    sys.stderr.write("summary modes are mutually exclusive\n")
     return 2
 
   # --sync-title: compatibility/repair mode with NO summarizer (no LLM, no
@@ -706,7 +780,10 @@ def run() -> int:
       _patch_title(chat_id, m.group(1).strip())
     return 0
 
-  snapshot = _read_chat_snapshot(chat_id)
+  snapshot = _read_chat_snapshot(
+    chat_id,
+    active_goal_checkpoint=active_goal_checkpoint,
+  )
   if snapshot is None:
     return 0  # missing, deleted, or currently running
   if not snapshot.transcript:
@@ -746,6 +823,7 @@ def run() -> int:
       expected_note_revision,
       note,
       out,
+      snapshot.active_goal_checkpoint,
     )
   except (OSError, sqlite3.Error) as e:
     sys.stderr.write(f"note write failed: {e!r}\n")

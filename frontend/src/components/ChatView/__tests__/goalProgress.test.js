@@ -152,9 +152,13 @@ test('a planned goal shows every running branch and dependency progress', () => 
   assert.deepEqual(progressRailViewModel('Ship it', [], plan), [
     {
       key: 'goal',
-      label: 'Goal · Ship it · 1/4',
+      label: 'Goal plan · 1 of 4',
       expandable: true,
       hasDetails: true,
+      title: 'Goal: Ship it',
+      ariaLabel: 'Goal plan for Ship it; 1 of 4 tasks complete',
+      actionLabel: 'View tasks',
+      expandedActionLabel: 'Hide tasks',
       current: false,
     },
     {
@@ -262,6 +266,8 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
   )
   assert.match(progressRail, /chat__progress-rail/)
   assert.match(progressRail, /aria-expanded=\{expanded\}/)
+  assert.match(progressRail, /chat__progress-step-action/)
+  assert.match(progressRail, /expandedActionLabel/)
   assert.match(progressRail, /label\.scrollWidth > step\.clientWidth/)
   assert.match(
     chatCss,

@@ -67,6 +67,16 @@ update the matching task, and start newly ready work. Ordinary in-turn fleets
 still die with the turn; use a capability that explicitly owns durable child
 work when the task must survive a restart.
 
-Do not mark the native Goal complete while any required task is pending,
-running, blocked, or failed. A green todo list supports the completion audit;
-it never replaces checking the actual result.
+Immediately before marking the native Goal complete, run the mediated
+completion preflight as its own command:
+
+```bash
+python3 /data/platform/backend/scripts/goal_plan.py check-complete
+```
+
+Only call `update_goal` with `status: complete` when that command exits zero
+and the actual requested outcome has been achieved. The preflight allows a
+deliberately unplanned one-step Goal; for a planned Goal it rejects pending,
+running, blocked, or failed tasks. Cancelled tasks are treated as deliberately
+removed from the route. A green todo list supports the completion audit; it
+never replaces checking the actual result.

@@ -248,6 +248,46 @@ def test_question_event_is_saved_before_broadcast(db, chat):
   )
 
 
+def test_question_checkpoint_runs_after_broadcast_without_blocking_card(db, chat):
+  """Goal summary work starts after the durable card and never delays it."""
+  chat.messages = [{"role": "user", "content": "/goal Ship it", "ts": 1}]
+  db.commit()
+  bc = _OrderedBroadcast(chat.id)
+
+  async def go():
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def checkpoint():
+      bc.timeline.append(("checkpoint", "start"))
+      started.set()
+      await release.wait()
+      finished.set()
+
+    sink = chat_mod._ChatEventSink(
+      bc,
+      chat.id,
+      run_token="rt-goal-q",
+      recall_binding=EMPTY_RECALL_BINDING,
+      on_question_checkpoint=checkpoint,
+    )
+    await sink.publish_question({
+      "type": "question",
+      "question_id": "q-goal",
+      "questions": [{"id": "q-goal", "question": "Proceed?"}],
+    })
+    assert not finished.is_set(), "the card waited for optional summary work"
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert bc.timeline.index(("publish", "question")) < bc.timeline.index(
+      ("checkpoint", "start")
+    )
+    release.set()
+    await asyncio.wait_for(finished.wait(), timeout=1)
+
+  asyncio.run(go())
+
+
 def test_publish_rejects_question_events(db, chat):
   """publish() must REJECT question events so a runner can't bypass the
   save-before-broadcast barrier — they MUST go through publish_question."""

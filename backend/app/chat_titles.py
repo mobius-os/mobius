@@ -1,6 +1,7 @@
 """Chat naming policy for the immediate first-message fallback."""
 
 from app.continuations import is_continuation_message
+from app.goal_commands import goal_objective
 
 FIRST_MESSAGE_TITLE_MAX_CHARS = 80
 
@@ -15,7 +16,11 @@ def first_message_title(content: object) -> str:
     )
   if not isinstance(content, str):
     return ""
-  return content.strip()[:FIRST_MESSAGE_TITLE_MAX_CHARS]
+  content = content.strip()
+  # The immediate drawer name is visible for the entire first Goal operation,
+  # which may span many physical turns. Keep the control syntax out of that
+  # user-facing fallback instead of waiting for the first summary publication.
+  return (goal_objective(content) or content)[:FIRST_MESSAGE_TITLE_MAX_CHARS]
 
 
 def first_user_message_title(messages: list[object] | None) -> str:

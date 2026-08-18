@@ -635,6 +635,26 @@ def test_start_turn_keeps_a_useful_first_message_title_preview(actor):
   assert _load_chat()["title"] == first_message[:80]
 
 
+def test_start_turn_strips_goal_control_syntax_from_title_preview(actor):
+  """A long-running Goal gets a useful drawer name before its first summary."""
+  objective = (
+    "Review every finished local change and prepare the safe contribution "
+    "without losing any owner work"
+  )
+  _seed_chat(messages=[])
+
+  _await(actor.submit(
+    StartTurn(
+      chat_id="c1",
+      run_token="rt-goal-title-preview",
+      user_msg={"role": "user", "content": f"/goal {objective}", "ts": 5},
+      title_source=f"/goal {objective}",
+    )
+  ))
+
+  assert _load_chat()["title"] == objective[:80]
+
+
 def test_start_turn_preserves_an_owner_title_before_the_first_message(actor):
   _seed_chat(messages=[], title="My chosen title", title_locked=True)
 

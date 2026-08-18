@@ -81,6 +81,21 @@ def _progress(value: str) -> dict:
   return {"current": current, "total": total}
 
 
+def _completion_blockers(plan: dict | None) -> list[str]:
+  """Return visible unfinished-task names for the completion preflight."""
+  if plan is None:
+    return []
+  tasks = [
+    task for task in plan.get("tasks") or []
+    if isinstance(task, dict)
+  ]
+  return [
+    str(task.get("title") or task.get("id") or "Unnamed task")
+    for task in tasks
+    if task.get("status") not in {"completed", "cancelled"}
+  ]
+
+
 def main() -> int:
   parser = argparse.ArgumentParser(
     prog="goal-plan",
@@ -88,6 +103,10 @@ def main() -> int:
   )
   sub = parser.add_subparsers(dest="command", required=True)
   sub.add_parser("show", help="print the current plan")
+  sub.add_parser(
+    "check-complete",
+    help="verify that every required task is completed or cancelled",
+  )
   set_parser = sub.add_parser("set", help="create or revise the complete plan")
   set_parser.add_argument(
     "--task", action="append", type=_parse_task, default=[],
@@ -110,6 +129,18 @@ def main() -> int:
   current = _current(chat_id)
   if args.command == "show":
     print(json.dumps(current, indent=2, ensure_ascii=False))
+    return 0
+  if args.command == "check-complete":
+    # One-step Goals deliberately have no plan and may complete normally.
+    if current is None:
+      print("Goal has no todo plan; completion is allowed.")
+      return 0
+    blockers = _completion_blockers(current)
+    if blockers:
+      raise SystemExit(
+        "Goal cannot complete; unfinished todo tasks: " + ", ".join(blockers)
+      )
+    print("Goal todo list is complete.")
     return 0
 
   revision = int((current or {}).get("revision", 0))

@@ -201,6 +201,10 @@ def serialize_plan(
   by_id = {task["id"]: task for task in tasks}
   completed = sum(task.get("status") == "completed" for task in tasks)
   running = [task["id"] for task in tasks if task.get("status") == "running"]
+  completion_blockers = [
+    task["id"] for task in tasks
+    if task.get("status") not in {"completed", "cancelled"}
+  ]
   ready: list[str] = []
   for task in tasks:
     waiting_on = [
@@ -223,6 +227,8 @@ def serialize_plan(
       "total": len(tasks),
       "running": running,
       "ready": ready,
+      "can_complete": not completion_blockers,
+      "completion_blockers": completion_blockers,
     },
   }
 

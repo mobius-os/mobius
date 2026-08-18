@@ -3259,6 +3259,19 @@
   border-radius: 3px;
 }
 
+.chat__progress-step-action {
+  flex: 0 0 auto;
+  margin-left: 2px;
+  color: var(--accent);
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.chat__progress-step--toggle:hover .chat__progress-step-action {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 .chat__progress-step--expanded {
   flex-basis: 100%;
 }

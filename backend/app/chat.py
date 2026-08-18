@@ -3700,6 +3700,7 @@ async def _ensure_chat_note(
   chat_id: str,
   *,
   deterministic: bool = False,
+  active_goal_checkpoint: bool = False,
 ) -> None:
   """Run the platform-owned turn-end chat-summary publisher.
 
@@ -3722,9 +3723,12 @@ async def _ensure_chat_note(
   env["DATA_DIR"] = data_dir
   if deterministic:
     env["CHAT_NOTE_PROVIDER"] = "deterministic"
+  args = ["python3", str(script), chat_id]
+  if active_goal_checkpoint:
+    args.append("--active-goal-checkpoint")
   try:
     proc = await asyncio.create_subprocess_exec(
-      "python3", str(script), chat_id,
+      *args,
       stdout=asyncio.subprocess.DEVNULL,
       stderr=asyncio.subprocess.PIPE,
       env=env,
@@ -3987,6 +3991,14 @@ async def _run_chat_impl_with_db(
   goal_clear = _goal_clear_requested(raw_user_message)
   goal_mode = _chat_has_goal_intent(messages)
   goal_continue = (raw_user_message or "").strip().lower() == "continue"
+  question_checkpoint = None
+  if settings.ensure_chat_note and chat_id and goal_mode:
+    async def question_checkpoint() -> None:
+      await _ensure_chat_note(
+        settings.data_dir,
+        chat_id,
+        active_goal_checkpoint=True,
+      )
   is_slash_command = _is_cli_slash_command(user_message)
   if is_slash_command:
     # The CLI dispatches a slash command only when it sits at position 0, so the
@@ -4585,7 +4597,11 @@ async def _run_chat_impl_with_db(
       chat_id=chat_id,
     )
     sink = _ChatEventSink(
-      bc, chat_id, run_token=run_token, recall_binding=recall_binding,
+      bc,
+      chat_id,
+      run_token=run_token,
+      recall_binding=recall_binding,
+      on_question_checkpoint=question_checkpoint,
     )
     register_active_sink(chat_id, sink)
     runner_result: dict = {}
@@ -4757,7 +4773,11 @@ async def _run_chat_impl_with_db(
       # warning log is the operator-facing signal.
       claude_session_id = None
     sink = _ChatEventSink(
-      bc, chat_id, run_token=run_token, recall_binding=recall_binding,
+      bc,
+      chat_id,
+      run_token=run_token,
+      recall_binding=recall_binding,
+      on_question_checkpoint=question_checkpoint,
     )
     register_active_sink(chat_id, sink)
     # As in the Codex path, do not pin a pooled connection while the provider

@@ -121,14 +121,20 @@ export function progressRailViewModel(goalObjective, buildPhases, goalPlan = nul
   if (goalObjective) {
     const completed = goalPlan?.summary?.completed
     const total = goalPlan?.summary?.total
-    const count = Number.isInteger(completed) && Number.isInteger(total)
-      ? ` · ${completed}/${total}`
-      : ''
+    const planned = Number.isInteger(completed) && Number.isInteger(total)
     items.push({
       key: 'goal',
-      label: `Goal · ${goalObjective}${count}`,
+      label: planned
+        ? `Goal plan · ${completed} of ${total}`
+        : `Goal · ${goalObjective}`,
       expandable: true,
-      ...(goalPlan ? { hasDetails: true } : {}),
+      ...(goalPlan ? {
+        hasDetails: true,
+        title: `Goal: ${goalObjective}`,
+        ariaLabel: `Goal plan for ${goalObjective}; ${completed} of ${total} tasks complete`,
+        actionLabel: 'View tasks',
+        expandedActionLabel: 'Hide tasks',
+      } : {}),
     })
   }
   const activeTasks = visibleGoalTasks(goalPlan)
