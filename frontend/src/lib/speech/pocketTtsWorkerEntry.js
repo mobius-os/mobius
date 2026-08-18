@@ -229,7 +229,17 @@ async function generate(text, requestId) {
   generation.claim(requestId)
   let steps = 0
   try {
-    const [processedText, framesAfterEos] = model.prepare_text(text)
+    const [processedText, rawFramesAfterEos] = model.prepare_text(text)
+    // prepare_text returns Kyutai's default post-EOS tail: 1 frame (80 ms) for
+    // >4-word blocks (3 for shorter). Measured against the Alba voice, that 80 ms
+    // clips the final phoneme mid-decay — a long block's audio ended at full
+    // ~0.017 RMS instead of reaching silence, i.e. "eats the end of each block".
+    // The News boundary trimmer was exonerated by the same measurement (it dropped
+    // 0 ms because the raw audio was audible to the very end). Render more of the
+    // decay so the phoneme completes; the app-side boundary trimmer then removes
+    // any excess trailing silence, so raising this cannot re-introduce long stops.
+    // 1 frame = 80 ms at the 12.5 Hz mimi frame rate; 6 frames ≈ 480 ms.
+    const framesAfterEos = Math.max(rawFramesAfterEos, 6)
     const tokens = tokenizer.encode(processedText)
     model.start_generation(voiceIndex, tokens, framesAfterEos, generationTemperature)
     // Reference guardrail (pocket_tts tts_model.py): a generation should last at
