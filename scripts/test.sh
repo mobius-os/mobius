@@ -27,6 +27,7 @@ TEST_IMAGE="${MOBIUS_IMAGE:-mobius-test:ci}"
 # suite remains the required --backend/--all closeout gate.
 FAST_TESTS=(
   "tests/test_readiness.py"
+  "tests/test_db_migrations.py::test_applied_legacy_schema_migration_is_immutable"
   "tests/test_auth_helpers.py"
   "tests/test_app_compile_contract.py"
   "tests/test_source_status.py"

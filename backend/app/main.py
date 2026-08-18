@@ -114,11 +114,11 @@ def _init_db():
       run_migrations(engine)
       from app.database import orm_schema_gaps
       gaps = orm_schema_gaps(engine)
+      _SCHEMA_GAPS[:] = gaps
       if gaps:
         # A mapped column with no migration fails at first query, not at
         # boot. Surface it loudly here and through /api/health(+/strict)
         # instead of letting turns fail one by one.
-        _SCHEMA_GAPS[:] = gaps
         print(
           "CRITICAL: database is missing ORM-declared schema: "
           + ", ".join(gaps)
@@ -131,6 +131,28 @@ def _init_db():
         time.sleep(delay)
       else:
         raise
+
+
+def _serviceability_schema_gaps() -> list[str]:
+  """Return current boot-detected schema gaps, clearing repaired gaps.
+
+  Healthy probes stay read-only and cheap. Once startup has found a mismatch,
+  readiness re-inspects until an external repair closes it; this lets Recovery
+  restore routing without requiring a cosmetic restart while still failing
+  closed if inspection itself cannot complete.
+  """
+  if not _SCHEMA_GAPS:
+    return []
+  try:
+    from app.database import orm_schema_gaps
+    gaps = orm_schema_gaps(engine)
+  except Exception:
+    # A readiness check must never turn an inspection failure into a green
+    # result. Preserve the boot-proven mismatch until a later probe can prove
+    # that Recovery completed the repair.
+    return list(_SCHEMA_GAPS)
+  _SCHEMA_GAPS[:] = gaps
+  return list(gaps)
 
 
 def _assert_provider_defaults(provider_names) -> None:
@@ -726,19 +748,19 @@ def health(response: Response):
 
 @app.get("/api/health/strict")
 def health_strict(response: Response):
-  """Serviceability probe for the container healthcheck.
+  """Schema-focused serviceability probe retained for diagnostics.
 
   Distinct from `/api/health` (reachability — must stay 200 whenever the
   process answers, or the shell would flip devices to offline UI): this
-  variant fails when the process is up but cannot serve turns, e.g. the
-  database is missing ORM-declared schema. Docker's HEALTHCHECK uses
-  `curl -f`, so the 503 marks the container unhealthy instead of silently
-  healthy while every turn dies.
+  variant fails when the database is missing ORM-declared schema. Deployment
+  healthchecks use `/api/ready`, which includes this schema contract plus the
+  chat-persistence writer contract.
   """
   response.headers["Cache-Control"] = "no-store"
-  if _SCHEMA_GAPS:
+  gaps = _serviceability_schema_gaps()
+  if gaps:
     response.status_code = 503
-    return {"status": "schema_mismatch", "schema_gaps": _SCHEMA_GAPS}
+    return {"status": "schema_mismatch", "schema_gaps": gaps}
   return {"status": "ok", "boot_id": _BOOT_ID}
 
 
@@ -758,16 +780,15 @@ def browser_bootstrap():
 
 @app.get("/api/ready")
 def ready(response: Response):
-  """Readiness probe: 200 only when chat persistence can actually serve.
+  """Readiness probe: 200 only when chats can actually be served.
 
-  Distinct from `/api/health` (liveness — the process is up and answering
-  HTTP). The single-writer chat-persistence actor can fail to start, go
-  fatal, or be stopping while the process still answers `/api/health` 200;
-  in that window every chat write fails. A deploy (and `deploy-prod.sh`'s
-  health gate) must NOT green on a process that can't persist a chat, so
-  this route returns 503 until the writer is genuinely ready.
+  Distinct from `/api/health` (reachability — the process is answering HTTP),
+  this route also requires an ORM-compatible database and a usable
+  single-writer chat-persistence actor. A deploy must not green while a mapped
+  column is absent or every chat write will fail, even though the process can
+  still answer ordinary HTTP requests.
 
-  `is_writer_ready()` (via `writer_readiness`) owns the predicate: the
+  After the schema gate, `writer_readiness()` owns the writer predicate: the
   writer singleton exists, its worker thread is alive, and the actor is
   neither fatal nor stopping. The route only maps the verdict to a status
   code and surfaces the reason. Startup ordering is fine — the lifespan
@@ -775,6 +796,14 @@ def ready(response: Response):
   window where this false-fails.
   """
   response.headers["Cache-Control"] = "no-store"
+  gaps = _serviceability_schema_gaps()
+  if gaps:
+    response.status_code = 503
+    return {
+      "ready": False,
+      "reason": "schema_mismatch",
+      "schema_gaps": gaps,
+    }
   from app.chat_writer import writer_readiness
   is_ready, reason = writer_readiness()
   if is_ready:

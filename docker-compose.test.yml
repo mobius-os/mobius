@@ -65,7 +65,7 @@ services:
     # separate host port only for exact, proxy-independent cleanup/probes.
     ports: !override ["${INTERNAL_TEST_PORT:-8012}:8000"]
     healthcheck:
-      # Includes ordinary API health plus a fail-closed checkout identity test.
+      # Includes API serviceability plus a fail-closed checkout identity test.
       # A healthy container therefore proves Playwright will exercise this
       # checkout's backend and the frontend watcher rooted in the same clone.
       test: ["CMD", "python3", "/app/scripts/verify_test_runtime.py"]

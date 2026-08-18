@@ -354,6 +354,6 @@ LABEL org.opencontainers.image.source="https://github.com/mobius-os/mobius" \
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-  CMD curl -f http://localhost:8000/api/health/strict || exit 1
+  CMD curl -f http://localhost:8000/api/ready || exit 1
 
 CMD ["./scripts/entrypoint.sh"]

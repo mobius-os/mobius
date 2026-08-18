@@ -1,10 +1,9 @@
-"""Readiness-probe tests for `GET /api/ready`.
+"""Serviceability-probe tests for `GET /api/ready`.
 
-`/api/health` is liveness only — it answers 200 even when the single-writer
-chat-persistence actor can't serve, so a deploy could green while every chat
-write fails. `/api/ready` closes that gap: 200 only when the writer is
-started, its worker thread is alive, and the actor is neither fatal nor
-stopping (the `chat_writer.writer_readiness` predicate).
+`/api/health` is reachability only — it answers 200 even when the database
+schema or single-writer chat-persistence actor cannot serve. `/api/ready`
+closes both gaps: 200 only when startup found no ORM schema mismatch and the
+writer is started, alive, and neither fatal nor stopping.
 
 The autouse `fresh_db` fixture (conftest) starts a real writer actor per test
 bound to the test DB, so the happy path sees a genuinely-ready writer. The
@@ -15,7 +14,9 @@ conftest's setup) so it does not poison sibling tests that share the process
 singleton.
 """
 
-from app import chat_writer
+from pathlib import Path
+
+from app import chat_writer, database, main as main_module
 from app.chat_writer import get_writer
 from app.database import SessionLocal
 
@@ -38,6 +39,67 @@ def test_ready_returns_200_when_writer_running(client):
   body = h.json()
   assert body["status"] == "ok"
   assert body["boot_id"]
+
+
+def test_schema_gap_fails_serviceability_but_not_reachability(
+  client, monkeypatch,
+):
+  """A mapped-column gap must keep every deployment probe fail-closed."""
+  gap = "apps.paused_capabilities"
+  main_module._SCHEMA_GAPS[:] = [gap]
+  monkeypatch.setattr(database, "orm_schema_gaps", lambda _engine: [gap])
+  try:
+    ready = client.get("/api/ready")
+    assert ready.status_code == 503
+    assert ready.json() == {
+      "ready": False,
+      "reason": "schema_mismatch",
+      "schema_gaps": [gap],
+    }
+    strict = client.get("/api/health/strict")
+    assert strict.status_code == 503
+    assert strict.json() == {
+      "status": "schema_mismatch",
+      "schema_gaps": [gap],
+    }
+    reachable = client.get("/api/health")
+    assert reachable.status_code == 200
+    assert reachable.json()["status"] == "schema_mismatch"
+  finally:
+    main_module._SCHEMA_GAPS.clear()
+
+
+def test_external_schema_repair_restores_readiness_without_restart(
+  client, monkeypatch,
+):
+  """Recovery can close a boot-detected gap while this process stays up."""
+  main_module._SCHEMA_GAPS[:] = ["apps.paused_capabilities"]
+  monkeypatch.setattr(database, "orm_schema_gaps", lambda _engine: [])
+  try:
+    ready = client.get("/api/ready")
+    assert ready.status_code == 200
+    assert ready.json() == {"ready": True}
+    assert main_module._SCHEMA_GAPS == []
+    assert client.get("/api/health").json()["status"] == "ok"
+  finally:
+    main_module._SCHEMA_GAPS.clear()
+
+
+def test_deployment_healthchecks_use_the_serviceability_probe():
+  """Managed, self-hosted, and image defaults must enforce one contract."""
+  root = Path(__file__).resolve().parents[2]
+  assert 'healthcheckPath = "/api/ready"' in (
+    root / "railway.toml"
+  ).read_text(encoding="utf-8")
+  assert 'http://localhost:8000/api/ready' in (
+    root / "docker-compose.yml"
+  ).read_text(encoding="utf-8")
+  assert 'http://localhost:8000/api/ready' in (
+    root / "Dockerfile"
+  ).read_text(encoding="utf-8")
+  assert 'http://127.0.0.1:8000/api/ready' in (
+    root / "backend/scripts/verify_test_runtime.py"
+  ).read_text(encoding="utf-8")
 
 
 def test_writer_probe_transactions_end_before_readiness():

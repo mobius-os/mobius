@@ -60,6 +60,26 @@ docker compose -p mobius-test -f docker-compose.test.yml build   # image must ex
 docker compose -p mobius-test -f docker-compose.test.yml run --rm pytest
 ```
 
+### Database changes
+
+`Base.metadata.create_all()` creates missing tables but never adds a column to
+an existing installation. Every new ORM column therefore needs a new,
+append-only function in `_SCHEMA_MIGRATIONS`; never add current work to
+`_converge_legacy_schema`, because migration `0001_legacy_schema_convergence`
+is already recorded on upgraded installations and will not run again.
+
+Test both a fresh database and an upgrade whose ledger already contains every
+earlier migration. The upgrade test should remove the new column, record the
+prior versions, run migrations twice, then assert the column exists, its new
+ledger entry appears once, and `orm_schema_gaps()` is empty. Before sharing any
+backend change, at minimum run the fast contract suite; before landing it, run
+the full backend suite:
+
+```bash
+scripts/test.sh --fast
+scripts/wt-pytest.sh backend/tests/test_db_migrations.py -q
+```
+
 CI runs the equivalent natively: install `frontend/package-lock.json`, put its
 locked `node_modules/.bin` on `PATH`, install the hashed
 `backend/requirements.lock` plus `backend/requirements-static.txt`, run Ruff,
