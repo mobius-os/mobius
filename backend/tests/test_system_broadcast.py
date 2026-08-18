@@ -37,7 +37,7 @@ from app.broadcast import (
   get_system_broadcast,
   set_active_broadcast,
 )
-from app.chat_writer import Barrier, get_writer
+from app.chat_writer import Barrier, StartTurn, get_writer
 from app.chat_transcript import materialized_messages
 from app.chat_event_sink import (
   ChatEventSink,
@@ -250,8 +250,12 @@ def test_question_event_is_saved_before_broadcast(db, chat):
 
 def test_question_checkpoint_runs_after_broadcast_without_blocking_card(db, chat):
   """Goal summary work starts after the durable card and never delays it."""
-  chat.messages = [{"role": "user", "content": "/goal Ship it", "ts": 1}]
-  db.commit()
+  get_writer().submit(StartTurn(
+    chat_id=chat.id,
+    run_token="rt-goal-q",
+    user_msg={"role": "user", "content": "/goal Ship it", "ts": 1},
+    title_source="/goal Ship it",
+  )).result(timeout=5)
   bc = _OrderedBroadcast(chat.id)
 
   async def go():
