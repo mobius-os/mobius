@@ -18,13 +18,13 @@ import {
 import { searchSnippetPresentation } from '../../lib/searchTermHighlight.js'
 import { formatRelativeTime } from '../../lib/relativeTime.js'
 import {
+  clearRecentSelections,
   chatSearchOpenTarget,
   chatSearchResultIsCurrent,
   moveSearchSelection,
-  recentApps,
-  recentChats,
-  readLastSearch,
-  rememberLastSearch,
+  readRecentSelections,
+  rememberRecentSelection,
+  resolveRecentSelections,
   resolvedSearchSelection,
   searchInstalledApps,
   visibleChatSearchState,
@@ -32,7 +32,6 @@ import {
 import './GlobalSearch.css'
 
 const SEARCH_DEBOUNCE_MS = 180
-const RECENT_RESULT_LIMIT = 6
 
 function GlobalSearchResult({
   row,
@@ -144,14 +143,14 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
   const inputRef = useRef(null)
   const contentRef = useRef(null)
   const chatSearchControllerRef = useRef(null)
-  // Reopening restores the owner's last search (see rememberLastSearch), so the
-  // in-flight-result guard has to start from that same term rather than '' —
-  // otherwise clicking a restored result before the revalidating fetch lands
-  // would be discarded as stale.
-  const restored = useRef(readLastSearch()).current
-  const latestQueryRef = useRef(restored.query.trim())
-  const [query, setQuery] = useState(restored.query)
-  const [chatState, setChatState] = useState(restored.chatState)
+  const latestQueryRef = useRef('')
+  const [query, setQuery] = useState('')
+  const [chatState, setChatState] = useState({
+    query: '', status: 'idle', results: [],
+  })
+  const [recentSelectionRefs, setRecentSelectionRefs] = useState(
+    () => readRecentSelections(),
+  )
   const [selectionIndex, setSelectionIndex] = useState(0)
   const appsQuery = appQueries.list.useQuery()
   const chatsQuery = chatQueries.list.useQuery()
@@ -161,17 +160,6 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
     initialFocusRef: inputRef,
     onClose,
   })
-
-  // A restored term is a starting point, not something to edit around: select
-  // it so the next keystroke replaces it, exactly like reopening a browser's
-  // find bar. Runs once, after useDialogFocus has moved focus to the input.
-  useEffect(() => {
-    if (restored.query) inputRef.current?.select()
-  }, [restored.query])
-
-  useEffect(() => {
-    rememberLastSearch(query, chatState)
-  }, [query, chatState])
 
   useEffect(() => {
     const normalizedQuery = query.trim()
@@ -185,16 +173,7 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
 
     const controller = new AbortController()
     chatSearchControllerRef.current = controller
-    // Reopening re-runs the query so a chat renamed, added, or deleted since
-    // last time is reflected. Keep the restored results on screen while that
-    // happens: blanking them to "Searching chats…" would undo the point of
-    // restoring them. A genuinely new term has no settled results to hold, so
-    // it still shows the loading state.
-    setChatState(previous => (
-      previous.query === normalizedQuery && previous.status === 'ready'
-        ? previous
-        : { query: normalizedQuery, status: 'loading', results: [] }
-    ))
+    setChatState({ query: normalizedQuery, status: 'loading', results: [] })
     const timer = window.setTimeout(async () => {
       try {
         const response = await api.chats.search(normalizedQuery, {
@@ -239,16 +218,17 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
     () => searchInstalledApps(appsQuery.data, normalizedQuery),
     [appsQuery.data, normalizedQuery],
   )
-  const initialChats = useMemo(
-    () => recentChats(chatsQuery.data, RECENT_RESULT_LIMIT),
-    [chatsQuery.data],
-  )
-  const initialApps = useMemo(
-    () => recentApps(appsQuery.data, RECENT_RESULT_LIMIT),
-    [appsQuery.data],
+  const recentSelectionRows = useMemo(
+    () => resolveRecentSelections(
+      recentSelectionRefs,
+      chatsQuery.data,
+      appsQuery.data,
+    ),
+    [appsQuery.data, chatsQuery.data, recentSelectionRefs],
   )
   const openChat = useCallback((result) => {
     if (!chatSearchResultIsCurrent(result, latestQueryRef.current)) return
+    rememberRecentSelection({ kind: 'chat', id: result.id })
     if (result.anchor_key) {
       requestChatSearchReveal(result.id, {
         anchorKey: result.anchor_key,
@@ -261,12 +241,14 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
 
   const openApp = useCallback((app) => {
     if (!app?.id) return
+    rememberRecentSelection({ kind: 'app', id: app.id })
     onClose()
     onOpenTarget?.({ view: 'canvas', app: String(app.id), intent: null })
   }, [onClose, onOpenTarget])
 
   const openRecentChat = useCallback((chat) => {
     if (!chat?.id) return
+    rememberRecentSelection({ kind: 'chat', id: chat.id })
     onClose()
     onOpenTarget?.(chatSearchOpenTarget(chat))
   }, [onClose, onOpenTarget])
@@ -293,20 +275,16 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
           },
         ]
       : [
-          ...(initialChats.length ? [{
-            headingId: 'global-search-recent-chats',
-            listId: 'global-search-recent-chat-results',
-            label: 'Recent chats',
-            rows: initialChats.map(chat => ({
-              kind: 'chat', value: chat, recent: true,
-            })),
-          }] : []),
-          ...(initialApps.length ? [{
-            headingId: 'global-search-recent-apps',
-            listId: 'global-search-recent-app-results',
-            label: 'Apps',
-            rows: initialApps.map(app => ({
-              kind: 'app', value: app, matchArea: 'Installed',
+          ...(recentSelectionRows.length ? [{
+            headingId: 'global-search-recent-selections',
+            listId: 'global-search-recent-selection-results',
+            label: 'Recent selections',
+            clearable: true,
+            rows: recentSelectionRows.map(({ kind, value }) => ({
+              kind,
+              value,
+              recent: true,
+              matchArea: 'Recent',
             })),
           }] : []),
         ]
@@ -316,7 +294,7 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
       ...group,
       rows: group.rows.map(row => ({ ...row, index: nextIndex++ })),
     }))
-  }, [appResults, initialApps, initialChats, normalizedQuery, visibleChats])
+  }, [appResults, normalizedQuery, recentSelectionRows, visibleChats])
 
   const selectableResults = useMemo(
     () => resultGroups.flatMap(group => group.rows),
@@ -340,6 +318,12 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
   const openSelectedResult = useCallback(() => {
     openResult(selectableResults[activeResultIndex])
   }, [activeResultIndex, openResult, selectableResults])
+
+  const clearSelectionHistory = useCallback(() => {
+    clearRecentSelections()
+    setRecentSelectionRefs([])
+    setSelectionIndex(0)
+  }, [])
 
   const handleSearchKeyDown = useCallback((event) => {
     if (event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return
@@ -368,9 +352,11 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
     && visibleChats.status === 'ready'
     && visibleChats.results.length === 0
     && appResults.length === 0
-  const loadingInitialResults = !normalizedQuery
+  const loadingRecentSelections = !normalizedQuery
     && resultGroups.length === 0
-    && (appsQuery.isLoading || chatsQuery.isLoading)
+    && recentSelectionRefs.some(selection => (
+      selection.kind === 'app' ? appsQuery.isLoading : chatsQuery.isLoading
+    ))
 
   return createPortal(
     <div
@@ -442,11 +428,11 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
               <span className="global-search__empty-icon" aria-hidden="true">
                 <MagnifyingGlassSearch width={30} height={30} />
               </span>
-              <h3>{loadingInitialResults ? 'Loading recent items…' : 'Nothing here yet'}</h3>
+              <h3>{loadingRecentSelections ? 'Loading recent selections…' : 'No recent selections yet'}</h3>
               <p>
-                {loadingInitialResults
-                  ? 'Your recent chats and installed apps will appear here.'
-                  : 'Start a chat or install an app, then use ⌘K to jump back to it.'}
+                {loadingRecentSelections
+                  ? 'The chats and apps you opened through search will appear here.'
+                  : 'Search for a chat or app and open it. It will appear here the next time you use ⌘K.'}
               </p>
             </div>
           )}
@@ -459,9 +445,20 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
                   className="global-search__group"
                   aria-labelledby={group.headingId}
                 >
-                  <h3 id={group.headingId}>
-                    {group.label} <span>{group.rows.length}</span>
-                  </h3>
+                  <div className="global-search__group-heading">
+                    <h3 id={group.headingId}>
+                      {group.label} <span>{group.rows.length}</span>
+                    </h3>
+                    {group.clearable && (
+                      <button
+                        type="button"
+                        className="global-search__clear"
+                        onClick={clearSelectionHistory}
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
                   {group.status === 'loading' && (
                     <p className="global-search__status" role="status">Searching chats…</p>
                   )}

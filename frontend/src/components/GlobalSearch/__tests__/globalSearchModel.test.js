@@ -4,16 +4,33 @@ import {
   appManifestSearchDocument,
   chatSearchOpenTarget,
   chatSearchResultIsCurrent,
-  clearLastSearch,
+  clearRecentSelections,
   moveSearchSelection,
-  recentApps,
-  recentChats,
-  readLastSearch,
-  rememberLastSearch,
+  readRecentSelections,
+  rememberRecentSelection,
+  resolveRecentSelections,
   resolvedSearchSelection,
   searchInstalledApps,
   visibleChatSearchState,
 } from '../globalSearchModel.js'
+
+class MemoryStorage {
+  constructor(initial = {}) {
+    this.values = new Map(Object.entries(initial))
+  }
+
+  getItem(key) {
+    return this.values.get(key) ?? null
+  }
+
+  setItem(key, value) {
+    this.values.set(key, String(value))
+  }
+
+  removeItem(key) {
+    this.values.delete(key)
+  }
+}
 
 const apps = [
   {
@@ -87,21 +104,51 @@ test('all query terms must match and result limits are stable', () => {
   assert.equal(searchInstalledApps(apps, 'news', 1).length, 1)
 })
 
-test('the empty search view starts with recent chats, then recently opened apps', () => {
-  const chats = [
-    { id: 'empty', title: 'Empty', has_messages: false, activity_at: '2026-08-18T13:00:00Z' },
-    { id: 'older', title: 'Older', has_messages: true, activity_at: '2026-08-18T11:00:00Z' },
-    { id: 'newer', title: 'Newer', has_messages: true, activity_at: '2026-08-18T12:00:00Z' },
-  ]
-  assert.deepEqual(recentChats(chats).map(chat => chat.id), ['newer', 'older'])
-  assert.deepEqual(chats.map(chat => chat.id), ['empty', 'older', 'newer'])
+test('recent selections persist as a deduplicated most-recent-first list', () => {
+  const storage = new MemoryStorage()
+  assert.deepEqual(readRecentSelections(storage), [])
 
-  const installed = [
-    { id: 1, name: 'Older', last_opened_at: '2026-08-17T12:00:00Z' },
-    { id: 2, name: 'Newest', last_opened_at: '2026-08-18T12:00:00Z' },
-    { id: 3, name: 'Never opened', created_at: '2026-08-16T12:00:00Z' },
+  rememberRecentSelection({ kind: 'chat', id: 'chat-1' }, storage)
+  rememberRecentSelection({ kind: 'app', id: 42 }, storage)
+  rememberRecentSelection({ kind: 'chat', id: 'chat-1' }, storage)
+
+  assert.deepEqual(readRecentSelections(storage), [
+    { kind: 'chat', id: 'chat-1' },
+    { kind: 'app', id: '42' },
+  ])
+
+  for (let index = 0; index < 14; index += 1) {
+    rememberRecentSelection({ kind: 'chat', id: `chat-${index}` }, storage)
+  }
+  const bounded = readRecentSelections(storage)
+  assert.equal(bounded.length, 12)
+  assert.deepEqual(bounded.slice(0, 2), [
+    { kind: 'chat', id: 'chat-13' },
+    { kind: 'chat', id: 'chat-12' },
+  ])
+
+  clearRecentSelections(storage)
+  assert.deepEqual(readRecentSelections(storage), [])
+})
+
+test('recent selections resolve current items in selection order and omit missing ones', () => {
+  const chats = [
+    { id: 'chat-1', title: 'First chat' },
+    { id: 'chat-2', title: 'Second chat' },
   ]
-  assert.deepEqual(recentApps(installed, 2).map(app => app.id), [2, 1])
+  const installedApps = [
+    { id: 7, name: 'Memory' },
+  ]
+  const rows = resolveRecentSelections([
+    { kind: 'app', id: '7' },
+    { kind: 'chat', id: 'missing' },
+    { kind: 'chat', id: 'chat-2' },
+  ], chats, installedApps)
+
+  assert.deepEqual(rows, [
+    { kind: 'app', value: installedApps[0] },
+    { kind: 'chat', value: chats[1] },
+  ])
 })
 
 test('keyboard search selection starts at the first result and wraps with arrows', () => {
@@ -143,44 +190,4 @@ test('chat destinations focus either the matched row or the ordinary composer', 
     chatId: 'chat-row',
     focusComposer: false,
   })
-})
-
-test('the last search survives a close/reopen so the term does not have to be retyped', () => {
-  clearLastSearch()
-  assert.deepEqual(readLastSearch(), {
-    query: '',
-    chatState: { query: '', status: 'idle', results: [] },
-  })
-
-  const settled = {
-    query: 'password',
-    status: 'ready',
-    results: [{ id: 'chat-1', searchQuery: 'password' }],
-  }
-  rememberLastSearch('password', settled)
-
-  // What a reopened dialog seeds its state from: the term AND the results the
-  // owner was looking at, so the list is on screen before any refetch lands.
-  const restored = readLastSearch()
-  assert.equal(restored.query, 'password')
-  assert.equal(restored.chatState.status, 'ready')
-  assert.deepEqual(restored.chatState.results, settled.results)
-  assert.deepEqual(visibleChatSearchState(restored.chatState, restored.query), settled)
-  // The restored rows stay clickable: the staleness guard keys off the term the
-  // dialog reopens with, not a fresh empty one.
-  assert.equal(chatSearchResultIsCurrent(restored.chatState.results[0], restored.query), true)
-
-  clearLastSearch()
-})
-
-test('an unsettled search is not restored, only its term', () => {
-  clearLastSearch()
-  for (const status of ['loading', 'error', 'idle']) {
-    rememberLastSearch('half typed', { query: 'half typed', status, results: [] })
-    const restored = readLastSearch()
-    assert.equal(restored.query, 'half typed', `${status} keeps the term`)
-    assert.equal(restored.chatState.status, 'idle', `${status} is not replayed`)
-    assert.deepEqual(restored.chatState.results, [])
-  }
-  clearLastSearch()
 })

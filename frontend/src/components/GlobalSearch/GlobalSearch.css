@@ -202,6 +202,14 @@
   gap: 7px;
 }
 
+.global-search__group-heading {
+  min-height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .global-search__group h3 {
   display: flex;
   align-items: center;
@@ -222,6 +230,30 @@
   background: var(--surface);
   font-size: 10px;
   text-align: center;
+}
+
+.global-search__clear {
+  flex: none;
+  min-height: 26px;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font: 600 11px/1.4 var(--font, system-ui);
+  cursor: pointer;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .global-search__clear:hover {
+    background: var(--surface);
+    color: var(--text);
+  }
+}
+
+.global-search__clear:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .global-search__results {
