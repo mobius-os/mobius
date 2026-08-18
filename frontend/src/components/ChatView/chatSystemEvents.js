@@ -21,6 +21,9 @@ export const CHAT_STREAM_SYSTEM_EVENTS = new Set([
   // reconnect's catch-up burst rebuilds the rail; the rail state dedupes by ts,
   // so replaying a phase never double-counts it.
   'build_phase',
+  // Goal plans are persisted before publication and carry the complete
+  // revisioned snapshot, so both live delivery and reconnect replay are safe.
+  'goal_plan_updated',
   'chat_run_started',
   'chat_run_finished',
 ])

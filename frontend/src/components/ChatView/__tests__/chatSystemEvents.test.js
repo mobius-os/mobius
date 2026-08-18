@@ -10,6 +10,7 @@ test('chat stream recognizes catch-up-safe system events without swallowing unkn
   assert.equal(isChatStreamSystemEvent('theme_updated'), true)
   assert.equal(isChatStreamSystemEvent('app_updated'), true)
   assert.equal(isChatStreamSystemEvent('build_phase'), true)
+  assert.equal(isChatStreamSystemEvent('goal_plan_updated'), true)
   assert.equal(isChatStreamSystemEvent('text'), false)
 })
 
@@ -31,7 +32,7 @@ test('catch-up-unsafe events never ride the chat stream (system-bus-only)', () =
 })
 
 test('every recognized chat-stream system event forwards (all are catch-up-safe)', () => {
-  for (const type of ['theme_updated', 'app_updated', 'build_phase', 'chat_run_started', 'chat_run_finished']) {
+  for (const type of ['theme_updated', 'app_updated', 'build_phase', 'goal_plan_updated', 'chat_run_started', 'chat_run_finished']) {
     assert.equal(
       shouldForwardChatStreamSystemEvent({ type }),
       true,

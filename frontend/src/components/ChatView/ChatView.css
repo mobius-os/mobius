@@ -3209,6 +3209,15 @@
   animation: progress-rail-in 0.22s ease both;
 }
 
+/* The compact rail can stay frosted, but an expanded todo list needs a solid
+   reading surface: several lines of chat showing through the list materially
+   reduces task-title and dependency-label contrast. */
+.chat__progress-rail:has(.chat__goal-plan) {
+  background: var(--surface);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
 @keyframes progress-rail-in {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: none; }
