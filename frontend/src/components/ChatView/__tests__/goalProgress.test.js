@@ -6,6 +6,7 @@ import {
   goalObjectiveAtRunStart,
   goalObjectiveFromText,
   goalObjectiveFromRuntime,
+  goalMessageObjectiveFromText,
   latestGoalObjective,
   progressRailViewModel,
   visibleGoalTasks,
@@ -17,6 +18,7 @@ const streamConnection = readFileSync(
   'utf8',
 )
 const progressRail = readFileSync(new URL('../ProgressRail.jsx', import.meta.url), 'utf8')
+const msgContent = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 
 test('goalObjectiveFromText follows the backend command boundary', () => {
@@ -35,6 +37,18 @@ test('goalObjectiveFromText does not present clear or an empty command as active
   assert.equal(goalObjectiveFromText('/goal   '), '')
   assert.equal(goalObjectiveFromText('/goal clear'), '')
   assert.equal(goalObjectiveFromText('/goal CLEAR'), '')
+})
+
+test('goal owner messages hide only a real command token and preserve objective formatting', () => {
+  assert.equal(
+    goalMessageObjectiveFromText('/goal Build the first slice\nthen verify it'),
+    'Build the first slice\nthen verify it',
+  )
+  assert.equal(goalMessageObjectiveFromText('please /goal later'), '')
+  assert.equal(goalMessageObjectiveFromText('/goal clear'), '')
+  assert.match(msgContent, /<UserMessageText text=\{text\} \/>/)
+  assert.match(msgContent, /className="chat__goal-message-tag">Goal<\/span>/)
+  assert.match(chatCss, /\.chat__goal-message\s*\{[\s\S]*?display: flex;/)
 })
 
 test('latestGoalObjective recovers only the current visible owner turn', () => {

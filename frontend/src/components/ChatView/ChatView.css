@@ -560,6 +560,30 @@
   white-space: pre-wrap;
 }
 
+.chat__goal-message {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.chat__goal-message-tag {
+  flex: 0 0 auto;
+  margin-top: 3px;
+  padding: 1px 7px;
+  border: 1px solid rgb(255 255 255 / 22%);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 14%);
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1.55;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+.chat__goal-message-objective {
+  min-width: 0;
+}
+
 .chat__text--assistant {
   color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
   max-width: 100%;

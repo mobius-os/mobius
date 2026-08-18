@@ -8,14 +8,24 @@
  * instead of lighting up for ordinary prose that happens to mention `/goal`.
  * Whitespace is collapsed because the footer is a one-line status surface.
  */
-export function goalObjectiveFromText(text) {
+function goalCommandObjective(text) {
   if (typeof text !== 'string') return ''
   const normalized = text.replace(/^\n+/, '')
   const match = normalized.match(/^\/goal(?:[ \t]+([\s\S]*))?$/)
   if (!match) return ''
-  const objective = (match[1] || '').trim().replace(/\s+/g, ' ')
-  if (!objective || objective.toLowerCase() === 'clear') return ''
+  const objective = (match[1] || '').trim()
+  const compactObjective = objective.replace(/\s+/g, ' ')
+  if (!compactObjective || compactObjective.toLowerCase() === 'clear') return ''
   return objective
+}
+
+export function goalObjectiveFromText(text) {
+  return goalCommandObjective(text).replace(/\s+/g, ' ')
+}
+
+/** Keep the owner's formatting while hiding the command token in the bubble. */
+export function goalMessageObjectiveFromText(text) {
+  return goalCommandObjective(text)
 }
 
 function isContinue(text) {

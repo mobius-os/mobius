@@ -20,6 +20,7 @@ import ErrorCard from './ErrorCard.jsx'
 import ContextCompactionMarker from './ContextCompactionMarker.jsx'
 import { assistantBlockKey } from './streamPromotion.js'
 import { copyAssistantSelection } from './markdownClipboard.js'
+import { goalMessageObjectiveFromText } from './goalProgress.js'
 
 
 // Answerability is purely a function of the block + its position + live hint.
@@ -63,6 +64,18 @@ function AssistantCopySurface({ msg, markdownByIndex, children }) {
     >
       {children}
     </div>
+  )
+}
+
+function UserMessageText({ text }) {
+  const goalObjective = goalMessageObjectiveFromText(text)
+  if (!goalObjective) return text
+
+  return (
+    <span className="chat__goal-message">
+      <span className="chat__goal-message-tag">Goal</span>
+      <span className="chat__goal-message-objective">{goalObjective}</span>
+    </span>
   )
 }
 
@@ -233,7 +246,7 @@ function MsgContentInner({
                       onInternalNav={onInternalNav}
                       mediaDimensions={msg.media_dimensions}
                     />)
-              : text}
+              : <UserMessageText text={text} />}
           </div>
         )
       }
@@ -457,7 +470,7 @@ function MsgContentInner({
                     onInternalNav={onInternalNav}
                     mediaDimensions={msg.media_dimensions}
                   />)
-            : text}
+            : <UserMessageText text={text} />}
         </div>
       ) : null}
     </AssistantCopySurface>
