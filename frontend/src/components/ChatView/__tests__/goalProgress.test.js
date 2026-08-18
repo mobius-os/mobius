@@ -48,7 +48,8 @@ test('goal owner messages hide only a real command token and preserve objective 
   assert.equal(goalMessageObjectiveFromText('/goal clear'), '')
   assert.match(msgContent, /<UserMessageText text=\{text\} \/>/)
   assert.match(msgContent, /className="chat__goal-message-tag">Goal<\/span>/)
-  assert.match(chatCss, /\.chat__goal-message\s*\{[\s\S]*?display: flex;/)
+  assert.match(chatCss, /\.chat__goal-message\s*\{[\s\S]*?display: inline;/)
+  assert.match(chatCss, /\.chat__goal-message-tag\s*\{[\s\S]*?display: inline-block;/)
 })
 
 test('latestGoalObjective recovers only the current visible owner turn', () => {
