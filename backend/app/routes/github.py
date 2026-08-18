@@ -835,7 +835,15 @@ async def contribution_review_status(
         if record is not None and record.get("id"):
           records.append(record)
 
-  prepared = [record for record in records if record.get("status") == "prepared"]
+  prepared = []
+  for record in records:
+    plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+    if (
+      record.get("status") == "prepared"
+      and record.get("type") == "pr"
+      and plan.get("action") == "pr"
+    ):
+      prepared.append(record)
   # The credential metadata is a file-backed resource shared by every review;
   # snapshot it once instead of reopening it for each prepared stack layer.
   github_state = github_auth.read_state() or {}

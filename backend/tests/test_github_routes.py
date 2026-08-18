@@ -1667,6 +1667,35 @@ def test_review_status_skips_oversized_records_without_loading_them(
   assert response.json()["records"] == []
 
 
+def test_review_status_ignores_prepared_comment_drafts(
+  client, owner_token,
+):
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  record = {
+    "id": "comment-draft",
+    "type": "issue_comment",
+    "status": "prepared",
+    "repo": "mobius-os/mobius",
+    "plan": {
+      "action": "issue_comment",
+      "repo": "mobius-os/mobius",
+      "target_url": "https://github.com/mobius-os/mobius/issues/1",
+      "body_draft": "Prepared feedback.",
+    },
+  }
+  _write_contribution(app_id, record["id"], record)
+
+  response = client.get(
+    f"/api/github/contributions/{app_id}/review-status",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["records"] == []
+
+
 def test_review_status_keeps_recent_stack_together_past_filename_scan_cap(
   client, owner_token, monkeypatch,
 ):
