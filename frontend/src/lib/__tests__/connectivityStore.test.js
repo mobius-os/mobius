@@ -4,6 +4,8 @@ import assert from 'node:assert/strict'
 import {
   AMBIGUOUS_VERDICT_CONFIRM_MS,
   createConnectivityStore,
+  RESUME_NETWORK_GRACE_MS,
+  RESUME_RETRY_MS,
 } from '../connectivityStore.js'
 
 function eventTarget(extra = {}) {
@@ -83,6 +85,8 @@ test('all subscribers share one monitor and the last unsubscribe removes it', as
   assert.equal(h.timers.intervalCount(), 1)
   assert.equal(h.windowTarget.listenerCount('online'), 1)
   assert.equal(h.windowTarget.listenerCount('offline'), 1)
+  assert.equal(h.windowTarget.listenerCount('focus'), 1)
+  assert.equal(h.windowTarget.listenerCount('pageshow'), 1)
   assert.equal(h.documentTarget.listenerCount('visibilitychange'), 1)
 
   stopA()
@@ -128,6 +132,8 @@ test('verification without subscribers is bounded and never starts a monitor', a
   assert.equal(h.timers.intervalCount(), 0)
   assert.equal(h.timers.timeoutCount(), 0)
   assert.equal(h.windowTarget.listenerCount('online'), 0)
+  assert.equal(h.windowTarget.listenerCount('focus'), 0)
+  assert.equal(h.windowTarget.listenerCount('pageshow'), 0)
   assert.equal(h.documentTarget.listenerCount('visibilitychange'), 0)
 })
 
@@ -182,6 +188,61 @@ test('returning to a stale-false browser flag confirms recovery promptly', async
   await flushMicrotasks()
 
   assert.equal(h.store.getSnapshot(), true, 'the prompt second success completes recovery')
+  stop()
+})
+
+test('resume preserves the confirmed online verdict while the network wakes', async () => {
+  let reachable = true
+  const h = harness(async () => {
+    if (!reachable) throw new TypeError('network still waking')
+    return { ok: true }
+  })
+  let notifications = 0
+  const stop = h.store.subscribe(() => { notifications += 1 })
+  await flushMicrotasks()
+
+  reachable = false
+  h.windowTarget.emit('focus')
+  await flushMicrotasks()
+
+  assert.equal(h.store.getSnapshot(), true)
+  assert.equal(notifications, 0)
+
+  h.timers.runTimeout(RESUME_RETRY_MS)
+  await flushMicrotasks()
+  assert.equal(h.store.getSnapshot(), true, 'an early retry still cannot flash Offline')
+
+  reachable = true
+  h.timers.runTimeout(RESUME_RETRY_MS)
+  await flushMicrotasks()
+  assert.equal(h.store.getSnapshot(), true)
+  assert.equal(notifications, 0, 'a normal wake remains visually quiet')
+  stop()
+})
+
+test('resume publishes Offline when reachability stays lost beyond the grace', async () => {
+  let reachable = true
+  const h = harness(async () => {
+    if (!reachable) throw new TypeError('offline')
+    return { ok: true }
+  })
+  const stop = h.store.subscribe(() => {})
+  await flushMicrotasks()
+
+  h.documentTarget.visibilityState = 'hidden'
+  h.documentTarget.emit('visibilitychange')
+  reachable = false
+  h.documentTarget.visibilityState = 'visible'
+  h.documentTarget.emit('visibilitychange')
+  await flushMicrotasks()
+
+  h.timers.runTimeout(RESUME_NETWORK_GRACE_MS)
+  await flushMicrotasks()
+  assert.equal(h.store.getSnapshot(), true, 'ordinary failure hysteresis still applies')
+
+  h.timers.runTimeout(AMBIGUOUS_VERDICT_CONFIRM_MS)
+  await flushMicrotasks()
+  assert.equal(h.store.getSnapshot(), false)
   stop()
 })
 

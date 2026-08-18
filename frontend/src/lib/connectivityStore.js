@@ -20,6 +20,14 @@ export const PROBE_TIMEOUT_MS = 3000
 // as truth. Android can emit it transiently while moving between radios.
 export const OFFLINE_EVENT_GRACE_MS = 2500
 export const POLL_INTERVAL_MS = 20000
+// Returning to a visible tab often beats the laptop's Wi-Fi/DNS wake-up. Keep
+// the last confirmed verdict while the network settles, probe during that
+// window, and only allow a failed probe to demote after the grace expires.
+// This is deliberately presentation-free: consumers keep the existing boolean
+// contract and the shell only shows its existing Offline status when the loss
+// persists beyond a normal resume.
+export const RESUME_NETWORK_GRACE_MS = 5000
+export const RESUME_RETRY_MS = 1000
 // A browser hint that disagrees with the probe is ambiguous in either
 // direction. Confirm the first result quickly instead of leaving Send enabled
 // or a recovered PWA labelled offline until the regular poll.
@@ -111,7 +119,39 @@ export function createConnectivityStore({
     let rerun = false
     let offlineTimer = null
     let confirmTimer = null
+    let resumeGraceTimer = null
+    let resumeRetryTimer = null
+    let resumeGraceActive = false
     let interval = null
+
+    function stopResumeRecovery() {
+      resumeGraceActive = false
+      if (resumeGraceTimer !== null) clearTimeoutFn(resumeGraceTimer)
+      if (resumeRetryTimer !== null) clearTimeoutFn(resumeRetryTimer)
+      resumeGraceTimer = null
+      resumeRetryTimer = null
+    }
+
+    function scheduleResumeRetry() {
+      if (!resumeGraceActive || resumeRetryTimer !== null) return
+      resumeRetryTimer = setTimeoutFn(() => {
+        resumeRetryTimer = null
+        void check()
+      }, RESUME_RETRY_MS)
+    }
+
+    function startResumeRecovery() {
+      stopResumeRecovery()
+      resumeGraceActive = true
+      resumeGraceTimer = setTimeoutFn(() => {
+        resumeGraceTimer = null
+        resumeGraceActive = false
+        if (resumeRetryTimer !== null) clearTimeoutFn(resumeRetryTimer)
+        resumeRetryTimer = null
+        void check()
+      }, RESUME_NETWORK_GRACE_MS)
+      void check()
+    }
 
     function check() {
       if (activeCheck) {
@@ -127,7 +167,16 @@ export function createConnectivityStore({
           // evidence is newer and stronger than the stale failed read.
           return true
         }
+        if (!reachable && resumeGraceActive) {
+          // A lid-open/tab-resume failure is not yet evidence of a lasting
+          // outage. Preserve the last confirmed verdict and retry while the
+          // laptop's network stack settles; the grace-ending check below is
+          // allowed to publish Offline if the failure persists.
+          scheduleResumeRetry()
+          return false
+        }
         const next = applyProbe(reachable)
+        if (reachable && next.online && resumeGraceActive) stopResumeRecovery()
         if (confirmTimer !== null) clearTimeoutFn(confirmTimer)
         confirmTimer = null
         // Either stale browser hint needs two matching probes. Run the second
@@ -171,11 +220,16 @@ export function createConnectivityStore({
       confirmTimer = null
       void check()
     }
-    const onVisible = () => {
-      if (documentTarget.visibilityState !== 'visible') return
+    const onForeground = () => {
+      if (documentTarget.visibilityState !== 'visible') {
+        stopResumeRecovery()
+        return
+      }
       if (offlineTimer !== null) clearTimeoutFn(offlineTimer)
+      if (confirmTimer !== null) clearTimeoutFn(confirmTimer)
       offlineTimer = null
-      void check()
+      confirmTimer = null
+      startResumeRecovery()
     }
 
     const current = {
@@ -185,17 +239,25 @@ export function createConnectivityStore({
         cancelled = true
         if (offlineTimer !== null) clearTimeoutFn(offlineTimer)
         if (confirmTimer !== null) clearTimeoutFn(confirmTimer)
+        stopResumeRecovery()
         if (interval !== null) clearIntervalFn(interval)
         windowTarget.removeEventListener('online', onOnline)
         windowTarget.removeEventListener('offline', onOffline)
-        documentTarget.removeEventListener('visibilitychange', onVisible)
+        windowTarget.removeEventListener('focus', onForeground)
+        windowTarget.removeEventListener('pageshow', onForeground)
+        documentTarget.removeEventListener('visibilitychange', onForeground)
         if (monitor === current) monitor = null
       },
     }
     monitor = current
     windowTarget.addEventListener('online', onOnline)
     windowTarget.addEventListener('offline', onOffline)
-    documentTarget.addEventListener('visibilitychange', onVisible)
+    // A laptop can sleep and wake without changing document.visibilityState.
+    // Window focus covers reopening Chrome in that exact retained-tab case;
+    // pageshow covers a page restored from the back/forward cache.
+    windowTarget.addEventListener('focus', onForeground)
+    windowTarget.addEventListener('pageshow', onForeground)
+    documentTarget.addEventListener('visibilitychange', onForeground)
     interval = setIntervalFn(() => {
       if (documentTarget.visibilityState === 'visible') void check()
     }, POLL_INTERVAL_MS)
