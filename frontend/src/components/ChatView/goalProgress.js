@@ -11,7 +11,7 @@
 function goalCommandObjective(text) {
   if (typeof text !== 'string') return ''
   const normalized = text.replace(/^\n+/, '')
-  const match = normalized.match(/^\/goal(?:[ \t]+([\s\S]*))?$/)
+  const match = normalized.match(/^\/goal(?:\s+([\s\S]*))?$/)
   if (!match) return ''
   const objective = (match[1] || '').trim()
   const compactObjective = objective.replace(/\s+/g, ' ')
@@ -26,6 +26,21 @@ export function goalObjectiveFromText(text) {
 /** Keep the owner's formatting while hiding the command token in the bubble. */
 export function goalMessageObjectiveFromText(text) {
   return goalCommandObjective(text)
+}
+
+/** Keep a live event from being regressed by an older initial fetch. */
+export function newestGoalPlan(current, incoming) {
+  if (!incoming) return current || null
+  if (!current) return incoming
+  if (
+    current.root_run_id === incoming.root_run_id
+    && Number.isInteger(current.revision)
+    && Number.isInteger(incoming.revision)
+    && current.revision > incoming.revision
+  ) {
+    return current
+  }
+  return incoming
 }
 
 function isContinue(text) {
@@ -147,7 +162,7 @@ export function progressRailViewModel(goalObjective, buildPhases, goalPlan = nul
       } : {}),
     })
   }
-  const activeTasks = visibleGoalTasks(goalPlan)
+  const activeTasks = goalObjective ? visibleGoalTasks(goalPlan) : []
   for (const task of activeTasks) {
     items.push({
       key: `goal-task-${task.id}`,

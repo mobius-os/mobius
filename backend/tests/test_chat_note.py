@@ -229,6 +229,16 @@ def test_deterministic_note_preserves_an_existing_generated_name():
   assert "description: unrelated raw prompt text" not in note
 
 
+def test_deterministic_note_names_a_goal_without_its_command_marker():
+  cn = _load_chat_note()
+  note = cn._deterministic_note(
+    "user: /goal review the complete feature\n\nassistant: working",
+    "",
+  )
+  assert "description: review the complete feature" in note
+  assert "description: /goal" not in note
+
+
 def test_deterministic_note_preserves_summary_with_internal_h2():
   cn = _load_chat_note()
   existing = (

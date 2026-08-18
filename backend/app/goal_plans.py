@@ -185,7 +185,10 @@ def active_goal_rows(
   if physical is None:
     return None
   root_id = physical.root_run_id or physical.id
-  root = db.query(models.ChatRun).filter(models.ChatRun.id == root_id).first()
+  root = db.query(models.ChatRun).filter(
+    models.ChatRun.id == root_id,
+    models.ChatRun.chat_id == chat_id,
+  ).first()
   if root is None:
     raise RuntimeError("active Goal refers to a missing logical root run")
   return physical, root

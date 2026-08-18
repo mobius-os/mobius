@@ -73,7 +73,8 @@ function UserMessageText({ text }) {
 
   return (
     <span className="chat__goal-message">
-      <span className="chat__goal-message-tag">Goal</span>
+      <span className="chat__goal-message-tag" aria-hidden="true">Goal</span>
+      <span className="chat__sr-only">Goal: </span>
       <span className="chat__goal-message-objective">{goalObjective}</span>
     </span>
   )
@@ -246,7 +247,7 @@ function MsgContentInner({
                       onInternalNav={onInternalNav}
                       mediaDimensions={msg.media_dimensions}
                     />)
-              : <UserMessageText text={text} />}
+              : msg.role === 'user' ? <UserMessageText text={text} /> : text}
           </div>
         )
       }
@@ -470,7 +471,7 @@ function MsgContentInner({
                     onInternalNav={onInternalNav}
                     mediaDimensions={msg.media_dimensions}
                   />)
-            : <UserMessageText text={text} />}
+            : msg.role === 'user' ? <UserMessageText text={text} /> : text}
         </div>
       ) : null}
     </AssistantCopySurface>

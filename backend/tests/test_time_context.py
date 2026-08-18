@@ -136,6 +136,19 @@ def test_goal_objective_is_extracted_from_clean_persisted_message():
   assert _goal_clear_requested("/goal clear")
   assert not _goal_clear_requested("/goal clear the backlog")
   assert _goal_objective("please /goal later") is None
+  assert _goal_objective(" /goal indented is prose") is None
+  assert _goal_objective("\t/goal indented is prose") is None
+
+
+def test_goal_intent_uses_the_native_command_boundary():
+  def messages(content):
+    return [schemas.ChatMessage(role="user", content=content)]
+
+  assert _chat_has_goal_intent(messages("/goal ship it"))
+  assert _chat_has_goal_intent(messages("\n/goal\nship it"))
+  assert not _chat_has_goal_intent(messages(" /goal indented is prose"))
+  assert not _chat_has_goal_intent(messages("\t/goal indented is prose"))
+  assert not _chat_has_goal_intent(messages("please run /goal later"))
 
 
 def test_goal_intent_and_latest_objective_scan_durable_history():

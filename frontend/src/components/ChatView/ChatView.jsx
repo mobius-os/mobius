@@ -157,6 +157,7 @@ import {
   goalObjectiveAtRunStart,
   goalObjectiveFromRuntime,
   latestGoalObjective,
+  newestGoalPlan,
   progressRailViewModel,
 } from './goalProgress.js'
 import './ChatView.css'
@@ -572,7 +573,9 @@ export default function ChatView({
     apiFetch(`/chats/${chatId}/goal-plan`, { timeoutMs: CHAT_FETCH_TIMEOUT_MS })
       .then(response => response.ok ? response.json() : null)
       .then(payload => {
-        if (!cancelled) setActiveGoalPlan(payload?.plan || null)
+        if (!cancelled) {
+          setActiveGoalPlan(current => newestGoalPlan(current, payload?.plan || null))
+        }
       })
       .catch(() => {})
     return () => { cancelled = true }
@@ -1284,7 +1287,7 @@ export default function ChatView({
     },
     onSystemEvent: event => {
       if (event?.type === 'goal_plan_updated') {
-        setActiveGoalPlan(event.plan || null)
+        setActiveGoalPlan(current => newestGoalPlan(current, event.plan || null))
         return
       }
       // A build_phase is chat-local: it only feeds this chat's milestone rail,

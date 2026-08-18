@@ -8,6 +8,7 @@ import {
   goalObjectiveFromRuntime,
   goalMessageObjectiveFromText,
   latestGoalObjective,
+  newestGoalPlan,
   progressRailViewModel,
   visibleGoalTasks,
 } from '../goalProgress.js'
@@ -30,6 +31,7 @@ test('goalObjectiveFromText follows the backend command boundary', () => {
   assert.equal(goalObjectiveFromText('please /goal later'), '')
   assert.equal(goalObjectiveFromText(' /goal indented is prose'), '')
   assert.equal(goalObjectiveFromText('/data/apps/x'), '')
+  assert.equal(goalObjectiveFromText('/goal\nShip after review'), 'Ship after review')
 })
 
 test('goalObjectiveFromText does not present clear or an empty command as active', () => {
@@ -47,9 +49,25 @@ test('goal owner messages hide only a real command token and preserve objective 
   assert.equal(goalMessageObjectiveFromText('please /goal later'), '')
   assert.equal(goalMessageObjectiveFromText('/goal clear'), '')
   assert.match(msgContent, /<UserMessageText text=\{text\} \/>/)
-  assert.match(msgContent, /className="chat__goal-message-tag">Goal<\/span>/)
+  assert.match(msgContent, /className="chat__goal-message-tag" aria-hidden="true">Goal<\/span>/)
+  assert.match(msgContent, /className="chat__sr-only">Goal: <\/span>/)
   assert.match(chatCss, /\.chat__goal-message\s*\{[\s\S]*?display: inline;/)
   assert.match(chatCss, /\.chat__goal-message-tag\s*\{[\s\S]*?display: inline-block;/)
+})
+
+test('newestGoalPlan rejects a stale fetch without hiding a new logical goal', () => {
+  const current = { root_run_id: 'root-a', revision: 3 }
+  assert.equal(newestGoalPlan(current, null), current)
+  assert.equal(
+    newestGoalPlan(current, { root_run_id: 'root-a', revision: 2 }),
+    current,
+  )
+
+  const newer = { root_run_id: 'root-a', revision: 4 }
+  assert.equal(newestGoalPlan(current, newer), newer)
+
+  const newGoal = { root_run_id: 'root-b', revision: 1 }
+  assert.equal(newestGoalPlan(current, newGoal), newGoal)
 })
 
 test('latestGoalObjective recovers only the current visible owner turn', () => {
@@ -151,6 +169,13 @@ test('the goal reuses the progress rail and stays as context for build phases', 
       { key: 'phase-2', label: 'Verifying', current: true },
     ],
   )
+})
+
+test('stale plan data cannot show tasks after the active goal has ended', () => {
+  const plan = {
+    tasks: [{ id: 'old', title: 'Old work', status: 'running' }],
+  }
+  assert.deepEqual(progressRailViewModel('', [], plan), [])
 })
 
 test('a planned goal shows every running branch and dependency progress', () => {

@@ -20,6 +20,7 @@ from app.goal_commands import (
   goal_argument as _goal_argument,
   goal_clear_requested as _goal_clear_requested,
   goal_objective as _goal_objective,
+  is_goal_command as _is_goal_command,
 )
 
 def _human_elapsed(seconds: float | None) -> str | None:
@@ -502,7 +503,7 @@ def _chat_has_goal_intent(messages: list[schemas.ChatMessage]) -> bool:
   """Whether this durable transcript has ever requested native goal mode."""
   return any(
     message.role == "user"
-    and re.match(r"^\s*/goal(?:\s|$)", message.content or "") is not None
+    and _is_goal_command(message.content or "")
     for message in messages
   )
 
