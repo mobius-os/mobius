@@ -985,6 +985,7 @@ def _sdk_imports() -> dict[str, Any]:
     CommandExecutionOutputDeltaNotification,
     CommandExecutionThreadItem,
     ContextCompactedNotification,
+    ContextCompactionThreadItem,
     DynamicToolCallThreadItem,
     ErrorNotification,
     FileChangePatchUpdatedNotification,
@@ -1082,6 +1083,7 @@ def _sdk_imports() -> dict[str, Any]:
     ),
     "CommandExecutionThreadItem": CommandExecutionThreadItem,
     "ContextCompactedNotification": ContextCompactedNotification,
+    "ContextCompactionThreadItem": ContextCompactionThreadItem,
     "DynamicToolCallThreadItem": DynamicToolCallThreadItem,
     "ErrorNotification": ErrorNotification,
     "FileChangePatchUpdatedNotification": FileChangePatchUpdatedNotification,
@@ -1460,6 +1462,24 @@ def _install_delegated_approval_handler(codex: Any, *, chat_id: str) -> None:
       "Codex SDK has no _client._sync chain — delegated approval guard "
       "NOT installed for chat_id=%s (likely a unit-test fake).",
       chat_id,
+    )
+
+
+def _publish_codex_context_compaction(bc: Any, chat_id: str) -> None:
+  """Make provider-native compaction visible without affecting the turn."""
+  log.info("Codex context compacted for chat %s", chat_id)
+  try:
+    bc.publish({
+      "type": "context_compacted",
+      "provider": "codex",
+    })
+  except Exception:
+    # Visibility must never interfere with the provider's own compaction or
+    # the rest of its turn.
+    log.warning(
+      "Codex context-compaction marker failed for chat %s",
+      chat_id,
+      exc_info=True,
     )
 
 
@@ -2217,6 +2237,9 @@ async def run_codex_sdk_turn(
 
         if isinstance(payload, sdk["ItemCompletedNotification"]):
           item = payload.item.root if hasattr(payload.item, "root") else payload.item
+          if isinstance(item, sdk["ContextCompactionThreadItem"]):
+            _publish_codex_context_compaction(bc, chat_id)
+            continue
           if isinstance(item, sdk["AgentMessageThreadItem"]):
             completed_message_phases.append(_agent_message_phase(item, sdk))
           collab_cls = sdk.get("CollabAgentToolCallThreadItem")
@@ -2267,20 +2290,9 @@ async def run_codex_sdk_turn(
           continue
 
         if isinstance(payload, sdk["ContextCompactedNotification"]):
-          log.info("Codex context compacted for chat %s", chat_id)
-          try:
-            bc.publish({
-              "type": "context_compacted",
-              "provider": "codex",
-            })
-          except Exception:
-            # Visibility must never interfere with the provider's own
-            # compaction or the rest of its turn.
-            log.warning(
-              "Codex context-compaction marker failed for chat %s",
-              chat_id,
-              exc_info=True,
-            )
+          # Compatibility for older app-server releases. Current v2 servers
+          # expose compaction as a ContextCompactionThreadItem instead.
+          _publish_codex_context_compaction(bc, chat_id)
           continue
 
         ratelimit_cls = sdk.get("AccountRateLimitsUpdatedNotification")

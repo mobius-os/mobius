@@ -320,6 +320,7 @@ def _fake_sdk(async_codex_cls):
     "CommandExecutionOutputDeltaNotification": _Dummy,
     "CommandExecutionThreadItem": _Dummy,
     "ContextCompactedNotification": _Dummy,
+    "ContextCompactionThreadItem": _Dummy,
     "DynamicToolCallThreadItem": _Dummy,
     "ErrorNotification": _FakeErrorNotification,
     "FileChangePatchUpdatedNotification": _Dummy,
@@ -2012,7 +2013,69 @@ def test_run_codex_sdk_turn_cleans_up_active_session_on_stream_exception(
   assert mark_finished_calls == [True]
 
 
-def test_run_codex_sdk_turn_publishes_context_compaction_marker(monkeypatch):
+def test_run_codex_sdk_turn_publishes_marker_from_context_compaction_item(
+  monkeypatch,
+):
+  class ContextCompactionThreadItem:
+    pass
+
+  class ItemCompletedNotification:
+    def __init__(self, item):
+      self.item = SimpleNamespace(root=item)
+
+  completed_turn = SimpleNamespace(id="turn-1", usage=None, error=None)
+  turn_handle = _FakeTurnHandle([
+    SimpleNamespace(
+      method="item/completed",
+      payload=ItemCompletedNotification(ContextCompactionThreadItem()),
+    ),
+    SimpleNamespace(
+      method="turn/completed",
+      payload=_FakeTurnCompletedNotification(completed_turn),
+    ),
+  ])
+  thread = _FakeThread("thread-1", turn_handle)
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      return thread
+
+  sdk = _fake_sdk(FakeAsyncCodex)
+  sdk["ContextCompactionThreadItem"] = ContextCompactionThreadItem
+  sdk["ItemCompletedNotification"] = ItemCompletedNotification
+  monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
+
+  bc = _FakeBroadcast()
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="hello",
+    session_id=None,
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-compaction",
+    bc=bc,
+    pending_questions={},
+    db=None,
+  ))
+
+  assert result["error"] is None
+  assert {
+    "type": "context_compacted",
+    "provider": "codex",
+  } in bc.events
+
+
+def test_run_codex_sdk_turn_keeps_legacy_compaction_notification(
+  monkeypatch,
+):
   class ContextCompactedNotification:
     pass
 
