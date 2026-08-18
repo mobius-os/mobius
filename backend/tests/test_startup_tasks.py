@@ -4,7 +4,12 @@ from types import SimpleNamespace
 import pytest
 
 import app.startup as startup
-from app.startup import StartupContext, StartupTask, run_startup_tasks
+from app.startup import (
+  StartupContext,
+  StartupTask,
+  run_startup_plan,
+  run_startup_tasks,
+)
 
 
 def context():
@@ -12,7 +17,7 @@ def context():
     app=SimpleNamespace(state=SimpleNamespace()),
     settings=SimpleNamespace(data_dir="/tmp"),
     boot_id="test-boot",
-    init_db=lambda: None,
+    init_db=lambda: [],
     install_pm_commit_launcher=lambda _source, _target: False,
     assert_provider_defaults=lambda _names: None,
     logger=logging.getLogger("test.startup"),
@@ -83,12 +88,15 @@ async def test_checkpoints_record_only_successful_named_outcomes(monkeypatch):
 
 
 def test_production_startup_plan_has_explicit_unique_order_and_criticality():
-  names = [task.name for task in startup.STARTUP_TASKS]
+  tasks = startup.PROCESS_STARTUP_TASKS + startup.DATABASE_STARTUP_TASKS
+  names = [task.name for task in tasks]
 
   assert len(names) == len(set(names))
-  assert [task.name for task in startup.STARTUP_TASKS if task.critical] == [
+  assert [task.name for task in tasks if task.critical] == [
     "initialize database",
   ]
+  assert startup.PROCESS_STARTUP_TASKS[-1].name == "initialize database"
+  assert startup.DATABASE_STARTUP_TASKS[0].name == "start chat writer"
   assert names.index("initialize database") < names.index("start chat writer")
   assert names.index("start chat writer") < names.index("fix forward chat media")
   assert names.index("start chat writer") < names.index("reconcile startup chats")
@@ -96,3 +104,45 @@ def test_production_startup_plan_has_explicit_unique_order_and_criticality():
   assert names.index("install bootstrap apps") < names.index(
     "reconcile app cron supervision"
   )
+
+
+@pytest.mark.asyncio
+async def test_schema_mismatch_skips_the_entire_database_startup_phase(
+  monkeypatch, caplog,
+):
+  events = []
+  startup_context = context()
+  startup_context.init_db = lambda: ["apps.paused_capabilities"]
+  monkeypatch.setattr(startup, "PROCESS_STARTUP_TASKS", (
+    StartupTask("initialize database", startup._initialize_database),
+  ))
+  monkeypatch.setattr(startup, "DATABASE_STARTUP_TASKS", (
+    StartupTask("must not run", lambda _context: events.append("database")),
+  ))
+  checkpoints = []
+  monkeypatch.setattr(startup, "record_memory_checkpoint", checkpoints.append)
+
+  with caplog.at_level(logging.CRITICAL, logger="test.startup"):
+    serviceable = await run_startup_plan(startup_context)
+
+  assert serviceable is False
+  assert startup_context.schema_gaps == ["apps.paused_capabilities"]
+  assert events == []
+  assert checkpoints == ["startup_schema_degraded"]
+  assert "skipped 1 database startup task" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_schema_safe_boot_runs_the_database_startup_phase(monkeypatch):
+  events = []
+  monkeypatch.setattr(startup, "PROCESS_STARTUP_TASKS", (
+    StartupTask("process", lambda _context: events.append("process")),
+  ))
+  monkeypatch.setattr(startup, "DATABASE_STARTUP_TASKS", (
+    StartupTask("database", lambda _context: events.append("database")),
+  ))
+
+  serviceable = await run_startup_plan(context())
+
+  assert serviceable is True
+  assert events == ["process", "database"]

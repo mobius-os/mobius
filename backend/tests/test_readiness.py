@@ -41,13 +41,10 @@ def test_ready_returns_200_when_writer_running(client):
   assert body["boot_id"]
 
 
-def test_schema_gap_fails_serviceability_but_not_reachability(
-  client, monkeypatch,
-):
+def test_schema_gap_fails_serviceability_but_not_reachability(client):
   """A mapped-column gap must keep every deployment probe fail-closed."""
   gap = "apps.paused_capabilities"
   main_module._SCHEMA_GAPS[:] = [gap]
-  monkeypatch.setattr(main_module, "orm_schema_gaps", lambda _engine: [gap])
   try:
     ready = client.get("/api/ready")
     assert ready.status_code == 503
@@ -65,22 +62,25 @@ def test_schema_gap_fails_serviceability_but_not_reachability(
     reachable = client.get("/api/health")
     assert reachable.status_code == 200
     assert reachable.json()["status"] == "schema_mismatch"
+    gated = client.get("/api/apps")
+    assert gated.status_code == 503
+    assert gated.json() == {
+      "detail": "database schema mismatch; restart after Recovery",
+      "schema_gaps": [gap],
+    }
+    assert client.get("/api/version").status_code == 200
   finally:
     main_module._SCHEMA_GAPS.clear()
 
 
-def test_external_schema_repair_restores_readiness_without_restart(
-  client, monkeypatch,
-):
-  """Recovery can close a boot-detected gap while this process stays up."""
+def test_external_schema_repair_requires_a_clean_startup(client):
+  """A degraded boot never starts skipped DB owners partway through life."""
   main_module._SCHEMA_GAPS[:] = ["apps.paused_capabilities"]
-  monkeypatch.setattr(main_module, "orm_schema_gaps", lambda _engine: [])
   try:
     ready = client.get("/api/ready")
-    assert ready.status_code == 200
-    assert ready.json() == {"ready": True}
-    assert main_module._SCHEMA_GAPS == []
-    assert client.get("/api/health").json()["status"] == "ok"
+    assert ready.status_code == 503
+    assert ready.json()["reason"] == "schema_mismatch"
+    assert main_module._SCHEMA_GAPS == ["apps.paused_capabilities"]
   finally:
     main_module._SCHEMA_GAPS.clear()
 
