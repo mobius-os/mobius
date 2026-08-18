@@ -105,6 +105,10 @@ export default function Drawer({
   // active across the whole app). Defaults to an empty Set so the
   // drawer renders cleanly if no parent supplies the prop.
   streamingChatIds,
+  // Set of chat ids parked on a question that needs the owner's answer.
+  // This state takes visual precedence over streaming because the agent
+  // cannot make progress until the owner acts.
+  ownerInputChatIds,
   // Set of chat ids whose latest background run finished while the
   // user was elsewhere. Rendered as a green attention dot, distinct by
   // colour from the accent streaming dot above (neither animates).
@@ -125,6 +129,7 @@ export default function Drawer({
   drawerRowGesturesRef,
 }) {
   const streamingSet = streamingChatIds || EMPTY_SET
+  const ownerInputSet = ownerInputChatIds || EMPTY_SET
   const attentionSet = attentionChatIds || EMPTY_SET
   const newAppSet = newAppIds || EMPTY_SET
   // One source of truth for which row the focused pane is showing, so a chat
@@ -1113,6 +1118,9 @@ export default function Drawer({
                       kind={kind}
                       item={item}
                       surface="drawer"
+                      needsOwnerInput={kind === 'chat'
+                        ? ownerInputSet.has(item.id)
+                        : !!(item.chat_id && ownerInputSet.has(item.chat_id))}
                       streaming={kind === 'chat' && streamingSet.has(item.id)}
                       building={kind === 'app' && !!(item.chat_id && streamingSet.has(item.chat_id))}
                       attention={kind === 'chat'
@@ -1153,6 +1161,9 @@ export default function Drawer({
                     kind={kind}
                     item={item}
                     surface="drawer"
+                    needsOwnerInput={kind === 'chat'
+                      ? ownerInputSet.has(item.id)
+                      : !!(item.chat_id && ownerInputSet.has(item.chat_id))}
                     streaming={kind === 'chat' && streamingSet.has(item.id)}
                     building={kind === 'app' && !!(item.chat_id && streamingSet.has(item.chat_id))}
                     attention={kind === 'chat'
@@ -1246,6 +1257,7 @@ export default function Drawer({
               item={app}
               variant="card"
               surface="directory"
+              needsOwnerInput={!!(app.chat_id && ownerInputSet.has(app.chat_id))}
               building={!!(app.chat_id && streamingSet.has(app.chat_id))}
               attention={newAppSet.has(Number(app.id))}
               active={activeView === 'canvas' && Number(activeAppId) === Number(app.id)}
@@ -1336,6 +1348,7 @@ const DrawerRow = memo(function DrawerRow({
   variant = 'row',
   surface = 'drawer',
   active,
+  needsOwnerInput,
   streaming,
   // App rows only: the app's owning chat is streaming, i.e. the agent is
   // actively building/editing this app right now. Reuses the streaming
@@ -1926,7 +1939,14 @@ const DrawerRow = memo(function DrawerRow({
         {/* Status dot. Sits before the text so the user's eye
             picks it up alongside the label rather than at the row's
             edge (where the pin lives). aria-label exposes the state. */}
-        {streaming ? (
+        {needsOwnerInput ? (
+          <span
+            className="drawer__owner-input-dot"
+            role="img"
+            aria-label="Your input is needed"
+            title="Your input is needed"
+          />
+        ) : streaming ? (
           <span
             className="drawer__streaming-dot"
             aria-label="Currently streaming"

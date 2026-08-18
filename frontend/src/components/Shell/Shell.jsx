@@ -83,6 +83,7 @@ import {
 } from './confirmedDeletion.js'
 import {
   withChatOwnerActivity,
+  withChatPendingQuestion,
   withChatRename,
   withChatRunState,
 } from './chatListProjection.js'
@@ -1624,6 +1625,13 @@ export default function Shell({ onInitialVisualReady }) {
     }
     return next
   }, [localStreamingChatIds, chats])
+  const ownerInputChatIds = useMemo(() => {
+    const next = new Set()
+    for (const chat of chats) {
+      if (chat.pending_question_id != null) next.add(chat.id)
+    }
+    return next
+  }, [chats])
   const streamingChatIdsRef = useRef(streamingChatIds)
   useEffect(() => { streamingChatIdsRef.current = streamingChatIds }, [streamingChatIds])
   // Whether the chat the owner is looking at is parked on an AskUserQuestion
@@ -1887,6 +1895,9 @@ export default function Shell({ onInitialVisualReady }) {
       chatId,
       running,
     ))
+  }, [projectChatList])
+  const markChatPendingQuestion = useCallback((chatId, questionId) => {
+    projectChatList(rows => withChatPendingQuestion(rows, chatId, questionId))
   }, [projectChatList])
   const applyChatRenameEvent = useCallback((event) => {
     projectChatList(rows => withChatRename(rows, event.chatId, {
@@ -2477,6 +2488,19 @@ export default function Shell({ onInitialVisualReady }) {
           onAction: () => navToRef.current('canvas', { appId: appStore.id }),
         } : undefined,
       })
+    } else if (ev.type === 'chat_owner_input_changed') {
+      if (ev.chatId) {
+        const knownInDrawer = chatsRef.current.some(
+          c => String(c.id) === String(ev.chatId),
+        )
+        markChatPendingQuestion(ev.chatId, ev.questionId)
+        // A background/system-created chat can ask before its start-event list
+        // refresh has inserted the row. The question was committed before this
+        // event, so a fresh read is authoritative and cannot lose the marker.
+        if (ev.questionId && !knownInDrawer) {
+          void invalidateShellListCache('chats').then(refreshChats)
+        }
+      }
     } else if (ev.type === 'chat_run_started') {
       if (ev.chatId) {
         // Capture drawer membership BEFORE the mark* projections below: those
@@ -2488,6 +2512,7 @@ export default function Shell({ onInitialVisualReady }) {
         markChatRunActivity(ev.chatId)
         markStreamingStart(ev.chatId)
         markChatRunState(ev.chatId, true)
+        markChatPendingQuestion(ev.chatId, null)
         // A run can be the drawer's FIRST evidence of a chat created entirely
         // server-side — the platform/app conflict resolver, a background or
         // morning agent, autopilot. selectChat only navigates; it never
@@ -2507,6 +2532,7 @@ export default function Shell({ onInitialVisualReady }) {
         markChatRunFinished(chatId)
         markStreamingEnd(chatId)
         markChatRunState(chatId, false)
+        markChatPendingQuestion(chatId, null)
         // Attention iff the finished chat is NOT visible in ANY pane — membership
         // in the visible set, not equality with one global id, so a chat visible
         // in a background split gets no false dot (finding D-iii).
@@ -2570,7 +2596,7 @@ export default function Shell({ onInitialVisualReady }) {
     confirmAppDeleted, confirmAppIdentityIsLive, confirmAppRecovered,
     confirmChatDeleted, confirmChatIdentityIsLive, confirmChatRecovered,
     loadTheme, markChatRunActivity, markChatRunFinished,
-    markChatRunState, markStreamingEnd, markStreamingStart,
+    markChatPendingQuestion, markChatRunState, markStreamingEnd, markStreamingStart,
     onNotificationCreated, placeInWorkspace, queryClient,
     refreshApps, refreshChats, warmAppCode,
   ])
@@ -3675,6 +3701,7 @@ export default function Shell({ onInitialVisualReady }) {
         onNowPlayingOpen={handleNowPlayingOpen}
         onNowPlayingControl={handleNowPlayingControl}
         streamingChatIds={streamingChatIds}
+        ownerInputChatIds={ownerInputChatIds}
         attentionChatIds={attentionChatIds}
         newAppIds={appAttentionSet}
         settingsWarning={providerAuth.needsAttention}

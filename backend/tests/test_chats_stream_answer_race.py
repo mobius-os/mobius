@@ -160,11 +160,22 @@ def _activity_at(chat_id: str) -> datetime:
 
 
 def test_answer_delivers_immediately_when_pending_registered(
-  client, auth, chat,
+  client, auth, chat, monkeypatch,
 ):
   """Pending question already in the registry — POST resolves the
   future and returns 202 answer_delivered without any waiting."""
   async def go():
+    system_events = []
+
+    class _SystemEvents:
+      def publish(self, event):
+        system_events.append(event)
+
+    monkeypatch.setattr(
+      chats_stream,
+      "get_system_broadcast",
+      lambda: _SystemEvents(),
+    )
     loop = asyncio.get_event_loop()
     fut = loop.create_future()
     pending = _make_pending(fut)
@@ -195,6 +206,11 @@ def test_answer_delivers_immediately_when_pending_registered(
     assert fut.result() == {"Pick one": "a"}
     # Registry cleared atomically by claim().
     assert questions.get(chat.id) is None
+    assert system_events == [{
+      "type": "chat_owner_input_changed",
+      "chatId": chat.id,
+      "questionId": None,
+    }]
     assert _activity_at(chat.id).replace(tzinfo=UTC) > old_activity
     # No grace-period delay on the happy path. 500ms cap; 250ms
     # leaves comfortable headroom for slow CI without making the

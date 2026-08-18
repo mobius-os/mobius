@@ -27,10 +27,22 @@ class _Bus:
     self.events.append(event)
 
 
-def test_park_question_publishes_before_waiting_and_cleans_exact_entry():
+def test_park_question_publishes_before_waiting_and_cleans_exact_entry(
+  monkeypatch,
+):
   async def exercise():
     registry: dict[str, PendingQuestion] = {}
     bus = _Bus()
+    system_events = []
+
+    class _SystemEvents:
+      def publish(self, event):
+        system_events.append(event)
+
+    monkeypatch.setattr(
+      "app.question_bridge.get_system_broadcast",
+      lambda: _SystemEvents(),
+    )
     task = asyncio.create_task(park_question(
       chat_id="chat-1",
       questions=[{"question": "Pick"}],
@@ -45,6 +57,11 @@ def test_park_question_publishes_before_waiting_and_cleans_exact_entry():
       "type": "question",
       "question_id": pending.question_id,
       "questions": [{"question": "Pick"}],
+    }]
+    assert system_events == [{
+      "type": "chat_owner_input_changed",
+      "chatId": "chat-1",
+      "questionId": pending.question_id,
     }]
     pending.future.set_result({"Pick": "First"})
     assert await task == {"Pick": "First"}

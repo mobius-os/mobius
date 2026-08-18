@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   withChatListRowPatch,
   withChatOwnerActivity,
+  withChatPendingQuestion,
   withChatRename,
   withChatRunState,
 } from '../chatListProjection.js'
@@ -41,4 +42,13 @@ test('run and rename events project only the committed fields they carry', () =>
   })
   assert.equal(renamed[0].title, 'Current topic')
   assert.equal(renamed[0].updated_at, '2026-08-01T12:30:00Z')
+})
+
+test('pending-question events project the durable owner-input marker', () => {
+  const waiting = withChatPendingQuestion(rows, 'a', 'question-1')
+  assert.equal(waiting[0].pending_question_id, 'question-1')
+  assert.equal(waiting[1], rows[1])
+
+  const answered = withChatPendingQuestion(waiting, 'a', null)
+  assert.equal(answered[0].pending_question_id, null)
 })

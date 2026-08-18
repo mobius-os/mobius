@@ -662,6 +662,11 @@ async def send_message(
             "question_id": body.question_id or pending.question_id,
             "answers": body.answers,
           })
+        get_system_broadcast().publish({
+          "type": "chat_owner_input_changed",
+          "chatId": chat_id,
+          "questionId": None,
+        })
         return _answer_delivered_response(chat_id)
       # No in-memory pending question. If the chat is still alive, this is a
       # stale/foreign card (or Stop cancelled the question) and must not answer

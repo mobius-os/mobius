@@ -858,7 +858,12 @@ test('opening navigation is presentation-only and never refetches whole lists', 
     'a run started in another live client must still advance drawer recency')
 })
 
-test('chat drawer dots distinguish active work from unseen completion', () => {
+test('chat drawer indicators distinguish owner input, active work, and unseen completion', () => {
+  assert.match(
+    shell,
+    /ev\.type === 'chat_owner_input_changed'[\s\S]*?markChatPendingQuestion\(ev\.chatId, ev\.questionId\)[\s\S]*?ev\.questionId && !knownInDrawer[\s\S]*?refreshChats/,
+    'an owner-input event must project the durable marker and recover a missing background row',
+  )
   assert.match(
     shell,
     /ev\.type === 'chat_run_started'[\s\S]*?markStreamingStart\(ev\.chatId\)/,
@@ -876,9 +881,11 @@ test('chat drawer dots distinguish active work from unseen completion', () => {
   )
   assert.match(
     drawer,
-    /streaming \? \([\s\S]*?drawer__streaming-dot[\s\S]*?: attention \? \([\s\S]*?drawer__attention-dot/,
-    'active work must take precedence over unseen completion in a row',
+    /needsOwnerInput \? \([\s\S]*?drawer__owner-input-dot[\s\S]*?: streaming \? \([\s\S]*?drawer__streaming-dot[\s\S]*?: attention \? \([\s\S]*?drawer__attention-dot/,
+    'owner input must take precedence over active work and unseen completion',
   )
+  assert.match(drawerCss, /\.drawer__owner-input-dot\s*\{[\s\S]*?transform:\s*rotate\(45deg\)/)
+  assert.match(drawerCss, /\.drawer__owner-input-dot\s*\{[\s\S]*?#f59e0b/)
   assert.match(drawerCss, /\.drawer__streaming-dot\s*\{[\s\S]*?background:\s*var\(--accent\)/)
   assert.match(drawerCss, /\.drawer__attention-dot\s*\{[\s\S]*?border:\s*1\.5px solid var\(--green\)/)
 })

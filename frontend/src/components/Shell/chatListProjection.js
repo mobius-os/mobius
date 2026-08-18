@@ -40,6 +40,12 @@ export function withChatRunState(rows, chatId, running) {
   })
 }
 
+export function withChatPendingQuestion(rows, chatId, questionId) {
+  return withChatListRowPatch(rows, chatId, {
+    pending_question_id: questionId || null,
+  })
+}
+
 export function withChatRename(rows, chatId, { title, updatedAt } = {}) {
   return withChatListRowPatch(rows, chatId, {
     ...(typeof title === 'string' ? { title } : {}),
