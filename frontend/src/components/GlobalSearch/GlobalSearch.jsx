@@ -51,7 +51,10 @@ function GlobalSearchResult({
     'aria-selected': selected,
     'data-search-result-index': index,
     className: resultClass,
-    onPointerEnter: () => onSelect(index),
+    // Pointer enter can fire when the dialog mounts beneath a stationary
+    // cursor. Pointer move represents deliberate hover intent and therefore
+    // must be the only pointer gesture that changes keyboard selection.
+    onPointerMove: () => onSelect(index),
     onFocus: () => onSelect(index),
     onClick: () => onOpen(row),
   }

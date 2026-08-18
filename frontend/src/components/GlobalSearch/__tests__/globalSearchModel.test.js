@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import {
   appManifestSearchDocument,
@@ -13,6 +14,11 @@ import {
   searchInstalledApps,
   visibleChatSearchState,
 } from '../globalSearchModel.js'
+
+const globalSearchSource = readFileSync(
+  new URL('../GlobalSearch.jsx', import.meta.url),
+  'utf8',
+)
 
 class MemoryStorage {
   constructor(initial = {}) {
@@ -162,6 +168,11 @@ test('keyboard search selection starts at the first result and wraps with arrows
   assert.equal(moveSearchSelection(0, 'ArrowUp', 3), 2)
   assert.equal(moveSearchSelection(2, 'ArrowUp', 3), 1)
   assert.equal(moveSearchSelection(0, 'ArrowDown', 0), -1)
+})
+
+test('a stationary pointer cannot replace the keyboard-selected result', () => {
+  assert.match(globalSearchSource, /onPointerMove:\s*\(\) => onSelect\(index\)/)
+  assert.doesNotMatch(globalSearchSource, /onPointerEnter:\s*\(\) => onSelect\(index\)/)
 })
 
 test('a changed chat query hides and rejects stale result actions', () => {
