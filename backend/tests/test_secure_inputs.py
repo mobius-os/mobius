@@ -26,7 +26,9 @@ def _create_request(client, auth, chat, *, mode="sealed"):
     },
   )
   assert response.status_code == 200
-  return bc, response.json()
+  created = response.json()
+  assert "expires_in" not in created
+  return bc, created
 
 
 def test_sealed_values_never_enter_events_status_or_chat(
@@ -360,10 +362,38 @@ def test_cancel_clears_memory_values(client, auth, chat):
   assert pending.values is None
 
 
+def test_pending_request_stays_open_without_an_expiry(monkeypatch):
+  from app import secure_inputs
+
+  pending, _ = secure_inputs.create_request(
+    chat_id="patient-chat",
+    mode="sealed",
+    title="No rush",
+    description="",
+    fields=[{
+      "name": "password",
+      "label": "Password",
+      "type": "password",
+      "autocomplete": "off",
+    }],
+  )
+
+  assert "expires_in" not in pending.public_event()
+  monkeypatch.setattr(
+    secure_inputs.time,
+    "monotonic",
+    lambda: pending.created_at + (365 * 24 * 60 * 60),
+  )
+  secure_inputs._cleanup()
+
+  assert pending.status == "pending"
+  assert secure_inputs.get_request(pending.request_id) is pending
+
+
 def test_filled_values_expire_without_another_request(monkeypatch):
   from app import secure_inputs
 
-  monkeypatch.setattr(secure_inputs, "REQUEST_TTL_SECONDS", 0.01)
+  monkeypatch.setattr(secure_inputs, "FILLED_TTL_SECONDS", 0.01)
 
   async def scenario():
     pending, _ = secure_inputs.create_request(
@@ -411,6 +441,28 @@ def test_sealed_consumer_discards_stdout_and_stderr(capsys):
   captured = capsys.readouterr()
   assert captured.out == ""
   assert captured.err == ""
+
+
+def test_sealed_consumer_keeps_the_two_minute_runtime_limit(monkeypatch):
+  script_path = (
+    Path(__file__).resolve().parents[1] / "scripts" / "secure-input.py"
+  )
+  spec = importlib.util.spec_from_file_location("secure_input_helper", script_path)
+  helper = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(helper)
+
+  observed = {}
+
+  def run(command, **kwargs):
+    observed["command"] = command
+    observed.update(kwargs)
+    return type("Completed", (), {"returncode": 0})()
+
+  monkeypatch.setattr(helper.subprocess, "run", run)
+  assert helper._run_consumer(["consumer"], {"password": "private"}) == 0
+  assert observed["timeout"] == 120
+  assert observed["stdout"] is helper.subprocess.DEVNULL
+  assert observed["stderr"] is helper.subprocess.DEVNULL
 
 
 def test_consumer_outcomes_are_predefined():

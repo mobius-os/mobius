@@ -23,8 +23,8 @@ from typing import Any
 from app.broadcast import get_broadcast
 
 
-REQUEST_TTL_SECONDS = 15 * 60
 COMPLETED_TTL_SECONDS = 2 * 60
+FILLED_TTL_SECONDS = 2 * 60
 CONSUMING_TTL_SECONDS = 2 * 60
 MAX_REQUESTS = 32
 MAX_FIELDS = 8
@@ -53,10 +53,10 @@ class SecureInputRequest:
   fields: list[dict[str, Any]]
   capability_hash: bytes
   created_at: float
-  expires_at: float
   status: str = "pending"
   values: dict[str, str] | None = None
   result: dict[str, Any] | None = None
+  filled_at: float | None = None
   consuming_at: float | None = None
   settled_at: float | None = None
   event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -70,7 +70,6 @@ class SecureInputRequest:
       "title": self.title,
       "description": self.description,
       "fields": self.fields,
-      "expires_in": max(0, int(self.expires_at - time.monotonic())),
     }
 
 
@@ -78,7 +77,7 @@ _requests: dict[str, SecureInputRequest] = {}
 
 
 def _schedule_cleanup(delay_seconds: float, request_id: str) -> None:
-  """Arm real-time expiry; access-time cleanup remains a restart-safe fallback."""
+  """Arm lifecycle cleanup; access-time cleanup remains a fallback."""
   try:
     loop = asyncio.get_running_loop()
   except RuntimeError:
@@ -255,16 +254,17 @@ def _settle(
 def _cleanup() -> None:
   now = time.monotonic()
   for request in list(_requests.values()):
-    expired_pending = (
-      request.status in {"pending", "filled"}
-      and request.expires_at <= now
+    expired_filled = (
+      request.status == "filled"
+      and request.filled_at is not None
+      and now - request.filled_at >= FILLED_TTL_SECONDS
     )
     expired_consumer = (
       request.status == "consuming"
       and request.consuming_at is not None
       and now - request.consuming_at >= CONSUMING_TTL_SECONDS
     )
-    if expired_pending or expired_consumer:
+    if expired_filled or expired_consumer:
       _settle(
         request,
         "expired",
@@ -298,7 +298,6 @@ def create_request(
     raise RuntimeError("Too many secure input requests are active.")
 
   capability = secrets.token_urlsafe(32)
-  now = time.monotonic()
   request = SecureInputRequest(
     request_id=secrets.token_urlsafe(18),
     chat_id=chat_id,
@@ -307,11 +306,9 @@ def create_request(
     description=description,
     fields=fields,
     capability_hash=_capability_digest(capability),
-    created_at=now,
-    expires_at=now + REQUEST_TTL_SECONDS,
+    created_at=time.monotonic(),
   )
   _requests[request.request_id] = request
-  _schedule_cleanup(REQUEST_TTL_SECONDS, request.request_id)
   return request, capability
 
 
@@ -334,8 +331,10 @@ def fill_request(request: SecureInputRequest, values: dict[str, str]) -> None:
     raise ValueError("Secure input request is no longer open.")
   request.values = values
   request.status = "filled"
+  request.filled_at = time.monotonic()
   request.event.set()
   _publish(request, "secure_input_filled")
+  _schedule_cleanup(FILLED_TTL_SECONDS, request.request_id)
 
 
 def consume_request(request: SecureInputRequest) -> dict[str, str]:
