@@ -39,6 +39,14 @@ test('restored chat rows and tool blocks do not replay entrance animation', () =
     'tool blocks should not flicker on streaming/remount updates')
 })
 
+test('the live response cursor stays visible without pulsing for reduced motion', () => {
+  const css = stripComments(chatCss)
+
+  assert.match(css,
+    /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*?\.chat__cursor\s*\{[^}]*animation:\s*none[^}]*opacity:\s*0\.65/,
+    'reduced-motion users should get a static live marker instead of an indefinite pulse')
+})
+
 test('stop action has no visible circular shell', () => {
   const css = stripComments(chatCss)
   const stopRules = css.match(/\.chat__stop\s*\{[^}]*\}/g) || []

@@ -1549,6 +1549,7 @@ export default function useScrollMode({
   const pendingGestureReleaseRafRef = useRef(0)
   const gestureSequenceRef = useRef(0)
   const resumeLayoutAfterGestureRef = useRef(null)
+  const settlePendingReaderGestureRef = useRef(null)
   // A newer semantic action (Send, attention nudge) supersedes any reader
   // settlement still waiting on the quiet edge. The effect publishes its
   // local cancel closure here so those actions cannot be overwritten later.
@@ -1899,6 +1900,12 @@ export default function useScrollMode({
   }, [scrollRef, transitionMode])
 
   const freezeQuestionSubmission = useCallback(() => {
+    // A real wheel/touch scroll can update the viewport and reader generation
+    // before its 250ms quiet settlement publishes ANCHOR_AT. Commit that
+    // reader-owned location before choosing the pre-submit base; discarding the
+    // settlement first would preserve a stale FOLLOW_BOTTOM and yank the reader
+    // back to the tail when the answer resumes.
+    settlePendingReaderGestureRef.current?.()
     const nextMode = modeForQuestionSubmission(scrollRef.current, modeRef.current)
     // Submit is a newer semantic reading action. Its current-geometry snapshot
     // must not be replaced a few milliseconds later by the quiet settlement of
@@ -2752,6 +2759,7 @@ export default function useScrollMode({
       resumeLayoutAfterGestureRef.current?.()
       requestRevealOnQuiet()
     }
+    settlePendingReaderGestureRef.current = settleReaderScroll
 
     const releasePendingGesture = (sequence) => {
       if (gestureSequenceRef.current !== sequence
@@ -3123,6 +3131,9 @@ export default function useScrollMode({
       clearTimeout(readerSettleTimer)
       if (discardPendingReaderSettleRef.current === discardPendingReaderSettle) {
         discardPendingReaderSettleRef.current = null
+      }
+      if (settlePendingReaderGestureRef.current === settleReaderScroll) {
+        settlePendingReaderGestureRef.current = null
       }
       clearTimeout(revealTimer)
       clearTimeout(deferredGestureLayoutTimer)

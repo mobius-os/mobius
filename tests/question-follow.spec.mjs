@@ -61,7 +61,20 @@ async function installQuestionStream(page, questionBlock) {
   })
 }
 
-test('accepted same-turn answer keeps following when the question was followed', async ({ page }) => {
+const questionFollowScenarios = [
+  {
+    name: 'accepted same-turn answer keeps following when the question was followed',
+    readerScrollBeforeSubmit: false,
+    expectedMode: 'FOLLOW_BOTTOM',
+  },
+  {
+    name: 'reader scroll immediately before Submit cancels stale follow restoration',
+    readerScrollBeforeSubmit: true,
+    expectedMode: 'ANCHOR_AT',
+  },
+]
+
+for (const scenario of questionFollowScenarios) test(scenario.name, async ({ page }) => {
   const questionBlock = {
     type: 'question',
     question_id: 'q-follow',
@@ -108,7 +121,12 @@ test('accepted same-turn answer keeps following when the question was followed',
 
   await page.setViewportSize({ width: 1512, height: 861 })
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-  const chat = await createTaggedChat(page, 'question-follow')
+  const chat = await createTaggedChat(
+    page,
+    scenario.readerScrollBeforeSubmit
+      ? 'question-follow-reader-override'
+      : 'question-follow',
+  )
   expect(chat?.id).toBeTruthy()
   const runtimeState = () => ({
     running: turnStarted,
@@ -166,19 +184,50 @@ test('accepted same-turn answer keeps following when the question was followed',
   }, undefined, { timeout: 5000 })
 
   await card.getByRole('radio', { name: 'Yes' }).click()
-  await card.getByRole('button', { name: 'Submit' }).click()
+  const submit = card.getByRole('button', { name: 'Submit' })
+  await expect(submit).toBeEnabled()
+  if (scenario.readerScrollBeforeSubmit) {
+    // Reproduce the real ordering boundary deterministically: the reader's
+    // scroll event has landed, but its 250ms quiet settlement has not yet
+    // converted the old FOLLOW_BOTTOM into an ordinary reading anchor when
+    // Submit freezes the card-to-stream handoff.
+    await page.evaluate(() => {
+      const scroll = document.querySelector(
+        '[data-chat-surface="painted"] .chat__scroll',
+      )
+      const submitButton = document.querySelector(
+        '[data-chat-surface="painted"] .qcard__submit',
+      )
+      scroll.dispatchEvent(new WheelEvent('wheel', {
+        bubbles: true,
+        deltaY: -160,
+      }))
+      scroll.scrollTop = Math.max(0, scroll.scrollTop - 160)
+      scroll.dispatchEvent(new Event('scroll'))
+      submitButton.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        button: 0,
+        pointerType: 'mouse',
+      }))
+      submitButton.click()
+    })
+  } else {
+    await submit.click()
+  }
   await expect(card.locator('.qcard__submit')).toHaveText('Submitted')
   await expect(surface.locator('.chat__msg--assistant'))
     .toContainText('AFTER_QUESTION_END', { timeout: 5000 })
 
-  await page.waitForFunction(() => {
+  await page.waitForFunction(({ expectedMode, readerScrollBeforeSubmit }) => {
     const scroll = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
     const spacer = document.querySelector('[data-chat-surface="painted"] .spacer-dynamic')
-    if (!scroll || scroll.dataset.scrollMode !== 'FOLLOW_BOTTOM') return false
+    if (!scroll || scroll.dataset.scrollMode !== expectedMode) return false
     const realContentGap = scroll.scrollHeight
       - (spacer?.offsetHeight || 0)
       - scroll.scrollTop
       - scroll.clientHeight
-    return Math.abs(realContentGap) <= 4
-  }, undefined, { timeout: 5000 })
+    return readerScrollBeforeSubmit
+      ? realContentGap > 40
+      : Math.abs(realContentGap) <= 4
+  }, scenario, { timeout: 5000 })
 })

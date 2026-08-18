@@ -133,12 +133,22 @@ test('terminal cursor removal keeps followed geometry unchanged', async ({ page 
   await expect(cursor).toBeVisible()
   const cursorGeometry = await cursor.evaluate(el => ({
     position: getComputedStyle(el).position,
+    animationName: getComputedStyle(el).animationName,
     width: el.getBoundingClientRect().width,
     height: el.getBoundingClientRect().height,
   }))
   expect(cursorGeometry.position).toBe('absolute')
+  expect(cursorGeometry.animationName).toBe('cursorPulse')
   expect(cursorGeometry.width).toBeGreaterThan(4)
   expect(cursorGeometry.height).toBeGreaterThan(4)
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await expect.poll(() => cursor.evaluate(el => ({
+    animationName: getComputedStyle(el).animationName,
+    opacity: getComputedStyle(el).opacity,
+  }))).toEqual({
+    animationName: 'none',
+    opacity: '0.65',
+  })
   await page.evaluate(() => new Promise(resolve => (
     requestAnimationFrame(() => requestAnimationFrame(resolve))
   )))

@@ -748,6 +748,13 @@
   50% { opacity: 1; }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .chat__cursor {
+    animation: none;
+    opacity: 0.65;
+  }
+}
+
 /* ── Spacer ──────────────────────────────────────── */
 
 .spacer-dynamic { /* no transition — must be instant for scroll math to work */ }
