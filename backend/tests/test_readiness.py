@@ -16,7 +16,7 @@ singleton.
 
 from pathlib import Path
 
-from app import chat_writer, database, main as main_module
+from app import chat_writer, main as main_module
 from app.chat_writer import get_writer
 from app.database import SessionLocal
 
@@ -47,7 +47,7 @@ def test_schema_gap_fails_serviceability_but_not_reachability(
   """A mapped-column gap must keep every deployment probe fail-closed."""
   gap = "apps.paused_capabilities"
   main_module._SCHEMA_GAPS[:] = [gap]
-  monkeypatch.setattr(database, "orm_schema_gaps", lambda _engine: [gap])
+  monkeypatch.setattr(main_module, "orm_schema_gaps", lambda _engine: [gap])
   try:
     ready = client.get("/api/ready")
     assert ready.status_code == 503
@@ -74,7 +74,7 @@ def test_external_schema_repair_restores_readiness_without_restart(
 ):
   """Recovery can close a boot-detected gap while this process stays up."""
   main_module._SCHEMA_GAPS[:] = ["apps.paused_capabilities"]
-  monkeypatch.setattr(database, "orm_schema_gaps", lambda _engine: [])
+  monkeypatch.setattr(main_module, "orm_schema_gaps", lambda _engine: [])
   try:
     ready = client.get("/api/ready")
     assert ready.status_code == 200

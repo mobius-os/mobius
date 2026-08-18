@@ -2,7 +2,8 @@ import ast
 import asyncio
 import hashlib
 import json
-from datetime import datetime
+import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,13 +13,50 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import models
-import app.database as database
+import app.schema_migrations as migrations
 from app.config import get_settings
-from app.database import (
+from app.schema_migrations import (
   _agent_lifecycle_width_migrations,
   run_migrations,
   schema_migration_history,
 )
+
+
+PREVIOUS_RELEASE_SCHEMA = (
+  Path(__file__).parent / "fixtures" / "schema_0013.sql"
+)
+
+
+def test_previous_release_database_upgrades_to_current_orm(tmp_path):
+  """The real boot order must close every ORM gap on an existing install.
+
+  Fresh databases are insufficient evidence because ``create_all`` creates
+  current tables and columns before migrations run. The frozen SQL fixture is
+  the empty schema from the release immediately preceding migration 0014,
+  including its already-applied ledger. Loading that artifact first makes a
+  newly declared column observable unless a genuinely new migration adds it.
+  """
+  db_path = tmp_path / "previous-release.db"
+  with sqlite3.connect(db_path) as connection:
+    connection.executescript(PREVIOUS_RELEASE_SCHEMA.read_text(encoding="utf-8"))
+
+  eng = create_engine(f"sqlite:///{db_path}")
+  before = {column["name"] for column in inspect(eng).get_columns("chat_runs")}
+  assert "goal_plan_json" not in before
+  assert "goal_plan_revision" not in before
+
+  # Production creates new tables first, then upgrades existing ones. Keep the
+  # test on that exact ordering: reversing it would prove a different system.
+  models.Base.metadata.create_all(bind=eng)
+  run_migrations(eng)
+  first_history = schema_migration_history(eng)
+  run_migrations(eng)
+
+  assert migrations.orm_schema_gaps(eng) == []
+  assert schema_migration_history(eng) == first_history
+  assert [row["version"] for row in first_history] == [
+    version for version, _migration in migrations._SCHEMA_MIGRATIONS
+  ]
 
 
 def test_run_migrations_drops_removed_image_generation_columns(tmp_path):
@@ -1064,8 +1102,8 @@ def test_pending_question_migration_backfills_only_active_latest_question(
       "('r-superseded', 'superseded', 'running')"
     ))
 
-  database._add_chat_pending_question_id(eng)
-  database._add_chat_pending_question_id(eng)
+  migrations._add_chat_pending_question_id(eng)
+  migrations._add_chat_pending_question_id(eng)
 
   assert "pending_question_id" in {
     column["name"] for column in inspect(eng).get_columns("chats")
@@ -1140,7 +1178,7 @@ def test_hosted_publication_reaches_a_fully_ledgered_private_app(tmp_path):
       "CREATE TABLE schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in database._SCHEMA_MIGRATIONS[:-3]:
+    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-3]:
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, '2026-08-15 00:00:00')"
@@ -1198,7 +1236,7 @@ def test_hosted_publication_migrates_the_unmerged_live_flag_to_a_snapshot(
       "CREATE TABLE schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in database._SCHEMA_MIGRATIONS[:-3]:
+    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-3]:
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, '2026-08-15 00:00:00')"
@@ -1322,7 +1360,8 @@ def test_connector_oauth_gcloud_migration_upgrades_legacy_rows_idempotently(
 
 
 def test_orm_schema_gaps_reports_missing_columns(tmp_path):
-  from app.database import Base, orm_schema_gaps
+  from app.database import Base
+  from app.schema_migrations import orm_schema_gaps
 
   eng = create_engine(f"sqlite:///{tmp_path / 'parity.db'}")
   Base.metadata.create_all(bind=eng)
@@ -1527,7 +1566,7 @@ def test_chat_search_migration_emits_plain_postgres_documents_without_fts():
     def execute(self, statement):
       statements.append(str(statement))
 
-  database._create_chat_search_tables(RecordingConnection())
+  migrations._create_chat_search_tables(RecordingConnection())
 
   emitted = "\n".join(statements)
   assert "DROP TABLE IF EXISTS chat_search_docs" in emitted
@@ -1583,7 +1622,7 @@ def test_goal_migration_backfills_only_the_running_turns_initiating_goal(
   eng = create_engine(f"sqlite:///{tmp_path / 'goal-run.db'}")
   models.Base.metadata.create_all(eng)
   started_at = datetime(2026, 7, 31, 12, 0, 0)
-  started_ms = int(started_at.replace(tzinfo=database.UTC).timestamp() * 1000)
+  started_ms = int(started_at.replace(tzinfo=UTC).timestamp() * 1000)
   with Session(eng) as session:
     session.add(models.Chat(
       id="goal-chat",
@@ -1636,7 +1675,7 @@ def test_goal_plan_migration_adds_snapshot_and_revision_to_existing_runs(
       "CREATE TABLE IF NOT EXISTS schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in database._SCHEMA_MIGRATIONS[:-2]:
+    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-2]:
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, :at)"
@@ -1683,7 +1722,7 @@ def test_goal_identity_migration_backfills_plan_and_recovery_runs(tmp_path):
       "CREATE TABLE IF NOT EXISTS schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in database._SCHEMA_MIGRATIONS[:-1]:
+    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-1]:
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
       ), {"v": version, "at": datetime(2026, 8, 18)})
@@ -1696,19 +1735,46 @@ def test_goal_identity_migration_backfills_plan_and_recovery_runs(tmp_path):
   assert rows == [("planned", "planned"), ("recovered", "planned")]
 
 
-def test_applied_legacy_schema_migration_is_immutable():
-  """Editing migration 0001 must require an intentional new migration."""
-  source = Path(database.__file__).read_text(encoding="utf-8")
+def test_published_schema_migration_history_is_unique_ordered_and_immutable():
+  """Published migrations are history; current work always appends."""
+  source = Path(migrations.__file__).read_text(encoding="utf-8")
   module = ast.parse(source)
-  migration = next(
-    node for node in module.body
+  functions = {
+    node.name: node
+    for node in module.body
     if isinstance(node, ast.FunctionDef)
-    and node.name == "_converge_legacy_schema"
+  }
+  versions = [version for version, _migration in migrations._SCHEMA_MIGRATIONS]
+  numbers = [int(version.split("_", 1)[0]) for version in versions]
+  function_names = [
+    migration.__name__ for _version, migration in migrations._SCHEMA_MIGRATIONS
+  ]
+
+  assert len(versions) == len(set(versions)), "migration versions must be unique"
+  assert numbers == sorted(set(numbers)), (
+    "migration numbers must increase without parallel-prefix collisions"
   )
-  semantic_shape = ast.dump(migration, include_attributes=False).encode()
-  assert hashlib.sha256(semantic_shape).hexdigest() == (
-    "4f7b1f167534e0f692eaa004e40c124b36b655c387671f93b66f4932a6e242ec"
-  ), "0001 is applied history; append a new numbered migration instead"
+  assert len(function_names) == len(set(function_names))
+
+  frozen = json.loads(
+    (Path(__file__).parent / "fixtures" / "migration_history.json").read_text(
+      encoding="utf-8",
+    )
+  )
+  assert frozen["format"] == 1
+  assert list(frozen["migrations"]) == versions, (
+    "append the new migration and freeze its semantic hash; never edit or "
+    "renumber an existing entry"
+  )
+  actual = {
+    version: hashlib.sha256(
+      ast.dump(functions[migration.__name__], include_attributes=False).encode()
+    ).hexdigest()
+    for version, migration in migrations._SCHEMA_MIGRATIONS
+  }
+  assert actual == frozen["migrations"], (
+    "published migration code changed; restore it and append a new migration"
+  )
 
 
 def test_failed_migration_is_not_recorded_and_can_retry(tmp_path, monkeypatch):
@@ -1725,7 +1791,7 @@ def test_failed_migration_is_not_recorded_and_can_retry(tmp_path, monkeypatch):
     raise RuntimeError("interrupted migration")
 
   monkeypatch.setattr(
-    database,
+    migrations,
     "_SCHEMA_MIGRATIONS",
     (("9000_retry_contract", fail_once),),
   )

@@ -528,7 +528,7 @@ class ChatSessionLink(Base):
   directly.
 
   ``create_all`` builds this table on the next boot — a new table needs no ALTER
-  migration (see ``run_migrations``, which only ALTERs existing tables); existing
+  migration (see ``schema_migrations.run_migrations``); existing
   rows are untouched.
   """
 
@@ -1062,7 +1062,7 @@ class ToolOutput(Base):
   plain text while a bounded background fix-forward updates old rows. Keeping
   one column preserves SQLite/PostgreSQL portability without a schema migration.
   `create_all` builds this table on the next boot — a new table needs no ALTER
-  migration (see run_migrations, which only ALTERs existing tables)."""
+  migration (see schema_migrations.run_migrations)."""
 
   __tablename__ = "tool_outputs"
 
@@ -1207,7 +1207,7 @@ class ContributionAutopilot(Base):
   this row. The ledger block is a one-way MIRROR of these fields for the UI/cron.
 
   ``create_all`` builds this table on the next boot — a new table needs no ALTER
-  migration (see ``database.run_migrations``, which only ALTERs existing tables).
+  migration (see ``schema_migrations.run_migrations``).
   """
 
   __tablename__ = "contribution_autopilot"

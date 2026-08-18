@@ -186,7 +186,8 @@ def test_display_migration_adds_column_to_existing_db(tmp_path):
   the column to simulate a pre-display DB, then assert run_migrations re-adds
   it (the same gate that runs on prod boot)."""
   from sqlalchemy import create_engine, inspect, text
-  from app.database import Base, run_migrations
+  from app.database import Base
+  from app.schema_migrations import run_migrations
 
   eng = create_engine(f"sqlite:///{tmp_path}/legacy.db")
   Base.metadata.create_all(bind=eng)

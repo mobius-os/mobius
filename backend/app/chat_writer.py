@@ -3902,7 +3902,7 @@ def _tail_open_question_id(messages) -> str | None:
   tail is an unanswered question." Deriving it from the messages is the single
   rule every writer that needs to (re)establish the marker can share, so the
   marker cannot drift from the transcript. This mirrors the one-time boot
-  backfill in database._add_chat_pending_question_id and applies the same
+  backfill in schema_migrations._add_chat_pending_question_id and applies the same
   1..64-char id validation the column accepts.
   """
   for message in reversed(messages or []):

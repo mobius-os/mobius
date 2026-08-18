@@ -71,7 +71,8 @@ if not (_static / "index.html").is_file():
     encoding="utf-8",
   )
 
-from app.database import Base, _create_chat_search_tables, engine
+from app.database import Base, engine
+from app.schema_migrations import _create_chat_search_tables
 from app.main import app
 from app.routes import auth as auth_module
 from app.routes.auth import _limiter as auth_limiter

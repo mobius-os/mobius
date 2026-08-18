@@ -841,7 +841,8 @@ def test_wake_disposition_gate_excludes_non_durable_terminals():
 def test_migration_adds_wake_columns_idempotently(db):
   from sqlalchemy import inspect as sa_inspect
 
-  from app.database import _add_delegation_parent_wake, engine
+  from app.database import engine
+  from app.schema_migrations import _add_delegation_parent_wake
 
   # Safe to re-run against the live (already-migrated) schema.
   _add_delegation_parent_wake(engine)

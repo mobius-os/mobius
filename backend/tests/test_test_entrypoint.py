@@ -16,7 +16,11 @@ def test_fast_mode_uses_host_runtime_before_any_docker_preflight():
   assert '"tests/test_readiness.py"' in source
   assert (
     '"tests/test_db_migrations.py::'
-    'test_applied_legacy_schema_migration_is_immutable"'
+    'test_previous_release_database_upgrades_to_current_orm"'
+  ) in source
+  assert (
+    '"tests/test_db_migrations.py::'
+    'test_published_schema_migration_history_is_unique_ordered_and_immutable"'
   ) in source
   assert '"tests/test_pm_commit.py"' in source
 

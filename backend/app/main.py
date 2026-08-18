@@ -39,9 +39,9 @@ from app.database import (
   SessionLocal,
   engine,
   reset_database_request_label,
-  run_migrations,
   set_database_request_label,
 )
+from app.schema_migrations import orm_schema_gaps, run_migrations
 from app.http_caching import strip_range
 from app.frontend_assets import (
   baked_frontend_dir,
@@ -114,7 +114,6 @@ def _init_db():
     try:
       Base.metadata.create_all(bind=engine)
       run_migrations(engine)
-      from app.database import orm_schema_gaps
       gaps = orm_schema_gaps(engine)
       _SCHEMA_GAPS[:] = gaps
       if gaps:
@@ -146,7 +145,6 @@ def _serviceability_schema_gaps() -> list[str]:
   if not _SCHEMA_GAPS:
     return []
   try:
-    from app.database import orm_schema_gaps
     gaps = orm_schema_gaps(engine)
   except Exception:
     # A readiness check must never turn an inspection failure into a green
