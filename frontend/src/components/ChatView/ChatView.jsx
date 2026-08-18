@@ -120,6 +120,7 @@ import {
   shouldRetryStopAfterConfirm,
   stopConfirmedIdle,
   stopRequestSucceeded,
+  supersedeResumedPauseBlocks,
   serverSnapshotBehindLocal,
   shouldFreezeStreamingReturn,
   startedMessagesFromResponse,
@@ -4148,9 +4149,13 @@ export default function ChatView({
     visibleGoalObjective,
     buildPhaseRail,
   )
+  const displayedMessages = useMemo(
+    () => supersedeResumedPauseBlocks(messages),
+    [messages],
+  )
   let lastVisibleMessageIndex = -1
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (!messages[i].hidden) {
+  for (let i = displayedMessages.length - 1; i >= 0; i -= 1) {
+    if (!displayedMessages[i].hidden) {
       lastVisibleMessageIndex = i
       break
     }
@@ -4271,7 +4276,7 @@ export default function ChatView({
             non-empty chat, including after unmount/remount. Keep the list's
             elastic min-height out of the spacer formula at all times. */}
         <ul className="chat__list" style={{ minHeight: 0 }}>
-          {messages.map((msg, i) => {
+          {displayedMessages.map((msg, i) => {
             if (msg.hidden) return null
             const continuationMarker = isContinuationMessage(msg)
             const isLastMsg = i === lastVisibleMessageIndex

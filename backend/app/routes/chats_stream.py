@@ -55,6 +55,20 @@ router = APIRouter(prefix="/api/chats", tags=["chats"])
 
 log = logging.getLogger(__name__)
 
+
+def _delegation_manages_chat(db: Session, chat_id: str) -> bool:
+  """Return whether a parent delegation owns this chat's send lifecycle.
+
+  Keep the send gate beside the route that enforces it. Delegation policy
+  loading is intentionally a separate concern and may evolve independently;
+  this guard only needs the durable ownership row already available through
+  the request session.
+  """
+  return db.query(models.Delegation.id).filter(
+    models.Delegation.child_chat_id == chat_id,
+  ).first() is not None
+
+
 def _pending_question_open_conflict() -> HTTPException:
   return HTTPException(
     status_code=409,
@@ -536,8 +550,7 @@ async def send_message(
   """
   require_chat_embed_operation(principal, "chat:send")
   chat = get_active_chat_for_principal(db, chat_id, principal)
-  from app.delegations import is_delegation_child
-  if is_delegation_child(chat_id):
+  if _delegation_manages_chat(db, chat_id):
     raise HTTPException(
       status_code=409,
       detail={
@@ -811,8 +824,7 @@ async def _send_message_locked(
       },
     )
 
-  from app.delegations import is_delegation_child
-  if is_delegation_child(chat_id):
+  if _delegation_manages_chat(db, chat_id):
     raise HTTPException(
       status_code=409,
       detail={

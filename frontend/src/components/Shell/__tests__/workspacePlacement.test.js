@@ -780,6 +780,8 @@ test('shell reconciles both durable drawer lists whenever the system stream reco
   assert.match(shellSource, /const reconcileSystemStateOnOpen = useCallback/)
   assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*refreshApps\(\)/)
   assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*refreshChats\(\)/)
+  assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*chat\.running[\s\S]*visibleChatIdsRef\.current[\s\S]*markChatRunReconcile\(chat\.id\)/,
+    'open chats and durable running chats reconcile even when run events were missed')
   assert.match(shellSource, /useSystemEventStream\(handleSystemEvent, \{ onOpen: reconcileSystemStateOnOpen \}\)/)
 })
 

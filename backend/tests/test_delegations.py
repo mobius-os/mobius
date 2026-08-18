@@ -419,6 +419,21 @@ def _capture_starts(monkeypatch, *, running=False):
   return starts
 
 
+def test_direct_send_to_delegation_child_is_rejected(
+  client, owner_token, db,
+):
+  _, child_id, _ = _seed_delegation(db, suffix="send-gate")
+
+  response = client.post(
+    f"/api/chats/{child_id}/messages",
+    json={"content": "Bypass the parent workflow."},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"]["code"] == "delegation_managed"
+
+
 def test_child_completion_wakes_idle_parent_once(db, monkeypatch):
   parent_id, child_id, delegation_id = _seed_delegation(
     db, suffix="idle",

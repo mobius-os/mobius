@@ -142,6 +142,8 @@ test('continuations render as product markers, not user bubbles', () => {
     'Resume must mark its provider-facing prompt as a product action')
   assert.match(chatView, /chat__msg--\$\{continuationMarker \? 'marker' : msg\.role\}/,
     'the row shell must not inherit owner-user alignment')
+  assert.match(chatView, /supersedeResumedPauseBlocks\(messages\)/,
+    'a completed continuation replaces its stale actionable pause in the render projection')
 })
 
 test('an enabled policy stays cancellable after the viewer clock reaches reset', () => {

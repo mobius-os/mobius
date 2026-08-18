@@ -14,6 +14,45 @@ export function isContinuationMessage(message) {
     || message?.kind === 'auto_continuation'
 }
 
+/**
+ * Project a completed resume as one product event instead of leaving the old
+ * actionable pause beside its continuation marker. The durable transcript is
+ * untouched; only the render projection drops the resumable tail block that
+ * the following continuation has superseded.
+ */
+export function supersedeResumedPauseBlocks(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return messages
+
+  let projected = messages
+  let previousVisibleIndex = -1
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index]
+    if (message?.hidden) continue
+
+    if (isContinuationMessage(message) && previousVisibleIndex >= 0) {
+      const previous = projected[previousVisibleIndex]
+      const blocks = Array.isArray(previous?.blocks) ? previous.blocks : []
+      const tail = blocks.at(-1)
+      if (
+        previous?.role === 'assistant'
+        && tail?.type === 'error'
+        && tail.resumable === true
+      ) {
+        if (projected === messages) projected = [...messages]
+        const remainingBlocks = blocks.slice(0, -1)
+        projected[previousVisibleIndex] = {
+          ...previous,
+          blocks: remainingBlocks,
+          ...(remainingBlocks.length === 0 ? { hidden: true } : {}),
+        }
+      }
+    }
+
+    previousVisibleIndex = index
+  }
+  return projected
+}
+
 /** A visible transcript row authored by the owner, excluding product events
  * that retain role=user only because the provider receives `continue`. */
 export function isOwnerUserMessage(message) {

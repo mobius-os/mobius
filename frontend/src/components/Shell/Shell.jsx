@@ -1706,6 +1706,10 @@ export default function Shell({ onInitialVisualReady }) {
     setChatRunSignals(prev => bumpChatRunSignal(prev, chatId, 'chat_run_started'))
   }, [])
 
+  const markChatRunReconcile = useCallback((chatId) => {
+    setChatRunSignals(prev => bumpChatRunSignal(prev, chatId, 'chat_run_reconcile'))
+  }, [])
+
   const markChatRunFinished = useCallback((chatId) => {
     setChatRunSignals(prev => bumpChatRunSignal(prev, chatId, 'chat_run_finished'))
   }, [])
@@ -2588,11 +2592,21 @@ export default function Shell({ onInitialVisualReady }) {
       invalidateShellListCache('chats'),
       reconcileDeletedAppIdentities(),
       reconcileDeletedChatIdentities(),
-    ]).then(() => {
-      refreshApps()
-      refreshChats()
+    ]).then(() => Promise.all([
+      refreshApps(),
+      refreshChats(),
+    ])).then(([, refreshedChats]) => {
+      for (const chat of refreshedChats) {
+        if (
+          chat.running
+          || visibleChatIdsRef.current.has(String(chat.id))
+        ) {
+          markChatRunReconcile(chat.id)
+        }
+      }
     })
   }, [
+    markChatRunReconcile,
     reconcileNotifications,
     reconcileDeletedAppIdentities,
     reconcileDeletedChatIdentities,

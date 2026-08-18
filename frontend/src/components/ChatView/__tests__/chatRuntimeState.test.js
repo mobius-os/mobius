@@ -25,6 +25,7 @@ import {
   stopConfirmedIdle,
   stopRequestSucceeded,
   stripInternalUserMessageFields,
+  supersedeResumedPauseBlocks,
   systemEventForChat,
 } from '../chatRuntimeState.js'
 import { mergeRecentMessagesIntoLoadedWindow } from '../../../lib/chatDetailCache.js'
@@ -60,6 +61,63 @@ test('automatic and manual continuations are product markers, not owner messages
   assert.equal(isOwnerUserMessage(marker), false)
   assert.equal(isOwnerUserMessage({ role: 'user', content: 'hello' }), true)
   assert.equal(isOwnerUserMessage({ role: 'user', hidden: true }), false)
+})
+
+test('a continuation supersedes the resumable pause it completed', () => {
+  const pause = {
+    role: 'assistant',
+    blocks: [
+      { type: 'text', content: 'Work before the restart.' },
+      { type: 'error', resumable: true, message: 'Paused for restart.' },
+    ],
+  }
+  const hiddenControlRow = { role: 'user', hidden: true, content: 'continue' }
+  const continuation = {
+    role: 'user',
+    kind: 'continuation',
+    continuation_reason: 'restart',
+    content: 'continue',
+  }
+  const messages = [pause, hiddenControlRow, continuation]
+
+  const displayed = supersedeResumedPauseBlocks(messages)
+
+  assert.notEqual(displayed, messages)
+  assert.deepEqual(displayed[0].blocks, [pause.blocks[0]])
+  assert.equal(displayed[1], hiddenControlRow)
+  assert.equal(displayed[2], continuation)
+  assert.equal(messages[0], pause, 'the durable transcript is not mutated')
+  assert.equal(messages[0].blocks.length, 2)
+})
+
+test('a pause-only row disappears once its continuation marker replaces it', () => {
+  const messages = [
+    {
+      role: 'assistant',
+      blocks: [{ type: 'error', resumable: true, message: 'Paused.' }],
+    },
+    { role: 'user', kind: 'continuation', continuation_reason: 'manual' },
+  ]
+
+  const displayed = supersedeResumedPauseBlocks(messages)
+
+  assert.equal(displayed[0].hidden, true)
+  assert.deepEqual(displayed[0].blocks, [])
+})
+
+test('a later continuation does not erase an unrelated historical pause', () => {
+  const messages = [
+    {
+      role: 'assistant',
+      blocks: [{ type: 'error', resumable: true, message: 'Paused.' }],
+    },
+    { role: 'user', content: 'Different owner message.' },
+    { role: 'user', kind: 'continuation', continuation_reason: 'restart' },
+  ]
+
+  assert.equal(supersedeResumedPauseBlocks(messages), messages)
+  const pauseOnly = messages.slice(0, 1)
+  assert.equal(supersedeResumedPauseBlocks(pauseOnly), pauseOnly)
 })
 
 test('the initial pageshow cannot retire a fast first-send pin', () => {
