@@ -41,6 +41,7 @@ import ChatSummaryViewer from './ChatSummaryViewer.jsx'
 import ComposerPopover from './ComposerPopover.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
 import ProgressRail from './ProgressRail.jsx'
+import GoalPlanDetails from './GoalPlanDetails.jsx'
 import ActiveAssistantSurface from './ActiveAssistantSurface.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import ContributionReviewCard from './ContributionReviewCard.jsx'
@@ -532,6 +533,7 @@ export default function ChatView({
   const [activeGoalObjective, setActiveGoalObjective] = useState(
     () => cached?.running ? (cached?.activeGoalObjective ?? '') : '',
   )
+  const [activeGoalPlan, setActiveGoalPlan] = useState(null)
   const setActiveGoalState = useCallback((objective) => {
     setActiveGoalObjective(objective)
     updateChatRuntimeCache(
@@ -560,6 +562,21 @@ export default function ChatView({
     const runtime = queryClient.getQueryData(chatMessagesQueryKey(chatId))
     setActiveGoalObjective(runtime?.running ? (runtime.activeGoalObjective ?? '') : '')
   }, [chatId, queryClient])
+
+  useEffect(() => {
+    let cancelled = false
+    if (!activeGoalObjective) {
+      setActiveGoalPlan(null)
+      return () => { cancelled = true }
+    }
+    apiFetch(`/chats/${chatId}/goal-plan`, { timeoutMs: CHAT_FETCH_TIMEOUT_MS })
+      .then(response => response.ok ? response.json() : null)
+      .then(payload => {
+        if (!cancelled) setActiveGoalPlan(payload?.plan || null)
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [activeGoalObjective, chatId])
 
   // Pending queue (the items shown in the queued-tray above the
   // composer) lives entirely inside usePendingQueue. Every mutation
@@ -1265,6 +1282,10 @@ export default function ChatView({
       onStreamEnd?.({ continues })
     },
     onSystemEvent: event => {
+      if (event?.type === 'goal_plan_updated') {
+        setActiveGoalPlan(event.plan || null)
+        return
+      }
       // A build_phase is chat-local: it only feeds this chat's milestone rail,
       // so accumulate it here (deduped by ts) instead of forwarding it to the
       // Shell, which has no handler for it.
@@ -4148,7 +4169,10 @@ export default function ChatView({
   const progressRail = progressRailViewModel(
     visibleGoalObjective,
     buildPhaseRail,
-  )
+    activeGoalPlan,
+  ).map(item => item.key === 'goal' && activeGoalPlan
+    ? { ...item, details: <GoalPlanDetails plan={activeGoalPlan} /> }
+    : item)
   const displayedMessages = useMemo(
     () => supersedeResumedPauseBlocks(messages),
     [messages],
@@ -4532,6 +4556,7 @@ export default function ChatView({
         </div>
         <ProgressRail
           items={progressRail}
+          key={activeGoalPlan?.root_run_id || visibleGoalObjective || 'build-progress'}
           ariaLabel={visibleGoalObjective ? 'Goal progress' : 'Build progress'}
         />
         <ConnectionStatus

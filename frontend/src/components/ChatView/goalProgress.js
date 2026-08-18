@@ -98,25 +98,63 @@ export function goalObjectiveFromRuntime(runtime, fallbackObjective = '') {
  * itself; afterwards the goal remains as quiet context while the newest phase
  * carries emphasis.
  */
-export function progressRailViewModel(goalObjective, buildPhases) {
+function progressLabel(task) {
+  const progress = task?.progress
+  if (Number.isInteger(progress?.current) && Number.isInteger(progress?.total)) {
+    return `${task.title} · ${progress.current}/${progress.total}`
+  }
+  return task?.title || ''
+}
+
+/** Active work first; when nothing is running, expose every newly ready task. */
+export function visibleGoalTasks(goalPlan) {
+  const tasks = Array.isArray(goalPlan?.tasks) ? goalPlan.tasks : []
+  const running = tasks.filter(task => task?.status === 'running')
+  if (running.length) return running.map(task => ({ ...task, activity: 'Now' }))
+  return tasks
+    .filter(task => task?.ready === true)
+    .map(task => ({ ...task, activity: 'Next' }))
+}
+
+export function progressRailViewModel(goalObjective, buildPhases, goalPlan = null) {
   const items = []
   if (goalObjective) {
+    const completed = goalPlan?.summary?.completed
+    const total = goalPlan?.summary?.total
+    const count = Number.isInteger(completed) && Number.isInteger(total)
+      ? ` · ${completed}/${total}`
+      : ''
     items.push({
       key: 'goal',
-      label: `Goal · ${goalObjective}`,
+      label: `Goal · ${goalObjective}${count}`,
       expandable: true,
+      ...(goalPlan ? { hasDetails: true } : {}),
     })
   }
-  for (const phase of Array.isArray(buildPhases) ? buildPhases : []) {
+  const activeTasks = visibleGoalTasks(goalPlan)
+  for (const task of activeTasks) {
+    items.push({
+      key: `goal-task-${task.id}`,
+      label: `${task.activity} · ${progressLabel(task)}`,
+      goalTask: true,
+    })
+  }
+  const phases = Array.isArray(buildPhases) ? buildPhases : []
+  for (const phase of phases) {
     if (!phase?.label) continue
     items.push({
       key: `phase-${phase.ts}`,
       label: phase.label,
     })
   }
-  const lastIndex = items.length - 1
+  const hasPhases = phases.some(phase => phase?.label)
+  const hasActiveTasks = activeTasks.length > 0
   return items.map((item, index) => ({
     ...item,
-    current: index === lastIndex,
+    current: hasPhases
+      ? index === items.length - 1
+      : hasActiveTasks
+        ? item.goalTask === true
+        : index === items.length - 1,
   }))
 }

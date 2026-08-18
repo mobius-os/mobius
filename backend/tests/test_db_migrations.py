@@ -1018,6 +1018,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0011_delegation_parent_wake",
     "0012_connector_oauth_gcloud",
     "0013_app_hosted_publication",
+    "0014_chat_run_goal_plan",
   ]
   assert second == first
 
@@ -1138,7 +1139,7 @@ def test_hosted_publication_reaches_a_fully_ledgered_private_app(tmp_path):
       "CREATE TABLE schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in database._SCHEMA_MIGRATIONS[:-1]:
+    for version, _migration in database._SCHEMA_MIGRATIONS[:-2]:
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, '2026-08-15 00:00:00')"
@@ -1196,7 +1197,7 @@ def test_hosted_publication_migrates_the_unmerged_live_flag_to_a_snapshot(
       "CREATE TABLE schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in database._SCHEMA_MIGRATIONS[:-1]:
+    for version, _migration in database._SCHEMA_MIGRATIONS[:-2]:
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, '2026-08-15 00:00:00')"
@@ -1620,6 +1621,37 @@ def test_goal_migration_backfills_only_the_running_turns_initiating_goal(
       "SELECT goal_objective FROM chat_runs WHERE id = 'goal-run'"
     )).scalar_one()
   assert objective == "finish the migration"
+
+
+def test_goal_plan_migration_adds_snapshot_and_revision_to_existing_runs(
+  tmp_path,
+):
+  eng = create_engine(f"sqlite:///{tmp_path / 'goal-plan.db'}")
+  models.Base.metadata.create_all(eng)
+  with eng.begin() as conn:
+    conn.execute(text("ALTER TABLE chat_runs DROP COLUMN goal_plan_json"))
+    conn.execute(text("ALTER TABLE chat_runs DROP COLUMN goal_plan_revision"))
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version, _migration in database._SCHEMA_MIGRATIONS[:-1]:
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) "
+        "VALUES (:version, :at)"
+      ), {"version": version, "at": datetime(2026, 8, 18)})
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  columns = {column["name"]: column for column in inspect(eng).get_columns("chat_runs")}
+  assert "goal_plan_json" in columns
+  assert "goal_plan_revision" in columns
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT COUNT(*) FROM schema_migrations "
+      "WHERE version = '0014_chat_run_goal_plan'"
+    )).scalar_one() == 1
 
 
 def test_applied_legacy_schema_migration_is_immutable():

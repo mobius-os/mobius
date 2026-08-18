@@ -247,6 +247,16 @@ class ChatRun(Base):
   # questions are steered into the same run and must not make the goal vanish
   # after a reload. NULL is an ordinary non-goal run.
   goal_objective = Column(Text, nullable=True, default=None)
+  # Optional agent-authored execution plan for the logical goal rooted at this
+  # run. Only the root row stores the snapshot; continuation rows resolve it
+  # through root_run_id. The JSON document is intentionally small and bounded
+  # by the goal-plan domain validator, while revision provides optimistic
+  # concurrency so two helpers cannot silently overwrite one another's
+  # progress.
+  goal_plan_json = Column(JSON, nullable=True, default=None)
+  goal_plan_revision = Column(
+    Integer, nullable=False, default=0, server_default="0"
+  )
   # App that initiated this turn under the app-attributed-chat contract
   # (077 §1). NULL = an ordinary owner-driven turn. Reserved now so the
   # attribution lands on the run row, not retrofitted later.

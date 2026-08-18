@@ -978,6 +978,26 @@ def _add_chat_run_goal_objective(eng) -> None:
       ), {"objective": objective, "run_id": run_id})
 
 
+def _add_chat_run_goal_plan(eng) -> None:
+  """Add the bounded plan snapshot and optimistic revision to goal roots."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chat_runs" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chat_runs")}
+  with eng.begin() as conn:
+    if "goal_plan_json" not in columns:
+      conn.execute(text(
+        "ALTER TABLE chat_runs ADD COLUMN goal_plan_json JSON NULL"
+      ))
+    if "goal_plan_revision" not in columns:
+      conn.execute(text(
+        "ALTER TABLE chat_runs ADD COLUMN goal_plan_revision INTEGER "
+        "NOT NULL DEFAULT 0"
+      ))
+
+
 def _add_chat_run_root_identity(eng) -> None:
   """Give every physical run a stable logical identity across continuations."""
   from sqlalchemy import inspect as sa_inspect, text
@@ -1749,6 +1769,7 @@ _SCHEMA_MIGRATIONS = (
   ("0011_delegation_parent_wake", _add_delegation_parent_wake),
   ("0012_connector_oauth_gcloud", _add_connector_oauth_gcloud_fields),
   ("0013_app_hosted_publication", _add_app_hosted_publication),
+  ("0014_chat_run_goal_plan", _add_chat_run_goal_plan),
 )
 
 

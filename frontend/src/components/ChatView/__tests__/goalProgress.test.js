@@ -8,6 +8,7 @@ import {
   goalObjectiveFromRuntime,
   latestGoalObjective,
   progressRailViewModel,
+  visibleGoalTasks,
 } from '../goalProgress.js'
 
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
@@ -134,6 +135,55 @@ test('the goal reuses the progress rail and stays as context for build phases', 
       { key: 'phase-1', label: 'First slice ready', current: false },
       { key: 'phase-2', label: 'Verifying', current: true },
     ],
+  )
+})
+
+test('a planned goal shows every running branch and dependency progress', () => {
+  const plan = {
+    summary: { completed: 1, total: 4 },
+    tasks: [
+      { id: 'done', title: 'Inspect', status: 'completed' },
+      { id: 'a', title: 'Run A', status: 'running', progress: { current: 2, total: 3 } },
+      { id: 'b', title: 'Run B', status: 'running' },
+      { id: 'c', title: 'Run C', status: 'pending', ready: false },
+    ],
+  }
+  assert.deepEqual(visibleGoalTasks(plan).map(task => task.id), ['a', 'b'])
+  assert.deepEqual(progressRailViewModel('Ship it', [], plan), [
+    {
+      key: 'goal',
+      label: 'Goal · Ship it · 1/4',
+      expandable: true,
+      hasDetails: true,
+      current: false,
+    },
+    {
+      key: 'goal-task-a',
+      label: 'Now · Run A · 2/3',
+      goalTask: true,
+      current: true,
+    },
+    {
+      key: 'goal-task-b',
+      label: 'Now · Run B',
+      goalTask: true,
+      current: true,
+    },
+  ])
+})
+
+test('a plan with no running work presents every independent ready task', () => {
+  const plan = {
+    summary: { completed: 0, total: 3 },
+    tasks: [
+      { id: 'a', title: 'A', status: 'pending', ready: true },
+      { id: 'b', title: 'B', status: 'pending', ready: true },
+      { id: 'c', title: 'C', status: 'pending', ready: false },
+    ],
+  }
+  assert.deepEqual(
+    visibleGoalTasks(plan).map(task => [task.id, task.activity]),
+    [['a', 'Next'], ['b', 'Next']],
   )
 })
 

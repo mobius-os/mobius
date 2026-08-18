@@ -115,6 +115,10 @@ SYSTEM_EVENT_TYPES: frozenset[str] = frozenset({
   # notify.py routes it onto the building chat's broadcast alone, never the
   # system fan-out.
   "build_phase",
+  # Durable Goal-plan snapshots are chat-local and replay-safe. The API writes
+  # the snapshot before emitting this event; reconnect can always recover it
+  # from GET /api/chats/<id>/goal-plan.
+  "goal_plan_updated",
 })
 
 

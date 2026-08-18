@@ -3276,9 +3276,124 @@
   font-weight: 600;
 }
 
+.chat__progress-toggle-mark {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  margin-left: 1px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: translateY(-1px) rotate(45deg);
+  transition: transform 0.16s ease;
+}
+
+.chat__progress-step[aria-expanded="true"] .chat__progress-toggle-mark {
+  transform: translateY(2px) rotate(225deg);
+}
+
+.chat__goal-plan {
+  flex: 1 0 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: min(42vh, 360px);
+  overflow-y: auto;
+  margin-top: 2px;
+  padding: 7px 0 1px;
+  border-top: 1px solid var(--border-light);
+  scrollbar-width: thin;
+}
+
+.chat__goal-task {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 5px 4px;
+  border-radius: 7px;
+  color: var(--muted);
+}
+
+.chat__goal-task--running,
+.chat__goal-task--ready {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.chat__goal-task-marker {
+  position: relative;
+  width: 12px;
+  height: 12px;
+  margin-top: 1px;
+  border: 1.5px solid color-mix(in srgb, currentColor 58%, transparent);
+  border-radius: 50%;
+}
+
+.chat__goal-task--running .chat__goal-task-marker {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.chat__goal-task--ready .chat__goal-task-marker {
+  border-color: var(--accent);
+}
+
+.chat__goal-task--completed .chat__goal-task-marker {
+  border-color: var(--green);
+  background: var(--green);
+}
+
+.chat__goal-task--completed .chat__goal-task-marker::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 1px;
+  width: 3px;
+  height: 6px;
+  border-right: 1.5px solid var(--bg);
+  border-bottom: 1.5px solid var(--bg);
+  transform: rotate(45deg);
+}
+
+.chat__goal-task--failed .chat__goal-task-marker,
+.chat__goal-task--blocked .chat__goal-task-marker {
+  border-color: var(--danger);
+}
+
+.chat__goal-task--cancelled {
+  opacity: 0.68;
+}
+
+.chat__goal-task-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.chat__goal-task-title {
+  color: inherit;
+  font-weight: 550;
+  overflow-wrap: anywhere;
+}
+
+.chat__goal-task--completed .chat__goal-task-title,
+.chat__goal-task--cancelled .chat__goal-task-title {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.chat__goal-task-meta {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .chat__progress-rail,
   .chat__copy-toast { animation: none; }
+  .chat__progress-toggle-mark { transition: none; }
 }
 
 /* ── Queued messages tray ──────────────────────────── */
