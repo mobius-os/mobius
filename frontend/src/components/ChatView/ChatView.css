@@ -725,14 +725,22 @@
 /* ── Reasoning lane (reused by the activity stretch) ── */
 
 .chat__cursor {
-  display: inline-block;
+  /* The live marker sits in the existing inter-message gap rather than
+     creating a trailing line box. Removing it at terminal promotion must not
+     change scrollHeight or make a followed conversation bounce downward. */
+  position: absolute;
+  inset-inline-start: 4px;
+  bottom: -16px;
   width: 6px;
   height: 6px;
   background: var(--accent); /* CONTRACT: vivid opaque accent fill */
   border-radius: 50%;
-  margin-left: 4px;
-  vertical-align: middle;
+  pointer-events: none;
   animation: cursorPulse 1.5s ease-in-out infinite;
+}
+
+.progressive-markdown[data-is-streaming="true"] {
+  position: relative;
 }
 
 @keyframes cursorPulse {

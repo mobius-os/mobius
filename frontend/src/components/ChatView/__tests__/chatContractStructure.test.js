@@ -28,16 +28,26 @@ test('ChatView only consumes methods returned by the scroll controller', () => {
     `ChatView consumes missing useScrollMode members: ${missing.join(', ')}`)
 })
 
-test('owner contract freezes question answers without locking keyboard movement', () => {
+test('owner contract freezes the Q&A handoff without losing prior follow or keyboard movement', () => {
   const architecture = readFileSync(
     new URL('../../../../../ARCHITECTURE.md', import.meta.url),
     'utf8',
   )
-  assert.match(architecture, /Owner-authoritative contract — v1\.20 \(2026-08-15\)/)
+  assert.match(architecture, /Owner-authoritative contract — v1\.21 \(2026-08-18\)/)
   assert.match(
     architecture,
-    /In-process question is answered \| any \| transient `ANCHOR_AT` over the prior mode; same active assistant row/,
-    'question submission must freeze the reader while preserving the R6 row',
+    /In-message question Submit begins \| any \| transient `ANCHOR_AT` over the prior mode/,
+    'question submission must freeze the pending-card handoff',
+  )
+  assert.match(
+    architecture,
+    /Same running turn accepts a question answer \| transient question anchor over prior follow, with no newer reader scroll\/location \| prior `FOLLOW_BOTTOM`/,
+    'an accepted answer must preserve follow that already owned the card',
+  )
+  assert.match(
+    architecture,
+    /Same running turn accepts a question answer \| transient question anchor over hold, or superseded submit intent \| existing hold/,
+    'answer acceptance must not invent follow over a reading hold',
   )
   assert.match(
     architecture,

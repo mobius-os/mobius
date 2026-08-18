@@ -1103,8 +1103,11 @@ const FOLLOW_ENTRY_EVENTS = new Set([
  */
 export function modeForScrollTransition(previousMode, proposedMode, event) {
   if (!proposedMode) return previousMode
-  const restoresQuestionSubmissionBase =
+  const restoresQuestionSubmissionBase = (
     event === 'layout:question-viewport-release'
+      || (event === 'send:question-follow-resume'
+        && proposedMode?.kind === 'FOLLOW_BOTTOM')
+  )
     && previousMode?.kind === 'ANCHOR_AT'
     && Number.isFinite(previousMode.questionSubmitViewportH)
     && previousMode.questionSubmitBaseMode === proposedMode
@@ -1374,12 +1377,12 @@ export function modeForDisclosureToggle(scrollEl, currentMode) {
 
 
 /** Submitting an in-message question answer resumes output inside the same
- * assistant row and may replace the card's controls immediately. It is not a
- * request to follow the live tail. Freeze the exact visible row/offset before
- * that card-to-stream handoff so neither the control reflow nor resumed output
- * moves the reader. The overlay remembers the mode that owned the unanswered
- * card and is scoped to the current viewport height; a keyboard resize returns
- * to that base mode before layout is recomputed. */
+ * assistant row and may replace the card's controls immediately. Freeze the
+ * exact visible row/offset during that card-to-stream handoff. The overlay
+ * remembers the mode that owned the unanswered card: an accepted same-turn
+ * answer may restore its prior FOLLOW_BOTTOM, while a reading hold remains a
+ * hold. The overlay is scoped to the current viewport height; a keyboard
+ * resize returns to that base mode before layout is recomputed. */
 export function modeForQuestionSubmission(scrollEl, currentMode) {
   if (!scrollEl) return currentMode
   const anchor = anchorModeFromScroll(scrollEl)
@@ -1390,6 +1393,25 @@ export function modeForQuestionSubmission(scrollEl, currentMode) {
     questionSubmitBaseMode:
       currentMode?.questionSubmitBaseMode || currentMode,
   }
+}
+
+
+/** Restore live following after an accepted same-turn answer only when the
+ * submitted card was itself being followed and no newer reader scroll or
+ * semantic location has replaced that temporary hold. */
+export function modeAfterAcceptedQuestionAnswer({
+  currentMode,
+  submission,
+  currentReaderIntentVersion,
+}) {
+  const submittedMode = submission?.mode
+  const baseMode = submittedMode?.questionSubmitBaseMode
+  if (baseMode?.kind !== 'FOLLOW_BOTTOM'
+      || submission?.readerIntentVersion !== currentReaderIntentVersion) {
+    return currentMode
+  }
+  if (currentMode === baseMode) return currentMode
+  return currentMode === submittedMode ? baseMode : currentMode
 }
 
 
@@ -1883,11 +1905,37 @@ export default function useScrollMode({
     // the scroll that positioned the question card.
     supersedePendingReaderGesture()
     readerLocationExplicitRef.current = true
-    return transitionMode(
+    const mode = transitionMode(
       nextMode,
       'send:question-freeze',
     )
+    return {
+      mode,
+      readerIntentVersion: readerIntentVersionRef.current,
+    }
   }, [scrollRef, supersedePendingReaderGesture, transitionMode])
+
+  const resumeQuestionSubmission = useCallback((submission) => {
+    const nextMode = modeAfterAcceptedQuestionAnswer({
+      currentMode: modeRef.current,
+      submission,
+      currentReaderIntentVersion: readerIntentVersionRef.current,
+    })
+    if (nextMode === modeRef.current) return modeRef.current
+    const mode = transitionMode(nextMode, 'send:question-follow-resume')
+    const scrollEl = scrollRef.current
+    if (mode === nextMode && scrollEl) {
+      writeMode(
+        scrollEl,
+        mode,
+        'send:question-follow-resume',
+        submission.readerIntentVersion,
+      )
+      lastAppliedModeRef.current = mode
+      persistMode()
+    }
+    return mode
+  }, [persistMode, scrollRef, transitionMode, writeMode])
 
   const anchorPagination = useCallback((key, offset) => {
     if (!key) return modeRef.current
@@ -3279,6 +3327,7 @@ export default function useScrollMode({
     freezeForegroundReturn,
     freezeQuestionSubmission,
     freezeQueuedSubmission,
+    resumeQuestionSubmission,
     revealConversationTail,
     revealAnchor,
     reapplyActiveMode,

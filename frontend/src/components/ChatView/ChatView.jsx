@@ -840,6 +840,7 @@ export default function ChatView({
     freezeForegroundReturn,
     freezeQuestionSubmission,
     freezeQueuedSubmission,
+    resumeQuestionSubmission,
     revealConversationTail,
     revealAnchor,
     reapplyActiveMode,
@@ -2977,9 +2978,11 @@ export default function ChatView({
     // A question-card answer resumes the SAME assistant row. Freeze the
     // currently visible message and its exact viewport offset synchronously,
     // before QuestionCard's pending state commits or the POST can resume live
-    // output. Staying in FOLLOW_BOTTOM here caused the card-to-stream handoff
-    // to drag the screen upward after Submit.
-    if (resolvedAnswers) freezeQuestionSubmission()
+    // output. Once that handoff is accepted, the scroll owner restores follow
+    // only if it owned the unanswered card and no reader scroll superseded it.
+    const questionSubmission = resolvedAnswers
+      ? freezeQuestionSubmission()
+      : null
     // Block a simultaneous composer send synchronously, but do not paint the
     // whole chat as a new active turn until the answer POST commits. On a
     // parked/durable question that premature parent transition swaps the
@@ -2989,11 +2992,10 @@ export default function ChatView({
     const wasServerRunning = serverRunningRef.current
     sendingRef.current = true
     promotedRef.current = false
-    // Hidden answer is a continuation, NOT a new visible send. The
-    // user may be reading somewhere else; don't yank them with a PIN.
-    // freezeQuestionSubmission above already converted the exact visible
-    // position into ANCHOR_AT, so resumed output grows inside the existing
-    // assistant row without creating tail-follow intent.
+    // Hidden answer is a continuation, NOT a new visible send. The user may be
+    // reading somewhere else, so it never creates a PIN. The transient
+    // question hold preserves that exact position; an accepted in-process
+    // answer may release it back to a FOLLOW_BOTTOM that already existed.
     try {
       // Mint a cid for symmetry so the persisted hidden row carries a stable
       // identity for reload dedup. It is inert here — a hidden answer send
@@ -3043,6 +3045,12 @@ export default function ChatView({
         // durable message list. Keep both render sources in agreement.
         patchQuestionAnswers(questionId, resolvedAnswers)
       }
+      // An answer accepted by the still-running turn resumes the scroll mode
+      // that owned its card. Only a previously followed card may resume
+      // following, and the scroll owner rejects this handoff if the reader
+      // moved while the POST was in flight. Recovered continuations remain a
+      // separate turn and keep the submit-time hold.
+      if (keepsCurrentTurn) resumeQuestionSubmission(questionSubmission)
       // `answer_delivered` resumes the SAME assistant turn. Keep its bridge
       // alive so terminal promotion replaces/extends the active row rather
       // than dropping the question and pre-answer output during the
@@ -3094,7 +3102,13 @@ export default function ChatView({
     } finally {
       sendSilentInFlightRef.current = false
     }
-  }, [streamSend, commitMessages, fetchMessages, freezeQuestionSubmission])
+  }, [
+    streamSend,
+    commitMessages,
+    fetchMessages,
+    freezeQuestionSubmission,
+    resumeQuestionSubmission,
+  ])
 
   function handleSubmit(e) {
     e.preventDefault()
