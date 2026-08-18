@@ -674,15 +674,39 @@ served_version_field() {  # $1 = json key
     | head -n1 || true
 }
 
-# The HTTP status of the writer-aware readiness probe. /api/health is
-# liveness only — it returns 200 even when the single-writer chat-persistence
-# actor failed to start, went fatal, or is stopping, so a deploy could green
-# while every chat write fails. /api/ready returns 200 only when the writer
-# can actually persist; "000" if the container is down / curl couldn't reach
-# it. The deploy gate fails on anything but 200, so a process that can't
-# persist a chat does not pass as deployed.
+# The HTTP status of the complete serviceability probe. /api/health is
+# reachability only; /api/ready also requires an ORM-compatible database and a
+# usable single-writer persistence actor. "000" means the container is down or
+# curl could not reach it.
+readiness_code() {
+  local target="$1"
+  docker exec "$target" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/ready'" 2>/dev/null || echo "000"
+}
+
 ready_code() {
-  docker exec "$CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/ready'" 2>/dev/null || echo "000"
+  readiness_code "$CONTAINER"
+}
+
+report_readiness_failure() {
+  local target="${1:-$CONTAINER}" body
+  body=$(docker exec "$target" sh -c "curl -sS '${INTERNAL_BASE}/api/ready'" 2>/dev/null || true)
+  case "$body" in
+    *'"reason":"schema_mismatch"'*)
+      fail "the database schema does not match this release; run Recovery, then restart cleanly."
+      ;;
+    *'"reason":'*)
+      fail "the persistence service is not ready."
+      ;;
+    '')
+      fail "the readiness endpoint could not be reached."
+      ;;
+    *)
+      fail "the readiness endpoint returned an unrecognized failure."
+      ;;
+  esac
+  if [ -n "$body" ]; then
+    printf '    /api/ready: %s\n' "$body" >&2
+  fi
 }
 
 # Tell already-open PWAs to reload after a successful frontend rebuild.
@@ -962,8 +986,9 @@ attempt_rollback() {
 # never does. Consolidates the four formerly-near-identical cutover waits so
 # the window is honest and configurable in ONE place. Args:
 #   $1 probe command (a string eval'd each poll; must echo an HTTP status)
-#   $2 success label   (e.g. "healthy", "writer ready")
+#   $2 success label   (e.g. "healthy", "serviceable")
 #   $3 failure summary (printed before rollback, names what didn't come up)
+#   $4 optional diagnostic command to run before rollback
 #
 # Two behaviors replace the old `for i in $(seq 1 120); … if [ "$i" = "30" ]`
 # loops, whose 120 bound was dead code: the i==30 trap rolled back at 30s, so
@@ -979,7 +1004,7 @@ attempt_rollback() {
 #      runtime failure (bad migration on the populated volume, OOM-kill), worth
 #      catching fast — while a steady count keeps waiting through a slow boot.
 wait_for_cutover() {
-  local probe="$1" ok_label="$2" fail_summary="$3"
+  local probe="$1" ok_label="$2" fail_summary="$3" diagnostic="${4:-}"
   local code="000" baseline_restarts now_restarts i
   baseline_restarts=$(container_restart_count)
   for i in $(seq 1 "$CUTOVER_WAIT_SECONDS"); do
@@ -1001,12 +1026,14 @@ wait_for_cutover() {
        [ "$baseline_restarts" -ge 0 ] 2>/dev/null &&
        [ $((now_restarts - baseline_restarts)) -ge "$CRASH_RESTART_THRESHOLD" ]; then
       fail "${fail_summary} (last: ${code}); ${CONTAINER} restarted $((now_restarts - baseline_restarts))× — it is crash-looping, not just slow."
+      [ -z "$diagnostic" ] || eval "$diagnostic"
       attempt_rollback || true
       exit 1
     fi
     sleep 1
   done
   fail "${fail_summary} after ${CUTOVER_WAIT_SECONDS}s (last: ${code}) — the new image is not serving."
+  [ -z "$diagnostic" ] || eval "$diagnostic"
   attempt_rollback || true
   exit 1
 }
@@ -1286,18 +1313,19 @@ if [ "$BUILT_THIS_RUN" = "1" ] && [ -n "$IMAGE_TAG" ]; then
   _pf_ready=0
   info "waiting up to ${PREFLIGHT_WAIT_SECONDS}s for preflight ${INTERNAL_BASE}/api/ready"
   for i in $(seq 1 "$PREFLIGHT_WAIT_SECONDS"); do
-    rcode=$(docker exec "$PREFLIGHT_CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/ready'" 2>/dev/null || echo "000")
+    rcode=$(readiness_code "$PREFLIGHT_CONTAINER")
     if [ "$rcode" = "200" ]; then ok "preflight /api/ready: 200 after ${i}s"; _pf_ready=1; break; fi
     sleep 1
   done
   if [ "$_pf_ready" != "1" ]; then
     fail "preflight: the new image's /api/ready never returned 200 in ${PREFLIGHT_WAIT_SECONDS}s (last: ${rcode})."
-    fail "the chat-persistence writer fails to start — the LIVE ${CONTAINER} was NOT touched. Last 40 log lines:"
+    report_readiness_failure "$PREFLIGHT_CONTAINER"
+    fail "the LIVE ${CONTAINER} was NOT touched. Last 40 log lines:"
     docker logs "$PREFLIGHT_CONTAINER" --tail 40 2>&1 | sed 's/^/    /' >&2 || true
     exit 1
   fi
   _cleanup_preflight
-  ok "preflight passed — the new image boots and the writer is ready; cutting over"
+  ok "preflight passed — the new image is serviceable; cutting over"
 elif [ "$SKIP_BUILD" = "1" ]; then
   info "preflight skipped (--skip-build): reusing the already-live image; nothing new to pre-check"
 fi
@@ -1321,14 +1349,12 @@ wait_for_cutover \
   "healthy" \
   "health check never returned 200"
 
-# Liveness alone is not enough: the chat-persistence writer must be ready
-# (started, alive, not fatal, not stopping) or every chat write fails on a
-# process that still answers /api/health 200. Give it the same budget —
-# start_writer runs in the lifespan before serving, so this is normally
-# already 200 by the time /api/health was.
+# Liveness alone is not enough: the database schema and persistence writer must
+# both be serviceable. Give the complete readiness contract the same budget.
 info "waiting up to ${CUTOVER_WAIT_SECONDS}s for ${INTERNAL_BASE}/api/ready"
-wait_for_cutover "ready_code" "writer ready" \
-  "readiness check never returned 200 — the chat-persistence writer is not serving"
+wait_for_cutover "ready_code" "serviceable" \
+  "readiness check never returned 200" \
+  "report_readiness_failure"
 
 run_deploy_canary
 
@@ -1513,15 +1539,14 @@ else
   exit 1
 fi
 
-# Writer-aware readiness: liveness 200 isn't enough — fail the deploy if the
-# chat-persistence writer can't actually serve (so we never report a deploy
-# as complete on a process where every chat write fails).
+# Complete readiness: fail if either schema parity or persistence ownership is
+# unavailable, even though the process still answers the reachability probe.
 rcode=$(ready_code)
 if [ "$rcode" = "200" ]; then
   ok "internal /api/ready:  ${rcode}"
 else
   fail "internal /api/ready:  ${rcode}"
-  fail "the process is live but the chat-persistence writer is not ready — chat writes would fail."
+  report_readiness_failure
   exit 1
 fi
 

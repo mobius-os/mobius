@@ -1,8 +1,8 @@
-import ast
 import asyncio
-import hashlib
 import json
 import sqlite3
+import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -1737,44 +1737,15 @@ def test_goal_identity_migration_backfills_plan_and_recovery_runs(tmp_path):
 
 def test_published_schema_migration_history_is_unique_ordered_and_immutable():
   """Published migrations are history; current work always appends."""
-  source = Path(migrations.__file__).read_text(encoding="utf-8")
-  module = ast.parse(source)
-  functions = {
-    node.name: node
-    for node in module.body
-    if isinstance(node, ast.FunctionDef)
-  }
-  versions = [version for version, _migration in migrations._SCHEMA_MIGRATIONS]
-  numbers = [int(version.split("_", 1)[0]) for version in versions]
-  function_names = [
-    migration.__name__ for _version, migration in migrations._SCHEMA_MIGRATIONS
-  ]
-
-  assert len(versions) == len(set(versions)), "migration versions must be unique"
-  assert numbers == sorted(set(numbers)), (
-    "migration numbers must increase without parallel-prefix collisions"
+  script = Path(__file__).parents[1] / "scripts" / "check-schema-migrations.py"
+  completed = subprocess.run(
+    [sys.executable, str(script)],
+    text=True,
+    capture_output=True,
+    check=False,
   )
-  assert len(function_names) == len(set(function_names))
-
-  frozen = json.loads(
-    (Path(__file__).parent / "fixtures" / "migration_history.json").read_text(
-      encoding="utf-8",
-    )
-  )
-  assert frozen["format"] == 1
-  assert list(frozen["migrations"]) == versions, (
-    "append the new migration and freeze its semantic hash; never edit or "
-    "renumber an existing entry"
-  )
-  actual = {
-    version: hashlib.sha256(
-      ast.dump(functions[migration.__name__], include_attributes=False).encode()
-    ).hexdigest()
-    for version, migration in migrations._SCHEMA_MIGRATIONS
-  }
-  assert actual == frozen["migrations"], (
-    "published migration code changed; restore it and append a new migration"
-  )
+  assert completed.returncode == 0, completed.stderr
+  assert "immutable migrations verified" in completed.stdout
 
 
 def test_failed_migration_is_not_recorded_and_can_retry(tmp_path, monkeypatch):

@@ -290,7 +290,7 @@ def test_identity_verifier_allows_the_mobius_owned_platform_repo():
   assert 'f"safe.directory={PLATFORM_ROOT}"' in verifier
 
 
-def test_pre_push_rejects_main_and_defers_backend_to_pr_ci():
+def test_pre_push_rejects_main_and_keeps_schema_history_local():
   hook = (ROOT / "scripts" / "githooks" / "pre-push").read_text(
     encoding="utf-8"
   )
@@ -300,6 +300,8 @@ def test_pre_push_rejects_main_and_defers_backend_to_pr_ci():
   assert '${MOBIUS_PREPUSH_FULL:-0}' in hook
   assert 'this push does not update main' in hook
   assert 'full suite currently ~10m' in hook
+  assert "check-schema-migrations.py" in hook
+  assert "schema-migration-history" in hook
 
 
 def test_git_doctor_compares_installed_hooks_to_landed_main():

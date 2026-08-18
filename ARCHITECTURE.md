@@ -149,7 +149,9 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `response_policy.py` | Validated origin sources plus the shell, embedded-chat, opaque app-frame, packaged-document, and published-site policies shared by direct and proxied deployments |
 | `frontend_watcher.py` | Polling watcher that auto-rebuilds the served frontend clone (`/data/platform/frontend`) on edit — debounced `vite build`, atomic `.dist-next`→`dist` swap |
 | `config.py` | `Settings` via pydantic-settings; reads `.env` |
-| `database.py` | SQLAlchemy engine, `SessionLocal`, `Base`, `get_db`, and `run_migrations()` (idempotent boot-time additive `ALTER TABLE`s) |
+| `database.py` | SQLAlchemy engine, pool instrumentation, `SessionLocal`, `Base`, and `get_db`; contains no schema history |
+| `schema_migrations.py` | Append-only schema/data migrations, durable ledger primitives, and ORM/live-schema parity inspection; published functions are semantic-hash frozen |
+| `startup.py` | Two-phase boot: process/schema preflight first, then writer/reconciliation/database supervisors only after schema parity succeeds |
 | `models.py` | ORM tables: `Owner`, `Chat`, `ChatRun`, `App`, `PushSubscription`, `Notification` |
 | `schemas.py` | Pydantic request/response models |
 | `auth.py` | bcrypt hashing, JWT creation/decoding, Fernet encryption |
@@ -210,6 +212,24 @@ recovery listener. The worker is deleted when the session finishes or expires.
 Self-hosters use the authority they already own:
 `docker compose exec -u 0 app bash`. This attaches to the live container and
 does not replace its normal process.
+
+### Health, readiness, and schema-degraded boot
+
+`GET /api/health` is reachability and remains HTTP 200 whenever the process can
+answer; the shell uses that distinction so a server fault never masquerades as
+the device being offline. `GET /api/ready` is serviceability: it requires both
+an ORM-compatible database and the single-writer persistence actor. Deployment
+and container probes use readiness. `GET /api/health/strict` retains the
+schema-only diagnostic contract.
+
+Boot runs `create_all`, append-only migrations, and `orm_schema_gaps()` before
+starting any database owner. A remaining gap enters a bounded degraded mode:
+ordinary APIs return one deterministic 503, database startup tasks and
+supervisors do not run, cron remains disabled, and static shell plus health,
+version, browser-bootstrap, and authenticated restart surfaces remain. External
+Recovery may alter the database, but the process intentionally keeps its boot
+verdict until restart; promoting only part of the skipped startup plan inside a
+health probe would create a second, race-prone boot mechanism.
 
 ### Misc shared helpers
 
@@ -429,7 +449,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | Task | Start here |
 |------|------------|
 | New API route | New module in `backend/app/routes/` exposing `router` → register in `routes/__init__.py` (`_load(...)` line + `__all__`) → mount in `main.py` |
-| New ORM table / column | `backend/app/models.py` plus an idempotent `ALTER TABLE` entry in `database.py:run_migrations()` (runs at boot; `create_all` never ALTERs an existing table) |
+| New ORM table / column | `backend/app/models.py` plus a new numbered function at the append-only end of `backend/app/schema_migrations.py`; run the frozen previous-release upgrade contract (`create_all` never alters an existing table) |
 | Change request/response shape | `backend/app/schemas.py` + the owning route |
 | Add an auth dependency / change CSRF | `backend/app/deps.py` |
 | Persist anything chat-domain | A domain command in `backend/app/chat_writer.py` — never write `Chat.messages`/`Chat.pending_messages` directly |

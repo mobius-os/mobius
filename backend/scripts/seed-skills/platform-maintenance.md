@@ -168,9 +168,17 @@ the write-surface contract.
 ## SQLite migrations
 
 SQLAlchemy `create_all` creates missing tables; it never adds a column to an
-existing table. A new model field therefore needs an explicit migration for the
-existing `/data/db/ultimate.db`. Test both a fresh database and an upgraded
-database rather than assuming model metadata altered the latter.
+existing table. A new model field therefore needs a new numbered, idempotent
+function at the append-only end of `backend/app/schema_migrations.py`; never
+edit a migration already present in the ledger. Test both a fresh database and
+the frozen previous-release upgrade fixture rather than assuming model metadata
+altered the latter.
+
+If `/api/ready` reports `reason: schema_mismatch`, the process has deliberately
+skipped its writer, reconciliation, cron, and database supervisors. Recovery
+repairs the database externally, then the partner approves one normal restart
+so boot can verify parity and start those owners coherently. Do not hand-edit
+the in-memory readiness verdict or try to start skipped owners piecemeal.
 
 ---
 
