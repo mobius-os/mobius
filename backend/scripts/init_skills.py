@@ -61,6 +61,12 @@ RETIRED_SKILLS = DATA_DIR / "shared" / "retired-skills"
 # touched. A set preserves every known unmodified predecessor when one skill
 # needs more than one fix-forward migration over its lifetime.
 _UNMODIFIED_MIGRATIONS = {
+  "goal-planning.md": {
+    # First dependency-aware Goal-plan seed. Replace only the untouched copy
+    # so existing instances learn the completion preflight without clobbering
+    # any owner-authored planning guidance.
+    "2adb39457e0ec2ee9d9a3596cb96e5a6240bae23d725e6459ba0f6e77d5474c4",
+  },
   "reflection.md": {
     "c0f57c227f61cd8539a56b70eadfbbe2212125c23b7137472dd173a578baacd8",
     # Resource-stewardship predecessor: propagate the adaptive analytics
