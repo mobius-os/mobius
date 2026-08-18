@@ -6,6 +6,8 @@ import {
   chatSearchResultIsCurrent,
   clearLastSearch,
   moveSearchSelection,
+  recentApps,
+  recentChats,
   readLastSearch,
   rememberLastSearch,
   resolvedSearchSelection,
@@ -83,6 +85,23 @@ test('all query terms must match and result limits are stable', () => {
   }])
   assert.deepEqual(searchInstalledApps(apps, 'news missing'), [])
   assert.equal(searchInstalledApps(apps, 'news', 1).length, 1)
+})
+
+test('the empty search view starts with recent chats, then recently opened apps', () => {
+  const chats = [
+    { id: 'empty', title: 'Empty', has_messages: false, activity_at: '2026-08-18T13:00:00Z' },
+    { id: 'older', title: 'Older', has_messages: true, activity_at: '2026-08-18T11:00:00Z' },
+    { id: 'newer', title: 'Newer', has_messages: true, activity_at: '2026-08-18T12:00:00Z' },
+  ]
+  assert.deepEqual(recentChats(chats).map(chat => chat.id), ['newer', 'older'])
+  assert.deepEqual(chats.map(chat => chat.id), ['empty', 'older', 'newer'])
+
+  const installed = [
+    { id: 1, name: 'Older', last_opened_at: '2026-08-17T12:00:00Z' },
+    { id: 2, name: 'Newest', last_opened_at: '2026-08-18T12:00:00Z' },
+    { id: 3, name: 'Never opened', created_at: '2026-08-16T12:00:00Z' },
+  ]
+  assert.deepEqual(recentApps(installed, 2).map(app => app.id), [2, 1])
 })
 
 test('keyboard search selection starts at the first result and wraps with arrows', () => {

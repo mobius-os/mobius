@@ -94,6 +94,34 @@ export function searchInstalledApps(apps, query, limit = 8) {
     .map(({ score: _score, ...result }) => result)
 }
 
+function newestFirst(items, timestamp, name) {
+  return items.slice().sort((left, right) => (
+    timestamp(right).localeCompare(timestamp(left))
+    || name(left).localeCompare(name(right))
+    || String(left?.id || '').localeCompare(String(right?.id || ''))
+  ))
+}
+
+export function recentChats(chats, limit = 6) {
+  const rows = Array.isArray(chats)
+    ? chats.filter(chat => chat?.id && chat.has_messages)
+    : []
+  return newestFirst(
+    rows,
+    chat => chat.activity_at || chat.updated_at || chat.created_at || '',
+    chat => String(chat.title || ''),
+  ).slice(0, Math.max(0, limit))
+}
+
+export function recentApps(apps, limit = 6) {
+  const rows = Array.isArray(apps) ? apps.filter(app => app?.id) : []
+  return newestFirst(
+    rows,
+    app => app.last_opened_at || app.updated_at || app.created_at || '',
+    app => String(app.name || ''),
+  ).slice(0, Math.max(0, limit))
+}
+
 export function resolvedSearchSelection(index, resultCount) {
   if (resultCount === 0) return -1
   return Math.min(Math.max(index, 0), resultCount - 1)
