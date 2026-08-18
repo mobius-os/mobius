@@ -94,6 +94,19 @@ export function searchInstalledApps(apps, query, limit = 8) {
     .map(({ score: _score, ...result }) => result)
 }
 
+export function resolvedSearchSelection(index, resultCount) {
+  if (resultCount === 0) return -1
+  return Math.min(Math.max(index, 0), resultCount - 1)
+}
+
+export function moveSearchSelection(index, key, resultCount) {
+  const current = resolvedSearchSelection(index, resultCount)
+  if (current === -1) return -1
+  if (key === 'ArrowDown') return (current + 1) % resultCount
+  if (key === 'ArrowUp') return (current - 1 + resultCount) % resultCount
+  return current
+}
+
 // The dialog unmounts on close (NotificationCenter renders it behind
 // `searchOpen &&`), so component state cannot survive a reopen. The owner's
 // last search lives here instead: type a term, open a result, reopen search,

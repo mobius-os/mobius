@@ -20,8 +20,10 @@ import { formatRelativeTime } from '../../lib/relativeTime.js'
 import {
   chatSearchOpenTarget,
   chatSearchResultIsCurrent,
+  moveSearchSelection,
   readLastSearch,
   rememberLastSearch,
+  resolvedSearchSelection,
   searchInstalledApps,
   visibleChatSearchState,
 } from './globalSearchModel.js'
@@ -51,6 +53,7 @@ export function GlobalSearchButton({ active = false, buttonRef, onClick }) {
 export default function GlobalSearch({ onClose, onOpenTarget }) {
   const dialogRef = useRef(null)
   const inputRef = useRef(null)
+  const contentRef = useRef(null)
   const chatSearchControllerRef = useRef(null)
   // Reopening restores the owner's last search (see rememberLastSearch), so the
   // in-flight-result guard has to start from that same term rather than '' —
@@ -60,6 +63,7 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
   const latestQueryRef = useRef(restored.query.trim())
   const [query, setQuery] = useState(restored.query)
   const [chatState, setChatState] = useState(restored.chatState)
+  const [selectionIndex, setSelectionIndex] = useState(0)
   const appsQuery = appQueries.list.useQuery()
 
   useDialogFocus({
@@ -163,6 +167,48 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
     onOpenTarget?.({ view: 'canvas', app: String(app.id), intent: null })
   }, [onClose, onOpenTarget])
 
+  const selectableResults = useMemo(() => [
+    ...appResults.map(({ app }) => ({ kind: 'app', value: app })),
+    ...visibleChats.results.map(result => ({ kind: 'chat', value: result })),
+  ], [appResults, visibleChats.results])
+  const activeResultIndex = resolvedSearchSelection(
+    selectionIndex,
+    selectableResults.length,
+  )
+  const resultListIds = [
+    appResults.length ? 'global-search-app-results' : '',
+    visibleChats.results.length ? 'global-search-chat-results' : '',
+  ].filter(Boolean).join(' ')
+
+  const openSelectedResult = useCallback(() => {
+    const selected = selectableResults[activeResultIndex]
+    if (selected?.kind === 'app') openApp(selected.value)
+    if (selected?.kind === 'chat') openChat(selected.value)
+  }, [activeResultIndex, openApp, openChat, selectableResults])
+
+  const handleSearchKeyDown = useCallback((event) => {
+    if (event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      if (!selectableResults.length) return
+      event.preventDefault()
+      setSelectionIndex(current => (
+        moveSearchSelection(current, event.key, selectableResults.length)
+      ))
+      return
+    }
+    if (event.key === 'Enter' && activeResultIndex !== -1) {
+      event.preventDefault()
+      openSelectedResult()
+    }
+  }, [activeResultIndex, openSelectedResult, selectableResults.length])
+
+  useEffect(() => {
+    if (activeResultIndex === -1) return
+    dialogRef.current
+      ?.querySelector(`[data-search-result-index="${activeResultIndex}"]`)
+      ?.scrollIntoView({ block: 'nearest' })
+  }, [activeResultIndex])
+
   const noResults = normalizedQuery
     && visibleChats.status === 'ready'
     && visibleChats.results.length === 0
@@ -205,16 +251,34 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
             ref={inputRef}
             type="search"
             value={query}
-            onChange={event => setQuery(event.target.value)}
+            onChange={event => {
+              setQuery(event.target.value)
+              setSelectionIndex(0)
+              if (contentRef.current) contentRef.current.scrollTop = 0
+            }}
+            onKeyDown={handleSearchKeyDown}
             placeholder="Search chats, apps, and app details"
             aria-label="Search chats, apps, and app details"
+            role="combobox"
+            aria-autocomplete="list"
+            aria-controls={resultListIds || undefined}
+            aria-expanded={selectableResults.length > 0}
+            aria-activedescendant={
+              activeResultIndex === -1
+                ? undefined
+                : `global-search-result-${activeResultIndex}`
+            }
             autoComplete="off"
             spellCheck="false"
           />
           <kbd>{shortcutLabel(SHELL_SHORTCUTS.openSearch)}</kbd>
         </label>
 
-        <div className="global-search__content" aria-live="polite">
+        <div
+          ref={contentRef}
+          className="global-search__content"
+          aria-live="polite"
+        >
           {!normalizedQuery && (
             <div className="global-search__empty">
               <span className="global-search__empty-icon" aria-hidden="true">
@@ -228,14 +292,30 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
           {normalizedQuery && (
             <div className="global-search__groups">
               {appResults.length > 0 && (
-                <section className="global-search__group" aria-labelledby="global-search-apps">
+                <section
+                  className="global-search__group"
+                  aria-labelledby="global-search-apps"
+                >
                   <h3 id="global-search-apps">Apps <span>{appResults.length}</span></h3>
-                  <div className="global-search__results">
-                    {appResults.map(({ app, matchArea }) => (
+                  <div
+                    id="global-search-app-results"
+                    className="global-search__results"
+                    role="listbox"
+                    aria-labelledby="global-search-apps"
+                  >
+                    {appResults.map(({ app, matchArea }, index) => (
                       <button
                         key={app.id}
+                        id={`global-search-result-${index}`}
                         type="button"
-                        className="global-search__result"
+                        role="option"
+                        aria-selected={activeResultIndex === index}
+                        data-search-result-index={index}
+                        className={`global-search__result${
+                          activeResultIndex === index ? ' global-search__result--selected' : ''
+                        }`}
+                        onPointerEnter={() => setSelectionIndex(index)}
+                        onFocus={() => setSelectionIndex(index)}
                         onClick={() => openApp(app)}
                       >
                         <AppIcon
@@ -256,7 +336,10 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
                 </section>
               )}
 
-              <section className="global-search__group" aria-labelledby="global-search-chats">
+              <section
+                className="global-search__group"
+                aria-labelledby="global-search-chats"
+              >
                 <h3 id="global-search-chats">
                   Chats
                   {visibleChats.status === 'ready' && <span>{visibleChats.results.length}</span>}
@@ -270,14 +353,28 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
                   </p>
                 )}
                 {visibleChats.results.length > 0 && (
-                  <div className="global-search__results">
-                    {visibleChats.results.map((result) => {
+                  <div
+                    id="global-search-chat-results"
+                    className="global-search__results"
+                    role="listbox"
+                    aria-labelledby="global-search-chats"
+                  >
+                    {visibleChats.results.map((result, chatIndex) => {
+                      const index = appResults.length + chatIndex
                       const lastActive = formatRelativeTime(result.last_active)
                       return (
                         <button
                           key={result.id}
+                          id={`global-search-result-${index}`}
                           type="button"
-                          className="global-search__result"
+                          role="option"
+                          aria-selected={activeResultIndex === index}
+                          data-search-result-index={index}
+                          className={`global-search__result${
+                            activeResultIndex === index ? ' global-search__result--selected' : ''
+                          }`}
+                          onPointerEnter={() => setSelectionIndex(index)}
+                          onFocus={() => setSelectionIndex(index)}
                           onClick={() => openChat(result)}
                         >
                           <span className="global-search__result-icon" aria-hidden="true">

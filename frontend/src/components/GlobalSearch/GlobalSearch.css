@@ -250,6 +250,11 @@
   border-top: 1px solid var(--border-light);
 }
 
+.global-search__result--selected {
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface2));
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
 @media (hover: hover) and (pointer: fine) {
   .global-search__result:hover { background: var(--surface2); }
   .global-search__close:hover { background: var(--surface2); }

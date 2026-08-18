@@ -5,8 +5,10 @@ import {
   chatSearchOpenTarget,
   chatSearchResultIsCurrent,
   clearLastSearch,
+  moveSearchSelection,
   readLastSearch,
   rememberLastSearch,
+  resolvedSearchSelection,
   searchInstalledApps,
   visibleChatSearchState,
 } from '../globalSearchModel.js'
@@ -81,6 +83,19 @@ test('all query terms must match and result limits are stable', () => {
   }])
   assert.deepEqual(searchInstalledApps(apps, 'news missing'), [])
   assert.equal(searchInstalledApps(apps, 'news', 1).length, 1)
+})
+
+test('keyboard search selection starts at the first result and wraps with arrows', () => {
+  assert.equal(resolvedSearchSelection(0, 3), 0)
+  assert.equal(resolvedSearchSelection(-1, 3), 0)
+  assert.equal(resolvedSearchSelection(8, 3), 2)
+  assert.equal(resolvedSearchSelection(0, 0), -1)
+
+  assert.equal(moveSearchSelection(0, 'ArrowDown', 3), 1)
+  assert.equal(moveSearchSelection(2, 'ArrowDown', 3), 0)
+  assert.equal(moveSearchSelection(0, 'ArrowUp', 3), 2)
+  assert.equal(moveSearchSelection(2, 'ArrowUp', 3), 1)
+  assert.equal(moveSearchSelection(0, 'ArrowDown', 0), -1)
 })
 
 test('a changed chat query hides and rejects stale result actions', () => {
