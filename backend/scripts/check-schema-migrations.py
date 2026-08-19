@@ -19,6 +19,27 @@ def fail(message: str) -> None:
   raise SystemExit(1)
 
 
+def semantic_hash(function: ast.FunctionDef, functions: dict[str, ast.FunctionDef]) -> str:
+  """Hash a migration and every module-local helper it transitively calls."""
+  dependencies: dict[str, ast.FunctionDef] = {}
+  pending = [function]
+  while pending:
+    current = pending.pop()
+    if current.name in dependencies:
+      continue
+    dependencies[current.name] = current
+    referenced = {
+      node.id for node in ast.walk(current)
+      if isinstance(node, ast.Name) and node.id in functions
+    }
+    pending.extend(functions[name] for name in sorted(referenced))
+  shape = "\n".join(
+    ast.dump(dependencies[name], include_attributes=False)
+    for name in sorted(dependencies)
+  ).encode()
+  return hashlib.sha256(shape).hexdigest()
+
+
 def main() -> None:
   module = ast.parse(SOURCE.read_text(encoding="utf-8"), filename=str(SOURCE))
   functions = {
@@ -78,8 +99,7 @@ def main() -> None:
     function = functions.get(function_name)
     if function is None:
       fail(f"registered function {function_name!r} does not exist")
-    shape = ast.dump(function, include_attributes=False).encode()
-    actual[version] = hashlib.sha256(shape).hexdigest()
+    actual[version] = semantic_hash(function, functions)
   if actual != expected:
     changed = [
       version for version in versions
