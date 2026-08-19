@@ -19,8 +19,13 @@ function goalCommandObjective(text) {
   return objective
 }
 
+/** Canonical one-line objective used by every compact Goal surface. */
+export function compactGoalObjective(objective) {
+  return String(objective || '').replace(/\s+/g, ' ').trim()
+}
+
 export function goalObjectiveFromText(text) {
-  return goalCommandObjective(text).replace(/\s+/g, ' ')
+  return compactGoalObjective(goalCommandObjective(text))
 }
 
 /** Keep the owner's formatting while hiding the command token in the bubble. */
@@ -113,9 +118,7 @@ export function goalObjectiveAtRunStart(text, messages) {
 /** Keep a known goal through a rolling/recovered active runtime; idle ends it. */
 export function goalObjectiveFromRuntime(runtime, fallbackObjective = '') {
   if (!runtime?.running) return ''
-  return String(runtime.active_goal_objective || fallbackObjective || '')
-    .replace(/\s+/g, ' ')
-    .trim()
+  return compactGoalObjective(runtime.active_goal_objective || fallbackObjective)
 }
 
 /**

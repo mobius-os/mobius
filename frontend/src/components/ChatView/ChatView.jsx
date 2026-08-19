@@ -157,6 +157,7 @@ import {
   railAtRunStart,
 } from './buildPhaseRail.js'
 import {
+  compactGoalObjective,
   goalObjectiveAtRunStart,
   goalObjectiveFromRuntime,
   latestGoalObjective,
@@ -540,15 +541,16 @@ export default function ChatView({
   // real run-start seam and left intact across mid-turn steers; a fresh mount
   // can recover it from the visible run-start message once liveness is known.
   const [activeGoalObjective, setActiveGoalObjective] = useState(
-    () => cached?.running ? (cached?.activeGoalObjective ?? '') : '',
+    () => cached?.running ? compactGoalObjective(cached?.activeGoalObjective) : '',
   )
   const [activeGoalPlan, setActiveGoalPlan] = useState(null)
   const setActiveGoalState = useCallback((objective) => {
-    setActiveGoalObjective(objective)
+    const compactObjective = compactGoalObjective(objective)
+    setActiveGoalObjective(compactObjective)
     updateChatRuntimeCache(
       queryClient,
       chatMessagesQueryKey(chatId),
-      { activeGoalObjective: objective },
+      { activeGoalObjective: compactObjective },
     )
   }, [chatId, queryClient])
 
@@ -569,7 +571,9 @@ export default function ChatView({
   }, [])
   useEffect(() => {
     const runtime = queryClient.getQueryData(chatMessagesQueryKey(chatId))
-    setActiveGoalObjective(runtime?.running ? (runtime.activeGoalObjective ?? '') : '')
+    setActiveGoalObjective(
+      runtime?.running ? compactGoalObjective(runtime.activeGoalObjective) : '',
+    )
   }, [chatId, queryClient])
 
   useEffect(() => {
@@ -4584,7 +4588,7 @@ export default function ChatView({
         </div>
         <ProgressRail
           items={progressRail}
-          key={activeGoalPlan?.root_run_id || visibleGoalObjective || 'build-progress'}
+          resetKey={activeGoalPlan?.root_run_id || visibleGoalObjective || 'build-progress'}
           ariaLabel={visibleGoalObjective ? 'Goal progress' : 'Build progress'}
         />
         <ConnectionStatus

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 import {
+  compactGoalObjective,
   goalObjectiveAtRunStart,
   goalObjectiveFromText,
   goalObjectiveFromRuntime,
@@ -81,6 +82,14 @@ test('latestGoalObjective recovers only the current visible owner turn', () => {
     { role: 'user', content: 'hidden answer', hidden: true },
     { role: 'assistant', content: 'Working', partial: true },
   ]), 'build the indicator')
+})
+
+test('compact Goal objectives are canonical before the first paint', () => {
+  assert.equal(
+    compactGoalObjective('Review every issue\nthen verify the result'),
+    'Review every issue then verify the result',
+  )
+  assert.equal(compactGoalObjective(null), '')
 })
 
 test('a resumable continue keeps the same goal through live start and cold attach', () => {
@@ -292,7 +301,7 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
   )
   assert.match(
     chatView,
-    /activeGoalObjective: objective/,
+    /activeGoalObjective: compactObjective/,
     'the existing chat cache should retain a goal across chat switches and steers',
   )
   assert.match(
@@ -305,6 +314,12 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
     /<ProgressRail\s+items=\{progressRail\}/,
     'the goal should render through the shared progress rail',
   )
+  assert.doesNotMatch(
+    chatView,
+    /<ProgressRail[\s\S]{0,160}\skey=/,
+    'late plan data must not remount the rail and replay its entrance animation',
+  )
+  assert.match(progressRail, /useEffect\(\(\) => setDetailsKey\(null\), \[resetKey\]\)/)
   assert.match(
     chatView,
     /`Following goal: \$\{activeGoalObjective\}\.`/,

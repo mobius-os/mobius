@@ -1,6 +1,6 @@
 /* ProgressRail renders the shared compact status sequence above the composer. */
 
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 function ProgressStep({ item, detailsExpanded, onDetailsToggle }) {
   const stepRef = useRef(null)
@@ -83,8 +83,9 @@ function ProgressStep({ item, detailsExpanded, onDetailsToggle }) {
   )
 }
 
-export default function ProgressRail({ items, ariaLabel }) {
+export default function ProgressRail({ items, ariaLabel, resetKey }) {
   const [detailsKey, setDetailsKey] = useState(null)
+  useEffect(() => setDetailsKey(null), [resetKey])
   if (!items.length) return null
   const detailItem = items.find(item => item.key === detailsKey && item.details)
   return (
