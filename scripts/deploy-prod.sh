@@ -683,6 +683,12 @@ readiness_code() {
   docker exec "$target" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/ready'" 2>/dev/null || echo "000"
 }
 
+health_code() {
+  docker exec "$CONTAINER" sh -c \
+    "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/health'" \
+    2>/dev/null || echo "000"
+}
+
 ready_code() {
   readiness_code "$CONTAINER"
 }
@@ -988,10 +994,10 @@ attempt_rollback() {
 # Wait for a live-container probe to return 200, then roll back + exit if it
 # never does. Consolidates the four formerly-near-identical cutover waits so
 # the window is honest and configurable in ONE place. Args:
-#   $1 probe command (a string eval'd each poll; must echo an HTTP status)
+#   $1 probe function (must echo an HTTP status)
 #   $2 success label   (e.g. "healthy", "serviceable")
 #   $3 failure summary (printed before rollback, names what didn't come up)
-#   $4 optional diagnostic command to run before rollback
+#   $4 optional diagnostic function to run before rollback
 #
 # Two behaviors replace the old `for i in $(seq 1 120); … if [ "$i" = "30" ]`
 # loops, whose 120 bound was dead code: the i==30 trap rolled back at 30s, so
@@ -1011,7 +1017,7 @@ wait_for_cutover() {
   local code="000" baseline_restarts now_restarts i
   baseline_restarts=$(container_restart_count)
   for i in $(seq 1 "$CUTOVER_WAIT_SECONDS"); do
-    code=$(eval "$probe")
+    code=$("$probe")
     if [ "$code" = "200" ]; then
       ok "${ok_label} after ${i}s"
       return 0
@@ -1029,14 +1035,14 @@ wait_for_cutover() {
        [ "$baseline_restarts" -ge 0 ] 2>/dev/null &&
        [ $((now_restarts - baseline_restarts)) -ge "$CRASH_RESTART_THRESHOLD" ]; then
       fail "${fail_summary} (last: ${code}); ${CONTAINER} restarted $((now_restarts - baseline_restarts))× — it is crash-looping, not just slow."
-      [ -z "$diagnostic" ] || eval "$diagnostic"
+      [ -z "$diagnostic" ] || "$diagnostic"
       attempt_rollback || true
       exit 1
     fi
     sleep 1
   done
   fail "${fail_summary} after ${CUTOVER_WAIT_SECONDS}s (last: ${code}) — the new image is not serving."
-  [ -z "$diagnostic" ] || eval "$diagnostic"
+  [ -z "$diagnostic" ] || "$diagnostic"
   attempt_rollback || true
   exit 1
 }
@@ -1348,7 +1354,7 @@ else
 fi
 info "waiting up to ${CUTOVER_WAIT_SECONDS}s for ${INTERNAL_BASE}/api/health"
 wait_for_cutover \
-  "docker exec \"\$CONTAINER\" sh -c \"curl -s -o /dev/null -w '%{http_code}' '\${INTERNAL_BASE}/api/health'\" 2>/dev/null || echo 000" \
+  "health_code" \
   "healthy" \
   "health check never returned 200"
 

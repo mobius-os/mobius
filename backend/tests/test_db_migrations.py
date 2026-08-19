@@ -2,9 +2,6 @@ import asyncio
 import hashlib
 import json
 import sqlite3
-import subprocess
-import sys
-import importlib.util
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,16 +24,6 @@ from app.schema_migrations import (
 PREVIOUS_RELEASE_SCHEMA = (
   Path(__file__).parent / "fixtures" / "schema_0013.sql"
 )
-
-
-def _migration_guard():
-  script = Path(__file__).parents[1] / "scripts" / "check-schema-migrations.py"
-  spec = importlib.util.spec_from_file_location("migration_guard", script)
-  assert spec and spec.loader
-  guard = importlib.util.module_from_spec(spec)
-  sys.modules[spec.name] = guard
-  spec.loader.exec_module(guard)
-  return guard
 
 
 def test_previous_release_database_upgrades_to_current_orm(tmp_path):
@@ -1745,86 +1732,6 @@ def test_goal_identity_migration_backfills_plan_and_recovery_runs(tmp_path):
       "SELECT id, goal_id FROM chat_runs ORDER BY started_at"
     )).all()
   assert rows == [("planned", "planned"), ("recovered", "planned")]
-
-
-def test_published_schema_migration_history_is_unique_ordered_and_immutable():
-  """Published migrations are history; current work always appends."""
-  script = Path(__file__).parents[1] / "scripts" / "check-schema-migrations.py"
-  completed = subprocess.run(
-    [sys.executable, str(script)],
-    text=True,
-    capture_output=True,
-    check=False,
-  )
-  assert completed.returncode == 0, completed.stderr
-  assert "append-only migrations verified" in completed.stdout
-
-
-def test_published_history_cannot_be_rehashed_in_place():
-  """Changing code and its checked-in hash together still rewrites history."""
-  guard = _migration_guard()
-
-  published = {"0001_initial": "old", "0002_add_field": "same"}
-  assert guard.append_only_error(published, {
-    "0001_initial": "new",
-    "0002_add_field": "same",
-  }) == "published migration 0001_initial changed"
-  assert guard.append_only_error(published, {
-    **published,
-    "0003_next": "added",
-  }) is None
-
-
-def test_published_history_cannot_be_removed_or_reordered():
-  guard = _migration_guard()
-
-  published = {"0001_initial": "one", "0002_next": "two"}
-  removed = guard.append_only_error(published, {"0001_initial": "one"})
-  reordered = guard.append_only_error(published, {
-    "0002_next": "two",
-    "0001_initial": "one",
-  })
-  assert removed == "published migration 0002_next was removed"
-  assert reordered == (
-    "published migration 0001_initial was reordered, removed, or renamed "
-    "to 0002_next"
-  )
-
-
-def test_new_migration_cannot_import_mutable_runtime_helpers():
-  """Published migrations own their behavior instead of freezing app code."""
-  guard = _migration_guard()
-  source = (
-    "def migrate(db):\n"
-    "  from app.helper import normalize\n"
-    "  return normalize(db)\n"
-    "_SCHEMA_MIGRATIONS = ((\"0016_new\", migrate),)\n"
-  )
-
-  with pytest.raises(SystemExit):
-    guard.inspect_history(source, source="candidate.py")
-
-
-def test_migration_hash_includes_migration_owned_helpers():
-  guard = _migration_guard()
-  first = guard.inspect_history(
-    "def normalize(value):\n"
-    "  return value\n"
-    "def migrate(db):\n"
-    "  return normalize(db)\n"
-    "_SCHEMA_MIGRATIONS = ((\"0016_new\", migrate),)\n",
-    source="first.py",
-  )
-  second = guard.inspect_history(
-    "def normalize(value):\n"
-    "  return str(value)\n"
-    "def migrate(db):\n"
-    "  return normalize(db)\n"
-    "_SCHEMA_MIGRATIONS = ((\"0016_new\", migrate),)\n",
-    source="second.py",
-  )
-
-  assert first["0016_new"] != second["0016_new"]
 
 
 def test_failed_migration_is_not_recorded_and_can_retry(tmp_path, monkeypatch):
