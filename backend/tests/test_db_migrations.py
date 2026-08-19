@@ -4,6 +4,7 @@ import json
 import sqlite3
 import subprocess
 import sys
+import importlib.util
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -1747,6 +1748,64 @@ def test_published_schema_migration_history_is_unique_ordered_and_immutable():
   )
   assert completed.returncode == 0, completed.stderr
   assert "immutable migrations verified" in completed.stdout
+
+
+def test_migration_hash_includes_imported_app_helper(tmp_path, monkeypatch):
+  """Changing live in-repository helper semantics must invalidate history."""
+  script = Path(__file__).parents[1] / "scripts" / "check-schema-migrations.py"
+  spec = importlib.util.spec_from_file_location("migration_guard", script)
+  assert spec and spec.loader
+  guard = importlib.util.module_from_spec(spec)
+  sys.modules[spec.name] = guard
+  spec.loader.exec_module(guard)
+
+  root = tmp_path
+  app = root / "backend" / "app"
+  app.mkdir(parents=True)
+  migration = app / "schema_migrations.py"
+  helper = app / "helper.py"
+  migration.write_text(
+    "def migrate(db):\n"
+    "  from app.helper import normalize\n"
+    "  return normalize(db)\n",
+    encoding="utf-8",
+  )
+  helper.write_text("def normalize(value):\n  return value\n", encoding="utf-8")
+  monkeypatch.setattr(guard, "ROOT", root)
+  first = guard.semantic_hash(migration, "migrate")
+
+  helper.write_text("def normalize(value):\n  return str(value)\n", encoding="utf-8")
+  second = guard.semantic_hash(migration, "migrate")
+
+  assert first != second
+
+
+def test_migration_hash_includes_imported_app_module_attribute(tmp_path, monkeypatch):
+  script = Path(__file__).parents[1] / "scripts" / "check-schema-migrations.py"
+  spec = importlib.util.spec_from_file_location("migration_guard_module", script)
+  assert spec and spec.loader
+  guard = importlib.util.module_from_spec(spec)
+  sys.modules[spec.name] = guard
+  spec.loader.exec_module(guard)
+
+  root = tmp_path
+  app = root / "backend" / "app"
+  app.mkdir(parents=True)
+  (app / "__init__.py").write_text("", encoding="utf-8")
+  migration = app / "schema_migrations.py"
+  helper = app / "helper.py"
+  migration.write_text(
+    "def migrate(db):\n"
+    "  from app import helper\n"
+    "  return helper.normalize(db)\n",
+    encoding="utf-8",
+  )
+  helper.write_text("def normalize(value):\n  return value\n", encoding="utf-8")
+  monkeypatch.setattr(guard, "ROOT", root)
+  first = guard.semantic_hash(migration, "migrate")
+  helper.write_text("def normalize(value):\n  return str(value)\n", encoding="utf-8")
+
+  assert first != guard.semantic_hash(migration, "migrate")
 
 
 def test_failed_migration_is_not_recorded_and_can_retry(tmp_path, monkeypatch):
