@@ -29,6 +29,17 @@ test('offline navigation falls back to the worker-matched shell generation', asy
   assert.deepEqual(keys, ['/index.html'])
 })
 
+test('a timed-out navigation falls back to the worker-matched shell generation', async () => {
+  const cached = { ok: true, generation: 'worker-precache' }
+  const result = await serveShellNavigation({
+    request: { url: '/shell/' },
+    fetchFresh: async () => { throw new DOMException('timed out', 'AbortError') },
+    matchPrecache: async key => key === '/index.html' ? cached : null,
+    errorResponse: () => ({ error: true }),
+  })
+  assert.equal(result, cached)
+})
+
 test('a failed server response never replaces the coherent offline fallback', async () => {
   const cached = { ok: true, generation: 'worker-precache' }
   const result = await serveShellNavigation({

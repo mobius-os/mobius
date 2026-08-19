@@ -681,7 +681,17 @@ registerRoute(
 async function shellNavigationHandler({ request }) {
   return serveShellNavigation({
     request,
-    fetchFresh: current => fetch(current, { cache: 'reload' }),
+    fetchFresh: current => boundedFetch((signal) => {
+      try {
+        return new Request(current, { cache: 'reload', signal })
+      } catch {
+        return new Request(current.url, {
+          cache: 'reload',
+          credentials: 'same-origin',
+          signal,
+        })
+      }
+    }),
     matchPrecache,
     errorResponse: () => Response.error(),
   })
