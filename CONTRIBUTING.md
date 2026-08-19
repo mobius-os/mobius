@@ -93,11 +93,11 @@ scripts/test.sh --fast
 scripts/wt-pytest.sh backend/tests/test_db_migrations.py -q
 ```
 
-A boot that still finds an ORM/schema gap deliberately starts no writer,
-reconciliation, scheduled work, or database supervisors. It serves only the
-shell and bounded diagnostic/restart APIs with `/api/ready` at 503. Recovery
-repairs the database externally; a clean restart is then required to run the
-skipped startup phase as one coherent transition.
+A boot whose migrations fail or whose mapped tables/columns remain incomplete
+deliberately starts no writer, reconciliation, scheduled work, or database
+supervisors. It serves only the shell and bounded diagnostic/restart APIs with
+`/api/ready` at 503. Recovery repairs the database externally; a clean restart
+is then required to run the skipped startup phase as one coherent transition.
 
 CI runs the equivalent natively: install `frontend/package-lock.json`, put its
 locked `node_modules/.bin` on `PATH`, install the hashed

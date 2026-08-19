@@ -675,9 +675,9 @@ served_version_field() {  # $1 = json key
 }
 
 # The HTTP status of the complete serviceability probe. /api/health is
-# reachability only; /api/ready also requires an ORM-compatible database and a
-# usable single-writer persistence actor. "000" means the container is down or
-# curl could not reach it.
+# reachability only; /api/ready also requires successful database initialization,
+# every mapped table/column, and a usable single-writer persistence actor.
+# "000" means the container is down or curl could not reach it.
 readiness_code() {
   local target="$1"
   docker exec "$target" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/ready'" 2>/dev/null || echo "000"
@@ -693,6 +693,9 @@ report_readiness_failure() {
   case "$body" in
     *'"reason":"schema_mismatch"'*)
       fail "the database schema does not match this release; run Recovery, then restart cleanly."
+      ;;
+    *'"reason":"database_initialization_failed"'*)
+      fail "database initialization failed; run Recovery, then restart cleanly."
       ;;
     *'"reason":'*)
       fail "the persistence service is not ready."
@@ -1539,8 +1542,9 @@ else
   exit 1
 fi
 
-# Complete readiness: fail if either schema parity or persistence ownership is
-# unavailable, even though the process still answers the reachability probe.
+# Complete readiness: fail if either database initialization/mapped shape or
+# persistence ownership is unavailable, even though the process still answers
+# the reachability probe.
 rcode=$(ready_code)
 if [ "$rcode" = "200" ]; then
   ok "internal /api/ready:  ${rcode}"

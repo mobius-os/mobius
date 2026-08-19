@@ -174,11 +174,12 @@ edit a migration already present in the ledger. Test both a fresh database and
 the frozen previous-release upgrade fixture rather than assuming model metadata
 altered the latter.
 
-If `/api/ready` reports `reason: schema_mismatch`, the process has deliberately
-skipped its writer, reconciliation, cron, and database supervisors. Recovery
-repairs the database externally, then the partner approves one normal restart
-so boot can verify parity and start those owners coherently. Do not hand-edit
-the in-memory readiness verdict or try to start skipped owners piecemeal.
+If `/api/ready` reports `reason: schema_mismatch` or
+`database_initialization_failed`, the process has deliberately skipped its
+writer, reconciliation, cron, and database supervisors. Recovery repairs the
+database externally, then the partner approves one normal restart so boot can
+verify the database and start those owners coherently. Do not hand-edit the
+in-memory readiness verdict or try to start skipped owners piecemeal.
 
 ---
 

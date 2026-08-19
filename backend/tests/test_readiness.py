@@ -19,6 +19,7 @@ from pathlib import Path
 from app import chat_writer, main as main_module
 from app.chat_writer import get_writer
 from app.database import SessionLocal
+from app.startup import DatabaseBootResult
 
 
 def _wait_for_healthy_writer():
@@ -44,7 +45,7 @@ def test_ready_returns_200_when_writer_running(client):
 def test_schema_gap_fails_serviceability_but_not_reachability(client):
   """A mapped-column gap must keep every deployment probe fail-closed."""
   gap = "apps.paused_capabilities"
-  main_module._SCHEMA_GAPS[:] = [gap]
+  main_module._set_database_boot_state(DatabaseBootResult(schema_gaps=(gap,)))
   try:
     ready = client.get("/api/ready")
     assert ready.status_code == 503
@@ -57,32 +58,68 @@ def test_schema_gap_fails_serviceability_but_not_reachability(client):
     assert strict.status_code == 503
     assert strict.json() == {
       "status": "schema_mismatch",
+      "reason": "schema_mismatch",
       "schema_gaps": [gap],
     }
     reachable = client.get("/api/health")
     assert reachable.status_code == 200
     assert reachable.json()["status"] == "schema_mismatch"
+    assert reachable.json()["reason"] == "schema_mismatch"
     gated = client.get("/api/apps")
     assert gated.status_code == 503
     assert gated.json() == {
-      "detail": "database schema mismatch; restart after Recovery",
+      "detail": "database is not serviceable; use Recovery, then restart",
+      "reason": "schema_mismatch",
       "schema_gaps": [gap],
     }
     assert client.get("/api/version").status_code == 200
   finally:
-    main_module._SCHEMA_GAPS.clear()
+    main_module._set_database_boot_state(DatabaseBootResult())
+
+
+def test_database_initialization_failure_uses_the_same_degraded_boundary(client):
+  result = DatabaseBootResult(
+    failure_reason="database_initialization_failed",
+  )
+  main_module._set_database_boot_state(result)
+  try:
+    ready = client.get("/api/ready")
+    assert ready.status_code == 503
+    assert ready.json() == {
+      "ready": False,
+      "reason": "database_initialization_failed",
+    }
+    strict = client.get("/api/health/strict")
+    assert strict.status_code == 503
+    assert strict.json() == {
+      "status": "database_initialization_failed",
+      "reason": "database_initialization_failed",
+    }
+    reachable = client.get("/api/health")
+    assert reachable.status_code == 200
+    assert reachable.json()["status"] == "database_initialization_failed"
+    gated = client.get("/api/apps")
+    assert gated.status_code == 503
+    assert gated.json() == {
+      "detail": "database is not serviceable; use Recovery, then restart",
+      "reason": "database_initialization_failed",
+    }
+  finally:
+    main_module._set_database_boot_state(DatabaseBootResult())
 
 
 def test_external_schema_repair_requires_a_clean_startup(client):
   """A degraded boot never starts skipped DB owners partway through life."""
-  main_module._SCHEMA_GAPS[:] = ["apps.paused_capabilities"]
+  main_module._set_database_boot_state(DatabaseBootResult(
+    schema_gaps=("apps.paused_capabilities",),
+  ))
   try:
     ready = client.get("/api/ready")
     assert ready.status_code == 503
     assert ready.json()["reason"] == "schema_mismatch"
     assert main_module._SCHEMA_GAPS == ["apps.paused_capabilities"]
   finally:
-    main_module._SCHEMA_GAPS.clear()
+    main_module._set_database_boot_state(DatabaseBootResult())
 
 
 def test_deployment_healthchecks_use_the_serviceability_probe():

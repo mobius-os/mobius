@@ -151,7 +151,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `config.py` | `Settings` via pydantic-settings; reads `.env` |
 | `database.py` | SQLAlchemy engine, pool instrumentation, `SessionLocal`, `Base`, and `get_db`; contains no schema history |
 | `schema_migrations.py` | One append-only schema/data migration runner, its durable ledger, and mapped table/column inspection; published migration-owned code is target-branch frozen |
-| `startup.py` | Two-phase boot: process/schema preflight first, then writer/reconciliation/database supervisors only after schema parity succeeds |
+| `startup.py` | Two-phase boot: process/database preflight first, then writer/reconciliation/database supervisors only after migrations and mapped-shape checks succeed |
 | `models.py` | ORM tables: `Owner`, `Chat`, `ChatRun`, `App`, `PushSubscription`, `Notification` |
 | `schemas.py` | Pydantic request/response models |
 | `auth.py` | bcrypt hashing, JWT creation/decoding, Fernet encryption |
@@ -213,23 +213,25 @@ Self-hosters use the authority they already own:
 `docker compose exec -u 0 app bash`. This attaches to the live container and
 does not replace its normal process.
 
-### Health, readiness, and schema-degraded boot
+### Health, readiness, and database-degraded boot
 
 `GET /api/health` is reachability and remains HTTP 200 whenever the process can
 answer; the shell uses that distinction so a server fault never masquerades as
 the device being offline. `GET /api/ready` is serviceability: it requires both
-an ORM-compatible database and the single-writer persistence actor. Deployment
-and container probes use readiness. `GET /api/health/strict` retains the
-schema-only diagnostic contract.
+a successfully initialized database with every mapped table and column, and
+the single-writer persistence actor. Deployment and container probes use
+readiness. `GET /api/health/strict` retains the database-only diagnostic
+contract.
 
 Boot runs `create_all`, append-only migrations, and `orm_schema_gaps()` before
-starting any database owner. A remaining gap enters a bounded degraded mode:
-ordinary APIs return one deterministic 503, database startup tasks and
-supervisors do not run, cron remains disabled, and static shell plus health,
-version, browser-bootstrap, and authenticated restart surfaces remain. External
-Recovery may alter the database, but the process intentionally keeps its boot
-verdict until restart; promoting only part of the skipped startup plan inside a
-health probe would create a second, race-prone boot mechanism.
+starting any database owner. A migration/initialization failure or remaining
+mapped-shape gap enters one bounded degraded mode: ordinary APIs return a
+deterministic 503, database startup tasks and supervisors do not run, cron
+remains disabled, and static shell plus health, version, browser-bootstrap, and
+the normally authenticated restart surface remain. External Recovery may alter
+the database, but the process intentionally keeps its boot verdict until
+restart; promoting only part of the skipped startup plan inside a health probe
+would create a second, race-prone boot mechanism.
 
 ### Misc shared helpers
 

@@ -4,7 +4,7 @@ Startup reconciliation is owned by ``startup.py``. This module owns only work
 that remains alive after readiness: watcher processes, periodic chat recovery,
 durable continuation wakeups, writer health, background compression, and
 browser-profile quota enforcement. Process-only and database-backed services
-have distinct start boundaries so a schema-degraded boot can keep source
+have distinct start boundaries so a database-degraded boot can keep source
 diagnostics alive without starting database work. ``stop`` remains the single
 shutdown boundary.
 """

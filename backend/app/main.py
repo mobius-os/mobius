@@ -82,9 +82,28 @@ from app.routes import (
 )
 
 _BOOT_ID = os.environ.get("MOBIUS_BOOT_ID") or f"{os.getpid()}-{time.time_ns()}"
-# ORM-vs-database schema gaps found at startup; non-empty means the process
-# answers but cannot serve turns (see health vs health_strict).
+# One boot verdict feeds startup ownership, middleware, and every health probe.
+# These stay fixed until restart: Recovery may repair the database externally,
+# but only a clean boot can coherently start the skipped database owners.
 _SCHEMA_GAPS: list[str] = []
+_DATABASE_INIT_FAILURE: str | None = None
+
+
+def _set_database_boot_state(result) -> None:
+  global _DATABASE_INIT_FAILURE
+  _SCHEMA_GAPS[:] = result.schema_gaps
+  _DATABASE_INIT_FAILURE = result.failure_reason
+
+
+def _database_degraded_payload() -> dict | None:
+  if _DATABASE_INIT_FAILURE:
+    return {"reason": _DATABASE_INIT_FAILURE}
+  if _SCHEMA_GAPS:
+    return {
+      "reason": "schema_mismatch",
+      "schema_gaps": list(_SCHEMA_GAPS),
+    }
+  return None
 
 
 def _install_pm_commit_launcher(source: Path, target: Path) -> bool:
@@ -104,7 +123,7 @@ def _install_pm_commit_launcher(source: Path, target: Path) -> bool:
   return True
 
 
-def _init_db() -> list[str]:
+def _init_db():
   """Create missing tables, then migrate existing ones, with retries.
 
   Creating tables first lets a migration move legacy data into a newly
@@ -112,12 +131,13 @@ def _init_db() -> list[str]:
   mutates existing tables, so column upgrades remain owned by
   ``run_migrations``.
   """
+  from app.startup import DatabaseBootResult
+
   for attempt in range(10):
     try:
       Base.metadata.create_all(bind=engine)
       run_migrations(engine)
       gaps = orm_schema_gaps(engine)
-      _SCHEMA_GAPS[:] = gaps
       if gaps:
         # A mapped column with no migration fails at first query, not at
         # boot. Surface it loudly here and through /api/health(+/strict)
@@ -126,7 +146,7 @@ def _init_db() -> list[str]:
           "CRITICAL: database is missing ORM-declared schema: "
           + ", ".join(gaps)
         )
-      return list(gaps)
+      return DatabaseBootResult(schema_gaps=tuple(gaps))
     except OperationalError as e:
       if attempt < 9:
         delay = min(2 ** attempt, 10)
@@ -169,7 +189,8 @@ async def lifespan(app):
     assert_provider_defaults=_assert_provider_defaults,
     logger=_log,
   )
-  database_serviceable = await run_startup_plan(startup_context)
+  database_boot = await run_startup_plan(startup_context)
+  _set_database_boot_state(database_boot)
   from app.runtime_supervisors import RuntimeSupervisors
   supervisors = RuntimeSupervisors(
     settings=settings,
@@ -179,7 +200,7 @@ async def lifespan(app):
   )
   await supervisors.start_process_services()
   record_memory_checkpoint("startup_frontend_watcher_started")
-  if database_serviceable:
+  if database_boot.serviceable:
     await supervisors.start_database_services()
     record_memory_checkpoint("startup_ready")
   try:
@@ -574,7 +595,7 @@ class _ServiceSurfaceHostMiddleware:
     return await self.app(scope, receive, send)
 
 
-_SCHEMA_DEGRADED_API_PATHS = frozenset({
+_DATABASE_DEGRADED_API_PATHS = frozenset({
   "/api/health",
   "/api/health/strict",
   "/api/ready",
@@ -584,8 +605,8 @@ _SCHEMA_DEGRADED_API_PATHS = frozenset({
 })
 
 
-class _SchemaServiceabilityMiddleware:
-  """Reject ordinary API work after a schema-incompatible boot.
+class _DatabaseServiceabilityMiddleware:
+  """Reject ordinary API work after an incompatible database boot.
 
   Readiness keeps a new deployment out of rotation, but an already-running
   reverse proxy can still reach an unhealthy replacement directly. Centralize
@@ -601,15 +622,16 @@ class _SchemaServiceabilityMiddleware:
 
   async def __call__(self, scope, receive, send):
     path = scope.get("path", "")
+    degraded = _database_degraded_payload()
     if (
       scope["type"] == "http"
-      and _SCHEMA_GAPS
+      and degraded
       and path.startswith("/api/")
-      and path not in _SCHEMA_DEGRADED_API_PATHS
+      and path not in _DATABASE_DEGRADED_API_PATHS
     ):
       body = json.dumps({
-        "detail": "database schema mismatch; restart after Recovery",
-        "schema_gaps": list(_SCHEMA_GAPS),
+        "detail": "database is not serviceable; use Recovery, then restart",
+        **degraded,
       }, separators=(",", ":")).encode()
       await send({
         "type": "http.response.start",
@@ -716,7 +738,7 @@ app.add_middleware(_OpaqueOriginCorsMiddleware)
 # before routing so it can never serve the shell, APIs, or another
 # service prefix.
 app.add_middleware(_ServiceSurfaceHostMiddleware)
-app.add_middleware(_SchemaServiceabilityMiddleware)
+app.add_middleware(_DatabaseServiceabilityMiddleware)
 app.add_middleware(_SecurityHeadersMiddleware)
 app.add_middleware(_DatabaseRequestContextMiddleware)
 app.add_middleware(_RequestErrorTelemetryMiddleware)
@@ -792,36 +814,36 @@ def health(response: Response):
   reloading while the old process is still briefly answering before SIGTERM.
   """
   response.headers["Cache-Control"] = "no-store"
+  degraded = _database_degraded_payload()
   payload = {
-    "status": "schema_mismatch" if _SCHEMA_GAPS else "ok",
+    "status": degraded["reason"] if degraded else "ok",
     "target": "mobius",
     "mode": "normal",
     "build_sha": settings.build_sha,
     "boot_id": _BOOT_ID,
   }
-  if _SCHEMA_GAPS:
-    # Still HTTP 200: the shell's reachability probe requires response.ok,
-    # and a schema gap must not masquerade as "device offline". The strict
-    # variant below carries the 5xx for container health.
-    payload["schema_gaps"] = _SCHEMA_GAPS
+  if degraded:
+    # Still HTTP 200: database failure must never masquerade as device offline.
+    # The strict and readiness variants below carry the 5xx service verdict.
+    payload.update(degraded)
   return payload
 
 
 @app.get("/api/health/strict")
 def health_strict(response: Response):
-  """Schema-focused serviceability probe retained for diagnostics.
+  """Database-focused serviceability probe retained for diagnostics.
 
   Distinct from `/api/health` (reachability — must stay 200 whenever the
   process answers, or the shell would flip devices to offline UI): this
-  variant fails when the database is missing ORM-declared schema. Deployment
-  healthchecks use `/api/ready`, which includes this schema contract plus the
-  chat-persistence writer contract.
+  variant fails when database initialization fails or mapped schema is absent.
+  Deployment healthchecks use `/api/ready`, which includes this database
+  contract plus the chat-persistence writer contract.
   """
   response.headers["Cache-Control"] = "no-store"
-  gaps = list(_SCHEMA_GAPS)
-  if gaps:
+  degraded = _database_degraded_payload()
+  if degraded:
     response.status_code = 503
-    return {"status": "schema_mismatch", "schema_gaps": gaps}
+    return {"status": degraded["reason"], **degraded}
   return {"status": "ok", "boot_id": _BOOT_ID}
 
 
@@ -844,7 +866,8 @@ def ready(response: Response):
   """Readiness probe: 200 only when chats can actually be served.
 
   Distinct from `/api/health` (reachability — the process is answering HTTP),
-  this route also requires an ORM-compatible database and a usable
+  this route also requires a successfully initialized database with every
+  mapped table and column, plus a usable
   single-writer chat-persistence actor. A deploy must not green while a mapped
   column is absent or every chat write will fail, even though the process can
   still answer ordinary HTTP requests.
@@ -857,13 +880,12 @@ def ready(response: Response):
   window where this false-fails.
   """
   response.headers["Cache-Control"] = "no-store"
-  gaps = list(_SCHEMA_GAPS)
-  if gaps:
+  degraded = _database_degraded_payload()
+  if degraded:
     response.status_code = 503
     return {
       "ready": False,
-      "reason": "schema_mismatch",
-      "schema_gaps": gaps,
+      **degraded,
     }
   from app.chat_writer import writer_readiness
   is_ready, reason = writer_readiness()

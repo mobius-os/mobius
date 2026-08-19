@@ -5,6 +5,7 @@ import pytest
 
 import app.startup as startup
 from app.startup import (
+  DatabaseBootResult,
   StartupContext,
   StartupTask,
   run_startup_plan,
@@ -17,7 +18,7 @@ def context():
     app=SimpleNamespace(state=SimpleNamespace()),
     settings=SimpleNamespace(data_dir="/tmp"),
     boot_id="test-boot",
-    init_db=lambda: [],
+    init_db=DatabaseBootResult,
     install_pm_commit_launcher=lambda _source, _target: False,
     assert_provider_defaults=lambda _names: None,
     logger=logging.getLogger("test.startup"),
@@ -92,9 +93,7 @@ def test_production_startup_plan_has_explicit_unique_order_and_criticality():
   names = [task.name for task in tasks]
 
   assert len(names) == len(set(names))
-  assert [task.name for task in tasks if task.critical] == [
-    "initialize database",
-  ]
+  assert [task.name for task in tasks if task.critical] == []
   assert startup.PROCESS_STARTUP_TASKS[-1].name == "initialize database"
   assert startup.DATABASE_STARTUP_TASKS[0].name == "start chat writer"
   assert names.index("initialize database") < names.index("start chat writer")
@@ -112,7 +111,9 @@ async def test_schema_mismatch_skips_the_entire_database_startup_phase(
 ):
   events = []
   startup_context = context()
-  startup_context.init_db = lambda: ["apps.paused_capabilities"]
+  startup_context.init_db = lambda: DatabaseBootResult(
+    schema_gaps=("apps.paused_capabilities",),
+  )
   monkeypatch.setattr(startup, "PROCESS_STARTUP_TASKS", (
     StartupTask("initialize database", startup._initialize_database),
   ))
@@ -123,13 +124,52 @@ async def test_schema_mismatch_skips_the_entire_database_startup_phase(
   monkeypatch.setattr(startup, "record_memory_checkpoint", checkpoints.append)
 
   with caplog.at_level(logging.CRITICAL, logger="test.startup"):
-    serviceable = await run_startup_plan(startup_context)
+    result = await run_startup_plan(startup_context)
 
-  assert serviceable is False
-  assert startup_context.schema_gaps == ["apps.paused_capabilities"]
+  assert result.serviceable is False
+  assert startup_context.database_boot.schema_gaps == (
+    "apps.paused_capabilities",
+  )
   assert events == []
-  assert checkpoints == ["startup_schema_degraded"]
-  assert "skipped 1 database startup task" in caplog.text
+  assert checkpoints == [
+    "startup_database_checked",
+    "startup_database_degraded",
+  ]
+  assert "skipped 1 database task" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_database_initialization_failure_enters_bounded_degraded_boot(
+  monkeypatch, caplog,
+):
+  events = []
+  startup_context = context()
+
+  def fail_init():
+    raise RuntimeError("broken migration")
+
+  startup_context.init_db = fail_init
+  monkeypatch.setattr(startup, "PROCESS_STARTUP_TASKS", (
+    StartupTask("initialize database", startup._initialize_database),
+  ))
+  monkeypatch.setattr(startup, "DATABASE_STARTUP_TASKS", (
+    StartupTask("must not run", lambda _context: events.append("database")),
+  ))
+  checkpoints = []
+  monkeypatch.setattr(startup, "record_memory_checkpoint", checkpoints.append)
+
+  with caplog.at_level(logging.CRITICAL, logger="test.startup"):
+    result = await run_startup_plan(startup_context)
+
+  assert result == DatabaseBootResult(
+    failure_reason="database_initialization_failed",
+  )
+  assert events == []
+  assert checkpoints == [
+    "startup_database_checked",
+    "startup_database_degraded",
+  ]
+  assert "database initialization failed: broken migration" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -142,7 +182,7 @@ async def test_schema_safe_boot_runs_the_database_startup_phase(monkeypatch):
     StartupTask("database", lambda _context: events.append("database")),
   ))
 
-  serviceable = await run_startup_plan(context())
+  result = await run_startup_plan(context())
 
-  assert serviceable is True
+  assert result.serviceable is True
   assert events == ["process", "database"]
