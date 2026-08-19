@@ -4,7 +4,10 @@ import {
   clearToken, clearQueryCache,
 } from '../api/client.js'
 import * as setupSession from '../lib/setupSession.js'
-import { reportNetworkReachable } from '../lib/connectivityStore.js'
+import {
+  reportNetworkReachable,
+  verifyConnectivity,
+} from '../lib/connectivityStore.js'
 
 /**
  * Persistent SSE subscription to /api/events/system. Lives on the
@@ -120,8 +123,12 @@ export default function useSystemEventStream(
       }
       // Reconnect with capped exponential backoff. The shell-level
       // stream is supposed to live as long as the Shell — any drop
-      // (network blip, server restart) should self-heal.
+      // (network blip, server restart) should self-heal. Feed the drop into
+      // the shared reachability owner before retrying: its Checking/Offline
+      // phase drives the one shell-wide dot, and its later recovery generation
+      // wakes chat streams whose own bounded retries exhausted during a restart.
       if (!cancelled) {
+        void verifyConnectivity()
         await new Promise(r => setTimeout(r, backoffMs))
         backoffMs = Math.min(backoffMs * 2, 30_000)
         connect()
