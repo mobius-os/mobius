@@ -10,7 +10,7 @@ import { shouldDeferShellReload } from './shellReloadPolicy.js'
 import {
   inspectShellUpdate,
   reloadWhenWorkerTakesOver,
-} from './swHandoff.js'
+} from '../../lib/shellUpdate.js'
 
 const RECHECK_MS = 6000
 

@@ -8,7 +8,7 @@ import {
   watchForShellUpdateOnForeground,
   SW_DISCOVERY_SETTLE_TIMEOUT_MS,
   SW_TAKEOVER_TIMEOUT_MS,
-} from '../swHandoff.js'
+} from '../shellUpdate.js'
 
 // Drain both promise continuations and the queued task where browsers publish a
 // newly-discovered registration.installing worker after update() resolves.

@@ -9,7 +9,7 @@ import {
   runAgentRepair,
   writeRefreshedRecoveryAttempt,
 } from '../../lib/errorRecovery.js'
-import { reloadIfGenerationStale } from '../Shell/swHandoff.js'
+import { reloadIfGenerationStale } from '../../lib/shellUpdate.js'
 import RecoveryPanel from './RecoveryPanel.jsx'
 import './ErrorBoundary.css'
 

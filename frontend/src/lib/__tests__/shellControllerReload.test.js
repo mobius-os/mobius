@@ -15,6 +15,10 @@ const shellSource = readFileSync(
   new URL('../../components/Shell/Shell.jsx', import.meta.url),
   'utf8',
 )
+const settingsSource = readFileSync(
+  new URL('../../components/SettingsView/SettingsView.jsx', import.meta.url),
+  'utf8',
+)
 
 test('the boot script discovers workers but never owns a shell reload', () => {
   assert.match(indexHtml, /navigator\.serviceWorker\.register\('\/sw\.js'/)
@@ -32,6 +36,12 @@ test('the shell controller has one deduplicated reload executor', () => {
   assert.match(controllerSource, /const reload = \(\) => \{/)
   assert.match(controllerSource, /inspectShellUpdate\(\{ serviceWorker: nav\.serviceWorker \}\)/)
   assert.doesNotMatch(controllerSource, /sw-skip-initiated|sw-auto-reloaded/)
+})
+
+test('Settings delegates worker inspection and takeover instead of duplicating them', () => {
+  assert.match(settingsSource, /inspectShellUpdate\(\{ serviceWorker/)
+  assert.match(settingsSource, /reloadWhenWorkerTakesOver\(\{/)
+  assert.doesNotMatch(settingsSource, /\.getRegistration\(\)|\.update\(\)|controllerchange/)
 })
 
 test('a claimed destination runs before navigation history or view mutation', () => {

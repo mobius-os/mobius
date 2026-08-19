@@ -104,7 +104,7 @@ import {
 import {
   inspectShellUpdate,
   watchForShellUpdateOnForeground,
-} from './swHandoff.js'
+} from '../../lib/shellUpdate.js'
 import './Shell.css'
 import './workspace.css'
 import WorkspaceChrome from './WorkspaceChrome.jsx'
