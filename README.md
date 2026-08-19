@@ -27,9 +27,9 @@ Möbius is a self-hosted workspace where apps, agents, memory, skills, files, an
 
 Agents can work with you in chat, inside apps, or through scheduled background work. Memory grows with useful context from the work. Reflection reviews repeated friction and prepares improvements that you can inspect and choose to keep.
 
-![Current Möbius workspace with its compact rail, pane strips, separate composers, and two agent chats in view](assets/product/app-building-showcase.png)
+![Current Möbius Builder workspace with the drawer, chat, and Contribute visible in live panes](assets/product/app-building-showcase.png)
 
-The [live app-building story](https://mobius.you/#build) re-renders the current shell as working web elements rather than playing a screenshot. Hold the top-left Möbius mark to deal the workspace into panes, watch a phone build Field Notes one layer at a time, add it to the home screen, and open it standalone.
+The [live app-building story](https://mobius.you/#build) re-renders the current shell as working web elements rather than playing a screenshot. Open Builder panes on the web, press the real + menu on mobile, add Habits to the home screen, and open the production app standalone.
 
 ## Start with the App Store
 
@@ -119,22 +119,22 @@ Möbius runs as a progressive web app (PWA). On the web, hold the top-left Möbi
 
 <table>
   <tr>
-    <td width="72%"><img src="assets/product/workspace-multiple-panes.png" alt="The current Möbius runtime at a desktop viewport with its compact rail and two empty chat panes"></td>
+    <td width="72%"><img src="assets/product/workspace-multiple-panes.png" alt="The current Möbius runtime with its drawer open and App Store and Contribute in separate working panes"></td>
     <td width="28%"><img src="assets/product/mobile-plus.png" alt="Möbius on mobile with the plus menu open above the composer"></td>
   </tr>
   <tr>
-    <td><strong>Web:</strong> keep several working panes and their separate composers visible together.</td>
+    <td><strong>Web:</strong> keep the App Store, Contribute, chats, and other working panes visible together.</td>
     <td><strong>Mobile:</strong> press + for files, continuation, summary, and agent context.</td>
   </tr>
 </table>
 
-An installed app can also become its own home-screen entry. The [interactive mobile sequence](https://mobius.you/#build) shows Field Notes appearing on the home screen, a cursor opening the exact new icon, and the app running without Möbius chrome.
+An installed app can also become its own home-screen entry. The [interactive mobile sequence](https://mobius.you/#build) shows Habits appearing on the home screen, a cursor opening its exact icon, and the production-compiled app running without Möbius chrome.
 
 <table>
   <tr>
-    <td width="33%"><img src="assets/product/mobile-field-notes-home.png" alt="Field Notes installed among the current Möbius app icons on a mobile home screen"></td>
-    <td width="33%"><img src="assets/product/mobile-field-notes-opening.png" alt="A cursor pressing the Field Notes icon on the mobile home screen"></td>
-    <td width="33%"><img src="assets/product/mobile-field-notes-standalone.png" alt="Field Notes open as a standalone mobile app without Möbius chrome"></td>
+    <td width="33%"><img src="assets/product/mobile-habits-home.png" alt="Habits installed among the current Möbius app icons on a mobile home screen"></td>
+    <td width="33%"><img src="assets/product/mobile-habits-opening.png" alt="A cursor pressing the Habits icon on the mobile home screen"></td>
+    <td width="33%"><img src="assets/product/mobile-habits-standalone.png" alt="The current Habits app open standalone without Möbius chrome"></td>
   </tr>
   <tr>
     <td><strong>Install:</strong> the created app joins the home screen.</td>
@@ -166,7 +166,7 @@ Möbius grows with the needs of the people using it. Anyone can build an app or 
 
 Contribute keeps that path inspectable. A private review agent can refresh a proposal before it is sent. A security audit can trace permission-bearing paths. GitHub checks and labels stay visible, and nothing is published automatically. Try the [live review and security-check controls](https://mobius.you/#agents).
 
-![The current Contribute app showing an agent follow-up, a security review, and passing GitHub checks](assets/product/contribute-agent-review.png)
+![The current Contribute app showing a security audit ready for approval and a published mobile-install improvement](assets/product/contribute-agent-review.png)
 
 <table>
   <tr>
