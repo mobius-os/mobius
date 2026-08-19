@@ -58,6 +58,26 @@ def goal_identity_for_run_start(
   objective = _goal_objective(content if isinstance(content, str) else "")
   if objective is not None:
     return objective, str(uuid.uuid4())
+  from app.continuations import DELEGATION_RESULT_MESSAGE_KIND
+  if (
+    isinstance(message, Mapping)
+    and message.get("kind") == DELEGATION_RESULT_MESSAGE_KIND
+  ):
+    source_work_id = message.get("source_work_id")
+    if isinstance(source_work_id, str) and source_work_id:
+      source = (
+        db.query(models.ChatRun)
+        .filter(
+          models.ChatRun.chat_id == chat_id,
+          models.ChatRun.goal_id == source_work_id,
+          models.ChatRun.goal_objective.isnot(None),
+        )
+        .order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc())
+        .first()
+      )
+      if source is not None:
+        return source.goal_objective, source.goal_id
+    return None, None
   previous = latest_run(db, chat_id)
   semantic_continuation = is_continuation_message(message)
   literal_continue = str(content or "").strip().lower() == "continue"

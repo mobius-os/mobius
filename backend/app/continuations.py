@@ -14,6 +14,12 @@ CONTINUATION_MESSAGE_KINDS = frozenset({
   "auto_continuation",
 })
 
+# Product-owned child results travel through the ordinary user-message slot so
+# both provider transports receive them without a second execution channel.
+# They are hidden from the owner transcript and carry their own semantic kind
+# so Goal identity, summaries, and recency never mistake them for owner speech.
+DELEGATION_RESULT_MESSAGE_KIND = "delegation_result"
+
 
 def is_continuation_message(message: Mapping[str, Any] | None) -> bool:
   return bool(

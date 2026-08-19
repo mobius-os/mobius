@@ -138,6 +138,10 @@ test('continuation recovery preserves only an active goal', () => {
     active_goal_objective: 'authoritative goal',
   }, 'stale goal'), 'authoritative goal')
   assert.equal(goalObjectiveFromRuntime({
+    running: true,
+    active_goal_objective: 'Review every issue\nthen verify the result',
+  }), 'Review every issue then verify the result')
+  assert.equal(goalObjectiveFromRuntime({
     running: false,
     active_goal_objective: null,
   }, 'finished goal'), '')

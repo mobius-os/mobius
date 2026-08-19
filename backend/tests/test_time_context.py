@@ -103,6 +103,12 @@ def test_elapsed_ignores_automatic_continuation_marker(monkeypatch):
           "ts": (now - 5 * 60) * 1000,
         },
         {"role": "assistant", "content": "automatic reply"},
+        {
+          "role": "user", "content": "internal child result",
+          "kind": "delegation_result", "hidden": True,
+          "ts": (now - 60) * 1000,
+        },
+        {"role": "assistant", "content": "internal result folded"},
         {"role": "user", "content": "current owner message", "ts": now * 1000},
       ],
     ))

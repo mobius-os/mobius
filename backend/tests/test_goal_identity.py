@@ -99,3 +99,42 @@ def test_continue_does_not_revive_a_settled_plan(db, chat):
   assert goal_identity_for_run_start(
     db, chat.id, {"content": "continue"},
   ) == (None, None)
+
+
+def test_delegation_result_inherits_only_its_originating_goal(db, chat):
+  db.add_all([
+    models.ChatRun(
+      id="origin", root_run_id="origin", chat_id=chat.id,
+      status="completed", provider="codex", goal_objective="Ship it",
+      goal_id="origin-goal",
+    ),
+    models.ChatRun(
+      id="later", root_run_id="later", chat_id=chat.id,
+      status="completed", provider="codex", goal_objective="Different",
+      goal_id="later-goal",
+    ),
+  ])
+  db.commit()
+
+  assert goal_identity_for_run_start(db, chat.id, {
+    "content": "<delegation_results>[]</delegation_results>",
+    "kind": "delegation_result",
+    "hidden": True,
+    "source_work_id": "origin-goal",
+  }) == ("Ship it", "origin-goal")
+
+
+def test_delegation_result_without_a_goal_origin_stays_non_goal(db, chat):
+  db.add(models.ChatRun(
+    id="old", root_run_id="old", chat_id=chat.id,
+    status="completed", provider="codex", goal_objective="Old",
+    goal_id="old-goal",
+  ))
+  db.commit()
+
+  assert goal_identity_for_run_start(db, chat.id, {
+    "content": "result",
+    "kind": "delegation_result",
+    "hidden": True,
+    "source_work_id": "ordinary-root",
+  }) == (None, None)

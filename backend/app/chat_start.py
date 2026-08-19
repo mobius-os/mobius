@@ -33,6 +33,9 @@ from app.chat_writer import (
 async def start_programmatic_chat_turn(
   *, chat_id: str, title: str, content: str, provider: str,
   initiated_by_app_id: int | None = None,
+  hidden: bool = False,
+  message_kind: str | None = None,
+  source_work_id: str | None = None,
 ) -> bool:
   """Durably start one system-initiated turn if the chat can be claimed.
 
@@ -57,6 +60,12 @@ async def start_programmatic_chat_turn(
       "content": content,
       "ts": int(time.time() * 1000),
     }
+    if hidden:
+      user_msg["hidden"] = True
+    if message_kind is not None:
+      user_msg["kind"] = message_kind
+    if source_work_id is not None:
+      user_msg["source_work_id"] = source_work_id
     result = await await_ack(get_writer().submit(StartTurn(
       chat_id=chat_id,
       run_token=run_token,

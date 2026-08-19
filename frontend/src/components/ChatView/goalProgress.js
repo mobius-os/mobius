@@ -113,7 +113,9 @@ export function goalObjectiveAtRunStart(text, messages) {
 /** Keep a known goal through a rolling/recovered active runtime; idle ends it. */
 export function goalObjectiveFromRuntime(runtime, fallbackObjective = '') {
   if (!runtime?.running) return ''
-  return runtime.active_goal_objective || fallbackObjective || ''
+  return String(runtime.active_goal_objective || fallbackObjective || '')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 /**

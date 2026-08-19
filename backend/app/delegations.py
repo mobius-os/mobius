@@ -660,7 +660,7 @@ def _wake_eligible_rows_for_parent(
 
 
 def _compose_wake_notice(db: Session, rows: list[models.Delegation]) -> str:
-  """One system-user message enumerating every finished child as runtime DATA.
+  """Provider-facing payload for one hidden child-completion product event.
 
   Uses `derived_status` directly rather than `serialize_delegation` so composing
   the notice has no lifecycle-event side effect.
@@ -693,11 +693,16 @@ def _compose_wake_notice(db: Session, rows: list[models.Delegation]) -> str:
   )
 
 
-async def _append_wake_pending(content: str, parent_chat_id: str) -> bool:
+async def _append_wake_pending(
+  content: str,
+  parent_chat_id: str,
+  source_work_id: str,
+) -> bool:
   """Queue the notice behind the parent's running turn (caller holds the lock)."""
   import time
 
   from app.chat_writer import AppendPending, await_ack, get_writer
+  from app.continuations import DELEGATION_RESULT_MESSAGE_KIND
 
   ack = get_writer().submit(AppendPending(
     chat_id=parent_chat_id,
@@ -706,6 +711,9 @@ async def _append_wake_pending(content: str, parent_chat_id: str) -> bool:
       "role": "user",
       "content": content,
       "ts": int(time.time() * 1000),
+      "hidden": True,
+      "kind": DELEGATION_RESULT_MESSAGE_KIND,
+      "source_work_id": source_work_id,
     },
     initiated_by_app_id=None,
   ))
@@ -734,6 +742,7 @@ async def _deliver_parent_wake(parent_chat_id: str) -> bool:
   import app.chat_queue as chat_queue
   from app.chat import is_chat_running
   from app.chat_start import start_programmatic_chat_turn
+  from app.continuations import DELEGATION_RESULT_MESSAGE_KIND
   from app.database import SessionLocal
 
   async with chat_queue.get_lock(parent_chat_id):
@@ -743,6 +752,7 @@ async def _deliver_parent_wake(parent_chat_id: str) -> bool:
         return False
       ids = [row.id for row in rows]
       content = _compose_wake_notice(db, rows)
+      source_work_id = rows[-1].parent_root_run_id
       parent_chat = (
         db.query(models.Chat)
         .filter(models.Chat.id == parent_chat_id)
@@ -754,7 +764,9 @@ async def _deliver_parent_wake(parent_chat_id: str) -> bool:
 
     delivered = False
     if is_chat_running(parent_chat_id):
-      delivered = await _append_wake_pending(content, parent_chat_id)
+      delivered = await _append_wake_pending(
+        content, parent_chat_id, source_work_id,
+      )
     else:
       delivered = await start_programmatic_chat_turn(
         chat_id=parent_chat_id,
@@ -762,11 +774,16 @@ async def _deliver_parent_wake(parent_chat_id: str) -> bool:
         content=content,
         provider=provider,
         initiated_by_app_id=None,
+        hidden=True,
+        message_kind=DELEGATION_RESULT_MESSAGE_KIND,
+        source_work_id=source_work_id,
       )
       if not delivered:
         # The actor refused the start (for example, an owner question opened or
         # a real turn claimed the parent); queue the notice instead.
-        delivered = await _append_wake_pending(content, parent_chat_id)
+        delivered = await _append_wake_pending(
+          content, parent_chat_id, source_work_id,
+        )
 
     if not delivered:
       return False

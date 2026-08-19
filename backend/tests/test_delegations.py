@@ -214,6 +214,59 @@ def test_app_token_can_only_submit_bounded_work_under_its_own_child(
   assert escalated.status_code == 403
   assert "read-only" in escalated.json()["detail"]
 
+  # The backend is the single recursion-policy owner. Descendants may use the
+  # same guarded helper until the fourth level, where another child is refused
+  # regardless of what an installed helper or its documentation claims.
+  nested_parent = nested.json()["child_chat_id"]
+  for depth in (3, 4):
+    db.add(models.ChatRun(
+      id=f"depth-{depth}-parent-run",
+      root_run_id=f"depth-{depth}-parent-run",
+      chat_id=nested_parent,
+      status="running",
+      provider="claude",
+    ))
+    db.commit()
+    nested_parent_policy = policy_for_chat(db, nested_parent)
+    assert nested_parent_policy is not None
+    nested_auth = {
+      "Authorization": (
+        f"Bearer {delegation_execution_token(db, nested_parent_policy)}"
+      )
+    }
+    deeper = client.post("/api/delegations", json={
+      **body,
+      "parent_chat_id": nested_parent,
+      "task_key": f"depth-{depth}",
+      "prompt": f"Check depth {depth}.",
+    }, headers=nested_auth)
+    assert deeper.status_code == 201, deeper.text
+    nested_parent = deeper.json()["child_chat_id"]
+
+  db.add(models.ChatRun(
+    id="depth-limit-parent-run",
+    root_run_id="depth-limit-parent-run",
+    chat_id=nested_parent,
+    status="running",
+    provider="claude",
+  ))
+  db.commit()
+  depth_limit_policy = policy_for_chat(db, nested_parent)
+  assert depth_limit_policy is not None and depth_limit_policy.depth == 4
+  depth_limit_auth = {
+    "Authorization": (
+      f"Bearer {delegation_execution_token(db, depth_limit_policy)}"
+    )
+  }
+  rejected_depth = client.post("/api/delegations", json={
+    **body,
+    "parent_chat_id": nested_parent,
+    "task_key": "depth-5",
+    "prompt": "Exceed the recursion limit.",
+  }, headers=depth_limit_auth)
+  assert rejected_depth.status_code == 409
+  assert "maximum (4)" in rejected_depth.json()["detail"]
+
 
 def test_delegation_listing_exposes_run_usage_without_loading_result(
   client, owner_token, db, monkeypatch,
@@ -533,6 +586,9 @@ def test_child_completion_wakes_idle_parent_once(db, monkeypatch):
   assert "task-idle" in starts[0]["content"]
   assert "All 3 checks passed." in starts[0]["content"]
   assert starts[0]["initiated_by_app_id"] is None
+  assert starts[0]["hidden"] is True
+  assert starts[0]["message_kind"] == "delegation_result"
+  assert starts[0]["source_work_id"] == "root-idle"
   db.expire_all()
   assert db.get(models.Delegation, delegation_id).parent_woken_at is not None
 
@@ -579,9 +635,12 @@ def test_running_parent_gets_appended_not_started(db, monkeypatch):
   db.expire_all()
   parent = db.get(models.Chat, parent_id)
   pending = parent.pending_messages or []
-  assert any(
-    "task-run" in (m.get("content") or "") for m in pending
-  ), pending
+  wake = next(
+    m for m in pending if "task-run" in (m.get("content") or "")
+  )
+  assert wake["hidden"] is True
+  assert wake["kind"] == "delegation_result"
+  assert wake["source_work_id"] == "root-run"
   assert db.get(models.Delegation, delegation_id).parent_woken_at is not None
 
   # The queued notice survives the parent's own drain into a continuation.
@@ -595,6 +654,12 @@ def test_running_parent_gets_appended_not_started(db, monkeypatch):
     (m.get("content") or "") for m in (parent.messages or [])
   )
   assert "task-run" in promoted
+  promoted_wake = next(
+    m for m in (parent.messages or [])
+    if "task-run" in (m.get("content") or "")
+  )
+  assert promoted_wake["hidden"] is True
+  assert promoted_wake["kind"] == "delegation_result"
 
 
 def test_question_blocked_parent_gets_appended_not_started(db, monkeypatch):
@@ -613,8 +678,8 @@ def test_question_blocked_parent_gets_appended_not_started(db, monkeypatch):
     starts.append(kwargs)
     return False
 
-  async def append_pending(content, chat_id):
-    queued.append((content, chat_id))
+  async def append_pending(content, chat_id, source_work_id=None):
+    queued.append((content, chat_id, source_work_id))
     return True
 
   monkeypatch.setattr(chat_start_mod, "start_programmatic_chat_turn", blocked_start)
@@ -626,6 +691,7 @@ def test_question_blocked_parent_gets_appended_not_started(db, monkeypatch):
   assert len(queued) == 1
   assert queued[0][1] == parent_id
   assert "task-question" in queued[0][0]
+  assert queued[0][2] == "root-question"
   db.expire_all()
   parent = db.get(models.Chat, parent_id)
   assert parent.pending_question_id == "owner-decision"
@@ -648,6 +714,37 @@ def test_stopped_and_cancelled_children_do_not_wake(db, monkeypatch):
   db.expire_all()
   assert db.get(models.Delegation, stopped_id).parent_woken_at is None
   assert db.get(models.Delegation, cancelled_id).parent_woken_at is None
+
+
+def test_cancelling_an_owner_settles_descendants_before_the_parent(db):
+  _parent, child_owner, owner_id = _seed_delegation(
+    db, suffix="cancel-owner", child_status="running",
+  )
+  _same_parent, child_leaf, leaf_id = _seed_delegation(
+    db,
+    suffix="cancel-leaf",
+    parent_id=child_owner,
+    child_status="running",
+  )
+
+  assert asyncio.run(
+    delegations_mod.cancel_delegation_execution(owner_id)
+  ) is True
+
+  db.expire_all()
+  owner = db.get(models.Delegation, owner_id)
+  leaf = db.get(models.Delegation, leaf_id)
+  assert owner.cancelled_at is not None
+  assert leaf.cancelled_at is not None
+  owner_run = db.query(models.ChatRun).filter(
+    models.ChatRun.chat_id == child_owner,
+  ).first()
+  leaf_run = db.query(models.ChatRun).filter(
+    models.ChatRun.chat_id == child_leaf,
+  ).first()
+  assert owner_run.status == "stopped"
+  assert leaf_run.status == "stopped"
+  assert leaf.cancelled_at <= owner.cancelled_at
 
 
 def test_interrupted_child_does_not_wake_it_resumes(db, monkeypatch):
