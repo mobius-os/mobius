@@ -498,6 +498,7 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     })
     await page.waitForFunction(
       () => Number(sessionStorage.getItem('__load_count') || '0') >= 1,
+      undefined,
       { timeout: 20000 },
     )
 

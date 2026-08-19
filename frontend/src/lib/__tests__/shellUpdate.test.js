@@ -567,6 +567,22 @@ test('inspectShellUpdate reports a waiting generation as available', async () =>
   assert.equal(result.updateAvailable, true)
 })
 
+test('inspectShellUpdate preserves a handoff that settles during update()', async () => {
+  const oldWorker = { id: 'old' }
+  const newWorker = { id: 'new' }
+  const reg = makeReg({ active: oldWorker, waiting: newWorker })
+  const sw = makeSwWith(reg, { controller: oldWorker })
+  reg.update = async () => {
+    reg.waiting = null
+    reg.active = newWorker
+    sw.controller = newWorker
+  }
+
+  const result = await inspectShellUpdate({ serviceWorker: sw })
+  assert.equal(result.registration, reg)
+  assert.equal(result.updateAvailable, true,
+    'a document that witnessed a generation handoff still needs one navigation')
+})
 test('inspectShellUpdate reports an active worker newer than the controller', async () => {
   const oldWorker = { id: 'N' }
   const newWorker = { id: 'N+1' }

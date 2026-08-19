@@ -180,6 +180,15 @@ export async function inspectShellUpdate({
   let registration = null
   try { registration = await serviceWorker.getRegistration() } catch { /* unavailable */ }
   if (!registration) return { registration: null, updateAvailable: false }
+  // Keep transition evidence from before the forced update. A waiting worker
+  // can finish its takeover while update() settles (for example, a policy
+  // override or another tab may release it). Looking only at the final
+  // registration then reports "current" when active === controller, even
+  // though this document is still executing the outgoing bundle and needs one
+  // navigation to adopt the new shell. Likewise, a waiting worker disappearing
+  // during this inspection is itself proof that a generation handoff happened.
+  const waitingAtStart = registration.waiting || null
+  const controllerAtStart = serviceWorker.controller || null
   await settleRegistrationUpdate({
     registration,
     timeoutMs,
@@ -188,11 +197,13 @@ export async function inspectShellUpdate({
   })
   return {
     registration,
-    updateAvailable: hasNewerShellGeneration({
-      waiting: registration.waiting || null,
-      active: registration.active || null,
-      controller: serviceWorker.controller || null,
-    }),
+    updateAvailable: !!waitingAtStart
+      || (!!controllerAtStart && serviceWorker.controller !== controllerAtStart)
+      || hasNewerShellGeneration({
+        waiting: registration.waiting || null,
+        active: registration.active || null,
+        controller: serviceWorker.controller || null,
+      }),
   }
 }
 
