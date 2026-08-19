@@ -91,6 +91,38 @@ class Owner(Base):
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
 
+class IdentityLinkAttempt(Base):
+  """Single outstanding PKCE account-link attempt for the local owner.
+
+  A new start replaces the previous row, so only the most recent browser
+  window can complete. The verifier is encrypted and never enters app code.
+  """
+
+  __tablename__ = "identity_link_attempts"
+
+  owner_id = Column(
+    Integer, ForeignKey("owner.id", ondelete="CASCADE"), primary_key=True,
+  )
+  attempt_id = Column(String(64), nullable=False, unique=True, index=True)
+  state_digest = Column(String(64), nullable=False)
+  verifier_encrypted = Column(Text, nullable=False)
+  expires_at = Column(DateTime, nullable=False, index=True)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
+class IdentityAccountLink(Base):
+  """Revocable, encrypted mobius.you grant for a self-hosted owner."""
+
+  __tablename__ = "identity_account_links"
+
+  owner_id = Column(
+    Integer, ForeignKey("owner.id", ondelete="CASCADE"), primary_key=True,
+  )
+  access_token_encrypted = Column(Text, nullable=False)
+  scopes_json = Column(JSON, nullable=False, default=list)
+  linked_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
 class SystemPromptSnapshot(Base):
   """Deduplicated immutable prompt bytes captured at a chat's first turn."""
 
