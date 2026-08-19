@@ -296,7 +296,7 @@ def test_oauth_add_signin_broker_and_disconnect(client, auth, db, provider):
   # 5. Broker attaches the token to a loopback MCP call.
   db.expire_all()
   cap = core.mint_broker_capability(
-    cid, db.query(models.Connector).get(cid).capability_id,
+    cid, db.get(models.Connector, cid).capability_id,
   )
   with TestClient(client.app, client=("127.0.0.1", 43110)) as loopback:
     brokered = loopback.post(
@@ -313,7 +313,7 @@ def test_oauth_add_signin_broker_and_disconnect(client, auth, db, provider):
   refresh_before = db.query(models.ConnectorOAuth).filter_by(
     connector_id=cid).one().refresh_token_encrypted
   assert refresh_before is not None
-  gen_now = db.query(models.Connector).get(cid).capability_id
+  gen_now = db.get(models.Connector, cid).capability_id
   disconnected = client.post(
     f"/api/connectors/{cid}/oauth/disconnect",
     headers=_headers(auth, gen_now),
@@ -778,7 +778,7 @@ def test_callback_rejects_forged_state(client, auth, db, provider):
   assert forged.status_code == 200
   assert "failed" in forged.text
   db.expire_all()
-  assert db.query(models.Connector).get(created["id"]).status == "oauth_required"
+  assert db.get(models.Connector, created["id"]).status == "oauth_required"
 
 
 def test_callback_rejects_issuer_mismatch(client, auth, db, provider):

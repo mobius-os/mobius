@@ -1,11 +1,11 @@
 # backend/tests/test_recover.py
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from app import models
 
 
 def test_recover_deleted_chat(client, db, auth, chat):
   """The chat recovery endpoint must clear deleted_at."""
-  chat.deleted_at = datetime.utcnow() - timedelta(days=1)
+  chat.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=1)
   db.commit()
 
   res = client.post(f"/api/chats/{chat.id}/recover", headers=auth)
@@ -18,7 +18,7 @@ def test_recover_deleted_chat(client, db, auth, chat):
 
 def test_recover_expired_chat(client, db, auth, chat):
   """Chat recovery past the 7-day window must return 410."""
-  chat.deleted_at = datetime.utcnow() - timedelta(days=8)
+  chat.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
   db.commit()
 
   res = client.post(f"/api/chats/{chat.id}/recover", headers=auth)
