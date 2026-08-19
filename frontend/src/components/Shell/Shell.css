@@ -561,23 +561,27 @@
    guidance. The old drawer banner stays retired. Sub-app installation
    lives in the standalone card surfaced from drawer ⋮ on a mini-app. */
 
-  /* The one persistent offline indicator. */
-  .shell__offline {
+  /* One compact indicator covers both the initial reachability check and the
+     confirmed-offline retry loop. The live text remains available to assistive
+     technology without competing for scarce phone-header space. */
+  .shell__connection-spinner {
     align-self: center;
-    padding: 3px 10px;
-    border-radius: 999px;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--danger, #f87171);
-    background: color-mix(in srgb, var(--danger, #f87171) 14%, transparent);
-    border: 1px solid color-mix(in srgb, var(--danger, #f87171) 35%, transparent);
-    white-space: nowrap;
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    flex: 0 0 28px;
   }
-  .shell__offline--checking {
-    color: var(--accent, #8b6cf7);
-    background: color-mix(in srgb, var(--accent, #8b6cf7) 12%, transparent);
-    border-color: color-mix(in srgb, var(--accent, #8b6cf7) 30%, transparent);
+  .shell__connection-spinner::before {
+    content: "";
+    width: 14px;
+    height: 14px;
+    border: 2px solid color-mix(in srgb, var(--accent, #8b6cf7) 24%, transparent);
+    border-top-color: var(--accent, #8b6cf7);
+    border-radius: 50%;
+    animation: shell-connection-spin 750ms linear infinite;
   }
+  @keyframes shell-connection-spin { to { rotate: 1turn; } }
 /* The ONE Settings wrapper is a solid surface in BOTH geometries: full-bleed as
    the takeover overlay (single mode / flag off) and paned as a builder tab. The
    opaque bg is what keeps a tiled Settings pane from letting the chrome or a
@@ -763,6 +767,7 @@
   .shell__logo { transition: none; }
   .shell__wordmark { transition: none; }
   .shell__tab-text-inner { animation: none !important; }
+  .shell__connection-spinner::before { animation: none; }
   /* No completion motion under reduced motion — the ignite/snap AND the hold's
      descriptor-owned release are both skipped (the toggle commits instantly, so
      is-beat-held is never even emitted; this is the belt-and-braces). The direct
@@ -867,14 +872,6 @@
     top: 7px;
     right: 12px;
     margin: 0;
-  }
-
-  /* The expanded desktop header cannot fit the full wordmark, connection
-     status, search, and notifications without collision. Keep the logo as the
-     drawer control's visible identity while the status temporarily owns that
-     text lane. */
-  .shell--drawer-docked .shell__bar:has(.shell__offline) .shell__wordmark {
-    visibility: hidden;
   }
 
   .shell__rail-actions {

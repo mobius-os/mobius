@@ -3624,11 +3624,11 @@ export default function Shell({ onInitialVisualReady }) {
         <div className="shell__bar-actions">
           {reachabilityLabel && (
             <span
-              className={`shell__offline${reachabilityPhase === ReachabilityPhase.CHECKING ? ' shell__offline--checking' : ''}`}
+              className="shell__connection-spinner"
               role="status"
               aria-live="polite"
             >
-              {reachabilityLabel}
+              <span className="shell__sr-only">{reachabilityLabel}</span>
             </span>
           )}
           <ScreenControlButton chatId={activeChatId} onNotice={showToast} />
