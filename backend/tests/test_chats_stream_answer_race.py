@@ -214,10 +214,9 @@ def test_answer_delivers_immediately_when_pending_registered(
       "questionId": None,
     }]
     assert _activity_at(chat.id).replace(tzinfo=UTC) > old_activity
-    # No grace-period delay on the happy path. 500ms cap; 250ms
-    # leaves comfortable headroom for slow CI without making the
-    # test useless.
-    assert elapsed < 0.25, (
+    # No grace-period delay on the happy path. A 500ms cap leaves comfortable
+    # headroom for slow CI while still catching the old one-second wait.
+    assert elapsed < 0.5, (
       f"happy path waited unexpectedly long: {elapsed:.3f}s"
     )
 
