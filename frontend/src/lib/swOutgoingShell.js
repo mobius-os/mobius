@@ -11,11 +11,9 @@ export async function findOutgoingShellEntries(cacheStorage, shellPath = '/index
   for (const cacheName of await cacheStorage.keys()) {
     const cache = await cacheStorage.open(cacheName)
     for (const request of await cache.keys()) {
-      try {
-        if (new URL(request.url).pathname === shellPath) {
-          entries.push({ cacheName, request })
-        }
-      } catch { /* ignore malformed third-party cache keys */ }
+      if (new URL(request.url).pathname === shellPath) {
+        entries.push({ cacheName, request })
+      }
     }
   }
   return entries
