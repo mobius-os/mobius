@@ -1081,11 +1081,16 @@ test('a manual platform reconcile refreshes the persistent Settings surface', ()
   )
 })
 
-test('boot waits for an installing shell generation before deciding it is current', () => {
+test('boot delegates the complete shell generation decision to one inspector', () => {
   assert.match(
     shell,
-    /const reg = await navigator\.serviceWorker\.getRegistration\(\)[\s\S]*?await settleNewestWorkerForHandoff\(\{ registration: reg \}\)[\s\S]*?rearm = shouldRearmShellApply/,
+    /const \{ updateAvailable \} = await inspectShellUpdate\(\{[\s\S]*?serviceWorker: navigator\.serviceWorker,[\s\S]*?\}\)/,
   )
+})
+
+test('foreground return is a deliberate apply, not a passive visible-chat hold', () => {
+  assert.match(shell, /watchForShellUpdateOnForeground\(\{[\s\S]*?rearm: \(\) => requestShellReload\(\),/)
+  assert.doesNotMatch(shell, /rearm: \(\) => requestShellReload\(\{ passive: true \}\)/)
 })
 
 test('the builder no-full-screen invariant scopes to DESTINATIONS, not transient dialogs (§2)', () => {

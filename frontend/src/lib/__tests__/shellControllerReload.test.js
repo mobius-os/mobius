@@ -18,7 +18,7 @@ const shellSource = readFileSync(
 
 test('the boot script discovers workers but never owns a shell reload', () => {
   assert.match(indexHtml, /navigator\.serviceWorker\.register\('\/sw\.js'/)
-  assert.match(indexHtml, /recoverStalePrecacheIfNeeded/)
+  assert.doesNotMatch(indexHtml, /registration\.update|visibilitychange|serviceWorker\.ready/)
   assert.doesNotMatch(indexHtml, /reloadAfterControllerChange/)
   assert.doesNotMatch(indexHtml, /sw-skip-initiated|sw-auto-reloaded/)
   assert.doesNotMatch(
@@ -30,7 +30,7 @@ test('the boot script discovers workers but never owns a shell reload', () => {
 test('the shell controller has one deduplicated reload executor', () => {
   assert.match(controllerSource, /if \(performingRef\.current\) return/)
   assert.match(controllerSource, /const reload = \(\) => \{/)
-  assert.match(controllerSource, /settleNewestWorkerForHandoff\(\{ registration \}\)/)
+  assert.match(controllerSource, /inspectShellUpdate\(\{ serviceWorker: nav\.serviceWorker \}\)/)
   assert.doesNotMatch(controllerSource, /sw-skip-initiated|sw-auto-reloaded/)
 })
 

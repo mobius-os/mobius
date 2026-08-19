@@ -2,10 +2,9 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  inspectShellUpdate,
   reloadIfGenerationStale,
   reloadWhenWorkerTakesOver,
-  settleNewestWorkerForHandoff,
-  shouldRearmShellApply,
   watchForShellUpdateOnForeground,
   SW_DISCOVERY_SETTLE_TIMEOUT_MS,
   SW_TAKEOVER_TIMEOUT_MS,
@@ -238,18 +237,18 @@ test('finding 2: a redundant install falls back to the still-waiting generation'
   dispose()
 })
 
-test('watchForShellUpdateOnForeground: the stale-precache flag re-arms; dispose removes listeners', async () => {
+test('watchForShellUpdateOnForeground: dispose removes listeners', async () => {
   const controller = { id: 'a' }
   const reg = makeReg({ waiting: null, active: controller })
   const sw = makeSwWith(reg, { controller })
   const doc = makeDoc('visible')
   let rearms = 0
   const dispose = watchForShellUpdateOnForeground({
-    doc, win: null, serviceWorker: sw, readStaleFlag: () => true, rearm: () => { rearms += 1 },
+    doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 },
   })
   doc.emit('visibilitychange')
   await flush()
-  assert.equal(rearms, 1, 'a stale-precache flag alone re-arms')
+  assert.equal(rearms, 0)
   assert.equal(doc.count('visibilitychange'), 1)
   dispose()
   assert.equal(doc.count('visibilitychange'), 0, 'dispose unwires the visibility listener')
@@ -313,80 +312,86 @@ function fakeTimers() {
   }
 }
 
-test('settleNewestWorkerForHandoff: waits for the newest install before choosing a waiting worker', async () => {
+test('inspectShellUpdate waits for the newest install and returns its generation state', async () => {
   const workerA = { id: 'A' }
+  const active = { id: 'active' }
   const installingB = makeInstalling('installing')
   let updates = 0
   const reg = makeReg({
     waiting: workerA,
+    active,
     onUpdate: (current) => {
       updates += 1
       current.installing = installingB
     },
   })
+  const sw = makeSwWith(reg, { controller: active })
 
-  let settled = false
-  const handoffReady = settleNewestWorkerForHandoff({
-    registration: reg,
+  let result = null
+  const inspection = inspectShellUpdate({
+    serviceWorker: sw,
     setTimeoutFn: null,
-  }).then(() => { settled = true })
+  }).then(value => { result = value })
   await flush()
-  assert.equal(updates, 1, 'the handoff forces a fresh generation check')
-  assert.equal(settled, false, 'the older waiting worker is not chosen while B installs')
+  assert.equal(updates, 1, 'one inspection owns the fresh generation check')
+  assert.equal(result, null, 'the older waiting worker is not chosen while B installs')
   assert.equal(installingB.count('statechange'), 1)
 
   reg.waiting = { id: 'B' }
   installingB.become('installed')
-  await handoffReady
-  assert.equal(settled, true)
-  assert.equal(reg.waiting.id, 'B', 'the caller now sees the newest waiting generation')
+  await inspection
+  assert.equal(result.registration, reg)
+  assert.equal(result.updateAvailable, true)
+  assert.equal(reg.waiting.id, 'B')
   assert.equal(installingB.count('statechange'), 0)
 })
 
-test('settleNewestWorkerForHandoff: observes an installing worker published after update resolves', async () => {
-  const workerA = { id: 'A' }
+test('inspectShellUpdate observes a worker published one task after update resolves', async () => {
+  const active = { id: 'active' }
   const installingB = makeInstalling('installing')
   const queuedTasks = []
-  const reg = makeReg({ waiting: workerA })
-  let settled = false
+  const reg = makeReg({ waiting: null, active })
+  const sw = makeSwWith(reg, { controller: active })
+  let result = null
 
-  const handoffReady = settleNewestWorkerForHandoff({
-    registration: reg,
+  const inspection = inspectShellUpdate({
+    serviceWorker: sw,
     setTimeoutFn: fn => { queuedTasks.push(fn); return queuedTasks.length },
     clearTimeoutFn: () => {},
-  }).then(() => { settled = true })
+  }).then(value => { result = value })
   await flush()
-  assert.equal(queuedTasks.length, 1, 'the helper yields for the queued registration update')
+  assert.equal(queuedTasks.length, 1, 'inspection yields for the queued registration update')
 
   reg.installing = installingB
   reg.emit('updatefound')
   queuedTasks.shift()()
   await flush()
-  assert.equal(settled, false, 'the newly-published worker owns the handoff wait')
+  assert.equal(result, null, 'the late-published worker owns the inspection')
 
   reg.waiting = { id: 'B' }
   installingB.become('installed')
-  await handoffReady
-  assert.equal(settled, true)
+  await inspection
+  assert.equal(result.updateAvailable, true)
   assert.equal(reg.count('updatefound'), 0)
 })
 
-test('settleNewestWorkerForHandoff: a wedged install has a bounded escape', async () => {
+test('inspectShellUpdate has a bounded escape from a wedged install', async () => {
   const installing = makeInstalling('installing')
   const reg = makeReg({ installing })
+  const sw = makeSwWith(reg)
   const timers = fakeTimers()
-  let settled = false
-  const handoffReady = settleNewestWorkerForHandoff({
-    registration: reg,
+  let result = null
+  const inspection = inspectShellUpdate({
+    serviceWorker: sw,
     setTimeoutFn: timers.setTimeoutFn,
     clearTimeoutFn: timers.clearTimeoutFn,
-  }).then(() => { settled = true })
+  }).then(value => { result = value })
   await flush()
-  assert.equal(settled, false)
+  assert.equal(result, null)
   assert.equal(timers.count(), 1)
   timers.fire()
-  await handoffReady
-  assert.equal(settled, true)
+  await inspection
+  assert.equal(result.registration, reg)
   assert.equal(installing.count('statechange'), 0)
 })
 
@@ -505,32 +510,40 @@ test('SW_TAKEOVER_TIMEOUT_MS is a sane bounded fallback', () => {
   assert.ok(SW_DISCOVERY_SETTLE_TIMEOUT_MS >= 1000 && SW_DISCOVERY_SETTLE_TIMEOUT_MS <= 3000)
 })
 
-test('shouldRearmShellApply: healthy page (controller is the active worker) does not re-arm', () => {
-  const w = {}
-  assert.equal(shouldRearmShellApply({ active: w, controller: w }), false)
-  assert.equal(shouldRearmShellApply({}), false)
-  // Uncontrolled page (first install in progress) is not "stale".
-  assert.equal(shouldRearmShellApply({ active: {}, controller: null }), false)
-  // Active-less registration (no SW) is not "stale".
-  assert.equal(shouldRearmShellApply({ active: null, controller: {} }), false)
+test('inspectShellUpdate reports a healthy controlled generation as current', async () => {
+  const worker = { id: 'current' }
+  const reg = makeReg({ active: worker })
+  const result = await inspectShellUpdate({ serviceWorker: makeSwWith(reg, { controller: worker }) })
+  assert.equal(result.registration, reg)
+  assert.equal(result.updateAvailable, false)
 })
 
-test('shouldRearmShellApply: a stale-precache flag re-arms', () => {
-  assert.equal(shouldRearmShellApply({ stalePrecacheFlagged: true }), true)
+test('inspectShellUpdate reports a waiting generation as available', async () => {
+  const active = { id: 'active' }
+  const reg = makeReg({ active, waiting: { id: 'waiting' } })
+  const result = await inspectShellUpdate({ serviceWorker: makeSwWith(reg, { controller: active }) })
+  assert.equal(result.updateAvailable, true)
 })
 
-test('shouldRearmShellApply: a waiting worker re-arms (lost apply signal)', () => {
-  assert.equal(shouldRearmShellApply({ waiting: {} }), true)
-})
-
-test('shouldRearmShellApply: an active worker newer than the controller re-arms (feature 207)', () => {
+test('inspectShellUpdate reports an active worker newer than the controller', async () => {
   const oldWorker = { id: 'N' }
   const newWorker = { id: 'N+1' }
-  // reg.waiting is null in the settled 207 state — the identity mismatch is the
-  // only signal, and it must re-arm.
-  assert.equal(shouldRearmShellApply({
-    waiting: null, active: newWorker, controller: oldWorker,
-  }), true)
+  const reg = makeReg({ active: newWorker })
+  const result = await inspectShellUpdate({
+    serviceWorker: makeSwWith(reg, { controller: oldWorker }),
+  })
+  assert.equal(result.updateAvailable, true)
+})
+
+test('inspectShellUpdate treats first install and unavailable registration as current', async () => {
+  const firstInstall = makeReg({ active: { id: 'first' } })
+  assert.equal((await inspectShellUpdate({
+    serviceWorker: makeSwWith(firstInstall, { controller: null }),
+  })).updateAvailable, false)
+  assert.deepEqual(await inspectShellUpdate({ serviceWorker: null }), {
+    registration: null,
+    updateAvailable: false,
+  })
 })
 
 // --- reloadIfGenerationStale (recovery reload) ------------------------------
@@ -571,21 +584,6 @@ test('reloadIfGenerationStale: already newest generation → no reload, returns 
   })
   assert.equal(healed, false, 'a genuine bug on the newest build must not auto-reload')
   assert.equal(handedOff, 0)
-})
-
-test('reloadIfGenerationStale: stale-precache flag alone triggers self-heal', async () => {
-  const controller = { id: 'a' }
-  const reg = makeReg({ waiting: null, active: controller })
-  const sw = makeSwWith(reg, { controller })
-  let handedOff = 0
-  const healed = await reloadIfGenerationStale({
-    serviceWorker: sw,
-    reload: () => {},
-    readStaleFlag: () => true,
-    handoff: () => { handedOff += 1 },
-  })
-  assert.equal(healed, true, 'the Chromium stale-precache flag is a stale generation')
-  assert.equal(handedOff, 1)
 })
 
 test('reloadIfGenerationStale: no service worker → returns false (no reload)', async () => {

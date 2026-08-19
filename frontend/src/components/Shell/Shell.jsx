@@ -102,8 +102,7 @@ import {
   releaseComposerFocusLease,
 } from './composerFocusLease.js'
 import {
-  settleNewestWorkerForHandoff,
-  shouldRearmShellApply,
+  inspectShellUpdate,
   watchForShellUpdateOnForeground,
 } from './swHandoff.js'
 import './Shell.css'
@@ -2258,8 +2257,8 @@ export default function Shell({ onInitialVisualReady }) {
       requestEmptySingleNewChat, workspaceStateRef, activeChatIdRef])
 
   // Deferred shell-update pickup: a service worker that finished installing and
-  // is now WAITING (leashed — it never took over on its own), or index.html's
-  // boot-time stale-precache flag. Route it through the SAME hold-until-idle
+  // is now WAITING (leashed — it never took over on its own). Route it through
+  // the SAME hold-until-idle
   // path as a live shell_rebuilt (requestShellReload → apply if idle, else hold
   // the reload until the running turn ends). This recovers a lost apply race:
   // the SW generation that installed just after an earlier apply signal, a
@@ -2281,30 +2280,10 @@ export default function Shell({ onInitialVisualReady }) {
     shellUpdatePickupCheckStartedRef.current = true
     let cancelled = false
     ;(async () => {
-      // Snapshot the stale-generation signal before the live chat query. A
-      // waiting worker can activate and claim this page while that fetch is in
-      // flight; active === controller would then make a later re-check look
-      // current even though this document is still executing the old bundle.
-      let flagged = false
-      try { flagged = sessionStorage.getItem('sw-stale-precache-pending') === '1' } catch { /* ignore */ }
-      let rearm = flagged
-      if (navigator.serviceWorker?.getRegistration) {
-        try {
-          const reg = await navigator.serviceWorker.getRegistration()
-          // register()/update() resolve while a newly-discovered worker can
-          // still be INSTALLING. Deciding from registration.waiting at that
-          // instant loses the generation until another refresh. Settle the
-          // newest install first, then inspect the authoritative handoff state.
-          await settleNewestWorkerForHandoff({ registration: reg })
-          rearm = shouldRearmShellApply({
-            stalePrecacheFlagged: flagged,
-            waiting: reg?.waiting || null,
-            active: reg?.active || null,
-            controller: navigator.serviceWorker.controller || null,
-          })
-        } catch { /* ignore */ }
-      }
-      if (cancelled || !rearm) return
+      const { updateAvailable } = await inspectShellUpdate({
+        serviceWorker: navigator.serviceWorker,
+      })
+      if (cancelled || !updateAvailable) return
       try {
         await queryClient.fetchQuery({
           queryKey: chatQueries.keys.all,
@@ -2344,19 +2323,18 @@ export default function Shell({ onInitialVisualReady }) {
   // watch is the missing apply trigger: on every return to visible (and on
   // regaining connectivity) it forces a fresh sw.js fetch and, once a newer
   // generation is waiting/mismatched, routes it through the SAME apply-on-idle
-  // reload as a live shell_rebuilt — silent, and deferred while a turn streams or
+  // reload as a deliberate apply — silent, and deferred while a turn streams or
   // the owner is typing (requestShellReload reads streaming/view state from refs,
-  // so this closure staying out of the deps is correct). Gated by
-  // shouldRearmShellApply inside the watch, so a return with no new generation is a
+  // so this closure staying out of the deps is correct). Unlike a passive source
+  // rebuild, a foreground return is itself the safe boundary the owner chose;
+  // classifying it as passive would hold the update forever behind any visible
+  // idle chat. The shared inspector makes a return with no new generation a
   // no-op — no toast, no spurious reload.
   useEffect(() => watchForShellUpdateOnForeground({
     doc: typeof document !== 'undefined' ? document : null,
     win: typeof window !== 'undefined' ? window : null,
     serviceWorker: typeof navigator !== 'undefined' ? navigator.serviceWorker : null,
-    readStaleFlag: () => {
-      try { return sessionStorage.getItem('sw-stale-precache-pending') === '1' } catch { return false }
-    },
-    rearm: () => requestShellReload({ passive: true }),
+    rearm: () => requestShellReload(),
   }), [])
 
   // Handle non-content SSE events: theme changes, app updates, shell rebuilds.

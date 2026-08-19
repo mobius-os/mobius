@@ -8,8 +8,8 @@ import {
 import * as paneModel from './paneModel.js'
 import { shouldDeferShellReload } from './shellReloadPolicy.js'
 import {
+  inspectShellUpdate,
   reloadWhenWorkerTakesOver,
-  settleNewestWorkerForHandoff,
 } from './swHandoff.js'
 
 const RECHECK_MS = 6000
@@ -149,12 +149,6 @@ export default function useShellReloadController(inputs) {
       activeViewRef,
       drawerOpenRef,
     } = inputsRef.current
-    let stalePrecache = false
-    try { stalePrecache = storage.getItem('sw-stale-precache-pending') === '1' } catch { /* ignore */ }
-    if (stalePrecache && nav.onLine === false) {
-      deferReload({ passive })
-      return
-    }
     performingRef.current = true
     performingPassiveRef.current = passive
     pendingRef.current = false
@@ -166,14 +160,9 @@ export default function useShellReloadController(inputs) {
     }
 
     let registration = null
-    if (nav.serviceWorker?.getRegistration) {
-      try {
-        registration = await nav.serviceWorker.getRegistration()
-        await settleNewestWorkerForHandoff({ registration })
-      } catch {
-        registration = null
-      }
-    }
+    try {
+      ;({ registration } = await inspectShellUpdate({ serviceWorker: nav.serviceWorker }))
+    } catch { /* a plain reload remains available without a registration */ }
 
     win.dispatchEvent(new win.Event(BEFORE_SHELL_RELOAD_EVENT))
     await awaitCacheFlushBeforeReload(flushPersistedQueryCache(queryClient))
@@ -187,13 +176,6 @@ export default function useShellReloadController(inputs) {
       return
     }
     persistWorkspaceSnapshot()
-
-    if (stalePrecache) {
-      // Let the new worker replace its precache during activation. Deleting the
-      // active generation first leaves a failed reload with no Möbius document.
-      try { storage.removeItem('sw-stale-precache-pending') } catch { /* ignore */ }
-      try { storage.setItem('sw-stale-precache-recovering', '1') } catch { /* ignore */ }
-    }
 
     // Commit the route at the LAST possible instant. A navigation during the
     // worker handoff can still replace destinationRef and be revealed only by

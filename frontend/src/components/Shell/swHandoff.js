@@ -26,7 +26,7 @@ export const SW_DISCOVERY_SETTLE_TIMEOUT_MS = 2000
 // The wait is bounded: a wedged install must not strand the page. On timeout the
 // caller proceeds with the best currently-usable registration state and the
 // boot re-arm net can recover a later generation.
-export async function settleNewestWorkerForHandoff({
+async function settleRegistrationUpdate({
   registration,
   timeoutMs = SW_DISCOVERY_SETTLE_TIMEOUT_MS,
   setTimeoutFn = (typeof setTimeout !== 'undefined' ? setTimeout : null),
@@ -137,13 +137,10 @@ export function reloadWhenWorkerTakesOver({
   if (waiting.state === 'activated' || waiting.state === 'redundant') finish()
 }
 
-// Whether a freshly-mounted shell should re-arm its apply-on-idle reload because
-// the page is NOT running the generation the service worker now serves. Any one
-// of these means a newer shell generation exists that the page has not adopted;
-// re-arming routes it back through the same hold-until-idle apply path.
+// Whether the page is NOT running the generation the service worker now serves.
+// Either state means a newer shell generation exists that the page has not
+// adopted; callers route it through the same hold-until-idle apply path.
 //
-//   - stalePrecacheFlagged: index.html's boot check saw the page's bundle differ
-//     from network /sw.js (the Chromium stale-precache class) and flagged it.
 //   - waiting: a newer worker installed and is WAITING (leashed) — its apply
 //     signal was lost or has not fired yet.
 //   - active !== controller: the registration has an ACTIVE worker that is not
@@ -154,19 +151,49 @@ export function reloadWhenWorkerTakesOver({
 //     check cannot see; this identity comparison is what makes the 4-minute
 //     stale state impossible to sit in.
 //
-// Pure over a plain snapshot (`waiting`/`active`/`controller` are opaque worker
-// references compared by identity) so the decision is unit-testable without a
-// live service worker.
-export function shouldRearmShellApply({
-  stalePrecacheFlagged = false,
+// `waiting`/`active`/`controller` are opaque worker references compared by
+// identity. This predicate stays private so callers cannot bypass inspection.
+function hasNewerShellGeneration({
   waiting = null,
   active = null,
   controller = null,
 } = {}) {
-  if (stalePrecacheFlagged) return true
   if (waiting) return true
   if (active && controller && controller !== active) return true
   return false
+}
+
+// The single discovery boundary for every shell-update caller. It refreshes
+// the registration, waits through the browser's queued updatefound/install
+// lifecycle, and returns one authoritative decision with the registration that
+// decision belongs to. Boot, foreground return, error recovery, and explicit
+// apply must not each reconstruct a partial version of this sequence.
+export async function inspectShellUpdate({
+  serviceWorker,
+  timeoutMs = SW_DISCOVERY_SETTLE_TIMEOUT_MS,
+  setTimeoutFn = (typeof setTimeout !== 'undefined' ? setTimeout : null),
+  clearTimeoutFn = (typeof clearTimeout !== 'undefined' ? clearTimeout : null),
+} = {}) {
+  if (!serviceWorker || typeof serviceWorker.getRegistration !== 'function') {
+    return { registration: null, updateAvailable: false }
+  }
+  let registration = null
+  try { registration = await serviceWorker.getRegistration() } catch { /* unavailable */ }
+  if (!registration) return { registration: null, updateAvailable: false }
+  await settleRegistrationUpdate({
+    registration,
+    timeoutMs,
+    setTimeoutFn,
+    clearTimeoutFn,
+  })
+  return {
+    registration,
+    updateAvailable: hasNewerShellGeneration({
+      waiting: registration.waiting || null,
+      active: registration.active || null,
+      controller: serviceWorker.controller || null,
+    }),
+  }
 }
 
 // Error-recovery reload that ESCAPES a stale service-worker generation.
@@ -180,9 +207,8 @@ export function shouldRearmShellApply({
 // fetch (so a just-shipped worker is discovered), then hands control to a waiting
 // worker before reloading, so recovery lands on the NEWEST generation.
 //
-// Reloads ONLY when a newer generation actually exists, reusing the same "newer
-// generation available?" predicate the foreground watcher uses
-// (shouldRearmShellApply); returns whether it did. The auto-heal caller keeps a
+// Reloads ONLY when inspection finds a newer generation; returns whether it did.
+// The auto-heal caller keeps a
 // false as "genuine bug on the newest build → show the recovery panel, never
 // reload-loop"; the manual-refresh caller treats a false as "already newest →
 // honor the refresh with a plain reload". Deps are injected so the wiring is
@@ -190,23 +216,10 @@ export function shouldRearmShellApply({
 export async function reloadIfGenerationStale({
   serviceWorker,
   reload,
-  readStaleFlag = () => false,
   handoff = reloadWhenWorkerTakesOver,
 } = {}) {
-  if (!serviceWorker || typeof serviceWorker.getRegistration !== 'function') return false
-  let registration = null
-  try { registration = await serviceWorker.getRegistration() } catch { return false }
-  if (!registration) return false
-  if (typeof registration.update === 'function') {
-    try { await registration.update() } catch { /* offline / transient — decide on what we have */ }
-  }
-  const stale = shouldRearmShellApply({
-    stalePrecacheFlagged: readStaleFlag(),
-    waiting: registration.waiting || null,
-    active: registration.active || null,
-    controller: serviceWorker.controller || null,
-  })
-  if (!stale) return false
+  const { registration, updateAvailable } = await inspectShellUpdate({ serviceWorker })
+  if (!registration || !updateAvailable) return false
   handoff({ registration, serviceWorker, reload })
   return true
 }
@@ -219,12 +232,8 @@ export async function reloadIfGenerationStale({
 // a TRANSIENT push to currently-connected clients. A PWA that was BACKGROUNDED
 // across the deploy has its EventSource suspended and the event is never replayed
 // on reconnect, so it never learns a new bundle shipped. It also does not
-// re-mount, so the boot re-arm net (shouldRearmShellApply at mount) cannot
-// re-fire. index.html DOES call reg.update() on visibility, which installs the new
-// worker — but under the SW update leash that worker INSTALLS AND WAITS, and
-// index.html's watchdog only reloads on 'activated', which a leashed worker never
-// reaches on its own. So the update is discovered but nothing applies it, and the
-// page keeps serving the OLD bundle until a true cold start.
+// re-mount, so the boot inspection cannot re-fire. Without this watcher nothing
+// discovers and applies the waiting generation until a later navigation.
 //
 // This wires the missing apply at the owning layer (the apply-on-idle machine):
 // on every return to visible (and on regaining connectivity) it forces a fresh
@@ -232,17 +241,16 @@ export async function reloadIfGenerationStale({
 // The caller routes `rearm` to requestShellReload, which posts SKIP_WAITING to the
 // waiting worker and reloads at the next IDLE boundary — silent (no toast), and
 // deferred while a turn streams or the owner is typing, so the sacred stream is
-// never cut. Gated by shouldRearmShellApply, so a return with no new generation is
+// never cut. Gated by the shared inspector, so a return with no new generation is
 // a no-op (never a spurious reload → no reload loop: after the apply the page runs
 // the new generation, active === controller, nothing waits, decide() is false).
 //
-// Deps are injected (doc/win/serviceWorker/readStaleFlag/rearm) so the wiring is
+// Deps are injected (doc/win/serviceWorker/rearm) so the wiring is
 // unit-testable without a live service worker. Returns a dispose function.
 export function watchForShellUpdateOnForeground({
   doc,
   win,
   serviceWorker,
-  readStaleFlag = () => false,
   rearm,
 } = {}) {
   if (!doc || !serviceWorker || typeof serviceWorker.getRegistration !== 'function') {
@@ -257,30 +265,18 @@ export function watchForShellUpdateOnForeground({
   // request is only redundant/harmful.
   let applied = false
 
-  const decide = (reg) => {
-    if (disposed || applied || !reg) return
-    if (shouldRearmShellApply({
-      stalePrecacheFlagged: readStaleFlag(),
-      waiting: reg.waiting || null,
-      active: reg.active || null,
-      controller: serviceWorker.controller || null,
-    })) {
+  const decide = (updateAvailable) => {
+    if (disposed || applied) return
+    if (updateAvailable) {
       applied = true
       rearm()
     }
   }
 
   const runCheck = async () => {
-    let reg
-    try { reg = await serviceWorker.getRegistration() } catch { return }
-    if (disposed || !reg) return
-    // Discover and settle the newest generation before deciding. In browsers,
-    // update() may resolve one queued task before registration.installing and
-    // updatefound become observable; the shared helper owns that race as well as
-    // the newer-installing/older-waiting case.
-    await settleNewestWorkerForHandoff({ registration: reg })
+    const { updateAvailable } = await inspectShellUpdate({ serviceWorker })
     if (disposed) return
-    decide(reg)
+    decide(updateAvailable)
   }
 
   // Coalesce concurrent triggers (review finding 1): a near-simultaneous

@@ -386,7 +386,7 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     expect(await loadCount(page)).toBe(after)
   })
 
-  test('an idle apply lands the page on the new SW generation, not the outgoing one', async ({ page }) => {
+  test('returning to an idle visible chat adopts the new SW generation without a hard refresh', async ({ page }) => {
     // This case drives FOUR real service-worker generation steps (install gen A,
     // a second gen-A keeper client, install-and-wait gen B, then the mount-time
     // handoff) plus TWO full page reloads. Those sequential real-SW waits are
@@ -436,11 +436,21 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     await keeper.goto(BASE, { waitUntil: 'domcontentloaded' })
     await keeper.waitForFunction(() => !!navigator.serviceWorker?.controller, { timeout: 15000 })
 
+    // Reproduce the owner's real lifecycle: this installed shell is suspended
+    // while the deploy happens, so it misses the transient shell_rebuilt event.
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        value: 'hidden',
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+
     // Publish gen B; wait until it is installed and WAITING (leashed — the SW
     // never skipWaiting()s on its own).
     swMarker = 'e2e gen B'
-    await page.evaluate(async () => { await (await navigator.serviceWorker.getRegistration()).update() })
-    await page.waitForFunction(
+    await keeper.evaluate(async () => { await (await navigator.serviceWorker.getRegistration()).update() })
+    await keeper.waitForFunction(
       async () => !!(await navigator.serviceWorker.getRegistration())?.waiting,
       { timeout: 15000 },
     )
@@ -462,26 +472,20 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       })
     })
 
-    // The synthetic gen B changes only a trailing sw.js comment, so its
-    // advertised page bundle is intentionally identical to gen A. A real shell
-    // publish changes that bundle hash and the boot check sets this recovery
-    // flag; seed the same public signal so this case exercises the resulting
-    // new-document handoff rather than an indistinguishable no-op generation.
-    await page.evaluate(() => sessionStorage.setItem('sw-stale-precache-pending', '1'))
     await resetLoadCount(page)
-    // Re-mount the shell so its once-per-mount pickup finds the waiting worker and
-    // re-arms the idle apply — the recovery path a client hits when a newer
-    // generation is installed but the page has not adopted it.
-    await page.reload({ waitUntil: 'domcontentloaded' })
-
-    // Controller identity can flip to gen B while this document is still
-    // executing gen A's precached bundle. The explicit reload above is load 1;
-    // mount-time pickup must remember the pre-fetch stale-generation signal,
-    // hand off the worker, and perform load 2. Requiring that navigation proves
-    // the document generation changed instead of accepting controller takeover
-    // alone as a false positive.
+    // Return to the still-mounted chat. This used to find gen B but classify the
+    // apply as passive, so the visible idle chat held it forever and only a hard
+    // refresh escaped gen A. Foreground return is now the deliberate apply
+    // boundary; one ordinary shell reload must follow without another gesture.
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        value: 'visible',
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
     await page.waitForFunction(
-      () => Number(sessionStorage.getItem('__load_count') || '0') >= 2,
+      () => Number(sessionStorage.getItem('__load_count') || '0') >= 1,
       { timeout: 20000 },
     )
 
