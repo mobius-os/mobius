@@ -5,7 +5,7 @@
 <h1 align="center">Möbius</h1>
 
 <p align="center">
-  The open-source front page of agentic AI. Build apps, run agents, and improve the system with memory embedded.
+  Build apps with an agent. Memory, connected tools, background work, and source are built in.
 </p>
 
 <p align="center">
@@ -21,20 +21,19 @@
   <a href="#contribute-to-the-platform">Contribute</a>
 </p>
 
-## The front page of agentic AI
+## Build apps with everything included
 
-Möbius is a self-hosted workspace where Claude, Codex, apps, memory, skills, files, and source live together. Start with what exists, build what is missing, and keep the result in the same place where you use it.
+Möbius is a self-hosted workspace where apps, agents, memory, skills, files, and source live together. Start with what exists, build what is missing, and keep the result where you use it.
 
-Agents can work with you in chat, inside apps, or through scheduled background work. Memory carries useful context forward, while Reflection turns repeated friction into improvements you can inspect and choose to keep. The goal is maximum productivity through a loop: run useful work, remember what matters, and make the next run better.
+Agents can work with you in chat, inside apps, or through scheduled background work. Memory keeps useful context available. Reflection turns repeated friction into improvements that you can inspect and choose to keep.
 
 ![Current Möbius Builder mode with the drawer open and App Store and Contribute in two live panes](assets/product/app-building-showcase.png)
 
-This is the current product, not a diagram: the drawer, pane strips, App Store,
-app icons, and Contribute surface were captured from a running Möbius container.
+This is the current product, not a diagram. The drawer, pane strips, App Store, app icons, and Contribute surface were captured from a running Möbius container. Visit the [live app-building story](https://mobius.you/#build) to open Builder mode, install Habits, place it on a phone home screen, and open it standalone.
 
 ## Start with the App Store
 
-The App Store includes everyday tools and the parts that help Möbius run itself. Browse apps for writing, planning, learning, health, creation, memory, connected tools, background work, and development. Its collections, summaries, state, and icons come from the published app manifests.
+The App Store includes everyday tools and the parts that help Möbius run itself. Browse apps for writing, planning, learning, health, creation, memory, connected tools, background work, and development. Its collections, summaries, state, and icons come from the published app manifests. The [live App Store explorer](https://mobius.you/#apps) renders the current icons in one interactive grid.
 
 ![The current Möbius App Store with its Browse and From URL tabs, filters, collections, and vertical app cards](assets/product/app-store.png)
 
@@ -112,7 +111,7 @@ No autonomous rewrite ships without a person in the loop. Agents can prepare cha
 
 ## Use the same workspace on phone and web
 
-Möbius runs as a progressive web app (PWA). On the web, Builder mode can open the app an agent is creating in a new pane beside the conversation. On mobile, the result arrives in a new tab while the composer keeps files, model choice, continuation controls, and memory context within reach. Different devices can build different apps; they do not have to be mirrored views of the same example.
+Möbius runs as a progressive web app (PWA). On the web, Builder mode can open the app an agent is creating in a new pane beside the conversation. On mobile, the result arrives in a new tab while the composer keeps files, continuation controls, and memory context within reach. Different devices can build different apps; they do not have to be mirrored views of the same example.
 
 <table>
   <tr>
@@ -121,19 +120,17 @@ Möbius runs as a progressive web app (PWA). On the web, Builder mode can open t
   </tr>
   <tr>
     <td><strong>Web:</strong> keep the drawer and several working panes visible together.</td>
-    <td><strong>Mobile:</strong> press + for files, model, continuation, summary, and agent context.</td>
+    <td><strong>Mobile:</strong> press + for files, continuation, summary, and agent context.</td>
   </tr>
 </table>
 
-An installed app can also become its own home-screen entry. Open the app's
-drawer actions, choose **Install to home screen**, confirm its current icon and
-name, then finish the browser handoff.
+An installed app can also become its own home-screen entry. Open the app's drawer actions, choose **Install to home screen**, confirm its current icon and name, then finish the browser handoff. The [interactive mobile sequence](https://mobius.you/#build) shows Habits moving from the install sheet to the home screen and opening standalone.
 
 ![Tandem selected in the Möbius drawer, followed by the Add to home screen sheet and install handoff](assets/product/mobile-install-to-home.png)
 
 ## Memory and self-improvement are built in
 
-Memory connects facts, decisions, preferences, and projects so useful context can survive the conversation where it first appeared. Reflection runs on a schedule, reviews completed work, and turns recurring friction into a better default, skill, app change, or proposal.
+Memory connects facts, decisions, preferences, and projects so useful context can survive the conversation where it first appeared. Reflection runs on a schedule, reviews completed work, and turns recurring friction into a better setting, skill, app change, or proposal.
 
 <table>
   <tr>
@@ -152,9 +149,7 @@ Themes can still reshape the full workspace, while Git history keeps agent-made 
 
 Möbius grows with the needs of the people using it. Anyone can build an app or platform change for their own work. When an idea helps beyond one person, Contribute gives it a path back to the community. Shared apps and platform improvements can raise the starting point for everyone.
 
-Contribute keeps that path inspectable. A private review agent can refresh a
-proposal before it is sent; a security audit can trace permission-bearing paths;
-GitHub checks and labels stay visible; and nothing is published automatically.
+Contribute keeps that path inspectable. A private review agent can refresh a proposal before it is sent. A security audit can trace permission-bearing paths. GitHub checks and labels stay visible, and nothing is published automatically. Try the [live review and security-check controls](https://mobius.you/#agents).
 
 ![The current Contribute app showing an agent follow-up, a security review, and passing GitHub checks](assets/product/contribute-agent-review.png)
 
@@ -184,9 +179,7 @@ Möbius uses an agent account you already control. Connect one of these provider
 - **OpenAI Codex**: sign in with a ChatGPT plan that includes Codex access. Usage limits depend on the plan.
 - **Claude Code**: sign in with a supported Claude Code plan
 
-Möbius uses provider sign-in, so the default setup does not require a separate API key. Reflection is its adaptive overnight meta-loop: it learns from recent work, anticipates likely needs, improves recurring workflows, and evolves its own operating model over time.
-
-Möbius always resolves a concrete named model for the active provider. First-run chats and initial background agents share the same programmatic Claude/Codex model map, and the picker never exposes an unnamed model state.
+Möbius uses provider sign-in, so setup does not require a separate application programming interface (API) key. Reflection is its adaptive overnight loop: it learns from recent work, anticipates likely needs, and improves recurring workflows.
 
 ## Launch your Möbius
 
