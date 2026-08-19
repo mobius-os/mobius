@@ -106,6 +106,7 @@ import {
   inspectShellUpdate,
   watchForShellUpdateOnResume,
 } from '../../lib/shellUpdate.js'
+import { watchChatStateOnResume } from './shellChatState.js'
 import './Shell.css'
 import './workspace.css'
 import WorkspaceChrome from './WorkspaceChrome.jsx'
@@ -1863,10 +1864,20 @@ export default function Shell({ onInitialVisualReady }) {
       .catch(() => queryClient.getQueryData(appQueries.keys.all) || [])
   }, [queryClient, reconcileApps])
   const refreshChats = useCallback(() => {
-    return queryClient.refetchQueries({ queryKey: chatQueries.keys.all })
-      .then(() => queryClient.getQueryData(chatQueries.keys.all) || [])
-      .catch(() => [])
-  }, [queryClient])
+    // Shell-level chat state (running, waiting for owner input, activity) is
+    // durable and must win over a transient event that may have been missed
+    // while the page was suspended or the server restarted. Cancel first so
+    // this reconciliation cannot coalesce with an older in-flight list read
+    // and then overwrite a newer event projection with its stale response.
+    return queryClient.cancelQueries({ queryKey: chatQueries.keys.all })
+      .then(() => queryClient.fetchQuery({
+        queryKey: chatQueries.keys.all,
+        queryFn: async () => reconcileCreatedChats(await chatQueries.list.fetch()),
+        staleTime: 0,
+      }))
+      .then(data => data || [])
+      .catch(() => queryClient.getQueryData(chatQueries.keys.all) || [])
+  }, [queryClient, reconcileCreatedChats])
   const projectChatList = useCallback((project) => {
     queryClient.setQueryData(chatQueries.keys.all, current => {
       const next = project(Array.isArray(current) ? current : [])
@@ -2609,6 +2620,15 @@ export default function Shell({ onInitialVisualReady }) {
     refreshChats,
   ])
   useSystemEventStream(handleSystemEvent, { onOpen: reconcileSystemStateOnOpen })
+
+  // The system event stream is an accelerator, not the source of truth. A PWA
+  // can suspend it without a clean disconnect, and process-local events are not
+  // replayed after restart. Returning to the page is a durable reconcile point.
+  useEffect(() => watchChatStateOnResume({
+    doc: typeof document !== 'undefined' ? document : null,
+    win: typeof window !== 'undefined' ? window : null,
+    reconcile: () => invalidateShellListCache('chats').then(refreshChats),
+  }), [refreshChats])
 
   // Service-worker messages arrive on navigator.serviceWorker, not the window
   // message bus used by AppCanvas. Keep this listener limited to notification
