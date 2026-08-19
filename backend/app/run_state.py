@@ -86,18 +86,22 @@ def goal_identity_for_run_start(
   if (
     previous is not None
     and previous.goal_objective is not None
-    and previous.goal_id is not None
-    and (
-      (
-        semantic_continuation
-        and previous.status in (
-          *models.NONTERMINAL_RUN_STATUSES, "interrupted",
-        )
-      )
-      or _goal_plan_is_unfinished(db, chat_id, previous.goal_id)
-    )
   ):
-    return previous.goal_objective, previous.goal_id
+    if (
+      semantic_continuation
+      and previous.status in (
+        *models.NONTERMINAL_RUN_STATUSES, "interrupted",
+      )
+    ):
+      # Pre-identity Goal rows can still exist in backups and fixtures. Keep
+      # their objective through an explicit semantic continuation; the normal
+      # migration supplies a stable id for current production rows.
+      return previous.goal_objective, previous.goal_id
+    if (
+      previous.goal_id is not None
+      and _goal_plan_is_unfinished(db, chat_id, previous.goal_id)
+    ):
+      return previous.goal_objective, previous.goal_id
   if not semantic_continuation:
     return None, None
 
