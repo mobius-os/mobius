@@ -1908,6 +1908,16 @@ export default function ChatView({
       return response.json()
     }
 
+    const settleSupersededActivation = () => {
+      // A fresh send or Stop has advanced the local generation and now owns
+      // the mounted transcript. The stale activation must not apply its
+      // server snapshot, but it still owns the entry gate it opened above.
+      // Retire that gate so the newer local owner can become paintable.
+      setInitialEntryPhase('ready')
+      setLoading(false)
+      setActivationSettled(true)
+    }
+
     const settleRuntime = (runtime, visibleMessages) => {
       const running = !!runtime.running
       const attachesToStream = shouldAttachRunningStream({
@@ -2004,7 +2014,11 @@ export default function ChatView({
         detailCache = chatDetailCacheValue(runtime)
       }
 
-      if (cancelled || fetchGenRef.current !== gen) return
+      if (cancelled) return
+      if (fetchGenRef.current !== gen) {
+        settleSupersededActivation()
+        return
+      }
       const msgs = detailCache.messages
       const failedAttempt = failedSendAttemptRef.current
       if (failedAttempt) {
@@ -2135,14 +2149,7 @@ export default function ChatView({
         await yieldToMainThread()
         if (cancelled) return
         if (fetchGenRef.current !== gen) {
-          // A newer generation owns the runtime now (a fresh send, or Stop
-          // clearing the queue), so this fetch must NOT apply its own runtime
-          // state — settleRuntime would re-hydrate the queue Stop just
-          // cleared. But 'preparing' is a hidden gate that only this path
-          // sets, and neither superseding path releases it: returning here
-          // without releasing it strands the chat blank until remount.
-          setInitialEntryPhase('ready')
-          setLoading(false)
+          settleSupersededActivation()
           return
         }
         // React may batch state updates across async task yields and discard
@@ -2156,6 +2163,10 @@ export default function ChatView({
     loadActivation()
       .catch((err) => {
         if (cancelled) return
+        if (fetchGenRef.current !== gen) {
+          settleSupersededActivation()
+          return
+        }
         // Offline degradation may use a complete cached restoration window,
         // but never a truncated one that cannot resolve the saved address.
         const cacheIsSafeFallback = activationCache

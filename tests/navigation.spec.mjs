@@ -351,6 +351,62 @@ async function goForward(page) {
 test.use({ serviceWorkers: 'block' })
 
 test.describe('Navigation basics', () => {
+  test('a first send retires the cold activation gate it supersedes', async ({ page }) => {
+    let releaseChatDetail
+    const wait = new Promise(resolve => { releaseChatDetail = resolve })
+    const blank = {
+      ...NAV_CHATS[0],
+      title: 'Cold empty chat',
+      has_messages: false,
+    }
+
+    await setup(page, undefined, {
+      chats: [blank],
+      detailForChat: emptyChatDetail,
+      chatDetailGate: { id: blank.id, wait },
+    })
+
+    let releaseStream
+    const streamWait = new Promise(resolve => { releaseStream = resolve })
+    let sendRequests = 0
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
+      sendRequests += 1
+      return route.fulfill({ status: 202, body: '{}' })
+    })
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
+      await streamWait
+      return route.fulfill({ status: 204, body: '' })
+    })
+
+    try {
+      const composer = page.locator('#main-content')
+        .getByRole('textbox', { name: 'Message Möbius…' })
+      await expect(composer).toBeVisible()
+      await composer.fill('Visible after superseding the cold read')
+      await composer.press('Enter')
+
+      await expect.poll(() => sendRequests).toBe(1)
+      releaseChatDetail()
+
+      const painted = page.locator(
+        `[data-chat-surface="painted"][data-chat-id="${blank.id}"]`,
+      )
+      const userRow = painted.locator('.chat__msg--user')
+      await expect(userRow).toContainText('Visible after superseding the cold read')
+      await expect(userRow).toBeVisible()
+
+      const position = await userRow.evaluate((row) => {
+        const scroll = row.closest('.chat__scroll')
+        return Math.round(row.getBoundingClientRect().top - scroll.getBoundingClientRect().top)
+      })
+      expect(position).toBeGreaterThanOrEqual(-2)
+      expect(position).toBeLessThanOrEqual(10)
+    } finally {
+      releaseChatDetail()
+      releaseStream()
+    }
+  })
+
   test('1. Initial state — chat view, URL is /shell/', async ({ page }) => {
     await setup(page)
     const state = await getNavState(page)
