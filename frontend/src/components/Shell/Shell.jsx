@@ -1677,6 +1677,16 @@ export default function Shell({ onInitialVisualReady }) {
   // setter form lets us avoid depending on the previous state.
   const markStreamingStart = useCallback((chatId) => {
     if (!chatId) return
+    // The reload controller reads this ref synchronously while an async worker
+    // takeover is settling. Publish the safety hold before React schedules the
+    // rendered Set; otherwise a send can land in the one-render gap and the
+    // queued reload tears down its optimistic row and scroll pin. Ending may
+    // lag conservatively until the effect above runs, but starting never may.
+    if (!streamingChatIdsRef.current.has(chatId)) {
+      const next = new Set(streamingChatIdsRef.current)
+      next.add(chatId)
+      streamingChatIdsRef.current = next
+    }
     setLocalStreamingChatIds(prev => {
       if (prev.has(chatId)) return prev
       const next = new Set(prev)
@@ -1713,7 +1723,10 @@ export default function Shell({ onInitialVisualReady }) {
   }, [])
 
   const markVoiceListening = useCallback((listening) => {
-    setVoiceDictationActive(!!listening)
+    const active = !!listening
+    // Dictation is protected by the same immediate reload boundary as a send.
+    voiceDictationActiveRef.current = active
+    setVoiceDictationActive(active)
   }, [])
 
   const clearChatAttention = useCallback((chatId) => {

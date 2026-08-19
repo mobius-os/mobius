@@ -871,6 +871,16 @@ test('chat drawer indicators distinguish owner input, active work, and unseen co
   )
   assert.match(
     shell,
+    /const markStreamingStart = useCallback\(\(chatId\) => \{[\s\S]*?streamingChatIdsRef\.current = next[\s\S]*?setLocalStreamingChatIds/,
+    'a send must publish its reload hold before React schedules the rendered run state',
+  )
+  assert.match(
+    shell,
+    /const markVoiceListening = useCallback\(\(listening\) => \{[\s\S]*?voiceDictationActiveRef\.current = active[\s\S]*?setVoiceDictationActive\(active\)/,
+    'dictation must publish the same reload hold before React schedules its rendered state',
+  )
+  assert.match(
+    shell,
     /ev\.type === 'chat_run_finished'[\s\S]*?!visibleChatIdsRef\.current\.has\(String\(chatId\)\)(?:(?!chatQueries\.messages\.refresh)[\s\S])*?setAttentionChatIds/,
     'a hidden finished chat must raise attention without parsing its transcript',
   )

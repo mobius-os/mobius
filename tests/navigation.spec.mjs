@@ -152,12 +152,14 @@ async function setup(
   await page.route(/\/api\/chats\/([0-9a-f-]+)(?:\?.*)?$/, route => {
     if (route.request().method() !== 'GET') return route.fallback()
     const id = new URL(route.request().url()).pathname.split('/').pop()
+    // Capture the body when the request begins. A delayed cold read represents
+    // that older server snapshot; later reads may observe a message accepted
+    // while it was in flight without rewriting history inside the fixture.
+    const detail = detailForChat ? detailForChat(id) : navChatDetail(id, assistantContent)
     const fulfill = () => route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(
-        detailForChat ? detailForChat(id) : navChatDetail(id, assistantContent),
-      ),
+      body: JSON.stringify(detail),
     })
     return chatDetailGate?.id === id
       ? chatDetailGate.wait.then(fulfill)
@@ -354,6 +356,8 @@ test.describe('Navigation basics', () => {
   test('a first send retires the cold activation gate it supersedes', async ({ page }) => {
     let releaseChatDetail
     const wait = new Promise(resolve => { releaseChatDetail = resolve })
+    let runtimeRunning = false
+    let acceptedMessage = null
     const blank = {
       ...NAV_CHATS[0],
       title: 'Cold empty chat',
@@ -362,16 +366,49 @@ test.describe('Navigation basics', () => {
 
     await setup(page, undefined, {
       chats: [blank],
-      detailForChat: emptyChatDetail,
+      detailForChat: () => ({
+        ...emptyChatDetail(),
+        messages: acceptedMessage ? [acceptedMessage] : [],
+        total: acceptedMessage ? 1 : 0,
+        running: runtimeRunning,
+      }),
       chatDetailGate: { id: blank.id, wait },
     })
 
     let releaseStream
     const streamWait = new Promise(resolve => { releaseStream = resolve })
     let sendRequests = 0
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/runtime(?:\?.*)?$/, route => {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          running: runtimeRunning,
+          active_goal_objective: null,
+          pending_messages: [],
+          pending_question_id: null,
+          updated_at: null,
+        }),
+      })
+    })
     await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
       sendRequests += 1
-      return route.fulfill({ status: 202, body: '{}' })
+      runtimeRunning = true
+      const request = route.request().postDataJSON()
+      acceptedMessage = {
+        role: 'user',
+        content: request.content,
+        ts: Date.now(),
+        cid: request.cid,
+      }
+      return route.fulfill({
+        status: 202,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          status: 'started',
+          message: acceptedMessage,
+        }),
+      })
     })
     await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
       await streamWait
@@ -379,7 +416,10 @@ test.describe('Navigation basics', () => {
     })
 
     try {
-      const composer = page.locator('#main-content')
+      const painted = page.locator(
+        `[data-chat-surface="painted"][data-chat-id="${blank.id}"]`,
+      )
+      const composer = painted
         .getByRole('textbox', { name: 'Message Möbius…' })
       await expect(composer).toBeVisible()
       await composer.fill('Visible after superseding the cold read')
@@ -388,9 +428,6 @@ test.describe('Navigation basics', () => {
       await expect.poll(() => sendRequests).toBe(1)
       releaseChatDetail()
 
-      const painted = page.locator(
-        `[data-chat-surface="painted"][data-chat-id="${blank.id}"]`,
-      )
       const userRow = painted.locator('.chat__msg--user')
       await expect(userRow).toContainText('Visible after superseding the cold read')
       await expect(userRow).toBeVisible()
