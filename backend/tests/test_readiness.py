@@ -117,7 +117,7 @@ def test_external_schema_repair_requires_a_clean_startup(client):
     ready = client.get("/api/ready")
     assert ready.status_code == 503
     assert ready.json()["reason"] == "schema_mismatch"
-    assert main_module._SCHEMA_GAPS == ["apps.paused_capabilities"]
+    assert main_module._MAPPED_SCHEMA_GAPS == ["apps.paused_capabilities"]
   finally:
     main_module._set_database_boot_state(DatabaseBootResult())
 

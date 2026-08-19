@@ -223,7 +223,7 @@ the single-writer persistence actor. Deployment and container probes use
 readiness. `GET /api/health/strict` retains the database-only diagnostic
 contract.
 
-Boot runs `create_all`, append-only migrations, and `orm_schema_gaps()` before
+Boot runs `create_all`, append-only migrations, and `mapped_schema_gaps()` before
 starting any database owner. A migration/initialization failure or remaining
 mapped-shape gap enters one bounded degraded mode: ordinary APIs return a
 deterministic 503, database startup tasks and supervisors do not run, cron

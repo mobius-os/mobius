@@ -76,7 +76,7 @@ frozen previous-release input; never regenerate it from current metadata,
 which would make a missing `ALTER TABLE` invisible. Advance that fixture only
 as an explicit release-baseline change. The upgrade contract runs production's
 `create_all` → migrations order twice, requires an idempotent ledger, and then
-requires `orm_schema_gaps()` to be empty.
+requires `mapped_schema_gaps()` to be empty.
 
 The history gate compares migration-owned code with the target branch itself:
 published functions and their local helpers cannot change, and new versions

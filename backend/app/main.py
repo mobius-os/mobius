@@ -42,7 +42,7 @@ from app.database import (
   reset_database_request_label,
   set_database_request_label,
 )
-from app.schema_migrations import orm_schema_gaps, run_migrations
+from app.schema_migrations import mapped_schema_gaps, run_migrations
 from app.http_caching import strip_range
 from app.frontend_assets import (
   baked_frontend_dir,
@@ -85,23 +85,23 @@ _BOOT_ID = os.environ.get("MOBIUS_BOOT_ID") or f"{os.getpid()}-{time.time_ns()}"
 # One boot verdict feeds startup ownership, middleware, and every health probe.
 # These stay fixed until restart: Recovery may repair the database externally,
 # but only a clean boot can coherently start the skipped database owners.
-_SCHEMA_GAPS: list[str] = []
+_MAPPED_SCHEMA_GAPS: list[str] = []
 _DATABASE_INIT_FAILURE: str | None = None
 
 
 def _set_database_boot_state(result) -> None:
   global _DATABASE_INIT_FAILURE
-  _SCHEMA_GAPS[:] = result.schema_gaps
+  _MAPPED_SCHEMA_GAPS[:] = result.schema_gaps
   _DATABASE_INIT_FAILURE = result.failure_reason
 
 
 def _database_degraded_payload() -> dict | None:
   if _DATABASE_INIT_FAILURE:
     return {"reason": _DATABASE_INIT_FAILURE}
-  if _SCHEMA_GAPS:
+  if _MAPPED_SCHEMA_GAPS:
     return {
       "reason": "schema_mismatch",
-      "schema_gaps": list(_SCHEMA_GAPS),
+      "schema_gaps": list(_MAPPED_SCHEMA_GAPS),
     }
   return None
 
@@ -137,7 +137,7 @@ def _init_db():
     try:
       Base.metadata.create_all(bind=engine)
       run_migrations(engine)
-      gaps = orm_schema_gaps(engine)
+      gaps = mapped_schema_gaps(engine)
       if gaps:
         # A mapped column with no migration fails at first query, not at
         # boot. Surface it loudly here and through /api/health(+/strict)
