@@ -84,6 +84,29 @@ def test_frame_returns_etag_and_cache_control(client, owner_token):
   assert "allow-same-origin" not in sandbox
 
 
+def test_loopback_frame_can_fetch_from_its_delivery_origin(
+  client, owner_token,
+):
+  """The authenticated visual-test harness serves frames over loopback.
+
+  An opaque sandbox does not treat CSP ``'self'`` as that delivery origin, so
+  the exact loopback origin must be named without changing the production
+  frame policy.
+  """
+  app_id = _make_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, "loopback-frame-test",
+  )
+
+  response = client.get(
+    f"/api/apps/{app_id}/frame",
+    headers={"host": "127.0.0.1:8123"},
+  )
+
+  policy = response.headers["content-security-policy"]
+  assert "connect-src" in policy
+  assert "http://127.0.0.1:8123" in policy
+
+
 def test_frame_304_on_matching_if_none_match(client, owner_token):
   """Repeated GET with the previous ETag returns 304 + empty body —
   closes the round-trip without re-sending the frame HTML."""

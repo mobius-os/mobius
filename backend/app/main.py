@@ -344,14 +344,34 @@ _APP_FRAME_PATH = re.compile(r"^/api/apps/[^/]+/frame$")
 # and it still cannot reach the shell's localStorage, cookies, or owner token.
 _STATIC_EMBED_CSP = static_embed_csp(settings.frontend_origin)
 _SHELL_CSP = shell_csp(os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", ""))
+_SERVICE_GATEWAY_ORIGIN = os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", "")
+_BROWSER_API_ORIGIN = os.environ.get("API_BASE_URL", "")
 _APP_FRAME_CSP = app_frame_csp(
   settings.frontend_origin,
-  os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", ""),
+  _SERVICE_GATEWAY_ORIGIN,
   # Only an explicitly configured browser-reachable API origin belongs in a
   # frame policy. settings.api_base_url defaults to backend-local localhost
   # for agents and jobs, which must not become the viewer's localhost.
-  os.environ.get("API_BASE_URL", ""),
+  _BROWSER_API_ORIGIN,
 )
+
+
+def _loopback_delivery_origin(scope) -> str | None:
+  """Return the exact loopback origin serving this request, if any."""
+  headers = dict(scope.get("headers") or ())
+  try:
+    authority = headers.get(b"host", b"").decode("ascii")
+    hostname = authority.rsplit("@", 1)[-1].rsplit(":", 1)[0].strip("[]")
+    is_loopback = (
+      hostname == "localhost"
+      or ipaddress.ip_address(hostname).is_loopback
+    )
+  except (UnicodeDecodeError, ValueError):
+    return None
+  if not is_loopback:
+    return None
+  scheme = str(scope.get("scheme") or "http")
+  return f"{scheme}://{authority}"
 
 
 def _static_embed_csp_for_scope(scope) -> str:
@@ -362,20 +382,23 @@ def _static_embed_csp_for_scope(scope) -> str:
   over loopback; an opaque sandbox cannot use CSP ``'self'`` for its own
   modules, so name that loopback delivery origin for this response only.
   """
-  headers = dict(scope.get("headers") or ())
-  try:
-    authority = headers.get(b"host", b"").decode("ascii")
-    hostname = authority.rsplit("@", 1)[-1].rsplit(":", 1)[0].strip("[]")
-    is_loopback = (
-      hostname == "localhost"
-      or ipaddress.ip_address(hostname).is_loopback
-    )
-  except (UnicodeDecodeError, ValueError):
+  delivery_origin = _loopback_delivery_origin(scope)
+  if delivery_origin is None:
     return _STATIC_EMBED_CSP
-  if not is_loopback:
-    return _STATIC_EMBED_CSP
-  scheme = str(scope.get("scheme") or "http")
-  return static_embed_csp(settings.frontend_origin, f"{scheme}://{authority}")
+  return static_embed_csp(settings.frontend_origin, delivery_origin)
+
+
+def _app_frame_csp_for_scope(scope) -> str:
+  """Let the loopback test harness exercise the real opaque app frame."""
+  delivery_origin = _loopback_delivery_origin(scope)
+  if delivery_origin is None:
+    return _APP_FRAME_CSP
+  return app_frame_csp(
+    settings.frontend_origin,
+    _SERVICE_GATEWAY_ORIGIN,
+    _BROWSER_API_ORIGIN,
+    delivery_origin,
+  )
 
 # Published sites (`/sites/<token>/`) are public snapshots of the owner's own
 # agent-authored artifacts and Web Studio builds. The `sandbox` directive
@@ -445,7 +468,7 @@ class _SecurityHeadersMiddleware:
       elif chat_embed:
         csp = CHAT_EMBED_CSP
       elif app_frame:
-        csp = _APP_FRAME_CSP
+        csp = _app_frame_csp_for_scope(scope)
       else:
         csp = _SHELL_CSP
       response_headers.append((
