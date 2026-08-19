@@ -150,7 +150,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `frontend_watcher.py` | Polling watcher that auto-rebuilds the served frontend clone (`/data/platform/frontend`) on edit — debounced `vite build`, atomic `.dist-next`→`dist` swap |
 | `config.py` | `Settings` via pydantic-settings; reads `.env` |
 | `database.py` | SQLAlchemy engine, pool instrumentation, `SessionLocal`, `Base`, and `get_db`; contains no schema history |
-| `schema_migrations.py` | Append-only schema/data migrations, durable ledger primitives, and ORM/live-schema parity inspection; published functions are semantic-hash frozen |
+| `schema_migrations.py` | One append-only schema/data migration runner, its durable ledger, and mapped table/column inspection; published migration-owned code is target-branch frozen |
 | `startup.py` | Two-phase boot: process/schema preflight first, then writer/reconciliation/database supervisors only after schema parity succeeds |
 | `models.py` | ORM tables: `Owner`, `Chat`, `ChatRun`, `App`, `PushSubscription`, `Notification` |
 | `schemas.py` | Pydantic request/response models |

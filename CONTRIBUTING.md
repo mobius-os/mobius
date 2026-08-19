@@ -78,14 +78,17 @@ as an explicit release-baseline change. The upgrade contract runs production's
 `create_all` → migrations order twice, requires an idempotent ledger, and then
 requires `orm_schema_gaps()` to be empty.
 
-The semantic-history manifest freezes every published migration function. A
-new migration appends its version and hash; a changed existing hash means the
-old function must be restored and the correction expressed as another
-migration. Before sharing any schema change, run the dependency-free history
-gate and the fast contracts; before landing it, run the full backend suite:
+The history gate compares migration-owned code with the target branch itself:
+published functions and their local helpers cannot change, and new versions
+can only append. New migrations must also be self-contained; importing mutable
+runtime ``app`` modules makes historical behavior drift with unrelated code.
+Three named legacy migrations predate that boundary and are grandfathered,
+but no new exception should be added. Before sharing any schema change, run
+the dependency-free history gate against the branch you will target and the
+fast contracts; before landing it, run the full backend suite:
 
 ```bash
-python3 backend/scripts/check-schema-migrations.py
+python3 backend/scripts/check-schema-migrations.py --against origin/main
 scripts/test.sh --fast
 scripts/wt-pytest.sh backend/tests/test_db_migrations.py -q
 ```

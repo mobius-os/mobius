@@ -830,6 +830,11 @@ def _add_chat_run_goal_plan(eng) -> None:
       conn.execute(text(
         "ALTER TABLE chat_runs ADD COLUMN goal_plan_json JSON NULL"
       ))
+    if "goal_plan_revision" not in columns:
+      conn.execute(text(
+        "ALTER TABLE chat_runs ADD COLUMN goal_plan_revision INTEGER "
+        "NOT NULL DEFAULT 0"
+      ))
 
 
 def _add_chat_run_goal_identity(eng) -> None:
@@ -1667,7 +1672,7 @@ def schema_migration_history(eng) -> list[dict]:
   ]
 
 
-def ensure_migration_ledger(eng) -> None:
+def _ensure_migration_ledger(eng) -> None:
   """Create the durable one-shot ledger if it does not exist yet."""
   from sqlalchemy import text
 
@@ -1680,50 +1685,31 @@ def ensure_migration_ledger(eng) -> None:
     ))
 
 
-def migration_applied(eng, version: str) -> bool:
-  """True when ``version`` has already completed on this database.
-
-  One ledger answers "has this one-shot already run?" for every kind of
-  migration. ``run_migrations`` drives the synchronous schema entries in
-  ``_SCHEMA_MIGRATIONS`` through these same primitives; migrations that cannot
-  live in that tuple — async ones, or ones doing network I/O such as fetching a
-  catalog manifest — call them directly. Same table, same question, one
-  implementation, so the ledger can never disagree with itself.
-
-  Without a durable marker a "one-shot" migration can only infer completion
-  from the shape of the rows it finds, which silently re-arms it for any row
-  created LATER that happens to match that shape.
-  """
-  from sqlalchemy import inspect as sa_inspect, text
-
-  if "schema_migrations" not in sa_inspect(eng).get_table_names():
-    return False
-  with eng.connect() as conn:
-    return conn.execute(text(
-      "SELECT 1 FROM schema_migrations WHERE version = :version"
-    ), {"version": version}).first() is not None
-
-
-def record_migration(eng, version: str) -> None:
-  """Mark ``version`` complete so it never re-evaluates rows. Idempotent."""
+def _applied_migrations(eng) -> set[str]:
+  """Read the completed versions once for one ordered migration pass."""
   from sqlalchemy import text
-  from sqlalchemy.exc import IntegrityError
 
-  ensure_migration_ledger(eng)
-  # Plain INSERT + IntegrityError rather than a dialect-specific upsert: this
-  # ledger runs on both SQLite and PostgreSQL (Railway), and re-recording an
-  # already-complete migration is a no-op either way.
-  try:
-    with eng.begin() as conn:
-      conn.execute(text(
-        "INSERT INTO schema_migrations (version, applied_at) "
-        "VALUES (:version, :applied_at)"
-      ), {
-        "version": version,
-        "applied_at": datetime.now(UTC).replace(tzinfo=None),
-      })
-  except IntegrityError:
-    pass
+  with eng.connect() as conn:
+    return {
+      str(version)
+      for (version,) in conn.execute(text(
+        "SELECT version FROM schema_migrations"
+      ))
+    }
+
+
+def _record_migration(eng, version: str) -> None:
+  """Record one completed version after its idempotent body succeeds."""
+  from sqlalchemy import text
+
+  with eng.begin() as conn:
+    conn.execute(text(
+      "INSERT INTO schema_migrations (version, applied_at) "
+      "VALUES (:version, :applied_at)"
+    ), {
+      "version": version,
+      "applied_at": datetime.now(UTC).replace(tzinfo=None),
+    })
 
 
 def run_migrations(eng) -> None:
@@ -1738,17 +1724,18 @@ def run_migrations(eng) -> None:
   insert safely retries it. The ledger row is committed only after the migration
   returns successfully.
 
-  Drives the shared ledger primitives (``migration_applied`` /
-  ``record_migration``) rather than its own SQL, so a one-shot recorded here and
-  one recorded by an async caller are the same fact in the same table.
+  One runner owns the ledger: it reads the applied set once, executes pending
+  entries in registry order, and records each success before continuing.
   """
   from sqlalchemy import inspect as sa_inspect
 
   if "apps" not in sa_inspect(eng).get_table_names():
     return
-  ensure_migration_ledger(eng)
+  _ensure_migration_ledger(eng)
+  applied = _applied_migrations(eng)
   for version, migration in _SCHEMA_MIGRATIONS:
-    if migration_applied(eng, version):
+    if version in applied:
       continue
     migration(eng)
-    record_migration(eng, version)
+    _record_migration(eng, version)
+    applied.add(version)

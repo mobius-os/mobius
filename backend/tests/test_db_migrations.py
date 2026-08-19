@@ -29,6 +29,16 @@ PREVIOUS_RELEASE_SCHEMA = (
 )
 
 
+def _migration_guard():
+  script = Path(__file__).parents[1] / "scripts" / "check-schema-migrations.py"
+  spec = importlib.util.spec_from_file_location("migration_guard", script)
+  assert spec and spec.loader
+  guard = importlib.util.module_from_spec(spec)
+  sys.modules[spec.name] = guard
+  spec.loader.exec_module(guard)
+  return guard
+
+
 def test_previous_release_database_upgrades_to_current_orm(tmp_path):
   """The real boot order must close every ORM gap on an existing install.
 
@@ -1747,65 +1757,74 @@ def test_published_schema_migration_history_is_unique_ordered_and_immutable():
     check=False,
   )
   assert completed.returncode == 0, completed.stderr
-  assert "immutable migrations verified" in completed.stdout
+  assert "append-only migrations verified" in completed.stdout
 
 
-def test_migration_hash_includes_imported_app_helper(tmp_path, monkeypatch):
-  """Changing live in-repository helper semantics must invalidate history."""
-  script = Path(__file__).parents[1] / "scripts" / "check-schema-migrations.py"
-  spec = importlib.util.spec_from_file_location("migration_guard", script)
-  assert spec and spec.loader
-  guard = importlib.util.module_from_spec(spec)
-  sys.modules[spec.name] = guard
-  spec.loader.exec_module(guard)
+def test_published_history_cannot_be_rehashed_in_place():
+  """Changing code and its checked-in hash together still rewrites history."""
+  guard = _migration_guard()
 
-  root = tmp_path
-  app = root / "backend" / "app"
-  app.mkdir(parents=True)
-  migration = app / "schema_migrations.py"
-  helper = app / "helper.py"
-  migration.write_text(
+  published = {"0001_initial": "old", "0002_add_field": "same"}
+  assert guard.append_only_error(published, {
+    "0001_initial": "new",
+    "0002_add_field": "same",
+  }) == "published migration 0001_initial changed"
+  assert guard.append_only_error(published, {
+    **published,
+    "0003_next": "added",
+  }) is None
+
+
+def test_published_history_cannot_be_removed_or_reordered():
+  guard = _migration_guard()
+
+  published = {"0001_initial": "one", "0002_next": "two"}
+  removed = guard.append_only_error(published, {"0001_initial": "one"})
+  reordered = guard.append_only_error(published, {
+    "0002_next": "two",
+    "0001_initial": "one",
+  })
+  assert removed == "published migration 0002_next was removed"
+  assert reordered == (
+    "published migration 0001_initial was reordered, removed, or renamed "
+    "to 0002_next"
+  )
+
+
+def test_new_migration_cannot_import_mutable_runtime_helpers():
+  """Published migrations own their behavior instead of freezing app code."""
+  guard = _migration_guard()
+  source = (
     "def migrate(db):\n"
     "  from app.helper import normalize\n"
-    "  return normalize(db)\n",
-    encoding="utf-8",
+    "  return normalize(db)\n"
+    "_SCHEMA_MIGRATIONS = ((\"0016_new\", migrate),)\n"
   )
-  helper.write_text("def normalize(value):\n  return value\n", encoding="utf-8")
-  monkeypatch.setattr(guard, "ROOT", root)
-  first = guard.semantic_hash(migration, "migrate")
 
-  helper.write_text("def normalize(value):\n  return str(value)\n", encoding="utf-8")
-  second = guard.semantic_hash(migration, "migrate")
-
-  assert first != second
+  with pytest.raises(SystemExit):
+    guard.inspect_history(source, source="candidate.py")
 
 
-def test_migration_hash_includes_imported_app_module_attribute(tmp_path, monkeypatch):
-  script = Path(__file__).parents[1] / "scripts" / "check-schema-migrations.py"
-  spec = importlib.util.spec_from_file_location("migration_guard_module", script)
-  assert spec and spec.loader
-  guard = importlib.util.module_from_spec(spec)
-  sys.modules[spec.name] = guard
-  spec.loader.exec_module(guard)
-
-  root = tmp_path
-  app = root / "backend" / "app"
-  app.mkdir(parents=True)
-  (app / "__init__.py").write_text("", encoding="utf-8")
-  migration = app / "schema_migrations.py"
-  helper = app / "helper.py"
-  migration.write_text(
+def test_migration_hash_includes_migration_owned_helpers():
+  guard = _migration_guard()
+  first = guard.inspect_history(
+    "def normalize(value):\n"
+    "  return value\n"
     "def migrate(db):\n"
-    "  from app import helper\n"
-    "  return helper.normalize(db)\n",
-    encoding="utf-8",
+    "  return normalize(db)\n"
+    "_SCHEMA_MIGRATIONS = ((\"0016_new\", migrate),)\n",
+    source="first.py",
   )
-  helper.write_text("def normalize(value):\n  return value\n", encoding="utf-8")
-  monkeypatch.setattr(guard, "ROOT", root)
-  first = guard.semantic_hash(migration, "migrate")
-  helper.write_text("def normalize(value):\n  return str(value)\n", encoding="utf-8")
+  second = guard.inspect_history(
+    "def normalize(value):\n"
+    "  return str(value)\n"
+    "def migrate(db):\n"
+    "  return normalize(db)\n"
+    "_SCHEMA_MIGRATIONS = ((\"0016_new\", migrate),)\n",
+    source="second.py",
+  )
 
-  assert first != guard.semantic_hash(migration, "migrate")
+  assert first["0016_new"] != second["0016_new"]
 
 
 def test_failed_migration_is_not_recorded_and_can_retry(tmp_path, monkeypatch):

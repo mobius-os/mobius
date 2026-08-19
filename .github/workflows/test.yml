@@ -55,6 +55,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The migration-history gate compares the candidate against the
+          # actual target revision; a shallow checkout cannot prove that
+          # already-published entries remained unchanged.
+          fetch-depth: 0
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -93,6 +98,8 @@ jobs:
         run: pip-audit --strict --disable-pip -r requirements.lock
       - name: Run serviceability contracts
         working-directory: backend
+        env:
+          SCHEMA_MIGRATION_BASE_REF: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || '' }}
         run: >-
           pytest -q
           tests/test_readiness.py
