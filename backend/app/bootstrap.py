@@ -58,7 +58,7 @@ BOOTSTRAP_CONNECTIONS_MANIFEST_URL = (
   "https://raw.githubusercontent.com/mobius-os/app-connections/main/mobius.json"
 )
 BOOTSTRAP_IDENTITY_MANIFEST_URL = (
-  "https://raw.githubusercontent.com/mobius-os/app-identity/main/mobius.json"
+  "https://raw.githubusercontent.com/mobius-os/app-mobius-you/main/mobius.json"
 )
 
 
