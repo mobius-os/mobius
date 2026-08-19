@@ -85,25 +85,43 @@ _BOOT_ID = os.environ.get("MOBIUS_BOOT_ID") or f"{os.getpid()}-{time.time_ns()}"
 # One boot verdict feeds startup ownership, middleware, and every health probe.
 # These stay fixed until restart: Recovery may repair the database externally,
 # but only a clean boot can coherently start the skipped database owners.
-_MAPPED_SCHEMA_GAPS: list[str] = []
-_DATABASE_INIT_FAILURE: str | None = None
+_DATABASE_BOOT_RESULT = None
 
 
 def _set_database_boot_state(result) -> None:
-  global _DATABASE_INIT_FAILURE
-  _MAPPED_SCHEMA_GAPS[:] = result.schema_gaps
-  _DATABASE_INIT_FAILURE = result.failure_reason
+  global _DATABASE_BOOT_RESULT
+  _DATABASE_BOOT_RESULT = result
 
 
 def _database_degraded_payload() -> dict | None:
-  if _DATABASE_INIT_FAILURE:
-    return {"reason": _DATABASE_INIT_FAILURE}
-  if _MAPPED_SCHEMA_GAPS:
+  result = _DATABASE_BOOT_RESULT
+  if result is None or result.serviceable:
+    return None
+  if result.failure_reason:
+    return {"reason": result.failure_reason}
+  if result.schema_gaps:
     return {
       "reason": "schema_mismatch",
-      "schema_gaps": list(_MAPPED_SCHEMA_GAPS),
+      "schema_gaps": list(result.schema_gaps),
     }
   return None
+
+
+def _database_init_error_is_transient(exc: OperationalError) -> bool:
+  """Retry only connection loss or SQLite lock contention at boot.
+
+  Deterministic migration/DDL errors are also ``OperationalError`` instances.
+  Retrying those ten times only delays the same degraded verdict and obscures
+  the first useful traceback. SQLite lock errors and invalidated connections
+  can genuinely clear without changing the release, so retain the bounded
+  retry for those cases.
+  """
+  if exc.connection_invalidated:
+    return True
+  if engine.dialect.name != "sqlite":
+    return False
+  detail = str(exc.orig or exc).lower()
+  return "locked" in detail or "busy" in detail
 
 
 def _install_pm_commit_launcher(source: Path, target: Path) -> bool:
@@ -148,7 +166,7 @@ def _init_db():
         )
       return DatabaseBootResult(schema_gaps=tuple(gaps))
     except OperationalError as e:
-      if attempt < 9:
+      if attempt < 9 and _database_init_error_is_transient(e):
         delay = min(2 ** attempt, 10)
         print(f"DB init retry {attempt + 1}/10 in {delay}s: {e}")
         time.sleep(delay)
@@ -818,7 +836,7 @@ def health(response: Response):
   payload = {
     "status": degraded["reason"] if degraded else "ok",
     "target": "mobius",
-    "mode": "normal",
+    "mode": "degraded" if degraded else "normal",
     "build_sha": settings.build_sha,
     "boot_id": _BOOT_ID,
   }

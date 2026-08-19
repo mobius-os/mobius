@@ -49,26 +49,6 @@ async def test_best_effort_startup_failure_is_named_and_does_not_stop_plan(
 
 
 @pytest.mark.asyncio
-async def test_critical_startup_failure_stops_before_later_tasks():
-  events = []
-
-  def fail(_context):
-    events.append("database")
-    raise RuntimeError("database unavailable")
-
-  def must_not_run(_context):
-    events.append("later")
-
-  with pytest.raises(RuntimeError, match="database unavailable"):
-    await run_startup_tasks(context(), (
-      StartupTask("database", fail, critical=True),
-      StartupTask("later", must_not_run),
-    ))
-
-  assert events == ["database"]
-
-
-@pytest.mark.asyncio
 async def test_checkpoints_record_only_successful_named_outcomes(monkeypatch):
   checkpoints = []
   monkeypatch.setattr(
@@ -88,12 +68,11 @@ async def test_checkpoints_record_only_successful_named_outcomes(monkeypatch):
   assert checkpoints == ["complete_checkpoint"]
 
 
-def test_production_startup_plan_has_explicit_unique_order_and_criticality():
+def test_production_startup_plan_has_explicit_unique_order():
   tasks = startup.PROCESS_STARTUP_TASKS + startup.DATABASE_STARTUP_TASKS
   names = [task.name for task in tasks]
 
   assert len(names) == len(set(names))
-  assert [task.name for task in tasks if task.critical] == []
   assert startup.PROCESS_STARTUP_TASKS[-1].name == "initialize database"
   assert startup.DATABASE_STARTUP_TASKS[0].name == "start chat writer"
   assert names.index("initialize database") < names.index("start chat writer")

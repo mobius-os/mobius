@@ -75,7 +75,6 @@ TaskAction = Callable[[StartupContext], object | Awaitable[object]]
 class StartupTask:
   name: str
   action: TaskAction
-  critical: bool = False
   checkpoint: str | None = None
 
 
@@ -90,14 +89,6 @@ async def run_startup_tasks(
       if inspect.isawaitable(result):
         await result
     except Exception as exc:
-      if task.critical:
-        context.logger.critical(
-          "critical startup task %s failed: %s",
-          task.name,
-          exc,
-          exc_info=True,
-        )
-        raise
       context.logger.error(
         "startup task %s failed: %s",
         task.name,

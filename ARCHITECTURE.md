@@ -489,6 +489,13 @@ The in-product agent is a first-class reader of this code, and its behavior has 
 └── service-token.txt       owner JWT used only by the platform job wrapper (chmod 600)
 ```
 
+SQLite is the shipped and tested persistence runtime. Some frozen historical
+migrations retain PostgreSQL branches because already-published migration code
+is immutable; those branches are compatibility history, not a second supported
+deployment contract. Adding another database therefore requires an explicit
+driver, end-to-end migration/readiness coverage, and deployment documentation
+rather than relying on those old conditional statements.
+
 `/data` is itself a git repo owned by the `mobius` user, tracking `shared/memory/` and `shared/skills/` with a nightly safety-net commit, so a bad memory consolidation or skill overwrite is recoverable. Inspect it as that user (`docker exec -u mobius ... git -C /data ...`) — as root it dies with "dubious ownership," which reads misleadingly as an empty/non-repo tree.
 
 ## Boot, self-heal, and how each layer updates
