@@ -1,4 +1,4 @@
-"""First-boot bootstrap for the App Store, Memory, and Reflection apps.
+"""First-boot bootstrap for the core and managed-account apps.
 
 Called from the FastAPI lifespan handler once the server is up and the
 DB is migrated. Calls `install_from_manifest()` directly (in-process)
@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from app import models
+from app.config import get_settings
 from app.install import install_from_manifest
 
 log = logging.getLogger("mobius.bootstrap")
@@ -56,6 +57,9 @@ BOOTSTRAP_REFLECTION_MANIFEST_URL = (
 BOOTSTRAP_CONNECTIONS_MANIFEST_URL = (
   "https://raw.githubusercontent.com/mobius-os/app-connections/main/mobius.json"
 )
+BOOTSTRAP_IDENTITY_MANIFEST_URL = (
+  "https://raw.githubusercontent.com/mobius-os/app-identity/main/mobius.json"
+)
 
 
 @dataclass(frozen=True)
@@ -79,6 +83,12 @@ _BOOTSTRAP_APPS = (
   # respected; the Store remains the way back.
   _BootstrapApp(
     "connections", BOOTSTRAP_CONNECTIONS_MANIFEST_URL, False,
+  ),
+  # Managed Railway owners have already authenticated with mobius.you. Their
+  # identity surface is therefore useful immediately, but it must not appear
+  # on ordinary self-hosted instances where no launcher account exists.
+  _BootstrapApp(
+    "identity", BOOTSTRAP_IDENTITY_MANIFEST_URL, False,
   ),
 )
 
@@ -113,6 +123,9 @@ async def ensure_bootstrap_apps_installed(db: Session) -> None:
   from app.install import _find_install_identity_row
 
   for bootstrap_app in _BOOTSTRAP_APPS:
+    if bootstrap_app.name == "identity" and not get_settings().mobius_sso_enabled:
+      log.info("bootstrap: identity skipped for local-account deployment")
+      continue
     # Use the installer's identity resolver here too: bootstrap and an explicit
     # Store action must agree across ref moves and legacy rows whose matching
     # catalog origin predates persisted manifest identity.

@@ -76,6 +76,7 @@ uploads_router = _load("uploads")
 media_router = _load("media")
 secrets_router = _load("secrets")
 github_router = _load("github")
+identity_router = _load("identity")
 push_router = _load("push")
 notifications_router = _load("notifications")
 debug_router = _load("debug")
@@ -115,6 +116,7 @@ __all__ = [
   "media_router",
   "secrets_router",
   "github_router",
+  "identity_router",
   "push_router",
   "notifications_router",
   "debug_router",

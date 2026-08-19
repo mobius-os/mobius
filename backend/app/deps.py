@@ -905,6 +905,36 @@ def get_owner_or_app_with_connections_manage(
   )
 
 
+def get_owner_or_app_with_identity_manage(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Owner JWT, or an app with the reviewed identity-management grant.
+
+  This grant lives in the accepted capability contract rather than a second
+  model column: identity is a package-owned system integration, and every
+  install/update already replaces that contract atomically. Omission on a
+  later app version therefore revokes access on the next request.
+  """
+  owner = principal.owner
+  if principal.app_id is None:
+    return owner
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  contract = app.capability_contract if isinstance(app.capability_contract, dict) else {}
+  data = contract.get("data") if isinstance(contract.get("data"), dict) else {}
+  if data.get("identity_manage") is True:
+    return owner
+  raise HTTPException(
+    status_code=403,
+    detail=(
+      "This app needs permissions.identity_manage=true in its manifest "
+      "to read or update your Möbius identity."
+    ),
+  )
+
+
 def get_owner_or_app_with_github_connect(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
