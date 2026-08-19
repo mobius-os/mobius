@@ -215,8 +215,85 @@ def _codex_config_overrides(
     # retrying a failed command outside the sandbox. Do not use this legacy
     # backend for workspace-write policies: the pinned CLI rejects that
     # combination instead of enforcing it.
-    overrides.append("features.use_legacy_landlock=true")
+    overrides += [
+      "features.use_legacy_landlock=true",
+      "features.network_proxy.enabled=true",
+      'features.network_proxy.domains={ "localhost" = "allow", '
+      '"127.0.0.1" = "allow", "::1" = "allow" }',
+    ]
   return overrides
+
+
+async def _start_codex_turn(
+  thread: Any,
+  user_message: str,
+  *,
+  cwd: str,
+  model: str | None,
+  effort: Any,
+  summary: Any,
+  delegated_read: bool,
+  approval_mode: Any,
+) -> Any:
+  """Start one turn, admitting only loopback network for read Delegations.
+
+  The public Python SDK's ``Sandbox.read_only`` preset fixes
+  ``networkAccess`` to false. Recursive Delegations need one narrower thing:
+  access to Möbius's loopback-only delegation API. The app-server network
+  proxy above allowlists only localhost; this turn-level policy enables that
+  already-filtered path without adding filesystem writes or permitting an
+  unsandboxed retry.
+
+  This uses the SDK's generated protocol seam until its public sandbox preset
+  can express read-only plus network. `_sdk_imports` already contract-tests
+  generated symbols for the same reason.
+  """
+  if not delegated_read:
+    return await thread.turn(
+      user_message,
+      cwd=cwd,
+      model=model,
+      effort=effort,
+      summary=summary,
+    )
+
+  from openai_codex.api import (
+    AsyncTurnHandle,
+    _approval_mode_override_settings,
+    _normalize_run_input,
+    _to_wire_input,
+  )
+  from openai_codex.generated.v2_all import (
+    ReadOnlySandboxPolicy,
+    SandboxPolicy,
+    TurnStartParams,
+  )
+
+  await thread._codex._ensure_initialized()
+  wire_input = _to_wire_input(_normalize_run_input(user_message))
+  approval_policy, approvals_reviewer = (
+    _approval_mode_override_settings(approval_mode)
+  )
+  params = TurnStartParams(
+    thread_id=thread.id,
+    input=wire_input,
+    approval_policy=approval_policy,
+    approvals_reviewer=approvals_reviewer,
+    cwd=cwd,
+    effort=effort,
+    model=model,
+    sandbox_policy=SandboxPolicy(root=ReadOnlySandboxPolicy(
+      type="readOnly",
+      network_access=True,
+    )),
+    summary=summary,
+  )
+  started = await thread._codex._client.turn_start(
+    thread.id,
+    wire_input,
+    params=params,
+  )
+  return AsyncTurnHandle(thread._codex, thread.id, started.turn.id)
 
 
 def _codex_app_server_launch_args(
@@ -2021,12 +2098,17 @@ async def run_codex_sdk_turn(
           # "continue" carries no extra content and is intentionally omitted.
           goal_steer_message = user_message
       else:
-        turn = await thread.turn(
+        turn = await _start_codex_turn(
+          thread,
           user_message,
           cwd=cwd,
           model=model,
           effort=effort,
           summary=reasoning_summary,
+          delegated_read=(
+            delegated and run_policy.scope == "read"
+          ),
+          approval_mode=approval_mode,
         )
       if abort_requested():
         try:

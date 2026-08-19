@@ -3290,6 +3290,54 @@ def test_read_delegation_config_selects_container_safe_landlock():
 
   assert "features.use_legacy_landlock=true" not in ordinary
   assert "features.use_legacy_landlock=true" in delegated
+  assert "features.network_proxy.enabled=true" not in ordinary
+  assert "features.network_proxy.enabled=true" in delegated
+  assert any(
+    "localhost" in override and '"127.0.0.1" = "allow"' in override
+    for override in delegated
+  )
+
+
+def test_read_delegation_turn_keeps_files_read_only_and_allows_proxy_network():
+  from openai_codex import ApprovalMode
+
+  captured = {}
+
+  class FakeClient:
+    async def turn_start(self, thread_id, wire_input, *, params):
+      captured.update(
+        thread_id=thread_id,
+        wire_input=wire_input,
+        params=params,
+      )
+      return SimpleNamespace(turn=SimpleNamespace(id="turn-read-network"))
+
+  class FakeCodex:
+    def __init__(self):
+      self._client = FakeClient()
+
+    async def _ensure_initialized(self):
+      captured["initialized"] = True
+
+  thread = SimpleNamespace(id="thread-read-network", _codex=FakeCodex())
+
+  handle = asyncio.run(codex_sdk_runner._start_codex_turn(
+    thread,
+    "delegate through localhost",
+    cwd="/data",
+    model=None,
+    effort=None,
+    summary=None,
+    delegated_read=True,
+    approval_mode=ApprovalMode.deny_all,
+  ))
+
+  policy = captured["params"].sandbox_policy.root
+  assert captured["initialized"] is True
+  assert handle.id == "turn-read-network"
+  assert policy.type == "readOnly"
+  assert policy.network_access is True
+  assert captured["params"].approval_policy.root.value == "never"
 
 
 def test_delegated_codex_approval_guard_fails_closed():
@@ -3358,6 +3406,13 @@ def test_codex_delegation_policy_reaches_the_provider_boundary(
   monkeypatch.setattr(
     codex_sdk_runner, "_sdk_imports", lambda: _fake_sdk(FakeAsyncCodex),
   )
+  if scope == "read":
+    async def fake_start_turn(thread, user_message, **_kwargs):
+      return await thread.turn(user_message)
+
+    monkeypatch.setattr(
+      codex_sdk_runner, "_start_codex_turn", fake_start_turn,
+    )
   policy = None if scope is None else SimpleNamespace(scope=scope)
 
   result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
