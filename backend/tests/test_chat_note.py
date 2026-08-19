@@ -329,6 +329,24 @@ def test_render_transcript_labels_automatic_continuation_as_product_event():
   assert "user: continue" not in rendered
 
 
+def test_render_transcript_excludes_hidden_product_control_messages():
+  cn = _load_chat_note()
+  raw = json.dumps([
+    {"role": "user", "content": "Address every issue"},
+    {
+      "role": "user", "hidden": True,
+      "content": "/goal Address every issue and verify the result",
+    },
+    {"role": "assistant", "content": "All checks pass."},
+  ])
+
+  rendered = cn._render_transcript(raw)
+
+  assert "Address every issue" in rendered
+  assert "All checks pass." in rendered
+  assert "/goal" not in rendered
+
+
 def test_claude_summary_prompt_receives_complete_transcript(monkeypatch):
   cn = _load_chat_note()
   monkeypatch.setattr(cn, "_configured_provider", lambda _provider=None: "claude")
