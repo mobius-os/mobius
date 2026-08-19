@@ -26,7 +26,8 @@ import { recordClientError } from '../../lib/errorLog.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import useTheme from '../../hooks/useTheme.js'
 import useProviderAuthStatus from '../../hooks/useProviderAuthStatus.js'
-import useOnlineStatus from '../../hooks/useOnlineStatus.js'
+import { useReachabilityPhase } from '../../hooks/useOnlineStatus.js'
+import { ReachabilityPhase } from '../../lib/connectivityStore.js'
 import {
   appQueries,
   chatMessagesQueryKey,
@@ -782,7 +783,11 @@ export default function Shell({ onInitialVisualReady }) {
   // One shell-wide indicator owns the persistent offline explanation. Chat
   // still disables sends while unavailable, but does not repeat this status
   // beside the composer.
-  const online = useOnlineStatus()
+  const reachabilityPhase = useReachabilityPhase()
+  const online = reachabilityPhase !== ReachabilityPhase.OFFLINE
+  const reachabilityLabel = reachabilityPhase === ReachabilityPhase.CHECKING
+    ? 'Reconnecting…'
+    : (reachabilityPhase === ReachabilityPhase.OFFLINE ? 'Offline' : null)
   const chatsLoadedRef = useRef(false)
   const knownExistingOffListChatIdsRef = useRef(new Set())
   // Always-current chats, for reading inside callbacks that may hold a stale
@@ -3617,9 +3622,13 @@ export default function Shell({ onInitialVisualReady }) {
           </button>
         </nav>
         <div className="shell__bar-actions">
-          {!online && (
-            <span className="shell__offline" role="status" aria-live="polite">
-              Offline
+          {reachabilityLabel && (
+            <span
+              className={`shell__offline${reachabilityPhase === ReachabilityPhase.CHECKING ? ' shell__offline--checking' : ''}`}
+              role="status"
+              aria-live="polite"
+            >
+              {reachabilityLabel}
             </span>
           )}
           <ScreenControlButton chatId={activeChatId} onNotice={showToast} />

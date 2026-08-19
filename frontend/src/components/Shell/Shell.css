@@ -573,6 +573,11 @@
     border: 1px solid color-mix(in srgb, var(--danger, #f87171) 35%, transparent);
     white-space: nowrap;
   }
+  .shell__offline--checking {
+    color: var(--accent, #8b6cf7);
+    background: color-mix(in srgb, var(--accent, #8b6cf7) 12%, transparent);
+    border-color: color-mix(in srgb, var(--accent, #8b6cf7) 30%, transparent);
+  }
 /* The ONE Settings wrapper is a solid surface in BOTH geometries: full-bleed as
    the takeover overlay (single mode / flag off) and paned as a builder tab. The
    opaque bg is what keeps a tiled Settings pane from letting the chrome or a
@@ -862,6 +867,14 @@
     top: 7px;
     right: 12px;
     margin: 0;
+  }
+
+  /* The expanded desktop header cannot fit the full wordmark, connection
+     status, search, and notifications without collision. Keep the logo as the
+     drawer control's visible identity while the status temporarily owns that
+     text lane. */
+  .shell--drawer-docked .shell__bar:has(.shell__offline) .shell__wordmark {
+    visibility: hidden;
   }
 
   .shell__rail-actions {

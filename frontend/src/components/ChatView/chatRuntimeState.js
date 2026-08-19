@@ -172,6 +172,28 @@ export function shouldAttachRunningStream({
   return !!running && !pendingQuestionId
 }
 
+/**
+ * A fresh runtime verdict may repair a mounted pane whose stream exhausted
+ * during a server restart. Let the stream hook's bounded retry owner finish
+ * first; once it has exhausted, restart that owner rather than bypassing its
+ * counters with another parallel reconnect.
+ */
+export function runtimeStreamAttachAction({
+  running,
+  pendingQuestionId,
+  isStreaming = false,
+  connectionError = null,
+  hidden = false,
+} = {}) {
+  if (
+    hidden
+    || isStreaming
+    || !shouldAttachRunningStream({ running, pendingQuestionId })
+  ) return 'none'
+  if (connectionError === 'retrying') return 'none'
+  return connectionError === 'disconnected' ? 'retry' : 'connect'
+}
+
 /** A recovery signal owns only an unfinished stream with exhausted retries. */
 export function shouldReconnectExhaustedStream({
   wantsReconnect = false,

@@ -15,6 +15,7 @@ import {
   openAppCtaViewModel,
   previewReadyAnnouncement,
   previewUpdatedAnnouncement,
+  runtimeStreamAttachAction,
   serverSnapshotBehindLocal,
   shouldAttachRunningStream,
   shouldRetireRestoredQuestionSnapshot,
@@ -195,6 +196,35 @@ test('a parked owner question uses compact history until its answer resumes the 
     running: false,
     pendingQuestionId: null,
   }), false)
+})
+
+test('a fresh running verdict repairs an exhausted visible stream through its retry owner', () => {
+  assert.equal(runtimeStreamAttachAction({
+    running: true,
+    connectionError: 'disconnected',
+  }), 'retry')
+  assert.equal(runtimeStreamAttachAction({
+    running: true,
+    connectionError: null,
+  }), 'connect')
+  assert.equal(runtimeStreamAttachAction({
+    running: true,
+    connectionError: 'retrying',
+  }), 'none', 'the bounded retry loop keeps sole ownership while active')
+  assert.equal(runtimeStreamAttachAction({
+    running: true,
+    pendingQuestionId: 'question-1',
+    connectionError: 'disconnected',
+  }), 'none', 'a parked question has no live output to attach to')
+  assert.equal(runtimeStreamAttachAction({
+    running: true,
+    connectionError: 'disconnected',
+    hidden: true,
+  }), 'none', 'only the visible pane owns transport recovery')
+  assert.equal(runtimeStreamAttachAction({
+    running: false,
+    connectionError: 'disconnected',
+  }), 'none', 'an idle server verdict must not resurrect a stream')
 })
 
 test('confirmed recovery reattaches only an unfinished exhausted visible stream', () => {

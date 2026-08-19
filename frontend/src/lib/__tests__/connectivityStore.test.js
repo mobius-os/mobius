@@ -90,6 +90,7 @@ test('one continuous failure deadline owns demotion and foreground storms cannot
   const stop = h.store.subscribe(() => {})
   await flush()
   assert.equal(h.store.getState().phase, ReachabilityPhase.CHECKING)
+  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.CHECKING)
   assert.equal(h.store.getSnapshot(), true)
   assert.equal(h.timers.countDelay(FAILURE_GRACE_MS), 1)
 
@@ -120,11 +121,11 @@ test('strong live evidence repairs uncertainty and emits one recovery generation
   let notifications = 0
   const stop = h.store.subscribe(() => { notifications += 1 })
   await flush()
-  assert.equal(notifications, 0, 'Checking stays publicly online')
+  assert.equal(notifications, 1, 'Checking is visible without disabling online actions')
   h.store.reportReachable()
   assert.equal(h.store.getState().phase, ReachabilityPhase.ONLINE)
   assert.equal(h.store.getRecoverySnapshot(), 1)
-  assert.equal(notifications, 1)
+  assert.equal(notifications, 2)
   assert.equal(h.timers.timeoutCount(), 0)
   stop()
 })
@@ -180,6 +181,7 @@ test('the hook and API client consume the shared store contract', () => {
   const hook = readFileSync(new URL('../../hooks/useOnlineStatus.js', import.meta.url), 'utf8')
   const client = readFileSync(new URL('../../api/client.js', import.meta.url), 'utf8')
   assert.match(hook, /useSyncExternalStore\(subscribeOnline, getOnlineSnapshot/)
+  assert.match(hook, /getReachabilityPhaseSnapshot/)
   assert.doesNotMatch(hook, /fetch\(|setInterval\(/)
   assert.match(client, /void verifyConnectivity\(\)/)
   assert.match(client, /reportNetworkReachable\(\)/)
@@ -190,12 +192,21 @@ test('both durable streams feed recovery and an exhausted chat observes it', () 
     new URL('../../components/ChatView/useStreamConnection.js', import.meta.url),
     'utf8',
   )
+  const chatView = readFileSync(
+    new URL('../../components/ChatView/ChatView.jsx', import.meta.url),
+    'utf8',
+  )
   const system = readFileSync(
     new URL('../../hooks/useSystemEventStream.js', import.meta.url),
     'utf8',
   )
   assert.match(chat, /const res = await fetch\([\s\S]*?reportNetworkReachable\(\)/)
   assert.match(chat, /subscribeRecovery\([\s\S]*?shouldReconnectExhaustedStream\(/)
+  assert.match(
+    chatView,
+    /const run = \(\) => \{[\s\S]*?reconcileRuntimeState\(\)[\s\S]*?subscribeRecovery\([\s\S]*?getRecoverySnapshot\(\)[\s\S]*?run\(\)/,
+    'every visible pane rechecks durable runtime after shared reachability recovers',
+  )
   assert.match(chat, /catch \(err\) \{[\s\S]*?void verifyConnectivity\(\)/)
   assert.match(system, /const res = await fetch\([\s\S]*?reportNetworkReachable\(\)/)
 })

@@ -95,16 +95,17 @@ export function createConnectivityStore({
   let evidenceRevision = 0
 
   function getSnapshot() { return publicOnline(state) }
+  function getPhaseSnapshot() { return state.phase }
   function getRecoverySnapshot() { return state.recoveryGeneration }
   function getState() { return state }
 
   function publish(next) {
     if (sameState(state, next)) return false
-    const previousOnline = publicOnline(state)
+    const previousPhase = state.phase
     const previousRecovery = state.recoveryGeneration
     state = next
     if (
-      previousOnline !== publicOnline(next)
+      previousPhase !== next.phase
       || previousRecovery !== next.recoveryGeneration
     ) listeners.forEach(listener => listener())
     return true
@@ -300,6 +301,7 @@ export function createConnectivityStore({
 
   return {
     getSnapshot,
+    getPhaseSnapshot,
     getRecoverySnapshot,
     getState,
     subscribe,
@@ -311,6 +313,7 @@ export function createConnectivityStore({
 const connectivityStore = createConnectivityStore()
 
 export const getOnlineSnapshot = connectivityStore.getSnapshot
+export const getReachabilityPhaseSnapshot = connectivityStore.getPhaseSnapshot
 export const getRecoverySnapshot = connectivityStore.getRecoverySnapshot
 export const subscribeOnline = connectivityStore.subscribe
 export const subscribeRecovery = connectivityStore.subscribe

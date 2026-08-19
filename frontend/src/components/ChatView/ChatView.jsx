@@ -29,7 +29,11 @@ import {
 } from './scroll/readingPositions.js'
 import useVoiceInput from './useVoiceInput.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
-import { getOnlineSnapshot } from '../../lib/connectivityStore.js'
+import {
+  getOnlineSnapshot,
+  getRecoverySnapshot,
+  subscribeRecovery,
+} from '../../lib/connectivityStore.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
@@ -118,6 +122,7 @@ import {
   isOwnerUserMessage,
   jumpToLatestShown,
   openAppCtaViewModel,
+  runtimeStreamAttachAction,
   shouldRetireRestoredQuestionSnapshot,
   shouldAttachRunningStream,
   shouldRecoverSettledRuntime,
@@ -1077,7 +1082,7 @@ export default function ChatView({
   // refresh. While a turn or visible queue exists, poll the small chat state
   // payload and hydrate only runtime fields — do not replace the transcript.
   const reconcileRuntimeState = useCallback(async () => {
-    if (hiddenRef.current) return
+    if (hiddenRef.current) return null
     const gen = fetchGenRef.current
     try {
       const res = await apiFetch(
@@ -1085,9 +1090,13 @@ export default function ChatView({
         { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
       )
       const data = await jsonOrThrow(res, 'Runtime refresh failed')
-      if (chatIdStaleRef.current) return
-      if (fetchGenRef.current !== gen) return
+      if (chatIdStaleRef.current) return null
+      if (fetchGenRef.current !== gen) return null
       const serverPending = data.pending_messages || []
+      const runtime = {
+        running: !!data.running,
+        pendingQuestionId: data.pending_question_id || null,
+      }
       // The SSE stream is the source of truth for "a turn is live" — this poll
       // is only a fallback. While the stream is alive (isStreamingRef) or a Stop
       // is in flight, local optimistic state is authoritative: this background
@@ -1118,7 +1127,7 @@ export default function ChatView({
         if (settled?.running === false) {
           retireSettledStreamRef.current?.()
         }
-        return
+        return runtime
       }
       if (data.running) {
         setSending(true)
@@ -1139,7 +1148,7 @@ export default function ChatView({
         data, cachedGoalObjective,
       )
       setActiveGoalObjective(runtimeGoalObjective)
-      const pendingQuestionId = data.pending_question_id || null
+      const pendingQuestionId = runtime.pendingQuestionId
       setLiveQuestionId(pendingQuestionId)
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
@@ -1172,7 +1181,9 @@ export default function ChatView({
           }
         })
       }
+      return runtime
     } catch { /* background reconciliation is best-effort */ }
+    return null
   }, [
     chatId,
     fetchMessages,
@@ -1584,14 +1595,14 @@ export default function ChatView({
     reconcileExternalActivity()
   }, [effectiveRunSignal.seq, hidden, reconcileExternalActivity])
 
-  const ensureRuntimeStreamConnected = useCallback(() => {
-    if (hiddenRef.current) return
-    if (connectionError === 'disconnected') return
-    if (!shouldAttachRunningStream({
-      running: serverRunningRef.current,
-      pendingQuestionId: liveQuestionId,
-    })) return
-    if (isStreamingRef.current) return
+  const ensureRuntimeStreamConnected = useCallback((runtime) => {
+    const action = runtimeStreamAttachAction({
+      ...runtime,
+      isStreaming: isStreamingRef.current,
+      connectionError,
+      hidden: hiddenRef.current,
+    })
+    if (action === 'none') return
     if (runtimeReconnectInFlightRef.current) return
 
     runtimeReconnectInFlightRef.current = true
@@ -1599,12 +1610,13 @@ export default function ChatView({
     // client has no live SSE attached: Android can pause/kill the fetch
     // during app switch, network handoff, or a shell rebuild. Reconnect
     // from the server verdict instead of waiting for a full remount.
-    Promise.resolve(connectToStream(true))
+    const attaching = action === 'retry' ? retry() : connectToStream(true)
+    Promise.resolve(attaching)
       .catch(() => {})
       .finally(() => {
         runtimeReconnectInFlightRef.current = false
       })
-  }, [connectToStream, connectionError, isStreamingRef, liveQuestionId])
+  }, [connectToStream, connectionError, isStreamingRef, retry])
 
   const wasHiddenRef = useRef(hidden)
   useLayoutEffect(() => {
@@ -3770,10 +3782,11 @@ export default function ChatView({
       // against a wedged backend. Skip a tick while the prior one is in flight;
       // the fetch is time-boxed (apiFetch timeoutMs) so inFlight always clears.
       inFlight = true
-      reconcileRuntimeState().finally(() => {
-        inFlight = false
-        if (!cancelled) ensureRuntimeStreamConnected()
-      })
+      reconcileRuntimeState()
+        .then(runtime => {
+          if (!cancelled && runtime) ensureRuntimeStreamConnected(runtime)
+        })
+        .finally(() => { inFlight = false })
     }
     run()
     const intervalMs = hasQueue ? 1000 : 3000
@@ -3802,10 +3815,11 @@ export default function ChatView({
   useEffect(() => {
     if (hidden) return
     let cancelled = false
+    let observedRecoveryGeneration = getRecoverySnapshot()
     const run = () => {
       if (cancelled) return
-      reconcileRuntimeState().finally(() => {
-        if (!cancelled) ensureRuntimeStreamConnected()
+      reconcileRuntimeState().then(runtime => {
+        if (!cancelled && runtime) ensureRuntimeStreamConnected(runtime)
       })
     }
     const onVisible = () => {
@@ -3815,8 +3829,15 @@ export default function ChatView({
     window.addEventListener('pageshow', run)
     window.addEventListener('online', run)
     document.addEventListener('visibilitychange', onVisible)
+    const unsubscribeRecovery = subscribeRecovery(() => {
+      const generation = getRecoverySnapshot()
+      if (generation === observedRecoveryGeneration) return
+      observedRecoveryGeneration = generation
+      run()
+    })
     return () => {
       cancelled = true
+      unsubscribeRecovery()
       window.removeEventListener('focus', run)
       window.removeEventListener('pageshow', run)
       window.removeEventListener('online', run)

@@ -1,6 +1,8 @@
 import { useSyncExternalStore } from 'react'
 import {
   getOnlineSnapshot,
+  getReachabilityPhaseSnapshot,
+  ReachabilityPhase,
   subscribeOnline,
 } from '../lib/connectivityStore.js'
 
@@ -9,4 +11,12 @@ import {
 // health probes, browser listeners, intervals, or mobile radio wakeups.
 export default function useOnlineStatus() {
   return useSyncExternalStore(subscribeOnline, getOnlineSnapshot, () => true)
+}
+
+export function useReachabilityPhase() {
+  return useSyncExternalStore(
+    subscribeOnline,
+    getReachabilityPhaseSnapshot,
+    () => ReachabilityPhase.ONLINE,
+  )
 }
