@@ -386,7 +386,12 @@ test('closeTab returns to the most recently visited surviving tab in that pane',
   base = paneModel.setActiveTab(base, 'p0', 'chat:a')
   base = paneModel.setActiveTab(base, 'p0', 'chat:c')
   assert.deepEqual(base.panes.p0.recentTabKeys, ['chat:c', 'chat:a', 'chat:b', 'chat:d'])
-  const afterMid = paneModel.closeTab(base, 'chat:c')
+  const afterBackground = paneModel.closeTab(base, 'chat:d')
+  assert.equal(afterBackground.panes.p0.activeTabKey, 'chat:c',
+    'closing a background tab leaves the active tab unchanged')
+  assert.deepEqual(afterBackground.panes.p0.recentTabKeys, ['chat:c', 'chat:a', 'chat:b'])
+
+  const afterMid = paneModel.closeTab(afterBackground, 'chat:c')
   assert.equal(afterMid.panes.p0.activeTabKey, 'chat:a', 'the previously visited tab activates')
 
   const afterPrevious = paneModel.closeTab(afterMid, 'chat:a')
@@ -921,8 +926,13 @@ test('parseWorkspace accepts a persisted pane with more than six tabs', () => {
     nextId: 1,
   })
   const parsed = paneModel.parseWorkspace(raw)
+  assert.equal(paneModel.isValidWorkspaceBlob(raw), true,
+    'an older v1 blob remains authoritative while recency is added')
   assert.deepEqual(parsed.panes.p0.tabs, many)
   assert.equal(parsed.panes.p0.activeTabKey, 'chat:c0')
+  assert.deepEqual(parsed.panes.p0.recentTabKeys,
+    ['chat:c0', 'chat:c9', 'chat:c8', 'chat:c7', 'chat:c6', 'chat:c5', 'chat:c4', 'chat:c3', 'chat:c2', 'chat:c1'],
+    'the missing recency field is seeded from the prior close order')
   assertInvariants(parsed)
 })
 

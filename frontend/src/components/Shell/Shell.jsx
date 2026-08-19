@@ -3305,7 +3305,7 @@ export default function Shell({ onInitialVisualReady }) {
     // Drop the tab pinned to this chat (local delete only — see deleteApp).
     // reason:'deleted' clears the undo slot so Cmd/Z can't resurrect a
     // tombstoned chat outside the backend recovery path. CLOSE_TAB already
-    // activates the pane's neighbour tab when one exists; only if that leaves
+    // activates the pane's most recently used surviving tab; only if that leaves
     // the focused pane EMPTY (we deleted its sole/active tab) do we open a fresh
     // chat — so a background sibling tab is preserved rather than overridden.
     dispatchWorkspace({
@@ -3374,7 +3374,7 @@ export default function Shell({ onInitialVisualReady }) {
     // (contract §4.1.5), tombstone its route so Back can't recreate the tab
     // (§5.1.1), then scrub the nav-stack, then close its tab. The
     // CLOSE_TAB(reason:'deleted') owns the view transition — the derived triple
-    // follows the workspace to the pane's neighbour/collapse; no global demote.
+    // follows the workspace to its recent tab or collapsed sibling; no global demote.
     retireAppHistory(id, 'deleted')
     tombstoneRoute('app', id)
     const sid = String(id)

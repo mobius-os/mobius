@@ -1549,6 +1549,7 @@ function isValidWorkspace(ws) {
   for (const id of ids) {
     const pane = ws.panes[id]
     const keys = pane.tabs.map(tabModel.tabKey)
+    const keySet = new Set(keys)
     for (const tab of pane.tabs) {
       if (tab.kind === 'app' && !Number.isFinite(Number(tab.id))) return false
       const key = tabModel.tabKey(tab)
@@ -1556,11 +1557,11 @@ function isValidWorkspace(ws) {
       seenTab.add(key)
     }
     if (pane.activeTabKey == null && keys.length > 0) return false
-    if (pane.activeTabKey != null && !keys.includes(pane.activeTabKey)) return false
+    if (pane.activeTabKey != null && !keySet.has(pane.activeTabKey)) return false
     if (!Array.isArray(pane.recentTabKeys)) return false
     if (pane.recentTabKeys.length !== keys.length) return false
     if (new Set(pane.recentTabKeys).size !== keys.length) return false
-    if (pane.recentTabKeys.some(key => !keys.includes(key))) return false
+    if (pane.recentTabKeys.some(key => !keySet.has(key))) return false
     if ((pane.recentTabKeys[0] ?? null) !== pane.activeTabKey) return false
   }
   return true
