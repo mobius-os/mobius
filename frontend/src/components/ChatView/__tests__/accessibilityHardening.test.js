@@ -100,6 +100,13 @@ test('QuestionCard gives the custom answer area a durable accessible name', () =
   assert.match(source, /placeholder=\{answered \? 'No custom answer' : 'Or type your own answer…'\}/)
 })
 
+test('context compaction is a provider-neutral accessible timeline marker', () => {
+  const source = read('../ContextCompactionMarker.jsx')
+  assert.match(source, /role="note" aria-label="Context compacted"/)
+  assert.match(source, />Context compacted<\/span>/)
+  assert.doesNotMatch(source, /PROVIDER_LABELS|compactionMeta|block\?\.provider/)
+})
+
 test('message references are an accessible lazy disclosure with safe links', () => {
   const source = read('../MessageSources.jsx')
   const msgContent = read('../MsgContent.jsx')
