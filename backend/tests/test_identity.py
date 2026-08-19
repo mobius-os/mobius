@@ -56,7 +56,25 @@ def test_identity_permission_is_part_of_review_contract():
   assert local["data"]["identity_manage"] is True
 
 
-def test_link_start_keeps_pkce_verifier_server_side_and_supersedes(client, auth):
+def test_link_start_keeps_pkce_verifier_server_side_and_supersedes(
+  client, auth, monkeypatch,
+):
+  class AuthorizationClient:
+    def __init__(self, *args, **kwargs):
+      pass
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *args):
+      return None
+
+    async def get(self, url, **kwargs):
+      return type("Response", (), {"status_code": 200})()
+
+  monkeypatch.setattr(
+    "app.routes.identity.httpx.AsyncClient", AuthorizationClient,
+  )
   granted = _app_auth(client, auth, granted=True)
 
   first = client.post(
@@ -82,13 +100,41 @@ def test_link_start_keeps_pkce_verifier_server_side_and_supersedes(client, auth)
     assert "code_verifier" not in rows[0].verifier_encrypted
 
 
+def test_link_start_keeps_owner_in_app_when_host_flow_is_missing(
+  client, auth, monkeypatch,
+):
+  class MissingAuthorizationClient:
+    def __init__(self, *args, **kwargs):
+      pass
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *args):
+      return None
+
+    async def get(self, url, **kwargs):
+      return type("Response", (), {"status_code": 404})()
+
+  monkeypatch.setattr(
+    "app.routes.identity.httpx.AsyncClient", MissingAuthorizationClient,
+  )
+  granted = _app_auth(client, auth, granted=True)
+  response = client.post(
+    "/api/identity/link/start", json={"provider": "google"}, headers=granted,
+  )
+  assert response.status_code == 503
+  assert response.json()["detail"] == (
+    "mobius.you sign-in is not available yet. Try again later."
+  )
+  with SessionLocal() as session:
+    assert session.query(models.IdentityLinkAttempt).count() == 0
+
+
 def test_link_complete_consumes_attempt_and_stores_encrypted_grant(
   client, auth, monkeypatch,
 ):
   granted = _app_auth(client, auth, granted=True)
-  started = client.post(
-    "/api/identity/link/start", json={"provider": "google"}, headers=granted,
-  ).json()
   plain_token = "account-token-" + "x" * 40
 
   class Response:
@@ -118,6 +164,10 @@ def test_link_complete_consumes_attempt_and_stores_encrypted_grant(
         "scope": "identity:read identity:write deployments:read",
       })
 
+    async def get(self, url, **kwargs):
+      assert url.startswith("https://www.mobius.you/connect/mobius?")
+      return Response(200)
+
     async def request(self, method, url, **kwargs):
       assert method == "GET"
       assert kwargs["headers"]["Authorization"] == f"Bearer {plain_token}"
@@ -136,6 +186,9 @@ def test_link_complete_consumes_attempt_and_stores_encrypted_grant(
       })
 
   monkeypatch.setattr("app.routes.identity.httpx.AsyncClient", Client)
+  started = client.post(
+    "/api/identity/link/start", json={"provider": "google"}, headers=granted,
+  ).json()
   completed = client.post("/api/identity/link/complete", json={
     "code": "one-use-code-" + "c" * 32,
     "state": started["state"],

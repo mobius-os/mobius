@@ -288,6 +288,30 @@ async def start_link(
     hashlib.sha256(verifier.encode()).digest(),
   ).rstrip(b"=").decode()
   expires_at = now_naive_utc() + _LINK_TTL
+  query = urlencode({
+    "state": state,
+    "code_challenge": challenge,
+    "code_challenge_method": "S256",
+    "provider": provider,
+  })
+  authorization_url = f"{_ACCOUNT_ORIGIN}/connect/mobius?{query}"
+  # Do not send the owner into a broken cross-origin popup while the matching
+  # mobius.you flow is unavailable. A real authorization page may render
+  # directly or redirect to its provider; both are valid readiness outcomes.
+  try:
+    async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
+      authorization = await client.get(
+        authorization_url,
+        headers={"Accept": "text/html"},
+      )
+  except httpx.HTTPError:
+    raise HTTPException(
+      503, "mobius.you sign-in is temporarily unavailable. Try again later."
+    )
+  if authorization.status_code < 200 or authorization.status_code >= 400:
+    raise HTTPException(
+      503, "mobius.you sign-in is not available yet. Try again later."
+    )
   existing = db.query(models.IdentityLinkAttempt).filter(
     models.IdentityLinkAttempt.owner_id == owner.id,
   ).one_or_none()
@@ -302,14 +326,8 @@ async def start_link(
     expires_at=expires_at,
   ))
   db.commit()
-  query = urlencode({
-    "state": state,
-    "code_challenge": challenge,
-    "code_challenge_method": "S256",
-    "provider": provider,
-  })
   return {
-    "authorization_url": f"{_ACCOUNT_ORIGIN}/connect/mobius?{query}",
+    "authorization_url": authorization_url,
     "attempt": attempt_id,
     "state": state,
     "expires_at": expires_at.isoformat() + "Z",
