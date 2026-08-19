@@ -5,7 +5,7 @@
 <h1 align="center">Möbius</h1>
 
 <p align="center">
-  Build apps with an agent. Memory, connected tools, background work, and source are built in.
+  The front page for agentic work. Build apps, run agents, and keep the memory that makes the next run better.
 </p>
 
 <p align="center">
@@ -21,19 +21,19 @@
   <a href="#contribute-to-the-platform">Contribute</a>
 </p>
 
-## Build apps with everything included
+## The front page for agentic work
 
-Möbius is a self-hosted workspace where apps, agents, memory, skills, files, and source live together. Start with what exists, build what is missing, and keep the result where you use it.
+Möbius is a self-hosted workspace where apps, agents, memory, skills, files, and source live together. Run several agents side by side, start with what exists, build what is missing, and keep the result where you use it.
 
-Agents can work with you in chat, inside apps, or through scheduled background work. Memory keeps useful context available. Reflection turns repeated friction into improvements that you can inspect and choose to keep.
+Agents can work with you in chat, inside apps, or through scheduled background work. Memory grows with useful context from the work. Reflection reviews repeated friction and prepares improvements that you can inspect and choose to keep.
 
-![Current Möbius Builder mode with the drawer open and App Store and Contribute in two live panes](assets/product/app-building-showcase.png)
+![Current Möbius workspace with its compact rail, pane strips, separate composers, and two agent chats in view](assets/product/app-building-showcase.png)
 
-This is the current product, not a diagram. The drawer, pane strips, App Store, app icons, and Contribute surface were captured from a running Möbius container. Visit the [live app-building story](https://mobius.you/#build) to open Builder mode, install Habits, place it on a phone home screen, and open it standalone.
+The [live app-building story](https://mobius.you/#build) re-renders the current shell as working web elements rather than playing a screenshot. Hold the top-left Möbius mark to deal the workspace into panes, watch a phone build Field Notes one layer at a time, add it to the home screen, and open it standalone.
 
 ## Start with the App Store
 
-The App Store includes everyday tools and the parts that help Möbius run itself. Browse apps for writing, planning, learning, health, creation, memory, connected tools, background work, and development. Its collections, summaries, state, and icons come from the published app manifests. The [live App Store explorer](https://mobius.you/#apps) renders the current icons in one interactive grid.
+The App Store includes everyday tools and the parts that help Möbius run itself. Browse apps for writing, planning, learning, health, creation, memory, connected tools, background work, and development. Its collections, summaries, state, and artwork come from the published apps. The [live App Store explorer](https://mobius.you/#apps) renders the current catalog as searchable, selectable interface elements.
 
 ![The current Möbius App Store with its Browse and From URL tabs, filters, collections, and vertical app cards](assets/product/app-store.png)
 
@@ -95,11 +95,15 @@ You do not need to know how Möbius apps are built. Tell your agent what would m
 
 Other apps can be as personal as the trip they support. Brazil 2026 keeps an itinerary, local phrases, weather, packing, and a journal together. News prepares a daily digest around the topics you care about.
 
+CubeRun shows that an app does not have to be another work utility. An agent can build a game, render its world live, and leave it beside the chats and tools that created it.
+
+![CubeRun rendering its current neon tunnel, star field, and ship](assets/product/cuberun-current.png)
+
 ## Build apps and run agents
 
 Open a chat and describe the outcome you want in your own words. For example:
 
-- “Build me a simple meal planner that remembers our favourite recipes.”
+- “Build me a meal planner that remembers our favourite recipes.”
 - “Add a weekly view and quicker task entry to my planner.”
 - “Run this check every morning and tell me when something changes.”
 
@@ -111,22 +115,33 @@ No autonomous rewrite ships without a person in the loop. Agents can prepare cha
 
 ## Use the same workspace on phone and web
 
-Möbius runs as a progressive web app (PWA). On the web, Builder mode can open the app an agent is creating in a new pane beside the conversation. On mobile, the result arrives in a new tab while the composer keeps files, continuation controls, and memory context within reach. Different devices can build different apps; they do not have to be mirrored views of the same example.
+Möbius runs as a progressive web app (PWA). On the web, hold the top-left Möbius mark or press Shift + Enter to open panes beside the conversation. On mobile, press + and describe the app you want. The agent says it will build a draft, opens a tab, and adds the surface, identity, and content in order. Different devices can build different apps; they do not have to be mirrored views of the same example.
 
 <table>
   <tr>
-    <td width="72%"><img src="assets/product/workspace-multiple-panes.png" alt="Möbius Builder mode with the drawer open and App Store and Contribute visible in separate panes"></td>
+    <td width="72%"><img src="assets/product/workspace-multiple-panes.png" alt="The current Möbius runtime at a desktop viewport with its compact rail and two empty chat panes"></td>
     <td width="28%"><img src="assets/product/mobile-plus.png" alt="Möbius on mobile with the plus menu open above the composer"></td>
   </tr>
   <tr>
-    <td><strong>Web:</strong> keep the drawer and several working panes visible together.</td>
+    <td><strong>Web:</strong> keep several working panes and their separate composers visible together.</td>
     <td><strong>Mobile:</strong> press + for files, continuation, summary, and agent context.</td>
   </tr>
 </table>
 
-An installed app can also become its own home-screen entry. Open the app's drawer actions, choose **Install to home screen**, confirm its current icon and name, then finish the browser handoff. The [interactive mobile sequence](https://mobius.you/#build) shows Habits moving from the install sheet to the home screen and opening standalone.
+An installed app can also become its own home-screen entry. The [interactive mobile sequence](https://mobius.you/#build) shows Field Notes appearing on the home screen, a cursor opening the exact new icon, and the app running without Möbius chrome.
 
-![Tandem selected in the Möbius drawer, followed by the Add to home screen sheet and install handoff](assets/product/mobile-install-to-home.png)
+<table>
+  <tr>
+    <td width="33%"><img src="assets/product/mobile-field-notes-home.png" alt="Field Notes installed among the current Möbius app icons on a mobile home screen"></td>
+    <td width="33%"><img src="assets/product/mobile-field-notes-opening.png" alt="A cursor pressing the Field Notes icon on the mobile home screen"></td>
+    <td width="33%"><img src="assets/product/mobile-field-notes-standalone.png" alt="Field Notes open as a standalone mobile app without Möbius chrome"></td>
+  </tr>
+  <tr>
+    <td><strong>Install:</strong> the created app joins the home screen.</td>
+    <td><strong>Open:</strong> the same icon launches the app.</td>
+    <td><strong>Standalone:</strong> the finished app owns the screen.</td>
+  </tr>
+</table>
 
 ## Memory and self-improvement are built in
 
