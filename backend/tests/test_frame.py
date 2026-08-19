@@ -107,6 +107,28 @@ def test_loopback_frame_can_fetch_from_its_delivery_origin(
   assert "http://127.0.0.1:8123" in policy
 
 
+def test_loopback_frame_accepts_bracketed_ipv6_delivery_origin(
+  client, owner_token,
+):
+  app_id = _make_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, "ipv6-frame-test",
+  )
+  response = client.get(
+    f"/api/apps/{app_id}/frame", headers={"host": "[::1]:8123"},
+  )
+  assert "http://[::1]:8123" in response.headers["content-security-policy"]
+
+
+def test_non_loopback_host_does_not_enter_frame_policy(client, owner_token):
+  app_id = _make_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, "public-frame-test",
+  )
+  response = client.get(
+    f"/api/apps/{app_id}/frame", headers={"host": "example.test:8123"},
+  )
+  assert "example.test" not in response.headers["content-security-policy"]
+
+
 def test_frame_304_on_matching_if_none_match(client, owner_token):
   """Repeated GET with the previous ETag returns 304 + empty body —
   closes the round-trip without re-sending the frame HTML."""

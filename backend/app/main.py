@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from datetime import timezone
 from email.utils import formatdate, parsedate_to_datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Do this before importing FastAPI, SQLAlchemy, or any app module that may
 # create worker threads. See allocator.limit_glibc_arenas for the observed
@@ -51,6 +52,7 @@ from app.memory_observability import record_memory_checkpoint
 from app.response_policy import (
   CHAT_EMBED_CSP,
   PUBLISHED_SITE_CSP,
+  absolute_csp_origin,
   app_frame_csp,
   shell_csp,
   static_embed_csp,
@@ -361,17 +363,20 @@ def _loopback_delivery_origin(scope) -> str | None:
   headers = dict(scope.get("headers") or ())
   try:
     authority = headers.get(b"host", b"").decode("ascii")
-    hostname = authority.rsplit("@", 1)[-1].rsplit(":", 1)[0].strip("[]")
+    scheme = str(scope.get("scheme") or "http")
+    origin = absolute_csp_origin(f"{scheme}://{authority}")
+    if origin is None:
+      return None
+    hostname = urlparse(origin).hostname
     is_loopback = (
       hostname == "localhost"
-      or ipaddress.ip_address(hostname).is_loopback
+      or (hostname is not None and ipaddress.ip_address(hostname).is_loopback)
     )
-  except (UnicodeDecodeError, ValueError):
+  except (UnicodeDecodeError, ValueError, TypeError):
     return None
   if not is_loopback:
     return None
-  scheme = str(scope.get("scheme") or "http")
-  return f"{scheme}://{authority}"
+  return origin
 
 
 def _static_embed_csp_for_scope(scope) -> str:
