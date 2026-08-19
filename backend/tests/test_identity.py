@@ -28,7 +28,15 @@ def test_identity_app_requires_reviewed_capability(client, auth):
   assert response.status_code == 200, response.text
   body = response.json()
   assert body["managed"] is False
-  assert body["profile"]["display_name"] == "test"
+  assert body["profile"] == {
+    "user_id": None,
+    "email": None,
+    "display_name": None,
+    "username": None,
+    "handle": None,
+    "avatar_url": None,
+  }
+  assert "test" not in response.text
   assert body["deployments"][0]["current"] is True
 
 

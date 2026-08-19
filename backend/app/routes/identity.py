@@ -33,7 +33,7 @@ class ProfilePatch(BaseModel):
   handle: str
 
 
-def _local_payload(owner: models.Owner) -> dict:
+def _local_payload() -> dict:
   settings = get_settings()
   current = {
     "id": settings.mobius_sso_instance_id or "local",
@@ -46,10 +46,14 @@ def _local_payload(owner: models.Owner) -> dict:
     "managed": settings.mobius_sso_enabled,
     "instance_id": settings.mobius_sso_instance_id or None,
     "profile": {
-      "user_id": owner.sso_subject,
-      "email": owner.sso_email,
-      "display_name": owner.username,
-      "username": owner.username,
+      # A local owner is not a mobius.you identity. Keep the shape stable for
+      # the app without leaking the installation login name into its signed-out
+      # account surface. Managed identity below replaces these nulls only after
+      # the SSO binding has been authenticated server-side.
+      "user_id": None,
+      "email": None,
+      "display_name": None,
+      "username": None,
       "handle": None,
       "avatar_url": None,
     },
@@ -102,7 +106,7 @@ async def _remote(method: str, suffix: str = "", **kwargs) -> dict:
 async def read_identity(
   owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
 ):
-  local = _local_payload(owner)
+  local = _local_payload()
   if not get_settings().mobius_sso_enabled:
     return local
   remote = await _remote("GET")
