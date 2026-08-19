@@ -26,4 +26,8 @@ def test_default_reflection_brief_has_no_unverified_run_ledger():
   assert "Run ledger" not in template
   assert "{{N_INTERVIEWED}}" not in template
   assert ".ledger" not in template
-  assert "From verified evidence" in template
+  assert "Run at a glance" in template
+  assert "Relative token use" in template
+  assert "What I learned" not in template
+  assert "conversation continues" not in template.lower()
+  assert "Ask me anything" not in template
