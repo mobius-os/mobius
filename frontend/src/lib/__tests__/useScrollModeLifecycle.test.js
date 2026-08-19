@@ -3,6 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { renderHook } from '../../components/ChatView/hooks/__tests__/react-hook-shim.mjs'
+import { PIN_OFFSET } from '../../components/ChatView/chatContract.js'
 import useScrollMode from '../../components/ChatView/useScrollMode.js'
 
 function fakeElement(fields = {}) {
@@ -33,8 +34,16 @@ function installBrowserEnvironment({ observers = [], frames = null } = {}) {
     document: globalThis.document,
     ResizeObserver: globalThis.ResizeObserver,
     MutationObserver: globalThis.MutationObserver,
+    localStorage: globalThis.localStorage,
     requestAnimationFrame: globalThis.requestAnimationFrame,
     cancelAnimationFrame: globalThis.cancelAnimationFrame,
+  }
+  const stored = new Map()
+  globalThis.localStorage = {
+    getItem(key) { return stored.has(key) ? stored.get(key) : null },
+    setItem(key, value) { stored.set(key, String(value)) },
+    removeItem(key) { stored.delete(key) },
+    clear() { stored.clear() },
   }
   globalThis.window = {
     addEventListener() {},
@@ -72,7 +81,7 @@ function installBrowserEnvironment({ observers = [], frames = null } = {}) {
   return () => Object.assign(globalThis, previous)
 }
 
-function mountTailController(chatId) {
+function mountTailController(chatId, overrides = {}) {
   const listeners = new Map()
   const lastUser = fakeElement({
     dataset: { cid: 'user-1', key: 'user-1' },
@@ -116,7 +125,7 @@ function mountTailController(chatId) {
     { role: 'user', cid: 'user-1', content: 'Question' },
     { role: 'assistant', cid: 'assistant-tail', content: 'Answer' },
   ]
-  const hook = renderHook(useScrollMode, {
+  const args = {
     chatId,
     scrollRef: { current: scroll },
     spacerRef: { current: fakeElement() },
@@ -128,8 +137,10 @@ function mountTailController(chatId) {
     loadingOlderRef: { current: false },
     initialEntryPhase: 'ready',
     ownsReadingPosition: true,
-  })
-  return { hook, listeners, scroll }
+    ...overrides,
+  }
+  const hook = renderHook(useScrollMode, args)
+  return { hook, listeners, scroll, list, assistant, args }
 }
 
 
@@ -419,6 +430,247 @@ test('a focused inline editor keeps one current owner across keyboard and growth
     assert.equal(scrollListeners.has('beforeinput'), false)
     assert.equal(scrollListeners.has('input'), false)
   } finally {
+    restoreBrowser()
+  }
+})
+
+test('visible FOLLOW_BOTTOM survives repeated Markdown-sized content growth', () => {
+  const observers = []
+  const restoreBrowser = installBrowserEnvironment({ observers })
+  try {
+    const { hook, scroll, list, assistant } = mountTailController(
+      'markdown-growth-follow',
+    )
+    hook.result.current.followLatest()
+    assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM')
+
+    for (const addedHeight of [64, 148, 96, 240]) {
+      assistant.offsetHeight += addedHeight
+      list.offsetHeight += addedHeight
+      scroll.scrollHeight += addedHeight
+      observers[0].callback([{ target: list }])
+      assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM',
+        'rendering structure cannot manufacture a reading hold')
+      assert.equal(scroll.scrollTop, scroll.scrollHeight - scroll.clientHeight,
+        'each visible section or reserved media frame follows the physical tail')
+    }
+
+    scroll.clientHeight = 420
+    observers[0].callback([{ target: scroll }])
+    assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM',
+      'viewport geometry preserves the semantic mode')
+    assert.equal(scroll.scrollTop, scroll.scrollHeight - scroll.clientHeight,
+      'the existing follow intent owns the resized physical tail')
+
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('a hidden chat performs no scroll work and returns to its saved hold', () => {
+  const observers = []
+  const restoreBrowser = installBrowserEnvironment({ observers })
+  try {
+    const mounted = mountTailController('background-hold')
+    const { hook, scroll, list, assistant, args } = mounted
+    hook.result.current.followLatest()
+    assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM')
+    const visibleTop = scroll.scrollTop
+
+    hook.rerender({ ...args, ownsReadingPosition: false })
+    assert.equal(observers[0].disconnected, true,
+      'the outgoing chat removes its layout observer')
+    assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT',
+      'leaving freezes follow into an exact reading coordinate')
+
+    assistant.offsetHeight += 300
+    list.offsetHeight += 300
+    scroll.scrollHeight += 300
+    assert.equal(scroll.scrollTop, visibleTop,
+      'content may grow while hidden without moving the retained transcript')
+
+    hook.rerender({ ...args, ownsReadingPosition: true })
+    assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT',
+      'return restores a hold and never manufactures follow intent')
+    assert.equal(scroll.scrollTop, visibleTop,
+      'return preserves the pre-background visible coordinate')
+
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('an empty chat keeps its first-send pin when the transcript mounts', () => {
+  const observers = []
+  const restoreBrowser = installBrowserEnvironment({ observers })
+  try {
+    const scrollRef = { current: null }
+    const spacerRef = { current: null }
+    const messagesRef = { current: [] }
+    const args = {
+      chatId: 'empty-first-send',
+      scrollRef,
+      spacerRef,
+      lastUserMsgRef: { current: null },
+      chatRef: { current: null },
+      footRef: { current: null },
+      messages: [],
+      messagesRef,
+      loadingOlderRef: { current: false },
+      initialEntryPhase: 'ready',
+      ownsReadingPosition: true,
+    }
+    const hook = renderHook(useScrollMode, args)
+    const intent = hook.result.current.captureSendIntent({ isFirstUserMsg: true })
+    hook.result.current.commitSendIntent({ cid: 'first-user', intent })
+
+    const userRow = fakeElement({
+      dataset: { cid: 'first-user', key: 'first-user' },
+      offsetTop: 120,
+      offsetHeight: 40,
+    })
+    const list = fakeElement({ offsetHeight: 160 })
+    const scroll = fakeElement({
+      scrollTop: 0,
+      scrollHeight: 700,
+      clientHeight: 500,
+      querySelector(selector) {
+        if (selector === '.chat__list') return list
+        if (selector.includes('data-cid="first-user"')) return userRow
+        return null
+      },
+      querySelectorAll(selector) {
+        if (selector === '.chat__msg--user[data-cid]') return [userRow]
+        return []
+      },
+    })
+    scroll.parentElement = fakeElement()
+    scrollRef.current = scroll
+    spacerRef.current = fakeElement()
+    args.lastUserMsgRef.current = userRow
+    args.chatRef.current = fakeElement()
+    args.footRef.current = fakeElement({ offsetHeight: 80 })
+    const messages = [{ role: 'user', cid: 'first-user', content: 'Hello' }]
+    messagesRef.current = messages
+    hook.rerender({ ...args, messages })
+
+    assert.equal(scroll.scrollTop, userRow.offsetTop - PIN_OFFSET,
+      'mounting the first row must apply the already-committed send pin')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('a same-turn Q&A handoff restores prior follow and keeps following growth', () => {
+  const observers = []
+  const restoreBrowser = installBrowserEnvironment({ observers })
+  try {
+    const { hook, scroll, list, assistant } = mountTailController(
+      'question-follow-handoff',
+    )
+    hook.result.current.followLatest()
+    const submission = hook.result.current.freezeQuestionSubmission()
+    assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT',
+      'submitting the answer holds the card through its pending reflow')
+
+    hook.result.current.resumeQuestionSubmission(submission)
+    assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM',
+      'the accepted same-turn answer restores the follow intent that owned the card')
+
+    assistant.offsetHeight += 180
+    list.offsetHeight += 180
+    scroll.scrollHeight += 180
+    observers[0].callback([{ target: list }])
+    assert.equal(scroll.scrollTop, scroll.scrollHeight - scroll.clientHeight,
+      'resumed output remains attached to the physical tail')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('gesture-start diagnostics add no transcript measurement to the hot path', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, listeners, scroll } = mountTailController(
+      'gesture-trace-cost',
+    )
+    let height = scroll.scrollHeight
+    let heightReads = 0
+    Object.defineProperty(scroll, 'scrollHeight', {
+      configurable: true,
+      get() {
+        heightReads += 1
+        return height
+      },
+      set(value) { height = value },
+    })
+    globalThis.window.__mobiusChatScrollTrace = undefined
+
+    const target = { parentElement: scroll, closest: () => null }
+    listeners.get('pointerdown')({
+      type: 'pointerdown', pointerType: 'mouse', button: 0, target,
+    })
+    assert.equal(heightReads, 0,
+      'claiming reader ownership must not synchronously lay out the transcript')
+
+    scroll.scrollTop -= 20
+    listeners.get('scroll')()
+    assert.equal(heightReads, 1,
+      'the first scroll reads tail geometry once, without a second trace read')
+    assert.equal(
+      globalThis.window.__mobiusChatScrollTrace.events.at(-1)?.geometry,
+      null,
+      'hot-path traces remain geometry-free',
+    )
+
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('stream and row churn cannot restart the absolute reveal deadline', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  const previousSetTimeout = globalThis.setTimeout
+  const previousClearTimeout = globalThis.clearTimeout
+  let timerId = 0
+  let revealDeadlines = 0
+  globalThis.setTimeout = (_callback, delay) => {
+    if (delay === 1500) revealDeadlines += 1
+    timerId += 1
+    return timerId
+  }
+  globalThis.clearTimeout = () => {}
+  try {
+    const mounted = mountTailController('fixed-reveal-deadline')
+    const { hook, args } = mounted
+    assert.equal(revealDeadlines, 1)
+
+    const streamed = args.messages.map(message => ({
+      ...message,
+      content: `${message.content}\n## A streamed section`,
+    }))
+    args.messagesRef.current = streamed
+    hook.rerender({ ...args, messages: streamed })
+    assert.equal(revealDeadlines, 1,
+      'content-only streaming must not move the safety cap')
+
+    const nextRow = [
+      ...streamed,
+      { role: 'assistant', cid: 'assistant-next', content: 'More output' },
+    ]
+    args.messagesRef.current = nextRow
+    hook.rerender({ ...args, messages: nextRow })
+    assert.equal(revealDeadlines, 1,
+      'even a structural row commit keeps the mount-scoped deadline')
+    hook.unmount()
+  } finally {
+    globalThis.setTimeout = previousSetTimeout
+    globalThis.clearTimeout = previousClearTimeout
     restoreBrowser()
   }
 })

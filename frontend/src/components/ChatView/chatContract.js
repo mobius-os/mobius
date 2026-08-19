@@ -27,17 +27,11 @@
  * OUT OF SCOPE: transient ordering/jitter and the hide-then-reveal blank
  * window belong to the replay harness and runtime monitor (.pm 210/208).
  *
- * CONSTANTS-SYNC DECISION: PIN_OFFSET / PIN_BOTTOM_ROOM are re-declared here,
- * not imported from useScrollMode.js. They are module-private there (not
- * exported), and importing anything from that file would pull React and a
- * module-load sessionStorage read into this module — breaking both the
- * no-React-import rule and browser-injectability. The mirror is the correct
- * trade. SYNC OBLIGATION: if these change in useScrollMode.js, change them here
- * too. They are exposed as predicate parameters (defaulting to the mirror) so a
- * caller can override without editing this file.
+ * PIN_OFFSET / PIN_BOTTOM_ROOM live here because both the pure contract and
+ * the DOM geometry owner consume them. Keeping one React-free definition
+ * removes the old source-text sync test and makes drift impossible.
  */
 
-// Mirror of the load-bearing constants in ChatView/useScrollMode.js.
 export const PIN_OFFSET = 4
 // Extra reservable room below the pin, ON TOP of what's needed to reach it.
 // 0 => the spacer reserves exactly enough to pin the message at the top

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import {
   olderHistoryRetryShown,
   olderHistoryShouldLoad,
-} from '../useScrollMode.js'
+} from '../scroll/policy.js'
 
 function scrollEl({ scrollHeight, scrollTop, clientHeight }) {
   return { scrollHeight, scrollTop, clientHeight }

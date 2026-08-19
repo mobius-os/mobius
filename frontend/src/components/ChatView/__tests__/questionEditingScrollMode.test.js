@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { modeForQuestionEditingViewportChange } from '../useScrollMode.js'
+import { modeForQuestionEditingViewportChange } from '../scroll/geometry.js'
 
 test('question editing rebases only an ordinary held viewport to native caret movement', () => {
   const staleHold = { kind: 'ANCHOR_AT', key: 'before-edit', offset: 20 }

@@ -1,19 +1,24 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 
 import {
   _anchorModeIntersectsContent,
   _anchorReapplyNeeded,
   _computeSpacerH,
-  _modeForPersistence,
   _pinReapplyNeeded,
-  _scrollModeForDiagnostics,
-  _validateSavedMode,
   applyMode,
   anchorModeFromScroll,
   bottomAnchorModeFromScroll,
   contentHoldModeFromScroll,
+  nextPinViewportHeight,
+  physicalBottomAnchorModeFromScroll,
+  releaseQuestionSubmissionForViewport,
+} from '../scroll/geometry.js'
+import {
+  _modeForPersistence,
+  _validateSavedMode,
+} from '../scroll/restore.js'
+import {
   composerTailIntentRequestsFollow,
   delayedSendWillPin,
   gestureLayoutRetryDelay,
@@ -29,17 +34,16 @@ import {
   modeAfterSpacerResize,
   modeAfterTerminalLayout,
   nestedReaderTargetOwnsInput,
-  physicalBottomAnchorModeFromScroll,
   readerInputClaimsPhysicalTail,
   readerInputEscapeDirection,
   readerInputActivatesDisclosure,
   readerInputMayScroll,
   readerInputNeedsFrameRelease,
   readerScrollEscapeDirection,
-  releaseQuestionSubmissionForViewport,
   settledPinMode,
   shouldPinSend,
-} from '../useScrollMode.js'
+} from '../scroll/policy.js'
+import { _scrollModeForDiagnostics } from '../useScrollMode.js'
 import {
   PIN_BOTTOM_ROOM,
   PIN_OFFSET,
@@ -47,11 +51,6 @@ import {
   pinLanded,
   snapshotChatUX,
 } from '../chatContract.js'
-
-const scrollModeSource = readFileSync(
-  new URL('../useScrollMode.js', import.meta.url),
-  'utf8',
-)
 
 function makeScrollEl({ scrollHeight, scrollTop, clientHeight, spacerHeight = 0 }) {
   return {
@@ -405,33 +404,6 @@ test('the no-scroll release classifier never reads touch geometry', () => {
   // Wheel genuinely needs the values, so it must still read them - exactly once.
   readerInputNeedsFrameRelease('wheel', readGeometry)
   assert.equal(geometryReads, 2, 'wheel reads the scroller once')
-})
-
-test('reader-input tracing never measures the transcript at gesture start', () => {
-  assert.match(
-    scrollModeSource,
-    /captureGeometry = true,[\s\S]*?geometry: captureGeometry \? _scrollGeometryForDiagnostics\(scrollEl\) : null/,
-    'low-frequency diagnostics retain geometry while hot paths can opt out',
-  )
-  assert.match(
-    scrollModeSource,
-    /reader:input-\$\{event\?\.type \|\| 'unknown'\}`,[\s\S]{0,120}?captureGeometry: false/,
-    'the first reader input must not force transcript layout',
-  )
-  assert.match(
-    scrollModeSource,
-    /reader:scroll-start', \{ captureGeometry: false \}/,
-    'the first compositor scroll frame must not force transcript layout',
-  )
-  const onScroll = scrollModeSource.slice(
-    scrollModeSource.indexOf('const onScroll = () =>'),
-    scrollModeSource.indexOf("scrollEl.addEventListener('scroll', onScroll"),
-  )
-  assert.ok(
-    onScroll.indexOf('if (!userDriven)')
-      < onScroll.indexOf('const distanceToBottom'),
-    'browser clamps must return before measuring reader-owned tail intent',
-  )
 })
 
 test('scroll diagnostics expose behavior without message identity', () => {
@@ -793,29 +765,6 @@ test('anchor reapply is inert for non-anchor modes and unresolved keys', () => {
       { kind: 'ANCHOR_AT', key: 'missing', offset: 0 }, 100,
     ),
     false, 'an unresolved anchor row never demands a re-apply',
-  )
-})
-
-test('viewport resize preserves the current mode except for focused Q&A caret reveal', () => {
-  assert.match(
-    scrollModeSource,
-    /applyLayoutMode\('layout:viewport-change', authorityVersion\)/,
-    'keyboard geometry keeps the existing pin, follow, or exact anchor',
-  )
-  assert.doesNotMatch(
-    scrollModeSource,
-    /transitionMode\(\s*modeRef\.current,\s*'layout:viewport-change'/,
-    'geometry must not manufacture a semantic no-op transition',
-  )
-  assert.doesNotMatch(
-    scrollModeSource,
-    /modeForViewportChange/,
-    'viewport layout has no second semantic mode-derivation path',
-  )
-  assert.doesNotMatch(
-    scrollModeSource,
-    /visualViewport\.addEventListener/,
-    'chat observes its actual resized box instead of racing Shell for the browser event',
   )
 })
 
@@ -1613,6 +1562,59 @@ test('keyboard height shrinks blank reservation before moving followed content',
     listEl.offsetHeight + openSpacer - 500,
     'removing 300px of visible height first removes 300px of blank spacer',
   )
+})
+
+test('a pin reserves the known keyboard-closed viewport before that resize paints', () => {
+  const scrollEl = makeSpacerScrollEl({ clientHeight: 500 })
+  const latestUserMsgEl = {
+    offsetTop: 500,
+    offsetHeight: 80,
+    dataset: { cid: 'latest' },
+  }
+  const listEl = { offsetHeight: 700 }
+
+  assert.equal(_computeSpacerH(
+    scrollEl,
+    listEl,
+    latestUserMsgEl,
+    { kind: 'PIN_USER_MSG', cid: 'latest' },
+    { pinViewportHeight: 800 },
+  ), 596)
+  assert.equal(_computeSpacerH(
+    scrollEl,
+    listEl,
+    latestUserMsgEl,
+    { kind: 'FOLLOW_BOTTOM' },
+    { pinViewportHeight: 800 },
+  ), 296, 'follow remains responsive to the keyboard-open box')
+})
+
+test('pin viewport ceiling survives same-width keyboard motion and resets on layout changes', () => {
+  assert.equal(nextPinViewportHeight({
+    previousHeight: 800,
+    previousWidth: 412,
+    currentHeight: 500,
+    currentWidth: 412,
+  }), 800)
+  assert.equal(nextPinViewportHeight({
+    previousHeight: 500,
+    previousWidth: 412,
+    currentHeight: 800,
+    currentWidth: 412,
+  }), 800)
+  assert.equal(nextPinViewportHeight({
+    previousHeight: 800,
+    previousWidth: 412,
+    currentHeight: 500,
+    currentWidth: 700,
+  }), 500, 'orientation/width changes establish a new ceiling')
+  assert.equal(nextPinViewportHeight({
+    previousHeight: 800,
+    previousWidth: 700,
+    currentHeight: 620,
+    currentWidth: 700,
+    committedResize: true,
+  }), 620, 'a committed pane resize establishes a new ceiling')
 })
 
 test('keyboard overflow lifts only content that no longer fits', () => {

@@ -561,7 +561,12 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   scroll box, now-hidden blank room is removed from the spacer first. In
   `FOLLOW_BOTTOM` this keeps the visible content fixed while room remains; after
   the spacer reaches zero, only the overflow that no longer fits moves upward.
-  Closing the keyboard restores the exact larger-screen deficit. The full range
+  A `PIN_USER_MSG` has one reachability exception: while the box is narrowed by
+  a same-width software keyboard, it reserves against the largest same-width
+  scroll box already observed. Closing the keyboard therefore cannot clamp the
+  sent row for one painted frame before ResizeObserver restores the larger
+  deficit. A width/orientation change or committed pane resize establishes a new
+  ceiling. FOLLOW and ordinary anchors continue to use the active box. The full range
   for the current visible viewport must exist before a downward gesture approaches
   the final turn: crossing the latest-user viewport boundary must never extend
   `scrollHeight` after momentum settles. The remaining room survives turn
@@ -600,7 +605,7 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   just before final buffered text fills the reservation. Later idle layout changes
   cannot create follow. A non-pinning send preserves the exact reading anchor.
   A settled `PIN_USER_MSG` survives the complete mobile-keyboard open/close
-  cycle. An armed live pin keeps the sent row fixed while the resized active
+  cycle without an intermediate displaced paint. An armed live pin keeps the sent row fixed while the resized active
   reservation remains; if the smaller visible viewport reduces that exact
   reservation to zero, the ordinary filled-reservation handoff enters
   `FOLLOW_BOTTOM` so covered live output moves into view and continues following.
@@ -718,8 +723,8 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   Its visibility is a pure physical-tail geometry read outside the controller's
   ownership gates: it renders only while the reader holds a position away from
   the physical tail, including after an upward move through reserved room. A fresh
-  live-send reservation does not summon it because a correctly pinned row rests at
-  that same physical clamp. It yields
+  live-send reservation does not summon it while `PIN_USER_MSG` owns that expected
+  latest-turn location, including during R1's transient keyboard-close ceiling. It yields
   to a visible attention nudge, which navigates to the same tail with strictly
   more context.
 - **R5b — One keyboard geometry signal; reservation-responsive resize.** Shell alone
@@ -728,6 +733,9 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   scroll-box `ResizeObserver` is the sole downstream signal that keyboard layout
   has actually landed. A resize recalculates the latest-turn spacer from the
   active scroll-box height, then reapplies the mode that already owns the chat.
+  PIN alone pre-reserves the largest already-observed same-width height, because
+  native viewport growth can clamp `scrollTop` one paint before ResizeObserver's
+  callback; this is reachability geometry, not a second viewport listener.
   `PIN_USER_MSG` keeps the sent row at its pinned offset while reservation remains,
   `ANCHOR_AT` keeps the same row offset, and `FOLLOW_BOTTOM` follows the resized
   physical tail without moving through blank room. The only ordinary mode change
@@ -788,7 +796,7 @@ path means routing it through the same entries rather than inventing another rul
 | Short reply settles before consuming the reservation | armed pin hold | settled pin hold | Keep prompt fixed; retire automatic handoff |
 | Other layout grows/collapses while latest user is visible | any hold | same hold | Consume/restore exact R1 deficit |
 | Latest user leaves the viewport | any | same reader mode | Collapse spacer to zero |
-| Viewport/keyboard changes | armed `PIN_USER_MSG` | same pin while responsive room remains; `FOLLOW_BOTTOM` if it reaches zero | Shrink blank reservation first; reapply pin or perform R3's ordinary filled-reservation handoff |
+| Viewport/keyboard changes | armed `PIN_USER_MSG` | same pin while responsive room remains; `FOLLOW_BOTTOM` if it reaches zero | Keep the same-width pin ceiling reachable before growth; reapply pin or perform R3's ordinary filled-reservation handoff |
 | Viewport/keyboard changes | settled `PIN_USER_MSG` | same `PIN_USER_MSG` | Reapply the same pin; geometry never reclassifies it |
 | Viewport/keyboard changes | follow or anchor hold | same mode | Resize reservation to the visible scroll box, then reapply the physical tail or exact anchor; never create or retire follow |
 | Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
@@ -818,7 +826,8 @@ Controller structure is part of the contract, not an implementation detail:
 - `useScrollMode` is the sole writer of `.spacer-dynamic` height and the
   composer-clearance CSS geometry. Those indirect writes and every `writeMode`
   call share R5's reader-generation commit gate. Spacer height is
-  derived from the latest user row, active scroll-box height, and exact tail deficit;
+  derived from the latest user row, active scroll-box height (plus R1's transient
+  same-width pin ceiling), and exact tail deficit;
   disclosure helpers and renderers may preserve an on-screen anchor but may never
   prime, enlarge, or unwind spacer themselves.
 - The gesture-gated `scroll` event reads physical-bottom geometry directly.

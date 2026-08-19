@@ -14,16 +14,19 @@ import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
 import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
-import useScrollMode, {
+import useScrollMode from './useScrollMode.js'
+import {
   FOLLOW_STICK_BAND_PX,
   isNearPhysicalBottom,
   olderHistoryRetryShown,
   olderHistoryShouldLoad,
+} from './scroll/policy.js'
+import {
   remapSavedReadingAnchor,
   retireSavedReadingPosition,
   savedReadingAnchorHasNestedPart,
   savedReadingAnchorKey,
-} from './useScrollMode.js'
+} from './scroll/readingPositions.js'
 import useVoiceInput from './useVoiceInput.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import { getOnlineSnapshot } from '../../lib/connectivityStore.js'
@@ -851,6 +854,7 @@ export default function ChatView({
     settleStreamingPin,
     composerEdited,
     paneResized,
+    pinning,
     following,
     followLatest,
   } = useScrollMode({
@@ -4104,7 +4108,12 @@ export default function ChatView({
   const questionNudgeShown = hasPendingQuestion && pendingCardOffscreen
   const resumeNudgeShown = hasPendingResume && resumeCardOffscreen
   const jumpToLatestVisible = jumpToLatestShown({
-    awayFromTail: awayFromLatest && !following,
+    // A send-owned PIN_USER_MSG is the expected latest-turn location, not a
+    // reader escape. Its keyboard-close reachability floor can temporarily
+    // extend the physical tail before the viewport grows, so suppress the
+    // navigation affordance until either the pin hands off or the reader
+    // scrolls into an ordinary anchor.
+    awayFromTail: awayFromLatest && !following && !pinning,
     questionNudgeShown,
     resumeNudgeShown,
   })
