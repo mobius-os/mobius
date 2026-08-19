@@ -25,7 +25,7 @@ from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app import activity, models
+from app import activity, deployment_control, models
 from app.database import get_db
 from app.deps import get_current_owner, reject_cross_site
 from app.restart_util import restart_this_worker
@@ -227,3 +227,39 @@ def restart_server(
     {"status": "restarting"},
     background=BackgroundTask(restart_this_worker),
   )
+
+
+@router.get("/rebuild")
+async def rebuild_status(
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Read the externally durable container-replacement operation."""
+  try:
+    return await deployment_control.read_rebuild_status()
+  except deployment_control.DeploymentControlError as exc:
+    raise HTTPException(
+      status_code=exc.status_code,
+      detail={"code": exc.code, "message": exc.message},
+    ) from exc
+
+
+@router.post(
+  "/rebuild",
+  dependencies=[Depends(reject_cross_site)],
+  status_code=202,
+)
+async def rebuild_container(
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Request replacement of this installation's fixed app container.
+
+  The empty owner action is intentional: deployment identity, target source,
+  and provider arguments belong to the external controller, never the browser.
+  """
+  try:
+    return await deployment_control.request_rebuild()
+  except deployment_control.DeploymentControlError as exc:
+    raise HTTPException(
+      status_code=exc.status_code,
+      detail={"code": exc.code, "message": exc.message},
+    ) from exc

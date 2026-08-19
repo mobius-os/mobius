@@ -261,8 +261,14 @@ class PlatformApplyResult(TypedDict):
 class _ActivationMarker(TypedDict):
   """Validated durable activation remainder."""
 
+  version: int
   target_sha: str
+  upstream_sha: str | None
   paths: list[str]
+  # Exact subset whose desired content matches ``upstream_sha`` and can
+  # therefore be satisfied by the official image for that release. Local-only
+  # image inputs stay outside this set and remain pending after a rebuild.
+  image_paths: list[str]
 
 
 class PlatformRestartResponse(TypedDict):
@@ -899,7 +905,13 @@ def _read_activation_marker() -> _ActivationMarker | None:
   except json.JSONDecodeError:
     # Before activation impacts existed this file held only a target SHA.  Its
     # only meaning was a backend restart, so preserve exactly that remainder.
-    return {"target_sha": raw, "paths": ["backend/app"]}
+    return {
+      "version": 0,
+      "target_sha": raw,
+      "upstream_sha": None,
+      "paths": ["backend/app"],
+      "image_paths": [],
+    }
   if not isinstance(parsed, dict):
     return None
   target = str(parsed.get("target_sha") or "").strip()
@@ -907,25 +919,98 @@ def _read_activation_marker() -> _ActivationMarker | None:
   if not isinstance(paths, list):
     return None
   clean_paths = sorted({str(path).strip() for path in paths if str(path).strip()})
-  return {"target_sha": target, "paths": clean_paths}
+  if parsed.get("version") == 2:
+    upstream = str(parsed.get("upstream_sha") or "").strip() or None
+    raw_image_paths = parsed.get("image_paths")
+    if not isinstance(raw_image_paths, list):
+      return None
+    image_paths = sorted({
+      str(path).strip() for path in raw_image_paths
+      if str(path).strip() in clean_paths
+    })
+    return {
+      "version": 2,
+      "target_sha": target,
+      "upstream_sha": upstream,
+      "paths": clean_paths,
+      "image_paths": image_paths,
+    }
+  # Schema 1 stored only target+paths. Preserve its historical completion
+  # semantics during a rolling upgrade; every newly written marker is schema 2
+  # and distinguishes upstream-covered paths from local-only image inputs.
+  return {
+    "version": 1,
+    "target_sha": target,
+    "upstream_sha": target or None,
+    "paths": clean_paths,
+    "image_paths": clean_paths,
+  }
 
 
-def _write_activation_marker(target_sha: str, paths: list[str]) -> None:
+def _write_activation_marker(
+  target_sha: str,
+  paths: list[str],
+  *,
+  upstream_sha: str | None = None,
+  image_paths: list[str] | None = None,
+) -> None:
   clean_paths = sorted({path.strip() for path in paths if path.strip()})
   if not clean_paths:
     RESTART_NEEDED_FLAG.unlink(missing_ok=True)
     return
+  clean_image_paths = sorted({
+    path.strip() for path in (image_paths or [])
+    if path.strip() in clean_paths
+  })
   _atomic_write_text(RESTART_NEEDED_FLAG, json.dumps({
+    "version": 2,
     "target_sha": target_sha or "",
+    "upstream_sha": upstream_sha or "",
     "paths": clean_paths,
+    "image_paths": clean_image_paths,
   }, separators=(",", ":")))
 
 
-def mark_activation_needed(target_sha: str, paths: list[str]) -> None:
+def _paths_matching_upstream(
+  repo: Path,
+  target_sha: str,
+  upstream_sha: str | None,
+  paths: list[str],
+) -> list[str]:
+  """Paths whose desired local content is exactly the upstream tree content."""
+  if not target_sha or not upstream_sha:
+    return []
+  matching: list[str] = []
+  for path in paths:
+    result = _git(
+      "diff", "--quiet", target_sha, upstream_sha, "--", path,
+      repo=repo, check=False,
+    )
+    if result.returncode == 0:
+      matching.append(path)
+  return matching
+
+
+def mark_activation_needed(
+  target_sha: str,
+  paths: list[str],
+  *,
+  upstream_sha: str | None = None,
+  repo: Path = PLATFORM_REPO,
+) -> None:
   """Persist activation work, preserving any earlier host/image remainder."""
   existing = _read_activation_marker()
   carried = existing["paths"] if existing else []
-  _write_activation_marker(target_sha, [*carried, *paths])
+  combined = sorted({*[str(path) for path in carried], *[str(path) for path in paths]})
+  covered = _paths_matching_upstream(
+    repo, target_sha, upstream_sha, combined,
+  )
+  _write_activation_marker(
+    target_sha,
+    combined,
+    upstream_sha=upstream_sha,
+    image_paths=covered,
+  )
 
 
 def _served_platform_sha() -> str | None:
@@ -997,14 +1082,13 @@ def _complete_boot_activation(repo: Path) -> None:
     RESTART_NEEDED_FLAG.unlink(missing_ok=True)
     return
   paths = marker["paths"]
-  target = marker["target_sha"]
+  target = marker["upstream_sha"] or marker["target_sha"]
   build = current_build_sha()
   build_contains_target = bool(
     target and build and (_rev(repo, build) or "")
     and _is_ancestor(repo, target, build)
   )
   completed_by_image = {
-    platform_activation.ActivationLevel.CONTAINER_RECREATE.value,
     platform_activation.ActivationLevel.IMAGE_REBUILD.value,
   }
   remaining: list[str] = []
@@ -1020,10 +1104,21 @@ def _complete_boot_activation(repo: Path) -> None:
       platform_activation.ActivationLevel.DEPENDENCY_SYNC.value,
     }:
       continue
-    if build_contains_target and level in completed_by_image:
+    if (
+      build_contains_target
+      and path in marker["image_paths"]
+      and level in completed_by_image
+    ):
       continue
     remaining.append(str(path))
-  _write_activation_marker(target, remaining)
+  _write_activation_marker(
+    marker["target_sha"],
+    remaining,
+    upstream_sha=marker["upstream_sha"],
+    image_paths=[
+      path for path in marker["image_paths"] if path in remaining
+    ],
+  )
 
 
 def _changed_paths(
@@ -2019,7 +2114,12 @@ async def apply_platform_update(
         changed_paths = _activation_paths_between(repo, served, head)
         incoming_impact = platform_activation.classify_activation(changed_paths)
         if incoming_impact["level"] != platform_activation.ActivationLevel.LIVE.value:
-          mark_activation_needed(head or "", changed_paths)
+          mark_activation_needed(
+            head or "",
+            changed_paths,
+            upstream_sha=res.target_sha,
+            repo=repo,
+          )
         return _platform_activation_impact(repo)
 
       if res.status == "updated":

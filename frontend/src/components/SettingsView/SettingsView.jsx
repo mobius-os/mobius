@@ -7,6 +7,11 @@ import { api, clearQueryCache, clearToken } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
 import { platformVersionIdentity } from '../../lib/platformVersionIdentity.js'
 import {
+  rebuildIsActive,
+  rebuildPollShouldContinue,
+  rebuildProgressMessage,
+} from '../../lib/containerRebuild.js'
+import {
   platformStatusFromApply,
   platformUpdateStatusLabel,
 } from '../../lib/platformUpdateState.js'
@@ -368,6 +373,13 @@ export default function SettingsView({
   // A manual restart interrupts any live chat, so it's a deliberate two-step:
   // the first tap arms the confirm, the second actually restarts.
   const [restartConfirm, setRestartConfirm] = useState(false)
+  const [rebuildConfirm, setRebuildConfirm] = useState(false)
+  const [rebuildStatus, setRebuildStatus] = useState(null)
+  const [rebuildError, setRebuildError] = useState('')
+  const [rebuildRequesting, setRebuildRequesting] = useState(false)
+  const rebuildPreviousBootIdRef = useRef('')
+  const rebuildInitiatedHereRef = useRef(false)
+  const rebuildReconnectStartedRef = useRef(false)
   const [signOutConfirm, setSignOutConfirm] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
   // Platform self-update (backend, frontend, and libraries as one release).
@@ -921,7 +933,7 @@ export default function SettingsView({
   }, [clearRestartPoll])
 
   async function restartServer() {
-    if (restartPhase === 'restarting') return
+    if (restartPhase === 'restarting' || rebuildIsActive(rebuildStatus)) return
     setRestartPhase('restarting')
     setRestartError('')
     setRestartSlow(false)
@@ -951,6 +963,111 @@ export default function SettingsView({
       setRestartConfirm(false)
       setRestartSlow(false)
       setRestartError(err.message || 'Restart request failed.')
+    }
+  }
+
+  const refreshRebuildStatus = useCallback(async () => {
+    try {
+      const response = await api.admin.rebuildStatus()
+      if (response.status === 404) {
+        setRebuildStatus({
+          supported: false,
+          state: 'idle',
+          message: 'Container rebuilding is not available yet.',
+        })
+        return null
+      }
+      if (!response.ok) return null
+      const body = await response.json()
+      setRebuildStatus(body)
+      return body
+    } catch {
+      return null
+    }
+  }, [])
+
+  useEffect(() => {
+    if (active) refreshRebuildStatus()
+  }, [active, refreshRebuildStatus, refreshToken])
+
+  useEffect(() => {
+    if (!active || !rebuildIsActive(rebuildStatus)) return undefined
+    let cancelled = false
+    let timer = null
+    const poll = async () => {
+      const body = await refreshRebuildStatus()
+      // A brief disconnect is expected while the container is replaced, and
+      // can also happen before replacement starts. Keep polling until the
+      // controller returns a terminal state rather than freezing on stale UI.
+      if (!cancelled && rebuildPollShouldContinue(body)) {
+        timer = window.setTimeout(poll, 1500)
+      }
+    }
+    timer = window.setTimeout(poll, 1500)
+    return () => {
+      cancelled = true
+      if (timer) window.clearTimeout(timer)
+    }
+  }, [active, rebuildStatus?.state, refreshRebuildStatus])
+
+  useEffect(() => {
+    const state = rebuildStatus?.state
+    if (!['replacing', 'verifying', 'succeeded'].includes(state)) return
+    if (!rebuildInitiatedHereRef.current) return
+    if (rebuildReconnectStartedRef.current) return
+    rebuildReconnectStartedRef.current = true
+    returnToSettingsAfterReload()
+    pollRestartThenReload({
+      previousBootId: rebuildPreviousBootIdRef.current,
+      onTimeout: ({ freshServerSeen }) => {
+        rebuildReconnectStartedRef.current = false
+        setRebuildError(freshServerSeen
+          ? 'The container changed, but Möbius couldn’t reload the shell. Refresh the page.'
+          : 'Möbius still can’t confirm the rebuilt container. Use your deployment’s Recovery action if it is unavailable.')
+      },
+    })
+  }, [rebuildStatus?.state])
+
+  useEffect(() => {
+    const state = rebuildStatus?.state
+    if (!['failed', 'rolled_back', 'needs_recovery'].includes(state)) return
+    setRebuildConfirm(false)
+    if (state === 'failed') {
+      setRebuildError(
+        rebuildStatus?.message || 'The container could not be rebuilt.',
+      )
+    }
+  }, [rebuildStatus?.state, rebuildStatus?.message])
+
+  async function rebuildContainer() {
+    if (
+      rebuildRequesting
+      || rebuildIsActive(rebuildStatus)
+      || restartPhase === 'restarting'
+    ) return
+    setRebuildRequesting(true)
+    setRebuildError('')
+    rebuildInitiatedHereRef.current = false
+    rebuildReconnectStartedRef.current = false
+    rebuildPreviousBootIdRef.current = await readRestartBootId()
+    try {
+      const response = await api.admin.rebuild()
+      let body = null
+      try { body = await response.json() } catch {}
+      if (!response.ok) {
+        const detail = body?.detail
+        throw new Error(
+          detail?.message || detail || `Rebuild failed (${response.status})`,
+        )
+      }
+      rebuildInitiatedHereRef.current = true
+      setRebuildStatus(body)
+      setRebuildConfirm(false)
+      returnToSettingsAfterReload()
+    } catch (err) {
+      setRebuildError(err?.message || 'The container could not be rebuilt.')
+    } finally {
+      setRebuildRequesting(false)
     }
   }
 
@@ -1858,7 +1975,7 @@ export default function SettingsView({
                   className="settings__btn settings__btn--outline settings__btn--sm"
                   type="button"
                   onClick={() => setRestartConfirm(false)}
-                  disabled={restartPhase === 'restarting'}
+                  disabled={restartPhase === 'restarting' || rebuildIsActive(rebuildStatus)}
                 >
                   Cancel
                 </button>
@@ -1866,7 +1983,7 @@ export default function SettingsView({
                   className="settings__btn settings__btn--sm settings__btn--nowrap"
                   type="button"
                   onClick={restartServer}
-                  disabled={restartPhase === 'restarting'}
+                  disabled={restartPhase === 'restarting' || rebuildIsActive(rebuildStatus)}
                 >
                   {restartPhase === 'restarting' ? 'Restarting…' : 'Restart now'}
                 </button>
@@ -1876,6 +1993,7 @@ export default function SettingsView({
                 className="settings__btn settings__btn--outline settings__btn--sm"
                 type="button"
                 onClick={() => { setRestartError(''); setRestartConfirm(true) }}
+                disabled={rebuildIsActive(rebuildStatus)}
               >
                 Restart
               </button>
@@ -1898,6 +2016,68 @@ export default function SettingsView({
               color="danger"
               variant="soft"
               description={restartError}
+            />
+          )}
+          <div className="settings__row">
+            <span className="settings__label">Rebuild container</span>
+            {rebuildConfirm ? (
+              <div className="settings__confirm">
+                <button
+                  className="settings__btn settings__btn--outline settings__btn--sm"
+                  type="button"
+                  onClick={() => setRebuildConfirm(false)}
+                  disabled={rebuildRequesting || rebuildIsActive(rebuildStatus)}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="settings__btn settings__btn--sm settings__btn--nowrap"
+                  type="button"
+                  onClick={rebuildContainer}
+                  disabled={rebuildRequesting || rebuildIsActive(rebuildStatus)}
+                >
+                  {rebuildRequesting || rebuildIsActive(rebuildStatus) ? 'Rebuilding…' : 'Rebuild now'}
+                </button>
+              </div>
+            ) : (
+              <button
+                className="settings__btn settings__btn--outline settings__btn--sm"
+                type="button"
+                onClick={() => { setRebuildError(''); setRebuildConfirm(true) }}
+                disabled={
+                  restartPhase === 'restarting'
+                  || rebuildRequesting
+                  || rebuildIsActive(rebuildStatus)
+                  || rebuildStatus?.supported === false
+                }
+              >
+                {rebuildStatus?.supported === false ? 'Not set up' : 'Rebuild'}
+              </button>
+            )}
+          </div>
+          {rebuildConfirm && !rebuildIsActive(rebuildStatus) && (
+            <p className="settings__subtext settings__subtext--tight">
+              Replaces the current container with one built for your updated
+              version. Möbius will be briefly unavailable and active chats may pause.
+            </p>
+          )}
+          {rebuildStatus?.supported === false && (
+            <p className="settings__subtext settings__subtext--tight">
+              {rebuildStatus.message || 'Container rebuilding is not set up on this installation.'}
+            </p>
+          )}
+          {(rebuildIsActive(rebuildStatus) || [
+            'succeeded', 'no_change', 'rolled_back', 'needs_recovery',
+          ].includes(rebuildStatus?.state)) && (
+            <div className="settings__notice" role="status">
+              {rebuildProgressMessage(rebuildStatus)}
+            </div>
+          )}
+          {rebuildError && (
+            <Alert
+              color="danger"
+              variant="soft"
+              description={rebuildError}
             />
           )}
           <div className="settings__row">
