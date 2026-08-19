@@ -102,6 +102,7 @@ import {
   releaseComposerFocusLease,
 } from './composerFocusLease.js'
 import {
+  settleNewestWorkerForHandoff,
   shouldRearmShellApply,
   watchForShellUpdateOnForeground,
 } from './swHandoff.js'
@@ -2290,6 +2291,11 @@ export default function Shell({ onInitialVisualReady }) {
       if (navigator.serviceWorker?.getRegistration) {
         try {
           const reg = await navigator.serviceWorker.getRegistration()
+          // register()/update() resolve while a newly-discovered worker can
+          // still be INSTALLING. Deciding from registration.waiting at that
+          // instant loses the generation until another refresh. Settle the
+          // newest install first, then inspect the authoritative handoff state.
+          await settleNewestWorkerForHandoff({ registration: reg })
           rearm = shouldRearmShellApply({
             stalePrecacheFlagged: flagged,
             waiting: reg?.waiting || null,

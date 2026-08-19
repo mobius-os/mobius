@@ -1081,6 +1081,13 @@ test('a manual platform reconcile refreshes the persistent Settings surface', ()
   )
 })
 
+test('boot waits for an installing shell generation before deciding it is current', () => {
+  assert.match(
+    shell,
+    /const reg = await navigator\.serviceWorker\.getRegistration\(\)[\s\S]*?await settleNewestWorkerForHandoff\(\{ registration: reg \}\)[\s\S]*?rearm = shouldRearmShellApply/,
+  )
+})
+
 test('the builder no-full-screen invariant scopes to DESTINATIONS, not transient dialogs (§2)', () => {
   // The invariant governs navigable destinations (Settings, takeover views,
   // immersive), NOT dismissible dialogs layered over the workspace. Those stay
