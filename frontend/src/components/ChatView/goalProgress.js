@@ -133,6 +133,23 @@ function progressLabel(task) {
 
 /** Active work first; when nothing is running, expose every newly ready task. */
 export function visibleGoalTasks(goalPlan) {
+  const activeStatuses = new Set(['starting', 'running', 'resuming', 'paused'])
+  const delegatedLeaves = []
+  const collectDelegatedLeaves = node => {
+    const activeChildren = (node?.children || []).filter(child => (
+      activeStatuses.has(child?.status)
+    ))
+    if (activeChildren.length) {
+      activeChildren.forEach(collectDelegatedLeaves)
+    } else if (activeStatuses.has(node?.status)) {
+      const title = String(node.task_key || '')
+        .replace(/[._-]+/g, ' ')
+        .replace(/^./, letter => letter.toUpperCase())
+      delegatedLeaves.push({ id: node.id, title, status: 'running' })
+    }
+  }
+  ;(goalPlan?.delegations || []).forEach(collectDelegatedLeaves)
+  if (delegatedLeaves.length) return delegatedLeaves
   const tasks = Array.isArray(goalPlan?.tasks) ? goalPlan.tasks : []
   const running = tasks.filter(task => task?.status === 'running')
   if (running.length) return running

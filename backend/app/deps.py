@@ -561,6 +561,8 @@ def get_principal(
     app_id=app_id,
     app_instance_id=payload.get("app_nonce") if app_id is not None else None,
     scope="app" if app_id is not None else "owner",
+    chat_id=payload.get("delegation_chat"),
+    delegation_id=payload.get("delegation_id"),
   )
 
 
@@ -592,6 +594,8 @@ def get_delegation_principal(
     owner=owner, app_id=app_id,
     app_instance_id=payload.get("app_nonce") if app_id is not None else None,
     scope="app" if app_id is not None else "owner",
+    chat_id=payload.get("delegation_chat"),
+    delegation_id=payload.get("delegation_id"),
   )
 
 

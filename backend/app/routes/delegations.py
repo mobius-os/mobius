@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import json
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
@@ -11,11 +13,13 @@ from sqlalchemy.orm import Session
 from app import models, providers
 from app.chat_start import start_programmatic_chat_turn
 from app.database import get_db
+from app.config import get_settings
 from app.delegations import (
   DelegationIntent,
   cancel_delegation_execution,
   create_or_attach_delegation,
   derived_status,
+  MAX_DELEGATION_DEPTH,
   normalize_cwd,
   parent_root_run_id,
   serialize_delegation,
@@ -75,9 +79,6 @@ class DelegationSubmit(BaseModel):
     return value
 
 
-MAX_DELEGATION_DEPTH = 4
-
-
 def _require_submitter(
   db: Session, principal: Principal, body: DelegationSubmit,
 ) -> models.Delegation | None:
@@ -94,7 +95,12 @@ def _require_submitter(
   ).first()
   if parent is None:
     raise HTTPException(status_code=403, detail="Delegated work must stay under its parent child chat.")
-  if principal.scope == "delegation" and (
+  if parent.scope == "read" and body.scope != "read":
+    raise HTTPException(
+      status_code=403,
+      detail="A read-only delegated owner cannot create write-capable children.",
+    )
+  if principal.delegation_id is not None and (
     principal.delegation_id != parent.id
     or principal.chat_id != body.parent_chat_id
   ):
@@ -114,7 +120,7 @@ def _row_for_principal(
   query = db.query(models.Delegation).filter(
     models.Delegation.id == delegation_id,
   )
-  if principal.scope == "delegation":
+  if principal.delegation_id is not None:
     query = query.filter(models.Delegation.parent_chat_id == principal.chat_id)
   elif principal.app_id is not None:
     query = query.filter(models.Delegation.app_id == principal.app_id)
@@ -237,9 +243,59 @@ async def submit_or_attach(
       ) from exc
 
     await _ensure_started(db, row, body.prompt)
+    from app.goal_plans import publish_plan_for_delegation
+    publish_plan_for_delegation(db, row)
   payload = serialize_delegation(db, row)
   payload["attached"] = attached
   return payload
+
+
+@router.get("/capabilities")
+async def delegation_capabilities(
+  principal: Principal = Depends(get_delegation_principal),
+  db: Session = Depends(get_db),
+):
+  """Read-only Subagents configuration for a confined delegated owner."""
+  if principal.delegation_id is None or principal.app_id is None:
+    raise HTTPException(status_code=403, detail="Delegated child token required.")
+  app = db.query(models.App).filter(
+    models.App.id == principal.app_id,
+    models.App.deleted_at.is_(None),
+  ).first()
+  if app is None:
+    raise HTTPException(status_code=403, detail="Delegation owner app is unavailable.")
+
+  def read_json(name: str) -> dict:
+    path = Path(get_settings().data_dir) / "apps" / str(app.id) / name
+    try:
+      value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+      return {}
+    return value if isinstance(value, dict) else {}
+
+  connections = {}
+  for provider_id, provider in providers.PROVIDERS.items():
+    error = provider.check_auth(get_settings().data_dir)
+    connections[provider_id] = {
+      "configured": error is None,
+      "authenticated": error is None,
+      "error": error,
+    }
+  registry = await providers.list_models(get_settings().data_dir)
+  models_by_provider = {
+    provider_id: [
+      {"id": entry["id"], "name": entry["label"]}
+      for entry in entries
+    ]
+    for provider_id, entries in registry.items()
+  }
+  return {
+    "app_id": app.id,
+    "config": read_json("config.json"),
+    "runtime": read_json("status.json"),
+    "connections": connections,
+    "models": models_by_provider,
+  }
 
 
 @router.get("")
@@ -252,7 +308,7 @@ def list_delegations(
   db: Session = Depends(get_db),
 ):
   query = db.query(models.Delegation)
-  if principal.scope == "delegation":
+  if principal.delegation_id is not None:
     query = query.filter(models.Delegation.parent_chat_id == principal.chat_id)
   elif principal.app_id is not None:
     query = query.filter(models.Delegation.app_id == principal.app_id)
@@ -303,6 +359,8 @@ async def cancel_delegation(
     db.rollback()
     row = _row_for_principal(db, delegation_id, principal)
   payload = serialize_delegation(db, row)
+  from app.goal_plans import publish_plan_for_delegation
+  publish_plan_for_delegation(db, row)
   return payload
 
 

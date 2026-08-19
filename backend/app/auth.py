@@ -118,6 +118,8 @@ def create_app_token(
   app_nonce: str | None = None,
   *,
   expires_delta: timedelta = timedelta(hours=8),
+  delegation_id: str | None = None,
+  delegation_chat: str | None = None,
 ) -> str:
   """Creates a short-lived JWT scoped to a specific mini-app.
 
@@ -135,6 +137,11 @@ def create_app_token(
   claims = {"sub": owner_username, "scope": "app", "app_id": app_id}
   if app_nonce is not None:
     claims["app_nonce"] = app_nonce
+  if (delegation_id is None) != (delegation_chat is None):
+    raise ValueError("delegation identity and chat must be supplied together")
+  if delegation_id is not None:
+    claims["delegation_id"] = delegation_id
+    claims["delegation_chat"] = delegation_chat
   return create_access_token(
     claims,
     expires_delta=expires_delta,

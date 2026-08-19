@@ -1,6 +1,7 @@
 """Durable Goal-plan validation, ordering, progress, and route contracts."""
 
 import importlib.util
+import hashlib
 from pathlib import Path
 
 from app import models
@@ -226,6 +227,67 @@ def test_plan_follows_stable_goal_identity_across_a_new_logical_run(
   assert recovered.status_code == 200, recovered.text
   assert recovered.json()["plan"]["revision"] == 1
   assert recovered.json()["plan"]["goal_id"] == "goal-1"
+
+
+def test_plan_projects_recursive_delegation_ownership_without_transcripts(
+  client, owner_token, db,
+):
+  auth, chat_id = _active_goal(client, owner_token, db)
+  created = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 0, "tasks": [{"id": "b", "title": "Do B"}]},
+    headers=auth,
+  )
+  assert created.status_code == 200, created.text
+  app = models.App(
+    slug="goal-tree-subagents", source_dir="/tmp/goal-tree-subagents",
+    name="Subagents", description="", jsx_source="",
+  )
+  db.add(app)
+  db.flush()
+  child_b = models.Chat(
+    id="child-b", title="B", messages=[], created_by_app_id=app.id,
+  )
+  child_x = models.Chat(
+    id="child-x", title="X", messages=[], created_by_app_id=app.id,
+  )
+  db.add_all([child_b, child_x])
+  db.flush()
+  common = {
+    "app_id": app.id, "provider": "codex", "model": None,
+    "effort": None, "scope": "read", "cwd": "/data",
+    "prompt_sha256": hashlib.sha256(b"").hexdigest(),
+  }
+  db.add_all([
+    models.Delegation(
+      id="delegation-b", parent_chat_id=chat_id,
+      parent_root_run_id="goal-root", task_key="b", child_chat_id="child-b",
+      **common,
+    ),
+    models.Delegation(
+      id="delegation-x", parent_chat_id="child-b",
+      parent_root_run_id="child-b-run", task_key="x", child_chat_id="child-x",
+      **common,
+    ),
+    models.ChatRun(
+      id="child-b-run", root_run_id="child-b-run", chat_id="child-b",
+      status="running", provider="codex",
+    ),
+    models.ChatRun(
+      id="child-x-run", root_run_id="child-x-run", chat_id="child-x",
+      status="running", provider="codex",
+    ),
+  ])
+  db.commit()
+
+  plan = client.get(f"/api/chats/{chat_id}/goal-plan", headers=auth).json()["plan"]
+  assert plan["delegations"] == [{
+    "id": "delegation-b", "task_key": "b", "provider": "codex",
+    "status": "running", "children": [{
+      "id": "delegation-x", "task_key": "x", "provider": "codex",
+      "status": "running", "children": [],
+    }],
+  }]
 
 
 def test_completion_preflight_names_only_unfinished_required_work():

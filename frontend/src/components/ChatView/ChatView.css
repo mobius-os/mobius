@@ -3358,6 +3358,9 @@
 }
 
 .chat__goal-task--running,
+.chat__goal-task--starting,
+.chat__goal-task--resuming,
+.chat__goal-task--paused,
 .chat__goal-task--ready,
 .chat__goal-task--verify {
   color: var(--text);
@@ -3376,6 +3379,13 @@
 .chat__goal-task--running .chat__goal-task-marker {
   border-color: var(--accent);
   box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.chat__goal-task--starting .chat__goal-task-marker,
+.chat__goal-task--resuming .chat__goal-task-marker,
+.chat__goal-task--paused .chat__goal-task-marker {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 .chat__goal-task--ready .chat__goal-task-marker {

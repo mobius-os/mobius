@@ -252,8 +252,88 @@ def active_goal_rows(
   return physical, root
 
 
+def _delegation_tree(
+  db: Session, physical: models.ChatRun, root: models.ChatRun,
+) -> list[dict[str, Any]]:
+  """Project durable immediate-child ownership without copying transcripts."""
+  from app.delegations import MAX_DELEGATION_DEPTH, derived_status
+
+  run_ids = {root.id}
+  if physical.goal_id:
+    run_ids.add(physical.goal_id)
+    run_ids.update(
+      str(value) for (value,) in db.query(models.ChatRun.root_run_id).filter(
+        models.ChatRun.chat_id == physical.chat_id,
+        models.ChatRun.goal_id == physical.goal_id,
+      ).all() if value
+    )
+  roots = db.query(models.Delegation).filter(
+    models.Delegation.parent_chat_id == physical.chat_id,
+    models.Delegation.parent_root_run_id.in_(run_ids),
+  ).order_by(models.Delegation.created_at.asc()).all()
+  children_by_parent: dict[str, list[models.Delegation]] = {}
+  frontier = [row.child_chat_id for row in roots]
+  seen_rows = {row.id for row in roots}
+  for _depth in range(1, MAX_DELEGATION_DEPTH):
+    if not frontier:
+      break
+    children = db.query(models.Delegation).filter(
+      models.Delegation.parent_chat_id.in_(frontier),
+    ).order_by(models.Delegation.created_at.asc()).all()
+    frontier = []
+    for child in children:
+      if child.id in seen_rows:
+        continue
+      seen_rows.add(child.id)
+      children_by_parent.setdefault(child.parent_chat_id, []).append(child)
+      frontier.append(child.child_chat_id)
+
+  def project(row: models.Delegation, seen: set[str]) -> dict[str, Any]:
+    if row.id in seen:
+      return {"id": row.id, "task_key": row.task_key, "status": "failed", "children": []}
+    status, _run, _result = derived_status(db, row, load_result=False)
+    children = children_by_parent.get(row.child_chat_id, [])
+    return {
+      "id": row.id,
+      "task_key": row.task_key,
+      "provider": row.provider,
+      "status": status,
+      "children": [project(child, seen | {row.id}) for child in children],
+    }
+
+  return [project(row, set()) for row in roots]
+
+
+def publish_plan_for_delegation(
+  db: Session, row: models.Delegation,
+) -> None:
+  """Refresh the root Goal when any locally-owned descendant changes state."""
+  top = row
+  seen = {row.id}
+  while True:
+    parent = db.query(models.Delegation).filter(
+      models.Delegation.child_chat_id == top.parent_chat_id,
+    ).first()
+    if parent is None:
+      break
+    if parent.id in seen:
+      return
+    seen.add(parent.id)
+    top = parent
+  rows = active_goal_rows(db, top.parent_chat_id)
+  if rows is None:
+    return
+  plan = serialize_plan(db, *rows)
+  if plan is None:
+    return
+  from app.broadcast import get_broadcast
+  broadcast = get_broadcast(top.parent_chat_id)
+  if broadcast is not None and broadcast.running:
+    broadcast.publish({"type": "goal_plan_updated", "plan": plan})
+
+
 def serialize_plan(
-  physical: models.ChatRun, root: models.ChatRun,
+  db: Session, physical: models.ChatRun, root: models.ChatRun,
 ) -> dict[str, Any] | None:
   raw = root.goal_plan_json
   if not isinstance(raw, dict) or not isinstance(raw.get("tasks"), list):
@@ -293,6 +373,7 @@ def serialize_plan(
     "revision": int(root.goal_plan_revision or 0),
     "updated_at": raw.get("updated_at"),
     "tasks": tasks,
+    "delegations": _delegation_tree(db, physical, root),
     "summary": {
       "completed": completed,
       "total": len(tasks),
@@ -334,7 +415,7 @@ def replace_plan(
     raise GoalPlanConflict("goal plan changed; fetch it and retry")
   db.commit()
   db.refresh(root)
-  plan = serialize_plan(physical, root)
+  plan = serialize_plan(db, physical, root)
   if plan is None:  # pragma: no cover - the write above guarantees a document
     raise RuntimeError("goal plan disappeared after commit")
   return plan
@@ -349,7 +430,7 @@ def update_task(
   task_id: str,
   changes: dict[str, Any],
 ) -> dict[str, Any]:
-  existing = serialize_plan(physical, root)
+  existing = serialize_plan(db, physical, root)
   if existing is None:
     raise GoalPlanError("this Goal does not have a plan yet")
   tasks = existing["tasks"]

@@ -30,6 +30,7 @@ TERMINAL_DELEGATION_STATUSES = frozenset({
   "interrupted",
 })
 REVIEW_REQUIRED_MARKER = "DELEGATION_WRITE_REVIEW_REQUIRED"
+MAX_DELEGATION_DEPTH = 4
 
 
 @dataclass(frozen=True)
@@ -74,8 +75,11 @@ class RunPolicy:
       "Subagents capability for bounded child work when parallelism or local "
       "decomposition materially helps; you remain responsible for checking "
       "your own completion condition after those children settle. Its guarded "
-      "helper is available at $MOBIUS_SUBAGENT_HELPER; use the same run syntax "
-      "as the parent and stable task keys. Do not use "
+      "helper is $MOBIUS_SUBAGENT_HELPER. Use: python3 "
+      "/data/apps/subagents/subagents.py run --provider claude|codex --name "
+      "stable-key --scope read|write --prompt 'one bounded contract'. A "
+      "read-only owner may create only read-only children. Use stable task "
+      "keys. Do not use "
       "any other agent CLI or recursive mechanism. "
       "Do not ask the owner an interactive question; if a required decision or "
       "credential is missing, stop and state the blocker precisely. Do not "
@@ -306,7 +310,7 @@ def parent_root_run_id(
       run = query.order_by(
         models.ChatRun.started_at.desc(), models.ChatRun.id.desc()
       ).first()
-  return (run.root_run_id or run.id) if run is not None else None
+  return (run.goal_id or run.root_run_id or run.id) if run is not None else None
 
 
 def _assistant_result(chat: models.Chat) -> str:
@@ -496,12 +500,12 @@ def delegation_execution_token(db: Session, policy: RunPolicy) -> str | None:
   ).first()
   if owner is None or app is None:
     raise RuntimeError("delegation owner app is unavailable")
+  row = db.query(models.Delegation).filter(
+    models.Delegation.id == policy.delegation_id,
+  ).first()
+  if row is None:
+    raise RuntimeError("delegation is unavailable")
   if policy.scope == "read":
-    row = db.query(models.Delegation).filter(
-      models.Delegation.id == policy.delegation_id,
-    ).first()
-    if row is None:
-      raise RuntimeError("delegation is unavailable")
     return auth.create_delegation_token(
       row.id, app.id, row.child_chat_id, owner.username, owner.token_epoch,
       expires_delta=auth.AGENT_RUN_TOKEN_TTL,
@@ -512,6 +516,8 @@ def delegation_execution_token(db: Session, policy: RunPolicy) -> str | None:
     owner.token_epoch,
     app_nonce=app.token_nonce,
     expires_delta=auth.AGENT_RUN_TOKEN_TTL,
+    delegation_id=policy.delegation_id,
+    delegation_chat=row.child_chat_id,
   )
 
 
@@ -557,7 +563,9 @@ def active_delegation_ids_for_chat(db: Session, chat_id: str) -> list[str]:
   return [row.id for row in rows if _delegation_is_active(db, row)]
 
 
-async def cancel_delegation_execution(delegation_id: str) -> bool:
+async def cancel_delegation_execution(
+  delegation_id: str, *, _seen: frozenset[str] = frozenset(),
+) -> bool:
   """Stop one child and latch cancellation only after it is quiescent.
 
   This owns the reusable cancellation boundary for the direct API, app/chat
@@ -567,6 +575,10 @@ async def cancel_delegation_execution(delegation_id: str) -> bool:
   from app.chat import _finish_run, is_chat_running, stop_chat_for
   from app.database import SessionLocal
 
+  if delegation_id in _seen:
+    return False
+  seen = _seen | {delegation_id}
+
   with SessionLocal() as db:
     row = db.query(models.Delegation).filter(
       models.Delegation.id == delegation_id,
@@ -575,6 +587,16 @@ async def cancel_delegation_execution(delegation_id: str) -> bool:
       return True
     child_id = row.child_chat_id
     active = _delegation_is_active(db, row)
+    descendants = [
+      child.id for child in db.query(models.Delegation).filter(
+        models.Delegation.parent_chat_id == child_id,
+      ).all()
+    ]
+  # A parent cannot be quiescent while one of its locally-owned branches is
+  # still spending or writing. Settle leaves first, then their owner.
+  for descendant_id in descendants:
+    if not await cancel_delegation_execution(descendant_id, _seen=seen):
+      return False
   if not active:
     return True
 
@@ -772,6 +794,9 @@ async def wake_parent_after_child_settled(child_chat_id: str) -> None:
         .filter(models.Delegation.child_chat_id == child_chat_id)
         .first()
       )
+      if row is not None:
+        from app.goal_plans import publish_plan_for_delegation
+        publish_plan_for_delegation(db, row)
       if (
         row is None
         or not row.notify_parent_on_complete

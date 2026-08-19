@@ -93,6 +93,10 @@ and reports to A. Use stable task keys at every level so restart attachment is
 idempotent. Never switch to a provider-native agent CLI or an ordinary detached
 process to bypass this ownership boundary.
 
+When a delegated child owns a visible task, use that task's exact plan id as
+the Subagents `--name`. The shell then attaches its provider/status and any
+recursive children to the right branch without exposing child transcripts.
+
 Immediately before marking the native Goal complete, run the mediated
 completion preflight as its own command:
 

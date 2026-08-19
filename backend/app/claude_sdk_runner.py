@@ -63,6 +63,8 @@ import logging
 import os
 import signal
 import shutil
+import shlex
+import re
 from collections import deque
 from contextlib import ExitStack
 from typing import Any
@@ -103,6 +105,55 @@ log = logging.getLogger(__name__)
 
 _CLAUDE_CLI = "/usr/local/bin/claude"
 _ISOLATED_CLAUDE_CLI = "/app/scripts/claude-isolated"
+_DELEGATED_PROMPT_RE = re.compile(r"^[A-Za-z0-9 .,:'\"!?/_()=+-]{1,20000}$")
+
+
+def _guarded_subagent_bash(input_data: dict[str, Any]) -> bool:
+  """Admit only one shell-safe invocation of the durable child helper."""
+  command = input_data.get("command")
+  if not isinstance(command, str) or len(command) > 24_000:
+    return False
+  try:
+    args = shlex.split(command, posix=True)
+  except ValueError:
+    return False
+  if len(args) < 9 or args[0] not in {"python", "python3"}:
+    return False
+  if args[1:3] != ["/data/apps/subagents/subagents.py", "run"]:
+    return False
+  valued = {
+    "--provider", "--name", "--scope", "--model", "--effort", "--cwd",
+    "--prompt",
+  }
+  flags = {"--explicit", "--background"}
+  parsed: dict[str, str] = {}
+  index = 3
+  while index < len(args):
+    option = args[index]
+    if option in flags:
+      if option in parsed:
+        return False
+      parsed[option] = "true"
+      index += 1
+      continue
+    if option not in valued or option in parsed or index + 1 >= len(args):
+      return False
+    parsed[option] = args[index + 1]
+    index += 2
+  return bool(
+    parsed.get("--provider") in {"claude", "codex"}
+    and parsed.get("--scope") == "read"
+    and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", parsed.get("--name", ""))
+    and _DELEGATED_PROMPT_RE.fullmatch(parsed.get("--prompt", ""))
+    and (
+      "--cwd" not in parsed
+      or re.fullmatch(r"/data(?:/[A-Za-z0-9._-]+)*", parsed["--cwd"])
+    )
+    and all(
+      re.fullmatch(r"[A-Za-z0-9._:/+-]{1,256}", parsed[option])
+      for option in ("--model", "--effort") if option in parsed
+    )
+  )
 
 
 def _claude_cli_path() -> str:
@@ -905,6 +956,8 @@ async def run_claude_sdk_turn(
       if run_policy is not None and run_policy.scope == "read" and tool_name in {
         "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
       }:
+        if tool_name == "Bash" and _guarded_subagent_bash(input_data):
+          return PermissionResultAllow(updated_input=input_data)
         return PermissionResultDeny(
           message="This delegated task is read-only."
         )

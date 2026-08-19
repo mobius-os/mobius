@@ -217,6 +217,22 @@ test('a plan with no running work presents every independent ready task', () => 
   )
 })
 
+test('the deepest live delegated owners replace their parent in the collapsed label', () => {
+  const plan = {
+    tasks: [{ id: 'b', title: 'Do B', status: 'running' }],
+    delegations: [{
+      id: 'delegation-b', task_key: 'b', status: 'running', children: [
+        { id: 'delegation-x', task_key: 'x', status: 'running', children: [] },
+        { id: 'delegation-y', task_key: 'y', status: 'running', children: [] },
+      ],
+    }],
+  }
+  assert.deepEqual(
+    visibleGoalTasks(plan).map(task => task.title),
+    ['X', 'Y'],
+  )
+})
+
 test('ChatView binds goal state to explicit run boundaries, not transport liveness', () => {
   const runtimePoll = chatView.match(
     /const reconcileRuntimeState = useCallback[\s\S]*?const handleCompactionStored/,

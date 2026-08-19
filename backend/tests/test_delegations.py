@@ -7,11 +7,13 @@ from app.chat_writer import (
   AppendPending, Barrier, PromotePending, StartTurn, get_writer,
 )
 from app.codex_sdk_runner import _codex_config_overrides
+from app.claude_sdk_runner import _guarded_subagent_bash
 from app.delegations import (
   RunPolicy,
   delegation_execution_token,
   derived_status,
   mark_cancelled,
+  parent_root_run_id,
   policy_for_chat,
 )
 from test_app_fixtures import create_local_app
@@ -122,6 +124,16 @@ def test_submit_is_idempotent_per_parent_root_and_task_key(
   assert wake_policy_conflict.status_code == 409
 
 
+def test_goal_identity_is_the_delegation_idempotency_parent(db, chat):
+  db.add(models.ChatRun(
+    id="goal-physical", root_run_id="logical-before-restart",
+    chat_id=chat.id, status="running", provider="codex",
+    goal_objective="Ship", goal_id="stable-goal",
+  ))
+  db.commit()
+  assert parent_root_run_id(db, chat.id, require_active=True) == "stable-goal"
+
+
 def test_app_token_can_only_submit_bounded_work_under_its_own_child(
   client, owner_token, db, monkeypatch,
 ):
@@ -169,6 +181,20 @@ def test_app_token_can_only_submit_bounded_work_under_its_own_child(
   child_auth = {
     "Authorization": f"Bearer {delegation_execution_token(db, child_policy)}"
   }
+  async def fake_models(_data_dir):
+    return {
+      "claude": [{"id": "claude-sonnet-4-6", "label": "Sonnet"}],
+      "codex": [{"id": "gpt-5.6-sol", "label": "Sol"}],
+    }
+  monkeypatch.setattr(
+    "app.routes.delegations.providers.list_models", fake_models,
+  )
+  capabilities = client.get(
+    "/api/delegations/capabilities", headers=child_auth,
+  )
+  assert capabilities.status_code == 200, capabilities.text
+  assert capabilities.json()["app_id"] == app_id
+  assert capabilities.json()["models"]["codex"][0]["id"] == "gpt-5.6-sol"
   nested = client.post("/api/delegations", json={
     **body,
     "parent_chat_id": child_id,
@@ -178,6 +204,15 @@ def test_app_token_can_only_submit_bounded_work_under_its_own_child(
   assert nested.status_code == 201, nested.text
   nested_policy = policy_for_chat(db, nested.json()["child_chat_id"])
   assert nested_policy is not None and nested_policy.depth == 2
+  escalated = client.post("/api/delegations", json={
+    **body,
+    "parent_chat_id": child_id,
+    "task_key": "nested-write",
+    "prompt": "Try to write.",
+    "scope": "write",
+  }, headers=child_auth)
+  assert escalated.status_code == 403
+  assert "read-only" in escalated.json()["detail"]
 
 
 def test_delegation_listing_exposes_run_usage_without_loading_result(
@@ -362,6 +397,21 @@ def test_delegated_codex_config_has_no_questions_or_nested_agents():
   assert "features.default_mode_request_user_input=true" not in overrides
   assert not any("multi_agent" in item for item in overrides)
   assert "features.goals=true" not in overrides
+
+
+def test_read_only_claude_admits_only_the_guarded_read_child_command():
+  assert _guarded_subagent_bash({"command": (
+    "python3 /data/apps/subagents/subagents.py run --provider codex "
+    "--name audit-x --scope read --prompt 'Check migration X.'"
+  )})
+  assert not _guarded_subagent_bash({"command": (
+    "python3 /data/apps/subagents/subagents.py run --provider codex "
+    "--name audit-x --scope write --prompt 'Change X.'"
+  )})
+  assert not _guarded_subagent_bash({"command": (
+    "python3 /data/apps/subagents/subagents.py run --provider codex "
+    "--name audit-x --scope read --prompt 'Check X.'; rm -rf /data"
+  )})
 
 
 # --- Parent auto-wake on child completion ------------------------------------

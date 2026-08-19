@@ -1655,6 +1655,47 @@ def test_goal_plan_migration_adds_snapshot_and_revision_to_existing_runs(
     )).scalar_one() == 1
 
 
+def test_goal_identity_migration_backfills_plan_and_recovery_runs(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'goal-identity.db'}")
+  models.Base.metadata.create_all(eng)
+  with eng.begin() as conn:
+    conn.execute(text("DROP INDEX ix_chat_runs_goal_id"))
+    conn.execute(text("ALTER TABLE chat_runs DROP COLUMN goal_id"))
+    conn.execute(text(
+      "INSERT INTO chats (id, title, title_locked, messages, pending_messages, "
+      "uploads, provider, created_at, updated_at) "
+      "VALUES ('c1', 'Goal', 0, '[]', '[]', '[]', 'codex', :at, :at)"
+    ), {"at": datetime(2026, 8, 18)})
+    conn.execute(text(
+      "INSERT INTO chat_runs "
+      "(id, root_run_id, chat_id, status, provider, goal_objective, "
+      "goal_plan_json, goal_plan_revision, started_at) VALUES "
+      "('planned', 'planned', 'c1', 'interrupted', 'codex', 'Ship', "
+      ":plan, 1, :first), "
+      "('recovered', 'recovered', 'c1', 'running', 'codex', 'Ship', "
+      "NULL, 0, :second)"
+    ), {
+      "first": datetime(2026, 8, 18, 10),
+      "second": datetime(2026, 8, 18, 11),
+      "plan": json.dumps({"version": 1, "tasks": []}),
+    })
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version, _migration in database._SCHEMA_MIGRATIONS[:-1]:
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
+      ), {"v": version, "at": datetime(2026, 8, 18)})
+
+  run_migrations(eng)
+  with eng.connect() as conn:
+    rows = conn.execute(text(
+      "SELECT id, goal_id FROM chat_runs ORDER BY started_at"
+    )).all()
+  assert rows == [("planned", "planned"), ("recovered", "planned")]
+
+
 def test_applied_legacy_schema_migration_is_immutable():
   """Editing migration 0001 must require an intentional new migration."""
   source = Path(database.__file__).read_text(encoding="utf-8")

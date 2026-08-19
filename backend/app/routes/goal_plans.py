@@ -88,7 +88,7 @@ def get_goal_plan(
   require_chat_embed_operation(principal, "chat:read")
   get_active_chat_for_principal(db, chat_id, principal)
   rows = active_goal_rows(db, chat_id)
-  return {"plan": serialize_plan(*rows) if rows is not None else None}
+  return {"plan": serialize_plan(db, *rows) if rows is not None else None}
 
 
 @router.put(
