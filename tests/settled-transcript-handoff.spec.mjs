@@ -184,7 +184,7 @@ async function mountScenario(page) {
   }
 }
 
-async function sendFromBottom(page, surface, text) {
+async function prepareSendFromBottom(page, surface, text) {
   await page.evaluate(() => {
     const scroll = document.querySelector(
       '[data-chat-surface="painted"] .chat__scroll',
@@ -200,10 +200,15 @@ async function sendFromBottom(page, surface, text) {
     return scroll
       && scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 4
   })
+}
+
+async function sendFromBottom(page, surface, text) {
+  await prepareSendFromBottom(page, surface, text)
   await page.keyboard.press('Enter')
 }
 
 async function sampleNextSend(page, surface, text) {
+  await prepareSendFromBottom(page, surface, text)
   const priorCount = await surface.locator('.chat__msg--user').count()
   await page.evaluate(() => {
     window.__handoffFrames = []
@@ -224,7 +229,7 @@ async function sampleNextSend(page, surface, text) {
     requestAnimationFrame(sample)
   })
 
-  await sendFromBottom(page, surface, text)
+  await page.keyboard.press('Enter')
   await page.waitForTimeout(1200)
   return page.evaluate(previousCount => {
     window.__handoffSampling = false
@@ -239,6 +244,12 @@ test('an authoritative settled-answer handoff cannot move a pinned send', async 
   await sendFromBottom(page, scenario.surface, 'First message')
   await expect(scenario.surface.getByText('Verification result', { exact: false }))
     .toBeVisible({ timeout: 10000 })
+  // Finish the first stream while its detailed live row is still mounted. The
+  // server already holds the compact settled projection, but the next send's
+  // authoritative read is what hands the rendered row over to that source.
+  await expect(scenario.surface.locator('.chat__stop')).toHaveCount(0, {
+    timeout: 10000,
+  })
   await page.waitForFunction(ts => {
     const rows = document.querySelectorAll(
       '[data-chat-surface="painted"] .chat__msg--assistant',
@@ -247,6 +258,8 @@ test('an authoritative settled-answer handoff cannot move a pinned send', async 
     return key && key !== `assistant-${ts}`
   }, scenario.settledAssistant.ts)
 
+  // Sample every painted frame across that source handoff. The newly sent row
+  // must stay at its semantic pin rather than wait for a later resize repair.
   const tops = await sampleNextSend(page, scenario.surface, 'Second message')
   expect(tops.length).toBeGreaterThan(0)
   expect(Math.max(...tops)).toBeLessThanOrEqual(12)
