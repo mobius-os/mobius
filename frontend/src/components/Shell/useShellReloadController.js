@@ -93,7 +93,6 @@ export default function useShellReloadController(inputs) {
       activeChatIdRef,
       multiPaneBuilderVisibleRef,
       streamingChatIdsRef,
-      activeChatWaitingOnQuestionRef,
       voiceDictationActiveRef,
     } = inputsRef.current
     return shouldDeferShellReload({
@@ -102,7 +101,6 @@ export default function useShellReloadController(inputs) {
       activeChatId: destination?.chatId ?? activeChatIdRef.current,
       multiPaneBuilderVisible: multiPaneBuilderVisibleRef.current,
       streamingChatIds: streamingChatIdsRef.current,
-      activeChatWaitingOnQuestion: activeChatWaitingOnQuestionRef.current,
       passiveRebuild: passive,
       voiceDictationActive: voiceDictationActiveRef.current,
       lastUserInteractionAt: ignoreRecentInteraction || interactionGraceSpent()

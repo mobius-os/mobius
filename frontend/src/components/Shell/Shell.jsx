@@ -1639,25 +1639,6 @@ export default function Shell({ onInitialVisualReady }) {
   }, [chats])
   const streamingChatIdsRef = useRef(streamingChatIds)
   useEffect(() => { streamingChatIdsRef.current = streamingChatIds }, [streamingChatIds])
-  // Whether the chat the owner is looking at is parked on an AskUserQuestion
-  // answer. Such a turn is `running` (so it stays in streamingChatIds above,
-  // keeping its drawer dot) but is NOT streaming tokens: the card is durably
-  // persisted and a reload re-renders it from server state without touching the
-  // server-owned turn. The reload policy treats this as idle, so an unanswered
-  // question can no longer pin a pending shell update. Only the active chat can
-  // defer a reload, so a single boolean is all the policy needs.
-  const activeChatWaitingOnQuestion = useMemo(() => {
-    if (activeChatId == null) return false
-    const active = chats.find(chat => String(chat.id) === String(activeChatId))
-    return active?.pending_question_id != null
-  }, [chats, activeChatId])
-  const activeChatWaitingOnQuestionRef = useRef(activeChatWaitingOnQuestion)
-  useEffect(() => {
-    activeChatWaitingOnQuestionRef.current = activeChatWaitingOnQuestion
-  }, [activeChatWaitingOnQuestion])
-  // The reload check runs inside a setTimeout (scheduleShellReloadCheck), which
-  // reads render-time state through a ref, so the boolean still needs a ref
-  // mirror even though it is no longer a Set.
   const voiceDictationActiveRef = useRef(voiceDictationActive)
   useEffect(() => {
     voiceDictationActiveRef.current = voiceDictationActive
@@ -1679,7 +1660,6 @@ export default function Shell({ onInitialVisualReady }) {
     drawerOpenRef,
     multiPaneBuilderVisibleRef,
     streamingChatIdsRef,
-    activeChatWaitingOnQuestionRef,
     voiceDictationActiveRef,
     activeView,
     activeChatId,
