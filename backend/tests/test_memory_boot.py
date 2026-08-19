@@ -1,5 +1,6 @@
 """Base boot creates chat continuity only; graph memory belongs to its app."""
 
+import ast
 import hashlib
 import importlib.util
 import os
@@ -341,8 +342,29 @@ def test_boot_preserves_the_optional_memory_apps_git_repository():
 
 def test_install_rollback_never_executes_app_owned_cron_declarations():
   text = INSTALL.read_text(encoding="utf-8")
-  assert '["bash", str(Path(o) / "init-cron.sh")]' not in text
-  assert (
-    "journal.rollback_actions.append(\n"
-    "              _reconcile_cron_after_install_rollback"
-  ) in text
+  module = ast.parse(text)
+  subprocess_runs = [
+    node for node in ast.walk(module)
+    if isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Attribute)
+    and isinstance(node.func.value, ast.Name)
+    and node.func.value.id == "subprocess"
+    and node.func.attr == "run"
+  ]
+  assert all(
+    "init-cron.sh" not in (ast.get_source_segment(text, call) or "")
+    for call in subprocess_runs
+  )
+  assert any(
+    isinstance(node, ast.Call)
+    and isinstance(node.func, ast.Attribute)
+    and node.func.attr == "append"
+    and isinstance(node.func.value, ast.Attribute)
+    and isinstance(node.func.value.value, ast.Name)
+    and node.func.value.value.id == "journal"
+    and node.func.value.attr == "rollback_actions"
+    and len(node.args) == 1
+    and isinstance(node.args[0], ast.Name)
+    and node.args[0].id == "_reconcile_cron_after_install_rollback"
+    for node in ast.walk(module)
+  )
