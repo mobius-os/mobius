@@ -5,9 +5,9 @@
  * or blanks a live turn. These cases exercise the SYNTHESIZED client mechanism
  * end to end (route-mocked SSE, no agent tokens):
  *
- *   1. shell_rebuilt DURING a streaming turn does NOT reload; the reload is held
- *      QUIETLY (shellReloadPolicy.shouldDeferShellReload) until idle — no toast,
- *      no popup — and the live turn keeps rendering.
+ *   1. shell_rebuilt DURING an unfinished turn does NOT reload, including after
+ *      the page is hidden and the turn parks on an owner question; the reload
+ *      is held QUIETLY until the turn settles and visible progress stays intact.
  *   2. passive shell_rebuilt generations stay coalesced while an idle chat is
  *      visible, so source-save bursts cannot interrupt a reader.
  *   3. a deliberate shell_apply_now that lands mid-turn reloads exactly ONCE
@@ -168,17 +168,29 @@ async function sendMessage(page, text) {
 }
 
 test.describe('shell update — apply on idle, SW on a leash', () => {
-  test('shell_rebuilt during a streaming turn does not reload; holds quietly', async ({ page }) => {
-    // The chat stream never sends `done`, so the turn stays live and the chat
-    // stays in the streaming set. shell_rebuilt arrives on the GLOBAL system
-    // stream — its only channel — while the turn is streaming; the gate must
-    // DEFER (quiet hold). The arm resolves only after the turn is visibly
-    // streaming, so the delivery is deterministically mid-turn.
+  test('an unfinished question turn survives a hidden-page shell update', async ({ page }) => {
+    // The chat stream parks on a question without `done`, so the active turn
+    // remains unfinished. shell_rebuilt arrives on the GLOBAL system stream,
+    // then the page is hidden — the exact boundary that previously treated the
+    // turn as disposable and reloaded away its visible activity.
     let armRebuilt
     const armed = new Promise(resolve => { armRebuilt = resolve })
     const streamingBody = sse([
       { type: 'catch_up_done' },
       { type: 'text', content: 'building the shell...' },
+      {
+        type: 'question',
+        question_id: 'q-shell-update-progress',
+        questions: [{
+          question: 'Continue with the update?',
+          header: 'Continue',
+          multiSelect: false,
+          options: [
+            { label: 'Continue', description: 'Resume the same turn.' },
+            { label: 'Not now', description: 'Keep it parked.' },
+          ],
+        }],
+      },
     ])
     await setup(page, {
       streamRoute: route => route.fulfill(fulfillStream(streamingBody)),
@@ -189,15 +201,25 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
 
     await sendMessage(page, 'rebuild the shell')
 
-    // The live turn is rendering — NOW deliver shell_rebuilt mid-turn.
+    // The accumulated progress and its question are both visible before the
+    // update arrives.
     await expect(page.locator('[data-chat-surface="painted"]').getByText('building the shell...')).toBeVisible({ timeout: 8000 })
+    await expect(page.getByText('Continue with the update?')).toBeVisible({ timeout: 8000 })
     armRebuilt()
 
-    // Wait PAST the hold-until-idle recheck interval (6s): the recheck fires,
-    // sees a still-streaming turn, and reschedules — it must NOT reload. This is
-    // the sacred-streaming-view invariant against the timer mechanism.
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        value: 'hidden',
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+
+    // Wait past the recheck interval: hidden + question-paused is still an
+    // unfinished active turn, so there is no reload and no lost activity.
     await page.waitForTimeout(7000)
     expect(await loadCount(page)).toBe(0)
+    await expect(page.locator('[data-chat-surface="painted"]').getByText('building the shell...')).toBeVisible()
   })
 
   test('a deliberate mid-turn shell_apply_now applies exactly once at the turn-end idle boundary', async ({ page }) => {
