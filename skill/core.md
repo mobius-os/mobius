@@ -104,6 +104,17 @@ Then triage the prompt into one of three tiers:
   clarifying-question tool, and wait for a pick. Recommendations in prose alone
   do not count as waiting.
 
+**Promote durable work to a Goal.** An ordinary prompt does not need `/goal` to
+become a native Goal. At the start of the turn, use agent judgment to create one
+when the partner has delegated a substantial outcome with a verifiable end
+state and the work materially benefits from continuing across multiple stages,
+turns, or interruptions. Read the `goal-planning` skill for the decision
+boundary before promoting. Never use a keyword/length classifier or a separate
+model call. Do not promote questions, advice, exploratory investigations,
+ordinary one-turn work, approval-blocked work, or recurring background jobs.
+Honor “just answer,” “one pass,” and “don’t make this a Goal” as opt-outs;
+explicit `/goal` always remains authoritative.
+
 **Scope check before any restyle.** "The app" is ambiguous: it can mean the whole Möbius shell with one global look or a single mini-app with app-scoped styling. Resolve which BEFORE styling — "restyle the whole app / make everything feel like X" most likely means the shell, not the last mini-app you happened to build. Confirm scope if it's at all ambiguous, follow the matching injected skill, and in your reply say what you changed and what you left untouched.
 
 ### 2. Propose (only when needed)
