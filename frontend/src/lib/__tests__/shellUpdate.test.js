@@ -3,11 +3,10 @@ import assert from 'node:assert/strict'
 
 import {
   inspectShellUpdate,
+  releaseWaitingShellUpdate,
   reloadIfGenerationStale,
-  reloadWhenWorkerTakesOver,
   watchForShellUpdateOnResume,
   SW_DISCOVERY_SETTLE_TIMEOUT_MS,
-  SW_TAKEOVER_TIMEOUT_MS,
 } from '../shellUpdate.js'
 
 // Drain both promise continuations and the queued task where browsers publish a
@@ -316,33 +315,6 @@ test('watchForShellUpdateOnResume: no serviceWorker support → inert dispose', 
   dispose() // must not throw
 })
 
-// Minimal event-emitter fakes so the SW handoff wiring is testable without a
-// live service worker.
-function makeWorker(state = 'installed') {
-  const listeners = {}
-  return {
-    state,
-    posted: [],
-    postMessage(msg) { this.posted.push(msg) },
-    addEventListener(type, fn) { (listeners[type] ||= []).push(fn) },
-    removeEventListener(type, fn) {
-      listeners[type] = (listeners[type] || []).filter(f => f !== fn)
-    },
-    emit(type) { (listeners[type] || []).slice().forEach(fn => fn()) },
-    count(type) { return (listeners[type] || []).length },
-  }
-}
-function makeSw() {
-  const listeners = {}
-  return {
-    addEventListener(type, fn) { (listeners[type] ||= []).push(fn) },
-    removeEventListener(type, fn) {
-      listeners[type] = (listeners[type] || []).filter(f => f !== fn)
-    },
-    emit(type) { (listeners[type] || []).slice().forEach(fn => fn()) },
-    count(type) { return (listeners[type] || []).length },
-  }
-}
 function fakeTimers() {
   let seq = 0
   let pending = []
@@ -437,119 +409,17 @@ test('inspectShellUpdate has a bounded escape from a wedged install', async () =
   assert.equal(installing.count('statechange'), 0)
 })
 
-test('reloadWhenWorkerTakesOver: no waiting worker reloads immediately', () => {
-  let reloads = 0
-  reloadWhenWorkerTakesOver({
-    registration: { waiting: null },
-    serviceWorker: makeSw(),
-    reload: () => { reloads += 1 },
-  })
-  assert.equal(reloads, 1)
-})
-
-test('reloadWhenWorkerTakesOver: missing registration reloads immediately', () => {
-  let reloads = 0
-  reloadWhenWorkerTakesOver({ registration: undefined, reload: () => { reloads += 1 } })
-  assert.equal(reloads, 1)
-})
-
-test('reloadWhenWorkerTakesOver: posts SKIP_WAITING and reloads only after activation', () => {
-  const waiting = makeWorker('installed')
-  const sw = makeSw()
-  const timers = fakeTimers()
-  let reloads = 0
-  reloadWhenWorkerTakesOver({
-    registration: { waiting },
-    serviceWorker: sw,
-    reload: () => { reloads += 1 },
-    setTimeoutFn: timers.setTimeoutFn,
-    clearTimeoutFn: timers.clearTimeoutFn,
-  })
-  // The one and only handoff message goes to the waiting worker.
-  assert.deepEqual(waiting.posted, [{ type: 'SKIP_WAITING' }])
-  assert.equal(reloads, 0, 'must not reload before the worker takes over')
-  // An intermediate transition is not a takeover.
-  waiting.state = 'activating'; waiting.emit('statechange')
-  assert.equal(reloads, 0)
-  // 'activated' is the takeover signal — reload now.
-  waiting.state = 'activated'; waiting.emit('statechange')
-  assert.equal(reloads, 1)
-  // Listeners + timer torn down so nothing fires twice.
-  assert.equal(waiting.count('statechange'), 0)
-  assert.equal(sw.count('controllerchange'), 0)
-  assert.equal(timers.count(), 0)
-})
-
-test('reloadWhenWorkerTakesOver: a controllerchange also triggers the reload', () => {
-  const waiting = makeWorker('installed')
-  const sw = makeSw()
-  const timers = fakeTimers()
-  let reloads = 0
-  reloadWhenWorkerTakesOver({
-    registration: { waiting }, serviceWorker: sw, reload: () => { reloads += 1 },
-    setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
-  })
-  sw.emit('controllerchange')
-  assert.equal(reloads, 1)
-})
-
-test('reloadWhenWorkerTakesOver: a redundant worker still reloads (re-arm net recovers)', () => {
-  const waiting = makeWorker('installed')
-  const timers = fakeTimers()
-  let reloads = 0
-  reloadWhenWorkerTakesOver({
-    registration: { waiting }, serviceWorker: makeSw(), reload: () => { reloads += 1 },
-    setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
-  })
-  waiting.state = 'redundant'; waiting.emit('statechange')
-  assert.equal(reloads, 1)
-})
-
-test('reloadWhenWorkerTakesOver: the bounded timeout reloads a wedged handoff', () => {
-  const waiting = makeWorker('installed')
-  const timers = fakeTimers()
-  let reloads = 0
-  reloadWhenWorkerTakesOver({
-    registration: { waiting }, serviceWorker: makeSw(), reload: () => { reloads += 1 },
-    setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
-  })
-  assert.equal(reloads, 0)
-  timers.fire() // SW never activated — fallback fires
-  assert.equal(reloads, 1)
-})
-
-test('reloadWhenWorkerTakesOver: reloads exactly once even if several signals fire', () => {
-  const waiting = makeWorker('installed')
-  const sw = makeSw()
-  const timers = fakeTimers()
-  let reloads = 0
-  reloadWhenWorkerTakesOver({
-    registration: { waiting }, serviceWorker: sw, reload: () => { reloads += 1 },
-    setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
-  })
-  waiting.state = 'activated'; waiting.emit('statechange')
-  sw.emit('controllerchange')       // no-op after settle
-  waiting.emit('statechange')       // no-op after settle
-  timers.fire()                     // already cleared — no-op
-  assert.equal(reloads, 1)
-})
-
-test('reloadWhenWorkerTakesOver: a worker already activated at attach reloads immediately', () => {
-  const waiting = makeWorker('activated')
-  const timers = fakeTimers()
-  let reloads = 0
-  reloadWhenWorkerTakesOver({
-    registration: { waiting }, serviceWorker: makeSw(), reload: () => { reloads += 1 },
-    setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
-  })
-  // The post-attach guard catches a worker that raced past 'waiting'.
-  assert.equal(reloads, 1)
-  assert.equal(timers.count(), 0)
-})
-
-test('SW_TAKEOVER_TIMEOUT_MS is a sane bounded fallback', () => {
-  assert.ok(SW_TAKEOVER_TIMEOUT_MS >= 1000 && SW_TAKEOVER_TIMEOUT_MS <= 3000)
+test('SW discovery has a sane bounded fallback', () => {
   assert.ok(SW_DISCOVERY_SETTLE_TIMEOUT_MS >= 1000 && SW_DISCOVERY_SETTLE_TIMEOUT_MS <= 3000)
+})
+
+test('releaseWaitingShellUpdate releases once without owning reload timing', () => {
+  const posted = []
+  releaseWaitingShellUpdate({
+    waiting: { postMessage: message => posted.push(message) },
+  })
+  assert.deepEqual(posted, [{ type: 'SKIP_WAITING' }])
+  assert.doesNotThrow(() => releaseWaitingShellUpdate(null))
 })
 
 test('inspectShellUpdate reports a healthy controlled generation as current', async () => {
@@ -611,22 +481,26 @@ test('reloadIfGenerationStale: forces reg.update() before deciding staleness', a
   const active = { id: 'a' }
   const reg = makeReg({ waiting: { id: 'w' }, active, onUpdate: () => { updated += 1 } })
   const sw = makeSwWith(reg, { controller: active })
-  await reloadIfGenerationStale({ serviceWorker: sw, reload: () => {}, handoff: () => {} })
+  await reloadIfGenerationStale({ serviceWorker: sw, reload: () => {} })
   assert.equal(updated, 1, 'a fresh sw.js fetch is forced so a just-shipped worker is discovered')
 })
 
-test('reloadIfGenerationStale: newer generation waiting → hands off and returns true', async () => {
+test('reloadIfGenerationStale: newer generation waiting → reloads and returns true', async () => {
   const active = { id: 'a' }
-  const reg = makeReg({ waiting: { id: 'w' }, active })
+  const posted = []
+  const reg = makeReg({
+    waiting: { id: 'w', postMessage: message => posted.push(message) },
+    active,
+  })
   const sw = makeSwWith(reg, { controller: active })
-  let handedOff = 0
+  let reloads = 0
   const healed = await reloadIfGenerationStale({
     serviceWorker: sw,
-    reload: () => {},
-    handoff: () => { handedOff += 1 },
+    reload: () => { reloads += 1 },
   })
   assert.equal(healed, true, 'a waiting worker means a stale bundle → self-heal')
-  assert.equal(handedOff, 1)
+  assert.deepEqual(posted, [{ type: 'SKIP_WAITING' }])
+  assert.equal(reloads, 1)
 })
 
 test('reloadIfGenerationStale: already newest generation → no reload, returns false', async () => {
@@ -634,23 +508,21 @@ test('reloadIfGenerationStale: already newest generation → no reload, returns 
   // active === controller, nothing waiting, no stale flag → current generation.
   const reg = makeReg({ waiting: null, active: controller })
   const sw = makeSwWith(reg, { controller })
-  let handedOff = 0
+  let reloads = 0
   const healed = await reloadIfGenerationStale({
     serviceWorker: sw,
-    reload: () => {},
-    handoff: () => { handedOff += 1 },
+    reload: () => { reloads += 1 },
   })
   assert.equal(healed, false, 'a genuine bug on the newest build must not auto-reload')
-  assert.equal(handedOff, 0)
+  assert.equal(reloads, 0)
 })
 
 test('reloadIfGenerationStale: no service worker → returns false (no reload)', async () => {
-  let handedOff = 0
+  let reloads = 0
   const healed = await reloadIfGenerationStale({
     serviceWorker: null,
-    reload: () => {},
-    handoff: () => { handedOff += 1 },
+    reload: () => { reloads += 1 },
   })
   assert.equal(healed, false)
-  assert.equal(handedOff, 0)
+  assert.equal(reloads, 0)
 })

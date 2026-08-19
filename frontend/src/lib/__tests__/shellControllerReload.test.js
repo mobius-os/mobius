@@ -34,14 +34,15 @@ test('the boot script discovers workers but never owns a shell reload', () => {
 test('the shell controller has one deduplicated reload executor', () => {
   assert.match(controllerSource, /if \(performingRef\.current\) return/)
   assert.match(controllerSource, /const reload = \(\) => \{/)
-  assert.match(controllerSource, /inspectShellUpdate\(\{ serviceWorker: nav\.serviceWorker \}\)/)
+  assert.match(controllerSource, /releaseWaitingShellUpdate\(registration\)/)
+  assert.doesNotMatch(controllerSource, /controllerchange|SW_TAKEOVER_TIMEOUT/)
   assert.doesNotMatch(controllerSource, /sw-skip-initiated|sw-auto-reloaded/)
 })
 
-test('Settings delegates worker inspection and takeover instead of duplicating them', () => {
+test('Settings may inspect for updates but reload freshness does not coordinate takeover', () => {
   assert.match(settingsSource, /inspectShellUpdate\(\{ serviceWorker/)
-  assert.match(settingsSource, /reloadWhenWorkerTakesOver\(\{/)
-  assert.doesNotMatch(settingsSource, /\.getRegistration\(\)|\.update\(\)|controllerchange/)
+  assert.match(settingsSource, /releaseWaitingShellUpdate\(registration\)/)
+  assert.doesNotMatch(settingsSource, /reloadWhenWorkerTakesOver|controllerchange/)
 })
 
 test('a claimed destination runs before navigation history or view mutation', () => {

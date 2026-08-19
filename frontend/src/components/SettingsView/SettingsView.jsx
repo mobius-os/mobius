@@ -23,7 +23,7 @@ import {
 import { updateCheckOutcome, updateCheckLabel } from '../../lib/updateCheckPhase.js'
 import {
   inspectShellUpdate,
-  reloadWhenWorkerTakesOver,
+  releaseWaitingShellUpdate,
 } from '../../lib/shellUpdate.js'
 import * as themeService from '../../lib/themeService.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
@@ -1012,21 +1012,18 @@ export default function SettingsView({
     }
   }
 
-  // After an approved server restart, use the same generation-safe worker
-  // inspection and takeover as every other shell reload. Settings owns the
-  // restart readiness poll; it does not own a second service-worker lifecycle.
+  // After an approved server restart, wait until the document is reachable and
+  // reload. Shell navigations are network-first, so freshness no longer depends
+  // on coordinating a service-worker takeover here.
   async function reloadOntoFreshSW() {
     if (!(await shellDocumentReady())) return false
-    const serviceWorker = navigator.serviceWorker
-    let registration = null
     try {
-      ;({ registration } = await inspectShellUpdate({ serviceWorker }))
-    } catch { /* fall through to a plain reload */ }
-    reloadWhenWorkerTakesOver({
-      registration,
-      serviceWorker,
-      reload: () => window.location.reload(),
-    })
+      const { registration } = await inspectShellUpdate({
+        serviceWorker: navigator.serviceWorker,
+      })
+      releaseWaitingShellUpdate(registration)
+    } catch { /* the online navigation remains authoritative */ }
+    window.location.reload()
     return true
   }
 
