@@ -1930,14 +1930,12 @@ export default function useScrollMode({
     footRef,
   ])
 
-  // Re-hold the reading position after an atomic catch-up commit lands
-  // post-reveal (contract v2 item 2, lever 3 — cloak the commit). The in-place
-  // reconcile keeps DOM identity but can still re-settle heights, so a real
-  // reconnect (Path B) or a Path-A commit after the reveal cap must not shift
-  // what the reader was looking at. Before reveal, hide-then-reveal already owns
-  // the position, so this no-ops; a quick-wake kept socket produces no commit,
-  // so the caller never invokes it. FOLLOW_BOTTOM/ANCHOR_AT only —
-  // PIN_USER_MSG settles via its own RO branch.
+  // Re-hold the reading position after an atomic transcript-source commit
+  // lands post-reveal. Reconnect catch-up and authoritative compact reads can
+  // both re-settle row heights without changing message count. Apply the mode
+  // already owned by the controller before paint; ResizeObserver remains the
+  // fallback for later intrinsic media/markdown growth. Before reveal,
+  // hide-then-reveal already owns the position, so this no-ops.
   const reapplyActiveMode = useCallback(() => {
     if (!revealedRef.current) return
     const scrollEl = scrollRef.current
@@ -1950,11 +1948,11 @@ export default function useScrollMode({
       now: performance.now(),
     })) return
     const k = modeRef.current.kind
-    if (k === 'FOLLOW_BOTTOM' || k === 'ANCHOR_AT') {
+    if (k === 'FOLLOW_BOTTOM' || k === 'ANCHOR_AT' || k === 'PIN_USER_MSG') {
       writeMode(
         scrollEl,
         modeRef.current,
-        'lifecycle:catch-up-reapply',
+        'lifecycle:transcript-reapply',
         authorityVersion,
       )
     }
