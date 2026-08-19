@@ -106,7 +106,6 @@ import {
   inspectShellUpdate,
   watchForShellUpdateOnResume,
 } from '../../lib/shellUpdate.js'
-import { watchChatStateOnResume } from './shellChatState.js'
 import './Shell.css'
 import './workspace.css'
 import WorkspaceChrome from './WorkspaceChrome.jsx'
@@ -2620,15 +2619,6 @@ export default function Shell({ onInitialVisualReady }) {
     refreshChats,
   ])
   useSystemEventStream(handleSystemEvent, { onOpen: reconcileSystemStateOnOpen })
-
-  // The system event stream is an accelerator, not the source of truth. A PWA
-  // can suspend it without a clean disconnect, and process-local events are not
-  // replayed after restart. Returning to the page is a durable reconcile point.
-  useEffect(() => watchChatStateOnResume({
-    doc: typeof document !== 'undefined' ? document : null,
-    win: typeof window !== 'undefined' ? window : null,
-    reconcile: () => invalidateShellListCache('chats').then(refreshChats),
-  }), [refreshChats])
 
   // Service-worker messages arrive on navigator.serviceWorker, not the window
   // message bus used by AppCanvas. Keep this listener limited to notification
