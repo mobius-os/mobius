@@ -386,10 +386,9 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     expect(await loadCount(page)).toBe(after)
   })
 
-  test('returning to an idle visible chat adopts the new SW generation without a hard refresh', async ({ page }) => {
-    // This case drives FOUR real service-worker generation steps (install gen A,
-    // a second gen-A keeper client, install-and-wait gen B, then the mount-time
-    // handoff) plus TWO full page reloads. Those sequential real-SW waits are
+  test('desktop return and ordinary refresh adopt new SW generations without a hard refresh', async ({ page }) => {
+    // This case drives two real service-worker update cycles after gen A plus
+    // the focus-time and mount-time handoffs. Those sequential real-SW waits are
     // legitimately slow and, under parallel-CI load, their cumulative time
     // (~86s worst case) can exceed Playwright's default 60s per-test budget —
     // the classic pass-when-fast, time-out-when-slow flake. The behaviour under
@@ -436,15 +435,9 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     await keeper.goto(BASE, { waitUntil: 'domcontentloaded' })
     await keeper.waitForFunction(() => !!navigator.serviceWorker?.controller, { timeout: 15000 })
 
-    // Reproduce the owner's real lifecycle: this installed shell is suspended
-    // while the deploy happens, so it misses the transient shell_rebuilt event.
-    await page.evaluate(() => {
-      Object.defineProperty(document, 'visibilityState', {
-        configurable: true,
-        value: 'hidden',
-      })
-      document.dispatchEvent(new Event('visibilitychange'))
-    })
+    // Reproduce the owner's desktop lifecycle: the browser window loses focus
+    // while the deploy happens, but the document remains `visible`. That means
+    // no visibilitychange is available to discover the new generation.
 
     // Publish gen B; wait until it is installed and WAITING (leashed — the SW
     // never skipWaiting()s on its own).
@@ -473,16 +466,13 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     })
 
     await resetLoadCount(page)
-    // Return to the still-mounted chat. This used to find gen B but classify the
-    // apply as passive, so the visible idle chat held it forever and only a hard
-    // refresh escaped gen A. Foreground return is now the deliberate apply
-    // boundary; one ordinary shell reload must follow without another gesture.
+    // Return to the still-mounted chat through the focus-only lifecycle the
+    // owner actually exercised. This used to have no update-check trigger at
+    // all, so only a hard refresh escaped gen A. Resume is now the deliberate
+    // apply boundary; one ordinary shell reload must follow without another
+    // gesture.
     await page.evaluate(() => {
-      Object.defineProperty(document, 'visibilityState', {
-        configurable: true,
-        value: 'visible',
-      })
-      document.dispatchEvent(new Event('visibilitychange'))
+      window.dispatchEvent(new Event('focus'))
     })
     await page.waitForFunction(
       () => Number(sessionStorage.getItem('__load_count') || '0') >= 1,
@@ -504,6 +494,30 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       return !reg.waiting && navigator.serviceWorker.controller === reg.active
     })
     expect(stable).toBe(true)
+
+    // Publish another generation, then exercise the owner's second exact
+    // symptom: Cmd+R. The first navigation is served by the current worker;
+    // mount-time discovery must then hand off gen C and perform one controlled
+    // reload. A hard-refresh bypass is neither used nor needed.
+    swMarker = 'e2e gen C'
+    await keeper.evaluate(async () => { await (await navigator.serviceWorker.getRegistration()).update() })
+    await keeper.waitForFunction(
+      async () => !!(await navigator.serviceWorker.getRegistration())?.waiting,
+      { timeout: 15000 },
+    )
+    await resetLoadCount(page)
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await page.waitForFunction(
+      () => Number(sessionStorage.getItem('__load_count') || '0') >= 2,
+      { timeout: 20000 },
+    )
+    await page.waitForFunction(async () => {
+      const reg = await navigator.serviceWorker.getRegistration()
+      return !!reg && !reg.waiting && !!reg.active
+        && navigator.serviceWorker.controller === reg.active
+    }, { timeout: 20000 })
+    await page.waitForTimeout(1500)
+    expect(await loadCount(page)).toBe(2)
     await keeper.close()
   })
 })

@@ -103,7 +103,7 @@ import {
 } from './composerFocusLease.js'
 import {
   inspectShellUpdate,
-  watchForShellUpdateOnForeground,
+  watchForShellUpdateOnResume,
 } from '../../lib/shellUpdate.js'
 import './Shell.css'
 import './workspace.css'
@@ -2314,7 +2314,7 @@ export default function Shell({ onInitialVisualReady }) {
     }
   }, [chatsQuery.isSuccess, queryClient])
 
-  // Foreground-return shell-update pickup. The boot re-arm net above runs once per
+  // Resume-time shell-update pickup. The boot re-arm net above runs once per
   // MOUNT, and a live `shell_rebuilt` reaches only a page with a live EventSource.
   // An installed PWA BACKGROUNDED across a deploy hits neither: it misses the
   // transient broadcast (its stream was suspended and the event is not replayed on
@@ -2326,11 +2326,11 @@ export default function Shell({ onInitialVisualReady }) {
   // reload as a deliberate apply — silent, and deferred while a turn streams or
   // the owner is typing (requestShellReload reads streaming/view state from refs,
   // so this closure staying out of the deps is correct). Unlike a passive source
-  // rebuild, a foreground return is itself the safe boundary the owner chose;
+  // rebuild, returning to the shell is itself the safe boundary the owner chose;
   // classifying it as passive would hold the update forever behind any visible
   // idle chat. The shared inspector makes a return with no new generation a
   // no-op — no toast, no spurious reload.
-  useEffect(() => watchForShellUpdateOnForeground({
+  useEffect(() => watchForShellUpdateOnResume({
     doc: typeof document !== 'undefined' ? document : null,
     win: typeof window !== 'undefined' ? window : null,
     serviceWorker: typeof navigator !== 'undefined' ? navigator.serviceWorker : null,

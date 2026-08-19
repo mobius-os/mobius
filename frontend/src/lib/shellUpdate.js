@@ -224,7 +224,7 @@ export async function reloadIfGenerationStale({
   return true
 }
 
-// Foreground/online shell-update watch — the APPLY trigger that lets a deploy
+// Resume/online shell-update watch — the APPLY trigger that lets a deploy
 // reach an ALREADY-INSTALLED PWA promptly, closing the "still broken after the
 // deploy" gap for a warm install.
 //
@@ -236,8 +236,11 @@ export async function reloadIfGenerationStale({
 // discovers and applies the waiting generation until a later navigation.
 //
 // This wires the missing apply at the owning layer (the apply-on-idle machine):
-// on every return to visible (and on regaining connectivity) it forces a fresh
+// on every return to the page (and on regaining connectivity) it forces a fresh
 // sw.js fetch and, once a newer generation is waiting/mismatched, calls `rearm()`.
+// A desktop app/window switch can leave document.visibilityState === 'visible',
+// so visibilitychange alone is not a resume boundary. Window focus covers that
+// path; pageshow covers a document restored from the back-forward cache.
 // The caller routes `rearm` to requestShellReload, which posts SKIP_WAITING to the
 // waiting worker and reloads at the next IDLE boundary — silent (no toast), and
 // deferred while a turn streams or the owner is typing, so the sacred stream is
@@ -247,7 +250,7 @@ export async function reloadIfGenerationStale({
 //
 // Deps are injected (doc/win/serviceWorker/rearm) so the wiring is
 // unit-testable without a live service worker. Returns a dispose function.
-export function watchForShellUpdateOnForeground({
+export function watchForShellUpdateOnResume({
   doc,
   win,
   serviceWorker,
@@ -294,10 +297,14 @@ export function watchForShellUpdateOnForeground({
 
   const onVisible = () => { if (doc.visibilityState === 'visible') check() }
   doc.addEventListener('visibilitychange', onVisible)
+  win?.addEventListener?.('focus', onVisible)
+  win?.addEventListener?.('pageshow', onVisible)
   win?.addEventListener?.('online', check)
   return () => {
     disposed = true
     doc.removeEventListener('visibilitychange', onVisible)
+    win?.removeEventListener?.('focus', onVisible)
+    win?.removeEventListener?.('pageshow', onVisible)
     win?.removeEventListener?.('online', check)
   }
 }

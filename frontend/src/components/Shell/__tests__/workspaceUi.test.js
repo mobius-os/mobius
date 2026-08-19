@@ -1088,8 +1088,8 @@ test('boot delegates the complete shell generation decision to one inspector', (
   )
 })
 
-test('foreground return is a deliberate apply, not a passive visible-chat hold', () => {
-  assert.match(shell, /watchForShellUpdateOnForeground\(\{[\s\S]*?rearm: \(\) => requestShellReload\(\),/)
+test('shell resume is a deliberate apply, not a passive visible-chat hold', () => {
+  assert.match(shell, /watchForShellUpdateOnResume\(\{[\s\S]*?rearm: \(\) => requestShellReload\(\),/)
   assert.doesNotMatch(shell, /rearm: \(\) => requestShellReload\(\{ passive: true \}\)/)
 })
 

@@ -5,7 +5,7 @@ import {
   inspectShellUpdate,
   reloadIfGenerationStale,
   reloadWhenWorkerTakesOver,
-  watchForShellUpdateOnForeground,
+  watchForShellUpdateOnResume,
   SW_DISCOVERY_SETTLE_TIMEOUT_MS,
   SW_TAKEOVER_TIMEOUT_MS,
 } from '../shellUpdate.js'
@@ -67,13 +67,13 @@ function makeReg({ waiting = null, active = null, installing = null, onUpdate } 
   return reg
 }
 
-test('watchForShellUpdateOnForeground: a WAITING worker on return-to-visible re-arms once', async () => {
+test('watchForShellUpdateOnResume: a WAITING worker on return-to-visible re-arms once', async () => {
   const active = { id: 'a' }
   const reg = makeReg({ waiting: { id: 'w' }, active })
   const sw = makeSwWith(reg, { controller: active })
   const doc = makeDoc('visible')
   let rearms = 0
-  const dispose = watchForShellUpdateOnForeground({
+  const dispose = watchForShellUpdateOnResume({
     doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 },
   })
   doc.emit('visibilitychange')
@@ -82,15 +82,50 @@ test('watchForShellUpdateOnForeground: a WAITING worker on return-to-visible re-
   dispose()
 })
 
-test('watchForShellUpdateOnForeground: no new generation is a NO-OP (no spurious reload)', async () => {
+test('watchForShellUpdateOnResume: desktop focus return checks while visibility stays visible', async () => {
+  const active = { id: 'a' }
+  const reg = makeReg({ waiting: { id: 'w' }, active })
+  const sw = makeSwWith(reg, { controller: active })
+  const doc = makeDoc('visible')
+  const win = makeWin()
+  let rearms = 0
+  const dispose = watchForShellUpdateOnResume({
+    doc, win, serviceWorker: sw, rearm: () => { rearms += 1 },
+  })
+
+  win.emit('focus')
+  await flush()
+  assert.equal(rearms, 1, 'switching back to a still-visible desktop window applies the update')
+  dispose()
+})
+
+test('watchForShellUpdateOnResume: pageshow checks a restored document', async () => {
+  const active = { id: 'a' }
+  const reg = makeReg({ waiting: { id: 'w' }, active })
+  const sw = makeSwWith(reg, { controller: active })
+  const doc = makeDoc('visible')
+  const win = makeWin()
+  let rearms = 0
+  const dispose = watchForShellUpdateOnResume({
+    doc, win, serviceWorker: sw, rearm: () => { rearms += 1 },
+  })
+
+  win.emit('pageshow')
+  await flush()
+  assert.equal(rearms, 1, 'a restored page applies the waiting generation')
+  dispose()
+})
+
+test('watchForShellUpdateOnResume: no new generation is a NO-OP (no spurious reload)', async () => {
   const controller = { id: 'a' }
   // active === controller, nothing waiting, no stale flag → current generation.
   const reg = makeReg({ waiting: null, active: controller })
   const sw = makeSwWith(reg, { controller })
   const doc = makeDoc('visible')
+  const win = makeWin()
   let rearms = 0
-  const dispose = watchForShellUpdateOnForeground({
-    doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 },
+  const dispose = watchForShellUpdateOnResume({
+    doc, win, serviceWorker: sw, rearm: () => { rearms += 1 },
   })
   doc.emit('visibilitychange')
   await flush()
@@ -98,7 +133,7 @@ test('watchForShellUpdateOnForeground: no new generation is a NO-OP (no spurious
   dispose()
 })
 
-test('watchForShellUpdateOnForeground: a worker discovered by update() re-arms when it reaches installed', async () => {
+test('watchForShellUpdateOnResume: a worker discovered by update() re-arms when it reaches installed', async () => {
   const active = { id: 'a' }
   const installing = makeInstalling('installing')
   // update() populates reg.installing (the just-discovered worker), still installing.
@@ -106,7 +141,7 @@ test('watchForShellUpdateOnForeground: a worker discovered by update() re-arms w
   const sw = makeSwWith(reg, { controller: active })
   const doc = makeDoc('visible')
   let rearms = 0
-  const dispose = watchForShellUpdateOnForeground({
+  const dispose = watchForShellUpdateOnResume({
     doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 },
   })
   doc.emit('visibilitychange')
@@ -122,7 +157,7 @@ test('watchForShellUpdateOnForeground: a worker discovered by update() re-arms w
   dispose()
 })
 
-test('watchForShellUpdateOnForeground: catches a worker published one task after update resolves', async () => {
+test('watchForShellUpdateOnResume: catches a worker published one task after update resolves', async () => {
   const active = { id: 'a' }
   const installing = makeInstalling('installing')
   let publishInstalling
@@ -138,7 +173,7 @@ test('watchForShellUpdateOnForeground: catches a worker published one task after
   const sw = makeSwWith(reg, { controller: active })
   const doc = makeDoc('visible')
   let rearms = 0
-  const dispose = watchForShellUpdateOnForeground({
+  const dispose = watchForShellUpdateOnResume({
     doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 },
   })
 
@@ -172,7 +207,7 @@ test('finding 1: near-simultaneous visibilitychange + online coalesce to ONE lis
   const doc = makeDoc('visible')
   const win = makeWin()
   let rearms = 0
-  const dispose = watchForShellUpdateOnForeground({ doc, win, serviceWorker: sw, rearm: () => { rearms += 1 } })
+  const dispose = watchForShellUpdateOnResume({ doc, win, serviceWorker: sw, rearm: () => { rearms += 1 } })
   // Both triggers fire synchronously, before the first check's await resolves.
   doc.emit('visibilitychange')
   win.emit('online')
@@ -192,7 +227,7 @@ test('finding 1: sequential returns never double-rearm (performing/applied latch
   const sw = makeSwWith(reg, { controller: active })
   const doc = makeDoc('visible')
   let rearms = 0
-  const dispose = watchForShellUpdateOnForeground({ doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 } })
+  const dispose = watchForShellUpdateOnResume({ doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 } })
   doc.emit('visibilitychange'); await flush()
   assert.equal(rearms, 1)
   doc.emit('visibilitychange'); await flush() // a second return after the apply was requested
@@ -208,7 +243,7 @@ test('finding 2: waiting A + installing B settles on the NEWEST (no reload into 
   const sw = makeSwWith(reg, { controller: active })
   const doc = makeDoc('visible')
   let rearms = 0
-  const dispose = watchForShellUpdateOnForeground({ doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 } })
+  const dispose = watchForShellUpdateOnResume({ doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 } })
   doc.emit('visibilitychange')
   await flush()
   assert.equal(rearms, 0, 'must NOT apply the older waiting A while a newer B is installing')
@@ -228,7 +263,7 @@ test('finding 2: a redundant install falls back to the still-waiting generation'
   const sw = makeSwWith(reg, { controller: active })
   const doc = makeDoc('visible')
   let rearms = 0
-  const dispose = watchForShellUpdateOnForeground({ doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 } })
+  const dispose = watchForShellUpdateOnResume({ doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 } })
   doc.emit('visibilitychange'); await flush()
   assert.equal(rearms, 0)
   installingB.become('redundant') // B failed; A is still the newest good generation
@@ -237,29 +272,36 @@ test('finding 2: a redundant install falls back to the still-waiting generation'
   dispose()
 })
 
-test('watchForShellUpdateOnForeground: dispose removes listeners', async () => {
+test('watchForShellUpdateOnResume: dispose removes listeners', async () => {
   const controller = { id: 'a' }
   const reg = makeReg({ waiting: null, active: controller })
   const sw = makeSwWith(reg, { controller })
   const doc = makeDoc('visible')
+  const win = makeWin()
   let rearms = 0
-  const dispose = watchForShellUpdateOnForeground({
-    doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 },
+  const dispose = watchForShellUpdateOnResume({
+    doc, win, serviceWorker: sw, rearm: () => { rearms += 1 },
   })
   doc.emit('visibilitychange')
   await flush()
   assert.equal(rearms, 0)
   assert.equal(doc.count('visibilitychange'), 1)
+  assert.equal(win.count('focus'), 1)
+  assert.equal(win.count('pageshow'), 1)
+  assert.equal(win.count('online'), 1)
   dispose()
   assert.equal(doc.count('visibilitychange'), 0, 'dispose unwires the visibility listener')
+  assert.equal(win.count('focus'), 0, 'dispose unwires the focus listener')
+  assert.equal(win.count('pageshow'), 0, 'dispose unwires the pageshow listener')
+  assert.equal(win.count('online'), 0, 'dispose unwires the online listener')
 })
 
-test('watchForShellUpdateOnForeground: a HIDDEN visibilitychange does nothing', async () => {
+test('watchForShellUpdateOnResume: a HIDDEN visibilitychange does nothing', async () => {
   const reg = makeReg({ waiting: { id: 'w' } })
   const sw = makeSwWith(reg)
   const doc = makeDoc('hidden')
   let rearms = 0
-  const dispose = watchForShellUpdateOnForeground({
+  const dispose = watchForShellUpdateOnResume({
     doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 },
   })
   doc.emit('visibilitychange') // going hidden — must not check/apply
@@ -268,8 +310,8 @@ test('watchForShellUpdateOnForeground: a HIDDEN visibilitychange does nothing', 
   dispose()
 })
 
-test('watchForShellUpdateOnForeground: no serviceWorker support → inert dispose', () => {
-  const dispose = watchForShellUpdateOnForeground({ doc: makeDoc(), serviceWorker: null, rearm: () => {} })
+test('watchForShellUpdateOnResume: no serviceWorker support → inert dispose', () => {
+  const dispose = watchForShellUpdateOnResume({ doc: makeDoc(), serviceWorker: null, rearm: () => {} })
   assert.equal(typeof dispose, 'function')
   dispose() // must not throw
 })
