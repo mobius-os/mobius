@@ -12,6 +12,7 @@ import {
   pointerSelectionChangedWithin,
   textSelectionSnapshot,
 } from '../../lib/selectableTextControl.js'
+import { getOnlineSnapshot } from '../../lib/connectivityStore.js'
 
 
 function resolveAnswer(answer, otherText) {
@@ -222,7 +223,7 @@ export default function QuestionCard({
       // assistant-looking error row after it makes the question cease to be
       // the transcript tail and disables the very retry the owner needs.
       setSubmitError(
-        typeof navigator !== 'undefined' && navigator.onLine === false
+        !getOnlineSnapshot()
           ? 'You’re offline. Your choice is saved — submit it when you’re back online.'
           : 'That answer didn’t save. Your choice is still here — please try again.',
       )

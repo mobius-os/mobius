@@ -19,6 +19,7 @@ import {
   shouldAttachRunningStream,
   shouldRetireRestoredQuestionSnapshot,
   shouldRecoverSettledRuntime,
+  shouldReconnectExhaustedStream,
   shouldRetryStopAfterConfirm,
   shouldShowOpenAppCta,
   startedMessagesFromResponse,
@@ -194,6 +195,29 @@ test('a parked owner question uses compact history until its answer resumes the 
     running: false,
     pendingQuestionId: null,
   }), false)
+})
+
+test('confirmed recovery reattaches only an unfinished exhausted visible stream', () => {
+  assert.equal(shouldReconnectExhaustedStream({
+    wantsReconnect: true,
+    connectionError: 'disconnected',
+    hidden: false,
+  }), true)
+  assert.equal(shouldReconnectExhaustedStream({
+    wantsReconnect: false,
+    connectionError: 'disconnected',
+    hidden: false,
+  }), false, 'a terminal stream is never resurrected')
+  assert.equal(shouldReconnectExhaustedStream({
+    wantsReconnect: true,
+    connectionError: 'retrying',
+    hidden: false,
+  }), false, 'bounded retry ownership is not duplicated')
+  assert.equal(shouldReconnectExhaustedStream({
+    wantsReconnect: true,
+    connectionError: 'disconnected',
+    hidden: true,
+  }), false, 'hidden panes wait for their foreground lifecycle')
 })
 
 test('a known server run settling recovers a live stream that missed its terminal event', () => {

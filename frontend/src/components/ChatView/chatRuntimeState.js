@@ -172,6 +172,17 @@ export function shouldAttachRunningStream({
   return !!running && !pendingQuestionId
 }
 
+/** A recovery signal owns only an unfinished stream with exhausted retries. */
+export function shouldReconnectExhaustedStream({
+  wantsReconnect = false,
+  connectionError = null,
+  hidden = false,
+} = {}) {
+  return wantsReconnect === true
+    && connectionError === 'disconnected'
+    && hidden !== true
+}
+
 /** Retire only a cold restored prefix proven older than the durable card. */
 export function shouldRetireRestoredQuestionSnapshot({
   isStreaming = false,

@@ -30,10 +30,13 @@ import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 import { agentViewport } from '../../lib/agentViewport.js'
 import { ChatTransportError, chatHttpError } from './sendErrors.js'
 import {
+  getRecoverySnapshot,
   reportNetworkReachable,
+  subscribeRecovery,
   verifyConnectivity,
 } from '../../lib/connectivityStore.js'
 import { sendWithAmbiguityRecovery } from './sendTransportRecovery.js'
+import { shouldReconnectExhaustedStream } from './chatRuntimeState.js'
 import {
   TEXT_REVEAL_MIN_COMMIT_MS,
   textRevealBudget,
@@ -706,6 +709,7 @@ export default function useStreamConnection(chatId, {
           signal: controller.signal,
         },
       )
+      reportNetworkReachable()
 
       // Stale-connection guard. Between scheduling this fetch and its
       // resolution, the connection we belong to may have been torn down
@@ -1282,6 +1286,7 @@ export default function useStreamConnection(chatId, {
       // fresh send) — the reattach window, if one is open, continues on
       // the successor connection, so the note is deliberately left alone.
       if (err.name === 'AbortError') return
+      void verifyConnectivity()
       flushBuffer()
       setIsStreaming(false)
       // Real failure: the connectionError states below own the
@@ -1684,6 +1689,31 @@ export default function useStreamConnection(chatId, {
       window.removeEventListener('online', onOnline)
     }
   }, [persistLatestStreamSnapshot])
+
+  // Automatic stream retries are intentionally bounded, but exhaustion is a
+  // browser-local transport state—not a terminal chat state. When any live
+  // HTTP/SSE response proves that the server recovered, reattach an unfinished
+  // turn even if this stream already displayed "Connection lost". This is the
+  // restart path: the shell system stream commonly reconnects first and its
+  // shared recovery generation wakes the active chat without a page refresh.
+  useEffect(() => {
+    let observedGeneration = getRecoverySnapshot()
+    return subscribeRecovery(() => {
+      const generation = getRecoverySnapshot()
+      if (generation === observedGeneration) return
+      observedGeneration = generation
+      if (!shouldReconnectExhaustedStream({
+        wantsReconnect: wantsReconnectRef.current,
+        connectionError: connectionErrorRef.current,
+        hidden: document.visibilityState === 'hidden',
+      })) return
+      retryCount.current = 0
+      setConnectionError(null)
+      clearReconnectingNote()
+      setIsStreaming(true)
+      connectRef.current?.(true)
+    })
+  }, [])
 
   // Exposed so ChatView's promoteStreamToMessages can wipe the live
   // streamItems right after copying them into `messages`. Without this,

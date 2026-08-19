@@ -9,7 +9,10 @@ import { clearLatchedTokens } from '../lib/appToken.js'
 import { clearOwnerDraftStorage } from '../lib/ownerDraftStorage.js'
 import { clearReadingPositions } from '../components/ChatView/useScrollMode.js'
 import { clearDurableComposerDrafts } from '../components/ChatView/composerDraft.js'
-import { verifyConnectivity } from '../lib/connectivityStore.js'
+import {
+  reportNetworkReachable,
+  verifyConnectivity,
+} from '../lib/connectivityStore.js'
 import {
   cachesToDeleteOnLogout,
   SHELL_DATA_CACHE,
@@ -236,6 +239,10 @@ export async function apiFetch(path, options = {}) {
   let res
   try {
     res = await fetch(`${BASE}/api${path}`, { ...fetchOptions, headers, signal })
+    // HTTP status is application evidence, not transport evidence. Even a 401
+    // or 500 proves that this live server answered and must repair a stale
+    // Offline/Checking verdict before the caller handles the status itself.
+    reportNetworkReachable()
   } catch (error) {
     // The request is evidence, not a verdict. Ask the shared reachability store
     // to verify promptly; its hysteresis still prevents one transient failure
