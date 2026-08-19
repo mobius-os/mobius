@@ -3624,7 +3624,7 @@ export default function Shell({ onInitialVisualReady }) {
         <div className="shell__bar-actions">
           {reachabilityLabel && (
             <span
-              className="shell__connection-spinner"
+              className="shell__connection-status"
               role="status"
               aria-live="polite"
             >
