@@ -343,6 +343,7 @@ async def apply_source_revision(
           app,
           capabilities=runtime_fields["capabilities"],
           public_access=runtime_fields["public_access"],
+          contract_permissions=manifest.get("permissions") or {},
         )
       if chat_id is not None:
         app.chat_id = chat_id

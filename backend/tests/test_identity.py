@@ -33,9 +33,14 @@ def test_identity_app_requires_reviewed_capability(client, auth):
 
 
 def test_identity_permission_is_part_of_review_contract():
-  from app.app_capabilities import contract_from_manifest
+  from app.app_capabilities import contract_from_app_state, contract_from_manifest
 
   contract = contract_from_manifest({
     "permissions": {"identity_manage": True},
   })
   assert contract["data"]["identity_manage"] is True
+  local = contract_from_app_state(
+    models.App(name="Identity", slug="identity", source_dir="/tmp/identity"),
+    contract_permissions={"identity_manage": True},
+  )
+  assert local["data"]["identity_manage"] is True
