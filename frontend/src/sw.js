@@ -79,6 +79,10 @@ import {
 import { RETAINED_RUNTIME_ASSETS } from './sw-precache-assets.js'
 import { isShellNavigationDenied } from './lib/swNavigationPolicy.js'
 import { serveShellNavigation } from './lib/swShellNavigation.js'
+import {
+  findOutgoingShellEntries,
+  refreshOutgoingShellEntries,
+} from './lib/swOutgoingShell.js'
 
 const isOpaqueFramePublicAssetRequest = request => {
   try {
@@ -147,13 +151,16 @@ const outgoingDocumentPolicy = caches.match('/index.html', { ignoreSearch: true 
   .then(response => (response ? response.headers.get('content-security-policy') || '' : null))
   .catch(() => null)
 
-async function documentPolicyChanged() {
-  const [outgoing, fresh] = await Promise.all([
-    outgoingDocumentPolicy,
-    fetch(`/index.html?policy=${SHELL_DOCUMENT_POLICY_REVISION}`, { cache: 'reload', credentials: 'same-origin' })
-      .then(response => response.headers.get('content-security-policy') || '')
-      .catch(() => ''),
-  ])
+// Snapshot the outgoing worker's revisioned document keys before Workbox
+// creates this generation's precache. A pre-network-first worker will keep
+// requesting one of these exact keys until it is replaced; refreshing the
+// response lets an ordinary navigation bootstrap into the current shell while
+// this worker remains safely waiting.
+const outgoingShellEntries = findOutgoingShellEntries(caches)
+
+async function documentPolicyChanged(freshDocument) {
+  const outgoing = await outgoingDocumentPolicy
+  const fresh = freshDocument?.headers.get('content-security-policy') || ''
   // No cached document, or offline: leave the leash in place.
   return outgoing !== null && fresh !== '' && fresh !== outgoing
 }
@@ -162,9 +169,15 @@ let isFirstInstall = false
 self.addEventListener('install', (event) => {
   isFirstInstall = !self.registration.active
   if (isFirstInstall) return
-  event.waitUntil(documentPolicyChanged().then(async (changed) => {
-    if (changed) await self.skipWaiting()
-  }).catch(() => {}))
+  event.waitUntil((async () => {
+    const entries = await outgoingShellEntries
+    const freshDocument = await fetch(`/index.html?policy=${SHELL_DOCUMENT_POLICY_REVISION}`, {
+      cache: 'reload',
+      credentials: 'same-origin',
+    }).catch(() => null)
+    await refreshOutgoingShellEntries(caches, entries, freshDocument)
+    if (await documentPolicyChanged(freshDocument)) await self.skipWaiting()
+  })().catch(() => {}))
 })
 self.addEventListener('message', (event) => {
   // The page reached its idle apply-boundary and asked us to take over.
