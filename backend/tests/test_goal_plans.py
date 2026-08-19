@@ -26,6 +26,7 @@ def _active_goal(client, owner_token, db):
     status="running",
     provider="codex",
     goal_objective="Ship the release",
+    goal_id="goal-1",
   ))
   db.commit()
   return auth, chat_id
@@ -164,6 +165,67 @@ def test_cancelled_work_is_removed_from_the_completion_route(
   summary = created.json()["plan"]["summary"]
   assert summary["can_complete"] is True
   assert summary["completion_blockers"] == []
+
+
+def test_nested_children_settle_before_parent_becomes_ready_to_verify(
+  client, owner_token, db,
+):
+  auth, chat_id = _active_goal(client, owner_token, db)
+  created = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 0, "tasks": [
+      {"id": "b", "title": "Deliver B", "status": "running"},
+      {"id": "x", "title": "Do X", "parent_id": "b"},
+      {"id": "y", "title": "Do Y", "parent_id": "b"},
+    ]}, headers=auth,
+  )
+  assert created.status_code == 200, created.text
+  revision = 1
+  for task_id, status in (("x", "completed"), ("y", "completed")):
+    response = client.patch(
+      f"/api/chats/{chat_id}/goal-plan/tasks/{task_id}",
+      json={"expected_revision": revision, "status": status}, headers=auth,
+    )
+    assert response.status_code == 200, response.text
+    revision += 1
+  tasks = {task["id"]: task for task in response.json()["plan"]["tasks"]}
+  assert tasks["b"]["children"] == ["x", "y"]
+  assert tasks["b"]["ready_to_verify"] is True
+
+  incomplete_parent = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": revision, "tasks": [
+      {"id": "b", "title": "Deliver B", "status": "completed"},
+      {"id": "x", "title": "Do X", "parent_id": "b"},
+    ]}, headers=auth,
+  )
+  assert incomplete_parent.status_code == 422
+  assert "children settle" in incomplete_parent.json()["detail"]
+
+
+def test_plan_follows_stable_goal_identity_across_a_new_logical_run(
+  client, owner_token, db,
+):
+  auth, chat_id = _active_goal(client, owner_token, db)
+  created = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 0, "tasks": [{"id": "a", "title": "A"}]},
+    headers=auth,
+  )
+  assert created.status_code == 200, created.text
+  db.query(models.ChatRun).filter(models.ChatRun.id == "goal-root").update({
+    models.ChatRun.status: "interrupted",
+  })
+  db.add(models.ChatRun(
+    id="recovered-root", root_run_id="recovered-root", chat_id=chat_id,
+    status="running", provider="codex", goal_objective="Ship the release",
+    goal_id="goal-1",
+  ))
+  db.commit()
+  recovered = client.get(f"/api/chats/{chat_id}/goal-plan", headers=auth)
+  assert recovered.status_code == 200, recovered.text
+  assert recovered.json()["plan"]["revision"] == 1
+  assert recovered.json()["plan"]["goal_id"] == "goal-1"
 
 
 def test_completion_preflight_names_only_unfinished_required_work():

@@ -95,6 +95,7 @@ class Principal:
   embed_session_id: str | None = None
   embed_role: str | None = None
   operations: frozenset[str] = frozenset()
+  delegation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -558,6 +559,37 @@ def get_principal(
   return Principal(
     owner=owner,
     app_id=app_id,
+    app_instance_id=payload.get("app_nonce") if app_id is not None else None,
+    scope="app" if app_id is not None else "owner",
+  )
+
+
+def get_delegation_principal(
+  token: str = Depends(_oauth2),
+  db: Session = Depends(get_db),
+) -> Principal:
+  """Resolve owner/app plus the route-confined delegated-child bearer."""
+  owner, payload = _resolve_owner(token, db)
+  if payload.get("scope") == "delegation":
+    delegation_id = payload.get("delegation_id")
+    chat_id = payload.get("delegation_chat")
+    app_id = payload.get("app_id")
+    row = db.query(models.Delegation).filter(
+      models.Delegation.id == delegation_id,
+      models.Delegation.child_chat_id == chat_id,
+      models.Delegation.app_id == app_id,
+    ).first()
+    if row is None:
+      raise HTTPException(status_code=403, detail="Delegation token is stale.")
+    return Principal(
+      owner=owner, app_id=int(app_id), scope="delegation",
+      chat_id=str(chat_id), delegation_id=str(delegation_id),
+    )
+  if payload.get("scope") not in (None, "app"):
+    raise HTTPException(status_code=403, detail="Token scope is not valid here.")
+  app_id = _enforce_app_scope(payload, db)
+  return Principal(
+    owner=owner, app_id=app_id,
     app_instance_id=payload.get("app_nonce") if app_id is not None else None,
     scope="app" if app_id is not None else "owner",
   )

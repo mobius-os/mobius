@@ -274,33 +274,13 @@ export function watchForShellUpdateOnForeground({
     let reg
     try { reg = await serviceWorker.getRegistration() } catch { return }
     if (disposed || !reg) return
-    // Force a fresh sw.js fetch so a deploy that shipped while we were backgrounded
-    // is discovered now (a cheap conditional GET; the server 304s when unchanged).
-    try { await reg.update() } catch { /* offline / transient — decide on what we have */ }
+    // Discover and settle the newest generation before deciding. In browsers,
+    // update() may resolve one queued task before registration.installing and
+    // updatefound become observable; the shared helper owns that race as well as
+    // the newer-installing/older-waiting case.
+    await settleNewestWorkerForHandoff({ registration: reg })
     if (disposed) return
-    // Settle on the NEWEST generation (review finding 2): update() resolves BEFORE
-    // the newly-discovered worker finishes installing. If a newer generation is
-    // still INSTALLING, defer the decision until it reaches installed/redundant so
-    // we never apply reg.waiting (an OLDER generation) first and then reload again
-    // into the newer one — one reload, into the newest. With nothing installing
-    // (the common case: a worker installed while we were away and is already
-    // waiting), decide now so the apply lands on this first foreground return.
-    const installing = reg.installing
-    const stillInstalling = installing
-      && installing.state !== 'installed'
-      && installing.state !== 'redundant'
-      && typeof installing.addEventListener === 'function'
-    if (stillInstalling) {
-      const onState = () => {
-        if (installing.state === 'installed' || installing.state === 'redundant') {
-          installing.removeEventListener('statechange', onState)
-          decide(reg)
-        }
-      }
-      installing.addEventListener('statechange', onState)
-    } else {
-      decide(reg)
-    }
+    decide(reg)
   }
 
   // Coalesce concurrent triggers (review finding 1): a near-simultaneous

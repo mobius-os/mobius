@@ -112,6 +112,12 @@ def main() -> int:
     "--task", action="append", type=_parse_task, default=[],
     metavar="ID|Title|DEP1,DEP2",
   )
+  add_parser = sub.add_parser("add", help="append a newly discovered subgoal")
+  add_parser.add_argument("task_id")
+  add_parser.add_argument("title")
+  add_parser.add_argument("--parent")
+  add_parser.add_argument("--depends-on", action="append", default=[])
+  add_parser.add_argument("--completion-condition")
   set_parser.add_argument(
     "--tasks-json", help="JSON array alternative to repeated --task",
   )
@@ -122,6 +128,7 @@ def main() -> int:
     choices=("pending", "running", "completed", "blocked", "failed", "cancelled"),
   )
   update_parser.add_argument("--note")
+  update_parser.add_argument("--result")
   update_parser.add_argument("--progress", type=_progress, metavar="CURRENT/TOTAL")
   args = parser.parse_args()
 
@@ -160,12 +167,34 @@ def main() -> int:
       "PUT", f"/api/chats/{chat_id}/goal-plan",
       {"expected_revision": revision, "tasks": tasks},
     )
+  elif args.command == "add":
+    tasks = list((current or {}).get("tasks") or [])
+    for task in tasks:
+      for transient in ("ready", "waiting_on", "children", "ready_to_verify"):
+        task.pop(transient, None)
+    added = {
+      "id": args.task_id,
+      "title": args.title,
+      "status": "pending",
+      "depends_on": args.depends_on,
+    }
+    if args.parent:
+      added["parent_id"] = args.parent
+    if args.completion_condition:
+      added["completion_condition"] = args.completion_condition
+    tasks.append(added)
+    result = _request(
+      "PUT", f"/api/chats/{chat_id}/goal-plan",
+      {"expected_revision": revision, "tasks": tasks},
+    )
   else:
     changes = {"expected_revision": revision}
     if args.status is not None:
       changes["status"] = args.status
     if args.note is not None:
       changes["note"] = args.note
+    if args.result is not None:
+      changes["result"] = args.result
     if args.progress is not None:
       changes["progress"] = args.progress
     if len(changes) == 1:

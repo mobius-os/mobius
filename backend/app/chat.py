@@ -4302,9 +4302,10 @@ async def _run_chat_impl_with_db(
   base_env.update(app_context_env)
   if run_policy is not None:
     base_env.update({
-      "MOBIUS_SUBAGENT_DEPTH": "1",
+      "MOBIUS_SUBAGENT_DEPTH": str(run_policy.depth),
       "MOBIUS_DELEGATION_ID": run_policy.delegation_id,
       "MOBIUS_SUBAGENT_PROVIDER": run_policy.provider,
+      "MOBIUS_SUBAGENT_HELPER": "/data/apps/subagents/subagents.py",
     })
   # Overrides any inherited TMPDIR from _safe_keys: agent scratch belongs on
   # the bounded data volume, never the container's unbounded overlay. TMP and

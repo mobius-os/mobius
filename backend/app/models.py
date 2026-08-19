@@ -247,6 +247,11 @@ class ChatRun(Base):
   # questions are steered into the same run and must not make the goal vanish
   # after a reload. NULL is an ordinary non-goal run.
   goal_objective = Column(Text, nullable=True, default=None)
+  # Stable identity for one native Goal across physical/logical run recovery.
+  # Unlike root_run_id this survives a fresh provider turn after a restart or
+  # question checkpoint. Explicit /goal starts mint a new identity; genuine
+  # continuations inherit it.
+  goal_id = Column(String(64), nullable=True, index=True, default=None)
   # Optional agent-authored execution plan for the logical goal rooted at this
   # run. Only the root row stores the snapshot; continuation rows resolve it
   # through root_run_id. The JSON document is intentionally small and bounded

@@ -991,6 +991,44 @@ def _add_chat_run_goal_plan(eng) -> None:
       conn.execute(text(
         "ALTER TABLE chat_runs ADD COLUMN goal_plan_json JSON NULL"
       ))
+
+
+def _add_chat_run_goal_identity(eng) -> None:
+  """Give a native Goal identity that survives logical-run recovery."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chat_runs" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chat_runs")}
+  with eng.begin() as conn:
+    if "goal_id" not in columns:
+      conn.execute(text("ALTER TABLE chat_runs ADD COLUMN goal_id VARCHAR(64) NULL"))
+    required = {
+      "id", "chat_id", "root_run_id", "goal_objective", "goal_plan_json",
+      "started_at",
+    }
+    if not required.issubset(columns):
+      return
+    rows = conn.execute(text(
+      "SELECT id, chat_id, root_run_id, goal_objective, goal_plan_json "
+      "FROM chat_runs WHERE goal_objective IS NOT NULL "
+      "ORDER BY chat_id, started_at, id"
+    )).mappings().all()
+    last_planned: dict[tuple[str, str], str] = {}
+    for row in rows:
+      identity = str(row["root_run_id"] or row["id"])
+      key = (str(row["chat_id"]), str(row["goal_objective"]))
+      if row["goal_plan_json"] is not None:
+        last_planned[key] = identity
+      elif key in last_planned:
+        # Legacy recovery sometimes opened a new logical root while retaining
+        # the same active objective. Reattach those rows to the nearest plan.
+        identity = last_planned[key]
+      conn.execute(text(
+        "UPDATE chat_runs SET goal_id = :goal_id WHERE id = :run_id "
+        "AND goal_id IS NULL"
+      ), {"goal_id": identity, "run_id": row["id"]})
     if "goal_plan_revision" not in columns:
       conn.execute(text(
         "ALTER TABLE chat_runs ADD COLUMN goal_plan_revision INTEGER "
@@ -1770,6 +1808,7 @@ _SCHEMA_MIGRATIONS = (
   ("0012_connector_oauth_gcloud", _add_connector_oauth_gcloud_fields),
   ("0013_app_hosted_publication", _add_app_hosted_publication),
   ("0014_chat_run_goal_plan", _add_chat_run_goal_plan),
+  ("0015_chat_run_goal_identity", _add_chat_run_goal_identity),
 )
 
 

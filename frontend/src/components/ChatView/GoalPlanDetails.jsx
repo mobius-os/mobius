@@ -21,25 +21,34 @@ export default function GoalPlanDetails({ plan }) {
   const tasks = Array.isArray(plan?.tasks) ? plan.tasks : []
   if (!tasks.length) return null
   const tasksById = new Map(tasks.map(task => [task.id, task]))
+  const childrenByParent = new Map()
+  for (const task of tasks) {
+    const parent = tasksById.has(task.parent_id) ? task.parent_id : null
+    childrenByParent.set(parent, [...(childrenByParent.get(parent) || []), task])
+  }
+  const renderBranch = (task, depth = 0) => (
+    <div key={task.id} className="chat__goal-branch" role="none">
+      <div
+        role="listitem"
+        style={{ paddingLeft: `${4 + Math.min(depth, 6) * 18}px` }}
+        className={`chat__goal-task chat__goal-task--${task.status}${
+          task.ready ? ' chat__goal-task--ready' : ''
+        }${task.ready_to_verify ? ' chat__goal-task--verify' : ''}`}
+      >
+        <span className="chat__goal-task-marker" aria-hidden="true" />
+        <span className="chat__goal-task-copy">
+          <span className="chat__goal-task-title">{task.title}</span>
+          <span className="chat__goal-task-meta">
+            {task.ready_to_verify ? 'Ready to verify' : taskMeta(task, tasksById)}
+          </span>
+        </span>
+      </div>
+      {(childrenByParent.get(task.id) || []).map(child => renderBranch(child, depth + 1))}
+    </div>
+  )
   return (
     <div className="chat__goal-plan" role="list" aria-label="Full goal todo list">
-      {tasks.map(task => (
-        <div
-          key={task.id}
-          role="listitem"
-          className={`chat__goal-task chat__goal-task--${task.status}${
-            task.ready ? ' chat__goal-task--ready' : ''
-          }`}
-        >
-          <span className="chat__goal-task-marker" aria-hidden="true" />
-          <span className="chat__goal-task-copy">
-            <span className="chat__goal-task-title">{task.title}</span>
-            <span className="chat__goal-task-meta">
-              {taskMeta(task, tasksById)}
-            </span>
-          </span>
-        </div>
-      ))}
+      {(childrenByParent.get(null) || []).map(task => renderBranch(task))}
     </div>
   )
 }

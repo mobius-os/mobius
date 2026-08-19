@@ -135,10 +135,8 @@ function progressLabel(task) {
 export function visibleGoalTasks(goalPlan) {
   const tasks = Array.isArray(goalPlan?.tasks) ? goalPlan.tasks : []
   const running = tasks.filter(task => task?.status === 'running')
-  if (running.length) return running.map(task => ({ ...task, activity: 'Now' }))
-  return tasks
-    .filter(task => task?.ready === true)
-    .map(task => ({ ...task, activity: 'Next' }))
+  if (running.length) return running
+  return tasks.filter(task => task?.ready === true)
 }
 
 export function progressRailViewModel(goalObjective, buildPhases, goalPlan = null) {
@@ -147,27 +145,19 @@ export function progressRailViewModel(goalObjective, buildPhases, goalPlan = nul
     const completed = goalPlan?.summary?.completed
     const total = goalPlan?.summary?.total
     const planned = Number.isInteger(completed) && Number.isInteger(total)
+    const activeTasks = visibleGoalTasks(goalPlan)
+    const activeLabels = activeTasks.map(progressLabel).filter(Boolean)
     items.push({
       key: 'goal',
       label: planned
-        ? `Goal plan · ${completed} of ${total}`
+        ? [`Goal · ${completed} of ${total}`, ...activeLabels].join(' · ')
         : `Goal · ${goalObjective}`,
       expandable: true,
       ...(goalPlan ? {
         hasDetails: true,
         title: `Goal: ${goalObjective}`,
-        ariaLabel: `Goal plan for ${goalObjective}; ${completed} of ${total} tasks complete`,
-        actionLabel: 'View tasks',
-        expandedActionLabel: 'Hide tasks',
+        ariaLabel: `Goal for ${goalObjective}; ${completed} of ${total} complete`,
       } : {}),
-    })
-  }
-  const activeTasks = goalObjective ? visibleGoalTasks(goalPlan) : []
-  for (const task of activeTasks) {
-    items.push({
-      key: `goal-task-${task.id}`,
-      label: `${task.activity} · ${progressLabel(task)}`,
-      goalTask: true,
     })
   }
   const phases = Array.isArray(buildPhases) ? buildPhases : []
@@ -178,14 +168,8 @@ export function progressRailViewModel(goalObjective, buildPhases, goalPlan = nul
       label: phase.label,
     })
   }
-  const hasPhases = phases.some(phase => phase?.label)
-  const hasActiveTasks = activeTasks.length > 0
   return items.map((item, index) => ({
     ...item,
-    current: hasPhases
-      ? index === items.length - 1
-      : hasActiveTasks
-        ? item.goalTask === true
-        : index === items.length - 1,
+    current: index === items.length - 1,
   }))
 }

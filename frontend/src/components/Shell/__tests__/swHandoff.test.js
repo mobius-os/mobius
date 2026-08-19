@@ -11,9 +11,15 @@ import {
   SW_TAKEOVER_TIMEOUT_MS,
 } from '../swHandoff.js'
 
-// Deterministic drain of the pending microtask queue (getRegistration/update are
-// awaited inside the watch). Two awaits cover getRegistration → update → decide.
-const flush = async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve() }
+// Drain both promise continuations and the queued task where browsers publish a
+// newly-discovered registration.installing worker after update() resolves.
+const flush = async () => {
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
+}
 
 function makeDoc(visibilityState = 'visible') {
   const listeners = {}
@@ -110,9 +116,42 @@ test('watchForShellUpdateOnForeground: a worker discovered by update() re-arms w
   // Simulate the install completing: the worker is now waiting (leashed).
   reg.waiting = { id: 'w' }
   installing.become('installed')
+  await flush()
   assert.equal(rearms, 1, 'reaching installed applies on the first return')
   installing.become('redundant') // a later transition must not re-fire
   assert.equal(rearms, 1)
+  dispose()
+})
+
+test('watchForShellUpdateOnForeground: catches a worker published one task after update resolves', async () => {
+  const active = { id: 'a' }
+  const installing = makeInstalling('installing')
+  let publishInstalling
+  const published = new Promise(resolve => { publishInstalling = resolve })
+  const reg = makeReg({ waiting: null, active })
+  reg.update = async () => {
+    setTimeout(() => {
+      reg.installing = installing
+      reg.emit('updatefound')
+      publishInstalling()
+    }, 0)
+  }
+  const sw = makeSwWith(reg, { controller: active })
+  const doc = makeDoc('visible')
+  let rearms = 0
+  const dispose = watchForShellUpdateOnForeground({
+    doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 },
+  })
+
+  doc.emit('visibilitychange')
+  await published
+  await flush()
+  assert.equal(rearms, 0, 'the foreground check waits for the late-published install')
+
+  reg.waiting = { id: 'w' }
+  installing.become('installed')
+  await flush()
+  assert.equal(rearms, 1, 'the newly-published generation applies without another foreground event')
   dispose()
 })
 
@@ -143,6 +182,7 @@ test('finding 1: near-simultaneous visibilitychange + online coalesce to ONE lis
   assert.equal(installing.count('statechange'), 1, 'one check ran, one listener attached')
   reg.waiting = { id: 'w' }
   installing.become('installed')
+  await flush()
   assert.equal(rearms, 1, 'exactly one rearm despite two concurrent triggers')
   dispose()
 })
@@ -176,6 +216,7 @@ test('finding 2: waiting A + installing B settles on the NEWEST (no reload into 
   // B finishes installing → it is now the waiting generation, A superseded.
   reg.waiting = { id: 'B' }
   installingB.become('installed')
+  await flush()
   assert.equal(rearms, 1, 'applies exactly once, on the newest generation (B)')
   dispose()
 })
@@ -192,6 +233,7 @@ test('finding 2: a redundant install falls back to the still-waiting generation'
   doc.emit('visibilitychange'); await flush()
   assert.equal(rearms, 0)
   installingB.become('redundant') // B failed; A is still the newest good generation
+  await flush()
   assert.equal(rearms, 1, 'apply the surviving waiting A when the newer install fails')
   dispose()
 })

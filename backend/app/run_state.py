@@ -8,6 +8,7 @@ reconstructed from a second per-chat marker.
 
 from collections.abc import Iterable, Mapping
 from typing import Any
+import uuid
 
 from sqlalchemy.orm import Session
 
@@ -41,6 +42,29 @@ def goal_objective_for_run_start(
   ):
     return None
   return previous.goal_objective
+
+
+def goal_identity_for_run_start(
+  db: Session,
+  chat_id: str,
+  message: Mapping[str, Any] | None,
+) -> tuple[str | None, str | None]:
+  """Resolve objective + stable Goal identity before prior runs are closed."""
+  from app.chat_context import _goal_objective
+  from app.continuations import is_continuation_message
+
+  content = message.get("content") if message is not None else ""
+  objective = _goal_objective(content if isinstance(content, str) else "")
+  if objective is not None:
+    return objective, str(uuid.uuid4())
+  if not is_continuation_message(message):
+    return None, None
+  previous = latest_run(db, chat_id)
+  if previous is None or previous.status not in (
+    *models.NONTERMINAL_RUN_STATUSES, "interrupted",
+  ):
+    return None, None
+  return previous.goal_objective, previous.goal_id
 
 
 def latest_run(db: Session, chat_id: str) -> models.ChatRun | None:

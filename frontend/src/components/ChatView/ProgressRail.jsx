@@ -32,9 +32,6 @@ function ProgressStep({ item, detailsExpanded, onDetailsToggle }) {
   const hasDetails = !!item.details
   const expanded = hasDetails ? detailsExpanded : labelExpanded
   const toggleable = item.expandable && (hasDetails || canExpand || expanded)
-  const actionLabel = expanded
-    ? item.expandedActionLabel
-    : item.actionLabel
   const accessibleLabel = item.ariaLabel || item.label
   const title = item.title || item.label
   const className = `chat__progress-step${
@@ -69,9 +66,9 @@ function ProgressStep({ item, detailsExpanded, onDetailsToggle }) {
       aria-current={item.current ? 'step' : undefined}
       aria-expanded={expanded}
       aria-label={toggleable
-        ? `${actionLabel || (expanded ? 'Collapse' : 'Expand')}: ${accessibleLabel}`
+        ? `${expanded ? 'Collapse' : 'Expand'}: ${accessibleLabel}`
         : accessibleLabel}
-      title={toggleable ? (actionLabel || (expanded ? 'Collapse' : title)) : title}
+      title={toggleable ? (expanded ? 'Collapse' : title) : title}
       disabled={!toggleable}
       onClick={() => {
         if (hasDetails) onDetailsToggle?.()
@@ -80,14 +77,7 @@ function ProgressStep({ item, detailsExpanded, onDetailsToggle }) {
     >
       {label}
       {hasDetails && (
-        <>
-          {actionLabel && (
-            <span className="chat__progress-step-action" aria-hidden="true">
-              {actionLabel}
-            </span>
-          )}
-          <span className="chat__progress-toggle-mark" aria-hidden="true" />
-        </>
+        <span className="chat__progress-toggle-mark" aria-hidden="true" />
       )}
     </button>
   )

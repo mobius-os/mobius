@@ -22,6 +22,7 @@ MAX_TASKS = 64
 MAX_DEPENDENCIES = 16
 MAX_TITLE = 160
 MAX_NOTE = 500
+MAX_RESULT = 1000
 
 
 class GoalPlanError(ValueError):
@@ -110,18 +111,41 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
       "status": status,
       "depends_on": depends_on,
     }
+    parent_id = raw.get("parent_id")
+    if parent_id is not None:
+      if not isinstance(parent_id, str) or not TASK_ID_RE.fullmatch(parent_id):
+        raise GoalPlanError(f"parent_id for {task_id} must be a valid task id")
+      task["parent_id"] = parent_id
+    completion_condition = _clean_text(
+      raw.get("completion_condition"),
+      field=f"completion_condition for {task_id}",
+      maximum=MAX_NOTE, required=False,
+    )
+    if completion_condition:
+      task["completion_condition"] = completion_condition
     note = _clean_text(
       raw.get("note"), field=f"note for {task_id}",
       maximum=MAX_NOTE, required=False,
     )
     if note:
       task["note"] = note
+    result = _clean_text(
+      raw.get("result"), field=f"result for {task_id}",
+      maximum=MAX_RESULT, required=False,
+    )
+    if result:
+      task["result"] = result
     if normalized_progress is not None:
       task["progress"] = normalized_progress
     tasks.append(task)
 
   by_id = {task["id"]: task for task in tasks}
   for task in tasks:
+    parent_id = task.get("parent_id")
+    if parent_id == task["id"]:
+      raise GoalPlanError(f"{task['id']} cannot be its own parent")
+    if parent_id is not None and parent_id not in by_id:
+      raise GoalPlanError(f"{task['id']} has missing parent {parent_id}")
     for dependency in task["depends_on"]:
       if dependency == task["id"]:
         raise GoalPlanError(f"{task['id']} cannot depend on itself")
@@ -147,6 +171,17 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
   for task in tasks:
     visit(task["id"])
 
+  # Parentage is a second, deliberately independent acyclic relation. A
+  # dependency orders sibling work; parentage owns completion verification.
+  for task in tasks:
+    seen = {task["id"]}
+    parent_id = task.get("parent_id")
+    while parent_id is not None:
+      if parent_id in seen:
+        raise GoalPlanError("goal-plan parentage must not contain a cycle")
+      seen.add(parent_id)
+      parent_id = by_id[parent_id].get("parent_id")
+
   for task in tasks:
     incomplete = [
       dependency for dependency in task["depends_on"]
@@ -156,6 +191,16 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
       raise GoalPlanError(
         f"{task['id']} cannot be {task['status']} until these dependencies "
         f"complete: {', '.join(incomplete)}"
+      )
+    unfinished_children = [
+      child["id"] for child in tasks
+      if child.get("parent_id") == task["id"]
+      and child["status"] not in {"completed", "cancelled"}
+    ]
+    if task["status"] == "completed" and unfinished_children:
+      raise GoalPlanError(
+        f"{task['id']} cannot complete before its children settle: "
+        f"{', '.join(unfinished_children)}"
       )
     progress = task.get("progress")
     if (
@@ -184,6 +229,19 @@ def active_goal_rows(
   )
   if physical is None:
     return None
+  if physical.goal_id:
+    plan_owner = (
+      db.query(models.ChatRun)
+      .filter(
+        models.ChatRun.chat_id == chat_id,
+        models.ChatRun.goal_id == physical.goal_id,
+        models.ChatRun.goal_plan_json.isnot(None),
+      )
+      .order_by(models.ChatRun.started_at.asc(), models.ChatRun.id.asc())
+      .first()
+    )
+    if plan_owner is not None:
+      return physical, plan_owner
   root_id = physical.root_run_id or physical.id
   root = db.query(models.ChatRun).filter(
     models.ChatRun.id == root_id,
@@ -216,10 +274,20 @@ def serialize_plan(
     ]
     task["waiting_on"] = waiting_on
     task["ready"] = task.get("status") == "pending" and not waiting_on
+    children = [
+      child["id"] for child in tasks
+      if child.get("parent_id") == task["id"]
+    ]
+    task["children"] = children
+    task["ready_to_verify"] = bool(children) and all(
+      by_id[child_id].get("status") in {"completed", "cancelled"}
+      for child_id in children
+    ) and task.get("status") not in {"completed", "cancelled"}
     if task["ready"]:
       ready.append(task["id"])
   return {
     "version": 1,
+    "goal_id": physical.goal_id,
     "root_run_id": root.id,
     "objective": physical.goal_objective,
     "revision": int(root.goal_plan_revision or 0),

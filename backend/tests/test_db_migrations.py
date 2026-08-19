@@ -1019,6 +1019,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0012_connector_oauth_gcloud",
     "0013_app_hosted_publication",
     "0014_chat_run_goal_plan",
+    "0015_chat_run_goal_identity",
   ]
   assert second == first
 
@@ -1139,7 +1140,7 @@ def test_hosted_publication_reaches_a_fully_ledgered_private_app(tmp_path):
       "CREATE TABLE schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in database._SCHEMA_MIGRATIONS[:-2]:
+    for version, _migration in database._SCHEMA_MIGRATIONS[:-3]:
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, '2026-08-15 00:00:00')"
@@ -1197,7 +1198,7 @@ def test_hosted_publication_migrates_the_unmerged_live_flag_to_a_snapshot(
       "CREATE TABLE schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in database._SCHEMA_MIGRATIONS[:-2]:
+    for version, _migration in database._SCHEMA_MIGRATIONS[:-3]:
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, '2026-08-15 00:00:00')"
@@ -1635,7 +1636,7 @@ def test_goal_plan_migration_adds_snapshot_and_revision_to_existing_runs(
       "CREATE TABLE IF NOT EXISTS schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in database._SCHEMA_MIGRATIONS[:-1]:
+    for version, _migration in database._SCHEMA_MIGRATIONS[:-2]:
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, :at)"

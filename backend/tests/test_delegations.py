@@ -33,9 +33,22 @@ def _parent_with_run(client, owner_token, db):
   return chat_id
 
 
-def test_read_delegation_receives_no_http_bearer(client, owner_token, db):
+def test_read_delegation_receives_only_a_delegation_scoped_bearer(
+  client, owner_token, db,
+):
   auth = {"Authorization": f"Bearer {owner_token}"}
   app_id = create_local_app(client, auth, name="Read policy")['id']
+  db.add_all([
+    models.Chat(id="parent", title="Parent", messages=[]),
+    models.Chat(id="read-child", title="Child", messages=[], created_by_app_id=app_id),
+  ])
+  db.add(models.Delegation(
+    id="read-policy", app_id=app_id, parent_chat_id="parent",
+    parent_root_run_id="parent-root", task_key="read", child_chat_id="read-child",
+    provider="codex", model=None, effort=None, scope="read", cwd="/data/platform",
+    prompt_sha256=hashlib.sha256(b"read").hexdigest(),
+  ))
+  db.commit()
   base = dict(
     delegation_id="read-policy",
     app_id=app_id,
@@ -48,7 +61,7 @@ def test_read_delegation_receives_no_http_bearer(client, owner_token, db):
 
   assert delegation_execution_token(
     db, RunPolicy(scope="read", **base),
-  ) is None
+  )
   assert delegation_execution_token(
     db, RunPolicy(scope="write", **base),
   )
@@ -109,7 +122,7 @@ def test_submit_is_idempotent_per_parent_root_and_task_key(
   assert wake_policy_conflict.status_code == 409
 
 
-def test_app_token_can_observe_own_work_but_cannot_submit_spend(
+def test_app_token_can_only_submit_bounded_work_under_its_own_child(
   client, owner_token, db, monkeypatch,
 ):
   owner_auth = {"Authorization": f"Bearer {owner_token}"}
@@ -144,6 +157,27 @@ def test_app_token_can_observe_own_work_but_cannot_submit_spend(
 
   rejected = client.post("/api/delegations", json=body, headers=app_auth)
   assert rejected.status_code == 403
+
+  child_id = created.json()["child_chat_id"]
+  db.add(models.ChatRun(
+    id="child-parent-run", root_run_id="child-parent-run",
+    chat_id=child_id, status="running", provider="claude",
+  ))
+  db.commit()
+  child_policy = policy_for_chat(db, child_id)
+  assert child_policy is not None and child_policy.depth == 1
+  child_auth = {
+    "Authorization": f"Bearer {delegation_execution_token(db, child_policy)}"
+  }
+  nested = client.post("/api/delegations", json={
+    **body,
+    "parent_chat_id": child_id,
+    "task_key": "nested-check",
+    "prompt": "Check one bounded detail.",
+  }, headers=child_auth)
+  assert nested.status_code == 201, nested.text
+  nested_policy = policy_for_chat(db, nested.json()["child_chat_id"])
+  assert nested_policy is not None and nested_policy.depth == 2
 
 
 def test_delegation_listing_exposes_run_usage_without_loading_result(
@@ -236,7 +270,8 @@ def test_child_policy_is_integrity_checked_and_write_loss_needs_review(db):
   assert policy is not None
   assert policy.allow_session_reseed is False
   assert policy.max_budget_usd == 5.0
-  assert "Do not launch" in policy.system_prompt
+  assert "$MOBIUS_SUBAGENT_HELPER" in policy.system_prompt
+  assert "Do not use any other agent CLI" in policy.system_prompt
 
   child.messages = [
     {"role": "user", "content": "Make the bounded edit."},

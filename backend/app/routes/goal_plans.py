@@ -43,12 +43,16 @@ class GoalTaskUpdate(BaseModel):
   expected_revision: int = Field(ge=0)
   status: str | None = None
   note: str | None = None
+  result: str | None = None
   progress: dict[str, Any] | None = None
 
   @model_validator(mode="after")
   def require_change(self) -> "GoalTaskUpdate":
-    if self.status is None and self.note is None and self.progress is None:
-      raise ValueError("provide status, note, or progress")
+    if (
+      self.status is None and self.note is None and self.result is None
+      and self.progress is None
+    ):
+      raise ValueError("provide status, note, result, or progress")
     return self
 
 
@@ -141,6 +145,7 @@ async def patch_goal_task(
         changes={
           "status": body.status,
           "note": body.note,
+          "result": body.result,
           "progress": body.progress,
         },
       )

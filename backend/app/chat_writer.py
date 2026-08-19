@@ -2202,8 +2202,8 @@ class ChatWriterActor:
     # so any still-running row is a prior run whose clear was dropped — mark it
     # interrupted before opening this one (at most one run is ever live).
     from app.models import ChatRun
-    from app.run_state import goal_objective_for_run_start
-    goal_objective = goal_objective_for_run_start(
+    from app.run_state import goal_identity_for_run_start
+    goal_objective, goal_id = goal_identity_for_run_start(
       db, cmd.chat_id, cmd.user_msg,
     )
     self._close_nonterminal_runs(db, cmd.chat_id, "interrupted")
@@ -2213,6 +2213,7 @@ class ChatWriterActor:
       provider=chat.provider, started_at=started_at,
       initiated_by_app_id=cmd.initiated_by_app_id,
       goal_objective=goal_objective,
+      goal_id=goal_id,
     ))
     if not _commit_or_rollback(db):
       raise _PersistFailed("StartTurn did not persist")
@@ -2238,7 +2239,6 @@ class ChatWriterActor:
     from datetime import UTC, datetime
 
     from app.models import ChatRun
-    from app.run_state import goal_objective_for_run_start
 
     chat = _active_chat(db, cmd.chat_id)
     if chat is None:
@@ -2356,7 +2356,10 @@ class ChatWriterActor:
     started_at = datetime.now(UTC)
     chat.updated_at = started_at
     provider = chat.provider or "claude"
-    goal_objective = goal_objective_for_run_start(db, cmd.chat_id, source)
+    from app.run_state import goal_identity_for_run_start
+    goal_objective, goal_id = goal_identity_for_run_start(
+      db, cmd.chat_id, source,
+    )
     db.add(ChatRun(
       id=cmd.run_token,
       chat_id=cmd.chat_id,
@@ -2366,6 +2369,7 @@ class ChatWriterActor:
       started_at=started_at,
       initiated_by_app_id=cmd.initiated_by_app_id,
       goal_objective=goal_objective,
+      goal_id=goal_id,
     ))
     if not _commit_or_rollback(db):
       raise _PersistFailed("StartContinuation did not persist")
@@ -2771,8 +2775,8 @@ class ChatWriterActor:
     # SAME commit as the queue handoff.
     from app.models import ChatRun
     from app.continuations import is_continuation_message
-    from app.run_state import goal_objective_for_run_start
-    goal_objective = goal_objective_for_run_start(
+    from app.run_state import goal_identity_for_run_start
+    goal_objective, goal_id = goal_identity_for_run_start(
       db, cmd.chat_id, agent_pending,
     )
     prior_run = (
@@ -2798,6 +2802,7 @@ class ChatWriterActor:
       provider=chat.provider, started_at=started_at,
       initiated_by_app_id=initiated_by_app_id,
       goal_objective=goal_objective,
+      goal_id=goal_id,
     ))
     if not _commit_or_rollback(db):
       raise _PersistFailed("PromotePending did not persist")

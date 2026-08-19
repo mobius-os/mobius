@@ -142,6 +142,29 @@ def create_app_token(
   )
 
 
+def create_delegation_token(
+  delegation_id: str,
+  app_id: int,
+  chat_id: str,
+  owner_username: str,
+  token_epoch: int,
+  *,
+  expires_delta: timedelta = timedelta(hours=8),
+) -> str:
+  """Create a bearer confined to one delegated agent and direct children."""
+  return create_access_token(
+    {
+      "sub": owner_username,
+      "scope": "delegation",
+      "delegation_id": delegation_id,
+      "app_id": app_id,
+      "delegation_chat": chat_id,
+    },
+    expires_delta=expires_delta,
+    token_epoch=token_epoch,
+  )
+
+
 def create_public_app_token(
   app_id: int,
   publication_nonce: str,

@@ -16,6 +16,12 @@ The Goal remains the stable outcome. Tasks describe the current route to it and
 may be revised as evidence changes, but revising the route never authorizes
 silently changing the requested outcome.
 
+Tasks may also form an ownership tree. A parent owns only its immediate
+children and re-checks its own completion condition after they settle. It does
+not need descendant transcripts or implementation detail; concise child
+status, blocker, result, and evidence are enough. A child can apply the same
+rule recursively to work it discovers.
+
 ## Publish the dependency graph
 
 Use the platform helper; it reads `$CHAT_ID`, `$API_BASE_URL`, and
@@ -40,6 +46,19 @@ Translate common shapes directly:
 - `A three times sequentially` -> one task with
   `"progress":{"current":0,"total":3}` and advance it after each run. Do
   not mark it complete until progress is `3/3`.
+
+When material work is discovered during execution, add it rather than hiding
+it in a note. `--parent` makes it a direct child and
+`--completion-condition` records what its owner must verify:
+
+```bash
+python3 /data/platform/backend/scripts/goal_plan.py add repair-migration \
+  'Repair the legacy migration' --parent backend \
+  --completion-condition 'Old and fresh databases both migrate cleanly'
+```
+
+Children may run in parallel when their dependency lists permit it. Settled
+children make their parent **ready to verify**; they never auto-complete it.
 
 ## Keep the visible state truthful
 
@@ -66,6 +85,13 @@ the easy case. When a delegated task settles, fold its evidence into the parent,
 update the matching task, and start newly ready work. Ordinary in-turn fleets
 still die with the turn; use a capability that explicitly owns durable child
 work when the task must survive a restart.
+
+Durable delegated children may use the same guarded Subagents helper for their
+own immediate children, up to the platform's bounded depth. This is local
+orchestration, not transcript propagation: X reports to B, B verifies itself
+and reports to A. Use stable task keys at every level so restart attachment is
+idempotent. Never switch to a provider-native agent CLI or an ordinary detached
+process to bypass this ownership boundary.
 
 Immediately before marking the native Goal complete, run the mediated
 completion preflight as its own command:

@@ -192,25 +192,11 @@ test('a planned goal shows every running branch and dependency progress', () => 
   assert.deepEqual(progressRailViewModel('Ship it', [], plan), [
     {
       key: 'goal',
-      label: 'Goal plan · 1 of 4',
+      label: 'Goal · 1 of 4 · Run A · 2/3 · Run B',
       expandable: true,
       hasDetails: true,
       title: 'Goal: Ship it',
-      ariaLabel: 'Goal plan for Ship it; 1 of 4 tasks complete',
-      actionLabel: 'View tasks',
-      expandedActionLabel: 'Hide tasks',
-      current: false,
-    },
-    {
-      key: 'goal-task-a',
-      label: 'Now · Run A · 2/3',
-      goalTask: true,
-      current: true,
-    },
-    {
-      key: 'goal-task-b',
-      label: 'Now · Run B',
-      goalTask: true,
+      ariaLabel: 'Goal for Ship it; 1 of 4 complete',
       current: true,
     },
   ])
@@ -226,8 +212,8 @@ test('a plan with no running work presents every independent ready task', () => 
     ],
   }
   assert.deepEqual(
-    visibleGoalTasks(plan).map(task => [task.id, task.activity]),
-    [['a', 'Next'], ['b', 'Next']],
+    visibleGoalTasks(plan).map(task => task.id),
+    ['a', 'b'],
   )
 })
 
@@ -306,8 +292,8 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
   )
   assert.match(progressRail, /chat__progress-rail/)
   assert.match(progressRail, /aria-expanded=\{expanded\}/)
-  assert.match(progressRail, /chat__progress-step-action/)
-  assert.match(progressRail, /expandedActionLabel/)
+  assert.doesNotMatch(progressRail, /chat__progress-step-action/)
+  assert.doesNotMatch(progressRail, /expandedActionLabel/)
   assert.match(progressRail, /label\.scrollWidth > step\.clientWidth/)
   assert.match(
     chatCss,

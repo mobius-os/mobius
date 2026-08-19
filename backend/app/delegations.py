@@ -44,6 +44,7 @@ class RunPolicy:
   scope: str
   cwd: str
   max_budget_usd: float | None
+  depth: int = 1
 
   @property
   def delegated(self) -> bool:
@@ -69,8 +70,13 @@ class RunPolicy:
     return (
       "You are a delegated subagent running as a durable child task inside "
       "Möbius. Complete only the bounded user task in this child conversation "
-      "and return a clear result to the parent. Do not launch, invoke, consult, "
-      "or delegate to another agent, workflow, model, provider, or agent CLI. "
+      "and return a clear result to the parent. You may use Möbius's installed "
+      "Subagents capability for bounded child work when parallelism or local "
+      "decomposition materially helps; you remain responsible for checking "
+      "your own completion condition after those children settle. Its guarded "
+      "helper is available at $MOBIUS_SUBAGENT_HELPER; use the same run syntax "
+      "as the parent and stable task keys. Do not use "
+      "any other agent CLI or recursive mechanism. "
       "Do not ask the owner an interactive question; if a required decision or "
       "credential is missing, stop and state the blocker precisely. Do not "
       "inspect unrelated chats, Memory, skills, or installed-app instructions. "
@@ -238,6 +244,7 @@ def policy_for_chat(db: Session, chat_id: str) -> RunPolicy | None:
       ).filter(models.ChatRun.chat_id == chat_id).all()
     ))
     remaining_budget = max(0.001, remaining_budget - known_prior_cost)
+  depth = delegation_depth(db, row)
   return RunPolicy(
     delegation_id=row.id,
     app_id=row.app_id,
@@ -247,7 +254,26 @@ def policy_for_chat(db: Session, chat_id: str) -> RunPolicy | None:
     scope=row.scope,
     cwd=row.cwd,
     max_budget_usd=remaining_budget,
+    depth=depth,
   )
+
+
+def delegation_depth(db: Session, row: models.Delegation) -> int:
+  """Return durable local-ownership depth by following parent child chats."""
+  depth = 1
+  parent_chat_id = row.parent_chat_id
+  seen = {row.id}
+  while True:
+    parent = db.query(models.Delegation).filter(
+      models.Delegation.child_chat_id == parent_chat_id,
+    ).first()
+    if parent is None:
+      return depth
+    if parent.id in seen:
+      raise RuntimeError("delegation parentage contains a cycle")
+    seen.add(parent.id)
+    depth += 1
+    parent_chat_id = parent.parent_chat_id
 
 
 def latest_run(db: Session, chat_id: str) -> models.ChatRun | None:
@@ -451,18 +477,17 @@ def active_parent_context(
 
 
 def delegation_execution_token(db: Session, policy: RunPolicy) -> str | None:
-  """Return the app bearer only for an explicitly write-scoped child.
+  """Return the narrowest bearer that can fulfill the child contract.
 
   A read delegation may still execute local inspection commands in the
   provider sandbox. Giving that process a normal app bearer would let a
   prompt-injected critic mutate app storage or call other app-owned write
   routes over HTTP, bypassing the filesystem policy entirely. Read children
-  therefore receive no ``AGENT_TOKEN`` at all; write children retain the
-  app-attributed authority their contract promises.
+  therefore receive a delegation-only bearer that can manage direct children
+  but cannot touch app storage. Write children retain the app-attributed
+  authority their contract promises.
   """
-  if policy.scope == "read":
-    return None
-  if policy.scope != "write":
+  if policy.scope not in {"read", "write"}:
     raise RuntimeError(f"unknown delegation scope: {policy.scope}")
   owner = db.query(models.Owner).first()
   app = db.query(models.App).filter(
@@ -471,6 +496,16 @@ def delegation_execution_token(db: Session, policy: RunPolicy) -> str | None:
   ).first()
   if owner is None or app is None:
     raise RuntimeError("delegation owner app is unavailable")
+  if policy.scope == "read":
+    row = db.query(models.Delegation).filter(
+      models.Delegation.id == policy.delegation_id,
+    ).first()
+    if row is None:
+      raise RuntimeError("delegation is unavailable")
+    return auth.create_delegation_token(
+      row.id, app.id, row.child_chat_id, owner.username, owner.token_epoch,
+      expires_delta=auth.AGENT_RUN_TOKEN_TTL,
+    )
   return auth.create_app_token(
     app.id,
     owner.username,

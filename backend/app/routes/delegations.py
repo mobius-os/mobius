@@ -20,7 +20,7 @@ from app.delegations import (
   parent_root_run_id,
   serialize_delegation,
 )
-from app.deps import Principal, get_principal, reject_cross_site
+from app.deps import Principal, get_delegation_principal, reject_cross_site
 from app.resource_access import get_active_chat_or_404
 
 
@@ -75,14 +75,37 @@ class DelegationSubmit(BaseModel):
     return value
 
 
-def _require_owner_submit(principal: Principal) -> None:
-  # App frames may observe and cancel their own children, but only the owner
-  # agent's token may authorize a new provider spend.
-  if principal.app_id is not None or principal.scope != "owner":
+MAX_DELEGATION_DEPTH = 4
+
+
+def _require_submitter(
+  db: Session, principal: Principal, body: DelegationSubmit,
+) -> models.Delegation | None:
+  if principal.scope == "owner" and principal.app_id is None:
+    return None
+  if principal.scope not in {"app", "delegation"} or principal.app_id != body.app_id:
     raise HTTPException(
       status_code=403,
-      detail="Only the owner agent may submit delegated work.",
+      detail="Only the owner agent or an attached delegated agent may submit work.",
     )
+  parent = db.query(models.Delegation).filter(
+    models.Delegation.child_chat_id == body.parent_chat_id,
+    models.Delegation.app_id == principal.app_id,
+  ).first()
+  if parent is None:
+    raise HTTPException(status_code=403, detail="Delegated work must stay under its parent child chat.")
+  if principal.scope == "delegation" and (
+    principal.delegation_id != parent.id
+    or principal.chat_id != body.parent_chat_id
+  ):
+    raise HTTPException(
+      status_code=403,
+      detail="Delegation token may only create direct children.",
+    )
+  from app.delegations import delegation_depth
+  if delegation_depth(db, parent) >= MAX_DELEGATION_DEPTH:
+    raise HTTPException(status_code=409, detail=f"Delegation depth reached the maximum ({MAX_DELEGATION_DEPTH}).")
+  return parent
 
 
 def _row_for_principal(
@@ -91,7 +114,9 @@ def _row_for_principal(
   query = db.query(models.Delegation).filter(
     models.Delegation.id == delegation_id,
   )
-  if principal.app_id is not None:
+  if principal.scope == "delegation":
+    query = query.filter(models.Delegation.parent_chat_id == principal.chat_id)
+  elif principal.app_id is not None:
     query = query.filter(models.Delegation.app_id == principal.app_id)
   row = query.first()
   if row is None:
@@ -132,11 +157,11 @@ async def _ensure_started(
 @router.post("", status_code=201, dependencies=[Depends(reject_cross_site)])
 async def submit_or_attach(
   body: DelegationSubmit,
-  principal: Principal = Depends(get_principal),
+  principal: Principal = Depends(get_delegation_principal),
   db: Session = Depends(get_db),
 ):
   """Create once per (parent logical run, task key), otherwise attach."""
-  _require_owner_submit(principal)
+  _require_submitter(db, principal, body)
   parent = get_active_chat_or_404(db, body.parent_chat_id)
   root_id = parent_root_run_id(db, parent.id, require_active=True)
   if root_id is None:
@@ -223,11 +248,13 @@ def list_delegations(
   parent_chat_id: str | None = Query(default=None, min_length=1, max_length=64),
   limit: int = Query(default=100, ge=1, le=500),
   offset: int = Query(default=0, ge=0),
-  principal: Principal = Depends(get_principal),
+  principal: Principal = Depends(get_delegation_principal),
   db: Session = Depends(get_db),
 ):
   query = db.query(models.Delegation)
-  if principal.app_id is not None:
+  if principal.scope == "delegation":
+    query = query.filter(models.Delegation.parent_chat_id == principal.chat_id)
+  elif principal.app_id is not None:
     query = query.filter(models.Delegation.app_id == principal.app_id)
   elif app_id is not None:
     query = query.filter(models.Delegation.app_id == app_id)
@@ -245,7 +272,7 @@ def list_delegations(
 def get_delegation(
   delegation_id: str,
   include_history: bool = Query(default=False),
-  principal: Principal = Depends(get_principal),
+  principal: Principal = Depends(get_delegation_principal),
   db: Session = Depends(get_db),
 ):
   row = _row_for_principal(db, delegation_id, principal)
@@ -262,7 +289,7 @@ def get_delegation(
 )
 async def cancel_delegation(
   delegation_id: str,
-  principal: Principal = Depends(get_principal),
+  principal: Principal = Depends(get_delegation_principal),
   db: Session = Depends(get_db),
 ):
   row = _row_for_principal(db, delegation_id, principal)
