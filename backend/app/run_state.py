@@ -8,6 +8,7 @@ reconstructed from a second per-chat marker.
 
 from collections.abc import Iterable, Mapping
 from typing import Any
+import json
 import uuid
 
 from sqlalchemy.orm import Session
@@ -57,14 +58,79 @@ def goal_identity_for_run_start(
   objective = _goal_objective(content if isinstance(content, str) else "")
   if objective is not None:
     return objective, str(uuid.uuid4())
-  if not is_continuation_message(message):
-    return None, None
   previous = latest_run(db, chat_id)
-  if previous is None or previous.status not in (
-    *models.NONTERMINAL_RUN_STATUSES, "interrupted",
-  ):
+  semantic_continuation = is_continuation_message(message)
+  literal_continue = str(content or "").strip().lower() == "continue"
+  if not semantic_continuation and not literal_continue:
     return None, None
-  return previous.goal_objective, previous.goal_id
+  if (
+    previous is not None
+    and previous.goal_objective is not None
+    and previous.goal_id is not None
+    and (
+      (
+        semantic_continuation
+        and previous.status in (
+          *models.NONTERMINAL_RUN_STATUSES, "interrupted",
+        )
+      )
+      or _goal_plan_is_unfinished(db, chat_id, previous.goal_id)
+    )
+  ):
+    return previous.goal_objective, previous.goal_id
+  if not semantic_continuation:
+    return None, None
+
+  # A restart can interrupt a physical continuation after its provider turn
+  # has already closed, leaving one no-goal recovery row between the new
+  # continuation marker and the logical Goal. Follow only an explicitly
+  # unfinished visible plan; completed or unplanned historical Goals never
+  # revive through this recovery path.
+  candidates = (
+    db.query(models.ChatRun)
+    .filter(
+      models.ChatRun.chat_id == chat_id,
+      models.ChatRun.goal_id.isnot(None),
+      models.ChatRun.goal_objective.isnot(None),
+    )
+    .order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc())
+    .all()
+  )
+  seen: set[str] = set()
+  for candidate in candidates:
+    if candidate.goal_id in seen:
+      continue
+    seen.add(candidate.goal_id)
+    if _goal_plan_is_unfinished(db, chat_id, candidate.goal_id):
+      return candidate.goal_objective, candidate.goal_id
+  return None, None
+
+
+def _goal_plan_is_unfinished(db: Session, chat_id: str, goal_id: str) -> bool:
+  """Whether a stable Goal identity owns a plan with unsettled work."""
+  owner = (
+    db.query(models.ChatRun.goal_plan_json)
+    .filter(
+      models.ChatRun.chat_id == chat_id,
+      models.ChatRun.goal_id == goal_id,
+      models.ChatRun.goal_plan_json.isnot(None),
+    )
+    .order_by(models.ChatRun.started_at.asc(), models.ChatRun.id.asc())
+    .first()
+  )
+  if owner is None:
+    return False
+  raw = owner[0]
+  try:
+    plan = json.loads(raw) if isinstance(raw, str) else raw
+  except (TypeError, json.JSONDecodeError):
+    return False
+  tasks = (plan or {}).get("tasks") if isinstance(plan, dict) else None
+  return bool(tasks) and any(
+    isinstance(task, dict)
+    and task.get("status") not in ("completed", "cancelled")
+    for task in tasks
+  )
 
 
 def latest_run(db: Session, chat_id: str) -> models.ChatRun | None:

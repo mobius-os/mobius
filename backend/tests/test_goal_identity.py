@@ -43,3 +43,59 @@ def test_ordinary_turn_does_not_revive_the_previous_goal(db, chat):
   assert goal_identity_for_run_start(
     db, chat.id, {"content": "unrelated follow-up"},
   ) == (None, None)
+
+
+def test_plain_continue_keeps_a_completed_physical_run_with_unfinished_plan(
+  db, chat,
+):
+  db.add(models.ChatRun(
+    id="planned-goal", root_run_id="planned-goal", chat_id=chat.id,
+    status="completed", provider="codex", goal_objective="Ship it",
+    goal_id="stable-goal", goal_plan_json={
+      "tasks": [{"id": "verify", "status": "running"}],
+    },
+  ))
+  db.commit()
+
+  assert goal_identity_for_run_start(
+    db, chat.id, {"content": "continue"},
+  ) == ("Ship it", "stable-goal")
+
+
+def test_semantic_recovery_skips_intervening_no_goal_run_for_unfinished_plan(
+  db, chat,
+):
+  db.add_all([
+    models.ChatRun(
+      id="planned-goal", root_run_id="planned-goal", chat_id=chat.id,
+      status="completed", provider="codex", goal_objective="Ship it",
+      goal_id="stable-goal", goal_plan_json={
+        "tasks": [{"id": "verify", "status": "running"}],
+      },
+    ),
+    models.ChatRun(
+      id="intervening", root_run_id="intervening", chat_id=chat.id,
+      status="interrupted", provider="codex",
+    ),
+  ])
+  db.commit()
+
+  assert goal_identity_for_run_start(db, chat.id, {
+    "content": "continue", "kind": "continuation",
+    "continuation_reason": "restart",
+  }) == ("Ship it", "stable-goal")
+
+
+def test_continue_does_not_revive_a_settled_plan(db, chat):
+  db.add(models.ChatRun(
+    id="settled-goal", root_run_id="settled-goal", chat_id=chat.id,
+    status="completed", provider="codex", goal_objective="Done",
+    goal_id="settled-id", goal_plan_json={
+      "tasks": [{"id": "verify", "status": "completed"}],
+    },
+  ))
+  db.commit()
+
+  assert goal_identity_for_run_start(
+    db, chat.id, {"content": "continue"},
+  ) == (None, None)
