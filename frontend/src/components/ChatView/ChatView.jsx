@@ -95,6 +95,7 @@ import {
   highlightSearchTerms,
 } from '../../lib/searchTermHighlight.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
+import { dataTransferHasFiles, droppedFiles } from './dragUpload.js'
 import useOpenAppCtaAutoDismiss from './hooks/useOpenAppCtaAutoDismiss.js'
 import {
   isPendingQuestionSendFailure,
@@ -482,6 +483,8 @@ export default function ChatView({
   const [embeddedRunSignal, setEmbeddedRunSignal] = useState(
     EMPTY_CHAT_RUN_SIGNAL,
   )
+  const [fileDropActive, setFileDropActive] = useState(false)
+  const fileDragDepthRef = useRef(0)
   const [embeddedRunActive, setEmbeddedRunActive] = useState(false)
   // A counter is only a render wake-up; deadline elapsed is derived directly
   // from the current card's reset timestamp below, so a newly loaded card can
@@ -4154,11 +4157,53 @@ export default function ChatView({
     }
   }
 
+  function handleFileDragEnter(event) {
+    if (!dataTransferHasFiles(event.dataTransfer)) return
+    event.preventDefault()
+    event.stopPropagation()
+    fileDragDepthRef.current += 1
+    setFileDropActive(true)
+  }
+
+  function handleFileDragOver(event) {
+    if (!dataTransferHasFiles(event.dataTransfer)) return
+    event.preventDefault()
+    event.stopPropagation()
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+  }
+
+  function handleFileDragLeave(event) {
+    if (!fileDropActive) return
+    event.preventDefault()
+    event.stopPropagation()
+    fileDragDepthRef.current = Math.max(0, fileDragDepthRef.current - 1)
+    if (fileDragDepthRef.current === 0) setFileDropActive(false)
+  }
+
+  function handleFileDrop(event) {
+    if (!dataTransferHasFiles(event.dataTransfer)) return
+    event.preventDefault()
+    event.stopPropagation()
+    fileDragDepthRef.current = 0
+    setFileDropActive(false)
+    const files = droppedFiles(event.dataTransfer)
+    if (files.length > 0) handleComposerAddFiles(files)
+  }
+
   return (
     <div
       ref={chatRef}
       className={`chat${showEmpty || showLoadError ? ' chat--empty' : ''}`}
+      onDragEnter={handleFileDragEnter}
+      onDragOver={handleFileDragOver}
+      onDragLeave={handleFileDragLeave}
+      onDrop={handleFileDrop}
     >
+      {fileDropActive && (
+        <div className="chat__file-drop-target" aria-hidden="true">
+          <div className="chat__file-drop-card">Drop files to attach</div>
+        </div>
+      )}
       {/* Single polite live region — announces state transitions only.
           aria-atomic keeps the full phrase together for NVDA/VoiceOver. */}
       <div
