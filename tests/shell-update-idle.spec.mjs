@@ -433,7 +433,10 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     await page.route('**/sw.js', async (route) => {
       if (!swBase) {
         const res = await route.fetch()
-        swBase = { status: res.status(), headers: res.headers(), body: await res.text() }
+        const headers = res.headers()
+        delete headers['content-encoding']
+        delete headers['content-length']
+        swBase = { status: res.status(), headers, body: await res.text() }
       }
       // A STABLE byte-append once armed → the browser installs ONE genuinely new,
       // leashed worker; later re-fetches stay byte-identical so it does not
@@ -547,7 +550,6 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
   test('a legacy cache-first worker bootstraps the current document through an ordinary reload', async ({ page }) => {
     test.slow()
     let serveCurrentWorker = false
-    let documentGeneration = 'A'
     let currentWorker = null
 
     // Generation A models the exact historical failure: every navigation is
@@ -558,7 +560,14 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       const KEY = '/index.html?__WB_REVISION__=legacy'
       self.addEventListener('install', event => event.waitUntil((async () => {
         const cache = await caches.open('legacy-precache')
-        await cache.put(KEY, await fetch('/index.html?legacy=A'))
+        const response = await fetch('/index.html')
+        const html = (await response.text()).replace(
+          '</head>',
+          '<meta name="test-shell-generation" content="A"></head>',
+        )
+        await cache.put(KEY, new Response(html, {
+          headers: { 'content-type': 'text/html' },
+        }))
         await self.skipWaiting()
       })()))
       self.addEventListener('activate', event => event.waitUntil(self.clients.claim()))
@@ -576,21 +585,16 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       }
       if (!currentWorker) {
         const response = await route.fetch()
+        const headers = response.headers()
+        delete headers['content-encoding']
+        delete headers['content-length']
         currentWorker = {
           status: response.status(),
-          headers: response.headers(),
+          headers,
           body: await response.text(),
         }
       }
       await route.fulfill(currentWorker)
-    })
-    await page.route(/\/index\.html(?:\?.*)?$/, async route => {
-      const response = await route.fetch()
-      const html = (await response.text()).replace(
-        '</head>',
-        `<meta name="test-shell-generation" content="${documentGeneration}"></head>`,
-      )
-      await route.fulfill({ status: response.status(), contentType: 'text/html', body: html })
     })
 
     await page.goto(BASE, { waitUntil: 'domcontentloaded' })
@@ -598,7 +602,6 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     await page.reload({ waitUntil: 'domcontentloaded' })
     await expect(page.locator('meta[name="test-shell-generation"]')).toHaveAttribute('content', 'A')
 
-    documentGeneration = 'B'
     serveCurrentWorker = true
     await page.evaluate(async () => {
       await (await navigator.serviceWorker.getRegistration()).update()
@@ -612,6 +615,6 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     // the outgoing worker serves its same key, whose response the waiting
     // worker refreshed during install.
     await page.reload({ waitUntil: 'domcontentloaded' })
-    await expect(page.locator('meta[name="test-shell-generation"]')).toHaveAttribute('content', 'B')
+    await expect(page.locator('meta[name="test-shell-generation"]')).toHaveCount(0)
   })
 })
