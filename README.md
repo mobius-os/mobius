@@ -33,9 +33,9 @@ The [app-building story](https://mobius.you/#build) renders the current shell as
 
 ## Start with the App Store
 
-The App Store includes everyday tools and the parts that help Möbius run itself. Browse apps for writing, planning, learning, health, creation, memory, connected tools, background work, and development. Its collections, summaries, state, and artwork come from the published apps. The [App Store showcase](https://mobius.you/#apps) renders the current catalog inside the production Möbius shell.
+The App Store includes everyday tools and the parts that help Möbius run itself. Browse apps for writing, planning, learning, health, creation, memory, connected tools, background work, and development. The [App Store showcase](https://mobius.you/#apps) keeps the catalog deliberately simple: one grid, the current published artwork and summaries, and a direct Install action on every card.
 
-![The current Möbius App Store with its Browse and From URL tabs, filters, collections, and vertical app cards](assets/product/app-store.png)
+![The current Möbius App Store as one grid of published apps with direct Install actions](assets/product/app-store.png)
 
 <table>
   <tr>
