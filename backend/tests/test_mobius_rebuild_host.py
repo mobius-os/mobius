@@ -97,3 +97,69 @@ def test_worker_lock_alone_proves_rebuild_is_running(monkeypatch):
   monkeypatch.setattr(host, "_unit_is_running", lambda _operation: False)
 
   assert host.rebuild_is_running({"operation_id": None}) is True
+
+
+def test_status_reconciles_an_abandoned_active_job(monkeypatch):
+  current = {
+    "operation_id": "a" * 32, "state": "verifying",
+    "updated_at": "2020-01-01T00:00:00+00:00",
+  }
+  monkeypatch.setattr(host, "read_json", lambda _path: current)
+  monkeypatch.setattr(host, "rebuild_is_running", lambda _current: False)
+  written = {}
+  monkeypatch.setattr(host, "write_status", lambda **fields: written.update(fields) or fields)
+
+  result = host.status()
+
+  assert result["state"] == "failed"
+  assert result["code"] == "worker_interrupted"
+
+
+def test_status_preserves_a_newly_queued_job_during_systemd_handoff(monkeypatch):
+  current = {
+    "operation_id": "a" * 32, "state": "queued",
+    "updated_at": host.now(),
+  }
+  monkeypatch.setattr(host, "read_json", lambda _path: current)
+  monkeypatch.setattr(host, "rebuild_is_running", lambda _current: False)
+
+  assert host.status() is current
+
+
+def test_worker_restores_the_previous_container_after_replacement_throws(
+  tmp_path: Path, monkeypatch,
+):
+  operation = "b" * 32
+  expected = "c" * 40
+  request = tmp_path / "request.json"
+  request.write_text(
+    f'{{"operation_id":"{operation}","expected_sha":"{expected}"}}',
+    encoding="utf-8",
+  )
+  monkeypatch.setattr(host, "STATE_DIR", tmp_path)
+  monkeypatch.setattr(host, "LOCK", tmp_path / "worker.lock")
+  monkeypatch.setattr(host, "CONFIG", tmp_path / "config.json")
+  monkeypatch.setattr(host, "read_json", lambda path: (
+    {"operation_id": operation, "expected_sha": expected}
+    if path == request else {"config": True}
+  ))
+  monkeypatch.setattr(host, "validate_config", lambda _value: {"image": "official"})
+  monkeypatch.setattr(host.subprocess, "run", lambda *args, **kwargs: None)
+  monkeypatch.setattr(host, "inspect_value", lambda _image, template: (
+    expected if "revision" in template else host.IMAGE_SOURCE if "source" in template else "new-digest"
+  ))
+  monkeypatch.setattr(host, "container_image", lambda _config: "old-digest")
+  calls = []
+  def compose(_config, *args, image=None, **_kwargs):
+    calls.append(image)
+    if image == "new-digest":
+      raise RuntimeError("replacement failed")
+  monkeypatch.setattr(host, "compose", compose)
+  monkeypatch.setattr(host, "wait_healthy", lambda *_args, **_kwargs: True)
+  statuses = []
+  monkeypatch.setattr(host, "write_status", lambda **fields: statuses.append(fields) or fields)
+
+  assert host.worker(request) == 1
+  assert calls == ["new-digest", "old-digest"]
+  assert statuses[-1]["state"] == "rolled_back"
+  assert statuses[-1]["code"] == "rebuild_failed"

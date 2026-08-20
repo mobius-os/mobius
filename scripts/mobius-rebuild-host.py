@@ -68,9 +68,26 @@ def write_status(**fields) -> dict:
 
 def status() -> dict:
     try:
-        return read_json(STATUS)
+        current = read_json(STATUS)
     except (OSError, ValueError, json.JSONDecodeError):
         return write_status()
+    if current.get("state") in {
+        "queued", "preparing", "waiting_for_work", "replacing", "verifying",
+    } and not rebuild_is_running(current) and not _recently_updated(current):
+        return write_status(
+            state="failed", code="worker_interrupted",
+            message="The rebuild worker stopped before reporting a result.",
+        )
+    return current
+
+
+def _recently_updated(current: dict, grace_seconds: int = 30) -> bool:
+    """Protect the short queued-to-systemd handoff from false reconciliation."""
+    try:
+        updated = datetime.fromisoformat(str(current["updated_at"]))
+        return (datetime.now(timezone.utc) - updated).total_seconds() < grace_seconds
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def _lock_is_held(path: Path) -> bool:
@@ -182,6 +199,10 @@ def validate_config(
 
 def worker(request_path: Path) -> int:
     operation = None
+    expected = None
+    config = None
+    previous = None
+    replacement_started = False
     try:
         request = read_json(request_path)
         operation = str(request.get("operation_id") or "")
@@ -202,12 +223,11 @@ def worker(request_path: Path) -> int:
                          expected_sha=expected, code=None,
                          message="Pulling the official Möbius image.")
             image = f"{config['image']}:sha-{expected}"
-            subprocess.run(["docker", "pull", "--platform", "linux/amd64", image],
+            subprocess.run(["docker", "pull", image],
                            text=True, capture_output=True, check=True)
             revision = inspect_value(image, "{{index .Config.Labels \"org.opencontainers.image.revision\"}}")
             source = inspect_value(image, "{{index .Config.Labels \"org.opencontainers.image.source\"}}")
-            architecture = inspect_value(image, "{{.Architecture}}")
-            if revision != expected or source != IMAGE_SOURCE or architecture != "amd64":
+            if revision != expected or source != IMAGE_SOURCE:
                 raise RuntimeError("the downloaded image did not match the requested official revision")
             digest = inspect_value(image, "{{.Id}}")
             previous = container_image(config)
@@ -218,6 +238,7 @@ def worker(request_path: Path) -> int:
                 return 0
             write_status(operation_id=operation, state="replacing",
                          expected_sha=expected, message="Replacing the container.")
+            replacement_started = True
             compose(config, "up", "-d", "--no-build", "--no-deps",
                     "--force-recreate", "app", image=digest)
             write_status(operation_id=operation, state="verifying",
@@ -241,8 +262,27 @@ def worker(request_path: Path) -> int:
                          message="Neither the new nor previous container became healthy.")
             return 1
     except Exception as exc:
-        write_status(operation_id=operation, state="failed", code="rebuild_failed",
-                     message=str(exc)[:300])
+        detail = str(exc)[:300]
+        if replacement_started and previous and config:
+            try:
+                write_status(operation_id=operation, state="verifying",
+                             expected_sha=expected, code="rebuild_failed",
+                             message="The rebuild failed; restoring the previous container.")
+                compose(config, "up", "-d", "--no-build", "--no-deps",
+                        "--force-recreate", "app", image=previous)
+                if wait_healthy(config, 120):
+                    write_status(operation_id=operation, state="rolled_back",
+                                 expected_sha=expected, code="rebuild_failed",
+                                 message=f"The rebuild failed and the previous container was restored: {detail}")
+                    return 1
+            except Exception as rollback_exc:
+                detail = f"{detail}; rollback failed: {str(rollback_exc)[:180]}"
+            write_status(operation_id=operation, state="needs_recovery",
+                         expected_sha=expected, code="rollback_failed",
+                         message=detail[:300])
+            return 1
+        write_status(operation_id=operation, state="failed",
+                     expected_sha=expected, code="rebuild_failed", message=detail)
         return 1
     finally:
         try: request_path.unlink()
