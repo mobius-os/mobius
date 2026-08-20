@@ -1,9 +1,9 @@
-"""Narrow deployment-to-launcher bridge for the Identity system app.
+"""Narrow deployment-to-account-service bridge for the Identity system app.
 
 The mini-app receives only its ordinary scoped bearer. This route owns the
 managed instance credential and forwards a deliberately small profile contract
-to Möbius Launch, which remains authoritative for globally unique handles,
-avatar storage, and the cross-deployment inventory.
+to the configured account service, which remains authoritative for globally
+unique handles, avatar storage, and the cross-deployment inventory.
 """
 
 from __future__ import annotations
@@ -20,7 +20,8 @@ import httpx
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import delete
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import models
@@ -36,7 +37,6 @@ router = APIRouter(
 )
 
 _REMOTE_PATH = "/api/instance/v1/identity"
-_ACCOUNT_ORIGIN = "https://www.mobius.you"
 _ACCOUNT_PATH = "/api/account/v1/identity"
 _LINK_SCOPE = "identity:read identity:write deployments:read"
 _LINK_TTL = timedelta(minutes=10)
@@ -79,7 +79,9 @@ def _digest(value: str) -> str:
   return hashlib.sha256(value.encode()).hexdigest()
 
 
-def _local_payload() -> dict:
+def _local_payload(
+  *, account_mode: str = "signed_out", account_unavailable: bool = False,
+) -> dict:
   settings = get_settings()
   current = {
     "id": settings.mobius_sso_instance_id or "local",
@@ -89,20 +91,13 @@ def _local_payload() -> dict:
     "url": settings.frontend_origin.rstrip("/"),
   }
   return {
-    "managed": settings.mobius_sso_enabled,
+    "account_mode": account_mode,
+    "account_unavailable": account_unavailable,
     "instance_id": settings.mobius_sso_instance_id or None,
-    "profile": {
-      # A local owner is not a mobius.you identity. Keep the shape stable for
-      # the app without leaking the installation login name into its signed-out
-      # account surface. Managed identity below replaces these nulls only after
-      # the SSO binding has been authenticated server-side.
-      "user_id": None,
-      "email": None,
-      "display_name": None,
-      "username": None,
-      "handle": None,
-      "avatar_url": None,
-    },
+    # A local owner is not a mobius.you identity. A null profile makes the
+    # signed-out privacy boundary explicit instead of encoding it as null
+    # fields that clients must infer.
+    "profile": None,
     "deployments": [current],
   }
 
@@ -114,6 +109,19 @@ def _remote_headers() -> dict[str, str]:
     "X-Mobius-Instance-Id": settings.mobius_sso_instance_id,
     "Accept": "application/json",
   }
+
+
+def _identity_contract(payload: object) -> dict:
+  if not isinstance(payload, dict):
+    raise HTTPException(502, "The Möbius account service returned an invalid response.")
+  if not isinstance(payload.get("profile"), dict):
+    raise HTTPException(502, "The Möbius account service returned an invalid profile.")
+  deployments = payload.get("deployments")
+  if not isinstance(deployments, list) or not all(
+    isinstance(item, dict) for item in deployments
+  ):
+    raise HTTPException(502, "The Möbius account service returned an invalid deployment list.")
+  return payload
 
 
 async def _managed_remote(method: str, suffix: str = "", **kwargs) -> dict:
@@ -129,7 +137,7 @@ async def _managed_remote(method: str, suffix: str = "", **kwargs) -> dict:
         **kwargs,
       )
   except httpx.HTTPError:
-    raise HTTPException(502, "mobius.you could not be reached.")
+    raise HTTPException(502, "The Möbius account service could not be reached.")
   if response.status_code == 409:
     detail = "That handle is already taken."
     try:
@@ -138,14 +146,12 @@ async def _managed_remote(method: str, suffix: str = "", **kwargs) -> dict:
       pass
     raise HTTPException(409, detail)
   if response.status_code not in (200, 201):
-    raise HTTPException(502, "mobius.you could not complete that request.")
+    raise HTTPException(502, "The Möbius account service could not complete that request.")
   try:
     payload = response.json()
   except ValueError:
-    raise HTTPException(502, "mobius.you returned an invalid response.")
-  if not isinstance(payload, dict):
-    raise HTTPException(502, "mobius.you returned an invalid response.")
-  return payload
+    raise HTTPException(502, "The Möbius account service returned an invalid response.")
+  return _identity_contract(payload)
 
 
 def _linked_row(db: Session, owner_id: int) -> models.IdentityAccountLink | None:
@@ -164,17 +170,24 @@ async def _linked_remote(
   link = _linked_row(db, owner_id)
   if link is None:
     return None
-  token = _open(link.access_token_encrypted)
+  try:
+    token = _open(link.access_token_encrypted)
+  except HTTPException:
+    # A rotated SECRET_KEY or damaged ciphertext cannot be recovered and must
+    # not strand the owner behind an unlink operation that also cannot decrypt.
+    db.delete(link)
+    db.commit()
+    return None
   try:
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
       response = await client.request(
         method,
-        _ACCOUNT_ORIGIN + _ACCOUNT_PATH + suffix,
+        get_settings().mobius_account_origin + _ACCOUNT_PATH + suffix,
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
         **kwargs,
       )
   except httpx.HTTPError:
-    raise HTTPException(502, "mobius.you could not be reached.")
+    raise HTTPException(502, "The Möbius account service could not be reached.")
   if response.status_code == 401:
     db.delete(link)
     db.commit()
@@ -187,14 +200,12 @@ async def _linked_remote(
       pass
     raise HTTPException(409, detail)
   if response.status_code not in (200, 201):
-    raise HTTPException(502, "mobius.you could not complete that request.")
+    raise HTTPException(502, "The Möbius account service could not complete that request.")
   try:
     payload = response.json()
   except ValueError:
-    raise HTTPException(502, "mobius.you returned an invalid response.")
-  if not isinstance(payload, dict):
-    raise HTTPException(502, "mobius.you returned an invalid response.")
-  return payload
+    raise HTTPException(502, "The Möbius account service returned an invalid response.")
+  return _identity_contract(payload)
 
 
 def _merge_local_deployment(payload: dict) -> dict:
@@ -202,12 +213,37 @@ def _merge_local_deployment(payload: dict) -> dict:
   remote_deployments = payload.get("deployments")
   deployments = list(remote_deployments) if isinstance(remote_deployments, list) else []
   deployments = [item for item in deployments if isinstance(item, dict)]
-  deployments.append(local["deployments"][0])
+  local_deployment = local["deployments"][0]
+  local_url = local_deployment["url"].rstrip("/")
+  deployments = [
+    item for item in deployments
+    if str(item.get("url") or "").rstrip("/") != local_url
+  ]
+  deployments.append(local_deployment)
   return {
-    "managed": False,
+    "account_mode": "linked",
+    "account_unavailable": False,
     "instance_id": None,
-    "profile": payload.get("profile") if isinstance(payload.get("profile"), dict) else {},
+    "profile": (
+      payload.get("profile") if isinstance(payload.get("profile"), dict) else None
+    ),
     "deployments": deployments,
+  }
+
+
+def _managed_payload(payload: dict, owner: models.Owner) -> dict:
+  # The local SSO binding is authoritative for the user and instance. Copy the
+  # remote profile before adding those fields so response objects are never
+  # mutated in place and can be reused safely by tests/adapters.
+  profile = dict(payload["profile"])
+  profile["user_id"] = owner.sso_subject
+  profile["email"] = owner.sso_email
+  return {
+    "account_mode": "managed",
+    "account_unavailable": False,
+    "instance_id": get_settings().mobius_sso_instance_id,
+    "profile": profile,
+    "deployments": list(payload["deployments"]),
   }
 
 
@@ -218,20 +254,33 @@ async def read_identity(
 ):
   local = _local_payload()
   if not get_settings().mobius_sso_enabled:
-    linked = await _linked_remote(db, owner.id, "GET")
+    had_link = _linked_row(db, owner.id) is not None
+    try:
+      linked = await _linked_remote(db, owner.id, "GET")
+    except HTTPException as exc:
+      if exc.status_code == 502 and had_link:
+        return _local_payload(
+          account_mode="linked", account_unavailable=True,
+        )
+      raise
     return _merge_local_deployment(linked) if linked is not None else local
-  remote = await _managed_remote("GET")
-  # The local binding is the authority for which user/instance this deployment
-  # represents. The launcher supplies editable/global fields and inventory.
-  profile = remote.get("profile") if isinstance(remote.get("profile"), dict) else {}
-  profile["user_id"] = owner.sso_subject
-  profile["email"] = owner.sso_email
-  return {
-    "managed": True,
-    "instance_id": get_settings().mobius_sso_instance_id,
-    "profile": profile,
-    "deployments": remote.get("deployments") if isinstance(remote.get("deployments"), list) else [],
-  }
+  try:
+    remote = await _managed_remote("GET")
+  except HTTPException as exc:
+    if exc.status_code != 502:
+      raise
+    degraded = _local_payload(
+      account_mode="managed", account_unavailable=True,
+    )
+    degraded["profile"] = {
+      "user_id": owner.sso_subject,
+      "email": owner.sso_email,
+      "display_name": None,
+      "handle": None,
+      "avatar_url": None,
+    }
+    return degraded
+  return _managed_payload(remote, owner)
 
 
 @router.patch("/profile")
@@ -244,10 +293,14 @@ async def update_profile(
   if not re.fullmatch(r"[a-z0-9_]{3,30}", handle):
     raise HTTPException(422, "Use 3–30 letters, numbers, or underscores.")
   if get_settings().mobius_sso_enabled:
-    await _managed_remote("PATCH", "/profile", json={"handle": handle})
-  elif await _linked_remote(db, owner.id, "PATCH", "/profile", json={"handle": handle}) is None:
+    remote = await _managed_remote("PATCH", "/profile", json={"handle": handle})
+    return _managed_payload(remote, owner)
+  remote = await _linked_remote(
+    db, owner.id, "PATCH", "/profile", json={"handle": handle},
+  )
+  if remote is None:
     raise HTTPException(409, "Sign in to edit your Möbius profile.")
-  return await read_identity(owner, db)
+  return _merge_local_deployment(remote)
 
 
 @router.post("/avatar")
@@ -264,10 +317,12 @@ async def update_avatar(
     raise HTTPException(413, "Profile pictures must be 5 MB or smaller.")
   files = {"avatar": (avatar.filename or "avatar", content, content_type)}
   if get_settings().mobius_sso_enabled:
-    await _managed_remote("POST", "/avatar", files=files)
-  elif await _linked_remote(db, owner.id, "POST", "/avatar", files=files) is None:
+    remote = await _managed_remote("POST", "/avatar", files=files)
+    return _managed_payload(remote, owner)
+  remote = await _linked_remote(db, owner.id, "POST", "/avatar", files=files)
+  if remote is None:
     raise HTTPException(409, "Sign in to edit your Möbius profile.")
-  return await read_identity(owner, db)
+  return _merge_local_deployment(remote)
 
 
 @router.post("/link/start")
@@ -278,6 +333,14 @@ async def start_link(
 ):
   if get_settings().mobius_sso_enabled:
     raise HTTPException(409, "This Möbius is already connected.")
+  if _linked_row(db, owner.id) is not None:
+    raise HTTPException(409, "Disconnect the current account before linking another.")
+  client_origin = get_settings().mobius_account_client_origin
+  if not client_origin:
+    raise HTTPException(
+      409,
+      "Set MOBIUS_ACCOUNT_CLIENT_ORIGIN to this Möbius's public HTTPS origin.",
+    )
   provider = body.provider.strip().lower()
   if provider not in {"google", "apple"}:
     raise HTTPException(422, "Choose Google or Apple.")
@@ -293,38 +356,29 @@ async def start_link(
     "code_challenge": challenge,
     "code_challenge_method": "S256",
     "provider": provider,
+    "client_origin": client_origin,
   })
-  authorization_url = f"{_ACCOUNT_ORIGIN}/connect/mobius?{query}"
-  # Do not send the owner into a broken cross-origin popup while the matching
-  # mobius.you flow is unavailable. A real authorization page may render
-  # directly or redirect to its provider; both are valid readiness outcomes.
-  try:
-    async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
-      authorization = await client.get(
-        authorization_url,
-        headers={"Accept": "text/html"},
-      )
-  except httpx.HTTPError:
-    raise HTTPException(
-      503, "mobius.you sign-in is temporarily unavailable. Try again later."
-    )
-  if authorization.status_code < 200 or authorization.status_code >= 400:
-    raise HTTPException(
-      503, "mobius.you sign-in is not available yet. Try again later."
-    )
-  existing = db.query(models.IdentityLinkAttempt).filter(
-    models.IdentityLinkAttempt.owner_id == owner.id,
-  ).one_or_none()
-  if existing is not None:
-    db.delete(existing)
-    db.flush()
-  db.add(models.IdentityLinkAttempt(
+  authorization_url = f"{get_settings().mobius_account_origin}/connect/mobius?{query}"
+  verifier_encrypted = _seal(verifier)
+  created_at = now_naive_utc()
+  statement = sqlite_insert(models.IdentityLinkAttempt).values(
     owner_id=owner.id,
     attempt_id=attempt_id,
     state_digest=_digest(state),
-    verifier_encrypted=_seal(verifier),
+    verifier_encrypted=verifier_encrypted,
     expires_at=expires_at,
-  ))
+    created_at=created_at,
+  ).on_conflict_do_update(
+    index_elements=[models.IdentityLinkAttempt.owner_id],
+    set_={
+      "attempt_id": attempt_id,
+      "state_digest": _digest(state),
+      "verifier_encrypted": verifier_encrypted,
+      "expires_at": expires_at,
+      "created_at": created_at,
+    },
+  )
+  db.execute(statement)
   db.commit()
   return {
     "authorization_url": authorization_url,
@@ -353,52 +407,62 @@ async def complete_link(
   )
   if not valid:
     raise HTTPException(400, "That sign-in attempt expired. Please try again.")
-  # The conditional DELETE is the consume operation. Two concurrent requests
-  # may both have observed the row above, but only one can receive its verifier
-  # and proceed to the host exchange.
-  verifier_encrypted = db.execute(
-    delete(models.IdentityLinkAttempt).where(
-      models.IdentityLinkAttempt.owner_id == owner.id,
-      models.IdentityLinkAttempt.attempt_id == body.attempt,
-      models.IdentityLinkAttempt.state_digest == _digest(body.state),
-      models.IdentityLinkAttempt.expires_at >= now_naive_utc(),
-    ).returning(models.IdentityLinkAttempt.verifier_encrypted)
-  ).scalar_one_or_none()
-  db.commit()
-  if verifier_encrypted is None:
-    raise HTTPException(400, "That sign-in attempt expired. Please try again.")
-  verifier = _open(verifier_encrypted)
+  if _linked_row(db, owner.id) is not None:
+    raise HTTPException(409, "Disconnect the current account before linking another.")
+  try:
+    verifier = _open(attempt.verifier_encrypted)
+  except HTTPException:
+    db.delete(attempt)
+    db.commit()
+    raise
   try:
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
       response = await client.post(
-        _ACCOUNT_ORIGIN + "/api/account-links/token",
+        get_settings().mobius_account_origin + "/api/account-links/token",
         json={"code": body.code, "code_verifier": verifier},
         headers={"Accept": "application/json"},
       )
   except httpx.HTTPError:
-    raise HTTPException(502, "mobius.you could not be reached. Start sign-in again.")
+    raise HTTPException(
+      502, "The Möbius account service could not be reached. Try completion again."
+    )
   if response.status_code != 200:
+    if response.status_code == 400:
+      db.delete(attempt)
+      db.commit()
     raise HTTPException(400, "That sign-in could not be completed. Please try again.")
   try:
     grant = response.json()
   except ValueError:
-    raise HTTPException(502, "mobius.you returned an invalid response.")
+    raise HTTPException(502, "The Möbius account service returned an invalid response.")
   token = grant.get("access_token") if isinstance(grant, dict) else None
   scope = grant.get("scope") if isinstance(grant, dict) else None
-  if not isinstance(token, str) or len(token) < 32 or scope != _LINK_SCOPE:
-    raise HTTPException(502, "mobius.you returned an invalid account grant.")
-  link = _linked_row(db, owner.id)
-  if link is None:
-    link = models.IdentityAccountLink(owner_id=owner.id)
-    db.add(link)
+  identity = grant.get("identity") if isinstance(grant, dict) else None
+  if (
+    not isinstance(token, str)
+    or len(token) < 32
+    or scope != _LINK_SCOPE
+  ):
+    raise HTTPException(502, "The Möbius account service returned an invalid account grant.")
+  identity = _identity_contract(identity)
+  link = models.IdentityAccountLink(owner_id=owner.id)
+  db.add(link)
   link.access_token_encrypted = _seal(token)
   link.scopes_json = scope.split()
   link.linked_at = now_naive_utc()
-  db.commit()
-  linked = await _linked_remote(db, owner.id, "GET")
-  if linked is None:
-    raise HTTPException(502, "The new account link could not be verified.")
-  return _merge_local_deployment(linked)
+  db.delete(attempt)
+  try:
+    db.commit()
+  except IntegrityError:
+    # A duplicate completion can race after the remote idempotent exchange.
+    # It is successful only when the winner stored the exact same grant.
+    db.rollback()
+    winner = _linked_row(db, owner.id)
+    if winner is None or not hmac.compare_digest(
+      _open(winner.access_token_encrypted), token,
+    ):
+      raise HTTPException(409, "Another account link completed first.")
+  return _merge_local_deployment(identity)
 
 
 @router.delete("/link", status_code=204)
@@ -411,17 +475,24 @@ async def delete_link(
   link = _linked_row(db, owner.id)
   if link is None:
     return Response(status_code=204)
-  token = _open(link.access_token_encrypted)
+  try:
+    token = _open(link.access_token_encrypted)
+  except HTTPException:
+    db.delete(link)
+    db.commit()
+    return Response(status_code=204)
   try:
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
       response = await client.post(
-        _ACCOUNT_ORIGIN + "/api/account-links/revoke",
+        get_settings().mobius_account_origin + "/api/account-links/revoke",
         headers={"Authorization": f"Bearer {token}"},
       )
   except httpx.HTTPError:
-    raise HTTPException(502, "mobius.you could not be reached; your link was kept.")
-  if response.status_code != 204:
-    raise HTTPException(502, "mobius.you could not revoke this account link.")
+    raise HTTPException(
+      502, "The Möbius account service could not be reached; your link was kept."
+    )
+  if response.status_code not in (204, 401):
+    raise HTTPException(502, "The Möbius account service could not revoke this link.")
   db.delete(link)
   db.commit()
   return Response(status_code=204)

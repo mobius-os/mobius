@@ -1,5 +1,7 @@
 """Identity app authorization and local-account behavior."""
 
+import httpx
+
 from urllib.parse import parse_qs, urlparse
 
 from app import models
@@ -29,15 +31,9 @@ def test_identity_app_requires_reviewed_capability(client, auth):
   response = client.get("/api/identity", headers=granted)
   assert response.status_code == 200, response.text
   body = response.json()
-  assert body["managed"] is False
-  assert body["profile"] == {
-    "user_id": None,
-    "email": None,
-    "display_name": None,
-    "username": None,
-    "handle": None,
-    "avatar_url": None,
-  }
+  assert body["account_mode"] == "signed_out"
+  assert body["account_unavailable"] is False
+  assert body["profile"] is None
   assert "test" not in response.text
   assert body["deployments"][0]["current"] is True
 
@@ -57,24 +53,8 @@ def test_identity_permission_is_part_of_review_contract():
 
 
 def test_link_start_keeps_pkce_verifier_server_side_and_supersedes(
-  client, auth, monkeypatch,
+  client, auth,
 ):
-  class AuthorizationClient:
-    def __init__(self, *args, **kwargs):
-      pass
-
-    async def __aenter__(self):
-      return self
-
-    async def __aexit__(self, *args):
-      return None
-
-    async def get(self, url, **kwargs):
-      return type("Response", (), {"status_code": 200})()
-
-  monkeypatch.setattr(
-    "app.routes.identity.httpx.AsyncClient", AuthorizationClient,
-  )
   granted = _app_auth(client, auth, granted=True)
 
   first = client.post(
@@ -86,6 +66,7 @@ def test_link_start_keeps_pkce_verifier_server_side_and_supersedes(
   assert query["provider"] == ["google"]
   assert query["code_challenge_method"] == ["S256"]
   assert query["state"] == [first_body["state"]]
+  assert query["client_origin"] == ["http://localhost:5173"]
   assert "code_verifier" not in first.text
 
   second = client.post(
@@ -100,35 +81,23 @@ def test_link_start_keeps_pkce_verifier_server_side_and_supersedes(
     assert "code_verifier" not in rows[0].verifier_encrypted
 
 
-def test_link_start_keeps_owner_in_app_when_host_flow_is_missing(
+def test_link_start_does_not_create_a_throwaway_server_side_oauth_flow(
   client, auth, monkeypatch,
 ):
-  class MissingAuthorizationClient:
+  class UnexpectedAuthorizationClient:
     def __init__(self, *args, **kwargs):
-      pass
-
-    async def __aenter__(self):
-      return self
-
-    async def __aexit__(self, *args):
-      return None
-
-    async def get(self, url, **kwargs):
-      return type("Response", (), {"status_code": 404})()
+      raise AssertionError("link start must not call the authorization URL")
 
   monkeypatch.setattr(
-    "app.routes.identity.httpx.AsyncClient", MissingAuthorizationClient,
+    "app.routes.identity.httpx.AsyncClient", UnexpectedAuthorizationClient,
   )
   granted = _app_auth(client, auth, granted=True)
   response = client.post(
     "/api/identity/link/start", json={"provider": "google"}, headers=granted,
   )
-  assert response.status_code == 503
-  assert response.json()["detail"] == (
-    "mobius.you sign-in is not available yet. Try again later."
-  )
+  assert response.status_code == 200
   with SessionLocal() as session:
-    assert session.query(models.IdentityLinkAttempt).count() == 0
+    assert session.query(models.IdentityLinkAttempt).count() == 1
 
 
 def test_link_complete_consumes_attempt_and_stores_encrypted_grant(
@@ -162,6 +131,19 @@ def test_link_complete_consumes_attempt_and_stores_encrypted_grant(
         "access_token": plain_token,
         "token_type": "Bearer",
         "scope": "identity:read identity:write deployments:read",
+        "identity": {
+          "profile": {
+            "user_id": "usr_123",
+            "email": "owner@example.com",
+            "display_name": "Owner",
+            "handle": "owner",
+            "avatar_url": None,
+          },
+          "deployments": [{
+            "id": "remote", "name": "Production", "status": "Active",
+            "url": "https://example.com", "current": False,
+          }],
+        },
       })
 
     async def get(self, url, **kwargs):
@@ -169,21 +151,7 @@ def test_link_complete_consumes_attempt_and_stores_encrypted_grant(
       return Response(200)
 
     async def request(self, method, url, **kwargs):
-      assert method == "GET"
-      assert kwargs["headers"]["Authorization"] == f"Bearer {plain_token}"
-      return Response(200, {
-        "profile": {
-          "user_id": "usr_123",
-          "email": "owner@example.com",
-          "display_name": "Owner",
-          "handle": "owner",
-          "avatar_url": None,
-        },
-        "deployments": [{
-          "id": "remote", "name": "Production", "status": "Active",
-          "url": "https://example.com", "current": False,
-        }],
-      })
+      raise AssertionError("completion must not need a second remote request")
 
   monkeypatch.setattr("app.routes.identity.httpx.AsyncClient", Client)
   started = client.post(
@@ -196,6 +164,7 @@ def test_link_complete_consumes_attempt_and_stores_encrypted_grant(
   }, headers=granted)
   assert completed.status_code == 200, completed.text
   body = completed.json()
+  assert body["account_mode"] == "linked"
   assert body["profile"]["user_id"] == "usr_123"
   assert [item["id"] for item in body["deployments"]] == ["remote", "local"]
 
@@ -207,9 +176,217 @@ def test_link_complete_consumes_attempt_and_stores_encrypted_grant(
       "identity:read", "identity:write", "deployments:read",
     ]
 
+  replacement = client.post(
+    "/api/identity/link/start", json={"provider": "apple"}, headers=granted,
+  )
+  assert replacement.status_code == 409
+  assert replacement.json()["detail"] == (
+    "Disconnect the current account before linking another."
+  )
+
   replay = client.post("/api/identity/link/complete", json={
     "code": "one-use-code-" + "c" * 32,
     "state": started["state"],
     "attempt": started["attempt"],
   }, headers=granted)
   assert replay.status_code == 400
+
+
+def test_unlink_removes_local_link_when_remote_grant_is_already_gone(
+  client, auth, monkeypatch,
+):
+  from app.routes.identity import _seal
+
+  granted = _app_auth(client, auth, granted=True)
+  with SessionLocal() as session:
+    owner = session.query(models.Owner).one()
+    session.add(models.IdentityAccountLink(
+      owner_id=owner.id,
+      access_token_encrypted=_seal("expired-token-" + "x" * 40),
+      scopes_json=["identity:read", "identity:write", "deployments:read"],
+    ))
+    session.commit()
+
+  class Client:
+    def __init__(self, *args, **kwargs):
+      pass
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *args):
+      return None
+
+    async def post(self, url, **kwargs):
+      assert url == "https://www.mobius.you/api/account-links/revoke"
+      return type("Response", (), {"status_code": 401})()
+
+  monkeypatch.setattr("app.routes.identity.httpx.AsyncClient", Client)
+  response = client.delete("/api/identity/link", headers=granted)
+
+  assert response.status_code == 204
+  with SessionLocal() as session:
+    assert session.query(models.IdentityAccountLink).count() == 0
+
+
+def test_link_completion_keeps_retry_state_when_host_response_is_lost(
+  client, auth, monkeypatch,
+):
+  granted = _app_auth(client, auth, granted=True)
+
+  class Client:
+    def __init__(self, *args, **kwargs):
+      pass
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *args):
+      return None
+
+    async def get(self, url, **kwargs):
+      return type("Response", (), {"status_code": 200})()
+
+    async def post(self, url, **kwargs):
+      raise httpx.ConnectError("response lost")
+
+  monkeypatch.setattr("app.routes.identity.httpx.AsyncClient", Client)
+  started = client.post(
+    "/api/identity/link/start", json={"provider": "google"}, headers=granted,
+  ).json()
+  response = client.post("/api/identity/link/complete", json={
+    "code": "one-use-code-" + "c" * 32,
+    "state": started["state"],
+    "attempt": started["attempt"],
+  }, headers=granted)
+
+  assert response.status_code == 502
+  with SessionLocal() as session:
+    assert session.query(models.IdentityLinkAttempt).count() == 1
+    assert session.query(models.IdentityAccountLink).count() == 0
+
+
+def test_corrupt_local_grant_self_heals_to_signed_out(client, auth):
+  granted = _app_auth(client, auth, granted=True)
+  with SessionLocal() as session:
+    owner = session.query(models.Owner).one()
+    session.add(models.IdentityAccountLink(
+      owner_id=owner.id,
+      access_token_encrypted="not-a-fernet-token",
+      scopes_json=["identity:read"],
+    ))
+    session.commit()
+
+  response = client.get("/api/identity", headers=granted)
+
+  assert response.status_code == 200
+  assert response.json()["account_mode"] == "signed_out"
+  with SessionLocal() as session:
+    assert session.query(models.IdentityAccountLink).count() == 0
+
+
+def test_linked_host_outage_preserves_local_deployment(client, auth, monkeypatch):
+  from app.routes.identity import _seal
+
+  granted = _app_auth(client, auth, granted=True)
+  with SessionLocal() as session:
+    owner = session.query(models.Owner).one()
+    session.add(models.IdentityAccountLink(
+      owner_id=owner.id,
+      access_token_encrypted=_seal("linked-token-" + "x" * 40),
+      scopes_json=["identity:read", "identity:write", "deployments:read"],
+    ))
+    session.commit()
+
+  class Client:
+    def __init__(self, *args, **kwargs):
+      pass
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *args):
+      return None
+
+    async def request(self, method, url, **kwargs):
+      raise httpx.ConnectError("account host unavailable")
+
+  monkeypatch.setattr("app.routes.identity.httpx.AsyncClient", Client)
+  response = client.get("/api/identity", headers=granted)
+
+  assert response.status_code == 200
+  body = response.json()
+  assert body["account_mode"] == "linked"
+  assert body["account_unavailable"] is True
+  assert body["profile"] is None
+  assert body["deployments"] == [{
+    "id": "local",
+    "name": "This Möbius",
+    "status": "Active",
+    "current": True,
+    "url": "http://localhost:5173",
+  }]
+
+
+def test_linked_profile_mutation_uses_the_authoritative_response_once(
+  client, auth, monkeypatch,
+):
+  from app.routes.identity import _seal
+
+  granted = _app_auth(client, auth, granted=True)
+  with SessionLocal() as session:
+    owner = session.query(models.Owner).one()
+    session.add(models.IdentityAccountLink(
+      owner_id=owner.id,
+      access_token_encrypted=_seal("linked-token-" + "x" * 40),
+      scopes_json=["identity:read", "identity:write", "deployments:read"],
+    ))
+    session.commit()
+
+  calls = []
+
+  class Response:
+    status_code = 200
+
+    @staticmethod
+    def json():
+      return {
+        "profile": {
+          "user_id": "usr_123",
+          "email": "owner@example.com",
+          "display_name": "Owner",
+          "handle": "new_handle",
+          "avatar_url": None,
+        },
+        "deployments": [],
+      }
+
+  class Client:
+    def __init__(self, *args, **kwargs):
+      pass
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *args):
+      return None
+
+    async def request(self, method, url, **kwargs):
+      calls.append((method, url, kwargs.get("json")))
+      return Response()
+
+  monkeypatch.setattr("app.routes.identity.httpx.AsyncClient", Client)
+  response = client.patch(
+    "/api/identity/profile",
+    json={"handle": "NEW_HANDLE"},
+    headers=granted,
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["account_mode"] == "linked"
+  assert response.json()["profile"]["handle"] == "new_handle"
+  assert calls == [(
+    "PATCH",
+    "https://www.mobius.you/api/account/v1/identity/profile",
+    {"handle": "new_handle"},
+  )]
