@@ -115,13 +115,20 @@ function _workspaceApplePlatform() {
   return /Mac|iPhone|iPad|iPod/i.test(String(globalThis.navigator?.platform || ''))
 }
 
+function _workspaceLinuxPlatform() {
+  return /Linux/i.test(String(globalThis.navigator?.platform || ''))
+}
+
 // Mirrors workspaceShortcutAction() in useWorkspaceShortcuts.js — see that
-// file's comment for why Mac uses Cmd+Option+[/] instead of a naive
-// Ctrl+Option+PageUp/PageDown port. Kept in sync by hand rather than shared
-// via import: this runtime ships standalone into the app iframe.
+// file's comments for why Mac uses Cmd+Option+[/] instead of a naive
+// Ctrl+Option+PageUp/PageDown port, and why Linux opens a new tab with N
+// instead of T (Ctrl+Alt+T is the desktop's own terminal shortcut on GNOME
+// and KDE). Kept in sync by hand rather than shared via import: this runtime
+// ships standalone into the app iframe.
 function _workspaceShortcutCandidate(event) {
   if (!event?.isTrusted || event.isComposing || event.repeat) return false
   const apple = _workspaceApplePlatform()
+  const linux = !apple && _workspaceLinuxPlatform()
   const modifiersMatch = apple
     ? (event.metaKey && event.altKey && !event.ctrlKey)
     : (event.ctrlKey && event.altKey && !event.metaKey)
@@ -129,6 +136,7 @@ function _workspaceShortcutCandidate(event) {
   const key = String(event.key || '')
   const lower = key.toLowerCase()
   if (lower === 't') return true
+  if (linux && lower === 'n') return !event.shiftKey
   if (lower === 'w') return !event.shiftKey
   if (event.shiftKey) return false
   if (apple) return key === ']' || key === '[' || /^[1-9]$/.test(key)

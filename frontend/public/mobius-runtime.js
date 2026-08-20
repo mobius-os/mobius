@@ -3749,9 +3749,13 @@ function _editableShortcutTarget(target) {
 function _workspaceApplePlatform() {
 	return /Mac|iPhone|iPad|iPod/i.test(String(globalThis.navigator?.platform || ""));
 }
+function _workspaceLinuxPlatform() {
+	return /Linux/i.test(String(globalThis.navigator?.platform || ""));
+}
 function _workspaceShortcutCandidate(event) {
 	if (!event?.isTrusted || event.isComposing || event.repeat) return false;
 	const apple = _workspaceApplePlatform();
+	const linux = !apple && _workspaceLinuxPlatform();
 	const modifiersMatch = apple
 		? (event.metaKey && event.altKey && !event.ctrlKey)
 		: (event.ctrlKey && event.altKey && !event.metaKey);
@@ -3759,6 +3763,7 @@ function _workspaceShortcutCandidate(event) {
 	const key = String(event.key || "");
 	const lower = key.toLowerCase();
 	if (lower === "t") return true;
+	if (linux && lower === "n") return !event.shiftKey;
 	if (lower === "w") return !event.shiftKey;
 	if (event.shiftKey) return false;
 	if (apple) return key === "]" || key === "[" || /^[1-9]$/.test(key);

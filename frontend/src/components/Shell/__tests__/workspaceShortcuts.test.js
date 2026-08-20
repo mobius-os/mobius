@@ -29,7 +29,7 @@ test('workspace shortcut provider is disabled while paused', () => {
   }]), true)
 })
 
-test('Windows/Linux shortcut mapping ignores AltGraph and unrelated modifiers', () => {
+test('Windows shortcut mapping ignores AltGraph and unrelated modifiers', () => {
   assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, key: 't' }, 'Win32'), 'open')
   assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, shiftKey: true, key: 'T' }, 'Win32'), 'restore')
   assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, key: 'PageDown' }, 'Win32'), 'next')
@@ -37,6 +37,18 @@ test('Windows/Linux shortcut mapping ignores AltGraph and unrelated modifiers', 
   assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, key: 't', getModifierState: k => k === 'AltGraph' }, 'Win32'), null)
   // A Cmd-modified event should never fire the Ctrl+Alt mapping.
   assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, metaKey: true, key: 't' }, 'Win32'), null)
+})
+
+test('Linux opens a new tab with N instead of T (Ctrl+Alt+T is the desktop terminal shortcut)', () => {
+  assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, key: 't' }, 'Linux x86_64'), null)
+  assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, key: 'n' }, 'Linux x86_64'), 'open')
+  // Shift+T still restores — only the bare terminal binding is taken.
+  assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, shiftKey: true, key: 'T' }, 'Linux x86_64'), 'restore')
+  // Everything else stays identical to the Windows mapping.
+  assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, key: 'w' }, 'Linux x86_64'), 'close')
+  assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, key: 'PageDown' }, 'Linux x86_64'), 'next')
+  assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, key: 'PageUp' }, 'Linux x86_64'), 'previous')
+  assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, key: '1' }, 'Linux x86_64'), 'select:1')
 })
 
 test('Mac shortcut mapping uses Cmd+Option, never the VoiceOver or native-Chrome combos', () => {

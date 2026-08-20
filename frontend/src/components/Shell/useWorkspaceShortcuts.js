@@ -14,6 +14,10 @@ export function isApplePlatform(platform) {
   return /Mac|iPhone|iPad|iPod/i.test(String(platform || ''))
 }
 
+export function isLinuxPlatform(platform) {
+  return /Linux/i.test(String(platform || ''))
+}
+
 // Windows/Linux use Ctrl+Alt — never bare Ctrl, which the browser chrome
 // itself owns for T/W/Tab-switching (Ctrl+T, Ctrl+Tab, ...), so a page can
 // never intercept the unprefixed key. Mac uses Cmd+Option instead of the
@@ -27,6 +31,7 @@ export function isApplePlatform(platform) {
 export function workspaceShortcutAction(event, platform = globalThis.navigator?.platform || '') {
   if (!event || event.isComposing || event.repeat) return null
   const apple = isApplePlatform(platform)
+  const linux = !apple && isLinuxPlatform(platform)
   const modifiersMatch = apple
     ? (event.metaKey && event.altKey && !event.ctrlKey)
     : (event.ctrlKey && event.altKey && !event.metaKey)
@@ -35,7 +40,14 @@ export function workspaceShortcutAction(event, platform = globalThis.navigator?.
 
   const key = String(event.key || '')
   const lower = key.toLowerCase()
-  if (lower === 't') return event.shiftKey ? 'restore' : 'open'
+  // Ctrl+Alt+T opens a terminal on GNOME, KDE, and most other Linux desktop
+  // environments — captured by the desktop shell before any page ever sees
+  // the keypress, the same non-interceptable-shortcut problem that shaped
+  // every other platform branch here. Linux opens a new tab with N instead;
+  // Shift+T still restores everywhere (only the bare terminal binding is
+  // taken, Ctrl+Alt+Shift+T is not a known desktop shortcut).
+  if (lower === 't') return event.shiftKey ? 'restore' : (linux ? null : 'open')
+  if (linux && lower === 'n' && !event.shiftKey) return 'open'
   if (lower === 'w' && !event.shiftKey) return 'close'
   if (event.shiftKey) return null
   if (apple) {
