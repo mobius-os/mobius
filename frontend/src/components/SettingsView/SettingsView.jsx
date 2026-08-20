@@ -377,6 +377,7 @@ export default function SettingsView({
   const [rebuildStatus, setRebuildStatus] = useState(null)
   const [rebuildError, setRebuildError] = useState('')
   const [rebuildRequesting, setRebuildRequesting] = useState(false)
+  const [rebuildStartedHere, setRebuildStartedHere] = useState(false)
   const rebuildPreviousBootIdRef = useRef('')
   const rebuildInitiatedHereRef = useRef(false)
   const rebuildReconnectStartedRef = useRef(false)
@@ -1047,6 +1048,7 @@ export default function SettingsView({
     ) return
     setRebuildRequesting(true)
     setRebuildError('')
+    setRebuildStartedHere(false)
     rebuildInitiatedHereRef.current = false
     rebuildReconnectStartedRef.current = false
     rebuildPreviousBootIdRef.current = await readRestartBootId()
@@ -1061,6 +1063,7 @@ export default function SettingsView({
         )
       }
       rebuildInitiatedHereRef.current = true
+      setRebuildStartedHere(true)
       setRebuildStatus(body)
       setRebuildConfirm(false)
       returnToSettingsAfterReload()
@@ -2066,9 +2069,9 @@ export default function SettingsView({
               {rebuildStatus.message || 'Container rebuilding is not set up on this installation.'}
             </p>
           )}
-          {(rebuildIsActive(rebuildStatus) || [
+          {(rebuildIsActive(rebuildStatus) || (rebuildStartedHere && [
             'succeeded', 'no_change', 'rolled_back', 'needs_recovery',
-          ].includes(rebuildStatus?.state)) && (
+          ].includes(rebuildStatus?.state))) && (
             <div className="settings__notice" role="status">
               {rebuildProgressMessage(rebuildStatus)}
             </div>
