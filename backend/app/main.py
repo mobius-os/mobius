@@ -5,6 +5,7 @@ static files.  API routes are registered first; the frontend SPA is
 mounted last as a catch-all so that client-side routing works.
 """
 
+import ipaddress
 import json
 import logging
 import mimetypes
@@ -16,6 +17,7 @@ from contextlib import asynccontextmanager
 from datetime import timezone
 from email.utils import formatdate, parsedate_to_datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Do this before importing FastAPI, SQLAlchemy, or any app module that may
 # create worker threads. See allocator.limit_glibc_arenas for the observed
@@ -51,6 +53,7 @@ from app.memory_observability import record_memory_checkpoint
 from app.response_policy import (
   CHAT_EMBED_CSP,
   PUBLISHED_SITE_CSP,
+  absolute_csp_origin,
   app_frame_csp,
   shell_csp,
   static_embed_csp,
@@ -320,14 +323,58 @@ _APP_FRAME_PATH = re.compile(r"^/api/apps/[^/]+/frame$")
 # and it still cannot reach the shell's localStorage, cookies, or owner token.
 _STATIC_EMBED_CSP = static_embed_csp(settings.frontend_origin)
 _SHELL_CSP = shell_csp(os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", ""))
+_SERVICE_GATEWAY_ORIGIN = os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", "")
+_BROWSER_API_ORIGIN = os.environ.get("API_BASE_URL", "")
 _APP_FRAME_CSP = app_frame_csp(
   settings.frontend_origin,
-  os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", ""),
+  _SERVICE_GATEWAY_ORIGIN,
   # Only an explicitly configured browser-reachable API origin belongs in a
   # frame policy. settings.api_base_url defaults to backend-local localhost
   # for agents and jobs, which must not become the viewer's localhost.
-  os.environ.get("API_BASE_URL", ""),
+  _BROWSER_API_ORIGIN,
 )
+
+def _loopback_delivery_origin(scope) -> str | None:
+  """Return the exact loopback origin serving a loopback request, if any."""
+  headers = dict(scope.get("headers") or ())
+  try:
+    client = scope.get("client")
+    peer = client[0] if isinstance(client, (list, tuple)) and client else None
+    peer_is_loopback = (
+      peer == "localhost"
+      or (isinstance(peer, str) and ipaddress.ip_address(peer).is_loopback)
+    )
+    if not peer_is_loopback:
+      return None
+    authority = headers.get(b"host", b"").decode("ascii")
+    scheme = str(scope.get("scheme") or "http")
+    origin = absolute_csp_origin(f"{scheme}://{authority}")
+    if origin is None:
+      return None
+    hostname = urlparse(origin).hostname
+    is_loopback = (
+      hostname == "localhost"
+      or (hostname is not None and ipaddress.ip_address(hostname).is_loopback)
+    )
+  except (UnicodeDecodeError, ValueError, TypeError):
+    return None
+  if not is_loopback:
+    return None
+  return origin
+
+
+def _app_frame_csp_for_scope(scope) -> str:
+  """Let the loopback test harness exercise the real opaque app frame."""
+  delivery_origin = _loopback_delivery_origin(scope)
+  if delivery_origin is None:
+    return _APP_FRAME_CSP
+  return app_frame_csp(
+    settings.frontend_origin,
+    _SERVICE_GATEWAY_ORIGIN,
+    _BROWSER_API_ORIGIN,
+    delivery_origin,
+  )
+
 
 # Published sites (`/sites/<token>/`) are public snapshots of the owner's own
 # agent-authored artifacts and Web Studio builds. The `sandbox` directive
@@ -397,7 +444,7 @@ class _SecurityHeadersMiddleware:
       elif chat_embed:
         csp = CHAT_EMBED_CSP
       elif app_frame:
-        csp = _APP_FRAME_CSP
+        csp = _app_frame_csp_for_scope(scope)
       else:
         csp = _SHELL_CSP
       response_headers.append((

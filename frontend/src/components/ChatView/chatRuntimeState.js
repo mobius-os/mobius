@@ -151,6 +151,28 @@ export function shouldRetireRestoredQuestionSnapshot({
   ))
 }
 
+/**
+ * A durable running -> idle transition settles a live transport that missed
+ * its terminal event. Requiring the prior server-running observation avoids
+ * mistaking the short optimistic send window (before StartTurn is persisted)
+ * for a completed turn.
+ */
+export function shouldRecoverSettledRuntime({
+  runtimeWasObservedRunning = false,
+  runtimeRunning = false,
+  pendingCount = 0,
+  streamStillActive = false,
+  stopInFlight = false,
+  localStartInFlight = false,
+} = {}) {
+  return !!runtimeWasObservedRunning
+    && runtimeRunning === false
+    && pendingCount === 0
+    && !!streamStillActive
+    && !stopInFlight
+    && !localStartInFlight
+}
+
 function coldBlockRenderCost(block) {
   if (block?.type !== 'text') return 1
   // Markdown reports create work roughly in proportion to their source size,

@@ -18,6 +18,7 @@ import {
   serverSnapshotBehindLocal,
   shouldAttachRunningStream,
   shouldRetireRestoredQuestionSnapshot,
+  shouldRecoverSettledRuntime,
   shouldRetryStopAfterConfirm,
   shouldShowOpenAppCta,
   startedMessagesFromResponse,
@@ -135,6 +136,45 @@ test('a parked owner question uses compact history until its answer resumes the 
     running: false,
     pendingQuestionId: null,
   }), false)
+})
+
+test('a known server run settling recovers a live stream that missed its terminal event', () => {
+  assert.equal(shouldRecoverSettledRuntime({
+    runtimeWasObservedRunning: true,
+    runtimeRunning: false,
+    pendingCount: 0,
+    streamStillActive: true,
+  }), true)
+
+  assert.equal(shouldRecoverSettledRuntime({
+    runtimeWasObservedRunning: false,
+    runtimeRunning: false,
+    pendingCount: 0,
+    streamStillActive: true,
+  }), false, 'the optimistic send window is not mistaken for a settled turn')
+
+  assert.equal(shouldRecoverSettledRuntime({
+    runtimeWasObservedRunning: true,
+    runtimeRunning: false,
+    pendingCount: 1,
+    streamStillActive: true,
+  }), false, 'a queued continuation still owns the handoff')
+
+  assert.equal(shouldRecoverSettledRuntime({
+    runtimeWasObservedRunning: true,
+    runtimeRunning: false,
+    pendingCount: 0,
+    streamStillActive: true,
+    stopInFlight: true,
+  }), false, 'the explicit stop flow owns its own settlement')
+
+  assert.equal(shouldRecoverSettledRuntime({
+    runtimeWasObservedRunning: true,
+    runtimeRunning: false,
+    pendingCount: 0,
+    streamStillActive: true,
+    localStartInFlight: true,
+  }), false, 'an unacknowledged local start owns the idle-snapshot race')
 })
 
 test('only a cold stream prefix missing the durable question is retired', () => {

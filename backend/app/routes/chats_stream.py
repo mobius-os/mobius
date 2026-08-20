@@ -874,7 +874,15 @@ async def _send_message_locked(
     if (
       is_chat_running(chat_id)
       and not questions.is_waiting(chat_id)
-      and (body.force_steer or body.direct_steer or _steer_enabled(chat))
+      and (
+        body.force_steer
+        or body.direct_steer
+        # Hidden sends are product control carriers, not owner-authored course
+        # corrections.  They must keep their queue boundary even when the
+        # owner has enabled automatic steering; explicit internal direct/force
+        # steering above remains available for the few flows that own it.
+        or (not body.hidden and _steer_enabled(chat))
+      )
       and (
         body.force_steer
         or body.direct_steer

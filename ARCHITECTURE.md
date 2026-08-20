@@ -1095,10 +1095,12 @@ placement intent and never encode pane ids, split directions, or breakpoints.
 `frontend/src/components/Shell/paneModel.js` is the pure workspace model. A
 workspace contains a binary `layout` tree, a map of pane records, a focused pane,
 a presentation mode (`single` or `panes`), and the single-screen slot. Each pane
-owns its ordered tabs and `activeTabKey`; tab identity and navigation mapping
-remain in `tabModel.js`. The model normalizes persisted input, enforces unique
-tabs across panes, bounds pane count/depth, collapses empty splits, and returns
-the same reference for no-op transitions.
+owns its visible tab order, `activeTabKey`, and a most-recent-first
+`recentTabKeys` permutation used when its active tab closes or moves away; tab
+identity and navigation mapping remain in `tabModel.js`. The model normalizes
+persisted input, seeds older blobs from the former neighbour-close order,
+enforces unique tabs across panes, bounds pane count/depth, collapses empty
+splits, and returns the same reference for no-op transitions.
 
 `useWorkspaceSession.js` is the live state owner. It composes reducer transitions
 through a synchronous ref boundary, persists the sole versioned

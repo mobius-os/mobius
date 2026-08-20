@@ -9,13 +9,9 @@ import {
   runAgentRepair,
   writeRefreshedRecoveryAttempt,
 } from '../../lib/errorRecovery.js'
-import { reloadIfGenerationStale } from '../Shell/swHandoff.js'
+import { reloadIfGenerationStale } from '../../lib/shellUpdate.js'
 import RecoveryPanel from './RecoveryPanel.jsx'
 import './ErrorBoundary.css'
-
-function readStalePrecacheFlag() {
-  try { return sessionStorage.getItem('sw-stale-precache-pending') === '1' } catch { return false }
-}
 
 /**
  * App-level error boundary. Without one, a render throw anywhere below
@@ -101,7 +97,6 @@ export default class ErrorBoundary extends Component {
   // Resolves true when a newer generation was found and a reload was initiated.
   recoverReload = (context) => reloadIfGenerationStale({
     serviceWorker: typeof navigator !== 'undefined' ? navigator.serviceWorker : null,
-    readStaleFlag: readStalePrecacheFlag,
     reload: () => this.applyRecoveryReload(context),
   })
 

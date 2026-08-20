@@ -127,6 +127,12 @@ def _render_messages(msgs: list[dict], *, start_index: int = 0) -> str:
   """Render user-visible messages as role-prefixed transcript text."""
   lines: list[str] = []
   for m in msgs[max(0, start_index):]:
+    # Hidden rows are product control messages, not owner-authored dialogue.
+    # Their visible effect is already represented by the surrounding question,
+    # Goal rail, or continuation state; feeding the raw carrier to the summary
+    # would leak implementation syntax such as an automatic ``/goal`` marker.
+    if m.get("hidden"):
+      continue
     # Provider handoffs are derived from this note. Re-ingesting them would
     # recursively duplicate the same context on every later re-switch.
     if m.get("kind") == "compaction":

@@ -102,9 +102,9 @@ import {
   releaseComposerFocusLease,
 } from './composerFocusLease.js'
 import {
-  shouldRearmShellApply,
-  watchForShellUpdateOnForeground,
-} from './swHandoff.js'
+  inspectShellUpdate,
+  watchForShellUpdateOnResume,
+} from '../../lib/shellUpdate.js'
 import './Shell.css'
 import './workspace.css'
 import WorkspaceChrome from './WorkspaceChrome.jsx'
@@ -1638,25 +1638,6 @@ export default function Shell({ onInitialVisualReady }) {
   }, [chats])
   const streamingChatIdsRef = useRef(streamingChatIds)
   useEffect(() => { streamingChatIdsRef.current = streamingChatIds }, [streamingChatIds])
-  // Whether the chat the owner is looking at is parked on an AskUserQuestion
-  // answer. Such a turn is `running` (so it stays in streamingChatIds above,
-  // keeping its drawer dot) but is NOT streaming tokens: the card is durably
-  // persisted and a reload re-renders it from server state without touching the
-  // server-owned turn. The reload policy treats this as idle, so an unanswered
-  // question can no longer pin a pending shell update. Only the active chat can
-  // defer a reload, so a single boolean is all the policy needs.
-  const activeChatWaitingOnQuestion = useMemo(() => {
-    if (activeChatId == null) return false
-    const active = chats.find(chat => String(chat.id) === String(activeChatId))
-    return active?.pending_question_id != null
-  }, [chats, activeChatId])
-  const activeChatWaitingOnQuestionRef = useRef(activeChatWaitingOnQuestion)
-  useEffect(() => {
-    activeChatWaitingOnQuestionRef.current = activeChatWaitingOnQuestion
-  }, [activeChatWaitingOnQuestion])
-  // The reload check runs inside a setTimeout (scheduleShellReloadCheck), which
-  // reads render-time state through a ref, so the boolean still needs a ref
-  // mirror even though it is no longer a Set.
   const voiceDictationActiveRef = useRef(voiceDictationActive)
   useEffect(() => {
     voiceDictationActiveRef.current = voiceDictationActive
@@ -1678,7 +1659,6 @@ export default function Shell({ onInitialVisualReady }) {
     drawerOpenRef,
     multiPaneBuilderVisibleRef,
     streamingChatIdsRef,
-    activeChatWaitingOnQuestionRef,
     voiceDictationActiveRef,
     activeView,
     activeChatId,
@@ -2252,8 +2232,8 @@ export default function Shell({ onInitialVisualReady }) {
       requestEmptySingleNewChat, workspaceStateRef, activeChatIdRef])
 
   // Deferred shell-update pickup: a service worker that finished installing and
-  // is now WAITING (leashed — it never took over on its own), or index.html's
-  // boot-time stale-precache flag. Route it through the SAME hold-until-idle
+  // is now WAITING (leashed — it never took over on its own). Route it through
+  // the SAME hold-until-idle
   // path as a live shell_rebuilt (requestShellReload → apply if idle, else hold
   // the reload until the running turn ends). This recovers a lost apply race:
   // the SW generation that installed just after an earlier apply signal, a
@@ -2275,25 +2255,10 @@ export default function Shell({ onInitialVisualReady }) {
     shellUpdatePickupCheckStartedRef.current = true
     let cancelled = false
     ;(async () => {
-      // Snapshot the stale-generation signal before the live chat query. A
-      // waiting worker can activate and claim this page while that fetch is in
-      // flight; active === controller would then make a later re-check look
-      // current even though this document is still executing the old bundle.
-      let flagged = false
-      try { flagged = sessionStorage.getItem('sw-stale-precache-pending') === '1' } catch { /* ignore */ }
-      let rearm = flagged
-      if (navigator.serviceWorker?.getRegistration) {
-        try {
-          const reg = await navigator.serviceWorker.getRegistration()
-          rearm = shouldRearmShellApply({
-            stalePrecacheFlagged: flagged,
-            waiting: reg?.waiting || null,
-            active: reg?.active || null,
-            controller: navigator.serviceWorker.controller || null,
-          })
-        } catch { /* ignore */ }
-      }
-      if (cancelled || !rearm) return
+      const { updateAvailable } = await inspectShellUpdate({
+        serviceWorker: navigator.serviceWorker,
+      })
+      if (cancelled || !updateAvailable) return
       try {
         await queryClient.fetchQuery({
           queryKey: chatQueries.keys.all,
@@ -2324,7 +2289,7 @@ export default function Shell({ onInitialVisualReady }) {
     }
   }, [chatsQuery.isSuccess, queryClient])
 
-  // Foreground-return shell-update pickup. The boot re-arm net above runs once per
+  // Resume-time shell-update pickup. The boot re-arm net above runs once per
   // MOUNT, and a live `shell_rebuilt` reaches only a page with a live EventSource.
   // An installed PWA BACKGROUNDED across a deploy hits neither: it misses the
   // transient broadcast (its stream was suspended and the event is not replayed on
@@ -2333,19 +2298,18 @@ export default function Shell({ onInitialVisualReady }) {
   // watch is the missing apply trigger: on every return to visible (and on
   // regaining connectivity) it forces a fresh sw.js fetch and, once a newer
   // generation is waiting/mismatched, routes it through the SAME apply-on-idle
-  // reload as a live shell_rebuilt — silent, and deferred while a turn streams or
+  // reload as a deliberate apply — silent, and deferred while a turn streams or
   // the owner is typing (requestShellReload reads streaming/view state from refs,
-  // so this closure staying out of the deps is correct). Gated by
-  // shouldRearmShellApply inside the watch, so a return with no new generation is a
+  // so this closure staying out of the deps is correct). Unlike a passive source
+  // rebuild, returning to the shell is itself the safe boundary the owner chose;
+  // classifying it as passive would hold the update forever behind any visible
+  // idle chat. The shared inspector makes a return with no new generation a
   // no-op — no toast, no spurious reload.
-  useEffect(() => watchForShellUpdateOnForeground({
+  useEffect(() => watchForShellUpdateOnResume({
     doc: typeof document !== 'undefined' ? document : null,
     win: typeof window !== 'undefined' ? window : null,
     serviceWorker: typeof navigator !== 'undefined' ? navigator.serviceWorker : null,
-    readStaleFlag: () => {
-      try { return sessionStorage.getItem('sw-stale-precache-pending') === '1' } catch { return false }
-    },
-    rearm: () => requestShellReload({ passive: true }),
+    rearm: () => requestShellReload(),
   }), [])
 
   // Handle non-content SSE events: theme changes, app updates, shell rebuilds.
@@ -3326,7 +3290,7 @@ export default function Shell({ onInitialVisualReady }) {
     // Drop the tab pinned to this chat (local delete only — see deleteApp).
     // reason:'deleted' clears the undo slot so Cmd/Z can't resurrect a
     // tombstoned chat outside the backend recovery path. CLOSE_TAB already
-    // activates the pane's neighbour tab when one exists; only if that leaves
+    // activates the pane's most recently used surviving tab; only if that leaves
     // the focused pane EMPTY (we deleted its sole/active tab) do we open a fresh
     // chat — so a background sibling tab is preserved rather than overridden.
     dispatchWorkspace({
@@ -3395,7 +3359,7 @@ export default function Shell({ onInitialVisualReady }) {
     // (contract §4.1.5), tombstone its route so Back can't recreate the tab
     // (§5.1.1), then scrub the nav-stack, then close its tab. The
     // CLOSE_TAB(reason:'deleted') owns the view transition — the derived triple
-    // follows the workspace to the pane's neighbour/collapse; no global demote.
+    // follows the workspace to its recent tab or collapsed sibling; no global demote.
     retireAppHistory(id, 'deleted')
     tombstoneRoute('app', id)
     const sid = String(id)

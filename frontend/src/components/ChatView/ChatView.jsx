@@ -117,6 +117,7 @@ import {
   openAppCtaViewModel,
   shouldRetireRestoredQuestionSnapshot,
   shouldAttachRunningStream,
+  shouldRecoverSettledRuntime,
   shouldRetryStopAfterConfirm,
   stopConfirmedIdle,
   stopRequestSucceeded,
@@ -497,6 +498,7 @@ export default function ChatView({
   // control. Keep its necessary detail refresh single-flight per exact owner;
   // the invariant below retries naturally after an honest fetch failure.
   const parkedQuestionHydrationRef = useRef(null)
+  const retireSettledStreamRef = useRef(null)
   // The pending-question and resume "tap to jump to it" nudges each track
   // whether their card is scrolled out of the viewport. Both use one shared
   // observer hook (useOffscreenNudge, below); their booleans are computed near
@@ -747,6 +749,13 @@ export default function ChatView({
   // useStreamConnection and is exposed below as `isStreamingRef`.
   const sendingRef = useRef(false)
   sendingRef.current = sending
+  // Identity of the one fresh-send request that has rendered locally but has
+  // not settled its POST yet. This is deliberately a transaction ref, not a
+  // fourth "running" flag: it never renders UI and is cleared by the exact
+  // request that created it. Runtime polling may observe the previous idle
+  // snapshot while app context, settings, or the POST is still in flight;
+  // that snapshot cannot retire this locally-owned start.
+  const localStartRequestRef = useRef(null)
   // Re-entrancy guard for doSendSilent (answer submissions). sendingRef
   // alone cannot guard doSendSilent because answer sends are deliberately
   // allowed while sendingRef is true (the runner is parked waiting for
@@ -1077,8 +1086,33 @@ export default function ChatView({
       // when the stream is genuinely dead (a stale Stop with no real turn) does
       // the server snapshot win. Event-driven over polling — see
       // docs/architecture.md "determinism".
+      const localStartInFlight =
+        localStartRequestRef.current?.chatId === String(chatId)
       const localAuthoritative =
-        handlingStopRef.current || isStreamingRef.current
+        handlingStopRef.current || localStartInFlight || isStreamingRef.current
+      if (shouldRecoverSettledRuntime({
+        runtimeWasObservedRunning: serverRunningRef.current,
+        runtimeRunning: !!data.running,
+        pendingCount: serverPending.length,
+        streamStillActive: isStreamingRef.current,
+        stopInFlight: handlingStopRef.current,
+        localStartInFlight,
+      })) {
+        // The backend has durably finalized a run but this browser missed its
+        // terminal SSE event. Re-read the transcript before retiring the stale
+        // transport so a saved final reply can never remain hidden behind the
+        // cached in-flight surface. A failed refresh leaves serverRunning
+        // latched, so the next runtime poll retries instead of declaring idle.
+        const settled = await fetchMessages({
+          force: true,
+          terminal204: true,
+          authoritative: true,
+        })
+        if (settled?.running === false) {
+          retireSettledStreamRef.current?.()
+        }
+        return
+      }
       if (data.running) {
         setSending(true)
       } else if (serverPending.length === 0 && !localAuthoritative) {
@@ -1404,6 +1438,11 @@ export default function ChatView({
     },
   })
 
+  retireSettledStreamRef.current = () => {
+    disconnect({ clearStreaming: true })
+    clearStreamItems()
+  }
+
   // useScrollMode's layout effect is registered before this one. At a steer
   // cut it therefore commits the new row's PIN_USER_MSG/ANCHOR_AT position
   // first; only then may a still-focused, otherwise-unchanged touch composer
@@ -1473,7 +1512,9 @@ export default function ChatView({
         processedExternalSignalRef.current = target
         const delta = chatRunSignalDelta(previous, target)
         const locallyActive = (
-          sendingRef.current || isStreamingRef.current
+          sendingRef.current
+          || isStreamingRef.current
+          || localStartRequestRef.current?.chatId === String(chatId)
         ) && !externalClaimedRunRef.current
         if (locallyActive) {
           // The local optimistic turn remains authoritative for its suffix,
@@ -1532,7 +1573,7 @@ export default function ChatView({
         queueMicrotask(reconcileExternalActivity)
       }
     }
-  }, [connectToStream, embedded, fetchMessages, isStreamingRef])
+  }, [chatId, connectToStream, embedded, fetchMessages, isStreamingRef])
   useEffect(() => {
     if (hidden) return
     reconcileExternalActivity()
@@ -1850,6 +1891,16 @@ export default function ChatView({
       return response.json()
     }
 
+    const settleSupersededActivation = () => {
+      // A fresh send or Stop has advanced the local generation and now owns
+      // the mounted transcript. The stale activation must not apply its
+      // server snapshot, but it still owns the entry gate it opened above.
+      // Retire that gate so the newer local owner can become paintable.
+      setInitialEntryPhase('ready')
+      setLoading(false)
+      setActivationSettled(true)
+    }
+
     const settleRuntime = (runtime, visibleMessages) => {
       const running = !!runtime.running
       const attachesToStream = shouldAttachRunningStream({
@@ -1946,7 +1997,11 @@ export default function ChatView({
         detailCache = chatDetailCacheValue(runtime)
       }
 
-      if (cancelled || fetchGenRef.current !== gen) return
+      if (cancelled) return
+      if (fetchGenRef.current !== gen) {
+        settleSupersededActivation()
+        return
+      }
       const msgs = detailCache.messages
       const failedAttempt = failedSendAttemptRef.current
       if (failedAttempt) {
@@ -2077,14 +2132,7 @@ export default function ChatView({
         await yieldToMainThread()
         if (cancelled) return
         if (fetchGenRef.current !== gen) {
-          // A newer generation owns the runtime now (a fresh send, or Stop
-          // clearing the queue), so this fetch must NOT apply its own runtime
-          // state — settleRuntime would re-hydrate the queue Stop just
-          // cleared. But 'preparing' is a hidden gate that only this path
-          // sets, and neither superseding path releases it: returning here
-          // without releasing it strands the chat blank until remount.
-          setInitialEntryPhase('ready')
-          setLoading(false)
+          settleSupersededActivation()
           return
         }
         // React may batch state updates across async task yields and discard
@@ -2098,6 +2146,10 @@ export default function ChatView({
     loadActivation()
       .catch((err) => {
         if (cancelled) return
+        if (fetchGenRef.current !== gen) {
+          settleSupersededActivation()
+          return
+        }
         // Offline degradation may use a complete cached restoration window,
         // but never a truncated one that cannot resolve the saved address.
         const cacheIsSafeFallback = activationCache
@@ -2671,6 +2723,8 @@ export default function ChatView({
     }
 
     // FRESH SEND PATH: no active turn, no queue.
+    const localStartRequest = { chatId: String(chatId), cid }
+    localStartRequestRef.current = localStartRequest
     fetchGenRef.current += 1
     onMessageStartRef.current?.()
     promotedRef.current = false
@@ -2705,7 +2759,6 @@ export default function ChatView({
       // comment above for the full rationale.
     }
     setSending(true)
-    setServerRunningState(true)
     // Pin per the R2 send rule via the funnel: it arms the reservation spacer
     // on every send and, when not pinning, retires any stale PIN to the
     // reader's anchor so their viewport stays fixed. The row carries its final
@@ -2858,6 +2911,12 @@ export default function ChatView({
         revealPendingQuestion()
       } else {
         onStreamEndRef.current?.({ continues: false })
+      }
+    } finally {
+      // A newer retry/chat transition must not be cleared by an older request
+      // settling late. Object identity makes this an exact transaction handoff.
+      if (localStartRequestRef.current === localStartRequest) {
+        localStartRequestRef.current = null
       }
     }
     // doSend doesn't need `sending` / `isStreaming` in deps anymore —

@@ -1081,6 +1081,18 @@ test('a manual platform reconcile refreshes the persistent Settings surface', ()
   )
 })
 
+test('boot delegates the complete shell generation decision to one inspector', () => {
+  assert.match(
+    shell,
+    /const \{ updateAvailable \} = await inspectShellUpdate\(\{[\s\S]*?serviceWorker: navigator\.serviceWorker,[\s\S]*?\}\)/,
+  )
+})
+
+test('shell resume is a deliberate apply, not a passive visible-chat hold', () => {
+  assert.match(shell, /watchForShellUpdateOnResume\(\{[\s\S]*?rearm: \(\) => requestShellReload\(\),/)
+  assert.doesNotMatch(shell, /rearm: \(\) => requestShellReload\(\{ passive: true \}\)/)
+})
+
 test('the builder no-full-screen invariant scopes to DESTINATIONS, not transient dialogs (§2)', () => {
   // The invariant governs navigable destinations (Settings, takeover views,
   // immersive), NOT dismissible dialogs layered over the workspace. Those stay
