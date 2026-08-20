@@ -1074,6 +1074,7 @@ def test_chat_retention_repair_reclaims_broken_workflow_graph(
   """0016 repairs old hard-purges and preserves unrelated durable state."""
   data_dir = tmp_path / "data"
   monkeypatch.setattr(get_settings(), "data_dir", str(data_dir))
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
   eng = create_engine(f"sqlite:///{tmp_path / 'retention-orphans.db'}")
   models.Base.metadata.create_all(eng)
 

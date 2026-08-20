@@ -1831,9 +1831,22 @@ def _repair_chat_retention_orphans(eng) -> None:
   # same best-effort rule as normal retention and never risks erasing a chat
   # whose database transaction could still roll back.
   if reclaimed_chat_ids:
-    from app.chat_retention import purge_chat_storage
+    import shutil
+
+    # Keep this historical migration self-contained. Calling the ordinary
+    # retention helper would make a future cleanup refactor silently rewrite
+    # what an already-published database migration does.
+    data_dir = Path(os.environ.get("DATA_DIR", "/data"))
     for chat_id in sorted(reclaimed_chat_ids):
-      purge_chat_storage(chat_id)
+      shutil.rmtree(data_dir / "chats" / chat_id, ignore_errors=True)
+      shutil.rmtree(
+        data_dir / "agent-browser-profiles" / f"chat-{chat_id}",
+        ignore_errors=True,
+      )
+      shutil.rmtree(
+        data_dir / "shared" / "memory" / "chats" / chat_id,
+        ignore_errors=True,
+      )
 
 
 _SCHEMA_MIGRATIONS = (
