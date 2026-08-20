@@ -27,7 +27,7 @@ Möbius is a self-hosted workspace where apps, agents, memory, skills, files, an
 
 Agents can work with you in chat, inside apps, or through scheduled background work. Memory grows with useful context from the work. Reflection reviews repeated friction and prepares improvements that you can inspect and choose to keep.
 
-![Möbius Builder with the drawer beside two chats, Atlas, and a live website render](assets/product/app-building-showcase.png)
+![Möbius Builder with four live web panes beside the mobile add-to-home-screen flow](assets/product/app-building-showcase.png)
 
 The [app-building story](https://mobius.you/#build) renders the current shell as web elements instead of playing a screenshot. It opens four Builder panes on the web. On mobile, it presses the real + menu, adds Habits beside Möbius, selects the exact icon, and opens the production app standalone.
 
@@ -82,16 +82,11 @@ Each community app is a public repository under the [Möbius OS GitHub organizat
 
 You do not need to know how Möbius apps are built. Tell your agent what would make your work easier, inspect the working result beside the conversation, and keep refining it from your feedback.
 
-<table>
-  <tr>
-    <td width="34%"><img src="assets/product/tandem-iphone.png" alt="Tandem showing a bilingual story with a selected word translated on an iPhone"></td>
-    <td width="66%"><img src="assets/product/atlas-desktop.png" alt="Atlas showing a country sidebar beside an interactive globe"></td>
-  </tr>
-  <tr>
-    <td><strong>Tandem:</strong> read generated stories in two languages at your chosen level.</td>
-    <td><strong>Atlas:</strong> collect the places you have visited and save where you want to go next.</td>
-  </tr>
-</table>
+The examples below run the production-compiled apps, not marketing recreations. Atlas stays inside the full Möbius web workspace while Beat Machine runs as a focused mobile app.
+
+![The current Atlas app in Möbius on the web beside the current Beat Machine app on mobile](assets/product/apps-web-mobile.png)
+
+Atlas collects places you have visited and saves where you want to go next. Beat Machine turns the same app system into an instrument built for touch. Tandem can generate stories at your language level and let you inspect a translation word by word.
 
 Other apps can be as personal as the trip they support. Brazil 2026 keeps an itinerary, local phrases, weather, packing, and a journal together. News prepares a daily digest around the topics you care about.
 
@@ -109,7 +104,7 @@ Open a chat and describe the outcome you want in your own words. For example:
 
 Your agent can build or adapt the app, work with real files, use connected tools, and set up recurring work. Workflows, Skills, Tasks, and Subagents keep the instructions and delegated work visible. Maps, Artifacts, documents, and websites keep the outputs close to their source context.
 
-Apps can take different forms. Beat Machine runs as a focused mobile instrument. Voice downloads its model, keeps the text editable, and can run a voice agent from the same surface.
+Apps can take different forms. Voice downloads its model, keeps the text editable, and can run a voice agent from the same surface.
 
 ![Skills showing the playbooks available to Möbius agents](assets/product/skills.png)
 
@@ -119,16 +114,11 @@ No autonomous rewrite ships without a person in the loop. Agents can prepare cha
 
 Möbius runs as a progressive web app (PWA). On the web, hold the top-left Möbius mark or press Shift + Enter to open panes beside the conversation. On mobile, press + to attach files or choose a model, then describe the app you want in the composer. The agent says it will build a draft, opens a tab, and adds the surface, identity, and content in order. Different devices can build different apps; they do not have to be mirrored views of the same example.
 
-<table>
-  <tr>
-    <td width="72%"><img src="assets/product/workspace-multiple-panes.png" alt="The current Möbius runtime with its drawer open and App Store and Contribute in separate working panes"></td>
-    <td width="28%"><img src="assets/product/mobile-plus.png" alt="Möbius on mobile with the plus menu open above the composer"></td>
-  </tr>
-  <tr>
-    <td><strong>Web:</strong> keep the App Store, Contribute, chats, and other working panes visible together.</td>
-    <td><strong>Mobile:</strong> press + for files, model, and effort selection.</td>
-  </tr>
-</table>
+Builder keeps chats, apps, source, and live output in separate web panes. On mobile, the current runtime opens files, model, and effort controls from +.
+
+<p align="center">
+  <img src="assets/product/mobile-plus.png" width="340" alt="The current Möbius mobile runtime with the plus menu open above the composer">
+</p>
 
 An installed app can also become its own home-screen entry. The [mobile sequence](https://mobius.you/#build) shows Habits appearing beside Möbius, a cursor selecting the exact icon, and the production-compiled app running without Möbius chrome.
 
@@ -145,30 +135,29 @@ An installed app can also become its own home-screen entry. The [mobile sequence
   </tr>
 </table>
 
+## Change Möbius while you use it
+
+Ask for a system-level change in the same place you do the rest of your work. In the Halloween example, the agent receives “Make Möbius Halloween themed,” replies with its approach, shows the inspection, editing, and verification tools it is running, and gradually changes the live shell.
+
+![An agent replying, running tools, and changing Möbius to a Halloween theme](assets/product/halloween-agent-theme.png)
+
+The change remains source-backed and inspectable. The animation demonstrates an agent modifying the real workspace around ongoing work, not a separate theme-picker mockup.
+
 ## Memory and self-improvement are built in
 
 Memory connects facts, decisions, preferences, and projects so useful context can survive the conversation where it first appeared. Reflection runs on a schedule, reviews completed work, and turns recurring friction into a better setting, skill, app change, or proposal.
 
-<table>
-  <tr>
-    <td width="34%"><img src="assets/product/memory-graph.png" alt="Memory showing connected notes about the user, Möbius apps, and the platform"></td>
-    <td width="66%"><img src="assets/product/reflection-settings.png" alt="Reflection settings for its morning brief and background agents"></td>
-  </tr>
-  <tr>
-    <td><strong>Memory:</strong> durable context shared across apps and agents.</td>
-    <td><strong>Reflection:</strong> scheduled review with explicit background-agent settings.</td>
-  </tr>
-</table>
+![Memory gaining connected context beside Reflection revealing last night's improvements block by block](assets/product/memory-reflection.png)
 
-Themes can reshape the full workspace. The website example asks for a dynamic Halloween theme, then shows Reflection report faster repeated work, improved skills, fixed bugs, and cleared stale memories. The Memory graph grows as the agent inspects what it knows about the user. Git history keeps the source change inspectable and recoverable.
+Memory and Reflection are different parts of the loop. Memory grows its graph as useful context accumulates across projects, skills, apps, and conversations. Reflection reviews the previous day and reveals small, reversible improvements block by block: a stronger skill, fixed recurring failures, cleaner memory, and prepared agent handoffs.
 
 ## Improve an open-source system
 
 Möbius grows with the needs of the people using it. Anyone can build an app or platform change for their own work. When an idea helps beyond one person, Contribute gives it a path back to the community. Shared apps and platform improvements can raise the starting point for everyone.
 
-Contribute keeps that path inspectable. A private review agent can refresh a proposal before it is sent. A security audit can trace permission-bearing paths. GitHub checks and labels stay visible, and nothing is published automatically. Watch the [review and security-check sequence](https://mobius.you/#agents) run across open work.
+Contribute keeps that path inspectable. A private review agent can refresh a proposal before it is sent. A security audit can trace permission-bearing paths. GitHub checks and labels stay visible, and nothing is published automatically. Watch the [review and security-check sequence](https://mobius.you/#agents) run across platform and app repositories.
 
-![Contribute showing local changes, open pull requests, and review and security agents](assets/product/contribute-agent-review.png)
+![The current Contribute app on web and mobile with review and security agent checks](assets/product/contribute-agent-review.png)
 
 <table>
   <tr>
