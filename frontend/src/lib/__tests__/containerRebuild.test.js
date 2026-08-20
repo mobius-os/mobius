@@ -7,9 +7,9 @@ import {
   rebuildProgressMessage,
 } from '../containerRebuild.js'
 
-test('container rebuild active states are exactly the controller phases', () => {
+test('container replacement active states are exactly the controller phases', () => {
   for (const state of [
-    'queued', 'preparing', 'waiting_for_work', 'replacing', 'verifying',
+    'queued', 'preparing', 'replacing', 'verifying',
   ]) {
     assert.equal(rebuildIsActive({ state }), true, state)
   }
@@ -20,17 +20,17 @@ test('container rebuild active states are exactly the controller phases', () => 
   }
 })
 
-test('container rebuild polling survives transient status failures', () => {
+test('container replacement polling survives transient status failures', () => {
   assert.equal(rebuildPollShouldContinue(null), true)
   assert.equal(rebuildPollShouldContinue({ state: 'replacing' }), true)
   assert.equal(rebuildPollShouldContinue({ state: 'succeeded' }), false)
   assert.equal(rebuildPollShouldContinue({ state: 'failed' }), false)
 })
 
-test('container rebuild progress copy stays provider-neutral', () => {
+test('container replacement progress copy stays factual', () => {
   assert.equal(
-    rebuildProgressMessage({ state: 'waiting_for_work' }),
-    'Waiting for active work to finish…',
+    rebuildProgressMessage({ state: 'succeeded' }),
+    'Container replaced successfully.',
   )
   assert.equal(
     rebuildProgressMessage({ state: 'needs_recovery' }),

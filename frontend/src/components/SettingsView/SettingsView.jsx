@@ -974,7 +974,7 @@ export default function SettingsView({
         setRebuildStatus({
           supported: false,
           state: 'idle',
-          message: 'Container rebuilding is not available yet.',
+          message: 'Container replacement is not available yet.',
         })
         return null
       }
@@ -1024,7 +1024,7 @@ export default function SettingsView({
         rebuildReconnectStartedRef.current = false
         setRebuildError(freshServerSeen
           ? 'The container changed, but Möbius couldn’t reload the shell. Refresh the page.'
-          : 'Möbius still can’t confirm the rebuilt container. Use your deployment’s Recovery action if it is unavailable.')
+          : 'Möbius still can’t confirm the replacement. Use your deployment’s Recovery action if it is unavailable.')
       },
     })
   }, [rebuildStatus?.state])
@@ -1035,7 +1035,7 @@ export default function SettingsView({
     setRebuildConfirm(false)
     if (state === 'failed') {
       setRebuildError(
-        rebuildStatus?.message || 'The container could not be rebuilt.',
+        rebuildStatus?.message || 'The container could not be replaced.',
       )
     }
   }, [rebuildStatus?.state, rebuildStatus?.message])
@@ -1059,7 +1059,7 @@ export default function SettingsView({
       if (!response.ok) {
         const detail = body?.detail
         throw new Error(
-          detail?.message || detail || `Rebuild failed (${response.status})`,
+          detail?.message || detail || `Replacement failed (${response.status})`,
         )
       }
       rebuildInitiatedHereRef.current = true
@@ -1068,7 +1068,7 @@ export default function SettingsView({
       setRebuildConfirm(false)
       returnToSettingsAfterReload()
     } catch (err) {
-      setRebuildError(err?.message || 'The container could not be rebuilt.')
+      setRebuildError(err?.message || 'The container could not be replaced.')
     } finally {
       setRebuildRequesting(false)
     }
@@ -2022,7 +2022,7 @@ export default function SettingsView({
             />
           )}
           <div className="settings__row">
-            <span className="settings__label">Rebuild container</span>
+            <span className="settings__label">Replace container</span>
             {rebuildConfirm ? (
               <div className="settings__confirm">
                 <button
@@ -2039,7 +2039,7 @@ export default function SettingsView({
                   onClick={rebuildContainer}
                   disabled={rebuildRequesting || rebuildIsActive(rebuildStatus)}
                 >
-                  {rebuildRequesting || rebuildIsActive(rebuildStatus) ? 'Rebuilding…' : 'Rebuild now'}
+                  {rebuildRequesting || rebuildIsActive(rebuildStatus) ? 'Replacing…' : 'Replace now'}
                 </button>
               </div>
             ) : (
@@ -2054,19 +2054,20 @@ export default function SettingsView({
                   || rebuildStatus?.supported === false
                 }
               >
-                {rebuildStatus?.supported === false ? 'Not set up' : 'Rebuild'}
+                {rebuildStatus?.supported === false ? 'Not set up' : 'Replace'}
               </button>
             )}
           </div>
           {rebuildConfirm && !rebuildIsActive(rebuildStatus) && (
             <p className="settings__subtext settings__subtext--tight">
-              Replaces the current container with one built for your updated
-              version. Möbius will be briefly unavailable and active chats may pause.
+              Deploys the official image for your applied update. Local-only
+              runtime changes recorded by Möbius block replacement; undeclared
+              container changes are lost. Active chats continue afterward.
             </p>
           )}
           {rebuildStatus?.supported === false && (
             <p className="settings__subtext settings__subtext--tight">
-              {rebuildStatus.message || 'Container rebuilding is not set up on this installation.'}
+              {rebuildStatus.message || 'Container replacement is not set up on this installation.'}
             </p>
           )}
           {(rebuildIsActive(rebuildStatus) || (rebuildStartedHere && [

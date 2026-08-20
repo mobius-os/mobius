@@ -1,9 +1,10 @@
-"""Trust-boundary tests for the separately installed host rebuild worker."""
+"""Trust and failure-boundary tests for the installed host worker."""
 
 from __future__ import annotations
 
 import importlib.util
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -16,150 +17,172 @@ host = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(host)
 
 
-def _config(root: Path) -> dict:
-  return {
-    "version": 2,
-    "directory": str(root),
-    "project": "mobius",
-    "service": "app",
-    "files": [str(root / "compose.yml"), str(root / "image.override.yml")],
-    "image": "ghcr.io/mobius-os/mobius",
-    "source_commit": "a" * 40,
-  }
+def _frozen(tmp_path: Path, monkeypatch) -> tuple[dict, Path]:
+  etc = tmp_path / "etc"
+  data = tmp_path / "data"
+  control = data / "mobius-rebuild"
+  inbox = control / "inbox"
+  etc.mkdir()
+  inbox.mkdir(parents=True)
+  config_path = etc / "config.json"
+  compose = etc / "compose.yml"
+  override = etc / "image.override.yml"
+  for path in (config_path, compose, override):
+    path.write_text("{}\n", encoding="utf-8")
+    path.chmod(0o600)
+  control.chmod(0o755)
+  monkeypatch.setattr(host, "CONFIG", config_path)
+  monkeypatch.setattr(host, "COMPOSE", compose)
+  monkeypatch.setattr(host, "OVERRIDE", override)
+  value = {"version": 3, "project": "mobius", "data_dir": str(data)}
+  return value, control
 
 
-def _snapshot(tmp_path: Path) -> Path:
-  config_path = tmp_path / "config.json"
-  (tmp_path / "compose.yml").write_text("services: {}\n", encoding="utf-8")
-  (tmp_path / "image.override.yml").write_text("services: {}\n", encoding="utf-8")
-  return config_path
+def test_frozen_config_accepts_minimal_root_owned_boundary(tmp_path, monkeypatch):
+  value, control = _frozen(tmp_path, monkeypatch)
+
+  result = host.validate_config(value, trusted_uid=os.getuid())
+
+  assert result["project"] == "mobius"
+  assert result["control_dir"] == control
+  assert set(value) == {"version", "project", "data_dir"}
 
 
-def test_frozen_config_accepts_only_the_fixed_snapshot_files(tmp_path: Path):
-  config_path = _snapshot(tmp_path)
-
-  result = host.validate_config(
-    _config(tmp_path), config_path=config_path, trusted_uid=os.getuid(),
-  )
-
-  assert result["files"] == [
-    str(tmp_path / "compose.yml"), str(tmp_path / "image.override.yml"),
-  ]
-
-
-def test_frozen_config_rejects_group_writable_input(tmp_path: Path):
-  config_path = _snapshot(tmp_path)
-  (tmp_path / "compose.yml").chmod(0o620)
+def test_frozen_config_rejects_group_writable_input(tmp_path, monkeypatch):
+  value, _control = _frozen(tmp_path, monkeypatch)
+  host.COMPOSE.chmod(0o620)
 
   with pytest.raises(ValueError, match="not root-controlled"):
-    host.validate_config(
-      _config(tmp_path), config_path=config_path, trusted_uid=os.getuid(),
-    )
+    host.validate_config(value, trusted_uid=os.getuid())
 
 
-def test_frozen_config_rejects_symlinked_input(tmp_path: Path):
-  config_path = _snapshot(tmp_path)
-  target = tmp_path / "mutable.yml"
-  target.write_text("services: {}\n", encoding="utf-8")
-  (tmp_path / "compose.yml").unlink()
-  (tmp_path / "compose.yml").symlink_to(target)
+def test_frozen_config_rejects_symlinked_input(tmp_path, monkeypatch):
+  value, _control = _frozen(tmp_path, monkeypatch)
+  target = host.COMPOSE.with_name("mutable.yml")
+  target.write_text("{}\n", encoding="utf-8")
+  host.COMPOSE.unlink()
+  host.COMPOSE.symlink_to(target)
 
   with pytest.raises(ValueError, match="may not use symlinks"):
-    host.validate_config(
-      _config(tmp_path), config_path=config_path, trusted_uid=os.getuid(),
-    )
+    host.validate_config(value, trusted_uid=os.getuid())
 
 
-def test_frozen_config_rejects_checkout_paths(tmp_path: Path):
-  config_path = _snapshot(tmp_path)
-  value = _config(tmp_path)
-  value["files"] = [str(tmp_path / "compose.yml")]
-
-  with pytest.raises(ValueError, match="invalid deployment directory"):
-    host.validate_config(
-      value, config_path=config_path, trusted_uid=os.getuid(),
-    )
-
-
-def test_active_status_requires_a_live_worker_or_systemd_unit(monkeypatch):
-  current = {"operation_id": "a" * 32, "state": "queued"}
-  monkeypatch.setattr(host, "_lock_is_held", lambda _path: False)
-  monkeypatch.setattr(host, "_unit_is_running", lambda _operation: False)
-
-  assert host.rebuild_is_running(current) is False
-
-  monkeypatch.setattr(host, "_unit_is_running", lambda _operation: True)
-  assert host.rebuild_is_running(current) is True
+def _worker_paths(tmp_path: Path, monkeypatch):
+  state = tmp_path / "state"
+  inbox = tmp_path / "control" / "inbox"
+  state.mkdir()
+  inbox.mkdir(parents=True)
+  monkeypatch.setattr(host, "STATE_DIR", state)
+  monkeypatch.setattr(host, "LOCK", state / "replace.lock")
+  monkeypatch.setattr(host, "STATUS", state / "status.json")
+  monkeypatch.setattr(host, "IMAGES", state / "images.json")
+  config = {"project": "mobius", "control_dir": inbox.parent}
+  monkeypatch.setattr(host, "config", lambda: config)
+  return config, inbox
 
 
-def test_worker_lock_alone_proves_rebuild_is_running(monkeypatch):
-  monkeypatch.setattr(host, "_lock_is_held", lambda _path: True)
-  monkeypatch.setattr(host, "_unit_is_running", lambda _operation: False)
-
-  assert host.rebuild_is_running({"operation_id": None}) is True
-
-
-def test_status_reconciles_an_abandoned_active_job(monkeypatch):
-  current = {
-    "operation_id": "a" * 32, "state": "verifying",
-    "updated_at": "2020-01-01T00:00:00+00:00",
-  }
-  monkeypatch.setattr(host, "read_json", lambda _path: current)
-  monkeypatch.setattr(host, "rebuild_is_running", lambda _current: False)
-  written = {}
-  monkeypatch.setattr(host, "write_status", lambda **fields: written.update(fields) or fields)
-
-  result = host.status()
-
-  assert result["state"] == "failed"
-  assert result["code"] == "worker_interrupted"
-
-
-def test_status_preserves_a_newly_queued_job_during_systemd_handoff(monkeypatch):
-  current = {
-    "operation_id": "a" * 32, "state": "queued",
-    "updated_at": host.now(),
-  }
-  monkeypatch.setattr(host, "read_json", lambda _path: current)
-  monkeypatch.setattr(host, "rebuild_is_running", lambda _current: False)
-
-  assert host.status() is current
-
-
-def test_worker_restores_the_previous_container_after_replacement_throws(
-  tmp_path: Path, monkeypatch,
-):
-  operation = "b" * 32
+def test_no_change_does_not_drain_active_chats(tmp_path, monkeypatch):
+  config, inbox = _worker_paths(tmp_path, monkeypatch)
   expected = "c" * 40
-  request = tmp_path / "request.json"
-  request.write_text(
-    f'{{"operation_id":"{operation}","expected_sha":"{expected}"}}',
-    encoding="utf-8",
+  (inbox / "request.json").write_text(
+    f'{{"version":1,"expected_sha":"{expected}"}}', encoding="utf-8",
   )
-  monkeypatch.setattr(host, "STATE_DIR", tmp_path)
-  monkeypatch.setattr(host, "LOCK", tmp_path / "worker.lock")
-  monkeypatch.setattr(host, "CONFIG", tmp_path / "config.json")
-  monkeypatch.setattr(host, "read_json", lambda path: (
-    {"operation_id": operation, "expected_sha": expected}
-    if path == request else {"config": True}
+  monkeypatch.setattr(host, "app_container", lambda _config: ("cid", "same"))
+  monkeypatch.setattr(host, "require_pull_space", lambda _image: None)
+  monkeypatch.setattr(host.subprocess, "run", lambda *_args, **_kwargs: None)
+  monkeypatch.setattr(host, "inspect_image", lambda _image, template: (
+    expected if "revision" in template else
+    host.IMAGE_SOURCE if "source" in template else
+    "amd64" if "Architecture" in template else "same"
   ))
-  monkeypatch.setattr(host, "validate_config", lambda _value: {"image": "official"})
-  monkeypatch.setattr(host.subprocess, "run", lambda *args, **kwargs: None)
-  monkeypatch.setattr(host, "inspect_value", lambda _image, template: (
-    expected if "revision" in template else host.IMAGE_SOURCE if "source" in template else "new-digest"
+  monkeypatch.setattr(host, "retain_images", lambda *_args: None)
+  monkeypatch.setattr(
+    host, "request_drain",
+    lambda *_args: (_ for _ in ()).throw(AssertionError("no-change must not drain")),
+  )
+  statuses = []
+  monkeypatch.setattr(
+    host, "write_status", lambda _config, **fields: statuses.append(fields) or fields,
+  )
+
+  assert host.run() == 0
+  assert statuses[-1]["state"] == "no_change"
+
+
+def test_replacement_drains_then_rolls_back_after_cutover_error(tmp_path, monkeypatch):
+  config, inbox = _worker_paths(tmp_path, monkeypatch)
+  expected = "d" * 40
+  (inbox / "request.json").write_text(
+    f'{{"version":1,"expected_sha":"{expected}"}}', encoding="utf-8",
+  )
+  monkeypatch.setattr(host, "app_container", lambda _config: ("cid", "old"))
+  monkeypatch.setattr(host, "require_pull_space", lambda _image: None)
+  monkeypatch.setattr(host.subprocess, "run", lambda *_args, **_kwargs: None)
+  monkeypatch.setattr(host, "inspect_image", lambda _image, template: (
+    expected if "revision" in template else
+    host.IMAGE_SOURCE if "source" in template else
+    "amd64" if "Architecture" in template else "new"
   ))
-  monkeypatch.setattr(host, "container_image", lambda _config: "old-digest")
-  calls = []
+  order = []
+  ready = inbox / "ready"
+  monkeypatch.setattr(
+    host, "request_drain", lambda *_args: order.append("drain") or ready,
+  )
+
   def compose(_config, *args, image=None, **_kwargs):
-    calls.append(image)
-    if image == "new-digest":
-      raise RuntimeError("replacement failed")
+    order.append(f"compose:{image}")
+    if image == f"{host.IMAGE}:sha-{expected}":
+      raise RuntimeError("cutover failed")
+
   monkeypatch.setattr(host, "compose", compose)
   monkeypatch.setattr(host, "wait_healthy", lambda *_args, **_kwargs: True)
   statuses = []
-  monkeypatch.setattr(host, "write_status", lambda **fields: statuses.append(fields) or fields)
+  monkeypatch.setattr(
+    host, "write_status", lambda _config, **fields: statuses.append(fields) or fields,
+  )
 
-  assert host.worker(request) == 1
-  assert calls == ["new-digest", "old-digest"]
+  assert host.run() == 1
+  assert order == [
+    "drain",
+    f"compose:{host.IMAGE}:sha-{expected}",
+    f"compose:{host.ROLLBACK_TAG}",
+  ]
   assert statuses[-1]["state"] == "rolled_back"
-  assert statuses[-1]["code"] == "rebuild_failed"
+  assert statuses[-1]["code"] == "replacement_failed"
+
+
+def test_reconcile_marks_interrupted_active_worker_failed(tmp_path, monkeypatch):
+  config, _inbox = _worker_paths(tmp_path, monkeypatch)
+  host.STATUS.write_text('{"state":"verifying"}', encoding="utf-8")
+  written = []
+  monkeypatch.setattr(
+    host, "write_status", lambda _config, **fields: written.append(fields) or fields,
+  )
+
+  assert host.reconcile() == 0
+  assert written[-1]["code"] == "worker_interrupted"
+
+
+def test_drain_waits_for_the_root_supervisor_receipt(tmp_path, monkeypatch):
+  data = tmp_path / "data"
+  inbox = data / "mobius-rebuild" / "inbox"
+  ledger = data / ".restart-ledger"
+  inbox.mkdir(parents=True)
+  ledger.mkdir()
+  operation = "a" * 32
+
+  def execute(*_args, **_kwargs):
+    (inbox / f"ready-{operation}").write_text("ready\n", encoding="utf-8")
+    (ledger / "accepted.json").write_text("{}", encoding="utf-8")
+    return subprocess.CompletedProcess([], 0)
+
+  monkeypatch.setattr(host.subprocess, "run", execute)
+  monkeypatch.setattr(host.time, "time", lambda: 0)
+
+  ready = host.request_drain(
+    {"data_dir": data, "control_dir": data / "mobius-rebuild"},
+    operation,
+    "container",
+  )
+
+  assert ready == inbox / f"ready-{operation}"

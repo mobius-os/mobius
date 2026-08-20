@@ -935,16 +935,42 @@ def _read_activation_marker() -> _ActivationMarker | None:
       "paths": clean_paths,
       "image_paths": image_paths,
     }
-  # Schema 1 stored only target+paths. Preserve its historical completion
-  # semantics during a rolling upgrade; every newly written marker is schema 2
-  # and distinguishes upstream-covered paths from local-only image inputs.
+  # Schema 1 stored only target+paths, so it cannot prove an official image
+  # contains a pending local runtime change. Fail closed until the next Apply
+  # writes a schema-2 receipt with exact upstream coverage.
   return {
     "version": 1,
     "target_sha": target,
-    "upstream_sha": target or None,
+    "upstream_sha": None,
     "paths": clean_paths,
-    "image_paths": clean_paths,
+    "image_paths": [],
   }
+
+
+def container_replacement_blockers() -> list[str]:
+  """Return local image/runtime changes absent from the official target.
+
+  An official image can retire only activation paths whose desired content is
+  exactly the applied upstream revision. Replacing a working container while a
+  local-only Dockerfile or baked-runtime change remains would silently remove
+  that runtime addition, so the owner action must fail closed before cutover.
+  """
+  marker = _read_activation_marker()
+  if not marker:
+    return []
+  covered = set(marker["image_paths"])
+  blockers: list[str] = []
+  for path in marker["paths"]:
+    impact = platform_activation.classify_activation(
+      [path], deployment="self_hosted",
+    )
+    if (
+      impact["level"]
+      == platform_activation.ActivationLevel.IMAGE_REBUILD.value
+      and path not in covered
+    ):
+      blockers.append(path)
+  return sorted(blockers)
 
 
 def _write_activation_marker(

@@ -1,7 +1,7 @@
-/** Pure projection of the durable container-rebuild job into Settings UI. */
+/** Pure projection of the durable container-replacement job into Settings UI. */
 
 export const ACTIVE_REBUILD_STATES = new Set([
-  'queued', 'preparing', 'waiting_for_work', 'replacing', 'verifying',
+  'queued', 'preparing', 'replacing', 'verifying',
 ])
 
 export function rebuildIsActive(status) {
@@ -17,18 +17,16 @@ export function rebuildProgressMessage(status) {
     case 'queued':
     case 'preparing':
       return 'Preparing the new container…'
-    case 'waiting_for_work':
-      return 'Waiting for active work to finish…'
     case 'replacing':
       return 'Replacing the container…'
     case 'verifying':
       return 'Checking that Möbius came back…'
     case 'succeeded':
-      return 'Container rebuilt successfully.'
+      return 'Container replaced successfully.'
     case 'no_change':
       return 'This container is already current.'
     case 'rolled_back':
-      return 'The rebuild failed, so the previous container was restored.'
+      return 'The replacement failed, so the previous container was restored.'
     case 'needs_recovery':
       return 'The container could not be restored. Use your deployment’s Recovery action.'
     default:

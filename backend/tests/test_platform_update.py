@@ -1276,6 +1276,48 @@ def test_platform_update_uses_explicit_activation_levels():
   assert classify(["docs/backend/app/notes.md"])["level"] == "live"
 
 
+def test_container_replacement_blocks_local_only_image_inputs(tmp_path, monkeypatch):
+  marker = tmp_path / "activation.json"
+  monkeypatch.setattr(pu, "RESTART_NEEDED_FLAG", marker)
+  pu._write_activation_marker(
+    "a" * 40,
+    ["Dockerfile", "backend/app/main.py"],
+    upstream_sha="b" * 40,
+    image_paths=[],
+  )
+
+  assert pu.container_replacement_blockers() == ["Dockerfile"]
+
+
+def test_container_replacement_accepts_image_input_covered_by_upstream(
+  tmp_path, monkeypatch,
+):
+  marker = tmp_path / "activation.json"
+  monkeypatch.setattr(pu, "RESTART_NEEDED_FLAG", marker)
+  pu._write_activation_marker(
+    "a" * 40,
+    ["Dockerfile"],
+    upstream_sha="a" * 40,
+    image_paths=["Dockerfile"],
+  )
+
+  assert pu.container_replacement_blockers() == []
+
+
+def test_legacy_activation_marker_cannot_claim_official_image_coverage(
+  tmp_path, monkeypatch,
+):
+  marker = tmp_path / "activation.json"
+  marker.write_text(
+    '{"target_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
+    '"paths":["Dockerfile"]}',
+    encoding="utf-8",
+  )
+  monkeypatch.setattr(pu, "RESTART_NEEDED_FLAG", marker)
+
+  assert pu.container_replacement_blockers() == ["Dockerfile"]
+
+
 def test_import_probe_classifier_excludes_constitution_only_change():
   assert platform_activation.backend_import_probe_required(
     ["skill/core.md"]

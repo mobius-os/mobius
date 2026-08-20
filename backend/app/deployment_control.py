@@ -1,37 +1,28 @@
-"""Provider-neutral container replacement control for Settings.
+"""Self-hosted container replacement control for Settings.
 
-The browser can request only "replace this installation's container".  This
-module derives the applied upstream revision server-side, selects the external
-controller that already owns the deployment, and normalizes its durable job
-status.  No Docker, Railway, path, image, or command arguments cross the owner
-API boundary.
-
-The running container is deliberately not the job owner: it disappears during
-cutover.  Self-hosted state lives in the root-owned host helper; managed state
-lives in Möbius Launch.
+The browser can request only one fixed operation: replace this installation's
+app container with the official image for its applied upstream revision.  The
+request and durable status cross the existing /data mount; a root-owned
+systemd.path job owns Docker, Compose topology, verification, and rollback.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import secrets
-import shutil
 from pathlib import Path
 from typing import Any, Literal, TypedDict
-from urllib.parse import quote
-
-import httpx
 
 from app import platform_activation, platform_update
 from app.config import get_settings
 
 
 RebuildState = Literal[
-  "idle", "queued", "preparing", "waiting_for_work", "replacing",
-  "verifying", "succeeded", "no_change", "failed", "rolled_back",
-  "needs_recovery",
+  "idle", "queued", "preparing", "replacing", "verifying", "succeeded",
+  "no_change", "failed", "rolled_back", "needs_recovery",
 ]
 
 
@@ -59,28 +50,12 @@ class DeploymentControlError(RuntimeError):
 
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-_HOST_RE = re.compile(r"^[A-Za-z0-9._:-]{1,255}$")
-_USER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")
+_OPERATION_RE = re.compile(r"^[0-9a-f]{32}$")
 _KNOWN_STATES = {
-  "idle", "queued", "preparing", "waiting_for_work", "replacing",
-  "verifying", "succeeded", "no_change", "failed", "rolled_back",
-  "needs_recovery",
+  "idle", "queued", "preparing", "replacing", "verifying", "succeeded",
+  "no_change", "failed", "rolled_back", "needs_recovery",
 }
-_ACTIVE_STATES = {
-  "queued", "preparing", "waiting_for_work", "replacing", "verifying",
-}
-_MANAGED_ACTIVE_ALIASES = {
-  "running": "preparing",
-  "initializing": "preparing",
-  "building": "preparing",
-  "deploying": "replacing",
-  "waiting": "queued",
-}
-_MANAGED_TERMINAL_ALIASES = {
-  "success": "succeeded",
-  "rejected": "failed",
-  "crashed": "failed",
-}
+_ACTIVE_STATES = {"queued", "preparing", "replacing", "verifying"}
 
 
 def _empty_status(
@@ -108,49 +83,59 @@ def _expected_upstream_sha() -> str | None:
     status = platform_update.platform_status()
   except Exception:
     return None
-  candidates = (
+  for raw in (
     status.get("contained_upstream_sha"),
     status.get("recorded_upstream_sha"),
     status.get("current_build_sha"),
-  )
-  for raw in candidates:
+  ):
     value = str(raw or "").strip().lower()
     if _SHA_RE.fullmatch(value):
       return value
   return None
 
 
+def _control_dir() -> Path:
+  return Path(get_settings().data_dir) / "mobius-rebuild"
+
+
+def _status_path() -> Path:
+  return _control_dir() / "status.json"
+
+
+def _inbox_dir() -> Path:
+  return _control_dir() / "inbox"
+
+
+def _configured() -> bool:
+  control = _control_dir()
+  inbox = _inbox_dir()
+  return (
+    control.is_dir()
+    and inbox.is_dir()
+    and os.access(inbox, os.W_OK | os.X_OK)
+    and _status_path().is_file()
+  )
+
+
 def _normalize_status(
-  raw: dict[str, Any],
-  *,
-  deployment: platform_activation.DeploymentKind,
-  default_supported: bool = True,
-  expected_sha: str | None = None,
+  raw: dict[str, Any], *, expected_sha: str | None = None,
 ) -> RebuildStatus:
-  raw_state = str(raw.get("state") or "idle").strip().lower()
-  state = _MANAGED_ACTIVE_ALIASES.get(raw_state, raw_state)
-  state = _MANAGED_TERMINAL_ALIASES.get(state, state)
+  state = str(raw.get("state") or "idle").strip().lower()
   if state not in _KNOWN_STATES:
     raise DeploymentControlError(
       "controller_invalid_response",
-      "The deployment controller returned an unknown rebuild state.",
+      "The host controller returned an unknown replacement state.",
     )
-  operation_id = str(
-    raw.get("operation_id") or raw.get("job_id") or ""
-  ).strip() or None
-  error = raw.get("error")
-  error_map = error if isinstance(error, dict) else {}
-  code = str(raw.get("code") or error_map.get("code") or "").strip() or None
-  message = str(
-    raw.get("message") or raw.get("detail") or error_map.get("message") or ""
-  ).strip() or None
+  operation_id = str(raw.get("operation_id") or "").strip() or None
+  code = str(raw.get("code") or "").strip() or None
+  message = str(raw.get("message") or "").strip() or None
   reported_sha = str(raw.get("expected_sha") or expected_sha or "").strip()
   if reported_sha and not _SHA_RE.fullmatch(reported_sha):
     reported_sha = ""
   updated_at = str(raw.get("updated_at") or "").strip() or None
   return RebuildStatus(
-    supported=bool(raw.get("supported", default_supported)),
-    deployment=deployment,
+    supported=True,
+    deployment="self_hosted",
     operation_id=operation_id,
     state=state,  # type: ignore[typeddict-item]
     expected_sha=reported_sha or None,
@@ -160,238 +145,148 @@ def _normalize_status(
   )
 
 
-def _self_host_connection_path() -> Path:
-  return Path(get_settings().data_dir) / "cli-auth" / "mobius-rebuild" / "connection.json"
-
-
-def _self_host_connection() -> dict[str, Any] | None:
-  path = _self_host_connection_path()
+def _read_host_status() -> dict[str, Any]:
   try:
-    value = json.loads(path.read_text(encoding="utf-8"))
-  except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
-    return None
-  if not isinstance(value, dict) or value.get("version") != 1:
-    return None
-  host = str(value.get("host") or "").strip()
-  user = str(value.get("user") or "").strip()
-  identity = Path(str(value.get("identity_file") or ""))
-  known_hosts = Path(str(value.get("known_hosts_file") or ""))
-  try:
-    port = int(value.get("port", 22))
-  except (TypeError, ValueError):
-    return None
-  if (
-    not _HOST_RE.fullmatch(host)
-    or not _USER_RE.fullmatch(user)
-    or not 1 <= port <= 65535
-    or not identity.is_file()
-    or not known_hosts.is_file()
-  ):
-    return None
-  return {
-    "host": host,
-    "user": user,
-    "port": port,
-    "identity_file": str(identity),
-    "known_hosts_file": str(known_hosts),
-  }
-
-
-async def _self_host_call(
-  operation: Literal["rebuild", "status"], expected_sha: str | None = None,
-) -> dict[str, Any]:
-  connection = _self_host_connection()
-  ssh = shutil.which("ssh")
-  if not connection or not ssh:
+    value = json.loads(_status_path().read_text(encoding="utf-8"))
+  except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError) as exc:
     raise DeploymentControlError(
-      "not_configured",
-      "Container rebuilding is not set up on this installation.",
-    )
-  args = [
-    ssh,
-    "-T",
-    "-o", "BatchMode=yes",
-    "-o", "IdentitiesOnly=yes",
-    "-o", "StrictHostKeyChecking=yes",
-    "-o", f"UserKnownHostsFile={connection['known_hosts_file']}",
-    "-o", "ConnectTimeout=5",
-    "-i", connection["identity_file"],
-    "-p", str(connection["port"]),
-    f"{connection['user']}@{connection['host']}",
-    operation,
-  ]
-  payload = b""
-  if operation == "rebuild":
-    if not expected_sha or not _SHA_RE.fullmatch(expected_sha):
-      raise DeploymentControlError(
-        "target_unavailable",
-        "Möbius cannot identify the upstream version to rebuild.",
-        status_code=409,
-      )
-    payload = json.dumps({
-      "version": 1,
-      "request_id": secrets.token_urlsafe(24),
-      "expected_sha": expected_sha,
-    }, separators=(",", ":")).encode("utf-8")
-  try:
-    process = await asyncio.create_subprocess_exec(
-      *args,
-      stdin=asyncio.subprocess.PIPE,
-      stdout=asyncio.subprocess.PIPE,
-      stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await asyncio.wait_for(
-      process.communicate(payload), timeout=15,
-    )
-  except TimeoutError as exc:
+      "controller_unavailable",
+      "The host replacement status is unavailable.",
+    ) from exc
+  if not isinstance(value, dict):
     raise DeploymentControlError(
-      "controller_timeout",
-      "The host accepted no timely rebuild response. Check status before retrying.",
-      status_code=504,
+      "controller_invalid_response",
+      "The host controller returned unreadable replacement status.",
+    )
+  request = _inbox_dir() / "request.json"
+  if str(value.get("state") or "idle") not in _ACTIVE_STATES and request.is_file():
+    try:
+      pending = json.loads(request.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+      pending = {}
+    expected = str(pending.get("expected_sha") or "") if isinstance(pending, dict) else ""
+    if _SHA_RE.fullmatch(expected):
+      return {
+        "state": "queued",
+        "expected_sha": expected,
+        "message": "Container replacement queued.",
+      }
+  return value
+
+
+def _write_request(expected_sha: str) -> None:
+  inbox = _inbox_dir()
+  request = inbox / "request.json"
+  if request.exists():
+    raise DeploymentControlError(
+      "already_running",
+      "A container replacement request is already queued.",
+      status_code=409,
+    )
+  temp = inbox / f".request-{secrets.token_hex(12)}.tmp"
+  payload = json.dumps(
+    {"version": 1, "expected_sha": expected_sha}, separators=(",", ":"),
+  )
+  try:
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+      handle.write(payload)
+      handle.flush()
+      os.fsync(handle.fileno())
+    os.replace(temp, request)
+  except FileExistsError as exc:
+    raise DeploymentControlError(
+      "already_running",
+      "A container replacement request is already queued.",
+      status_code=409,
     ) from exc
   except OSError as exc:
     raise DeploymentControlError(
       "controller_unavailable",
-      "The host rebuild helper is unavailable.",
+      "The host replacement request could not be queued.",
     ) from exc
-  if process.returncode != 0:
-    detail = stderr.decode("utf-8", errors="replace").strip()[:300]
+  finally:
+    temp.unlink(missing_ok=True)
+
+
+def replacement_ready_path(operation_id: str) -> Path:
+  """Validate the host's current cutover request and return its ready marker."""
+  if not _OPERATION_RE.fullmatch(operation_id):
     raise DeploymentControlError(
-      "controller_rejected",
-      detail or "The host rejected the rebuild request.",
+      "invalid_operation", "The replacement operation is invalid.",
       status_code=409,
     )
-  try:
-    value = json.loads(stdout.decode("utf-8"))
-  except (UnicodeError, json.JSONDecodeError) as exc:
+  status = _read_host_status()
+  if (
+    status.get("operation_id") != operation_id
+    or status.get("state") != "preparing"
+  ):
     raise DeploymentControlError(
-      "controller_invalid_response",
-      "The host rebuild helper returned an unreadable response.",
-    ) from exc
-  if not isinstance(value, dict):
-    raise DeploymentControlError(
-      "controller_invalid_response",
-      "The host rebuild helper returned an unreadable response.",
+      "operation_mismatch",
+      "The host is not waiting for this replacement operation.",
+      status_code=409,
     )
-  return value
-
-
-def _managed_urls() -> tuple[str, str, str] | None:
-  settings = get_settings()
-  if not settings.mobius_sso_enabled:
-    return None
-  base = settings.mobius_sso_issuer.rstrip("/")
-  instance = quote(settings.mobius_sso_instance_id, safe="")
-  collection = f"{base}/api/managed/instances/{instance}/container-rebuilds"
-  return collection, f"{collection}/current", settings.mobius_sso_client_secret
-
-
-async def _managed_call(
-  operation: Literal["rebuild", "status"], expected_sha: str | None = None,
-) -> dict[str, Any]:
-  urls = _managed_urls()
-  if not urls:
-    raise DeploymentControlError(
-      "not_configured",
-      "Managed container rebuilding is not configured for this instance.",
-    )
-  collection, current, secret = urls
-  headers = {
-    "Authorization": f"Bearer {secret}",
-    "Accept": "application/json",
-  }
-  if operation == "rebuild":
-    headers["Idempotency-Key"] = secrets.token_urlsafe(24)
-  try:
-    async with httpx.AsyncClient(
-      timeout=httpx.Timeout(12.0, connect=5.0), follow_redirects=False,
-    ) as client:
-      response = (
-        await client.post(
-          collection,
-          json={"expected_sha": expected_sha},
-          headers=headers,
-        )
-        if operation == "rebuild"
-        else await client.get(current, headers=headers)
-      )
-  except httpx.TimeoutException as exc:
-    raise DeploymentControlError(
-      "controller_timeout",
-      "Launch did not return a timely response. Check status before retrying.",
-      status_code=504,
-    ) from exc
-  except httpx.HTTPError as exc:
-    raise DeploymentControlError(
-      "controller_unavailable",
-      "Möbius Launch is temporarily unavailable.",
-    ) from exc
-  try:
-    value = response.json()
-  except ValueError:
-    value = {}
-  if response.status_code == 404 and operation == "status":
-    return {"supported": False, "state": "idle", "code": "not_configured",
-            "message": "Managed container rebuilding is not available yet."}
-  if response.status_code >= 400:
-    error = value if isinstance(value, dict) else {}
-    code = str(error.get("code") or "controller_rejected")
-    message = str(
-      error.get("message") or error.get("detail")
-      or "Launch rejected the rebuild request."
-    )
-    raise DeploymentControlError(
-      code, message, status_code=response.status_code,
-    )
-  if not isinstance(value, dict):
-    raise DeploymentControlError(
-      "controller_invalid_response",
-      "Möbius Launch returned an unreadable response.",
-    )
-  return value
+  return _inbox_dir() / f"ready-{operation_id}"
 
 
 async def read_rebuild_status() -> RebuildStatus:
   deployment = platform_activation.deployment_kind()
   if deployment == "railway":
-    if not _managed_urls():
-      return _empty_status(
-        deployment, supported=False, code="not_configured",
-        message="Managed container rebuilding is not available yet.",
-      )
-    raw = await _managed_call("status")
-  else:
-    if not _self_host_connection() or not shutil.which("ssh"):
-      return _empty_status(
-        deployment, supported=False, code="not_configured",
-        message="Container rebuilding is not set up on this installation.",
-      )
-    raw = await _self_host_call("status")
-  return _normalize_status(raw, deployment=deployment)
+    return _empty_status(
+      deployment,
+      supported=False,
+      code="not_supported",
+      message="Container replacement is not available on Railway yet.",
+    )
+  if not _configured():
+    return _empty_status(
+      deployment,
+      supported=False,
+      code="not_configured",
+      message="Container replacement is not set up on this installation.",
+    )
+  return _normalize_status(await asyncio.to_thread(_read_host_status))
 
 
 async def request_rebuild() -> RebuildStatus:
   deployment = platform_activation.deployment_kind()
+  if deployment == "railway":
+    raise DeploymentControlError(
+      "not_supported",
+      "Container replacement is not available on Railway yet.",
+      status_code=409,
+    )
+  if not _configured():
+    raise DeploymentControlError(
+      "not_configured",
+      "Container replacement is not set up on this installation.",
+      status_code=409,
+    )
   expected_sha = _expected_upstream_sha()
   if not expected_sha:
     raise DeploymentControlError(
       "target_unavailable",
-      "Möbius cannot identify the upstream version to rebuild.",
+      "Möbius cannot identify the official version to deploy.",
       status_code=409,
     )
-  raw = (
-    await _managed_call("rebuild", expected_sha)
-    if deployment == "railway"
-    else await _self_host_call("rebuild", expected_sha)
-  )
-  status = _normalize_status(
-    raw, deployment=deployment, expected_sha=expected_sha,
-  )
-  if status["state"] not in _ACTIVE_STATES | {
-    "succeeded", "no_change", "failed", "rolled_back", "needs_recovery",
-  }:
+  blockers = platform_update.container_replacement_blockers()
+  if blockers:
     raise DeploymentControlError(
-      "controller_invalid_response",
-      "The deployment controller did not acknowledge the rebuild.",
+      "local_runtime_changes",
+      "The official image does not contain local runtime changes. "
+      "Commit them upstream or remove them before replacing this container.",
+      status_code=409,
     )
-  return status
+  current = _normalize_status(await asyncio.to_thread(_read_host_status))
+  if current["state"] in _ACTIVE_STATES:
+    raise DeploymentControlError(
+      "already_running",
+      "A container replacement is already running.",
+      status_code=409,
+    )
+  await asyncio.to_thread(_write_request, expected_sha)
+  return _normalize_status({
+    "state": "queued",
+    "expected_sha": expected_sha,
+    "message": "Container replacement queued.",
+  }, expected_sha=expected_sha)

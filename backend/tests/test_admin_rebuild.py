@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app import deployment_control as dc
+from app.routes import admin as admin_routes
 
 
 def _status(**overrides):
@@ -23,6 +24,7 @@ def _status(**overrides):
 def test_rebuild_routes_require_owner(client):
   assert client.get("/api/admin/rebuild").status_code == 401
   assert client.post("/api/admin/rebuild").status_code == 401
+  assert client.post("/api/admin/rebuild/prepare").status_code == 401
 
 
 def test_rebuild_post_rejects_cross_site(client, auth):
@@ -80,3 +82,30 @@ def test_rebuild_error_preserves_stable_code(client, auth, monkeypatch):
     "code": "image_not_ready",
     "message": "The new container image is still publishing.",
   }
+
+
+def test_host_prepare_drains_only_the_matching_operation(
+  client, auth, tmp_path, monkeypatch,
+):
+  operation = "a" * 32
+  ready = tmp_path / "ready"
+  calls = []
+  monkeypatch.setattr(dc, "replacement_ready_path", lambda value: (
+    ready if value == operation else (_ for _ in ()).throw(
+      dc.DeploymentControlError("operation_mismatch", "wrong", status_code=409)
+    )
+  ))
+
+  async def drain(path=None):
+    calls.append(path)
+
+  monkeypatch.setattr(admin_routes, "restart_this_worker", drain)
+
+  response = client.post(
+    "/api/admin/rebuild/prepare",
+    json={"operation_id": operation},
+    headers=auth,
+  )
+
+  assert response.status_code == 202
+  assert calls == [ready]

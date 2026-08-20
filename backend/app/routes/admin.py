@@ -139,6 +139,10 @@ class ActivityEmit(BaseModel):
   model_config = {"extra": "allow"}
 
 
+class ContainerReplacementPrepare(BaseModel):
+  operation_id: str
+
+
 @router.post("/activity/emit", status_code=204)
 def emit_activity_event(
   body: ActivityEmit,
@@ -263,3 +267,32 @@ async def rebuild_container(
       status_code=exc.status_code,
       detail={"code": exc.code, "message": exc.message},
     ) from exc
+
+
+@router.post(
+  "/rebuild/prepare",
+  dependencies=[Depends(reject_cross_site)],
+  status_code=202,
+)
+def prepare_container_replacement(
+  body: ContainerReplacementPrepare,
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Drain active turns before the root-owned host job cuts over.
+
+  The host invokes this from inside the running app container with the existing
+  service token. The operation must already be the root-owned current status,
+  so an owner request cannot park chats without a matching host replacement.
+  """
+  try:
+    ready_path = deployment_control.replacement_ready_path(body.operation_id)
+  except deployment_control.DeploymentControlError as exc:
+    raise HTTPException(
+      status_code=exc.status_code,
+      detail={"code": exc.code, "message": exc.message},
+    ) from exc
+  return JSONResponse(
+    {"status": "draining"},
+    status_code=202,
+    background=BackgroundTask(restart_this_worker, ready_path),
+  )

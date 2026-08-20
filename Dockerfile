@@ -45,7 +45,7 @@ RUN useradd -m -s /bin/bash mobius
 ARG CLAUDE_CODE_VERSION=2.1.234
 ARG AGENT_BROWSER_VERSION=0.33.2
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    age ca-certificates cron curl git jq openssh-client procps ripgrep sqlite3 sudo unzip util-linux \
+    age ca-certificates cron curl git jq procps ripgrep sqlite3 sudo unzip util-linux \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
     libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
