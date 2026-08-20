@@ -160,7 +160,7 @@ Memory connects facts, decisions, preferences, and projects so useful context ca
   </tr>
 </table>
 
-Themes can reshape the full workspace. The website example asks for a dynamic Halloween theme, then shows Reflection identify the improvement and Memory keep the preference. Git history keeps the source change inspectable and recoverable.
+Themes can reshape the full workspace. The website example asks for a dynamic Halloween theme, then shows Reflection report faster repeated work, improved skills, fixed bugs, and cleared stale memories. The Memory graph grows as the agent inspects what it knows about the user. Git history keeps the source change inspectable and recoverable.
 
 ## Improve an open-source system
 
