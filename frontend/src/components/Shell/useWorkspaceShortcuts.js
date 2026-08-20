@@ -10,13 +10,27 @@ export function hasWorkspaceShortcutProvider(apps) {
   ))
 }
 
-function isApplePlatform(platform) {
+export function isApplePlatform(platform) {
   return /Mac|iPhone|iPad|iPod/i.test(String(platform || ''))
 }
 
+// Windows/Linux use Ctrl+Alt — never bare Ctrl, which the browser chrome
+// itself owns for T/W/Tab-switching (Ctrl+T, Ctrl+Tab, ...), so a page can
+// never intercept the unprefixed key. Mac uses Cmd+Option instead of the
+// naive Ctrl+Option port for two independent reasons: Control+Option is
+// macOS's own VoiceOver modifier (silently breaks for screen-reader users),
+// and Cmd+Option+Left/Right is Chrome's own native, equally uninterceptable
+// tab-switcher — using it here would move the browser's real tabs, not
+// Möbius's panes. Next/previous use bracket keys instead, mirroring the
+// pattern Chrome/Safari already use for tab-switching on Mac, just under the
+// free Cmd+Option prefix rather than the taken one.
 export function workspaceShortcutAction(event, platform = globalThis.navigator?.platform || '') {
-  if (!event || isApplePlatform(platform) || event.isComposing || event.repeat) return null
-  if (!event.ctrlKey || !event.altKey || event.metaKey) return null
+  if (!event || event.isComposing || event.repeat) return null
+  const apple = isApplePlatform(platform)
+  const modifiersMatch = apple
+    ? (event.metaKey && event.altKey && !event.ctrlKey)
+    : (event.ctrlKey && event.altKey && !event.metaKey)
+  if (!modifiersMatch) return null
   if (event.getModifierState?.('AltGraph')) return null
 
   const key = String(event.key || '')
@@ -24,8 +38,13 @@ export function workspaceShortcutAction(event, platform = globalThis.navigator?.
   if (lower === 't') return event.shiftKey ? 'restore' : 'open'
   if (lower === 'w' && !event.shiftKey) return 'close'
   if (event.shiftKey) return null
-  if (key === 'PageDown') return 'next'
-  if (key === 'PageUp') return 'previous'
+  if (apple) {
+    if (key === ']') return 'next'
+    if (key === '[') return 'previous'
+  } else {
+    if (key === 'PageDown') return 'next'
+    if (key === 'PageUp') return 'previous'
+  }
   if (/^[1-9]$/.test(key)) return `select:${key}`
   return null
 }

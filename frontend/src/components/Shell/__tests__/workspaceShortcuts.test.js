@@ -29,13 +29,28 @@ test('workspace shortcut provider is disabled while paused', () => {
   }]), true)
 })
 
-test('Windows shortcut mapping ignores AltGraph and unrelated modifiers', () => {
+test('Windows/Linux shortcut mapping ignores AltGraph and unrelated modifiers', () => {
   assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, key: 't' }, 'Win32'), 'open')
   assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, shiftKey: true, key: 'T' }, 'Win32'), 'restore')
   assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, key: 'PageDown' }, 'Win32'), 'next')
   assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, key: '9' }, 'Win32'), 'select:9')
   assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, key: 't', getModifierState: k => k === 'AltGraph' }, 'Win32'), null)
+  // A Cmd-modified event should never fire the Ctrl+Alt mapping.
+  assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, metaKey: true, key: 't' }, 'Win32'), null)
+})
+
+test('Mac shortcut mapping uses Cmd+Option, never the VoiceOver or native-Chrome combos', () => {
+  assert.equal(workspaceShortcutAction({ metaKey: true, altKey: true, key: 't' }, 'MacIntel'), 'open')
+  assert.equal(workspaceShortcutAction({ metaKey: true, altKey: true, shiftKey: true, key: 'T' }, 'MacIntel'), 'restore')
+  assert.equal(workspaceShortcutAction({ metaKey: true, altKey: true, key: ']' }, 'MacIntel'), 'next')
+  assert.equal(workspaceShortcutAction({ metaKey: true, altKey: true, key: '[' }, 'MacIntel'), 'previous')
+  assert.equal(workspaceShortcutAction({ metaKey: true, altKey: true, key: '9' }, 'MacIntel'), 'select:9')
+  // Ctrl+Alt (Ctrl+Option) is the VoiceOver modifier on Mac — must not fire.
   assert.equal(workspaceShortcutAction({ ctrlKey: true, altKey: true, key: 't' }, 'MacIntel'), null)
+  // Cmd+Option+Left/Right is Chrome's own native tab-switcher — must not fire
+  // (it would move real browser tabs, and the page never sees it anyway).
+  assert.equal(workspaceShortcutAction({ metaKey: true, altKey: true, key: 'ArrowRight' }, 'MacIntel'), null)
+  assert.equal(workspaceShortcutAction({ metaKey: true, altKey: true, key: 't', getModifierState: k => k === 'AltGraph' }, 'MacIntel'), null)
 })
 
 test('closed tab records restore into the current workspace without replacing siblings', () => {

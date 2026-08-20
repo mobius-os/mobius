@@ -111,14 +111,27 @@ function _editableShortcutTarget(target) {
     && !!target.closest('input, textarea, select, [contenteditable], [role="textbox"]')
 }
 
+function _workspaceApplePlatform() {
+  return /Mac|iPhone|iPad|iPod/i.test(String(globalThis.navigator?.platform || ''))
+}
+
+// Mirrors workspaceShortcutAction() in useWorkspaceShortcuts.js — see that
+// file's comment for why Mac uses Cmd+Option+[/] instead of a naive
+// Ctrl+Option+PageUp/PageDown port. Kept in sync by hand rather than shared
+// via import: this runtime ships standalone into the app iframe.
 function _workspaceShortcutCandidate(event) {
   if (!event?.isTrusted || event.isComposing || event.repeat) return false
-  if (!event.ctrlKey || !event.altKey || event.metaKey || event.getModifierState?.('AltGraph')) return false
+  const apple = _workspaceApplePlatform()
+  const modifiersMatch = apple
+    ? (event.metaKey && event.altKey && !event.ctrlKey)
+    : (event.ctrlKey && event.altKey && !event.metaKey)
+  if (!modifiersMatch || event.getModifierState?.('AltGraph')) return false
   const key = String(event.key || '')
   const lower = key.toLowerCase()
   if (lower === 't') return true
   if (lower === 'w') return !event.shiftKey
   if (event.shiftKey) return false
+  if (apple) return key === ']' || key === '[' || /^[1-9]$/.test(key)
   return key === 'PageDown' || key === 'PageUp' || /^[1-9]$/.test(key)
 }
 
