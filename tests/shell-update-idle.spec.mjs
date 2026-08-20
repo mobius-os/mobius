@@ -424,20 +424,20 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     // left waiting. That is generation identity: it landed on the new generation,
     // not back on the outgoing one.
     let swMarker = ''
-    // Serve /sw.js from a single cached fetch. updateViaCache:'none' plus the
-    // reg.update() calls below make the browser re-request it many times, and a
-    // live route.fetch() per hit is a real round-trip to the shared test backend
-    // the parallel workers already contend on — that contention, not any SW
-    // race, is what timed this case out. Served bytes are unchanged.
-    let swBase = null
+    // Read the built worker once outside request interception. The browser then
+    // receives those decoded bytes with transport-encoding headers removed;
+    // each update request is deterministic and cannot recursively depend on its
+    // own route handler.
+    const swResponse = await page.request.get(`${BASE}/sw.js`)
+    const swHeaders = swResponse.headers()
+    delete swHeaders['content-encoding']
+    delete swHeaders['content-length']
+    const swBase = {
+      status: swResponse.status(),
+      headers: swHeaders,
+      body: await swResponse.text(),
+    }
     await page.route('**/sw.js', async (route) => {
-      if (!swBase) {
-        const res = await route.fetch()
-        const headers = res.headers()
-        delete headers['content-encoding']
-        delete headers['content-length']
-        swBase = { status: res.status(), headers, body: await res.text() }
-      }
       // A STABLE byte-append once armed → the browser installs ONE genuinely new,
       // leashed worker; later re-fetches stay byte-identical so it does not
       // reinstall. The bundle is unchanged — the new WORKER's identity is the
@@ -550,7 +550,15 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
   test('a legacy cache-first worker bootstraps the current document through an ordinary reload', async ({ page }) => {
     test.slow()
     let serveCurrentWorker = false
-    let currentWorker = null
+    const workerResponse = await page.request.get(`${BASE}/sw.js`)
+    const workerHeaders = workerResponse.headers()
+    delete workerHeaders['content-encoding']
+    delete workerHeaders['content-length']
+    const currentWorker = {
+      status: workerResponse.status(),
+      headers: workerHeaders,
+      body: await workerResponse.text(),
+    }
 
     // Generation A models the exact historical failure: every navigation is
     // answered from one revisioned document entry. Generation B is the real
@@ -560,12 +568,8 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       const KEY = '/index.html?__WB_REVISION__=legacy'
       self.addEventListener('install', event => event.waitUntil((async () => {
         const cache = await caches.open('legacy-precache')
-        const response = await fetch('/index.html')
-        const html = (await response.text()).replace(
-          '</head>',
-          '<meta name="test-shell-generation" content="A"></head>',
-        )
-        await cache.put(KEY, new Response(html, {
+        await cache.put(KEY, new Response(
+          '<!doctype html><meta name="test-shell-generation" content="A">', {
           headers: { 'content-type': 'text/html' },
         }))
         await self.skipWaiting()
@@ -582,17 +586,6 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       if (!serveCurrentWorker) {
         await route.fulfill({ contentType: 'text/javascript', body: legacyWorker })
         return
-      }
-      if (!currentWorker) {
-        const response = await route.fetch()
-        const headers = response.headers()
-        delete headers['content-encoding']
-        delete headers['content-length']
-        currentWorker = {
-          status: response.status(),
-          headers,
-          body: await response.text(),
-        }
       }
       await route.fulfill(currentWorker)
     })
