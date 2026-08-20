@@ -18,7 +18,7 @@ from app.config import get_settings
 from app.timeutil import SOFT_DELETE_TTL, now_naive_utc
 
 
-def _purge_chat_storage(chat_id: str) -> None:
+def purge_chat_storage(chat_id: str) -> None:
   """Remove data derived from a chat after its recovery window has closed."""
   data_dir = Path(get_settings().data_dir)
   shutil.rmtree(data_dir / "chats" / chat_id, ignore_errors=True)
@@ -173,6 +173,6 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
   for chat_id in chat_ids:
     questions.cancel(chat_id)
     forget_chat(chat_id)
-    _purge_chat_storage(chat_id)
+    purge_chat_storage(chat_id)
 
   return chat_ids

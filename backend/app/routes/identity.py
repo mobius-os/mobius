@@ -14,7 +14,7 @@ import hmac
 import re
 import secrets
 from datetime import timedelta
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
@@ -122,6 +122,69 @@ def _identity_contract(payload: object) -> dict:
   ):
     raise HTTPException(502, "The Möbius account service returned an invalid deployment list.")
   return payload
+
+
+def _remote_avatar_url(payload: dict | None) -> str | None:
+  """Return one safe HTTPS avatar URL from the trusted account response.
+
+  Mini-app CSP intentionally disallows arbitrary external images. The bridge
+  fetches the account host's selected avatar server-side instead, so moving the
+  account service does not require weakening every app frame's browser policy.
+  """
+  profile = payload.get("profile") if isinstance(payload, dict) else None
+  value = profile.get("avatar_url") if isinstance(profile, dict) else None
+  if not isinstance(value, str) or len(value) > 2048:
+    return None
+  try:
+    parsed = urlparse(value)
+    port = parsed.port
+  except ValueError:
+    return None
+  if (
+    parsed.scheme != "https"
+    or not parsed.hostname
+    or parsed.username is not None
+    or parsed.password is not None
+    or port not in (None, 443)
+    or parsed.fragment
+  ):
+    return None
+  origin = f"https://{parsed.hostname}"
+  account_origins = {
+    str(get_settings().mobius_account_origin).rstrip("/"),
+    str(get_settings().mobius_sso_issuer).rstrip("/"),
+  }
+  google_avatar = parsed.hostname == "googleusercontent.com" or (
+    parsed.hostname.endswith(".googleusercontent.com")
+  )
+  if origin not in account_origins and not google_avatar:
+    return None
+  return value
+
+
+async def _avatar_bytes(url: str) -> tuple[bytes, str]:
+  try:
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
+      async with client.stream(
+        "GET", url, headers={"Accept": ", ".join(sorted(_AVATAR_TYPES))},
+      ) as response:
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+        if response.status_code != 200 or content_type not in _AVATAR_TYPES:
+          raise HTTPException(502, "The Möbius account avatar is unavailable.")
+        chunks: list[bytes] = []
+        size = 0
+        async for chunk in response.aiter_bytes():
+          size += len(chunk)
+          if size > _AVATAR_MAX_BYTES:
+            raise HTTPException(502, "The Möbius account avatar is too large.")
+          chunks.append(chunk)
+  except HTTPException:
+    raise
+  except httpx.HTTPError:
+    raise HTTPException(502, "The Möbius account avatar could not be reached.")
+  if not chunks:
+    raise HTTPException(502, "The Möbius account avatar is empty.")
+  return b"".join(chunks), content_type
 
 
 async def _managed_remote(method: str, suffix: str = "", **kwargs) -> dict:
@@ -323,6 +386,29 @@ async def update_avatar(
   if remote is None:
     raise HTTPException(409, "Sign in to edit your Möbius profile.")
   return _merge_local_deployment(remote)
+
+
+@router.get("/avatar")
+async def read_avatar(
+  owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
+  db: Session = Depends(get_db),
+):
+  if get_settings().mobius_sso_enabled:
+    remote = await _managed_remote("GET")
+  else:
+    remote = await _linked_remote(db, owner.id, "GET")
+  url = _remote_avatar_url(remote)
+  if url is None:
+    raise HTTPException(404, "This Möbius account has no profile picture.")
+  content, content_type = await _avatar_bytes(url)
+  return Response(
+    content=content,
+    media_type=content_type,
+    headers={
+      "Cache-Control": "private, max-age=300",
+      "X-Content-Type-Options": "nosniff",
+    },
+  )
 
 
 @router.post("/link/start")

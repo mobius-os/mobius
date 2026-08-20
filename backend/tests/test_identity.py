@@ -328,6 +328,99 @@ def test_linked_host_outage_preserves_local_deployment(client, auth, monkeypatch
   }]
 
 
+def test_linked_avatar_is_proxied_through_the_authenticated_bridge(
+  client, auth, monkeypatch,
+):
+  from app.routes.identity import _seal
+
+  granted = _app_auth(client, auth, granted=True)
+  with SessionLocal() as session:
+    owner = session.query(models.Owner).one()
+    session.add(models.IdentityAccountLink(
+      owner_id=owner.id,
+      access_token_encrypted=_seal("linked-token-" + "x" * 40),
+      scopes_json=["identity:read", "identity:write", "deployments:read"],
+    ))
+    session.commit()
+
+  class IdentityResponse:
+    status_code = 200
+
+    @staticmethod
+    def json():
+      return {
+        "profile": {
+          "user_id": "usr_123",
+          "email": "owner@example.com",
+          "display_name": "Owner",
+          "handle": "owner",
+          "avatar_url": "https://www.mobius.you/api/account/v1/avatars/key/256.webp",
+        },
+        "deployments": [],
+      }
+
+  class AvatarResponse:
+    status_code = 200
+    headers = {"content-type": "image/png"}
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *args):
+      return None
+
+    async def aiter_bytes(self):
+      yield b"safe-avatar-bytes"
+
+  class Client:
+    def __init__(self, *args, **kwargs):
+      assert kwargs.get("follow_redirects") is False
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *args):
+      return None
+
+    async def request(self, method, url, **kwargs):
+      assert method == "GET"
+      assert url.endswith("/api/account/v1/identity")
+      return IdentityResponse()
+
+    def stream(self, method, url, **kwargs):
+      assert method == "GET"
+      assert url == "https://www.mobius.you/api/account/v1/avatars/key/256.webp"
+      return AvatarResponse()
+
+  monkeypatch.setattr("app.routes.identity.httpx.AsyncClient", Client)
+  response = client.get("/api/identity/avatar", headers=granted)
+
+  assert response.status_code == 200
+  assert response.content == b"safe-avatar-bytes"
+  assert response.headers["content-type"] == "image/png"
+  assert response.headers["cache-control"] == "private, max-age=300"
+  assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_avatar_proxy_rejects_unsafe_remote_urls():
+  from app.routes.identity import _remote_avatar_url
+
+  assert _remote_avatar_url({
+    "profile": {"avatar_url": "https://www.mobius.you/avatar.webp"},
+  }) == "https://www.mobius.you/avatar.webp"
+  assert _remote_avatar_url({
+    "profile": {"avatar_url": "https://lh3.googleusercontent.com/avatar"},
+  }) == "https://lh3.googleusercontent.com/avatar"
+  for value in (
+    "http://images.example/avatar.webp",
+    "https://user:pass@images.example/avatar.webp",
+    "https://images.example:444/avatar.webp",
+    "https://images.example/avatar.webp#fragment",
+    "https://private.example/avatar.webp",
+  ):
+    assert _remote_avatar_url({"profile": {"avatar_url": value}}) is None
+
+
 def test_linked_profile_mutation_uses_the_authoritative_response_once(
   client, auth, monkeypatch,
 ):

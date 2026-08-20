@@ -1637,6 +1637,205 @@ def _add_app_hosted_publication(eng) -> None:
         conn.execute(text(f"ALTER TABLE apps DROP COLUMN {retired}"))
 
 
+def _repair_chat_retention_orphans(eng) -> None:
+  """Finish chat purges performed before workflow-aware retention existed.
+
+  Older releases could hard-delete a controller or child chat without removing
+  its Gauntlet/Delegation graph. They could also leave optional Autopilot links
+  and lifecycle rows pointing at already-purged chat/run rows. Current
+  ``chat_retention`` removes the whole graph in one transaction; this one-shot
+  repair gives databases upgraded from the older behavior that same terminal
+  state instead of carrying corrupt compatibility data forever.
+
+  The graph expansion is deliberately data-driven. A broken workflow may have
+  nested delegated children, or a task may be the only surviving edge between
+  an otherwise-valid run and an orphaned delegation. Once any control edge is
+  invalid, reclaim its entire workflow-owned branch just as the current hard
+  purge does. Ordinary chats are never inferred abandoned by age or content.
+  """
+  from sqlalchemy import bindparam, inspect as sa_inspect, text
+
+  tables = set(sa_inspect(eng).get_table_names())
+  if "chats" not in tables:
+    return
+
+  def _rows(conn, table: str, columns: str):
+    if table not in tables:
+      return []
+    return conn.execute(text(f"SELECT {columns} FROM {table}")).all()
+
+  def _delete_ids(conn, table: str, column: str, values: set[str]) -> None:
+    if table not in tables or not values:
+      return
+    ordered = sorted(values)
+    statement = text(
+      f"DELETE FROM {table} WHERE {column} IN :values"
+    ).bindparams(bindparam("values", expanding=True))
+    # Stay below conservative SQLite/PostgreSQL parameter limits on a database
+    # carrying many years of legacy workflow artifacts.
+    for offset in range(0, len(ordered), 500):
+      conn.execute(statement, {"values": ordered[offset:offset + 500]})
+
+  reclaimed_chat_ids: set[str] = set()
+  with eng.begin() as conn:
+    chat_ids = {str(row[0]) for row in _rows(conn, "chats", "id")}
+    delegations = {
+      str(row[0]): (str(row[1]), str(row[2]))
+      for row in _rows(
+        conn, "delegations", "id, parent_chat_id, child_chat_id",
+      )
+    }
+    gauntlets = {
+      str(row[0]): str(row[1])
+      for row in _rows(conn, "gauntlet_runs", "id, parent_chat_id")
+    }
+    tasks = [
+      (str(row[0]), str(row[1]), str(row[2]) if row[2] is not None else None)
+      for row in _rows(
+        conn, "gauntlet_tasks", "id, gauntlet_run_id, delegation_id",
+      )
+    ]
+
+    delete_delegations = {
+      delegation_id
+      for delegation_id, (parent_id, child_id) in delegations.items()
+      if parent_id not in chat_ids or child_id not in chat_ids
+    }
+    delete_gauntlets = {
+      gauntlet_id
+      for gauntlet_id, parent_id in gauntlets.items()
+      if parent_id not in chat_ids
+    }
+    delete_tasks = {
+      task_id
+      for task_id, gauntlet_id, delegation_id in tasks
+      if gauntlet_id not in gauntlets
+      or (delegation_id is not None and delegation_id not in delegations)
+    }
+    # A task whose other control parent already disappeared identifies the
+    # surviving side as part of that same incomplete workflow, not as a new
+    # standalone authority.
+    for task_id, gauntlet_id, delegation_id in tasks:
+      if task_id not in delete_tasks:
+        continue
+      if gauntlet_id in gauntlets:
+        delete_gauntlets.add(gauntlet_id)
+      if delegation_id in delegations:
+        delete_delegations.add(delegation_id)
+
+    while True:
+      before = (
+        len(reclaimed_chat_ids), len(delete_delegations),
+        len(delete_gauntlets), len(delete_tasks),
+      )
+      reclaimed_chat_ids.update(
+        child_id
+        for delegation_id, (_parent_id, child_id) in delegations.items()
+        if delegation_id in delete_delegations and child_id in chat_ids
+      )
+      delete_gauntlets.update(
+        gauntlet_id
+        for gauntlet_id, parent_id in gauntlets.items()
+        if parent_id in reclaimed_chat_ids
+      )
+      delete_delegations.update(
+        delegation_id
+        for delegation_id, (parent_id, child_id) in delegations.items()
+        if parent_id in reclaimed_chat_ids or child_id in reclaimed_chat_ids
+      )
+      for task_id, gauntlet_id, delegation_id in tasks:
+        if (
+          gauntlet_id in delete_gauntlets
+          or delegation_id in delete_delegations
+        ):
+          delete_tasks.add(task_id)
+          if gauntlet_id in gauntlets:
+            delete_gauntlets.add(gauntlet_id)
+          if delegation_id in delegations:
+            delete_delegations.add(delegation_id)
+      after = (
+        len(reclaimed_chat_ids), len(delete_delegations),
+        len(delete_gauntlets), len(delete_tasks),
+      )
+      if after == before:
+        break
+
+    if "contribution_autopilot" in tables:
+      # The follow-up chat is a convenience pointer, not the Autopilot record's
+      # identity. Preserve the ledger while clearing both old and newly-reclaimed
+      # targets.
+      conn.execute(text(
+        "UPDATE contribution_autopilot SET followup_chat_id = NULL "
+        "WHERE followup_chat_id IS NOT NULL AND NOT EXISTS ("
+        "SELECT 1 FROM chats c WHERE c.id = followup_chat_id)"
+      ))
+      if reclaimed_chat_ids:
+        statement = text(
+          "UPDATE contribution_autopilot SET followup_chat_id = NULL "
+          "WHERE followup_chat_id IN :values"
+        ).bindparams(bindparam("values", expanding=True))
+        ordered = sorted(reclaimed_chat_ids)
+        for offset in range(0, len(ordered), 500):
+          conn.execute(statement, {"values": ordered[offset:offset + 500]})
+
+    _delete_ids(conn, "gauntlet_tasks", "id", delete_tasks)
+    _delete_ids(conn, "gauntlet_runs", "id", delete_gauntlets)
+    _delete_ids(conn, "delegations", "id", delete_delegations)
+
+    if "agent_lifecycle_events" in tables:
+      conn.execute(text(
+        "DELETE FROM agent_lifecycle_events "
+        "WHERE NOT EXISTS ("
+        "SELECT 1 FROM chats c WHERE c.id = agent_lifecycle_events.chat_id"
+        ") OR (chat_run_id IS NOT NULL AND NOT EXISTS ("
+        "SELECT 1 FROM chat_runs r "
+        "WHERE r.id = agent_lifecycle_events.chat_run_id))"
+      ))
+
+    if reclaimed_chat_ids:
+      # Match the current hard-purge dependency order. Lifecycle events also
+      # bind ChatRun, so remove them before the run rows even if corrupt legacy
+      # data gave the event a mismatched chat_id.
+      if "agent_lifecycle_events" in tables and "chat_runs" in tables:
+        statement = text(
+          "DELETE FROM agent_lifecycle_events WHERE chat_id IN :values "
+          "OR chat_run_id IN (SELECT id FROM chat_runs "
+          "WHERE chat_id IN :values)"
+        ).bindparams(bindparam("values", expanding=True))
+        ordered = sorted(reclaimed_chat_ids)
+        for offset in range(0, len(ordered), 500):
+          conn.execute(statement, {"values": ordered[offset:offset + 500]})
+      for table in (
+        "chat_embed_grants",
+        "agent_lifecycle_run_updates",
+        "tool_outputs",
+        "thinking_traces",
+        "chat_session_links",
+        "chat_runs",
+        "chat_search_docs",
+        "chat_search_state",
+      ):
+        _delete_ids(conn, table, "chat_id", reclaimed_chat_ids)
+      _delete_ids(conn, "chats", "id", reclaimed_chat_ids)
+
+    if eng.dialect.name == "sqlite":
+      violations = conn.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+      if violations:
+        kinds = sorted({f"{row[0]}->{row[2]}" for row in violations})
+        raise RuntimeError(
+          "chat-retention repair left foreign-key violations: "
+          + ", ".join(kinds)
+        )
+
+  # The database commit is authoritative. Derived filesystem state follows the
+  # same best-effort rule as normal retention and never risks erasing a chat
+  # whose database transaction could still roll back.
+  if reclaimed_chat_ids:
+    from app.chat_retention import purge_chat_storage
+    for chat_id in sorted(reclaimed_chat_ids):
+      purge_chat_storage(chat_id)
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -1653,6 +1852,7 @@ _SCHEMA_MIGRATIONS = (
   ("0013_app_hosted_publication", _add_app_hosted_publication),
   ("0014_chat_run_goal_plan", _add_chat_run_goal_plan),
   ("0015_chat_run_goal_identity", _add_chat_run_goal_identity),
+  ("0016_chat_retention_orphan_repair", _repair_chat_retention_orphans),
 )
 
 

@@ -26,6 +26,12 @@ PREVIOUS_RELEASE_SCHEMA = (
 )
 
 
+def _migration_versions_before(target: str) -> list[str]:
+  """Select historical setup by identity, independent of future appends."""
+  versions = [version for version, _migration in migrations._SCHEMA_MIGRATIONS]
+  return versions[:versions.index(target)]
+
+
 def test_previous_release_database_upgrades_to_current_orm(tmp_path):
   """The real boot order must close every ORM gap on an existing install.
 
@@ -1057,8 +1063,136 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0013_app_hosted_publication",
     "0014_chat_run_goal_plan",
     "0015_chat_run_goal_identity",
+    "0016_chat_retention_orphan_repair",
   ]
   assert second == first
+
+
+def test_chat_retention_repair_reclaims_broken_workflow_graph(
+  tmp_path, monkeypatch,
+):
+  """0016 repairs old hard-purges and preserves unrelated durable state."""
+  data_dir = tmp_path / "data"
+  monkeypatch.setattr(get_settings(), "data_dir", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'retention-orphans.db'}")
+  models.Base.metadata.create_all(eng)
+
+  controller_id = "missing-controller"
+  child_id = "orphan-child"
+  nested_id = "orphan-nested"
+  survivor_id = "survivor"
+  source_dir = data_dir / "apps" / "repair"
+  source_dir.mkdir(parents=True)
+  app = models.App(
+    name="Repair", slug="repair", source_dir=str(source_dir),
+  )
+  controller = models.Chat(
+    id=controller_id, title="Controller", messages=[], provider="codex",
+  )
+  child = models.Chat(
+    id=child_id, title="Child", messages=[], provider="codex",
+  )
+  nested = models.Chat(
+    id=nested_id, title="Nested", messages=[], provider="codex",
+  )
+  survivor = models.Chat(
+    id=survivor_id, title="Survivor", messages=[], provider="codex",
+  )
+  missing_run = models.ChatRun(
+    id="missing-run", root_run_id="missing-run", chat_id=survivor_id,
+    status="completed", provider="codex",
+  )
+  valid_run = models.ChatRun(
+    id="valid-run", root_run_id="valid-run", chat_id=survivor_id,
+    status="completed", provider="codex",
+  )
+  with Session(eng) as session:
+    session.add_all((app, controller, child, nested, survivor))
+    session.flush()
+    session.add_all((
+      models.GauntletRun(
+        id="orphan-gauntlet", app_id=app.id,
+        parent_chat_id=controller.id, parent_root_run_id="controller-run",
+        target_path="/data/platform", contract_json={},
+        contract_sha256="a" * 64, provider="codex", status="stopped",
+        phase="terminal", current_round=1, max_rounds=1, revision=1,
+      ),
+      models.Delegation(
+        id="orphan-delegation", app_id=app.id,
+        parent_chat_id=controller.id, parent_root_run_id="controller-run",
+        task_key="critic", child_chat_id=child.id, provider="codex",
+        scope="read", cwd="/data/platform", prompt_sha256="b" * 64,
+      ),
+      models.Delegation(
+        id="nested-delegation", app_id=app.id,
+        parent_chat_id=child.id, parent_root_run_id="child-run",
+        task_key="nested", child_chat_id=nested.id, provider="codex",
+        scope="read", cwd="/data/platform", prompt_sha256="c" * 64,
+      ),
+      models.ContributionAutopilot(
+        app_id=app.id, record_id="dangling", followup_chat_id=controller.id,
+      ),
+      models.ContributionAutopilot(
+        app_id=app.id, record_id="valid", followup_chat_id=survivor.id,
+      ),
+      missing_run,
+      valid_run,
+    ))
+    session.flush()
+    session.add(models.GauntletTask(
+      id="orphan-task", gauntlet_run_id="orphan-gauntlet",
+      phase="baseline", round=0, ordinal=0, role="critic", scope="read",
+      delegation_id="orphan-delegation", prompt_sha256="d" * 64,
+    ))
+    for key, run_id in (("orphan-event", "missing-run"),
+                        ("valid-event", "valid-run")):
+      session.add(models.AgentLifecycleEvent(
+        event_key=key, chat_id=survivor.id, chat_run_id=run_id,
+        provider="codex", provider_agent_id=key, agent_id=key,
+        activation_id=f"activation-{key}", parent_kind="unknown",
+        event_type="agent_terminal", state="done", time_quality="observed",
+        source="runner",
+      ))
+    session.commit()
+
+  for chat_id in (child_id, nested_id, survivor_id):
+    path = data_dir / "chats" / chat_id
+    path.mkdir(parents=True)
+    (path / "marker").write_text("derived", encoding="utf-8")
+
+  # Reproduce the pre-retention-fix state: raw hard deletes bypassed the graph
+  # and lifecycle cleanup while SQLite foreign-key enforcement was absent.
+  with eng.begin() as conn:
+    conn.execute(text("DELETE FROM chats WHERE id = 'missing-controller'"))
+    conn.execute(text("DELETE FROM chat_runs WHERE id = 'missing-run'"))
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  with eng.connect() as conn:
+    assert conn.exec_driver_sql("PRAGMA foreign_key_check").fetchall() == []
+    assert conn.execute(text(
+      "SELECT followup_chat_id FROM contribution_autopilot "
+      "WHERE record_id = 'dangling'"
+    )).scalar_one() is None
+    assert conn.execute(text(
+      "SELECT followup_chat_id FROM contribution_autopilot "
+      "WHERE record_id = 'valid'"
+    )).scalar_one() == survivor_id
+    assert conn.execute(text(
+      "SELECT event_key FROM agent_lifecycle_events ORDER BY event_key"
+    )).scalars().all() == ["valid-event"]
+    for table in ("gauntlet_tasks", "gauntlet_runs", "delegations"):
+      assert conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar_one() == 0
+    assert conn.execute(text(
+      "SELECT id FROM chats ORDER BY id"
+    )).scalars().all() == [survivor_id]
+  assert not (data_dir / "chats" / child_id).exists()
+  assert not (data_dir / "chats" / nested_id).exists()
+  assert (data_dir / "chats" / survivor_id).exists()
+  assert "0016_chat_retention_orphan_repair" in {
+    row["version"] for row in schema_migration_history(eng)
+  }
 
 
 def test_pending_question_migration_backfills_only_active_latest_question(
@@ -1177,7 +1311,7 @@ def test_hosted_publication_reaches_a_fully_ledgered_private_app(tmp_path):
       "CREATE TABLE schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-3]:
+    for version in _migration_versions_before("0013_app_hosted_publication"):
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, '2026-08-15 00:00:00')"
@@ -1235,7 +1369,7 @@ def test_hosted_publication_migrates_the_unmerged_live_flag_to_a_snapshot(
       "CREATE TABLE schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-3]:
+    for version in _migration_versions_before("0013_app_hosted_publication"):
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, '2026-08-15 00:00:00')"
@@ -1674,7 +1808,7 @@ def test_goal_plan_migration_adds_snapshot_and_revision_to_existing_runs(
       "CREATE TABLE IF NOT EXISTS schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-2]:
+    for version in _migration_versions_before("0014_chat_run_goal_plan"):
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) "
         "VALUES (:version, :at)"
@@ -1721,7 +1855,7 @@ def test_goal_identity_migration_backfills_plan_and_recovery_runs(tmp_path):
       "CREATE TABLE IF NOT EXISTS schema_migrations ("
       "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
     ))
-    for version, _migration in migrations._SCHEMA_MIGRATIONS[:-1]:
+    for version in _migration_versions_before("0015_chat_run_goal_identity"):
       conn.execute(text(
         "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
       ), {"v": version, "at": datetime(2026, 8, 18)})

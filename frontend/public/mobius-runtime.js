@@ -3557,8 +3557,10 @@ function makeCapabilities({ declarations = {}, hostWindow, selfWindow } = {}) {
 		open,
 		async invoke(capability, input = {}, { signal } = {}) {
 			const session = open(capability, input);
-			if (signal) if (signal.aborted) session.cancel();
-			else signal.addEventListener("abort", () => session.cancel(), { once: true });
+			if (signal) {
+				if (signal.aborted) session.cancel();
+				else signal.addEventListener("abort", () => session.cancel(), { once: true });
+			}
 			return session.result;
 		},
 		_updateDeclarations(next) {
