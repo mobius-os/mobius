@@ -27,13 +27,13 @@ Möbius is a self-hosted workspace where apps, agents, memory, skills, files, an
 
 Agents can work with you in chat, inside apps, or through scheduled background work. Memory grows with useful context from the work. Reflection reviews repeated friction and prepares improvements that you can inspect and choose to keep.
 
-![Current Möbius Builder workspace with the drawer, chat, and Contribute visible in live panes](assets/product/app-building-showcase.png)
+![Möbius Builder with the drawer beside two chats, Atlas, and a live website render](assets/product/app-building-showcase.png)
 
-The [live app-building story](https://mobius.you/#build) re-renders the current shell as working web elements rather than playing a screenshot. Open Builder panes on the web, press the real + menu on mobile, add Habits to the home screen, and open the production app standalone.
+The [app-building story](https://mobius.you/#build) renders the current shell as web elements instead of playing a screenshot. It opens four Builder panes on the web. On mobile, it presses the real + menu, adds Habits beside Möbius, selects the exact icon, and opens the production app standalone.
 
 ## Start with the App Store
 
-The App Store includes everyday tools and the parts that help Möbius run itself. Browse apps for writing, planning, learning, health, creation, memory, connected tools, background work, and development. Its collections, summaries, state, and artwork come from the published apps. The [live App Store explorer](https://mobius.you/#apps) renders the current catalog as searchable, selectable interface elements.
+The App Store includes everyday tools and the parts that help Möbius run itself. Browse apps for writing, planning, learning, health, creation, memory, connected tools, background work, and development. Its collections, summaries, state, and artwork come from the published apps. The [App Store showcase](https://mobius.you/#apps) renders the current catalog inside the production Möbius shell.
 
 ![The current Möbius App Store with its Browse and From URL tabs, filters, collections, and vertical app cards](assets/product/app-store.png)
 
@@ -107,7 +107,9 @@ Open a chat and describe the outcome you want in your own words. For example:
 - “Add a weekly view and quicker task entry to my planner.”
 - “Run this check every morning and tell me when something changes.”
 
-Your agent can build or adapt the app, work with real files, use connected tools, and set up recurring work. The Skills app keeps the playbooks behind that work visible and searchable.
+Your agent can build or adapt the app, work with real files, use connected tools, and set up recurring work. Workflows, Skills, Tasks, and Subagents keep the instructions and delegated work visible. Maps, Artifacts, documents, and websites keep the outputs close to their source context.
+
+Apps can take different forms. Beat Machine runs as a focused mobile instrument. Voice downloads its model, keeps the text editable, and can run a voice agent from the same surface.
 
 ![Skills showing the playbooks available to Möbius agents](assets/product/skills.png)
 
@@ -115,7 +117,7 @@ No autonomous rewrite ships without a person in the loop. Agents can prepare cha
 
 ## Use the same workspace on phone and web
 
-Möbius runs as a progressive web app (PWA). On the web, hold the top-left Möbius mark or press Shift + Enter to open panes beside the conversation. On mobile, press + and describe the app you want. The agent says it will build a draft, opens a tab, and adds the surface, identity, and content in order. Different devices can build different apps; they do not have to be mirrored views of the same example.
+Möbius runs as a progressive web app (PWA). On the web, hold the top-left Möbius mark or press Shift + Enter to open panes beside the conversation. On mobile, press + to attach files or choose a model, then describe the app you want in the composer. The agent says it will build a draft, opens a tab, and adds the surface, identity, and content in order. Different devices can build different apps; they do not have to be mirrored views of the same example.
 
 <table>
   <tr>
@@ -124,15 +126,15 @@ Möbius runs as a progressive web app (PWA). On the web, hold the top-left Möbi
   </tr>
   <tr>
     <td><strong>Web:</strong> keep the App Store, Contribute, chats, and other working panes visible together.</td>
-    <td><strong>Mobile:</strong> press + for files, continuation, summary, and agent context.</td>
+    <td><strong>Mobile:</strong> press + for files, model, and effort selection.</td>
   </tr>
 </table>
 
-An installed app can also become its own home-screen entry. The [interactive mobile sequence](https://mobius.you/#build) shows Habits appearing on the home screen, a cursor opening its exact icon, and the production-compiled app running without Möbius chrome.
+An installed app can also become its own home-screen entry. The [mobile sequence](https://mobius.you/#build) shows Habits appearing beside Möbius, a cursor selecting the exact icon, and the production-compiled app running without Möbius chrome.
 
 <table>
   <tr>
-    <td width="33%"><img src="assets/product/mobile-habits-home.png" alt="Habits installed among the current Möbius app icons on a mobile home screen"></td>
+    <td width="33%"><img src="assets/product/mobile-habits-home.png" alt="Habits installed beside Möbius on a mobile home screen"></td>
     <td width="33%"><img src="assets/product/mobile-habits-opening.png" alt="A cursor pressing the Habits icon on the mobile home screen"></td>
     <td width="33%"><img src="assets/product/mobile-habits-standalone.png" alt="The current Habits app open standalone without Möbius chrome"></td>
   </tr>
@@ -158,15 +160,15 @@ Memory connects facts, decisions, preferences, and projects so useful context ca
   </tr>
 </table>
 
-Themes can still reshape the full workspace, while Git history keeps agent-made source changes inspectable and recoverable.
+Themes can reshape the full workspace. The website example asks for a dynamic Halloween theme, then shows Reflection identify the improvement and Memory keep the preference. Git history keeps the source change inspectable and recoverable.
 
 ## Improve an open-source system
 
 Möbius grows with the needs of the people using it. Anyone can build an app or platform change for their own work. When an idea helps beyond one person, Contribute gives it a path back to the community. Shared apps and platform improvements can raise the starting point for everyone.
 
-Contribute keeps that path inspectable. A private review agent can refresh a proposal before it is sent. A security audit can trace permission-bearing paths. GitHub checks and labels stay visible, and nothing is published automatically. Try the [live review and security-check controls](https://mobius.you/#agents).
+Contribute keeps that path inspectable. A private review agent can refresh a proposal before it is sent. A security audit can trace permission-bearing paths. GitHub checks and labels stay visible, and nothing is published automatically. Watch the [review and security-check sequence](https://mobius.you/#agents) run across open work.
 
-![The current Contribute app showing a security audit ready for approval and a published mobile-install improvement](assets/product/contribute-agent-review.png)
+![Contribute showing local changes, open pull requests, and review and security agents](assets/product/contribute-agent-review.png)
 
 <table>
   <tr>
