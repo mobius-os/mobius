@@ -136,6 +136,20 @@ function progressLabel(task) {
   return task?.title || ''
 }
 
+function deepestPlanTasks(tasks, candidates) {
+  const byId = new Map(tasks.map(task => [task.id, task]))
+  const candidateIds = new Set(candidates.map(task => task.id))
+  const shadowedAncestors = new Set()
+  for (const task of candidates) {
+    let parent = byId.get(task.parent_id)
+    while (parent) {
+      if (candidateIds.has(parent.id)) shadowedAncestors.add(parent.id)
+      parent = byId.get(parent.parent_id)
+    }
+  }
+  return candidates.filter(task => !shadowedAncestors.has(task.id))
+}
+
 /** Active work first; when nothing is running, expose every newly ready task. */
 export function visibleGoalTasks(goalPlan) {
   const activeStatuses = new Set(['starting', 'running', 'resuming', 'paused'])
@@ -157,8 +171,8 @@ export function visibleGoalTasks(goalPlan) {
   if (delegatedLeaves.length) return delegatedLeaves
   const tasks = Array.isArray(goalPlan?.tasks) ? goalPlan.tasks : []
   const running = tasks.filter(task => task?.status === 'running')
-  if (running.length) return running
-  return tasks.filter(task => task?.ready === true)
+  if (running.length) return deepestPlanTasks(tasks, running)
+  return deepestPlanTasks(tasks, tasks.filter(task => task?.ready === true))
 }
 
 export function progressRailViewModel(goalObjective, buildPhases, goalPlan = null) {
@@ -172,11 +186,12 @@ export function progressRailViewModel(goalObjective, buildPhases, goalPlan = nul
     items.push({
       key: 'goal',
       label: planned
-        ? [`Goal · ${completed} of ${total}`, ...activeLabels].join(' · ')
+        ? `Goal · ${completed}/${total}${
+          activeLabels.length ? ` · ${activeLabels.join(' + ')}` : ''
+        }`
         : `Goal · ${goalObjective}`,
       expandable: true,
       ...(goalPlan ? {
-        hasDetails: true,
         title: `Goal: ${goalObjective}`,
         ariaLabel: `Goal for ${goalObjective}; ${completed} of ${total} complete`,
       } : {}),

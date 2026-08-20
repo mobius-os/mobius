@@ -3275,22 +3275,31 @@
 
 .chat__progress-step--button {
   appearance: none;
-  padding: 0;
+  flex: 1 0 100%;
+  width: 100%;
+  margin: -3px -4px;
+  padding: 3px 4px;
   border: 0;
+  border-radius: 7px;
   background: transparent;
   font: inherit;
   text-align: left;
+  justify-content: space-between;
   -webkit-tap-highlight-color: transparent;
+  transition: background 0.15s ease;
 }
 
 .chat__progress-step--toggle {
   cursor: pointer;
 }
 
+.chat__progress-step--button:hover {
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+}
+
 .chat__progress-step--toggle:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 3px;
-  border-radius: 3px;
+  outline-offset: 2px;
 }
 
 .chat__progress-step--expanded {

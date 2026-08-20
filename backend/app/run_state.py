@@ -16,35 +16,6 @@ from sqlalchemy.orm import Session
 from app import models
 
 
-def goal_objective_for_run_start(
-  db: Session,
-  chat_id: str,
-  message: Mapping[str, Any] | None,
-) -> str | None:
-  """Resolve the goal metadata for a newly opened durable run.
-
-  Explicit ``/goal`` commands start a new objective. A real continuation may
-  inherit only from the immediately preceding unfinished/interrupted run; an
-  ordinary turn after a completed goal therefore cannot revive stale UI state.
-  """
-  from app.chat_context import _goal_objective
-  from app.continuations import is_continuation_message
-
-  content = message.get("content") if message is not None else ""
-  objective = _goal_objective(content if isinstance(content, str) else "")
-  if objective is not None:
-    return objective
-  if not is_continuation_message(message):
-    return None
-  previous = latest_run(db, chat_id)
-  if previous is None or previous.status not in (
-    *models.NONTERMINAL_RUN_STATUSES,
-    "interrupted",
-  ):
-    return None
-  return previous.goal_objective
-
-
 def goal_identity_for_run_start(
   db: Session,
   chat_id: str,

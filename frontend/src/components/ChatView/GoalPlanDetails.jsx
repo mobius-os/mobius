@@ -43,6 +43,27 @@ function delegationTitle(node) {
     .replace(/^./, letter => letter.toUpperCase())
 }
 
+function GoalPlanRow({ title, status, meta, depth, emphasized, children }) {
+  const hasChildren = Array.isArray(children) ? children.length > 0 : !!children
+  return (
+    <div className="chat__goal-branch" role="listitem">
+      <div
+        style={{ paddingLeft: `${4 + Math.min(depth, 6) * 18}px` }}
+        className={`chat__goal-task chat__goal-task--${status}${
+          emphasized ? ` chat__goal-task--${emphasized}` : ''
+        }`}
+      >
+        <span className="chat__goal-task-marker" aria-hidden="true" />
+        <span className="chat__goal-task-copy">
+          <span className="chat__goal-task-title">{title}</span>
+          <span className="chat__goal-task-meta">{meta}</span>
+        </span>
+      </div>
+      {hasChildren && <div className="chat__goal-children" role="list">{children}</div>}
+    </div>
+  )
+}
+
 export default function GoalPlanDetails({ plan }) {
   const tasks = Array.isArray(plan?.tasks) ? plan.tasks : []
   if (!tasks.length) return null
@@ -61,51 +82,39 @@ export default function GoalPlanDetails({ plan }) {
   ) => {
     const planChildren = childrenByParent.get(task.id) || []
     const executionChildren = execution?.children || []
-    return <div key={task.id} className="chat__goal-branch" role="none">
-      <div
-        role="listitem"
-        style={{ paddingLeft: `${4 + Math.min(depth, 6) * 18}px` }}
-        className={`chat__goal-task chat__goal-task--${task.status}${
-          task.ready ? ' chat__goal-task--ready' : ''
-        }${task.ready_to_verify ? ' chat__goal-task--verify' : ''}`}
-      >
-        <span className="chat__goal-task-marker" aria-hidden="true" />
-        <span className="chat__goal-task-copy">
-          <span className="chat__goal-task-title">{task.title}</span>
-          <span className="chat__goal-task-meta">
-            {task.ready_to_verify
-              ? 'Ready to verify'
-              : execution
-                ? delegationMeta(execution)
-                : taskMeta(task, tasksById)}
-          </span>
-        </span>
-      </div>
-      {planChildren.map(child => renderBranch(
+    const children = planChildren.map(child => renderBranch(
         child,
         depth + 1,
         executionChildren.find(node => node.task_key === child.id),
-      ))}
-      {executionChildren
+      ))
+    children.push(...executionChildren
         .filter(node => !planChildren.some(child => child.id === node.task_key))
-        .map(node => renderDelegation(node, depth + 1))}
-    </div>
+        .map(node => renderDelegation(node, depth + 1)))
+    return <GoalPlanRow
+      key={task.id}
+      title={task.title}
+      status={task.status}
+      depth={depth}
+      emphasized={task.ready_to_verify ? 'verify' : task.ready ? 'ready' : ''}
+      meta={task.ready_to_verify
+        ? 'Ready to verify'
+        : execution
+          ? delegationMeta(execution)
+          : taskMeta(task, tasksById)}
+    >
+      {children}
+    </GoalPlanRow>
   }
   const renderDelegation = (node, depth = 0) => (
-    <div key={node.id} className="chat__goal-branch" role="none">
-      <div
-        role="listitem"
-        style={{ paddingLeft: `${4 + Math.min(depth, 6) * 18}px` }}
-        className={`chat__goal-task chat__goal-task--${node.status}`}
-      >
-        <span className="chat__goal-task-marker" aria-hidden="true" />
-        <span className="chat__goal-task-copy">
-          <span className="chat__goal-task-title">{delegationTitle(node)}</span>
-          <span className="chat__goal-task-meta">{delegationMeta(node)}</span>
-        </span>
-      </div>
+    <GoalPlanRow
+      key={node.id}
+      title={delegationTitle(node)}
+      status={node.status}
+      depth={depth}
+      meta={delegationMeta(node)}
+    >
       {(node.children || []).map(child => renderDelegation(child, depth + 1))}
-    </div>
+    </GoalPlanRow>
   )
   return (
     <div className="chat__goal-plan" role="list" aria-label="Full goal todo list">

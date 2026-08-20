@@ -205,9 +205,8 @@ test('a planned goal shows every running branch and dependency progress', () => 
   assert.deepEqual(progressRailViewModel('Ship it', [], plan), [
     {
       key: 'goal',
-      label: 'Goal · 1 of 4 · Run A · 2/3 · Run B',
+      label: 'Goal · 1/4 · Run A · 2/3 + Run B',
       expandable: true,
-      hasDetails: true,
       title: 'Goal: Ship it',
       ariaLabel: 'Goal for Ship it; 1 of 4 complete',
       current: true,
@@ -243,6 +242,21 @@ test('the deepest live delegated owners replace their parent in the collapsed la
   assert.deepEqual(
     visibleGoalTasks(plan).map(task => task.title),
     ['X', 'Y'],
+  )
+})
+
+test('the deepest running plan nodes replace coordinating parents', () => {
+  const plan = {
+    tasks: [
+      { id: 'root', title: 'Coordinate', status: 'running' },
+      { id: 'branch', parent_id: 'root', title: 'Inspect branch', status: 'running' },
+      { id: 'leaf', parent_id: 'branch', title: 'Verify leaf', status: 'running' },
+      { id: 'parallel', parent_id: 'root', title: 'Check parallel path', status: 'running' },
+    ],
+  }
+  assert.deepEqual(
+    visibleGoalTasks(plan).map(task => task.id),
+    ['leaf', 'parallel'],
   )
 })
 
@@ -329,7 +343,8 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
   assert.match(progressRail, /aria-expanded=\{expanded\}/)
   assert.doesNotMatch(progressRail, /chat__progress-step-action/)
   assert.doesNotMatch(progressRail, /expandedActionLabel/)
-  assert.match(progressRail, /label\.scrollWidth > step\.clientWidth/)
+  assert.doesNotMatch(progressRail, /ResizeObserver|scrollWidth|clientWidth/)
+  assert.match(progressRail, /aria-label=\{`\$\{expanded \? 'Collapse' : 'Expand'\}/)
   assert.match(
     chatCss,
     /\.chat__foot \.chat__progress-step--toggle[\s\S]*?\{ pointer-events: auto; \}/,
