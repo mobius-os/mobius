@@ -598,6 +598,8 @@ export const api = {
   },
   admin: {
     restart: () => apiFetch('/admin/restart', { method: 'POST' }),
+    rebuildStatus: () => apiFetch('/admin/rebuild'),
+    rebuild: () => apiFetch('/admin/rebuild', { method: 'POST' }),
   },
   platform: {
     status: () => apiFetch('/platform/status'),

@@ -22,6 +22,7 @@ import logging
 import os
 import signal
 import threading
+from pathlib import Path
 
 log = logging.getLogger("mobius.restart")
 
@@ -32,7 +33,7 @@ log = logging.getLogger("mobius.restart")
 _FORCE_KILL_AFTER_SECONDS = 5.0
 
 
-async def restart_this_worker() -> None:
+async def restart_this_worker(ready_path: Path | None = None) -> None:
   """Drain live turns, then restart this uvicorn worker with the current code.
 
   Runs as an async BackgroundTask (after the response is flushed), so the drain
@@ -131,6 +132,8 @@ async def restart_this_worker() -> None:
       nonce=restart_nonce,
       runs=restart_runs,
     )
+    if ready_path is not None:
+      ready_path.write_text("ready\n", encoding="utf-8")
   except Exception:
     # Restart reliability and continuation authorization are independent.
     # If the external handshake cannot be published, restart directly; the
