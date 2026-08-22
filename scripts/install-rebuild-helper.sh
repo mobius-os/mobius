@@ -72,7 +72,8 @@ APP_GID=$(docker exec "$CID" id -g mobius)
 
 # Resolve and compare the exact network set before any host state is written.
 RUNNING_NETWORKS=$(docker inspect "$CID" --format \
-  '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' | sort)
+  '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' \
+  | sed '/^$/d' | sort)
 RESOLVED=$(mktemp)
 trap 'rm -f "$RESOLVED"' EXIT
 docker compose "${ARGS[@]}" config --format json >"$RESOLVED"
