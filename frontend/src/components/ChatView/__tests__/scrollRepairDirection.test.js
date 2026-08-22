@@ -122,7 +122,7 @@ test('transition entry authority prevents layout and reader paths creating pins'
   assert.equal(modeForScrollTransition(hold, pin, 'send:pin-user-message'), pin)
 })
 
-test('question viewport release restores only its captured base authority', () => {
+test('question viewport and response-start releases restore only captured authority', () => {
   const follow = { kind: 'FOLLOW_BOTTOM' }
   const pin = { kind: 'PIN_USER_MSG', cid: 'c-2', followWhenFilled: true }
   const followOverlay = {
@@ -152,6 +152,16 @@ test('question viewport release restores only its captured base authority', () =
     { kind: 'FOLLOW_BOTTOM' },
     'layout:question-viewport-release',
   ), followOverlay, 'an equivalent-looking mode is not the overlay\'s authority')
+  assert.equal(modeForScrollTransition(
+    followOverlay,
+    follow,
+    'stream:question-response-follow',
+  ), follow, 'first post-answer activity may restore its exact prior follow mode')
+  assert.equal(modeForScrollTransition(
+    pinOverlay,
+    pin,
+    'stream:question-response-follow',
+  ), pinOverlay, 'response start cannot invent a non-follow release')
 })
 
 test('only explicit tail intent or an armed pin handoff can enter follow', () => {

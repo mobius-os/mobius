@@ -24,6 +24,7 @@ import {
   modeForForegroundReturn,
   modeForQuestionSubmission,
   modeForQueuedSubmission,
+  modeAfterQuestionResponseStart,
   modeAfterReaderGesture,
   modeAfterSpacerResize,
   modeAfterTerminalLayout,

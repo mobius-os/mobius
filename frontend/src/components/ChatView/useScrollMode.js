@@ -1033,8 +1033,11 @@ const FOLLOW_ENTRY_EVENTS = new Set([
  */
 export function modeForScrollTransition(previousMode, proposedMode, event) {
   if (!proposedMode) return previousMode
-  const restoresQuestionSubmissionBase =
+  const restoresQuestionSubmissionBase = (
     event === 'layout:question-viewport-release'
+      || (event === 'stream:question-response-follow'
+        && proposedMode?.kind === 'FOLLOW_BOTTOM')
+  )
     && previousMode?.kind === 'ANCHOR_AT'
     && Number.isFinite(previousMode.questionSubmitViewportH)
     && previousMode.questionSubmitBaseMode === proposedMode
@@ -1320,6 +1323,26 @@ export function modeForQuestionSubmission(scrollEl, currentMode) {
     questionSubmitBaseMode:
       currentMode?.questionSubmitBaseMode || currentMode,
   }
+}
+
+
+/** Restore live following when the first post-answer activity starts only
+ * when the submitted card was itself being followed and no newer reader
+ * scroll or semantic location has replaced that temporary hold. Acceptance
+ * alone leaves the card anchored: it is not yet a visible continuation. */
+export function modeAfterQuestionResponseStart({
+  currentMode,
+  submission,
+  currentReaderIntentVersion,
+}) {
+  const submittedMode = submission?.mode
+  const baseMode = submittedMode?.questionSubmitBaseMode
+  if (baseMode?.kind !== 'FOLLOW_BOTTOM'
+      || submission?.readerIntentVersion !== currentReaderIntentVersion) {
+    return currentMode
+  }
+  if (currentMode === baseMode) return currentMode
+  return currentMode === submittedMode ? baseMode : currentMode
 }
 
 
@@ -1820,6 +1843,28 @@ export default function useScrollMode({
       'send:question-freeze',
     )
   }, [scrollRef, supersedePendingReaderGesture, transitionMode])
+
+  const resumeQuestionSubmissionOnResponse = useCallback((submission) => {
+    const nextMode = modeAfterQuestionResponseStart({
+      currentMode: modeRef.current,
+      submission,
+      currentReaderIntentVersion: readerIntentVersionRef.current,
+    })
+    if (nextMode === modeRef.current) return modeRef.current
+    const mode = transitionMode(nextMode, 'stream:question-response-follow')
+    const scrollEl = scrollRef.current
+    if (mode === nextMode && scrollEl) {
+      writeMode(
+        scrollEl,
+        mode,
+        'stream:question-response-follow',
+        submission.readerIntentVersion,
+      )
+      lastAppliedModeRef.current = mode
+      persistMode()
+    }
+    return mode
+  }, [persistMode, scrollRef, transitionMode, writeMode])
 
   const anchorPagination = useCallback((key, offset) => {
     if (!key) return modeRef.current
@@ -3121,6 +3166,7 @@ export default function useScrollMode({
     freezeForegroundReturn,
     freezeQuestionSubmission,
     freezeQueuedSubmission,
+    resumeQuestionSubmissionOnResponse,
     revealConversationTail,
     revealAnchor,
     reapplyActiveMode,

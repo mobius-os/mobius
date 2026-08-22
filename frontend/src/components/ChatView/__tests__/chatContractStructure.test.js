@@ -28,21 +28,31 @@ test('ChatView only consumes methods returned by the scroll controller', () => {
     `ChatView consumes missing useScrollMode members: ${missing.join(', ')}`)
 })
 
-test('owner contract freezes question answers without locking keyboard movement', () => {
+test('owner contract hands question anchors to visible responses without locking keyboard movement', () => {
   const architecture = readFileSync(
     new URL('../../../../../ARCHITECTURE.md', import.meta.url),
     'utf8',
   )
-  assert.match(architecture, /Owner-authoritative contract — v1\.20 \(2026-08-15\)/)
+  assert.match(architecture, /Owner-authoritative contract — v1\.21 \(2026-08-20\)/)
   assert.match(
     architecture,
-    /In-process question is answered \| any \| transient `ANCHOR_AT` over the prior mode; same active assistant row/,
+    /In-message question Submit begins \| any \| transient `ANCHOR_AT` over the prior mode/,
     'question submission must freeze the reader while preserving the R6 row',
   )
   assert.match(
     architecture,
     /question-submit hold is the sole calculation exception: it may reserve only the\s+exact tail deficit required for a stable card handoff while the viewport size is\s+unchanged/,
     'question submission may reserve only its same-viewport reachability deficit',
+  )
+  assert.match(
+    architecture,
+    /Same running turn accepts a question answer \| transient question anchor over any prior mode \| same transient anchor; same active assistant row/,
+    'answer acceptance alone must preserve the submission anchor',
+  )
+  assert.match(
+    architecture,
+    /First renderable activity after an accepted same-turn answer \| transient question anchor over prior follow, with no newer reader scroll\/location \| prior `FOLLOW_BOTTOM`; same active assistant row/,
+    'visible response activity must restore only the prior live-tail follow',
   )
   assert.match(
     architecture,
