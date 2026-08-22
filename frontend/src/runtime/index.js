@@ -102,6 +102,46 @@ export * from './immersive.js'
 // ─────────────────────────────────────────────────────────────────────────────
 let _online = typeof navigator !== 'undefined' ? navigator.onLine : true
 const _onlineListeners = new Set()
+let _workspaceShortcutsEnabled = false
+
+function _editableShortcutTarget(target) {
+  if (!target || typeof target !== 'object') return false
+  if (target.isContentEditable) return true
+  return typeof target.closest === 'function'
+    && !!target.closest('input, textarea, select, [contenteditable], [role="textbox"]')
+}
+
+function _workspaceApplePlatform() {
+  return /Mac|iPhone|iPad|iPod/i.test(String(globalThis.navigator?.platform || ''))
+}
+
+function _workspaceLinuxPlatform() {
+  return /Linux/i.test(String(globalThis.navigator?.platform || ''))
+}
+
+// Mirrors workspaceShortcutAction() in useWorkspaceShortcuts.js — see that
+// file's comments for why Mac uses Cmd+Option+[/] instead of a naive
+// Ctrl+Option+PageUp/PageDown port, and why Linux opens a new tab with N
+// instead of T (Ctrl+Alt+T is the desktop's own terminal shortcut on GNOME
+// and KDE). Kept in sync by hand rather than shared via import: this runtime
+// ships standalone into the app iframe.
+function _workspaceShortcutCandidate(event) {
+  if (!event?.isTrusted || event.isComposing || event.repeat) return false
+  const apple = _workspaceApplePlatform()
+  const linux = !apple && _workspaceLinuxPlatform()
+  const modifiersMatch = apple
+    ? (event.metaKey && event.altKey && !event.ctrlKey)
+    : (event.ctrlKey && event.altKey && !event.metaKey)
+  if (!modifiersMatch || event.getModifierState?.('AltGraph')) return false
+  const key = String(event.key || '')
+  const lower = key.toLowerCase()
+  if (lower === 't') return true
+  if (linux && lower === 'n') return !event.shiftKey
+  if (lower === 'w') return !event.shiftKey
+  if (event.shiftKey) return false
+  if (apple) return key === ']' || key === '[' || /^[1-9]$/.test(key)
+  return key === 'PageDown' || key === 'PageUp' || /^[1-9]$/.test(key)
+}
 
 function _setOnline(next) {
   if (next === _online) return
@@ -114,16 +154,39 @@ function _setOnline(next) {
 // Listen for the probed verdict from AppCanvas.
 if (typeof window !== 'undefined') {
   window.addEventListener('message', (e) => {
-    if (e.origin !== window.location.origin) return
+    // The default mount is a sandboxed opaque-origin frame (see the module
+    // doc above), so window.location.origin here is the literal string
+    // "null" and can never equal the shell's real origin — an origin-string
+    // check silently drops every trusted message from the parent, including
+    // the online-status seed and (newly, loudly) the workspace-shortcuts
+    // enable signal. Verify sender identity instead, matching the pattern
+    // immersive.js and navigation.js already use for the same opaque frame.
+    if (e.source !== window.parent) return
     const msg = e.data
     if (!msg || typeof msg !== 'object') return
     if (msg.type === 'moebius:online-status' && typeof msg.online === 'boolean') {
       _setOnline(msg.online)
+    } else if (msg.type === 'moebius:workspace-shortcuts-status') {
+      _workspaceShortcutsEnabled = msg.enabled === true
     }
   })
   // Keep the seed roughly current before AppCanvas's first probed verdict.
   window.addEventListener('online', () => _setOnline(true))
   window.addEventListener('offline', () => _setOnline(false))
+  window.addEventListener('keydown', event => {
+    if (!_workspaceShortcutsEnabled || _editableShortcutTarget(event.target)) return
+    if (!_workspaceShortcutCandidate(event)) return
+    event.preventDefault()
+    window.parent.postMessage({
+      type: 'moebius:workspace-shortcut',
+      key: event.key,
+      ctrlKey: event.ctrlKey,
+      altKey: event.altKey,
+      shiftKey: event.shiftKey,
+      metaKey: event.metaKey,
+      editable: false,
+    }, '*')
+  }, true)
 }
 // ─────────────────────────────────────────────────────────────────────────────
 

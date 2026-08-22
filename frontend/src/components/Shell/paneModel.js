@@ -900,6 +900,38 @@ export function closeTab(ws, tabKey) {
   })
 }
 
+// Capture only the source material needed to reopen a user-closed tab. The
+// session owner keeps this small record outside the persisted workspace so an
+// uninstall/delete can never resurrect a missing resource after relaunch.
+export function closedTabRecord(ws, tabKey) {
+  const pane = paneOf(ws, tabKey)
+  if (!pane) return null
+  const index = pane.tabs.findIndex(tab => tabModel.tabKey(tab) === tabKey)
+  if (index < 0) return null
+  return { tab: pane.tabs[index], tabKey, paneId: pane.id, index }
+}
+
+export function restoreClosedTab(ws, record) {
+  const clean = sanitizeTab(record?.tab)
+  if (!clean) return ws
+  const key = tabModel.tabKey(clean)
+  if (paneOf(ws, key)) return ws
+  const paneId = ws.panes[record.paneId]
+    ? record.paneId
+    : (ws.panes[ws.focusedPaneId] ? ws.focusedPaneId : paneIdsInOrder(ws)[0])
+  const pane = ws.panes[paneId]
+  if (!pane) return ws
+  const index = Math.max(0, Math.min(Number(record.index) || 0, pane.tabs.length))
+  const tabs = [...pane.tabs]
+  tabs.splice(index, 0, clean)
+  return commit(ws, {
+    ...ws,
+    viewMode: record.restoreViewMode ? 'panes' : ws.viewMode,
+    panes: { ...ws.panes, [paneId]: { ...pane, tabs, activeTabKey: key } },
+    focusedPaneId: paneId,
+  })
+}
+
 // Close a whole pane: drop every tab it holds, then normalize (the emptied pane
 // collapses and its space returns to the surviving sibling, focus follows). The
 // keyboard/menu "Close pane" affordance (design §3.6) so a multi-tab pane need
@@ -1718,6 +1750,10 @@ export function workspaceReducer(state, action) {
       const closeLabel = action.label || 'Closed tab'
       const { ws: closed, autoReturned } = completeCloseTransition(ws, next)
       return { ws: closed, undo: { ws, label: closeLabel, toast: closeLabel, restoreViewMode: autoReturned } }
+    }
+    case 'RESTORE_CLOSED_TAB_RECORD': {
+      const next = restoreClosedTab(ws, action.record)
+      return next === ws ? state : { ws: next, undo: null }
     }
     case 'CLOSE_PANE': {
       // Closing a pane closes all its tabs at once (a keyboard/menu affordance —

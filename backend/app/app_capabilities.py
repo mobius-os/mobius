@@ -214,6 +214,18 @@ def public_access_declaration_from_contract(
 # its own integer version, so adding (say) camera v2 never forces every storage
 # or microphone consumer onto a new global runtime version.
 RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
+  "workspace.shortcuts": {
+    "version": 1,
+    "kind": "activation",
+    "title": "Control workspace tabs with keyboard shortcuts",
+    "description": (
+      "Enable reviewed keyboard commands for the focused Möbius workspace pane."
+    ),
+    "risk": "workspace",
+    "lifecycle": "installed",
+    "default_limits": {},
+    "hard_limits": {},
+  },
   "device.asset-cache": {
     "version": 1,
     "kind": "session",

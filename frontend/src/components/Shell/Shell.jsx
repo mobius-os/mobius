@@ -150,6 +150,7 @@ import useWorkspaceSession from './useWorkspaceSession.js'
 import useShellReloadController from './useShellReloadController.js'
 import useAppFrameCache from './useAppFrameCache.js'
 import useShellVisualViewport from './useShellVisualViewport.js'
+import useWorkspaceShortcuts, { hasWorkspaceShortcutProvider } from './useWorkspaceShortcuts.js'
 import ShellBrand from './ShellBrand.jsx'
 import { createMediaSessionOwner } from './mediaSessionOwner.js'
 import { HistoryDismissProvider } from '../../hooks/useHistoryDismiss.jsx'
@@ -537,6 +538,10 @@ export default function Shell({ onInitialVisualReady }) {
   })
   const apps = appsQuery.data ?? EMPTY_LIST
   const chats = chatsQuery.data ?? EMPTY_LIST
+  const workspaceShortcutsEnabled = useMemo(
+    () => hasWorkspaceShortcutProvider(apps),
+    [apps],
+  )
   const appsStatus = apps.length > 0 || appsQuery.isSuccess
     ? 'success'
     : (appsQuery.isError ? 'error' : 'loading')
@@ -3185,6 +3190,15 @@ export default function Shell({ onInitialVisualReady }) {
   // Keep the latest-materialize ref current so the watcher effect (stable deps) always
   // runs this render's live closure without depending on the function's identity.
   materializeNewChatHomeRef.current = materializeNewChatHome
+  const handleWorkspaceShortcut = useWorkspaceShortcuts({
+    enabled: workspaceShortcutsEnabled,
+    workspaceStateRef,
+    dispatchWorkspace,
+    startNewChat: () => newChatRef.current?.({
+      forceNew: workspaceStateRef.current.ws.viewMode === 'panes',
+      recordHistory: true,
+    }),
+  })
 
   // Suppressing automatic repair while the explicit presentation owns the
   // null slot is safe only if retirement hands that responsibility back. A
@@ -3837,6 +3851,7 @@ export default function Shell({ onInitialVisualReady }) {
               // mode scene (cross-origin app interaction is inert throughout).
               interactive={appRuntimeVisible
                 && !coveredByNewChat && !navigationSurfaceOpen && !modeBeatActive}
+              workspaceShortcutsEnabled={workspaceShortcutsEnabled}
               version={versionForApp(id)}
               appName={app?.name}
               appSlug={app?.slug}
@@ -3856,6 +3871,7 @@ export default function Shell({ onInitialVisualReady }) {
               onAppError={handleAppError}
               onHostRequest={handleAppHostRequest}
               onMediaSession={handleMediaSession}
+              onWorkspaceShortcut={handleWorkspaceShortcut}
             />
             </ErrorBoundary>
           </div>

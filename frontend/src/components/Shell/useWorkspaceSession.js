@@ -45,6 +45,7 @@ export default function useWorkspaceSession({ storage, legacyStorage = null }) {
 
   const workspaceStateRef = useRef(workspaceState)
   workspaceStateRef.current = workspaceState
+  const closedTabsRef = useRef([])
   const dragActiveRef = useRef(false)
   const onWorkspaceTransitionRef = useRef(null)
   const requestEmptySingleNewChatRef = useRef(null)
@@ -62,7 +63,37 @@ export default function useWorkspaceSession({ storage, legacyStorage = null }) {
 
   const dispatchWorkspace = useCallback((action) => {
     const prev = workspaceStateRef.current
-    const next = paneModel.workspaceReducer(prev, action)
+    let resolvedAction = action
+    let restoreRecord = null
+    if (action?.type === 'RESTORE_CLOSED_TAB') {
+      while (closedTabsRef.current.length) {
+        const candidate = closedTabsRef.current[closedTabsRef.current.length - 1]
+        const candidateAction = { type: 'RESTORE_CLOSED_TAB_RECORD', record: candidate }
+        const candidateState = paneModel.workspaceReducer(prev, candidateAction)
+        closedTabsRef.current.pop()
+        if (candidateState !== prev) {
+          resolvedAction = candidateAction
+          restoreRecord = candidate
+          break
+        }
+      }
+      if (!restoreRecord) return false
+    }
+    const closedRecord = resolvedAction?.type === 'CLOSE_TAB'
+      ? paneModel.closedTabRecord(prev.ws, resolvedAction.tabKey)
+      : null
+    const next = paneModel.workspaceReducer(prev, resolvedAction)
+    if (resolvedAction?.type === 'CLOSE_TAB' && resolvedAction.reason === 'deleted') {
+      closedTabsRef.current = closedTabsRef.current.filter(
+        record => record.tabKey !== resolvedAction.tabKey,
+      )
+    } else if (closedRecord && next.ws !== prev.ws) {
+      closedTabsRef.current.push({
+        ...closedRecord,
+        restoreViewMode: prev.ws.viewMode !== next.ws.viewMode,
+      })
+      if (closedTabsRef.current.length > 20) closedTabsRef.current.shift()
+    }
     workspaceStateRef.current = next
     const enteredEmptySingle = next.ws !== prev.ws
       && enteredEmptySingleScreen(prev.ws, next.ws)
@@ -79,8 +110,9 @@ export default function useWorkspaceSession({ storage, legacyStorage = null }) {
         }
       }
     }
-    dispatchWorkspaceRaw(action)
+    dispatchWorkspaceRaw(resolvedAction)
     if (enteredEmptySingle) requestEmptySingleNewChatRef.current?.()
+    return next !== prev
   }, [setFocusedPaneViewId])
 
   const contentElRef = useRef(null)

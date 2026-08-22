@@ -484,6 +484,7 @@ async def install_app(
     system_app=app.system_app,
     chat_log_access=app.chat_log_access,
     capability_contract=app.capability_contract,
+    paused_capabilities=app.paused_capabilities,
     created_at=app.created_at,
     updated_at=app.updated_at,
     mode=mode,
@@ -2193,6 +2194,25 @@ async def update_app(
           ),
         )
       app.manage_skills = body.manage_skills
+    if body.capability_pause is not None:
+      granted = ((app.capability_contract or {}).get("runtime") or {})
+      unknown = [k for k in body.capability_pause if k not in granted]
+      if unknown:
+        raise HTTPException(
+          status_code=400,
+          detail=f"App does not hold capability: {', '.join(sorted(unknown))}.",
+        )
+      not_pausable = [
+        k for k in body.capability_pause if granted[k].get("kind") != "activation"
+      ]
+      if not_pausable:
+        raise HTTPException(
+          status_code=400,
+          detail=f"Capability is not pausable: {', '.join(sorted(not_pausable))}.",
+        )
+      merged = dict(app.paused_capabilities or {})
+      merged.update({k: bool(v) for k, v in body.capability_pause.items()})
+      app.paused_capabilities = merged
     # Keep the owner-readable server-permission projection current. Runtime
     # capabilities and offline declarations still come only from reviewed
     # manifest/application flows. Store contracts must retain every other

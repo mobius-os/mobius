@@ -107,6 +107,28 @@ def test_runtime_capability_is_independently_versioned_and_bounded():
   }
 
 
+def test_workspace_shortcuts_capability_is_installed_lifecycle_activation():
+  runtime = normalize_runtime_capabilities(_manifest(capabilities={
+    "workspace.shortcuts": {
+      "version": 1,
+      "reason": "Enable tab controls across the focused workspace pane.",
+    },
+  }))
+
+  assert runtime["workspace.shortcuts"] == {
+    "version": 1,
+    "kind": "activation",
+    "title": "Control workspace tabs with keyboard shortcuts",
+    "description": (
+      "Enable reviewed keyboard commands for the focused Möbius workspace pane."
+    ),
+    "risk": "workspace",
+    "lifecycle": "installed",
+    "reason": "Enable tab controls across the focused workspace pane.",
+    "limits": {},
+  }
+
+
 def test_device_asset_cache_is_client_only_and_reviewed_by_size():
   runtime = normalize_runtime_capabilities(_manifest(capabilities={
     "device.asset-cache": {
@@ -212,6 +234,66 @@ def test_local_app_create_normalizes_runtime_capability(client, auth):
   assert runtime["media.microphone.capture"]["limits"] == {
     "max_duration_ms": 8000,
   }
+
+
+def test_capability_pause_toggles_activation_capability_and_survives_reapply(
+  client, auth,
+):
+  created = create_local_app(
+    client, auth,
+    name="Shortcut Provider",
+    capabilities={"workspace.shortcuts": {"version": 1}},
+  )
+  app_id = created["id"]
+  assert created.get("paused_capabilities") in (None, {})
+
+  paused = client.patch(
+    f"/api/apps/{app_id}", headers=auth,
+    json={"capability_pause": {"workspace.shortcuts": True}},
+  )
+  assert paused.status_code == 200, paused.text
+  assert paused.json()["paused_capabilities"] == {"workspace.shortcuts": True}
+
+  # Reapplying regenerates capability_contract from the manifest, but must
+  # not clobber the separately-stored pause state — otherwise every source
+  # edit would silently resume a paused activation capability.
+  reapplied = client.post(
+    "/api/apps/apply", headers=auth,
+    json={"source_dir": created["source_dir"]},
+  )
+  assert reapplied.status_code == 200, reapplied.text
+  assert reapplied.json()["app"]["paused_capabilities"] == {
+    "workspace.shortcuts": True,
+  }
+
+  resumed = client.patch(
+    f"/api/apps/{app_id}", headers=auth,
+    json={"capability_pause": {"workspace.shortcuts": False}},
+  )
+  assert resumed.status_code == 200, resumed.text
+  assert resumed.json()["paused_capabilities"] == {"workspace.shortcuts": False}
+
+
+def test_capability_pause_rejects_capability_the_app_does_not_hold(client, auth):
+  created = create_local_app(client, auth, name="No Capabilities")
+  response = client.patch(
+    f"/api/apps/{created['id']}", headers=auth,
+    json={"capability_pause": {"workspace.shortcuts": True}},
+  )
+  assert response.status_code == 400, response.text
+
+
+def test_capability_pause_rejects_non_activation_capability(client, auth):
+  created = create_local_app(
+    client, auth,
+    name="Recorder Two",
+    capabilities={"media.microphone.capture": {"version": 1}},
+  )
+  response = client.patch(
+    f"/api/apps/{created['id']}", headers=auth,
+    json={"capability_pause": {"media.microphone.capture": True}},
+  )
+  assert response.status_code == 400, response.text
 
 
 def test_local_app_capability_replacement_is_explicit(client, auth):

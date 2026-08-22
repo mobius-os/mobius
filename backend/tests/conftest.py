@@ -36,6 +36,14 @@ os.environ["MOBIUS_TEST_RUNTIME"] = "1"
 os.environ["MOBIUS_APP_BASE"] = f"{_tmp}/apps"
 os.environ["API_BASE_URL"] = "http://127.0.0.1:9"
 os.environ["MOEBIUS_SKIP_BOOTSTRAP"] = "1"
+# A Railway-managed instance carries real MOBIUS_SSO_* secrets in its process
+# environment. Inherited into the test process, get_settings().mobius_sso_enabled
+# reads true and every owner_token-dependent test fails setup with 403
+# "Managed sign-in is enabled for this deployment." — a real config leak, not
+# a test bug. Clear all three together so the derived property is false.
+os.environ.pop("MOBIUS_SSO_ISSUER", None)
+os.environ.pop("MOBIUS_SSO_INSTANCE_ID", None)
+os.environ.pop("MOBIUS_SSO_CLIENT_SECRET", None)
 
 # Ensure the baked static dir exists with an index.html carrying the
 # __mobius-theme__ slot BEFORE importing app.main — main.py registers the SPA

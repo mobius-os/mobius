@@ -3740,6 +3740,35 @@ function makeImmersive({ appId } = {}) {
 //#region src/runtime/index.js
 let _online = typeof navigator !== "undefined" ? navigator.onLine : true;
 const _onlineListeners = /* @__PURE__ */ new Set();
+let _workspaceShortcutsEnabled = false;
+function _editableShortcutTarget(target) {
+	if (!target || typeof target !== "object") return false;
+	if (target.isContentEditable) return true;
+	return typeof target.closest === "function" && !!target.closest("input, textarea, select, [contenteditable], [role=\"textbox\"]");
+}
+function _workspaceApplePlatform() {
+	return /Mac|iPhone|iPad|iPod/i.test(String(globalThis.navigator?.platform || ""));
+}
+function _workspaceLinuxPlatform() {
+	return /Linux/i.test(String(globalThis.navigator?.platform || ""));
+}
+function _workspaceShortcutCandidate(event) {
+	if (!event?.isTrusted || event.isComposing || event.repeat) return false;
+	const apple = _workspaceApplePlatform();
+	const linux = !apple && _workspaceLinuxPlatform();
+	const modifiersMatch = apple
+		? (event.metaKey && event.altKey && !event.ctrlKey)
+		: (event.ctrlKey && event.altKey && !event.metaKey);
+	if (!modifiersMatch || event.getModifierState?.("AltGraph")) return false;
+	const key = String(event.key || "");
+	const lower = key.toLowerCase();
+	if (lower === "t") return true;
+	if (linux && lower === "n") return !event.shiftKey;
+	if (lower === "w") return !event.shiftKey;
+	if (event.shiftKey) return false;
+	if (apple) return key === "]" || key === "[" || /^[1-9]$/.test(key);
+	return key === "PageDown" || key === "PageUp" || /^[1-9]$/.test(key);
+}
 function _setOnline(next) {
 	if (next === _online) return;
 	_online = next;
@@ -3749,13 +3778,28 @@ function _setOnline(next) {
 }
 if (typeof window !== "undefined") {
 	window.addEventListener("message", (e) => {
-		if (e.origin !== window.location.origin) return;
+		if (e.source !== window.parent) return;
 		const msg = e.data;
 		if (!msg || typeof msg !== "object") return;
 		if (msg.type === "moebius:online-status" && typeof msg.online === "boolean") _setOnline(msg.online);
+		else if (msg.type === "moebius:workspace-shortcuts-status") _workspaceShortcutsEnabled = msg.enabled === true;
 	});
 	window.addEventListener("online", () => _setOnline(true));
 	window.addEventListener("offline", () => _setOnline(false));
+	window.addEventListener("keydown", (event) => {
+		if (!_workspaceShortcutsEnabled || _editableShortcutTarget(event.target)) return;
+		if (!_workspaceShortcutCandidate(event)) return;
+		event.preventDefault();
+		window.parent.postMessage({
+			type: "moebius:workspace-shortcut",
+			key: event.key,
+			ctrlKey: event.ctrlKey,
+			altKey: event.altKey,
+			shiftKey: event.shiftKey,
+			metaKey: event.metaKey,
+			editable: false
+		}, "*");
+	}, true);
 }
 let _runtimeContext = null;
 const runtimeFeatures = Object.freeze({ idleDocument: true });

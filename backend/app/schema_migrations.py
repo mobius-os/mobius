@@ -503,6 +503,12 @@ def _converge_legacy_schema(eng) -> None:
         "ALTER TABLE apps ADD COLUMN capability_contract JSON NULL"
       ))
       conn.commit()
+  if "paused_capabilities" not in apps_cols:
+    with eng.connect() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN paused_capabilities JSON NULL"
+      ))
+      conn.commit()
   # Authority used to be an execution-policy switch in capability receipts.
   # Server-side jobs now have one owner-trusted process path, so rewrite known
   # historical receipts once rather than leaving inert policy vocabulary in
