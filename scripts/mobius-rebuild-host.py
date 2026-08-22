@@ -273,8 +273,12 @@ def run() -> int:
     if not request.is_file():
         return 0
     operation = uuid.uuid4().hex
-    claimed = STATE_DIR / f"request-{operation}.json"
-    os.replace(request, claimed)
+    # Claim inside the root-owned control directory. The inbox and its parent
+    # are guaranteed to share a filesystem, unlike /data and STATE_DIR, so the
+    # atomic rename also works when operators place Docker data on a separate
+    # mount. Moving out of the app-writable inbox prevents later replacement.
+    claimed = config_value["control_dir"] / f".request-{operation}.json"
+    request_claimed = False
     expected = None
     previous = None
     image_ref = None
@@ -282,6 +286,8 @@ def run() -> int:
     replacement_started = False
     ready: Path | None = None
     try:
+        os.replace(request, claimed)
+        request_claimed = True
         with LOCK.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             payload = read_json(claimed)
@@ -369,6 +375,10 @@ def run() -> int:
         return 1
     finally:
         claimed.unlink(missing_ok=True)
+        if not request_claimed:
+            # A malformed path or other claim failure must not leave the path
+            # unit continuously retriggering an unrecoverable request.
+            request.unlink(missing_ok=True)
         if ready is not None:
             ready.unlink(missing_ok=True)
 
@@ -378,16 +388,23 @@ def reconcile() -> int:
     try:
         current = read_json(STATUS)
     except (OSError, ValueError, json.JSONDecodeError):
-        write_status(config_value)
-        return 0
-    if current.get("state") in ACTIVE_STATES:
-        with LOCK.open("a+") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return 0
-        write_status(config_value, state="failed", code="worker_interrupted",
-                     message="The host replacement worker stopped unexpectedly.")
+        current = None
+    with LOCK.open("a+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        # A hard power loss can strand the already-claimed request before or
+        # after the first status write. Once no worker owns the lock, it is no
+        # longer runnable and must not accumulate in the root-controlled area.
+        for claimed in config_value["control_dir"].glob(".request-*.json"):
+            if re.fullmatch(r"\.request-[0-9a-f]{32}\.json", claimed.name):
+                claimed.unlink(missing_ok=True)
+        if current is None:
+            write_status(config_value)
+        elif current.get("state") in ACTIVE_STATES:
+            write_status(config_value, state="failed", code="worker_interrupted",
+                         message="The host replacement worker stopped unexpectedly.")
     return 0
 
 

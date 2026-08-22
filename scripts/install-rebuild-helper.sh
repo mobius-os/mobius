@@ -133,9 +133,25 @@ Unit=mobius-rebuild.service
 [Install]
 WantedBy=multi-user.target
 EOF
-chmod 0644 /etc/systemd/system/mobius-rebuild.service /etc/systemd/system/mobius-rebuild.path
+cat >/etc/systemd/system/mobius-rebuild-reconcile.service <<'EOF'
+[Unit]
+Description=Reconcile interrupted Möbius container replacement state
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/mobius-rebuild-host reconcile
+
+[Install]
+WantedBy=multi-user.target
+EOF
+chmod 0644 /etc/systemd/system/mobius-rebuild.service \
+  /etc/systemd/system/mobius-rebuild.path \
+  /etc/systemd/system/mobius-rebuild-reconcile.service
 systemctl daemon-reload
 /usr/local/libexec/mobius-rebuild-host reconcile
+systemctl enable mobius-rebuild-reconcile.service
 systemctl enable --now mobius-rebuild.path
 
 echo "Container replacement installed for Compose project '$PROJECT'."

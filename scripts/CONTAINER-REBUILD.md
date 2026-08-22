@@ -29,7 +29,9 @@ fail during installation rather than later during replacement.
 The app writes one fixed `request.json` into the persistent `/data` inbox. A
 root-owned `systemd.path` unit starts a one-shot worker; durable status is
 mirrored back into `/data` for polling without a host process or network
-handshake. The request contains only the expected 40-character upstream SHA.
+handshake. A boot-time one-shot reconciles any active status left behind by a
+host power loss. The request contains only the expected 40-character upstream
+SHA and is claimed atomically on the same persistent filesystem before use.
 
 The worker:
 

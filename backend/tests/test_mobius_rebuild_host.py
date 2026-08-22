@@ -11,6 +11,7 @@ import pytest
 
 
 SCRIPT = Path(__file__).parents[2] / "scripts" / "mobius-rebuild-host.py"
+INSTALLER = Path(__file__).parents[2] / "scripts" / "install-rebuild-helper.sh"
 ENTRYPOINT = Path(__file__).parents[1] / "scripts" / "entrypoint.sh"
 SPEC = importlib.util.spec_from_file_location("mobius_rebuild_host", SCRIPT)
 assert SPEC and SPEC.loader
@@ -28,6 +29,15 @@ def test_entrypoint_restores_host_control_after_compatibility_chown():
   )
 
   assert broad_chown < control_hardening < inbox_grant
+
+
+def test_installer_enables_boot_time_reconciliation():
+  source = INSTALLER.read_text(encoding="utf-8")
+
+  assert "mobius-rebuild-reconcile.service" in source
+  assert "ExecStart=/usr/local/libexec/mobius-rebuild-host reconcile" in source
+  assert "WantedBy=multi-user.target" in source
+  assert "systemctl enable mobius-rebuild-reconcile.service" in source
 
 
 def _frozen(tmp_path: Path, monkeypatch) -> tuple[dict, Path]:
@@ -122,6 +132,58 @@ def test_no_change_does_not_drain_active_chats(tmp_path, monkeypatch):
   assert statuses[-1]["state"] == "no_change"
 
 
+def test_request_is_claimed_on_the_control_filesystem(tmp_path, monkeypatch):
+  config, inbox = _worker_paths(tmp_path, monkeypatch)
+  expected = "e" * 40
+  request = inbox / "request.json"
+  request.write_text(
+    f'{{"version":1,"expected_sha":"{expected}"}}', encoding="utf-8",
+  )
+  real_replace = host.os.replace
+  claims = []
+
+  def same_filesystem_replace(source, target):
+    if Path(source) == request:
+      claims.append(Path(target))
+      assert Path(target).parent == config["control_dir"]
+    return real_replace(source, target)
+
+  monkeypatch.setattr(host.os, "replace", same_filesystem_replace)
+  monkeypatch.setattr(host, "app_container", lambda _config: ("cid", "same"))
+  monkeypatch.setattr(host, "require_pull_space", lambda _image: None)
+  monkeypatch.setattr(host.subprocess, "run", lambda *_args, **_kwargs: None)
+  monkeypatch.setattr(host, "inspect_image", lambda _image, template: (
+    expected if "revision" in template else
+    host.IMAGE_SOURCE if "source" in template else
+    "amd64" if "Architecture" in template else "same"
+  ))
+  monkeypatch.setattr(host, "retain_images", lambda *_args: None)
+  monkeypatch.setattr(host, "write_status", lambda _config, **fields: fields)
+
+  assert host.run() == 0
+  assert len(claims) == 1
+  assert not claims[0].exists()
+
+
+def test_failed_request_claim_is_terminal_and_retryable(tmp_path, monkeypatch):
+  _config, inbox = _worker_paths(tmp_path, monkeypatch)
+  request = inbox / "request.json"
+  request.write_text(
+    f'{{"version":1,"expected_sha":"{"f" * 40}"}}', encoding="utf-8",
+  )
+  statuses = []
+  monkeypatch.setattr(
+    host, "write_status", lambda _config, **fields: statuses.append(fields) or fields,
+  )
+  monkeypatch.setattr(
+    host.os, "replace", lambda *_args: (_ for _ in ()).throw(OSError("claim failed")),
+  )
+
+  assert host.run() == 1
+  assert statuses[-1]["state"] == "failed"
+  assert not request.exists()
+
+
 def test_replacement_drains_then_rolls_back_after_cutover_error(tmp_path, monkeypatch):
   config, inbox = _worker_paths(tmp_path, monkeypatch)
   expected = "d" * 40
@@ -165,8 +227,10 @@ def test_replacement_drains_then_rolls_back_after_cutover_error(tmp_path, monkey
 
 
 def test_reconcile_marks_interrupted_active_worker_failed(tmp_path, monkeypatch):
-  config, _inbox = _worker_paths(tmp_path, monkeypatch)
+  config, inbox = _worker_paths(tmp_path, monkeypatch)
   host.STATUS.write_text('{"state":"verifying"}', encoding="utf-8")
+  abandoned = inbox.parent / f'.request-{"a" * 32}.json'
+  abandoned.write_text("{}", encoding="utf-8")
   written = []
   monkeypatch.setattr(
     host, "write_status", lambda _config, **fields: written.append(fields) or fields,
@@ -174,6 +238,21 @@ def test_reconcile_marks_interrupted_active_worker_failed(tmp_path, monkeypatch)
 
   assert host.reconcile() == 0
   assert written[-1]["code"] == "worker_interrupted"
+  assert not abandoned.exists()
+
+
+def test_reconcile_cleans_claim_abandoned_before_first_status(tmp_path, monkeypatch):
+  _config, inbox = _worker_paths(tmp_path, monkeypatch)
+  abandoned = inbox.parent / f'.request-{"b" * 32}.json'
+  abandoned.write_text("{}", encoding="utf-8")
+  written = []
+  monkeypatch.setattr(
+    host, "write_status", lambda _config, **fields: written.append(fields) or fields,
+  )
+
+  assert host.reconcile() == 0
+  assert written == [{}]
+  assert not abandoned.exists()
 
 
 def test_drain_waits_for_the_root_supervisor_receipt(tmp_path, monkeypatch):
