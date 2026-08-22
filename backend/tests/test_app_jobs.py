@@ -43,13 +43,38 @@ def test_cron_parser_resolves_wall_clock_gate_to_real_job():
   )
 
 
-def test_only_bootstrap_commands_request_a_readiness_wait():
+def test_initialization_commands_request_a_readiness_wait():
   job = Path("/data/apps/memory/memory-job.sh")
 
   assert app_jobs.runner_command(57, job, wait_for_ready=True)[-3:] == [
     "--wait-for-ready", "57", str(job),
   ]
   assert app_jobs.runner_command(57, job)[-2:] == ["57", str(job)]
+
+
+def test_first_owner_launches_manifest_initialization_jobs(db, tmp_path, monkeypatch):
+  source = tmp_path / "memory"
+  source.mkdir()
+  (source / "fetch.sh").write_text("#!/bin/sh\nexit 0\n")
+  (source / "mobius.json").write_text(json.dumps({
+    "schedule": {"job": "fetch.sh", "initialize_on_install": True},
+  }))
+  app = models.App(
+    name="Memory", description="", jsx_source="", compiled_path="",
+    slug="memory", source_dir=str(source),
+  )
+  db.add(app)
+  db.commit()
+  calls = []
+  monkeypatch.setattr(
+    app_jobs, "launch_app_job",
+    lambda *args, **kwargs: calls.append((args, kwargs)),
+  )
+
+  assert app_jobs.launch_deferred_initializations(db) == [app.id]
+  assert calls == [(
+    (app.id, source / "fetch.sh", source), {"wait_for_ready": True},
+  )]
 
 
 def test_direct_launch_passes_the_configured_backend_address(monkeypatch, tmp_path):
