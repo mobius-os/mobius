@@ -11,10 +11,23 @@ import pytest
 
 
 SCRIPT = Path(__file__).parents[2] / "scripts" / "mobius-rebuild-host.py"
+ENTRYPOINT = Path(__file__).parents[1] / "scripts" / "entrypoint.sh"
 SPEC = importlib.util.spec_from_file_location("mobius_rebuild_host", SCRIPT)
 assert SPEC and SPEC.loader
 host = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(host)
+
+
+def test_entrypoint_restores_host_control_after_compatibility_chown():
+  source = ENTRYPOINT.read_text(encoding="utf-8")
+
+  broad_chown = source.index("chown -R mobius:mobius /data")
+  control_hardening = source.index("chown -R root:root /data/mobius-rebuild")
+  inbox_grant = source.index(
+    "chown -R mobius:mobius /data/mobius-rebuild/inbox",
+  )
+
+  assert broad_chown < control_hardening < inbox_grant
 
 
 def _frozen(tmp_path: Path, monkeypatch) -> tuple[dict, Path]:
