@@ -111,6 +111,34 @@
   overflow: hidden;
 }
 
+/* An external Explorer/Finder drag claims the whole conversation, rather than
+   requiring a precise drop on the compact composer. The overlay is visual
+   only and pointer-transparent; the chat root owns the actual drop. */
+.chat__file-drop-target {
+  position: absolute;
+  inset: 8px;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  border: 2px dashed color-mix(in srgb, var(--accent) 72%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--accent) 9%, var(--bg));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.chat__file-drop-card {
+  padding: 10px 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border-light));
+  border-radius: 999px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface) 92%, var(--accent));
+  box-shadow: 0 8px 28px color-mix(in srgb, #000 18%, transparent);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
 /* Empty state: centered in the available chat area, with a FIXED
    bottom reservation so the composer doesn't overlap the logo.
    Centering means the cluster moves up when the visible viewport
