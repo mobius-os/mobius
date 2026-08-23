@@ -39,6 +39,7 @@ export function streamItemToBlock(item, { finalize = true } = {}) {
       ...(item.answers ? { answers: item.answers } : {}),
     }
   }
+  if (item.type === 'secure_input') return { ...item }
   if (item.type === 'error') {
     // Carry the whitelisted extras (resumable drives the one-tap Resume; the
     // single `pause` descriptor — {kind, resets_at?} — drives the calm "Paused"
@@ -307,6 +308,23 @@ export function chooseActiveAssistantSurface(msg, items) {
     return { hideMessage: false, suppressStream: true }
   }
 
+  // Compact durable messages deliberately collapse thinking/tool runs into
+  // activity blocks, so their block arrays cannot prove ordinary prefix
+  // coverage against the detailed replay stream. Visible assistant prose is
+  // still monotonic: when one related surface strictly extends the other's
+  // text, keep the longer answer instead of letting private activity weight
+  // hide a saved final paragraph behind a stale live replay.
+  const msgText = normalizeMirrorText(assistantMessageText(msg))
+  const streamText = normalizeMirrorText(streamPayload.content)
+  if (msgText && streamText && msgText.length !== streamText.length) {
+    if (msgText.startsWith(streamText)) {
+      return { hideMessage: false, suppressStream: true }
+    }
+    if (streamText.startsWith(msgText)) {
+      return { hideMessage: true, suppressStream: false }
+    }
+  }
+
   const msgPayload = {
     content: assistantMessageText(msg),
     blocks: Array.isArray(msg.blocks) ? msg.blocks.filter(Boolean) : [],
@@ -466,4 +484,48 @@ export function promoteAssistantStream(messages, { items, bridgeTs = null }) {
   }
 
   return [...messages, { role: 'assistant', content, blocks }]
+}
+
+/**
+ * Promote one assistant turn and place the user/product rows that start its
+ * continuation immediately after it.
+ *
+ * A restored live turn can bridge an assistant row that is no longer the
+ * mounted transcript tail: newer local rows may already be visible while the
+ * old stream replay catches up. Appending the continuation rows after that
+ * suffix briefly tells the wrong story until the next detail refresh. Keep
+ * the whole turn boundary in one list operation instead.
+ */
+export function promoteAssistantStreamWithFollowingMessages(
+  messages,
+  { items, bridgeTs = null, followingMessages = [] },
+) {
+  const source = Array.isArray(messages) ? messages : []
+  const bridgeIdx = bridgeTs == null
+    ? -1
+    : source.findIndex(m => m?.role === 'assistant' && m.ts === bridgeTs)
+  const promoted = promoteAssistantStream(source, { items, bridgeTs })
+  const batch = Array.isArray(followingMessages)
+    ? followingMessages.filter(Boolean)
+    : []
+  if (batch.length === 0) return promoted
+
+  const seenTs = new Set(promoted.map(m => m?.ts).filter(v => v != null))
+  const unseen = batch.filter(message => {
+    if (message.ts == null) return true
+    if (seenTs.has(message.ts)) return false
+    seenTs.add(message.ts)
+    return true
+  })
+  if (unseen.length === 0) return promoted
+
+  // With no bridge, promoteAssistantStream appends the completed assistant and
+  // it is the boundary. With a bridge, preserve every newer local suffix row
+  // but place the continuation before it.
+  const insertAt = bridgeIdx >= 0 ? bridgeIdx + 1 : promoted.length
+  return [
+    ...promoted.slice(0, insertAt),
+    ...unseen,
+    ...promoted.slice(insertAt),
+  ]
 }

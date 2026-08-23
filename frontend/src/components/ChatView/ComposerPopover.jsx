@@ -1,6 +1,6 @@
 /**
  * ComposerPopover — the `+` button in the chat composer and the popover
- * it opens. Two sections in one popover:
+ * it opens. Three sections in one popover:
  *
  *   1. Attach files  — calls `onAttachClick` (parent owns the hidden
  *      <input type="file"> so it can clear .value after each pick).
@@ -17,6 +17,12 @@
  * remove that `position: relative` thinking `.chat__form` is the
  * anchor — the form is only relative so other absolutely-positioned
  * children (none today) could anchor to it.
+ *
+ * A draft-first New Chat uses this same component with `pending`. That
+ * renders the canonical trigger in its final geometry, but keeps it disabled
+ * and omits dialog semantics until the server-backed chat is ready. Keeping
+ * the pending state here prevents the provisional composer from maintaining a
+ * second lookalike button that can drift from the real control.
  *
  * Soft-keyboard contract: opening or using this popover preserves whether the
  * owning textarea was focused. The + trigger suppresses native button focus
@@ -39,6 +45,7 @@ import {
   clientLengthToLayout,
   clientPointToLayout,
 } from '../../lib/layoutSpace.js'
+import useModelSelectionPopover from './hooks/useModelSelectionPopover.js'
 
 export default function ComposerPopover({
   chatInfo,
@@ -57,18 +64,15 @@ export default function ComposerPopover({
   autoResumeSaving,
   autoResumeError,
   onAutoResumeChange,
-  restartResumeEnabled,
-  restartResumeSaving,
-  restartResumeError,
-  onRestartResumeChange,
   providerSwitchState,
   settingsSaveTailRef,
   composerInputRef,
+  modelSelectionRequest = 0,
   onOpenInspector,
   onOpenSummary,
   embedded = false,
+  pending = false,
 }) {
-  const [open, setOpen] = useState(false)
   const wrapRef = useRef(null)
   const triggerRef = useRef(null)
   // Tracks whether the chat textarea was focused at the moment the
@@ -83,7 +87,10 @@ export default function ComposerPopover({
   // AFTER React commits — on iOS Safari the focus state can shift
   // between the click handler and the post-commit effect, leaving
   // the ref stale. Sync capture in onClick is reliable.
-  const wasInputFocusedRef = useRef(false)
+  const { open, setOpen, wasInputFocusedRef } = useModelSelectionPopover(
+    modelSelectionRequest,
+    composerInputRef,
+  )
   // Measured cap on the panel's height: the space above the trigger inside both
   // the chat pane (which clips with `overflow: hidden`) and the keyboard-shrunk
   // visible viewport. See composerPopoverHeight.js for why CSS viewport units
@@ -150,6 +157,20 @@ export default function ComposerPopover({
     function onPointer(e) {
       if (!wrapRef.current) return
       if (wrapRef.current.contains(e.target)) return
+      // Dismissing by pressing outside must not drop the soft keyboard. If the
+      // textarea was focused when the popover opened, suppress the focus change
+      // this outside press would otherwise cause (which blurs the textarea and
+      // collapses the keyboard), then restore focus next frame only if a later
+      // click still steals it — mirroring the popover's own pointer boundary.
+      // preventDefault on pointerdown keeps focus and caret without blocking
+      // scrolling, which is governed by touch-action.
+      if (wasInputFocusedRef.current) {
+        e.preventDefault()
+        requestAnimationFrame(() => {
+          const el = composerInputRef?.current
+          if (el && document.activeElement !== el) focusComposerElement(el)
+        })
+      }
       setOpen(false)
     }
     function onKey(e) {
@@ -194,7 +215,9 @@ export default function ComposerPopover({
       <button
         ref={triggerRef}
         type="button"
-        className={`chat__plus${open ? ' chat__plus--active' : ''}`}
+        className={`chat__plus${pending ? ' chat__plus--pending' : ''}`
+          + `${open && !pending ? ' chat__plus--active' : ''}`}
+        disabled={pending}
         // PointerDown preventDefault stops the focus from moving off
         // the textarea — keeps the soft keyboard open when the user
         // taps `+` mid-typing. Without this, focus shifts to the
@@ -223,13 +246,15 @@ export default function ComposerPopover({
             })
           }
         }}
-        aria-label="Attach or change model"
-        aria-haspopup="dialog"
-        aria-expanded={open}
+        aria-label={pending
+          ? 'Chat options unavailable until this chat is ready'
+          : 'Attach or change model'}
+        aria-haspopup={pending ? undefined : 'dialog'}
+        aria-expanded={pending ? undefined : open}
       >
         <Plus width={26} height={26} />
       </button>
-      {open && (
+      {open && !pending && (
         <div
           className="composer-popover"
           role="dialog"
@@ -264,10 +289,6 @@ export default function ComposerPopover({
                 autoResumeSaving={autoResumeSaving}
                 autoResumeError={autoResumeError}
                 onAutoResumeChange={onAutoResumeChange}
-                restartResumeEnabled={restartResumeEnabled}
-                restartResumeSaving={restartResumeSaving}
-                restartResumeError={restartResumeError}
-                onRestartResumeChange={onRestartResumeChange}
                 onChange={onChangeChatInfo}
                 providerSwitchState={providerSwitchState}
                 settingsSaveTailRef={settingsSaveTailRef}

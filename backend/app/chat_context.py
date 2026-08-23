@@ -16,6 +16,12 @@ from app.continuations import (
   continuation_actor_label,
   is_continuation_message,
 )
+from app.goal_commands import (
+  goal_argument as _goal_argument,
+  goal_clear_requested as _goal_clear_requested,
+  goal_objective as _goal_objective,
+  is_goal_command as _is_goal_command,
+)
 
 def _human_elapsed(seconds: float | None) -> str | None:
   """Human 'N ago' for the gap since the user's previous message.
@@ -68,6 +74,7 @@ def _last_user_message_elapsed(db, chat_id: str) -> str | None:
       if (
         not isinstance(m, dict)
         or m.get("role") != "user"
+        or m.get("hidden")
         or is_continuation_message(m)
       ):
         continue
@@ -493,31 +500,11 @@ def _build_resumed_context(chat_row) -> str | None:
 CLI_SLASH_COMMANDS = frozenset({"/goal"})
 
 
-def _goal_argument(text: str) -> str | None:
-  match = re.match(r"^\s*/goal(?:\s+([\s\S]+))?\s*$", text or "")
-  if match is None:
-    return None
-  return (match.group(1) or "").strip() or None
-
-
-def _goal_clear_requested(text: str) -> bool:
-  argument = _goal_argument(text)
-  return bool(argument and argument.lower() == "clear")
-
-
-def _goal_objective(text: str) -> str | None:
-  """Return the clean objective from a leading ``/goal`` command."""
-  objective = _goal_argument(text)
-  if objective is None or objective.lower() == "clear":
-    return None
-  return objective
-
-
 def _chat_has_goal_intent(messages: list[schemas.ChatMessage]) -> bool:
   """Whether this durable transcript has ever requested native goal mode."""
   return any(
     message.role == "user"
-    and re.match(r"^\s*/goal(?:\s|$)", message.content or "") is not None
+    and _is_goal_command(message.content or "")
     for message in messages
   )
 
@@ -559,6 +546,8 @@ def _goal_resume_requested(chat_row, text: str) -> bool:
   # old goal that may already have finished before native goal storage existed.
   for message in reversed(durable[:-1]):
     if not isinstance(message, dict):
+      continue
+    if message.get("hidden"):
       continue
     if message.get("role") == "user":
       return False

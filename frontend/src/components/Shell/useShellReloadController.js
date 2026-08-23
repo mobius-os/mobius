@@ -8,9 +8,9 @@ import {
 import * as paneModel from './paneModel.js'
 import { shouldDeferShellReload } from './shellReloadPolicy.js'
 import {
-  reloadWhenWorkerTakesOver,
-  settleNewestWorkerForHandoff,
-} from './swHandoff.js'
+  inspectShellUpdate,
+  releaseWaitingShellUpdate,
+} from '../../lib/shellUpdate.js'
 
 const RECHECK_MS = 6000
 
@@ -93,7 +93,6 @@ export default function useShellReloadController(inputs) {
       activeChatIdRef,
       multiPaneBuilderVisibleRef,
       streamingChatIdsRef,
-      activeChatWaitingOnQuestionRef,
       voiceDictationActiveRef,
     } = inputsRef.current
     return shouldDeferShellReload({
@@ -102,7 +101,6 @@ export default function useShellReloadController(inputs) {
       activeChatId: destination?.chatId ?? activeChatIdRef.current,
       multiPaneBuilderVisible: multiPaneBuilderVisibleRef.current,
       streamingChatIds: streamingChatIdsRef.current,
-      activeChatWaitingOnQuestion: activeChatWaitingOnQuestionRef.current,
       passiveRebuild: passive,
       voiceDictationActive: voiceDictationActiveRef.current,
       lastUserInteractionAt: ignoreRecentInteraction || interactionGraceSpent()
@@ -149,12 +147,6 @@ export default function useShellReloadController(inputs) {
       activeViewRef,
       drawerOpenRef,
     } = inputsRef.current
-    let stalePrecache = false
-    try { stalePrecache = storage.getItem('sw-stale-precache-pending') === '1' } catch { /* ignore */ }
-    if (stalePrecache && nav.onLine === false) {
-      deferReload({ passive })
-      return
-    }
     performingRef.current = true
     performingPassiveRef.current = passive
     pendingRef.current = false
@@ -166,14 +158,9 @@ export default function useShellReloadController(inputs) {
     }
 
     let registration = null
-    if (nav.serviceWorker?.getRegistration) {
-      try {
-        registration = await nav.serviceWorker.getRegistration()
-        await settleNewestWorkerForHandoff({ registration })
-      } catch {
-        registration = null
-      }
-    }
+    try {
+      ;({ registration } = await inspectShellUpdate({ serviceWorker: nav.serviceWorker }))
+    } catch { /* document freshness does not depend on worker inspection */ }
 
     win.dispatchEvent(new win.Event(BEFORE_SHELL_RELOAD_EVENT))
     await awaitCacheFlushBeforeReload(flushPersistedQueryCache(queryClient))
@@ -187,13 +174,6 @@ export default function useShellReloadController(inputs) {
       return
     }
     persistWorkspaceSnapshot()
-
-    if (stalePrecache) {
-      // Let the new worker replace its precache during activation. Deleting the
-      // active generation first leaves a failed reload with no Möbius document.
-      try { storage.removeItem('sw-stale-precache-pending') } catch { /* ignore */ }
-      try { storage.setItem('sw-stale-precache-recovering', '1') } catch { /* ignore */ }
-    }
 
     // Commit the route at the LAST possible instant. A navigation during the
     // worker handoff can still replace destinationRef and be revealed only by
@@ -218,15 +198,11 @@ export default function useShellReloadController(inputs) {
       replaceNavEntry('base', '/shell/')
       win.location.reload()
     }
-    if (registration) {
-      reloadWhenWorkerTakesOver({
-        registration,
-        serviceWorker: nav.serviceWorker,
-        reload,
-      })
-    } else {
-      reload()
-    }
+    // Release the worker, but never wait for its activation to make the
+    // navigation fresh. Online shell navigation owns freshness; activation
+    // only advances the coherent offline generation.
+    releaseWaitingShellUpdate(registration)
+    reload()
   }
 
   function checkPendingImpl() {

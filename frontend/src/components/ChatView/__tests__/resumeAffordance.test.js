@@ -183,8 +183,11 @@ test('viewport-derived nudges never participate in footer geometry', () => {
   const stackCss = css.match(/\.chat__floating-actions\s*\{[\s\S]*?\}/)?.[0] ?? ''
   assert.match(stackCss, /position:\s*absolute/,
     'the shared parent keeps every cue outside measured footer geometry')
-  assert.match(stackCss, /bottom:\s*calc\(100% \+ var\(--chat-foot-card-gap\)\)/,
-    'the shared stack clears every flow-owned footer control')
+  assert.match(
+    stackCss,
+    /bottom:\s*calc\(100% \+ var\(--chat-foot-card-gap\)\)/,
+    'the transient stack stays geometry-neutral and clear of the composer',
+  )
 
   const nudgeCss = css.match(
     /\.chat__question-nudge,\s*\n\.chat__resume-nudge\s*\{[\s\S]*?\}/,

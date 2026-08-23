@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  isModelSelectionRequiredFailure,
   isPendingQuestionSendFailure,
   sendFailureMessage,
 } from '../sendFailure.js'
@@ -64,6 +65,17 @@ test('a pending-question conflict explains the recovery instead of reporting a g
   assert.match(sendFailureMessage(error), /Answer the pending question above/)
   assert.match(sendFailureMessage(error), /safe in the composer/)
   assert.equal(isPendingQuestionSendFailure(new ChatHttpError(409, {
+    code: 'another_conflict',
+  })), false)
+})
+
+test('a missing model is a distinct recoverable send conflict', () => {
+  const error = new ChatHttpError(409, { code: 'model_selection_required' })
+
+  assert.equal(isModelSelectionRequiredFailure(error), true)
+  assert.match(sendFailureMessage(error), /Choose a model before sending/)
+  assert.match(sendFailureMessage(error), /safe in the composer/)
+  assert.equal(isModelSelectionRequiredFailure(new ChatHttpError(409, {
     code: 'another_conflict',
   })), false)
 })

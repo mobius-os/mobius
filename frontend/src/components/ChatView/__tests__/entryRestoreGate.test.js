@@ -65,7 +65,7 @@ function paintedScrollEl(row, { scrollTop = 0, clientHeight = 900, spacer = 0 } 
   return scrollEl
 }
 
-for (const phase of ['cached', 'ready', 'cache-validating']) {
+for (const phase of ['cached', 'stream-catchup', 'ready', 'cache-validating']) {
   test(`entryRestoreDecision waits (never commits INITIAL) with no painted rows: ${phase}`, () => {
     const decision = entryRestoreDecision({
       mode: { kind: 'INITIAL' },
@@ -104,6 +104,20 @@ test('entryRestoreDecision commits an explicit saved anchor once it resolves (re
     messages: [{ id: 'm-1' }],
     scrollEl,
     phase: 'ready',
+  })
+  assert.equal(decision.action, 'commit')
+  assert.equal(decision.mode.key, 'm-1')
+  assert.equal(decision.resolved, true)
+})
+
+test('entryRestoreDecision commits an explicit saved anchor while running catch-up continues', () => {
+  const scrollEl = paintedScrollEl(partedRow('m-1', 0, [700]))
+  const decision = entryRestoreDecision({
+    mode: { kind: 'INITIAL' },
+    saved: { kind: 'ANCHOR_AT', key: 'm-1', offset: 40, at: 1 },
+    messages: [{ id: 'm-1' }],
+    scrollEl,
+    phase: 'stream-catchup',
   })
   assert.equal(decision.action, 'commit')
   assert.equal(decision.mode.key, 'm-1')

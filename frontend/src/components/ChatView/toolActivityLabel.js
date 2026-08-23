@@ -229,10 +229,10 @@ export function effectiveToolName(tool) {
 // files, ran commands" summary (owner ref 2026-07-17). The read/grep/edit/bash
 // plumbing is the agent's background housekeeping — one calm folded line is
 // right — but a notable beat like viewing an image is worth seeing on its own,
-// so scanning the transcript tells the story. Skill reads use the same lane:
-// effectiveToolName reclassifies their receipt-bearing Read/Bash block without
-// losing its expandable raw details.
-const DISTINCTIVE_ACTIVITIES = new Set(['ViewImage', 'MemoryRecall', 'Skill'])
+// so scanning the transcript tells the story. Skill reads are housekeeping too:
+// effectiveToolName still gives them an honest label and expandable details,
+// while the ordinary activity stretch folds them beside reads and commands.
+const DISTINCTIVE_ACTIVITIES = new Set(['ViewImage', 'MemoryRecall'])
 
 // The one-line story of a memory lookup, including honest operational failure.
 // Reading the count from the result set the backend already parsed keeps the

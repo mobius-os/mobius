@@ -38,6 +38,7 @@ from app.memory_observability import (
 from app.questions import question_memory_diagnostics
 from app.resource_pressure import resource_status
 from app.runner_registry import RunnerKind, registry
+from app.secure_inputs import secure_input_memory_diagnostics
 
 router = APIRouter(prefix="/api/debug", tags=["debug"])
 
@@ -67,6 +68,7 @@ def _runtime_memory_ownership(*, include_payloads: bool = True) -> dict:
     ),
     "writer": writer_memory_diagnostics(),
     "questions": question_memory_diagnostics(),
+    "secure_inputs": secure_input_memory_diagnostics(),
   }
   report["payload_sizing"] = {
     "included": include_payloads,
@@ -187,6 +189,11 @@ def debug_status(
     memory=memory["cgroup"],
   )
   result["runtime_memory"] = _runtime_memory_ownership(include_payloads=False)
+  try:
+    from app.public_app_transport import public_app_usage_snapshot
+    result["public_apps"] = public_app_usage_snapshot()
+  except Exception:
+    result["public_apps"] = {}
   if reconciliation_failed:
     result["reconciliation_failed"] = True
   if media_migration_failed:

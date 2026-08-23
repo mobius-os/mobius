@@ -187,7 +187,7 @@ test('phone header preserves the 44px bell and widest badge without collisions',
 
   await context.setOffline(true)
   await page.evaluate(() => window.dispatchEvent(new Event('offline')))
-  const pill = page.locator('.shell__offline')
+  const pill = page.locator('.shell__connection-status')
   await expect(pill).toBeVisible({ timeout: 15000 })
 
   const box = locator => locator.boundingBox()
@@ -205,6 +205,37 @@ test('phone header preserves the 44px bell and widest badge without collisions',
   for (const [a, b] of [[brand, pillBox], [brand, bellBox2], [pillBox, bellBox2], [pillBox, badgeBox]]) {
     expect(overlaps(a, b)).toBe(false)
   }
+})
+
+test('phone preview stays content-sized for a short list', async ({ page }) => {
+  await mockNotifications(page)
+  await setup(page, { width: 390, height: 500 })
+  await openPreview(page)
+
+  const panelBox = await page.locator('.notifications').boundingBox()
+  expect(panelBox.height).toBeLessThan(300)
+})
+
+test('phone preview scrolls a long list within its compact cap', async ({ page }) => {
+  const manyRows = Array.from({ length: 8 }, (_, index) => ({
+    id: `n-${index}`, source_type: 'agent', source_id: CHAT_ID,
+    title: `Notification ${index + 1}`, body: 'A useful update with enough detail for two lines.',
+    icon: null, target: `/shell/?chat=${CHAT_ID}`, actions: null,
+    sent_at: new Date(Date.now() - index * 60_000).toISOString(), clicked_at: null, read_at: null,
+  }))
+  await mockNotifications(page, { rows: manyRows })
+  await setup(page, { width: 390, height: 500 })
+  await openPreview(page)
+
+  const panel = page.locator('.notifications')
+  const content = page.locator('.notifications__content')
+  const panelBox = await panel.boundingBox()
+  expect(panelBox.height).toBeLessThanOrEqual(352)
+  const dimensions = await content.evaluate(element => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }))
+  expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight)
 })
 
 test('preview is identical at desktop width', async ({ page }) => {

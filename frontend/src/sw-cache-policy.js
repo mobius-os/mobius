@@ -48,7 +48,13 @@ export const SHELL_DATA_CACHE = 'mobius-shell-data'
 // holding it never sees a new window.mobius capability even after the app is
 // recompiled and the shell restarts. Activation evicts v6 so every client
 // refetches the current versioned module (with the current compiled runtime).
-export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v7'
+// Bumped -v7 → -v8 (2026-08-15): a device may hold a News (or any Wasm app)
+// frame cached before/around the WebAssembly CSP change whose stored response
+// headers block Wasm compilation. Because the frame is served cache-first under
+// a `?v=<app.updated_at>` key that has not changed, only a cache-name bump forces
+// eviction: activation evicts v7 and the next app open refetches the current
+// WebAssembly-enabled frame.
+export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v8'
 // Bumped -v2 → -v3 (2026-07-30): v2 standalone documents executed app-authored
 // modules directly at owner origin. The secure host now mounts the shared
 // opaque AppCanvas frame; activation must evict every cached v2 document so an

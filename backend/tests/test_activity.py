@@ -879,7 +879,7 @@ def test_shared_storage_put_emits_storage_write(client, auth):
   r = client.put(
     "/api/storage/shared/agent-experience.md",
     headers={**auth, "Content-Type": "text/plain"},
-    data="seed content\n",
+    content="seed content\n",
   )
   assert r.status_code == 204, r.text
 
@@ -896,7 +896,7 @@ def test_shared_storage_delete_emits_negative_delta(client, auth):
   client.put(
     "/api/storage/shared/scratch.txt",
     headers={**auth, "Content-Type": "text/plain"},
-    data="bye\n",
+    content="bye\n",
   )
   activity._reset_for_tests()
   r = client.delete("/api/storage/shared/scratch.txt", headers=auth)
@@ -914,7 +914,7 @@ def test_shared_storage_put_debounces_within_window(client, auth):
     r = client.put(
       "/api/storage/shared/agent-experience.md",
       headers={**auth, "Content-Type": "text/plain"},
-      data="v\n",
+      content="v\n",
     )
     assert r.status_code == 204
   writes = [l for l in _read_lines() if l["ev"] == "storage_write"]

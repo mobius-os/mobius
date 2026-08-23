@@ -97,17 +97,6 @@
   }
 }
 
-/* The selected provider-default row is state, not another choice. */
-.csp-row--static {
-  cursor: default;
-}
-@media (hover: hover) and (pointer: fine) {
-  .csp-row--static:hover,
-  .csp-row--selected.csp-row--static:hover {
-    background: color-mix(in srgb, var(--accent) 9%, var(--surface));
-  }
-}
-
 .csp-row--locked {
   opacity: 0.4;
   cursor: not-allowed;
@@ -210,6 +199,17 @@
   color: var(--muted);
   font-size: 13px;
   line-height: 1.35;
+}
+
+.csp__selection-required {
+  margin: 1px 10px 7px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border-light));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .csp__availability-warning {

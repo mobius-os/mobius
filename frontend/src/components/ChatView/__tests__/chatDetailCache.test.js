@@ -45,7 +45,7 @@ test('cache first paint requires the saved reading coordinate when one exists', 
 })
 
 
-test('a running cache waits for subscribe-time replay', () => {
+test('a running cache enters the in-place stream reconciliation phase', () => {
   const running = {
     restorationWindowComplete: true,
     running: true,
@@ -103,7 +103,6 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
     effective_agent_settings: { effort: 'high' },
     has_assistant_turns: true,
     auto_resume_on_limit: true,
-    auto_resume_on_restart: false,
   }
 
   const cached = chatDetailCacheValue(source)
@@ -122,7 +121,6 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
     effective: { effort: 'high' },
     has_assistant_turns: true,
     auto_resume_on_limit: true,
-    auto_resume_on_restart: false,
   })
 })
 

@@ -26,6 +26,7 @@ function PaneChatView({
   paneId,
   apps,
   runtimeActive = true,
+  previewPresented = false,
   keepTranscriptPainted = false,
   focusedPresentation = false,
   paneContentHeight,
@@ -49,6 +50,7 @@ function PaneChatView({
   onChatMissing,
   onFirstMessage,
   onDisplayReady,
+  onChatBoundaryError,
 }) {
   // builtApps is derived PER chatId, memoized on the same signature Shell uses
   // for the primary chat — an unrelated app's refetch is a no-op for this pane.
@@ -127,11 +129,13 @@ function PaneChatView({
       variant="inline"
       label="chat"
       recoveryKey={`chat:${chatId}`}
+      onError={onChatBoundaryError}
     >
       <ChatView
         key={chatId}
         chatId={chatId}
         hidden={!runtimeActive}
+        previewPresented={previewPresented}
         keepTranscriptPainted={keepTranscriptPainted}
         paneContentHeight={paneContentHeight}
         externalRunSignal={externalRunSignal}

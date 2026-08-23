@@ -41,7 +41,11 @@ def _write_static(app_id, relpath, content):
 
 def _assert_opaque_embed_policy(response, status_code):
   assert response.status_code == status_code
-  assert response.headers["content-security-policy"] == _STATIC_EMBED_CSP
+  policy = response.headers["content-security-policy"]
+  assert policy == _STATIC_EMBED_CSP
+  assert "allow-popups-to-escape-sandbox" in policy
+  assert "allow-same-origin" not in policy
+  assert "allow-top-navigation" not in policy
   assert "x-frame-options" not in response.headers
 
 

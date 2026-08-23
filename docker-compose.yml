@@ -34,9 +34,18 @@ services:
     init: true
     restart: unless-stopped
     environment:
-      - SECRET_KEY=${SECRET_KEY}
-      - DOMAIN=${DOMAIN}
+      # Fail loudly instead of silently blanking these: a bare `docker compose
+      # up` (without deploy-prod.sh or --env-file) would default them to "",
+      # deriving FRONTEND_ORIGIN=https:// and crash-looping the app — and a
+      # changed SECRET_KEY would drift JWT/crypto. Refuse to start unless set.
+      - SECRET_KEY=${SECRET_KEY:?set SECRET_KEY — use scripts/deploy-prod.sh or docker compose --env-file <prod .env>, never a bare docker compose up}
+      - DOMAIN=${DOMAIN:?set DOMAIN — use scripts/deploy-prod.sh or docker compose --env-file <prod .env>, never a bare docker compose up}
       - FRONTEND_ORIGIN=https://${DOMAIN}
+      # Ordinary self-hosted account linking follows this service origin. The
+      # client origin normally derives from FRONTEND_ORIGIN; set it explicitly
+      # only when the browser-facing origin differs from DOMAIN.
+      - MOBIUS_ACCOUNT_ORIGIN=${MOBIUS_ACCOUNT_ORIGIN:-https://www.mobius.you}
+      - MOBIUS_ACCOUNT_CLIENT_ORIGIN=${MOBIUS_ACCOUNT_CLIENT_ORIGIN:-}
       # No application default: every public_surface fails closed unless the
       # operator explicitly configures the same shared origin consumed by
       # Caddy above. One gateway serves all owner-trusted service slugs.
@@ -57,7 +66,7 @@ services:
     expose:
       - "8000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/ready"]
       interval: 30s
       timeout: 10s
       retries: 3

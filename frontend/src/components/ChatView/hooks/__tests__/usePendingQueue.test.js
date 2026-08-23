@@ -88,6 +88,29 @@ test('a steer reservation hides a row without removing its durable queue record'
   )
 })
 
+test('hidden product events remain durable but never enter the owner queue tray', () => {
+  const { result } = renderHook(() => usePendingQueue([
+    { role: 'user', content: 'owner follow-up', ts: 1, cid: 'owner' },
+    {
+      role: 'user', content: 'internal child result', ts: 2, cid: 'product',
+      hidden: true, kind: 'delegation_result',
+    },
+  ]))
+
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current.map(m => m.cid),
+    ['owner', 'product'],
+  )
+  assert.deepEqual(
+    result.current.visiblePendingMessages.map(m => m.cid),
+    ['owner'],
+  )
+  assert.deepEqual(
+    result.current.getVisiblePendingMessages().map(m => m.cid),
+    ['owner'],
+  )
+})
+
 test('a deferred-cut hydrate keeps a reserved row hidden until its cut', () => {
   const { result } = renderHook(() => usePendingQueue([
     { role: 'user', content: 'first', ts: 1, cid: 'a' },

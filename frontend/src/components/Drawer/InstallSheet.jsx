@@ -6,6 +6,7 @@ import { appQueries } from '../../hooks/queries.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { loginBoundaryPath } from '../../lib/safeReturnPath.js'
 import {
+  androidBrowserIntentHref,
   detectInstallPlatform,
   isStandaloneDisplay,
 } from '../../utils/installPlatform.js'
@@ -62,11 +63,14 @@ export default function InstallSheet({ app, onClose }) {
   // the app. So every platform, iOS Safari included, navigates to the app's
   // own page, which serves the app's manifest, name, and icon.
   //
-  // The one case that cannot navigate is the installed Möbius app: it has no
-  // Share button, and iOS gives a PWA no supported way to hand off to Safari
-  // (`x-safari-https:` is undocumented and errors on some versions). There
-  // `handoff` flips the card to a tappable link plus a copyable address, so
-  // the user carries the destination across instead of retyping it.
+  // The one case that cannot navigate usefully is the installed Möbius app.
+  // iOS: it has no Share button, and iOS gives a PWA no supported way to hand
+  // off to Safari (`x-safari-https:` is undocumented and errors on some
+  // versions). Android: navigating out of the installed app's scope opens an
+  // in-app Custom Tab, where Chromium never fires `beforeinstallprompt`, so
+  // the install card would sit there looking broken. Both flip `handoff`: the
+  // card becomes a tappable link (an intent: URI on Android, which escapes to
+  // the real browser) plus a copyable address as the fallback.
   const [platform] = useState(() => detectInstallPlatform())
   const [standalone] = useState(() => isStandaloneDisplay())
   const [handoff, setHandoff] = useState(false)
@@ -194,10 +198,11 @@ export default function InstallSheet({ app, onClose }) {
       const url = platform.ios
         ? await buildInstallUrl()
         : new URL(installPath, window.location.origin).href
-      if (platform.ios && standalone) {
-        // No Share button here and nowhere to navigate that would produce
-        // one. Hand the destination over instead.
-        setHandoffUrl(url)
+      if (standalone && (platform.ios || platform.android)) {
+        // Installed-app context: navigating in place can't complete an
+        // install (no Share button on iOS; an install-less Custom Tab on
+        // Android). Hand the destination over instead.
+        setHandoffUrl(platform.ios ? url : androidBrowserIntentHref(url))
         setSubmitting(false)
         setHandoff(true)
         return
@@ -241,22 +246,31 @@ export default function InstallSheet({ app, onClose }) {
               ×
             </button>
             <h2 className="is__title">Add {label} to your home screen</h2>
-            <p className="is__hint is__hint--steps">
-              Only Safari can put an app on your home screen, and you’re in
-              the installed Möbius app right now. Open {label}’s own page,
-              then tap <strong>Share</strong> and choose{' '}
-              <strong>Add to Home Screen</strong>.
-            </p>
+            {platform.ios ? (
+              <p className="is__hint is__hint--steps">
+                Only Safari can put an app on your home screen, and you’re in
+                the installed Möbius app right now. Open {label}’s own page,
+                then tap <strong>Share</strong> and choose{' '}
+                <strong>Add to Home Screen</strong>.
+              </p>
+            ) : (
+              <p className="is__hint is__hint--steps">
+                You’re in the installed Möbius app, and Android only offers
+                installs from a real browser tab. Open {label}’s page in your
+                browser, then tap <strong>Install</strong>.
+              </p>
+            )}
 
             <div className="is__handoff">
               <a
                 ref={primaryFocusRef}
                 className="is__btn is__btn--primary is__btn--link"
                 href={handoffUrl}
-                target="_blank"
-                rel="noopener noreferrer"
+                {...(platform.ios
+                  ? { target: '_blank', rel: 'noopener noreferrer' }
+                  : {})}
               >
-                Open {label}’s page
+                {platform.ios ? `Open ${label}’s page` : 'Open in your browser'}
               </a>
               <button
                 type="button"
@@ -269,11 +283,18 @@ export default function InstallSheet({ app, onClose }) {
 
             {error && <div className="is__error" role="alert">{error}</div>}
 
-            <p className="is__hint">
-              If it opens inside Möbius rather than Safari, tap the compass
-              icon to switch over. Or open Safari yourself and go to{' '}
-              <span className="is__url">{plainHandoffUrl}</span>
-            </p>
+            {platform.ios ? (
+              <p className="is__hint">
+                If it opens inside Möbius rather than Safari, tap the compass
+                icon to switch over. Or open Safari yourself and go to{' '}
+                <span className="is__url">{plainHandoffUrl}</span>
+              </p>
+            ) : (
+              <p className="is__hint">
+                If nothing opens, copy the link and paste it into your
+                browser: <span className="is__url">{plainHandoffUrl}</span>
+              </p>
+            )}
           </>
         ) : (
         <>

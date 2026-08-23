@@ -38,6 +38,7 @@ function propBag(overrides = {}) {
     chatId: 'chat-a',
     paneId: 'pane-1',
     runtimeActive: true,
+    previewPresented: true,
     keepTranscriptPainted: false,
     paneContentHeight: 640,
     externalRunSignal: { startedAt: 1, activityAt: 2 },
@@ -114,6 +115,8 @@ test('Shell hands the pane only identity-stable props', () => {
   // navTo is declared per render in useNavigation; the pane gets the ref-backed
   // wrapper instead so its identity never churns.
   assert.match(slice, /navTo=\{stablePaneNavTo\}/)
+  assert.match(slice, /previewPresented=\{chatSurfaceInteractive\}/,
+    'preview expiry must use the shell surface that is actually presented')
   assert.match(shell, /const stablePaneNavTo = useCallback\(/)
   // loadTheme is a dependency of handleSystemEvent, which is itself a pane prop.
   assert.match(useTheme, /const loadTheme = useCallback\(/)

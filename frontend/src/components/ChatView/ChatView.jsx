@@ -16,7 +16,7 @@ import { chatMessagesQueryKey } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
   FOLLOW_STICK_BAND_PX,
-  isNearContentBottom,
+  isNearPhysicalBottom,
   olderHistoryRetryShown,
   olderHistoryShouldLoad,
   remapSavedReadingAnchor,
@@ -26,7 +26,11 @@ import useScrollMode, {
 } from './useScrollMode.js'
 import useVoiceInput from './useVoiceInput.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
-import { getOnlineSnapshot } from '../../lib/connectivityStore.js'
+import {
+  getOnlineSnapshot,
+  getRecoverySnapshot,
+  subscribeRecovery,
+} from '../../lib/connectivityStore.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
@@ -41,6 +45,7 @@ import ChatSummaryViewer from './ChatSummaryViewer.jsx'
 import ComposerPopover from './ComposerPopover.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
 import ProgressRail from './ProgressRail.jsx'
+import GoalPlanDetails from './GoalPlanDetails.jsx'
 import ActiveAssistantSurface from './ActiveAssistantSurface.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import ContributionReviewCard from './ContributionReviewCard.jsx'
@@ -64,6 +69,7 @@ import {
 import { questionKey } from './questionKey.js'
 import { clearChatQuestionDrafts } from './questionDraft.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
+import { isTouchPrimary } from '../../lib/pointerPrimary.js'
 import { resolveStopResend } from './resolveStopResend.js'
 import {
   focusComposerElement,
@@ -94,7 +100,9 @@ import {
   highlightSearchTerms,
 } from '../../lib/searchTermHighlight.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
+import useOpenAppCtaAutoDismiss from './hooks/useOpenAppCtaAutoDismiss.js'
 import {
+  isModelSelectionRequiredFailure,
   isPendingQuestionSendFailure,
   sendFailureMessage,
 } from './sendFailure.js'
@@ -113,9 +121,10 @@ import {
   isOwnerUserMessage,
   jumpToLatestShown,
   openAppCtaViewModel,
+  runtimeStreamAttachAction,
   shouldRetireRestoredQuestionSnapshot,
-  shouldShowOpenAppCta,
   shouldAttachRunningStream,
+  shouldRecoverSettledRuntime,
   shouldRetryStopAfterConfirm,
   stopConfirmedIdle,
   stopRequestSucceeded,
@@ -143,6 +152,7 @@ import {
   reconcileComposerTextarea,
   resetComposerTextarea,
 } from './composerTextareaSizing.js'
+import { needsModelSelection } from './modelSelectionPolicy.js'
 import {
   EMPTY_BUILD_PHASE_RAIL,
   accumulateBuildPhase,
@@ -151,35 +161,25 @@ import {
   railAtRunStart,
 } from './buildPhaseRail.js'
 import {
+  compactGoalObjective,
+  goalObjectiveForQueuedStart,
   goalObjectiveAtRunStart,
   goalObjectiveFromRuntime,
   latestGoalObjective,
+  newestGoalPlan,
   progressRailViewModel,
 } from './goalProgress.js'
 import './ChatView.css'
 
 
-// Cache touch-primary detection. Updated dynamically if input devices change.
-const _touchMql = typeof matchMedia === 'function'
-  ? matchMedia('(hover: none) and (pointer: coarse)')
-  : null
-let _isTouchPrimary = _touchMql?.matches ?? false
-_touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
-
 const STOP_RETRY_DELAYS_MS = [0, 250, 700, 1200]
 const CHAT_FETCH_TIMEOUT_MS = 15000
 const MESSAGE_META_VISIBLE_MS = 5000
-// How long the settled "Open <app>" CTA lingers after a turn ends before it
-// auto-dismisses itself (a durable "final" acknowledgement). An ephemeral nudge,
-// not a permanent chat-foot fixture.
-const OPEN_APP_CTA_AUTO_DISMISS_MS = 8000
-// The floating jump-to-latest control is driven by follow-state, not a raw
-// pixel distance (use-stick-to-bottom's `!isAtBottom`): it shows whenever the
-// reader is NOT following AND sits beyond the shared follow-stick band above the
-// CONTENT tail (reserved spacer room is phantom, per the send-snapshot bottom
-// rule). Using the SAME band the controller sticks within removes the old dead
-// zone where a dropped follow left the reader with neither autoscroll nor a
-// button between the band and the previous 200px threshold.
+// The floating jump-to-latest control is driven by follow-state plus physical
+// tail distance. Reserved reply room remains part of that range, so an upward
+// reader escape can reveal the control even while the latest row is visible.
+// Using the same band the controller sticks within removes the old dead zone
+// where a dropped follow left the reader with neither autoscroll nor a button.
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -299,6 +299,10 @@ export default function ChatView({
   // the scroll controller's paneResized() below. Null for a single-pane chat (today's
   // behavior — the controller's own ResizeObserver owns resize there).
   paneContentHeight = null,
+  // Shell presentation is narrower than runtime activity: overlays and modal
+  // navigation can cover a mounted, active chat. App-preview observation uses
+  // this explicit surface fact so covered shortcuts do not expire unseen.
+  previewPresented = false,
   // True when this mounted chat is hidden behind the full-workspace Settings
   // overlay (design §2). Before path-unification the single ChatView UNMOUNTED on
   // Settings, which aborted the mic; now it stays mounted, so we must stop voice
@@ -399,8 +403,7 @@ export default function ChatView({
   // Cached rows are safe restoration geometry, but their persisted liveness can
   // be stale. Do not publish a chat-to-chat handoff until this activation's
   // runtime/detail verdict has arrived: otherwise an apparently idle cache can
-  // be promoted, then disappear when the server reports a running turn and the
-  // stream catch-up gate closes one frame later.
+  // be promoted before the server reports that its turn is still running.
   const [activationSettled, setActivationSettled] = useState(false)
   const acceptCachedReadingCoordinate = useCallback(() => {
     // The scroll owner has proved the exact nested part against committed DOM.
@@ -497,6 +500,7 @@ export default function ChatView({
   // control. Keep its necessary detail refresh single-flight per exact owner;
   // the invariant below retries naturally after an honest fetch failure.
   const parkedQuestionHydrationRef = useRef(null)
+  const retireSettledStreamRef = useRef(null)
   // The pending-question and resume "tap to jump to it" nudges each track
   // whether their card is scrolled out of the viewport. Both use one shared
   // observer hook (useOffscreenNudge, below); their booleans are computed near
@@ -529,14 +533,16 @@ export default function ChatView({
   // real run-start seam and left intact across mid-turn steers; a fresh mount
   // can recover it from the visible run-start message once liveness is known.
   const [activeGoalObjective, setActiveGoalObjective] = useState(
-    () => cached?.running ? (cached?.activeGoalObjective ?? '') : '',
+    () => compactGoalObjective(cached?.activeGoalObjective),
   )
+  const [activeGoalPlan, setActiveGoalPlan] = useState(null)
   const setActiveGoalState = useCallback((objective) => {
-    setActiveGoalObjective(objective)
+    const compactObjective = compactGoalObjective(objective)
+    setActiveGoalObjective(compactObjective)
     updateChatRuntimeCache(
       queryClient,
       chatMessagesQueryKey(chatId),
-      { activeGoalObjective: objective },
+      { activeGoalObjective: compactObjective },
     )
   }, [chatId, queryClient])
 
@@ -557,8 +563,27 @@ export default function ChatView({
   }, [])
   useEffect(() => {
     const runtime = queryClient.getQueryData(chatMessagesQueryKey(chatId))
-    setActiveGoalObjective(runtime?.running ? (runtime.activeGoalObjective ?? '') : '')
+    setActiveGoalObjective(
+      compactGoalObjective(runtime?.activeGoalObjective),
+    )
   }, [chatId, queryClient])
+
+  useEffect(() => {
+    let cancelled = false
+    if (!activeGoalObjective) {
+      setActiveGoalPlan(null)
+      return () => { cancelled = true }
+    }
+    apiFetch(`/chats/${chatId}/goal-plan`, { timeoutMs: CHAT_FETCH_TIMEOUT_MS })
+      .then(response => response.ok ? response.json() : null)
+      .then(payload => {
+        if (!cancelled) {
+          setActiveGoalPlan(current => newestGoalPlan(current, payload?.plan || null))
+        }
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [activeGoalObjective, chatId])
 
   // Pending queue (the items shown in the queued-tray above the
   // composer) lives entirely inside usePendingQueue. Every mutation
@@ -601,6 +626,11 @@ export default function ChatView({
   // settles. Keep its serialized write tail at ChatView scope so both a closed
   // + popover and an immediate Send still observe the same ordering boundary.
   const settingsSaveTailRef = useRef(Promise.resolve())
+  // A send with no explicit model turns into an open-picker request rather
+  // than falling through to the provider SDK's invisible default. A monotonic
+  // request keeps the popover's open state local while making repeated submit
+  // attempts observable even when it was dismissed between them.
+  const [modelSelectionRequest, setModelSelectionRequest] = useState(0)
   // Refs for the absolutely-positioned foot. Its ResizeObserver notifies the
   // scroll controller, which owns publishing composer clearance together with
   // every other indirect scroll-geometry write.
@@ -729,6 +759,13 @@ export default function ChatView({
   // useStreamConnection and is exposed below as `isStreamingRef`.
   const sendingRef = useRef(false)
   sendingRef.current = sending
+  // Identity of the one fresh-send request that has rendered locally but has
+  // not settled its POST yet. This is deliberately a transaction ref, not a
+  // fourth "running" flag: it never renders UI and is cleared by the exact
+  // request that created it. Runtime polling may observe the previous idle
+  // snapshot while app context, settings, or the POST is still in flight;
+  // that snapshot cannot retire this locally-owned start.
+  const localStartRequestRef = useRef(null)
   // Re-entrancy guard for doSendSilent (answer submissions). sendingRef
   // alone cannot guard doSendSilent because answer sends are deliberately
   // allowed while sendingRef is true (the runner is parked waiting for
@@ -1040,7 +1077,7 @@ export default function ChatView({
   // refresh. While a turn or visible queue exists, poll the small chat state
   // payload and hydrate only runtime fields — do not replace the transcript.
   const reconcileRuntimeState = useCallback(async () => {
-    if (hiddenRef.current) return
+    if (hiddenRef.current) return null
     const gen = fetchGenRef.current
     try {
       const res = await apiFetch(
@@ -1048,9 +1085,13 @@ export default function ChatView({
         { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
       )
       const data = await jsonOrThrow(res, 'Runtime refresh failed')
-      if (chatIdStaleRef.current) return
-      if (fetchGenRef.current !== gen) return
+      if (chatIdStaleRef.current) return null
+      if (fetchGenRef.current !== gen) return null
       const serverPending = data.pending_messages || []
+      const runtime = {
+        running: !!data.running,
+        pendingQuestionId: data.pending_question_id || null,
+      }
       // The SSE stream is the source of truth for "a turn is live" — this poll
       // is only a fallback. While the stream is alive (isStreamingRef) or a Stop
       // is in flight, local optimistic state is authoritative: this background
@@ -1059,8 +1100,33 @@ export default function ChatView({
       // when the stream is genuinely dead (a stale Stop with no real turn) does
       // the server snapshot win. Event-driven over polling — see
       // docs/architecture.md "determinism".
+      const localStartInFlight =
+        localStartRequestRef.current?.chatId === String(chatId)
       const localAuthoritative =
-        handlingStopRef.current || isStreamingRef.current
+        handlingStopRef.current || localStartInFlight || isStreamingRef.current
+      if (shouldRecoverSettledRuntime({
+        runtimeWasObservedRunning: serverRunningRef.current,
+        runtimeRunning: !!data.running,
+        pendingCount: serverPending.length,
+        streamStillActive: isStreamingRef.current,
+        stopInFlight: handlingStopRef.current,
+        localStartInFlight,
+      })) {
+        // The backend has durably finalized a run but this browser missed its
+        // terminal SSE event. Re-read the transcript before retiring the stale
+        // transport so a saved final reply can never remain hidden behind the
+        // cached in-flight surface. A failed refresh leaves serverRunning
+        // latched, so the next runtime poll retries instead of declaring idle.
+        const settled = await fetchMessages({
+          force: true,
+          terminal204: true,
+          authoritative: true,
+        })
+        if (settled?.running === false) {
+          retireSettledStreamRef.current?.()
+        }
+        return
+      }
       if (data.running) {
         setSending(true)
       } else if (serverPending.length === 0 && !localAuthoritative) {
@@ -1080,7 +1146,7 @@ export default function ChatView({
         data, cachedGoalObjective,
       )
       setActiveGoalObjective(runtimeGoalObjective)
-      const pendingQuestionId = data.pending_question_id || null
+      const pendingQuestionId = runtime.pendingQuestionId
       setLiveQuestionId(pendingQuestionId)
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
@@ -1113,7 +1179,9 @@ export default function ChatView({
           }
         })
       }
+      return runtime
     } catch { /* background reconciliation is best-effort */ }
+    return null
   }, [
     chatId,
     fetchMessages,
@@ -1138,13 +1206,9 @@ export default function ChatView({
     clearAutoResumeError,
     handleAutoResumeChange,
     handleAutoResumeSettingsChange,
-    handleRestartResumeChange,
     mergeChatInfo,
     providerSwitchState,
     providerSwitching,
-    restartResumeEnabled,
-    restartResumeError,
-    restartResumeSaving,
     setChatInfo,
   } = useChatRuntimePolicy({
     chatId,
@@ -1179,7 +1243,24 @@ export default function ChatView({
     },
     onStreamEnd: ({ continues, promotedMessage } = {}) => {
       if (embedded && continues === false) setEmbeddedRunActive(false)
-      promoteStreamToMessages()
+      const continuation = continues ? queuedContinuationRef.current : null
+      queuedContinuationRef.current = null
+      const localPromoted = continuation?.rows || null
+      const continuationPinIntent = continuation?.intent || null
+      const promotedRows = continues
+        ? continuationRowsFromPromotedMessage(promotedMessage, localPromoted)
+        : []
+      // Read this before the rows become visible. Continuation markers are not
+      // owner messages, but an ordinary first queued send is.
+      const contIsFirstUser = promotedRows.length > 0
+        ? isFirstVisibleUserMessage()
+        : false
+      const pinCid = promotedRows.length > 0 ? cidOf(promotedRows[0]) : null
+      // The completed assistant and the rows starting its continuation form
+      // one transcript boundary. A restored assistant may be bridged in place
+      // above a newer local row, so committing the following rows separately
+      // at the list tail makes a restart marker flash below that newer row.
+      promoteStreamToMessages({ followingMessages: promotedRows })
       if (continues) {
         // Backend auto-promoted queued follow-ups into the next turn. Newer
         // backend code persists the visible rows separately while sending
@@ -1187,24 +1268,13 @@ export default function ChatView({
         // The local queue was already trimmed when the
         // queued_turn_starting event arrived, so a message queued after
         // that event cannot be accidentally folded into this turn here.
-        const continuation = queuedContinuationRef.current
-        queuedContinuationRef.current = null
-        const localPromoted = continuation?.rows || null
-        const continuationPinIntent = continuation?.intent || null
-        const promotedRows = continuationRowsFromPromotedMessage(
-          promotedMessage,
-          localPromoted,
-        )
         if (promotedRows.length > 0) {
           // A queued continuation is still a user send becoming the active
           // turn, so it follows the same send rule (see shouldPinSend):
-          // pin only when first-or-at-bottom. Read the first-user check
-          // before the append. When not pinning, leave the reader where
+          // pin only when first-or-at-physical-tail. Read the first-user check
+          // before the boundary commit. When not pinning, leave the reader where
           // the previous turn left them — the continuation just appears
           // below without moving the scroll.
-          const contIsFirstUser = isFirstVisibleUserMessage()
-          const pinCid = cidOf(promotedRows[0])
-          commitMessages(prev => appendMessageBatch(prev, promotedRows))
           promotedRef.current = false
           landSentMessage(pinCid, {
             intent: continuationPinIntent,
@@ -1221,11 +1291,12 @@ export default function ChatView({
         setSending(true)
         setServerRunningState(true)
       } else {
-        queuedContinuationRef.current = null
         setSending(false)
         sendingRef.current = false
         setServerRunningState(false)
-        setActiveGoalState('')
+        if (activeGoalPlan?.summary?.can_complete !== false) {
+          setActiveGoalState('')
+        }
         // Stream ended without continuation. If we have local pending
         // entries, server may have cleared them (auth fail, error) —
         // refetch to reconcile. Skip when pending empty.
@@ -1237,6 +1308,15 @@ export default function ChatView({
       onStreamEnd?.({ continues })
     },
     onSystemEvent: event => {
+      if (event?.type === 'goal_activated') {
+        setActiveGoalPlan(null)
+        setActiveGoalState(event.objective || '')
+        return
+      }
+      if (event?.type === 'goal_plan_updated') {
+        setActiveGoalPlan(current => newestGoalPlan(current, event.plan || null))
+        return
+      }
       // A build_phase is chat-local: it only feeds this chat's milestone rail,
       // so accumulate it here (deduped by ts) instead of forwarding it to the
       // Shell, which has no handler for it.
@@ -1255,9 +1335,8 @@ export default function ChatView({
       // position the live stream did (old-run phases, then reset) and the
       // rail always lands on the run being displayed.
       setBuildPhases(railAtRunStart())
-      setActiveGoalState(goalObjectiveAtRunStart(
-        message?.content,
-        messagesRef.current,
+      setActiveGoalState(goalObjectiveForQueuedStart(
+        message, messagesRef.current,
       ))
       const consumedCids = message?._consumed_cids
       const serverRows = Array.isArray(message?._messages)
@@ -1377,6 +1456,11 @@ export default function ChatView({
     },
   })
 
+  retireSettledStreamRef.current = () => {
+    disconnect({ clearStreaming: true })
+    clearStreamItems()
+  }
+
   // useScrollMode's layout effect is registered before this one. At a steer
   // cut it therefore commits the new row's PIN_USER_MSG/ANCHOR_AT position
   // first; only then may a still-focused, otherwise-unchanged touch composer
@@ -1446,7 +1530,9 @@ export default function ChatView({
         processedExternalSignalRef.current = target
         const delta = chatRunSignalDelta(previous, target)
         const locallyActive = (
-          sendingRef.current || isStreamingRef.current
+          sendingRef.current
+          || isStreamingRef.current
+          || localStartRequestRef.current?.chatId === String(chatId)
         ) && !externalClaimedRunRef.current
         if (locallyActive) {
           // The local optimistic turn remains authoritative for its suffix,
@@ -1505,20 +1591,20 @@ export default function ChatView({
         queueMicrotask(reconcileExternalActivity)
       }
     }
-  }, [connectToStream, embedded, fetchMessages, isStreamingRef])
+  }, [chatId, connectToStream, embedded, fetchMessages, isStreamingRef])
   useEffect(() => {
     if (hidden) return
     reconcileExternalActivity()
   }, [effectiveRunSignal.seq, hidden, reconcileExternalActivity])
 
-  const ensureRuntimeStreamConnected = useCallback(() => {
-    if (hiddenRef.current) return
-    if (connectionError === 'disconnected') return
-    if (!shouldAttachRunningStream({
-      running: serverRunningRef.current,
-      pendingQuestionId: liveQuestionId,
-    })) return
-    if (isStreamingRef.current) return
+  const ensureRuntimeStreamConnected = useCallback((runtime) => {
+    const action = runtimeStreamAttachAction({
+      ...runtime,
+      isStreaming: isStreamingRef.current,
+      connectionError,
+      hidden: hiddenRef.current,
+    })
+    if (action === 'none') return
     if (runtimeReconnectInFlightRef.current) return
 
     runtimeReconnectInFlightRef.current = true
@@ -1526,12 +1612,13 @@ export default function ChatView({
     // client has no live SSE attached: Android can pause/kill the fetch
     // during app switch, network handoff, or a shell rebuild. Reconnect
     // from the server verdict instead of waiting for a full remount.
-    Promise.resolve(connectToStream(true))
+    const attaching = action === 'retry' ? retry() : connectToStream(true)
+    Promise.resolve(attaching)
       .catch(() => {})
       .finally(() => {
         runtimeReconnectInFlightRef.current = false
       })
-  }, [connectToStream, connectionError, isStreamingRef, liveQuestionId])
+  }, [connectToStream, connectionError, isStreamingRef, retry])
 
   const wasHiddenRef = useRef(hidden)
   useLayoutEffect(() => {
@@ -1589,10 +1676,16 @@ export default function ChatView({
   // would duplicate the in-flight content in the final transcript.
   // APPEND otherwise (the normal first-time send path: `prev` ends in
   // a user message, the assistant message hasn't been committed yet).
-  function promoteStreamToMessages({ keepTurnOpen = false } = {}) {
-    if (promotedRef.current && !keepTurnOpen) return
+  function promoteStreamToMessages({
+    keepTurnOpen = false,
+    followingMessages = [],
+  } = {}) {
+    const following = Array.isArray(followingMessages)
+      ? followingMessages.filter(Boolean)
+      : []
+    if (promotedRef.current && !keepTurnOpen && following.length === 0) return
     const items = latestItemsRef.current
-    if (items.length === 0) return
+    if (items.length === 0 && following.length === 0) return
     // A steer can cut over before the assistant emitted any real output — the
     // only buffered item is an empty/whitespace token. Sealing it would leave a
     // stray empty assistant bubble before the steered user row (the card-166
@@ -1634,6 +1727,7 @@ export default function ChatView({
       paintedItems: streamItems,
       promotedItems: items,
       bridgeTs,
+      followingMessages: following,
       commitMessages,
     })
     // force=true bypasses sameMessageList. In the BRIDGE merge path
@@ -1816,6 +1910,16 @@ export default function ChatView({
       return response.json()
     }
 
+    const settleSupersededActivation = () => {
+      // A fresh send or Stop has advanced the local generation and now owns
+      // the mounted transcript. The stale activation must not apply its
+      // server snapshot, but it still owns the entry gate it opened above.
+      // Retire that gate so the newer local owner can become paintable.
+      setInitialEntryPhase('ready')
+      setLoading(false)
+      setActivationSettled(true)
+    }
+
     const settleRuntime = (runtime, visibleMessages) => {
       const running = !!runtime.running
       const attachesToStream = shouldAttachRunningStream({
@@ -1834,8 +1938,10 @@ export default function ChatView({
           ? visibleMessages[visibleMessages.length - 1]
           : null,
       })
-      // Persisted rows are not the complete surface of a running turn. Keep
-      // the outgoing chat visible until the subscribe-time replay commits.
+      // Runtime truth is enough to present the canonical transcript and its
+      // stable in-progress assistant surface. Subscribe-time replay reconciles
+      // into that same row after presentation instead of holding the outgoing
+      // chat—and its stale reading cues—through the transport catch-up.
       setInitialEntryPhase(attachesToStream ? 'stream-catchup' : 'ready')
       setLoading(false)
       setActivationSettled(true)
@@ -1912,7 +2018,11 @@ export default function ChatView({
         detailCache = chatDetailCacheValue(runtime)
       }
 
-      if (cancelled || fetchGenRef.current !== gen) return
+      if (cancelled) return
+      if (fetchGenRef.current !== gen) {
+        settleSupersededActivation()
+        return
+      }
       const msgs = detailCache.messages
       const failedAttempt = failedSendAttemptRef.current
       if (failedAttempt) {
@@ -2043,14 +2153,7 @@ export default function ChatView({
         await yieldToMainThread()
         if (cancelled) return
         if (fetchGenRef.current !== gen) {
-          // A newer generation owns the runtime now (a fresh send, or Stop
-          // clearing the queue), so this fetch must NOT apply its own runtime
-          // state — settleRuntime would re-hydrate the queue Stop just
-          // cleared. But 'preparing' is a hidden gate that only this path
-          // sets, and neither superseding path releases it: returning here
-          // without releasing it strands the chat blank until remount.
-          setInitialEntryPhase('ready')
-          setLoading(false)
+          settleSupersededActivation()
           return
         }
         // React may batch state updates across async task yields and discard
@@ -2064,6 +2167,10 @@ export default function ChatView({
     loadActivation()
       .catch((err) => {
         if (cancelled) return
+        if (fetchGenRef.current !== gen) {
+          settleSupersededActivation()
+          return
+        }
         // Offline degradation may use a complete cached restoration window,
         // but never a truncated one that cannot resolve the saved address.
         const cacheIsSafeFallback = activationCache
@@ -2192,6 +2299,11 @@ export default function ChatView({
   useLayoutEffect(() => {
     const el = scrollRef.current
     if (!el || loadingOlder.current || loading || offset <= 0) return
+    // A failed page must hand control to the manual retry button, not auto-fill
+    // again: the failed fetch added no rows, so the surface is still
+    // non-scrollable and this dependency-less effect would otherwise re-fire and
+    // re-fetch on every render — an unbounded, backoff-free request storm.
+    if (olderHistoryError) return
     if (olderHistoryShouldLoad(el)) loadOlderMessages()
   })
 
@@ -2205,7 +2317,7 @@ export default function ChatView({
   const [awayFromLatest, setAwayFromLatest] = useState(false)
   const updateJumpToLatest = useCallback(() => {
     const el = scrollRef.current
-    const away = !!el && !isNearContentBottom(el, FOLLOW_STICK_BAND_PX)
+    const away = !!el && !isNearPhysicalBottom(el, FOLLOW_STICK_BAND_PX)
     setAwayFromLatest(prev => (prev === away ? prev : away))
   }, [])
   useLayoutEffect(updateJumpToLatest)
@@ -2213,7 +2325,7 @@ export default function ChatView({
   function handleScroll() {
     updateJumpToLatest()
     const el = scrollRef.current
-    if (!el || loadingOlder.current || loading) return
+    if (!el || loadingOlder.current || loading || olderHistoryError) return
     // Programmatic scrolls can land near the top, so the shared gesture window
     // still owns intent. Prefetch before the loaded-page boundary can become a
     // visible interruption instead of waiting for the absolute top.
@@ -2225,8 +2337,8 @@ export default function ChatView({
 
 
   // `opts.pin` allows the shared submit-time rule to pin the message. Normal
-  // user sends opt in, but still pin only when first-or-already-following at
-  // the bottom. Pass `pin: false` from synthetic-send paths where pinning
+  // user sends opt in, but still pin only when first-or-at-physical-tail.
+  // Pass `pin: false` from synthetic-send paths where pinning
   // would be surprising:
   //   - handleStop's queue-collapse: the user clicked Stop, not Send;
   //     pinning the auto-generated combined message would yank the
@@ -2272,7 +2384,7 @@ export default function ChatView({
     if (listeningRef.current) stopVoiceRef.current?.()
 
     // Resolve the ONE direct/queued/steered pin rule BEFORE blurring the
-    // textarea. The real-content geometry is authoritative; mode can lag a
+    // textarea. Physical-tail geometry is authoritative; mode can lag a
     // gesture/layout by a frame. Mobile blur can resize/clamp the viewport, so
     // capture the complete decision before it.
     const isFirstUserMsgAtSubmit = isFirstVisibleUserMessage()
@@ -2304,7 +2416,7 @@ export default function ChatView({
     // can be typed immediately. Fresh sends and explicit queue+steer submits
     // dismiss it; desktop retains its existing cursor-ready behaviour.
     if (shouldDismissComposerKeyboardOnSubmit({
-      isTouchPrimary: _isTouchPrimary,
+      isTouchPrimary: isTouchPrimary(),
       queuesBehindActiveTurn,
       directSteer,
     })) {
@@ -2569,7 +2681,7 @@ export default function ChatView({
           // Apply the shared send-intent rule before appending. A message that
           // raced into a started turn
           // is still a new send becoming the active turn, so it pins only
-          // when first-or-at-bottom. The decision was captured at send time.
+          // when first-or-at-physical-tail. The decision was captured at send time.
           const startedMessages = startedMessagesFromResponse(result)
           commitMessages(prev => {
             if (startedMessages) return appendMessageBatch(prev, startedMessages)
@@ -2613,6 +2725,8 @@ export default function ChatView({
         }
       } catch (err) {
         const pendingQuestionBlocked = isPendingQuestionSendFailure(err)
+        const modelSelectionBlocked = showPicker
+          && isModelSelectionRequiredFailure(err)
         // Roll back optimistic + restore input.
         if (!directSteer) pendingQueue.cancelByCid(queuedMsg.cid)
         forgetSendIntent({ cid: queuedMsg.cid })
@@ -2625,8 +2739,14 @@ export default function ChatView({
           })
         }
         restoreComposerAfterFailedSend()
-        setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
-        if (pendingQuestionBlocked) revealPendingQuestion()
+        setSendFailure(modelSelectionBlocked
+          ? null
+          : sendFailureMessage(err, { online: getOnlineSnapshot() }))
+        if (modelSelectionBlocked) {
+          setModelSelectionRequest(request => request + 1)
+        } else if (pendingQuestionBlocked) {
+          revealPendingQuestion()
+        }
       } finally {
         if (!directSteer
             && queuedSendRequestsRef.current.get(cid) === queueRequest) {
@@ -2637,6 +2757,8 @@ export default function ChatView({
     }
 
     // FRESH SEND PATH: no active turn, no queue.
+    const localStartRequest = { chatId: String(chatId), cid }
+    localStartRequestRef.current = localStartRequest
     fetchGenRef.current += 1
     onMessageStartRef.current?.()
     promotedRef.current = false
@@ -2671,7 +2793,6 @@ export default function ChatView({
       // comment above for the full rationale.
     }
     setSending(true)
-    setServerRunningState(true)
     // Pin per the R2 send rule via the funnel: it arms the reservation spacer
     // on every send and, when not pinning, retires any stale PIN to the
     // reader's anchor so their viewport stays fixed. The row carries its final
@@ -2795,6 +2916,8 @@ export default function ChatView({
       }
     } catch (err) {
       const pendingQuestionBlocked = isPendingQuestionSendFailure(err)
+      const modelSelectionBlocked = showPicker
+        && isModelSelectionRequiredFailure(err)
       if (!pendingQuestionBlocked) {
         setSending(false)
         sendingRef.current = false
@@ -2819,11 +2942,22 @@ export default function ChatView({
         if (idx >= 0) next.splice(idx, 1)
         return next
       })
-      setSendFailure(sendFailureMessage(err, { online: getOnlineSnapshot() }))
-      if (pendingQuestionBlocked) {
+      setSendFailure(modelSelectionBlocked
+        ? null
+        : sendFailureMessage(err, { online: getOnlineSnapshot() }))
+      if (modelSelectionBlocked) {
+        setModelSelectionRequest(request => request + 1)
+        onStreamEndRef.current?.({ continues: false })
+      } else if (pendingQuestionBlocked) {
         revealPendingQuestion()
       } else {
         onStreamEndRef.current?.({ continues: false })
+      }
+    } finally {
+      // A newer retry/chat transition must not be cleared by an older request
+      // settling late. Object identity makes this an exact transaction handoff.
+      if (localStartRequestRef.current === localStartRequest) {
+        localStartRequestRef.current = null
       }
     }
     // doSend doesn't need `sending` / `isStreaming` in deps anymore —
@@ -3016,6 +3150,9 @@ export default function ChatView({
       sendingRef.current = wasSending
       setSending(wasSending)
       setServerRunningState(wasServerRunning)
+      if (showPicker && isModelSelectionRequiredFailure(err)) {
+        setModelSelectionRequest(request => request + 1)
+      }
       if (err.message === 'HTTP 410') {
         // The backend refused this answer because the durable transcript no
         // longer has that open question (for example Stop cancelled it, or a
@@ -3038,12 +3175,20 @@ export default function ChatView({
   function handleSubmit(e) {
     e.preventDefault()
     if (isProviderSwitchBlocking(chatId)) return
+    if (needsModelSelection({ showPicker, chatInfo })) {
+      setModelSelectionRequest(request => request + 1)
+      return
+    }
     doSend(input.trim())
   }
 
   function handleSubmitSteer(e) {
     e.preventDefault()
     if (isProviderSwitchBlocking(chatId)) return
+    if (needsModelSelection({ showPicker, chatInfo })) {
+      setModelSelectionRequest(request => request + 1)
+      return
+    }
     if (submitSteerInFlightRef.current) return
     submitSteerInFlightRef.current = true
     void doSend(input.trim(), { directSteer: true })
@@ -3092,6 +3237,37 @@ export default function ChatView({
         // the two requests were pending.
         pendingQueue.restoreByCid(cancelledRow, cancelledIndex)
       }
+    }
+  }, [chatId, pendingQueue])
+
+  const handleUpdatePending = useCallback(async (cid, content) => {
+    // Let any in-flight enqueue for this cid settle first, so we PATCH a row
+    // the server already knows about rather than racing its POST.
+    const queueWrite = queuedSendRequestsRef.current.get(cid)
+    if (queueWrite) await Promise.allSettled([queueWrite])
+    try {
+      const res = await apiFetch(
+        `/chats/${chatId}/pending/${encodeURIComponent(cid)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content }),
+          timeoutMs: CHAT_FETCH_TIMEOUT_MS,
+        },
+      )
+      const data = await jsonOrThrow(res, 'Queued-message edit failed')
+      if (data.updated && Array.isArray(data.pending_messages)) {
+        // Reconcile the edited text from server truth.
+        pendingQueue.hydrate(data.pending_messages)
+        return 'saved'
+      }
+      // updated:false — a racing promotion or cancel already pulled this row
+      // from the queue, so the edit could not apply. Report it distinctly
+      // instead of a phantom success; the normal stream reconcile drops the
+      // stale row and the editor explains why.
+      return 'gone'
+    } catch {
+      return 'error'
     }
   }, [chatId, pendingQueue])
 
@@ -3434,7 +3610,7 @@ export default function ChatView({
       // changes. Both composer and per-row steer actions share this path.
       const inputEl = inputRef.current
       steerKeyboardDismissRequestRef.current = null
-      if (_isTouchPrimary && document.activeElement === inputEl) {
+      if (isTouchPrimary() && document.activeElement === inputEl) {
         steerKeyboardDismissRequestRef.current = {
           chatId: String(chatId),
           cid: steerCid,
@@ -3593,24 +3769,12 @@ export default function ChatView({
   // (The fast-forward identity/readiness gates are computed separately below.)
   const turnActive = sending || isStreaming || serverRunning
 
-  // Auto-dismiss the settled "Open <app>" CTA a few seconds after the turn
-  // ends, so it reads as an ephemeral nudge rather than a permanent chat-foot
-  // fixture. Only the settled (post-turn) CTA times out; a live in-turn preview
-  // link stays put while the app is still being built. Dismissal is the same
-  // durable "final" acknowledgement that opening performs — minus the
-  // navigation — so the button never reappears on a later refetch, and a click
-  // that lands first simply advances the same server truth and cancels this.
-  // (Declared here, after `turnActive`, so its dep array is out of the TDZ.)
-  useEffect(() => {
-    if (turnActive || !onDismissApp) return
-    const timers = builtApps
-      .filter(app => shouldShowOpenAppCta(app, false))
-      .map(app => setTimeout(
-        () => onDismissApp(app), OPEN_APP_CTA_AUTO_DISMISS_MS,
-      ))
-    if (timers.length === 0) return
-    return () => timers.forEach(clearTimeout)
-  }, [builtApps, turnActive, onDismissApp])
+  useOpenAppCtaAutoDismiss({
+    builtApps,
+    turnActive,
+    presented: previewPresented && connectionError !== 'disconnected',
+    onDismissApp,
+  })
 
   useEffect(() => {
     if (!turnActive) return
@@ -3694,10 +3858,11 @@ export default function ChatView({
       // against a wedged backend. Skip a tick while the prior one is in flight;
       // the fetch is time-boxed (apiFetch timeoutMs) so inFlight always clears.
       inFlight = true
-      reconcileRuntimeState().finally(() => {
-        inFlight = false
-        if (!cancelled) ensureRuntimeStreamConnected()
-      })
+      reconcileRuntimeState()
+        .then(runtime => {
+          if (!cancelled && runtime) ensureRuntimeStreamConnected(runtime)
+        })
+        .finally(() => { inFlight = false })
     }
     run()
     const intervalMs = hasQueue ? 1000 : 3000
@@ -3726,10 +3891,11 @@ export default function ChatView({
   useEffect(() => {
     if (hidden) return
     let cancelled = false
+    let observedRecoveryGeneration = getRecoverySnapshot()
     const run = () => {
       if (cancelled) return
-      reconcileRuntimeState().finally(() => {
-        if (!cancelled) ensureRuntimeStreamConnected()
+      reconcileRuntimeState().then(runtime => {
+        if (!cancelled && runtime) ensureRuntimeStreamConnected(runtime)
       })
     }
     const onVisible = () => {
@@ -3739,8 +3905,15 @@ export default function ChatView({
     window.addEventListener('pageshow', run)
     window.addEventListener('online', run)
     document.addEventListener('visibilitychange', onVisible)
+    const unsubscribeRecovery = subscribeRecovery(() => {
+      const generation = getRecoverySnapshot()
+      if (generation === observedRecoveryGeneration) return
+      observedRecoveryGeneration = generation
+      run()
+    })
     return () => {
       cancelled = true
+      unsubscribeRecovery()
       window.removeEventListener('focus', run)
       window.removeEventListener('pageshow', run)
       window.removeEventListener('online', run)
@@ -3772,9 +3945,13 @@ export default function ChatView({
 
   // A safe cached window can prepare while its freshness check runs. History
   // and progressive preparation remain hidden; `cached` is granted only after
-  // the saved-coordinate coverage check above.
+  // the saved-coordinate coverage check above. The display-ready gate below
+  // publishes a running frame only after the activation verdict settles, while
+  // catch-up continues to reconcile into the same active assistant row.
   const transcriptPaintable = (
-    initialEntryPhase === 'cached' || initialEntryPhase === 'ready'
+    initialEntryPhase === 'cached'
+    || initialEntryPhase === 'stream-catchup'
+    || initialEntryPhase === 'ready'
   ) && revealed
   const displayReady = activationSettled
     && !loading
@@ -4120,7 +4297,10 @@ export default function ChatView({
   const progressRail = progressRailViewModel(
     visibleGoalObjective,
     buildPhaseRail,
-  )
+    activeGoalPlan,
+  ).map(item => item.key === 'goal' && activeGoalPlan
+    ? { ...item, details: <GoalPlanDetails plan={activeGoalPlan} /> }
+    : item)
   let lastVisibleMessageIndex = -1
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     if (!messages[i].hidden) {
@@ -4418,20 +4598,12 @@ export default function ChatView({
             composer remain in normal footer flow. The shell owns the one persistent
             offline explanation; the composer retains contextual send-failure copy. */}
         <div className="chat__floating-actions">
-          {/* Contribution staged from THIS chat: approve it where the work
-              happened, but keep the transient card out of composer-height
-              measurement so confirmation cannot move the transcript. */}
-          {!embedded && (
-            <ContributionReviewCard
-              chatId={chatId}
-              turnActive={turnActive}
-              onOpenApp={onOpenApp}
-            />
-          )}
-          {/* The viewport cues and post-turn cards share one floating stack so
-              they clear each other without entering footer or scroll geometry. */}
-          {connectionError !== 'disconnected' && (
-            <>
+          {/* Short-lived controls share one lane above the stable contribution
+              anchor. Adding or dismissing any transient can only grow this
+              lane upward; it cannot move the action below it. */}
+          {connectionError !== 'disconnected'
+            && (offscreenControlsVisible || openAppCtas.length > 0) && (
+            <div className="chat__floating-transients">
               {offscreenControlsVisible && (
                 <div className="chat__offscreen-nudges">
                   {olderHistoryRetryShown(olderHistoryError, offset) && (
@@ -4493,10 +4665,22 @@ export default function ChatView({
                   })}
                 </div>
               )}
-            </>
+            </div>
           )}
-        </div>        <ProgressRail
+          {/* Contribution staged from THIS chat: approve it where the work
+              happened, but keep the transient card out of composer-height
+              measurement so confirmation cannot move the transcript. */}
+          {!embedded && (
+            <ContributionReviewCard
+              chatId={chatId}
+              turnActive={turnActive}
+              onOpenApp={onOpenApp}
+            />
+          )}
+        </div>
+        <ProgressRail
           items={progressRail}
+          resetKey={activeGoalPlan?.root_run_id || visibleGoalObjective || 'build-progress'}
           ariaLabel={visibleGoalObjective ? 'Goal progress' : 'Build progress'}
         />
         <ConnectionStatus
@@ -4508,9 +4692,11 @@ export default function ChatView({
           <QueuedMessages
             items={pendingQueue.visiblePendingMessages}
             onCancel={handleCancelPending}
+            onEdit={handleUpdatePending}
             onSteerOne={handleSteerOne}
             steerActive={turnActive && !hasPendingQuestion}
             steerBusy={steerBusy}
+            focusComposer={() => focusComposerElement(inputRef.current)}
           />
         )}
         <ChatInputBar
@@ -4568,16 +4754,11 @@ export default function ChatView({
                 onAutoResumeChange={
                   embedded ? undefined : handleAutoResumeSettingsChange
                 }
-                restartResumeEnabled={restartResumeEnabled}
-                restartResumeSaving={restartResumeSaving}
-                restartResumeError={restartResumeError}
-                onRestartResumeChange={
-                  embedded ? undefined : handleRestartResumeChange
-                }
                 onChangeChatInfo={mergeChatInfo}
                 providerSwitchState={providerSwitchState}
                 settingsSaveTailRef={settingsSaveTailRef}
                 composerInputRef={inputRef}
+                modelSelectionRequest={modelSelectionRequest}
                 onOpenInspector={() => setShowInspector(true)}
                 onOpenSummary={() => setShowSummary(true)}
                 embedded={embedded}

@@ -66,16 +66,16 @@ test('skill loads attach by tool id and accumulate without duplicates', () => {
     toolItem('Bash', { tool_use_id: 'cmd-2' }),
   ]
   const first = applySkillLoaded(running, {
-    skill: 'recovery', tool_use_id: 'cmd-1',
+    skill: 'platform-maintenance', tool_use_id: 'cmd-1',
   })
   const duplicate = applySkillLoaded(first, {
-    skill: 'recovery', tool_use_id: 'cmd-1',
+    skill: 'platform-maintenance', tool_use_id: 'cmd-1',
   })
   const second = applySkillLoaded(duplicate, {
     skill: 'theming', tool_use_id: 'cmd-1',
   })
 
-  assert.deepEqual(second[0].skills, ['recovery', 'theming'])
+  assert.deepEqual(second[0].skills, ['platform-maintenance', 'theming'])
   assert.equal(second[0].tool, 'Bash')
   assert.equal(second[1].skills, undefined, 'a parallel tool is never misattributed')
   assert.equal(running[0].skills, undefined, 'the prior live snapshot stays immutable')

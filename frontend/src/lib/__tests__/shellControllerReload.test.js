@@ -15,10 +15,14 @@ const shellSource = readFileSync(
   new URL('../../components/Shell/Shell.jsx', import.meta.url),
   'utf8',
 )
+const settingsSource = readFileSync(
+  new URL('../../components/SettingsView/SettingsView.jsx', import.meta.url),
+  'utf8',
+)
 
 test('the boot script discovers workers but never owns a shell reload', () => {
   assert.match(indexHtml, /navigator\.serviceWorker\.register\('\/sw\.js'/)
-  assert.match(indexHtml, /recoverStalePrecacheIfNeeded/)
+  assert.doesNotMatch(indexHtml, /registration\.update|visibilitychange|serviceWorker\.ready/)
   assert.doesNotMatch(indexHtml, /reloadAfterControllerChange/)
   assert.doesNotMatch(indexHtml, /sw-skip-initiated|sw-auto-reloaded/)
   assert.doesNotMatch(
@@ -30,8 +34,15 @@ test('the boot script discovers workers but never owns a shell reload', () => {
 test('the shell controller has one deduplicated reload executor', () => {
   assert.match(controllerSource, /if \(performingRef\.current\) return/)
   assert.match(controllerSource, /const reload = \(\) => \{/)
-  assert.match(controllerSource, /settleNewestWorkerForHandoff\(\{ registration \}\)/)
+  assert.match(controllerSource, /releaseWaitingShellUpdate\(registration\)/)
+  assert.doesNotMatch(controllerSource, /controllerchange|SW_TAKEOVER_TIMEOUT/)
   assert.doesNotMatch(controllerSource, /sw-skip-initiated|sw-auto-reloaded/)
+})
+
+test('Settings may inspect for updates but reload freshness does not coordinate takeover', () => {
+  assert.match(settingsSource, /inspectShellUpdate\(\{ serviceWorker/)
+  assert.match(settingsSource, /releaseWaitingShellUpdate\(registration\)/)
+  assert.doesNotMatch(settingsSource, /reloadWhenWorkerTakesOver|controllerchange/)
 })
 
 test('a claimed destination runs before navigation history or view mutation', () => {
@@ -54,7 +65,7 @@ test('a claimed destination runs before navigation history or view mutation', ()
 
 test('Shell connects navigation to the current reload claimant through one ref', () => {
   assert.match(shellSource, /const beforeNavigateRef = useRef\(null\)/)
-  assert.match(shellSource, /beforeNavigateRef,\s*\}\)/)
+  assert.match(shellSource, /beforeNavigateRef,\s*/)
   assert.match(
     shellSource,
     /beforeNavigateRef\.current = claimPendingShellReloadNavigation/,

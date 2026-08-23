@@ -1,12 +1,12 @@
 /**
  * The send-scroll rule (owner's words):
  *
- *   "The first message always pins. Later messages pin when the reader is
- *    actually at the real-content bottom; every pin returns to hold."
+ *   "The first message always goes to the top. Later messages go to the top
+ *    only in autoscroll mode — i.e. at the physical bottom."
  *
  * Direct, queued, and steered rows share that submit-time rule. The pre-append
- * real-content geometry is authoritative; internal mode can lag input/layout
- * by a frame and must not make an identical bottom send intermittent.
+ * physical-tail geometry is authoritative while mode settles. Reserved reply
+ * room is part of that range: scrolling upward through it exits autoscroll.
  *
  * Mirrors the route-mock SSE flow of second-send-pin.spec.mjs.
  *
@@ -172,6 +172,7 @@ async function measure(page) {
       clientH: scroll.clientHeight,
       scrollH: scroll.scrollHeight,
       spacerH: parseInt(spacer?.style.height) || 0,
+      mode: scroll.dataset.scrollMode || null,
       lastUserVisualTop: lr ? Math.round(lr.top - sr.top) : null,
       lastUserText: textEl?.textContent?.trim() ?? '',
       userMsgCount: users.length,
@@ -371,24 +372,87 @@ test('Send while scrolled up preserves the exact reading position', async ({ pag
   expect(after.spacerH).toBeGreaterThanOrEqual(0)
 })
 
+test('Scrolling upward inside reserved reply room keeps the next send in place', async ({ page }) => {
+  await setup(page)
+  await newChat(page)
+
+  // Build real history so a later pinned row can move from the top into the
+  // middle while the latest-turn reservation still remains below it.
+  await routeStream(page, [
+    { type: 'catch_up_done' },
+    { type: 'text', content: 'Long first response. '.repeat(150) },
+    { type: 'done' },
+  ])
+  await sendMessage(page, 'First user message')
+  await waitStreamDone(page)
+  await gestureToBottom(page)
+
+  await routeStream(page, [
+    { type: 'catch_up_done' },
+    { type: 'text', content: 'Short second reply.' },
+    { type: 'done' },
+  ])
+  await sendMessage(page, 'Second message pins from autoscroll')
+  await waitStreamDone(page)
+
+  const pinned = await measure(page)
+  expect(pinned.lastUserVisualTop).toBeGreaterThanOrEqual(-2)
+  expect(pinned.lastUserVisualTop).toBeLessThanOrEqual(10)
+  expect(pinned.spacerH).toBeGreaterThan(100)
+
+  // This is the owner-reported failure: move upward only inside the reserved
+  // range, leaving the latest user row around mid-screen. The old send rule
+  // subtracted spacerH and still called this "at the bottom."
+  await page.evaluate(() => {
+    const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+    if (!s) return
+    s.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+    s.scrollTop = Math.max(0, s.scrollTop - Math.round(s.clientHeight * 0.45))
+  })
+  await page.evaluate(() => new Promise(r => setTimeout(r, 350)))
+
+  const before = await measure(page)
+  expect(before.mode).toBe('ANCHOR_AT')
+  expect(before.lastUserVisualTop).toBeGreaterThan(before.clientH * 0.25)
+  expect(before.lastUserVisualTop).toBeLessThan(before.clientH * 0.7)
+  const physicalGap = before.scrollH - before.scrollTop - before.clientH
+  const oldSpacerExcludedGap = physicalGap - before.spacerH
+  expect(physicalGap).toBeGreaterThan(100)
+  expect(oldSpacerExcludedGap).toBeLessThan(50)
+  const savedTop = before.scrollTop
+
+  await routeStream(page, [
+    { type: 'catch_up_done' },
+    { type: 'text', content: 'Third reply stays below the reader.' },
+    { type: 'done' },
+  ])
+  await sendMessage(page, 'Third message while reading reserved range')
+  await page.evaluate(() => new Promise(r =>
+    requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 120)))))
+
+  const after = await measure(page)
+  expect(after.lastUserText).toBe('Third message while reading reserved range')
+  expect(Math.abs(after.scrollTop - savedTop)).toBeLessThanOrEqual(8)
+})
+
 // ───────────────────────────────────────────────────────────────────
-// Short chat at its real-content tail — the second send pins too
+// Short chat already at the one physical tail — the second send pins too
 // ───────────────────────────────────────────────────────────────────
 
-test('Short chat at the real-content tail pins the next send', async ({ page }) => {
+test('Short chat at the physical tail pins the next send', async ({ page }) => {
   await setup(page)
   await newChat(page)
 
   // The first send pins and its short reply leaves a permanent reservation.
-  // The content itself still fits: the reader is at its real-content tail.
+  // The exact spacer keeps that pin at the one physical clamp.
   await routeStream(page, [{ type: 'catch_up_done' }, { type: 'text', content: 'Short reply.' }, { type: 'done' }])
   await sendMessage(page, 'First short')
   await waitStreamDone(page)
 
-  // The chat fits the viewport, so its real-content bottom is already visible.
+  // The chat fits the viewport and already rests at the physical bottom.
   const fits = await measure(page)
   const fitsGap = fits.scrollH - fits.scrollTop - fits.clientH
-  expect(fitsGap).toBeLessThan(50)
+  expect(Math.abs(fitsGap)).toBeLessThanOrEqual(4)
 
   await routeStream(page, [{ type: 'catch_up_done' }, { type: 'text', content: 'Another short.' }, { type: 'done' }])
   await sendMessage(page, 'Second short')

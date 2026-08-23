@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app import activity, models, theme
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_owner, resolve_owner_or_app
+from app.deps import authorize_app_module_token, get_current_owner
 from app.http_caching import strip_range
 from app.net_utils import validate_url_safe
 from app.resource_access import live_app, live_app_or_404
@@ -461,7 +461,7 @@ def get_module(
     raise HTTPException(
       status_code=401, detail="Valid token required."
     )
-  resolve_owner_or_app(token, db)
+  authorize_app_module_token(token, db)
   app = live_app(db, app_id)
   if not app or not app.compiled_path:
     raise HTTPException(status_code=404, detail="Module not found.")

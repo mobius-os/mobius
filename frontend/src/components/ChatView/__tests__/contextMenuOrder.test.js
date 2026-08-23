@@ -30,7 +30,8 @@ test('chat context actions follow model selection and continuation policy', () =
   assert.ok(picker < summary)
   assert.ok(summary < inspector)
   assert.match(settingsSource, /Automatically continue after usage limits/)
-  assert.match(settingsSource, /Continue after planned restarts/)
+  // Restart continuation is always on and has no toggle to render.
+  assert.doesNotMatch(settingsSource, /Continue after planned restarts/)
   assert.doesNotMatch(settingsSource, /Chat summar(?:y|ies)/)
 })
 

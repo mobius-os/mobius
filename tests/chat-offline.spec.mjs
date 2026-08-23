@@ -15,7 +15,7 @@ test('shell notes offline once while composer disables, then both recover', asyn
   await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Send"]')).toBeEnabled()
 
   await context.setOffline(true)
-  await expect(page.locator('.shell__offline')).toHaveText(/Offline/i)
+  await expect(page.locator('.shell__connection-status')).toHaveText(/Offline/i)
   await expect(
     page.locator('[data-chat-surface="painted"]')
       .getByText("You're offline — chat needs a connection."),
@@ -23,6 +23,6 @@ test('shell notes offline once while composer disables, then both recover', asyn
   await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Send"]')).toBeDisabled()
 
   await context.setOffline(false)
-  await expect(page.locator('.shell__offline')).toHaveCount(0)
+  await expect(page.locator('.shell__connection-status')).toHaveCount(0)
   await expect(page.locator('[data-chat-surface="painted"] button[aria-label="Send"]')).toBeEnabled()
 })

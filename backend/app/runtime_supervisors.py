@@ -3,9 +3,10 @@
 Startup reconciliation is owned by ``startup.py``. This module owns only work
 that remains alive after readiness: watcher processes, periodic chat recovery,
 durable continuation wakeups, writer health, background compression, and
-browser-profile quota enforcement. ``RuntimeSupervisors.start`` and ``stop``
-are the complete lifecycle boundary so lifespan never needs individual task
-handles or cancellation ordering knowledge.
+browser-profile quota enforcement. Process-only and database-backed services
+have distinct start boundaries so a schema-degraded boot can keep source
+diagnostics alive without starting database work. ``stop`` remains the single
+shutdown boundary.
 """
 
 from __future__ import annotations
@@ -49,9 +50,12 @@ class RuntimeSupervisors:
       coroutine, name=f"mobius:{name}",
     )
 
-  async def start(self) -> None:
-    """Start every supervisor; individual wiring failures fail open."""
+  async def start_process_services(self) -> None:
+    """Start services that are safe without a serviceable database."""
     await self._start_frontend_watcher()
+
+  async def start_database_services(self) -> None:
+    """Start long-lived database work; individual wiring failures fail open."""
     try:
       await self._start_chat_supervisors()
     except Exception as exc:

@@ -31,10 +31,10 @@ from app import (
 )
 from app.config import get_settings
 from app.contribution_errors import ContributionSubmitError, push_rejected
+from app.github_connection import has_full_pr_access
 from app.terminal_output import readable_output
 from app.github_contribution_contract import (
   BRANCH_NAME as _BRANCH_NAME,
-  COAUTHOR_TRAILER as _COAUTHOR_TRAILER,
   GITHUB_LOGIN as _GITHUB_LOGIN,
   GITHUB_REPO as _GITHUB_REPO,
   GIT_SHA as _GIT_SHA,
@@ -1320,19 +1320,6 @@ def _existing_branch_pr(
   return merged
 
 
-def _is_workflow_scope_push_error(message: str) -> bool:
-  """Recognize GitHub's stable OAuth workflow-scope rejection."""
-  detail = str(message or "").lower()
-  return (
-    "workflow" in detail
-    and (
-      "refusing to allow" in detail
-      or ".github/workflows" in detail
-      or "oauth app" in detail
-    )
-  )
-
-
 def _is_transient_push_error(message: str) -> bool:
   """Retry transport/server failures, never deterministic push rejections."""
   detail = str(message or "").lower()
@@ -1444,18 +1431,7 @@ def _inspect_owner_fork_default_branch(
   upstream_branch: str,
   upstream_sha: str,
 ) -> dict:
-  """Inspect a reusable PR fork without mutating its default branch.
-
-  GitHub rejects an OAuth push that would introduce a new or changed Actions
-  workflow to a repository unless the token also has the broad `workflow`
-  scope. The same restriction applies to GitHub's merge-upstream endpoint, so
-  a public_repo-only connection cannot refresh a stale fork that crossed a
-  workflow change. Instead, a strictly-behind fork is handled by preparing the
-  reviewed change on its existing tip; the fork's default branch stays put.
-
-  A current fork (or one containing upstream) can receive the reviewed branch
-  normally. A diverged default branch is left untouched and stops submission.
-  """
+  """Classify a reusable PR fork's default branch without mutating it."""
   upstream_branch = _git_ops._validate_branch(upstream_branch)
   if not _GIT_SHA.match(str(upstream_sha or "")):
     raise ContributionSubmitError(
@@ -1467,7 +1443,6 @@ def _inspect_owner_fork_default_branch(
     f"{fork_slug}\0{fork_branch}\0{time.time_ns()}".encode("utf-8")
   ).hexdigest()[:24]
   fork_ref = f"refs/mobius-submit/fork-{ref_key}"
-  fork_heads_prefix = f"refs/mobius-submit/fork-heads-{ref_key}"
   patch = {
     "last_submit_fork_branch": fork_branch,
     "last_submit_upstream_branch": upstream_branch,
@@ -1523,161 +1498,19 @@ def _inspect_owner_fork_default_branch(
         record_patch={**patch, "last_submit_fork_sync": "diverged"},
       )
 
-    # GitHub's own "Update branch" action can merge current upstream into a
-    # topic branch while leaving the reusable fork's default branch stale. In
-    # that case the workflow-bearing upstream commits already exist in the
-    # fork, so a public_repo-only token may safely create another reviewed
-    # topic ref without introducing workflow history. Discover that carrier
-    # branch before asking for broader workflow access.
-    fetched_heads = _git_ops._git(
-      repo,
-      "fetch", "--no-tags", "--force",
-      fork_url,
-      f"+refs/heads/*:{fork_heads_prefix}/*",
-      check=False,
-    )
-    if fetched_heads.returncode == 0:
-      refs = _git_ops._git(
-        repo,
-        "for-each-ref", "--format=%(refname)%00%(objectname)",
-        f"{fork_heads_prefix}/",
-      ).stdout.splitlines()
-      for row in refs:
-        ref, separator, tip = row.partition("\0")
-        if not separator or not _GIT_SHA.match(tip):
-          continue
-        if is_ancestor(upstream_sha, tip):
-          carrier = ref.removeprefix(f"{fork_heads_prefix}/")
-          return {
-            **patch,
-            "last_submit_fork_sync": "contains-upstream",
-            "last_submit_fork_carrier_branch": carrier,
-            "last_submit_fork_carrier_sha": tip,
-          }
     return {**patch, "last_submit_fork_sync": "strictly-behind"}
   finally:
     _git_ops._git(repo, "update-ref", "-d", fork_ref, check=False)
-    refs = _git_ops._git(
-      repo,
-      "for-each-ref", "--format=%(refname)", f"{fork_heads_prefix}/",
-      check=False,
-    )
-    if refs.returncode == 0:
-      for ref in (refs.stdout or "").splitlines():
-        _git_ops._git(repo, "update-ref", "-d", ref, check=False)
 
 
-def _build_fork_compatible_topic_commit(
-  repo: Path,
-  *,
-  branch: str,
-  fork_sha: str,
-  upstream_sha: str,
-  diff_path: Path,
-  expected_diff: str,
-  author_name: str,
-  author_email: str,
-) -> str:
-  """Re-parent an exact reviewed change onto a strictly-behind fork tip.
-
-  The fork default branch is never changed. The temporary topic commit is
-  accepted only when merging it into current upstream produces the exact
-  reviewed source diff byte-for-byte. This avoids OAuth's workflow restriction
-  without weakening review or silently changing the contribution.
-  """
-  message = _git_ops._git(repo, "log", "-1", "--format=%B", branch).stdout
-  if _COAUTHOR_TRAILER not in message:
-    raise ContributionSubmitError(
-      "This staged commit is missing the Möbius Agent co-author trailer. "
-      "Leave feedback so your agent can prepare it again."
-    )
-
-  message_path = None
-  detached = False
-  try:
-    with tempfile.NamedTemporaryFile(
-      "w", encoding="utf-8", delete=False,
-    ) as message_file:
-      message_file.write(message)
-      message_path = message_file.name
-
-    _git_ops._git(repo, "checkout", "-q", "--detach", fork_sha)
-    detached = True
-    applied = _git_ops._git(
-      repo,
-      "apply", "--index", "--3way", "--binary", str(diff_path),
-      check=False,
-    )
-    if applied.returncode != 0:
-      raise ContributionSubmitError(
-        "The reviewed change cannot be placed safely on this stale PR fork. "
-        "Leave feedback so your agent can refresh the contribution."
-      )
-
-    workflows = _git_ops._git(
-      repo, "diff", "--cached", "--name-only", "--", ".github/workflows",
-    ).stdout.strip()
-    if workflows:
-      raise ContributionSubmitError(
-        "This reviewed contribution changes a GitHub Actions workflow. "
-        "Reconnect GitHub with a classic token granting public_repo and "
-        "workflow, then try Send again."
-      )
-
-    _git_ops._git(
-      repo,
-      "-c", f"user.name={author_name}",
-      "-c", f"user.email={author_email}",
-      "commit", "--no-gpg-sign", "-F", message_path,
-    )
-    push_sha = _git_ops._git(repo, "rev-parse", "HEAD").stdout.strip()
-    if not _GIT_SHA.match(push_sha):
-      raise ContributionSubmitError(
-        "Could not prepare the reviewed branch for this stale PR fork."
-      )
-
-    merged = _git_ops._git(
-      repo, "merge-tree", "--write-tree", upstream_sha, push_sha,
-      check=False,
-    )
-    merged_tree = (merged.stdout or "").strip().splitlines()[0:1]
-    if (
-      merged.returncode != 0
-      or not merged_tree
-      or not _GIT_SHA.match(merged_tree[0])
-    ):
-      raise ContributionSubmitError(
-        "The stale-fork branch no longer merges cleanly with upstream. Leave "
-        "feedback so your agent can refresh the contribution."
-      )
-    merged_hash = hashlib.sha256(
-      _git_ops._reviewed_branch_diff(repo, upstream_sha, merged_tree[0])
-    ).hexdigest()
-    if merged_hash != expected_diff:
-      raise ContributionSubmitError(
-        "Adapting this branch to the stale PR fork would change the reviewed "
-        "result, so Contribute stopped before pushing anything."
-      )
-    return push_sha
-  finally:
-    if message_path:
-      try:
-        os.unlink(message_path)
-      except OSError:
-        pass
-    if detached:
-      _git_ops._git(repo, "reset", "--hard", fork_sha, check=False)
-      _git_ops._git(repo, "checkout", "-q", branch, check=False)
-
-
-def _sync_owner_fork_with_workflow_scope(
+def _sync_owner_fork(
   repo: Path,
   fork_slug: str,
   *,
   upstream_branch: str,
   upstream_sha: str,
 ) -> dict:
-  """Fast-forward a proven-behind fork when the owner granted workflow scope."""
+  """Fast-forward a proven-behind fork and verify the resulting default."""
   synced = _git_ops._gh(
     repo,
     "api", "--method", "POST",
@@ -1708,92 +1541,6 @@ def _sync_owner_fork_with_workflow_scope(
   return {**verified, "last_submit_fork_sync": "fast-forwarded"}
 
 
-def _push_reviewed_topic(
-  repo: Path,
-  *,
-  branch: str,
-  fork_slug: str,
-  merge_patch: dict,
-  record_patch: dict,
-  diff_path: Path,
-  expected_diff: str,
-  author_name: str,
-  author_email: str,
-  workflow_scope: bool = False,
-) -> tuple[str, dict]:
-  """Push the reviewed topic, inspecting a stale fork only when required."""
-  push_source = "HEAD"
-  last_push_error = _push_topic_branch(repo, branch, push_source)
-  if not last_push_error:
-    return push_source, record_patch
-  if not _is_workflow_scope_push_error(last_push_error):
-    raise push_rejected(last_push_error, record_patch=record_patch)
-
-  # Most topic branches can be pushed without consulting the fork's default
-  # branch. GitHub only makes that state relevant when a public_repo-only
-  # OAuth token would introduce a workflow that landed upstream after the
-  # fork fell behind. Inspect and adapt only on that specific rejection.
-  try:
-    fork_sync_patch = _inspect_owner_fork_default_branch(
-      repo,
-      fork_slug,
-      upstream_branch=str(merge_patch["last_submit_upstream_branch"]),
-      upstream_sha=str(merge_patch["last_submit_upstream_sha"]),
-    )
-    record_patch = _git_ops._record_patch_with(record_patch, fork_sync_patch)
-  except ContributionSubmitError as exc:
-    raise _git_ops._merge_error_patch(exc, record_patch) from exc
-  if fork_sync_patch.get("last_submit_fork_sync") != "strictly-behind":
-    raise ContributionSubmitError(
-      "GitHub refused this branch because the connection does not grant "
-      "workflow access. Reconnect GitHub with a classic token granting "
-      "public_repo and workflow, then try Send again.",
-      record_patch=record_patch,
-    )
-  try:
-    push_source = _build_fork_compatible_topic_commit(
-      repo,
-      branch=branch,
-      fork_sha=str(fork_sync_patch["last_submit_fork_sha"]),
-      upstream_sha=str(merge_patch["last_submit_upstream_sha"]),
-      diff_path=diff_path,
-      expected_diff=expected_diff,
-      author_name=author_name,
-      author_email=author_email,
-    )
-    record_patch = _git_ops._record_patch_with(record_patch, {
-      "last_submit_fork_sync": "stale-base-compatible",
-      "last_submit_push_sha": push_source,
-    })
-  except ContributionSubmitError as exc:
-    if not workflow_scope:
-      raise ContributionSubmitError(
-        "This reviewed change depends on newer code in a stale PR fork. "
-        "In Contribute, enable optional workflow access, then try Send "
-        "again; Contribute will fast-forward only that fork's default "
-        "branch before pushing the reviewed topic branch.",
-        record_patch=_git_ops._record_patch_with(record_patch, {
-          "last_submit_requires_workflow_scope": True,
-          "last_submit_compatible_error": exc.message,
-        }),
-      ) from exc
-    try:
-      synced_patch = _sync_owner_fork_with_workflow_scope(
-        repo,
-        fork_slug,
-        upstream_branch=str(merge_patch["last_submit_upstream_branch"]),
-        upstream_sha=str(merge_patch["last_submit_upstream_sha"]),
-      )
-      record_patch = _git_ops._record_patch_with(record_patch, synced_patch)
-      push_source = "HEAD"
-    except ContributionSubmitError as sync_exc:
-      raise _git_ops._merge_error_patch(sync_exc, record_patch) from sync_exc
-  last_push_error = _push_topic_branch(repo, branch, push_source)
-  if last_push_error:
-    raise push_rejected(last_push_error, record_patch=record_patch)
-  return push_source, record_patch
-
-
 def _submit_prepared_pr(
   record: dict,
   diff_path: Path,
@@ -1811,6 +1558,11 @@ def _submit_prepared_pr(
   login = str(state.get("login") or "")
   if not token or not login:
     raise ContributionSubmitError("Connect GitHub before approving this PR.", 401)
+  if not has_full_pr_access(state.get("scopes")):
+    raise ContributionSubmitError(
+      "Reconnect GitHub with full PR access before approving this PR.",
+      status_code=409,
+    )
   author_name, author_email = _git_ops._connected_git_identity(state, login)
 
   plan = record.get("plan") or {}
@@ -1930,18 +1682,10 @@ def _submit_prepared_pr(
       except ContributionSubmitError as exc:
         raise _git_ops._merge_error_patch(exc, record_patch) from exc
       record_patch = _git_ops._record_patch_with(record_patch, {"head_repository": fork_slug})
-      push_source, record_patch = _push_reviewed_topic(
-        repo,
-        branch=branch,
-        fork_slug=fork_slug,
-        merge_patch=merge_patch,
-        record_patch=record_patch,
-        diff_path=diff_path,
-        expected_diff=expected_diff,
-        author_name=author_name,
-        author_email=author_email,
-        workflow_scope="workflow" in set(state.get("scopes") or []),
-      )
+      push_source = "HEAD"
+      last_push_error = _push_topic_branch(repo, branch, push_source)
+      if last_push_error:
+        raise push_rejected(last_push_error, record_patch=record_patch)
       published_repo = fork_slug
     pushed_branch_url = (
       f"https://github.com/{published_repo}/tree/{quote(branch, safe='/')}"
@@ -2091,6 +1835,11 @@ def _preflight_prepared_stack(rows: list[dict]) -> None:
   login = str(state.get("login") or "")
   if not token or not login:
     raise ContributionSubmitError("Connect GitHub before approving this PR stack.", 401)
+  if not has_full_pr_access(state.get("scopes")):
+    raise ContributionSubmitError(
+      "Reconnect GitHub with full PR access before approving this PR stack.",
+      status_code=409,
+    )
   author_name, author_email = _git_ops._connected_git_identity(state, login)
   sendable = [row for row in rows if row["record"].get("status") == "submitting"]
   if not sendable:
@@ -2236,6 +1985,11 @@ def _land_reviewed_stack(rows: list[dict]) -> tuple[str, str]:
   login = str(state.get("login") or "")
   if not token or not login:
     raise ContributionSubmitError("Connect GitHub before landing this PR stack.", 401)
+  if not has_full_pr_access(state.get("scopes")):
+    raise ContributionSubmitError(
+      "Reconnect GitHub with full PR access before landing this PR stack.",
+      status_code=409,
+    )
 
   first_record = rows[0]["record"]
   first_plan = first_record.get("plan") or {}

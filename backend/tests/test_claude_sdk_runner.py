@@ -1136,7 +1136,14 @@ async def test_run_claude_sdk_turn_requests_summarized_thinking(monkeypatch):
 
   assert captured["options"].model == "claude-opus-4-8"
   assert captured["options"].effort == "high"
-  assert captured["options"].system_prompt == "system"
+  # The Claude runner appends its provider-authored concise register on top of
+  # the shared base (documented amendment to system_prompts.py's contract): the
+  # shared base is preserved verbatim, with the register appended after it.
+  assert captured["options"].system_prompt == (
+    claude_sdk_runner._system_prompt_with_register("system")
+  )
+  assert captured["options"].system_prompt.startswith("system")
+  assert "# Concise register" in captured["options"].system_prompt
   assert captured["options"].max_buffer_size == 10 * 1024 * 1024
   assert captured["options"].thinking == {
     "type": "adaptive",

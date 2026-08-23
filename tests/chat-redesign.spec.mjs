@@ -73,12 +73,10 @@ async function newChat(page) {
   // Create the chat via API first (so it's tagged with the worker
   // prefix and can be reaped after the spec finishes), then click
   // through the UI to actually land on it.
-  await createTaggedChat(page)
-  await page.evaluate(() => document.querySelector('.drawer__item--new')?.click())
-  const hasEmpty = await page.evaluate(
-    () => !!document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
-  )
-  if (!hasEmpty) await page.goto(BASE)
+  const chat = await createTaggedChat(page)
+  await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
+    waitUntil: 'domcontentloaded',
+  })
   await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
 }
 
@@ -340,10 +338,12 @@ test.describe('Bug 1: AskUserQuestion', () => {
     })
 
     const before = await geometry()
+    // Plain Enter now sends in the inline answer editor (matches the composer),
+    // so a multi-line answer is built with Shift+Enter for each newline.
     await customAnswer.pressSequentially('First line')
-    await page.keyboard.press('Enter')
+    await page.keyboard.press('Shift+Enter')
     await customAnswer.pressSequentially('Second line')
-    await page.keyboard.press('Enter')
+    await page.keyboard.press('Shift+Enter')
     await customAnswer.pressSequentially('Third line')
     await page.evaluate(() => new Promise(resolve => (
       requestAnimationFrame(() => requestAnimationFrame(resolve))
@@ -360,7 +360,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     // Drive the real keyboard path so caret reveal, beforeinput, input, and the
     // chat scroll owner race exactly as they do for an owner writing an answer.
     for (let line = 4; line <= 14; line += 1) {
-      await page.keyboard.press('Enter')
+      await page.keyboard.press('Shift+Enter')
       await customAnswer.pressSequentially(`Line ${line}`)
     }
     await page.evaluate(() => new Promise(resolve => (
@@ -372,6 +372,73 @@ test.describe('Bug 1: AskUserQuestion', () => {
     expect(inputScrollTop).toBeGreaterThan(0)
     expect(capped.cardTop).toBeCloseTo(before.cardTop, 5)
     expect(capped.chatScrollTop).toBeCloseTo(before.chatScrollTop, 5)
+  })
+
+
+  test('a nested answer editor keeps its keys and wheel from relatching the transcript', async ({ page }) => {
+    const streamBody = [
+      `data: ${JSON.stringify({
+        type: 'text',
+        content: 'Earlier context keeps the transcript scrollable. '.repeat(180),
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        type: 'question',
+        question_id: 'q-nested-input-owner',
+        questions: [{
+          question: 'Write the detailed answer',
+          header: 'Details',
+          multiSelect: false,
+          options: [{ label: 'Skip writing' }],
+        }],
+      })}\n\n`,
+      'data: {"type":"done"}\n\n',
+    ].join('')
+    await setupWithStreamMock(page, streamBody, { width: 426, height: 510 })
+    await mockPendingQuestionState(page, 'q-nested-input-owner')
+    await newChat(page)
+    await sendMessage(page, 'Ask for a detailed answer')
+
+    const scroll = page.locator('[data-chat-surface="painted"] .chat__scroll')
+    const customAnswer = page.getByRole('textbox', {
+      name: 'Custom answer for: Write the detailed answer',
+    })
+    await expect(customAnswer).toBeVisible({ timeout: 5000 })
+    await customAnswer.fill(
+      Array.from({ length: 24 }, (_, index) => `Detail line ${index + 1}`).join('\n'),
+    )
+    await expect.poll(() => customAnswer.evaluate(
+      el => el.scrollHeight - el.clientHeight,
+    )).toBeGreaterThan(20)
+
+    // Establish a genuine reader hold, then move its DOM coordinate to the
+    // physical clamp without granting follow. This is the exact state in which
+    // a bubbled End/wheel used to relatch the outer transcript.
+    await scroll.evaluate(el => {
+      el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }))
+      el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - 160)
+      el.dispatchEvent(new Event('scroll'))
+      el.dispatchEvent(new Event('scrollend'))
+    })
+    await expect(scroll).toHaveAttribute('data-scroll-mode', 'ANCHOR_AT')
+    await scroll.evaluate(el => { el.scrollTop = el.scrollHeight })
+    await page.evaluate(() => new Promise(resolve => (
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    )))
+    await expect(scroll).toHaveAttribute('data-scroll-mode', 'ANCHOR_AT')
+
+    await customAnswer.focus()
+    await customAnswer.press('End')
+    await expect(scroll).toHaveAttribute('data-scroll-mode', 'ANCHOR_AT')
+
+    await customAnswer.evaluate(el => { el.scrollTop = 0 })
+    const outerBefore = await scroll.evaluate(el => el.scrollTop)
+    await customAnswer.hover()
+    await page.mouse.wheel(0, 120)
+    await expect.poll(() => customAnswer.evaluate(el => el.scrollTop))
+      .toBeGreaterThan(0)
+    await expect(scroll).toHaveAttribute('data-scroll-mode', 'ANCHOR_AT')
+    const outerAfter = await scroll.evaluate(el => el.scrollTop)
+    expect(Math.abs(outerAfter - outerBefore)).toBeLessThanOrEqual(1)
   })
 
 
@@ -683,7 +750,7 @@ test.describe('Q&A atomic write', () => {
         row => row.event === 'send:question-freeze',
       )
       return transitions.slice(freezeIndex + 1).some(
-        row => row.event === 'reader:physical-bottom',
+        row => row.event === 'reader:scroll-bottom',
       )
     })
     expect(laterReaderBottom).toBe(false)

@@ -797,6 +797,21 @@
   background: var(--accent);
 }
 
+/* "The agent needs YOUR answer" — amber is reserved here for a blocked
+   handoff, while the diamond silhouette keeps the state distinguishable
+   without colour. Mixing the amber toward --text preserves 3:1+ contrast
+   against the drawer in both built-in themes without adding a second theme
+   palette that custom themes would have to maintain. */
+.drawer__owner-input-dot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  margin-right: 2px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--owner-input, #f59e0b) 60%, var(--text));
+  transform: rotate(45deg);
+}
+
 /* "The latest background run FINISHED while you were elsewhere" — a
    different row state from the streaming dot above, and it has to stay
    legible as one now that motion no longer separates them. Colour alone

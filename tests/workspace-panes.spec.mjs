@@ -1212,7 +1212,7 @@ test.describe('Workspace drag (PR3)', () => {
     const durationMs = Number.parseFloat(motion.duration) * 1000
     const expectedDurationMs = Math.min(
       32000,
-      Math.round(Math.abs(motion.shift) * (1000 / 12)),
+      Math.round(Math.abs(motion.shift) * (1000 / 14.4)),
     )
     expect(durationMs).toBeCloseTo(expectedDurationMs, -1)
     expect(durationMs).toBeGreaterThan(4800)
@@ -1220,7 +1220,7 @@ test.describe('Workspace drag (PR3)', () => {
     expect(motion.shift).toBeLessThan(0)
     if (expectedDurationMs < 32000) {
       const travelPxPerSecond = Math.abs(motion.shift) / (durationMs * 0.4 / 1000)
-      expect(travelPxPerSecond).toBeCloseTo(30, 0)
+      expect(travelPxPerSecond).toBeCloseTo(36, 0)
     }
 
     // A long title must visibly advance soon after the fixed delay. The previous

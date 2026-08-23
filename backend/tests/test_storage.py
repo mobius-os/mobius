@@ -102,7 +102,7 @@ def test_put_text_accepts_raw_text_body(client, auth, owner_token):
 
   r = client.put(
     f"/api/storage/apps/{app_id}/notes.txt",
-    data="plain text body",
+    content="plain text body",
     headers={**auth, "Content-Type": "text/plain; charset=utf-8"},
   )
   assert r.status_code == 204
@@ -118,7 +118,7 @@ def test_put_binary_accepts_raw_bytes(client, auth, owner_token):
 
   r = client.put(
     f"/api/storage/apps/{app_id}/blob.bin",
-    data=data,
+    content=data,
     headers={**auth, "Content-Type": "application/octet-stream"},
   )
   assert r.status_code == 204
@@ -376,7 +376,7 @@ def test_put_text_accepts_non_json_content_type(client, auth, owner_token):
 
   r = client.put(
     f"/api/storage/apps/{app_id}/notes.txt",
-    data="raw body",
+    content="raw body",
     headers={**auth, "Content-Type": "text/plain"},
   )
   assert r.status_code == 204
@@ -387,7 +387,7 @@ def test_list_returns_entries_with_metadata(client, auth, owner_token):
   app_id = _make_app(client, owner_token)
   client.put(
     f"/api/storage/apps/{app_id}/reports/2026-06-01.html",
-    data="<p>hi</p>",
+    content="<p>hi</p>",
     headers={**auth, "Content-Type": "text/html"},
   )
   client.put(
@@ -433,7 +433,7 @@ def test_list_can_include_bounded_json_content(
     )
   client.put(
     f"/api/storage/apps/{app_id}/records/note.txt",
-    data="plain",
+    content="plain",
     headers={**auth, "Content-Type": "text/plain"},
   )
 
@@ -1273,11 +1273,15 @@ def test_reap_orphaned_bundles_keeps_live_and_tombstoned_rows(
   client, owner_token, db,
 ):
   """Startup cleanup removes crash leftovers, never recoverable app bundles."""
-  from app.compiler import reap_orphaned_bundles
+  from app.compiler import publish_public_bundle, reap_orphaned_bundles
   live_id = _make_app(client, owner_token)
   tombstoned_id = _make_app(client, owner_token)
   live = _bundle_path(db, live_id)
   tombstoned = _bundle_path(db, tombstoned_id)
+  live_row = db.query(models.App).filter(models.App.id == live_id).first()
+  public_live, public_digest = publish_public_bundle(live_id, live)
+  live_row.public_bundle_path = str(public_live)
+  live_row.public_bundle_digest = public_digest
   row = db.query(models.App).filter(models.App.id == tombstoned_id).first()
   row.deleted_at = __import__(
     "app.timeutil", fromlist=["now_naive_utc"],
@@ -1286,19 +1290,24 @@ def test_reap_orphaned_bundles_keeps_live_and_tombstoned_rows(
   compiled = live.parent
   orphan_legacy = compiled / "app-999.js"
   orphan_content = compiled / ("app-999-" + "a" * 64 + ".js")
+  orphan_public = compiled / ("public-app-999-" + "b" * 64 + ".js")
   unrelated = compiled / "app-helper.js"
   orphan_legacy.write_text("legacy", encoding="utf-8")
   orphan_content.write_text("orphan", encoding="utf-8")
+  orphan_public.write_text("orphan public", encoding="utf-8")
   unrelated.write_text("not an app bundle", encoding="utf-8")
 
   removed = set(reap_orphaned_bundles(db))
 
   assert live.is_file()
+  assert public_live.is_file()
   assert tombstoned.is_file()
   assert str(orphan_legacy) in removed
   assert str(orphan_content) in removed
+  assert str(orphan_public) in removed
   assert not orphan_legacy.exists()
   assert not orphan_content.exists()
+  assert not orphan_public.exists()
   assert unrelated.is_file()
 
 
@@ -1306,11 +1315,13 @@ def test_purge_app_bundles_is_scoped_to_exact_numeric_id(
   client, owner_token, db,
 ):
   """Hard-delete cleanup removes every generation without matching id prefixes."""
-  from app.compiler import purge_app_bundles
+  from app.compiler import publish_public_bundle, purge_app_bundles
   first_id = _make_app(client, owner_token)
   second_id = _make_app(client, owner_token)
   first = _bundle_path(db, first_id)
   second = _bundle_path(db, second_id)
+  first_public, _ = publish_public_bundle(first_id, first)
+  second_public, _ = publish_public_bundle(second_id, second)
   legacy = first.parent / f"app-{first_id}.js"
   extra = first.parent / f"app-{first_id}-{'b' * 64}.js"
   legacy.write_text("legacy", encoding="utf-8")
@@ -1321,7 +1332,9 @@ def test_purge_app_bundles_is_scoped_to_exact_numeric_id(
   assert not first.exists()
   assert not legacy.exists()
   assert not extra.exists()
+  assert not first_public.exists()
   assert second.is_file()
+  assert second_public.is_file()
 
 
 def test_owned_bundle_path_canonicalizes_equivalent_stored_path(

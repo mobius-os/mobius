@@ -22,12 +22,20 @@ import { builtInCapabilityProviders } from '../../lib/capabilityProviders.js'
 import { requestAppCodeWarm } from '../../lib/appPrecache.js'
 import { appHostRequest } from '../../lib/appHostRequest.js'
 import {
+  accountLinkCompletion,
+  accountLinkRegistration,
+  accountLinkUnregistration,
+  identityLinkBrokerAllowed,
+} from '../../lib/accountLinkBroker.js'
+import {
   appMediaSessionEvent,
   applyVirtualStorageMutation,
   attributedFrameVersion,
+  serveClipboardWrite,
   serveModuleRequest,
   serveStorageRpc,
 } from './appFrameProtocol.js'
+import { writeClipboardText } from '../../runtime/clipboard.js'
 import {
   initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
 } from '../../lib/previewSwapState.js'
@@ -72,6 +80,11 @@ function appFrameRequestUrl(appId, version, frameRev) {
 //      frame → parent, answered by `moebius:storage-rpc-result`. The shell owns
 //      IndexedDB/cache/outbox because an opaque frame cannot open it. Exact
 //      source attribution and the app id + installation nonce bind every call.
+//
+//   Clipboard write: {type:'moebius:clipboard-write', requestId, text}
+//      live visible frame → parent, answered by moebius:clipboard-write-result.
+//      The host is a fallback for engines that deny clipboard access inside an
+//      opaque frame; source attribution and visibility gate the side effect.
 //
 //   2. {type: 'moebius:frame-mounted', appId}              frame → parent
 //      Fired by the frame AFTER its first render COMMITS (MountSignal's
@@ -147,6 +160,17 @@ function appFrameRequestUrl(appId, version, frameRev) {
 //      Pointer input inside an opaque iframe cannot bubble into its positioned
 //      shell wrapper. The live frame signals the parent so its pane becomes the
 //      focused owner of keyboard and immersive state.
+//
+//   9. moebius:account-link-*                               three-party broker
+//      The CSP-sandboxed app frame has an opaque origin, so an external OAuth
+//      completion page cannot safely target it by the shell's concrete origin.
+//      A live, visible frame with the reviewed identity_manage grant registers
+//      one unpredictable state + exact authorization origin here. The external
+//      page posts to window.opener.top at the exact shell origin; the shell
+//      accepts only that origin/state/shape and forwards the one-time result to
+//      the exact registered contentWindow. `"*"` is required only on that last
+//      hop because the target is opaque; frame identity and parent-origin
+//      validation provide the trust boundary.
 //
 // Host-level messages (attributed and narrowed here, outcomes owned by the
 // `onHostRequest` callback):
@@ -362,6 +386,16 @@ const AppCanvas = forwardRef(function AppCanvas({
   // VERSION — a Map, not a single ref, because two iframes are alive during the
   // swap window and each must be addressable independently.
   const framesRef = useRef(new Map())
+  // At most one short-lived external account-link result may be routed to this
+  // app canvas. The registration binds the result to an exact mounted frame;
+  // it is retired on unregister, timeout, document removal, reload, or unmount.
+  const accountLinkRef = useRef(null)
+  function clearAccountLinkRegistration(expected = null) {
+    const current = accountLinkRef.current
+    if (!current || (expected && current !== expected)) return
+    clearTimeout(current.timeoutId)
+    accountLinkRef.current = null
+  }
   // Playback remains inside the app frame. This map only binds the shell's
   // small metadata/control surface to the exact document that owns it.
   const frameMediaSessionRef = useRef(new Map())
@@ -443,6 +477,9 @@ const AppCanvas = forwardRef(function AppCanvas({
             framesRef.current.get(v)?.contentWindow,
           )
           storageHostRef.current.detachSource(framesRef.current.get(v)?.contentWindow)
+          if (accountLinkRef.current?.source === framesRef.current.get(v)?.contentWindow) {
+            clearAccountLinkRegistration()
+          }
           retireFrameMediaSession(v)
           // A service-surface takeover can remove the live iframe without
           // unmounting AppCanvas or advancing the buffered version. Retire its
@@ -637,6 +674,28 @@ const AppCanvas = forwardRef(function AppCanvas({
   useEffect(() => {
     if (!appId) return
     function onMessage(e) {
+      // The external completion page talks to the concrete top-level shell,
+      // not to the opaque app frame. Consume this before the frame-origin gate,
+      // then forward only to the still-mounted document that registered it.
+      const registered = accountLinkRef.current
+      const completion = accountLinkCompletion(e, registered)
+      if (completion) {
+        const registeredVersion = attributedFrameVersion(
+          framesRef.current,
+          registered.source,
+        )
+        if (
+          registeredVersion === registered.frameVersion
+          && registeredVersion === liveVersionRef.current
+          && identityLinkBrokerAllowed(capabilityContractRef.current)
+        ) {
+          clearAccountLinkRegistration(registered)
+          try { registered.source.postMessage(completion, '*') } catch { /* frame retired */ }
+        } else {
+          clearAccountLinkRegistration(registered)
+        }
+        return
+      }
       if (e.origin !== 'null' && e.origin !== window.location.origin) return
       const msg = e.data
       if (!msg || typeof msg !== 'object') return
@@ -746,6 +805,55 @@ const AppCanvas = forwardRef(function AppCanvas({
       // browsing context). Route acks back to the source frame via e.source
       // directly — it is the verified sender window.
       if (srcVersion !== liveVersionRef.current) return
+
+      if (msg.type === 'moebius:clipboard-write') {
+        if (!visibleRef.current) return
+        serveClipboardWrite({
+          message: msg,
+          source: e.source,
+          writeText: writeClipboardText,
+        })
+        return
+      }
+
+      if (msg.type === 'moebius:account-link-register') {
+        if (!visibleRef.current || !identityLinkBrokerAllowed(capabilityContractRef.current)) {
+          return
+        }
+        const parsed = accountLinkRegistration(msg)
+        if (!parsed) return
+        clearAccountLinkRegistration()
+        const registration = {
+          ...parsed,
+          source: e.source,
+          frameVersion: srcVersion,
+          timeoutId: null,
+        }
+        registration.timeoutId = setTimeout(() => {
+          clearAccountLinkRegistration(registration)
+        }, Math.max(0, registration.deadline - Date.now()))
+        accountLinkRef.current = registration
+        try {
+          e.source.postMessage({
+            type: 'moebius:account-link-registered',
+            state: registration.state,
+          }, '*')
+        } catch {
+          clearAccountLinkRegistration(registration)
+        }
+        return
+      }
+
+      if (msg.type === 'moebius:account-link-unregister') {
+        const registration = accountLinkRef.current
+        if (
+          registration?.source === e.source
+          && accountLinkUnregistration(msg, registration)
+        ) {
+          clearAccountLinkRegistration(registration)
+        }
+        return
+      }
 
       // App-owned playback may continue while its warm frame is hidden, so its
       // drawer control surface is live-frame-scoped rather than visibility-
@@ -889,6 +997,13 @@ const AppCanvas = forwardRef(function AppCanvas({
     onAppFocus, onImmersive, onIntentDelivered, onAppError, onHostRequest,
     queryClient,
   ])
+
+  // The listener above may be refreshed when callback props change. Keep the
+  // short-lived registration across those harmless refreshes, but never across
+  // an AppCanvas unmount or a different app taking over this component.
+  useEffect(() => () => {
+    clearAccountLinkRegistration()
+  }, [appId])
 
   // Capabilities belong to a visible workspace pane, not merely the focused
   // pane. Finish/cancel active-frame work before a cached app becomes hidden.
@@ -1320,6 +1435,9 @@ const AppCanvas = forwardRef(function AppCanvas({
     // why the parent never dedups frame-init).
     if (loadedDocsRef.current.has(v)) {
       retireFrameMediaSession(v)
+      if (accountLinkRef.current?.source === framesRef.current.get(v)?.contentWindow) {
+        clearAccountLinkRegistration()
+      }
       capabilityHostRef.current.detachSource(
         framesRef.current.get(v)?.contentWindow,
       )
@@ -1386,7 +1504,7 @@ const AppCanvas = forwardRef(function AppCanvas({
             // withholds it.
             data-app-id={isLive ? appId : undefined}
             data-frame-version={v}
-            allow="fullscreen"
+            allow="clipboard-write; fullscreen"
             allowFullScreen
             onLoad={() => handleFrameLoad(v)}
           />

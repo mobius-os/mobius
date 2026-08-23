@@ -55,8 +55,8 @@ if ! docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null | grep -q t
 fi
 
 # Stream backend/app + backend/scripts into the served platform layer. tar runs
-# as root (docker exec default) so it can overwrite the root-owned recovery
-# island files too; we chown back to mobius and the entrypoint re-applies the
+# as root (docker exec default) so it can overwrite root-owned protected
+# platform files too; we chown back to mobius and the entrypoint re-applies the
 # protected-file perms on the restart below. __pycache__/.pyc are skipped so a
 # stale host cache can't shadow the new source.
 step "[1/4] syncing backend/app → ${CONTAINER}:/data/platform/backend/app/"

@@ -24,6 +24,8 @@
   color: var(--text, #d4d4d8);
   box-shadow: 0 16px 42px rgba(0, 0, 0, 0.36);
   animation: sas-pop 0.18s cubic-bezier(0.2, 0.7, 0.2, 1);
+  max-height: min(760px, calc(100dvh - 32px));
+  overflow-y: auto;
 }
 
 @keyframes sas-pop {
@@ -67,6 +69,47 @@
   color: var(--muted, #9ca3af);
   font-size: 13px;
   line-height: 1.55;
+}
+
+.sas__section {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border, #252b36);
+}
+
+.sas__section--install {
+  margin-top: 20px;
+}
+
+.sas__section-title {
+  margin: 0;
+  color: var(--text, #d4d4d8);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.sas__section .sas__body {
+  margin-top: 7px;
+}
+
+.sas__confirm {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, #ef4444 42%, var(--border, #252b36));
+  border-radius: 9px;
+  background: color-mix(in srgb, #ef4444 8%, transparent);
+}
+
+.sas__confirm p {
+  margin: 0;
+  color: var(--text, #d4d4d8);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.sas__confirm .sas__actions {
+  margin-top: 12px;
 }
 
 .sas__url {
@@ -143,6 +186,24 @@
   border-color: var(--border, #252b36);
   background: transparent;
   color: var(--text, #d4d4d8);
+}
+
+.sas__btn--quiet {
+  flex: 0 0 auto;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted, #9ca3af);
+}
+
+.sas__btn--danger {
+  border-color: #ef4444;
+  background: #ef4444;
+  color: #fff;
+}
+
+.sas__btn:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 .sas__status {

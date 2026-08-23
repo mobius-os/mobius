@@ -28,6 +28,19 @@ test('ShareAppSheet uses the shared modal focus contract', () => {
   assert.match(source, /aria-labelledby="sas-title"/)
 })
 
+test('ShareAppSheet presents hosted use and installable copies as separate lifecycles', () => {
+  const source = read('../../Drawer/ShareAppSheet.jsx')
+  const client = read('../../../api/client.js')
+  assert.match(source, /app\.hosted_publication/)
+  assert.match(source, /onPublish\?\.\(app\.id\)/)
+  assert.match(source, /onStop\?\.\(app\.id\)/)
+  assert.match(source, />Install or remix</)
+  assert.match(source, /editable copy/)
+  assert.doesNotMatch(source, /public_enabled|onSetPublic/)
+  assert.match(client, /\/hosted-publication.*method: 'PUT'/)
+  assert.match(client, /\/hosted-publication.*method: 'DELETE'/)
+})
+
 test('full-screen dialogs share one focus, inerting, and Escape contract', () => {
   const dialogs = [
     read('../../ui/ModelSheet.jsx'),
@@ -85,6 +98,13 @@ test('QuestionCard gives the custom answer area a durable accessible name', () =
   const source = read('../QuestionCard.jsx')
   assert.match(source, /aria-label=\{`Custom answer for: \$\{question\}`\}/)
   assert.match(source, /placeholder=\{answered \? 'No custom answer' : 'Or type your own answer…'\}/)
+})
+
+test('context compaction is a provider-neutral accessible timeline marker', () => {
+  const source = read('../ContextCompactionMarker.jsx')
+  assert.match(source, /role="note" aria-label="Context compacted"/)
+  assert.match(source, />Context compacted<\/span>/)
+  assert.doesNotMatch(source, /PROVIDER_LABELS|compactionMeta|block\?\.provider/)
 })
 
 test('message references are an accessible lazy disclosure with safe links', () => {
