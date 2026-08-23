@@ -20,6 +20,38 @@ from app.github_contribution_contract import (
   GIT_SHA as _GIT_SHA,
   SUBMIT_TIMEOUT_SECONDS as _SUBMIT_TIMEOUT,
 )
+from app.terminal_output import readable_output
+
+
+_FETCH_ATTEMPTS = 2
+
+
+def _is_transient_transport_error(message: str) -> bool:
+  """Classify failures worth one safe retry before any public mutation."""
+  detail = str(message or "").lower()
+  transient_markers = (
+    "could not resolve host",
+    "failed to connect",
+    "connection reset",
+    "connection timed out",
+    "operation timed out",
+    "remote end hung up unexpectedly",
+    "remote hung up unexpectedly",
+    "temporarily unavailable",
+    "empty reply from server",
+    "early eof",
+    "http 429",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "the requested url returned error: 429",
+    "the requested url returned error: 500",
+    "the requested url returned error: 502",
+    "the requested url returned error: 503",
+    "the requested url returned error: 504",
+  )
+  return any(marker in detail for marker in transient_markers)
 
 def _validate_repo_slug(value: object) -> str:
   repo = str(value or "")
@@ -166,6 +198,7 @@ def _merge_error_patch(exc: ContributionSubmitError, patch: dict) -> Contributio
     exc.status_code,
     record_patch={**patch, **exc.record_patch},
     code=exc.code,
+    detail=exc.detail,
   )
 
 
@@ -493,20 +526,59 @@ def _assert_merges_with_upstream(
   upstream_ref = f"refs/mobius-submit/upstream-{ref_key}"
   preflight_patch = {"last_submit_upstream_branch": upstream_branch}
   try:
-    fetched = _git(
-      repo,
-      "fetch", "--no-tags", "--force",
-      remote_url,
-      f"+refs/heads/{upstream_branch}:{upstream_ref}",
-      check=False,
-    )
-    if fetched.returncode != 0:
+    fetch_detail = ""
+    fetched = None
+    fetch_was_transient = False
+    for attempt in range(_FETCH_ATTEMPTS):
+      fetched = None
+      try:
+        fetched = _git(
+          repo,
+          "fetch", "--no-tags", "--force",
+          remote_url,
+          f"+refs/heads/{upstream_branch}:{upstream_ref}",
+          check=False,
+        )
+      except subprocess.TimeoutExpired as exc:
+        fetch_detail = readable_output(
+          exc.stderr or exc.stdout or
+          f"Git fetch timed out after {exc.timeout} seconds."
+        )
+        fetch_was_transient = True
+        if attempt + 1 < _FETCH_ATTEMPTS:
+          continue
+        break
+      if fetched.returncode == 0:
+        break
+      observed_detail = readable_output(fetched.stderr or fetched.stdout or "")
+      if observed_detail:
+        fetch_detail = observed_detail
+      fetch_was_transient = _is_transient_transport_error(fetch_detail)
+      if not fetch_was_transient:
+        break
+      # Starting a fresh git process is the recovery boundary. There is no
+      # sleep here: Send remains bounded, and deterministic rejections never
+      # consume a second attempt.
+      if attempt + 1 >= _FETCH_ATTEMPTS:
+        break
+    if fetched is None or fetched.returncode != 0:
+      transient = fetch_was_transient
       raise ContributionSubmitError(
         (
-          "Could not verify that this PR merges with the upstream branch. "
-          "Leave feedback so your agent can refresh it."
+          "GitHub was temporarily unreachable while Contribute checked "
+          f"upstream {upstream_branch}. Nothing was published. Try Send "
+          "again; leave feedback only if it keeps failing."
+          if transient else
+          f"GitHub could not provide upstream {upstream_branch} while "
+          "Contribute checked mergeability. Nothing was published. Leave "
+          "feedback so your agent can inspect it."
         ),
         record_patch=preflight_patch,
+        code=(
+          "upstream_fetch_unavailable" if transient
+          else "upstream_fetch_failed"
+        ),
+        detail=fetch_detail or "Git fetch failed without diagnostic output.",
       ) from None
     upstream_sha = _git(
       repo, "rev-parse", "--verify", f"{upstream_ref}^{{commit}}",

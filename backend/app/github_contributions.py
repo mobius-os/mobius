@@ -960,6 +960,7 @@ def _mark_submit_failure(
   record_path: Path,
   message: str,
   record_patch: dict | None = None,
+  code: str = "",
   detail: str = "",
 ) -> dict | None:
   try:
@@ -981,6 +982,10 @@ def _mark_submit_failure(
     next_record["last_submit_error_detail"] = detail
   else:
     next_record.pop("last_submit_error_detail", None)
+  if code:
+    next_record["last_submit_error_code"] = code
+  else:
+    next_record.pop("last_submit_error_code", None)
   _write_record(record_path, next_record)
   return next_record
 
@@ -1006,6 +1011,7 @@ def _mark_submit_success(
     next_record["number"] = number
   next_record.pop("last_submit_error", None)
   next_record.pop("last_submit_error_detail", None)
+  next_record.pop("last_submit_error_code", None)
   _write_record(record_path, next_record)
   return next_record
 
@@ -1047,6 +1053,7 @@ def _mark_stack_submit_failure(
   *,
   failed_id: str | None = None,
   record_patch: dict | None = None,
+  code: str = "",
   detail: str = "",
 ) -> list[dict]:
   snapshots = []
@@ -1060,6 +1067,7 @@ def _mark_stack_submit_failure(
         record_path=row["record_path"],
         message=message,
         record_patch=patch,
+        code=code if is_failed else "",
         # Only the layer that actually failed owns the transcript; the
         # siblings were stopped, not rejected.
         detail=detail if is_failed else "",
@@ -1366,26 +1374,7 @@ def _existing_branch_pr(
 
 def _is_transient_push_error(message: str) -> bool:
   """Retry transport/server failures, never deterministic push rejections."""
-  detail = str(message or "").lower()
-  transient_markers = (
-    "could not resolve host",
-    "failed to connect",
-    "connection reset",
-    "connection timed out",
-    "operation timed out",
-    "remote end hung up unexpectedly",
-    "remote hung up unexpectedly",
-    "temporarily unavailable",
-    "http 500",
-    "http 502",
-    "http 503",
-    "http 504",
-    "the requested url returned error: 500",
-    "the requested url returned error: 502",
-    "the requested url returned error: 503",
-    "the requested url returned error: 504",
-  )
-  return any(marker in detail for marker in transient_markers)
+  return _git_ops._is_transient_transport_error(message)
 
 
 def _push_branch(

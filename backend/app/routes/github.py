@@ -1335,11 +1335,17 @@ async def submit_contribution(
         record_path=record_path,
         message=exc.message,
         record_patch=exc.record_patch,
+        code=exc.code or "",
         detail=exc.detail,
       )
     raise HTTPException(
       status_code=exc.status_code,
-      detail={"message": exc.message, "detail": exc.detail, "record": record},
+      detail={
+        "message": exc.message,
+        "detail": exc.detail,
+        "record": record,
+        **({"code": exc.code} if exc.code else {}),
+      },
     )
   except Exception as exc:
     log.exception("Contribution submit failed for %s/%s", app_id, record_id)
@@ -1695,6 +1701,7 @@ async def submit_contribution_stack(
               exc.message,
               failed_id=str(record.get("id") or ""),
               record_patch=exc.record_patch,
+              code=exc.code or "",
               detail=exc.detail,
             )
           raise HTTPException(
@@ -1704,6 +1711,7 @@ async def submit_contribution_stack(
               "detail": exc.detail,
               "records": snapshots,
               "submitted": submitted_urls,
+              **({"code": exc.code} if exc.code else {}),
             },
           ) from exc
 
@@ -1737,11 +1745,17 @@ async def submit_contribution_stack(
         rows,
         exc.message,
         record_patch=exc.record_patch,
+        code=exc.code or "",
         detail=exc.detail,
       )
     raise HTTPException(
       status_code=exc.status_code,
-      detail={"message": exc.message, "detail": exc.detail, "records": snapshots},
+      detail={
+        "message": exc.message,
+        "detail": exc.detail,
+        "records": snapshots,
+        **({"code": exc.code} if exc.code else {}),
+      },
     ) from exc
   except Exception as exc:
     log.exception("Contribution stack submit failed for app %s", app_id)
