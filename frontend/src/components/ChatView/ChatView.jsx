@@ -4739,7 +4739,7 @@ export default function ChatView({
           messageHistory={messageHistory}
           provider={chatInfo?.provider}
           leftButtons={
-            <BrainUsageButton>
+            <BrainUsageButton usageEnabled={!embedded}>
               {({ icon, ariaLabel }) => (
               <ComposerPopover
                 modelTriggerIcon={icon}

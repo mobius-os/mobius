@@ -2,9 +2,13 @@ import { settingsQueries } from '../../hooks/queries.js'
 import BrainUsageIcon from './BrainUsageIcon.jsx'
 import { mostConstrainedRemainingPercent } from '../SettingsView/providerUsage.js'
 
-export default function BrainUsageButton({ children }) {
-  const codexUsage = settingsQueries.providerUsage.useQuery('codex')
-  const claudeUsage = settingsQueries.providerUsage.useQuery('claude')
+export default function BrainUsageButton({ children, usageEnabled = true }) {
+  const codexUsage = settingsQueries.providerUsage.useQuery('codex', {
+    enabled: usageEnabled,
+  })
+  const claudeUsage = settingsQueries.providerUsage.useQuery('claude', {
+    enabled: usageEnabled,
+  })
   const leftPercent = codexUsage.isLoading
     ? null
     : mostConstrainedRemainingPercent(codexUsage.data)
