@@ -5,6 +5,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  androidBrowserIntentHref,
   detectInstallPlatform,
   installCopyForPlatform,
   isStandaloneDisplay,
@@ -206,4 +207,22 @@ test('standalone detection never throws on hostile or absent globals', () => {
   assert.equal(isStandaloneDisplay(null), false)
   assert.equal(isStandaloneDisplay({}), false)
   assert.equal(isStandaloneDisplay({ matchMedia() { throw new Error('denied') } }), false)
+})
+
+test('Android Chromium copy warns against Create shortcut', () => {
+  const copy = installCopyForPlatform(detectInstallPlatform(UA.androidChrome))
+  assert.match(copy.body, /Install/)
+  assert.match(copy.body, /not Create shortcut/)
+})
+
+test('androidBrowserIntentHref escapes the in-app tab with a fallback', () => {
+  const href = androidBrowserIntentHref('https://mobius.example/apps/notes/?install=1')
+  assert.equal(
+    href,
+    'intent://mobius.example/apps/notes/?install=1' +
+      '#Intent;scheme=https;S.browser_fallback_url=' +
+      'https%3A%2F%2Fmobius.example%2Fapps%2Fnotes%2F%3Finstall%3D1;end',
+  )
+  // Non-https input is left alone rather than turned into a broken intent.
+  assert.equal(androidBrowserIntentHref('http://x.test/a'), 'http://x.test/a')
 })

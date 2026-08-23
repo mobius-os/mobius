@@ -41,6 +41,7 @@ from app.chat_writer import (
   ReplaceTranscript,
   StartTurn,
   StartTurnBlockedByPendingQuestion,
+  UpdatePending,
 )
 from app.database import SessionLocal
 
@@ -511,6 +512,59 @@ def test_concurrent_append_cancel_promote_preserve_order(actor):
   assert chat["pending_messages"] == []
   assert "m0" in promoted["promoted"]["content"]
   assert "m3" not in promoted["promoted"]["content"]
+
+
+def test_update_pending_preserves_non_text_fields(actor):
+  """UpdatePending replaces only the matched row's text; identity, ordering,
+  and attachments on it and its neighbours are untouched."""
+  _seed_chat(pending=[
+    {
+      "role": "user", "content": "before", "ts": 10, "cid": "c-edit",
+      "position": 1, "attachments": [{"name": "notes.txt"}],
+    },
+    {"role": "user", "content": "next", "ts": 20, "cid": "c-next"},
+  ])
+  result = _await(actor.submit(UpdatePending(
+    chat_id="c1", run_token="", cid="c-edit", content="after",
+  )))
+  assert result["updated"] is True
+  assert result["pending"] == [
+    {
+      "role": "user", "content": "after", "ts": 10, "cid": "c-edit",
+      "position": 1, "attachments": [{"name": "notes.txt"}],
+    },
+    {"role": "user", "content": "next", "ts": 20, "cid": "c-next"},
+  ]
+
+
+def test_update_pending_missing_cid_is_a_noop(actor):
+  """Editing a cid no longer queued reports updated:False and rewrites nothing
+  (the promote/cancel race the UI reconciles instead of assuming success)."""
+  _seed_chat(pending=[
+    {"role": "user", "content": "keep", "ts": 10, "cid": "c-keep"},
+  ])
+  result = _await(actor.submit(UpdatePending(
+    chat_id="c1", run_token="", cid="c-gone", content="late",
+  )))
+  assert result["updated"] is False
+  assert result["pending"] == [
+    {"role": "user", "content": "keep", "ts": 10, "cid": "c-keep"},
+  ]
+
+
+def test_update_pending_same_text_reports_present_without_change(actor):
+  """Editing a queued row to its current text still reports it present
+  (updated:True) and returns the row byte-for-byte unchanged, so an idempotent
+  retry is a no-op rather than a phantom 'gone'."""
+  seeded = {
+    "role": "user", "content": "same", "ts": 10, "cid": "c-same", "position": 1,
+  }
+  _seed_chat(pending=[dict(seeded)])
+  result = _await(actor.submit(UpdatePending(
+    chat_id="c1", run_token="", cid="c-same", content="same",
+  )))
+  assert result["updated"] is True
+  assert result["pending"] == [seeded]
 
 
 # -- cid identity: dedup + idempotency ------------------------------------

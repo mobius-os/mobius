@@ -74,6 +74,7 @@ def _last_user_message_elapsed(db, chat_id: str) -> str | None:
       if (
         not isinstance(m, dict)
         or m.get("role") != "user"
+        or m.get("hidden")
         or is_continuation_message(m)
       ):
         continue
@@ -545,6 +546,8 @@ def _goal_resume_requested(chat_row, text: str) -> bool:
   # old goal that may already have finished before native goal storage existed.
   for message in reversed(durable[:-1]):
     if not isinstance(message, dict):
+      continue
+    if message.get("hidden"):
       continue
     if message.get("role") == "user":
       return False

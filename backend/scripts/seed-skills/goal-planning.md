@@ -1,9 +1,48 @@
 # Goal planning
 
-Use this whenever a native `/goal` is created or resumed. It turns a genuinely
-multi-step Goal into the visible, dependency-aware todo list above the composer.
-Read it before doing material work on an active Goal that has multiple
-verifiable stages, repeated work, or stages that can safely run in parallel.
+Read this before material work on every ordinary prompt that delegates an
+outcome, and whenever a Goal is created or resumed. It turns genuinely durable
+work into the visible, dependency-aware todo list above the composer. Questions
+and explanation-only prompts are not delegated outcomes and do not need this
+routing read. Automatic promotion belongs to a top-level owner turn; a delegated
+subagent keeps its assigned task bounded rather than starting another Goal.
+
+## Decide whether the request should become a Goal
+
+Automatically promote the current turn only when all of these are true:
+
+- The partner delegated an outcome to complete, not merely an explanation,
+  recommendation, critique, or investigation to report back.
+- Completion has an observable condition the agent can eventually verify.
+- Durability materially helps because the route likely spans multiple
+  independently verifiable stages or turns, repeated work, dynamic discovery,
+  safe parallel branches, a long operation, or a plausible restart.
+- Work can begin without first waiting for a material owner choice, destructive
+  approval, or external event.
+
+Do not infer a Goal from message length, words such as “thoroughly,” a
+multi-file edit, or the mere fact that a useful task list could be written.
+Keep bounded work that can honestly finish in one turn as a standard prompt.
+Honor “just answer,” “one pass,” and “don't make this a Goal” as opt-outs.
+
+When the criteria hold, promote the current physical turn before material work:
+
+```bash
+python3 /data/platform/backend/scripts/goal_promote.py \
+  'Concise outcome and observable completion condition'
+```
+
+Run that helper as its own command. It attaches the already-running turn to
+Möbius's provider-neutral Goal state and verifies the committed identity; it
+does not add a hidden message or start a second turn. Do not call a
+provider-private `create_goal` from an ordinary turn, queue a synthetic `/goal`,
+or claim activation before the helper succeeds. Explicit `/goal` remains
+authoritative.
+
+If an ordinary turn begins bounded but discovery later reveals substantial
+durable work that now meets every criterion, promote at that point before
+starting the newly discovered branch. Do not rewrite completed work as if the
+Goal existed earlier.
 
 ## Decide whether the Goal earns a plan
 
@@ -15,6 +54,10 @@ not a keyword parser: do not manufacture busywork merely to fill a list.
 The Goal remains the stable outcome. Tasks describe the current route to it and
 may be revised as evidence changes, but revising the route never authorizes
 silently changing the requested outcome.
+
+When discovery adds work, run `show`, then replace the complete plan with
+`set --tasks-json`, preserving every existing task's truthful status, note, and
+progress while adding or rewiring only the newly understood route.
 
 ## Publish the dependency graph
 
@@ -41,6 +84,31 @@ Translate common shapes directly:
   `"progress":{"current":0,"total":3}` and advance it after each run. Do
   not mark it complete until progress is `3/3`.
 
+## Grow the route as the work teaches you more
+
+The initial plan is a useful route, not a prediction ritual. When completing a
+task reveals substantial independently verifiable work, add it as a child of
+the task that owns the newly discovered requirement:
+
+```bash
+python3 /data/platform/backend/scripts/goal_plan.py add inspect-auth \
+  'Inspect the authentication boundary' \
+  --parent audit \
+  --completion-condition 'The owner and child authority paths are verified'
+```
+
+Children may themselves gain children. The deepest ready leaves are the work
+that can run now; safe independent leaves may run in parallel. After all direct
+children settle, their parent becomes **Ready to verify** rather than
+auto-completing. Verify the parent's own completion condition, record the
+concise result, and only then complete it. This repeats upward until the root
+outcome is proved.
+
+A parent owns coordination, not descendant transcripts. Pass each child only
+the bounded contract and context it needs. Fold its concise result into its
+immediate parent; the top-level agent needs the status and verified result of
+its direct children, not every lower-level implementation detail.
+
 ## Keep the visible state truthful
 
 Before starting a task, mark it running; after evidence proves its outcome,
@@ -61,22 +129,21 @@ do not duplicate that scheduler with prose or timers.
 
 When several ready tasks are independent, run them in parallel only when the
 available delegation capability and write isolation make that safe. Shared
-live writes still need one serialized integrator; parallel read/review work is
-the easy case. When a delegated task settles, fold its evidence into the parent,
-update the matching task, and start newly ready work. Ordinary in-turn fleets
-still die with the turn; use a capability that explicitly owns durable child
-work when the task must survive a restart.
+live writes—including Goal-plan revisions—still need one serialized integrator;
+parallel read/review work is the easy case. When a delegated task settles, fold
+its evidence into the parent, update the matching task, and start newly ready
+work. Ordinary in-turn fleets still die with the turn; use a capability that
+explicitly owns durable child work when the task must survive a restart.
 
-Immediately before marking the native Goal complete, run the mediated
-completion preflight as its own command:
+Immediately before completing the native Goal, run the mediated completion
+preflight as its own command:
 
 ```bash
 python3 /data/platform/backend/scripts/goal_plan.py check-complete
 ```
 
-Only call `update_goal` with `status: complete` when that command exits zero
-and the actual requested outcome has been achieved. The preflight allows a
-deliberately unplanned one-step Goal; for a planned Goal it rejects pending,
-running, blocked, or failed tasks. Cancelled tasks are treated as deliberately
-removed from the route. A green todo list supports the completion audit; it
-never replaces checking the actual result.
+For a planned Goal it rejects unfinished tasks and active mapped delegations.
+A green todo list supports the completion audit; it never replaces checking the
+actual result. Where an explicit provider Goal exposes mediated `update_goal`,
+call it with `status: complete` only after the preflight and real completion
+audit pass; otherwise the verified end of the agent turn completes the Goal.

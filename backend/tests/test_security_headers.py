@@ -147,7 +147,14 @@ def test_static_embed_policy_authoritatively_replaces_route_headers(monkeypatch)
   response = TestClient(app).get("/app-embeds/by-id/999/index.html")
 
   assert response.status_code == 418
-  assert response.headers["content-security-policy"] == _STATIC_EMBED_CSP
+  policy = response.headers["content-security-policy"]
+  assert policy == _STATIC_EMBED_CSP
+  # A packaged app may opt into a user-opened destination tab at its own iframe
+  # boundary. The destination must escape this opaque sandbox or signed-in
+  # storage and same-origin requests on sites such as GitHub remain broken.
+  assert "allow-popups-to-escape-sandbox" in policy
+  assert "allow-same-origin" not in policy
+  assert "allow-top-navigation" not in policy
   assert "x-frame-options" not in response.headers
 
 

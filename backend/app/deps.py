@@ -91,10 +91,12 @@ class Principal:
   app_instance_id: str | None = None
   scope: str = "owner"
   chat_id: str | None = None
+  run_id: str | None = None
   embed_instance_id: str | None = None
   embed_session_id: str | None = None
   embed_role: str | None = None
   operations: frozenset[str] = frozenset()
+  delegation_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -170,6 +172,18 @@ def _resolve_owner(
     raise HTTPException(status_code=401, detail="Owner not found.")
   if payload.get("epoch", 0) != owner.token_epoch:
     raise HTTPException(status_code=401, detail="Token revoked.")
+  agent_chat = payload.get("agent_chat")
+  agent_run = payload.get("agent_run")
+  if agent_chat is not None or agent_run is not None:
+    if not isinstance(agent_chat, str) or not isinstance(agent_run, str):
+      raise HTTPException(status_code=401, detail="Invalid agent token.")
+    live_run = db.query(models.ChatRun.id).filter(
+      models.ChatRun.id == agent_run,
+      models.ChatRun.chat_id == agent_chat,
+      models.ChatRun.status == "running",
+    ).first()
+    if live_run is None:
+      raise HTTPException(status_code=401, detail="Agent run is no longer active.")
   return owner, payload
 
 
@@ -288,6 +302,42 @@ def get_current_owner(
   return resolve_owner_only(token, db)
 
 
+def _enforce_delegation_claims(
+  payload: dict, db: Session, app_id: int | None,
+) -> tuple[str, str]:
+  """Bind a delegated bearer to its exact currently-running child attempt."""
+  delegation_id = payload.get("delegation_id")
+  chat_id = payload.get("delegation_chat")
+  run_id = payload.get("delegation_run")
+  if not (
+    isinstance(app_id, int)
+    and isinstance(delegation_id, str)
+    and isinstance(chat_id, str)
+    and isinstance(run_id, str)
+  ):
+    raise HTTPException(status_code=401, detail="Malformed delegation token.")
+  active = (
+    db.query(models.Delegation.id)
+    .join(models.App, models.App.id == models.Delegation.app_id)
+    .join(models.ChatRun, models.ChatRun.chat_id == models.Delegation.child_chat_id)
+    .filter(
+      models.Delegation.id == delegation_id,
+      models.Delegation.child_chat_id == chat_id,
+      models.Delegation.app_id == app_id,
+      models.Delegation.cancelled_at.is_(None),
+      models.App.deleted_at.is_(None),
+      models.ChatRun.id == run_id,
+      models.ChatRun.status == "running",
+    )
+    .first()
+  )
+  if active is None:
+    raise HTTPException(
+      status_code=401, detail="Delegation token is no longer active.",
+    )
+  return delegation_id, chat_id
+
+
 def _enforce_app_scope(payload: dict, db: Session) -> int | None:
   """Validates an app-scoped token's app identity; returns its app_id.
 
@@ -328,6 +378,11 @@ def _enforce_app_scope(payload: dict, db: Session) -> int | None:
   stamped = payload.get("app_nonce")
   if stamped is not None and stamped != app.token_nonce:
     raise HTTPException(status_code=401, detail="App token no longer valid.")
+  if any(
+    payload.get(key) is not None
+    for key in ("delegation_id", "delegation_chat", "delegation_run")
+  ):
+    _enforce_delegation_claims(payload, db, app_id)
   return app_id
 
 
@@ -516,12 +571,55 @@ def get_principal(
   if payload.get("scope") not in (None, "app"):
     raise HTTPException(status_code=403, detail="Token scope is not valid here.")
   app_id = _enforce_app_scope(payload, db)
+  delegation_id = payload.get("delegation_id")
+  delegation_chat = payload.get("delegation_chat")
   return Principal(
     owner=owner,
     app_id=app_id,
     app_instance_id=payload.get("app_nonce") if app_id is not None else None,
     scope="app" if app_id is not None else "owner",
+    chat_id=payload.get("agent_chat") or delegation_chat,
+    run_id=payload.get("agent_run"),
+    delegation_id=delegation_id,
   )
+
+
+def get_delegation_principal(
+  token: str = Depends(_oauth2),
+  db: Session = Depends(get_db),
+) -> Principal:
+  """Resolve owner/app plus the route-confined delegated-child bearer."""
+  _owner, payload = _resolve_owner(token, db)
+  if payload.get("scope") == "delegation":
+    app_id = payload.get("app_id")
+    delegation_id, chat_id = _enforce_delegation_claims(
+      payload, db, app_id,
+    )
+    return Principal(
+      owner=_owner, app_id=int(app_id), scope="delegation",
+      chat_id=str(chat_id), delegation_id=str(delegation_id),
+    )
+  # Any non-delegation token resolves through the generic principal path.
+  return get_principal(token, db)
+
+
+def get_agent_run_principal(
+  token: str = Depends(_oauth2),
+  db: Session = Depends(get_db),
+) -> Principal:
+  """Resolve the short-lived owner bearer minted for one physical agent run."""
+  principal = get_principal(token, db)
+  if (
+    principal.scope != "owner"
+    or principal.app_id is not None
+    or not isinstance(principal.chat_id, str)
+    or not isinstance(principal.run_id, str)
+  ):
+    raise HTTPException(
+      status_code=403,
+      detail="This operation requires the current agent run.",
+    )
+  return principal
 
 
 def get_chat_view_principal(
@@ -825,6 +923,82 @@ def get_owner_or_app_with_connections_manage(
     detail=(
       "This app needs permissions.connections_manage=true in its manifest "
       "to manage MCP connections on your behalf."
+    ),
+  )
+
+
+def get_owner_or_app_with_connect_manage(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Owner JWT, or an app token granted external-machine management."""
+  owner = principal.owner
+  if principal.app_id is None:
+    return owner
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  if bool(app.connect_manage):
+    return owner
+  raise HTTPException(
+    status_code=403,
+    detail=(
+      "This app needs permissions.connect_manage=true in its manifest "
+      "to manage paired machines on your behalf."
+    ),
+  )
+
+
+def get_owner_or_app_with_identity_manage(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Owner JWT, or an app with the reviewed identity-management grant.
+
+  This grant lives in the accepted capability contract rather than a second
+  model column: identity is a package-owned system integration, and every
+  install/update already replaces that contract atomically. Omission on a
+  later app version therefore revokes access on the next request.
+  """
+  owner = principal.owner
+  if principal.app_id is None:
+    return owner
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  contract = app.capability_contract if isinstance(app.capability_contract, dict) else {}
+  data = contract.get("data") if isinstance(contract.get("data"), dict) else {}
+  if data.get("identity_manage") is True:
+    return owner
+  raise HTTPException(
+    status_code=403,
+    detail=(
+      "This app needs permissions.identity_manage=true in its manifest "
+      "to read or update your Möbius identity."
+    ),
+  )
+
+
+def get_owner_or_app_with_railway_manage(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """Owner JWT, or an app with reviewed Railway deployment authority."""
+  owner = principal.owner
+  if principal.app_id is None:
+    return owner
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  contract = app.capability_contract if isinstance(app.capability_contract, dict) else {}
+  data = contract.get("data") if isinstance(contract.get("data"), dict) else {}
+  if data.get("railway_manage") is True:
+    return owner
+  raise HTTPException(
+    status_code=403,
+    detail=(
+      "This app needs permissions.railway_manage=true in its manifest "
+      "to manage Railway deployments on your behalf."
     ),
   )
 

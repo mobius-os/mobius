@@ -64,7 +64,6 @@ def test_known_models_fallback_lists_current_claude_and_codex():
     "claude-opus-4-8",
     "claude-opus-4-7",
   ]
-  assert providers.DEFAULT_MODELS["claude"] == "claude-opus-4-8"
   # Current Codex family — each canonical id present by name.
   for model_id in (
     "gpt-5.6-sol",

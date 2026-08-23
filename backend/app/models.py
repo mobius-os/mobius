@@ -54,11 +54,6 @@ class Owner(Base):
   auto_resume_on_limit_default = Column(
     Boolean, nullable=False, default=False, server_default=false()
   )
-  # Planned restarts are initiated by Möbius, so continuing interrupted work
-  # is initially on. This remains independently configurable per chat.
-  auto_resume_on_restart_default = Column(
-    Boolean, nullable=False, default=True, server_default=true()
-  )
   # Per-owner model-picker preferences. Shape:
   #   {"hidden_ids": ["claude-haiku-4-5-20251001", ...]}
   # The picker filters out any registry entry whose ID appears in
@@ -77,7 +72,7 @@ class Owner(Base):
   # other onboarding signals later — same shape as a SCD type 1 row.
   walkthrough_completed_at = Column(DateTime, nullable=True, default=None)
   # Monotonic JWT-validity generation. Every owner-derived token (the
-  # 30-day login token, the 8h app token, the 2h agent token, the
+  # 30-day login token, the 8h app token, the run-bound agent token, the
   # 90-day service token) is stamped with the owner's token_epoch at
   # mint time; the owner-resolving dependency in deps.py rejects any
   # token whose stamped epoch is behind this value. Incrementing it is
@@ -89,6 +84,38 @@ class Owner(Base):
   # legacy tokens stay valid until the first bump.
   token_epoch = Column(Integer, nullable=False, default=0)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
+
+
+class IdentityLinkAttempt(Base):
+  """Single outstanding PKCE account-link attempt for the local owner.
+
+  A new start replaces the previous row, so only the most recent browser
+  window can complete. The verifier is encrypted and never enters app code.
+  """
+
+  __tablename__ = "identity_link_attempts"
+
+  owner_id = Column(
+    Integer, ForeignKey("owner.id", ondelete="CASCADE"), primary_key=True,
+  )
+  attempt_id = Column(String(64), nullable=False, unique=True, index=True)
+  state_digest = Column(String(64), nullable=False)
+  verifier_encrypted = Column(Text, nullable=False)
+  expires_at = Column(DateTime, nullable=False, index=True)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
+class IdentityAccountLink(Base):
+  """Revocable, encrypted mobius.you grant for a self-hosted owner."""
+
+  __tablename__ = "identity_account_links"
+
+  owner_id = Column(
+    Integer, ForeignKey("owner.id", ondelete="CASCADE"), primary_key=True,
+  )
+  access_token_encrypted = Column(Text, nullable=False)
+  scopes_json = Column(JSON, nullable=False, default=list)
+  linked_at = Column(DateTime, nullable=False, default=now_naive_utc)
 
 
 class SystemPromptSnapshot(Base):
@@ -162,8 +189,12 @@ class Chat(Base):
   auto_resume_on_limit = Column(
     Boolean, nullable=False, default=False, server_default=false()
   )
-  # Per-chat policy for continuing after a supervisor-authenticated planned
-  # restart. Initially on because Möbius interrupted the work itself.
+  # Internal latch for continuing after a supervisor-authenticated planned
+  # restart. This is NOT an owner preference — a Möbius-initiated restart
+  # should always continue interrupted work, so it is on for every real chat
+  # and there is no toggle. It is only ever cleared internally, by
+  # delegations.mark_cancelled, so a cancelled delegated child cannot
+  # resurrect itself when the boot sweep claims restart parks.
   auto_resume_on_restart = Column(
     Boolean, nullable=False, default=True, server_default=true()
   )
@@ -247,6 +278,11 @@ class ChatRun(Base):
   # questions are steered into the same run and must not make the goal vanish
   # after a reload. NULL is an ordinary non-goal run.
   goal_objective = Column(Text, nullable=True, default=None)
+  # Stable identity for one native Goal across physical/logical run recovery.
+  # Unlike root_run_id this survives a fresh provider turn after a restart or
+  # question checkpoint. Explicit /goal starts mint a new identity; genuine
+  # continuations inherit it.
+  goal_id = Column(String(64), nullable=True, index=True, default=None)
   # Optional agent-authored execution plan for the logical goal rooted at this
   # run. Only the root row stores the snapshot; continuation rows resolve it
   # through root_run_id. The JSON document is intentionally small and bounded
@@ -729,6 +765,10 @@ class App(Base):
   # canonical holder. Stored keys and broker capabilities never cross this
   # surface, so the grant manages rows without holding what they protect.
   connections_manage = Column(Boolean, nullable=False, default=False)
+  # External-machine management: pair/revoke runners and dispatch commands.
+  # Connect is the canonical holder. This is separate from filesystem_access:
+  # the command runs on another machine rather than this Möbius host.
+  connect_manage = Column(Boolean, nullable=False, default=False)
   # Offline capability. The agent opts an app in (default False) only
   # when it's built to run without the network — it uses
   # window.mobius.storage (which queues writes and syncs on reconnect)

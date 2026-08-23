@@ -40,6 +40,25 @@ function requestIdOf(message) {
     : ''
 }
 
+export function serveClipboardWrite({ message, source, writeText }) {
+  if (!message || message.type !== 'moebius:clipboard-write') return false
+  const requestId = requestIdOf(message)
+  const text = typeof message.text === 'string' && message.text.length <= 1_000_000
+    ? message.text
+    : ''
+  if (!requestId || !text) return true
+  ;(async () => {
+    let ok = false
+    try { ok = await writeText(text) === true } catch { /* report false */ }
+    try {
+      source?.postMessage({
+        type: 'moebius:clipboard-write-result', requestId, ok,
+      }, '*')
+    } catch { /* frame detached while copying */ }
+  })()
+  return true
+}
+
 export function serveModuleRequest({
   message,
   source,

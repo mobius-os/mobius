@@ -73,12 +73,10 @@ async function newChat(page) {
   // Create the chat via API first (so it's tagged with the worker
   // prefix and can be reaped after the spec finishes), then click
   // through the UI to actually land on it.
-  await createTaggedChat(page)
-  await page.evaluate(() => document.querySelector('.drawer__item--new')?.click())
-  const hasEmpty = await page.evaluate(
-    () => !!document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
-  )
-  if (!hasEmpty) await page.goto(BASE)
+  const chat = await createTaggedChat(page)
+  await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
+    waitUntil: 'domcontentloaded',
+  })
   await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
 }
 
@@ -340,10 +338,12 @@ test.describe('Bug 1: AskUserQuestion', () => {
     })
 
     const before = await geometry()
+    // Plain Enter now sends in the inline answer editor (matches the composer),
+    // so a multi-line answer is built with Shift+Enter for each newline.
     await customAnswer.pressSequentially('First line')
-    await page.keyboard.press('Enter')
+    await page.keyboard.press('Shift+Enter')
     await customAnswer.pressSequentially('Second line')
-    await page.keyboard.press('Enter')
+    await page.keyboard.press('Shift+Enter')
     await customAnswer.pressSequentially('Third line')
     await page.evaluate(() => new Promise(resolve => (
       requestAnimationFrame(() => requestAnimationFrame(resolve))
@@ -360,7 +360,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     // Drive the real keyboard path so caret reveal, beforeinput, input, and the
     // chat scroll owner race exactly as they do for an owner writing an answer.
     for (let line = 4; line <= 14; line += 1) {
-      await page.keyboard.press('Enter')
+      await page.keyboard.press('Shift+Enter')
       await customAnswer.pressSequentially(`Line ${line}`)
     }
     await page.evaluate(() => new Promise(resolve => (

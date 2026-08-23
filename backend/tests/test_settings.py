@@ -306,7 +306,7 @@ def test_get_settings_prefers_connected_codex_over_unconnected_default(client, a
     body = client.get("/api/settings", headers=auth).json()
     assert body["codex_authenticated"] is True
     assert body["provider"] == "codex"
-    assert body["agent_settings"]["model"] == providers.DEFAULT_MODELS["codex"]
+    assert body["agent_settings"]["model"] is None
     assert body["background_agents"]["primary"]["provider"] == "codex"
   finally:
     codex_auth.unlink(missing_ok=True)

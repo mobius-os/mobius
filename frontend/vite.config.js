@@ -154,15 +154,11 @@ export default defineConfig({
         // skipping precache.
         maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
       },
-      // `registerType` is intentionally omitted. It only takes
-      // effect when the plugin injects a client-side registration
-      // helper, but we've set `injectRegister: null` (we register
-      // the SW ourselves in `index.html`). Setting `registerType`
-      // here would be misleading — a future reader might assume
-      // the plugin manages the update lifecycle and remove the
-      // manual `self.skipWaiting()` + `clientsClaim()` calls from
-      // `src/sw.js` thinking they're redundant. Those calls are
-      // load-bearing for auto-update with this strategy.
+      // `registerType` is intentionally omitted. It only affects the plugin's
+      // injected registration helper, while `injectRegister: null` leaves
+      // registration and the apply-on-idle lifecycle to index.html + Shell.
+      // Declaring an auto-update mode here would falsely suggest the plugin owns
+      // worker activation and encourage a second, competing handoff path.
 
       // No manifest config here — `frontend/public/manifest.webmanifest`
       // is the source of truth and the server rewrites theme colors

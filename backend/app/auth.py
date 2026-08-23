@@ -11,6 +11,11 @@ from jwt.exceptions import InvalidTokenError
 from app.config import get_settings
 
 
+# Covers the platform's at-most-24-hour turn capabilities with clock skew.
+# deps._resolve_owner also rejects it as soon as the exact run stops running.
+AGENT_RUN_TOKEN_TTL = timedelta(hours=26)
+
+
 # bcrypt ignores bytes after the first 72. Pre-hashing new passwords makes the
 # full UTF-8 input significant while retaining bcrypt's salt and work factor.
 # The prefix makes the format self-describing so hashes created by older Mobius
@@ -79,6 +84,26 @@ def create_access_token(
   )
 
 
+def create_agent_token(
+  chat_id: str,
+  run_id: str,
+  owner_username: str,
+  token_epoch: int,
+  *,
+  expires_delta: timedelta = AGENT_RUN_TOKEN_TTL,
+) -> str:
+  """Create the owner bearer bound to one ordinary interactive agent run."""
+  return create_access_token(
+    {
+      "sub": owner_username,
+      "agent_chat": chat_id,
+      "agent_run": run_id,
+    },
+    expires_delta=expires_delta,
+    token_epoch=token_epoch,
+  )
+
+
 def create_app_token(
   app_id: int,
   owner_username: str,
@@ -86,6 +111,9 @@ def create_app_token(
   app_nonce: str | None = None,
   *,
   expires_delta: timedelta = timedelta(hours=8),
+  delegation_id: str | None = None,
+  delegation_chat: str | None = None,
+  delegation_run: str | None = None,
 ) -> str:
   """Creates a short-lived JWT scoped to a specific mini-app.
 
@@ -103,8 +131,44 @@ def create_app_token(
   claims = {"sub": owner_username, "scope": "app", "app_id": app_id}
   if app_nonce is not None:
     claims["app_nonce"] = app_nonce
+  delegated_claims = (delegation_id, delegation_chat, delegation_run)
+  if any(value is not None for value in delegated_claims) and not all(
+    value is not None for value in delegated_claims
+  ):
+    raise ValueError(
+      "delegation identity, chat, and run must be supplied together"
+    )
+  if delegation_id is not None:
+    claims["delegation_id"] = delegation_id
+    claims["delegation_chat"] = delegation_chat
+    claims["delegation_run"] = delegation_run
   return create_access_token(
     claims,
+    expires_delta=expires_delta,
+    token_epoch=token_epoch,
+  )
+
+
+def create_delegation_token(
+  delegation_id: str,
+  app_id: int,
+  chat_id: str,
+  run_id: str,
+  owner_username: str,
+  token_epoch: int,
+  *,
+  expires_delta: timedelta = timedelta(hours=8),
+) -> str:
+  """Create a bearer confined to one delegated agent and direct children."""
+  return create_access_token(
+    {
+      "sub": owner_username,
+      "scope": "delegation",
+      "delegation_id": delegation_id,
+      "app_id": app_id,
+      "delegation_chat": chat_id,
+      "delegation_run": run_id,
+    },
     expires_delta=expires_delta,
     token_epoch=token_epoch,
   )

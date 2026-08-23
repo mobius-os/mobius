@@ -133,6 +133,27 @@ export function shouldAttachRunningStream({
   return !!running && !pendingQuestionId
 }
 
+/**
+ * A fresh runtime verdict may repair a mounted pane whose stream exhausted.
+ * The stream hook keeps sole ownership while its bounded retry loop is active;
+ * after exhaustion, restart that owner rather than creating a parallel loop.
+ */
+export function runtimeStreamAttachAction({
+  running,
+  pendingQuestionId,
+  isStreaming = false,
+  connectionError = null,
+  hidden = false,
+} = {}) {
+  if (
+    hidden
+    || isStreaming
+    || !shouldAttachRunningStream({ running, pendingQuestionId })
+  ) return 'none'
+  if (connectionError === 'retrying') return 'none'
+  return connectionError === 'disconnected' ? 'retry' : 'connect'
+}
+
 /** Retire only a cold restored prefix proven older than the durable card. */
 export function shouldRetireRestoredQuestionSnapshot({
   isStreaming = false,
@@ -149,6 +170,28 @@ export function shouldRetireRestoredQuestionSnapshot({
     && item.question_id === pendingQuestionId
     && !item.answers
   ))
+}
+
+/**
+ * A durable running -> idle transition settles a live transport that missed
+ * its terminal event. Requiring the prior server-running observation avoids
+ * mistaking the short optimistic send window (before StartTurn is persisted)
+ * for a completed turn.
+ */
+export function shouldRecoverSettledRuntime({
+  runtimeWasObservedRunning = false,
+  runtimeRunning = false,
+  pendingCount = 0,
+  streamStillActive = false,
+  stopInFlight = false,
+  localStartInFlight = false,
+} = {}) {
+  return !!runtimeWasObservedRunning
+    && runtimeRunning === false
+    && pendingCount === 0
+    && !!streamStillActive
+    && !stopInFlight
+    && !localStartInFlight
 }
 
 function coldBlockRenderCost(block) {

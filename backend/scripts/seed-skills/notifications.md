@@ -16,7 +16,23 @@ Send push notifications for meaningful events — not routine confirmations. If 
 
 ## `open_item` is live-only — pair it with a push for durability
 
-The `open_item` system event (see `core.md`, "Opening something in the partner's workspace") drops an app or chat straight into the workspace, but only for a partner whose session is live right now — it fires once and is never stored. When the open matters and the partner may be away, ALSO send a push notification with the deep link here: the push is the durable "look at this later" channel, `open_item` is the instant one. They compose — fire both.
+The `open_item` system event drops an app or chat into the live workspace and is
+never stored. Use it when the partner asks to open an item or when a completed
+item should be visible now:
+
+```bash
+curl -s -X POST "$API_BASE_URL/api/notify" \
+  -H "Authorization: Bearer $AGENT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"open_item","itemKind":"app","itemId":"42","sourceKind":"chat","sourceId":"'"$CHAT_ID"'","placement":"beside-source","activation":"background"}'
+```
+
+- Default `activation` to `background`; use `foreground` only when the partner
+  just asked to open that exact item.
+- Never describe geometry. Say "I've opened it in your workspace" because a
+  phone may render a tab or stacked pane rather than a split.
+- When the partner may be away, also send a push with the deep link: the push is
+  the durable "look at this later" channel and `open_item` is the instant one.
 
 ---
 

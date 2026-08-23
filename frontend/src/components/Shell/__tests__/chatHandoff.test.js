@@ -35,12 +35,12 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
     /const activationCacheEntryState = chatCacheEntryState\([\s\S]*setLoading\(activationCacheEntryState === 'missing'\)[\s\S]*activationCacheEntryState === 'validating'[\s\S]*'cache-validating'/,
     'a retained chat revalidates cache coverage on every visible activation')
   assert.match(scrollMode,
-    /initialEntryPhaseRef\.current !== 'cached'[\s\S]*initialEntryPhaseRef\.current !== 'ready'[\s\S]*forceRevealRef/,
-    'the reveal deadline admits only caller-validated cache or authoritative history')
+    /initialEntryPhaseRef\.current !== 'cached'[\s\S]*initialEntryPhaseRef\.current !== 'stream-catchup'[\s\S]*initialEntryPhaseRef\.current !== 'ready'[\s\S]*forceRevealRef/,
+    'the reveal deadline admits only caller-validated or authoritative transcript frames')
   assert.match(
     chatView,
-    /const transcriptPaintable = \([\s\S]*initialEntryPhase === 'cached' \|\| initialEntryPhase === 'ready'[\s\S]*\) && revealed[\s\S]*const displayReady = activationSettled[\s\S]*&& !loading[\s\S]*&& \(transcriptPaintable \|\| showEmpty \|\| showLoadError\)/,
-    'a coordinate-complete cache can paint only after this activation confirms its runtime state',
+    /const transcriptPaintable = \([\s\S]*initialEntryPhase === 'cached'[\s\S]*initialEntryPhase === 'stream-catchup'[\s\S]*initialEntryPhase === 'ready'[\s\S]*\) && revealed[\s\S]*const displayReady = activationSettled[\s\S]*&& !loading[\s\S]*&& \(transcriptPaintable \|\| showEmpty \|\| showLoadError\)/,
+    'a coordinate-complete frame, including a running one, publishes only after runtime confirmation',
   )
   assert.match(chatView, /useLayoutEffect\(\(\) => \{[\s\S]*onDisplayReady\?\.\(chatId\)/,
     'ChatView must report layout readiness before its transcript can be promoted')
@@ -71,7 +71,7 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
   )
 })
 
-test('activation holds an unchanged running transcript until stream catch-up', () => {
+test('activation presents a confirmed running transcript while stream catch-up reconciles', () => {
   const initialLoad = chatView.match(
     /const loadActivation = async \(\) => \{[\s\S]*?\n    loadActivation\(\)/,
   )?.[0] || ''
@@ -125,7 +125,7 @@ test('activation holds an unchanged running transcript until stream catch-up', (
   assert.match(
     chatView,
     /setInitialEntryPhase\(attachesToStream \? 'stream-catchup' : 'ready'\)[\s\S]*if \(running\) \{[\s\S]*connectToStream\(false\)/,
-    'a running persisted frame remains gated until stream catch-up commits',
+    'a running persisted frame keeps an explicit reconciliation phase while its stream attaches',
   )
   assert.match(
     chatView,

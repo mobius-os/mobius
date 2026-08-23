@@ -3288,11 +3288,16 @@
 
 .chat__progress-step--button {
   appearance: none;
-  padding: 0;
+  flex: 1 0 100%;
+  width: 100%;
+  margin: -3px -4px;
+  padding: 3px 4px;
   border: 0;
+  border-radius: 7px;
   background: transparent;
   font: inherit;
   text-align: left;
+  justify-content: space-between;
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -3302,21 +3307,7 @@
 
 .chat__progress-step--toggle:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 3px;
-  border-radius: 3px;
-}
-
-.chat__progress-step-action {
-  flex: 0 0 auto;
-  margin-left: 2px;
-  color: var(--accent);
-  font-weight: 650;
-  white-space: nowrap;
-}
-
-.chat__progress-step--toggle:hover .chat__progress-step-action {
-  text-decoration: underline;
-  text-underline-offset: 2px;
+  outline-offset: 2px;
 }
 
 .chat__progress-step--expanded {
@@ -3384,7 +3375,11 @@
 }
 
 .chat__goal-task--running,
-.chat__goal-task--ready {
+.chat__goal-task--starting,
+.chat__goal-task--resuming,
+.chat__goal-task--paused,
+.chat__goal-task--ready,
+.chat__goal-task--verify {
   color: var(--text);
   background: color-mix(in srgb, var(--accent) 7%, transparent);
 }
@@ -3401,6 +3396,13 @@
 .chat__goal-task--running .chat__goal-task-marker {
   border-color: var(--accent);
   box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.chat__goal-task--starting .chat__goal-task-marker,
+.chat__goal-task--resuming .chat__goal-task-marker,
+.chat__goal-task--paused .chat__goal-task-marker {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 .chat__goal-task--ready .chat__goal-task-marker {
@@ -3614,6 +3616,65 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.queued__row--editing {
+  padding: 6px;
+  background: var(--bg);
+}
+
+.queued__editor {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 4px;
+}
+
+.queued__editor-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 56px;
+  max-height: 160px;
+  padding: 8px 10px;
+  /* Grow to fit the message being edited (capped by max-height, then scroll)
+     so a longer draft is visible instead of scrolling a cramped fixed box.
+     Browsers without field-sizing fall back to autoGrowTextarea's measurement. */
+  field-sizing: content;
+  overflow-y: auto;
+  resize: none;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  outline: none;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  /* Keep at 16px: iOS Safari zooms focused inputs below 16px (see contract above). */
+  font-size: 16px;
+  line-height: 1.4;
+}
+
+.queued__editor-input:focus {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.queued__editor-actions {
+  display: flex;
+  align-items: flex-start;
+}
+
+.queued__edit-save:not(:disabled) {
+  color: var(--accent);
+}
+
+.queued__editor-error {
+  grid-column: 1 / -1;
+  padding: 0 4px 2px;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.3;
 }
 
 .queued__action {

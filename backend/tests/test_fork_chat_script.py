@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -9,21 +10,39 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "backend" / "scripts" / "fork-chat.sh"
 
 
-def _seed_chat(data_dir: Path, *, provider="codex", chat_id="chat-1") -> None:
+def test_platform_coaching_helper_is_directly_executable():
+  assert SCRIPT.stat().st_mode & stat.S_IXUSR
+
+
+def _seed_chat(
+  data_dir: Path,
+  *,
+  provider="codex",
+  chat_id="chat-1",
+  session_id="provider-session-id",
+  deleted=False,
+) -> None:
   db_dir = data_dir / "db"
   db_dir.mkdir(parents=True)
   con = sqlite3.connect(db_dir / "ultimate.db")
   con.execute(
     "create table chats (id text primary key, provider text, "
-    "session_id text, messages text)"
+    "session_id text, messages text, deleted_at text)"
   )
   messages = [
     {"role": "user", "content": "please fix the thing"},
     {"role": "assistant", "content": "I fixed the thing"},
   ]
   con.execute(
-    "insert into chats (id, provider, session_id, messages) values (?, ?, ?, ?)",
-    (chat_id, provider, "codex-session-id", json.dumps(messages)),
+    "insert into chats "
+    "(id, provider, session_id, messages, deleted_at) values (?, ?, ?, ?, ?)",
+    (
+      chat_id,
+      provider,
+      session_id,
+      json.dumps(messages),
+      "2026-08-22T00:00:00" if deleted else None,
+    ),
   )
   con.commit()
   con.close()
@@ -59,6 +78,27 @@ fi
   printf 'args=%s\\n' "${{args[*]}}"
   printf 'stdin=%s\\n' "$stdin_payload"
 }} > "$out"
+""",
+    encoding="utf-8",
+  )
+  fake.chmod(0o755)
+
+
+def _write_fake_claude(bin_dir: Path, *, exit_code=0) -> None:
+  bin_dir.mkdir()
+  fake = bin_dir / "claude"
+  fake.write_text(
+    f"""#!/usr/bin/env bash
+set -euo pipefail
+if [[ {exit_code} -ne 0 ]]; then
+  echo "fake claude failure" >&2
+  exit {exit_code}
+fi
+if [[ " $* " == *" --resume "* && " $* " == *" --fork-session "* ]]; then
+  echo "answer from exact session fork"
+else
+  echo "answer from transcript reseed"
+fi
 """,
     encoding="utf-8",
   )
@@ -112,4 +152,158 @@ def test_codex_fork_reports_cli_failure(tmp_path):
 
   assert proc.returncode == 7
   assert "fake codex trust failure" in proc.stderr
-  assert "fork-chat: codex interview failed for chat-1 (rc=7)" in proc.stderr
+  assert "fork-chat: codex coaching failed for chat-1 (rc=7)" in proc.stderr
+
+
+def test_json_contract_labels_codex_reseed(tmp_path):
+  _seed_chat(tmp_path)
+  bin_dir = tmp_path / "bin"
+  _write_fake_codex(bin_dir)
+
+  proc = subprocess.run(
+    ["bash", str(SCRIPT), "--json", "chat-1", "interview"],
+    env={
+      **os.environ,
+      "DATA_DIR": str(tmp_path),
+      "PATH": f"{bin_dir}:{os.environ['PATH']}",
+    },
+    text=True,
+    capture_output=True,
+    check=True,
+  )
+
+  payload = json.loads(proc.stdout)
+  assert payload == {
+    "chat_id": "chat-1",
+    "provider": "codex",
+    "method": "transcript_reseed",
+    "exact_session_fork": False,
+    "answer": payload["answer"],
+  }
+  assert "You previously worked on this" in payload["answer"]
+  assert "fork-chat: method=transcript_reseed provider=codex" in proc.stderr
+
+
+def test_json_contract_labels_exact_claude_session_fork(tmp_path):
+  _seed_chat(tmp_path, provider="claude", session_id="claude-session")
+  bin_dir = tmp_path / "bin"
+  _write_fake_claude(bin_dir)
+  encoded_cwd = "-" + str(tmp_path).lstrip("/").replace("/", "-")
+  transcript = (
+    tmp_path / "cli-auth" / "claude" / "projects" / encoded_cwd
+    / "claude-session.jsonl"
+  )
+  transcript.parent.mkdir(parents=True)
+  transcript.write_text("{}\n", encoding="utf-8")
+
+  proc = subprocess.run(
+    ["bash", str(SCRIPT), "--json", "chat-1", "interview"],
+    env={
+      **os.environ,
+      "DATA_DIR": str(tmp_path),
+      "CLAUDE_CONFIG_DIR": str(tmp_path / "cli-auth" / "claude"),
+      "PATH": f"{bin_dir}:{os.environ['PATH']}",
+    },
+    text=True,
+    capture_output=True,
+    check=True,
+  )
+
+  payload = json.loads(proc.stdout)
+  assert payload == {
+    "chat_id": "chat-1",
+    "provider": "claude",
+    "method": "session_fork",
+    "exact_session_fork": True,
+    "answer": "answer from exact session fork",
+  }
+  assert "fork-chat: method=session_fork provider=claude" in proc.stderr
+
+
+def test_json_contract_labels_claude_transcript_reseed(tmp_path):
+  _seed_chat(tmp_path, provider="claude", session_id="missing-session")
+  bin_dir = tmp_path / "bin"
+  _write_fake_claude(bin_dir)
+
+  proc = subprocess.run(
+    ["bash", str(SCRIPT), "--json", "chat-1", "interview"],
+    env={
+      **os.environ,
+      "DATA_DIR": str(tmp_path),
+      "PATH": f"{bin_dir}:{os.environ['PATH']}",
+    },
+    text=True,
+    capture_output=True,
+    check=True,
+  )
+
+  payload = json.loads(proc.stdout)
+  assert payload["method"] == "transcript_reseed"
+  assert payload["exact_session_fork"] is False
+  assert payload["answer"] == "answer from transcript reseed"
+  assert "has no resumable transcript; reseeding from DB" in proc.stderr
+
+
+def test_claude_session_fork_failure_is_not_emitted_as_coaching(tmp_path):
+  _seed_chat(tmp_path, provider="claude", session_id="claude-session")
+  bin_dir = tmp_path / "bin"
+  _write_fake_claude(bin_dir, exit_code=9)
+  encoded_cwd = "-" + str(tmp_path).lstrip("/").replace("/", "-")
+  transcript = (
+    tmp_path / "cli-auth" / "claude" / "projects" / encoded_cwd
+    / "claude-session.jsonl"
+  )
+  transcript.parent.mkdir(parents=True)
+  transcript.write_text("{}\n", encoding="utf-8")
+
+  proc = subprocess.run(
+    ["bash", str(SCRIPT), "--json", "chat-1", "coaching"],
+    env={
+      **os.environ,
+      "DATA_DIR": str(tmp_path),
+      "CLAUDE_CONFIG_DIR": str(tmp_path / "cli-auth" / "claude"),
+      "PATH": f"{bin_dir}:{os.environ['PATH']}",
+    },
+    text=True,
+    capture_output=True,
+  )
+
+  assert proc.returncode == 9
+  assert proc.stdout == ""
+  assert "claude session fork failed for chat-1 (rc=9)" in proc.stderr
+
+
+def test_claude_reseed_failure_is_not_emitted_as_coaching(tmp_path):
+  _seed_chat(tmp_path, provider="claude", session_id="missing-session")
+  bin_dir = tmp_path / "bin"
+  _write_fake_claude(bin_dir, exit_code=8)
+
+  proc = subprocess.run(
+    ["bash", str(SCRIPT), "--json", "chat-1", "coaching"],
+    env={
+      **os.environ,
+      "DATA_DIR": str(tmp_path),
+      "PATH": f"{bin_dir}:{os.environ['PATH']}",
+    },
+    text=True,
+    capture_output=True,
+  )
+
+  assert proc.returncode == 8
+  assert proc.stdout == ""
+  assert "claude transcript reseed failed for chat-1 (rc=8)" in proc.stderr
+
+
+def test_deleted_chat_is_evidence_only_and_never_forked(tmp_path):
+  _seed_chat(tmp_path, provider="claude", deleted=True)
+
+  proc = subprocess.run(
+    ["bash", str(SCRIPT), "--json", "chat-1", "interview"],
+    env={**os.environ, "DATA_DIR": str(tmp_path)},
+    text=True,
+    capture_output=True,
+  )
+
+  assert proc.returncode == 7
+  assert proc.stdout == ""
+  assert "is deleted; refusing to fork" in proc.stderr

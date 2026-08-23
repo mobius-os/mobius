@@ -45,6 +45,7 @@ import {
   clientLengthToLayout,
   clientPointToLayout,
 } from '../../lib/layoutSpace.js'
+import useModelSelectionPopover from './hooks/useModelSelectionPopover.js'
 
 export default function ComposerPopover({
   chatInfo,
@@ -63,19 +64,15 @@ export default function ComposerPopover({
   autoResumeSaving,
   autoResumeError,
   onAutoResumeChange,
-  restartResumeEnabled,
-  restartResumeSaving,
-  restartResumeError,
-  onRestartResumeChange,
   providerSwitchState,
   settingsSaveTailRef,
   composerInputRef,
+  modelSelectionRequest = 0,
   onOpenInspector,
   onOpenSummary,
   embedded = false,
   pending = false,
 }) {
-  const [open, setOpen] = useState(false)
   const wrapRef = useRef(null)
   const triggerRef = useRef(null)
   // Tracks whether the chat textarea was focused at the moment the
@@ -90,7 +87,10 @@ export default function ComposerPopover({
   // AFTER React commits — on iOS Safari the focus state can shift
   // between the click handler and the post-commit effect, leaving
   // the ref stale. Sync capture in onClick is reliable.
-  const wasInputFocusedRef = useRef(false)
+  const { open, setOpen, wasInputFocusedRef } = useModelSelectionPopover(
+    modelSelectionRequest,
+    composerInputRef,
+  )
   // Measured cap on the panel's height: the space above the trigger inside both
   // the chat pane (which clips with `overflow: hidden`) and the keyboard-shrunk
   // visible viewport. See composerPopoverHeight.js for why CSS viewport units
@@ -157,6 +157,20 @@ export default function ComposerPopover({
     function onPointer(e) {
       if (!wrapRef.current) return
       if (wrapRef.current.contains(e.target)) return
+      // Dismissing by pressing outside must not drop the soft keyboard. If the
+      // textarea was focused when the popover opened, suppress the focus change
+      // this outside press would otherwise cause (which blurs the textarea and
+      // collapses the keyboard), then restore focus next frame only if a later
+      // click still steals it — mirroring the popover's own pointer boundary.
+      // preventDefault on pointerdown keeps focus and caret without blocking
+      // scrolling, which is governed by touch-action.
+      if (wasInputFocusedRef.current) {
+        e.preventDefault()
+        requestAnimationFrame(() => {
+          const el = composerInputRef?.current
+          if (el && document.activeElement !== el) focusComposerElement(el)
+        })
+      }
       setOpen(false)
     }
     function onKey(e) {
@@ -275,10 +289,6 @@ export default function ComposerPopover({
                 autoResumeSaving={autoResumeSaving}
                 autoResumeError={autoResumeError}
                 onAutoResumeChange={onAutoResumeChange}
-                restartResumeEnabled={restartResumeEnabled}
-                restartResumeSaving={restartResumeSaving}
-                restartResumeError={restartResumeError}
-                onRestartResumeChange={onRestartResumeChange}
                 onChange={onChangeChatInfo}
                 providerSwitchState={providerSwitchState}
                 settingsSaveTailRef={settingsSaveTailRef}

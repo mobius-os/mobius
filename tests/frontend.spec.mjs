@@ -989,7 +989,7 @@ test.describe('Scroll position', () => {
     expect(restored.scrollTop).toBeGreaterThan(0)
   })
 
-  test('10d. Previous-chat entry stays held until catch-up, then settles without movement', async ({ page }) => {
+  test('10d. Running chat presents before catch-up, then settles without movement', async ({ page }) => {
     await setup(page, { width: 900, height: 760 })
     await newChat(page)
 
@@ -1163,7 +1163,15 @@ test.describe('Scroll position', () => {
       chatId,
       { timeout: 3000 },
     )
-    await expect(page.locator('.shell__chat-view--held')).toHaveCount(1)
+    await page.waitForFunction(id => {
+      const painted = document.querySelector(
+        `[data-chat-surface="painted"][data-chat-id="${id}"]`,
+      )
+      const el = painted?.querySelector('.chat__scroll')
+      const target = painted?.querySelector('[data-key="entry-anchor"]')
+      return !!el && getComputedStyle(el).visibility !== 'hidden' && !!target
+    }, chatId, { timeout: 5000 })
+    await expect(page.locator('.shell__chat-view--held')).toHaveCount(0)
     expect(catchUpServed).toBe(false)
     releaseCatchUp()
     await expect.poll(() => catchUpServed, { timeout: 3000 }).toBe(true)

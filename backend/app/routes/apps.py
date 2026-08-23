@@ -1521,7 +1521,9 @@ async def apply_app_source(
         "appId": str(result.app.id),
         "chatId": str(body.chat_id),
       })
-  return schemas.AppApplyOut(mode=result.mode, app=result.app)
+  return schemas.AppApplyOut(
+    mode=result.mode, app=result.app, warnings=list(result.warnings)
+  )
 
 
 def _pending_store_update_app(
@@ -2532,7 +2534,9 @@ async def delete_app(
   tombstone against a concurrent install of the same app, and the per-app
   storage lock matches the order the purge (which DOES rmtree) takes them.
   """
+  from app import chat_queue
   async with (
+    chat_queue.get_transition_lock(f"app-lifecycle:{app_id}"),
     fs_locks.install_uninstall_lock(),
     fs_locks.app_storage_lock(app_id),
   ):
@@ -2542,6 +2546,29 @@ async def delete_app(
       .first()
     )
     if not app:
+      raise HTTPException(status_code=404, detail="App not found.")
+
+    # An app-owned delegated process can keep spending or writing after its
+    # frame disappears. Settle every child (and its descendants) before the
+    # app authority is tombstoned; a provider that will not stop makes the
+    # uninstall retryable rather than orphaning live work.
+    from app.delegations import (
+      active_delegation_ids_for_app,
+      cancel_delegation_execution,
+    )
+    for delegation_id in active_delegation_ids_for_app(db, app_id):
+      if not await cancel_delegation_execution(delegation_id):
+        raise HTTPException(
+          status_code=409,
+          detail="Could not stop active delegated work; retry",
+        )
+    db.rollback()
+    app = (
+      db.query(models.App)
+      .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+      .first()
+    )
+    if app is None:
       raise HTTPException(status_code=404, detail="App not found.")
 
     await _revoke_app_publish_tokens(

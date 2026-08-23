@@ -339,6 +339,7 @@ class AppOut(BaseModel):
 class AppApplyOut(BaseModel):
   mode: Literal["created", "updated", "unchanged"]
   app: AppOut
+  warnings: list[str] = Field(default_factory=list)
 
 
 class AppInstall(BaseModel):
@@ -627,8 +628,6 @@ class ChatPatch(BaseModel):
   pinned: bool | None = None
   # Per-chat automatic continuation after a paid provider limit.
   auto_resume_on_limit: bool | None = None
-  # Per-chat automatic continuation after a supervisor-authenticated restart.
-  auto_resume_on_restart: bool | None = None
   # Naming precedence. by_agent marks an AGENT title-sync — it fills the name
   # only when the owner hasn't locked it via a manual rename. clear_title resets
   # the name (unlock + drop to the first-message default; re-derived next turn).
@@ -737,6 +736,13 @@ class SendMessage(BaseModel):
     if self.continuation == "manual" and self.content.strip().lower() != "continue":
       raise ValueError("manual continuation content must be 'continue'")
     return self
+
+
+class PendingMessageUpdate(BaseModel):
+  # New text for one already-queued message. Only the content is client-
+  # supplied; the row's stable `cid`, ordering `ts`, attachments, and queue
+  # position are preserved server-side and never taken from the request.
+  content: str
 
 
 class PushKeys(BaseModel):

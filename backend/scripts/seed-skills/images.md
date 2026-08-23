@@ -6,26 +6,14 @@ For simple icons or logos, consider an SVG instead — it's crisp, themeable, an
 
 ---
 
-## Codex (`$imagegen`)
+## Codex (`imagegen`)
 
 Codex includes a built-in image generator covered by the plan, with no separate API key needed.
 
-```bash
-$imagegen "a serene mountain landscape"
-```
-
-The PNG saves under `/data/cli-auth/codex/generated_images/...` and is not
-automatically visible in Möbius chat. Publish the exact returned path:
-
-```bash
-python "$SCRIPTS_DIR/publish_chat_image.py" "<exact path returned by imagegen>" \
-  --alt "short description"
-```
-
-Paste the returned `embed` value into the reply before describing the image.
-The helper writes to the resolved current chat and deliberately requires the
-exact generated path; never rediscover an output by modification time, which
-can select another run's image.
+Call the injected `imagegen` tool according to its current contract. Return the
+tool's generated-image result directly in the reply before describing it. Do
+not inspect, locate, or republish a backing file: generated-image storage is an
+implementation detail inside the protected credentials tree.
 
 ---
 

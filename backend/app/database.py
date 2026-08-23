@@ -23,6 +23,7 @@ from app.config import get_settings
 
 
 _log = logging.getLogger(__name__)
+sqlite_policy.install_adapters()
 _request_label: ContextVar[str] = ContextVar(
   "mobius_database_request_label", default="background",
 )

@@ -77,8 +77,15 @@ function assertInvariants(ws) {
       assert.ok(!seenTab.has(key), 'a tab is unique workspace-wide')
       seenTab.add(key)
     }
+    assert.deepEqual(
+      [...pane.recentTabKeys].sort(), [...keys].sort(),
+      'recency is a duplicate-free permutation of the pane tabs',
+    )
     if (keys.length === 0) assert.equal(pane.activeTabKey, null)
-    else assert.ok(keys.includes(pane.activeTabKey), 'active tab is a member')
+    else {
+      assert.ok(keys.includes(pane.activeTabKey), 'active tab is a member')
+      assert.equal(pane.recentTabKeys[0], pane.activeTabKey, 'active tab is most recent')
+    }
   }
 }
 
@@ -88,6 +95,7 @@ test('seedFromFlatTabs makes a single focused pane with the last tab active', ()
   assert.equal(ws.focusedPaneId, 'p0')
   assert.deepEqual(paneModel.flatten(ws), [makeTab('chat', 'a'), makeTab('app', 42)])
   assert.equal(ws.panes.p0.activeTabKey, 'app:42')
+  assert.deepEqual(ws.panes.p0.recentTabKeys, ['app:42', 'chat:a'])
   assertInvariants(ws)
 })
 
@@ -157,6 +165,8 @@ test('normalize coerces a stale active tab to a real member', () => {
     nextId: 1,
   })
   assert.equal(ws.panes.p0.activeTabKey, 'chat:b', 'falls back to the last tab')
+  assert.deepEqual(ws.panes.p0.recentTabKeys, ['chat:b', 'chat:a'],
+    'an older blob seeds recency from the former close order')
 })
 
 test('normalize keeps a sole empty root but removes any other empty pane', () => {
@@ -357,8 +367,8 @@ test('seedFromFlatTabs preserves more than six deduplicated tabs', () => {
   assertInvariants(ws)
 })
 
-test('closeTab activates the neighbour before it, or the new last when at index 0', () => {
-  const base = paneModel.normalize({
+test('closeTab returns to the most recently visited surviving tab in that pane', () => {
+  let base = paneModel.normalize({
     v: 1,
     layout: 'p0',
     panes: {
@@ -371,15 +381,41 @@ test('closeTab activates the neighbour before it, or the new last when at index 
     focusedPaneId: 'p0',
     nextId: 1,
   })
-  const afterMid = paneModel.closeTab(base, 'chat:c')
-  assert.equal(afterMid.panes.p0.activeTabKey, 'chat:b', 'neighbour at index-1 activates')
+  // Visit A, then C. A is not adjacent to C, so this distinguishes MRU from
+  // the old left-neighbour selection.
+  base = paneModel.setActiveTab(base, 'p0', 'chat:a')
+  base = paneModel.setActiveTab(base, 'p0', 'chat:c')
+  assert.deepEqual(base.panes.p0.recentTabKeys, ['chat:c', 'chat:a', 'chat:b', 'chat:d'])
+  const afterBackground = paneModel.closeTab(base, 'chat:d')
+  assert.equal(afterBackground.panes.p0.activeTabKey, 'chat:c',
+    'closing a background tab leaves the active tab unchanged')
+  assert.deepEqual(afterBackground.panes.p0.recentTabKeys, ['chat:c', 'chat:a', 'chat:b'])
 
-  const headActive = paneModel.setActiveTab(base, 'p0', 'chat:a')
-  const afterHead = paneModel.closeTab(headActive, 'chat:a')
-  assert.equal(afterHead.panes.p0.activeTabKey, 'chat:d', 'closing the head activates the new last')
+  const afterMid = paneModel.closeTab(afterBackground, 'chat:c')
+  assert.equal(afterMid.panes.p0.activeTabKey, 'chat:a', 'the previously visited tab activates')
+
+  const afterPrevious = paneModel.closeTab(afterMid, 'chat:a')
+  assert.equal(afterPrevious.panes.p0.activeTabKey, 'chat:b', 'repeated closes keep walking recency')
 
   assert.equal(paneModel.closeTab(base, 'chat:absent'), base, 'closing an absent tab is a no-op')
   assertInvariants(afterMid)
+})
+
+test('moving the active tab away reveals the source pane MRU and activates it at destination', () => {
+  let ws = paneModel.seedFromFlatTabs(
+    ['a', 'b', 'c', 'd', 'destination'].map(id => makeTab('chat', id)),
+  )
+  ws = paneModel.moveTab(ws, 'chat:destination', { paneId: 'p0', edge: 'right' })
+  const destinationPaneId = paneModel.paneOf(ws, 'chat:destination').id
+
+  ws = paneModel.setActiveTab(ws, 'p0', 'chat:a')
+  ws = paneModel.setActiveTab(ws, 'p0', 'chat:c')
+  assert.deepEqual(ws.panes.p0.recentTabKeys.slice(0, 2), ['chat:c', 'chat:a'])
+
+  const moved = paneModel.moveTab(ws, 'chat:c', { paneId: destinationPaneId })
+  assert.equal(moved.panes.p0.activeTabKey, 'chat:a', 'the source returns to its previous tab')
+  assert.equal(moved.panes[destinationPaneId].activeTabKey, 'chat:c', 'the moved tab is active at destination')
+  assertInvariants(moved)
 })
 
 test('closeTab that empties a pane collapses the workspace', () => {
@@ -890,8 +926,13 @@ test('parseWorkspace accepts a persisted pane with more than six tabs', () => {
     nextId: 1,
   })
   const parsed = paneModel.parseWorkspace(raw)
+  assert.equal(paneModel.isValidWorkspaceBlob(raw), true,
+    'an older v1 blob remains authoritative while recency is added')
   assert.deepEqual(parsed.panes.p0.tabs, many)
   assert.equal(parsed.panes.p0.activeTabKey, 'chat:c0')
+  assert.deepEqual(parsed.panes.p0.recentTabKeys,
+    ['chat:c0', 'chat:c9', 'chat:c8', 'chat:c7', 'chat:c6', 'chat:c5', 'chat:c4', 'chat:c3', 'chat:c2', 'chat:c1'],
+    'the missing recency field is seeded from the prior close order')
   assertInvariants(parsed)
 })
 

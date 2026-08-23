@@ -390,3 +390,51 @@ def test_standalone_boot_slot_cannot_break_out_of_json_script(client, owner_toke
   assert "</" not in match.group(1)
   boot = json.loads(match.group(1))
   assert boot["name"].startswith("</script>")
+
+
+def test_manifest_declares_generated_screenshots(client, owner_token):
+  """Narrow + wide screenshots unlock Chromium's richer install sheet; both
+  must be versioned like the icons so a rename/icon change refreshes them."""
+  app = _create_app(client, owner_token, "Cover App")
+  r = client.get(f"/apps/{app['slug']}/manifest.json")
+  assert r.status_code == 200
+  shots = r.json()["screenshots"]
+  by_form = {s["form_factor"]: s for s in shots}
+  assert set(by_form) == {"narrow", "wide"}
+  assert by_form["narrow"]["sizes"] == "1080x1920"
+  assert by_form["wide"]["sizes"] == "1920x1080"
+  for s in shots:
+    assert s["type"] == "image/png"
+    assert s["label"] == "Cover App"
+    assert re.search(r"\?v=\d+$", s["src"])
+    assert s["src"].startswith(f"/apps/{app['slug']}/screenshot-")
+
+
+def test_screenshot_route_serves_generated_cover(client, owner_token):
+  """The screenshot route renders a real PNG at the declared dimensions and
+  gives the browser the same 304 path as the icons."""
+  import io
+  from PIL import Image
+  app = _create_app(client, owner_token, "Cover App Two")
+  r = client.get(f"/apps/{app['slug']}/screenshot-narrow.png")
+  assert r.status_code == 200
+  assert r.headers["content-type"] == "image/png"
+  img = Image.open(io.BytesIO(r.content))
+  assert img.size == (1080, 1920)
+  etag = r.headers["etag"]
+  r304 = client.get(
+    f"/apps/{app['slug']}/screenshot-narrow.png",
+    headers={"If-None-Match": etag},
+  )
+  assert r304.status_code == 304
+  wide = client.get(f"/apps/{app['slug']}/screenshot-wide.png")
+  assert wide.status_code == 200
+  assert Image.open(io.BytesIO(wide.content)).size == (1920, 1080)
+
+
+def test_screenshot_route_rejects_unknown_asset_names(client, owner_token):
+  app = _create_app(client, owner_token, "Cover App Three")
+  assert client.get(
+    f"/apps/{app['slug']}/screenshot-huge.png"
+  ).status_code == 404
+  assert client.get(f"/apps/{app['slug']}/anything.png").status_code == 404

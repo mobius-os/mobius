@@ -1,5 +1,5 @@
 # backend/tests/test_lifecycle.py
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import uuid
 
@@ -11,7 +11,7 @@ from sqlalchemy import event
 def test_ttl_is_seven_days(db, chat):
   """Chats deleted fewer than 7 days ago must not be purged."""
   chat_id = chat.id  # capture before any purge
-  chat.deleted_at = datetime.utcnow() - timedelta(days=6)
+  chat.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=6)
   db.commit()
 
   purge_expired_chat_tombstones(db)
@@ -25,7 +25,7 @@ def test_ttl_is_seven_days(db, chat):
 def test_purge_after_seven_days(db, chat):
   """Chats deleted more than 7 days ago must be hard-deleted."""
   chat_id = chat.id  # capture before purge deletes the row
-  chat.deleted_at = datetime.utcnow() - timedelta(days=8)
+  chat.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
   db.commit()
 
   purge_expired_chat_tombstones(db)
@@ -51,7 +51,7 @@ def test_hard_purge_removes_derived_search_transcript_without_later_search(
   )
 
   chat_id = chat.id
-  chat.deleted_at = datetime.utcnow() - timedelta(days=8)
+  chat.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
   db.commit()
   purge_expired_chat_tombstones(db)
 
@@ -75,7 +75,7 @@ def test_expired_tombstone_purge_does_not_hydrate_transcript_json(
   """The retention sweep selects tombstone ids, not complete Chat entities."""
   chat_id = chat.id
   chat.messages = [{"role": "user", "content": "large transcript sentinel"}]
-  chat.deleted_at = datetime.utcnow() - timedelta(days=8)
+  chat.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
   db.commit()
   # Remove the fixture entity from this session so an accidental
   # ``query(Chat).all()`` must instantiate it and fire the load event below.
@@ -98,7 +98,7 @@ def test_expired_tombstone_purge_does_not_hydrate_transcript_json(
 def test_expired_tombstone_survives_drawer_reads(client, db, auth, chat):
   """GET /api/chats is projection-only and never performs permanent cleanup."""
   chat_id = chat.id
-  chat.deleted_at = datetime.utcnow() - timedelta(days=8)
+  chat.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
   db.commit()
 
   response = client.get("/api/chats", headers=auth)
@@ -117,7 +117,7 @@ def test_new_delete_reclaims_older_expired_tombstones(
     id=expired_id,
     title="Expired tombstone",
     messages=[],
-    deleted_at=datetime.utcnow() - timedelta(days=8),
+    deleted_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8),
   ))
   db.commit()
 
@@ -138,7 +138,7 @@ def test_old_empty_chat_survives_drawer_reads(client, db, auth):
     messages=[],
     pending_messages=[],
     session_id=None,
-    created_at=datetime.utcnow() - timedelta(days=365),
+    created_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(days=365),
   ))
   db.commit()
 
@@ -154,7 +154,7 @@ def test_purge_removes_data_dir(db, chat):
   """Hard delete must remove /data/chats/{id}/ directory."""
   import os
   chat_id = chat.id  # capture before purge
-  chat.deleted_at = datetime.utcnow() - timedelta(days=8)
+  chat.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
   db.commit()
 
   data_dir = os.environ["DATA_DIR"]
@@ -178,7 +178,7 @@ def test_purge_removes_agent_browser_profile(db, chat):
   """
   import os
   chat_id = chat.id  # capture before purge
-  chat.deleted_at = datetime.utcnow() - timedelta(days=8)
+  chat.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
   db.commit()
 
   data_dir = os.environ["DATA_DIR"]
@@ -204,7 +204,7 @@ def test_purge_removes_memory_note_dir(db, chat):
   """
   import os
   chat_id = chat.id  # capture before purge
-  chat.deleted_at = datetime.utcnow() - timedelta(days=8)
+  chat.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
   db.commit()
 
   data_dir = os.environ["DATA_DIR"]
@@ -230,7 +230,7 @@ def test_old_notifications_survive_chat_drawer_reads(client, db, auth):
     source_id=notif_source,
     title="Old",
     body="should be purged",
-    sent_at=datetime.utcnow() - timedelta(days=91),
+    sent_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(days=91),
   )
   recent = models.Notification(
     id="recent-notif",
@@ -239,7 +239,7 @@ def test_old_notifications_survive_chat_drawer_reads(client, db, auth):
     source_id=notif_source,
     title="Recent",
     body="should survive",
-    sent_at=datetime.utcnow() - timedelta(days=30),
+    sent_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(days=30),
   )
   db.add(old)
   db.add(recent)

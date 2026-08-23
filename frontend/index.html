@@ -221,107 +221,19 @@
     <script>
       // `updateViaCache: 'none'` tells the browser to bypass its HTTP
       // cache when fetching sw.js itself during update checks. Without
-      // this, the browser caches sw.js (we set Cache-Control: no-cache
-      // server-side but a previously-cached SW response still applies
-      // until the browser revalidates) and the OLD sw.js keeps being
-      // served on reload — users get stuck on a stale precached bundle
-      // and need to manually clear cache. With this set, every reload
-      // triggers a fresh sw.js fetch from network so deploys take
-      // effect immediately. Belt-and-suspenders with the server-side
-      // header in main.py.
+      // this, a previously-cached SW response can delay discovery. Registration
+      // discovers fresh worker bytes; the mounted shell owns the safe handoff.
+      // Belt-and-suspenders with the server-side header in main.py.
       // The chat embed lives in an opaque sandbox: merely reading
       // navigator.serviceWorker throws there, and it must not register or
       // control a worker anyway. Keep the stripped route entirely in-memory.
       if (window.location.pathname !== '/shell/embed/chat' && 'serviceWorker' in navigator) {
-        // A page that loaded WITHOUT a controller is a first-ever SW install:
-        // the worker claiming this page is NOT an update (it just re-fetches the
-        // same bundle), so reloading is a wasted splash-flash for real first-time
-        // users. It is also not permission for this boot script to reload a live
-        // page. Shell's apply-on-idle controller is the ONE owner of generation
-        // handoff and reload; this script only discovers registrations and stale
-        // precache state for that controller to claim safely after mount.
-        const hadControllerAtLoad = !!navigator.serviceWorker.controller
-        // Stale-precache escape hatch.
-        //
-        // The normal path is: /sw.js updates → controllerchange → reload onto
-        // the new Workbox precache. We have seen Chromium keep serving the old
-        // precached index after a shell rebuild even though network /sw.js
-        // already advertises a newer Vite bundle. In that state a normal
-        // reload is a no-op: the old service worker keeps handing out the old
-        // /index.html, and the chat UI can look like saved rows are missing.
-        //
-        // Detect that exact mismatch at boot. /sw.js is not runtime-cached by
-        // the service worker and is registered with updateViaCache:'none', so
-        // fetch('/sw.js', {cache:'reload'}) is the reliable network identity.
-        // If the current document loaded bundle A but network /sw.js precaches
-        // bundle B, DEFER the recovery to Shell's apply-on-idle machine (set a
-        // flag; do NOT delete caches or reload here). This runs from an async
-        // register()/ready callback that can resolve AFTER Shell has mounted and
-        // reconnected to a running background turn — a boot-time force-reload
-        // there would blank a live stream. Shell reads the flag on mount, routes
-        // it through the same hold-until-idle path (idle → apply, else wait for
-        // the turn to end), and only then hands off to the new worker + reloads.
-        const stalePrecacheRecoveryKey = 'sw-stale-precache-recovering'
-        const wasRecoveringStalePrecache =
-          sessionStorage.getItem(stalePrecacheRecoveryKey) === '1'
-        if (wasRecoveringStalePrecache) {
-          sessionStorage.removeItem(stalePrecacheRecoveryKey)
-        }
-        let stalePrecacheCheckStarted = false
-        const currentShellBundle = () => {
-          const scripts = Array.from(document.scripts || [])
-            .map(s => s.src || '')
-          return scripts.find(src => /\/assets\/index-[A-Za-z0-9_-]+\.js(?:[?#].*)?$/.test(src)) || ''
-        }
-        const expectedShellBundleFromSw = (swText) => {
-          const matches = String(swText || '').match(/assets\/index-[A-Za-z0-9_-]+\.js/g)
-          return matches && matches.length ? matches[matches.length - 1] : ''
-        }
-        const recoverStalePrecacheIfNeeded = async (reg) => {
-          if (stalePrecacheCheckStarted || wasRecoveringStalePrecache) return
-          stalePrecacheCheckStarted = true
-          try {
-            if (!hadControllerAtLoad || !navigator.serviceWorker.controller || !window.caches) return
-            const current = currentShellBundle()
-            if (!current) return
-            const res = await fetch('/sw.js', { cache: 'reload' })
-            if (!res.ok) return
-            const expected = expectedShellBundleFromSw(await res.text())
-            if (!expected || current.includes(expected)) return
-            // Re-fetch sw.js so the update watchdog can install the new worker;
-            // harmless (conditional GET). Then flag the mismatch for Shell to
-            // resolve at an idle boundary — the worker handoff + reload happen
-            // there, never here.
-            try { await reg?.update?.() } catch (_) {}
-            try { sessionStorage.setItem('sw-stale-precache-pending', '1') } catch (_) {}
-          } catch (_) {
-            // Best-effort self-heal only; never block shell boot.
-          }
-        }
-        // Register immediately so a new generation can install while React
-        // starts. Do not attach a reload listener here: Shell owns the route
-        // snapshot, cache flush, worker takeover and the one resulting reload.
-        navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
-        .then(reg => {
-          recoverStalePrecacheIfNeeded(reg)
-          // Poll for a new SW whenever the PWA returns to the foreground.
-          // The explicit `shell_rebuilt` SSE event (Shell.jsx) handles a
-          // PWA with a LIVE connection, but a backgrounded/reopened install
-          // may have dropped its EventSource and would otherwise keep
-          // running the old shell until a hard reload. reg.update() re-fetches
-          // sw.js. Shell's foreground watcher observes the resulting waiting
-          // generation and claims it at a safe apply boundary. Cheap (one
-          // conditional GET, server sends 304 when unchanged) and only on
-          // visible, so this is not a polling loop.
-          document.addEventListener('visibilitychange', () => {
-            if (document.visibilityState === 'visible') {
-              reg.update().catch(() => {})
-            }
-          })
-        }).catch(() => {})
-        navigator.serviceWorker.ready.then(reg => {
-          recoverStalePrecacheIfNeeded(reg)
-        }).catch(() => {})
+        // Registration only. Once React mounts, the shell's update inspector is
+        // the sole owner of refresh, install settling, generation comparison,
+        // apply-on-idle, and reload. Keeping lifecycle policy out of this boot
+        // document prevents an older cached page and the mounted shell from
+        // racing two partial update mechanisms.
+        navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).catch(() => {})
       }
       // Request persistent storage so cached app modules and offline
       // state aren't evicted under storage pressure. Best-effort —

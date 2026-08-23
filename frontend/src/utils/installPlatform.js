@@ -76,6 +76,27 @@ export function detectInstallPlatform(ua, maxTouchPoints) {
   }
 }
 
+/**
+ * Android intent: URI that asks the OS to open `httpsUrl` in the user's full
+ * browser rather than the in-app tab the current context would use.
+ *
+ * From inside an installed PWA (WebAPK), an ordinary link to a page outside
+ * the app's scope opens in a Custom Tab, where Chromium never offers installs
+ * (`beforeinstallprompt` does not fire there). Intent resolution leaves the
+ * app entirely: the target is outside this app's scope, so Android hands the
+ * URL to the default browser as a real tab. `browser_fallback_url` keeps the
+ * link working if nothing claims the intent.
+ */
+export function androidBrowserIntentHref(httpsUrl) {
+  const url = new URL(httpsUrl)
+  if (url.protocol !== 'https:') return httpsUrl
+  const pathAndQuery = `${url.pathname}${url.search}`
+  return (
+    `intent://${url.host}${pathAndQuery}` +
+    `#Intent;scheme=https;S.browser_fallback_url=${encodeURIComponent(httpsUrl)};end`
+  )
+}
+
 // Manual fallback for browsers that do not expose `beforeinstallprompt`.
 // Native prompt availability always wins in the UI; these instructions keep
 // iOS, Android, and desktop useful without it.
@@ -124,7 +145,9 @@ export function installCopyForPlatform(
     return {
       title: `Install ${productName}`,
       summary: 'Use your browser menu to add it.',
-      body: 'Open the browser menu, then choose Install app or Add to Home screen.',
+      body: 'Open the browser menu, then choose Install app. If you only see ' +
+        'Add to Home screen, tap it and pick Install — not Create shortcut, ' +
+        'which only makes a browser bookmark.',
       ctaLabel: 'Show me',
     }
   }

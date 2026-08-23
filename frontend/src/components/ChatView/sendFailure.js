@@ -3,6 +3,11 @@ export function isPendingQuestionSendFailure(error) {
     && error?.code === 'pending_question_open'
 }
 
+export function isModelSelectionRequiredFailure(error) {
+  return Number(error?.status) === 409
+    && error?.code === 'model_selection_required'
+}
+
 export function sendFailureMessage(error, { online = true } = {}) {
   if (!online) {
     return 'You’re offline. Your message is back in the composer—send it when you reconnect.'
@@ -25,6 +30,9 @@ export function sendFailureMessage(error, { online = true } = {}) {
   }
   if (isPendingQuestionSendFailure(error)) {
     return 'Answer the pending question above, or Stop the turn. Your message is safe in the composer.'
+  }
+  if (isModelSelectionRequiredFailure(error)) {
+    return 'Choose a model before sending. Your message is safe in the composer.'
   }
   return 'Möbius couldn’t send the message. It’s back in the composer—try again.'
 }

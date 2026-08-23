@@ -256,19 +256,10 @@ def get_settings_view(
   """
   data_dir = get_app_settings().data_dir
   codex_creds = Path(data_dir) / "cli-auth" / "codex" / "auth.json"
-  configured_provider = (
-    owner.provider if owner.provider in providers.PROVIDERS
-    else providers.DEFAULT_PROVIDER
-  )
   provider = providers.resolve_default_provider(data_dir, owner.provider)
   agent_settings = providers.effective_agent_settings(
     data_dir, None, provider
   )
-  if provider != configured_provider and agent_settings.get("model") is None:
-    agent_settings = {
-      **agent_settings,
-      "model": providers.DEFAULT_MODELS.get(provider),
-    }
   return {
     "codex_authenticated": codex_creds.exists(),
     "provider": provider,

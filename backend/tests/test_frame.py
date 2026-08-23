@@ -1,5 +1,7 @@
 """Tests for the mini-app frame endpoint."""
 
+from fastapi.testclient import TestClient
+
 from test_app_fixtures import create_local_app
 
 
@@ -82,6 +84,68 @@ def test_frame_returns_etag_and_cache_control(client, owner_token):
   # signed-in storage on sites such as GitHub).
   assert "allow-popups-to-escape-sandbox" in sandbox
   assert "allow-same-origin" not in sandbox
+
+
+def test_loopback_frame_can_fetch_from_its_delivery_origin(
+  client, owner_token,
+):
+  """The authenticated visual-test harness serves frames over loopback.
+
+  An opaque sandbox does not treat CSP ``'self'`` as that delivery origin, so
+  the exact loopback origin must be named without changing the production
+  frame policy.
+  """
+  app_id = _make_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, "loopback-frame-test",
+  )
+
+  with TestClient(client.app, client=("127.0.0.1", 43110)) as loopback:
+    response = loopback.get(
+      f"/api/apps/{app_id}/frame",
+      headers={"host": "127.0.0.1:8123"},
+    )
+
+  policy = response.headers["content-security-policy"]
+  assert "connect-src" in policy
+  assert "http://127.0.0.1:8123" in policy
+
+
+def test_loopback_frame_accepts_bracketed_ipv6_delivery_origin(
+  client, owner_token,
+):
+  app_id = _make_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, "ipv6-frame-test",
+  )
+  with TestClient(client.app, client=("::1", 43110)) as loopback:
+    response = loopback.get(
+      f"/api/apps/{app_id}/frame", headers={"host": "[::1]:8123"},
+    )
+  assert "http://[::1]:8123" in response.headers["content-security-policy"]
+
+
+def test_non_loopback_host_does_not_enter_frame_policy(client, owner_token):
+  app_id = _make_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, "public-frame-test",
+  )
+  response = client.get(
+    f"/api/apps/{app_id}/frame", headers={"host": "example.test:8123"},
+  )
+  assert "example.test" not in response.headers["content-security-policy"]
+
+
+def test_spoofed_loopback_host_from_remote_peer_does_not_enter_frame_policy(
+  client, owner_token,
+):
+  app_id = _make_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, "remote-frame-test",
+  )
+  with TestClient(client.app, client=("198.51.100.7", 43110)) as remote:
+    response = remote.get(
+      f"/api/apps/{app_id}/frame", headers={"host": "127.0.0.1:8123"},
+    )
+  assert "http://127.0.0.1:8123" not in response.headers[
+    "content-security-policy"
+  ]
 
 
 def test_frame_304_on_matching_if_none_match(client, owner_token):

@@ -2412,6 +2412,7 @@ async def _prepare_app_row(
     github_connect=bool(permissions.get("github_connect", False)),
     filesystem_access=bool(permissions.get("filesystem_access", False)),
     connections_manage=bool(permissions.get("connections_manage", False)),
+    connect_manage=bool(permissions.get("connect_manage", False)),
     offline_capable=bool(manifest.get("offline_capable", False)),
     embeds_agent=bool(manifest.get("embeds_agent", False)),
     offline_contract=manifest.get("offline") or None,
@@ -2486,6 +2487,7 @@ async def _activate_install_source(
     app.github_connect = bool(permissions.get("github_connect", False))
     app.filesystem_access = bool(permissions.get("filesystem_access", False))
     app.connections_manage = bool(permissions.get("connections_manage", False))
+    app.connect_manage = bool(permissions.get("connect_manage", False))
     if "offline_capable" in manifest:
       app.offline_capable = bool(manifest["offline_capable"])
     if "embeds_agent" in manifest:

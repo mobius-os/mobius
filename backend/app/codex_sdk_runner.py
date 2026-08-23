@@ -210,6 +210,20 @@ def _codex_config_overrides(
   return overrides
 
 
+def _needs_native_goal_control(
+  *,
+  goal_mode: bool,
+  goal_objective: str | None,
+  goal_clear: bool,
+  fallback_goal_objective: str | None,
+) -> bool:
+  """Whether this turn already belongs to Codex's explicit Goal lifecycle."""
+  return bool(
+    goal_mode or goal_objective is not None or goal_clear
+    or fallback_goal_objective is not None
+  )
+
+
 def _codex_app_server_launch_args(
   codex_bin: str | None,
   config_overrides: list[str],
@@ -1504,22 +1518,14 @@ async def run_codex_sdk_turn(
     agent_settings = {}
   # The per-chat picker writes the `model` key.
   model = agent_settings.get("model")
-  # Cross-provider mismatch defense. Chats persisted before the
-  # snapshot logic learned to provider-validate (see chat.py
-  # snapshot-on-first-send and effective_agent_settings) can end up
-  # with a Claude model on a Codex chat (the global default file
-  # remembered the last Claude pick when a fresh Codex chat was
-  # created). Sending that to Codex 400s every turn with "model
-  # not supported". Quietly normalize to the Codex default so
-  # existing chats keep working; the user can re-pick in the
-  # picker if they want a specific Codex model.
-  from app.providers import _model_belongs_to_other_provider, DEFAULT_MODELS
+  # Admission and effective settings normally reject a cross-provider model
+  # before this boundary. Stay strict for legacy/corrupt callers too: silently
+  # substituting a provider model makes the picker contract untruthful.
+  from app.providers import _model_belongs_to_other_provider
   if model and _model_belongs_to_other_provider(model, "codex"):
-    log.warning(
-      "codex turn started with non-codex model %r — normalizing to %r",
-      model, DEFAULT_MODELS["codex"],
+    raise ValueError(
+      f"Selected model {model!r} does not belong to provider 'codex'."
     )
-    model = DEFAULT_MODELS["codex"]
 
   # Reasoning effort comes from Codex's live per-model catalog. The generated
   # enum implements `_missing_`, so newer wire values such as max/ultra survive
@@ -1580,10 +1586,16 @@ async def run_codex_sdk_turn(
   # Delegated children disable those optional tools at this provider-owned seam.
   codex_bin = shutil.which("codex")
   delegated = run_policy is not None
+  needs_goal_control = _needs_native_goal_control(
+    goal_mode=goal_mode,
+    goal_objective=goal_objective,
+    goal_clear=goal_clear,
+    fallback_goal_objective=fallback_goal_objective,
+  )
   config_overrides = _codex_config_overrides(
     allow_questions=not delegated,
     allow_multi_agent=not delegated,
-    allow_goals=not delegated,
+    allow_goals=not delegated and needs_goal_control,
   )
   launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
   config_kwargs: dict[str, Any] = dict(
@@ -1678,10 +1690,6 @@ async def run_codex_sdk_turn(
   try:
     codex, entry_cancel = await _enter_codex_context_owned(codex_context)
     async with _EnteredCodexContext(codex_context, codex) as codex:
-      needs_goal_control = bool(
-        goal_mode or goal_objective is not None or goal_clear
-        or goal_continue or fallback_goal_objective is not None
-      )
       goal_client = control_client(codex) if needs_goal_control else None
       record_memory_checkpoint_once(
         "codex_first_client_connected",

@@ -51,6 +51,11 @@ export async function mockPendingQuestionState(page, questionId) {
             total: 0,
             offset: 0,
             provider: 'claude',
+            agent_settings_json: { model: 'claude-sonnet-4-6' },
+            effective_agent_settings: {
+              model: 'claude-sonnet-4-6',
+              effort: 'medium',
+            },
           },
     })
   }

@@ -102,7 +102,7 @@ def test_put_text_accepts_raw_text_body(client, auth, owner_token):
 
   r = client.put(
     f"/api/storage/apps/{app_id}/notes.txt",
-    data="plain text body",
+    content="plain text body",
     headers={**auth, "Content-Type": "text/plain; charset=utf-8"},
   )
   assert r.status_code == 204
@@ -118,7 +118,7 @@ def test_put_binary_accepts_raw_bytes(client, auth, owner_token):
 
   r = client.put(
     f"/api/storage/apps/{app_id}/blob.bin",
-    data=data,
+    content=data,
     headers={**auth, "Content-Type": "application/octet-stream"},
   )
   assert r.status_code == 204
@@ -376,7 +376,7 @@ def test_put_text_accepts_non_json_content_type(client, auth, owner_token):
 
   r = client.put(
     f"/api/storage/apps/{app_id}/notes.txt",
-    data="raw body",
+    content="raw body",
     headers={**auth, "Content-Type": "text/plain"},
   )
   assert r.status_code == 204
@@ -387,7 +387,7 @@ def test_list_returns_entries_with_metadata(client, auth, owner_token):
   app_id = _make_app(client, owner_token)
   client.put(
     f"/api/storage/apps/{app_id}/reports/2026-06-01.html",
-    data="<p>hi</p>",
+    content="<p>hi</p>",
     headers={**auth, "Content-Type": "text/html"},
   )
   client.put(
@@ -433,7 +433,7 @@ def test_list_can_include_bounded_json_content(
     )
   client.put(
     f"/api/storage/apps/{app_id}/records/note.txt",
-    data="plain",
+    content="plain",
     headers={**auth, "Content-Type": "text/plain"},
   )
 

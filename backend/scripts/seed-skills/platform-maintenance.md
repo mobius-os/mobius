@@ -94,6 +94,25 @@ Review the exact changed paths and use the smallest matching action:
 
 ---
 
+### Debugging the platform runtime
+
+Use the existing authenticated diagnostics instead of adding temporary routes:
+
+```bash
+curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/debug/status" | python3 -m json.tool
+curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/debug/memory?process_limit=20&allocation_limit=25" | python3 -m json.tool
+curl -s -H "Authorization: Bearer $AGENT_TOKEN" "$API_BASE_URL/api/debug/logs?lines=50&chat_id=$CHAT_ID" | python3 -m json.tool
+```
+
+`status` is the cheap health view and deliberately omits variable-sized runtime
+payload totals; its `runtime_memory.payload_sizing` field points to the detailed
+`memory` report. Query flags on `status` do not enable payload sizing. Use
+`memory` for processes, maps, runtime-owner payloads, GC diagnostics, and
+optional allocation tracing. Add `deep=true` only when a GC object-type walk is
+actually needed.
+
+---
+
 ## Backend edits — restart to load, hand off persistence
 
 The live backend is `/data/platform/backend/app/*.py`. Edits there take effect

@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  isInlineEditorSubmit,
   isPlainTextPasteShortcut,
   resolveComposerEnterAction,
 } from '../composerShortcuts.js'
@@ -137,6 +138,27 @@ test('non-Enter keys do not trigger composer shortcuts', () => {
     }),
     null,
   )
+})
+
+test('inline editor: plain Enter sends on desktop, matching the composer', () => {
+  assert.equal(isInlineEditorSubmit(enter(), { isTouchPrimary: false }), true)
+})
+
+test('inline editor: plain Enter stays a newline on touch', () => {
+  assert.equal(isInlineEditorSubmit(enter(), { isTouchPrimary: true }), false)
+})
+
+test('inline editor: Shift+Enter is always a newline', () => {
+  assert.equal(isInlineEditorSubmit(enter({ shiftKey: true }), { isTouchPrimary: false }), false)
+})
+
+test('inline editor: Cmd/Ctrl+Enter always sends, even on touch', () => {
+  assert.equal(isInlineEditorSubmit(enter({ metaKey: true }), { isTouchPrimary: true }), true)
+  assert.equal(isInlineEditorSubmit(enter({ ctrlKey: true }), { isTouchPrimary: false }), true)
+})
+
+test('inline editor: non-Enter keys never send', () => {
+  assert.equal(isInlineEditorSubmit({ key: 'a' }, { isTouchPrimary: false }), false)
 })
 
 test('Cmd/Ctrl+Shift+V requests paste without Markdown formatting', () => {

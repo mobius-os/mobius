@@ -22,6 +22,7 @@ MAX_TASKS = 64
 MAX_DEPENDENCIES = 16
 MAX_TITLE = 160
 MAX_NOTE = 500
+MAX_RESULT = 1000
 
 
 class GoalPlanError(ValueError):
@@ -48,10 +49,11 @@ def _clean_text(value: Any, *, field: str, maximum: int, required: bool) -> str:
 def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
   """Validate and normalize one complete plan snapshot.
 
-  Dependencies form a DAG. A task may run or complete only after every
-  dependency has completed, and repeated progress cannot claim completion
-  before its total has been reached. Those are orchestration invariants, not
-  UI hints, so every write path shares this function.
+  Explicit dependencies and implicit child-before-parent completion edges form
+  one DAG. A task may run or complete only after every dependency has
+  completed, and repeated progress cannot claim completion before its total has
+  been reached. Those are orchestration invariants, not UI hints, so every
+  write path shares this function.
   """
   if not isinstance(raw_tasks, list) or not raw_tasks:
     raise GoalPlanError("a goal plan needs at least one task")
@@ -110,18 +112,41 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
       "status": status,
       "depends_on": depends_on,
     }
+    parent_id = raw.get("parent_id")
+    if parent_id is not None:
+      if not isinstance(parent_id, str) or not TASK_ID_RE.fullmatch(parent_id):
+        raise GoalPlanError(f"parent_id for {task_id} must be a valid task id")
+      task["parent_id"] = parent_id
+    completion_condition = _clean_text(
+      raw.get("completion_condition"),
+      field=f"completion_condition for {task_id}",
+      maximum=MAX_NOTE, required=False,
+    )
+    if completion_condition:
+      task["completion_condition"] = completion_condition
     note = _clean_text(
       raw.get("note"), field=f"note for {task_id}",
       maximum=MAX_NOTE, required=False,
     )
     if note:
       task["note"] = note
+    result = _clean_text(
+      raw.get("result"), field=f"result for {task_id}",
+      maximum=MAX_RESULT, required=False,
+    )
+    if result:
+      task["result"] = result
     if normalized_progress is not None:
       task["progress"] = normalized_progress
     tasks.append(task)
 
   by_id = {task["id"]: task for task in tasks}
   for task in tasks:
+    parent_id = task.get("parent_id")
+    if parent_id == task["id"]:
+      raise GoalPlanError(f"{task['id']} cannot be its own parent")
+    if parent_id is not None and parent_id not in by_id:
+      raise GoalPlanError(f"{task['id']} has missing parent {parent_id}")
     for dependency in task["depends_on"]:
       if dependency == task["id"]:
         raise GoalPlanError(f"{task['id']} cannot depend on itself")
@@ -130,22 +155,33 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
           f"{task['id']} depends on missing task {dependency}"
         )
 
+  children_by_parent: dict[str, list[str]] = {}
+  for task in tasks:
+    parent_id = task.get("parent_id")
+    if parent_id is not None:
+      children_by_parent.setdefault(parent_id, []).append(task["id"])
+
   visiting: set[str] = set()
   visited: set[str] = set()
 
-  def visit(task_id: str) -> None:
+  def visit_completion_prerequisites(task_id: str) -> None:
     if task_id in visited:
       return
     if task_id in visiting:
-      raise GoalPlanError("goal-plan dependencies must not contain a cycle")
+      raise GoalPlanError(
+        "goal-plan dependencies and parentage must not form a completion cycle"
+      )
     visiting.add(task_id)
-    for dependency in by_id[task_id]["depends_on"]:
-      visit(dependency)
+    prerequisites = (
+      by_id[task_id]["depends_on"] + children_by_parent.get(task_id, [])
+    )
+    for prerequisite in prerequisites:
+      visit_completion_prerequisites(prerequisite)
     visiting.remove(task_id)
     visited.add(task_id)
 
   for task in tasks:
-    visit(task["id"])
+    visit_completion_prerequisites(task["id"])
 
   for task in tasks:
     incomplete = [
@@ -156,6 +192,16 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
       raise GoalPlanError(
         f"{task['id']} cannot be {task['status']} until these dependencies "
         f"complete: {', '.join(incomplete)}"
+      )
+    unfinished_children = [
+      child["id"] for child in tasks
+      if child.get("parent_id") == task["id"]
+      and child["status"] not in {"completed", "cancelled"}
+    ]
+    if task["status"] == "completed" and unfinished_children:
+      raise GoalPlanError(
+        f"{task['id']} cannot complete before its children settle: "
+        f"{', '.join(unfinished_children)}"
       )
     progress = task.get("progress")
     if (
@@ -171,7 +217,7 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
 def active_goal_rows(
   db: Session, chat_id: str,
 ) -> tuple[models.ChatRun, models.ChatRun] | None:
-  """Return (active physical row, logical root row) for this chat's Goal."""
+  """Return the currently executing or delegated Goal and its plan owner."""
   physical = (
     db.query(models.ChatRun)
     .filter(
@@ -183,7 +229,44 @@ def active_goal_rows(
     .first()
   )
   if physical is None:
-    return None
+    # A parent provider turn may finish after launching durable background
+    # children. Keep that latest Goal visible while its plan or delegation tree
+    # still owns unsettled work, but never reach past a newer ordinary turn.
+    physical = (
+      db.query(models.ChatRun)
+      .filter(models.ChatRun.chat_id == chat_id)
+      .order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc())
+      .first()
+    )
+    if physical is None or physical.goal_objective is None:
+      return None
+  if physical.goal_id:
+    plan_owner = (
+      db.query(models.ChatRun)
+      .filter(
+        models.ChatRun.chat_id == chat_id,
+        models.ChatRun.goal_id == physical.goal_id,
+        models.ChatRun.goal_plan_json.isnot(None),
+      )
+      .order_by(models.ChatRun.started_at.asc(), models.ChatRun.id.asc())
+      .first()
+    )
+    if plan_owner is not None:
+      rows = (physical, plan_owner)
+      if physical.status in models.NONTERMINAL_RUN_STATUSES:
+        return rows
+      document = plan_owner.goal_plan_json
+      tasks = document.get("tasks") if isinstance(document, dict) else None
+      unfinished_plan = bool(tasks) and any(
+        isinstance(task, dict)
+        and task.get("status") not in {"completed", "cancelled"}
+        for task in tasks
+      )
+      if unfinished_plan or _delegation_tree_has_active_work(
+        _delegation_tree(db, *rows),
+      ):
+        return rows
+      return None
   root_id = physical.root_run_id or physical.id
   root = db.query(models.ChatRun).filter(
     models.ChatRun.id == root_id,
@@ -191,40 +274,203 @@ def active_goal_rows(
   ).first()
   if root is None:
     raise RuntimeError("active Goal refers to a missing logical root run")
+  if physical.status not in models.NONTERMINAL_RUN_STATUSES:
+    document = root.goal_plan_json
+    tasks = document.get("tasks") if isinstance(document, dict) else None
+    unfinished_plan = bool(tasks) and any(
+      isinstance(task, dict)
+      and task.get("status") not in {"completed", "cancelled"}
+      for task in tasks
+    )
+    if not unfinished_plan and not _delegation_tree_has_active_work(
+      _delegation_tree(db, physical, root),
+    ):
+      return None
   return physical, root
 
 
+def _delegation_tree(
+  db: Session, physical: models.ChatRun, root: models.ChatRun,
+) -> list[dict[str, Any]]:
+  """Project durable immediate-child ownership without copying transcripts."""
+  from app.delegations import MAX_DELEGATION_DEPTH, derived_status
+
+  run_ids = {root.id}
+  if physical.goal_id:
+    run_ids.add(physical.goal_id)
+    run_ids.update(
+      str(value) for (value,) in db.query(models.ChatRun.root_run_id).filter(
+        models.ChatRun.chat_id == physical.chat_id,
+        models.ChatRun.goal_id == physical.goal_id,
+      ).all() if value
+    )
+  root_rows = db.query(models.Delegation).filter(
+    models.Delegation.parent_chat_id == physical.chat_id,
+    models.Delegation.parent_root_run_id.in_(run_ids),
+  ).order_by(models.Delegation.created_at.asc()).all()
+  # A resumed Goal may delegate the same plan task again from a newer physical
+  # run. Only the latest attempt is current execution; older attempts remain in
+  # Workflows history rather than appearing twice (or disagreeing with the
+  # compact rail) in the Goal tree.
+  roots_by_task = {row.task_key: row for row in root_rows}
+  roots = list(roots_by_task.values())
+  children_by_parent: dict[str, list[models.Delegation]] = {}
+  frontier = [row.child_chat_id for row in roots]
+  seen_rows = {row.id for row in roots}
+  for _depth in range(1, MAX_DELEGATION_DEPTH):
+    if not frontier:
+      break
+    child_rows = db.query(models.Delegation).filter(
+      models.Delegation.parent_chat_id.in_(frontier),
+    ).order_by(models.Delegation.created_at.asc()).all()
+    frontier = []
+    latest_by_owner_and_task = {
+      (child.parent_chat_id, child.task_key): child for child in child_rows
+    }
+    for child in latest_by_owner_and_task.values():
+      if child.id in seen_rows:
+        continue
+      seen_rows.add(child.id)
+      children_by_parent.setdefault(child.parent_chat_id, []).append(child)
+      frontier.append(child.child_chat_id)
+
+  def project(row: models.Delegation, seen: set[str]) -> dict[str, Any]:
+    if row.id in seen:
+      return {"id": row.id, "task_key": row.task_key, "status": "failed", "children": []}
+    status, _run, _result = derived_status(db, row, load_result=False)
+    children = children_by_parent.get(row.child_chat_id, [])
+    return {
+      "id": row.id,
+      "task_key": row.task_key,
+      "provider": row.provider,
+      "status": status,
+      "children": [project(child, seen | {row.id}) for child in children],
+    }
+
+  return [project(row, set()) for row in roots]
+
+
+def _delegation_tree_has_active_work(nodes: list[dict[str, Any]]) -> bool:
+  from app.delegations import TERMINAL_DELEGATION_STATUSES
+
+  return any(
+    node.get("status") not in TERMINAL_DELEGATION_STATUSES
+    or _delegation_tree_has_active_work(node.get("children") or [])
+    for node in nodes
+  )
+
+
+def publish_plan_for_delegation(
+  db: Session, row: models.Delegation,
+) -> None:
+  """Refresh the root Goal when any locally-owned descendant changes state."""
+  top = row
+  seen = {row.id}
+  while True:
+    parent = db.query(models.Delegation).filter(
+      models.Delegation.child_chat_id == top.parent_chat_id,
+    ).first()
+    if parent is None:
+      break
+    if parent.id in seen:
+      return
+    seen.add(parent.id)
+    top = parent
+  rows = active_goal_rows(db, top.parent_chat_id)
+  if rows is None:
+    return
+  plan = serialize_plan(db, *rows)
+  if plan is None:
+    return
+  from app.broadcast import get_broadcast
+  broadcast = get_broadcast(top.parent_chat_id)
+  if broadcast is not None and broadcast.running:
+    broadcast.publish({"type": "goal_plan_updated", "plan": plan})
+
+
 def serialize_plan(
-  physical: models.ChatRun, root: models.ChatRun,
+  db: Session, physical: models.ChatRun, root: models.ChatRun,
 ) -> dict[str, Any] | None:
   raw = root.goal_plan_json
   if not isinstance(raw, dict) or not isinstance(raw.get("tasks"), list):
     return None
   tasks = deepcopy(raw["tasks"])
   by_id = {task["id"]: task for task in tasks}
-  completed = sum(task.get("status") == "completed" for task in tasks)
+  delegations = _delegation_tree(db, physical, root)
+  from app.delegations import TERMINAL_DELEGATION_STATUSES
+
+  active_execution_keys: list[str] = []
+
+  def collect_active_execution(nodes: list[dict[str, Any]]) -> bool:
+    any_active = False
+    for node in nodes:
+      branch_start = len(active_execution_keys)
+      descendant_active = collect_active_execution(node.get("children") or [])
+      subtree_active = (
+        node.get("status") not in TERMINAL_DELEGATION_STATUSES
+        or descendant_active
+      )
+      if subtree_active:
+        active_execution_keys.insert(
+          branch_start, str(node.get("task_key") or node["id"]),
+        )
+        any_active = True
+    return any_active
+
+  collect_active_execution(delegations)
+  active_execution = set(active_execution_keys)
+  completed = sum(
+    task.get("status") == "completed" and task["id"] not in active_execution
+    for task in tasks
+  )
   running = [task["id"] for task in tasks if task.get("status") == "running"]
-  completion_blockers = [
+  task_blockers = [
     task["id"] for task in tasks
     if task.get("status") not in {"completed", "cancelled"}
   ]
+  completion_blockers = list(dict.fromkeys(
+    task_blockers + active_execution_keys
+  ))
   ready: list[str] = []
   for task in tasks:
     waiting_on = [
       dep for dep in task.get("depends_on", [])
       if by_id.get(dep, {}).get("status") != "completed"
     ]
+    children = [
+      child["id"] for child in tasks
+      if child.get("parent_id") == task["id"]
+    ]
     task["waiting_on"] = waiting_on
-    task["ready"] = task.get("status") == "pending" and not waiting_on
+    task["children"] = children
+    # Once a task has children, its next executable step is owned by the
+    # deepest ready leaves. The parent returns only as a verification step
+    # after every child settles; it must not also appear in the ordinary ready
+    # set and invite duplicate top-level work.
+    task["ready"] = (
+      task.get("status") == "pending"
+      and not waiting_on
+      and not children
+    )
+    task["ready_to_verify"] = (
+      task.get("status") in {"pending", "running"}
+      and not waiting_on
+      and bool(children) and all(
+        by_id[child_id].get("status") in {"completed", "cancelled"}
+        for child_id in children
+      )
+    )
     if task["ready"]:
       ready.append(task["id"])
   return {
     "version": 1,
+    "goal_id": physical.goal_id,
     "root_run_id": root.id,
     "objective": physical.goal_objective,
     "revision": int(root.goal_plan_revision or 0),
     "updated_at": raw.get("updated_at"),
     "tasks": tasks,
+    "delegations": delegations,
     "summary": {
       "completed": completed,
       "total": len(tasks),
@@ -266,7 +512,7 @@ def replace_plan(
     raise GoalPlanConflict("goal plan changed; fetch it and retry")
   db.commit()
   db.refresh(root)
-  plan = serialize_plan(physical, root)
+  plan = serialize_plan(db, physical, root)
   if plan is None:  # pragma: no cover - the write above guarantees a document
     raise RuntimeError("goal plan disappeared after commit")
   return plan
@@ -281,15 +527,13 @@ def update_task(
   task_id: str,
   changes: dict[str, Any],
 ) -> dict[str, Any]:
-  existing = serialize_plan(physical, root)
+  existing = serialize_plan(db, physical, root)
   if existing is None:
     raise GoalPlanError("this Goal does not have a plan yet")
   tasks = existing["tasks"]
   target = next((task for task in tasks if task["id"] == task_id), None)
   if target is None:
     raise GoalPlanError(f"unknown task id: {task_id}")
-  target.pop("ready", None)
-  target.pop("waiting_on", None)
   for key, value in changes.items():
     if value is not None:
       target[key] = value
