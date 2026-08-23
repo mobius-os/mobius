@@ -1518,22 +1518,14 @@ async def run_codex_sdk_turn(
     agent_settings = {}
   # The per-chat picker writes the `model` key.
   model = agent_settings.get("model")
-  # Cross-provider mismatch defense. Chats persisted before the
-  # snapshot logic learned to provider-validate (see chat.py
-  # snapshot-on-first-send and effective_agent_settings) can end up
-  # with a Claude model on a Codex chat (the global default file
-  # remembered the last Claude pick when a fresh Codex chat was
-  # created). Sending that to Codex 400s every turn with "model
-  # not supported". Quietly normalize to the Codex default so
-  # existing chats keep working; the user can re-pick in the
-  # picker if they want a specific Codex model.
-  from app.providers import _model_belongs_to_other_provider, DEFAULT_MODELS
+  # Admission and effective settings normally reject a cross-provider model
+  # before this boundary. Stay strict for legacy/corrupt callers too: silently
+  # substituting a provider model makes the picker contract untruthful.
+  from app.providers import _model_belongs_to_other_provider
   if model and _model_belongs_to_other_provider(model, "codex"):
-    log.warning(
-      "codex turn started with non-codex model %r — normalizing to %r",
-      model, DEFAULT_MODELS["codex"],
+    raise ValueError(
+      f"Selected model {model!r} does not belong to provider 'codex'."
     )
-    model = DEFAULT_MODELS["codex"]
 
   # Reasoning effort comes from Codex's live per-model catalog. The generated
   # enum implements `_missing_`, so newer wire values such as max/ultra survive

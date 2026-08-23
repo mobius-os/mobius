@@ -73,12 +73,10 @@ async function newChat(page) {
   // Create the chat via API first (so it's tagged with the worker
   // prefix and can be reaped after the spec finishes), then click
   // through the UI to actually land on it.
-  await createTaggedChat(page)
-  await page.evaluate(() => document.querySelector('.drawer__item--new')?.click())
-  const hasEmpty = await page.evaluate(
-    () => !!document.querySelector('[data-chat-surface="painted"] .chat__empty-wrap')
-  )
-  if (!hasEmpty) await page.goto(BASE)
+  const chat = await createTaggedChat(page)
+  await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
+    waitUntil: 'domcontentloaded',
+  })
   await expect(page.locator('[data-chat-surface="painted"] .chat__empty-wrap')).toBeVisible({ timeout: 8000 })
 }
 

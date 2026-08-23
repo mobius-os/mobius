@@ -4259,15 +4259,15 @@ async def _run_chat_impl_with_db(
     )
   )
 
-  # Snapshot-on-first-send: if the chat has no overrides yet (created
-  # empty, never had the picker touched), freeze the current effective
-  # settings onto the row so subsequent turns in THIS chat don't drift
-  # when the global default changes in another chat. Without this, a
+  # Snapshot-on-first-send: if the chat has no per-chat choices yet, freeze the
+  # current explicit model/effort onto the row so subsequent turns in THIS
+  # chat don't drift when another chat changes the owner's latest choices.
+  # Without this, a
   # user who starts a Codex/high conversation and later picks Codex/low
   # in a sibling chat would silently get the new effort on their next
   # turn in the original — a real "why did my model change?" surprise.
   # The picker's PATCH path is the other commit point; this one covers
-  # the "just typed and sent without opening the picker" path.
+  # the path where a prior explicit selection is inherited by a new chat.
   # Invariant: keep this block await-free through the commit below. A
   # picker PATCH from another coroutine can only interleave at await
   # points; if one is added here, a concurrent PATCH could clobber the
@@ -4278,10 +4278,10 @@ async def _run_chat_impl_with_db(
       if k not in agent_settings:
         continue
       value = agent_settings.get(k)
-      # ``model: None`` is meaningful: this chat started before the
-      # owner manually pinned a default model, so keep it on the
-      # provider SDK's own default instead of letting a later global
-      # model choice drift into this already-started chat.
+      # Interactive sends never reach this point without a model. A ``None``
+      # model is retained only for non-interactive programmatic/background
+      # starts, whose separately configured policy may deliberately choose the
+      # provider SDK's native model instead of the composer's picker contract.
       if value is None and k != "model":
         continue
       snapshot[k] = value

@@ -63,7 +63,7 @@ def test_effective_settings_chat_override_wins(tmp_path):
 
 
 def test_effective_settings_ignores_none_values(tmp_path):
-  """A None model in the override means "use the provider default"."""
+  """An explicit None masks the last pick so admission can request a choice."""
   shared = tmp_path / "shared"
   shared.mkdir()
   (shared / "agent-settings.json").write_text(
@@ -76,7 +76,7 @@ def test_effective_settings_ignores_none_values(tmp_path):
 
 
 def test_effective_settings_has_no_model_until_manual_pick(tmp_path):
-  """No global/chat model means the SDK receives no model override."""
+  """No global/chat model remains unresolved for the send-time guard."""
   shared = tmp_path / "shared"
   shared.mkdir()
   (shared / "agent-settings.json").write_text(json.dumps({}))

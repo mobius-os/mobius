@@ -623,12 +623,7 @@ export default function ChatSettingsPanel({
   }, [registry, hiddenIds, selectedModel, selectedProvider, draftModel, draftProvider])
 
   const currentProviderConfigured = availability.configuredProviders.has(draftProvider)
-  const currentProviderInfo = PROVIDER_INFO[draftProvider]
-  const currentProviderLabel = currentProviderInfo?.label || draftProvider
-  // A chat can deliberately have no model override: the provider then chooses
-  // its own default. Keep that real state selected in the picker instead of
-  // making every explicit model row look inactive.
-  const usesProviderDefault = !selectedModel
+  const currentProviderLabel = PROVIDER_INFO[draftProvider]?.label || draftProvider
 
   return (
     <div className="csp">
@@ -688,31 +683,9 @@ export default function ChatSettingsPanel({
             </span>
           </div>
       )}
-      {dataReady && usesProviderDefault && currentProviderInfo && (
-        <div className="csp__default-model">
-          <div
-            className="csp-row csp-row--selected csp-row--static"
-            aria-label={`Using ${currentProviderLabel}'s default model`}
-          >
-            <span className="csp-row__icon"><currentProviderInfo.Logo /></span>
-            <span className="csp-row__main">
-              <span className="csp-row__title">
-                <span>{currentProviderLabel} default model</span>
-              </span>
-              <span className="csp-row__sub">
-                No specific model is pinned for this chat
-              </span>
-            </span>
-            <span className="csp-row__dot" aria-hidden="true" />
-          </div>
-          <div className="csp-effort-indent">
-            <EffortStepper
-              efforts={currentProviderInfo.efforts}
-              value={draftEffort}
-              onChange={handleEffortChange}
-              disabled={switchBusy || !currentProviderConfigured}
-            />
-          </div>
+      {dataReady && !selectedModel && (
+        <div className="csp__selection-required" role="status" aria-live="polite">
+          Choose a model before sending your message.
         </div>
       )}
       {dataReady && PROVIDER_ORDER.map(pid => {

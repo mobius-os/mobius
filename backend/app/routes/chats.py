@@ -797,15 +797,15 @@ def create_chat(
 ):
   """Creates a new chat.
 
-  Leaves `agent_settings_json` NULL so the chat reads the live global
-  defaults from `/data/shared/agent-settings.json` until the user
+  Leaves `agent_settings_json` NULL so the chat reads the owner's latest
+  picker choices from `/data/shared/agent-settings.json` until the user
   picks something specific. Snapshotting at creation time used to
   freeze whatever the defaults were when the empty chat was first
   created, and the frontend's empty-chat reuse path then surfaced
   that stale snapshot — silently ignoring whichever model/effort the
   user had since picked. The snapshot now happens lazily, at the
   first commit point: a PATCH from the picker (see `patch_chat`
-  below) or the first message send (see `chat.py:_snapshot_initial_settings`).
+  below) or the first admitted message send (see `chat.py`).
   Either path freezes the chat's settings so subsequent global
   changes from OTHER chats don't bleed in. Provider is still
   inherited from owner.provider — the implicit "default = last

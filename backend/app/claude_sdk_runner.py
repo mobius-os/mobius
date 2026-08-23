@@ -1082,19 +1082,15 @@ async def run_claude_sdk_turn(
   if _effort == "ultracode":
     _effort = "xhigh"
   turn_message = user_message + _ULTRACODE_REMINDER if _ultracode else user_message
-  # Cross-provider mismatch defense (mirrors codex_sdk_runner).
-  # Chats persisted before the snapshot logic learned to
-  # provider-validate (see chat.py snapshot-on-first-send and
-  # effective_agent_settings) can carry a Codex model on a Claude
-  # chat. Sending that through here would surface as an obscure SDK
-  # error. Quietly normalize so existing chats keep working.
-  from app.providers import _model_belongs_to_other_provider, DEFAULT_MODELS
+  # Cross-provider mismatch defense (mirrors codex_sdk_runner). Admission and
+  # effective settings normally reject this before the SDK boundary. Keep the
+  # boundary strict too: a legacy/corrupt value must never become an implicit
+  # provider-chosen model.
+  from app.providers import _model_belongs_to_other_provider
   if _model and _model_belongs_to_other_provider(_model, "claude"):
-    log.warning(
-      "claude turn started with non-claude model %r — normalizing to %r",
-      _model, DEFAULT_MODELS["claude"],
+    raise ValueError(
+      f"Selected model {_model!r} does not belong to provider 'claude'."
     )
-    _model = DEFAULT_MODELS["claude"]
   async def _run_once(model_override: str | None) -> RunnerResult:
     nonlocal current_session_id, cost_usd
     # Most recent provider rate-limit reset time seen this attempt (from any

@@ -45,6 +45,7 @@ import {
   clientLengthToLayout,
   clientPointToLayout,
 } from '../../lib/layoutSpace.js'
+import useModelSelectionPopover from './hooks/useModelSelectionPopover.js'
 
 export default function ComposerPopover({
   chatInfo,
@@ -66,12 +67,12 @@ export default function ComposerPopover({
   providerSwitchState,
   settingsSaveTailRef,
   composerInputRef,
+  modelSelectionRequest = 0,
   onOpenInspector,
   onOpenSummary,
   embedded = false,
   pending = false,
 }) {
-  const [open, setOpen] = useState(false)
   const wrapRef = useRef(null)
   const triggerRef = useRef(null)
   // Tracks whether the chat textarea was focused at the moment the
@@ -86,7 +87,10 @@ export default function ComposerPopover({
   // AFTER React commits — on iOS Safari the focus state can shift
   // between the click handler and the post-commit effect, leaving
   // the ref stale. Sync capture in onClick is reliable.
-  const wasInputFocusedRef = useRef(false)
+  const { open, setOpen, wasInputFocusedRef } = useModelSelectionPopover(
+    modelSelectionRequest,
+    composerInputRef,
+  )
   // Measured cap on the panel's height: the space above the trigger inside both
   // the chat pane (which clips with `overflow: hidden`) and the keyboard-shrunk
   // visible viewport. See composerPopoverHeight.js for why CSS viewport units

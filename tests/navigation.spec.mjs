@@ -50,8 +50,8 @@ function emptyChatDetail() {
     session_id: null,
     provider: 'codex',
     created_by_app_id: null,
-    agent_settings_json: null,
-    effective_agent_settings: { model: 'gpt-current', effort: 'medium' },
+    agent_settings_json: { model: 'gpt-5.6-sol' },
+    effective_agent_settings: { model: 'gpt-5.6-sol', effort: 'medium' },
     has_assistant_turns: false,
     auto_resume_on_limit: false,
     auto_resume_on_restart: true,
@@ -134,6 +134,15 @@ async function setup(
   } = {},
 ) {
   await page.setViewportSize(viewport)
+
+  await page.route('**/api/auth/providers/status', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    json: {
+      claude: { name: 'Claude Code', configured: false, authenticated: false },
+      codex: { name: 'Codex', configured: true, authenticated: true, error: null },
+    },
+  }))
 
   // Navigation is a client-side contract. Seed an explicit active chat and
   // mock the complete chat surface so the suite neither reads nor borrows

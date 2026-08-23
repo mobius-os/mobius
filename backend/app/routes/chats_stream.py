@@ -37,7 +37,12 @@ from app.chat_writer import (
   get_writer,
 )
 from app import claude_sdk_runner, codex_sdk_runner
-from app.providers import _load_agent_settings, resolve_default_provider
+from app.chat_visibility import coerce_agent_settings
+from app.providers import (
+  _load_agent_settings,
+  effective_agent_settings,
+  resolve_default_provider,
+)
 from app.runner_registry import RunnerKind, registry
 from app.config import get_settings
 from app.database import get_db
@@ -73,6 +78,49 @@ def _pending_question_open_conflict() -> HTTPException:
       "message": "Answer the pending question, or Stop the turn, before sending.",
     },
   )
+
+
+def _model_selection_required_conflict() -> HTTPException:
+  return HTTPException(
+    status_code=409,
+    detail={
+      "code": "model_selection_required",
+      "message": "Choose a model before sending this chat.",
+    },
+  )
+
+
+def _selected_model_for_chat(
+  chat: models.Chat, *, provider: str | None = None,
+) -> str | None:
+  """Return the explicit model this chat would use, never an SDK fallback."""
+  effective = effective_agent_settings(
+    get_settings().data_dir,
+    coerce_agent_settings(chat.agent_settings_json) or None,
+    provider=provider or chat.provider or "claude",
+  )
+  model = effective.get("model")
+  return model.strip() if isinstance(model, str) and model.strip() else None
+
+
+def _next_execution_provider(db: Session, chat: models.Chat) -> str:
+  """Match the provider the current send path will actually execute on."""
+  provider = chat.provider or "claude"
+  # StartTurn alone re-reads the owner's latest provider for a pristine owner
+  # chat. Queued, draining, app-owned, and already-started chats keep their
+  # durable provider, so the model check must evaluate against that same value.
+  if (
+    chat.created_by_app_id is None
+    and not (chat.messages or [])
+    and not (chat.pending_messages or [])
+    and not is_chat_running(chat.id)
+    and not is_draining()
+  ):
+    owner = db.query(models.Owner).first()
+    return resolve_default_provider(
+      get_settings().data_dir, owner.provider if owner else None,
+    )
+  return provider
 
 # Keepalive interval for the SSE stream to prevent proxy timeouts.
 _KEEPALIVE_INTERVAL = 30  # seconds
@@ -686,6 +734,9 @@ async def send_message(
           detail="The question is no longer accepting answers.",
         )
 
+      if _selected_model_for_chat(chat) is None:
+        raise _model_selection_required_conflict()
+
       if not mark_starting(chat_id):
         raise HTTPException(
           status_code=409,
@@ -814,6 +865,11 @@ async def _send_message_locked(
       status_code=403,
       detail="Only the owner can resume a paused chat.",
     )
+  next_execution_provider = _next_execution_provider(db, chat)
+  if _selected_model_for_chat(
+    chat, provider=next_execution_provider,
+  ) is None:
+    raise _model_selection_required_conflict()
   record_memory_checkpoint_once(
     "chat_send_first_request",
     chat_id=chat_id,
@@ -831,7 +887,7 @@ async def _send_message_locked(
     activity.log_event(
       "chat_sent",
       chat_id=chat_id,
-      provider=(chat.provider or "claude"),
+      provider=next_execution_provider,
       app_id=principal.app_id,
     )
 
@@ -1072,20 +1128,12 @@ async def _send_message_locked(
     start_gen = current_run_generation(chat_id)
     run_token = alloc_run_token()
     user_msg = _user_message_from_body(chat, body)
-    owner = db.query(models.Owner).first()
-    global_default_provider = resolve_default_provider(
-      get_settings().data_dir, owner.provider if owner else None,
-    )
     # An app-owned chat chooses its provider when the app creates the chat.
     # Preserve that explicit contract through the first StartTurn instead of
     # replacing it with whichever provider the owner most recently selected
     # in an unrelated chat. Owner-created empty chats deliberately retain the
     # live-default behavior documented by create_chat.
-    default_provider = (
-      (chat.provider or global_default_provider)
-      if chat.created_by_app_id is not None
-      else global_default_provider
-    )
+    default_provider = next_execution_provider
 
     ack = get_writer().submit(
       StartTurn(

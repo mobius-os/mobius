@@ -71,7 +71,12 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
         running: false,
         pending_messages: [],
         pending_question_id: null,
-        provider: 'codex',
+        provider: 'claude',
+        agent_settings_json: { model: 'claude-sonnet-4-6' },
+        effective_agent_settings: {
+          model: 'claude-sonnet-4-6',
+          effort: 'medium',
+        },
       }),
     })
   })
