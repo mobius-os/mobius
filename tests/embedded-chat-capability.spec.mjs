@@ -207,7 +207,7 @@ test('opaque embedded chat completes authenticated flow and survives remount', a
     // Picker + real attachment path use the same chat-only principal.
     // Keyboard activation avoids Playwright's root-zoom frame projection;
     // workspace-panes separately exercises a physical cross-frame click.
-    await chatFrame.getByRole('button', { name: 'Attach or change model' }).press('Enter')
+    await chatFrame.getByRole('button', { name: 'Attach files' }).press('Enter')
     await expect(chatFrame.getByRole('button', { name: 'Attach files' })).toBeVisible()
     await chatFrame.locator('input[type="file"]').setInputFiles({
       name: 'e2e.txt',

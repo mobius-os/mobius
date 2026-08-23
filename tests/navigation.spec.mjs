@@ -1045,7 +1045,7 @@ test.describe('Touch navigation', () => {
       length: element.value.length,
     }))).toEqual({ start: 19, end: 19, length: 19 })
     const readyOptions = page.locator('[data-chat-surface="painted"]')
-      .getByRole('button', { name: 'Attach or change model' })
+      .getByRole('button', { name: 'Attach files or view chat info' })
     await expect(readyOptions).toBeVisible()
     await expect(readyOptions).toBeEnabled()
     const readyOptionsBox = await readyOptions.boundingBox()
