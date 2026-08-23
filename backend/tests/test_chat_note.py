@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from app import chat, chat_queue
+from app import chat, chat_queue, models
 
 
 def _settings(on=True):
@@ -72,6 +72,35 @@ def test_skips_on_non_settled_dispositions(tmp_path):
     ), d
 
 
+def test_active_goal_checkpoint_reads_the_exact_current_run(
+  client, owner_token, db,
+):
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  chat_id = client.post(
+    "/api/chats", json={"title": "Dynamic Goal"}, headers=owner_auth,
+  ).json()["id"]
+  run = models.ChatRun(
+    id="dynamic-goal-run", root_run_id="dynamic-goal-run", chat_id=chat_id,
+    status="running", provider="claude",
+  )
+  db.add(run)
+  db.commit()
+
+  assert not chat._run_owns_active_goal(
+    db, chat_id=chat_id, run_token=run.id,
+  )
+  run.goal_objective = "Discover and repair every represented defect"
+  db.commit()
+  assert chat._run_owns_active_goal(
+    db, chat_id=chat_id, run_token=run.id,
+  )
+  run.status = "completed"
+  db.commit()
+  assert not chat._run_owns_active_goal(
+    db, chat_id=chat_id, run_token=run.id,
+  )
+
+
 def test_fires_on_limit_parked(tmp_path):
   # The parked response is the chat's final durable state until a later
   # resume. It must be summarized immediately, without retrying the exhausted
@@ -108,6 +137,27 @@ async def test_limit_publisher_forces_provider_free_summary(monkeypatch):
   monkeypatch.setattr(chat.asyncio, "create_subprocess_exec", spawn)
   await chat._ensure_chat_note("/tmp/data", "c1", deterministic=True)
   assert captured["env"]["CHAT_NOTE_PROVIDER"] == "deterministic"
+
+
+@pytest.mark.asyncio
+async def test_goal_checkpoint_publisher_uses_the_active_mode(monkeypatch):
+  captured = {}
+
+  class Proc:
+    returncode = 0
+
+    async def communicate(self):
+      return b"", b""
+
+  async def spawn(*args, **kwargs):
+    captured["args"] = args
+    return Proc()
+
+  monkeypatch.setattr(chat.asyncio, "create_subprocess_exec", spawn)
+  await chat._ensure_chat_note(
+    "/tmp/data", "c1", active_goal_checkpoint=True,
+  )
+  assert captured["args"][-1] == "--active-goal-checkpoint"
 
 
 def test_still_fires_if_a_legacy_writer_touched_the_note(tmp_path):
@@ -208,6 +258,16 @@ def test_deterministic_note_preserves_an_existing_generated_name():
   assert "description: unrelated raw prompt text" not in note
 
 
+def test_deterministic_note_names_a_goal_without_its_command_marker():
+  cn = _load_chat_note()
+  note = cn._deterministic_note(
+    "user: /goal review the complete feature\n\nassistant: working",
+    "",
+  )
+  assert "description: review the complete feature" in note
+  assert "description: /goal" not in note
+
+
 def test_deterministic_note_preserves_summary_with_internal_h2():
   cn = _load_chat_note()
   existing = (
@@ -296,6 +356,24 @@ def test_render_transcript_labels_automatic_continuation_as_product_event():
 
   assert rendered == "automatic continuation (restart): continue"
   assert "user: continue" not in rendered
+
+
+def test_render_transcript_excludes_hidden_product_control_messages():
+  cn = _load_chat_note()
+  raw = json.dumps([
+    {"role": "user", "content": "Address every issue"},
+    {
+      "role": "user", "hidden": True,
+      "content": "/goal Address every issue and verify the result",
+    },
+    {"role": "assistant", "content": "All checks pass."},
+  ])
+
+  rendered = cn._render_transcript(raw)
+
+  assert "Address every issue" in rendered
+  assert "All checks pass." in rendered
+  assert "/goal" not in rendered
 
 
 def test_claude_summary_prompt_receives_complete_transcript(monkeypatch):
@@ -467,16 +545,17 @@ def _snapshot_db(cn, tmp_path):
   con.execute(
     "create table chats ("
     "id text primary key, messages text, updated_at text, provider text, "
-    "deleted_at text)"
+    "deleted_at text, pending_question_id text)"
   )
   con.execute(
     "create table chat_runs ("
-    "id text primary key, chat_id text, status text, started_at text)"
+    "id text primary key, chat_id text, status text, started_at text, "
+    "goal_objective text)"
   )
   con.execute("create table owner (provider text)")
   con.execute("insert into owner values ('claude')")
   con.execute(
-    "insert into chats values (?, ?, ?, 'codex', null)",
+    "insert into chats values (?, ?, ?, 'codex', null, null)",
     (
       "c1",
       json.dumps([
@@ -518,6 +597,90 @@ def test_authenticated_chat_provider_wins_over_stale_owner_default(tmp_path):
   assert cn._configured_provider(snapshot.provider) == "codex"
 
 
+def _pause_active_goal_at_question(db_path, *, objective="Ship it"):
+  con = sqlite3.connect(db_path)
+  con.execute(
+    "update chats set pending_question_id='q-open' where id='c1'"
+  )
+  con.execute(
+    "insert into chat_runs values (?, ?, ?, ?, ?)",
+    (
+      "goal-run",
+      "c1",
+      "running",
+      "2026-07-13 10:00:01.000000",
+      objective,
+    ),
+  )
+  con.commit()
+  con.close()
+
+
+def test_active_goal_question_is_a_summary_checkpoint(tmp_path):
+  cn = _load_chat_note()
+  db_path = _snapshot_db(cn, tmp_path)
+  _pause_active_goal_at_question(db_path)
+
+  assert cn._read_chat_snapshot("c1") is None
+  snapshot = cn._read_chat_snapshot(
+    "c1", active_goal_checkpoint=True,
+  )
+
+  assert snapshot is not None
+  assert snapshot.active_goal_checkpoint == cn.ActiveGoalCheckpoint(
+    "goal-run", "q-open",
+  )
+  note = cn._note_path("c1")
+  _existing, note_revision = cn._read_note_snapshot(note)
+  assert cn._publish_if_current(
+    "c1",
+    snapshot.updated_at,
+    note_revision,
+    note,
+    _valid_note("Goal checkpoint"),
+    snapshot.active_goal_checkpoint,
+  )
+  assert "description: Goal checkpoint" in note.read_text()
+
+
+def test_active_non_goal_question_is_not_a_summary_checkpoint(tmp_path):
+  cn = _load_chat_note()
+  db_path = _snapshot_db(cn, tmp_path)
+  _pause_active_goal_at_question(db_path, objective=None)
+
+  assert cn._read_chat_snapshot(
+    "c1", active_goal_checkpoint=True,
+  ) is None
+
+
+def test_answering_the_goal_question_makes_checkpoint_publication_stale(tmp_path):
+  cn = _load_chat_note()
+  db_path = _snapshot_db(cn, tmp_path)
+  _pause_active_goal_at_question(db_path)
+  snapshot = cn._read_chat_snapshot(
+    "c1", active_goal_checkpoint=True,
+  )
+  note = cn._note_path("c1")
+  _existing, note_revision = cn._read_note_snapshot(note)
+
+  con = sqlite3.connect(db_path)
+  con.execute(
+    "update chats set pending_question_id=null where id='c1'"
+  )
+  con.commit()
+  con.close()
+
+  assert not cn._publish_if_current(
+    "c1",
+    snapshot.updated_at,
+    note_revision,
+    note,
+    _valid_note("Stale checkpoint"),
+    snapshot.active_goal_checkpoint,
+  )
+  assert not note.exists()
+
+
 def test_unauthenticated_claude_falls_back_without_spawning(
   tmp_path, monkeypatch,
 ):
@@ -544,7 +707,9 @@ def test_first_summary_publication_replaces_the_opening_message_title(
   monkeypatch.setattr(
     cn,
     "_read_chat_snapshot",
-    lambda _cid: cn.ChatSnapshot("transcript", "r1", [], "codex"),
+    lambda _cid, **_kwargs: cn.ChatSnapshot(
+      "transcript", "r1", [], "codex",
+    ),
   )
   monkeypatch.setattr(cn, "_read_note_snapshot", lambda _note: ("", "missing"))
   summarized = {}
@@ -660,7 +825,7 @@ def test_new_turn_or_delete_makes_summary_publication_stale(tmp_path):
   con = sqlite3.connect(db_path)
   con.execute(
     "insert into chat_runs values "
-    "('run-c1', 'c1', 'running', '2026-07-13 10:00:01.000000')"
+    "('run-c1', 'c1', 'running', '2026-07-13 10:00:01.000000', null)"
   )
   con.execute(
     "update chats set updated_at=? where id='c1'",

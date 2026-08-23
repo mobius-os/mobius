@@ -14,7 +14,7 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunsplit
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -33,6 +33,32 @@ def _read_build_info() -> dict:
   except Exception:
     return {}
   return data if isinstance(data, dict) else {}
+
+
+def _validated_origin(value: str, setting_name: str) -> str:
+  """Return a normalized HTTPS origin (HTTP is allowed only on loopback)."""
+  normalized = value.strip().rstrip("/")
+  parsed = urlparse(normalized)
+  is_local_http = (
+    parsed.scheme == "http"
+    and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+  )
+  try:
+    parsed.port
+  except ValueError as exc:
+    raise ValueError(f"{setting_name} must be an HTTPS origin.") from exc
+  if (
+    (parsed.scheme != "https" and not is_local_http)
+    or not parsed.hostname
+    or parsed.username is not None
+    or parsed.password is not None
+    or parsed.path not in {"", "/"}
+    or parsed.params
+    or parsed.query
+    or parsed.fragment
+  ):
+    raise ValueError(f"{setting_name} must be an HTTPS origin.")
+  return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), "", "", ""))
 
 
 class Settings(BaseSettings):
@@ -74,17 +100,6 @@ class Settings(BaseSettings):
   # is sent, so it adds no user-facing latency. No chat agent writes these files.
   ensure_chat_note: bool = True
 
-  # Peak concurrent agent turns (each spawns a heavy provider subprocess).
-  # Turn dispatch is otherwise unbounded, so a fan-out of many chats/subagents
-  # can exhaust the container's memory. These ceilings queue excess turns
-  # (holding no subprocess while waiting) instead of spawning without limit.
-  # Two buckets so a parent turn that BLOCKS on a delegated child never
-  # deadlocks against it (they draw from different pools; children are depth-1).
-  # Sized for the default ~6 GB cgroup; owners self-host, so raise on bigger
-  # hosts / lower on smaller ones via env (MAX_CONCURRENT_AGENT_TURNS, etc).
-  max_concurrent_agent_turns: int = 6
-  max_concurrent_delegated_turns: int = 3
-
   # Managed deployments receive this complete triplet from their provisioning
   # layer. When absent, Möbius is an ordinary self-hosted installation and
   # keeps the local username/password setup flow. Partial configuration is a
@@ -93,6 +108,14 @@ class Settings(BaseSettings):
   mobius_sso_issuer: str = ""
   mobius_sso_instance_id: str = ""
   mobius_sso_client_secret: str = ""
+  # Authoritative account service used by ordinary self-hosted installations
+  # when their owner links a mobius.you identity. Keep this independent from
+  # the managed-deployment SSO issuer so the account service can move hosts
+  # without a code change or an implicit coupling between the two protocols.
+  mobius_account_origin: str = "https://www.mobius.you"
+  # Public origin of this installation, bound into self-hosted account grants.
+  # Empty derives from FRONTEND_ORIGIN when that is HTTPS or loopback HTTP.
+  mobius_account_client_origin: str = ""
 
   model_config = SettingsConfigDict(env_file=".env")
 
@@ -151,26 +174,31 @@ class Settings(BaseSettings):
         "MOBIUS_SSO_CLIENT_SECRET must be configured together."
       )
     if all(sso_values):
-      issuer = urlparse(sso_values[0])
-      is_local_http = (
-        issuer.scheme == "http"
-        and issuer.hostname in {"localhost", "127.0.0.1", "::1"}
+      self.mobius_sso_issuer = _validated_origin(
+        sso_values[0], "MOBIUS_SSO_ISSUER",
       )
-      if (
-        (issuer.scheme != "https" and not is_local_http)
-        or not issuer.netloc
-        or issuer.path not in {"", "/"}
-        or issuer.params
-        or issuer.query
-        or issuer.fragment
-      ):
-        raise ValueError("MOBIUS_SSO_ISSUER must be an HTTPS origin.")
       if not re.fullmatch(r"mob_[A-Za-z0-9_-]{3,80}", sso_values[1]):
         raise ValueError("MOBIUS_SSO_INSTANCE_ID is invalid.")
       if len(sso_values[2]) < 32:
         raise ValueError("MOBIUS_SSO_CLIENT_SECRET must be at least 32 characters.")
-      self.mobius_sso_issuer = sso_values[0].rstrip("/")
       self.mobius_sso_instance_id = sso_values[1]
+    self.mobius_account_origin = _validated_origin(
+      self.mobius_account_origin, "MOBIUS_ACCOUNT_ORIGIN",
+    )
+    client_origin = self.mobius_account_client_origin.strip()
+    if client_origin:
+      self.mobius_account_client_origin = _validated_origin(
+        client_origin, "MOBIUS_ACCOUNT_CLIENT_ORIGIN",
+      )
+    else:
+      try:
+        self.mobius_account_client_origin = _validated_origin(
+          self.frontend_origin, "FRONTEND_ORIGIN",
+        )
+      except ValueError:
+        # Non-loopback HTTP remains supported for an entirely local Möbius,
+        # but it cannot be entrusted with a cross-origin account grant.
+        self.mobius_account_client_origin = ""
     return self
 
   @property

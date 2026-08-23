@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 import ChatInputBar from '../ChatView/ChatInputBar.jsx'
+import ComposerPopover from '../ChatView/ComposerPopover.jsx'
 import {
   composerDraftRevision,
   persistComposerDraft,
@@ -33,6 +34,8 @@ export default function NewChatLanding({
   focusToken = 0,
   onComposerReady,
   onRetry,
+  onSubmit,
+  submitted = false,
 }) {
   const inputRef = useRef(null)
   const listeningRef = useRef(false)
@@ -98,6 +101,24 @@ export default function NewChatLanding({
     if (chatId != null) persistComposerDraft(chatId, inputValueRef.current, next)
   }
 
+  function submitDraft(event) {
+    event?.preventDefault?.()
+    if (submitted || !input.trim()) return
+    onSubmit?.(input)
+  }
+
+  const statusMessage = submitted
+    ? (failure === 'offline'
+        ? 'Queued — your message will send when Möbius reconnects.'
+        : (failure
+            ? 'Queued — waiting to start this chat.'
+            : 'Queued — starting this chat…'))
+    : (failure === 'offline'
+        ? 'You’re offline — your draft is safe.'
+        : (failure === 'queue'
+            ? 'Couldn’t queue this message — your draft is safe.'
+            : (failure ? 'Couldn’t start a new chat — your draft is safe.' : null)))
+
   const liveComposer = chatId != null
   return (
     <div className="chat chat--empty">
@@ -105,14 +126,12 @@ export default function NewChatLanding({
         <div className="chat__empty">
           <img className="chat__empty-glyph" src="/moebius.png" alt="" width="76" height="76" />
           <p className="chat__empty-title">What&apos;s on your mind?</p>
-          {failure && (
+          {statusMessage && (
             <>
               <p className="chat__empty-sub" role="status">
-                {failure === 'offline'
-                  ? 'You’re offline — your draft is safe.'
-                  : 'Couldn’t start a new chat — your draft is safe.'}
+                {statusMessage}
               </p>
-              {onRetry && (
+              {failure && failure !== 'queue' && onRetry && (
                 <button
                   type="button"
                   className="chat__empty-action"
@@ -126,15 +145,15 @@ export default function NewChatLanding({
           )}
         </div>
       </div>
-      {liveComposer && (
+      {liveComposer && !submitted && (
         <div className="chat__foot">
           <ChatInputBar
             chatId={chatId}
             input={input}
             onInputChange={updateInput}
             onInputIntent={() => {}}
-            onSubmit={event => event?.preventDefault?.()}
-            onSubmitSteer={event => event?.preventDefault?.()}
+            onSubmit={submitDraft}
+            onSubmitSteer={submitDraft}
             inputRef={inputRef}
             sending={false}
             listening={false}
@@ -145,9 +164,10 @@ export default function NewChatLanding({
             onSteer={() => {}}
             canSteer={false}
             offline={failure === 'offline'}
-            submissionBlocked
+            submissionBlocked={submitted}
             pendingFiles={attachments}
             onRemoveFile={removeAttachment}
+            leftButtons={<ComposerPopover pending />}
             attachmentsDisabled
           />
         </div>

@@ -15,6 +15,7 @@ const scrollMode = readFileSync(new URL('../../ChatView/useScrollMode.js', impor
 const detailCache = readFileSync(new URL('../../../lib/chatDetailCache.js', import.meta.url), 'utf8')
 const searchTermHighlight = readFileSync(new URL('../../../lib/searchTermHighlight.js', import.meta.url), 'utf8')
 const apiClient = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
+const navigationSource = readFileSync(new URL('../../../hooks/useNavigation.js', import.meta.url), 'utf8')
 
 function ruleBody(selector, source = shellCss) {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -34,12 +35,12 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
     /const activationCacheEntryState = chatCacheEntryState\([\s\S]*setLoading\(activationCacheEntryState === 'missing'\)[\s\S]*activationCacheEntryState === 'validating'[\s\S]*'cache-validating'/,
     'a retained chat revalidates cache coverage on every visible activation')
   assert.match(scrollMode,
-    /initialEntryPhaseRef\.current !== 'cached'[\s\S]*initialEntryPhaseRef\.current !== 'ready'[\s\S]*forceRevealRef/,
-    'the reveal deadline admits only caller-validated cache or authoritative history')
+    /initialEntryPhaseRef\.current !== 'cached'[\s\S]*initialEntryPhaseRef\.current !== 'stream-catchup'[\s\S]*initialEntryPhaseRef\.current !== 'ready'[\s\S]*forceRevealRef/,
+    'the reveal deadline admits only caller-validated or authoritative transcript frames')
   assert.match(
     chatView,
-    /const transcriptPaintable = \([\s\S]*initialEntryPhase === 'cached' \|\| initialEntryPhase === 'ready'[\s\S]*\) && revealed[\s\S]*const displayReady = activationSettled[\s\S]*&& !loading[\s\S]*&& \(transcriptPaintable \|\| showEmpty \|\| showLoadError\)/,
-    'a coordinate-complete cache can paint only after this activation confirms its runtime state',
+    /const transcriptPaintable = \([\s\S]*initialEntryPhase === 'cached'[\s\S]*initialEntryPhase === 'stream-catchup'[\s\S]*initialEntryPhase === 'ready'[\s\S]*\) && revealed[\s\S]*const displayReady = activationSettled[\s\S]*&& !loading[\s\S]*&& \(transcriptPaintable \|\| showEmpty \|\| showLoadError\)/,
+    'a coordinate-complete frame, including a running one, publishes only after runtime confirmation',
   )
   assert.match(chatView, /useLayoutEffect\(\(\) => \{[\s\S]*onDisplayReady\?\.\(chatId\)/,
     'ChatView must report layout readiness before its transcript can be promoted')
@@ -70,7 +71,7 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
   )
 })
 
-test('activation holds an unchanged running transcript until stream catch-up', () => {
+test('activation presents a confirmed running transcript while stream catch-up reconciles', () => {
   const initialLoad = chatView.match(
     /const loadActivation = async \(\) => \{[\s\S]*?\n    loadActivation\(\)/,
   )?.[0] || ''
@@ -124,7 +125,7 @@ test('activation holds an unchanged running transcript until stream catch-up', (
   assert.match(
     chatView,
     /setInitialEntryPhase\(attachesToStream \? 'stream-catchup' : 'ready'\)[\s\S]*if \(running\) \{[\s\S]*connectToStream\(false\)/,
-    'a running persisted frame remains gated until stream catch-up commits',
+    'a running persisted frame keeps an explicit reconciliation phase while its stream attaches',
   )
   assert.match(
     chatView,
@@ -299,7 +300,7 @@ test('direct chat actions hand focus to the destination composer', () => {
     /function selectChat\(id, \{ focusComposer = true \} = \{\}\) \{([\s\S]*?)\n  \}/,
   )?.[1] || ''
   assert.match(selectChat,
-    /navTo\('chat', \{ chatId: id, preserveDrawerPresentation \}\)[\s\S]*if \(focusComposer\) focusDesktopChatPaneComposer\(id\)/,
+    /navTo\('chat', \{ chatId: id, preserveDrawerPresentation \}\)[\s\S]*if \(focusComposer\) focusSelectedChatComposer\(id\)/,
     'drawer and settings chat selection must focus after requesting navigation')
   assert.match(shell,
     /target\.focusComposer === true[\s\S]*requestComposer\(target\.chatId, \{ focus: true \}\)/,
@@ -311,13 +312,33 @@ test('direct chat actions hand focus to the destination composer', () => {
     /flushSync\(\(\) => restoreDurableDraft\(\)\)[\s\S]*placeCaretAtTextEnd\(inputRef\.current\)/,
     'the destination composer must place the caret after its final draft re-read')
   assert.match(shell,
-    /onActivate=\{\(\) => \{[\s\S]*tabModel\.tabNavTarget\(tab\)[\s\S]*navTo\(view, opts\)[\s\S]*tab\.kind === 'chat'[\s\S]*focusDesktopChatPaneComposer\(tab\.id\)/,
+    /onActivate=\{\(\) => \{[\s\S]*tabModel\.tabNavTarget\(tab\)[\s\S]*navTo\(view, opts\)[\s\S]*tab\.kind === 'chat'[\s\S]*focusSelectedChatComposer\(tab\.id\)/,
     'the single-pane tab strip must focus a selected chat composer')
   const selectedChatHandoffs = workspaceChrome.match(
     /if \(tab\.kind === 'chat'\) onChatPaneSelected\?\.\(tab\.id\)/g,
   ) || []
   assert.equal(selectedChatHandoffs.length, 2,
     'both active-tab and tab-switch paths in a tiled pane must focus chat composers')
+  assert.match(shell,
+    /composerDraftWantsKeyboard\(saved\)[\s\S]*beginTouchComposerFocusLease\([\s\S]*initialValue: saved\.input[\s\S]*requestComposer\(chatId, \{ focus: true, restoreExistingDraft: true \}\)/,
+    'a selected touch chat with an unsent draft must reserve the keyboard until its real composer takes focus')
+  assert.match(shell, /className="shell__composer-focus-lease"[\s\S]*aria-label="Restoring message draft"/,
+    'the hidden lease must not impersonate the visible Message Möbius composer in the accessibility tree')
+  assert.match(shell,
+    /beforeRestoreRouteRef\.current = \(route\) => \{[\s\S]*route\?\.view !== 'chat'[\s\S]*reserveTouchDraftComposer\(route\.chatId\)/,
+    'Back and Forward must use the same draft-only touch focus handoff')
+  assert.match(shell, /const beforeRestoreRouteRef = useRef\(null\)/)
+  assert.match(shell, /beforeRestoreRouteRef,\s*\}\)/)
+  assert.match(
+    navigationSource,
+    /if \(itemRoute\) \{\s*beforeRestoreRouteRef\?\.current\?\.\(itemRoute\)\s*applyModeDestination\(itemRoute\)/,
+    'Back and Forward must reserve the draft keyboard before restoring the destination',
+  )
+  assert.match(
+    navigationSource,
+    /function closeDrawer[\s\S]*beforeRestoreRouteRef\?\.current\?\.\(snapshotRoute\(\)\)[\s\S]*const userBackTraversal = !drawerClosePendingRef\.current[\s\S]*if \(drawerOpenRef\.current && drawerPushedRef\.current\)[\s\S]*beforeRestoreRouteRef\?\.current\?\.\(returnRoute\)/,
+    'both explicit and Back-driven drawer closes must reserve the restored draft keyboard',
+  )
 })
 
 test('the held chat is an opaque layer above staging until the atomic swap', () => {

@@ -29,6 +29,7 @@ from app.chat_writer import (
   CancelPending,
   StartTurn,
   StartTurnBlockedByPendingQuestion,
+  UpdatePending,
   alloc_run_token,
   await_ack,
   cid_of,
@@ -36,11 +37,17 @@ from app.chat_writer import (
   get_writer,
 )
 from app import claude_sdk_runner, codex_sdk_runner
-from app.providers import _load_agent_settings, resolve_default_provider
+from app.chat_visibility import coerce_agent_settings
+from app.providers import (
+  _load_agent_settings,
+  effective_agent_settings,
+  resolve_default_provider,
+)
 from app.runner_registry import RunnerKind, registry
 from app.config import get_settings
 from app.database import get_db
 from app.memory_observability import record_memory_checkpoint_once
+from app.owner_input import publish_owner_input_changed
 from app.deps import (
   Principal, get_chat_view_principal, get_owner_or_chat_embed_principal,
   get_current_owner, reject_cross_site,
@@ -55,6 +62,14 @@ router = APIRouter(prefix="/api/chats", tags=["chats"])
 
 log = logging.getLogger(__name__)
 
+
+def _delegation_manages_chat(db: Session, chat_id: str) -> bool:
+  """Whether a parent delegation owns this chat's send lifecycle."""
+  return db.query(models.Delegation.id).filter(
+    models.Delegation.child_chat_id == chat_id,
+  ).first() is not None
+
+
 def _pending_question_open_conflict() -> HTTPException:
   return HTTPException(
     status_code=409,
@@ -63,6 +78,49 @@ def _pending_question_open_conflict() -> HTTPException:
       "message": "Answer the pending question, or Stop the turn, before sending.",
     },
   )
+
+
+def _model_selection_required_conflict() -> HTTPException:
+  return HTTPException(
+    status_code=409,
+    detail={
+      "code": "model_selection_required",
+      "message": "Choose a model before sending this chat.",
+    },
+  )
+
+
+def _selected_model_for_chat(
+  chat: models.Chat, *, provider: str | None = None,
+) -> str | None:
+  """Return the explicit model this chat would use, never an SDK fallback."""
+  effective = effective_agent_settings(
+    get_settings().data_dir,
+    coerce_agent_settings(chat.agent_settings_json) or None,
+    provider=provider or chat.provider or "claude",
+  )
+  model = effective.get("model")
+  return model.strip() if isinstance(model, str) and model.strip() else None
+
+
+def _next_execution_provider(db: Session, chat: models.Chat) -> str:
+  """Match the provider the current send path will actually execute on."""
+  provider = chat.provider or "claude"
+  # StartTurn alone re-reads the owner's latest provider for a pristine owner
+  # chat. Queued, draining, app-owned, and already-started chats keep their
+  # durable provider, so the model check must evaluate against that same value.
+  if (
+    chat.created_by_app_id is None
+    and not (chat.messages or [])
+    and not (chat.pending_messages or [])
+    and not is_chat_running(chat.id)
+    and not is_draining()
+  ):
+    owner = db.query(models.Owner).first()
+    return resolve_default_provider(
+      get_settings().data_dir, owner.provider if owner else None,
+    )
+  return provider
 
 # Keepalive interval for the SSE stream to prevent proxy timeouts.
 _KEEPALIVE_INTERVAL = 30  # seconds
@@ -76,6 +134,8 @@ _SNAPSHOT_REPLAY_EVENT_TYPES = frozenset({
   "answers_applied",
   "app_updated",
   "build_phase",
+  "goal_plan_updated",
+  "goal_activated",
   "chat_run_finished",
   "chat_run_started",
   "queued_turn_starting",
@@ -124,10 +184,9 @@ def _sse(data: dict) -> str:
   return f"data: {json.dumps(data)}\n\n"
 
 
-def _content_with_uploads(chat: models.Chat, body: schemas.SendMessage) -> str:
+def _content_with_uploads(chat: models.Chat, content: str) -> str:
   """Returns message content with the session upload notice appended."""
   settings = get_settings()
-  content = body.content
   # Force-steer resends the exact canonical pending-message content. Pending
   # rows already include this hidden upload manifest; appending it again makes
   # steered multi-message turns look duplicated/newline-heavy in the client and
@@ -316,7 +375,7 @@ def _user_message_from_body(
   """Builds the durable user message payload for a send request."""
   user_msg = {
     "role": "user",
-    "content": _content_with_uploads(chat, body),
+    "content": _content_with_uploads(chat, body.content),
     "ts": int(time.time() * 1000),
   }
   # Carry the client-minted identity when present; API clients may omit it, so
@@ -532,6 +591,14 @@ async def send_message(
   """
   require_chat_embed_operation(principal, "chat:send")
   chat = get_active_chat_for_principal(db, chat_id, principal)
+  if _delegation_manages_chat(db, chat_id):
+    raise HTTPException(
+      status_code=409,
+      detail={
+        "code": "delegation_managed",
+        "message": "This evaluator chat is managed by its parent workflow.",
+      },
+    )
 
   # AskUserQuestion answer delivery. If a live SDK turn is blocked waiting for
   # the answer (held in `questions._pending[chat_id]`), persist through the
@@ -636,6 +703,7 @@ async def send_message(
             "question_id": body.question_id or pending.question_id,
             "answers": body.answers,
           })
+        publish_owner_input_changed(chat_id, None, question_id=None)
         return _answer_delivered_response(chat_id)
       # No in-memory pending question. If the chat is still alive, this is a
       # stale/foreign card (or Stop cancelled the question) and must not answer
@@ -665,6 +733,9 @@ async def send_message(
           status_code=410,
           detail="The question is no longer accepting answers.",
         )
+
+      if _selected_model_for_chat(chat) is None:
+        raise _model_selection_required_conflict()
 
       if not mark_starting(chat_id):
         raise HTTPException(
@@ -779,11 +850,26 @@ async def _send_message_locked(
   duplicate = _duplicate_send_response(chat_id, chat, body.cid)
   if duplicate is not None:
     return duplicate
+  # Re-check after acquiring the transition lock: creation may have attached
+  # this chat to a delegation after the request's initial admission read.
+  if _delegation_manages_chat(db, chat_id):
+    raise HTTPException(
+      status_code=409,
+      detail={
+        "code": "delegation_managed",
+        "message": "This evaluator chat is managed by its parent workflow.",
+      },
+    )
   if body.continuation == "manual" and principal.app_id is not None:
     raise HTTPException(
       status_code=403,
       detail="Only the owner can resume a paused chat.",
     )
+  next_execution_provider = _next_execution_provider(db, chat)
+  if _selected_model_for_chat(
+    chat, provider=next_execution_provider,
+  ) is None:
+    raise _model_selection_required_conflict()
   record_memory_checkpoint_once(
     "chat_send_first_request",
     chat_id=chat_id,
@@ -801,7 +887,7 @@ async def _send_message_locked(
     activity.log_event(
       "chat_sent",
       chat_id=chat_id,
-      provider=(chat.provider or "claude"),
+      provider=next_execution_provider,
       app_id=principal.app_id,
     )
 
@@ -867,7 +953,15 @@ async def _send_message_locked(
     if (
       is_chat_running(chat_id)
       and not questions.is_waiting(chat_id)
-      and (body.force_steer or body.direct_steer or _steer_enabled(chat))
+      and (
+        body.force_steer
+        or body.direct_steer
+        # Hidden sends are product control carriers, not owner-authored course
+        # corrections.  They must keep their queue boundary even when the
+        # owner has enabled automatic steering; explicit internal direct/force
+        # steering above remains available for the few flows that own it.
+        or (not body.hidden and _steer_enabled(chat))
+      )
       and (
         body.force_steer
         or body.direct_steer
@@ -1034,20 +1128,12 @@ async def _send_message_locked(
     start_gen = current_run_generation(chat_id)
     run_token = alloc_run_token()
     user_msg = _user_message_from_body(chat, body)
-    owner = db.query(models.Owner).first()
-    global_default_provider = resolve_default_provider(
-      get_settings().data_dir, owner.provider if owner else None,
-    )
     # An app-owned chat chooses its provider when the app creates the chat.
     # Preserve that explicit contract through the first StartTurn instead of
     # replacing it with whichever provider the owner most recently selected
     # in an unrelated chat. Owner-created empty chats deliberately retain the
     # live-default behavior documented by create_chat.
-    default_provider = (
-      (chat.provider or global_default_provider)
-      if chat.created_by_app_id is not None
-      else global_default_provider
-    )
+    default_provider = next_execution_provider
 
     ack = get_writer().submit(
       StartTurn(
@@ -1175,6 +1261,50 @@ async def cancel_pending_message(
   )
   result = await await_ack(ack)
   return {"pending_messages": result["pending"]}
+
+
+@router.patch(
+  "/{chat_id}/pending/{cid}",
+  status_code=200,
+  dependencies=[Depends(reject_cross_site)],
+)
+async def update_pending_message(
+  chat_id: str,
+  cid: str,
+  body: schemas.PendingMessageUpdate,
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+):
+  """Edits one queued (not-yet-started) user message in place, identified by
+  its stable `cid`. Only the visible text changes; the actor's UpdatePending
+  preserves the row's identity, ordering, attachments, and queue position.
+
+  The request carries just the owner's text. The hidden session-file manifest
+  is re-derived here through the same `_content_with_uploads` the send path
+  uses, so the edit can never blank a row or drop its file references, and the
+  browser is never trusted to round-trip that hidden content.
+
+  Returns `updated` plus the current pending queue so the client can reconcile
+  drift: `updated` is False when a racing promotion or cancellation pulled the
+  message into the active turn between the owner saving and the PATCH landing.
+  """
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:send")
+  chat = get_active_chat_for_principal(
+    db, chat_id, principal, load_fields=(models.Chat.uploads,),
+  )
+  content = body.content.strip()
+  if not content:
+    raise HTTPException(status_code=422, detail="Queued message cannot be empty.")
+  content = _content_with_uploads(chat, content)
+  # The actor's UpdatePending is the SOLE runtime mutator of pending_messages,
+  # so an edit racing a concurrent promote/cancel can't lost-update.
+  ack = get_writer().submit(
+    UpdatePending(chat_id=chat_id, run_token="", cid=cid, content=content)
+  )
+  result = await await_ack(ack)
+  return {"updated": result["updated"], "pending_messages": result["pending"]}
 
 
 @router.get("/{chat_id}/stream")

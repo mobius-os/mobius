@@ -17,7 +17,7 @@ import {
   composerTailIntentRequestsFollow,
   delayedSendWillPin,
   gestureLayoutRetryDelay,
-  isNearContentBottom,
+  isNearPhysicalBottom,
   layoutMayOwnScroll,
   modeForChatExit,
   modeForDisclosureToggle,
@@ -27,7 +27,9 @@ import {
   modeAfterReaderGesture,
   modeAfterSpacerResize,
   modeAfterTerminalLayout,
+  nestedReaderTargetOwnsInput,
   physicalBottomAnchorModeFromScroll,
+  readerInputClaimsPhysicalTail,
   readerInputEscapeDirection,
   readerInputActivatesDisclosure,
   readerInputMayScroll,
@@ -78,18 +80,6 @@ test('shouldPinSend trusts actual scroll position over stale FOLLOW_BOTTOM mode'
   }), false)
 })
 
-test('shouldPinSend can use a complete pre-blur auto-scroll snapshot on mobile submit', () => {
-  // Mobile send blurs the textarea, which can resize/clamp the viewport before
-  // the pin decision runs. A true pre-blur bottom snapshot must win over the
-  // post-blur geometry so send-at-bottom still pins the new user row.
-  assert.equal(shouldPinSend({
-    scrollEl: makeScrollEl({ scrollHeight: 2000, scrollTop: 0, clientHeight: 500 }),
-    mode: { kind: 'ANCHOR_AT', key: 'old', offset: 0 },
-    isFirstUserMsg: false,
-    wasAtContentBottom: true,
-  }), true)
-})
-
 test('shouldPinSend uses FOLLOW_BOTTOM only when no scroll element is available', () => {
   assert.equal(shouldPinSend({
     scrollEl: null,
@@ -98,20 +88,10 @@ test('shouldPinSend uses FOLLOW_BOTTOM only when no scroll element is available'
   }), true)
 })
 
-test('shouldPinSend holds delayed insertion when submit-time intent is unavailable', () => {
-  assert.equal(shouldPinSend({
-    scrollEl: makeScrollEl({ scrollHeight: 2000, scrollTop: 0, clientHeight: 500 }),
-    mode: { kind: 'FOLLOW_BOTTOM' },
-    isFirstUserMsg: false,
-    wasAtContentBottom: false,
-  }), false)
-})
-
-test('shouldPinSend pins a following reader at the real-content bottom, ignoring dynamic spacer', () => {
-  // Raw gap is 440px, but 400px is phantom spacer left by a previous pin.
-  // Real content gap is 40px: visually, the reader is at the conversation
-  // tail. The next send should pin to the top even though the physical scroll
-  // bottom includes empty reserved room below the messages.
+test('shouldPinSend does not mistake reserved reply room for autoscroll after an upward escape', () => {
+  // Raw physical gap is 440px. The old rule subtracted the 400px spacer,
+  // misclassified this as a 40px bottom gap, and yanked the next message to the
+  // top even though the reader had moved the latest user row into mid-screen.
   const scrollEl = makeScrollEl({
     scrollHeight: 2000,
     scrollTop: 1000,
@@ -120,12 +100,12 @@ test('shouldPinSend pins a following reader at the real-content bottom, ignoring
   })
   assert.equal(shouldPinSend({
     scrollEl,
-    mode: { kind: 'FOLLOW_BOTTOM' },
+    mode: { kind: 'ANCHOR_AT', key: 'reader-row', offset: -280 },
     isFirstUserMsg: false,
-  }), true)
+  }), false)
 })
 
-test('shouldPinSend still refuses to pin when real content gap is large', () => {
+test('shouldPinSend still refuses to pin when the physical bottom gap is large', () => {
   const scrollEl = makeScrollEl({
     scrollHeight: 2000,
     scrollTop: 800,
@@ -139,10 +119,10 @@ test('shouldPinSend still refuses to pin when real content gap is large', () => 
   }), false)
 })
 
-test('shouldPinSend trusts bottom geometry even when mode is a stale hold', () => {
+test('shouldPinSend trusts the exact physical bottom even when mode is a stale hold', () => {
   const scrollEl = makeScrollEl({
     scrollHeight: 2000,
-    scrollTop: 1000,
+    scrollTop: 1440,
     clientHeight: 560,
     spacerHeight: 400,
   })
@@ -207,6 +187,44 @@ test('only scrolling keys claim reader ownership', () => {
   assert.equal(readerInputMayScroll('keydown', 'Tab'), true)
   assert.equal(readerInputMayScroll('wheel'), true)
   assert.equal(readerInputMayScroll('touchmove'), true)
+})
+
+test('nested controls keep their own keys and available scroll range', () => {
+  const editor = {
+    closest: selector => selector.startsWith('textarea,') ? editor : null,
+  }
+  const button = {
+    closest: selector => selector.startsWith('button,') ? button : null,
+  }
+  assert.equal(nestedReaderTargetOwnsInput({
+    type: 'keydown', key: 'End', target: editor,
+  }), true, 'caret navigation in a textarea is not transcript intent')
+  assert.equal(nestedReaderTargetOwnsInput({
+    type: 'keydown', key: ' ', target: button,
+  }), true, 'Space activates the focused control instead of scrolling the chat')
+  assert.equal(nestedReaderTargetOwnsInput({
+    type: 'keydown', key: 'End', target: button,
+  }), false, 'an unconsumed scroll key may still belong to the transcript')
+
+  const scrollEl = { contains: node => node === nested }
+  const nested = {
+    scrollTop: 20,
+    scrollHeight: 200,
+    clientHeight: 80,
+    closest: selector => selector === '[data-chat-scroll-region], .chat__scroll'
+      ? nested
+      : null,
+  }
+  assert.equal(nestedReaderTargetOwnsInput({
+    type: 'wheel', target: nested, scrollEl, direction: 'down',
+  }), true)
+  nested.scrollTop = 120
+  assert.equal(nestedReaderTargetOwnsInput({
+    type: 'wheel', target: nested, scrollEl, direction: 'down',
+  }), false, 'a clamped nested surface may chain the gesture to the transcript')
+  assert.equal(nestedReaderTargetOwnsInput({
+    type: 'wheel', target: nested, scrollEl, direction: 'up',
+  }), true)
 })
 
 test('a composer press or direct edit requests follow only at the physical tail', () => {
@@ -536,18 +554,16 @@ test('queued submission anchors before the active assistant shell that steer wil
   )
 })
 
-test('isNearContentBottom uses the same phantom-spacer bottom contract', () => {
+test('isNearPhysicalBottom keeps reserved room in the reader distance', () => {
   const scrollEl = makeScrollEl({
     scrollHeight: 2000,
     scrollTop: 1000,
     clientHeight: 560,
     spacerHeight: 400,
   })
-  assert.equal(isNearContentBottom(scrollEl), true)
-  assert.ok(
-    scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight > 50,
-    'the meaningful content tail does not require traversing reserved room',
-  )
+  assert.equal(isNearPhysicalBottom(scrollEl), false)
+  scrollEl.scrollTop = 1440
+  assert.equal(isNearPhysicalBottom(scrollEl), true)
 })
 
 test('pin reapply is needed when the first pin was clamped but spacer now makes the target reachable', () => {
@@ -828,6 +844,19 @@ test('reader settlement follows the physical tail even while reservation remains
   assert.equal(readerInputEscapeDirection('keydown', { key: 'Tab' }), null)
   assert.equal(readerInputEscapeDirection('pointerdown', {}), null)
 }
+
+test('end-directed input at the physical clamp follows without a scroll event', () => {
+  assert.equal(readerInputClaimsPhysicalTail('down', 0), true,
+    'a downward input at the clamp is explicit follow intent')
+  assert.equal(readerInputClaimsPhysicalTail('down', 3.5), true,
+    'subpixel browser rounding at the clamp remains physical-tail intent')
+  assert.equal(readerInputClaimsPhysicalTail('down', 4), false,
+    'near the tail is not enough when no scroll event proves arrival')
+  assert.equal(readerInputClaimsPhysicalTail('up', 0), false,
+    'an upward input at the tail must escape rather than follow')
+  assert.equal(readerInputClaimsPhysicalTail(null, 0), false,
+    'directionless input cannot manufacture follow intent')
+})
 
 {
   assert.equal(readerScrollEscapeDirection(1400, 1200), 'up')

@@ -132,6 +132,8 @@ export const coldRestoredCanvasAppId =
  *   beforeNavigateRef   optional synchronous destination claimant, run after
  *                       validation/no-op detection but before history or
  *                       workspace mutation.
+ *   beforeRestoreRouteRef optional synchronous Back/Forward destination hook,
+ *                       run after validation but before workspace mutation.
  *
  * Three load-bearing pieces remain: `openDrawer` pushes one mobile sentinel;
  * `navTo` retags that sentinel or pushes one ordinary destination; every modal
@@ -148,6 +150,7 @@ export default function useNavigation({
   replaceImplicitBootTab,
   dragActiveRef,
   beforeNavigateRef,
+  beforeRestoreRouteRef,
 }) {
   // Monotonic presentation signal for re-revealing an already-active tab. The
   // semantic route remains a no-op (no history or workspace write), but a drawer
@@ -640,6 +643,7 @@ export default function useNavigation({
     // skip past the drawer's sentinel before the first traversal settles.
     if (!drawerOpenRef.current || drawerClosePendingRef.current) return
     if (drawerPushedRef.current) {
+      beforeRestoreRouteRef?.current?.(snapshotRoute())
       clearDrawerOpenAfterClose()
       drawerClosePendingRef.current = true
       drawerClosePendingAtRef.current = Date.now()
@@ -1116,6 +1120,7 @@ export default function useNavigation({
       if (chatId != null) itemRoute = { view: 'chat', chatId, appId: null, paneId: route.paneId }
     }
     if (itemRoute) {
+      beforeRestoreRouteRef?.current?.(itemRoute)
       applyModeDestination(itemRoute)
       return
     }
@@ -1139,7 +1144,13 @@ export default function useNavigation({
     }
     setSettingsOpen(false)
     settingsOpenRef.current = false
-  }, [applyModeDestination, applySettingsDestination, dispatchWorkspace, workspaceStateRef])
+  }, [
+    applyModeDestination,
+    applySettingsDestination,
+    beforeRestoreRouteRef,
+    dispatchWorkspace,
+    workspaceStateRef,
+  ])
 
   useEffect(() => {
     let bootPaneId = workspaceStateRef.current.ws.focusedPaneId
@@ -1430,7 +1441,8 @@ export default function useNavigation({
       // gesture. closeDrawer also traverses history, but that traversal is our
       // own bookkeeping: arming the same guard there made a quick post-swipe
       // iOS tap disappear when WebKit delivered click without pointerdown.
-      if (!drawerClosePendingRef.current) {
+      const userBackTraversal = !drawerClosePendingRef.current
+      if (userBackTraversal) {
         backFiredRef.current = true
         setTimeout(() => { backFiredRef.current = false }, 400)
       }
@@ -1457,6 +1469,12 @@ export default function useNavigation({
       // the drawer only — never pops navStack. Catches real back-gestures on a
       // drawer-open view AND closeDrawer's history.back().
       if (drawerOpenRef.current && drawerPushedRef.current) {
+        if (userBackTraversal) {
+          const returnRoute = isRestorableRoute(destination?.route)
+            ? destination.route
+            : snapshotRoute()
+          beforeRestoreRouteRef?.current?.(returnRoute)
+        }
         const reopenAfterClose = drawerOpenAfterCloseRef.current
         clearDrawerOpenAfterClose()
         drawerPushedRef.current = false

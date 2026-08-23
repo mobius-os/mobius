@@ -57,6 +57,7 @@ chat_router = _load("chat")
 chat_embed_router = _load("chat_embed")
 chats_router = _load("chats")
 chats_stream_router = _load("chats_stream")
+secure_inputs_router = _load("secure_inputs")
 chat_logs_router = _load("chat_logs")
 connectors_router = _load("connectors")
 try:
@@ -64,6 +65,7 @@ try:
 except Exception:  # pragma: no cover - mirrors _load's stub behavior
   connectors_public_router = APIRouter()
 proxy_router = _load("proxy")
+public_apps_router = _load("public_apps")
 local_services_router = _load("local_services")
 notify_router = _load("notify")
 settings_router = _load("settings")
@@ -73,10 +75,12 @@ uploads_router = _load("uploads")
 media_router = _load("media")
 secrets_router = _load("secrets")
 github_router = _load("github")
+identity_router = _load("identity")
 push_router = _load("push")
 notifications_router = _load("notifications")
 debug_router = _load("debug")
 delegations_router = _load("delegations")
+goal_plans_router = _load("goal_plans")
 theme_router = _load("theme")
 self_reminders_router = _load("self_reminders")
 skills_router = _load("skills")
@@ -85,6 +89,7 @@ client_error_router = _load("client_error")
 client_signal_router = _load("client_signal")
 platform_router = _load("platform")
 published_router = _load("published")
+connect_router = _load("connect")
 
 __all__ = [
   "admin_router",
@@ -96,10 +101,12 @@ __all__ = [
   "chat_embed_router",
   "chats_router",
   "chats_stream_router",
+  "secure_inputs_router",
   "chat_logs_router",
   "connectors_router",
   "connectors_public_router",
   "proxy_router",
+  "public_apps_router",
   "local_services_router",
   "notify_router",
   "settings_router",
@@ -107,10 +114,12 @@ __all__ = [
   "media_router",
   "secrets_router",
   "github_router",
+  "identity_router",
   "push_router",
   "notifications_router",
   "debug_router",
   "delegations_router",
+  "goal_plans_router",
   "theme_router",
   "self_reminders_router",
   "skills_router",
@@ -119,4 +128,5 @@ __all__ = [
   "client_signal_router",
   "platform_router",
   "published_router",
+  "connect_router",
 ]

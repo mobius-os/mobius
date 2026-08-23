@@ -24,11 +24,11 @@
     "test:hooks:coverage": "node --experimental-test-coverage --test-coverage-lines=63 --test-coverage-branches=60 --test-coverage-functions=58 --loader=./src/components/ChatView/hooks/__tests__/react-loader.mjs --test $(find src/components/ChatView/hooks -name '*.test.js') $(find src/components/Shell/__tests__ -name '*.hooktest.js')"
   },
   "dependencies": {
-    "@codemirror/commands": "6.10.4",
+    "@codemirror/commands": "6.11.0",
     "@codemirror/lang-markdown": "6.5.2",
     "@codemirror/language": "6.12.4",
     "@codemirror/state": "6.7.1",
-    "@codemirror/view": "6.43.8",
+    "@codemirror/view": "6.43.9",
     "@lezer/highlight": "1.2.3",
     "@openai/apps-sdk-ui": "0.2.2",
     "@tanstack/query-async-storage-persister": "^5.101.2",
@@ -40,7 +40,7 @@
     "dompurify": "^3.4.13",
     "highlight.js": "^11.11.1",
     "idb-keyval": "^6.2.6",
-    "katex": "0.18.1",
+    "katex": "0.18.4",
     "lucide-react": "^1.23.0",
     "marked": "^18.0.9",
     "marked-highlight": "2.2.4",

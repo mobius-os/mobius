@@ -445,10 +445,10 @@ textarea:focus-visible {
    chrome gets the lock.  buttons already get this via the rule above;
    these selectors cover labelled containers that aren't `<button>`. */
 
-/* Shell header (logo, wordmark, brand area, offline pill). */
+/* Shell header (logo, wordmark, brand area, connection status). */
 .shell__bar,
 .shell__brand,
-.shell__offline,
+.shell__connection-status,
 .shell__wordmark {
   user-select: none;
   -webkit-user-select: none;

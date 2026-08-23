@@ -168,7 +168,6 @@ export function chatDetailCacheValue(data = {}) {
       effective: data.effective_agent_settings || {},
       has_assistant_turns: !!data.has_assistant_turns,
       auto_resume_on_limit: !!data.auto_resume_on_limit,
-      auto_resume_on_restart: !!data.auto_resume_on_restart,
     },
   }
 }

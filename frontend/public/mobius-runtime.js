@@ -3737,6 +3737,88 @@ function makeImmersive({ appId } = {}) {
 }
 
 //#endregion
+//#region src/runtime/clipboard.js
+const HOST_COPY_TIMEOUT_MS = 1200;
+function execCopy(value) {
+	try {
+		const previousActive = document.activeElement;
+		const ta = document.createElement("textarea");
+		ta.value = value;
+		ta.setAttribute("aria-hidden", "true");
+		ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;margin:0;opacity:0;font-size:16px;";
+		document.body.appendChild(ta);
+		let copied = false;
+		try {
+			ta.focus();
+			ta.select();
+			if (typeof ta.setSelectionRange === "function") ta.setSelectionRange(0, value.length);
+			copied = Boolean(document.execCommand("copy"));
+		} catch {
+			copied = false;
+		}
+		try {
+			ta.remove();
+		} catch {}
+		try {
+			if (previousActive && typeof previousActive.focus === "function") previousActive.focus();
+		} catch {}
+		return copied;
+	} catch {
+		return false;
+	}
+}
+async function asyncCopy(value) {
+	try {
+		if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+			await navigator.clipboard.writeText(value);
+			return true;
+		}
+	} catch {}
+	return false;
+}
+function hostCopy(value) {
+	if (typeof window === "undefined" || !window.parent || window.parent === window) return Promise.resolve(null);
+	const requestId = globalThis.crypto?.randomUUID?.() || `clipboard-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+	return new Promise((resolve) => {
+		let settled = false;
+		const finish = (result) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeout);
+			window.removeEventListener("message", onMessage);
+			resolve(result);
+		};
+		const onMessage = (event) => {
+			if (event.source !== window.parent || event.origin !== window.location.origin) return;
+			const message = event.data;
+			if (message?.type !== "moebius:clipboard-write-result" || message.requestId !== requestId) return;
+			finish(message.ok === true);
+		};
+		const timeout = setTimeout(() => finish(null), HOST_COPY_TIMEOUT_MS);
+		window.addEventListener("message", onMessage);
+		try {
+			window.parent.postMessage({
+				type: "moebius:clipboard-write",
+				requestId,
+				text: value
+			}, window.location.origin);
+		} catch {
+			finish(null);
+		}
+	});
+}
+function makeClipboard() {
+	async function writeText(text) {
+		const value = text == null ? "" : String(text);
+		if (!value) return false;
+		if (execCopy(value)) return true;
+		if (await hostCopy(value) === true) return true;
+		return asyncCopy(value);
+	}
+	return { writeText };
+}
+
+//#endregion
 //#region src/runtime/index.js
 let _online = typeof navigator !== "undefined" ? navigator.onLine : true;
 const _onlineListeners = /* @__PURE__ */ new Set();
@@ -3814,7 +3896,8 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 		}),
 		nav: makeNav(),
 		split: makeSplit(),
-		immersive: makeImmersive({ appId })
+		immersive: makeImmersive({ appId }),
+		clipboard: makeClipboard()
 	};
 	window.mobius = api;
 	_runtimeContext = {

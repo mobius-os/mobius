@@ -6,10 +6,12 @@ registry beside it makes steering and diagnostics operate on the same owner
 rather than reaching through the broader chat scheduler.
 """
 
+import asyncio
 import copy
 import time
 import uuid
 from datetime import UTC, datetime
+from typing import Awaitable, Callable
 
 from app.agent_lifecycle import normalize_chat_event
 from app.broadcast import get_broadcast
@@ -43,6 +45,7 @@ from app.memory_recall import (
   RecallBinding, recall_from_command, settle_recall,
 )
 from app.runtime_types import ChatEvent
+from app.secure_inputs import redact_reveal_markers
 
 
 _active_sinks: dict[str, "ChatEventSink"] = {}
@@ -243,7 +246,7 @@ class ChatEventSink:
   _IMMEDIATE_SAVE_TYPES = frozenset(
     {
       "context_compacted", "tool_start", "tool_end", "task_start",
-      "task_done", "error",
+      "task_done", "secure_input_request", "secure_input_settled", "error",
     }
   )
 
@@ -254,6 +257,7 @@ class ChatEventSink:
     run_token: str | None = None,
     *,
     recall_binding: RecallBinding,
+    on_question_checkpoint: Callable[[], Awaitable[None]] | None = None,
   ):
     self.bc = bc
     self.chat_id = chat_id
@@ -262,6 +266,13 @@ class ChatEventSink:
     # that silently fell back to "no provider" would drop every citation for
     # the turn and look identical to "the agent never looked".
     self._recall_binding = recall_binding
+    # Active Goals may span many physical turns. A durably persisted question
+    # is their safe mid-operation summary boundary: the card is already
+    # recoverable, while an answer has not yet advanced the transcript. The
+    # caller owns summary policy; the sink only fires this optional hook after
+    # the QuestionCommit barrier and never waits on it before showing the card.
+    self._on_question_checkpoint = on_question_checkpoint
+    self._checkpoint_tasks: set[asyncio.Task] = set()
     # Per-turn run identity, allocated by the scheduler and threaded in
     # via `_run_chat_impl`. The sink stamps it on every writer-actor
     # command so the actor coalesces/fences this turn's snapshots under
@@ -550,6 +561,10 @@ class ChatEventSink:
     # contains the line that settles a recognized lookup.
     output_reduced = False
     if event_type == "tool_output":
+      # An explicit secure-input reveal reaches the provider as a tool result,
+      # but the marked envelope must not enter Möbius's live UI, transcript, or
+      # chat-side logs. Normal sealed execution never emits these markers.
+      event["content"] = redact_reveal_markers(event.get("content"))
       output_reduced = self._reduce_tool_output(event)
       if not output_reduced and event.get("output_exit_code") is None:
         exit_code = tool_output_exit_code(event.get("content"))
@@ -881,6 +896,24 @@ class ChatEventSink:
     # snapshot in publish() doesn't redundantly re-commit the same state
     # immediately after.
     self._last_save = time.monotonic()
+    if self._on_question_checkpoint is not None:
+      task = asyncio.create_task(self._on_question_checkpoint())
+      self._checkpoint_tasks.add(task)
+
+      def _settle_checkpoint(done: asyncio.Task) -> None:
+        self._checkpoint_tasks.discard(done)
+        try:
+          done.result()
+        except asyncio.CancelledError:
+          pass
+        except Exception:
+          _get_logger().debug(
+            "question checkpoint summary failed chat_id=%s",
+            self.chat_id,
+            exc_info=True,
+          )
+
+      task.add_done_callback(_settle_checkpoint)
 
 
 async def commit_steer_cut(

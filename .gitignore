@@ -8,6 +8,8 @@ venv/
 
 # Environment — never commit secrets
 .env
+# Retired versions wrote this secret file. It is no longer read, but a leftover
+# must remain uncommittable on an upgraded checkout.
 .mobius-recovery.env
 
 # Node

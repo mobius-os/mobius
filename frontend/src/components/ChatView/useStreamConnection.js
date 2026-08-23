@@ -135,6 +135,8 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  *                         { question_id, questions: [...] }. Renders a
  *                         card, absorbing the call's own tool_start
  *                         block in place (see streamReducers.js).
+ *   secure_input_request  Trusted one-use input card. Prompt labels and status
+ *                         persist; submitted values never ride SSE or chat.
  *   context_compacted     Provider condensed its native context window.
  *                         Appends a quiet, standalone timeline marker; this
  *                         is not tool activity or a handoff summary.
@@ -1037,6 +1039,40 @@ export default function useStreamConnection(chatId, {
               onLiveQuestionRef.current?.(event.question_id || null)
               applyStreamItems(prev => upsertQuestionItem(prev, incoming))
             }
+          } else if (event.type === 'secure_input_request') {
+            flushBuffer()
+            const incoming = {
+              type: 'secure_input',
+              request_id: event.request_id,
+              mode: event.mode || 'sealed',
+              title: event.title || 'Secure input',
+              description: event.description || '',
+              fields: Array.isArray(event.fields) ? event.fields : [],
+              status: 'pending',
+            }
+            applyStreamItems(prev => [
+              ...prev.filter(item => !(
+                item.type === 'secure_input'
+                && item.request_id === incoming.request_id
+              )),
+              incoming,
+            ])
+          } else if (
+            event.type === 'secure_input_filled'
+            || event.type === 'secure_input_consuming'
+            || event.type === 'secure_input_settled'
+          ) {
+            const status = event.type === 'secure_input_filled'
+              ? 'filled'
+              : event.type === 'secure_input_consuming'
+                ? 'consuming'
+                : (event.status || 'completed')
+            applyStreamItems(prev => prev.map(item => (
+              item.type === 'secure_input'
+              && item.request_id === event.request_id
+                ? { ...item, status }
+                : item
+            )))
           } else if (event.type === 'answers_applied') {
             // The question was answered (by this tab, another tab, or the
             // in-process answer delivery). Patch the in-flight card to

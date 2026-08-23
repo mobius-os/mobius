@@ -46,8 +46,10 @@ test('unanswered question cards do not have a stale gray state', () => {
     'a submitted multiline answer should stay scrollable but not editable')
   assert.match(component, /resizeCustomAnswer|textareaUsesNativeSizing/,
     'older browsers should measure the growing answer when native sizing is unavailable')
-  assert.match(component, /e\.key === 'Enter' && \(e\.metaKey \|\| e\.ctrlKey\)/,
-    'plain Enter should create a new line while the explicit shortcut submits')
+  assert.match(component, /isInlineEditorSubmit\(e, \{ isTouchPrimary: isTouchPrimary\(\) \}\)/,
+    'the custom answer should send on the same Enter chord as the composer')
+  assert.match(component, /if \(!canSubmit\) return/,
+    'Enter should stay a newline until the card can actually be submitted')
   assert.match(component, /val\.replace\(\/\\n\/g, '\\n  '\)/,
     'multiline custom answers should keep their structure in the resumed turn')
   assert.match(component, /const next = arr\.includes\(label\)[\s\S]*?: \[\.\.\.arr, label\]/,

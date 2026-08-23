@@ -62,7 +62,7 @@ export default function MarkerCard({ icon, title, subtitle, children }) {
         </div>
       )}
       {collapsible && open && (
-        <div className="chat__marker-body">{children}</div>
+        <div className="chat__marker-body" data-chat-scroll-region>{children}</div>
       )}
     </div>
   )

@@ -72,6 +72,10 @@ EventType = Literal[
   "task_progress",
   "task_done",
   "question",
+  "secure_input_request",
+  "secure_input_filled",
+  "secure_input_consuming",
+  "secure_input_settled",
   "queued_turn_starting",
   "catch_up_done",
   "error",
@@ -111,6 +115,10 @@ SYSTEM_EVENT_TYPES: frozenset[str] = frozenset({
   # notify.py routes it onto the building chat's broadcast alone, never the
   # system fan-out.
   "build_phase",
+  # Durable Goal-plan snapshots are chat-local and replay-safe. The API writes
+  # the snapshot before emitting this event; reconnect can always recover it
+  # from GET /api/chats/<id>/goal-plan.
+  "goal_plan_updated",
 })
 
 
@@ -241,7 +249,7 @@ def _persisted_block(block: dict) -> dict:
 # Event types that begin (or belong to) a DIFFERENT visible content block and
 # therefore legitimately END a trailing thinking run. This is EXACTLY the set of
 # branches below that APPEND a new sibling block: text, text_final, text_boundary,
-# context_compacted, tool_start, error, question.
+# context_compacted, tool_start, error, question, secure_input_request.
 #
 # Every OTHER event type must be TRANSPARENT to thinking coalescing:
 #  - Provider bookkeeping/heartbeats forwarded as "unknown_sdk_event" (a periodic
@@ -262,6 +270,7 @@ _THINKING_INTERRUPTING_TYPES: frozenset[str] = frozenset({
   "context_compacted",
   "tool_start",
   "question",
+  "secure_input_request",
   "error",
 })
 
@@ -507,6 +516,108 @@ def _process_question_event(event: dict, assistant_blocks: list) -> bool:
     return True
 
   return False
+
+
+_SECURE_INPUT_EVENT_TYPES = frozenset({
+  "secure_input_request",
+  "secure_input_filled",
+  "secure_input_consuming",
+  "secure_input_settled",
+})
+_SECURE_INPUT_TERMINAL_STATUSES = frozenset({
+  "completed", "failed", "cancelled", "expired",
+})
+_SECURE_INPUT_ACTIVE_PHASE = {"pending": 0, "filled": 1, "consuming": 2}
+
+
+def _secure_input_fields(fields) -> list[dict]:
+  """Copy only safe prompt metadata onto a durable secure-input receipt."""
+  safe: list[dict] = []
+  for raw in fields if isinstance(fields, list) else []:
+    if not isinstance(raw, dict):
+      continue
+    name = raw.get("name")
+    label = raw.get("label")
+    if not isinstance(name, str) or not name or len(name) > 48:
+      continue
+    if not isinstance(label, str) or not label or len(label) > 80:
+      continue
+    input_type = raw.get("type")
+    autocomplete = raw.get("autocomplete")
+    safe.append({
+      "name": name,
+      "label": label,
+      "type": input_type if input_type in {"text", "password"} else "password",
+      "autocomplete": (
+        autocomplete
+        if isinstance(autocomplete, str) and len(autocomplete) <= 64
+        else "off"
+      ),
+    })
+    if len(safe) >= 8:
+      break
+  return safe
+
+
+def _process_secure_input_event(event: dict, assistant_blocks: list) -> bool:
+  """Persist prompts and state while structurally excluding entered values."""
+  event_type = event.get("type")
+  request_id = event.get("request_id")
+  if not isinstance(request_id, str) or not request_id or len(request_id) > 128:
+    return False
+
+  existing = next((
+    block for block in reversed(assistant_blocks)
+    if block.get("type") == "secure_input"
+    and block.get("request_id") == request_id
+  ), None)
+
+  if event_type == "secure_input_request":
+    title = event.get("title")
+    description = event.get("description")
+    receipt = {
+      "type": "secure_input",
+      "request_id": request_id,
+      "mode": "reveal" if event.get("mode") == "reveal" else "sealed",
+      "title": title[:80] if isinstance(title, str) else "Secure input",
+      "description": (
+        description[:240] if isinstance(description, str) else ""
+      ),
+      "fields": _secure_input_fields(event.get("fields")),
+      "status": "pending",
+    }
+    if existing is None:
+      assistant_blocks.append(receipt)
+      return True
+    # A replayed request refreshes safe prompt metadata without turning a
+    # completed receipt back into a live form.
+    receipt["status"] = existing.get("status", "pending")
+    changed = any(existing.get(key) != value for key, value in receipt.items())
+    existing.update(receipt)
+    return changed
+
+  if existing is None:
+    return False
+  if event_type == "secure_input_filled":
+    status = "filled"
+  elif event_type == "secure_input_consuming":
+    status = "consuming"
+  else:
+    raw_status = event.get("status")
+    status = (
+      raw_status if raw_status in _SECURE_INPUT_TERMINAL_STATUSES else "failed"
+    )
+  current = existing.get("status", "pending")
+  if current in _SECURE_INPUT_TERMINAL_STATUSES:
+    return False
+  if (
+    status not in _SECURE_INPUT_TERMINAL_STATUSES
+    and _SECURE_INPUT_ACTIVE_PHASE.get(status, 0)
+      <= _SECURE_INPUT_ACTIVE_PHASE.get(current, 0)
+  ):
+    return False
+  existing["status"] = status
+  return True
 
 
 _SUBAGENT_EVENT_TYPES = frozenset({"task_start", "task_done"})
@@ -985,6 +1096,9 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
   if event_type == "question":
     return _process_question_event(event, assistant_blocks)
 
+  if event_type in _SECURE_INPUT_EVENT_TYPES:
+    return _process_secure_input_event(event, assistant_blocks)
+
   return False
 
 
@@ -1204,3 +1318,10 @@ def finalize_blocks(assistant_blocks: list) -> None:
     if (blk.get("type") == "tool"
         and blk.get("status") == "running"):
       blk["status"] = "done"
+    if (
+      blk.get("type") == "secure_input"
+      and blk.get("status") in {"pending", "filled", "consuming"}
+    ):
+      # A finalized/recovered turn no longer has an in-memory request behind
+      # the receipt. Never persist an apparently-live form after that boundary.
+      blk["status"] = "expired"

@@ -6,6 +6,13 @@ const SOURCE = readFileSync(
   new URL('../../../public/sw-push.js', import.meta.url),
   'utf8',
 )
+const BADGE_PNG = readFileSync(
+  new URL('../../../public/icons/notification-badge.png', import.meta.url),
+)
+const BADGE_SVG = readFileSync(
+  new URL('../../../public/icons/notification-badge.svg', import.meta.url),
+  'utf8',
+)
 
 // _safeTarget is the notification-click allowlist: it normalizes whatever a
 // notification carried in `data.target` down to a shell route we are willing
@@ -35,6 +42,18 @@ function loadSafeTarget() {
 }
 
 const safeTarget = loadSafeTarget()
+
+test('push worker uses a dedicated transparent 96px status-bar badge', () => {
+  assert.match(SOURCE, /badge:\s*['"]\/icons\/notification-badge\.png['"]/)
+  assert.deepEqual(
+    [...BADGE_PNG.subarray(0, 8)],
+    [137, 80, 78, 71, 13, 10, 26, 10],
+  )
+  assert.equal(BADGE_PNG.readUInt32BE(16), 96)
+  assert.equal(BADGE_PNG.readUInt32BE(20), 96)
+  assert.equal(BADGE_PNG[25], 6, 'badge PNG must retain its RGBA transparency')
+  assert.match(BADGE_SVG, /viewBox="0\.00 0\.00 96\.00 96\.00"/)
+})
 
 test('an app deep-link keeps the intent naming which item to open', () => {
   // The agent links artifacts as /shell/?app=artifacts&intent=artifact:<id>,

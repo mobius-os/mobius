@@ -65,7 +65,7 @@ def test_extensionless_blob_cold_read_serves_stored_mime(
 
   r = client.put(
     f"/api/storage/apps/{app_id}/avatar",
-    data=png,
+    content=png,
     headers={**auth, "Content-Type": "image/png"},
   )
   assert r.status_code == 204
@@ -87,7 +87,7 @@ def test_custom_mime_overrides_extension_guess(client, auth, owner_token):
 
   r = client.put(
     f"/api/storage/apps/{app_id}/model.bin",
-    data=data,
+    content=data,
     headers={**auth, "Content-Type": "model/gltf-binary"},
   )
   assert r.status_code == 204
@@ -101,7 +101,7 @@ def test_listing_reports_sidecar_mime(client, auth, owner_token):
   app_id = _make_app(client, owner_token)
   client.put(
     f"/api/storage/apps/{app_id}/media/clip",
-    data=b"\x00\x01\x02",
+    content=b"\x00\x01\x02",
     headers={**auth, "Content-Type": "audio/webm"},
   )
 
@@ -117,7 +117,7 @@ def test_sidecar_not_listed_in_app_tree(client, auth, owner_token):
   app_id = _make_app(client, owner_token)
   client.put(
     f"/api/storage/apps/{app_id}/avatar",
-    data=b"\x89PNG",
+    content=b"\x89PNG",
     headers={**auth, "Content-Type": "image/png"},
   )
 
@@ -135,7 +135,7 @@ def test_delete_removes_sidecar(client, auth, owner_token):
   app_id = _make_app(client, owner_token)
   client.put(
     f"/api/storage/apps/{app_id}/asset",
-    data=b"\x89PNG",
+    content=b"\x89PNG",
     headers={**auth, "Content-Type": "image/png"},
   )
   # The sidecar must physically vanish on delete.
@@ -154,7 +154,7 @@ def test_delete_removes_sidecar(client, auth, owner_token):
   # Re-create the same path with a different type — no stale shadow.
   client.put(
     f"/api/storage/apps/{app_id}/asset",
-    data=b"%PDF-1.4",
+    content=b"%PDF-1.4",
     headers={**auth, "Content-Type": "application/pdf"},
   )
   r = client.get(f"/api/storage/apps/{app_id}/asset", headers=auth)
@@ -215,7 +215,7 @@ def test_move_folder_onto_stale_meta_dest_does_not_nest_sidecars(tmp_path):
 def _put_blob(client, auth, app_id, name, nbytes):
   return client.put(
     f"/api/storage/apps/{app_id}/{name}",
-    data=b"a" * nbytes,
+    content=b"a" * nbytes,
     headers={**auth, "Content-Type": "application/octet-stream"},
   )
 

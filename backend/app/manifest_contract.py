@@ -5,6 +5,21 @@ from urllib.parse import unquote, urlparse
 import re
 
 REQUIRED_STRING_FIELDS = ("id", "name", "version", "description", "entry")
+# Capability permissions this Möbius build recognizes. An app MAY list any of
+# these in `requires` to demand the platform actually provides them; requiring a
+# name absent here fails the install loudly instead of granting nothing in
+# silence. Extending a capability (e.g. the identity bridge) adds its name here.
+RECOGNIZED_CAPABILITIES = (
+  "manage_apps",
+  "manage_skills",
+  "github_access",
+  "github_connect",
+  "filesystem_access",
+  "connections_manage",
+  "connect_manage",
+  "identity_manage",
+  "railway_manage",
+)
 SOURCE_FILES_COUNT_MAX = 50
 SKILLS_COUNT_MAX = 5
 MANIFEST_MAX_BYTES = 64 * 1024
@@ -214,20 +229,35 @@ def validate_manifest_contract(manifest) -> None:
       f"Manifest permission {names} has been removed; server-side app jobs "
       "run as ordinary Möbius processes."
     )
-  for field in (
-    "manage_apps",
-    "manage_skills",
-    "github_access",
-    "github_connect",
-    "filesystem_access",
-    "connections_manage",
-  ):
+  for field in RECOGNIZED_CAPABILITIES:
     if field in permissions and not isinstance(permissions[field], bool):
       _fail(f"Manifest `permissions.{field}` must be a boolean.")
+
+  # An app declares the platform capabilities it cannot function without. A name
+  # this build does not recognize means the running Möbius predates the feature
+  # the app needs, so refuse the install loudly here rather than let it land in a
+  # permanently broken state where the capability is silently ungranted.
+  requires = manifest.get("requires", [])
+  if not isinstance(requires, list) or not all(
+    isinstance(name, str) for name in requires
+  ):
+    _fail("Manifest `requires` must be a list of capability names.")
+  unmet = [name for name in requires if name not in RECOGNIZED_CAPABILITIES]
+  if unmet:
+    _fail(
+      "This app requires capabilities this Möbius build does not provide: "
+      + ", ".join(sorted(set(unmet)))
+      + ". Update Möbius, then install."
+    )
 
   # Runtime capabilities are normalized by the same canonical registry used
   # to build the owner-reviewable install contract. Keep a single definition
   # of names, versions, limits, and failure semantics.
+  from app.app_capabilities import normalize_public_access
+  try:
+    normalize_public_access(dict(manifest))
+  except ValueError as exc:
+    _fail(str(exc))
   from app.app_capabilities import normalize_runtime_capabilities
   try:
     normalize_runtime_capabilities(dict(manifest))

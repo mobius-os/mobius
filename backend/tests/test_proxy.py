@@ -299,6 +299,45 @@ def test_proxy_post_passes_sni_hostname_as_text(
   assert r.text == "ok"
 
 
+def test_proxy_sends_identifiable_user_agent(client, owner_token, monkeypatch):
+  """Both proxy verbs identify themselves instead of using httpx's default.
+
+  Public APIs with client-identification policies (OSM Nominatim, Photon)
+  reject "python-httpx/x.y" with 403, breaking every app that fetches them
+  through the proxy.
+  """
+  from app.routes.proxy import _PROXY_USER_AGENT
+
+  seen = []
+
+  def fake_validate_url_safe(url):
+    return "https://93.184.216.34/data", "example.com", "example.com"
+
+  async def fake_capped_response(_client, req):
+    seen.append(req.headers.get("user-agent"))
+    return Response(content=b"ok", media_type="text/plain")
+
+  monkeypatch.setattr("app.routes.proxy.validate_url_safe", fake_validate_url_safe)
+  monkeypatch.setattr("app.routes.proxy._capped_response", fake_capped_response)
+
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  r = client.get(
+    "/api/proxy",
+    params={"url": "https://example.com/data"},
+    headers=auth,
+  )
+  assert r.status_code == 200
+  r = client.post(
+    "/api/proxy",
+    json={"url": "https://example.com/data", "body": "value=1"},
+    headers=auth,
+  )
+  assert r.status_code == 200
+
+  assert seen == [_PROXY_USER_AGENT, _PROXY_USER_AGENT]
+  assert seen[0].startswith("Mobius/1.0")
+
+
 def test_proxy_forwards_rate_limit_headers():
   class _RateLimitedResponse:
     status_code = 429

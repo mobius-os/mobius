@@ -1049,6 +1049,112 @@ def _install_candidate_digest(
   return digest.hexdigest()
 
 
+def package_content_digest(
+  *,
+  manifest: dict,
+  entry_bytes: bytes,
+  icon_processed: bytes | None,
+  bundled_job: bytes | None,
+  static_assets: dict[str, bytes],
+  source_files: dict[str, bytes],
+  seeds: dict[str, bytes],
+) -> str:
+  """Bind every installable package byte without binding its public URL.
+
+  Install replay deliberately includes ``raw_base`` because a moved upstream
+  is a different replay input. Publication verification has the opposite
+  requirement: compare an accepted local package with the same bytes fetched
+  from its eventual public location. Reuse the install digest with one stable
+  empty origin so future package fields cannot silently drift between those
+  two comparisons.
+  """
+  return _install_candidate_digest(
+    manifest=manifest,
+    raw_base="",
+    entry_bytes=entry_bytes,
+    icon_processed=icon_processed,
+    bundled_job=bundled_job,
+    static_assets=static_assets,
+    source_files=source_files,
+    seeds=seeds,
+  )
+
+
+class PackageContentError(ValueError):
+  """An accepted source tree cannot reproduce its declared install package."""
+
+
+def package_content_digest_from_tree(
+  tree: dict[str, bytes],
+) -> tuple[str, str]:
+  """Return manifest identity + package digest from an immutable source tree.
+
+  This is the local half of publication verification. Keep it beside the
+  fetch/install implementation so every declared package input has one owner
+  when the manifest contract grows.
+  """
+  try:
+    manifest = json.loads(tree["mobius.json"])
+    validate_manifest_contract(manifest)
+  except (
+    KeyError, UnicodeDecodeError, json.JSONDecodeError, ManifestContractError,
+  ) as exc:
+    raise PackageContentError("invalid or missing mobius.json") from exc
+
+  def required_bytes(relative: str, field: str) -> bytes:
+    try:
+      return tree[relative]
+    except KeyError as exc:
+      raise PackageContentError(
+        f"missing declared {field} file ({relative})",
+      ) from exc
+
+  entry_bytes = required_bytes(manifest["entry"], "entry")
+  source_files = {
+    relative: required_bytes(relative, "source_files")
+    for relative in manifest.get("source_files") or []
+  }
+  schedule = manifest.get("schedule")
+  job_name = schedule.get("job") if isinstance(schedule, dict) else None
+  bundled_job = required_bytes(job_name, "schedule job") if job_name else None
+
+  icon_processed = None
+  icon_name = manifest.get("icon")
+  if icon_name:
+    try:
+      icon_processed = icon_assets.normalize_icon(
+        required_bytes(icon_name, "icon"),
+      )
+    except icon_assets.InvalidIcon as exc:
+      raise PackageContentError("invalid declared icon") from exc
+
+  static_assets = {
+    destination: required_bytes(relative, "static asset")
+    for destination, relative in static_asset_entries(
+      manifest.get("static_assets") or {},
+    ).items()
+  }
+  seeds: dict[str, bytes] = {}
+  for destination, value in (manifest.get("storage_seeds") or {}).items():
+    seeds[destination] = (
+      json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+      ).encode("utf-8")
+      if _seed_value_is_inline(value)
+      else required_bytes(value, "storage seed")
+    )
+
+  return manifest["id"], package_content_digest(
+    manifest=manifest,
+    entry_bytes=entry_bytes,
+    icon_processed=icon_processed,
+    bundled_job=bundled_job,
+    static_assets=static_assets,
+    source_files=source_files,
+    seeds=seeds,
+  )
+
+
 def _source_review_digest(
   *,
   manifest: dict,
@@ -1758,13 +1864,26 @@ class InstallCandidate:
   source_review_digest: str
 
 
+def install_candidate_content_digest(candidate: InstallCandidate) -> str:
+  """Return the origin-independent package digest for one fetched candidate."""
+  return package_content_digest(
+    manifest=candidate.manifest,
+    entry_bytes=candidate.entry_bytes,
+    icon_processed=candidate.icon_processed,
+    bundled_job=candidate.bundled_job,
+    static_assets=candidate.static_assets,
+    source_files=candidate.source_files,
+    seeds=candidate.seeds,
+  )
+
+
 @dataclass(frozen=True)
 class InstallTarget:
   """Identity decision made before any database or filesystem mutation."""
 
   existing: models.App | None
   mode: str
-  renaming: bool
+  adopting_previous_id: bool
   adopting_trusted_origin: bool
   canonical_manifest_url: str
   force_core_store_update: bool
@@ -2010,6 +2129,20 @@ async def _fetch_install_candidate(
   )
 
 
+async def fetch_install_candidate(manifest_url: str) -> InstallCandidate:
+  """Fetch the exact package the installer would use, without installing it."""
+  return await _fetch_install_candidate(
+    manifest_url=manifest_url,
+    manifest=None,
+    raw_base=None,
+    reviewed_capability_digest=None,
+    reviewed_source_digest=None,
+    expected_app_id=None,
+    expected_upstream_commit=None,
+    expected_candidate_digest=None,
+  )
+
+
 def _select_install_target(
   db: Session,
   *,
@@ -2034,7 +2167,7 @@ def _select_install_target(
     db, source_url=source_for_key, manifest_id=manifest_id,
   )
 
-  renaming = False
+  adopting_previous_id = False
   if existing is None:
     # A rename is explicit and source-bound: previous_id is looked up under the
     # same canonical package base, never by a globally reusable slug.
@@ -2050,7 +2183,7 @@ def _select_install_target(
         .first()
       )
       if existing:
-        renaming = True
+        adopting_previous_id = True
 
   if expected_app_id is not None and (
     existing is None or existing.id != expected_app_id
@@ -2059,7 +2192,7 @@ def _select_install_target(
   return InstallTarget(
     existing=existing,
     mode="update" if existing else "install",
-    renaming=renaming,
+    adopting_previous_id=adopting_previous_id,
     adopting_trusted_origin=bool(
       existing is not None and existing.manifest_url is None
     ),
@@ -2195,7 +2328,7 @@ async def _prepare_app_row(
   manifest_id = manifest["id"]
   data_dir = Path(get_settings().data_dir)
   existing = target.existing
-  renaming = target.renaming
+  adopting_previous_id = target.adopting_previous_id
   canonical_manifest_url = target.canonical_manifest_url
 
   if existing:
@@ -2205,41 +2338,49 @@ async def _prepare_app_row(
     app.description = manifest.get("description", "")
     db.flush()
 
-    if renaming and manifest_id != app.slug:
+    if adopting_previous_id:
+      old_slug = app.slug
       old_source_dir = app.source_dir
       target_slug = manifest_id
       target_source_dir = str(data_dir / "apps" / target_slug)
-      moved = False
+      converged = False
       if old_source_dir and Path(old_source_dir).is_dir():
-        async with fs_locks.source_dir_lock(old_source_dir):
-          try:
-            _reject_if_source_dir_taken(
-              db, target_source_dir, exclude_id=app.id,
-            )
-            target_taken = False
-          except HTTPException:
-            target_taken = True
-          if not target_taken and not Path(target_source_dir).exists():
-            _unregister_cron(Path(old_source_dir))
-            os.rename(old_source_dir, target_source_dir)
-            moved = True
-            journal.rollback_actions.append(
-              _reconcile_cron_after_install_rollback
-            )
-            journal.rollback_actions.append(
-              lambda o=old_source_dir, n=target_source_dir:
-                os.rename(n, o)
-                if Path(n).is_dir() and not Path(o).exists()
-                else None
-            )
-      if moved:
+        if old_source_dir == target_source_dir:
+          converged = app.slug == target_slug
+        else:
+          async with fs_locks.source_dir_lock(old_source_dir):
+            try:
+              _reject_if_source_dir_taken(
+                db, target_source_dir, exclude_id=app.id,
+              )
+              target_taken = False
+            except HTTPException:
+              target_taken = True
+            if not target_taken and not Path(target_source_dir).exists():
+              _unregister_cron(Path(old_source_dir))
+              os.rename(old_source_dir, target_source_dir)
+              converged = True
+              journal.rollback_actions.append(
+                _reconcile_cron_after_install_rollback
+              )
+              journal.rollback_actions.append(
+                lambda o=old_source_dir, n=target_source_dir:
+                  os.rename(n, o)
+                  if Path(n).is_dir() and not Path(o).exists()
+                  else None
+              )
+      if converged:
         app.slug = target_slug
         app.source_dir = target_source_dir
         app.manifest_url = canonical_manifest_url
         db.flush()
       elif old_source_dir and Path(old_source_dir).is_dir():
         warnings.append(
-          f"could not rename slug {app.slug}->{manifest_id}: target in use"
+          f"could not rename slug {old_slug}->{manifest_id}: target in use"
+        )
+      else:
+        warnings.append(
+          f"could not rename slug {old_slug}->{manifest_id}: source missing"
         )
     return app
 
@@ -2271,6 +2412,7 @@ async def _prepare_app_row(
     github_connect=bool(permissions.get("github_connect", False)),
     filesystem_access=bool(permissions.get("filesystem_access", False)),
     connections_manage=bool(permissions.get("connections_manage", False)),
+    connect_manage=bool(permissions.get("connect_manage", False)),
     offline_capable=bool(manifest.get("offline_capable", False)),
     embeds_agent=bool(manifest.get("embeds_agent", False)),
     offline_contract=manifest.get("offline") or None,
@@ -2345,6 +2487,7 @@ async def _activate_install_source(
     app.github_connect = bool(permissions.get("github_connect", False))
     app.filesystem_access = bool(permissions.get("filesystem_access", False))
     app.connections_manage = bool(permissions.get("connections_manage", False))
+    app.connect_manage = bool(permissions.get("connect_manage", False))
     if "offline_capable" in manifest:
       app.offline_capable = bool(manifest["offline_capable"])
     if "embeds_agent" in manifest:

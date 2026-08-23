@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   AMBIGUOUS_VERDICT_CONFIRM_MS,
   createConnectivityStore,
+  ReachabilityPhase,
 } from '../connectivityStore.js'
 
 function eventTarget(extra = {}) {
@@ -95,18 +96,21 @@ test('all subscribers share one monitor and the last unsubscribe removes it', as
   assert.equal(h.documentTarget.listenerCount('visibilitychange'), 0)
 })
 
-test('a stale-online failure is confirmed promptly and published once', async () => {
+test('a stale-online failure publishes checking before it is confirmed offline', async () => {
   const h = harness(async () => { throw new TypeError('offline') })
   let notifications = 0
   const stop = h.store.subscribe(() => { notifications += 1 })
   await flushMicrotasks()
 
   assert.equal(h.store.getSnapshot(), true)
+  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.CHECKING)
+  assert.equal(notifications, 1)
   h.timers.runTimeout(AMBIGUOUS_VERDICT_CONFIRM_MS)
   await flushMicrotasks()
 
   assert.equal(h.store.getSnapshot(), false)
-  assert.equal(notifications, 1)
+  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.OFFLINE)
+  assert.equal(notifications, 2)
   stop()
 })
 
@@ -142,22 +146,62 @@ test('a live mutation response repairs a stale offline verdict immediately', asy
 
   h.store.reportReachable()
   assert.equal(h.store.getSnapshot(), true)
-  assert.equal(notifications, 2)
+  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.ONLINE)
+  assert.equal(h.store.getRecoverySnapshot(), 1)
+  assert.equal(notifications, 3)
   stop()
 })
 
 test('a live mutation response outranks an older in-flight failed probe', async () => {
-  let settleProbe
-  const h = harness(() => new Promise((resolve) => { settleProbe = resolve }))
+  let rejectProbe
+  const h = harness(() => new Promise((resolve, reject) => { rejectProbe = reject }))
   h.navigatorTarget.onLine = false
   const stop = h.store.subscribe(() => {})
 
   h.store.reportReachable()
-  settleProbe({ ok: false })
+  rejectProbe(new TypeError('offline'))
   await flushMicrotasks()
 
   assert.equal(h.store.getSnapshot(), true)
   assert.equal(h.timers.timeoutCount(), 0)
+  stop()
+})
+
+test('any HTTP response proves transport reachability regardless of status', async () => {
+  const h = harness(async () => ({ ok: false, status: 503 }))
+  const stop = h.store.subscribe(() => {})
+  await flushMicrotasks()
+
+  assert.equal(h.store.getSnapshot(), true)
+  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.ONLINE)
+  stop()
+})
+
+test('verification exposes uncertainty immediately and recovery emits one generation', async () => {
+  let reachable = true
+  const h = harness(async () => {
+    if (!reachable) throw new TypeError('offline')
+    return { ok: true }
+  })
+  let notifications = 0
+  const stop = h.store.subscribe(() => { notifications += 1 })
+  await flushMicrotasks()
+
+  reachable = false
+  const failedCheck = h.store.verify()
+  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.CHECKING)
+  assert.equal(h.store.getSnapshot(), true, 'uncertainty must not disable actions')
+  await failedCheck
+
+  reachable = true
+  await h.store.verify()
+  assert.equal(h.store.getPhaseSnapshot(), ReachabilityPhase.ONLINE)
+  assert.equal(h.store.getRecoverySnapshot(), 1)
+  assert.equal(notifications, 2)
+
+  h.store.reportReachable()
+  assert.equal(h.store.getRecoverySnapshot(), 1)
+  assert.equal(notifications, 2, 'settled responses must not repeat recovery')
   stop()
 })
 
@@ -189,6 +233,20 @@ test('the hook and API client consume the shared store contract', () => {
   const hook = readFileSync(new URL('../../hooks/useOnlineStatus.js', import.meta.url), 'utf8')
   const client = readFileSync(new URL('../../api/client.js', import.meta.url), 'utf8')
   assert.match(hook, /useSyncExternalStore\(subscribeOnline, getOnlineSnapshot/)
+  assert.match(hook, /getReachabilityPhaseSnapshot/)
+  assert.match(hook, /useRecoveryGeneration[\s\S]*?getRecoverySnapshot/)
   assert.doesNotMatch(hook, /fetch\(|setInterval\(/)
   assert.match(client, /void verifyConnectivity\(\)/)
+})
+
+test('visible chats subscribe their runtime owner to shared recovery', () => {
+  const chatView = readFileSync(
+    new URL('../../components/ChatView/ChatView.jsx', import.meta.url),
+    'utf8',
+  )
+  assert.match(
+    chatView,
+    /reconcileRuntimeState\(\)\.then\(runtime => \{[\s\S]*?subscribeRecovery\([\s\S]*?getRecoverySnapshot\(\)[\s\S]*?run\(\)/,
+    'every visible pane rechecks durable runtime after shared reachability recovers',
+  )
 })

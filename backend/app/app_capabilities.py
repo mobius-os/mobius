@@ -10,11 +10,199 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from copy import deepcopy
 from typing import Any
+from urllib.parse import urlsplit
 
 
-CONTRACT_SCHEMA = 4
+CONTRACT_SCHEMA = 5
+
+_PUBLIC_NETWORK_RULE_LIMIT = 16
+_PUBLIC_QUERY_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _normalize_public_query(value: Any, *, rule_index: int) -> dict[str, Any]:
+  if value is None:
+    return {}
+  if not isinstance(value, dict) or set(value) - {"allow", "exact", "sha256"}:
+    raise ValueError(
+      f"Manifest public network rule {rule_index} query must contain only "
+      "`allow`, `exact`, and `sha256`."
+    )
+  allow = value.get("allow", [])
+  exact = value.get("exact", {})
+  digests = value.get("sha256", {})
+  if not isinstance(allow, list) or not all(
+    isinstance(name, str) and _PUBLIC_QUERY_NAME.fullmatch(name)
+    for name in allow
+  ):
+    raise ValueError(
+      f"Manifest public network rule {rule_index} query.allow must be an "
+      "array of bounded parameter names."
+    )
+  if len(set(allow)) != len(allow):
+    raise ValueError(
+      f"Manifest public network rule {rule_index} query.allow contains duplicates."
+    )
+
+  def normalized_map(raw: Any, *, field: str, digest: bool) -> dict[str, list[str]]:
+    if not isinstance(raw, dict):
+      raise ValueError(
+        f"Manifest public network rule {rule_index} query.{field} must be an object."
+      )
+    result: dict[str, list[str]] = {}
+    for name in sorted(raw):
+      accepted = raw[name]
+      valid_name = isinstance(name, str) and _PUBLIC_QUERY_NAME.fullmatch(name)
+      valid_values = (
+        isinstance(accepted, list)
+        and 1 <= len(accepted) <= 8
+        and all(isinstance(item, str) for item in accepted)
+      )
+      if not valid_name or not valid_values:
+        raise ValueError(
+          f"Manifest public network rule {rule_index} query.{field} entries "
+          "must map bounded parameter names to 1-8 strings."
+        )
+      if digest:
+        if not all(re.fullmatch(r"[0-9a-f]{64}", item) for item in accepted):
+          raise ValueError(
+            f"Manifest public network rule {rule_index} query.sha256 values "
+            "must be lowercase SHA-256 digests."
+          )
+      elif not all(len(item) <= 4096 for item in accepted):
+        raise ValueError(
+          f"Manifest public network rule {rule_index} query.exact values may "
+          "contain at most 4096 characters."
+        )
+      result[name] = sorted(set(accepted))
+    return result
+
+  normalized_exact = normalized_map(exact, field="exact", digest=False)
+  normalized_digests = normalized_map(digests, field="sha256", digest=True)
+  names = set(allow) | set(normalized_exact) | set(normalized_digests)
+  if len(names) > 16:
+    raise ValueError(
+      f"Manifest public network rule {rule_index} may constrain at most 16 "
+      "query parameters."
+    )
+  if len(names) != len(allow) + len(normalized_exact) + len(normalized_digests):
+    raise ValueError(
+      f"Manifest public network rule {rule_index} query parameter names must "
+      "belong to exactly one constraint."
+    )
+  normalized: dict[str, Any] = {}
+  if allow:
+    normalized["allow"] = sorted(allow)
+  if normalized_exact:
+    normalized["exact"] = normalized_exact
+  if normalized_digests:
+    normalized["sha256"] = normalized_digests
+  return normalized
+
+
+def normalize_public_access(manifest: dict[str, Any]) -> dict[str, Any]:
+  """Normalize the network surface available to anonymous app sessions.
+
+  Publication itself is owner state and deliberately does not live in the
+  manifest. The package may only declare a bounded set of exact HTTPS origins
+  and path prefixes that the public, GET-only fetch capability may reach.
+  """
+  raw = manifest.get("public_access")
+  if raw is None:
+    return {"network": []}
+  if not isinstance(raw, dict) or set(raw) - {"network"}:
+    raise ValueError(
+      "Manifest `public_access` must be an object containing only `network`."
+    )
+  network = raw.get("network", [])
+  if not isinstance(network, list):
+    raise ValueError("Manifest `public_access.network` must be an array.")
+  if len(network) > _PUBLIC_NETWORK_RULE_LIMIT:
+    raise ValueError(
+      f"Manifest `public_access.network` may contain at most "
+      f"{_PUBLIC_NETWORK_RULE_LIMIT} rules."
+    )
+
+  normalized: list[dict[str, Any]] = []
+  seen: set[tuple[str, str, str]] = set()
+  for index, rule in enumerate(network):
+    if (
+      not isinstance(rule, dict)
+      or set(rule) - {"origin", "path_prefix", "query"}
+      or not {"origin", "path_prefix"}.issubset(rule)
+    ):
+      raise ValueError(
+        "Each `public_access.network` rule must contain `origin` and "
+        "`path_prefix`, with only an optional `query` contract."
+      )
+    origin = rule.get("origin")
+    prefix = rule.get("path_prefix")
+    if not isinstance(origin, str) or not isinstance(prefix, str):
+      raise ValueError(
+        f"Manifest public network rule {index + 1} must use string values."
+      )
+    try:
+      parsed = urlsplit(origin.strip())
+      port = parsed.port
+    except ValueError as exc:
+      raise ValueError(
+        f"Manifest public network rule {index + 1} has an invalid origin."
+      ) from exc
+    if (
+      parsed.scheme != "https"
+      or not parsed.hostname
+      or parsed.username is not None
+      or parsed.password is not None
+      or parsed.path not in ("", "/")
+      or parsed.query
+      or parsed.fragment
+    ):
+      raise ValueError(
+        f"Manifest public network rule {index + 1} origin must be an exact "
+        "HTTPS origin."
+      )
+    host = parsed.hostname.lower()
+    authority = host if port in (None, 443) else f"{host}:{port}"
+    normalized_origin = f"https://{authority}"
+    if (
+      not prefix.startswith("/")
+      or "?" in prefix
+      or "#" in prefix
+      or len(prefix) > 512
+    ):
+      raise ValueError(
+        f"Manifest public network rule {index + 1} path_prefix must be a "
+        "plain absolute path."
+      )
+    query = _normalize_public_query(rule.get("query"), rule_index=index + 1)
+    key = (
+      normalized_origin,
+      prefix,
+      json.dumps(query, sort_keys=True, separators=(",", ":")),
+    )
+    if key not in seen:
+      seen.add(key)
+      normalized_rule: dict[str, Any] = {
+        "origin": normalized_origin,
+        "path_prefix": prefix,
+      }
+      if query:
+        normalized_rule["query"] = query
+      normalized.append(normalized_rule)
+  return {"network": normalized}
+
+
+def public_access_declaration_from_contract(
+  contract: dict[str, Any] | None,
+) -> dict[str, Any]:
+  """Recover the normalized public declaration from a stored contract."""
+  value = contract.get("public") if isinstance(contract, dict) else None
+  network = value.get("network") if isinstance(value, dict) else None
+  if not isinstance(network, list):
+    return {"network": []}
+  return {"network": deepcopy(network)}
 
 
 # Host-mediated browser capabilities. These are deliberately separate from
@@ -184,7 +372,10 @@ def local_manifest_runtime_fields(manifest: dict[str, Any]) -> dict[str, Any]:
   # Validate names, versions, reasons, and limits now; callers still need the
   # author declaration rather than the host-enriched normalized contract.
   normalize_runtime_capabilities(manifest)
-  fields: dict[str, Any] = {"capabilities": capabilities}
+  fields: dict[str, Any] = {
+    "capabilities": capabilities,
+    "public_access": normalize_public_access(manifest),
+  }
   if "offline_capable" in manifest:
     offline_capable = manifest["offline_capable"]
     if not isinstance(offline_capable, bool):
@@ -241,6 +432,9 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "github_access": bool(perms.get("github_access", False)),
       "github_connect": bool(perms.get("github_connect", False)),
       "connections_manage": bool(perms.get("connections_manage", False)),
+      "connect_manage": bool(perms.get("connect_manage", False)),
+      "identity_manage": bool(perms.get("identity_manage", False)),
+      "railway_manage": bool(perms.get("railway_manage", False)),
     },
     "background": (
       {
@@ -257,6 +451,7 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "contract": manifest.get("offline") or None,
     },
     "runtime": normalize_runtime_capabilities(manifest),
+    "public": normalize_public_access(manifest),
   }
 
 
@@ -289,6 +484,8 @@ def contract_from_app_state(
   app: Any,
   *,
   capabilities: dict[str, Any] | None = None,
+  public_access: dict[str, Any] | None = None,
+  contract_permissions: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
   """Build an accurate contract for an owner-authored local app.
 
@@ -299,6 +496,10 @@ def contract_from_app_state(
   """
   if capabilities is None:
     capabilities = runtime_declaration_from_contract(
+      getattr(app, "capability_contract", None),
+    )
+  if public_access is None:
+    public_access = public_access_declaration_from_contract(
       getattr(app, "capability_contract", None),
     )
   manifest = {
@@ -315,10 +516,21 @@ def contract_from_app_state(
       "github_access": bool(getattr(app, "github_access", False)),
       "github_connect": bool(getattr(app, "github_connect", False)),
       "connections_manage": bool(getattr(app, "connections_manage", False)),
+      "connect_manage": bool(getattr(app, "connect_manage", False)),
+      # Contract-only grants are declared by a local package on every apply.
+      # Store installs build straight from their manifest and never enter this
+      # projection. Do not inherit an older accepted value: omission revokes.
+      "identity_manage": bool(
+        (contract_permissions or {}).get("identity_manage", False)
+      ),
+      "railway_manage": bool(
+        (contract_permissions or {}).get("railway_manage", False)
+      ),
     },
     "offline_capable": bool(getattr(app, "offline_capable", False)),
     "offline": getattr(app, "offline_contract", None),
     "capabilities": capabilities,
+    "public_access": public_access,
   }
   return contract_from_manifest(manifest)
 

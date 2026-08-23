@@ -601,7 +601,7 @@ sleep 0.3
 # read inside the page and never appears in argv or output.
 BROWSER_PHASE="authentication verification"
 AUTH_OK="$(browser_eval_retry \
-  "(async () => { const token = localStorage.getItem('token'); if (!token || document.querySelector('input[type=password]')) return false; try { const res = await fetch('/api/chats?agent-screenshot-auth=' + Date.now(), { cache: 'no-store', headers: { Authorization: 'Bearer ' + token } }); return res.status === 200 && !!localStorage.getItem('token') && !document.querySelector('input[type=password]'); } catch { return false; } })()" \
+  "(async () => { const token = localStorage.getItem('token'); const login = () => document.querySelector('[data-auth-surface=login]'); if (!token || login()) return false; try { const res = await fetch('/api/chats?agent-screenshot-auth=' + Date.now(), { cache: 'no-store', headers: { Authorization: 'Bearer ' + token } }); return res.status === 200 && !!localStorage.getItem('token') && !login(); } catch { return false; } })()" \
   || true)"
 if [ "$AUTH_OK" != "true" ]; then
   die "authentication failed; the token was rejected or the login page remained visible"
@@ -609,13 +609,30 @@ fi
 
 # For shell routes, prove the browser loaded the same hashed entry asset that
 # exists in the currently-built dist. This turns stale screenshots into a clear
-# failure instead of misleading visual evidence. Standalone app PWAs have their
-# own entry shape, but still receive controller detachment + cache-busted
-# navigation.
+# failure instead of misleading visual evidence. Standalone PWAs and anonymous
+# public app hosts have their own entry shapes, but still receive controller
+# detachment + cache-busted navigation.
 SHELL_SETTLED_EXPR=""
+PUBLIC_APP_PAGE="$(browser_eval_retry \
+  "document.querySelector('body > iframe#app') !== null && document.querySelector('body > #status') !== null" \
+  || true)"
 case "$ROUTE" in
   /apps/*) : ;;
   *)
+    if [ "$PUBLIC_APP_PAGE" = "true" ]; then
+      CAPTURE_MIN_BYTES=8192
+      BROWSER_PHASE="public app visual readiness"
+      if ! browser_wait --fn \
+        "document.querySelector('body > iframe#app') !== null && document.querySelector('body > #status.is-ready') !== null" \
+        >/dev/null; then
+        die "public app did not reach its mounted frame before capture"
+      fi
+      if ! browser_eval_retry \
+        "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))" \
+        >/dev/null; then
+        die "public app did not commit its mounted frame before capture"
+      fi
+    else
     # An authenticated shell frame always contains chrome/text and is far
     # larger than the ~3 KiB one-colour PNG Chromium emits before its first
     # useful compositor submission. Standalone app PWAs may intentionally be a
@@ -671,6 +688,7 @@ PY
       "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))" \
       >/dev/null; then
       die "shell did not commit its settled frame before capture"
+    fi
     fi
     ;;
 esac

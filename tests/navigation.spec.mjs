@@ -50,8 +50,8 @@ function emptyChatDetail() {
     session_id: null,
     provider: 'codex',
     created_by_app_id: null,
-    agent_settings_json: null,
-    effective_agent_settings: { model: 'gpt-current', effort: 'medium' },
+    agent_settings_json: { model: 'gpt-5.6-sol' },
+    effective_agent_settings: { model: 'gpt-5.6-sol', effort: 'medium' },
     has_assistant_turns: false,
     auto_resume_on_limit: false,
     auto_resume_on_restart: true,
@@ -134,6 +134,15 @@ async function setup(
   } = {},
 ) {
   await page.setViewportSize(viewport)
+
+  await page.route('**/api/auth/providers/status', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    json: {
+      claude: { name: 'Claude Code', configured: false, authenticated: false },
+      codex: { name: 'Codex', configured: true, authenticated: true, error: null },
+    },
+  }))
 
   // Navigation is a client-side contract. Seed an explicit active chat and
   // mock the complete chat surface so the suite neither reads nor borrows
@@ -351,11 +360,94 @@ async function goForward(page) {
 test.use({ serviceWorkers: 'block' })
 
 test.describe('Navigation basics', () => {
+  test('a first send retires the cold activation gate it supersedes', async ({ page }) => {
+    let releaseChatDetail
+    const wait = new Promise(resolve => { releaseChatDetail = resolve })
+    const blank = {
+      ...NAV_CHATS[0],
+      title: 'Cold empty chat',
+      has_messages: false,
+    }
+
+    await setup(page, undefined, {
+      chats: [blank],
+      detailForChat: emptyChatDetail,
+      chatDetailGate: { id: blank.id, wait },
+    })
+
+    let releaseStream
+    const streamWait = new Promise(resolve => { releaseStream = resolve })
+    let sendRequests = 0
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
+      sendRequests += 1
+      return route.fulfill({ status: 202, body: '{}' })
+    })
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
+      await streamWait
+      return route.fulfill({ status: 204, body: '' })
+    })
+
+    try {
+      const composer = page.locator('#main-content')
+        .getByRole('textbox', { name: 'Message Möbius…' })
+      await expect(composer).toBeVisible()
+      await composer.fill('Visible after superseding the cold read')
+      await composer.press('Enter')
+
+      await expect.poll(() => sendRequests).toBe(1)
+      releaseChatDetail()
+
+      const painted = page.locator(
+        `[data-chat-surface="painted"][data-chat-id="${blank.id}"]`,
+      )
+      const userRow = painted.locator('.chat__msg--user')
+      await expect(userRow).toContainText('Visible after superseding the cold read')
+      await expect(userRow).toBeVisible()
+
+      const position = await userRow.evaluate((row) => {
+        const scroll = row.closest('.chat__scroll')
+        return Math.round(row.getBoundingClientRect().top - scroll.getBoundingClientRect().top)
+      })
+      expect(position).toBeGreaterThanOrEqual(-2)
+      expect(position).toBeLessThanOrEqual(10)
+    } finally {
+      releaseChatDetail()
+      releaseStream()
+    }
+  })
+
   test('1. Initial state — chat view, URL is /shell/', async ({ page }) => {
     await setup(page)
     const state = await getNavState(page)
     expect(state.hasChat).toBe(true)
     expect(state.url).toBe('/shell/')
+  })
+
+  test('owner-input status is named and outranks the active-work dot', async ({ page }) => {
+    const chats = NAV_CHATS.map((chat, index) => ({
+      ...chat,
+      running: index < 2,
+      owner_input_kind: index === 0 ? 'secure_input' : null,
+      pending_question_id: null,
+    }))
+    await setup(page, { width: 1512, height: 861 }, { chats })
+
+    const navigation = page.getByRole('navigation', {
+      name: 'Primary navigation',
+    })
+    const waiting = navigation.getByRole('button', {
+      name: `Your input is needed ${chats[0].title}`,
+      exact: true,
+    })
+    await expect(waiting.locator('.drawer__owner-input-dot')).toBeVisible()
+    await expect(waiting.locator('.drawer__streaming-dot')).toHaveCount(0)
+
+    const working = navigation.getByRole('button', {
+      name: `Currently streaming ${chats[1].title}`,
+      exact: true,
+    })
+    await expect(working.locator('.drawer__streaming-dot')).toBeVisible()
+    await expect(working.locator('.drawer__owner-input-dot')).toHaveCount(0)
   })
 
   test('2. Navigate between two chats — back returns to first', async ({ page }) => {
@@ -884,7 +976,7 @@ test.describe('Touch navigation', () => {
     await expect(page.locator('[data-chat-surface="painted"] textarea')).toBeFocused()
   })
 
-  test('New chat preserves phone focus and early typing through allocation', async ({ page }) => {
+  test('New chat keeps options geometry, phone focus, and early typing through allocation', async ({ page }) => {
     await setup(page)
     await expect.poll(() => page.evaluate(() => (
       matchMedia('(hover: none) and (pointer: coarse)').matches
@@ -916,8 +1008,14 @@ test.describe('Touch navigation', () => {
 
     const presentation = page.locator('[data-new-chat-presentation]')
     const immediateComposer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
+    const pendingOptions = presentation.getByRole('button', {
+      name: 'Chat options unavailable until this chat is ready',
+    })
     await expect(presentation).toBeVisible()
     await expect(presentation.getByText("What's on your mind?", { exact: true })).toBeVisible()
+    await expect(pendingOptions).toBeVisible()
+    await expect(pendingOptions).toBeDisabled()
+    const pendingOptionsBox = await pendingOptions.boundingBox()
     await expect(immediateComposer).toBeFocused()
     await page.keyboard.type('Typed while opening')
     await expect.poll(() => requestedId).toMatch(
@@ -946,6 +1044,17 @@ test.describe('Touch navigation', () => {
       end: element.selectionEnd,
       length: element.value.length,
     }))).toEqual({ start: 19, end: 19, length: 19 })
+    const readyOptions = page.locator('[data-chat-surface="painted"]')
+      .getByRole('button', { name: 'Attach or change model' })
+    await expect(readyOptions).toBeVisible()
+    await expect(readyOptions).toBeEnabled()
+    const readyOptionsBox = await readyOptions.boundingBox()
+    expect(pendingOptionsBox).not.toBeNull()
+    expect(readyOptionsBox).not.toBeNull()
+    expect(readyOptionsBox.width).toBe(pendingOptionsBox.width)
+    expect(readyOptionsBox.height).toBe(pendingOptionsBox.height)
+    expect(Math.abs(readyOptionsBox.x - pendingOptionsBox.x)).toBeLessThanOrEqual(1)
+    expect(Math.abs(readyOptionsBox.y - pendingOptionsBox.y)).toBeLessThanOrEqual(1)
     await page.keyboard.type(' after allocation')
     await expect(composer).toHaveValue('Typed while opening after allocation')
   })
@@ -2167,25 +2276,37 @@ test.describe('Drawer close paths converge through handleBack', () => {
         layout: element.offsetWidth,
       }
     })
-    const box = await handle.boundingBox()
-    expect(box).not.toBeNull()
-
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await handle.evaluate((element) => {
+      element.addEventListener('pointerdown', (event) => {
+        element.dataset.testPointerId = String(event.pointerId)
+        element.dataset.testPointerX = String(event.clientX)
+        element.dataset.testPointerY = String(event.clientY)
+      }, { once: true })
+    })
+    // Ask Playwright to resolve and hit-test the live handle after moving the
+    // drawer. A cached bounding box can lag that style change under CI load.
+    await handle.hover()
     await page.mouse.down()
-    await page.mouse.move(box.x + box.width / 2 + 48, box.y + box.height / 2)
+    const pointer = await handle.evaluate((element) => ({
+      id: Number(element.dataset.testPointerId),
+      x: Number(element.dataset.testPointerX),
+      y: Number(element.dataset.testPointerY),
+    }))
+    expect(Number.isInteger(pointer.id)).toBe(true)
+    expect(Number.isFinite(pointer.x)).toBe(true)
+    expect(Number.isFinite(pointer.y)).toBe(true)
+    await page.mouse.move(pointer.x + 48, pointer.y)
     const released = await handle.evaluate((element) => {
-      for (let pointerId = 1; pointerId <= 5; pointerId += 1) {
-        if (!element.hasPointerCapture(pointerId)) continue
-        // A programmatic releasePointerCapture() only flushes lostpointercapture
-        // on the next pointer-event dispatch, so dispatch the capture-loss event
-        // the browser itself delivers when a drag's capture is interrupted.
-        element.dispatchEvent(new PointerEvent('lostpointercapture', {
-          pointerId,
-          bubbles: true,
-        }))
-        return true
-      }
-      return false
+      const pointerId = Number(element.dataset.testPointerId)
+      if (!Number.isInteger(pointerId) || !element.hasPointerCapture(pointerId)) return false
+      // A programmatic releasePointerCapture() only flushes lostpointercapture
+      // on the next pointer-event dispatch, so dispatch the capture-loss event
+      // the browser itself delivers when a drag's capture is interrupted.
+      element.dispatchEvent(new PointerEvent('lostpointercapture', {
+        pointerId,
+        bubbles: true,
+      }))
+      return true
     })
     expect(released).toBe(true)
 

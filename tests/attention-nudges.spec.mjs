@@ -221,11 +221,10 @@ for (const scenario of SCENARIOS) {
   })
 }
 
-// R5a jump-to-latest (contract v1.18): the floating control renders only while
-// the reader holds a position away from the content tail; tapping it is the
-// same one-shot controller tail reveal as the nudges and lands a settled
-// ANCHOR_AT hold — never live-follow — after which the control retires itself.
-test('jump-to-latest appears only away from the tail and lands a settled hold', async ({ page }) => {
+// R5a jump-to-latest (contract v1.20): the floating control renders only while
+// the reader holds a position away from the physical tail; tapping it explicitly
+// re-enters FOLLOW_BOTTOM, after which the control retires itself.
+test('jump-to-latest appears only away from the physical tail and resumes follow', async ({ page }) => {
   await page.setViewportSize({ width: 1512, height: 861 })
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(

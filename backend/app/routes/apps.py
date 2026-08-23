@@ -48,9 +48,12 @@ from app.storage_io import (
 from app.app_capabilities import diff_contracts
 from app.broadcast import get_system_broadcast
 from app.compiler import (
+  app_bundle_digest,
   app_bundle_uses_current_compile_contract,
   CompileError,
+  publish_public_bundle,
   recompile_app_bundle,
+  unlink_public_bundle,
 )
 from app.chat_start import start_programmatic_chat_turn
 from app.config import get_settings
@@ -465,6 +468,14 @@ async def install_app(
     filesystem_access=app.filesystem_access,
     slug=app.slug,
     manifest_url=app.manifest_url,
+    published_manifest_url=app.published_manifest_url,
+    public_name=app.public_name,
+    public_bundle_path=app.public_bundle_path,
+    public_bundle_digest=app.public_bundle_digest,
+    public_source_commit=app.public_source_commit,
+    public_access_contract=app.public_access_contract,
+    public_access_digest=app.public_access_digest,
+    public_published_at=app.public_published_at,
     theme_color=app.theme_color,
     background_color=app.background_color,
     display=app.display,
@@ -611,6 +622,47 @@ def _recorded_runtime_paths(previous_tree: dict[str, bytes]) -> set[str]:
   if isinstance(schedule, dict) and isinstance(schedule.get("job"), str):
     paths.add(schedule["job"])
   return paths
+
+
+def _accepted_local_distribution_package(app: models.App) -> tuple[str, str]:
+  """Return accepted manifest identity + origin-independent package digest.
+
+  A local worktree is a draft. Distribution must compare the public package with the
+  immutable commit that produced the live bundle, not with files an agent may
+  be editing for the next apply. The digest mirrors every installer input:
+  manifest, entry, icon, job, source modules, static assets, and storage seeds.
+  """
+  from app import install
+
+  if not app.source_commit or not app.source_dir:
+    raise HTTPException(
+      409,
+      {
+        "code": "distribution_source_unavailable",
+        "message": (
+          "Apply the local app source before attaching a distribution manifest."
+        ),
+      },
+    )
+  try:
+    tree = app_git.read_ref_tree(app.source_dir, app.source_commit)
+    return install.package_content_digest_from_tree(tree)
+  except (
+    install.PackageContentError,
+    OSError,
+    RuntimeError,
+    subprocess.SubprocessError,
+  ) as exc:
+    raise HTTPException(
+      409,
+      {
+        "code": "distribution_source_unavailable",
+        "message": (
+          "The accepted local package could not be reproduced. Apply its "
+          "complete source again before attaching a distribution manifest."
+        ),
+      },
+    ) from exc
 
 
 def _git_path_exists(repo: Path, name: str) -> bool:
@@ -1469,7 +1521,9 @@ async def apply_app_source(
         "appId": str(result.app.id),
         "chatId": str(body.chat_id),
       })
-  return schemas.AppApplyOut(mode=result.mode, app=result.app)
+  return schemas.AppApplyOut(
+    mode=result.mode, app=result.app, warnings=list(result.warnings)
+  )
 
 
 def _pending_store_update_app(
@@ -2045,6 +2099,27 @@ async def update_app(
   _: models.Owner = Depends(get_current_owner),
 ):
   """Update owner-controlled app metadata and narrow permission grants."""
+  from app import install
+
+  distribution_candidate = None
+  if body.published_manifest_url:
+    # Prove the row exists and is local before spending a network fetch. Close
+    # the request session before that I/O so a slow publisher cannot occupy a
+    # database connection or either lifecycle lock.
+    existing = live_app_or_404(db, app_id)
+    if existing.manifest_url is not None:
+      raise HTTPException(
+        409,
+        {
+          "code": "distribution_requires_local_app",
+          "message": "Only a local app can attach a separate distribution manifest.",
+        },
+      )
+    db.close()
+    distribution_candidate = await install.fetch_install_candidate(
+      body.published_manifest_url,
+    )
+
   async with (
     fs_locks.install_uninstall_lock(),
     fs_locks.app_storage_lock(app_id),
@@ -2064,8 +2139,47 @@ async def update_app(
       app.cross_app_access = body.cross_app_access
     if body.chat_log_access is not None:
       app.chat_log_access = body.chat_log_access
-    if body.share_manifest_url is not None:
-      app.share_manifest_url = body.share_manifest_url or None
+    if body.published_manifest_url is not None:
+      if distribution_candidate is not None:
+        if app.manifest_url is not None:
+          raise HTTPException(
+            409,
+            {
+              "code": "distribution_requires_local_app",
+              "message": "Only a local app can attach a separate distribution manifest.",
+            },
+          )
+        accepted_id, accepted_digest = await asyncio.to_thread(
+          _accepted_local_distribution_package, app,
+        )
+        if distribution_candidate.manifest["id"] != accepted_id:
+          raise HTTPException(
+            409,
+            {
+              "code": "distribution_identity_mismatch",
+              "message": (
+                "The published manifest belongs to a different app. Publish "
+                "this app's accepted package before attaching its distribution "
+                "manifest."
+              ),
+            },
+          )
+        published_digest = install.install_candidate_content_digest(
+          distribution_candidate,
+        )
+        if published_digest != accepted_digest:
+          raise HTTPException(
+            409,
+            {
+              "code": "distribution_package_mismatch",
+              "message": (
+                "The published package does not match the app's accepted "
+                "revision. Publish the current package before attaching its "
+                "distribution manifest."
+              ),
+            },
+          )
+      app.published_manifest_url = body.published_manifest_url or None
     if body.manage_skills is not None:
       # Downgrade-only: the owner can revoke skills authority here (effective
       # on the app's next request — the gate reads the live row), but a grant
@@ -2112,7 +2226,7 @@ async def update_app(
       field is None
       for field in (
         body.name, body.description, body.chat_id, body.share_with_apps,
-        body.cross_app_access, body.chat_log_access, body.share_manifest_url,
+        body.cross_app_access, body.chat_log_access, body.published_manifest_url,
         body.manage_skills,
       )
     )
@@ -2124,6 +2238,105 @@ async def update_app(
     # query's chat_id + updated_at, so app_updated alone surfaces it in the
     # owning chat. A metadata-only PATCH still bumps updated_at; the wire carries
     # no source-only version key to gate on.
+  return app
+
+
+@router.put(
+  "/{app_id}/hosted-publication",
+  response_model=schemas.AppOut,
+  dependencies=[Depends(reject_cross_site)],
+)
+async def publish_hosted_app(
+  app_id: int,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Publish the app's exact current module and anonymous network contract."""
+  from app.app_capabilities import (
+    capability_digest,
+    public_access_declaration_from_contract,
+  )
+  from app.routes.public_apps import public_slug_is_available
+
+  new_bundle = None
+  previous_bundle = None
+  async with (
+    fs_locks.install_uninstall_lock(),
+    fs_locks.app_storage_lock(app_id),
+  ):
+    app = live_app_or_404(db, app_id, populate=True)
+    if not public_slug_is_available(app.slug):
+      raise HTTPException(
+        status_code=400,
+        detail="This app slug is reserved and cannot be published.",
+      )
+    current_digest = app_bundle_digest(app.id, app.compiled_path)
+    if current_digest is None:
+      raise HTTPException(
+        status_code=409,
+        detail="The current app build is not ready to publish.",
+      )
+    previous_bundle = app.public_bundle_path
+    try:
+      new_bundle, bundle_digest = await asyncio.to_thread(
+        publish_public_bundle, app.id, app.compiled_path,
+      )
+      if bundle_digest != current_digest:
+        raise RuntimeError("The app build changed while publication was prepared.")
+      public_access = public_access_declaration_from_contract(
+        app.capability_contract,
+      )
+      app.public_name = app.name
+      app.public_bundle_path = str(new_bundle)
+      app.public_bundle_digest = bundle_digest
+      app.public_source_commit = app.source_commit
+      app.public_access_contract = public_access
+      app.public_access_digest = capability_digest(public_access)
+      app.public_token_nonce = secrets.token_hex(16)
+      app.public_published_at = now_naive_utc()
+      db.commit()
+    except Exception:
+      db.rollback()
+      if new_bundle is not None and str(new_bundle) != previous_bundle:
+        unlink_public_bundle(app_id, new_bundle)
+      raise
+    if previous_bundle and previous_bundle != str(new_bundle):
+      unlink_public_bundle(app_id, previous_bundle)
+    db.refresh(app)
+  get_system_broadcast().publish({"type": "app_updated", "appId": str(app.id)})
+  return app
+
+
+@router.delete(
+  "/{app_id}/hosted-publication",
+  response_model=schemas.AppOut,
+  dependencies=[Depends(reject_cross_site)],
+)
+async def stop_hosted_app(
+  app_id: int,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Revoke the active anonymous snapshot and every token minted for it."""
+  previous_bundle = None
+  async with (
+    fs_locks.install_uninstall_lock(),
+    fs_locks.app_storage_lock(app_id),
+  ):
+    app = live_app_or_404(db, app_id, populate=True)
+    previous_bundle = app.public_bundle_path
+    app.public_name = None
+    app.public_bundle_path = None
+    app.public_bundle_digest = None
+    app.public_source_commit = None
+    app.public_access_contract = None
+    app.public_access_digest = None
+    app.public_token_nonce = None
+    app.public_published_at = None
+    db.commit()
+    unlink_public_bundle(app_id, previous_bundle)
+    db.refresh(app)
+  get_system_broadcast().publish({"type": "app_updated", "appId": str(app.id)})
   return app
 
 
@@ -2321,7 +2534,9 @@ async def delete_app(
   tombstone against a concurrent install of the same app, and the per-app
   storage lock matches the order the purge (which DOES rmtree) takes them.
   """
+  from app import chat_queue
   async with (
+    chat_queue.get_transition_lock(f"app-lifecycle:{app_id}"),
     fs_locks.install_uninstall_lock(),
     fs_locks.app_storage_lock(app_id),
   ):
@@ -2331,6 +2546,29 @@ async def delete_app(
       .first()
     )
     if not app:
+      raise HTTPException(status_code=404, detail="App not found.")
+
+    # An app-owned delegated process can keep spending or writing after its
+    # frame disappears. Settle every child (and its descendants) before the
+    # app authority is tombstoned; a provider that will not stop makes the
+    # uninstall retryable rather than orphaning live work.
+    from app.delegations import (
+      active_delegation_ids_for_app,
+      cancel_delegation_execution,
+    )
+    for delegation_id in active_delegation_ids_for_app(db, app_id):
+      if not await cancel_delegation_execution(delegation_id):
+        raise HTTPException(
+          status_code=409,
+          detail="Could not stop active delegated work; retry",
+        )
+    db.rollback()
+    app = (
+      db.query(models.App)
+      .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+      .first()
+    )
+    if app is None:
       raise HTTPException(status_code=404, detail="App not found.")
 
     await _revoke_app_publish_tokens(

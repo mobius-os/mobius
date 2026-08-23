@@ -44,8 +44,8 @@ log = logging.getLogger(__name__)
 _model_registry_log = logging.getLogger(f"{__name__}.models")
 
 
-# Fallback models per provider, ordered the same way the pickers display
-# them. Listing known values lets the snapshot logic detect cross-provider
+# Known models per provider, ordered the same way the pickers display
+# them. Listing known values lets the settings logic detect cross-provider
 # model mismatches (e.g. the global file remembers a Codex model but a new
 # chat starts on Claude) while live registry fetches remain the broader
 # source of truth for newly released IDs.
@@ -89,14 +89,6 @@ MODEL_EFFORT_LEVELS: dict[str, list[str]] = {
   "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
   "gpt-5.6-terra": ["low", "medium", "high", "xhigh", "max", "ultra"],
   "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
-}
-
-# Runtime recovery defaults are intentionally independent of picker order.
-# Fable is presented first in the interactive picker, but a stale/mismatched
-# saved value must not silently opt an unattended retry into usage credits.
-DEFAULT_MODELS = {
-  "claude": "claude-opus-4-8",
-  "codex": "gpt-5.6-sol",
 }
 
 # Curated first-run model visibility. The registry remains broader so an
@@ -270,20 +262,18 @@ def effective_agent_settings(
   chat_overrides: _SettingsOverride | dict[str, Any] | None = None,
   provider: str | None = None,
 ) -> dict:
-  """Merges per-chat overrides on top of the global defaults.
+  """Merge per-chat choices on top of the owner's latest picker choices.
 
   Layer order (later wins per key):
-    1. Hard-coded effort default (medium). There is intentionally
-       NO hard-coded model default: until the owner manually picks a
-       model, the provider SDK runs with its own default.
+    1. Hard-coded effort seed (medium). There is intentionally no model seed:
+       until the owner picks a model, ``model`` remains ``None`` and chat-turn
+       admission refuses to start provider work.
     2. Global file at /data/shared/agent-settings.json.
     3. Per-chat overrides from Chat.agent_settings_json.
 
-  Provider-aware filtering still rejects a saved model that belongs
-  to the other provider, but it now resolves that case to ``None``
-  rather than silently inventing the provider's top model. A model
-  becomes the default only after a manual picker choice mirrors into
-  /data/shared/agent-settings.json.
+  Provider-aware filtering resolves a saved model that belongs to the other
+  provider to ``None``. That unresolved state is deliberate: the picker can
+  ask for a valid choice instead of either SDK silently substituting one.
 
   Known keys today: `model`, `effort`. Future picker fields (thinking
   budget, sandbox mode) follow the same path — add the key here
@@ -318,10 +308,10 @@ def effective_agent_settings(
       if isinstance(fm, str) and fm and not _model_belongs_to_other_provider(fm, prov)
       else None
     )
-  # Per-chat overrides are authoritative for the active chat, while
-  # still applying the same cross-provider safety rail: a stale Codex
-  # model on a Claude chat resolves to provider default rather than
-  # sending the wrong ID into the SDK.
+  # Per-chat overrides are authoritative for the active chat, while still
+  # applying the same cross-provider safety rail: a stale Codex model on a
+  # Claude chat resolves to the explicit unselected state rather than sending
+  # the wrong ID into the SDK.
   if overrides:
     for k, v in overrides.items():
       if k == "model":

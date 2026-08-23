@@ -58,7 +58,11 @@ test('picker exposes configured providers without leaking unavailable registry r
   })
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-  const chat = await createTaggedChat(page, 'provider-availability')
+  const chat = await createTaggedChat(
+    page,
+    'provider-availability',
+    { mockProvider: false },
+  )
   expect(chat?.id).toBeTruthy()
   await openPicker(page, chat.id)
 
@@ -104,7 +108,11 @@ test('model and effort choices stay interactive while saves remain ordered', asy
   })
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
-  const chat = await createTaggedChat(page, 'rapid-model-choice')
+  const chat = await createTaggedChat(
+    page,
+    'rapid-model-choice',
+    { mockProvider: false },
+  )
   expect(chat?.id).toBeTruthy()
   const provider = chat.detail?.provider || chat.provider
   expect(['claude', 'codex']).toContain(provider)

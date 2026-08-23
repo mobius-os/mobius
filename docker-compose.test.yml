@@ -65,7 +65,7 @@ services:
     # separate host port only for exact, proxy-independent cleanup/probes.
     ports: !override ["${INTERNAL_TEST_PORT:-8012}:8000"]
     healthcheck:
-      # Includes ordinary API health plus a fail-closed checkout identity test.
+      # Includes API serviceability plus a fail-closed checkout identity test.
       # A healthy container therefore proves Playwright will exercise this
       # checkout's backend and the frontend watcher rooted in the same clone.
       test: ["CMD", "python3", "/app/scripts/verify_test_runtime.py"]
@@ -94,7 +94,7 @@ services:
     volumes:
       # Mount one coherent checkout at a non-runtime path and run exactly like
       # CI (`cd backend && pytest`). Mounting only app/tests/scripts at /app
-      # mixed live tests with baked recovery, frontend, root scripts, and build
+      # mixed live tests with a stale baked fallback, frontend, root scripts, and build
       # metadata from another revision; repo-root tests then resolved `/` and
       # produced a large false-failure cluster.
       - ./:/workspace

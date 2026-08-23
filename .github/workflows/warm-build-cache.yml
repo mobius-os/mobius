@@ -29,6 +29,9 @@ concurrency:
 
 jobs:
   warm:
+    # A fork may enable Actions solely to run the allowlisted Tests workflow.
+    # It must not inherit the canonical repository's recurring cache spend.
+    if: github.repository == 'mobius-os/mobius'
     runs-on: ubuntu-latest
     # A full cold build can approach the same duration as the e2e build it feeds.
     timeout-minutes: 40

@@ -6,7 +6,7 @@ Read this first if you just cloned the repo. It maps the system so you can find 
 
 Möbius is a self-hosted PWA where one owner chats with an in-product AI agent to build mini-apps and modify the platform itself. The "agent" is a coding-agent (Claude Code or Codex) running as a subprocess inside the container; a chat message spawns a turn, the backend streams the agent's output back over SSE, and the agent can compile JSX into mini-apps, edit the shell UI, manage files, and schedule tasks. The whole platform runs in a single Docker container and installs on Android/iOS as a PWA.
 
-The design has one line behind it: **low floor, high ceiling, no walls.** The agent is the product; everything else is substrate it operates on. Möbius bets on rising AI capability and inverts the usual defaults: **make the good path easy** — design, examples, prompts, and a clean script for any step that's identical every time — and **make the bad path harder but never impossible.** The owner can tell the agent to delete everything and it can; the net under it is the recovery floor, not a wall. **Code empowers the agent, it does not police it**: prevention lives in the instruction layer and learned memory, never in code-level validators or in removing a capability.
+The design has one line behind it: **low floor, high ceiling, no walls.** The agent is the product; everything else is substrate it operates on. Möbius bets on rising AI capability and inverts the usual defaults: **make the good path easy** — design, examples, prompts, and a clean script for any step that's identical every time — and **make the bad path harder but never impossible.** The owner can tell the agent to delete everything and it can; the net under it is the fallback floor, not a wall. **Code empowers the agent, it does not police it**: prevention lives in the instruction layer and learned memory, never in code-level validators or in removing a capability.
 
 **Intelligence over scripts.** A script, validator, or fixed procedure earns its place only for the unambiguous and identical-every-time — pull a promoted recovery image, rebuild the served frontend, a deterministic migration. Everything ambiguous — why something broke, how to reach the last good state, fixing what another agent did — is the agent reasoning in context. Branching logic to cover cases, or bespoke machinery to detect-and-auto-handle a situation, is the tell that you're building the wrong thing: script the certain step, **instruct** the agent to run it (sharpen the prompt if it forgets), and trust intelligence for the rest. The only automation worth keeping is one a tool already ships (a real watcher, HMR) — never flimsy glue invented to avoid instructing the agent. **Recovery** is this made concrete: an on-demand external agent that cannot rewrite its own image but reaches and fixes the stopped target by reasoning about what broke, not from a menu of canned reversions.
 
@@ -59,7 +59,7 @@ At startup `backend/app/main.py:1000` picks one static directory **at module loa
 /app/static/                   ← fallback (baked into the image, current with git HEAD)
 ```
 
-The `/data` volume persists across `docker compose build && up -d`, so a new image's `/app/static/` is masked by an old `/data/platform/frontend/dist/`. After a frontend deploy, refresh both source and dist and verify the bundle hash changed in `/data/platform/frontend/dist/assets/index-*.js`. Because the choice is made at module load, an in-container shell rebuild does not take effect until the uvicorn process restarts. Never delete `/app/static/` — it is the only recovery fallback and is root-owned.
+The `/data` volume persists across `docker compose build && up -d`, so a new image's `/app/static/` is masked by an old `/data/platform/frontend/dist/`. After a frontend deploy, refresh both source and dist and verify the bundle hash changed in `/data/platform/frontend/dist/assets/index-*.js`. Because the choice is made at module load, an in-container shell rebuild does not take effect until the uvicorn process restarts. Never delete `/app/static/` — it is the immutable frontend fallback and is root-owned.
 
 ### Security updates — who patches what
 
@@ -149,14 +149,16 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `response_policy.py` | Validated origin sources plus the shell, embedded-chat, opaque app-frame, packaged-document, and published-site policies shared by direct and proxied deployments |
 | `frontend_watcher.py` | Polling watcher that auto-rebuilds the served frontend clone (`/data/platform/frontend`) on edit — debounced `vite build`, atomic `.dist-next`→`dist` swap |
 | `config.py` | `Settings` via pydantic-settings; reads `.env` |
-| `database.py` | SQLAlchemy engine, `SessionLocal`, `Base`, `get_db`, and `run_migrations()` (idempotent boot-time additive `ALTER TABLE`s) |
+| `database.py` | SQLAlchemy engine, pool instrumentation, `SessionLocal`, `Base`, and `get_db`; contains no schema history |
+| `schema_migrations.py` | Append-only schema/data migrations, durable ledger primitives, and ORM/live-schema parity inspection; published functions are semantic-hash frozen |
+| `startup.py` | Two-phase boot: process/schema preflight first, then writer/reconciliation/database supervisors only after schema parity succeeds |
 | `models.py` | ORM tables: `Owner`, `Chat`, `ChatRun`, `App`, `PushSubscription`, `Notification` |
 | `schemas.py` | Pydantic request/response models |
 | `auth.py` | bcrypt hashing, JWT creation/decoding, Fernet encryption |
 | `deps.py` | FastAPI auth dependencies: `get_current_owner` (owner-only), `get_current_owner_or_app` (owner + app token), `get_principal`, `require_app_permission`, and `reject_cross_site` (CSRF) |
 | `compiler.py` | `compile_jsx()` — calls the Rolldown adapter to compile a JSX string into an ES module |
 | `providers.py` | `BaseProvider` adapters (`ClaudeProvider`, `CodexProvider`) + the `PROVIDERS` registry; identity/auth/env shaping for the SDK runners (`build_env`), and `get_skill_path()`. |
-| `claude_sdk_runner.py` | Claude SDK turn runner; passes `cli_path="/usr/local/bin/claude"` so the SDK drives the same pinned binary recovery + cron use |
+| `claude_sdk_runner.py` | Claude SDK turn runner; passes `cli_path="/usr/local/bin/claude"` so interactive chat and cron turns use the same pinned binary |
 | `codex_sdk_runner.py` | Codex SDK turn runner (Thread/TurnHandle + steer) |
 | `codex_appserver.py` | Small helper module: `codex_sdk_runner.py` imports its one surviving function, `_extract_bash_command`, which pulls the bash command string out of a shell tool item. The SDK runner does its own event/tool classification locally. |
 | `chat.py` | `run_chat()` background task: spawns the turn, publishes events, routes persistence through the actor |
@@ -210,6 +212,24 @@ recovery listener. The worker is deleted when the session finishes or expires.
 Self-hosters use the authority they already own:
 `docker compose exec -u 0 app bash`. This attaches to the live container and
 does not replace its normal process.
+
+### Health, readiness, and schema-degraded boot
+
+`GET /api/health` is reachability and remains HTTP 200 whenever the process can
+answer; the shell uses that distinction so a server fault never masquerades as
+the device being offline. `GET /api/ready` is serviceability: it requires both
+an ORM-compatible database and the single-writer persistence actor. Deployment
+and container probes use readiness. `GET /api/health/strict` retains the
+schema-only diagnostic contract.
+
+Boot runs `create_all`, append-only migrations, and `orm_schema_gaps()` before
+starting any database owner. A remaining gap enters a bounded degraded mode:
+ordinary APIs return one deterministic 503, database startup tasks and
+supervisors do not run, cron remains disabled, and static shell plus health,
+version, browser-bootstrap, and authenticated restart surfaces remain. External
+Recovery may alter the database, but the process intentionally keeps its boot
+verdict until restart; promoting only part of the skipped startup plan inside a
+health probe would create a second, race-prone boot mechanism.
 
 ### Misc shared helpers
 
@@ -429,7 +449,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | Task | Start here |
 |------|------------|
 | New API route | New module in `backend/app/routes/` exposing `router` → register in `routes/__init__.py` (`_load(...)` line + `__all__`) → mount in `main.py` |
-| New ORM table / column | `backend/app/models.py` plus an idempotent `ALTER TABLE` entry in `database.py:run_migrations()` (runs at boot; `create_all` never ALTERs an existing table) |
+| New ORM table / column | `backend/app/models.py` plus a new numbered function at the append-only end of `backend/app/schema_migrations.py`; run the frozen previous-release upgrade contract (`create_all` never alters an existing table) |
 | Change request/response shape | `backend/app/schemas.py` + the owning route |
 | Add an auth dependency / change CSRF | `backend/app/deps.py` |
 | Persist anything chat-domain | A domain command in `backend/app/chat_writer.py` — never write `Chat.messages`/`Chat.pending_messages` directly |
@@ -524,7 +544,7 @@ installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.18 (2026-08-04).** This section is the
+**Owner-authoritative contract — v1.20 (2026-08-15).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -537,13 +557,14 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
 (`tests/send-rule`, `spacer`, `second-send-pin`, `steer-queued`, `stream-reconnect`,
 `backend/tests/test_chats_stream_steer`) encode this:
 
-- **R0 — Two modes; two explicit auto-scroll entrances.** A chat is either in **auto-scroll**
+- **R0 — Two modes; explicit auto-scroll entrances.** A chat is either in **auto-scroll**
   (`FOLLOW_BOTTOM`, following the physical scroll tail as the reply streams) or **hold**
   (`PIN_USER_MSG` or `ANCHOR_AT`, staying at a pinned prompt or frozen reading
-  position). Auto-scroll engages only through (a) the gesture-gated scroll handler
+  position). Auto-scroll engages only through (a) the gesture-gated reader path
   after the user manually reaches or explicitly swipes toward the physical bottom,
-  or (b) the live-send pin handoff when the streaming reply has consumed its exact
-  reserved room. Only a send may create `PIN_USER_MSG`. Reservation does not create
+  (b) a composer press or edit that begins at that physical bottom, or (c) the
+  live-send pin handoff when the streaming reply has consumed its exact reserved
+  room. Only a send may create `PIN_USER_MSG`. Reservation does not create
   a second kind of bottom: when `FOLLOW_BOTTOM` is active, it follows the physical
   tail including any remaining room. Real output first consumes that room without
   advancing the tail; after the room reaches zero, the same tail advances with the
@@ -575,14 +596,18 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   mode before a keyboard or other viewport resize is laid out.
 - **R2 — One send rule everywhere.** The first visible user message always pins to
   the viewport top. Every subsequent direct, queued, promoted, or steered message
-  pins when its submit-time DOM snapshot is at the real-content tail. Geometry is
-  authoritative because `ScrollMode` can lag an input/layout frame; requiring both
-  made identical bottom sends behave inconsistently. A real user scroll after
-  submission invalidates an automatic delayed queue promotion (a tap without
-  scrolling does not). Explicit fast-forward reuses that snapshot through tray
-  reflow while its reader generation remains current; after a real scroll it
-  captures current geometry instead. Another scroll during the request invalidates
-  that snapshot. Missing delayed intent degrades to hold, never to an inferred pin.
+  pins only when its submit-time DOM snapshot is at the one physical
+  tail. Reserved reply spacer remains part of that distance: once the reader moves
+  upward through it—even while the latest user message remains visible—the chat is
+  in hold and the next send must leave the viewport untouched. Subtracting spacer
+  from the send decision creates a false second bottom and is forbidden. Physical
+  geometry is authoritative for the send snapshot while `ScrollMode` settlement may
+  trail a gesture or layout by a frame. A real user scroll after submission
+  invalidates an automatic delayed queue promotion (a tap without scrolling does
+  not). Explicit fast-forward reuses that snapshot through tray reflow while its
+  reader generation remains current; after a real scroll it captures current
+  physical geometry instead. Another scroll during the request invalidates that
+  snapshot. Missing delayed intent degrades to hold, never to an inferred pin.
 - **R3 — Pin holds until the reservation is filled.** A legitimate live pin
   transitions to `PIN_USER_MSG`, not immediately to `FOLLOW_BOTTOM`; the response
   first grows below the prompt without moving it. Exactly when the streaming reply
@@ -642,10 +667,16 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   Never replace the input-to-first-scroll handoff with a fixed short window: under
   rendering load the browser may deliver that scroll later. Ownership begins only for
   inputs whose default action can scroll the transcript; ordinary typing, Enter, and
-  control activation are not reader scroll intent. Pointer/touch release handles taps,
+  control activation are not reader scroll intent. Editing controls retain their own
+  navigation keys. A nested vertical surface marked `data-chat-scroll-region` retains
+  wheel and touch input while it can scroll in that direction; only a gesture at its
+  matching edge may chain to the transcript. Pointer/touch release handles taps,
   while scrolling-key input that produces no scroll releases on the next frame. Wheel
   input gets that early release only when its direction is exactly clamped at the
-  matching scroll edge. An elapsed frame is not evidence that an in-range wheel was a
+  matching scroll edge. An end-directed wheel or scroll-key input already clamped at
+  the physical tail claims `FOLLOW_BOTTOM` before that no-scroll release; otherwise
+  the browser's missing `scroll` event would discard explicit follow intent. An
+  elapsed frame is not evidence that an in-range wheel was a
   no-op: renderer/compositor load can update geometry before the main-thread `scroll`
   handler runs. A meaningful touch swipe toward the end may enter `FOLLOW_BOTTOM`
   once even when the browser is already clamped at the physical tail and therefore
@@ -671,6 +702,9 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   newer gesture is rejected; once that gesture settles, the controller adopts the
   current semantic location and performs one fresh geometry reconciliation. Waiting
   for the timing gate to expire never gives stale work its authority back.
+  An end-directed input already clamped at the tail may enter `FOLLOW_BOTTOM`
+  without advancing that generation: no scroll occurred, so a delayed queued send
+  retains the submit-time pin decision that the generation protects.
   A marked Q&A custom-answer field is the deliberate exception to "ordinary
   typing cannot scroll": changing its value can grow the field and cause the
   browser to move the transcript to keep the native caret visible. Only an
@@ -692,11 +726,13 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   viewport intersection alone cannot detect that the absolutely-positioned
   composer is covering the target. The floating jump-to-latest control
   (owner ask, 2026-08-04) is the same explicit one-shot action through the
-  identical controller tail reveal, with the same settled `ANCHOR_AT` outcome.
-  Its visibility is a pure geometry read outside the controller's ownership
-  gates: it renders only while the reader holds a position away from the
-  content tail, where reserved spacer room is phantom per R2's send-snapshot
-  bottom rule — so a fresh live-send reservation never summons it. It yields
+  controller's physical-tail reveal and explicitly resumes `FOLLOW_BOTTOM` so
+  subsequent output remains visible.
+  Its visibility is a pure physical-tail geometry read outside the controller's
+  ownership gates: it renders only while the reader holds a position away from
+  the physical tail, including after an upward move through reserved room. A fresh
+  live-send reservation does not summon it because a correctly pinned row rests at
+  that same physical clamp. It yields
   to a visible attention nudge, which navigates to the same tail with strictly
   more context.
 - **R5b — One keyboard geometry signal; reservation-responsive resize.** Shell alone
@@ -745,22 +781,16 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   text block in event order, without hiding, duplicating, or reordering them. Only a
   recovered answer whose POST returns `started` creates a new hidden continuation.
   Switching sources preserves the active row's anchor identity and writes no scroll.
-- **R4a — Attention nudges reveal the usable tail.** Tapping an offscreen question or
-  paused-turn nudge lands at the physical tail, including composer-clearance padding,
-  so the real Submit or Resume action is visible above the overlaid composer. This is
-  a settled `ANCHOR_AT` hold, not `FOLLOW_BOTTOM`; one-shot navigation must not create
-  live-follow intent for later content. It routes through the scroll owner rather than
-  `scrollIntoView`, whose viewport intersection cannot detect composer coverage.
-
 The transition table is intentionally exhaustive; adding a new send or lifecycle
 path means routing it through the same entries rather than inventing another rule:
 
 | Event | Before | After | Scroll write |
 |---|---|---|---|
 | First direct/queued/steered user row becomes visible | any | `PIN_USER_MSG` | New row to top |
-| Later send submitted at real-content tail (mode may be one frame stale) | any | `PIN_USER_MSG` | New row to top |
+| Later send submitted at the physical autoscroll tail (mode may be one frame stale) | any | `PIN_USER_MSG` | New row to top |
 | Later send submitted anywhere else | hold or stale follow | `ANCHOR_AT`/existing hold | None |
 | Reader reaches or explicitly swipes toward physical bottom | any | `FOLLOW_BOTTOM` | User-owned; follow the one physical tail, including remaining reservation |
+| Composer press or edit begins at physical bottom | any hold | `FOLLOW_BOTTOM` | No immediate write; the next owned layout follows the existing physical tail |
 | Reader scrolls manually away from bottom | any | `ANCHOR_AT` | User-owned |
 | Reply grows while an armed live pin still has reserved room | pin hold | same pin hold | Keep prompt fixed |
 | Streaming reply consumes the armed pin reservation | pin hold | `FOLLOW_BOTTOM` | Follow physical tail |
@@ -915,10 +945,14 @@ every supervisor sweep, so a later ledger read cannot disagree with the boot.
 When a successful pass leaves a restart remainder, the same supervisor follows
 up after two seconds; a no-progress pass returns to the event/60-second cadence.
 It creates neither per-chat workers nor a permanent short poll. Paid
-provider-limit continuation (`auto_resume_on_limit`) initially defaults off;
-planned-restart continuation (`auto_resume_on_restart`) initially defaults on.
-Each chat stores both choices independently, and changing either choice seeds
-future chats without rewriting existing conversations.
+provider-limit continuation (`auto_resume_on_limit`) is an owner choice that
+initially defaults off; each chat stores it independently, and changing it
+seeds future chats without rewriting existing conversations. Planned-restart
+continuation is always on and has no owner toggle — Möbius interrupted the work
+itself, so it should just continue. The per-chat `auto_resume_on_restart`
+column remains only as an internal latch: it defaults on and is cleared solely
+by `delegations.mark_cancelled`, so a cancelled delegated child cannot
+resurrect itself when the boot sweep claims restart parks.
 
 ### Tool output rendering
 
@@ -1065,10 +1099,12 @@ placement intent and never encode pane ids, split directions, or breakpoints.
 `frontend/src/components/Shell/paneModel.js` is the pure workspace model. A
 workspace contains a binary `layout` tree, a map of pane records, a focused pane,
 a presentation mode (`single` or `panes`), and the single-screen slot. Each pane
-owns its ordered tabs and `activeTabKey`; tab identity and navigation mapping
-remain in `tabModel.js`. The model normalizes persisted input, enforces unique
-tabs across panes, bounds pane count/depth, collapses empty splits, and returns
-the same reference for no-op transitions.
+owns its visible tab order, `activeTabKey`, and a most-recent-first
+`recentTabKeys` permutation used when its active tab closes or moves away; tab
+identity and navigation mapping remain in `tabModel.js`. The model normalizes
+persisted input, seeds older blobs from the former neighbour-close order,
+enforces unique tabs across panes, bounds pane count/depth, collapses empty
+splits, and returns the same reference for no-op transitions.
 
 `useWorkspaceSession.js` is the live state owner. It composes reducer transitions
 through a synchronous ref boundary, persists the sole versioned

@@ -256,7 +256,7 @@ test.describe('Spacer mechanics', () => {
     assertSpacerReasonable(m)
   })
 
-  test('2. Second message at the content tail retargets the spacer and pins', async ({ page }) => {
+  test('2. Second message at the physical tail retargets the spacer and pins', async ({ page }) => {
     await setup(page)
     await newChat(page)
     await sendMessage(page, 'First message')
@@ -281,7 +281,7 @@ test.describe('Spacer mechanics', () => {
     assertSpacerReasonable(m)
   })
 
-  test('3. Repeated messages at the content tail pin deterministically', async ({ page }) => {
+  test('3. Repeated messages at the physical tail pin deterministically', async ({ page }) => {
     await setup(page)
     await newChat(page)
     await sendMessage(page, 'First')
@@ -472,7 +472,7 @@ test.describe('Short responses', () => {
     // Let spacer recalculation settle before next send.
     await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
 
-    // The short transcript is still at its real-content tail, so the next
+    // The short transcript is still at its physical tail, so the next
     // send follows the same geometry rule as every other send: retarget the
     // permanent reservation and pin the new user row.
     await sendMessage(page, 'Follow-up question')
@@ -1239,6 +1239,56 @@ test.describe('Scroll edge cases', () => {
       return s ? s.scrollHeight - s.scrollTop - s.clientHeight : 0
     })
     expect(afterGap).toBeLessThan(50)
+  })
+
+  test('24b. A downward wheel at the clamp re-engages follow without a scroll event', async ({ page }) => {
+    await setup(page)
+    await newChat(page)
+    await sendMessage(page, 'Clamped wheel re-engage test')
+    await injectContent(page, 'Existing streamed content. ', 140)
+
+    const scroll = page.locator('[data-chat-surface="painted"] .chat__scroll')
+    const box = await scroll.boundingBox()
+    expect(box).not.toBeNull()
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+
+    // First establish a genuine reader hold away from the tail.
+    await page.mouse.wheel(0, -500)
+    await expect(scroll).toHaveAttribute('data-scroll-mode', 'ANCHOR_AT', {
+      timeout: 3000,
+    })
+
+    // Browser/app layout may put a held coordinate exactly at the physical
+    // clamp without granting follow. A further downward wheel then emits no
+    // scroll event, but it is still an explicit request to follow the tail.
+    await page.evaluate(() => {
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      if (s) s.scrollTop = s.scrollHeight
+    })
+    await page.evaluate(() => new Promise(resolve => (
+      requestAnimationFrame(() => requestAnimationFrame(resolve))
+    )))
+    await expect(scroll).toHaveAttribute('data-scroll-mode', 'ANCHOR_AT')
+
+    await page.evaluate(() => {
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      window.__clampedWheelScrollEvents = 0
+      s?.addEventListener('scroll', () => {
+        window.__clampedWheelScrollEvents += 1
+      }, { once: true })
+    })
+
+    await page.mouse.wheel(0, 500)
+    await expect(scroll).toHaveAttribute('data-scroll-mode', 'FOLLOW_BOTTOM', {
+      timeout: 3000,
+    })
+    expect(await page.evaluate(() => window.__clampedWheelScrollEvents)).toBe(0)
+
+    await injectContent(page, 'Content after the clamped gesture. ', 20)
+    await expect.poll(async () => page.evaluate(() => {
+      const s = document.querySelector('[data-chat-surface="painted"] .chat__scroll')
+      return s ? s.scrollHeight - s.scrollTop - s.clientHeight : Infinity
+    })).toBeLessThan(50)
   })
 
   test('26. Fresh second send while scrolled up preserves the reading anchor', async ({ page }) => {

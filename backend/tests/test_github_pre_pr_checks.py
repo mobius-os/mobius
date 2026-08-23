@@ -2,11 +2,17 @@
 
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
+import yaml
 
 from app.contribution_errors import ContributionSubmitError
-from app import github_pre_pr_checks as checks
+from app import github_auth, github_pre_pr_checks as checks
+
+
+ROOT = Path(__file__).resolve().parents[2]
+CANONICAL_REPOSITORY_GUARD = "github.repository == 'mobius-os/mobius'"
 
 
 def _record(*, repo="mobius-os/mobius", status="prepared"):
@@ -42,6 +48,38 @@ def test_support_is_narrow_and_active_states_are_explicit():
   assert not checks.pre_pr_checks_active({"state": "completed"})
 
 
+def test_only_allowlisted_workflow_jobs_may_run_in_forks():
+  """Enabling Tests on a fork must not arm production or scheduled jobs."""
+  workflow_dir = ROOT / ".github" / "workflows"
+  paths = sorted([
+    *workflow_dir.glob("*.yml"),
+    *workflow_dir.glob("*.yaml"),
+  ])
+  allowlisted = set(checks._SUPPORTED_WORKFLOWS.values())
+  names = {path.name for path in paths}
+  assert allowlisted <= names
+
+  for path in paths:
+    payload = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    jobs = payload.get("jobs") if isinstance(payload, dict) else None
+    assert isinstance(jobs, dict) and jobs, f"{path.name} must define jobs"
+    if path.name in allowlisted:
+      assert payload.get("permissions") == {"contents": "read"}, (
+        f"{path.name} is fork-runnable and must remain read-only"
+      )
+      assert all("permissions" not in job for job in jobs.values()), (
+        f"{path.name} jobs must not widen the fork workflow token"
+      )
+      continue
+    for job_name, job in jobs.items():
+      assert isinstance(job, dict), f"{path.name}:{job_name} must be a job"
+      condition = str(job.get("if") or "")
+      assert condition == CANONICAL_REPOSITORY_GUARD, (
+        f"{path.name}:{job_name} can run in a fork; add the canonical "
+        "repository guard or explicitly allowlist the workflow"
+      )
+
+
 def test_bootstrap_requires_manual_trigger_on_upstream(monkeypatch, tmp_path):
   calls = []
 
@@ -59,6 +97,22 @@ def test_bootstrap_requires_manual_trigger_on_upstream(monkeypatch, tmp_path):
   assert calls[0][1] == (
     "show", f"{'a' * 40}:.github/workflows/test.yml",
   )
+
+
+def test_dispatch_rejects_partial_connection_before_git(monkeypatch, tmp_path):
+  monkeypatch.setattr(github_auth, "get_token", lambda: "gh-partial")
+  monkeypatch.setattr(
+    github_auth,
+    "read_state",
+    lambda: {"login": "octocat", "scopes": ["public_repo"]},
+  )
+  monkeypatch.setattr(checks.shutil, "which", lambda name: f"/bin/{name}")
+
+  with pytest.raises(ContributionSubmitError) as failure:
+    checks.dispatch_pre_pr_checks(_record(), tmp_path / "reviewed.diff")
+
+  assert failure.value.code == "pre_pr_checks_scope"
+  assert "full PR access" in failure.value.message
 
 
 def test_dispatch_response_without_run_identity_is_uncertain(

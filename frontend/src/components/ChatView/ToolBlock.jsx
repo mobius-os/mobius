@@ -494,6 +494,7 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
           className={`chat__tool-detail${
             editPreview ? ' chat__tool-detail--edit' : ''
           }`}
+          data-chat-scroll-region
           role="region"
           aria-labelledby={headerId}
           tabIndex={open ? 0 : undefined}

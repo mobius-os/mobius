@@ -94,33 +94,105 @@ export function searchInstalledApps(apps, query, limit = 8) {
     .map(({ score: _score, ...result }) => result)
 }
 
-// The dialog unmounts on close (NotificationCenter renders it behind
-// `searchOpen &&`), so component state cannot survive a reopen. The owner's
-// last search lives here instead: type a term, open a result, reopen search,
-// and the term and its results are still there rather than a blank field.
-//
-// Memory-only on purpose. It is owner-authored content, so it must not outlive
-// the session — and because nothing is written to storage, a reload or logout
-// drops it without any explicit clean-up path to keep correct.
-const IDLE_CHAT_STATE = { query: '', status: 'idle', results: [] }
-let lastSearch = { query: '', chatState: IDLE_CHAT_STATE }
+export const RECENT_SELECTION_LIMIT = 12
+const RECENT_SELECTIONS_STORAGE_KEY = 'mobius:global-search:recent-selections:v1'
 
-export function readLastSearch() {
-  return lastSearch
-}
-
-// Only a settled result set is worth restoring: replaying a `loading` or
-// `error` snapshot would reopen the dialog into a state the owner never saw
-// settle, and the mount effect re-runs the query anyway.
-export function rememberLastSearch(query, chatState) {
-  lastSearch = {
-    query: String(query || ''),
-    chatState: chatState?.status === 'ready' ? chatState : IDLE_CHAT_STATE,
+function browserStorage() {
+  try {
+    return globalThis.localStorage || null
+  } catch (_) {
+    return null
   }
 }
 
-export function clearLastSearch() {
-  lastSearch = { query: '', chatState: IDLE_CHAT_STATE }
+function normalizedRecentSelections(selections) {
+  const seen = new Set()
+  const normalized = []
+  for (const selection of Array.isArray(selections) ? selections : []) {
+    if (!['app', 'chat'].includes(selection?.kind)) continue
+    const id = String(selection?.id ?? '').trim()
+    if (!id) continue
+    const key = `${selection.kind}:${id}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    normalized.push({ kind: selection.kind, id })
+    if (normalized.length === RECENT_SELECTION_LIMIT) break
+  }
+  return normalized
+}
+
+// Selection history intentionally stores only stable item references. Titles,
+// snippets, and the owner's query text remain in their owning data sources and
+// are resolved afresh when the dialog opens.
+export function readRecentSelections(storage = browserStorage()) {
+  try {
+    return normalizedRecentSelections(JSON.parse(
+      storage?.getItem(RECENT_SELECTIONS_STORAGE_KEY) || '[]',
+    ))
+  } catch (_) {
+    return []
+  }
+}
+
+export function rememberRecentSelection(selection, storage = browserStorage()) {
+  const next = normalizedRecentSelections([
+    selection,
+    ...readRecentSelections(storage),
+  ])
+  try {
+    storage?.setItem(RECENT_SELECTIONS_STORAGE_KEY, JSON.stringify(next))
+  } catch (_) {
+    // Restricted and private browsing contexts may reject Web Storage. Search
+    // still works; it simply has no history on the next open.
+  }
+  return next
+}
+
+export function clearRecentSelections(storage = browserStorage()) {
+  try {
+    storage?.removeItem(RECENT_SELECTIONS_STORAGE_KEY)
+  } catch (_) {
+    // Clearing an unavailable store is already the desired end state.
+  }
+}
+
+export function resolveRecentSelections(selections, chats, apps) {
+  const chatsById = new Map(
+    (Array.isArray(chats) ? chats : [])
+      .filter(chat => chat?.id)
+      .map(chat => [String(chat.id), chat]),
+  )
+  const appsById = new Map(
+    (Array.isArray(apps) ? apps : [])
+      .filter(app => app?.id)
+      .map(app => [String(app.id), app]),
+  )
+
+  return normalizedRecentSelections(selections).flatMap(selection => {
+    const value = selection.kind === 'chat'
+      ? chatsById.get(selection.id)
+      : appsById.get(selection.id)
+    return value ? [{ kind: selection.kind, value }] : []
+  })
+}
+
+export function resolvedSearchSelection(index, resultCount) {
+  if (resultCount === 0) return -1
+  return Math.min(Math.max(index, 0), resultCount - 1)
+}
+
+export function moveSearchSelection(index, key, resultCount) {
+  const current = resolvedSearchSelection(index, resultCount)
+  if (current === -1) return -1
+  if (key === 'ArrowDown') return (current + 1) % resultCount
+  if (key === 'ArrowUp') return (current - 1 + resultCount) % resultCount
+  return current
+}
+
+export function pointerPositionChanged(previous, next) {
+  return Boolean(previous && next) && (
+    previous.x !== next.x || previous.y !== next.y
+  )
 }
 
 export function visibleChatSearchState(chatState, query) {

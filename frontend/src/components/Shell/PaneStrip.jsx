@@ -4,11 +4,11 @@ import * as tabModel from './tabModel.js'
 import { STRIP_H } from './paneModel.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 
-// Each direction owns 40% of the one-shot cycle, so 1000/12 ms per clipped pixel
-// keeps travel at a readable 30px/s. The cycle runs once, returns to the beginning,
+// Each direction owns 40% of the one-shot cycle, so 1000/14.4 ms per clipped pixel
+// keeps travel at a readable 36px/s. The cycle runs once, returns to the beginning,
 // and stops; duration therefore scales with distance instead of making long manual
 // titles accelerate.
-const TITLE_CYCLE_MS_PER_PX = 1000 / 12
+const TITLE_CYCLE_MS_PER_PX = 1000 / 14.4
 
 function paneDomToken(value) {
   return encodeURIComponent(String(value))

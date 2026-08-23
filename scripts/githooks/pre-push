@@ -216,6 +216,21 @@ if [ -n "$PY" ]; then
   fi
 fi
 
+# 2b. Schema history is a cheap, dependency-free exception to the ordinary
+# topic-branch backend deferral. A first-time fork may not receive GitHub
+# runner approval, and create_all-based tests can mask a missing upgrade. Any
+# change to the ORM or migration owner must prove that published functions are
+# untouched and version numbers are append-only before it leaves the machine.
+if changed_match '^(backend/app/models\.py|backend/app/schema_migrations\.py|backend/scripts/check-schema-migrations\.py|backend/tests/fixtures/(migration_history\.json|schema_[0-9]+\.sql))$'; then
+  if python3 backend/scripts/check-schema-migrations.py >"$PP_TMP/schema" 2>&1; then
+    ok "schema migration history is append-only"
+  else
+    err "schema migration history FAILED:"
+    sed 's/^/    /' "$PP_TMP/schema" >&2
+    fail_check schema-migration-history
+  fi
+fi
+
 # 3. JSX/JS parse on changed frontend files through Rolldown's Oxc transformer
 #    (no import resolution — pure syntax). Skipped if dependencies are absent.
 JSX="$(changed_list '^frontend/src/.*\.(jsx|js)$')"

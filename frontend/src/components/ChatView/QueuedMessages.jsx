@@ -1,13 +1,28 @@
 import { useRef, useState } from 'react'
-import { ChevronDown, DoubleChevronRight, X } from '@openai/apps-sdk-ui/components/Icon'
+import { flushSync } from 'react-dom'
+import {
+  Check,
+  ChevronDown,
+  DoubleChevronRight,
+  Pencil,
+  X,
+} from '@openai/apps-sdk-ui/components/Icon'
 import { stripAugmentation } from './msgText.js'
 import { cidOf } from './messageIdentity.js'
+import { placeCaretAtTextEnd } from './composerFocusPolicy.js'
+import { autoGrowTextarea } from './composerTextareaSizing.js'
+import { restoreQueuedEditorAfterSave } from './queuedEditorFocus.js'
+import { isInlineEditorSubmit } from './composerShortcuts.js'
+import { isTouchPrimary } from '../../lib/pointerPrimary.js'
 import {
   pointerSelectionChangedWithin,
   textSelectionSnapshot,
 } from '../../lib/selectableTextControl.js'
 
 const TRUNCATE_AT = 80
+// Matches .queued__editor-input max-height; the JS fallback caps growth here
+// for browsers without native field-sizing.
+const EDITOR_MAX_HEIGHT = 160
 
 /**
  * Queued-messages tray rendered above the chat input.
@@ -25,11 +40,17 @@ const TRUNCATE_AT = 80
  * the chat list and the input form. Empty queue → nothing rendered.
  */
 export default function QueuedMessages({
-  items, onCancel, onSteerOne, steerActive, steerBusy = false,
+  items, onCancel, onEdit, onSteerOne, steerActive, steerBusy = false,
+  focusComposer,
 }) {
   const [expanded, setExpanded] = useState(() => new Set())
   const [collapsed, setCollapsed] = useState(false)
+  const [editingCid, setEditingCid] = useState(null)
+  const [editDraft, setEditDraft] = useState('')
+  const [editSaving, setEditSaving] = useState(false)
+  const [editError, setEditError] = useState('')
   const pointerSelectionRef = useRef(null)
+  const editorRef = useRef(null)
 
   if (!items || items.length === 0) return null
 
@@ -52,6 +73,78 @@ export default function QueuedMessages({
 
   function toggleCollapsed() {
     setCollapsed(c => !c)
+  }
+
+  function beginEdit(msg) {
+    if (editSaving) return
+    const cid = cidOf(msg)
+    // Reveal the editor synchronously so the textarea exists inside this tap's
+    // call stack (also expand, so the whole message is visible while editing a
+    // truncated row), then move focus to it before the gesture ends. iOS keeps
+    // the soft keyboard open only across a focus change that happens within the
+    // user gesture; autoFocus fires after the tapped pencil is already gone,
+    // which drops the keyboard mid-composition.
+    flushSync(() => {
+      setEditingCid(cid)
+      setEditDraft(stripAugmentation(msg.content || ''))
+      setEditError('')
+      setExpanded(prev => new Set(prev).add(cid))
+    })
+    const el = editorRef.current
+    if (el) {
+      try { el.focus({ preventScroll: true }) } catch { el.focus() }
+      placeCaretAtTextEnd(el)
+      // Reveal the whole message being edited (fallback for browsers without
+      // native field-sizing).
+      autoGrowTextarea(el, EDITOR_MAX_HEIGHT)
+    }
+  }
+
+  function cancelEdit() {
+    if (editSaving) return
+    // Hand focus back to the composer so the soft keyboard stays up and the
+    // owner can keep typing, then tear the editor down.
+    focusComposer?.()
+    setEditingCid(null)
+    setEditDraft('')
+    setEditError('')
+  }
+
+  async function saveEdit(msg) {
+    if (editSaving) return
+    const visible = editDraft.trim()
+    if (!visible) {
+      setEditError('Queued message cannot be empty.')
+      return
+    }
+    if (visible === stripAugmentation(msg.content || '').trim()) {
+      cancelEdit()
+      return
+    }
+    // Move focus to the composer now, inside this tap, before the textarea is
+    // disabled below. A disabled field blurs — on mobile that would drop the
+    // soft keyboard for the whole save round-trip. Handing focus to the
+    // composer keeps the keyboard up and leaves the owner ready to keep typing.
+    focusComposer?.()
+    setEditSaving(true)
+    setEditError('')
+    // Send only the owner's visible text; the server re-derives the hidden
+    // session-file manifest, so the browser never round-trips it. onEdit
+    // reports an explicit outcome so a race can't read as success: 'saved'
+    // applied, 'gone' already promoted/cancelled, 'error' transport.
+    const outcome = await onEdit?.(cidOf(msg), visible)
+    flushSync(() => {
+      setEditSaving(false)
+      if (outcome === 'saved') {
+        setEditingCid(null)
+        setEditDraft('')
+      } else if (outcome === 'gone') {
+        setEditError('This message already started — it can’t be edited now.')
+      } else {
+        setEditError('Couldn’t save this edit. Try again.')
+      }
+    })
+    restoreQueuedEditorAfterSave(outcome, editorRef.current)
   }
 
   function onHdrKeyDown(e) {
@@ -107,82 +200,156 @@ export default function QueuedMessages({
               ? firstLine.slice(0, TRUNCATE_AT) + '…'
               : firstLine + (text.includes('\n') ? ' …' : '')
             const MessageSurface = needsTruncation ? 'button' : 'div'
+            const isEditing = editingCid === key
 
             return (
               <div
                 key={key}
-                className={`queued__row${isExpanded ? ' queued__row--expanded' : ''}`}
+                className={`queued__row${isExpanded ? ' queued__row--expanded' : ''}${isEditing ? ' queued__row--editing' : ''}`}
                 role="listitem"
               >
-                <MessageSurface
-                  type={needsTruncation ? 'button' : undefined}
-                  className={`queued__toggle${needsTruncation ? '' : ' queued__toggle--static'}`}
-                  onPointerDown={needsTruncation ? () => {
-                    pointerSelectionRef.current = textSelectionSnapshot()
-                  } : undefined}
-                  onClick={needsTruncation ? (event) => {
-                    const selectionBeforePointer = pointerSelectionRef.current
-                    pointerSelectionRef.current = null
-                    if (
-                      event.detail !== 0
-                      && pointerSelectionChangedWithin(
-                        selectionBeforePointer,
-                        event.currentTarget,
-                      )
-                    ) return
-                    toggle(key)
-                  } : undefined}
-                  aria-expanded={needsTruncation ? isExpanded : undefined}
-                  aria-label={needsTruncation
-                    ? (isExpanded ? 'Collapse message' : 'Expand message')
-                    : undefined}
-                >
-                  {needsTruncation && (
-                    <ChevronDown
-                      className={`queued__chevron${isExpanded ? ' queued__chevron--open' : ''}`}
-                      width={10}
-                      height={10}
-                      aria-hidden="true"
+                {isEditing ? (
+                  <div className="queued__editor">
+                    <textarea
+                      ref={editorRef}
+                      className="queued__editor-input"
+                      value={editDraft}
+                      onChange={(event) => {
+                        setEditDraft(event.target.value)
+                        setEditError('')
+                        autoGrowTextarea(event.target, EDITOR_MAX_HEIGHT)
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Escape') {
+                          event.preventDefault()
+                          cancelEdit()
+                          return
+                        }
+                        // Empty draft can't save, so leave Enter as a newline.
+                        if (!editDraft.trim()) return
+                        if (isInlineEditorSubmit(event, { isTouchPrimary: isTouchPrimary() })) {
+                          event.preventDefault()
+                          void saveEdit(msg)
+                        }
+                      }}
+                      aria-label="Edit queued message"
+                      rows={2}
+                      disabled={editSaving}
                     />
-                  )}
-                  <span className="queued__text">
-                    {isExpanded ? text : preview}
-                  </span>
-                </MessageSurface>
-                {steerActive && (
-                  // Per-row fast-forward (owner ask, 2026-07-17): the same
-                  // double-chevron as the composer's steer button, in the
-                  // queue action's compact neutral well — send exactly THIS
-                  // message into the running turn now.
-                  // Render it with the optimistic row so the action well and
-                  // cancel-X arrive together. An early tap waits for this
-                  // row's queue write in ChatView before force-steering it.
-                  <button
-                    type="button"
-                    className="queued__action queued__steer"
-                    onPointerDown={(e) => e.preventDefault()}
-                    onTouchEnd={(e) => {
-                      e.preventDefault()
-                      onSteerOne?.(cidOf(msg))
-                    }}
-                    onClick={() => onSteerOne?.(cidOf(msg))}
-                    aria-label="Send this queued message now"
-                    title="Send now"
-                    disabled={steerBusy}
-                  >
-                    <DoubleChevronRight width={16} height={16} aria-hidden="true" />
-                  </button>
+                    <div className="queued__editor-actions">
+                      <button
+                        type="button"
+                        className="queued__action queued__edit-save"
+                        onPointerDown={(e) => e.preventDefault()}
+                        onClick={() => void saveEdit(msg)}
+                        aria-label="Save queued message edit"
+                        title="Save edit"
+                        disabled={editSaving || !editDraft.trim()}
+                      >
+                        <Check width={16} height={16} aria-hidden="true" />
+                      </button>
+                      <button
+                        type="button"
+                        className="queued__action queued__edit-cancel"
+                        onPointerDown={(e) => e.preventDefault()}
+                        onClick={cancelEdit}
+                        aria-label="Discard queued message edit"
+                        title="Discard edit"
+                        disabled={editSaving}
+                      >
+                        <X width={16} height={16} aria-hidden="true" />
+                      </button>
+                    </div>
+                    {editError && (
+                      <div className="queued__editor-error" role="status">
+                        {editError}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    <MessageSurface
+                      type={needsTruncation ? 'button' : undefined}
+                      className={`queued__toggle${needsTruncation ? '' : ' queued__toggle--static'}`}
+                      onPointerDown={needsTruncation ? () => {
+                        pointerSelectionRef.current = textSelectionSnapshot()
+                      } : undefined}
+                      onClick={needsTruncation ? (event) => {
+                        const selectionBeforePointer = pointerSelectionRef.current
+                        pointerSelectionRef.current = null
+                        if (
+                          event.detail !== 0
+                          && pointerSelectionChangedWithin(
+                            selectionBeforePointer,
+                            event.currentTarget,
+                          )
+                        ) return
+                        toggle(key)
+                      } : undefined}
+                      aria-expanded={needsTruncation ? isExpanded : undefined}
+                      aria-label={needsTruncation
+                        ? (isExpanded ? 'Collapse message' : 'Expand message')
+                        : undefined}
+                    >
+                      {needsTruncation && (
+                        <ChevronDown
+                          className={`queued__chevron${isExpanded ? ' queued__chevron--open' : ''}`}
+                          width={10}
+                          height={10}
+                          aria-hidden="true"
+                        />
+                      )}
+                      <span className="queued__text">
+                        {isExpanded ? text : preview}
+                      </span>
+                    </MessageSurface>
+                    <button
+                      type="button"
+                      className="queued__action queued__edit"
+                      onPointerDown={(e) => e.preventDefault()}
+                      onClick={() => beginEdit(msg)}
+                      aria-label="Edit queued message"
+                      title="Edit"
+                      disabled={editSaving}
+                    >
+                      <Pencil width={16} height={16} aria-hidden="true" />
+                    </button>
+                    {steerActive && (
+                      // Per-row fast-forward (owner ask, 2026-07-17): the same
+                      // double-chevron as the composer's steer button, in the
+                      // queue action's compact neutral well — send exactly THIS
+                      // message into the running turn now.
+                      // Render it with the optimistic row so the action well and
+                      // cancel-X arrive together. An early tap waits for this
+                      // row's queue write in ChatView before force-steering it.
+                      <button
+                        type="button"
+                        className="queued__action queued__steer"
+                        onPointerDown={(e) => e.preventDefault()}
+                        onTouchEnd={(e) => {
+                          e.preventDefault()
+                          onSteerOne?.(cidOf(msg))
+                        }}
+                        onClick={() => onSteerOne?.(cidOf(msg))}
+                        aria-label="Send this queued message now"
+                        title="Send now"
+                        disabled={steerBusy}
+                      >
+                        <DoubleChevronRight width={16} height={16} aria-hidden="true" />
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="queued__action queued__cancel"
+                      onPointerDown={(e) => e.preventDefault()}
+                      onClick={() => onCancel?.(cidOf(msg))}
+                      aria-label="Cancel queued message"
+                      title="Cancel"
+                    >
+                      <X width={16} height={16} aria-hidden="true" />
+                    </button>
+                  </>
                 )}
-                <button
-                  type="button"
-                  className="queued__action queued__cancel"
-                  onPointerDown={(e) => e.preventDefault()}
-                  onClick={() => onCancel?.(cidOf(msg))}
-                  aria-label="Cancel queued message"
-                  title="Cancel"
-                >
-                  <X width={16} height={16} aria-hidden="true" />
-                </button>
               </div>
             )
           })}

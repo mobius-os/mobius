@@ -53,7 +53,21 @@ Keep experimental overlays bounded and cheap. Full-viewport animated gradients a
 
 ## Structural changes (JSX/CSS) — a watcher rebuilds, no restart
 
-Read source first, then save your edits under `/data/platform/frontend/src/`. A file watcher runs `vite build` into the served `dist/` on every source change (debounced, atomic swap) — there is NO manual rebuild step and NO restart. Just reload the page to see the change. Batch all edits so the watcher rebuilds once instead of on every save. For CSS-only changes, prefer `theme.css` above (hot-reloaded, no build at all). If the shell breaks, direct the partner to their deployment's external Recovery action (see `recovery.md`).
+Read source first, then save your edits under `/data/platform/frontend/src/`. A file watcher runs `vite build` into the served `dist/` on every source change (debounced, atomic swap) — there is NO manual rebuild step and NO restart. Just reload the page to see the change. Batch all edits so the watcher rebuilds once instead of on every save. For CSS-only changes, prefer `theme.css` above (hot-reloaded, no build at all). If the shell breaks, direct the partner to their deployment's external Recovery action (see `platform-maintenance.md`).
+
+### Shell scale belongs to the shell; local zoom belongs to apps
+
+Keep the top-level Möbius document at one stable page scale on touch devices.
+The toolbar, drawer, chat, tabs, and pane geometry must not pinch-zoom together:
+their text and animated edges rely on remaining pixel-aligned. Do not remove the
+shell viewport scale lock or its `html, body { touch-action: pan-x pan-y; }`
+contract as part of onboarding, accessibility, or theme work.
+
+Mini-apps retain zoom where it is useful. Maps, images, canvases, diagrams, and
+documents implement zoom inside their own content surface with visible controls
+and local Pointer Events; the shared app frame itself stays free of a viewport
+scale lock. The paired `shellViewportZoom` tests enforce both halves, so a
+future policy change must be explicit rather than incidental.
 
 After finishing a burst of shell edits, wait for the watcher build to land, then
 request the apply. This endpoint deliberately returns an empty `204` success, so
@@ -92,7 +106,7 @@ import { ArrowUp, ChevronDown, Mic, Paperclip, X } from '@openai/apps-sdk-ui/com
 <button><ArrowUp width={20} height={20} /></button>
 ```
 
-The SDK components accept normal SVG props; set `width` and `height` explicitly at the call site when the surrounding CSS does not own the size. Keep provider logos, brand marks, progress graphics, and purpose-built state illustrations custom when the SDK has no honest semantic match. Inline path data is otherwise brittle, hard to review, and easy to size inconsistently. Dependency additions belong in the repo/image, not as runtime installs.
+The SDK components accept normal SVG props; set `width` and `height` explicitly at the call site when the surrounding CSS does not own the size. Keep provider logos, brand marks, progress graphics, and purpose-built state illustrations custom when the SDK has no honest semantic match. Inline path data is otherwise brittle, hard to review, and easy to size inconsistently. Install a needed dependency into the live runtime first when safe, and declare/lock it in the repo when shipped behavior depends on it; do not require an immediate container rebuild merely because the declaration changed.
 
 ---
 
@@ -129,5 +143,5 @@ cd /data/platform && git diff -- frontend/
 
 If the shell breaks, direct the partner to their deployment's external Recovery
 action; a fresh agent can fix `/data/platform/frontend` or restore the platform
-clone (see `recovery.md`).
+clone (see `undo-and-restore.md`).
 After substantial shell work, commit it in `/data/platform`.

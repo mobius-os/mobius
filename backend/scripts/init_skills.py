@@ -15,6 +15,13 @@ while every owner/agent-edited copy is preserved. A normal baked-seed edit does
 not propagate until its predecessor hash is deliberately registered below; this
 keeps urgent fix-forward migrations possible without blind overwrites.
 
+Retired flat seed skills use a separate one-way contract. Every known baked
+generation is removed from the active skills directory. A customized copy is
+not discarded: its exact bytes are moved to `/data/shared/retired-skills/`,
+outside runtime discovery, before the active legacy path is removed. This lets
+one overloaded skill id disappear without erasing owner notes or leaving stale
+instructions active forever.
+
 One narrow exception, and it is deliberate: a registered digest may name a
 known-bad OWNER-CURATED generation rather than a baked one, when that exact
 content is unsafe to leave in place (today: a `cron.md` copy that tells app
@@ -49,10 +56,19 @@ if _APP_IMPORT_ROOT not in sys.path:
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 SKILLS = DATA_DIR / "shared" / "skills"
+RETIRED_SKILLS = DATA_DIR / "shared" / "retired-skills"
 # Update only byte-for-byte baked copies; an owner/agent-edited file is never
 # touched. A set preserves every known unmodified predecessor when one skill
 # needs more than one fix-forward migration over its lifetime.
 _UNMODIFIED_MIGRATIONS = {
+  "goal-planning.md": {
+    # First dependency-aware Goal-plan seed. Replace only the untouched copy
+    # so existing instances learn the completion preflight without clobbering
+    # any owner-authored planning guidance.
+    "2adb39457e0ec2ee9d9a3596cb96e5a6240bae23d725e6459ba0f6e77d5474c4",
+    # Dependency-aware plan seed before provider-neutral automatic promotion.
+    "a3edc5fcc453a5305102e144c2d58ae16b828612ac93a6a7442be7e267779f59",
+  },
   "reflection.md": {
     "c0f57c227f61cd8539a56b70eadfbbe2212125c23b7137472dd173a578baacd8",
     # Resource-stewardship predecessor: propagate the adaptive analytics
@@ -60,6 +76,15 @@ _UNMODIFIED_MIGRATIONS = {
     "865dd241a99668b026cd9be90c472cfde562210df51f729b2c25929f6b3bd60a",
     # v15 baked copy: route app work through the base + matching extensions.
     "cba6c0c7dd97384bbe3bfa19e78707bfa272085843bab5102279a937467e5d17",
+    # Pre-reconciliation seed: still scanned provider credential caches and
+    # lagged the checkpoint-ordered live Reflection procedure.
+    "1086688efd4dede48ebc95b12b92fb958280e67896a53e52e02cd5def3aa265f",
+    # Pre-Agent-Coaching seed: kept a separate Reflection interview method and
+    # still referenced the retired manager-session evidence helper.
+    "daf11f9e65e347334b57b5f5607a7a3fe4135349b4cbe20d94e53444f37e9535",
+    # Current upstream predecessor, including the learning-loop and receipt
+    # refinements that Agent Coaching must preserve during migration.
+    "3b9af10ffe3db873df8ba7fd9719c126e1de2951c10c7b85cac9f47f27c82217",
   },
   "cron.md": {
     "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",
@@ -84,15 +109,13 @@ _UNMODIFIED_MIGRATIONS = {
     # Pre-#612 baked copy: clarify that an accepted overlapping run may skip.
     "e58970bb7357030b9ac9c72e3b547d3bc93cdb75a1442dc5bb92db6174beebad",
   },
-  "recovery.md": {
-    "ef62abb0d03d740f99add1b6f3938f780b34439cb0025616cb9dc5f74f779633",
-    "6e6e82e02287e8bb38195fb021ea25cee2dc4e27da1a6ce1e2a0143fb1d82d87",
-    # v22 baked copy: remove the retired in-container maintenance surface.
-    "c679f6e1f1cee15f18704e21b88c6ef1acdb67ca10ca0e80757987a1d935465b",
-  },
   "theming.md": {
     # v22 baked copy: point shell-break guidance at the operator reset path.
     "7fb5ed4c1e29e6822b56394c089984a1a7e5da1bdf552a21ff0cbdc6413bd998",
+    # Owner-curated copy that still sends agents to the removed /recover UI.
+    # The current seed retains its useful shell-scale invariant and removes the
+    # dead route, so this exact known-bad generation is safe to reconcile.
+    "1d655ec09d7f25c831e105411d59b8428b07defc6f58416f8290a8c1b08ca594",
   },
   "workflows-app.md": {
     # Resolved the app by slug=="workflows". An install whose preferred slug
@@ -105,6 +128,14 @@ _UNMODIFIED_MIGRATIONS = {
     "248ea31e13d2d2d84a5acfca13526aa8ebfa3d90e9ee4bf55cfb72d47937f7d1",
     # v20 baked copy: publish the exact generated image, never newest-by-time.
     "29039a6fc5c9281794247eda5d0bbf66e969a1a260e9ed56c69ee6e1cd175f7c",
+    # Pre-direct-result seed: sent Codex through a backing file under the
+    # protected credentials tree instead of returning the tool result.
+    "75271f2a704a6db349e2529d76ddfa505f0ceb1a7f33894a6d4bba23dbd317bb",
+  },
+  "notifications.md": {
+    # Pre-slimming seed: open_item mechanics still lived in core.md, leaving
+    # this policy owner without the executable recipe.
+    "309e5969df6f589cc82c17b450e7596a00bae87ef77ab2923a9b0de061ed146e",
   },
   "building-apps.md": {
     "4126b40d209c422184e0135f611bb9f4197ea280fa27e63cd71c806f8b5ebd79",
@@ -114,6 +145,9 @@ _UNMODIFIED_MIGRATIONS = {
     "a8591f03bd5fb6eb0cfcd811d6d6d4309657f2f4e9e8e11ded4cbefbd77facfd",
     # v20 baked copy: delete by exact id and retain its recovery receipt.
     "5a6bafaa654071c4af5a5c7a201e23e4b0294c392ccb2b9afd7c2b18e17ff3fe",
+    # Pre-slimming seed: duplicated the component catalog's full UI skeleton
+    # inside an advanced runtime guide that is always read with quickstart.
+    "294a4a207a2528245b006877ff486aa79fdf401b738afbf43aaf2b67b3e7eead",
   },
   "building-apps-quickstart.md": {
     "7d8af2664b37a69b88e48c2a28140c15556202c3c7ce30d77816c203d1959fcb",
@@ -125,6 +159,9 @@ _UNMODIFIED_MIGRATIONS = {
     "02fda2ea04f3c0ce808ef0db4b1fe4e893924bd019a5bf102a46749ef9142510",
     # v20 baked copy: retain the apply receipt's numeric id across the flow.
     "68c84158a9255ab53686968ed4ec8f594c460483bec0e90dcfa472682c1d9b70",
+    # Owner-curated pre-preview-helper copy: valid local prose, but stale
+    # capture and apply receipts now bypass readiness and relist app state.
+    "c8d1dada4ba2a4ad29da159edf654cf99175a372569f753100398a8a307bc7d6",
   },
   "resolving-app-git.md": {
     # v17 baked copy: resolution is an explicit installer replay.
@@ -134,6 +171,9 @@ _UNMODIFIED_MIGRATIONS = {
     # resolver prompt in routes/apps.py, which sends the agent here and then
     # tells it to run resolve_app_update.py. Unmodified copies migrate.
     "4911c6db2d3d47eb7c3c206b53ca9be9459619f149a78c06c02711422b941127",
+    # Owner-curated resolver guide predating the mandatory policy/review/finalize
+    # modes. Its bare command now fails argparse before doing useful work.
+    "6bbfe07a575734c4bc0b1d84e40dbaab9d9689671825e7a42383b4f2e673112a",
   },
   "app-component-shapes.md": {
     "0320609ff924a0954c20d5e5db91ed3681d421d76f6804b24552eb6e8fa5eb31",
@@ -148,6 +188,50 @@ _UNMODIFIED_MIGRATIONS = {
     "5db160b2d796d54ec320119cbdbbb2860a78cfd703cfe37667626d23abc8e4d9",
     # v19 baked copy: replace speculative selector examples with grounding.
     "bf58243aeb1779eb0a94d5404a99c2132e55d60542cbb555fc50bc5cf65349fe",
+    # Owner-curated copy using the retired opaque-frame selector path. The
+    # merged seed preserves its media-order and browser-cleanup safeguards.
+    "2b14caf13f4cc7c76868f9566f2c0789f6e9b8c0fefac897e1d9ebda11dff8bf",
+  },
+}
+
+# Every distinct recovery.md shipped on main. This legacy file mixed external
+# emergency access with ordinary maintenance, Git undo, and soft-delete APIs.
+# The focused replacement skills are platform-maintenance.md and
+# undo-and-restore.md. Current-seed hashes belong here by design: retirement,
+# unlike a fix-forward replacement, must also remove the latest untouched copy.
+_RETIRED_UNMODIFIED_SKILLS = {
+  # Agent Coaching subsumes the former on-demand manager ritual with a neutral
+  # feedback-first method that Reflection can also use for self-improvement.
+  # Preserve customized copies in retired-skills, but keep no parallel active
+  # skill whose framing or procedure can drift from Agent Coaching.
+  "manager-session.md": {
+    "3a3535b7bfa5d8214a5559567c1e7fb4b7218f404e8a8cf1426455cf46af075d",
+    "8375041d3b37cd3f97d8a3d554c85485a35dc9c8b1466abab2c5f52ff44e1c18",
+    "f1157721e9c874cd69c961bd018d13d0233bac1e3720b1d5655e06033bc20aea",
+  },
+  "recovery.md": {
+    "0a028cfea8427d9c7b7cd9522da64caf196554f268957e305dc521bb7d6faa3d",
+    "0e68863722e977c2ca78754fb2699ac0c19906062bbc63acc3a1aab41b4ea260",
+    "0f58a4b5d83dfab083549cc1209d3f7835c973b61928752543be286fad360017",
+    "0fbd53e4ac9d67ed7c2731271f5f4ccf5a74bb8348bd5885605bc3c2b5a2b7f4",
+    "109cc54c47595a2b9f7d09bbfbfc0f7b6be919ef3ca2a2c16cd2d8fc5d6533e7",
+    "157700e43f17cf81ef0cb993c8bbc887ae5dc1303508778382f136e7f80c3d8c",
+    "3c4db1828fd893738f0e241bcecb7da218159656ea3a2b63c35c16d4d771febe",
+    "467542740b110e6fbd21e86bfbd247551c676385a46d64a5130a2a648c47346a",
+    "4805da9cc334d5a1c0e0d5e30d0b2655bd4a4de3e1d1f470b73a01092d8d18cb",
+    "5fbf576db34553b5552e83383590435a8e96dbfcdf71837dbe3de4f4ca1c1d45",
+    "59af11e6f1313f1e0df4fc7905cf018786eb648116aaf7e8bcafea7aa7a4c9fe",
+    "6e6e82e02287e8bb38195fb021ea25cee2dc4e27da1a6ce1e2a0143fb1d82d87",
+    "79d4a1ff10cf2a28d8e74123aa95e1ba006f1ede299d64c619b2b15d0c89ce57",
+    "8cda43c1637cdb66702a70c53d1682629e6923ccf157676faf09582109b8e570",
+    "a27e02e948b417dddecf0f7d81c6d00e3c7a044e7901cd3c026031a2f05eb978",
+    "b4b634e93d43b635cf46ed37a12f3f419d3bee4d926cb912e42f9ddb1098dd94",
+    "c679f6e1f1cee15f18704e21b88c6ef1acdb67ca10ca0e80757987a1d935465b",
+    "cb283d498f55a188f9e8bed0664afb0472ec76f2ddfd421a007f844b720679f5",
+    "e4b2866319e5aa59f688e32f2e5ff3ddf262f339c1404ce6e451fa0857c3f995",
+    "e648e1d45b43c3a0360a244521f1387f52ee5c5e48eb7d5d2db9bddcdf86ae0e",
+    "ef62abb0d03d740f99add1b6f3938f780b34439cb0025616cb9dc5f74f779633",
+    "f72a51b41f1cde7ca9b7bf00029a33bc90203a5f252d274381fccddf2040a4a0",
   },
 }
 
@@ -197,6 +281,50 @@ def _write_index() -> None:
     print("init_skills: skills-index.md regenerated")
   except Exception as exc:  # noqa: BLE001 - boot must not fail on the index
     print(f"init_skills: index generation skipped ({exc})")
+
+
+def _retire_legacy_skills() -> tuple[int, int]:
+  """Remove baked legacy seeds and archive customized flat copies exactly."""
+  removed = 0
+  archived = 0
+  for name, baked_digests in _RETIRED_UNMODIFIED_SKILLS.items():
+    path = SKILLS / name
+    if not path.is_file():
+      continue
+    try:
+      content = path.read_bytes()
+    except OSError as exc:
+      print(f"init_skills: could not inspect retired {name} ({exc})")
+      continue
+    digest = hashlib.sha256(content).hexdigest()
+    if digest in baked_digests:
+      try:
+        path.unlink()
+      except OSError as exc:
+        print(f"init_skills: could not remove retired {name} ({exc})")
+        continue
+      removed += 1
+      continue
+
+    # A content-addressed archive is idempotent across a crash between writing
+    # the archive and unlinking the active path. Never overwrite different
+    # owner bytes, even under an astronomically unlikely digest collision.
+    archive = RETIRED_SKILLS / f"{path.stem}-{digest}.md"
+    try:
+      RETIRED_SKILLS.mkdir(parents=True, exist_ok=True)
+      if archive.exists():
+        if archive.read_bytes() != content:
+          raise OSError("archive digest collision")
+      else:
+        archive.write_bytes(content)
+        if archive.read_bytes() != content:
+          raise OSError("archive verification failed")
+      path.unlink()
+    except OSError as exc:
+      print(f"init_skills: could not archive customized {name} ({exc})")
+      continue
+    archived += 1
+  return removed, archived
 
 
 def init() -> None:
@@ -249,6 +377,7 @@ def init() -> None:
     if not dst.exists():
       shutil.copy2(src, dst)
       added += 1
+  retired, archived = _retire_legacy_skills()
   if skipped:
     print(f"init_skills: skipped {skipped} seed skill(s) colliding with an "
           "installed directory skill of the same id")
@@ -256,7 +385,13 @@ def init() -> None:
     print(f"init_skills: added {added} new seed skill(s) (existing kept)")
   if migrated:
     print(f"init_skills: migrated {migrated} unmodified base skill(s)")
+  if retired:
+    print(f"init_skills: removed {retired} retired base skill(s)")
+  if archived:
+    print(f"init_skills: archived {archived} customized retired skill(s)")
   _chown_mobius(SKILLS)
+  if RETIRED_SKILLS.exists():
+    _chown_mobius(RETIRED_SKILLS)
   _write_index()
 
 

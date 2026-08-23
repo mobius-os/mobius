@@ -3,8 +3,16 @@ import assert from 'node:assert/strict'
 
 import {
   beginTouchComposerFocusLease,
+  composerDraftWantsKeyboard,
   releaseComposerFocusLease,
 } from '../composerFocusLease.js'
+
+test('only a real unsent draft asks to reopen the touch keyboard', () => {
+  assert.equal(composerDraftWantsKeyboard(null), false)
+  assert.equal(composerDraftWantsKeyboard({ input: '', attachments: [] }), false)
+  assert.equal(composerDraftWantsKeyboard({ input: 'unfinished', attachments: [] }), true)
+  assert.equal(composerDraftWantsKeyboard({ input: '', attachments: [{ id: '1' }] }), true)
+})
 
 test('touch focus lease starts synchronously with a clean buffer', () => {
   const calls = []
@@ -39,6 +47,30 @@ test('touch focus lease resumes a durable draft with the caret at its end', () =
   }), true)
   assert.equal(el.value, 'draft survives')
   assert.deepEqual(selections, [[14, 14]])
+})
+
+test('an active touch lease retargets without blurring or refocusing the keyboard', () => {
+  const calls = []
+  const selections = []
+  const older = {}
+  const newer = {}
+  const el = {
+    value: 'older',
+    focus: (...args) => calls.push(args),
+    setSelectionRange: (...args) => selections.push(args),
+  }
+
+  assert.equal(beginTouchComposerFocusLease(el, {
+    matchMediaImpl: () => ({ matches: true }),
+    activeElement: el,
+    owner: newer,
+    initialValue: 'new destination',
+  }), true)
+  assert.equal(el.value, 'new destination')
+  assert.deepEqual(calls, [])
+  assert.deepEqual(selections, [[15, 15]])
+  assert.equal(releaseComposerFocusLease(el, { activeElement: el, owner: older }), false)
+  assert.equal(releaseComposerFocusLease(el, { activeElement: null, owner: newer }), true)
 })
 
 test('touch focus lease stays inert on desktop and releases failed handoffs', () => {

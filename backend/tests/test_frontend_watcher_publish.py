@@ -52,6 +52,8 @@ def fw_dirs(tmp_path, monkeypatch):
     "attic": frontend / ".assets-attic",
     "cache": frontend / ".vite-cache",
     "tmp": frontend / ".vite-tmp",
+    "rebuild_cache": frontend / ".vite-cache-rebuild",
+    "rebuild_tmp": frontend / ".vite-tmp-rebuild",
   }
   monkeypatch.setattr(fw, "_FRONTEND_DIR", frontend)
   monkeypatch.setattr(fw, "_DIST_DIR", dirs["dist"])
@@ -62,6 +64,8 @@ def fw_dirs(tmp_path, monkeypatch):
   monkeypatch.setattr(fw, "_ATTIC_DIR", dirs["attic"])
   monkeypatch.setattr(fw, "_CACHE_DIR", dirs["cache"])
   monkeypatch.setattr(fw, "_TMP_DIR", dirs["tmp"])
+  monkeypatch.setattr(fw, "_REBUILD_CACHE_DIR", dirs["rebuild_cache"])
+  monkeypatch.setattr(fw, "_REBUILD_TMP_DIR", dirs["rebuild_tmp"])
   monkeypatch.setattr(fw, "_memory_is_tight", lambda: False)
   monkeypatch.setattr(fw, "require_vite_build_admission", lambda: None)
   monkeypatch.setattr(
@@ -514,14 +518,39 @@ def test_explicit_rebuild_builds_after_admission(
   runs = []
 
   def run(*args, **kwargs):
-    runs.append(args)
+    command = args[0]
+    runs.append(command)
     _write_build(fw_dirs["rebuild"], "explicit")
-    return fw.subprocess.CompletedProcess(args, 0, "vite build complete", None)
+    return fw.subprocess.CompletedProcess(
+      command, 0, "vite build complete", None,
+    )
 
   monkeypatch.setattr(fw.subprocess, "run", run)
 
   assert fw._run_vite_build_once(fw_dirs["rebuild"]) == "vite build complete"
-  assert len(runs) == 1
+  assert runs == [fw._vite_build_cmd(fw_dirs["rebuild"])]
+
+
+def test_vite_environment_prunes_only_stale_node_compile_cache(
+  fw_dirs, monkeypatch,
+):
+  cache_root = fw_dirs["tmp"] / "node-compile-cache"
+  current = cache_root / "v22-current"
+  stale = cache_root / "v21-stale"
+  current.mkdir(parents=True)
+  stale.mkdir()
+
+  def current_cache(*_args, **_kwargs):
+    return fw.subprocess.CompletedProcess(
+      ["node"], 0, str(current), "",
+    )
+
+  monkeypatch.setattr(fw.subprocess, "run", current_cache)
+
+  fw._vite_env(fw_dirs["cache"], fw_dirs["tmp"])
+
+  assert current.is_dir()
+  assert not stale.exists()
 
 
 def test_explicit_rebuild_defers_before_mutating_or_starting_vite(
@@ -846,3 +875,28 @@ def test_vite_env_preserves_operator_resource_overrides(fw_dirs, monkeypatch):
 
   assert env["CHOKIDAR_INTERVAL"] == "900"
   assert env["NODE_OPTIONS"] == "--trace-warnings --max_old_space_size=768"
+
+
+@pytest.mark.asyncio
+async def test_memory_deferral_is_visible_in_health_and_clears():
+  """A build waiting on memory admission must be visible: health once read
+  "running, no error" while a stale pressure reading held builds for hours."""
+  handler = fw._FrontendHandler(asyncio.get_running_loop(),
+                                start_threads=False)
+  try:
+    assert handler.health()["build_deferred"] is None
+
+    handler._note_build_deferred("edit: App.jsx")
+    handler._note_build_deferred("edit: App.jsx")
+    deferred = handler.health()["build_deferred"]
+    assert deferred is not None
+    assert deferred["attempts"] == 2
+    assert deferred["reason"] == "edit: App.jsx"
+    assert deferred["since"] <= time.time()
+
+    handler._clear_build_deferral()
+    assert handler.health()["build_deferred"] is None
+    # Clearing when nothing is deferred stays a no-op.
+    handler._clear_build_deferral()
+  finally:
+    handler.close()

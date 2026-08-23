@@ -7,7 +7,7 @@ import {
   X,
 } from '@openai/apps-sdk-ui/components/Icon'
 import { api } from '../../api/client.js'
-import { appQueries } from '../../hooks/queries.js'
+import { appQueries, chatQueries } from '../../hooks/queries.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { requestChatSearchReveal } from '../../lib/chatSearchReveal.js'
 import AppIcon from '../AppIcon.jsx'
@@ -18,16 +18,112 @@ import {
 import { searchSnippetPresentation } from '../../lib/searchTermHighlight.js'
 import { formatRelativeTime } from '../../lib/relativeTime.js'
 import {
+  clearRecentSelections,
   chatSearchOpenTarget,
   chatSearchResultIsCurrent,
-  readLastSearch,
-  rememberLastSearch,
+  moveSearchSelection,
+  pointerPositionChanged,
+  readRecentSelections,
+  rememberRecentSelection,
+  resolveRecentSelections,
+  resolvedSearchSelection,
   searchInstalledApps,
   visibleChatSearchState,
 } from './globalSearchModel.js'
 import './GlobalSearch.css'
 
 const SEARCH_DEBOUNCE_MS = 180
+
+function GlobalSearchResult({
+  row,
+  activeResultIndex,
+  onOpen,
+  onPointerActivity,
+  onSelect,
+}) {
+  const { index } = row
+  const selected = activeResultIndex === index
+  const resultClass = `global-search__result${
+    selected ? ' global-search__result--selected' : ''
+  }`
+  const sharedProps = {
+    id: `global-search-result-${index}`,
+    type: 'button',
+    role: 'option',
+    'aria-selected': selected,
+    'data-search-result-index': index,
+    className: resultClass,
+    // Some browsers emit pointerenter AND a zero-distance pointermove when the
+    // dialog mounts beneath a stationary cursor. The parent compares actual
+    // coordinates before treating either event as selection intent.
+    onPointerEnter: event => onPointerActivity(index, event),
+    onPointerMove: event => onPointerActivity(index, event),
+    onFocus: () => onSelect(index),
+    onClick: () => onOpen(row),
+  }
+
+  if (row.kind === 'app') {
+    const app = row.value
+    return (
+      <button {...sharedProps}>
+        <AppIcon
+          item={app}
+          label={app.name}
+          className="global-search__result-icon"
+        />
+        <span className="global-search__result-main">
+          <span className="global-search__result-title">{app.name}</span>
+          <span className="global-search__result-detail">
+            {app.description || app.slug}
+          </span>
+        </span>
+        <span className="global-search__match-kind">{row.matchArea}</span>
+      </button>
+    )
+  }
+
+  const result = row.value
+  const lastActiveValue = result.last_active
+    || result.activity_at
+    || result.updated_at
+    || result.created_at
+  const lastActive = formatRelativeTime(lastActiveValue)
+  return (
+    <button {...sharedProps}>
+      <span className="global-search__result-icon" aria-hidden="true">
+        <Chat width={18} height={18} />
+      </span>
+      <span className="global-search__result-main">
+        <span className="global-search__result-title">
+          {result.title || 'Untitled chat'}
+        </span>
+        {result.snippet && (
+          <span className="global-search__result-detail">
+            {result.snippetParts.map((part, partIndex) => (
+              part.marked
+                ? <mark key={partIndex}>{part.text}</mark>
+                : <span key={partIndex}>{part.text}</span>
+            ))}
+          </span>
+        )}
+      </span>
+      <span className="global-search__result-meta">
+        <span className="global-search__match-kind">
+          {row.recent ? 'Recent' : (result.anchor_key ? 'Conversation' : 'Title')}
+        </span>
+        {lastActive && (
+          <time
+            className="global-search__result-time"
+            dateTime={lastActiveValue}
+            title={`Last active ${new Date(lastActiveValue).toLocaleString()}`}
+          >
+            {lastActive}
+          </time>
+        )}
+      </span>
+    </button>
+  )
+}
 
 export function GlobalSearchButton({ active = false, buttonRef, onClick }) {
   const shortcut = shortcutLabel(SHELL_SHORTCUTS.openSearch)
@@ -51,33 +147,26 @@ export function GlobalSearchButton({ active = false, buttonRef, onClick }) {
 export default function GlobalSearch({ onClose, onOpenTarget }) {
   const dialogRef = useRef(null)
   const inputRef = useRef(null)
+  const contentRef = useRef(null)
   const chatSearchControllerRef = useRef(null)
-  // Reopening restores the owner's last search (see rememberLastSearch), so the
-  // in-flight-result guard has to start from that same term rather than '' —
-  // otherwise clicking a restored result before the revalidating fetch lands
-  // would be discarded as stale.
-  const restored = useRef(readLastSearch()).current
-  const latestQueryRef = useRef(restored.query.trim())
-  const [query, setQuery] = useState(restored.query)
-  const [chatState, setChatState] = useState(restored.chatState)
+  const latestQueryRef = useRef('')
+  const [query, setQuery] = useState('')
+  const [chatState, setChatState] = useState({
+    query: '', status: 'idle', results: [],
+  })
+  const [recentSelectionRefs, setRecentSelectionRefs] = useState(
+    () => readRecentSelections(),
+  )
+  const [selectionIndex, setSelectionIndex] = useState(0)
+  const pointerPositionRef = useRef(null)
   const appsQuery = appQueries.list.useQuery()
+  const chatsQuery = chatQueries.list.useQuery()
 
   useDialogFocus({
     containerRef: dialogRef,
     initialFocusRef: inputRef,
     onClose,
   })
-
-  // A restored term is a starting point, not something to edit around: select
-  // it so the next keystroke replaces it, exactly like reopening a browser's
-  // find bar. Runs once, after useDialogFocus has moved focus to the input.
-  useEffect(() => {
-    if (restored.query) inputRef.current?.select()
-  }, [restored.query])
-
-  useEffect(() => {
-    rememberLastSearch(query, chatState)
-  }, [query, chatState])
 
   useEffect(() => {
     const normalizedQuery = query.trim()
@@ -91,16 +180,7 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
 
     const controller = new AbortController()
     chatSearchControllerRef.current = controller
-    // Reopening re-runs the query so a chat renamed, added, or deleted since
-    // last time is reflected. Keep the restored results on screen while that
-    // happens: blanking them to "Searching chats…" would undo the point of
-    // restoring them. A genuinely new term has no settled results to hold, so
-    // it still shows the loading state.
-    setChatState(previous => (
-      previous.query === normalizedQuery && previous.status === 'ready'
-        ? previous
-        : { query: normalizedQuery, status: 'loading', results: [] }
-    ))
+    setChatState({ query: normalizedQuery, status: 'loading', results: [] })
     const timer = window.setTimeout(async () => {
       try {
         const response = await api.chats.search(normalizedQuery, {
@@ -145,8 +225,17 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
     () => searchInstalledApps(appsQuery.data, normalizedQuery),
     [appsQuery.data, normalizedQuery],
   )
+  const recentSelectionRows = useMemo(
+    () => resolveRecentSelections(
+      recentSelectionRefs,
+      chatsQuery.data,
+      appsQuery.data,
+    ),
+    [appsQuery.data, chatsQuery.data, recentSelectionRefs],
+  )
   const openChat = useCallback((result) => {
     if (!chatSearchResultIsCurrent(result, latestQueryRef.current)) return
+    rememberRecentSelection({ kind: 'chat', id: result.id })
     if (result.anchor_key) {
       requestChatSearchReveal(result.id, {
         anchorKey: result.anchor_key,
@@ -159,14 +248,132 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
 
   const openApp = useCallback((app) => {
     if (!app?.id) return
+    rememberRecentSelection({ kind: 'app', id: app.id })
     onClose()
     onOpenTarget?.({ view: 'canvas', app: String(app.id), intent: null })
   }, [onClose, onOpenTarget])
+
+  const openRecentChat = useCallback((chat) => {
+    if (!chat?.id) return
+    rememberRecentSelection({ kind: 'chat', id: chat.id })
+    onClose()
+    onOpenTarget?.(chatSearchOpenTarget(chat))
+  }, [onClose, onOpenTarget])
+
+  const resultGroups = useMemo(() => {
+    const groups = normalizedQuery
+      ? [
+          ...(appResults.length ? [{
+            headingId: 'global-search-apps',
+            listId: 'global-search-app-results',
+            label: 'Apps',
+            rows: appResults.map(({ app, matchArea }) => ({
+              kind: 'app', value: app, matchArea,
+            })),
+          }] : []),
+          {
+            headingId: 'global-search-chats',
+            listId: 'global-search-chat-results',
+            label: 'Chats',
+            status: visibleChats.status,
+            rows: visibleChats.results.map(result => ({
+              kind: 'chat', value: result,
+            })),
+          },
+        ]
+      : [
+          ...(recentSelectionRows.length ? [{
+            headingId: 'global-search-recent-selections',
+            listId: 'global-search-recent-selection-results',
+            label: 'Recent selections',
+            clearable: true,
+            rows: recentSelectionRows.map(({ kind, value }) => ({
+              kind,
+              value,
+              recent: true,
+              matchArea: 'Recent',
+            })),
+          }] : []),
+        ]
+
+    let nextIndex = 0
+    return groups.map(group => ({
+      ...group,
+      rows: group.rows.map(row => ({ ...row, index: nextIndex++ })),
+    }))
+  }, [appResults, normalizedQuery, recentSelectionRows, visibleChats])
+
+  const selectableResults = useMemo(
+    () => resultGroups.flatMap(group => group.rows),
+    [resultGroups],
+  )
+  const activeResultIndex = resolvedSearchSelection(
+    selectionIndex,
+    selectableResults.length,
+  )
+  const resultListIds = resultGroups
+    .filter(group => group.rows.length)
+    .map(group => group.listId)
+    .join(' ')
+
+  const openResult = useCallback((row) => {
+    if (row?.kind === 'app') openApp(row.value)
+    if (row?.kind === 'chat' && row.recent) openRecentChat(row.value)
+    if (row?.kind === 'chat' && !row.recent) openChat(row.value)
+  }, [openApp, openChat, openRecentChat])
+
+  const openSelectedResult = useCallback(() => {
+    openResult(selectableResults[activeResultIndex])
+  }, [activeResultIndex, openResult, selectableResults])
+
+  const clearSelectionHistory = useCallback(() => {
+    clearRecentSelections()
+    setRecentSelectionRefs([])
+    setSelectionIndex(0)
+  }, [])
+
+  const handleResultPointerActivity = useCallback((index, event) => {
+    const nextPosition = { x: event.clientX, y: event.clientY }
+    const moved = pointerPositionChanged(
+      pointerPositionRef.current,
+      nextPosition,
+    )
+    pointerPositionRef.current = nextPosition
+    if (moved) setSelectionIndex(index)
+  }, [])
+
+  const handleSearchKeyDown = useCallback((event) => {
+    if (event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      if (!selectableResults.length) return
+      event.preventDefault()
+      setSelectionIndex(current => (
+        moveSearchSelection(current, event.key, selectableResults.length)
+      ))
+      return
+    }
+    if (event.key === 'Enter' && activeResultIndex !== -1) {
+      event.preventDefault()
+      openSelectedResult()
+    }
+  }, [activeResultIndex, openSelectedResult, selectableResults.length])
+
+  useEffect(() => {
+    if (activeResultIndex === -1) return
+    dialogRef.current
+      ?.querySelector(`[data-search-result-index="${activeResultIndex}"]`)
+      ?.scrollIntoView({ block: 'nearest' })
+  }, [activeResultIndex])
 
   const noResults = normalizedQuery
     && visibleChats.status === 'ready'
     && visibleChats.results.length === 0
     && appResults.length === 0
+  const loadingRecentSelections = !normalizedQuery
+    && resultGroups.length === 0
+    && recentSelectionRefs.some(selection => (
+      selection.kind === 'app' ? appsQuery.isLoading : chatsQuery.isLoading
+    ))
 
   return createPortal(
     <div
@@ -205,118 +412,99 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
             ref={inputRef}
             type="search"
             value={query}
-            onChange={event => setQuery(event.target.value)}
+            onChange={event => {
+              setQuery(event.target.value)
+              setSelectionIndex(0)
+              if (contentRef.current) contentRef.current.scrollTop = 0
+            }}
+            onKeyDown={handleSearchKeyDown}
             placeholder="Search chats, apps, and app details"
             aria-label="Search chats, apps, and app details"
+            role="combobox"
+            aria-autocomplete="list"
+            aria-controls={resultListIds || undefined}
+            aria-expanded={selectableResults.length > 0}
+            aria-activedescendant={
+              activeResultIndex === -1
+                ? undefined
+                : `global-search-result-${activeResultIndex}`
+            }
             autoComplete="off"
             spellCheck="false"
           />
           <kbd>{shortcutLabel(SHELL_SHORTCUTS.openSearch)}</kbd>
         </label>
 
-        <div className="global-search__content" aria-live="polite">
-          {!normalizedQuery && (
+        <div
+          ref={contentRef}
+          className="global-search__content"
+          aria-live="polite"
+        >
+          {!normalizedQuery && resultGroups.length === 0 && (
             <div className="global-search__empty">
               <span className="global-search__empty-icon" aria-hidden="true">
                 <MagnifyingGlassSearch width={30} height={30} />
               </span>
-              <h3>Find anything you’ve worked on</h3>
-              <p>Search chat titles and conversation text, plus app names and app details.</p>
+              <h3>{loadingRecentSelections ? 'Loading recent selections…' : 'No recent selections yet'}</h3>
+              <p>
+                {loadingRecentSelections
+                  ? 'The chats and apps you opened through search will appear here.'
+                  : 'Search for a chat or app and open it. It will appear here the next time you use ⌘K.'}
+              </p>
             </div>
           )}
 
-          {normalizedQuery && (
+          {resultGroups.length > 0 && (
             <div className="global-search__groups">
-              {appResults.length > 0 && (
-                <section className="global-search__group" aria-labelledby="global-search-apps">
-                  <h3 id="global-search-apps">Apps <span>{appResults.length}</span></h3>
-                  <div className="global-search__results">
-                    {appResults.map(({ app, matchArea }) => (
+              {resultGroups.map(group => (
+                <section
+                  key={group.listId}
+                  className="global-search__group"
+                  aria-labelledby={group.headingId}
+                >
+                  <div className="global-search__group-heading">
+                    <h3 id={group.headingId}>
+                      {group.label} <span>{group.rows.length}</span>
+                    </h3>
+                    {group.clearable && (
                       <button
-                        key={app.id}
                         type="button"
-                        className="global-search__result"
-                        onClick={() => openApp(app)}
+                        className="global-search__clear"
+                        onClick={clearSelectionHistory}
                       >
-                        <AppIcon
-                          item={app}
-                          label={app.name}
-                          className="global-search__result-icon"
-                        />
-                        <span className="global-search__result-main">
-                          <span className="global-search__result-title">{app.name}</span>
-                          <span className="global-search__result-detail">
-                            {app.description || app.slug}
-                          </span>
-                        </span>
-                        <span className="global-search__match-kind">{matchArea}</span>
+                        Clear
                       </button>
-                    ))}
+                    )}
                   </div>
+                  {group.status === 'loading' && (
+                    <p className="global-search__status" role="status">Searching chats…</p>
+                  )}
+                  {group.status === 'error' && (
+                    <p className="global-search__status global-search__status--error" role="alert">
+                      Chat search is unavailable right now. App results still work.
+                    </p>
+                  )}
+                  {group.rows.length > 0 && (
+                    <div
+                      id={group.listId}
+                      className="global-search__results"
+                      role="listbox"
+                      aria-labelledby={group.headingId}
+                    >
+                      {group.rows.map(row => (
+                        <GlobalSearchResult
+                          key={`${row.kind}-${row.value.id}`}
+                          row={row}
+                          activeResultIndex={activeResultIndex}
+                          onOpen={openResult}
+                          onPointerActivity={handleResultPointerActivity}
+                          onSelect={setSelectionIndex}
+                        />
+                      ))}
+                    </div>
+                  )}
                 </section>
-              )}
-
-              <section className="global-search__group" aria-labelledby="global-search-chats">
-                <h3 id="global-search-chats">
-                  Chats
-                  {visibleChats.status === 'ready' && <span>{visibleChats.results.length}</span>}
-                </h3>
-                {visibleChats.status === 'loading' && (
-                  <p className="global-search__status" role="status">Searching chats…</p>
-                )}
-                {visibleChats.status === 'error' && (
-                  <p className="global-search__status global-search__status--error" role="alert">
-                    Chat search is unavailable right now. App results still work.
-                  </p>
-                )}
-                {visibleChats.results.length > 0 && (
-                  <div className="global-search__results">
-                    {visibleChats.results.map((result) => {
-                      const lastActive = formatRelativeTime(result.last_active)
-                      return (
-                        <button
-                          key={result.id}
-                          type="button"
-                          className="global-search__result"
-                          onClick={() => openChat(result)}
-                        >
-                          <span className="global-search__result-icon" aria-hidden="true">
-                            <Chat width={18} height={18} />
-                          </span>
-                          <span className="global-search__result-main">
-                            <span className="global-search__result-title">
-                              {result.title || 'Untitled chat'}
-                            </span>
-                            {result.snippet && (
-                              <span className="global-search__result-detail">
-                                {result.snippetParts.map((part, index) => (
-                                  part.marked
-                                    ? <mark key={index}>{part.text}</mark>
-                                    : <span key={index}>{part.text}</span>
-                                ))}
-                              </span>
-                            )}
-                          </span>
-                          <span className="global-search__result-meta">
-                            <span className="global-search__match-kind">
-                              {result.anchor_key ? 'Conversation' : 'Title'}
-                            </span>
-                            {lastActive && (
-                              <time
-                                className="global-search__result-time"
-                                dateTime={result.last_active}
-                                title={`Last active ${new Date(result.last_active).toLocaleString()}`}
-                              >
-                                {lastActive}
-                              </time>
-                            )}
-                          </span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                )}
-              </section>
+              ))}
 
               {noResults && (
                 <div className="global-search__empty global-search__empty--results">
