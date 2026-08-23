@@ -546,6 +546,16 @@ def test_store_local_apply_accepts_installer_managed_tree_without_manifest(
   assert app_git._run(source, "status", "--porcelain").stdout == ""
 
 
+def test_local_apply_without_manifest_still_fails_closed(client, auth):
+  source = _source()
+  (source / "mobius.json").unlink()
+
+  failed = _apply(client, auth, source)
+
+  assert failed.status_code == 422
+  assert failed.json()["detail"]["code"] == "manifest_missing"
+
+
 def test_legacy_inline_source_mutation_routes_are_retired(client, auth):
   source = _source()
 
