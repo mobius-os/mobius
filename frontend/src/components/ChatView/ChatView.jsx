@@ -95,7 +95,7 @@ import {
   highlightSearchTerms,
 } from '../../lib/searchTermHighlight.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
-import { dataTransferHasFiles, droppedFiles } from './dragUpload.js'
+import { createFileDragHandlers } from './dragUpload.js'
 import useOpenAppCtaAutoDismiss from './hooks/useOpenAppCtaAutoDismiss.js'
 import {
   isPendingQuestionSendFailure,
@@ -4157,47 +4157,21 @@ export default function ChatView({
     }
   }
 
-  function handleFileDragEnter(event) {
-    if (!dataTransferHasFiles(event.dataTransfer)) return
-    event.preventDefault()
-    event.stopPropagation()
-    fileDragDepthRef.current += 1
-    setFileDropActive(true)
-  }
-
-  function handleFileDragOver(event) {
-    if (!dataTransferHasFiles(event.dataTransfer)) return
-    event.preventDefault()
-    event.stopPropagation()
-    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
-  }
-
-  function handleFileDragLeave(event) {
-    if (!fileDropActive) return
-    event.preventDefault()
-    event.stopPropagation()
-    fileDragDepthRef.current = Math.max(0, fileDragDepthRef.current - 1)
-    if (fileDragDepthRef.current === 0) setFileDropActive(false)
-  }
-
-  function handleFileDrop(event) {
-    if (!dataTransferHasFiles(event.dataTransfer)) return
-    event.preventDefault()
-    event.stopPropagation()
-    fileDragDepthRef.current = 0
-    setFileDropActive(false)
-    const files = droppedFiles(event.dataTransfer)
-    if (files.length > 0) handleComposerAddFiles(files)
-  }
+  const fileDragHandlers = createFileDragHandlers({
+    getDepth: () => fileDragDepthRef.current,
+    setDepth: depth => { fileDragDepthRef.current = depth },
+    setActive: setFileDropActive,
+    onFiles: handleComposerAddFiles,
+  })
 
   return (
     <div
       ref={chatRef}
       className={`chat${showEmpty || showLoadError ? ' chat--empty' : ''}`}
-      onDragEnter={handleFileDragEnter}
-      onDragOver={handleFileDragOver}
-      onDragLeave={handleFileDragLeave}
-      onDrop={handleFileDrop}
+      onDragEnter={fileDragHandlers.onDragEnter}
+      onDragOver={fileDragHandlers.onDragOver}
+      onDragLeave={fileDragHandlers.onDragLeave}
+      onDrop={fileDragHandlers.onDrop}
     >
       {fileDropActive && (
         <div className="chat__file-drop-target" aria-hidden="true">
