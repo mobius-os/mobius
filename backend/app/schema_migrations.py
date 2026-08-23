@@ -837,6 +837,39 @@ def _add_chat_run_goal_plan(eng) -> None:
       ))
 
 
+def _add_chat_run_goal_identity(eng) -> None:
+  """Give a native Goal identity that survives logical-run recovery."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chat_runs" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chat_runs")}
+  with eng.begin() as conn:
+    if "goal_id" not in columns:
+      conn.execute(text("ALTER TABLE chat_runs ADD COLUMN goal_id VARCHAR(64) NULL"))
+    required = {"id", "root_run_id", "goal_objective"}
+    if not required.issubset(columns):
+      return
+    rows = conn.execute(text(
+      "SELECT id, root_run_id FROM chat_runs "
+      "WHERE goal_objective IS NOT NULL"
+    )).mappings().all()
+    for row in rows:
+      # Historical logical roots are the only identity the old schema proves.
+      # Never merge two Goals merely because their objective text matches: an
+      # owner may deliberately start the same Goal again. Future recovery rows
+      # inherit the stable id through goal_identity_for_run_start.
+      identity = str(row["root_run_id"] or row["id"])
+      conn.execute(text(
+        "UPDATE chat_runs SET goal_id = :goal_id WHERE id = :run_id "
+        "AND goal_id IS NULL"
+      ), {"goal_id": identity, "run_id": row["id"]})
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_chat_runs_goal_id ON chat_runs (goal_id)"
+    ))
+
+
 def _add_chat_run_root_identity(eng) -> None:
   """Give every physical run a stable logical identity across continuations."""
   from sqlalchemy import inspect as sa_inspect, text
@@ -1397,6 +1430,22 @@ def _add_app_connections_manage(eng) -> None:
     ))
 
 
+def _add_app_connect_manage(eng) -> None:
+  """Grant column for the Connect mini-app's external-machine access."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  columns = {
+    column["name"] for column in sa_inspect(eng).get_columns("apps")
+  }
+  if "connect_manage" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE apps ADD COLUMN connect_manage BOOLEAN "
+      "NOT NULL DEFAULT FALSE"
+    ))
+
+
 def _add_chat_pending_question_id(eng) -> None:
   """Add the durable open-AskUserQuestion marker (models.Chat).
 
@@ -1594,6 +1643,48 @@ def _add_app_hosted_publication(eng) -> None:
         conn.execute(text(f"ALTER TABLE apps DROP COLUMN {retired}"))
 
 
+def _retire_restart_resume_toggle(eng) -> None:
+  """Retire the owner restart-resume seed and lift chats a toggle latched off.
+
+  Restart continuation is now always on with no owner toggle. Earlier installs
+  carried an ``auto_resume_on_restart_default`` owner seed and let a per-chat
+  toggle latch continuation off. Lift every chat a prior toggle latched off —
+  EXCEPT a cancelled delegation child, whose ``False`` is an internal
+  do-not-resurrect latch owned by ``delegations.mark_cancelled`` — then drop the
+  dead seed column. Guarded on the seed column's presence, so it no-ops on any
+  database that never carried it.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  tables = set(inspector.get_table_names())
+  if "owner" not in tables:
+    return
+  owner_cols = {c["name"] for c in inspector.get_columns("owner")}
+  if "auto_resume_on_restart_default" not in owner_cols:
+    return
+  # The data lift and schema retirement are one migration outcome. If the
+  # column drop fails (for example because the database is locked), roll the
+  # lift back and let the migration ledger retry the complete operation later.
+  with eng.begin() as conn:
+    if "chats" in tables:
+      if "delegations" in tables:
+        conn.execute(text(
+          "UPDATE chats SET auto_resume_on_restart = 1 "
+          "WHERE auto_resume_on_restart = 0 AND id NOT IN ("
+          "SELECT child_chat_id FROM delegations "
+          "WHERE cancelled_at IS NOT NULL AND child_chat_id IS NOT NULL)"
+        ))
+      else:
+        conn.execute(text(
+          "UPDATE chats SET auto_resume_on_restart = 1 "
+          "WHERE auto_resume_on_restart = 0"
+        ))
+    conn.execute(text(
+      "ALTER TABLE owner DROP COLUMN auto_resume_on_restart_default"
+    ))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -1609,6 +1700,9 @@ _SCHEMA_MIGRATIONS = (
   ("0012_connector_oauth_gcloud", _add_connector_oauth_gcloud_fields),
   ("0013_app_hosted_publication", _add_app_hosted_publication),
   ("0014_chat_run_goal_plan", _add_chat_run_goal_plan),
+  ("0015_chat_run_goal_identity", _add_chat_run_goal_identity),
+  ("0016_app_connect_manage", _add_app_connect_manage),
+  ("0017_retire_restart_resume_toggle", _retire_restart_resume_toggle),
 )
 
 

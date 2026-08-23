@@ -225,10 +225,6 @@ export default function ChatSettingsPanel({
   autoResumeSaving = false,
   autoResumeError = '',
   onAutoResumeChange,
-  restartResumeEnabled = true,
-  restartResumeSaving = false,
-  restartResumeError = '',
-  onRestartResumeChange,
   onChange,
   // Shared promise tail for picker writes, handoffs, and message sends.
   settingsSaveTailRef,
@@ -608,9 +604,6 @@ export default function ChatSettingsPanel({
   const autoResumeSwitchId = chatId
     ? `chat-settings-auto-resume-${chatId}`
     : undefined
-  const restartResumeSwitchId = chatId
-    ? `chat-settings-restart-resume-${chatId}`
-    : undefined
   const appProviderLocked = chat?.created_by_app_id != null
 
   // Build the per-provider displayed-models list once per render. The backend
@@ -815,57 +808,25 @@ export default function ChatSettingsPanel({
           )
         })
       })}
-      {(onAutoResumeChange || onRestartResumeChange) && (
+      {onAutoResumeChange && (
         <div className="csp__automation">
           <div className="csp__label csp__label--automation">Automation</div>
-          {onAutoResumeChange && (
-            <>
-              <div
-                className="csp__automation-row"
-              >
-                <label className="csp__automation-copy" htmlFor={autoResumeSwitchId}>
-                  <span className="csp__automation-title">Automatically continue after usage limits</span>
-                </label>
-                <Switch
-                  className="chat-policy-switch"
-                  id={autoResumeSwitchId}
-                  checked={!!autoResumeEnabled}
-                  onCheckedChange={onAutoResumeChange}
-                  disabled={!!autoResumeSaving}
-                />
-              </div>
-              {autoResumeError && (
-                <p className="csp__automation-error" role="alert">
-                  {autoResumeError}
-                </p>
-              )}
-            </>
-          )}
-          {onRestartResumeChange && (
-            <>
-              <div
-                className="csp__automation-row"
-              >
-                <label
-                  className="csp__automation-copy"
-                  htmlFor={restartResumeSwitchId}
-                >
-                  <span className="csp__automation-title">Continue after planned restarts</span>
-                </label>
-                <Switch
-                  className="chat-policy-switch"
-                  id={restartResumeSwitchId}
-                  checked={!!restartResumeEnabled}
-                  onCheckedChange={onRestartResumeChange}
-                  disabled={!!restartResumeSaving}
-                />
-              </div>
-              {restartResumeError && (
-                <p className="csp__automation-error" role="alert">
-                  {restartResumeError}
-                </p>
-              )}
-            </>
+          <div className="csp__automation-row">
+            <label className="csp__automation-copy" htmlFor={autoResumeSwitchId}>
+              <span className="csp__automation-title">Automatically continue after usage limits</span>
+            </label>
+            <Switch
+              className="chat-policy-switch"
+              id={autoResumeSwitchId}
+              checked={!!autoResumeEnabled}
+              onCheckedChange={onAutoResumeChange}
+              disabled={!!autoResumeSaving}
+            />
+          </div>
+          {autoResumeError && (
+            <p className="csp__automation-error" role="alert">
+              {autoResumeError}
+            </p>
           )}
         </div>
       )}

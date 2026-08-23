@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-from app import app_git
+from app import app_git, models
 from app.config import get_settings
 from test_app_fixtures import create_local_app
 
@@ -4040,7 +4040,7 @@ def _install_simple(client, auth, base, manifest, jsx=JSX):
 
 
 def test_install_response_includes_capability_flags(
-  client, auth, bypass_url_validation,
+  client, auth, db, bypass_url_validation,
 ):
   """The immediate install response must match the persisted app capabilities."""
   base = "https://caps.test/repo/"
@@ -4051,6 +4051,7 @@ def test_install_response_includes_capability_flags(
   manifest["permissions"]["manage_skills"] = True
   manifest["permissions"]["github_connect"] = True
   manifest["permissions"]["filesystem_access"] = True
+  manifest["permissions"]["connect_manage"] = True
 
   r = _install_simple(client, auth, base, manifest)
 
@@ -4071,6 +4072,8 @@ def test_install_response_includes_capability_flags(
   assert row["manage_skills"] is True
   assert row["github_connect"] is True
   assert row["filesystem_access"] is True
+  persisted = db.query(models.App).filter(models.App.id == payload["id"]).one()
+  assert persisted.connect_manage is True
 
 
 def test_install_rejects_non_boolean_filesystem_capability(

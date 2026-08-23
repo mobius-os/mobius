@@ -103,6 +103,27 @@ export function resizeComposerTextarea(textarea, value = textarea?.value) {
   return height
 }
 
+/**
+ * Grow an inline-editor textarea to fit its content, capped at `maxHeight`.
+ *
+ * For the small inline editors (the Q&A custom answer, the queued-message
+ * editor) that live outside the composer pill and want to reveal a longer
+ * draft instead of scrolling a cramped fixed box. Browsers with native
+ * `field-sizing: content` size from CSS, so this is a no-op there; this is the
+ * measurement fallback for the rest. Shared so a new inline editor reuses one
+ * sizing rule rather than copying the measure/cap/overflow dance.
+ */
+export function autoGrowTextarea(textarea, maxHeight) {
+  if (!textarea?.style || textareaUsesNativeSizing()) return
+  textarea.style.height = 'auto'
+  const contentHeight = Number(textarea.scrollHeight) || 0
+  // A display:none pane reports 0; leave the intrinsic height rather than
+  // collapsing the field to nothing.
+  if (contentHeight <= 0) return
+  textarea.style.height = `${Math.min(contentHeight, maxHeight)}px`
+  textarea.style.overflowY = contentHeight > maxHeight ? 'auto' : 'hidden'
+}
+
 /** Collapse immediately while React is still committing an empty value. */
 export function resetComposerTextarea(textarea) {
   if (!textarea?.style) return

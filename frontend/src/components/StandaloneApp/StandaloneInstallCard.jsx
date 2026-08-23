@@ -51,8 +51,22 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
   // not the app is already on the home screen (adding twice is harmless),
   // which is exactly why they are safe to show without knowing. Other
   // platforms keep the native prompt primary and reveal steps only if it fails.
+  //
+  // Chromium is the special case: it CAN offer one-tap install but gates the
+  // prompt behind engagement heuristics (a tap plus ~30 seconds on the site),
+  // so a fresh arrival often lands in `manual` with the prompt seconds away.
+  // Showing menu instructions immediately reads as "install is broken" and
+  // sends people into the browser menu, where Create shortcut waits to be
+  // mistaken for Install. Hold a visible warming state instead, and reveal
+  // the manual steps only when the browser has had a fair chance and stayed
+  // silent (or on request).
+  const warmupCapable = platform.bipCapable && !platform.ios
   const [showInstructions, setShowInstructions] = useState(
-    () => platform.ios || (installState === 'manual' && forceOpen),
+    () => platform.ios ||
+      (installState === 'manual' && forceOpen && !warmupCapable),
+  )
+  const [warmingUp, setWarmingUp] = useState(
+    () => warmupCapable && installState === 'manual',
   )
   const dialogRef = useRef(null)
   const primaryRef = useRef(null)
@@ -62,6 +76,23 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
   useEffect(() => {
     if (forceOpen) setOpen(true)
   }, [forceOpen])
+
+  // The browser sends no "not eligible yet" signal — silence is the only
+  // negative answer. Give it a bounded window; if the prompt arrives the
+  // store flips this card to `ready` on its own, and if the window closes
+  // quietly the manual steps take over.
+  useEffect(() => {
+    if (!open || !warmingUp) return undefined
+    if (installState !== 'manual') {
+      setWarmingUp(false)
+      return undefined
+    }
+    const timer = setTimeout(() => {
+      setWarmingUp(false)
+      setShowInstructions(true)
+    }, 30000)
+    return () => clearTimeout(timer)
+  }, [open, warmingUp, installState])
 
   useEffect(() => {
     const previous = previousInstallStateRef.current
@@ -111,8 +142,11 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
   // native install prompt, or reveal guidance not yet on screen. On iPhone
   // neither is ever true — there is no install API and the steps show on
   // arrival — so the card ends at the sentence rather than at a button whose
-  // only effect is to close a dialog that already has a close.
-  const showAction = installState === 'ready' || !showInstructions
+  // only effect is to close a dialog that already has a close. While the
+  // warming state is on screen its own skip button covers the reveal, so a
+  // second "Show me" would be a duplicate.
+  const warming = warmingUp && installState === 'manual' && !showInstructions
+  const showAction = installState === 'ready' || (!showInstructions && !warming)
 
   if (!open) return null
 
@@ -160,6 +194,25 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
               />
               <h1 id="standalone-install-title">Install {app.name}</h1>
             </div>
+            {warming && (
+              <div className="standalone-install__warming" role="status">
+                <span className="standalone-install__spinner" aria-hidden="true" />
+                <span>
+                  Getting one-tap install ready — this can take a moment on a
+                  first visit.
+                </span>
+                <button
+                  type="button"
+                  className="standalone-install__warming-skip"
+                  onClick={() => {
+                    setWarmingUp(false)
+                    revealInstructions()
+                  }}
+                >
+                  Show the manual steps
+                </button>
+              </div>
+            )}
             {showInstructions && (platform.iosSafari && !platform.ipad ? (
               // On iPhone the sentence IS the card, so it gets no box of its
               // own — a bordered panel inside a bordered card is nesting that

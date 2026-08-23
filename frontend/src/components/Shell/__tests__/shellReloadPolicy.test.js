@@ -41,7 +41,7 @@ test('only the actively viewed chat turn defers shell reloads', () => {
   }), false)
 })
 
-test('a question-parked active chat no longer defers the shell reload', () => {
+test('an unfinished active turn defers reload while hidden or parked on a question', () => {
   const base = {
     activeElement: el('body'),
     activeView: 'chat',
@@ -50,11 +50,12 @@ test('a question-parked active chat no longer defers the shell reload', () => {
     lastUserInteractionAt: 0,
     now: 10000,
   }
-  assert.equal(shouldDeferShellReload(base), true, 'a streaming turn still holds')
+  assert.equal(shouldDeferShellReload(base), true,
+    'an unfinished turn still holds when its live stream is parked on a question')
   assert.equal(shouldDeferShellReload({
     ...base,
-    activeChatWaitingOnQuestion: true,
-  }), false, 'parked on the owner\'s answer is a safe apply boundary')
+    visibilityState: 'hidden',
+  }), true, 'backgrounding cannot discard unfinished visible progress')
 })
 
 test('recent interaction defers visible shell reloads', () => {

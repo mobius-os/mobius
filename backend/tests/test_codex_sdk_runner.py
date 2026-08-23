@@ -3276,6 +3276,24 @@ def test_codex_config_overrides_enable_native_goal_runtime(monkeypatch):
   assert "features.goals=true" in codex_sdk_runner._codex_config_overrides()
 
 
+def test_ordinary_codex_turns_do_not_expose_provider_private_goal_tools():
+  assert codex_sdk_runner._needs_native_goal_control(
+    goal_mode=False,
+    goal_objective=None,
+    goal_clear=False,
+    fallback_goal_objective=None,
+  ) is False
+  assert "features.goals=true" not in codex_sdk_runner._codex_config_overrides(
+    allow_goals=False,
+  )
+  assert codex_sdk_runner._needs_native_goal_control(
+    goal_mode=True,
+    goal_objective="Ship and verify",
+    goal_clear=False,
+    fallback_goal_objective=None,
+  ) is True
+
+
 def test_codex_app_server_launch_args_preserve_overrides_under_setsid(
   monkeypatch,
 ):

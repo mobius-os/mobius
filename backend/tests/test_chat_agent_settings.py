@@ -174,7 +174,6 @@ def test_auto_resume_is_per_chat_and_survives_runtime_clear(
   )
   assert enabled.status_code == 200
   assert enabled.json()["auto_resume_on_limit"] is True
-  assert enabled.json()["auto_resume_on_restart"] is True
   assert enabled.json()["agent_settings_json"] == {
     "model": "historical-model", "effort": "high",
   }
@@ -187,7 +186,6 @@ def test_auto_resume_is_per_chat_and_survives_runtime_clear(
 
   sibling = client.get(f"/api/chats/{other['id']}", headers=auth).json()
   assert sibling["auto_resume_on_limit"] is False
-  assert sibling["auto_resume_on_restart"] is True
 
   cleared = client.patch(
     f"/api/chats/{chat.id}",
@@ -248,38 +246,39 @@ def test_new_chat_inherits_last_auto_resume_selection(client, auth, chat):
   ).json()["auto_resume_on_limit"] is True
 
 
-def test_restart_resume_is_separate_and_defaults_on(client, auth, chat):
-  """Restart recovery starts on while paid usage retries remain off."""
+def test_restart_continuation_is_always_on_and_not_owner_configurable(
+  client, auth, chat, db,
+):
+  """Planned-restart continuation is always on and has no owner toggle.
+
+  A Möbius-initiated restart should always continue interrupted work, so the
+  per-chat column is on for every real chat and is neither exposed nor settable
+  through the chat API. It is only ever cleared internally (delegation
+  cancellation, covered in test_delegations)."""
+  from app import models
+
+  # The runtime setting is no longer part of any chat payload.
   initial = client.get(f"/api/chats/{chat.id}", headers=auth).json()
-  assert initial["auto_resume_on_limit"] is False
-  assert initial["auto_resume_on_restart"] is True
+  assert "auto_resume_on_restart" not in initial
 
-  existing_on = client.post(
-    "/api/chats", headers=auth, json={"title": "existing on"},
+  # Every freshly created chat continues after a restart at the storage layer.
+  created = client.post(
+    "/api/chats", headers=auth, json={"title": "fresh"},
   ).json()
-  assert client.get(
-    f"/api/chats/{existing_on['id']}", headers=auth,
-  ).json()["auto_resume_on_restart"] is True
+  assert "auto_resume_on_restart" not in created
+  db.expire_all()
+  assert db.get(models.Chat, created["id"]).auto_resume_on_restart is True
 
-  disabled = client.patch(
+  # An attempt to turn it off through the API is ignored, not honored.
+  patched = client.patch(
     f"/api/chats/{chat.id}",
     headers=auth,
     json={"auto_resume_on_restart": False},
   )
-  assert disabled.status_code == 200
-  assert disabled.json()["auto_resume_on_restart"] is False
-  assert disabled.json()["auto_resume_on_limit"] is False
-
-  inherited_off = client.post(
-    "/api/chats", headers=auth, json={"title": "inherits restart off"},
-  ).json()
-  assert client.get(
-    f"/api/chats/{inherited_off['id']}", headers=auth,
-  ).json()["auto_resume_on_restart"] is False
-  # Changing the seed never rewrites older conversations.
-  assert client.get(
-    f"/api/chats/{existing_on['id']}", headers=auth,
-  ).json()["auto_resume_on_restart"] is True
+  assert patched.status_code == 200
+  assert "auto_resume_on_restart" not in patched.json()
+  db.expire_all()
+  assert db.get(models.Chat, chat.id).auto_resume_on_restart is True
 
 
 def test_stale_global_auto_resume_setting_is_not_a_chat_default(

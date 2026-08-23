@@ -779,7 +779,7 @@ test('an active overflowing chat title cycles once, then becomes idle', () => {
     'clipped titles must not share a fixed duration; distance owns the cadence')
   assert.doesNotMatch(paneStrip, /TITLE_CYCLE_MAX_MS|Math\.min/,
     'long titles must not accelerate through a duration cap')
-  assert.match(paneStrip, /const TITLE_CYCLE_MS_PER_PX = 1000 \/ 12/)
+  assert.match(paneStrip, /const TITLE_CYCLE_MS_PER_PX = 1000 \/ 14\.4/)
   assert.match(paneStrip, /className="shell__tab-text-inner"/)
   const cycle = shellCss.match(/\.shell__tabstrip:not\(\.workspace__strip\)[\s\S]*?shell-tab-title-cycle var\(--tab-title-duration\) linear 700ms 1 both/)?.[0] || ''
   assert.match(cycle, /\.workspace__strip--focused/)
@@ -1079,6 +1079,18 @@ test('a manual platform reconcile refreshes the persistent Settings surface', ()
     settingsView,
     /useEffect\(\(\) => \{\s*if \(active\) refreshPlatform\(\)\s*\}, \[active, refreshPlatform, refreshToken\]\)/,
   )
+})
+
+test('boot delegates the complete shell generation decision to one inspector', () => {
+  assert.match(
+    shell,
+    /const \{ updateAvailable \} = await inspectShellUpdate\(\{[\s\S]*?serviceWorker: navigator\.serviceWorker,[\s\S]*?\}\)/,
+  )
+})
+
+test('shell resume is a deliberate apply, not a passive visible-chat hold', () => {
+  assert.match(shell, /watchForShellUpdateOnResume\(\{[\s\S]*?rearm: \(\) => requestShellReload\(\),/)
+  assert.doesNotMatch(shell, /rearm: \(\) => requestShellReload\(\{ passive: true \}\)/)
 })
 
 test('the builder no-full-screen invariant scopes to DESTINATIONS, not transient dialogs (§2)', () => {

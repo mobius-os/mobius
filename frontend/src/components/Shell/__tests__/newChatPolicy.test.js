@@ -99,7 +99,7 @@ test('reconcileNewChatIntentCreate rotates only on authoritative conflicts', () 
 
 test('a superseded create waiter cannot rotate the reopened New Chat draft', () => {
   const settle = shellSource.match(
-    /async function settleDraftFirstNewChat\(presentation\) \{([\s\S]*?)\n  \}\n\n  function retryDraftFirstNewChat/,
+    /async function settleDraftFirstNewChat\(presentation\) \{([\s\S]*?)\n  \}\n\n  settleDraftFirstNewChatRef\.current/,
   )?.[1] || ''
   const rotate = settle.match(
     /if \(decision\.action === 'rotate'\) \{([\s\S]*?)\n    \}\n\n    if \(decision\.action !== 'accept'\)/,
@@ -140,7 +140,7 @@ test('a superseded create waiter cannot rotate the reopened New Chat draft', () 
 
 test('an accepted allocation hydrates durable draft ownership before handoff', () => {
   const settle = shellSource.match(
-    /async function settleDraftFirstNewChat\(presentation\) \{([\s\S]*?)\n  \}\n\n  function retryDraftFirstNewChat/,
+    /async function settleDraftFirstNewChat\(presentation\) \{([\s\S]*?)\n  \}\n\n  settleDraftFirstNewChatRef\.current/,
   )?.[1] || ''
   const accepted = settle.slice(settle.indexOf("if (decision.action !== 'accept')"))
   const hydrate = accepted.indexOf('await readComposerDraftAsync(intentId)')
@@ -441,7 +441,6 @@ test('a canonical create response becomes an authoritative empty detail cache', 
       effective_agent_settings: { model: 'gpt-current', effort: 'medium' },
       has_assistant_turns: false,
       auto_resume_on_limit: false,
-      auto_resume_on_restart: true,
       offset: 0,
       updated_at: '2026-07-30T12:00:00Z',
     }),
@@ -463,7 +462,6 @@ test('a canonical create response becomes an authoritative empty detail cache', 
       effective: { model: 'gpt-current', effort: 'medium' },
       has_assistant_turns: false,
       auto_resume_on_limit: false,
-      auto_resume_on_restart: true,
     },
   })
 })

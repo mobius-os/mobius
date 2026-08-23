@@ -340,10 +340,12 @@ test.describe('Bug 1: AskUserQuestion', () => {
     })
 
     const before = await geometry()
+    // Plain Enter now sends in the inline answer editor (matches the composer),
+    // so a multi-line answer is built with Shift+Enter for each newline.
     await customAnswer.pressSequentially('First line')
-    await page.keyboard.press('Enter')
+    await page.keyboard.press('Shift+Enter')
     await customAnswer.pressSequentially('Second line')
-    await page.keyboard.press('Enter')
+    await page.keyboard.press('Shift+Enter')
     await customAnswer.pressSequentially('Third line')
     await page.evaluate(() => new Promise(resolve => (
       requestAnimationFrame(() => requestAnimationFrame(resolve))
@@ -360,7 +362,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     // Drive the real keyboard path so caret reveal, beforeinput, input, and the
     // chat scroll owner race exactly as they do for an owner writing an answer.
     for (let line = 4; line <= 14; line += 1) {
-      await page.keyboard.press('Enter')
+      await page.keyboard.press('Shift+Enter')
       await customAnswer.pressSequentially(`Line ${line}`)
     }
     await page.evaluate(() => new Promise(resolve => (

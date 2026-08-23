@@ -9,9 +9,38 @@ function settledLabel(status) {
   if (status === 'filled') return 'Provided'
   if (status === 'consuming') return 'Using securely…'
   if (status === 'completed') return 'Provided securely'
-  if (status === 'failed') return 'Not used'
+  // A failed consumer has already received the values. "Not used" would
+  // incorrectly describe the input lifecycle rather than the operation.
+  if (status === 'failed') return 'Used securely'
   if (status === 'cancelled' || status === 'expired') return 'Not provided'
   return ''
+}
+
+
+export function collectAndClearSecureFields(form, fields) {
+  const inputs = new Map(
+    Array.from(form.querySelectorAll('input[data-secure-field]'))
+      .map(input => [input.dataset.secureField, input]),
+  )
+  const values = {}
+  for (const field of fields || []) {
+    values[field.name] = String(inputs.get(field.name)?.value || '')
+  }
+
+  // Chrome can treat removal of a filled password form as a successful login.
+  // Clear and blur before the server can publish a state that replaces the form.
+  form.reset()
+  for (const input of inputs.values()) {
+    input.value = ''
+    input.blur()
+  }
+  return values
+}
+
+
+function declaredCredentialHint(field) {
+  const hint = field?.autocomplete
+  return typeof hint === 'string' && hint !== 'off' ? hint : null
 }
 
 
@@ -24,6 +53,7 @@ export default function SecureInputCard({ block, chatId, interactive = false }) 
   const blockStatus = block.status || 'pending'
   const status = blockStatus === 'pending' ? localStatus : blockStatus
   const open = status === 'pending' && interactive
+  const credentialForm = (block.fields || []).some(declaredCredentialHint)
 
   useEffect(() => {
     if (block.status && block.status !== 'pending') {
@@ -37,19 +67,16 @@ export default function SecureInputCard({ block, chatId, interactive = false }) 
     const form = formRef.current
     if (!form?.reportValidity()) return
 
-    const data = new FormData(form)
-    const fields = {}
-    for (const field of block.fields || []) {
-      fields[field.name] = String(data.get(field.name) || '')
-    }
-    if (reveal && data.get('reveal_confirmed') !== 'yes') {
+    const revealConfirmed = reveal
+      && form.elements.reveal_confirmed?.checked === true
+    if (reveal && !revealConfirmed) {
       setError('Confirm that these values may be sent to the AI provider.')
       return
     }
 
+    const fields = collectAndClearSecureFields(form, block.fields)
     setError('')
     setSubmitting(true)
-    const revealConfirmed = reveal && data.get('reveal_confirmed') === 'yes'
     try {
       await jsonOrThrow(
         await api.secureInputs.submit(chatId, block.request_id, {
@@ -58,15 +85,14 @@ export default function SecureInputCard({ block, chatId, interactive = false }) 
         }),
         'Secure input failed',
       )
-      // Remove values from the live DOM as soon as Möbius acknowledges its
-      // transient server copy. Nothing is mirrored into React state or browser
-      // storage; the visible card retains names + status only.
-      form.reset()
       setLocalStatus('filled')
     } catch (submitError) {
-      setError(submitError?.message || 'Secure input failed. Please try again.')
+      setError(
+        submitError?.message
+        || 'Secure input failed. Please enter the values again.',
+      )
     } finally {
-      // FormData/fields are ordinary JS memory and become unreachable here.
+      // Submitted fields are ordinary JS memory and become unreachable here.
       for (const key of Object.keys(fields)) fields[key] = ''
       setSubmitting(false)
     }
@@ -93,20 +119,35 @@ export default function SecureInputCard({ block, chatId, interactive = false }) 
       </p>
 
       {open ? (
-        <form ref={formRef} className="secure-card__form" onSubmit={submit}>
-          {(block.fields || []).map(field => (
-            <label className="secure-card__field" key={field.name}>
-              <span>{field.label}</span>
-              <input
-                name={field.name}
-                type={field.type === 'text' ? 'text' : 'password'}
-                autoComplete={field.autocomplete || 'off'}
-                required
-                disabled={submitting}
-                data-chat-inline-editor="secure-input"
-              />
-            </label>
-          ))}
+        <form
+          ref={formRef}
+          className="secure-card__form"
+          autoComplete={credentialForm ? 'on' : 'off'}
+          onSubmit={submit}
+        >
+          {(block.fields || []).map(field => {
+            const credentialHint = declaredCredentialHint(field)
+            const genericMaskedField = field.type !== 'text' && !credentialHint
+            return (
+              <label className="secure-card__field" key={field.name}>
+                <span>{field.label}</span>
+                <input
+                  name={credentialHint ? field.name : undefined}
+                  // Chromium deliberately ignores autocomplete="off" on
+                  // password fields. Generic secrets are ordinary text inputs
+                  // with visual masking; only explicitly declared owner
+                  // credentials enter the browser's password-manager flow.
+                  type={genericMaskedField ? 'text' : (field.type === 'text' ? 'text' : 'password')}
+                  autoComplete={credentialHint || 'off'}
+                  required
+                  disabled={submitting}
+                  data-secure-field={field.name}
+                  data-secure-masked={genericMaskedField ? 'true' : undefined}
+                  data-chat-inline-editor="secure-input"
+                />
+              </label>
+            )
+          })}
 
           {reveal && (
             <label className="secure-card__consent">
@@ -148,10 +189,14 @@ export default function SecureInputCard({ block, chatId, interactive = false }) 
         {reveal
           ? (open
               ? 'Explicit reveal sends values to AI; Möbius omits them from its transcript.'
-              : 'Receipt saved · revealed values omitted from the Möbius transcript')
+              : status === 'failed'
+                ? 'Operation failed · revealed values omitted from the Möbius transcript'
+                : 'Receipt saved · revealed values omitted from the Möbius transcript')
           : (open
               ? 'One-time entry · values bypass the chat and AI'
-              : 'Receipt saved · entered values omitted')}
+              : status === 'failed'
+                ? 'Operation failed · entered values omitted'
+                : 'Receipt saved · entered values omitted')}
       </p>
     </section>
   )

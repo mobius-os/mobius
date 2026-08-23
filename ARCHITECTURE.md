@@ -945,10 +945,14 @@ every supervisor sweep, so a later ledger read cannot disagree with the boot.
 When a successful pass leaves a restart remainder, the same supervisor follows
 up after two seconds; a no-progress pass returns to the event/60-second cadence.
 It creates neither per-chat workers nor a permanent short poll. Paid
-provider-limit continuation (`auto_resume_on_limit`) initially defaults off;
-planned-restart continuation (`auto_resume_on_restart`) initially defaults on.
-Each chat stores both choices independently, and changing either choice seeds
-future chats without rewriting existing conversations.
+provider-limit continuation (`auto_resume_on_limit`) is an owner choice that
+initially defaults off; each chat stores it independently, and changing it
+seeds future chats without rewriting existing conversations. Planned-restart
+continuation is always on and has no owner toggle — Möbius interrupted the work
+itself, so it should just continue. The per-chat `auto_resume_on_restart`
+column remains only as an internal latch: it defaults on and is cleared solely
+by `delegations.mark_cancelled`, so a cancelled delegated child cannot
+resurrect itself when the boot sweep claims restart parks.
 
 ### Tool output rendering
 
@@ -1095,10 +1099,12 @@ placement intent and never encode pane ids, split directions, or breakpoints.
 `frontend/src/components/Shell/paneModel.js` is the pure workspace model. A
 workspace contains a binary `layout` tree, a map of pane records, a focused pane,
 a presentation mode (`single` or `panes`), and the single-screen slot. Each pane
-owns its ordered tabs and `activeTabKey`; tab identity and navigation mapping
-remain in `tabModel.js`. The model normalizes persisted input, enforces unique
-tabs across panes, bounds pane count/depth, collapses empty splits, and returns
-the same reference for no-op transitions.
+owns its visible tab order, `activeTabKey`, and a most-recent-first
+`recentTabKeys` permutation used when its active tab closes or moves away; tab
+identity and navigation mapping remain in `tabModel.js`. The model normalizes
+persisted input, seeds older blobs from the former neighbour-close order,
+enforces unique tabs across panes, bounds pane count/depth, collapses empty
+splits, and returns the same reference for no-op transitions.
 
 `useWorkspaceSession.js` is the live state owner. It composes reducer transitions
 through a synchronous ref boundary, persists the sole versioned

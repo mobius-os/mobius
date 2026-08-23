@@ -300,15 +300,76 @@ def test_seeded_guidance_uses_current_preview_recovery_and_resolver_contracts():
   assert "Do not turn this trigger into an unconditional nightly diff" in reflection
 
 
-def test_image_skill_publishes_exact_generated_path():
+def test_core_routes_operational_recipes_to_their_owning_skills():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text()
+  seed_dir = repo / "backend" / "scripts" / "seed-skills"
+  maintenance = (seed_dir / "platform-maintenance.md").read_text()
+  notifications = (seed_dir / "notifications.md").read_text()
+
+  assert "/api/debug/status" not in core
+  assert '"type":"open_item"' not in core
+  assert "/api/debug/status" in maintenance
+  assert "/api/debug/memory" in maintenance
+  assert "/api/debug/logs" in maintenance
+  assert '"type":"open_item"' in notifications
+  assert "Default `activation` to `background`" in notifications
+
+
+def test_advanced_app_skill_does_not_duplicate_the_component_catalog():
+  repo = Path(__file__).resolve().parents[2]
+  advanced = (
+    repo / "backend" / "scripts" / "seed-skills" / "building-apps.md"
+  ).read_text()
+
+  assert "## UI conventions stay in the base workflow" in advanced
+  assert "## Design conventions" not in advanced
+  assert "### The AppShell skeleton" not in advanced
+  assert "/* mobius-ui:Button" not in advanced
+
+
+def test_reflection_seed_uses_staged_evidence_and_avoids_template_duplication():
+  repo = Path(__file__).resolve().parents[2]
+  reflection = (
+    repo / "backend" / "scripts" / "seed-skills" / "reflection.md"
+  ).read_text()
+
+  assert "inputs/chats.md" in reflection
+  assert "ordered `cron_outcome` events" in reflection
+  assert "/data/cli-auth/" not in reflection
+  assert "this wasted a turn on 2026" not in reflection
+  assert "The seeded template owns the exact HTML and styling" in reflection
+  assert "Copy this skeleton" not in reflection
+
+
+def test_agent_coaching_is_the_single_neutral_coaching_skill():
+  repo = Path(__file__).resolve().parents[2]
+  seed_dir = repo / "backend" / "scripts" / "seed-skills"
+  coaching = (seed_dir / "agent-coaching.md").read_text(encoding="utf-8")
+  reflection = (seed_dir / "reflection.md").read_text(encoding="utf-8")
+
+  assert not (seed_dir / "manager-session.md").exists()
+  assert "neutral learning conversation" in coaching
+  assert "what the agent did well" in coaching
+  assert "what could improve" in coaching
+  assert "What is the most general lesson" in coaching
+  assert "platform primitive" in coaching
+  assert "exact_session_fork" in coaching
+  assert "`/data/shared/skills/agent-coaching.md` completely" in reflection
+  assert "what should Reflection itself change" in reflection
+  assert "/data/platform/backend/scripts/reflection-evidence.py" in reflection
+
+
+def test_image_skill_returns_tool_result_without_touching_protected_storage():
   repo = Path(__file__).resolve().parents[2]
   images = (
     repo / "backend" / "scripts" / "seed-skills" / "images.md"
   ).read_text(encoding="utf-8")
 
-  assert "publish_chat_image.py" in images
-  assert "<exact path returned by imagegen>" in images
-  assert "IMG=$(ls -t" not in images
+  assert "generated-image result directly" in images
+  assert "inspect, locate, or republish a backing file" in images
+  assert "/data/cli-auth/" not in images
+  assert "publish_chat_image.py" not in images
 
 
 def test_quickstart_reuses_apply_receipt_id_without_relisting():

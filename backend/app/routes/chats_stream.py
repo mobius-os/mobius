@@ -29,6 +29,7 @@ from app.chat_writer import (
   CancelPending,
   StartTurn,
   StartTurnBlockedByPendingQuestion,
+  UpdatePending,
   alloc_run_token,
   await_ack,
   cid_of,
@@ -56,6 +57,14 @@ router = APIRouter(prefix="/api/chats", tags=["chats"])
 
 log = logging.getLogger(__name__)
 
+
+def _delegation_manages_chat(db: Session, chat_id: str) -> bool:
+  """Whether a parent delegation owns this chat's send lifecycle."""
+  return db.query(models.Delegation.id).filter(
+    models.Delegation.child_chat_id == chat_id,
+  ).first() is not None
+
+
 def _pending_question_open_conflict() -> HTTPException:
   return HTTPException(
     status_code=409,
@@ -78,15 +87,12 @@ _SNAPSHOT_REPLAY_EVENT_TYPES = frozenset({
   "app_updated",
   "build_phase",
   "goal_plan_updated",
+  "goal_activated",
   "chat_run_finished",
   "chat_run_started",
   "queued_turn_starting",
   "steer_delivery_failed",
   "steered_into_turn",
-  "secure_input_request",
-  "secure_input_filled",
-  "secure_input_consuming",
-  "secure_input_settled",
   "theme_updated",
 })
 
@@ -130,10 +136,9 @@ def _sse(data: dict) -> str:
   return f"data: {json.dumps(data)}\n\n"
 
 
-def _content_with_uploads(chat: models.Chat, body: schemas.SendMessage) -> str:
+def _content_with_uploads(chat: models.Chat, content: str) -> str:
   """Returns message content with the session upload notice appended."""
   settings = get_settings()
-  content = body.content
   # Force-steer resends the exact canonical pending-message content. Pending
   # rows already include this hidden upload manifest; appending it again makes
   # steered multi-message turns look duplicated/newline-heavy in the client and
@@ -322,7 +327,7 @@ def _user_message_from_body(
   """Builds the durable user message payload for a send request."""
   user_msg = {
     "role": "user",
-    "content": _content_with_uploads(chat, body),
+    "content": _content_with_uploads(chat, body.content),
     "ts": int(time.time() * 1000),
   }
   # Carry the client-minted identity when present; API clients may omit it, so
@@ -538,6 +543,14 @@ async def send_message(
   """
   require_chat_embed_operation(principal, "chat:send")
   chat = get_active_chat_for_principal(db, chat_id, principal)
+  if _delegation_manages_chat(db, chat_id):
+    raise HTTPException(
+      status_code=409,
+      detail={
+        "code": "delegation_managed",
+        "message": "This evaluator chat is managed by its parent workflow.",
+      },
+    )
 
   # AskUserQuestion answer delivery. If a live SDK turn is blocked waiting for
   # the answer (held in `questions._pending[chat_id]`), persist through the
@@ -786,6 +799,16 @@ async def _send_message_locked(
   duplicate = _duplicate_send_response(chat_id, chat, body.cid)
   if duplicate is not None:
     return duplicate
+  # Re-check after acquiring the transition lock: creation may have attached
+  # this chat to a delegation after the request's initial admission read.
+  if _delegation_manages_chat(db, chat_id):
+    raise HTTPException(
+      status_code=409,
+      detail={
+        "code": "delegation_managed",
+        "message": "This evaluator chat is managed by its parent workflow.",
+      },
+    )
   if body.continuation == "manual" and principal.app_id is not None:
     raise HTTPException(
       status_code=403,
@@ -874,7 +897,15 @@ async def _send_message_locked(
     if (
       is_chat_running(chat_id)
       and not questions.is_waiting(chat_id)
-      and (body.force_steer or body.direct_steer or _steer_enabled(chat))
+      and (
+        body.force_steer
+        or body.direct_steer
+        # Hidden sends are product control carriers, not owner-authored course
+        # corrections.  They must keep their queue boundary even when the
+        # owner has enabled automatic steering; explicit internal direct/force
+        # steering above remains available for the few flows that own it.
+        or (not body.hidden and _steer_enabled(chat))
+      )
       and (
         body.force_steer
         or body.direct_steer
@@ -1182,6 +1213,50 @@ async def cancel_pending_message(
   )
   result = await await_ack(ack)
   return {"pending_messages": result["pending"]}
+
+
+@router.patch(
+  "/{chat_id}/pending/{cid}",
+  status_code=200,
+  dependencies=[Depends(reject_cross_site)],
+)
+async def update_pending_message(
+  chat_id: str,
+  cid: str,
+  body: schemas.PendingMessageUpdate,
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+):
+  """Edits one queued (not-yet-started) user message in place, identified by
+  its stable `cid`. Only the visible text changes; the actor's UpdatePending
+  preserves the row's identity, ordering, attachments, and queue position.
+
+  The request carries just the owner's text. The hidden session-file manifest
+  is re-derived here through the same `_content_with_uploads` the send path
+  uses, so the edit can never blank a row or drop its file references, and the
+  browser is never trusted to round-trip that hidden content.
+
+  Returns `updated` plus the current pending queue so the client can reconcile
+  drift: `updated` is False when a racing promotion or cancellation pulled the
+  message into the active turn between the owner saving and the PATCH landing.
+  """
+  if principal.scope == "app":
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  require_chat_embed_operation(principal, "chat:send")
+  chat = get_active_chat_for_principal(
+    db, chat_id, principal, load_fields=(models.Chat.uploads,),
+  )
+  content = body.content.strip()
+  if not content:
+    raise HTTPException(status_code=422, detail="Queued message cannot be empty.")
+  content = _content_with_uploads(chat, content)
+  # The actor's UpdatePending is the SOLE runtime mutator of pending_messages,
+  # so an edit racing a concurrent promote/cancel can't lost-update.
+  ack = get_writer().submit(
+    UpdatePending(chat_id=chat_id, run_token="", cid=cid, content=content)
+  )
+  result = await await_ack(ack)
+  return {"updated": result["updated"], "pending_messages": result["pending"]}
 
 
 @router.get("/{chat_id}/stream")

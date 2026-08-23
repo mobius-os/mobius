@@ -152,6 +152,33 @@ async def test_programmatic_start_does_nothing_when_claim_is_busy(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_programmatic_start_preserves_hidden_product_event_identity(
+  monkeypatch,
+):
+  state = _install_start_fakes(monkeypatch)
+  monkeypatch.setattr(chat_start.time, "time", lambda: 123.456)
+
+  assert await chat_start.start_programmatic_chat_turn(
+    chat_id="parent",
+    title="Delegation results",
+    content="child completed",
+    provider="codex",
+    hidden=True,
+    message_kind="delegation_result",
+    source_work_id="goal-1",
+  ) is True
+
+  assert state.writer.commands[0].user_msg == {
+    "role": "user",
+    "content": "child completed",
+    "ts": 123456,
+    "hidden": True,
+    "kind": "delegation_result",
+    "source_work_id": "goal-1",
+  }
+
+
+@pytest.mark.asyncio
 async def test_programmatic_start_yields_to_pending_owner_question(monkeypatch):
   state = _install_start_fakes(
     monkeypatch,

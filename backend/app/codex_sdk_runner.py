@@ -210,6 +210,20 @@ def _codex_config_overrides(
   return overrides
 
 
+def _needs_native_goal_control(
+  *,
+  goal_mode: bool,
+  goal_objective: str | None,
+  goal_clear: bool,
+  fallback_goal_objective: str | None,
+) -> bool:
+  """Whether this turn already belongs to Codex's explicit Goal lifecycle."""
+  return bool(
+    goal_mode or goal_objective is not None or goal_clear
+    or fallback_goal_objective is not None
+  )
+
+
 def _codex_app_server_launch_args(
   codex_bin: str | None,
   config_overrides: list[str],
@@ -1580,10 +1594,16 @@ async def run_codex_sdk_turn(
   # Delegated children disable those optional tools at this provider-owned seam.
   codex_bin = shutil.which("codex")
   delegated = run_policy is not None
+  needs_goal_control = _needs_native_goal_control(
+    goal_mode=goal_mode,
+    goal_objective=goal_objective,
+    goal_clear=goal_clear,
+    fallback_goal_objective=fallback_goal_objective,
+  )
   config_overrides = _codex_config_overrides(
     allow_questions=not delegated,
     allow_multi_agent=not delegated,
-    allow_goals=not delegated,
+    allow_goals=not delegated and needs_goal_control,
   )
   launch_args = _codex_app_server_launch_args(codex_bin, config_overrides)
   config_kwargs: dict[str, Any] = dict(
@@ -1678,10 +1698,6 @@ async def run_codex_sdk_turn(
   try:
     codex, entry_cancel = await _enter_codex_context_owned(codex_context)
     async with _EnteredCodexContext(codex_context, codex) as codex:
-      needs_goal_control = bool(
-        goal_mode or goal_objective is not None or goal_clear
-        or goal_continue or fallback_goal_objective is not None
-      )
       goal_client = control_client(codex) if needs_goal_control else None
       record_memory_checkpoint_once(
         "codex_first_client_connected",

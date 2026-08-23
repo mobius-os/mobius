@@ -228,6 +228,38 @@ def test_steers_into_live_codex_turn_when_flag_on(
   ]
 
 
+def test_hidden_control_message_queues_even_when_auto_steer_is_enabled(
+  client, auth, monkeypatch,
+):
+  """Product control carriers must retain their next-turn boundary."""
+  chat_id = "hiddencontrolqueues"
+  message_cid = "hidden-control-cid"
+  _make_codex_chat(chat_id, steer_enabled=True)
+  registry.register(_make_active_codex_turn(chat_id))
+  create_broadcast(chat_id)
+
+  async def _must_not_steer(*_args, **_kwargs):
+    raise AssertionError("hidden control messages must not auto-steer")
+
+  _patch_codex_steer(monkeypatch, _must_not_steer)
+  res = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={
+      "content": "/goal Finish and verify the migration",
+      "cid": message_cid,
+      "hidden": True,
+    },
+    headers=auth,
+  )
+
+  assert res.status_code == 202, res.text
+  assert res.json()["status"] == "queued"
+  chat = _read_chat(chat_id)
+  assert [cid_of(row) for row in chat.pending_messages] == [message_cid]
+  assert chat.pending_messages[0]["hidden"] is True
+  assert chat.pending_messages[0]["content"].startswith("/goal ")
+
+
 def test_direct_steer_reserves_and_converts_new_codex_message_in_one_request(
   client, auth, monkeypatch,
 ):

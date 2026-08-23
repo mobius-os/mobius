@@ -806,6 +806,13 @@ class _FrontendHandler(FileSystemEventHandler):
     self._last_source_change = 0.0
     self._last_build_reason = "startup"
     self._blocked_conflict_signature: str | None = None
+    # Memory-admission deferrals were once invisible: the watcher requeued
+    # silently while health read "running, no error", and a stale reading
+    # could hold builds for hours on an idle box. Track them so health and
+    # the log say that builds are waiting, on what, and since when.
+    self._deferred_since: float | None = None
+    self._deferral_count = 0
+    self._deferred_reason: str | None = None
     self._staging_dirty = False
     self._incomplete_since: float | None = None
     self._incomplete_notified = False
@@ -891,12 +898,26 @@ class _FrontendHandler(FileSystemEventHandler):
         pass
     with self._state_lock:
       staging_dirty = self._staging_dirty
+      deferred_since = self._deferred_since
+      deferral_count = self._deferral_count
+      deferred_reason = self._deferred_reason
     return {
       "running": not self._closed.is_set(),
       "building": pid is not None,
       "pid": pid,
       "rss_bytes": rss_bytes,
       "staging_dirty": staging_dirty,
+      # Present only while a source change is waiting on memory admission,
+      # so "running, no error" can never again hide a stalled rebuild.
+      "build_deferred": (
+        {
+          "since": deferred_since,
+          "attempts": deferral_count,
+          "reason": deferred_reason,
+        }
+        if deferred_since is not None
+        else None
+      ),
       "lease_path": str(_FRONTEND_DIR / ".watch.lock"),
     }
 
@@ -1015,6 +1036,7 @@ class _FrontendHandler(FileSystemEventHandler):
     try:
       with build_lease(blocking=False):
         if _memory_is_tight():
+          self._note_build_deferred(reason)
           self._queue_build(reason)
           return
         with self._state_lock:
@@ -1080,6 +1102,7 @@ class _FrontendHandler(FileSystemEventHandler):
           with self._proc_lock:
             self._watch_proc = proc
           log.info("frontend demand build started after %s", reason)
+          self._clear_build_deferral()
           try:
             output, _ = proc.communicate(timeout=180)
           except subprocess.TimeoutExpired as exc:
@@ -1128,6 +1151,39 @@ class _FrontendHandler(FileSystemEventHandler):
     except BuildLeaseUnavailable:
       # Only the acquisition above can raise this; the body takes no lease.
       self._queue_build(reason)
+
+  def _note_build_deferred(self, reason: str) -> None:
+    """Record one memory-admission deferral where health and logs can see it."""
+    with self._state_lock:
+      self._deferral_count += 1
+      self._deferred_reason = reason
+      first = self._deferred_since is None
+      if first:
+        self._deferred_since = time.time()
+      count = self._deferral_count
+    # Warn on the first deferral, then periodically — a persisted deferral is
+    # exactly the state that must not stay quiet, but every debounce tick
+    # would be noise.
+    if first or count % 20 == 0:
+      log.warning(
+        "frontend build deferred by memory admission"
+        " (%d attempt%s, change: %s); the last good dist remains served",
+        count, "" if count == 1 else "s", reason,
+      )
+
+  def _clear_build_deferral(self) -> None:
+    with self._state_lock:
+      if self._deferred_since is None:
+        return
+      since = self._deferred_since
+      count = self._deferral_count
+      self._deferred_since = None
+      self._deferral_count = 0
+      self._deferred_reason = None
+    log.info(
+      "frontend build admitted after %d deferred attempt%s (%.0f s waiting)",
+      count, "" if count == 1 else "s", time.time() - since,
+    )
 
   def _refresh_staging_signature(self) -> bool:
     sig = _tree_signature(_STAGING_DIST_DIR)

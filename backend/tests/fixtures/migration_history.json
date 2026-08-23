@@ -14,6 +14,8 @@
     "0011_delegation_parent_wake": "beaf17a1887c950209fa8e695d5ba66dbd544db881b2c888e80a1a926fe41709",
     "0012_connector_oauth_gcloud": "cc0f805478540ee55fd927786f10e03a020873f349cc3b0ee99a7b741cff45f1",
     "0013_app_hosted_publication": "62d7ff873ded24c52da4031684ca5fd95ed244f416345ae1dcbae9cf880025ae",
-    "0014_chat_run_goal_plan": "28a1e1a60164ae48845a9cfb4227e7d8c58655852caed6b95e1e1725dd12a217"
+    "0014_chat_run_goal_plan": "28a1e1a60164ae48845a9cfb4227e7d8c58655852caed6b95e1e1725dd12a217",
+    "0015_chat_run_goal_identity": "aa63ad39a2b55b364b97c950f912041ff88cd59ebf315218a824bb567bc6bf77",
+    "0017_retire_restart_resume_toggle": "ef68e15bcea2a9799f0a0e2bbd212dd18d69818ea24c2bfe60c25ca72af61d4d"
   }
 }

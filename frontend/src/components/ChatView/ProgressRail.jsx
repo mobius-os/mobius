@@ -1,49 +1,22 @@
 /* ProgressRail renders the shared compact status sequence above the composer. */
 
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 
 function ProgressStep({ item, detailsExpanded, onDetailsToggle }) {
-  const stepRef = useRef(null)
-  const labelRef = useRef(null)
   const [labelExpanded, setLabelExpanded] = useState(false)
-  const [canExpand, setCanExpand] = useState(false)
-
-  useLayoutEffect(() => {
-    setLabelExpanded(false)
-    setCanExpand(false)
-  }, [item.label])
-
-  useLayoutEffect(() => {
-    const step = stepRef.current
-    const label = labelRef.current
-    if (!step || !label || labelExpanded || !item.expandable) return undefined
-
-    const measure = () => {
-      setCanExpand(label.scrollWidth > step.clientWidth + 1)
-    }
-    measure()
-
-    if (typeof ResizeObserver === 'undefined') return undefined
-    const observer = new ResizeObserver(measure)
-    observer.observe(step)
-    return () => observer.disconnect()
-  }, [labelExpanded, item.expandable, item.label])
+  useEffect(() => setLabelExpanded(false), [item.label])
 
   const hasDetails = !!item.details
   const expanded = hasDetails ? detailsExpanded : labelExpanded
-  const toggleable = item.expandable && (hasDetails || canExpand || expanded)
-  const actionLabel = expanded
-    ? item.expandedActionLabel
-    : item.actionLabel
   const accessibleLabel = item.ariaLabel || item.label
   const title = item.title || item.label
   const className = `chat__progress-step${
     item.current ? ' chat__progress-step--current' : ''
-  }${toggleable ? ' chat__progress-step--toggle' : ''}${
+  }${item.expandable ? ' chat__progress-step--toggle' : ''}${
     labelExpanded ? ' chat__progress-step--expanded' : ''
   }`
   const label = (
-    <span ref={labelRef} className="chat__progress-step-label">
+    <span className="chat__progress-step-label">
       {item.label}
     </span>
   )
@@ -51,7 +24,6 @@ function ProgressStep({ item, detailsExpanded, onDetailsToggle }) {
   if (!item.expandable) {
     return (
       <span
-        ref={stepRef}
         className={className}
         aria-current={item.current ? 'step' : undefined}
         title={title}
@@ -63,16 +35,14 @@ function ProgressStep({ item, detailsExpanded, onDetailsToggle }) {
 
   return (
     <button
-      ref={stepRef}
       type="button"
       className={`${className} chat__progress-step--button`}
       aria-current={item.current ? 'step' : undefined}
       aria-expanded={expanded}
-      aria-label={toggleable
-        ? `${actionLabel || (expanded ? 'Collapse' : 'Expand')}: ${accessibleLabel}`
-        : accessibleLabel}
-      title={toggleable ? (actionLabel || (expanded ? 'Collapse' : title)) : title}
-      disabled={!toggleable}
+      aria-label={`${expanded ? 'Collapse' : 'Expand'}: ${accessibleLabel}`}
+      title={expanded ? 'Collapse' : title}
+      // Keep composer focus (and the soft keyboard) put when expanding.
+      onPointerDown={(event) => event.preventDefault()}
       onClick={() => {
         if (hasDetails) onDetailsToggle?.()
         else setLabelExpanded(value => !value)
@@ -80,21 +50,15 @@ function ProgressStep({ item, detailsExpanded, onDetailsToggle }) {
     >
       {label}
       {hasDetails && (
-        <>
-          {actionLabel && (
-            <span className="chat__progress-step-action" aria-hidden="true">
-              {actionLabel}
-            </span>
-          )}
-          <span className="chat__progress-toggle-mark" aria-hidden="true" />
-        </>
+        <span className="chat__progress-toggle-mark" aria-hidden="true" />
       )}
     </button>
   )
 }
 
-export default function ProgressRail({ items, ariaLabel }) {
+export default function ProgressRail({ items, ariaLabel, resetKey }) {
   const [detailsKey, setDetailsKey] = useState(null)
+  useEffect(() => setDetailsKey(null), [resetKey])
   if (!items.length) return null
   const detailItem = items.find(item => item.key === detailsKey && item.details)
   return (

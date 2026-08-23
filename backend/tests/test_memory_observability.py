@@ -126,10 +126,14 @@ def test_cgroup_snapshot_separates_reclaimable_file_cache(tmp_path: Path):
     cgroup_root=cgroup_root,
   )
 
+  # Working set excludes BOTH file-LRU halves (1000 - 400 inactive - 200
+  # active): the active/inactive split is access recency, not evictability,
+  # and counting active cache as footprint once stalled frontend builds for
+  # hours behind a cache-warmed "constrained" reading.
   assert snapshot == {
     "available": True,
     "current_bytes": 1000,
-    "working_set_bytes": 600,
+    "working_set_bytes": 400,
     "limit_bytes": 2000,
     "swap_current_bytes": 30,
     "anon_bytes": 300,

@@ -2,10 +2,27 @@
 
 import importlib.util
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 from app import database, sqlite_policy
+
+
+def test_explicit_datetime_adapter_replaces_deprecated_python_default(
+  tmp_path,
+):
+  sqlite_policy.install_adapters()
+  value = datetime(2026, 8, 19, 12, 34, 56, 123456)
+
+  with sqlite3.connect(tmp_path / "adapter.db") as connection:
+    connection.execute("CREATE TABLE events (occurred_at TEXT NOT NULL)")
+    connection.execute("INSERT INTO events VALUES (?)", (value,))
+    stored = connection.execute(
+      "SELECT occurred_at FROM events"
+    ).fetchone()[0]
+
+  assert stored == "2026-08-19 12:34:56.123456"
 
 
 def _capture_connect_pragmas(monkeypatch, tmp_path):

@@ -3,10 +3,13 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 import {
+  compactGoalObjective,
+  goalObjectiveForQueuedStart,
   goalObjectiveAtRunStart,
   goalObjectiveFromText,
   goalObjectiveFromRuntime,
   goalMessageObjectiveFromText,
+  goalTaskDisplayStatus,
   latestGoalObjective,
   newestGoalPlan,
   progressRailViewModel,
@@ -19,6 +22,10 @@ const streamConnection = readFileSync(
   'utf8',
 )
 const progressRail = readFileSync(new URL('../ProgressRail.jsx', import.meta.url), 'utf8')
+const goalPlanDetails = readFileSync(
+  new URL('../GoalPlanDetails.jsx', import.meta.url),
+  'utf8',
+)
 const msgContent = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 
@@ -83,6 +90,14 @@ test('latestGoalObjective recovers only the current visible owner turn', () => {
   ]), 'build the indicator')
 })
 
+test('compact Goal objectives are canonical before the first paint', () => {
+  assert.equal(
+    compactGoalObjective('Review every issue\nthen verify the result'),
+    'Review every issue then verify the result',
+  )
+  assert.equal(compactGoalObjective(null), '')
+})
+
 test('a resumable continue keeps the same goal through live start and cold attach', () => {
   const interruptedGoal = [
     { role: 'user', content: '/goal finish the migration' },
@@ -108,6 +123,15 @@ test('a resumable continue keeps the same goal through live start and cold attac
     ]),
     'finish the migration',
   )
+})
+
+test('a queued child-result continuation keeps the committed Goal without jitter', () => {
+  assert.equal(goalObjectiveForQueuedStart({
+    content: '<delegation_results>[]</delegation_results>',
+    hidden: true,
+    kind: 'delegation_result',
+    _goal_objective: 'Ship the audited result',
+  }, []), 'Ship the audited result')
 })
 
 test('continuation recovery preserves only an active goal', () => {
@@ -138,9 +162,17 @@ test('continuation recovery preserves only an active goal', () => {
     active_goal_objective: 'authoritative goal',
   }, 'stale goal'), 'authoritative goal')
   assert.equal(goalObjectiveFromRuntime({
+    running: true,
+    active_goal_objective: 'Review every issue\nthen verify the result',
+  }), 'Review every issue then verify the result')
+  assert.equal(goalObjectiveFromRuntime({
     running: false,
     active_goal_objective: null,
   }, 'finished goal'), '')
+  assert.equal(goalObjectiveFromRuntime({
+    running: false,
+    active_goal_objective: 'Waiting for delegated checks',
+  }, 'stale goal'), 'Waiting for delegated checks')
 })
 
 test('the goal reuses the progress rail and stays as context for build phases', () => {
@@ -192,25 +224,10 @@ test('a planned goal shows every running branch and dependency progress', () => 
   assert.deepEqual(progressRailViewModel('Ship it', [], plan), [
     {
       key: 'goal',
-      label: 'Goal plan · 1 of 4',
+      label: 'Goal · 1/4 · Run A · 2/3 + Run B',
       expandable: true,
-      hasDetails: true,
       title: 'Goal: Ship it',
-      ariaLabel: 'Goal plan for Ship it; 1 of 4 tasks complete',
-      actionLabel: 'View tasks',
-      expandedActionLabel: 'Hide tasks',
-      current: false,
-    },
-    {
-      key: 'goal-task-a',
-      label: 'Now · Run A · 2/3',
-      goalTask: true,
-      current: true,
-    },
-    {
-      key: 'goal-task-b',
-      label: 'Now · Run B',
-      goalTask: true,
+      ariaLabel: 'Goal for Ship it; 1 of 4 complete',
       current: true,
     },
   ])
@@ -226,9 +243,103 @@ test('a plan with no running work presents every independent ready task', () => 
     ],
   }
   assert.deepEqual(
-    visibleGoalTasks(plan).map(task => [task.id, task.activity]),
-    [['a', 'Next'], ['b', 'Next']],
+    visibleGoalTasks(plan).map(task => task.id),
+    ['a', 'b'],
   )
+})
+
+test('the deepest live delegated owners replace their parent in the collapsed label', () => {
+  const plan = {
+    tasks: [{ id: 'b', title: 'Do B', status: 'running' }],
+    delegations: [{
+      id: 'delegation-b', task_key: 'b', status: 'running', children: [
+        { id: 'delegation-x', task_key: 'x', status: 'running', children: [] },
+        { id: 'delegation-y', task_key: 'y', status: 'running', children: [] },
+      ],
+    }],
+  }
+  assert.deepEqual(
+    visibleGoalTasks(plan).map(task => task.title),
+    ['X', 'Y'],
+  )
+})
+
+test('delegated leaves stay beside independent local running work', () => {
+  const plan = {
+    tasks: [
+      { id: 'a', title: 'Delegated A', status: 'running' },
+      { id: 'b', title: 'Local B', status: 'running' },
+    ],
+    delegations: [{
+      id: 'delegation-a', task_key: 'a', status: 'running', children: [
+        { id: 'delegation-x', task_key: 'x', status: 'running', children: [] },
+      ],
+    }],
+  }
+  assert.deepEqual(
+    visibleGoalTasks(plan).map(task => task.title),
+    ['Local B', 'X'],
+  )
+  const completedAncestors = {
+    tasks: [
+      { id: 'audit', title: 'Audit', status: 'running' },
+      { id: 'other', title: 'Other', status: 'running' },
+    ],
+    delegations: [{
+      id: 'delegation-audit', task_key: 'audit', status: 'completed', children: [{
+        id: 'delegation-detail', task_key: 'detail', status: 'completed', children: [{
+          id: 'delegation-leaf', task_key: 'leaf-check', status: 'running', children: [],
+        }],
+      }],
+    }],
+  }
+  assert.deepEqual(
+    visibleGoalTasks(completedAncestors).map(task => task.title),
+    ['Other', 'Leaf check'],
+  )
+})
+
+test('the deepest running plan nodes replace coordinating parents', () => {
+  const plan = {
+    tasks: [
+      { id: 'root', title: 'Coordinate', status: 'running' },
+      { id: 'branch', parent_id: 'root', title: 'Inspect branch', status: 'running' },
+      { id: 'leaf', parent_id: 'branch', title: 'Verify leaf', status: 'running' },
+      { id: 'parallel', parent_id: 'root', title: 'Check parallel path', status: 'running' },
+    ],
+  }
+  assert.deepEqual(
+    visibleGoalTasks(plan).map(task => task.id),
+    ['leaf', 'parallel'],
+  )
+})
+
+test('malformed parent cycles cannot hang current-work selection', () => {
+  const plan = {
+    tasks: [
+      { id: 'a', parent_id: 'b', title: 'A', status: 'running' },
+      { id: 'b', parent_id: 'a', title: 'B', status: 'running' },
+    ],
+  }
+  assert.deepEqual(visibleGoalTasks(plan), [])
+})
+
+test('malformed delegation cycles cannot recurse forever', () => {
+  const a = { id: 'a', task_key: 'a', status: 'running', children: [] }
+  const b = { id: 'b', task_key: 'b', status: 'running', children: [a] }
+  a.children = [b]
+  assert.deepEqual(
+    visibleGoalTasks({ delegations: [a] }).map(task => task.id),
+    ['b'],
+  )
+})
+
+test('live delegated execution outranks a stale completed task presentation', () => {
+  const task = { id: 'audit', status: 'completed' }
+  assert.equal(goalTaskDisplayStatus(task, { status: 'running' }), 'running')
+  assert.equal(goalTaskDisplayStatus(task, { status: 'paused' }), 'running')
+  assert.equal(goalTaskDisplayStatus(task, { status: 'needs_review' }), 'failed')
+  assert.equal(goalTaskDisplayStatus(task, { status: 'completed' }), 'completed')
 })
 
 test('ChatView binds goal state to explicit run boundaries, not transport liveness', () => {
@@ -250,7 +361,7 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
   for (const suffix of runStarts) {
     assert.match(
       suffix.slice(0, 380),
-      /setActiveGoalState\(goalObjectiveAtRunStart\(/,
+      /setActiveGoalState\(goalObjective(?:AtRunStart|ForQueuedStart)\(/,
       'goal and build progress must reset together at each run boundary',
     )
   }
@@ -261,8 +372,8 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
   )
   assert.match(
     chatView,
-    /setServerRunningState\(false\)\s*setActiveGoalState\(''\)\s*\/\/ Stream ended without continuation/,
-    'a terminal stream boundary must retire its goal indication',
+    /setServerRunningState\(false\)[\s\S]{0,180}activeGoalPlan\?\.summary\?\.can_complete !== false[\s\S]{0,100}setActiveGoalState\(''\)/,
+    'a terminal stream should retain an unfinished delegated Goal but retire a settled one',
   )
   assert.match(
     chatView,
@@ -286,7 +397,7 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
   )
   assert.match(
     chatView,
-    /activeGoalObjective: objective/,
+    /activeGoalObjective: compactObjective/,
     'the existing chat cache should retain a goal across chat switches and steers',
   )
   assert.match(
@@ -299,6 +410,12 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
     /<ProgressRail\s+items=\{progressRail\}/,
     'the goal should render through the shared progress rail',
   )
+  assert.doesNotMatch(
+    chatView,
+    /<ProgressRail[\s\S]{0,160}\skey=/,
+    'late plan data must not remount the rail and replay its entrance animation',
+  )
+  assert.match(progressRail, /useEffect\(\(\) => setDetailsKey\(null\), \[resetKey\]\)/)
   assert.match(
     chatView,
     /`Following goal: \$\{activeGoalObjective\}\.`/,
@@ -306,9 +423,15 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
   )
   assert.match(progressRail, /chat__progress-rail/)
   assert.match(progressRail, /aria-expanded=\{expanded\}/)
-  assert.match(progressRail, /chat__progress-step-action/)
-  assert.match(progressRail, /expandedActionLabel/)
-  assert.match(progressRail, /label\.scrollWidth > step\.clientWidth/)
+  assert.doesNotMatch(progressRail, /chat__progress-step-action/)
+  assert.doesNotMatch(progressRail, /expandedActionLabel/)
+  assert.doesNotMatch(progressRail, /ResizeObserver|scrollWidth|clientWidth/)
+  assert.doesNotMatch(
+    chatCss,
+    /\.chat__progress-step--button:hover/,
+    'the Goal header should toggle without a selected-looking hover fill',
+  )
+  assert.match(progressRail, /aria-label=\{`\$\{expanded \? 'Collapse' : 'Expand'\}/)
   assert.match(
     chatCss,
     /\.chat__foot \.chat__progress-step--toggle[\s\S]*?\{ pointer-events: auto; \}/,
@@ -316,4 +439,19 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
   )
   assert.doesNotMatch(progressRail, /goal|build/i,
     'the shared rail should not encode one producer’s domain')
+  assert.match(
+    goalPlanDetails,
+    /className="chat__goal-branch" role="listitem"[\s\S]*?role="list"/,
+    'expanded Goal hierarchy should expose nested list semantics',
+  )
+  assert.match(
+    goalPlanDetails,
+    /execution = delegatedByTask\.get\(task\.id\)/,
+    'a nested plan task without a child-local match should retain root execution fallback',
+  )
+  assert.match(
+    goalPlanDetails,
+    /status=\{goalTaskDisplayStatus\(task, execution\)\}/,
+    'live delegated execution should own the row presentation state',
+  )
 })

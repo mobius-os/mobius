@@ -618,6 +618,13 @@ async def test_notify_catch_up_unsafe_event_is_system_bus_only(
     bc_mod.remove_broadcast("live-chat-2")
 
 
+def test_notify_rejects_server_owned_goal_activation(client, auth):
+  response = client.post(
+    "/api/notify", headers=auth, json={"type": "goal_activated"},
+  )
+  assert response.status_code == 422
+
+
 # --- Chat-scoped build_phase milestone rail (feature 212) --------------
 
 
@@ -918,6 +925,22 @@ async def test_snapshot_stream_sends_reduced_items_plus_control_tail(
   bc.publish({"type": "tool_start", "tool": "Bash", "tool_use_id": "u1"})
   bc.publish({"type": "build_phase", "phase": "rebuilding"})
   bc.publish({"type": "answers_applied", "question_id": "q1", "answers": {}})
+  bc.publish({
+    "type": "secure_input_request",
+    "request_id": "secure-1",
+    "title": "One-time secret",
+    "fields": [],
+  })
+  bc.publish({
+    "type": "secure_input_consuming",
+    "request_id": "secure-1",
+    "status": "consuming",
+  })
+  bc.publish({
+    "type": "secure_input_settled",
+    "request_id": "secure-1",
+    "status": "failed",
+  })
   bc.publish({"type": "steered_into_turn", "ts": 4, "content": "follow up"})
   bc.running = False
   bc_mod._broadcasts[bc.chat_id] = bc
@@ -954,6 +977,9 @@ async def test_snapshot_stream_sends_reduced_items_plus_control_tail(
     assert "steered_into_turn" in replay_types
     assert "text" not in replay_types
     assert "tool_start" not in replay_types
+    assert "secure_input_request" not in replay_types
+    assert "secure_input_consuming" not in replay_types
+    assert "secure_input_settled" not in replay_types
     assert replay_types[-2:] == ["catch_up_done", "done"]
   finally:
     bc_mod._broadcasts.pop(bc.chat_id, None)

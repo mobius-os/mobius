@@ -73,13 +73,23 @@ def require_vite_build_admission(memory: dict | None = None) -> None:
   )
   if state not in {"constrained", "critical"} and not too_little_headroom:
     return
-  detail = f"memory pressure is {state}"
-  if isinstance(headroom, int):
-    detail += f" with {headroom // MIB} MiB cgroup headroom"
+  # Say exactly which condition refused the build. A single headroom-shaped
+  # template once produced "5260 MiB headroom; 512 MiB is required" while the
+  # real trigger was a PSI spike — a self-contradiction that misdirects
+  # whoever is debugging a stalled rebuild.
+  causes: list[str] = []
+  if state in {"constrained", "critical"}:
+    signals = (assessment.get("reason") or {}).get("signals") or []
+    named = "; ".join(signals) if signals else f"memory pressure is {state}"
+    causes.append(f"memory pressure is {state} ({named})")
+  if too_little_headroom:
+    causes.append(
+      f"only {headroom // MIB} MiB cgroup headroom;"
+      f" {VITE_BUILD_MIN_HEADROOM_BYTES // MIB} MiB is required to start"
+    )
   raise ViteBuildDeferred(
-    "Vite build deferred: "
-    f"{detail}; {VITE_BUILD_MIN_HEADROOM_BYTES // MIB} MiB is required "
-    "before starting. Retry after memory pressure falls."
+    "Vite build deferred: " + " and ".join(causes) +
+    ". Retry after memory pressure falls."
   )
 
 

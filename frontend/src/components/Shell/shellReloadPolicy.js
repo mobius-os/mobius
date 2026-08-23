@@ -73,13 +73,22 @@ export function shouldDeferShellReload({
   activeChatId,
   multiPaneBuilderVisible = false,
   streamingChatIds,
-  activeChatWaitingOnQuestion = false,
   passiveRebuild = false,
   voiceDictationActive = false,
   lastUserInteractionAt = 0,
   now = Date.now(),
   visibilityState = 'visible',
 } = {}) {
+  // The active chat owns one continuous visible turn until the server marks it
+  // settled. That includes time parked on an owner question and time spent in
+  // the background: neither boundary makes the accumulated tool/thinking
+  // surface a committed transcript. Reloading there can leave the server turn
+  // running while its visible progress disappears on remount.
+  //
+  // Keep this invariant ahead of the hidden-page shortcut. Background runs in
+  // other chats remain reloadable because hasActiveChatTurn scopes the hold to
+  // the chat this document would actually tear down.
+  if (hasActiveChatTurn({ activeView, activeChatId, streamingChatIds })) return true
   if (visibilityState === 'hidden') return false
   // Builder is one live workspace, not merely the focused route. Reloading it
   // at the focused chat's idle boundary tears down every visible chat and app
@@ -101,16 +110,6 @@ export function shouldDeferShellReload({
   // through the ordinary apply-on-idle policy below.
   if (passiveRebuild && activeView === 'chat' && activeChatId != null) return true
   if (hasProtectedEditingContent(activeElement)) return true
-  // A turn parked on the owner's AskUserQuestion answer is `running` (so the
-  // active chat is in streamingChatIds) but is NOT streaming tokens: the card is
-  // durably persisted and reloading re-renders it from server state without
-  // touching the server-owned turn. So it never counts as a live turn here —
-  // otherwise an unanswered question pins a pending shell update indefinitely
-  // while the owner reads the card.
-  if (
-    !activeChatWaitingOnQuestion
-    && hasActiveChatTurn({ activeView, activeChatId, streamingChatIds })
-  ) return true
   // A reload mid-dictation would drop the in-flight transcript, so hold it
   // while the mic is live.
   if (voiceDictationActive) return true

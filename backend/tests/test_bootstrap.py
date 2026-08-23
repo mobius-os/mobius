@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from app import app_git, models
 from app.bootstrap import (
   BOOTSTRAP_CONNECTIONS_MANIFEST_URL,
+  BOOTSTRAP_IDENTITY_MANIFEST_URL,
   BOOTSTRAP_MEMORY_MANIFEST_URL,
   BOOTSTRAP_REFLECTION_MANIFEST_URL,
   BOOTSTRAP_SKILLS_MANIFEST_URL,
@@ -77,6 +78,23 @@ async def test_bootstrap_installs_all_apps_in_order_when_absent(db, monkeypatch)
     assert call.kwargs["manifest"] is None
     assert call.kwargs["raw_base"] is None
     assert call.kwargs["source"] == "bootstrap"
+
+
+@pytest.mark.asyncio
+async def test_managed_deployment_also_bootstraps_identity(db, monkeypatch):
+  """Railway SSO is the install condition; local owners do not get the app."""
+  monkeypatch.delenv("MOEBIUS_SKIP_BOOTSTRAP", raising=False)
+  install_mock = AsyncMock(return_value=_install_result())
+
+  class ManagedSettings:
+    mobius_sso_enabled = True
+
+  monkeypatch.setattr("app.bootstrap.get_settings", lambda: ManagedSettings())
+  with patch("app.bootstrap.install_from_manifest", install_mock):
+    await ensure_bootstrap_apps_installed(db)
+
+  urls = [call.kwargs["manifest_url"] for call in install_mock.await_args_list]
+  assert urls == _bootstrap_urls() + [BOOTSTRAP_IDENTITY_MANIFEST_URL]
 
 
 @pytest.mark.asyncio

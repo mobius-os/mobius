@@ -19,8 +19,13 @@ function goalCommandObjective(text) {
   return objective
 }
 
+/** Canonical one-line objective used by every compact Goal surface. */
+export function compactGoalObjective(objective) {
+  return String(objective || '').replace(/\s+/g, ' ').trim()
+}
+
 export function goalObjectiveFromText(text) {
-  return goalCommandObjective(text).replace(/\s+/g, ' ')
+  return compactGoalObjective(goalCommandObjective(text))
 }
 
 /** Keep the owner's formatting while hiding the command token in the bubble. */
@@ -110,10 +115,21 @@ export function goalObjectiveAtRunStart(text, messages) {
   return priorGoalObjective(messages, tailIndex)
 }
 
+/** Prefer the ChatRun identity committed with a queue promotion over parsing. */
+export function goalObjectiveForQueuedStart(message, messages) {
+  if (message && Object.hasOwn(message, '_goal_objective')) {
+    return compactGoalObjective(message._goal_objective)
+  }
+  return goalObjectiveAtRunStart(message?.content, messages)
+}
+
 /** Keep a known goal through a rolling/recovered active runtime; idle ends it. */
 export function goalObjectiveFromRuntime(runtime, fallbackObjective = '') {
+  if (runtime?.active_goal_objective) {
+    return compactGoalObjective(runtime.active_goal_objective)
+  }
   if (!runtime?.running) return ''
-  return runtime.active_goal_objective || fallbackObjective || ''
+  return compactGoalObjective(fallbackObjective)
 }
 
 /**
@@ -131,14 +147,67 @@ function progressLabel(task) {
   return task?.title || ''
 }
 
+/** Present the live execution owner rather than a stale optimistic task state. */
+export function goalTaskDisplayStatus(task, execution) {
+  if (!execution || execution.status === 'completed') return task?.status
+  if (['starting', 'running', 'resuming', 'paused'].includes(execution.status)) {
+    return 'running'
+  }
+  if (['failed', 'needs_review', 'interrupted'].includes(execution.status)) {
+    return 'failed'
+  }
+  return execution.status
+}
+
+function deepestPlanTasks(tasks, candidates) {
+  const byId = new Map(tasks.map(task => [task.id, task]))
+  const candidateIds = new Set(candidates.map(task => task.id))
+  const shadowedAncestors = new Set()
+  for (const task of candidates) {
+    let parent = byId.get(task.parent_id)
+    const visited = new Set()
+    while (parent && !visited.has(parent.id)) {
+      visited.add(parent.id)
+      if (candidateIds.has(parent.id)) shadowedAncestors.add(parent.id)
+      parent = byId.get(parent.parent_id)
+    }
+  }
+  return candidates.filter(task => !shadowedAncestors.has(task.id))
+}
+
 /** Active work first; when nothing is running, expose every newly ready task. */
 export function visibleGoalTasks(goalPlan) {
+  const activeStatuses = new Set(['starting', 'running', 'resuming', 'paused'])
+  const delegatedLeaves = []
+  const delegatedTaskKeys = new Set()
+  const collectDelegatedLeaves = (node, ancestors = new Set()) => {
+    if (!node || ancestors.has(node.id)) return false
+    const branch = new Set(ancestors).add(node.id)
+    let childActive = false
+    for (const child of node?.children || []) {
+      childActive = collectDelegatedLeaves(child, branch) || childActive
+    }
+    const ownActive = activeStatuses.has(node?.status)
+    const subtreeActive = ownActive || childActive
+    if (subtreeActive && node?.task_key) delegatedTaskKeys.add(node.task_key)
+    if (ownActive && !childActive) {
+      const title = String(node.task_key || '')
+        .replace(/[._-]+/g, ' ')
+        .replace(/^./, letter => letter.toUpperCase())
+      delegatedLeaves.push({ id: node.id, title, status: 'running' })
+    }
+    return subtreeActive
+  }
+  ;(goalPlan?.delegations || []).forEach(node => collectDelegatedLeaves(node))
   const tasks = Array.isArray(goalPlan?.tasks) ? goalPlan.tasks : []
-  const running = tasks.filter(task => task?.status === 'running')
-  if (running.length) return running.map(task => ({ ...task, activity: 'Now' }))
-  return tasks
-    .filter(task => task?.ready === true)
-    .map(task => ({ ...task, activity: 'Next' }))
+  const running = deepestPlanTasks(
+    tasks,
+    tasks.filter(task => task?.status === 'running'),
+  ).filter(task => !delegatedTaskKeys.has(task.id))
+  if (running.length || delegatedLeaves.length) {
+    return [...running, ...delegatedLeaves]
+  }
+  return deepestPlanTasks(tasks, tasks.filter(task => task?.ready === true))
 }
 
 export function progressRailViewModel(goalObjective, buildPhases, goalPlan = null) {
@@ -147,27 +216,20 @@ export function progressRailViewModel(goalObjective, buildPhases, goalPlan = nul
     const completed = goalPlan?.summary?.completed
     const total = goalPlan?.summary?.total
     const planned = Number.isInteger(completed) && Number.isInteger(total)
+    const activeTasks = visibleGoalTasks(goalPlan)
+    const activeLabels = activeTasks.map(progressLabel).filter(Boolean)
     items.push({
       key: 'goal',
       label: planned
-        ? `Goal plan · ${completed} of ${total}`
+        ? `Goal · ${completed}/${total}${
+          activeLabels.length ? ` · ${activeLabels.join(' + ')}` : ''
+        }`
         : `Goal · ${goalObjective}`,
       expandable: true,
       ...(goalPlan ? {
-        hasDetails: true,
         title: `Goal: ${goalObjective}`,
-        ariaLabel: `Goal plan for ${goalObjective}; ${completed} of ${total} tasks complete`,
-        actionLabel: 'View tasks',
-        expandedActionLabel: 'Hide tasks',
+        ariaLabel: `Goal for ${goalObjective}; ${completed} of ${total} complete`,
       } : {}),
-    })
-  }
-  const activeTasks = goalObjective ? visibleGoalTasks(goalPlan) : []
-  for (const task of activeTasks) {
-    items.push({
-      key: `goal-task-${task.id}`,
-      label: `${task.activity} · ${progressLabel(task)}`,
-      goalTask: true,
     })
   }
   const phases = Array.isArray(buildPhases) ? buildPhases : []
@@ -178,14 +240,8 @@ export function progressRailViewModel(goalObjective, buildPhases, goalPlan = nul
       label: phase.label,
     })
   }
-  const hasPhases = phases.some(phase => phase?.label)
-  const hasActiveTasks = activeTasks.length > 0
   return items.map((item, index) => ({
     ...item,
-    current: hasPhases
-      ? index === items.length - 1
-      : hasActiveTasks
-        ? item.goalTask === true
-        : index === items.length - 1,
+    current: index === items.length - 1,
   }))
 }

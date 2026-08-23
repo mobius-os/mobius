@@ -6,10 +6,7 @@ import {
   useSyncExternalStore,
 } from 'react'
 
-import {
-  saveAutoResumePolicy,
-  saveRestartResumePolicy,
-} from '../autoResumePolicy.js'
+import { saveAutoResumePolicy } from '../autoResumePolicy.js'
 import {
   clearProviderSwitch,
   getProviderSwitchState,
@@ -28,12 +25,8 @@ export default function useChatRuntimePolicy({
   const [autoResumeSaving, setAutoResumeSaving] = useState(false)
   const [autoResumeError, setAutoResumeError] = useState('')
   const [autoResumeErrorSource, setAutoResumeErrorSource] = useState('')
-  const [restartResumeSaving, setRestartResumeSaving] = useState(false)
-  const [restartResumeError, setRestartResumeError] = useState('')
   const autoResumeSavingRef = useRef(false)
   const autoResumeRequestRef = useRef(0)
-  const restartResumeSavingRef = useRef(false)
-  const restartResumeRequestRef = useRef(0)
 
   const subscribeToProviderSwitch = useCallback(
     listener => subscribeProviderSwitch(chatId, listener),
@@ -74,10 +67,6 @@ export default function useChatRuntimePolicy({
     setAutoResumeSaving(false)
     setAutoResumeError('')
     setAutoResumeErrorSource('')
-    restartResumeRequestRef.current += 1
-    restartResumeSavingRef.current = false
-    setRestartResumeSaving(false)
-    setRestartResumeError('')
   }, [chatId])
 
   const handleAutoResumeChange = useCallback(async (
@@ -117,34 +106,6 @@ export default function useChatRuntimePolicy({
     [handleAutoResumeChange],
   )
 
-  const handleRestartResumeChange = useCallback(async next => {
-    if (restartResumeSavingRef.current) return
-    restartResumeSavingRef.current = true
-    const requestId = ++restartResumeRequestRef.current
-    setRestartResumeSaving(true)
-    setRestartResumeError('')
-    try {
-      const result = await saveRestartResumePolicy({
-        chatId,
-        next,
-        request,
-      })
-      if (requestId !== restartResumeRequestRef.current) return
-      if (result.value !== null) {
-        setChatInfo(previous => previous ? ({
-          ...previous,
-          auto_resume_on_restart: result.value,
-        }) : previous)
-      }
-      setRestartResumeError(result.error)
-    } finally {
-      if (requestId === restartResumeRequestRef.current) {
-        restartResumeSavingRef.current = false
-        setRestartResumeSaving(false)
-      }
-    }
-  }, [chatId, request])
-
   useEffect(() => {
     if (hidden) return
     if (
@@ -164,7 +125,6 @@ export default function useChatRuntimePolicy({
   ])
 
   const autoResumeEnabled = !!chatInfo?.auto_resume_on_limit
-  const restartResumeEnabled = !!chatInfo?.auto_resume_on_restart
 
   return {
     autoResumeEnabled,
@@ -175,13 +135,9 @@ export default function useChatRuntimePolicy({
     clearAutoResumeError,
     handleAutoResumeChange,
     handleAutoResumeSettingsChange,
-    handleRestartResumeChange,
     mergeChatInfo,
     providerSwitchState,
     providerSwitching,
-    restartResumeEnabled,
-    restartResumeError,
-    restartResumeSaving,
     setChatInfo,
   }
 }

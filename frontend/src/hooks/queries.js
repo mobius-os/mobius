@@ -143,6 +143,13 @@ function useChatsQuery({ reconcile } = {}) {
       const rows = await fetchChats(context)
       return reconcile ? reconcile(rows) : rows
     },
+    // The system stream accelerates drawer updates, but its process-local
+    // events are intentionally not replayed after a restart and browsers may
+    // suspend it without a clean disconnect. The list is the durable owner of
+    // running and owner-input state, so every real return/reconnect revalidates
+    // it even when the persisted query snapshot is still inside staleTime.
+    refetchOnWindowFocus: 'always',
+    refetchOnReconnect: 'always',
   })
 }
 

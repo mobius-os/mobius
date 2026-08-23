@@ -26,6 +26,10 @@ import {
   restartPollDecision,
 } from '../../lib/restartReadiness.js'
 import { updateCheckOutcome, updateCheckLabel } from '../../lib/updateCheckPhase.js'
+import {
+  inspectShellUpdate,
+  releaseWaitingShellUpdate,
+} from '../../lib/shellUpdate.js'
 import * as themeService from '../../lib/themeService.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
@@ -1083,8 +1087,8 @@ export default function SettingsView({
   }
 
   // Refresh both Möbius update signals on demand: the service worker cache and
-  // platform git availability. `registration.update()` forces a fresh fetch of
-  // /sw.js (served `no-cache`) and we re-read /api/version for the current
+  // platform git availability. The shared inspector refreshes /sw.js and we
+  // re-read /api/version for the current
   // served identity. Platform: POST /platform/check runs the `git fetch` that the cheap
   // /status read deliberately skips, so a deploy that landed since boot becomes
   // visible without waiting for a reboot. Both run in parallel and neither
@@ -1097,10 +1101,7 @@ export default function SettingsView({
     setUpdatePhase('checking')
     let freshPlatform = null
     const frontendP = (async () => {
-      if ('serviceWorker' in navigator) {
-        const reg = await navigator.serviceWorker.getRegistration()
-        if (reg) await reg.update()
-      }
+      await inspectShellUpdate({ serviceWorker: navigator.serviceWorker })
       await versionQueries.current.invalidate(queryClient)
       // refetch resolves with an error result rather than rejecting, so a
       // failed version probe must be re-thrown for allSettled to see it —
@@ -1131,29 +1132,17 @@ export default function SettingsView({
     }
   }
 
-  // Reload onto the FRESH service worker so the new precache — including the
-  // content-hashed /mobius-runtime.js — serves the reloaded page. sw.js calls
-  // skipWaiting() + clientsClaim(), so a newly-installed worker activates on its
-  // own; we just wait for it to take control before reloading, instead of racing
-  // a reload the OLD worker serves with the stale runtime (which leaves
-  // window.mobius missing durableWrite/createUseDocument and breaks migrated
-  // mini-apps until the tab happens to reload onto the new worker).
+  // After an approved server restart, wait until the document is reachable and
+  // reload. Shell navigations are network-first, so freshness no longer depends
+  // on coordinating a service-worker takeover here.
   async function reloadOntoFreshSW() {
-    if ('serviceWorker' in navigator) {
-      try {
-        const reg = await navigator.serviceWorker.getRegistration()
-        if (reg) {
-          await reg.update()
-          if (reg.installing || reg.waiting) {
-            await new Promise((resolve) => {
-              navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true })
-              setTimeout(resolve, 5000) // never hang if the worker never swaps
-            })
-          }
-        }
-      } catch { /* fall through to a plain reload */ }
-    }
     if (!(await shellDocumentReady())) return false
+    try {
+      const { registration } = await inspectShellUpdate({
+        serviceWorker: navigator.serviceWorker,
+      })
+      releaseWaitingShellUpdate(registration)
+    } catch { /* the online navigation remains authoritative */ }
     window.location.reload()
     return true
   }
@@ -1213,10 +1202,7 @@ export default function SettingsView({
     let cancelled = false
     ;(async () => {
       try {
-        if ('serviceWorker' in navigator) {
-          const reg = await navigator.serviceWorker.getRegistration()
-          if (reg) await reg.update()
-        }
+        await inspectShellUpdate({ serviceWorker: navigator.serviceWorker })
         if (cancelled) return
         await versionQueries.current.invalidate(queryClient)
         await versionQuery.refetch()

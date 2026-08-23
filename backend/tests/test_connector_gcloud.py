@@ -325,7 +325,7 @@ def test_gcloud_complete_multi_project_then_set_and_broker(
   # A project-less gcloud grant must NOT be brokered even if reached directly.
   db.expire_all()
   cap0 = core.mint_broker_capability(
-    cid, db.query(models.Connector).get(cid).capability_id,
+    cid, db.get(models.Connector, cid).capability_id,
   )
   with TestClient(client.app, client=("127.0.0.1", 43110)) as loopback:
     refused = loopback.post(
@@ -353,7 +353,7 @@ def test_gcloud_complete_multi_project_then_set_and_broker(
   assert "ya29" not in json.dumps(out)
 
   # Choose a project.
-  gen2 = db.query(models.Connector).get(cid).capability_id
+  gen2 = db.get(models.Connector, cid).capability_id
   chosen = client.post(
     f"/api/connectors/{cid}/oauth/gcloud/project",
     headers=_headers(auth, gen2), json={"project_id": "proj-2"},
@@ -366,7 +366,7 @@ def test_gcloud_complete_multi_project_then_set_and_broker(
 
   # Broker attaches BOTH the bearer token and the quota-project header.
   cap = core.mint_broker_capability(
-    cid, db.query(models.Connector).get(cid).capability_id,
+    cid, db.get(models.Connector, cid).capability_id,
   )
   with TestClient(client.app, client=("127.0.0.1", 43110)) as loopback:
     brokered = loopback.post(
@@ -468,7 +468,7 @@ def test_gcloud_list_projects_for_signed_in_connection(
     json={"state": started["state"], "code": "4/x", "project_id": "proj-2"},
   )
   db.expire_all()
-  gen2 = db.query(models.Connector).get(cid).capability_id
+  gen2 = db.get(models.Connector, cid).capability_id
   listed = client.get(
     f"/api/connectors/{cid}/oauth/gcloud/projects", headers=_headers(auth, gen2),
   )
@@ -595,7 +595,7 @@ def test_gcloud_reuse_signin_across_connections(client, auth, db, monkeypatch):
   b = db.query(models.ConnectorOAuth).filter_by(connector_id=b_id).one()
   assert b.refresh_token_encrypted and b.client_id == a.client_id
   cap = core.mint_broker_capability(
-    b_id, db.query(models.Connector).get(b_id).capability_id,
+    b_id, db.get(models.Connector, b_id).capability_id,
   )
   with TestClient(client.app, client=("127.0.0.1", 43110)) as loopback:
     brokered = loopback.post(
@@ -784,7 +784,7 @@ def test_gcloud_disconnect_does_not_revoke_shared_credential(
     json={"source_connector_id": a_id, "source_generation": a_gen},
   )
   db.expire_all()
-  a_gen_now = db.query(models.Connector).get(a_id).capability_id
+  a_gen_now = db.get(models.Connector, a_id).capability_id
   out = client.post(
     f"/api/connectors/{a_id}/oauth/disconnect", headers=_headers(auth, a_gen_now),
   )
@@ -809,7 +809,7 @@ def test_gcloud_disconnect_revokes_when_unshared(client, auth, db, monkeypatch):
     db.query(models.ConnectorOAuth).filter_by(connector_id=cid).one()
     .refresh_token_encrypted
   )
-  gen_now = db.query(models.Connector).get(cid).capability_id
+  gen_now = db.get(models.Connector, cid).capability_id
   client.post(
     f"/api/connectors/{cid}/oauth/disconnect", headers=_headers(auth, gen_now),
   )
@@ -845,7 +845,7 @@ def test_gcloud_projectless_stays_withheld_after_recheck(
   assert out["needs_project"] is True
   assert out["connection"]["status"] == "oauth_required"
   db.expire_all()
-  gen_now = db.query(models.Connector).get(cid).capability_id
+  gen_now = db.get(models.Connector, cid).capability_id
   rechecked = client.post(
     f"/api/connectors/{cid}/refresh", headers=_headers(auth, gen_now),
   )
@@ -873,15 +873,15 @@ def test_gcloud_reuse_clears_stale_project(client, auth, db, monkeypatch):
   # A must look signed-in to the 2-project mock too; re-sign A so its token is
   # valid against the new mock.
   _complete_signin(client, auth, a_id,
-                   db.query(models.Connector).get(a_id).capability_id,
+                   db.get(models.Connector, a_id).capability_id,
                    project_id="proj-1")
   db.expire_all()
   reused = client.post(
     f"/api/connectors/{b_id}/oauth/gcloud/reuse",
-    headers=_headers(auth, db.query(models.Connector).get(b_id).capability_id),
+    headers=_headers(auth, db.get(models.Connector, b_id).capability_id),
     json={
       "source_connector_id": a_id,
-      "source_generation": db.query(models.Connector).get(a_id).capability_id,
+      "source_generation": db.get(models.Connector, a_id).capability_id,
     },  # no project_id → none auto-selected
   )
   assert reused.status_code == 200

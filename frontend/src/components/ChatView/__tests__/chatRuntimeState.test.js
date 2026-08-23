@@ -15,9 +15,11 @@ import {
   openAppCtaViewModel,
   previewReadyAnnouncement,
   previewUpdatedAnnouncement,
+  runtimeStreamAttachAction,
   serverSnapshotBehindLocal,
   shouldAttachRunningStream,
   shouldRetireRestoredQuestionSnapshot,
+  shouldRecoverSettledRuntime,
   shouldRetryStopAfterConfirm,
   shouldShowOpenAppCta,
   startedMessagesFromResponse,
@@ -135,6 +137,74 @@ test('a parked owner question uses compact history until its answer resumes the 
     running: false,
     pendingQuestionId: null,
   }), false)
+})
+
+test('a known server run settling recovers a live stream that missed its terminal event', () => {
+  assert.equal(shouldRecoverSettledRuntime({
+    runtimeWasObservedRunning: true,
+    runtimeRunning: false,
+    pendingCount: 0,
+    streamStillActive: true,
+  }), true)
+
+  assert.equal(shouldRecoverSettledRuntime({
+    runtimeWasObservedRunning: false,
+    runtimeRunning: false,
+    pendingCount: 0,
+    streamStillActive: true,
+  }), false, 'the optimistic send window is not mistaken for a settled turn')
+
+  assert.equal(shouldRecoverSettledRuntime({
+    runtimeWasObservedRunning: true,
+    runtimeRunning: false,
+    pendingCount: 1,
+    streamStillActive: true,
+  }), false, 'a queued continuation still owns the handoff')
+
+  assert.equal(shouldRecoverSettledRuntime({
+    runtimeWasObservedRunning: true,
+    runtimeRunning: false,
+    pendingCount: 0,
+    streamStillActive: true,
+    stopInFlight: true,
+  }), false, 'the explicit stop flow owns its own settlement')
+
+  assert.equal(shouldRecoverSettledRuntime({
+    runtimeWasObservedRunning: true,
+    runtimeRunning: false,
+    pendingCount: 0,
+    streamStillActive: true,
+    localStartInFlight: true,
+  }), false, 'an unacknowledged local start owns the idle-snapshot race')
+})
+
+test('a fresh running verdict repairs only an exhausted visible stream', () => {
+  assert.equal(runtimeStreamAttachAction({
+    running: true,
+    connectionError: 'disconnected',
+  }), 'retry')
+  assert.equal(runtimeStreamAttachAction({
+    running: true,
+    connectionError: null,
+  }), 'connect')
+  assert.equal(runtimeStreamAttachAction({
+    running: true,
+    connectionError: 'retrying',
+  }), 'none', 'the bounded retry loop keeps sole ownership while active')
+  assert.equal(runtimeStreamAttachAction({
+    running: true,
+    pendingQuestionId: 'question-1',
+    connectionError: 'disconnected',
+  }), 'none', 'a parked question has no live output to attach to')
+  assert.equal(runtimeStreamAttachAction({
+    running: true,
+    connectionError: 'disconnected',
+    hidden: true,
+  }), 'none', 'only the visible pane owns transport recovery')
+  assert.equal(runtimeStreamAttachAction({
+    running: false,
+    connectionError: 'disconnected',
+  }), 'none', 'an idle server verdict must not resurrect a stream')
 })
 
 test('only a cold stream prefix missing the durable question is retired', () => {

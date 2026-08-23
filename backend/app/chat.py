@@ -3591,6 +3591,20 @@ def _should_ensure_chat_note(
   )
 
 
+def _run_owns_active_goal(
+  db: Session, *, chat_id: str, run_token: str | None,
+) -> bool:
+  """Whether the exact physical run currently owns committed Goal state."""
+  if not chat_id or not run_token:
+    return False
+  return db.query(models.ChatRun.id).filter(
+    models.ChatRun.id == run_token,
+    models.ChatRun.chat_id == chat_id,
+    models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+    models.ChatRun.goal_objective.isnot(None),
+  ).first() is not None
+
+
 async def _ensure_chat_note(
   data_dir: str,
   chat_id: str,
@@ -3888,8 +3902,19 @@ async def _run_chat_impl_with_db(
   goal_mode = _chat_has_goal_intent(messages)
   goal_continue = (raw_user_message or "").strip().lower() == "continue"
   question_checkpoint = None
-  if settings.ensure_chat_note and chat_id and goal_mode:
+  if settings.ensure_chat_note and chat_id:
     async def question_checkpoint() -> None:
+      # Automatic promotion happens after this runner has started, so
+      # transcript intent captured above is not authoritative here. Read the
+      # exact physical run at checkpoint time and summarize only if it owns a
+      # committed Goal then.
+      from app.database import SessionLocal
+      with SessionLocal() as checkpoint_db:
+        active_goal = _run_owns_active_goal(
+          checkpoint_db, chat_id=chat_id, run_token=run_token,
+        )
+      if not active_goal:
+        return
       await _ensure_chat_note(
         settings.data_dir,
         chat_id,
@@ -4093,10 +4118,9 @@ async def _run_chat_impl_with_db(
 
   # A planned restart can replace the parent provider process while durable
   # child tasks keep running. Re-attach their immutable ids/statuses to every
-  # ordinary parent turn so a resumed agent waits on the existing child rather
-  # than launching a duplicate. Delegated children never receive this block,
-  # which also enforces the depth-one boundary.
-  if run_policy is None and chat_id and run_token:
+  # parent turn so both the root agent and a nested delegated owner wait on
+  # their existing direct children rather than launching duplicates.
+  if chat_id and run_token:
     from app.delegations import active_parent_context
     delegation_context = active_parent_context(db, chat_id, run_token)
     if delegation_context:
@@ -4149,13 +4173,11 @@ async def _run_chat_impl_with_db(
     return disposition
 
   if run_policy is not None:
-    from app.delegations import mint_app_token
-    agent_token = mint_app_token(db, run_policy)
+    from app.delegations import delegation_execution_token
+    agent_token = delegation_execution_token(db, run_policy, run_token or "")
   else:
-    agent_token = auth.create_access_token(
-      {"sub": owner.username},
-      expires_delta=timedelta(hours=2),
-      token_epoch=owner.token_epoch,
+    agent_token = auth.create_agent_token(
+      chat_id, run_token, owner.username, owner.token_epoch,
     )
 
   # Build the base environment shared by all providers.
@@ -4174,12 +4196,18 @@ async def _run_chat_impl_with_db(
     "CHAT_ID": chat_id,
   })
   base_env.update(app_context_env)
-  if run_policy is not None:
+  if run_policy is None:
+    base_env["MOBIUS_RUN_TOKEN"] = run_token
+  else:
     base_env.update({
-      "MOBIUS_SUBAGENT_DEPTH": "1",
+      "MOBIUS_SUBAGENT_DEPTH": str(run_policy.depth),
       "MOBIUS_DELEGATION_ID": run_policy.delegation_id,
       "MOBIUS_SUBAGENT_PROVIDER": run_policy.provider,
     })
+    if run_policy.provider == "claude":
+      base_env["MOBIUS_SUBAGENT_HELPER"] = (
+        "/data/apps/subagents/subagents.py"
+      )
   # Overrides any inherited TMPDIR from _safe_keys: agent scratch belongs on
   # the bounded data volume, never the container's unbounded overlay. TMP and
   # TEMP travel with it so a tool reading either does not escape back to /tmp.

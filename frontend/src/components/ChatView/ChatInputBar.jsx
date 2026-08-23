@@ -61,9 +61,9 @@
  * ║      synthesis. Don't remove either handler.                     ║
  * ║                                                                  ║
  * ║   7. ENTER / SHORTCUT SEND                                       ║
- * ║      `_isTouchPrimary` is detected once via                      ║
- * ║      `matchMedia('(hover: none) and (pointer: coarse)')` and     ║
- * ║      gates plain Enter. Touch devices: Enter inserts a           ║
+ * ║      `isTouchPrimary()` (shared lib/pointerPrimary.js, also used ║
+ * ║      by the inline QA + queued editors) gates plain Enter.        ║
+ * ║      Touch devices: Enter inserts a                              ║
  * ║      newline. Desktop: Enter sends or steers queued text.        ║
  * ║      Cmd/Ctrl+Enter fast-forwards composed text into a live      ║
  * ║      turn when possible, otherwise it sends normally.            ║
@@ -95,6 +95,7 @@ import {
   isPlainTextPasteShortcut,
   resolveComposerEnterAction,
 } from './composerShortcuts.js'
+import { isTouchPrimary } from '../../lib/pointerPrimary.js'
 import SlashMenu from './SlashMenu.jsx'
 import {
   applySlashCommand,
@@ -118,14 +119,6 @@ import {
   focusComposerElement,
   placeCaretAtTextEnd,
 } from './composerFocusPolicy.js'
-
-
-// Detect touch-primary once (same heuristic ChatView uses).
-const _touchMql = typeof matchMedia === 'function'
-  ? matchMedia('(hover: none) and (pointer: coarse)')
-  : null
-let _isTouchPrimary = _touchMql?.matches ?? false
-_touchMql?.addEventListener('change', (e) => { _isTouchPrimary = e.matches })
 
 
 /** The primary action button — Steer / Send / Stop / Mic —
@@ -801,7 +794,7 @@ export default function ChatInputBar({
       canSteer,
       canRequestSteer,
       canSubmitSteer,
-      isTouchPrimary: _isTouchPrimary,
+      isTouchPrimary: isTouchPrimary(),
     })
     if (!action) return
     e.preventDefault()
