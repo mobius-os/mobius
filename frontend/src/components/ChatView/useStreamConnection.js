@@ -4,7 +4,11 @@ import {
   isChatStreamSystemEvent,
   shouldForwardChatStreamSystemEvent,
 } from './chatSystemEvents.js'
-import { questionKey } from './questionKey.js'
+import { questionKey, lastQuestionKey } from './questionKey.js'
+import {
+  questionResponseActivityChanged,
+  questionResponseBaselineSnapshot,
+} from './questionResponseActivity.js'
 import {
   upsertQuestionItem,
   attachToolOutput,
@@ -195,6 +199,9 @@ const BROADCAST_REGISTRATION_WINDOW_MS = 1500
  *   the steered message inline.
  * @param {(questionId: string|null) => void} [callbacks.onLiveQuestion]
  *   Fired when the stream shows the currently-live AskUserQuestion card.
+ * @param {(questionKey: string) => void} [callbacks.onQuestionResponseStart]
+ *   Fired in the same React commit as the first renderable assistant activity
+ *   after an answer. The answer patch itself is not response activity.
  *
  * @returns {{
  *   streamItems: Array<
@@ -241,6 +248,7 @@ export default function useStreamConnection(chatId, {
   onSteeredIntoTurn,
   onSteerDeliveryFailed,
   onLiveQuestion,
+  onQuestionResponseStart,
 }) {
   // sessionStorage reads and JSON parsing are synchronous. Lazy initialization
   // keeps them off every frame-paced render while a reply is revealing.
@@ -269,17 +277,73 @@ export default function useStreamConnection(chatId, {
   // socket never reconnects, so it produces no commit and no bump — the shade
   // glance can't blink the chat.
   const [catchUpCommitSeq, setCatchUpCommitSeq] = useState(0)
+  const onQuestionResponseStartRef = useRef(onQuestionResponseStart)
+  onQuestionResponseStartRef.current = onQuestionResponseStart
+  // An answered card stays anchored until the assistant surface actually
+  // changes. Capture its renderable baseline at submission instead of asking
+  // each wire event to declare whether it counts: the comparison covers live
+  // deltas and atomic reconnect snapshots through one owning path.
+  const pendingQuestionResponseRef = useRef(null)
+  const respondedQuestionKeysRef = useRef(new Set())
 
   // Wrapper that keeps latestItemsRef in sync synchronously.
   // This prevents promoteStreamToMessages from reading stale items
   // when called from a requestAnimationFrame that fires before React
   // processes a queued state updater.
-  function setStreamItems(updater) {
-    const next = typeof updater === 'function' ? updater(latestItemsRef.current) : updater
+  const setStreamItems = useCallback((updater) => {
+    const previous = latestItemsRef.current
+    const next = typeof updater === 'function' ? updater(previous) : updater
     if (next.length > 0) lastGoodItemsRef.current = next
     latestItemsRef.current = next
     _setStreamItems(next)
-  }
+    return next !== previous
+  }, [])
+
+  const publishQuestionResponseStart = useCallback((questionResponseKey) => {
+    if (!questionResponseKey) return
+    onQuestionResponseStartRef.current?.(questionResponseKey)
+  }, [])
+
+  const armQuestionResponse = useCallback((questionResponseKey, items) => {
+    if (!questionResponseKey
+        || respondedQuestionKeysRef.current.has(questionResponseKey)
+        || pendingQuestionResponseRef.current?.questionKey === questionResponseKey) {
+      return
+    }
+    const baselineItems = Array.isArray(items)
+      ? items
+      : (latestItemsRef.current.length > 0
+          ? latestItemsRef.current
+          : lastGoodItemsRef.current)
+    pendingQuestionResponseRef.current = {
+      questionKey: questionResponseKey,
+      baseline: questionResponseBaselineSnapshot(baselineItems, questionResponseKey),
+    }
+  }, [])
+
+  const clearQuestionResponseTracking = useCallback(() => {
+    pendingQuestionResponseRef.current = null
+    respondedQuestionKeysRef.current.clear()
+  }, [])
+
+  // Commit renderable stream state first, then publish its answer-boundary
+  // identity. ChatView reacts in a layout effect, so the card releases to
+  // FOLLOW only after the new response DOM exists and before that frame paints.
+  // Answer controls and absorbed question-tool settlement are removed by the
+  // render projection, so transport vocabulary cannot accidentally move it.
+  const commitRenderableStreamItems = useCallback((updater) => {
+    const changed = setStreamItems(updater)
+    const pending = pendingQuestionResponseRef.current
+    if (changed && pending && questionResponseActivityChanged(
+      pending.baseline,
+      latestItemsRef.current,
+    )) {
+      pendingQuestionResponseRef.current = null
+      respondedQuestionKeysRef.current.add(pending.questionKey)
+      publishQuestionResponseStart(pending.questionKey)
+    }
+    return changed
+  }, [publishQuestionResponseStart, setStreamItems])
 
   const [isStreaming, _setIsStreaming] = useState(false)
   const isStreamingRef = useRef(false)
@@ -495,13 +559,15 @@ export default function useStreamConnection(chatId, {
       const textItemId = textBufferItemIdRef.current
       textBufferRef.current = buf.slice(budget.count)
 
-      setStreamItems(prev => appendTextChunk(prev, chunk, textItemId))
+      commitRenderableStreamItems(
+        prev => appendTextChunk(prev, chunk, textItemId),
+      )
 
       rafRef.current = requestAnimationFrame(drain)
     }
 
     rafRef.current = requestAnimationFrame(drain)
-  }, [])
+  }, [commitRenderableStreamItems])
 
   // Flush all remaining buffer immediately.
   // IMPORTANT: always cancel rAF even if buffer looks empty — the drain
@@ -523,8 +589,10 @@ export default function useStreamConnection(chatId, {
     textBufferRef.current = ''
     textBufferItemIdRef.current = null
 
-    setStreamItems(prev => appendTextChunk(prev, remaining, textItemId))
-  }, [])
+    commitRenderableStreamItems(
+      prev => appendTextChunk(prev, remaining, textItemId),
+    )
+  }, [commitRenderableStreamItems])
 
   const disconnect = useCallback(({ clearStreaming = false } = {}) => {
     connectionGenerationRef.current += 1
@@ -549,13 +617,14 @@ export default function useStreamConnection(chatId, {
     cancelReconnectTimers()
     if (clearStreaming) {
       wantsReconnectRef.current = false
+      clearQuestionResponseTracking()
       setIsStreaming(false)
       setConnectionError(null)
       clearReconnectingNote()
       retryCount.current = 0
       justSentAtRef.current = 0
     }
-  }, [flushBuffer])
+  }, [clearQuestionResponseTracking, flushBuffer])
 
   useEffect(() => () => {
     // On chatId change: tear down the old connection AND wipe stream
@@ -582,7 +651,14 @@ export default function useStreamConnection(chatId, {
     // Answers belong to the chat we're leaving; carrying them into the next
     // chat could re-arm a same-keyed question with a foreign answer.
     answersByQuestionKeyRef.current.clear()
-  }, [chatId, disconnect, persistLatestStreamSnapshot])
+    clearQuestionResponseTracking()
+  }, [
+    chatId,
+    clearQuestionResponseTracking,
+    disconnect,
+    persistLatestStreamSnapshot,
+    setStreamItems,
+  ])
 
   useEffect(() => {
     activeStreamChatIdRef.current = chatId
@@ -764,6 +840,7 @@ export default function useStreamConnection(chatId, {
         // clobber. Keep the teardown in one React batch so the UI does not
         // show a one-frame "thinking" row between dropping stale streamItems
         // and ChatView clearing its running state.
+        clearQuestionResponseTracking()
         onStreamEndRef.current?.()
         setIsStreaming(false)
         refreshThenSettleCatchUp({ force: true, terminal204: true })
@@ -794,7 +871,7 @@ export default function useStreamConnection(chatId, {
 
       const applyStreamItems = (updater) => {
         if (!isCatchUp) {
-          setStreamItems(updater)
+          commitRenderableStreamItems(updater)
           return
         }
         catchUpItems = typeof updater === 'function'
@@ -815,7 +892,9 @@ export default function useStreamConnection(chatId, {
           // streamSnapshotCache hand-off: no duplicate append). A steer drop
           // leaves catchUpItems empty and falls to the authoritative branch
           // below, so dropped pre-steer items are never resurrected here.
-          setStreamItems(prev => reconcileStreamItems(prev, catchUpItems))
+          commitRenderableStreamItems(
+            prev => reconcileStreamItems(prev, catchUpItems),
+          )
         } else {
           // Empty replay is authoritative. Do not preserve a stale visible
           // snapshot here: after fast-forward, that snapshot may already be
@@ -843,11 +922,15 @@ export default function useStreamConnection(chatId, {
           if (it.type !== 'question') return it
           const itKey = questionKey(it)
           if (key ? itKey === key : true) {
+            // An id-less answer patches every live card and records its answer;
+            // arming keys on the last one, matching the live and submitted paths.
             if (!key) answersByQuestionKeyRef.current.set(itKey, answers)
             return { ...it, answers }
           }
           return it
         })
+        const matchedKey = key || lastQuestionKey(catchUpItems)
+        if (matchedKey) armQuestionResponse(matchedKey, catchUpItems)
       }
 
       while (true) {
@@ -914,7 +997,9 @@ export default function useStreamConnection(chatId, {
             const textItemId = event.text_item_id || null
             if (isCatchUp) {
               // Catch-up burst: rebuild into the off-screen catch-up buffer.
-              applyStreamItems(prev => appendTextChunk(prev, content, textItemId))
+              applyStreamItems(
+                prev => appendTextChunk(prev, content, textItemId),
+              )
             } else {
               // Live streaming: buffer for typewriter reveal.
               if (textBufferRef.current
@@ -935,9 +1020,11 @@ export default function useStreamConnection(chatId, {
             flushBuffer()
             const content = event.content || ''
             if (content) {
-              applyStreamItems(prev => replaceLastText(
-                prev, content, event.text_item_id || null,
-              ))
+              applyStreamItems(
+                prev => replaceLastText(
+                  prev, content, event.text_item_id || null,
+                ),
+              )
             }
           } else if (event.type === 'thinking') {
             // The agent's extended reasoning (Claude thinking_delta /
@@ -949,14 +1036,16 @@ export default function useStreamConnection(chatId, {
             const content = event.content || ''
             if (content || event.thinking_deferred) {
               flushBuffer()
-              applyStreamItems(prev => appendThinkingChunk(
-                prev,
-                content,
-                Date.now(),
-                event.ts,
-                event.segment_id,
-                event,
-              ))
+              applyStreamItems(
+                prev => appendThinkingChunk(
+                  prev,
+                  content,
+                  Date.now(),
+                  event.ts,
+                  event.segment_id,
+                  event,
+                ),
+              )
             }
           } else if (event.type === 'context_compacted') {
             // A first-class chronology boundary: flush prose so the marker
@@ -964,16 +1053,20 @@ export default function useStreamConnection(chatId, {
             // small block shape the backend persists. MsgContent deliberately
             // renders it outside ActivityStretch and outside MarkerCard.
             flushBuffer()
-            applyStreamItems(prev => [...prev, {
-              type: 'context_compaction',
-              ...(event.provider ? { provider: event.provider } : {}),
-              ...(event.trigger ? { trigger: event.trigger } : {}),
-            }])
+            applyStreamItems(
+              prev => [...prev, {
+                type: 'context_compaction',
+                ...(event.provider ? { provider: event.provider } : {}),
+                ...(event.trigger ? { trigger: event.trigger } : {}),
+              }],
+            )
           } else if (event.type === 'tool_start') {
             flushBuffer()
             // Codex identifies Memory here; Claude may add the same marker on
             // a later tool_input. One reducer owns the shared live block shape.
-            applyStreamItems(prev => startToolLifecycle(prev, event))
+            applyStreamItems(
+              prev => startToolLifecycle(prev, event),
+            )
           } else if (event.type === 'tool_input') {
             // Backfill by stable identity. Older id-less events retain their
             // earliest-input-less fallback; a late id may be adopted only when
@@ -995,7 +1088,9 @@ export default function useStreamConnection(chatId, {
           } else if (event.type === 'skill_loaded') {
             // One pure reducer owns the live receipt shape; the backend event
             // reducer mirrors it for reloads and transcript compaction.
-            applyStreamItems(prev => applySkillLoaded(prev, event))
+            applyStreamItems(
+              prev => applySkillLoaded(prev, event),
+            )
           } else if (
             event.type === 'task_start'
             || event.type === 'task_progress'
@@ -1008,7 +1103,9 @@ export default function useStreamConnection(chatId, {
             // catch-up reconcile + promotion for free, so live/promoted/reloaded
             // (backend 247) render identically. Idempotent, so a replayed burst
             // can't duplicate a helper.
-            applyStreamItems(prev => applyTaskEvent(prev, event, Date.now()))
+            applyStreamItems(
+              prev => applyTaskEvent(prev, event, Date.now()),
+            )
           } else if (event.type === 'question') {
             const questions = event.questions || []
             if (questions.length > 0 && questions[0]?.question) {
@@ -1037,7 +1134,9 @@ export default function useStreamConnection(chatId, {
               )
               if (knownAnswers && !incoming.answers) incoming.answers = knownAnswers
               onLiveQuestionRef.current?.(event.question_id || null)
-              applyStreamItems(prev => upsertQuestionItem(prev, incoming))
+              applyStreamItems(
+                prev => upsertQuestionItem(prev, incoming),
+              )
             }
           } else if (event.type === 'secure_input_request') {
             flushBuffer()
@@ -1050,13 +1149,15 @@ export default function useStreamConnection(chatId, {
               fields: Array.isArray(event.fields) ? event.fields : [],
               status: 'pending',
             }
-            applyStreamItems(prev => [
-              ...prev.filter(item => !(
-                item.type === 'secure_input'
-                && item.request_id === incoming.request_id
-              )),
-              incoming,
-            ])
+            applyStreamItems(
+              prev => [
+                ...prev.filter(item => !(
+                  item.type === 'secure_input'
+                  && item.request_id === incoming.request_id
+                )),
+                incoming,
+              ],
+            )
           } else if (
             event.type === 'secure_input_filled'
             || event.type === 'secure_input_consuming'
@@ -1228,6 +1329,7 @@ export default function useStreamConnection(chatId, {
             // next turn (a queued continuation streams on the same hook and
             // must not inherit a stale answer for a re-used question key).
             answersByQuestionKeyRef.current.clear()
+            clearQuestionResponseTracking()
             // Promote before flipping `isStreaming` false. `flushBuffer()`,
             // `commitCatchUp()`, and setStreamItems keep latestItemsRef
             // synchronous, so the old rAF delay was unnecessary and created a
@@ -1328,7 +1430,15 @@ export default function useStreamConnection(chatId, {
         scheduleReconnect(() => connectRef.current?.(true), delay)
       }
     }
-  }, [disconnect, startDraining, flushBuffer])
+  }, [
+    armQuestionResponse,
+    clearQuestionResponseTracking,
+    commitRenderableStreamItems,
+    disconnect,
+    flushBuffer,
+    setStreamItems,
+    startDraining,
+  ])
 
   // Keep ref in sync so retry timeouts call the latest version.
   connectRef.current = connectToStream
@@ -1380,6 +1490,7 @@ export default function useStreamConnection(chatId, {
     // stream stays attached and the steered message renders inline.
     if (!queueOnly && !isAnswerSubmission && !forceSteer && !directSteer) {
       wantsReconnectRef.current = true
+      clearQuestionResponseTracking()
       justSentAtRef.current = Date.now()
       clearStoredStreamSnapshot(activeStreamChatIdRef.current)
       lastGoodItemsRef.current = []
@@ -1579,7 +1690,7 @@ export default function useStreamConnection(chatId, {
     // backend/app/routes/chats_stream.py:121-131.)
     connectRef.current?.(true)
     return responseData || { status: 'started' }
-  }, [])
+  }, [clearQuestionResponseTracking, setStreamItems])
 
   // Reconnect on visibility change or network recovery, but ONLY
   // when we believe a stream is active (isStreamingRef). Idle chats
@@ -1718,13 +1829,23 @@ export default function useStreamConnection(chatId, {
     // pending. When the questionId is known we record under that key directly;
     // an id-less (text-keyed) question is recorded from the matched item below.
     if (key) answersByQuestionKeyRef.current.set(key, answers)
+    const baselineItems = latestItemsRef.current.length > 0
+      ? latestItemsRef.current
+      : lastGoodItemsRef.current
+    // For an id-less (text-keyed) answer, key on the LAST question item so this
+    // matches ChatView's submitted questionKey and the catch-up path (all three
+    // route through lastQuestionKey). Keying on the first would diverge for a
+    // turn with two or more live cards, dropping the response-activity handoff.
+    let matchedKey = key || lastQuestionKey(baselineItems)
+    if (matchedKey) armQuestionResponse(matchedKey, baselineItems)
     setStreamItems(prev => {
       return prev.map(it => {
         if (it.type !== 'question') return it
-        // When we have a questionId, match by id; otherwise patch the
-        // first question item (mirrors the single-question-per-turn norm).
+        // When we have a questionId, match by id; otherwise patch every
+        // question item and let the last one win the arming key above.
         const itKey = questionKey(it)
         if (key ? itKey === key : true) {
+          if (!matchedKey) matchedKey = itKey
           if (!key) answersByQuestionKeyRef.current.set(itKey, answers)
           return { ...it, answers }
         }

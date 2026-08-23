@@ -9,40 +9,81 @@ subagent keeps its assigned task bounded rather than starting another Goal.
 
 ## Decide whether the request should become a Goal
 
-Automatically promote the current turn only when all of these are true:
+The working agent already has the request, context, and constraints; do not add
+a second classifier call. Automatically create a Goal only when all of these
+are true:
 
-- The partner delegated an outcome to complete, not merely an explanation,
-  recommendation, critique, or investigation to report back.
+- The partner delegated an outcome to complete, not merely a question,
+  explanation, recommendation, critique, or investigation to report back.
 - Completion has an observable condition the agent can eventually verify.
 - Durability materially helps because the route likely spans multiple
   independently verifiable stages or turns, repeated work, dynamic discovery,
-  safe parallel branches, a long operation, or a plausible restart.
-- Work can begin without first waiting for a material owner choice, destructive
-  approval, or external event.
+  safe parallel branches, a long-running operation, or a plausible restart.
+- The task can make meaningful progress without first waiting for a material
+  owner choice, destructive approval, or an external event.
 
-Do not infer a Goal from message length, words such as “thoroughly,” a
-multi-file edit, or the mere fact that a useful task list could be written.
-Keep bounded work that can honestly finish in one turn as a standard prompt.
-Honor “just answer,” “one pass,” and “don't make this a Goal” as opt-outs.
+Make this decision before the first material tool call for **every** ordinary
+top-level delegated outcome. Do not silently skip it because the work looks
+easy enough to finish in one turn or is described as synthetic, a fixture, or
+a test; those labels say nothing about durability. Several independently
+verifiable stages followed by an explicit final verification are strong
+evidence that durability materially helps, even when each individual action is
+simple. This remains a structural judgment using all criteria above, not a
+keyword trigger.
 
-When the criteria hold, promote the current physical turn before material work:
+### Recheck when the work changes phase
+
+Goal routing is a transition check, not a one-time classification of the first
+message. Reapply every criterion **before the first material action** when any
+of these boundaries is crossed, even inside the same agent turn:
+
+- the partner answers a required scope, direction, or approval question;
+- investigation or critique turns into an implementation request;
+- a bounded task reveals a durable multi-stage branch, merge surprise, or
+  substantially broader scope; or
+- a later instruction adds independently verifiable outcomes to work already
+  underway.
+
+An unanswered question may correctly prevent promotion because meaningful work
+cannot begin yet. Its answer removes that blocker; it is not a reason to keep
+the newly approved implementation ordinary. Likewise, discovery can make a
+request Goal-shaped after several standard steps. Promote at that boundary
+before editing or launching the expanded branch—do not wait for another user
+message and do not rewrite completed work as if the Goal existed earlier.
+
+Do not infer a Goal from message length, words such as “thoroughly” or
+“production-ready,” a multi-file edit, or the mere fact that a useful task list
+could be written. Keep bounded work that can honestly finish in one turn as a
+standard prompt. Use schedules for recurring background work. Honor “just
+answer,” “one pass,” and “don't make this a Goal” as explicit opt-outs.
+
+Examples:
+
+- **Goal:** “Migrate every caller to the new API, update the documentation, and
+  keep working until the complete test suite passes.”
+- **Goal:** “Address all issues you discover in this checkout flow, including
+  substantial nested work, then run a production-readiness audit.”
+- **Standard prompt:** “Explain why this failed and recommend what to do.”
+- **Standard prompt:** “Add a loading state to this button and test it.”
+
+When the criteria hold, promote the current physical turn before material work.
+Call the platform's first-class `promote_goal` tool when it is available; its
+single `objective` argument is the concise outcome and observable completion
+condition. The helper is resilience, not an equivalent convenience path: use
+it only when the tool is absent from the callable inventory or an attempted
+tool call returns a failure:
 
 ```bash
 python3 /data/platform/backend/scripts/goal_promote.py \
   'Concise outcome and observable completion condition'
 ```
 
-Run that helper as its own command. It attaches the already-running turn to
-Möbius's provider-neutral Goal state and verifies the committed identity; it
-does not add a hidden message or start a second turn. Do not call a
+Run the helper as its own command. The tool and helper attach the already-running
+turn to Möbius's provider-neutral Goal state and verify the committed identity;
+neither adds a hidden message nor starts a second turn. Do not call a
 provider-private `create_goal` from an ordinary turn, queue a synthetic `/goal`,
-or claim activation before the helper succeeds. Explicit `/goal` remains
+or claim activation before the operation succeeds. Explicit `/goal` remains
 authoritative.
-
-If an ordinary turn begins bounded but discovery later reveals substantial
-durable work that now meets every criterion, promote at that point before
-starting the newly discovered branch. Do not rewrite completed work as if the
-Goal existed earlier.
 
 ## Decide whether the Goal earns a plan
 

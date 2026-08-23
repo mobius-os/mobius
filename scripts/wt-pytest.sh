@@ -106,6 +106,11 @@ elif python3 -c 'import pytest' >/dev/null 2>&1; then
   # interpreter through the wrapper is not the guarded direct-pytest path.
   PYTHON="$(command -v python3)"
   echo "wt-pytest: shared venv absent; using the image's Python test runtime" >&2
+  if [ -r /app/requirements.lock ] \
+      && ! cmp -s "$ROOT/backend/requirements.lock" /app/requirements.lock; then
+    echo "wt-pytest: WARNING — checkout requirements.lock differs from the image runtime" >&2
+    echo "wt-pytest: results are useful but not dependency-authoritative; use a lock-matched venv or hosted checks" >&2
+  fi
 else
   echo "wt-pytest: neither shared venv nor image pytest is available" >&2
   echo "  create the shared venv once with:" >&2

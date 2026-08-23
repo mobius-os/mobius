@@ -6,6 +6,8 @@
  * and POST must mirror that state or a terminal refresh correctly turns their
  * transient question card into read-only history.
  */
+import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
+
 export async function mockPendingQuestionState(page, questionId) {
   let pendingQuestionId = null
   let turnStarted = false
@@ -51,11 +53,7 @@ export async function mockPendingQuestionState(page, questionId) {
             total: 0,
             offset: 0,
             provider: 'claude',
-            agent_settings_json: { model: 'claude-sonnet-4-6' },
-            effective_agent_settings: {
-              model: 'claude-sonnet-4-6',
-              effort: 'medium',
-            },
+            ...testChatAgentSettings(),
           },
     })
   }

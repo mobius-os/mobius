@@ -508,6 +508,20 @@ def _chat_detail_response(
     chat_id=chat.id,
     data_dir=get_settings().data_dir,
   )
+  from app.goal_plans import terminal_goal_summaries_by_message_index
+  summaries_by_index = terminal_goal_summaries_by_message_index(
+    db, chat.id, all_msgs,
+  )
+  if summaries_by_index:
+    next_page = list(page)
+    for relative_index, message in enumerate(page):
+      summaries = summaries_by_index.get(start + relative_index)
+      if not summaries:
+        continue
+      projected_message = dict(message)
+      projected_message["goal_summaries"] = summaries
+      next_page[relative_index] = projected_message
+    page = next_page
 
   provider = chat.provider or "claude"
   settings_obj = _coerce_agent_settings(chat.agent_settings_json) or None

@@ -42,3 +42,12 @@ export function visibleUsageWindows(snapshot) {
     .filter(window => window && typeof window.label === 'string')
     .slice(0, 4)
 }
+
+export function mostConstrainedRemainingPercent(snapshot) {
+  if (snapshot?.state !== 'ready' || !Array.isArray(snapshot.windows)) return null
+  const used = snapshot.windows
+    .map(window => Number(window?.used_percent))
+    .filter(Number.isFinite)
+  if (used.length === 0) return null
+  return 100 - Math.max(...used.map(clampUsagePercent))
+}

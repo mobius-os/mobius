@@ -95,6 +95,7 @@ def test_promotion_requires_the_current_physical_run(monkeypatch):
   monkeypatch.setenv("API_BASE_URL", "http://mobius.test")
   monkeypatch.setenv("AGENT_TOKEN", "owner-token")
   monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.delenv("MOBIUS_RUN_TOKEN", raising=False)
 
   with pytest.raises(SystemExit, match="MOBIUS_RUN_TOKEN"):
     helper.promote_goal("Ship and verify")
