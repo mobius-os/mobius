@@ -69,6 +69,21 @@ _TASK_TEXT_CAP = 2000
 _TASK_LABEL_CAP = 200
 
 
+def is_root_conversation_message(message: Any) -> bool:
+  """Whether one Claude conversation frame belongs to the owner turn.
+
+  Claude streams native Agent/Task work on the same SDK connection as its
+  parent, but marks each child-sidechain StreamEvent, AssistantMessage, and
+  UserMessage with ``parent_tool_use_id``. Only frames without that parent own
+  the root chat row. Child activity is already represented by the separate
+  Task lifecycle and by the parent's later synthesis.
+
+  Result/System messages do not expose this field and are root lifecycle
+  frames, so the runner can use this predicate for its broader session-id gate.
+  """
+  return getattr(message, "parent_tool_use_id", None) is None
+
+
 def _clip_task_text(value: object, cap: int) -> str | None:
   """Coerce a task_* text field to a bounded string (or None).
 
@@ -252,6 +267,15 @@ def dispatch_sdk_message(
   + stop_reason side channels) without spinning up a live SDK
   subprocess.
   """
+  if (
+    isinstance(sdk_msg, (StreamEvent, AssistantMessage, UserMessage))
+    and not is_root_conversation_message(sdk_msg)
+  ):
+    # A native child turn is a sidechain, not another piece of the owner's
+    # assistant row. Its Task lifecycle remains visible and the root agent
+    # later emits its own synthesis.
+    return current_session_id, None
+
   if isinstance(sdk_msg, SystemMessage):
     if isinstance(sdk_msg, TaskStartedMessage):
       # tool_use_id ties this sub-task back to the parent turn's tool call that

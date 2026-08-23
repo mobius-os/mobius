@@ -1578,7 +1578,6 @@ async def run_codex_sdk_turn(
   # detached plan rather than silently masking internal contract violations.
   connector_thread_config = None
   if connector_plan is not None:
-    connector_thread_config = connector_plan.codex_config
     env.update(connector_plan.codex_env)
 
   # config_overrides always isolates the prompt stack, then carries the
@@ -1586,6 +1585,11 @@ async def run_codex_sdk_turn(
   # Delegated children disable those optional tools at this provider-owned seam.
   codex_bin = shutil.which("codex")
   delegated = run_policy is not None
+  from app.platform_tools import codex_turn_mcp_config
+  connector_thread_config = codex_turn_mcp_config(
+    connector_plan,
+    control_enabled=not delegated,
+  )
   needs_goal_control = _needs_native_goal_control(
     goal_mode=goal_mode,
     goal_objective=goal_objective,

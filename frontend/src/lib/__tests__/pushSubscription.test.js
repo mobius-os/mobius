@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { PUSH_SW_SCOPE, subscribeToPush } from '../pushSubscription.js'
+import {
+  PUSH_SW_SCOPE,
+  subscribeToPush,
+  subscribeToPushWithRetry,
+} from '../pushSubscription.js'
 
 // Mirrors the shell PWA's manifest scope (frontend/public/manifest.webmanifest).
 // Android hands a push to the installed Möbius app only when the service
@@ -87,7 +91,7 @@ function fakePush() {
     sent: [],
     removed: [],
     vapidKey: async () => ({ ok: true, json: async () => ({ publicKey: 'QUJD' }) }),
-    subscribe: async (payload) => { push.sent.push(payload) },
+    subscribe: async (payload) => { push.sent.push(payload); return { ok: true } },
     unsubscribe: async (payload) => { push.removed.push(payload) },
   }
   return push
@@ -198,4 +202,167 @@ test('an unusable legacy pushManager is skipped, not fatal', async () => {
 
   assert.deepEqual(push.removed, [])
   assert.equal(push.sent.length, 1, 'the new subscription still lands')
+})
+
+// A first-boot install can race the very first worker activation and reject the
+// first subscribe; the retry is what lets the grant take effect without a reload.
+test('a first-boot install failure is retried until it lands', async () => {
+  let calls = 0
+  const slept = []
+  const ok = await subscribeToPushWithRetry({
+    subscribe: async () => {
+      calls += 1
+      if (calls < 2) throw new Error('InvalidStateError') // redundant first install
+    },
+    sleep: async (ms) => { slept.push(ms) },
+  })
+
+  assert.equal(ok, true)
+  assert.equal(calls, 2, 'retried after the racing first install failed')
+  assert.deepEqual(slept, [1000], 'backed off once before the retry')
+})
+
+test('a denied permission stops the retry loop immediately', async () => {
+  let calls = 0
+  let denied = false
+  const ok = await subscribeToPushWithRetry({
+    subscribe: async () => {
+      calls += 1
+      denied = true // the user just dismissed the prompt as "block"
+      throw new Error('NotAllowedError')
+    },
+    isDenied: () => denied,
+    sleep: async () => { throw new Error('must not sleep after a denial') },
+  })
+
+  assert.equal(ok, false)
+  assert.equal(calls, 1, 'a denied prompt is not re-raised')
+})
+
+test('the retry gives up after the configured number of retries', async () => {
+  let calls = 0
+  const ok = await subscribeToPushWithRetry({
+    subscribe: async () => { calls += 1; throw new Error('still installing') },
+    retries: 2,
+    sleep: async () => {},
+  })
+
+  assert.equal(ok, false)
+  assert.equal(calls, 3, 'initial attempt plus two retries')
+})
+
+test('a subscribe that never had to be asked twice does not retry', async () => {
+  let calls = 0
+  const ok = await subscribeToPushWithRetry({
+    subscribe: async () => { calls += 1 },
+    sleep: async () => { throw new Error('must not sleep on success') },
+  })
+
+  assert.equal(ok, true)
+  assert.equal(calls, 1)
+})
+
+// A DISMISSED prompt leaves permission at 'default' (isDenied stays false), but
+// the browser won't re-raise it — retrying just wastes time and can trip Chrome's
+// auto-block heuristic, so a NotAllowedError stops the loop at once.
+test('a dismissed prompt (NotAllowedError) stops without burning retries', async () => {
+  let calls = 0
+  const ok = await subscribeToPushWithRetry({
+    subscribe: async () => {
+      calls += 1
+      const err = new Error('permission dismissed')
+      err.name = 'NotAllowedError'
+      throw err
+    },
+    isDenied: () => false, // dismiss, not block — permission is still 'default'
+    sleep: async () => { throw new Error('must not sleep after a dismissed prompt') },
+  })
+
+  assert.equal(ok, false)
+  assert.equal(calls, 1, 'a dismissed prompt is not retried')
+})
+
+test('a cancelled caller abandons the retry loop', async () => {
+  let calls = 0
+  let cancelled = false
+  const ok = await subscribeToPushWithRetry({
+    subscribe: async () => {
+      calls += 1
+      cancelled = true // e.g. the Shell unmounted during the first attempt
+      throw new Error('still installing')
+    },
+    isCancelled: () => cancelled,
+    sleep: async () => { throw new Error('must not sleep after cancellation') },
+  })
+
+  assert.equal(ok, false)
+  assert.equal(calls, 1, 'no further attempts once cancelled')
+})
+
+// End-to-end through the REAL subscribeToPush: the first install goes redundant
+// (subscribe throws), the retry re-registers onto an active worker and lands.
+test('the retry drives the real subscribe from a redundant first install to success',
+  async () => {
+    const push = fakePush()
+    // Settles redundant from INSIDE addEventListener (after the listener is
+    // registered), so activatePushWorker's statechange promise actually resolves
+    // — settling on a bare microtask would race ahead of the listener and hang.
+    const redundantWorker = {
+      state: 'installing',
+      addEventListener: (_evt, fn) => {
+        queueMicrotask(() => { redundantWorker.state = 'redundant'; fn() })
+      },
+      removeEventListener: () => {},
+    }
+    let registrations = 0
+    const pushWorker = {
+      scope: `${ORIGIN}${PUSH_SW_SCOPE}`,
+      active: null,
+      installing: redundantWorker,
+      pushManager: {
+        subscribe: async (options) => {
+          if (!pushWorker.active) throw new Error('InvalidStateError')
+          pushWorker.subscribeOptions = options
+          return fakeSubscription(PUSH_ENDPOINT)
+        },
+      },
+    }
+    const container = {
+      register: async () => {
+        registrations += 1
+        if (registrations >= 2) { // the retry finds an active worker
+          pushWorker.active = {}
+          pushWorker.installing = null
+        }
+        return pushWorker
+      },
+      getRegistration: async () => undefined, // no legacy subscription
+    }
+
+    const ok = await subscribeToPushWithRetry({
+      subscribe: () => subscribeToPush({ container, push }),
+      sleep: async () => {},
+    })
+
+    assert.equal(ok, true)
+    assert.equal(registrations, 2, 're-registered on the retry')
+    assert.equal(push.sent.length, 1, 'the subscription finally landed')
+  })
+
+// subscribeToPush must THROW on a cold-backend failure (not silently return),
+// or the retry wrapper reports success while nothing was registered.
+test('a non-ok VAPID key fetch throws so the retry can cover it', async () => {
+  const container = fakeContainer()
+  const push = fakePush()
+  push.vapidKey = async () => ({ ok: false, status: 503 })
+
+  await assert.rejects(subscribeToPush({ container, push }), /VAPID/)
+})
+
+test('a non-ok subscription POST throws so the retry can cover it', async () => {
+  const container = fakeContainer()
+  const push = fakePush()
+  push.subscribe = async () => ({ ok: false, status: 500 })
+
+  await assert.rejects(subscribeToPush({ container, push }), /registration failed/)
 })

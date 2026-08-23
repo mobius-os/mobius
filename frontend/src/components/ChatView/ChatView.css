@@ -2563,6 +2563,8 @@
 /* ── + button (composer popover trigger) ──────────────── */
 .composer-plus {
   position: relative;
+  display: flex;
+  gap: 8px;
   flex-shrink: 0;
   align-self: flex-end;
 }
@@ -2629,6 +2631,18 @@
   box-shadow: none;
 }
 
+/* ── Brain usage button (model picker + weekly-usage gauge) ──
+   Same 48×48 frosted-glass circle as .chat__plus (shares the base
+   rule); this block only adds the small deltas so the pair reads as
+   a matched set: it never gets the plus's --active purple fill,
+   since ComposerPopover.jsx decides open/closed for THIS button
+   too and there is nothing separate here to mark active. */
+.chat__brain-usage {
+  align-self: flex-end;
+}
+.chat__brain-usage:focus { outline: none; }
+.chat__brain-usage:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 /* ── Composer popover (Attach + Model picker) ────────── */
 
 /* Drops UP from the trigger — composer sits at the bottom of the
@@ -2663,6 +2677,28 @@
      the keyboard or scroll the chat behind it. */
   touch-action: pan-y;
   overscroll-behavior: contain;
+}
+
+/* Shell scrollbars stay hidden by default (see index.css) — normally gated
+   back on with `(hover: hover) and (pointer: fine)` for pointer-accurate
+   clients only (see .chat__tool-diff-scroll). This panel opts in
+   unconditionally instead: the model list can run well past the popover's
+   capped height (two providers, several models each, plus the effort
+   stepper and automation toggles), and a hidden, discovery-only scrollbar
+   left that overflow with no visible affordance at all on a touch client,
+   which is exactly the environment the hover/pointer gate was written for. */
+.composer-popover {
+  --shell-scrollbar-width: thin;
+  --shell-scrollbar-display: block;
+  scrollbar-color: color-mix(in srgb, var(--muted) 32%, transparent) transparent;
+}
+
+.composer-popover::-webkit-scrollbar { width: 10px; }
+.composer-popover::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 32%, transparent);
+  background-clip: padding-box;
 }
 
 [data-theme="light"] .composer-popover {
@@ -3363,6 +3399,102 @@
   border-top: 1px solid var(--border-light);
   scrollbar-width: thin;
 }
+
+.chat__goal-history {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--green) 30%, var(--border-light));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--green) 6%, var(--surface));
+}
+
+.chat__goal-history--failed {
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--border-light));
+  background: color-mix(in srgb, var(--danger) 5%, var(--surface));
+}
+
+.chat__goal-history-marker {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+.chat__goal-history-marker::after {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 3px;
+  width: 4px;
+  height: 8px;
+  border-right: 2px solid var(--bg);
+  border-bottom: 2px solid var(--bg);
+  transform: rotate(45deg);
+}
+
+.chat__goal-history--failed .chat__goal-history-marker {
+  background: var(--danger);
+}
+
+.chat__goal-history--failed .chat__goal-history-marker::after {
+  content: '!';
+  inset: 0;
+  width: auto;
+  height: auto;
+  border: 0;
+  color: white;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 18px;
+  text-align: center;
+  transform: none;
+}
+
+.chat__goal-history-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chat__goal-history-kicker {
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+.chat__goal-history--failed .chat__goal-history-kicker { color: var(--danger); }
+
+.chat__goal-history-objective {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.chat__goal-history-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.chat__goal-history-details { margin-top: 5px; }
+
+.chat__goal-history-details > summary {
+  width: fit-content;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chat__goal-history-details[open] > summary { color: var(--text); }
 
 .chat__goal-task {
   display: grid;

@@ -61,6 +61,12 @@ RETIRED_SKILLS = DATA_DIR / "shared" / "retired-skills"
 # touched. A set preserves every known unmodified predecessor when one skill
 # needs more than one fix-forward migration over its lifetime.
 _UNMODIFIED_MIGRATIONS = {
+  "platform-maintenance.md": {
+    # Baked copies before the container-boundary guidance. Both hashes are
+    # released, untouched generations; owner-edited copies remain protected.
+    "bcc617354747c49ddad7fa1f419cf921fd7280909358096323cdbc427ad063c3",
+    "b591d15e335c72c0acf394ca7ce4b0daa633e124a487df7a713847cafc13ab6d",
+  },
   "goal-planning.md": {
     # First dependency-aware Goal-plan seed. Replace only the untouched copy
     # so existing instances learn the completion preflight without clobbering
@@ -68,6 +74,13 @@ _UNMODIFIED_MIGRATIONS = {
     "2adb39457e0ec2ee9d9a3596cb96e5a6240bae23d725e6459ba0f6e77d5474c4",
     # Dependency-aware plan seed before provider-neutral automatic promotion.
     "a3edc5fcc453a5305102e144c2d58ae16b828612ac93a6a7442be7e267779f59",
+    # Hierarchical Goal seed before provider-neutral automatic promotion.
+    "bca228c745881bfffdad5d7adaab3c62871e6f62801252784fb0522787cfb850",
+    # Provider-neutral promotion seed before phase-transition rechecks and the
+    # first-class platform promote_goal affordance.
+    "0c2b88ff8a79ff05f75ebaa60af2899f0b9ed27d0a23bfff83b54f4e2a1de97a",
+    # Phase-transition seed before the mandatory turn-local routing decision.
+    "7a80e90870f75be7c8802f421e76ac21790f1ef812d4a4d0d923d474e5dadd2d",
   },
   "reflection.md": {
     "c0f57c227f61cd8539a56b70eadfbbe2212125c23b7137472dd173a578baacd8",

@@ -28,15 +28,15 @@ test('ChatView only consumes methods returned by the scroll controller', () => {
     `ChatView consumes missing useScrollMode members: ${missing.join(', ')}`)
 })
 
-test('owner contract freezes question answers without locking keyboard movement', () => {
+test('owner contract hands question anchors to visible responses without locking keyboard movement', () => {
   const architecture = readFileSync(
     new URL('../../../../../ARCHITECTURE.md', import.meta.url),
     'utf8',
   )
-  assert.match(architecture, /Owner-authoritative contract — v1\.20 \(2026-08-15\)/)
+  assert.match(architecture, /Owner-authoritative contract — v1\.21 \(2026-08-20\)/)
   assert.match(
     architecture,
-    /In-process question is answered \| any \| transient `ANCHOR_AT` over the prior mode; same active assistant row/,
+    /In-message question Submit begins \| any \| transient `ANCHOR_AT` over the prior mode/,
     'question submission must freeze the reader while preserving the R6 row',
   )
   assert.match(

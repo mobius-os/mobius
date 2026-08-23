@@ -50,6 +50,104 @@ def _agent_run_auth(db, chat_id, run_id):
   return {"Authorization": f"Bearer {token}"}
 
 
+def test_terminal_goal_history_projects_onto_final_assistant_message(
+  client, owner_token, db,
+):
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  base = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+  created = client.post(
+    "/api/chats",
+    json={
+      "title": "Goal history",
+      "messages": [
+        {"role": "user", "content": "start", "ts": 1_787_486_400_000},
+        {"role": "assistant", "content": "first leg", "ts": 1_787_486_401_000},
+        {"role": "user", "content": "continue", "ts": 1_787_486_410_000},
+        {"role": "assistant", "content": "finished", "ts": 1_787_486_411_000},
+      ],
+    },
+    headers=auth,
+  )
+  chat_id = created.json()["id"]
+  db.add_all([
+    models.ChatRun(
+      id="history-root", root_run_id="history-root", chat_id=chat_id,
+      status="completed", provider="codex", goal_objective="Ship safely",
+      goal_id="history-goal", started_at=base,
+      ended_at=base + timedelta(seconds=5),
+      goal_plan_json={
+        "version": 1,
+        "updated_at": base.isoformat(),
+        "tasks": [{
+          "id": "ship", "title": "Ship safely", "status": "completed",
+          "depends_on": [],
+        }],
+      },
+      goal_plan_revision=1,
+    ),
+    models.ChatRun(
+      id="history-resume", root_run_id="history-root", chat_id=chat_id,
+      status="completed", provider="codex", goal_objective="Ship safely",
+      goal_id="history-goal", started_at=base + timedelta(seconds=10),
+      ended_at=base + timedelta(seconds=15),
+    ),
+  ])
+  db.commit()
+
+  response = client.get(f"/api/chats/{chat_id}?limit=20", headers=auth)
+  assert response.status_code == 200, response.text
+  messages = response.json()["messages"]
+  assert "goal_summaries" not in messages[1]
+  summary = messages[3]["goal_summaries"][0]
+  assert summary["id"] == "history-goal"
+  assert summary["objective"] == "Ship safely"
+  assert summary["status"] == "completed"
+  assert summary["duration_seconds"] == 15
+  assert summary["plan"]["summary"] == {
+    "completed": 1,
+    "total": 1,
+    "running": [],
+    "ready": [],
+    "can_complete": True,
+    "completion_blockers": [],
+  }
+
+
+def test_terminal_goal_history_respects_message_pagination(
+  client, owner_token, db,
+):
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  base = datetime(2026, 8, 23, 13, 0, tzinfo=UTC)
+  created = client.post(
+    "/api/chats",
+    json={
+      "title": "Paginated goal history",
+      "messages": [
+        {"role": "user", "content": "older", "ts": 1_787_490_000_000},
+        {"role": "assistant", "content": "done", "ts": 1_787_490_001_000},
+        {"role": "user", "content": "newer", "ts": 1_787_490_010_000},
+      ],
+    },
+    headers=auth,
+  )
+  chat_id = created.json()["id"]
+  db.add(models.ChatRun(
+    id="old-goal-run", root_run_id="old-goal-run", chat_id=chat_id,
+    status="completed", provider="claude", goal_objective="Old Goal",
+    goal_id="old-goal", started_at=base,
+    ended_at=base + timedelta(seconds=3),
+  ))
+  db.commit()
+
+  latest = client.get(f"/api/chats/{chat_id}?limit=1", headers=auth).json()
+  assert latest["offset"] == 2
+  assert "goal_summaries" not in latest["messages"][0]
+  older = client.get(
+    f"/api/chats/{chat_id}?limit=2&before=2", headers=auth,
+  ).json()
+  assert older["messages"][1]["goal_summaries"][0]["id"] == "old-goal"
+
+
 def test_current_turn_promotes_atomically_without_a_goal_message(
   client, owner_token, db,
 ):

@@ -100,7 +100,7 @@ Contribute keeps your projects, your agents, and your decisions in one place: sp
 
 Möbius is open source, MIT licensed. The agent, your apps, your memory, and the platform itself run on a server you control. Bring the provider plan you already pay for; no separate API key is needed.
 
-**Hosted for you.** [mobius.you](https://mobius.you/) creates a private deployment in a Railway account you control: sign in with Google or Apple, connect Railway, open your Möbius. Up to $5 in hosting credit for 30 days, usually no card. Your chats, files, apps, credentials, and agent activity stay inside that deployment.
+**Hosted for you.** [mobius.you](https://mobius.you/) creates a private deployment in a Railway account you control: sign in with Google or Apple, connect Railway, open your Möbius. Up to $5 in hosting credit for 30 days, no card required. Your chats, files, apps, credentials, and agent activity stay inside that deployment.
 
 **On your own server.** You need Docker, a domain name, and a Claude Code or ChatGPT (Codex) account:
 

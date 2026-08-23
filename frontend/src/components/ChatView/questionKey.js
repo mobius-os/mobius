@@ -21,3 +21,30 @@ export function questionKey(block) {
   if (first.id) return `id:${first.id}`
   return `text:${first.question || first.text || ''}`
 }
+
+/**
+ * Index of the last question item, optionally constrained to one key.
+ *
+ * An id-less answer selects the LAST question item so a turn with two live
+ * cards keys the response handoff on the card that was actually answered.
+ * Both the live and catch-up patch paths and ChatView's submitted key must
+ * make the same choice, so they all route through this one function rather
+ * than each re-deriving it (a past divergence dropped response_activity).
+ *
+ * Returns -1 when no matching question item exists.
+ */
+export function lastQuestionIndex(items, key = null) {
+  if (!Array.isArray(items)) return -1
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const item = items[i]
+    if (item?.type !== 'question') continue
+    if (!key || questionKey(item) === key) return i
+  }
+  return -1
+}
+
+/** Key of the last question item, or null when there is none. */
+export function lastQuestionKey(items) {
+  const index = lastQuestionIndex(items)
+  return index >= 0 ? questionKey(items[index]) : null
+}

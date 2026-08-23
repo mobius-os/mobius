@@ -435,6 +435,97 @@ def _success_result(
   )
 
 
+@pytest.mark.asyncio
+async def test_native_child_drain_waits_for_clean_parent_synthesis(monkeypatch):
+  async def _ignore_session_persistence(*_args):
+    return None
+
+  class _FakeClient:
+    def __init__(self, _options):
+      pass
+
+    async def connect(self):
+      return None
+
+    async def query(self, _message):
+      return None
+
+    async def disconnect(self):
+      return None
+
+    async def receive_response(self):
+      yield TaskStartedMessage(
+        subtype="task_started",
+        data={},
+        task_id="agent-1",
+        description="inspect the implementation",
+        uuid="task-start-1",
+        session_id="root-session",
+        tool_use_id="spawn-1",
+        task_type="local_agent",
+      )
+      yield _success_result("root-session", cost=0.01)
+
+    async def receive_messages(self):
+      yield StreamEvent(
+        uuid="child-delta",
+        session_id="child-session",
+        parent_tool_use_id="spawn-1",
+        event={
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": {"type": "text_delta", "text": "Child raw report."},
+        },
+      )
+      yield AssistantMessage(
+        content=[TextBlock(text="Child raw report.")],
+        model="claude-sonnet",
+        parent_tool_use_id="spawn-1",
+        session_id="child-session",
+      )
+      yield TaskNotificationMessage(
+        subtype="task_notification",
+        data={},
+        task_id="agent-1",
+        status="completed",
+        output_file="/tmp/agent-1",
+        summary="inspection complete",
+        uuid="task-done-1",
+        session_id="root-session",
+        tool_use_id="spawn-1",
+      )
+      yield AssistantMessage(
+        content=[TextBlock(text="Parent synthesized the result.")],
+        model="claude-sonnet",
+        session_id="root-session",
+      )
+      yield _success_result("root-session", cost=0.03)
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+  monkeypatch.setattr(
+    claude_sdk_runner, "_persist_session_id", _ignore_session_persistence,
+  )
+  bus = _Bus()
+
+  result = await run_claude_sdk_turn(
+    "delegate this inspection",
+    session_id=None,
+    base_env={},
+    cwd="/data",
+    chat_id="native-followup",
+    skill_text="system",
+    bc=bus,
+    pending_questions={},
+    db=None,
+  )
+
+  assert result["cost_usd"] == 0.03
+  assert next(
+    event for event in bus.events if event["type"] == "text_final"
+  )["content"] == "Parent synthesized the result."
+  assert "Child raw report" not in str(bus.events)
+
+
 def _interrupt_result(session_id: str = "sess-1") -> ResultMessage:
   """The terminal an SDK interrupt produces — error_during_execution."""
   return ResultMessage(
@@ -1068,6 +1159,61 @@ def test_dispatch_thinking_delta_emits_thinking(monkeypatch):
   }]
 
 
+def test_control_mcp_readiness_waits_for_promote_goal_tool():
+  from app import claude_sdk_runner
+
+  class _Client:
+    def __init__(self):
+      self.calls = 0
+
+    async def get_mcp_status(self):
+      self.calls += 1
+      if self.calls == 1:
+        return {"mcpServers": [{
+          "name": "mobius_control",
+          "status": "pending",
+        }]}
+      return {"mcpServers": [{
+        "name": "mobius_control",
+        "status": "connected",
+        "tools": [{"name": "promote_goal"}],
+      }]}
+
+  client = _Client()
+  assert asyncio.run(
+    claude_sdk_runner._await_control_mcp_ready(client, enabled=True)
+  ) is None
+  assert client.calls == 2
+
+
+def test_control_mcp_readiness_reports_terminal_failure_without_retrying():
+  from app import claude_sdk_runner
+
+  class _Client:
+    async def get_mcp_status(self):
+      return {"mcpServers": [{
+        "name": "mobius_control",
+        "status": "failed",
+        "error": "stdio child exited",
+      }]}
+
+  assert asyncio.run(
+    claude_sdk_runner._await_control_mcp_ready(_Client(), enabled=True)
+  ) == "failed: stdio child exited"
+
+
+def test_control_mcp_readiness_is_absent_for_restricted_turns():
+  from app import claude_sdk_runner
+
+  class _Client:
+    async def get_mcp_status(self):
+      raise AssertionError("restricted turns must not inspect owner controls")
+
+  assert asyncio.run(
+    claude_sdk_runner._await_control_mcp_ready(_Client(), enabled=False)
+  ) is None
+
+
 def test_claude_thinking_config_requests_summarized_adaptive_thinking():
   assert claude_sdk_runner._claude_thinking_config("claude-opus-4-8") == {
     "type": "adaptive",
@@ -1245,6 +1391,56 @@ def test_dispatch_assistant_tool_use_emits_tool_start():
   dispatch_sdk_message(msg, bus, None)
   types = [e["type"] for e in bus.events]
   assert "tool_start" in types
+
+
+def test_child_sidechain_messages_never_enter_the_owner_assistant_row():
+  bus = _Bus()
+  bus.current_message_id = "root-message"
+  current_session_id = "root-session"
+  child_messages = [
+    StreamEvent(
+      uuid="child-start",
+      session_id="child-session",
+      parent_tool_use_id="spawn-1",
+      event={"type": "message_start", "message": {"id": "child-message"}},
+    ),
+    StreamEvent(
+      uuid="child-delta",
+      session_id="child-session",
+      parent_tool_use_id="spawn-1",
+      event={
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {"type": "text_delta", "text": "child prose"},
+      },
+    ),
+    AssistantMessage(
+      content=[
+        TextBlock(text="child prose"),
+        ToolUseBlock(id="child-bash", name="Bash", input={"command": "pwd"}),
+      ],
+      model="claude-sonnet",
+      parent_tool_use_id="spawn-1",
+      message_id="child-message",
+      session_id="child-session",
+      usage={"input_tokens": 10, "output_tokens": 5},
+      stop_reason="tool_use",
+    ),
+    UserMessage(
+      content=[ToolResultBlock(tool_use_id="child-bash", content="/tmp")],
+      parent_tool_use_id="spawn-1",
+    ),
+  ]
+
+  for message in child_messages:
+    current_session_id, terminal = dispatch_sdk_message(
+      message, bus, current_session_id,
+    )
+    assert terminal is None
+
+  assert current_session_id == "root-session"
+  assert bus.current_message_id == "root-message"
+  assert bus.events == []
 
 
 def test_dispatch_claude_edit_carries_shared_diff_preview(tmp_path):

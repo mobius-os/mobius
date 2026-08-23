@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { attachCleanup, createTaggedChat } from './_chatTracker.mjs'
+import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 
@@ -72,11 +73,7 @@ test('an idle runtime snapshot cannot retire an unacknowledged fresh send', asyn
         pending_messages: [],
         pending_question_id: null,
         provider: 'claude',
-        agent_settings_json: { model: 'claude-sonnet-4-6' },
-        effective_agent_settings: {
-          model: 'claude-sonnet-4-6',
-          effort: 'medium',
-        },
+        ...testChatAgentSettings(),
       }),
     })
   })

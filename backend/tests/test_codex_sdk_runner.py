@@ -3967,7 +3967,13 @@ def test_run_codex_sdk_turn_controls_prompt_layers(monkeypatch, session_id):
   )
   assert captured["thread_options"]["developer_instructions"] == ""
   assert captured["thread_options"]["personality"] == "none"
-  assert captured["thread_options"]["config"] == connector_plan.codex_config
+  thread_mcp = captured["thread_options"]["config"]["mcp_servers"]
+  assert thread_mcp["search"] == (
+    connector_plan.codex_config["mcp_servers"]["search"]
+  )
+  assert thread_mcp["mobius_control"]["args"][0].endswith(
+    "/scripts/mobius_control_mcp.py"
+  )
   process_env = captured["process_config"].kwargs["env"]
   assert process_env["MOBIUS_CONNECTOR_3_SEARCH"] == "private-key"
   assert "private-key" not in repr(captured["thread_options"]["config"])

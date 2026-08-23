@@ -126,6 +126,7 @@ export async function createTaggedChat(
   })
   const result = response.ok() ? await response.json() : null
   if (result?.id) {
+    if (info) registerCreatedChats(info.workerIndex, result.id)
     // Most browser tests exercise chat behavior after the first-send choice,
     // not the picker itself. Keep that prerequisite explicit in the shared
     // fixture now that production no longer inherits an SDK default.
@@ -139,7 +140,6 @@ export async function createTaggedChat(
         `Could not select the test chat model (${selected.status()})`,
       )
     }
-    if (info) registerCreatedChats(info.workerIndex, result.id)
   }
   return result
 }

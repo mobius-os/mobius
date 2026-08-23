@@ -1685,6 +1685,168 @@ def _retire_restart_resume_toggle(eng) -> None:
     ))
 
 
+def _pin_established_legacy_chat_models(eng) -> None:
+  """Replace the retired interactive SDK default with explicit chat choices.
+
+  Chats that already completed an assistant turn before model selection became
+  mandatory were allowed to persist no model at all. Pin only those established
+  conversations to an explicit model the owner has already chosen for the same
+  provider. Empty chats keep the intentional first-send selection prompt, while
+  deleted and already-explicit chats remain byte-for-byte unchanged.
+
+  The current shared picker file is the strongest source for its provider. For
+  the other provider, the most recently used explicit owner chat is the best
+  durable evidence available: historical SDK defaults were never recorded.
+  """
+  from sqlalchemy import JSON as SAJSON, bindparam, inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  tables = set(inspector.get_table_names())
+  if "chats" not in tables:
+    return
+  columns = {column["name"] for column in inspector.get_columns("chats")}
+  required = {"id", "provider", "messages", "agent_settings_json"}
+  if not required.issubset(columns):
+    return
+
+  invalid_json = object()
+
+  def decoded_json(value):
+    if isinstance(value, str):
+      try:
+        return json.loads(value)
+      except (TypeError, ValueError):
+        return invalid_json
+    return value
+
+  def model_provider(model):
+    if not isinstance(model, str) or not model.strip():
+      return None
+    normalized = model.strip()
+    if normalized.startswith("claude-"):
+      return "claude"
+    if normalized.startswith("gpt-"):
+      return "codex"
+    return None
+
+  provider_ids = {"claude", "codex"}
+  selected_models = {}
+
+  # The shared file contains the latest picker choice. Associate a future or
+  # custom model id with owner.provider unless its known prefix contradicts it.
+  owner_provider = None
+  if "owner" in tables:
+    owner_columns = {
+      column["name"] for column in inspector.get_columns("owner")
+    }
+    if "provider" in owner_columns:
+      with eng.connect() as conn:
+        owner_provider = conn.execute(text(
+          "SELECT provider FROM owner ORDER BY id LIMIT 1"
+        )).scalar_one_or_none()
+  try:
+    global_settings = json.loads(
+      (Path(os.environ.get("DATA_DIR", "/data"))
+       / "shared" / "agent-settings.json").read_text(encoding="utf-8")
+    )
+  except (OSError, TypeError, ValueError):
+    global_settings = {}
+  global_model = (
+    global_settings.get("model") if isinstance(global_settings, dict) else None
+  )
+  global_model_provider = model_provider(global_model)
+  if (
+    owner_provider in provider_ids
+    and isinstance(global_model, str)
+    and global_model.strip()
+    and global_model_provider in {None, owner_provider}
+  ):
+    selected_models[owner_provider] = global_model.strip()
+
+  optional_columns = [
+    name for name in (
+      "deleted_at", "created_by_app_id", "activity_at", "updated_at",
+      "created_at",
+    ) if name in columns
+  ]
+  select_columns = [
+    "id", "provider", "messages", "agent_settings_json", *optional_columns,
+  ]
+  source_where = " WHERE deleted_at IS NULL" if "deleted_at" in columns else ""
+  order_columns = [
+    name for name in ("activity_at", "updated_at", "created_at")
+    if name in columns
+  ]
+  if len(order_columns) > 1:
+    source_order = " ORDER BY COALESCE(" + ", ".join(order_columns) + ") DESC"
+  elif order_columns:
+    source_order = f" ORDER BY {order_columns[0]} DESC"
+  else:
+    source_order = " ORDER BY id DESC"
+
+  with eng.begin() as conn:
+    rows = conn.execute(text(
+      "SELECT " + ", ".join(select_columns) + " FROM chats"
+      + source_where + source_order
+    )).mappings().all()
+
+    # Fill any provider the shared file did not cover from the latest explicit
+    # owner chat. Unknown ids remain valid evidence unless they are visibly a
+    # model from the other supported provider.
+    for row in rows:
+      provider = row["provider"]
+      if provider not in provider_ids or provider in selected_models:
+        continue
+      if (
+        "created_by_app_id" in columns
+        and row.get("created_by_app_id") is not None
+      ):
+        continue
+      settings = decoded_json(row["agent_settings_json"])
+      if settings is invalid_json or not isinstance(settings, dict):
+        continue
+      model = settings.get("model")
+      classified = model_provider(model)
+      if (
+        isinstance(model, str)
+        and model.strip()
+        and classified in {None, provider}
+      ):
+        selected_models[provider] = model.strip()
+
+    update_settings = text(
+      "UPDATE chats SET agent_settings_json = :settings WHERE id = :chat_id"
+    ).bindparams(bindparam("settings", type_=SAJSON))
+    for row in rows:
+      provider = row["provider"]
+      selected_model = selected_models.get(provider)
+      if selected_model is None:
+        continue
+      settings = decoded_json(row["agent_settings_json"])
+      if settings is invalid_json:
+        # A malformed JSON value is partner data, not an empty settings object.
+        continue
+      if settings is None:
+        settings = {}
+      if not isinstance(settings, dict):
+        continue
+      model = settings.get("model")
+      if isinstance(model, str) and model.strip():
+        continue
+      messages = decoded_json(row["messages"])
+      if messages is invalid_json or not isinstance(messages, list) or not any(
+        isinstance(message, dict) and message.get("role") == "assistant"
+        for message in messages
+      ):
+        continue
+      migrated_settings = dict(settings)
+      migrated_settings["model"] = selected_model
+      conn.execute(update_settings, {
+        "settings": migrated_settings,
+        "chat_id": row["id"],
+      })
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -1703,6 +1865,7 @@ _SCHEMA_MIGRATIONS = (
   ("0015_chat_run_goal_identity", _add_chat_run_goal_identity),
   ("0016_app_connect_manage", _add_app_connect_manage),
   ("0017_retire_restart_resume_toggle", _retire_restart_resume_toggle),
+  ("0018_explicit_legacy_chat_models", _pin_established_legacy_chat_models),
 )
 
 

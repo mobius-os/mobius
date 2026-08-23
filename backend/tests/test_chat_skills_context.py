@@ -170,6 +170,30 @@ def test_core_prompt_requires_approval_before_changing_guarded_invariants():
   assert "preserves the same contract does not require escalation" in normalized
 
 
+def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
+  planning = (
+    repo / "backend" / "scripts" / "seed-skills" / "goal-planning.md"
+  ).read_text(encoding="utf-8")
+  core_normalized = " ".join(core.split())
+  planning_normalized = " ".join(planning.split())
+
+  assert "Before the first material tool call" in core_normalized
+  assert "labels such as “synthetic,” “fixture,” or “test”" in core_normalized
+  assert "after an owner choice resolves" in core_normalized
+  assert "not merely at the next user message" in core_normalized
+  assert "`promote_goal` tool when available" in core_normalized
+  assert "### Recheck when the work changes phase" in planning
+  assert "before the first material action" in planning_normalized
+  assert "for **every** ordinary top-level delegated outcome" in planning_normalized
+  assert "not a keyword trigger" in planning_normalized
+  assert "Its answer removes that blocker" in planning_normalized
+  assert "first-class `promote_goal` tool" in planning_normalized
+  assert "resilience, not an equivalent convenience path" in planning_normalized
+  assert "an attempted tool call returns a failure" in planning_normalized
+
+
 def test_core_prompt_distinguishes_durable_delegation_and_owner_led_contribution():
   repo = Path(__file__).resolve().parents[2]
   core = (repo / "skill" / "core.md").read_text(encoding="utf-8")

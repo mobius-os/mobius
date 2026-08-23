@@ -35,7 +35,7 @@ async function openPicker(page, chatId) {
   })
   const paintedChat = page.locator('[data-chat-surface="painted"]')
   await expect(paintedChat.locator('.chat__form')).toBeVisible()
-  await paintedChat.getByRole('button', { name: 'Attach or change model' }).click()
+  await paintedChat.locator('.chat__brain-usage').click()
 }
 
 test('picker exposes configured providers without leaking unavailable registry rows', async ({ page }) => {
