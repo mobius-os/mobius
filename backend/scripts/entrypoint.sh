@@ -1134,6 +1134,15 @@ _health_url="http://127.0.0.1:${_public_port}/api/health"
   exit 1
 ) &
 
+# Make the mapi helper callable by bare name in agent shells. The Bash tool's
+# shell snapshot hard-sets PATH (clobbering any exported prefix), but
+# /usr/local/bin is on it — so expose the helper there via a stable symlink.
+_mapi=/data/platform/backend/scripts/mapi
+[ -x "$_mapi" ] || _mapi=/app/scripts/mapi
+if [ -x "$_mapi" ]; then
+  ln -sfn "$_mapi" /usr/local/bin/mapi 2>/dev/null || true
+fi
+
 # --timeout-graceful-shutdown bounds uvicorn's SIGTERM drain. Without it,
 # uvicorn waits FOREVER for open connections to close on SIGTERM — and the chat
 # SSE stream never closes on its own — so an in-app restart (the Settings

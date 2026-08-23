@@ -1,12 +1,15 @@
 import { useEffect } from 'react'
-import { subscribeToPush } from '../lib/pushSubscription.js'
+import { subscribeToPushWithRetry } from '../lib/pushSubscription.js'
 
 /**
  * Subscribes the browser to Web Push notifications after login.
  * Runs once per session — re-subscribes each time (subscriptions can
  * rotate), but only prompts for permission once.
  *
- * Push lives on its own service worker — see `lib/pushSubscription.js`.
+ * Push lives on its own service worker — see `lib/pushSubscription.js`. On a
+ * first boot the worker installs for the first time WHILE this runs, so the
+ * first subscribe can lose the race and reject; `subscribeToPushWithRetry`
+ * retries in place so the grant takes effect without the user reloading.
  */
 export default function usePushSubscription() {
   useEffect(() => {
@@ -17,7 +20,11 @@ export default function usePushSubscription() {
     // `globalThis.` matters: a bare `Notification` is a ReferenceError, not
     // undefined, anywhere the API is absent.
     if (globalThis.Notification?.permission === 'denied') return
+    // Abandon the multi-second retry if the Shell unmounts or the user logs out
+    // — and so StrictMode's double-invoke in dev doesn't leave two loops running.
+    let cancelled = false
     // Push unsupported or the prompt refused — nothing to surface.
-    subscribeToPush().catch(() => {})
+    subscribeToPushWithRetry({ isCancelled: () => cancelled }).catch(() => {})
+    return () => { cancelled = true }
   }, [])
 }

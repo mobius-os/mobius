@@ -27,7 +27,9 @@ def test_fast_mode_uses_host_runtime_before_any_docker_preflight():
 
 def test_full_backend_keeps_the_isolated_container_contract():
   source = SCRIPT.read_text()
-  assert "Docker is not available in this runtime" in source
+  assert "normal Möbius app container" in source
+  assert "intentional trust boundary" in source
+  assert "Run GitHub checks" in source
   assert "docker compose -p \"${TEST_PROJECT}\"" in source
   assert "docker-compose.test.yml run --rm --no-deps" in source
 
@@ -36,3 +38,10 @@ def test_host_runner_checks_backend_node_surface_not_full_frontend_tree():
   source = HOST_RUNNER.read_text()
   assert "backend_test_node_deps \"$ROOT/frontend\"" in source
   assert "npm ls --depth=0" not in source
+
+
+def test_image_runtime_reports_when_its_python_lock_differs():
+  source = HOST_RUNNER.read_text()
+  assert 'cmp -s "$ROOT/backend/requirements.lock" /app/requirements.lock' in source
+  assert "checkout requirements.lock differs from the image runtime" in source
+  assert "not dependency-authoritative" in source

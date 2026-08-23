@@ -5,7 +5,7 @@ export default function useModelSelectionPopover(
   modelSelectionRequest,
   composerInputRef,
 ) {
-  const [open, setOpen] = useState(false)
+  const [mode, setMode] = useState(null)
   const wasInputFocusedRef = useRef(false)
   const handledRequestRef = useRef(modelSelectionRequest)
 
@@ -15,8 +15,8 @@ export default function useModelSelectionPopover(
     }
     handledRequestRef.current = modelSelectionRequest
     wasInputFocusedRef.current = document.activeElement === composerInputRef?.current
-    setOpen(true)
+    setMode('model')
   }, [composerInputRef, modelSelectionRequest])
 
-  return { open, setOpen, wasInputFocusedRef }
+  return { mode, setMode, wasInputFocusedRef }
 }

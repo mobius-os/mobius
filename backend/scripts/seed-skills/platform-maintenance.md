@@ -21,6 +21,31 @@ not part of the agent's authority. Package changes made only in a running
 container are ephemeral; declare them in the Dockerfile or lockfile and ship a
 new image when they must survive recreation.
 
+### Container root stops at the container boundary
+
+The normal Möbius app container intentionally has no Docker daemon or CLI and
+does not mount the host's Docker socket. `sudo` grants root inside that
+container only. Treat Docker's absence there as an expected trust boundary,
+not a broken dependency. Do not install a Docker CLI, start Docker-in-Docker,
+or request a host-socket mount for agent tests: the CLI alone has no daemon,
+while a socket or privileged daemon would cross into operator-owned host
+authority and would not work consistently on managed deployments.
+
+This boundary is not a reason to hide or skip validation. Inside Möbius:
+
+- run `scripts/test.sh --fast` for the cheap hermetic contracts and
+  `scripts/wt-pytest.sh <focused tests>` for the changed behavior;
+- if the worktree runner says the checkout lock differs from the image
+  runtime, treat those results as useful but not dependency-authoritative and
+  use a lock-matched environment or hosted checks for that contract; and
+- for concurrency or ordering, persistence, auth or security, migrations,
+  provider protocols, dependency/runtime changes, or broad cross-cutting work,
+  explicitly recommend Contribute's **Run GitHub checks** before **Send PR**.
+
+`scripts/test.sh --backend` remains for a Docker-capable contributor host. The
+hosted pre-PR workflow gives early full-suite evidence for the exact reviewed
+commit, and the merge queue remains the unconditional authoritative gate.
+
 Recovery is not a daemon, listener, alternate boot mode, or second process
 inside Möbius. If the interface is unavailable, ask the partner to open
 **Recovery** from the deployment card in Möbius Launch. The launcher creates a

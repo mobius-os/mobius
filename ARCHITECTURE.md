@@ -544,7 +544,7 @@ installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.20 (2026-08-15).** This section is the
+**Owner-authoritative contract — v1.21 (2026-08-20).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -564,7 +564,11 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   after the user manually reaches or explicitly swipes toward the physical bottom,
   (b) a composer press or edit that begins at that physical bottom, or (c) the
   live-send pin handoff when the streaming reply has consumed its exact reserved
-  room. Only a send may create `PIN_USER_MSG`. Reservation does not create
+  room, or (d) restoration of the exact pre-submit `FOLLOW_BOTTOM` once both
+  an accepted same-turn question answer and its first renderable post-answer
+  activity have committed, with no newer reader scroll. Answer acceptance alone
+  never enters follow or moves through blank tail room. Only a send may create
+  `PIN_USER_MSG`. Reservation does not create
   a second kind of bottom: when `FOLLOW_BOTTOM` is active, it follows the physical
   tail including any remaining room. Real output first consumes that room without
   advancing the tail; after the room reaches zero, the same tail advances with the
@@ -758,16 +762,23 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   resumes that same row and turn, so answering must not retire its source bridge.
   Submitting an in-message answer is also a deliberate reading action: before the
   card enters its pending state or output resumes, the controller snapshots the
-  currently visible message and its exact viewport offset as `ANCHOR_AT`. Resumed
-  output grows without dragging the reader, even when the chat had been following
-  the tail before Submit. That exact hold is scoped to the viewport where Submit
-  occurred. If the mobile keyboard changes the viewport, the controller restores
-  the mode that owned the unanswered card before sizing the new geometry. Answering
-  therefore adds no movement of its own, while the keyboard still moves the card
-  exactly as it would have moved unanswered. The transient hold is stripped before
-  persistence. A failed answer
-  keeps that settled reading anchor for the retryable card rather than manufacturing
-  follow intent again.
+  currently visible message and its exact viewport offset as a transient
+  `ANCHOR_AT`. This prevents the pending card reflow from moving the viewport while
+  the answer request is unresolved. When the same running turn accepts the answer,
+  that overlay remains in place. It releases back to `FOLLOW_BOTTOM` only once
+  the first renderable post-answer activity also commits, follow owned the
+  unanswered card, and no newer reader scroll or semantic location superseded
+  it. If response activity races the answer request, neither boundary moves the
+  card alone: the release waits until both commits exist. A card that
+  began in hold remains held, and a recovered `answer_turn: "new"` continuation
+  never gains follow. The exact temporary hold is scoped to the viewport where
+  Submit occurred. If the mobile keyboard changes the viewport first, the controller
+  restores the mode that owned the unanswered card before sizing the new geometry.
+  Acceptance therefore adds no movement; an already-followed tail begins moving
+  only with the response it is following. The keyboard still moves the card exactly
+  as it would have moved unanswered. The transient hold is stripped before
+  persistence. A failed answer keeps that settled reading anchor for the retryable
+  card rather than manufacturing follow intent again.
   While the custom-answer field is focused, a visual-viewport change may rebase
   an ordinary `ANCHOR_AT` hold to the browser's current caret-visible position
   instead of reapplying its stale pre-edit offset. `PIN_USER_MSG`,
@@ -801,7 +812,10 @@ path means routing it through the same entries rather than inventing another rul
 | Viewport/keyboard changes | settled `PIN_USER_MSG` | same `PIN_USER_MSG` | Reapply the same pin; geometry never reclassifies it |
 | Viewport/keyboard changes | follow or anchor hold | same mode | Resize reservation to the visible scroll box, then reapply the physical tail or exact anchor; never create or retire follow |
 | Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
-| In-process question is answered | any | transient `ANCHOR_AT` over the prior mode; same active assistant row | Hold exact visible anchor through same-viewport card reflow and resumed output |
+| In-message question Submit begins | any | transient `ANCHOR_AT` over the prior mode | Hold exact visible anchor through the unresolved same-viewport card reflow |
+| Same running turn accepts a question answer | transient question anchor over any prior mode | same transient anchor; same active assistant row | None; acceptance alone does not move through blank tail room |
+| First renderable activity after an accepted same-turn answer | transient question anchor over prior follow, with no newer reader scroll/location | prior `FOLLOW_BOTTOM`; same active assistant row | Resume the one physical live tail with the response commit |
+| First renderable activity after an accepted same-turn answer | transient question anchor over hold, or superseded submit intent | existing hold | None; resumed output grows below the reader |
 | Viewport/keyboard changes after question submission | transient question anchor | pre-submit unanswered-card mode | Apply ordinary viewport behavior; answering adds no extra movement |
 | Focused Q&A custom answer grows or its keyboard viewport changes | ordinary hold | current caret-visible `ANCHOR_AT` | Browser may reveal the caret once; controller rebases instead of snapping back. Pins, reserved-tail holds, follow, and submission overlay are unchanged |
 | Live assistant row settles to the durable transcript | any | same mode and row identity | None (except R3's exact spacer handoff) |

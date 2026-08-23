@@ -88,7 +88,12 @@ export async function subscribeToPush({
     activatePushWorker(container),
     push.vapidKey(),
   ])
-  if (!res.ok) return
+  // Throw (don't silently return) on a cold-backend failure so a first-boot
+  // caller that retries actually re-attempts these — a swallowed 5xx here left
+  // the subscription unregistered until the user reloaded.
+  if (!res.ok) {
+    throw new Error(`Push VAPID key fetch failed (${res.status}).`)
+  }
 
   const { publicKey } = await res.json()
   const subscription = await registration.pushManager.subscribe({
@@ -97,8 +102,64 @@ export async function subscribeToPush({
   })
 
   const { endpoint, keys } = subscription.toJSON()
-  await push.subscribe({ endpoint, keys })
+  const saved = await push.subscribe({ endpoint, keys })
+  // apiFetch resolves the Response on a non-2xx (it only throws on 401 /
+  // network), so a 5xx here would otherwise pass as success.
+  if (saved && saved.ok === false) {
+    throw new Error(`Push subscription registration failed (${saved.status}).`)
+  }
 
   // Only once the replacement is registered server-side.
   await retireLegacySubscriptions(container, push)
+}
+
+/**
+ * Subscribe, retrying a few times so a first-boot install lands without a reload.
+ *
+ * On the very first visit the push worker installs for the first time WHILE this
+ * runs: `register()` resolves on a worker that can still go `redundant`, so
+ * `subscribeToPush()` rejects (see its test "a failed install settles instead of
+ * hanging forever"). A single attempt then swallows that and the subscription
+ * only registers when the user happens to reload — the "I allowed notifications
+ * but had to reload for it to take effect" report. A retry re-registers the
+ * worker (idempotent once active) and subscribes in place instead.
+ *
+ * Only TRANSIENT failures are retried. A dismissed or blocked prompt won't be
+ * re-raised (permission stays 'default' on dismiss, flips to 'denied' on block),
+ * so retrying it just wastes time and can trip the browser's auto-block
+ * heuristic — those stop immediately. `retries` is the number of RETRIES after
+ * the first attempt (default 3 → up to 4 subscribe() calls). Deps are injected
+ * so the policy is unit-testable without real timers or a service worker;
+ * `isCancelled` lets a caller abandon the multi-second loop on unmount/logout.
+ */
+export async function subscribeToPushWithRetry({
+  subscribe = subscribeToPush,
+  retries = 3,
+  backoffMs = (attempt) => 1000 * 2 ** attempt,
+  isDenied = () => globalThis.Notification?.permission === 'denied',
+  isCancelled = () => false,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+} = {}) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (isCancelled() || isDenied()) return false
+    try {
+      await subscribe()
+      return true
+    } catch (err) {
+      // Terminal, nothing left to retry: the caller abandoned it, the user
+      // won't be asked again (denied), the prompt was dismissed/blocked
+      // (NotAllowedError — retrying can't re-raise it and risks auto-block), or
+      // this was the last attempt.
+      if (
+        isCancelled()
+        || isDenied()
+        || err?.name === 'NotAllowedError'
+        || attempt === retries
+      ) {
+        return false
+      }
+      await sleep(backoffMs(attempt))
+    }
+  }
+  return false
 }

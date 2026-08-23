@@ -3,12 +3,13 @@
 Two failure modes break `claude --resume <Chat.session_id>`, and these
 tests lock in the fixes:
 
-1. PHANTOM session ids. The codex plugin's SessionStart hook emits a
+1. NON-ROOT session ids. The codex plugin's SessionStart hook emits a
    `HookEventMessage` (a `SystemMessage` subclass) carrying a session
    id that gets a `session-env/<id>` dir but never a transcript
-   `.jsonl`. The runner's early-persist is type-gated so only real
-   conversation messages (StreamEvent/Assistant/User/Result) advance
-   `Chat.session_id` — the phantom is never persisted.
+   `.jsonl`. Native child-agent sidechains use real conversation message
+   classes but carry `parent_tool_use_id`. The runner's early-persist gate
+   admits only root conversation messages, so neither kind can repoint
+   `Chat.session_id`.
 
 2. MISSING transcript. A correctly-stored id can still have no
    transcript (CLI ~30-day cleanup, or a pre-fix phantom already on an
@@ -74,6 +75,19 @@ def _real_result() -> ResultMessage:
   )
 
 
+def _child_stream() -> StreamEvent:
+  return StreamEvent(
+    uuid="evt-child",
+    session_id="CHILD",
+    parent_tool_use_id="spawn-1",
+    event={
+      "type": "content_block_delta",
+      "index": 0,
+      "delta": {"type": "text_delta", "text": "child detail"},
+    },
+  )
+
+
 def _phantom_hook() -> HookEventMessage:
   """A SessionStart HookEventMessage carrying a phantom session id.
 
@@ -93,9 +107,9 @@ def test_phantom_session_id_never_persisted(monkeypatch):
   """The phantom hook id is never persisted; REAL is the final id.
 
   Drives the runner with [HookEventMessage(PHANTOM), StreamEvent(REAL),
-  ResultMessage(REAL)] and records every PersistSessionId the runner
-  submits. The early-persist type-gate must skip the SystemMessage so
-  PHANTOM is never written, and REAL is the persisted + returned id.
+  child StreamEvent(CHILD), ResultMessage(REAL)] and records every
+  PersistSessionId the runner submits. The ownership gate skips both non-root
+  frames, leaving REAL as the only persisted + returned id.
   """
   persisted: list[str] = []
 
@@ -123,6 +137,7 @@ def test_phantom_session_id_never_persisted(monkeypatch):
     async def receive_response(self):
       yield _phantom_hook()
       yield _real_stream()
+      yield _child_stream()
       yield _real_result()
 
   monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
@@ -143,8 +158,9 @@ def test_phantom_session_id_never_persisted(monkeypatch):
       )
     )
 
-    # The phantom id is never persisted; only REAL is.
+    # Neither non-root id is persisted; only REAL is.
     assert "PHANTOM" not in persisted
+    assert "CHILD" not in persisted
     assert persisted == ["REAL"]
     # The returned session id is the resumable one.
     assert result["session_id"] == "REAL"

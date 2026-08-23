@@ -75,8 +75,11 @@ EOF
 # run` chew through a 3-minute build with no explanation.
 check_backend_prereqs() {
   if ! command -v docker >/dev/null 2>&1; then
-    die "Docker is not available in this runtime. Use --fast for local iteration;
-    run --backend on a Docker-capable host or rely on the complete CI gate."
+    die "Docker is unavailable. In the normal Möbius app container this is an
+    intentional trust boundary: no daemon or host socket is exposed. Use
+    --fast plus focused scripts/wt-pytest.sh tests for local evidence; run
+    --backend on a Docker-capable host, use Contribute's Run GitHub checks for
+    early full coverage, or rely on the merge queue's complete gate."
   fi
   if ! docker compose version >/dev/null 2>&1; then
     die "Docker Compose is not available. Install the compose plugin before --backend."

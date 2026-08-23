@@ -1163,8 +1163,220 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0015_chat_run_goal_identity",
     "0016_app_connect_manage",
     "0017_retire_restart_resume_toggle",
+    "0018_explicit_legacy_chat_models",
   ]
   assert second == first
+
+
+def test_legacy_chat_models_pin_only_established_unselected_chats(
+  tmp_path, monkeypatch,
+):
+  """0018 repairs invisible defaults without creating a new default path."""
+  data_dir = tmp_path / "data"
+  shared = data_dir / "shared"
+  shared.mkdir(parents=True)
+  (shared / "agent-settings.json").write_text(json.dumps({
+    "model": "gpt-5.6-sol",
+    "effort": "xhigh",
+  }))
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'legacy-chat-models.db'}")
+  models.Base.metadata.create_all(eng)
+  established = [
+    {"role": "user", "content": "hello"},
+    {"role": "assistant", "content": "hi"},
+  ]
+  with Session(eng) as session:
+    session.add(models.Owner(
+      username="owner",
+      hashed_password="hash",
+      provider="codex",
+    ))
+    rows = [
+      models.Chat(
+        id="claude-source-old", title="Old Claude choice", provider="claude",
+        messages=[], agent_settings_json={"model": "claude-sonnet-4-6"},
+        activity_at=datetime(2026, 8, 20),
+      ),
+      models.Chat(
+        id="claude-source-current", title="Current Claude choice",
+        provider="claude", messages=[],
+        agent_settings_json={"model": "claude-opus-4-8"},
+        activity_at=datetime(2026, 8, 22),
+      ),
+      # A newer app-owned model is not evidence of the owner's picker choice.
+      models.Chat(
+        id="claude-app-source", title="App model", provider="claude",
+        messages=[], agent_settings_json={"model": "claude-fable-5"},
+        created_by_app_id=99, activity_at=datetime(2026, 8, 23),
+      ),
+      models.Chat(
+        id="legacy-claude", title="Legacy Claude", provider="claude",
+        messages=established, agent_settings_json=None,
+      ),
+      models.Chat(
+        id="legacy-codex", title="Legacy Codex", provider="codex",
+        messages=established,
+        agent_settings_json={"effort": "high", "project_id": "alpha"},
+      ),
+      models.Chat(
+        id="legacy-app", title="Legacy app", provider="claude",
+        messages=established, created_by_app_id=99,
+        agent_settings_json={"report_kind": "reflection"},
+      ),
+      models.Chat(
+        id="empty-chat", title="First run", provider="codex",
+        messages=[{"role": "user", "content": "not completed"}],
+        agent_settings_json={"effort": "medium"},
+      ),
+      models.Chat(
+        id="deleted-chat", title="Deleted", provider="codex",
+        messages=established, agent_settings_json=None,
+        deleted_at=datetime(2026, 8, 22),
+      ),
+      models.Chat(
+        id="explicit-chat", title="Explicit", provider="codex",
+        messages=established,
+        agent_settings_json={"model": "gpt-5.5", "effort": "low"},
+      ),
+    ]
+    session.add_all(rows)
+    session.commit()
+
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version in _migration_versions_before(
+      "0018_explicit_legacy_chat_models",
+    ):
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) "
+        "VALUES (:version, '2026-08-23 00:00:00')"
+      ), {"version": version})
+
+  run_migrations(eng)
+  with Session(eng) as session:
+    settings = {
+      row.id: row.agent_settings_json
+      for row in session.query(models.Chat).all()
+    }
+  assert settings["legacy-claude"] == {"model": "claude-opus-4-8"}
+  assert settings["legacy-codex"] == {
+    "effort": "high",
+    "project_id": "alpha",
+    "model": "gpt-5.6-sol",
+  }
+  assert settings["legacy-app"] == {
+    "report_kind": "reflection",
+    "model": "claude-opus-4-8",
+  }
+  assert settings["empty-chat"] == {"effort": "medium"}
+  assert settings["deleted-chat"] is None
+  assert settings["explicit-chat"] == {"model": "gpt-5.5", "effort": "low"}
+
+  # Simulate a crash after the data commit but before the ledger insert. The
+  # retry must no-op rather than revising any newly explicit conversation.
+  with eng.begin() as conn:
+    conn.execute(text(
+      "DELETE FROM schema_migrations "
+      "WHERE version = '0018_explicit_legacy_chat_models'"
+    ))
+  run_migrations(eng)
+  with Session(eng) as session:
+    assert session.get(models.Chat, "legacy-codex").agent_settings_json == {
+      "effort": "high",
+      "project_id": "alpha",
+      "model": "gpt-5.6-sol",
+    }
+
+
+def test_legacy_chat_models_never_invent_a_provider_default(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  shared = data_dir / "shared"
+  shared.mkdir(parents=True)
+  (shared / "agent-settings.json").write_text(json.dumps({
+    "model": "gpt-5.6-sol",
+  }))
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'no-invented-model.db'}")
+  models.Base.metadata.create_all(eng)
+  transcript = [
+    {"role": "user", "content": "hello"},
+    {"role": "assistant", "content": "hi"},
+  ]
+  with Session(eng) as session:
+    session.add(models.Owner(
+      username="owner",
+      hashed_password="hash",
+      provider="codex",
+    ))
+    session.add_all([
+      models.Chat(
+        id="known-provider-choice", title="Codex", provider="codex",
+        messages=transcript, agent_settings_json=None,
+      ),
+      models.Chat(
+        id="no-provider-choice", title="Claude", provider="claude",
+        messages=transcript, agent_settings_json=None,
+      ),
+    ])
+    session.commit()
+
+  migrations._pin_established_legacy_chat_models(eng)
+  migrations._pin_established_legacy_chat_models(eng)
+
+  with Session(eng) as session:
+    assert session.get(
+      models.Chat, "known-provider-choice",
+    ).agent_settings_json == {"model": "gpt-5.6-sol"}
+    assert session.get(
+      models.Chat, "no-provider-choice",
+    ).agent_settings_json is None
+
+
+def test_legacy_chat_models_preserve_malformed_settings(tmp_path, monkeypatch):
+  data_dir = tmp_path / "data"
+  shared = data_dir / "shared"
+  shared.mkdir(parents=True)
+  (shared / "agent-settings.json").write_text(json.dumps({
+    "model": "gpt-5.6-sol",
+  }))
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'malformed-settings.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as session:
+    session.add(models.Owner(
+      username="owner",
+      hashed_password="hash",
+      provider="codex",
+    ))
+    session.add(models.Chat(
+      id="malformed-settings",
+      title="Malformed settings",
+      provider="codex",
+      messages=[
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+      ],
+      agent_settings_json=None,
+    ))
+    session.commit()
+  with eng.begin() as conn:
+    conn.execute(text(
+      "UPDATE chats SET agent_settings_json = '{malformed' "
+      "WHERE id = 'malformed-settings'"
+    ))
+
+  migrations._pin_established_legacy_chat_models(eng)
+
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT agent_settings_json FROM chats WHERE id = 'malformed-settings'"
+    )).scalar_one() == "{malformed"
 
 
 def test_pending_question_migration_backfills_only_active_latest_question(

@@ -104,16 +104,22 @@ Then triage the prompt into one of three tiers:
   clarifying-question tool, and wait for a pick. Recommendations in prose alone
   do not count as waiting.
 
-**Automatic Goal routing.** Before material work on an ordinary top-level
-partner request that delegates an outcome, create a Goal only when completion
-is observable and durability materially helps (multiple stages/turns,
-repetition, discovery, parallel work,
-or restart risk), and work can begin without an owner choice or external event.
-When those criteria hold, before material work read `goal-planning`, then run
-`python3 /data/platform/backend/scripts/goal_promote.py '<objective>'`. Never use a
-provider-private Goal or synthetic `/goal` message.
-If discovery makes the criteria true only later, promote promptly before
-starting the newly discovered durable branch.
+**Automatic Goal routing.** Before the first material tool call for every
+ordinary top-level delegated outcome, make a turn-local Goal-routing decision;
+do not let apparent ease, likely one-turn completion, or labels such as
+“synthetic,” “fixture,” or “test” skip that checkpoint. Recheck again before
+the first material action after an owner choice resolves, an investigation
+becomes implementation, or bounded work expands. Create a Goal
+only when completion is observable and durability materially helps (multiple
+stages/turns, repetition, discovery, parallel work, or restart risk), and work
+can begin without an owner choice or external event. When those criteria hold,
+before material work read `goal-planning`, then call the platform
+`promote_goal` tool when available; otherwise run
+`python3 /data/platform/backend/scripts/goal_promote.py '<objective>'`. Never use
+a provider-private Goal or synthetic `/goal` message. A question or approval
+gate defers the decision; once resolved, re-evaluate before implementing. If
+discovery makes the criteria true later, promote before the newly durable
+branch—not merely at the next user message.
 Keep questions, explanations, and honestly bounded one-turn work standard.
 Delegated subagents remain bounded tasks rather than starting their own Goals.
 Explicit `/goal` and explicit opt-outs remain authoritative.

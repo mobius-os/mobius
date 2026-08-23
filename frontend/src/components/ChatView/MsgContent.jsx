@@ -21,6 +21,7 @@ import ContextCompactionMarker from './ContextCompactionMarker.jsx'
 import { assistantBlockKey } from './streamPromotion.js'
 import { copyAssistantSelection } from './markdownClipboard.js'
 import { goalMessageObjectiveFromText } from './goalProgress.js'
+import GoalHistoryCard from './GoalHistoryCard.jsx'
 
 
 // Answerability is purely a function of the block + its position + live hint.
@@ -78,6 +79,13 @@ function UserMessageText({ text }) {
       <span className="chat__goal-message-objective">{goalObjective}</span>
     </span>
   )
+}
+
+function GoalHistory({ msg }) {
+  if (msg.role !== 'assistant' || !Array.isArray(msg.goal_summaries)) return null
+  return msg.goal_summaries.map(summary => (
+    <GoalHistoryCard key={summary.id} summary={summary} />
+  ))
 }
 
 function MsgContentInner({
@@ -441,6 +449,7 @@ function MsgContentInner({
             disclosureKey={`${messageKey}:references`}
           />
         )}
+        {!isStreaming && <GoalHistory msg={msg} />}
       </AssistantCopySurface>
     )
   }
@@ -473,6 +482,7 @@ function MsgContentInner({
             : msg.role === 'user' ? <UserMessageText text={text} /> : text}
         </div>
       ) : null}
+      {!isStreaming && <GoalHistory msg={msg} />}
     </AssistantCopySurface>
   )
 }

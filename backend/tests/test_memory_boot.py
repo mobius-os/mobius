@@ -131,9 +131,16 @@ def test_later_boot_migrates_only_unmodified_graph_aware_base_skill(
 def test_controlled_skills_have_fix_forward_migrations():
   module = _load("init_skills")
 
+  assert module._UNMODIFIED_MIGRATIONS["platform-maintenance.md"] == {
+    "bcc617354747c49ddad7fa1f419cf921fd7280909358096323cdbc427ad063c3",
+    "b591d15e335c72c0acf394ca7ce4b0daa633e124a487df7a713847cafc13ab6d",
+  }
   assert module._UNMODIFIED_MIGRATIONS["goal-planning.md"] == {
     "2adb39457e0ec2ee9d9a3596cb96e5a6240bae23d725e6459ba0f6e77d5474c4",
     "a3edc5fcc453a5305102e144c2d58ae16b828612ac93a6a7442be7e267779f59",
+    "bca228c745881bfffdad5d7adaab3c62871e6f62801252784fb0522787cfb850",
+    "0c2b88ff8a79ff05f75ebaa60af2899f0b9ed27d0a23bfff83b54f4e2a1de97a",
+    "7a80e90870f75be7c8802f421e76ac21790f1ef812d4a4d0d923d474e5dadd2d",
   }
   assert "1086688efd4dede48ebc95b12b92fb958280e67896a53e52e02cd5def3aa265f" in (
     module._UNMODIFIED_MIGRATIONS["reflection.md"]

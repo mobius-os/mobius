@@ -819,6 +819,8 @@ def build_turn_plan(
 @contextmanager
 def claude_mcp_config_handle(
   plan: ConnectorTurnPlan | None,
+  *,
+  extra_servers: dict[str, dict] | None = None,
 ) -> Iterator[ClaudeMcpConfigHandle | None]:
   """Yield an anonymous 0600 MCP config handle for Claude startup only.
 
@@ -830,8 +832,13 @@ def claude_mcp_config_handle(
   with ``/dev/null``. Keeping the harmless descriptor reserved until teardown
   prevents the argv-visible fd number from being reused for unrelated data.
   There is no named capability file left behind after a crash or restart.
+  ``extra_servers`` carries non-secret platform controls through the same one
+  config surface so they coexist with optional remote connectors.
   """
-  servers = plan.claude_servers if plan else {}
+  servers = dict(plan.claude_servers if plan else {})
+  # Platform-owned local controls win the deliberately disjoint reserved key
+  # if a malformed connector snapshot ever tries to claim it.
+  servers.update(extra_servers or {})
   if not servers:
     yield None
     return

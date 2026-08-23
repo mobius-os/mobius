@@ -482,6 +482,85 @@ def serialize_plan(
   }
 
 
+def terminal_goal_summaries_by_message_index(
+  db: Session,
+  chat_id: str,
+  messages: list[dict[str, Any]],
+) -> dict[int, list[dict[str, Any]]]:
+  """Project terminal Goals beside the assistant row that concluded them."""
+  goal_rows = (
+    db.query(models.ChatRun)
+    .filter(
+      models.ChatRun.chat_id == chat_id,
+      models.ChatRun.goal_objective.isnot(None),
+    )
+    .order_by(models.ChatRun.started_at.asc(), models.ChatRun.id.asc())
+    .all()
+  )
+  grouped: dict[str, list[models.ChatRun]] = {}
+  for row in goal_rows:
+    identity = row.goal_id or row.root_run_id or row.id
+    grouped.setdefault(identity, []).append(row)
+
+  assistant_rows: list[tuple[int, int]] = []
+  for index, message in enumerate(messages):
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+      continue
+    ts = message.get("ts")
+    if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+      assistant_rows.append((index, int(ts)))
+
+  def epoch_ms(value: datetime | None) -> int | None:
+    if value is None:
+      return None
+    if value.tzinfo is None:
+      value = value.replace(tzinfo=UTC)
+    return round(value.timestamp() * 1000)
+
+  projected: dict[int, list[dict[str, Any]]] = {}
+  for identity, rows in grouped.items():
+    latest = rows[-1]
+    if latest.ended_at is None or latest.status not in {"completed", "failed"}:
+      continue
+    root = next(
+      (row for row in rows if isinstance(row.goal_plan_json, dict)),
+      rows[0],
+    )
+    plan = serialize_plan(db, latest, root)
+    if (
+      latest.status == "completed"
+      and plan is not None
+      and not plan["summary"]["can_complete"]
+    ):
+      continue
+    started_at = min(
+      (row.started_at for row in rows if row.started_at is not None),
+      default=None,
+    )
+    started_ms = epoch_ms(started_at)
+    ended_ms = epoch_ms(latest.ended_at)
+    if started_ms is None or ended_ms is None:
+      continue
+    candidate_index = next((
+      index for index, ts in reversed(assistant_rows)
+      if started_ms - 1000 <= ts <= ended_ms + 1000
+    ), None)
+    if candidate_index is None:
+      continue
+    status = "failed" if latest.status == "failed" else "completed"
+    projected.setdefault(candidate_index, []).append({
+      "id": identity,
+      "objective": latest.goal_objective,
+      "status": status,
+      "resumable": False,
+      "started_at": started_at.isoformat(),
+      "completed_at": latest.ended_at.isoformat(),
+      "duration_seconds": max(0, round((ended_ms - started_ms) / 1000)),
+      "plan": plan,
+    })
+  return projected
+
+
 def replace_plan(
   db: Session,
   *,

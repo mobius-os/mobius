@@ -1033,8 +1033,11 @@ const FOLLOW_ENTRY_EVENTS = new Set([
  */
 export function modeForScrollTransition(previousMode, proposedMode, event) {
   if (!proposedMode) return previousMode
-  const restoresQuestionSubmissionBase =
+  const restoresQuestionSubmissionBase = (
     event === 'layout:question-viewport-release'
+      || (event === 'stream:question-response-follow'
+        && proposedMode?.kind === 'FOLLOW_BOTTOM')
+  )
     && previousMode?.kind === 'ANCHOR_AT'
     && Number.isFinite(previousMode.questionSubmitViewportH)
     && previousMode.questionSubmitBaseMode === proposedMode
@@ -1323,6 +1326,26 @@ export function modeForQuestionSubmission(scrollEl, currentMode) {
 }
 
 
+/** Restore live following when the first post-answer activity starts only
+ * when the submitted card was itself being followed and no newer reader
+ * scroll or semantic location has replaced that temporary hold. Acceptance
+ * alone leaves the card anchored: it is not yet a visible continuation. */
+export function modeAfterQuestionResponseStart({
+  currentMode,
+  submission,
+  currentReaderIntentVersion,
+}) {
+  const submittedMode = submission?.mode
+  const baseMode = submittedMode?.questionSubmitBaseMode
+  if (baseMode?.kind !== 'FOLLOW_BOTTOM'
+      || submission?.readerIntentVersion !== currentReaderIntentVersion) {
+    return currentMode
+  }
+  if (currentMode === baseMode) return currentMode
+  return currentMode === submittedMode ? baseMode : currentMode
+}
+
+
 /** A queued send changes composer/footer layout but does not add a transcript
  * row. Freeze the visible anchor before that reflow; its separately-captured
  * submit intent still decides what happens when the row is later promoted. */
@@ -1462,6 +1485,11 @@ export default function useScrollMode({
   // settlement still waiting on the quiet edge. The effect publishes its
   // local cancel closure here so those actions cannot be overwritten later.
   const discardPendingReaderSettleRef = useRef(null)
+  // Question Submit must snapshot before it retires a pending gesture, while
+  // the gesture's dirty state lives inside the layout effect. This bridge reads
+  // the exact hold only on that rare semantic boundary, never in the hot scroll
+  // path.
+  const capturePendingReaderHoldRef = useRef(null)
   // Monotonic generation for actual reader scroll intent. Send/steer snapshots
   // and every deferred/automatic geometry commit use this same authority:
   // once a newer gesture lands, older work can never regain ownership merely
@@ -1809,17 +1837,48 @@ export default function useScrollMode({
   }, [scrollRef, transitionMode])
 
   const freezeQuestionSubmission = useCallback(() => {
-    const nextMode = modeForQuestionSubmission(scrollRef.current, modeRef.current)
+    const pendingReaderHold = capturePendingReaderHoldRef.current?.()
+    const nextMode = modeForQuestionSubmission(
+      scrollRef.current,
+      pendingReaderHold || modeRef.current,
+    )
+    const readerIntentVersion = readerIntentVersionRef.current
     // Submit is a newer semantic reading action. Its current-geometry snapshot
     // must not be replaced a few milliseconds later by the quiet settlement of
     // the scroll that positioned the question card.
-    supersedePendingReaderGesture()
     readerLocationExplicitRef.current = true
-    return transitionMode(
+    supersedePendingReaderGesture()
+    const mode = transitionMode(
       nextMode,
       'send:question-freeze',
     )
+    return {
+      mode,
+      readerIntentVersion,
+    }
   }, [scrollRef, supersedePendingReaderGesture, transitionMode])
+
+  const resumeQuestionSubmissionOnResponse = useCallback((submission) => {
+    const nextMode = modeAfterQuestionResponseStart({
+      currentMode: modeRef.current,
+      submission,
+      currentReaderIntentVersion: readerIntentVersionRef.current,
+    })
+    if (nextMode === modeRef.current) return modeRef.current
+    const mode = transitionMode(nextMode, 'stream:question-response-follow')
+    const scrollEl = scrollRef.current
+    if (mode === nextMode && scrollEl) {
+      writeMode(
+        scrollEl,
+        mode,
+        'stream:question-response-follow',
+        submission.readerIntentVersion,
+      )
+      lastAppliedModeRef.current = mode
+      persistMode()
+    }
+    return mode
+  }, [persistMode, scrollRef, transitionMode, writeMode])
 
   const anchorPagination = useCallback((key, offset) => {
     if (!key) return modeRef.current
@@ -2445,6 +2504,10 @@ export default function useScrollMode({
       disclosureInputOwnsGesture = false
     }
     discardPendingReaderSettleRef.current = discardPendingReaderSettle
+    const capturePendingReaderHold = () => (
+      readerScrollDirty ? anchorModeFromScroll(scrollEl) : null
+    )
+    capturePendingReaderHoldRef.current = capturePendingReaderHold
 
     const settleReaderScroll = () => {
       clearTimeout(readerSettleTimer)
@@ -2920,6 +2983,9 @@ export default function useScrollMode({
       if (discardPendingReaderSettleRef.current === discardPendingReaderSettle) {
         discardPendingReaderSettleRef.current = null
       }
+      if (capturePendingReaderHoldRef.current === capturePendingReaderHold) {
+        capturePendingReaderHoldRef.current = null
+      }
       clearTimeout(revealTimer)
       clearTimeout(deferredGestureLayoutTimer)
       if (resumeLayoutAfterGestureRef.current === resumeLayoutAfterGesture) {
@@ -3121,6 +3187,7 @@ export default function useScrollMode({
     freezeForegroundReturn,
     freezeQuestionSubmission,
     freezeQueuedSubmission,
+    resumeQuestionSubmissionOnResponse,
     revealConversationTail,
     revealAnchor,
     reapplyActiveMode,
