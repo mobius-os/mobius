@@ -20,7 +20,11 @@ export default function usePushSubscription() {
     // `globalThis.` matters: a bare `Notification` is a ReferenceError, not
     // undefined, anywhere the API is absent.
     if (globalThis.Notification?.permission === 'denied') return
+    // Abandon the multi-second retry if the Shell unmounts or the user logs out
+    // — and so StrictMode's double-invoke in dev doesn't leave two loops running.
+    let cancelled = false
     // Push unsupported or the prompt refused — nothing to surface.
-    subscribeToPushWithRetry().catch(() => {})
+    subscribeToPushWithRetry({ isCancelled: () => cancelled }).catch(() => {})
+    return () => { cancelled = true }
   }, [])
 }
