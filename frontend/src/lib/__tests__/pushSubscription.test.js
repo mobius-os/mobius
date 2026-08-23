@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { PUSH_SW_SCOPE, subscribeToPush } from '../pushSubscription.js'
+import {
+  PUSH_SW_SCOPE,
+  subscribeToPush,
+  subscribeToPushWithRetry,
+} from '../pushSubscription.js'
 
 // Mirrors the shell PWA's manifest scope (frontend/public/manifest.webmanifest).
 // Android hands a push to the installed Möbius app only when the service
@@ -198,4 +202,62 @@ test('an unusable legacy pushManager is skipped, not fatal', async () => {
 
   assert.deepEqual(push.removed, [])
   assert.equal(push.sent.length, 1, 'the new subscription still lands')
+})
+
+// A first-boot install can race the very first worker activation and reject the
+// first subscribe; the retry is what lets the grant take effect without a reload.
+test('a first-boot install failure is retried until it lands', async () => {
+  let calls = 0
+  const slept = []
+  const ok = await subscribeToPushWithRetry({
+    subscribe: async () => {
+      calls += 1
+      if (calls < 2) throw new Error('InvalidStateError') // redundant first install
+    },
+    sleep: async (ms) => { slept.push(ms) },
+  })
+
+  assert.equal(ok, true)
+  assert.equal(calls, 2, 'retried after the racing first install failed')
+  assert.deepEqual(slept, [1000], 'backed off once before the retry')
+})
+
+test('a denied permission stops the retry loop immediately', async () => {
+  let calls = 0
+  let denied = false
+  const ok = await subscribeToPushWithRetry({
+    subscribe: async () => {
+      calls += 1
+      denied = true // the user just dismissed the prompt as "block"
+      throw new Error('NotAllowedError')
+    },
+    isDenied: () => denied,
+    sleep: async () => { throw new Error('must not sleep after a denial') },
+  })
+
+  assert.equal(ok, false)
+  assert.equal(calls, 1, 'a denied prompt is not re-raised')
+})
+
+test('the retry gives up after the configured attempts', async () => {
+  let calls = 0
+  const ok = await subscribeToPushWithRetry({
+    subscribe: async () => { calls += 1; throw new Error('still installing') },
+    attempts: 2,
+    sleep: async () => {},
+  })
+
+  assert.equal(ok, false)
+  assert.equal(calls, 3, 'initial attempt plus two retries')
+})
+
+test('a subscribe that never had to be asked twice does not retry', async () => {
+  let calls = 0
+  const ok = await subscribeToPushWithRetry({
+    subscribe: async () => { calls += 1 },
+    sleep: async () => { throw new Error('must not sleep on success') },
+  })
+
+  assert.equal(ok, true)
+  assert.equal(calls, 1)
 })

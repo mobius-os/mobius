@@ -102,3 +102,40 @@ export async function subscribeToPush({
   // Only once the replacement is registered server-side.
   await retireLegacySubscriptions(container, push)
 }
+
+/**
+ * Subscribe, retrying a few times so a first-boot install lands without a reload.
+ *
+ * On the very first visit the push worker installs for the first time WHILE this
+ * runs: `register()` resolves on a worker that can still go `redundant`, so
+ * `subscribeToPush()` rejects (see its test "a failed install settles instead of
+ * hanging forever"). A single attempt then swallows that and the subscription
+ * only registers when the user happens to reload — the "I allowed notifications
+ * but had to reload for it to take effect" report. A retry re-registers the
+ * worker (idempotent once active) and subscribes in place instead.
+ *
+ * A DENIED prompt can never be re-raised, so we stop the moment permission is
+ * denied rather than burning the remaining attempts. Deps are injected so the
+ * retry policy is unit-testable without real timers or a service worker.
+ */
+export async function subscribeToPushWithRetry({
+  subscribe = subscribeToPush,
+  attempts = 3,
+  backoffMs = (attempt) => 1000 * 2 ** attempt,
+  isDenied = () => globalThis.Notification?.permission === 'denied',
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+} = {}) {
+  for (let attempt = 0; attempt <= attempts; attempt++) {
+    if (isDenied()) return false
+    try {
+      await subscribe()
+      return true
+    } catch {
+      // The last attempt, or a decision the user won't be asked again, is
+      // terminal — nothing left to retry.
+      if (attempt === attempts || isDenied()) return false
+      await sleep(backoffMs(attempt))
+    }
+  }
+  return false
+}
