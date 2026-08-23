@@ -144,6 +144,34 @@ def test_token_stamped_at_wrong_epoch_is_rejected(client, owner_token, db):
   assert r.status_code == 401
 
 
+def test_agent_token_is_valid_only_while_its_exact_run_is_running(
+  client, owner_token, db,
+):
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  chat_id = client.post(
+    "/api/chats", json={"title": "Run-bound agent"}, headers=owner_auth,
+  ).json()["id"]
+  owner = db.query(models.Owner).filter(models.Owner.username == "test").one()
+  db.add(models.ChatRun(
+    id="agent-run", root_run_id="agent-run", chat_id=chat_id,
+    status="running", provider="codex",
+  ))
+  db.commit()
+  token = auth.create_agent_token(
+    chat_id, "agent-run", owner.username, owner.token_epoch,
+  )
+  agent_auth = {"Authorization": f"Bearer {token}"}
+
+  assert client.get("/api/apps/", headers=agent_auth).status_code == 200
+
+  run = db.query(models.ChatRun).filter(models.ChatRun.id == "agent-run").one()
+  run.status = "completed"
+  db.commit()
+  response = client.get("/api/apps/", headers=agent_auth)
+  assert response.status_code == 401
+  assert response.json()["detail"] == "Agent run is no longer active."
+
+
 def test_bump_revokes_query_param_token_on_module_route(client, owner_token):
   """The module route takes the token on `?token=` (iframe import can't
   set headers) and used to skip the revocation check. After the bump,

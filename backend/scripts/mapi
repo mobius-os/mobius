@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Call the Möbius backend with the current agent's base URL and owner auth.
+set -euo pipefail
+: "${AGENT_TOKEN:?mapi: AGENT_TOKEN is not set in this environment}"
+: "${API_BASE_URL:?mapi: API_BASE_URL is not set in this environment}"
+
+option_takes_value() {
+  case "$1" in
+    -X|--request|-H|--header|-d|--data|--data-raw|--data-binary|--data-urlencode|\
+    -F|--form|-T|--upload-file|-o|--output|-w|--write-out|\
+    --connect-timeout|--max-time|--retry|--retry-delay|--cacert|--cert|--key)
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+resolved=()
+has_body=false
+has_content_type=false
+has_api_target=false
+previous=""
+for argument in "$@"; do
+  case "$argument" in
+    -d|--data|--data-raw|--data-binary|--data-urlencode) has_body=true ;;
+    -d?*|--data=*|--data-raw=*|--data-binary=*|--data-urlencode=*)
+      has_body=true
+      ;;
+  esac
+  lower_argument="${argument,,}"
+  if [[ "$previous" == "-H" || "$previous" == "--header" ]]; then
+    [[ "$lower_argument" == content-type:* ]] && has_content_type=true
+  elif [[ "$lower_argument" == -hcontent-type:* \
+       || "$lower_argument" == --header=content-type:* ]]; then
+    has_content_type=true
+  fi
+  if [[ "$argument" == /api/* || "$argument" == /api ]]; then
+    has_api_target=true
+    argument="${API_BASE_URL%/}$argument"
+  elif [[ "$argument" == http://* || "$argument" == https://* \
+       || "$argument" == --url || "$argument" == --url=* ]]; then
+    printf '%s\n' \
+      "mapi: targets must be Möbius /api paths; refusing to forward owner auth" >&2
+    exit 2
+  elif [[ "$argument" != -* ]] && ! option_takes_value "$previous"; then
+    printf '%s\n' \
+      "mapi: unexpected target '$argument'; only Möbius /api paths are allowed" >&2
+    exit 2
+  fi
+  resolved+=("$argument")
+  previous="$argument"
+done
+
+if ! $has_api_target; then
+  printf '%s\n' "mapi: expected a Möbius /api target" >&2
+  exit 2
+fi
+
+curl_args=(-sS -H "Authorization: Bearer $AGENT_TOKEN")
+if $has_body && ! $has_content_type; then
+  curl_args+=(-H "Content-Type: application/json")
+fi
+exec curl "${curl_args[@]}" "${resolved[@]}"

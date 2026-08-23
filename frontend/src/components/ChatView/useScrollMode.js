@@ -750,6 +750,7 @@ export function entryRestoreDecision({ mode, saved, messages, scrollEl, phase })
   const savedPresent = !!saved
   const restorePhase = phase === 'cache-validating'
     || phase === 'cached'
+    || phase === 'stream-catchup'
     || phase === 'ready'
   if (mode?.kind !== 'INITIAL' || !restorePhase) {
     return { action: 'idle', resolved: false, savedPresent }
@@ -1390,9 +1391,10 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  * @param {'history'|'cache-validating'|'cached'|'stream-catchup'|'preparing'|'ready'} args.initialEntryPhase
  *   History blocks reveal, cached is a caller-validated restoration window,
  *   cache-validating mounts a complete cached window behind the gate so its
- *   exact nested coordinate can be checked, stream-catchup holds a running
- *   transcript until replay commits, preparing is a hidden progressive
- *   cold render, and ready means authoritative history has settled.
+ *   exact nested coordinate can be checked, stream-catchup is an authoritative
+ *   running frame whose transport replay may still reconcile in place,
+ *   preparing is a hidden progressive cold render, and ready means settled
+ *   authoritative history.
  * @param {() => void} [args.onCachedCoordinateReady]
  *   Promotes a hidden validation cache after its exact saved part resolves.
  * @param {boolean} args.ownsReadingPosition
@@ -1536,6 +1538,7 @@ export default function useScrollMode({
       // is assigned only after the caller proves saved-coordinate coverage.
       if (
         initialEntryPhaseRef.current !== 'cached'
+        && initialEntryPhaseRef.current !== 'stream-catchup'
         && initialEntryPhaseRef.current !== 'ready'
       ) return
       if (forceRevealRef.current) forceRevealRef.current()
@@ -2269,6 +2272,7 @@ export default function useScrollMode({
     let revealTimer = 0
     let mountMutationObserver = null
     const entryReady = () => initialEntryPhaseRef.current === 'cached'
+      || initialEntryPhaseRef.current === 'stream-catchup'
       || initialEntryPhaseRef.current === 'ready'
     const requestRevealOnQuiet = () => {
       clearTimeout(revealTimer)

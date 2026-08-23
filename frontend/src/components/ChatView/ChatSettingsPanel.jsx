@@ -225,10 +225,6 @@ export default function ChatSettingsPanel({
   autoResumeSaving = false,
   autoResumeError = '',
   onAutoResumeChange,
-  restartResumeEnabled = true,
-  restartResumeSaving = false,
-  restartResumeError = '',
-  onRestartResumeChange,
   onChange,
   // Shared promise tail for picker writes, handoffs, and message sends.
   settingsSaveTailRef,
@@ -608,9 +604,6 @@ export default function ChatSettingsPanel({
   const autoResumeSwitchId = chatId
     ? `chat-settings-auto-resume-${chatId}`
     : undefined
-  const restartResumeSwitchId = chatId
-    ? `chat-settings-restart-resume-${chatId}`
-    : undefined
   const appProviderLocked = chat?.created_by_app_id != null
 
   // Build the per-provider displayed-models list once per render. The backend
@@ -630,12 +623,7 @@ export default function ChatSettingsPanel({
   }, [registry, hiddenIds, selectedModel, selectedProvider, draftModel, draftProvider])
 
   const currentProviderConfigured = availability.configuredProviders.has(draftProvider)
-  const currentProviderInfo = PROVIDER_INFO[draftProvider]
-  const currentProviderLabel = currentProviderInfo?.label || draftProvider
-  // A chat can deliberately have no model override: the provider then chooses
-  // its own default. Keep that real state selected in the picker instead of
-  // making every explicit model row look inactive.
-  const usesProviderDefault = !selectedModel
+  const currentProviderLabel = PROVIDER_INFO[draftProvider]?.label || draftProvider
 
   return (
     <div className="csp">
@@ -695,31 +683,9 @@ export default function ChatSettingsPanel({
             </span>
           </div>
       )}
-      {dataReady && usesProviderDefault && currentProviderInfo && (
-        <div className="csp__default-model">
-          <div
-            className="csp-row csp-row--selected csp-row--static"
-            aria-label={`Using ${currentProviderLabel}'s default model`}
-          >
-            <span className={`csp-row__icon${draftProvider === 'claude' ? ' csp-row__icon--claude' : ''}`}><currentProviderInfo.Logo /></span>
-            <span className="csp-row__main">
-              <span className="csp-row__title">
-                <span>{currentProviderLabel} default model</span>
-              </span>
-              <span className="csp-row__sub">
-                No specific model is pinned for this chat
-              </span>
-            </span>
-            <span className="csp-row__dot" aria-hidden="true" />
-          </div>
-          <div className="csp-effort-indent">
-            <EffortStepper
-              efforts={currentProviderInfo.efforts}
-              value={draftEffort}
-              onChange={handleEffortChange}
-              disabled={switchBusy || !currentProviderConfigured}
-            />
-          </div>
+      {dataReady && !selectedModel && (
+        <div className="csp__selection-required" role="status" aria-live="polite">
+          Choose a model before sending your message.
         </div>
       )}
       {dataReady && PROVIDER_ORDER.map(pid => {
@@ -756,7 +722,7 @@ export default function ChatSettingsPanel({
                   ? 'App chats keep their original provider. Create a new app chat to use this provider.'
                   : (isCrossProvider ? 'Prepare this chat and switch providers' : undefined)}
               >
-                <span className={`csp-row__icon${pid === 'claude' ? ' csp-row__icon--claude' : ''}`}><info.Logo /></span>
+                <span className="csp-row__icon"><info.Logo /></span>
                 <span className="csp-row__main">
                   <span className="csp-row__title">
                     <span>{m.label}</span>
@@ -815,57 +781,25 @@ export default function ChatSettingsPanel({
           )
         })
       })}
-      {(onAutoResumeChange || onRestartResumeChange) && (
+      {onAutoResumeChange && (
         <div className="csp__automation">
           <div className="csp__label csp__label--automation">Automation</div>
-          {onAutoResumeChange && (
-            <>
-              <div
-                className="csp__automation-row"
-              >
-                <label className="csp__automation-copy" htmlFor={autoResumeSwitchId}>
-                  <span className="csp__automation-title">Automatically continue after usage limits</span>
-                </label>
-                <Switch
-                  className="chat-policy-switch"
-                  id={autoResumeSwitchId}
-                  checked={!!autoResumeEnabled}
-                  onCheckedChange={onAutoResumeChange}
-                  disabled={!!autoResumeSaving}
-                />
-              </div>
-              {autoResumeError && (
-                <p className="csp__automation-error" role="alert">
-                  {autoResumeError}
-                </p>
-              )}
-            </>
-          )}
-          {onRestartResumeChange && (
-            <>
-              <div
-                className="csp__automation-row"
-              >
-                <label
-                  className="csp__automation-copy"
-                  htmlFor={restartResumeSwitchId}
-                >
-                  <span className="csp__automation-title">Continue after planned restarts</span>
-                </label>
-                <Switch
-                  className="chat-policy-switch"
-                  id={restartResumeSwitchId}
-                  checked={!!restartResumeEnabled}
-                  onCheckedChange={onRestartResumeChange}
-                  disabled={!!restartResumeSaving}
-                />
-              </div>
-              {restartResumeError && (
-                <p className="csp__automation-error" role="alert">
-                  {restartResumeError}
-                </p>
-              )}
-            </>
+          <div className="csp__automation-row">
+            <label className="csp__automation-copy" htmlFor={autoResumeSwitchId}>
+              <span className="csp__automation-title">Automatically continue after usage limits</span>
+            </label>
+            <Switch
+              className="chat-policy-switch"
+              id={autoResumeSwitchId}
+              checked={!!autoResumeEnabled}
+              onCheckedChange={onAutoResumeChange}
+              disabled={!!autoResumeSaving}
+            />
+          </div>
+          {autoResumeError && (
+            <p className="csp__automation-error" role="alert">
+              {autoResumeError}
+            </p>
           )}
         </div>
       )}

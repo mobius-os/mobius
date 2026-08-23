@@ -1,12 +1,11 @@
-"""GitHub connection routes: device flow, PAT fallback, read surface, submit.
+"""GitHub connection routes: device flow, read surface, and reviewed writes.
 
 Connect endpoints persist a token via app.github_auth (owner OR a
 github_connect app — so the Contribute app can drive connect from its
 own UI — CSRF-guarded, rate-limited — INV4). github_connect is the
 credential-management grant: an app with it can start/complete the connect
-flow, submit a PAT, inspect connection status, and disconnect. A
-normal connect still needs the owner to authorize on github.com or
-paste their own token, but the grant itself is powerful — see the
+flow, inspect connection status, and disconnect. A normal connect still needs
+the owner to authorize on github.com, but the grant itself is powerful — see the
 get_owner_or_app_with_github_connect docstring. The separate github_access
 grant gates the remote read and reviewed-submit surface.
 (/api/{path}, /graphql) is read-only by construction (INV2): the REST
@@ -77,18 +76,14 @@ from app.database import get_db
 from app.github_connection import (
   _ACCESS_TOKEN_URL,
   _API_BASE,
-  _CLASSIC_TOKEN_URL,
-  _CLASSIC_WORKFLOW_TOKEN_URL,
   _GITHUB_LOGIN,
-  GithubConnectStartRequest,
-  GithubTokenRequest,
   _bounded_provider_int,
   _github_connection_transaction,
+  has_full_pr_access,
   _github_user,
   _start_device_attempt,
   _device_attempt_result,
   _current_device_attempt,
-  _connect_token_locked,
 )
 from app.github_checks import (
   _contributions_dir,
@@ -166,16 +161,13 @@ from app.github_contributions import (
   _apply_reviewed_pr_labels,
   _find_existing_pr,
   _existing_branch_pr,
-  _is_workflow_scope_push_error,
   _is_transient_push_error,
   _push_branch,
   _push_topic_branch,
   _github_remote_slug,
   _ensure_owner_fork_remote,
   _inspect_owner_fork_default_branch,
-  _build_fork_compatible_topic_commit,
-  _sync_owner_fork_with_workflow_scope,
-  _push_reviewed_topic,
+  _sync_owner_fork,
   _submit_prepared_pr,
   _preflight_prepared_stack,
   _push_stack_tip_with_lease,
@@ -308,15 +300,14 @@ class ContributionStackLandRequest(BaseModel):
 @_limiter.limit("3/minute")
 async def connect_start(
   request: Request,
-  body: GithubConnectStartRequest | None = None,
   _: models.Owner = Depends(get_owner_or_app_with_github_connect),
 ):
   """Starts exactly one GitHub device flow and returns its user code."""
   # All credential/attempt mutations share this lock. In particular, a start
   # cannot publish a ghost attempt after its client timed out behind an older
-  # poll, PAT connection, or Disconnect.
+  # poll or Disconnect.
   async with _github_connection_transaction():
-    return await _start_device_attempt(request, body)
+    return await _start_device_attempt(request)
 
 
 
@@ -439,6 +430,18 @@ async def connect_poll(
       flow.pop("pending_token", None)
       github_auth.set_device_flow(flow)
       return _device_attempt_result(flow, now=now)
+    if not has_full_pr_access(scopes):
+      flow.update(
+        status="failed",
+        reason="insufficient_scopes",
+        message=(
+          "GitHub did not grant the full PR access Contribute needs. "
+          "Try connecting again and approve the complete permission request."
+        ),
+      )
+      flow.pop("pending_token", None)
+      github_auth.set_device_flow(flow)
+      return _device_attempt_result(flow, now=now)
     github_auth.write_credentials(
       token=token, login=login, user_id=user_id, scopes=scopes,
       source="device",
@@ -465,21 +468,6 @@ async def connect_cancel(
       flow.pop("pending_token", None)
       github_auth.set_device_flow(flow)
     return _device_attempt_result(flow)
-
-
-
-
-@router.post("/connect/token", dependencies=[Depends(reject_cross_site)])
-@_limiter.limit("5/minute")
-async def connect_token(
-  request: Request,
-  body: GithubTokenRequest,
-  _: models.Owner = Depends(get_owner_or_app_with_github_connect),
-):
-  """Connects GitHub with a pasted classic personal access token."""
-  async with _github_connection_transaction():
-    return await _connect_token_locked(body)
-
 
 @router.get("/status")
 async def github_status(
@@ -515,8 +503,6 @@ async def github_status(
     "scopes": (state.get("scopes") or []) if connected else [],
     "token_source": state.get("token_source") if connected else None,
     "device_flow_available": bool(get_settings().github_oauth_client_id),
-    "classic_token_url": _CLASSIC_TOKEN_URL,
-    "classic_workflow_token_url": _CLASSIC_WORKFLOW_TOKEN_URL,
     "gh_version": github_auth.gh_version(),
     "active_attempt": active_attempt,
     "autopilot_available": True,
@@ -551,7 +537,7 @@ async def github_source_status(
     "slug": row.slug,
     "version": row.version,
     "manifest_url": row.manifest_url,
-    "share_manifest_url": row.share_manifest_url,
+    "published_manifest_url": row.published_manifest_url,
     "source_dir": row.source_dir,
   } for row in rows]
 

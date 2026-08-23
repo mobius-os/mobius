@@ -25,6 +25,11 @@ def _args() -> argparse.Namespace:
     "--name",
     help="exact display-name search; may return multiple apps",
   )
+  parser.add_argument(
+    "--with-source-dir",
+    action="store_true",
+    help="include each app's source_dir in the compact result",
+  )
   return parser.parse_args()
 
 
@@ -63,11 +68,18 @@ def main() -> None:
   except (urllib.error.URLError, json.JSONDecodeError) as exc:
     print(f"Could not list apps: {exc}", file=sys.stderr)
     raise SystemExit(1) from exc
-  compact = [
-    {"id": app.get("id"), "name": app.get("name"), "slug": app.get("slug")}
-    for app in apps
-    if isinstance(app, dict) and _matches(app, args)
-  ]
+  compact = []
+  for app in apps:
+    if not isinstance(app, dict) or not _matches(app, args):
+      continue
+    item = {
+      "id": app.get("id"),
+      "name": app.get("name"),
+      "slug": app.get("slug"),
+    }
+    if args.with_source_dir:
+      item["source_dir"] = app.get("source_dir")
+    compact.append(item)
   print(json.dumps(compact, ensure_ascii=False, separators=(",", ":")))
 
 

@@ -4,6 +4,7 @@ import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.
 import ActivityStretch from './ActivityStretch.jsx'
 import { groupActivityRuns, coalesceThinkingEntries } from './groupBlocks.js'
 import QuestionCard from './QuestionCard.jsx'
+import SecureInputCard from './SecureInputCard.jsx'
 import MessageSources from './MessageSources.jsx'
 import Attachments from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
@@ -18,6 +19,8 @@ import { stripAugmentation } from './msgText.js'
 import ErrorCard from './ErrorCard.jsx'
 import ContextCompactionMarker from './ContextCompactionMarker.jsx'
 import { assistantBlockKey } from './streamPromotion.js'
+import { copyAssistantSelection } from './markdownClipboard.js'
+import { goalMessageObjectiveFromText } from './goalProgress.js'
 
 
 // Answerability is purely a function of the block + its position + live hint.
@@ -39,6 +42,41 @@ function blockAnswerable(block, { msg, isLastMsg, liveQuestionId, onQuestionAnsw
     && !block.answers
     && liveQuestionId
     && block.question_id === liveQuestionId
+  )
+}
+
+function AssistantCopySurface({ msg, markdownByIndex, children }) {
+  if (msg.role !== 'assistant') return children
+
+  function markdownForBlock(element) {
+    const index = Number(element.dataset.assistantMarkdownBlock)
+    // A supplied map is authoritative, including a missing entry. Streaming
+    // and cold-rendered blocks intentionally omit source until the whole block
+    // is visible; falling back to msg.content here would copy the hidden tail.
+    if (markdownByIndex) return markdownByIndex.get(index) ?? ''
+    return msg.content ?? ''
+  }
+
+  return (
+    <div
+      className="chat__assistant-copy-surface"
+      onCopy={(event) => copyAssistantSelection(event, markdownForBlock)}
+    >
+      {children}
+    </div>
+  )
+}
+
+function UserMessageText({ text }) {
+  const goalObjective = goalMessageObjectiveFromText(text)
+  if (!goalObjective) return text
+
+  return (
+    <span className="chat__goal-message">
+      <span className="chat__goal-message-tag" aria-hidden="true">Goal</span>
+      <span className="chat__sr-only">Goal: </span>
+      <span className="chat__goal-message-objective">{goalObjective}</span>
+    </span>
   )
 }
 
@@ -149,6 +187,16 @@ function MsgContentInner({
     const lastEntryIdx = finalEntries.length
       ? finalEntries[finalEntries.length - 1].idx
       : -1
+    const assistantMarkdownByIndex = new Map(
+      msg.role !== 'assistant' ? [] : finalEntries.flatMap(({ item, idx }) => {
+        if (item.type !== 'text' || !item.content) return []
+        const coldFraction = Number(item._coldRenderFraction)
+        const fullyRendered = !(
+          Number.isFinite(coldFraction) && coldFraction > 0 && coldFraction < 1
+        )
+        return fullyRendered ? [[idx, item.content]] : []
+      }),
+    )
 
     // Render a stretch-breaking block by type. Activity entries (tool/thinking)
     // are folded into an ActivityStretch below; this renders only the `single`
@@ -180,7 +228,11 @@ function MsgContentInner({
           ? stripAugmentation(block.content) : block.content
         if (!text) return null
         return (
-          <div key={assistantBlockKey(block, i)} className={`chat__text chat__text--${msg.role}`}>
+          <div
+            key={assistantBlockKey(block, i)}
+            className={`chat__text chat__text--${msg.role}`}
+            data-assistant-markdown-block={msg.role === 'assistant' ? i : undefined}
+          >
             {msg.role === 'assistant'
               ? (isActiveAnswer
                   ? <ProgressiveMarkdown
@@ -195,7 +247,7 @@ function MsgContentInner({
                       onInternalNav={onInternalNav}
                       mediaDimensions={msg.media_dimensions}
                     />)
-              : text}
+              : msg.role === 'user' ? <UserMessageText text={text} /> : text}
           </div>
         )
       }
@@ -203,7 +255,6 @@ function MsgContentInner({
         return (
           <ContextCompactionMarker
             key={assistantBlockKey(block, i)}
-            block={block}
           />
         )
       }
@@ -240,6 +291,16 @@ function MsgContentInner({
               pendingCardRef={answerable ? pendingQuestionRef : undefined}
             />
           </div>
+        )
+      }
+      if (block.type === 'secure_input') {
+        return (
+          <SecureInputCard
+            key={block.request_id || `secure-input-${i}`}
+            block={block}
+            chatId={chatId}
+            interactive={isActiveAnswer && isStreaming}
+          />
         )
       }
       if (block.type === 'error') {
@@ -334,7 +395,7 @@ function MsgContentInner({
     const nodes = groupActivityRuns(finalEntries)
 
     return (
-      <>
+      <AssistantCopySurface msg={msg} markdownByIndex={assistantMarkdownByIndex}>
         {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
         {nodes.map((node, nodeIdx) => {
           if (node.group) {
@@ -380,7 +441,7 @@ function MsgContentInner({
             disclosureKey={`${messageKey}:references`}
           />
         )}
-      </>
+      </AssistantCopySurface>
     )
   }
 
@@ -388,12 +449,13 @@ function MsgContentInner({
     ? stripAugmentation(msg.content) : msg.content
 
   return (
-    <>
+    <AssistantCopySurface msg={msg}>
       {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
       {text ? (
         <div
           key={isActiveAnswer ? 0 : undefined}
           className={`chat__text chat__text--${msg.role}`}
+          data-assistant-markdown-block={msg.role === 'assistant' ? 0 : undefined}
         >
           {msg.role === 'assistant'
             ? (isActiveAnswer
@@ -408,10 +470,10 @@ function MsgContentInner({
                     onInternalNav={onInternalNav}
                     mediaDimensions={msg.media_dimensions}
                   />)
-            : text}
+            : msg.role === 'user' ? <UserMessageText text={text} /> : text}
         </div>
       ) : null}
-    </>
+    </AssistantCopySurface>
   )
 }
 

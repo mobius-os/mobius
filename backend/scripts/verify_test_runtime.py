@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed health check for the disposable Compose E2E runtime."""
+"""Fail-closed serviceability check for the disposable Compose E2E runtime."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from urllib.request import urlopen
 
 FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 VERSION_URL = "http://127.0.0.1:8000/api/version"
-HEALTH_URL = "http://127.0.0.1:8000/api/health"
+READINESS_URL = "http://127.0.0.1:8000/api/ready"
 PLATFORM_ROOT = Path("/data/platform")
 
 
@@ -59,9 +59,9 @@ def platform_head() -> str:
 
 def main() -> int:
   try:
-    with urlopen(HEALTH_URL, timeout=3) as response:
+    with urlopen(READINESS_URL, timeout=3) as response:
       if response.status != 200:
-        raise RuntimeError(f"health returned HTTP {response.status}")
+        raise RuntimeError(f"readiness returned HTTP {response.status}")
     with urlopen(VERSION_URL, timeout=3) as response:
       version = json.load(response)
     head = platform_head()

@@ -222,7 +222,18 @@ def cgroup_memory_snapshot(
   proc_root: Path = Path("/proc"),
   cgroup_root: Path = Path("/sys/fs/cgroup"),
 ) -> dict[str, Any]:
-  """Return cgroup-v2 memory split so file cache is not mistaken for heap."""
+  """Return cgroup-v2 memory split so file cache is not mistaken for heap.
+
+  ``working_set_bytes`` is the unreclaimable footprint: everything the kernel
+  cannot simply drop before OOMing this cgroup. Both file-LRU halves are
+  subtracted, not just ``inactive_file``: the active/inactive split records
+  access recency, not evictability, and the kernel evicts either before an
+  OOM kill. Counting active file cache as footprint once held the frontend
+  build gate "constrained" for hours on an idle box, because a test/grep-heavy
+  agent session had promoted gigabytes of page cache to the active list and
+  nothing ever reclaims it on an idle machine. PSI — reported alongside —
+  remains the signal for whether reclaim is actually hurting.
+  """
   root = _cgroup_dir(proc_root=proc_root, cgroup_root=cgroup_root)
   current = _read_int(root / "memory.current")
   if current is None:
@@ -244,10 +255,11 @@ def cgroup_memory_snapshot(
     except ValueError:
       pass
   inactive_file = stat.get("inactive_file", 0)
+  file_lru = inactive_file + stat.get("active_file", 0)
   return {
     "available": True,
     "current_bytes": current,
-    "working_set_bytes": max(0, current - inactive_file),
+    "working_set_bytes": max(0, current - file_lru),
     "limit_bytes": limit,
     "swap_current_bytes": _read_int(root / "memory.swap.current"),
     "anon_bytes": stat.get("anon"),

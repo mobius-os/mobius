@@ -81,6 +81,7 @@ import { makeChat } from './chat.js'
 import { makeNav, makeSplit } from './navigation.js'
 import { makeCapabilities } from './capabilities.js'
 import { makeImmersive } from './immersive.js'
+import { makeClipboard } from './clipboard.js'
 import { tokenMatchesRuntime } from './token.js'
 
 export * from './storage.js'
@@ -208,6 +209,7 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
     nav: makeNav(),
     split: makeSplit(),
     immersive: makeImmersive({ appId }),
+    clipboard: makeClipboard(),
   }
   window.mobius = api
   _runtimeContext = { identityKey, tokenRef, storage, signal, capabilities, api }

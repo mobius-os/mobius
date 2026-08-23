@@ -55,7 +55,7 @@ def register_cron(
   the source schedule is due in its named IANA zone.
 
   Tests may inject ``scaffold`` explicitly. Production callers normally omit
-  it so the served checkout is preferred over the baked recovery floor.
+  it so the served checkout is preferred over the baked fallback.
   """
   if cron_mutation_blocked_in_test_runtime():
     raise HTTPException(500, "Cron mutation is disabled in the test runtime.")

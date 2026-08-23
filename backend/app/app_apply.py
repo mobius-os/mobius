@@ -55,6 +55,32 @@ log = logging.getLogger("mobius.app_apply")
 class ApplyResult:
   app: models.App
   mode: Literal["created", "updated", "unchanged"]
+  warnings: tuple[str, ...] = ()
+
+
+async def _sync_accepted_app_skills(
+  db: Session, app: models.App, manifest: dict | None,
+) -> tuple[str, ...]:
+  """Refresh declared skills at the same acceptance boundary as app source."""
+  from app import install
+
+  if manifest is None:
+    contract = app.capability_contract or {}
+    agent = contract.get("agent") if isinstance(contract, dict) else None
+    skills = agent.get("skills") if isinstance(agent, dict) else None
+    manifest = {
+      # Store metadata remains authoritative for WHICH skills are approved;
+      # the accepted local source revision owns their current bytes.
+      "skills": skills if isinstance(skills, list) else [],
+      "version": "accepted-local-revision",
+    }
+  warnings: list[str] = []
+  try:
+    await install._sync_app_skills(db, app, manifest, warnings)
+  except Exception as exc:
+    log.exception("app apply: skill sync failed post-commit")
+    warnings.append(f"skills: sync failed — {exc!r}")
+  return tuple(warnings)
 
 
 async def _git_operation(label: str, fn, *args):
@@ -301,7 +327,7 @@ async def apply_source_revision(
         app.jsx_source,
         app.compiled_path,
         app.source_commit,
-        app.share_manifest_url,
+        app.published_manifest_url,
         app.icon_png,
         app.icon_override_png,
       )
@@ -333,7 +359,10 @@ async def apply_source_revision(
         if "offline_capable" in runtime_fields:
           app.offline_capable = runtime_fields["offline_capable"]
         app.capability_contract = contract_from_app_state(
-          app, capabilities=runtime_fields["capabilities"],
+          app,
+          capabilities=runtime_fields["capabilities"],
+          public_access=runtime_fields["public_access"],
+          contract_permissions=manifest.get("permissions") or {},
         )
       if chat_id is not None:
         app.chat_id = chat_id
@@ -354,10 +383,10 @@ async def apply_source_revision(
         app.manifest_url is None
         and app.source_commit != previous_state[7]
       ):
-        # A share URL is a statement about one exact accepted package. Once
+        # A distribution manifest is a statement about one exact accepted package. Once
         # local source advances, require publication verification again rather
         # than silently offering a stale repository to other people.
-        app.share_manifest_url = None
+        app.published_manifest_url = None
       published = publish_staged_bundle(app.id, staged)
       staged = None
 
@@ -373,14 +402,15 @@ async def apply_source_revision(
           source,
           str(published),
           app.source_commit,
-          app.share_manifest_url,
+          app.published_manifest_url,
           app.icon_png,
           app.icon_override_png,
         )
       )
       if not changed:
         db.rollback()
-        return ApplyResult(app=app, mode="unchanged")
+        warnings = await _sync_accepted_app_skills(db, app, manifest)
+        return ApplyResult(app=app, mode="unchanged", warnings=warnings)
 
       app.jsx_source = source
       app.compiled_path = str(published)
@@ -395,7 +425,12 @@ async def apply_source_revision(
       if previous_bundle != published:
         unlink_app_bundle(app.id, previous_bundle)
       db.refresh(app)
-      return ApplyResult(app=app, mode="created" if created else "updated")
+      warnings = await _sync_accepted_app_skills(db, app, manifest)
+      return ApplyResult(
+        app=app,
+        mode="created" if created else "updated",
+        warnings=warnings,
+      )
   except Exception:
     db.rollback()
     if staged is not None:

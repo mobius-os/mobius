@@ -13,7 +13,7 @@ def live_frontend_dir(data_dir: str) -> Path:
 
 
 def baked_frontend_dir() -> Path:
-  # The baked SPA is an image-level recovery floor, not relative to this clone.
+  # The baked SPA is an image-level fallback, not relative to this clone.
   return Path(os.environ.get("MOBIUS_BAKED_STATIC_DIR", "/app/static"))
 
 
@@ -28,7 +28,7 @@ def is_complete_frontend_build(directory: Path) -> bool:
 
 
 def resolve_frontend_dir(data_dir: str) -> Path:
-  """Return the live complete build, otherwise the immutable recovery floor.
+  """Return the live complete build, otherwise the immutable baked fallback.
 
   Resolution is deliberately request-time: the frontend watcher swaps dist
   while the backend remains running. The short memo avoids repeated stat sets

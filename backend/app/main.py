@@ -5,6 +5,8 @@ static files.  API routes are registered first; the frontend SPA is
 mounted last as a catch-all so that client-side routing works.
 """
 
+import ipaddress
+import json
 import logging
 import mimetypes
 import os
@@ -15,6 +17,7 @@ from contextlib import asynccontextmanager
 from datetime import timezone
 from email.utils import formatdate, parsedate_to_datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Do this before importing FastAPI, SQLAlchemy, or any app module that may
 # create worker threads. See allocator.limit_glibc_arenas for the observed
@@ -37,9 +40,9 @@ from app.database import (
   SessionLocal,
   engine,
   reset_database_request_label,
-  run_migrations,
   set_database_request_label,
 )
+from app.schema_migrations import orm_schema_gaps, run_migrations
 from app.http_caching import strip_range
 from app.frontend_assets import (
   baked_frontend_dir,
@@ -50,6 +53,7 @@ from app.memory_observability import record_memory_checkpoint
 from app.response_policy import (
   CHAT_EMBED_CSP,
   PUBLISHED_SITE_CSP,
+  absolute_csp_origin,
   app_frame_csp,
   shell_csp,
   static_embed_csp,
@@ -63,13 +67,17 @@ from app import activity, models
 from app.routes import (
   admin_router, apps_router, auth_router,
   chat_embed_router, chat_logs_router, chat_router, chats_router, chats_stream_router,
+  secure_inputs_router,
   connectors_router, connectors_public_router,
-  debug_router, delegations_router, fs_router, github_router, media_router,
+  debug_router, delegations_router, fs_router, goal_plans_router, github_router, media_router,
+  identity_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
+  public_apps_router,
   secrets_router, self_reminders_router, settings_router, skills_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
   theme_router, uploads_router, platform_router,
   published_router,
+  connect_router,
 )
 
 _BOOT_ID = os.environ.get("MOBIUS_BOOT_ID") or f"{os.getpid()}-{time.time_ns()}"
@@ -95,7 +103,7 @@ def _install_pm_commit_launcher(source: Path, target: Path) -> bool:
   return True
 
 
-def _init_db():
+def _init_db() -> list[str]:
   """Create missing tables, then migrate existing ones, with retries.
 
   Creating tables first lets a migration move legacy data into a newly
@@ -107,18 +115,17 @@ def _init_db():
     try:
       Base.metadata.create_all(bind=engine)
       run_migrations(engine)
-      from app.database import orm_schema_gaps
       gaps = orm_schema_gaps(engine)
+      _SCHEMA_GAPS[:] = gaps
       if gaps:
         # A mapped column with no migration fails at first query, not at
         # boot. Surface it loudly here and through /api/health(+/strict)
         # instead of letting turns fail one by one.
-        _SCHEMA_GAPS[:] = gaps
         print(
           "CRITICAL: database is missing ORM-declared schema: "
           + ", ".join(gaps)
         )
-      return
+      return list(gaps)
     except OperationalError as e:
       if attempt < 9:
         delay = min(2 ** attempt, 10)
@@ -149,9 +156,8 @@ async def lifespan(app):
   _log = logging.getLogger(__name__)
   record_memory_checkpoint("lifespan_start")
   from app.startup import (
-    STARTUP_TASKS,
     StartupContext,
-    run_startup_tasks,
+    run_startup_plan,
   )
   startup_context = StartupContext(
     app=app,
@@ -162,7 +168,7 @@ async def lifespan(app):
     assert_provider_defaults=_assert_provider_defaults,
     logger=_log,
   )
-  await run_startup_tasks(startup_context, STARTUP_TASKS)
+  database_serviceable = await run_startup_plan(startup_context)
   from app.runtime_supervisors import RuntimeSupervisors
   supervisors = RuntimeSupervisors(
     settings=settings,
@@ -170,13 +176,20 @@ async def lifespan(app):
     restart_authorization=startup_context.restart_authorization,
     restart_fallback_chats=startup_context.restart_fallback_chats,
   )
-  await supervisors.start()
+  await supervisors.start_process_services()
   record_memory_checkpoint("startup_frontend_watcher_started")
-  record_memory_checkpoint("startup_ready")
+  if database_serviceable:
+    await supervisors.start_database_services()
+    record_memory_checkpoint("startup_ready")
   try:
     yield
   finally:
     record_memory_checkpoint("shutdown_begin")
+    try:
+      from app.public_app_transport import close_public_fetch_clients
+      await close_public_fetch_clients()
+    except Exception as exc:
+      _log.error("public fetch client shutdown failed: %s", exc, exc_info=True)
     # Preserve the final partial request-error windows across graceful restarts.
     # This is one bounded batch append, not one write per response.
     activity.flush_request_errors()
@@ -312,14 +325,58 @@ _APP_FRAME_PATH = re.compile(r"^/api/apps/[^/]+/frame$")
 # and it still cannot reach the shell's localStorage, cookies, or owner token.
 _STATIC_EMBED_CSP = static_embed_csp(settings.frontend_origin)
 _SHELL_CSP = shell_csp(os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", ""))
+_SERVICE_GATEWAY_ORIGIN = os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", "")
+_BROWSER_API_ORIGIN = os.environ.get("API_BASE_URL", "")
 _APP_FRAME_CSP = app_frame_csp(
   settings.frontend_origin,
-  os.environ.get("MOBIUS_SERVICE_GATEWAY_ORIGIN", ""),
+  _SERVICE_GATEWAY_ORIGIN,
   # Only an explicitly configured browser-reachable API origin belongs in a
   # frame policy. settings.api_base_url defaults to backend-local localhost
   # for agents and jobs, which must not become the viewer's localhost.
-  os.environ.get("API_BASE_URL", ""),
+  _BROWSER_API_ORIGIN,
 )
+
+def _loopback_delivery_origin(scope) -> str | None:
+  """Return the exact loopback origin serving a loopback request, if any."""
+  headers = dict(scope.get("headers") or ())
+  try:
+    client = scope.get("client")
+    peer = client[0] if isinstance(client, (list, tuple)) and client else None
+    peer_is_loopback = (
+      peer == "localhost"
+      or (isinstance(peer, str) and ipaddress.ip_address(peer).is_loopback)
+    )
+    if not peer_is_loopback:
+      return None
+    authority = headers.get(b"host", b"").decode("ascii")
+    scheme = str(scope.get("scheme") or "http")
+    origin = absolute_csp_origin(f"{scheme}://{authority}")
+    if origin is None:
+      return None
+    hostname = urlparse(origin).hostname
+    is_loopback = (
+      hostname == "localhost"
+      or (hostname is not None and ipaddress.ip_address(hostname).is_loopback)
+    )
+  except (UnicodeDecodeError, ValueError, TypeError):
+    return None
+  if not is_loopback:
+    return None
+  return origin
+
+
+def _app_frame_csp_for_scope(scope) -> str:
+  """Let the loopback test harness exercise the real opaque app frame."""
+  delivery_origin = _loopback_delivery_origin(scope)
+  if delivery_origin is None:
+    return _APP_FRAME_CSP
+  return app_frame_csp(
+    settings.frontend_origin,
+    _SERVICE_GATEWAY_ORIGIN,
+    _BROWSER_API_ORIGIN,
+    delivery_origin,
+  )
+
 
 # Published sites (`/sites/<token>/`) are public snapshots of the owner's own
 # agent-authored artifacts and Web Studio builds. The `sandbox` directive
@@ -389,7 +446,7 @@ class _SecurityHeadersMiddleware:
       elif chat_embed:
         csp = CHAT_EMBED_CSP
       elif app_frame:
-        csp = _APP_FRAME_CSP
+        csp = _app_frame_csp_for_scope(scope)
       else:
         csp = _SHELL_CSP
       response_headers.append((
@@ -510,6 +567,57 @@ class _ServiceSurfaceHostMiddleware:
     return await self.app(scope, receive, send)
 
 
+_SCHEMA_DEGRADED_API_PATHS = frozenset({
+  "/api/health",
+  "/api/health/strict",
+  "/api/ready",
+  "/api/version",
+  "/api/browser-bootstrap",
+  "/api/admin/restart",
+})
+
+
+class _SchemaServiceabilityMiddleware:
+  """Reject ordinary API work after a schema-incompatible boot.
+
+  Readiness keeps a new deployment out of rotation, but an already-running
+  reverse proxy can still reach an unhealthy replacement directly. Centralize
+  the degraded boundary here so requests receive one deterministic 503 instead
+  of executing arbitrary ORM queries and surfacing whichever missing column
+  they happen to touch first. Static shell assets and the bounded diagnostic /
+  restart endpoints remain available; Recovery repairs the database externally
+  and a normal restart performs the skipped startup phase.
+  """
+
+  def __init__(self, app):
+    self.app = app
+
+  async def __call__(self, scope, receive, send):
+    path = scope.get("path", "")
+    if (
+      scope["type"] == "http"
+      and _SCHEMA_GAPS
+      and path.startswith("/api/")
+      and path not in _SCHEMA_DEGRADED_API_PATHS
+    ):
+      body = json.dumps({
+        "detail": "database schema mismatch; restart after Recovery",
+        "schema_gaps": list(_SCHEMA_GAPS),
+      }, separators=(",", ":")).encode()
+      await send({
+        "type": "http.response.start",
+        "status": 503,
+        "headers": [
+          (b"content-type", b"application/json"),
+          (b"cache-control", b"no-store"),
+          (b"content-length", str(len(body)).encode()),
+        ],
+      })
+      await send({"type": "http.response.body", "body": body})
+      return
+    return await self.app(scope, receive, send)
+
+
 app.add_middleware(_BodySizeLimitMiddleware, max_bytes=_MAX_REQUEST_BODY_BYTES)
 
 app.add_middleware(
@@ -601,6 +709,7 @@ app.add_middleware(_OpaqueOriginCorsMiddleware)
 # before routing so it can never serve the shell, APIs, or another
 # service prefix.
 app.add_middleware(_ServiceSurfaceHostMiddleware)
+app.add_middleware(_SchemaServiceabilityMiddleware)
 app.add_middleware(_SecurityHeadersMiddleware)
 app.add_middleware(_DatabaseRequestContextMiddleware)
 app.add_middleware(_RequestErrorTelemetryMiddleware)
@@ -614,7 +723,9 @@ app.include_router(chat_router)
 app.include_router(chat_embed_router)
 app.include_router(chats_router)
 app.include_router(chats_stream_router)
+app.include_router(secure_inputs_router)
 app.include_router(delegations_router)
+app.include_router(goal_plans_router)
 app.include_router(chat_logs_router)
 app.include_router(connectors_router)
 app.include_router(connectors_public_router)
@@ -632,7 +743,9 @@ except Exception as _exc:  # pragma: no cover - defensive boot guard
   )
 app.include_router(notify_router)
 app.include_router(proxy_router)
+app.include_router(public_apps_router)
 app.include_router(local_services_router)
+app.include_router(connect_router)
 app.include_router(client_error_router)
 app.include_router(client_signal_router)
 app.include_router(settings_router)
@@ -641,6 +754,7 @@ app.include_router(uploads_router)
 app.include_router(media_router)
 app.include_router(secrets_router)
 app.include_router(github_router)
+app.include_router(identity_router)
 app.include_router(push_router)
 app.include_router(notifications_router)
 app.include_router(debug_router)
@@ -687,19 +801,19 @@ def health(response: Response):
 
 @app.get("/api/health/strict")
 def health_strict(response: Response):
-  """Serviceability probe for the container healthcheck.
+  """Schema-focused serviceability probe retained for diagnostics.
 
   Distinct from `/api/health` (reachability — must stay 200 whenever the
   process answers, or the shell would flip devices to offline UI): this
-  variant fails when the process is up but cannot serve turns, e.g. the
-  database is missing ORM-declared schema. Docker's HEALTHCHECK uses
-  `curl -f`, so the 503 marks the container unhealthy instead of silently
-  healthy while every turn dies.
+  variant fails when the database is missing ORM-declared schema. Deployment
+  healthchecks use `/api/ready`, which includes this schema contract plus the
+  chat-persistence writer contract.
   """
   response.headers["Cache-Control"] = "no-store"
-  if _SCHEMA_GAPS:
+  gaps = list(_SCHEMA_GAPS)
+  if gaps:
     response.status_code = 503
-    return {"status": "schema_mismatch", "schema_gaps": _SCHEMA_GAPS}
+    return {"status": "schema_mismatch", "schema_gaps": gaps}
   return {"status": "ok", "boot_id": _BOOT_ID}
 
 
@@ -719,16 +833,15 @@ def browser_bootstrap():
 
 @app.get("/api/ready")
 def ready(response: Response):
-  """Readiness probe: 200 only when chat persistence can actually serve.
+  """Readiness probe: 200 only when chats can actually be served.
 
-  Distinct from `/api/health` (liveness — the process is up and answering
-  HTTP). The single-writer chat-persistence actor can fail to start, go
-  fatal, or be stopping while the process still answers `/api/health` 200;
-  in that window every chat write fails. A deploy (and `deploy-prod.sh`'s
-  health gate) must NOT green on a process that can't persist a chat, so
-  this route returns 503 until the writer is genuinely ready.
+  Distinct from `/api/health` (reachability — the process is answering HTTP),
+  this route also requires an ORM-compatible database and a usable
+  single-writer chat-persistence actor. A deploy must not green while a mapped
+  column is absent or every chat write will fail, even though the process can
+  still answer ordinary HTTP requests.
 
-  `is_writer_ready()` (via `writer_readiness`) owns the predicate: the
+  After the schema gate, `writer_readiness()` owns the writer predicate: the
   writer singleton exists, its worker thread is alive, and the actor is
   neither fatal nor stopping. The route only maps the verdict to a status
   code and surfaces the reason. Startup ordering is fine — the lifespan
@@ -736,6 +849,14 @@ def ready(response: Response):
   window where this false-fails.
   """
   response.headers["Cache-Control"] = "no-store"
+  gaps = list(_SCHEMA_GAPS)
+  if gaps:
+    response.status_code = 503
+    return {
+      "ready": False,
+      "reason": "schema_mismatch",
+      "schema_gaps": gaps,
+    }
   from app.chat_writer import writer_readiness
   is_ready, reason = writer_readiness()
   if is_ready:
@@ -955,6 +1076,15 @@ def _resolve_asset_file(asset_path: str) -> Path | None:
 # Push (see frontend/public/sw-push.js). Same delivery contract at every use
 # site below.
 _SERVICE_WORKER_SCRIPTS = frozenset({"sw.js", "sw-push.js"})
+
+# Small, same-origin worker scripts that are deliberately NOT precached (mirrors
+# the frontend precache-policy.mjs UNPRECACHED_WORKERS list). A worker runs under
+# the Content-Security-Policy of its OWN response, so — exactly like sw.js — it
+# must revalidate on every load. Without this the browser caches the worker by
+# HTTP heuristic freshness, and a device that fetched it under an earlier policy
+# keeps executing under that stale CSP: this is how on-device Pocket TTS stayed
+# WebAssembly-blocked even after shell_csp restored the 'wasm-unsafe-eval' source.
+_UNPRECACHED_WORKER_SCRIPTS = frozenset({"speech/pocket-tts-worker.js"})
 
 # The push worker's scope. It exists only to name a URL prefix inside the
 # shell's PWA scope, and must never resolve to a document — a page here would
@@ -1298,6 +1428,19 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
     # Resolve which build serves THIS request (live dist if complete, else the
     # baked floor) once, up front — per request, never a module-load snapshot.
     static_dir = _resolve_static_dir()
+    # An explicitly public app owns its exact top-level slug. It still runs in
+    # the ordinary opaque sandbox, but the tiny parent host carries only a
+    # short-lived exact-app public capability — never the owner's session.
+    try:
+      from app.routes.public_apps import public_app_page_for_path
+      public_page = await run_in_threadpool(public_app_page_for_path, path)
+    except Exception:
+      logging.getLogger(__name__).exception(
+        "public app host resolution failed for path=%s", path,
+      )
+      public_page = None
+    if public_page is not None:
+      return public_page
     app_slug = await run_in_threadpool(_top_level_app_slug_alias, path)
     if app_slug:
       from fastapi.responses import RedirectResponse
@@ -1357,7 +1500,7 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
       # If-None-Match on every request, so a 304 keeps the
       # download cheap when nothing changed.
       headers = _public_static_headers(path)
-      if path in _SERVICE_WORKER_SCRIPTS:
+      if path in _SERVICE_WORKER_SCRIPTS or path in _UNPRECACHED_WORKER_SCRIPTS:
         headers["Cache-Control"] = "no-cache, must-revalidate"
         # A worker script is a REVALIDATING response (no-cache + the mtime ETag
         # FileResponse sets), so it must never answer a 206. A

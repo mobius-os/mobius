@@ -115,6 +115,7 @@ def _fake_browser(tmp_path: Path) -> tuple[Path, Path]:
     "  eval)\n"
     "    if [ \"$2\" = \"--stdin\" ]; then cat > \"$FAKE_BROWSER_STDIN_LOG\"; exit 0; fi\n"
     "    case \"$2\" in\n"
+    "      *body\\ \\>\\ iframe#app*) printf '%s\\n' \"${FAKE_PUBLIC_APP:-false}\" ;;\n"
     "      *src.split*) printf '%s\\n' \"${FAKE_LOADED_ASSET:-none}\" ;;\n"
     "      *serviceWorker*) printf '%s\\n' true ;;\n"
     "      *) printf '%s\\n' \"${FAKE_AUTH_OK:-false}\" ;;\n"
@@ -177,6 +178,7 @@ def _run_helper(
   wait_error: bool = False,
   timeout_eval_mode: str = "",
   bootstrap_intercept_once: bool = False,
+  public_app: bool = False,
   existing_output: bytes | None = None,
   profile_locked: bool = False,
   subprocess_timeout: float | None = None,
@@ -243,6 +245,7 @@ def _run_helper(
     "FAKE_TIMEOUT_EVAL_MARKER": str(tmp_path / "timeout-eval-once"),
     "FAKE_BOOTSTRAP_INTERCEPT_ONCE": "1" if bootstrap_intercept_once else "0",
     "FAKE_BOOTSTRAP_INTERCEPT_MARKER": str(tmp_path / "bootstrap-intercepted"),
+    "FAKE_PUBLIC_APP": "true" if public_app else "false",
   }
   args = ["bash", str(script)]
   if content_only:
@@ -365,6 +368,13 @@ def test_helper_captures_after_authentication_is_confirmed(tmp_path: Path):
     for command in commands
   )
   assert all("test-token" not in command for command in commands)
+
+
+def test_auth_check_targets_login_surface_not_unrelated_password_fields():
+  source = SCRIPT.read_text(encoding="utf-8")
+
+  assert "[data-auth-surface=login]" in source
+  assert "input[type=password]" not in source
 
 
 def test_helper_accepts_a_stable_canonical_shell_route(tmp_path: Path):
@@ -514,6 +524,23 @@ def test_stale_shell_fails_instead_of_capturing_misleading_evidence(tmp_path: Pa
   assert "stale shell loaded" in result.stderr
   assert not output.exists()
   assert not marker.exists()
+
+
+def test_public_app_host_uses_its_mounted_frame_readiness_contract(tmp_path: Path):
+  result, output, marker, browser_log = _run_helper(
+    tmp_path,
+    auth_ok=True,
+    route="/published-map",
+    public_app=True,
+    loaded_asset="index-stale.js",
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert output.exists()
+  assert marker.exists()
+  commands = browser_log.read_text(encoding="utf-8").splitlines()
+  assert not any("src.split" in command for command in commands)
+  assert any("#status.is-ready" in command for command in commands)
 
 
 def test_preserve_cache_mode_is_explicit_and_skips_freshness_reset(tmp_path: Path):

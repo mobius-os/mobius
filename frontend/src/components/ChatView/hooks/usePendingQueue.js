@@ -171,12 +171,12 @@ export default function usePendingQueue(initialServerList = []) {
 
   const getVisiblePendingMessages = useCallback(
     () => pendingMessagesRef.current.filter(
-      msg => !steerReservedCidsRef.current.has(cidOf(msg)),
+      msg => !msg.hidden && !steerReservedCidsRef.current.has(cidOf(msg)),
     ),
     [],
   )
   const visiblePendingMessages = pendingMessages.filter(
-    msg => !steerReservedCids.has(cidOf(msg)),
+    msg => !msg.hidden && !steerReservedCids.has(cidOf(msg)),
   )
 
   // Internal helper: synchronously update both the ref and React state. Every

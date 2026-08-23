@@ -511,6 +511,31 @@ def test_send_message_rejects_cross_site_request(client, auth, chat):
   assert cross.status_code == 403
 
 
+def test_send_requires_explicit_model_before_any_durable_side_effect(
+  client, auth, chat, db,
+):
+  chat.agent_settings_json = None
+  db.commit()
+
+  response = client.post(
+    f"/api/chats/{chat.id}/messages",
+    json={"content": "keep this as a draft", "cid": "missing-model"},
+    headers=auth,
+  )
+
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"] == {
+    "code": "model_selection_required",
+    "message": "Choose a model before sending this chat.",
+  }
+  db.refresh(chat)
+  assert chat.messages == []
+  assert chat.pending_messages == []
+  assert db.query(models.ChatRun).filter(
+    models.ChatRun.chat_id == chat.id,
+  ).count() == 0
+
+
 def test_fresh_send_response_includes_stored_user_message(
   client, auth, chat, db, monkeypatch,
 ):

@@ -27,6 +27,7 @@ def _receipt(result: dict) -> dict:
     "chat_id": app.get("chat_id"),
     "preview_path": f"/app/{app_id}",
     "open_path": f"/shell/?app={app_id}",
+    "warnings": result.get("warnings") or [],
   }
 
 

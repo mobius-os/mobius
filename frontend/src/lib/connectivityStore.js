@@ -25,6 +25,18 @@ export const POLL_INTERVAL_MS = 20000
 // or a recovered PWA labelled offline until the regular poll.
 export const AMBIGUOUS_VERDICT_CONFIRM_MS = 1000
 
+export const ReachabilityPhase = Object.freeze({
+  ONLINE: 'online',
+  CHECKING: 'checking',
+  OFFLINE: 'offline',
+})
+
+function reachabilityPhase(state) {
+  if (!state.online) return ReachabilityPhase.OFFLINE
+  if (state.failureStreak > 0) return ReachabilityPhase.CHECKING
+  return ReachabilityPhase.ONLINE
+}
+
 /**
  * One reachability monitor shared by every shell consumer. The dependency
  * arguments keep the state machine directly testable without browser globals.
@@ -41,19 +53,38 @@ export function createConnectivityStore({
   clearIntervalFn = clearInterval,
 } = {}) {
   const listeners = new Set()
-  let snapshot = navigatorTarget?.onLine !== false
-  let connectivityState = { successStreak: 0, failureStreak: 0, online: snapshot }
+  let connectivityState = {
+    successStreak: 0,
+    failureStreak: 0,
+    online: navigatorTarget?.onLine !== false,
+  }
+  let phase = reachabilityPhase(connectivityState)
+  let recoveryGeneration = 0
   let monitor = null
   let verificationCheck = null
   let authoritativeReachabilityRevision = 0
 
   function getSnapshot() {
-    return snapshot
+    return phase !== ReachabilityPhase.OFFLINE
   }
 
-  function publish(next) {
-    if (snapshot === next) return
-    snapshot = next
+  function getPhaseSnapshot() {
+    return phase
+  }
+
+  function getRecoverySnapshot() {
+    return recoveryGeneration
+  }
+
+  function publish(nextState, nextPhase = reachabilityPhase(nextState)) {
+    const recovered = (
+      nextPhase === ReachabilityPhase.ONLINE
+      && phase !== ReachabilityPhase.ONLINE
+    )
+    connectivityState = nextState
+    if (phase === nextPhase) return
+    if (recovered) recoveryGeneration += 1
+    phase = nextPhase
     listeners.forEach((listener) => listener())
   }
 
@@ -65,12 +96,14 @@ export function createConnectivityStore({
       if (controller) {
         timer = setTimeoutFn(() => controller.abort(), PROBE_TIMEOUT_MS)
       }
-      const response = await fetchImpl(HEALTH_URL, {
+      await fetchImpl(HEALTH_URL, {
         method: 'GET',
         cache: 'no-store',
         signal: controller?.signal,
       })
-      return response.ok
+      // Any response proves transport reachability. Status handling belongs to
+      // the request owner and must not masquerade as an offline connection.
+      return true
     } catch {
       return false
     } finally {
@@ -79,27 +112,27 @@ export function createConnectivityStore({
   }
 
   function applyProbe(reachable) {
-    connectivityState = resolveOnline(
+    const next = resolveOnline(
       reachable,
       navigatorTarget?.onLine !== false,
       connectivityState,
     )
-    publish(connectivityState.online)
-    return connectivityState
+    publish(next)
+    return next
   }
 
-  // An uncached mutation response is stronger evidence than navigator.onLine
-  // or a cacheable health probe: it could only have come from the live server.
-  // Let owning write paths repair a stale offline verdict immediately instead
-  // of waiting for the next poll or Android's delayed `online` event.
+  // An authenticated HTTP response is stronger evidence than navigator.onLine
+  // or a failed health probe: it could only have come from the live server.
+  // Let durable streams and owning write paths repair a stale offline verdict
+  // immediately instead of waiting for the next poll or `online` event.
   function reportReachable() {
     authoritativeReachabilityRevision += 1
-    connectivityState = {
+    const next = {
       successStreak: Math.max(1, connectivityState.successStreak),
       failureStreak: 0,
       online: true,
     }
-    publish(true)
+    publish(next)
   }
 
   function startMonitor() {
@@ -219,6 +252,9 @@ export function createConnectivityStore({
   // reuse their coalesced monitor. Without consumers, perform one bounded probe
   // only—never create an ownerless polling interval.
   function verify() {
+    if (phase === ReachabilityPhase.ONLINE) {
+      publish(connectivityState, ReachabilityPhase.CHECKING)
+    }
     if (monitor) return monitor.check()
     if (verificationCheck) return verificationCheck
     const startedRevision = authoritativeReachabilityRevision
@@ -235,12 +271,22 @@ export function createConnectivityStore({
     return verificationCheck
   }
 
-  return { getSnapshot, subscribe, verify, reportReachable }
+  return {
+    getSnapshot,
+    getPhaseSnapshot,
+    getRecoverySnapshot,
+    subscribe,
+    verify,
+    reportReachable,
+  }
 }
 
 const connectivityStore = createConnectivityStore()
 
 export const getOnlineSnapshot = connectivityStore.getSnapshot
+export const getReachabilityPhaseSnapshot = connectivityStore.getPhaseSnapshot
+export const getRecoverySnapshot = connectivityStore.getRecoverySnapshot
 export const subscribeOnline = connectivityStore.subscribe
+export const subscribeRecovery = connectivityStore.subscribe
 export const verifyConnectivity = connectivityStore.verify
 export const reportNetworkReachable = connectivityStore.reportReachable

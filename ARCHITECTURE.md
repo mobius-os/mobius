@@ -6,7 +6,7 @@ Read this first if you just cloned the repo. It maps the system so you can find 
 
 Möbius is a self-hosted PWA where one owner chats with an in-product AI agent to build mini-apps and modify the platform itself. The "agent" is a coding-agent (Claude Code or Codex) running as a subprocess inside the container; a chat message spawns a turn, the backend streams the agent's output back over SSE, and the agent can compile JSX into mini-apps, edit the shell UI, manage files, and schedule tasks. The whole platform runs in a single Docker container and installs on Android/iOS as a PWA.
 
-The design has one line behind it: **low floor, high ceiling, no walls.** The agent is the product; everything else is substrate it operates on. Möbius bets on rising AI capability and inverts the usual defaults: **make the good path easy** — design, examples, prompts, and a clean script for any step that's identical every time — and **make the bad path harder but never impossible.** The owner can tell the agent to delete everything and it can; the net under it is the recovery floor, not a wall. **Code empowers the agent, it does not police it**: prevention lives in the instruction layer and learned memory, never in code-level validators or in removing a capability.
+The design has one line behind it: **low floor, high ceiling, no walls.** The agent is the product; everything else is substrate it operates on. Möbius bets on rising AI capability and inverts the usual defaults: **make the good path easy** — design, examples, prompts, and a clean script for any step that's identical every time — and **make the bad path harder but never impossible.** The owner can tell the agent to delete everything and it can; the net under it is the fallback floor, not a wall. **Code empowers the agent, it does not police it**: prevention lives in the instruction layer and learned memory, never in code-level validators or in removing a capability.
 
 **Intelligence over scripts.** A script, validator, or fixed procedure earns its place only for the unambiguous and identical-every-time — pull a promoted recovery image, rebuild the served frontend, a deterministic migration. Everything ambiguous — why something broke, how to reach the last good state, fixing what another agent did — is the agent reasoning in context. Branching logic to cover cases, or bespoke machinery to detect-and-auto-handle a situation, is the tell that you're building the wrong thing: script the certain step, **instruct** the agent to run it (sharpen the prompt if it forgets), and trust intelligence for the rest. The only automation worth keeping is one a tool already ships (a real watcher, HMR) — never flimsy glue invented to avoid instructing the agent. **Recovery** is this made concrete: an on-demand external agent that cannot rewrite its own image but reaches and fixes the stopped target by reasoning about what broke, not from a menu of canned reversions.
 
@@ -59,7 +59,7 @@ At startup `backend/app/main.py:1000` picks one static directory **at module loa
 /app/static/                   ← fallback (baked into the image, current with git HEAD)
 ```
 
-The `/data` volume persists across `docker compose build && up -d`, so a new image's `/app/static/` is masked by an old `/data/platform/frontend/dist/`. After a frontend deploy, refresh both source and dist and verify the bundle hash changed in `/data/platform/frontend/dist/assets/index-*.js`. Because the choice is made at module load, an in-container shell rebuild does not take effect until the uvicorn process restarts. Never delete `/app/static/` — it is the only recovery fallback and is root-owned.
+The `/data` volume persists across `docker compose build && up -d`, so a new image's `/app/static/` is masked by an old `/data/platform/frontend/dist/`. After a frontend deploy, refresh both source and dist and verify the bundle hash changed in `/data/platform/frontend/dist/assets/index-*.js`. Because the choice is made at module load, an in-container shell rebuild does not take effect until the uvicorn process restarts. Never delete `/app/static/` — it is the immutable frontend fallback and is root-owned.
 
 ### Security updates — who patches what
 
@@ -149,14 +149,16 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `response_policy.py` | Validated origin sources plus the shell, embedded-chat, opaque app-frame, packaged-document, and published-site policies shared by direct and proxied deployments |
 | `frontend_watcher.py` | Polling watcher that auto-rebuilds the served frontend clone (`/data/platform/frontend`) on edit — debounced `vite build`, atomic `.dist-next`→`dist` swap |
 | `config.py` | `Settings` via pydantic-settings; reads `.env` |
-| `database.py` | SQLAlchemy engine, `SessionLocal`, `Base`, `get_db`, and `run_migrations()` (idempotent boot-time additive `ALTER TABLE`s) |
+| `database.py` | SQLAlchemy engine, pool instrumentation, `SessionLocal`, `Base`, and `get_db`; contains no schema history |
+| `schema_migrations.py` | Append-only schema/data migrations, durable ledger primitives, and ORM/live-schema parity inspection; published functions are semantic-hash frozen |
+| `startup.py` | Two-phase boot: process/schema preflight first, then writer/reconciliation/database supervisors only after schema parity succeeds |
 | `models.py` | ORM tables: `Owner`, `Chat`, `ChatRun`, `App`, `PushSubscription`, `Notification` |
 | `schemas.py` | Pydantic request/response models |
 | `auth.py` | bcrypt hashing, JWT creation/decoding, Fernet encryption |
 | `deps.py` | FastAPI auth dependencies: `get_current_owner` (owner-only), `get_current_owner_or_app` (owner + app token), `get_principal`, `require_app_permission`, and `reject_cross_site` (CSRF) |
 | `compiler.py` | `compile_jsx()` — calls the Rolldown adapter to compile a JSX string into an ES module |
 | `providers.py` | `BaseProvider` adapters (`ClaudeProvider`, `CodexProvider`) + the `PROVIDERS` registry; identity/auth/env shaping for the SDK runners (`build_env`), and `get_skill_path()`. |
-| `claude_sdk_runner.py` | Claude SDK turn runner; passes `cli_path="/usr/local/bin/claude"` so the SDK drives the same pinned binary recovery + cron use |
+| `claude_sdk_runner.py` | Claude SDK turn runner; passes `cli_path="/usr/local/bin/claude"` so interactive chat and cron turns use the same pinned binary |
 | `codex_sdk_runner.py` | Codex SDK turn runner (Thread/TurnHandle + steer) |
 | `codex_appserver.py` | Small helper module: `codex_sdk_runner.py` imports its one surviving function, `_extract_bash_command`, which pulls the bash command string out of a shell tool item. The SDK runner does its own event/tool classification locally. |
 | `chat.py` | `run_chat()` background task: spawns the turn, publishes events, routes persistence through the actor |
@@ -210,6 +212,24 @@ recovery listener. The worker is deleted when the session finishes or expires.
 Self-hosters use the authority they already own:
 `docker compose exec -u 0 app bash`. This attaches to the live container and
 does not replace its normal process.
+
+### Health, readiness, and schema-degraded boot
+
+`GET /api/health` is reachability and remains HTTP 200 whenever the process can
+answer; the shell uses that distinction so a server fault never masquerades as
+the device being offline. `GET /api/ready` is serviceability: it requires both
+an ORM-compatible database and the single-writer persistence actor. Deployment
+and container probes use readiness. `GET /api/health/strict` retains the
+schema-only diagnostic contract.
+
+Boot runs `create_all`, append-only migrations, and `orm_schema_gaps()` before
+starting any database owner. A remaining gap enters a bounded degraded mode:
+ordinary APIs return one deterministic 503, database startup tasks and
+supervisors do not run, cron remains disabled, and static shell plus health,
+version, browser-bootstrap, and authenticated restart surfaces remain. External
+Recovery may alter the database, but the process intentionally keeps its boot
+verdict until restart; promoting only part of the skipped startup plan inside a
+health probe would create a second, race-prone boot mechanism.
 
 ### Misc shared helpers
 
@@ -429,7 +449,7 @@ The chat is large and self-contained; its hooks live beside it, not in `src/hook
 | Task | Start here |
 |------|------------|
 | New API route | New module in `backend/app/routes/` exposing `router` → register in `routes/__init__.py` (`_load(...)` line + `__all__`) → mount in `main.py` |
-| New ORM table / column | `backend/app/models.py` plus an idempotent `ALTER TABLE` entry in `database.py:run_migrations()` (runs at boot; `create_all` never ALTERs an existing table) |
+| New ORM table / column | `backend/app/models.py` plus a new numbered function at the append-only end of `backend/app/schema_migrations.py`; run the frozen previous-release upgrade contract (`create_all` never alters an existing table) |
 | Change request/response shape | `backend/app/schemas.py` + the owning route |
 | Add an auth dependency / change CSRF | `backend/app/deps.py` |
 | Persist anything chat-domain | A domain command in `backend/app/chat_writer.py` — never write `Chat.messages`/`Chat.pending_messages` directly |
@@ -925,10 +945,14 @@ every supervisor sweep, so a later ledger read cannot disagree with the boot.
 When a successful pass leaves a restart remainder, the same supervisor follows
 up after two seconds; a no-progress pass returns to the event/60-second cadence.
 It creates neither per-chat workers nor a permanent short poll. Paid
-provider-limit continuation (`auto_resume_on_limit`) initially defaults off;
-planned-restart continuation (`auto_resume_on_restart`) initially defaults on.
-Each chat stores both choices independently, and changing either choice seeds
-future chats without rewriting existing conversations.
+provider-limit continuation (`auto_resume_on_limit`) is an owner choice that
+initially defaults off; each chat stores it independently, and changing it
+seeds future chats without rewriting existing conversations. Planned-restart
+continuation is always on and has no owner toggle — Möbius interrupted the work
+itself, so it should just continue. The per-chat `auto_resume_on_restart`
+column remains only as an internal latch: it defaults on and is cleared solely
+by `delegations.mark_cancelled`, so a cancelled delegated child cannot
+resurrect itself when the boot sweep claims restart parks.
 
 ### Tool output rendering
 
@@ -1075,10 +1099,12 @@ placement intent and never encode pane ids, split directions, or breakpoints.
 `frontend/src/components/Shell/paneModel.js` is the pure workspace model. A
 workspace contains a binary `layout` tree, a map of pane records, a focused pane,
 a presentation mode (`single` or `panes`), and the single-screen slot. Each pane
-owns its ordered tabs and `activeTabKey`; tab identity and navigation mapping
-remain in `tabModel.js`. The model normalizes persisted input, enforces unique
-tabs across panes, bounds pane count/depth, collapses empty splits, and returns
-the same reference for no-op transitions.
+owns its visible tab order, `activeTabKey`, and a most-recent-first
+`recentTabKeys` permutation used when its active tab closes or moves away; tab
+identity and navigation mapping remain in `tabModel.js`. The model normalizes
+persisted input, seeds older blobs from the former neighbour-close order,
+enforces unique tabs across panes, bounds pane count/depth, collapses empty
+splits, and returns the same reference for no-op transitions.
 
 `useWorkspaceSession.js` is the live state owner. It composes reducer transitions
 through a synchronous ref boundary, persists the sole versioned

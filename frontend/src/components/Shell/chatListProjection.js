@@ -40,6 +40,33 @@ export function withChatRunState(rows, chatId, running) {
   })
 }
 
+export function ownerInputChangeFromEvent(event) {
+  const safeEvent = event && typeof event === 'object' ? event : {}
+  const hasQuestionId = Object.hasOwn(safeEvent, 'questionId')
+  const inputKind = ['question', 'secure_input'].includes(safeEvent.inputKind)
+    ? safeEvent.inputKind
+    // Compatibility while a new frontend and the prior backend generation can
+    // briefly overlap during a live platform update.
+    : hasQuestionId && safeEvent.questionId ? 'question' : null
+  return {
+    kind: inputKind,
+    ...(hasQuestionId ? { questionId: safeEvent.questionId || null } : {}),
+  }
+}
+
+export function withChatOwnerInput(
+  rows,
+  chatId,
+  { kind = null, questionId } = {},
+) {
+  return withChatListRowPatch(rows, chatId, {
+    owner_input_kind: kind,
+    ...(questionId !== undefined
+      ? { pending_question_id: questionId || null }
+      : {}),
+  })
+}
+
 export function withChatRename(rows, chatId, { title, updatedAt } = {}) {
   return withChatListRowPatch(rows, chatId, {
     ...(typeof title === 'string' ? { title } : {}),

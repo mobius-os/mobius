@@ -80,7 +80,7 @@ security migration, not a routine cache-name bump.
 ## Failure and rollback boundaries
 
 - If the editable frontend build is incomplete, both shell and standalone
-  routes select the baked recovery floor through one resolver.
+  routes select the baked fallback through one resolver.
 - If the signed index template loses a required boot seam, standalone returns
   a retryable 503 rather than falling back to direct app execution.
 - A missing/deleted app remains a 404 at the backend route; a deletion observed

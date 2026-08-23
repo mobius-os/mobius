@@ -3,7 +3,7 @@
 # authenticated Möbius shell.
 #
 # Thin wrapper around agent-screenshot.sh (the general authenticated-
-# screenshot helper). Kept for its historical signature so recovery.md
+# screenshot helper). Kept for its historical signature so platform-maintenance.md
 # and existing callers keep working:
 #
 #   preview_app.sh [--standalone] <app_id> [output_path]

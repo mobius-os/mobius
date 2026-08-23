@@ -16,13 +16,14 @@ from pathlib import Path
 from urllib.parse import quote
 
 from app import github_auth
-from app.contribution_errors import ContributionSubmitError
+from app.contribution_errors import ContributionSubmitError, push_rejected
 from app.github_contribution_contract import (
   GIT_SHA as _GIT_SHA,
   PRE_PR_CHECK_ACTIVE_STATES as _ACTIVE_STATES,
 )
 from app import github_contribution_git as _git_ops
 from app import github_contributions as _contrib
+from app.github_connection import has_full_pr_access
 
 
 _SUPPORTED_WORKFLOWS = {
@@ -197,10 +198,9 @@ def dispatch_pre_pr_checks(
   token = github_auth.get_token()
   state = github_auth.read_state() or {}
   login = str(state.get("login") or "")
-  scopes = set(state.get("scopes") or [])
   if not token or not login:
     raise ContributionSubmitError("Connect GitHub before running checks.", 401)
-  if "workflow" not in scopes:
+  if not has_full_pr_access(state.get("scopes")):
     raise ContributionSubmitError(
       "Reconnect GitHub with full PR access before running checks on a fork.",
       status_code=409,
@@ -280,11 +280,8 @@ def dispatch_pre_pr_checks(
       upstream_branch=str(merge_patch["last_submit_upstream_branch"]),
       upstream_sha=str(merge_patch["last_submit_upstream_sha"]),
     )
-    if (
-      fork_patch.get("last_submit_fork_sync") == "strictly-behind"
-      or fork_patch.get("last_submit_fork_carrier_branch")
-    ):
-      fork_patch = _contrib._sync_owner_fork_with_workflow_scope(
+    if fork_patch.get("last_submit_fork_sync") == "strictly-behind":
+      fork_patch = _contrib._sync_owner_fork(
         repo,
         fork_slug,
         upstream_branch=str(merge_patch["last_submit_upstream_branch"]),
@@ -292,18 +289,10 @@ def dispatch_pre_pr_checks(
       )
     record_patch = _git_ops._record_patch_with(record_patch, fork_patch)
 
-    push_source, record_patch = _contrib._push_reviewed_topic(
-      repo,
-      branch=branch,
-      fork_slug=fork_slug,
-      merge_patch=merge_patch,
-      record_patch=record_patch,
-      diff_path=diff_path,
-      expected_diff=expected_diff,
-      author_name=author_name,
-      author_email=author_email,
-      workflow_scope=True,
-    )
+    push_source = "HEAD"
+    last_push_error = _contrib._push_topic_branch(repo, branch, push_source)
+    if last_push_error:
+      raise push_rejected(last_push_error, record_patch=record_patch)
     pushed_sha = _git_ops._git(repo, "rev-parse", push_source).stdout.strip()
     if not _GIT_SHA.fullmatch(pushed_sha):
       raise ContributionSubmitError(

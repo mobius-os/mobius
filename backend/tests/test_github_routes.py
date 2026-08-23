@@ -85,7 +85,7 @@ def _install_mock_transport(monkeypatch, handler):
 
 def _write_token(
   *, token="gh-tok-abc", login="octocat", user_id=42,
-  scopes=("public_repo",), source="pat",
+  scopes=("public_repo", "workflow"), source="device",
 ):
   """Writes a connected-state file directly (the get_token() read source)."""
   os.makedirs(github_auth.GH_AUTH_DIR, exist_ok=True)
@@ -176,7 +176,7 @@ async def test_disconnected_start_never_publishes_attempt():
       return True
 
   with pytest.raises(HTTPException) as caught:
-    await github_routes._start_device_attempt(GoneRequest(), None)
+    await github_routes._start_device_attempt(GoneRequest())
 
   assert getattr(caught.value, "status_code", None) == 499
   assert github_auth.get_device_flow() is None
@@ -231,7 +231,7 @@ def test_connect_start_bounds_invalid_provider_durations(
   assert github_auth.get_device_flow()["interval"] == 5
 
 
-def test_connect_start_can_explicitly_request_workflow_scope(
+def test_connect_start_always_requests_full_pr_access(
   client, auth, monkeypatch,
 ):
   _set_client_id(monkeypatch, "cid-123")
@@ -248,13 +248,29 @@ def test_connect_start_can_explicitly_request_workflow_scope(
     return _fail(request)
 
   _install_mock_transport(monkeypatch, handler)
+  # Older Contribute builds sent this selector. It is intentionally ignored:
+  # callers can no longer create a partial connection.
   r = client.post(
-    "/api/github/connect/start", headers=auth, json={"workflow": True},
+    "/api/github/connect/start", headers=auth, json={"workflow": False},
   )
 
   assert r.status_code == 200, r.text
   assert seen["scope"] == ["public_repo workflow"]
   assert r.json()["requested_scopes"] == ["public_repo", "workflow"]
+
+
+@pytest.mark.parametrize(
+  ("scopes", "expected"),
+  [
+    (("public_repo", "workflow"), True),
+    (("repo", "workflow"), True),
+    (("public_repo",), False),
+    (("workflow",), False),
+    ((), False),
+  ],
+)
+def test_full_pr_access_is_one_explicit_scope_contract(scopes, expected):
+  assert github_routes.has_full_pr_access(scopes) is expected
 
 
 def test_connect_start_app_with_github_connect(
@@ -338,7 +354,9 @@ def test_device_flow_happy_path(client, auth, monkeypatch, tmp_path):
       calls["user"] += 1
       assert request.headers.get("authorization") == "Bearer gh-secret-xyz"
       return httpx.Response(200, json={"login": "octocat", "id": 42},
-                            headers={"x-oauth-scopes": "public_repo, read:org"})
+                            headers={
+                              "x-oauth-scopes": "public_repo, workflow, read:org",
+                            })
     return _fail(request)
 
   _install_mock_transport(monkeypatch, handler)
@@ -387,7 +405,7 @@ def test_device_flow_happy_path(client, auth, monkeypatch, tmp_path):
   assert state["token"] == "gh-secret-xyz"
   assert state["login"] == "octocat"
   assert state["token_source"] == "device"
-  assert state["scopes"] == ["public_repo", "read:org"]
+  assert state["scopes"] == ["public_repo", "workflow", "read:org"]
 
   # Git identity attributes commits to the connected user.
   def _git_get(key):
@@ -424,7 +442,7 @@ def test_device_token_survives_user_lookup_retry(
       return httpx.Response(
         200,
         json={"login": "octocat", "id": 42},
-        headers={"x-oauth-scopes": "public_repo"},
+        headers={"x-oauth-scopes": "public_repo, workflow"},
       )
     return _fail(request)
 
@@ -450,6 +468,45 @@ def test_device_token_survives_user_lookup_retry(
   assert completed.json()["status"] == "complete"
   assert calls == {"token": 1, "user": 2}
   assert github_auth.read_state()["token"] == "gh-recoverable"
+  assert "pending_token" not in github_auth.get_device_flow()
+
+
+def test_device_flow_rejects_a_partial_scope_grant(
+  client, auth, monkeypatch,
+):
+  _set_client_id(monkeypatch, "cid-123")
+
+  def handler(request):
+    url = str(request.url)
+    if url == _DEVICE_CODE_URL:
+      return httpx.Response(200, json={
+        "device_code": "DEV", "user_code": "AB-12",
+        "verification_uri": "https://github.com/login/device",
+        "interval": 5, "expires_in": 900,
+      })
+    if url == _ACCESS_TOKEN_URL:
+      return httpx.Response(200, json={"access_token": "gh-partial"})
+    if url == "https://api.github.com/user":
+      return httpx.Response(
+        200,
+        json={"login": "octocat", "id": 42},
+        headers={"x-oauth-scopes": "public_repo"},
+      )
+    return _fail(request)
+
+  _install_mock_transport(monkeypatch, handler)
+  attempt_id = client.post(
+    "/api/github/connect/start", headers=auth,
+  ).json()["attempt_id"]
+  _patch_device_flow(next_poll_at=0)
+
+  result = _poll(client, auth, attempt_id)
+
+  assert result.status_code == 200
+  assert result.json()["status"] == "failed"
+  assert result.json()["reason"] == "insufficient_scopes"
+  assert "full PR access" in result.json()["message"]
+  assert github_auth.read_state() is None
   assert "pending_token" not in github_auth.get_device_flow()
 
 
@@ -601,63 +658,14 @@ def test_expired_attempt_never_calls_github(client, auth, monkeypatch):
   assert "device_code" not in github_auth.get_device_flow()
 
 
-# --- connect/token (classic PAT) --------------------------------------
+def test_legacy_pasted_token_connection_is_retired(client, auth):
+  response = client.post(
+    "/api/github/connect/token",
+    json={"token": "ghp_not_sent_anywhere"},
+    headers=auth,
+  )
 
-
-def test_connect_token_rejects_fine_grained(client, auth):
-  r = client.post("/api/github/connect/token",
-                  json={"token": "github_pat_11ABCDEF_secret"}, headers=auth)
-  assert r.status_code == 400
-  detail = r.json()["detail"]
-  assert "fine-grained" in detail
-  # The rejection is actionable: it links straight to the classic-token
-  # creation page with the required scope pre-filled, and says why.
-  assert "https://github.com/settings/tokens/new" in detail
-  assert "scopes=public_repo" in detail
-
-
-def test_connect_token_rejects_missing_scope(client, auth, monkeypatch):
-  def handler(request):
-    if str(request.url) == "https://api.github.com/user":
-      return httpx.Response(200, json={"login": "octocat", "id": 42},
-                            headers={"x-oauth-scopes": "read:user, gist"})
-    return _fail(request)
-
-  _install_mock_transport(monkeypatch, handler)
-  r = client.post("/api/github/connect/token",
-                  json={"token": "ghp_noscope"}, headers=auth)
-  assert r.status_code == 400
-  detail = r.json()["detail"]
-  # The scopes the token DID have are echoed back.
-  assert "read:user" in detail and "gist" in detail
-
-
-def test_connect_token_happy_path(client, auth, monkeypatch):
-  def handler(request):
-    if str(request.url) == "https://api.github.com/user":
-      assert request.headers.get("authorization") == "Bearer ghp_classic123"
-      return httpx.Response(200, json={"login": "octocat", "id": 42},
-                            headers={"x-oauth-scopes": "repo"})
-    return _fail(request)
-
-  _install_mock_transport(monkeypatch, handler)
-  github_auth.set_device_flow({
-    "attempt_id": "superseded-by-pat",
-    "status": "waiting",
-    "device_code": "DEV",
-  })
-  r = client.post("/api/github/connect/token",
-                  json={"token": "ghp_classic123"}, headers=auth)
-  assert r.status_code == 200, r.text
-  assert r.json() == {"login": "octocat"}
-  state = json.loads(github_auth.STATE_PATH.read_text())
-  assert state["token"] == "ghp_classic123"
-  assert state["token_source"] == "pat"
-  assert stat.S_IMODE(github_auth.STATE_PATH.stat().st_mode) == 0o600
-  hosts = github_auth.HOSTS_PATH.read_text()
-  assert 'user: "octocat"' in hosts
-  assert 'oauth_token: "ghp_classic123"' in hosts
-  assert github_auth.get_device_flow() is None
+  assert response.status_code == 404
 
 
 def test_connection_mutation_lock_is_exclusive_and_survives_disconnect():
@@ -693,7 +701,7 @@ def test_credential_state_is_committed_only_after_cli_view(
       login="octocat",
       user_id=42,
       scopes=["public_repo"],
-      source="pat",
+      source="device",
     )
 
   assert github_auth.HOSTS_PATH.exists()
@@ -714,8 +722,8 @@ def test_status_disconnected(client, auth, monkeypatch):
   assert body["scopes"] == []
   assert body["token_source"] is None
   assert body["device_flow_available"] is True
-  assert "scopes=public_repo" in body["classic_token_url"]
-  assert "workflow" in body["classic_workflow_token_url"]
+  assert "classic_token_url" not in body
+  assert "classic_workflow_token_url" not in body
   assert "gh_version" in body
   assert body["active_attempt"] is None
   assert "token" not in body
@@ -759,7 +767,7 @@ def test_status_exposes_resumable_attempt_without_secrets(client, auth):
     "next_poll_at": time.time() + 5,
     "created_at": time.time(),
     "expires_at": time.time() + 300,
-    "requested_scopes": ["public_repo"],
+    "requested_scopes": ["public_repo", "workflow"],
     "user_code": "ABCD-EFGH",
     "verification_uri": "https://github.com/login/device",
   })
@@ -786,14 +794,14 @@ def test_status_device_flow_unavailable_without_client_id(
 
 def test_status_connected_never_echoes_token(client, auth):
   secret = _write_token(token="gh-super-secret", login="octocat",
-                        scopes=("public_repo", "read:org"), source="pat")
+                        scopes=("public_repo", "read:org"), source="device")
   r = client.get("/api/github/status", headers=auth)
   assert r.status_code == 200
   body = r.json()
   assert body["connected"] is True
   assert body["login"] == "octocat"
   assert body["scopes"] == ["public_repo", "read:org"]
-  assert body["token_source"] == "pat"
+  assert body["token_source"] == "device"
   # INV1: the token never appears anywhere in the payload.
   assert "token" not in body
   assert secret not in json.dumps(body)
@@ -866,7 +874,7 @@ def test_source_status_requires_github_access_for_app_tokens(
   assert allowed.status_code == 200, allowed.text
 
 
-def test_source_status_projects_local_share_manifest_identity(
+def test_source_status_projects_local_distribution_manifest_identity(
   client, owner_token, auth, monkeypatch,
 ):
   from app import models
@@ -875,14 +883,14 @@ def test_source_status_projects_local_share_manifest_identity(
   app_id, _ = _app_token(client, owner_token)
   source_dir = Path(get_settings().data_dir) / "apps" / "published-source"
   source_dir.mkdir(parents=True, exist_ok=True)
-  share_url = (
+  distribution_url = (
     "https://raw.githubusercontent.com/example/published/main/mobius.json"
   )
   session = SessionLocal()
   try:
     session.query(models.App).filter(models.App.id == app_id).update({
       "source_dir": str(source_dir),
-      "share_manifest_url": share_url,
+      "published_manifest_url": distribution_url,
     })
     session.commit()
   finally:
@@ -894,7 +902,7 @@ def test_source_status_projects_local_share_manifest_identity(
 
   def inspect(app):
     assert app["manifest_url"] is None
-    assert app["share_manifest_url"] == share_url
+    assert app["published_manifest_url"] == distribution_url
     return {"key": f"app:{app['id']}", "name": app["name"]}
 
   monkeypatch.setattr(source_status, "build_app_status", inspect)
@@ -1765,164 +1773,6 @@ def test_push_topic_branch_briefly_retries_transient_transport_errors(
   assert sleeps == [0.5, 1.0]
 
 
-def test_workflow_scope_push_errors_are_classified_for_stale_fork_fallback():
-  from app.routes.github import _is_workflow_scope_push_error
-
-  assert _is_workflow_scope_push_error(
-    "refusing to allow an OAuth App to create or update workflow "
-    "`.github/workflows/test.yml` without `workflow` scope"
-  )
-  assert not _is_workflow_scope_push_error(
-    "remote rejected: non-fast-forward"
-  )
-
-
-def test_push_reviewed_topic_adapts_only_after_workflow_scope_rejection(
-  tmp_path, monkeypatch,
-):
-  from app.routes.github import _push_reviewed_topic
-
-  pushes = []
-  inspections = []
-  built_sha = "e" * 40
-
-  def fake_push(_repo, branch, source="HEAD"):
-    pushes.append((branch, source))
-    if len(pushes) == 1:
-      return (
-        "refusing to allow an OAuth App to create or update workflow "
-        "`.github/workflows/test.yml` without `workflow` scope"
-      )
-    return None
-
-  monkeypatch.setattr("app.github_contributions._push_topic_branch", fake_push)
-  monkeypatch.setattr(
-    "app.github_contributions._inspect_owner_fork_default_branch",
-    lambda _repo, fork, **kwargs: inspections.append((fork, kwargs)) or {
-      "last_submit_fork_sync": "strictly-behind",
-      "last_submit_fork_sha": "c" * 40,
-    },
-  )
-  monkeypatch.setattr(
-    "app.github_contributions._build_fork_compatible_topic_commit",
-    lambda *_args, **_kwargs: built_sha,
-  )
-
-  source, patch = _push_reviewed_topic(
-    tmp_path,
-    branch="fix/demo",
-    fork_slug="octocat/demo",
-    merge_patch={
-      "last_submit_upstream_branch": "main",
-      "last_submit_upstream_sha": "d" * 40,
-    },
-    record_patch={"head_repository": "octocat/demo"},
-    diff_path=tmp_path / "reviewed.diff",
-    expected_diff="f" * 64,
-    author_name="octocat",
-    author_email="42+octocat@users.noreply.github.com",
-  )
-
-  assert source == built_sha
-  assert pushes == [("fix/demo", "HEAD"), ("fix/demo", built_sha)]
-  assert len(inspections) == 1
-  assert patch["last_submit_fork_sync"] == "stale-base-compatible"
-  assert patch["last_submit_push_sha"] == built_sha
-
-
-def test_push_reviewed_topic_uses_granted_workflow_scope_only_as_fallback(
-  tmp_path, monkeypatch,
-):
-  from app.routes.github import ContributionSubmitError, _push_reviewed_topic
-
-  pushes = []
-  syncs = []
-
-  def fake_push(_repo, branch, source="HEAD"):
-    pushes.append((branch, source))
-    if len(pushes) == 1:
-      return (
-        "refusing to allow an OAuth App to create or update workflow "
-        "`.github/workflows/test.yml` without `workflow` scope"
-      )
-    return None
-
-  monkeypatch.setattr("app.github_contributions._push_topic_branch", fake_push)
-  monkeypatch.setattr(
-    "app.github_contributions._inspect_owner_fork_default_branch",
-    lambda *_args, **_kwargs: {
-      "last_submit_fork_sync": "strictly-behind",
-      "last_submit_fork_sha": "c" * 40,
-    },
-  )
-  monkeypatch.setattr(
-    "app.github_contributions._build_fork_compatible_topic_commit",
-    lambda *_args, **_kwargs: (_ for _ in ()).throw(
-      ContributionSubmitError("workflow files cannot be re-parented")
-    ),
-  )
-  monkeypatch.setattr(
-    "app.github_contributions._sync_owner_fork_with_workflow_scope",
-    lambda _repo, fork, **kwargs: syncs.append((fork, kwargs)) or {
-      "last_submit_fork_sync": "fast-forwarded",
-    },
-  )
-
-  source, patch = _push_reviewed_topic(
-    tmp_path,
-    branch="fix/workflow",
-    fork_slug="octocat/demo",
-    merge_patch={
-      "last_submit_upstream_branch": "main",
-      "last_submit_upstream_sha": "d" * 40,
-    },
-    record_patch={"head_repository": "octocat/demo"},
-    diff_path=tmp_path / "reviewed.diff",
-    expected_diff="f" * 64,
-    author_name="octocat",
-    author_email="42+octocat@users.noreply.github.com",
-    workflow_scope=True,
-  )
-
-  assert source == "HEAD"
-  assert pushes == [("fix/workflow", "HEAD"), ("fix/workflow", "HEAD")]
-  assert len(syncs) == 1
-  assert patch["last_submit_fork_sync"] == "fast-forwarded"
-
-
-def test_push_reviewed_topic_skips_fork_inspection_on_happy_path(
-  tmp_path, monkeypatch,
-):
-  from app.routes.github import _push_reviewed_topic
-
-  monkeypatch.setattr(
-    "app.github_contributions._push_topic_branch",
-    lambda _repo, _branch, _source="HEAD": None,
-  )
-  monkeypatch.setattr(
-    "app.github_contributions._inspect_owner_fork_default_branch",
-    lambda *_args, **_kwargs: pytest.fail("fork inspection is not needed"),
-  )
-
-  source, patch = _push_reviewed_topic(
-    tmp_path,
-    branch="fix/demo",
-    fork_slug="octocat/demo",
-    merge_patch={
-      "last_submit_upstream_branch": "main",
-      "last_submit_upstream_sha": "d" * 40,
-    },
-    record_patch={"head_repository": "octocat/demo"},
-    diff_path=tmp_path / "reviewed.diff",
-    expected_diff="f" * 64,
-    author_name="octocat",
-    author_email="42+octocat@users.noreply.github.com",
-  )
-
-  assert source == "HEAD"
-  assert patch == {"head_repository": "octocat/demo"}
-
-
 def test_inspect_owner_fork_reports_strictly_behind_without_mutation(
   tmp_path, monkeypatch,
 ):
@@ -1967,52 +1817,7 @@ def test_inspect_owner_fork_reports_strictly_behind_without_mutation(
   assert patch["last_submit_fork_sync"] == "strictly-behind"
   assert patch["last_submit_fork_sha"] == stale
   assert gh_calls == []
-  assert sum(call[:1] == ("fetch",) for call in git_calls) == 2
-
-
-def test_inspect_owner_fork_accepts_updated_topic_as_upstream_carrier(
-  tmp_path, monkeypatch,
-):
-  from app.routes.github import _inspect_owner_fork_default_branch
-
-  repo = tmp_path / "repo"
-  repo.mkdir()
-  stale = "c" * 40
-  upstream = "d" * 40
-  carrier_tip = "e" * 40
-
-  monkeypatch.setattr(
-    "app.github_contribution_git._upstream_default_branch",
-    lambda _repo, _slug: "main",
-  )
-
-  def fake_git(repo_path, *args, check=True):
-    if args[:2] == ("rev-parse", "--verify"):
-      return _cp(stale + "\n")
-    if args[:2] == ("merge-base", "--is-ancestor"):
-      if args[2:] == (upstream, stale):
-        return _cp(returncode=1)
-      if args[2:] == (stale, upstream):
-        return _cp(returncode=0)
-      if args[2:] == (upstream, carrier_tip):
-        return _cp(returncode=0)
-    if args[:2] == ("for-each-ref", "--format=%(refname)%00%(objectname)"):
-      prefix = args[2].rstrip("/")
-      return _cp(f"{prefix}/fix/review\x00{carrier_tip}\n")
-    return _cp("")
-
-  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
-
-  patch = _inspect_owner_fork_default_branch(
-    repo,
-    "octocat/app-demo",
-    upstream_branch="main",
-    upstream_sha=upstream,
-  )
-
-  assert patch["last_submit_fork_sync"] == "contains-upstream"
-  assert patch["last_submit_fork_carrier_branch"] == "fix/review"
-  assert patch["last_submit_fork_carrier_sha"] == carrier_tip
+  assert sum(call[:1] == ("fetch",) for call in git_calls) == 1
 
 
 def test_inspect_owner_fork_leaves_diverged_default_branch_untouched(
@@ -2109,10 +1914,10 @@ def test_inspect_owner_fork_reports_current_or_ahead_branch(
   assert gh_calls == []
 
 
-def test_sync_owner_fork_with_workflow_scope_verifies_fast_forward(
+def test_sync_owner_fork_verifies_fast_forward(
   tmp_path, monkeypatch,
 ):
-  from app.routes.github import _sync_owner_fork_with_workflow_scope
+  from app.routes.github import _sync_owner_fork
 
   repo = tmp_path / "repo"
   repo.mkdir()
@@ -2132,7 +1937,7 @@ def test_sync_owner_fork_with_workflow_scope_verifies_fast_forward(
     },
   )
 
-  patch = _sync_owner_fork_with_workflow_scope(
+  patch = _sync_owner_fork(
     repo,
     "octocat/app-demo",
     upstream_branch="main",
@@ -2147,117 +1952,29 @@ def test_sync_owner_fork_with_workflow_scope_verifies_fast_forward(
   assert patch["last_submit_fork_sync"] == "fast-forwarded"
 
 
-def test_build_fork_compatible_topic_preserves_exact_reviewed_merge(tmp_path):
-  from app.routes.github import (
-    _build_fork_compatible_topic_commit,
-    _reviewed_branch_diff,
-  )
-
-  repo = tmp_path / "repo"
-  repo.mkdir()
-
-  def git(*args, input_text=None):
-    return subprocess.run(
-      ["git", "-C", str(repo), *args],
-      input=input_text,
-      capture_output=True,
-      text=True,
-      check=True,
-    ).stdout.strip()
-
-  git("init", "-b", "main")
-  (repo / ".github" / "workflows").mkdir(parents=True)
-  (repo / ".github" / "workflows" / "test.yml").write_text("old workflow\n")
-  (repo / "app.py").write_text("old\n")
-  git("add", ".")
-  git(
-    "-c", "user.name=owner", "-c", "user.email=owner@example.com",
-    "commit", "-m", "fork base",
-  )
-  fork_sha = git("rev-parse", "HEAD")
-
-  (repo / ".github" / "workflows" / "test.yml").write_text("new workflow\n")
-  git("add", ".github/workflows/test.yml")
-  git(
-    "-c", "user.name=owner", "-c", "user.email=owner@example.com",
-    "commit", "-m", "upstream workflow change",
-  )
-  upstream_sha = git("rev-parse", "HEAD")
-  git("checkout", "-b", "reviewed")
-  (repo / "app.py").write_text("reviewed\n")
-  git("add", "app.py")
-  git(
-    "-c", "user.name=owner", "-c", "user.email=owner@example.com",
-    "commit", "-m", "Reviewed fix", "-m", (
-      "Co-authored-by: Möbius Agent "
-      "<mobius-agent@users.noreply.github.com>"
+@pytest.mark.parametrize(
+  "operation",
+  [
+    lambda tmp_path: github_routes._submit_prepared_pr(
+      {}, tmp_path / "reviewed.diff",
     ),
-  )
-  reviewed_sha = git("rev-parse", "HEAD")
-  reviewed_diff = _reviewed_branch_diff(repo, upstream_sha, reviewed_sha)
-  diff_path = tmp_path / "reviewed.diff"
-  diff_path.write_bytes(reviewed_diff)
-  expected_diff = hashlib.sha256(reviewed_diff).hexdigest()
-
-  push_sha = _build_fork_compatible_topic_commit(
-    repo,
-    branch="reviewed",
-    fork_sha=fork_sha,
-    upstream_sha=upstream_sha,
-    diff_path=diff_path,
-    expected_diff=expected_diff,
-    author_name="owner",
-    author_email="owner@example.com",
-  )
-
-  assert git("rev-parse", "--abbrev-ref", "HEAD") == "reviewed"
-  assert git("rev-parse", f"{push_sha}^") == fork_sha
-  assert git("diff", "--name-only", f"{fork_sha}..{push_sha}") == "app.py"
-  merged_tree = git("merge-tree", "--write-tree", upstream_sha, push_sha)
-  assert hashlib.sha256(
-    _reviewed_branch_diff(repo, upstream_sha, merged_tree)
-  ).hexdigest() == expected_diff
-  assert git("status", "--porcelain") == ""
-
-
-def test_build_fork_compatible_topic_does_not_reset_if_detach_fails(
-  tmp_path, monkeypatch,
+    lambda _tmp_path: github_routes._preflight_prepared_stack([]),
+    lambda _tmp_path: github_routes._land_reviewed_stack([]),
+  ],
+)
+def test_reviewed_writes_reject_partial_connections_before_git(
+  tmp_path, monkeypatch, operation,
 ):
-  from app.routes.github import (
-    ContributionSubmitError,
-    _build_fork_compatible_topic_commit,
+  _write_token(scopes=("public_repo",))
+  monkeypatch.setattr(
+    "app.github_contributions.shutil.which", lambda name: f"/bin/{name}",
   )
 
-  repo = tmp_path / "repo"
-  repo.mkdir()
-  calls = []
+  with pytest.raises(ContributionSubmitError) as failure:
+    operation(tmp_path)
 
-  def fake_git(repo_path, *args, check=True):
-    calls.append(args)
-    if args[:3] == ("log", "-1", "--format=%B"):
-      return _cp(
-        "Reviewed fix\n\nCo-authored-by: Möbius Agent "
-        "<mobius-agent@users.noreply.github.com>\n"
-      )
-    if args[:3] == ("checkout", "-q", "--detach"):
-      raise ContributionSubmitError("detach failed")
-    return _cp("")
-
-  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
-
-  with pytest.raises(ContributionSubmitError, match="detach failed"):
-    _build_fork_compatible_topic_commit(
-      repo,
-      branch="reviewed",
-      fork_sha="a" * 40,
-      upstream_sha="b" * 40,
-      diff_path=tmp_path / "reviewed.diff",
-      expected_diff="c" * 64,
-      author_name="owner",
-      author_email="owner@example.com",
-    )
-
-  assert not any(call[:2] == ("reset", "--hard") for call in calls)
+  assert failure.value.status_code == 409
+  assert "full PR access" in failure.value.message
 
 
 def test_safe_repo_path_accepts_durable_contribution_roots():
@@ -3134,8 +2851,8 @@ def test_submit_contribution_recovers_ambiguous_create_by_exact_pushed_head(
     lambda *_args, **_kwargs: "octocat/app-demo-1",
   )
   monkeypatch.setattr(
-    "app.github_contributions._push_reviewed_topic",
-    lambda *_args, **kwargs: ("HEAD", kwargs["record_patch"]),
+    "app.github_contributions._push_topic_branch",
+    lambda *_args, **_kwargs: None,
   )
 
   git_calls = []

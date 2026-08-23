@@ -117,7 +117,9 @@ def _make_codex_chat(chat_id: str, *, steer_enabled: bool) -> None:
   user message must land just before it so the runner's snapshot /
   finalize writes keep targeting the assistant as `messages[-1]`.
   """
-  settings = {"steer_enabled": True} if steer_enabled else {}
+  settings = {"model": "gpt-5.6-sol"}
+  if steer_enabled:
+    settings["steer_enabled"] = True
   db = SessionLocal()
   try:
     chat = models.Chat(
@@ -148,9 +150,10 @@ def _make_claude_chat(chat_id: str, *, steer_enabled: bool) -> None:
         {"role": "user", "content": "start", "ts": 1},
         {"role": "assistant", "content": "working", "ts": 2, "blocks": []},
       ],
-      agent_settings_json=(
-        {"steer_enabled": True} if steer_enabled else {}
-      ),
+      agent_settings_json={
+        "model": "claude-opus-4-8",
+        **({"steer_enabled": True} if steer_enabled else {}),
+      },
     )
     db.add(chat)
     db.commit()
@@ -226,6 +229,38 @@ def test_steers_into_live_codex_turn_when_flag_on(
       "content": "actually use blue",
     }
   ]
+
+
+def test_hidden_control_message_queues_even_when_auto_steer_is_enabled(
+  client, auth, monkeypatch,
+):
+  """Product control carriers must retain their next-turn boundary."""
+  chat_id = "hiddencontrolqueues"
+  message_cid = "hidden-control-cid"
+  _make_codex_chat(chat_id, steer_enabled=True)
+  registry.register(_make_active_codex_turn(chat_id))
+  create_broadcast(chat_id)
+
+  async def _must_not_steer(*_args, **_kwargs):
+    raise AssertionError("hidden control messages must not auto-steer")
+
+  _patch_codex_steer(monkeypatch, _must_not_steer)
+  res = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={
+      "content": "/goal Finish and verify the migration",
+      "cid": message_cid,
+      "hidden": True,
+    },
+    headers=auth,
+  )
+
+  assert res.status_code == 202, res.text
+  assert res.json()["status"] == "queued"
+  chat = _read_chat(chat_id)
+  assert [cid_of(row) for row in chat.pending_messages] == [message_cid]
+  assert chat.pending_messages[0]["hidden"] is True
+  assert chat.pending_messages[0]["content"].startswith("/goal ")
 
 
 def test_direct_steer_reserves_and_converts_new_codex_message_in_one_request(
@@ -493,7 +528,7 @@ def test_steer_drops_empty_pre_steer_partial(client, auth, monkeypatch):
       title="Codex chat",
       provider="codex",
       messages=[{"role": "user", "content": "Q1", "ts": 1}],
-      agent_settings_json={"steer_enabled": True},
+      agent_settings_json={"model": "gpt-5.6-sol", "steer_enabled": True},
     ))
     db.commit()
   finally:
@@ -567,7 +602,7 @@ def test_steer_splits_assistant_turn_for_reload_order(
           {"type": "text", "content": "A1"},
         ]},
       ],
-      agent_settings_json={"steer_enabled": True},
+      agent_settings_json={"model": "gpt-5.6-sol", "steer_enabled": True},
     ))
     db.commit()
   finally:
@@ -947,7 +982,9 @@ def test_claude_force_steer_defers_to_runner_and_reorders(client, auth):
     chat = models.Chat(
       id=chat_id, title="Claude", provider="claude",
       messages=[{"role": "user", "content": "Q1", "ts": 1}],
-      agent_settings_json={},  # auto-steer OFF — force_steer overrides.
+      agent_settings_json={
+        "model": "claude-opus-4-8",
+      },  # auto-steer OFF — force_steer overrides.
     )
     chat.pending_messages = [
       {"role": "user", "content": "use blue", "ts": 10, "cid": "legacy-10"}
@@ -1387,7 +1424,9 @@ def test_claude_runner_splits_steer_at_boundary_not_http_arrival(
     db.add(models.Chat(
       id=chat_id, title="Claude chat", provider="claude",
       messages=[{"role": "user", "content": "Q1", "ts": 1}],
-      agent_settings_json={"steer_enabled": True},
+      agent_settings_json={
+        "model": "claude-opus-4-8", "steer_enabled": True,
+      },
     ))
     db.commit()
   finally:
@@ -1460,7 +1499,9 @@ def test_claude_steer_cut_event_is_published_at_the_seal_not_at_http_arrival(
     db.add(models.Chat(
       id=chat_id, title="Claude chat", provider="claude",
       messages=[{"role": "user", "content": "Q1", "ts": 1}],
-      agent_settings_json={"steer_enabled": True},
+      agent_settings_json={
+        "model": "claude-opus-4-8", "steer_enabled": True,
+      },
     ))
     db.commit()
   finally:
@@ -1544,7 +1585,7 @@ def test_codex_steer_publishes_cut_from_handle_owned_settlement(
     db.add(models.Chat(
       id=chat_id, title="Codex chat", provider="codex",
       messages=[{"role": "user", "content": "Q1", "ts": 1}],
-      agent_settings_json={"steer_enabled": True},
+      agent_settings_json={"model": "gpt-5.6-sol", "steer_enabled": True},
     ))
     db.commit()
   finally:

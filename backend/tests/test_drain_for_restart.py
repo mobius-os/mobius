@@ -702,7 +702,12 @@ def test_send_while_draining_queues_instead_of_starting(client, auth):
   cid = str(uuid.uuid4())
   db = SessionLocal()
   try:
-    db.add(models.Chat(id=cid, title="t", messages=[]))
+    db.add(models.Chat(
+      id=cid,
+      title="t",
+      messages=[],
+      agent_settings_json={"model": "claude-opus-4-8"},
+    ))
     db.commit()
   finally:
     db.close()
@@ -732,7 +737,12 @@ def test_force_steer_while_draining_queues_too(client, auth):
   cid = str(uuid.uuid4())
   db = SessionLocal()
   try:
-    db.add(models.Chat(id=cid, title="t", messages=[]))
+    db.add(models.Chat(
+      id=cid,
+      title="t",
+      messages=[],
+      agent_settings_json={"model": "claude-opus-4-8"},
+    ))
     db.commit()
   finally:
     db.close()

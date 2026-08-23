@@ -6,7 +6,12 @@
   display: flex;
   flex-direction: column;
   width: min(390px, calc(100vw - 24px));
-  max-height: min(560px, calc(100dvh - var(--shell-bar-height) - 24px));
+  /* Stay a compact preview: grow with the rows, then scroll within the cap. */
+  max-height: min(
+    520px,
+    70dvh,
+    calc(100dvh - var(--shell-bar-height) - env(safe-area-inset-top) - 24px)
+  );
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -177,6 +182,5 @@
   .notifications {
     right: 8px;
     width: calc(100vw - 16px);
-    max-height: min(520px, calc(100dvh - var(--shell-bar-height) - 18px));
   }
 }

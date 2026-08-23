@@ -37,6 +37,9 @@ class CompileError(RuntimeError):
 
 _CONTENT_BUNDLE_RE = re.compile(r"^app-(?P<app_id>[0-9]+)-(?P<digest>[0-9a-f]{64})\.js$")
 _LEGACY_BUNDLE_RE = re.compile(r"^app-(?P<app_id>[0-9]+)\.js$")
+_PUBLIC_BUNDLE_RE = re.compile(
+  r"^public-app-(?P<app_id>[0-9]+)-(?P<digest>[0-9a-f]{64})\.js$"
+)
 
 
 def _compiled_dir() -> Path:
@@ -152,6 +155,81 @@ def unlink_app_bundle(app_id: int, path: str | Path | None) -> bool:
     return False
 
 
+def app_bundle_digest(app_id: int, path: str | Path | None) -> str | None:
+  """Return the content digest encoded by one validated immutable bundle."""
+  owned = owned_bundle_path(app_id, path)
+  if owned is None:
+    return None
+  match = _CONTENT_BUNDLE_RE.fullmatch(owned.name)
+  return match.group("digest") if match else None
+
+
+def owned_public_bundle_path(
+  app_id: int, path: str | Path | None,
+) -> Path | None:
+  """Return a validated anonymous-publication bundle owned by ``app_id``."""
+  if not path:
+    return None
+  candidate = Path(path)
+  try:
+    if candidate.parent.resolve() != _compiled_dir().resolve():
+      return None
+  except OSError:
+    return None
+  match = _PUBLIC_BUNDLE_RE.fullmatch(candidate.name)
+  if match is None or int(match.group("app_id")) != app_id:
+    return None
+  return _compiled_dir() / candidate.name
+
+
+def publish_public_bundle(app_id: int, source: str | Path) -> tuple[Path, str]:
+  """Snapshot one installed module behind a separately-owned public name.
+
+  The source bundle is immutable and content-addressed. A hard link gives the
+  hosted publication its own lifetime without duplicating bytes; unlinking a
+  later-superseded installed name cannot remove the public snapshot. The copy
+  fallback covers filesystems that do not support hard links.
+  """
+  source_path = owned_bundle_path(app_id, source)
+  if source_path is None or not source_path.is_file():
+    raise ValueError("Installed app bundle is missing or invalid.")
+  digest = _file_sha256(source_path)
+  final = _compiled_dir() / f"public-app-{app_id}-{digest}.js"
+  if final.exists():
+    try:
+      if _file_sha256(final) == digest:
+        _sync_published_bundle(final)
+        return final, digest
+    except OSError:
+      pass
+  staging = _compiled_dir() / f"public-app-{app_id}.js.staging"
+  staging.unlink(missing_ok=True)
+  try:
+    try:
+      os.link(source_path, staging)
+    except OSError:
+      shutil.copyfile(source_path, staging)
+    if _file_sha256(staging) != digest:
+      raise OSError("Public bundle snapshot changed while it was copied.")
+    os.replace(staging, final)
+    _sync_published_bundle(final)
+  finally:
+    staging.unlink(missing_ok=True)
+  return final, digest
+
+
+def unlink_public_bundle(app_id: int, path: str | Path | None) -> bool:
+  """Best-effort unlink of one validated hosted-publication bundle."""
+  owned = owned_public_bundle_path(app_id, path)
+  if owned is None:
+    return False
+  try:
+    owned.unlink(missing_ok=True)
+    return True
+  except OSError:
+    return False
+
+
 def purge_app_bundles(app_id: int) -> None:
   """Best-effort removal of every legacy/content bundle for a hard-deleted app."""
   compiled = _compiled_dir()
@@ -159,6 +237,8 @@ def purge_app_bundles(app_id: int) -> None:
     compiled / f"app-{app_id}.js",
     compiled / f"app-{app_id}.js.staging",
     *compiled.glob(f"app-{app_id}-*.js"),
+    compiled / f"public-app-{app_id}.js.staging",
+    *compiled.glob(f"public-app-{app_id}-*.js"),
   ]
   for candidate in candidates:
     if candidate.name.endswith(".staging"):
@@ -167,7 +247,10 @@ def purge_app_bundles(app_id: int) -> None:
       except OSError:
         pass
       continue
-    unlink_app_bundle(app_id, candidate)
+    if candidate.name.startswith("public-app-"):
+      unlink_public_bundle(app_id, candidate)
+    else:
+      unlink_app_bundle(app_id, candidate)
 
 
 def _entry_source_path(app, *, source_root: Path | None = None) -> Path:
@@ -520,11 +603,19 @@ def reap_orphaned_bundles(db) -> list[str]:
       referenced.add(Path(stored_path).resolve())
     except OSError:
       continue
+  for (stored_path,) in db.query(models.App.public_bundle_path).all():
+    if not stored_path:
+      continue
+    try:
+      referenced.add(Path(stored_path).resolve())
+    except OSError:
+      continue
   removed: list[str] = []
-  for candidate in _compiled_dir().glob("app-*.js"):
+  for candidate in _compiled_dir().glob("*.js"):
     if not (
       _LEGACY_BUNDLE_RE.fullmatch(candidate.name)
       or _CONTENT_BUNDLE_RE.fullmatch(candidate.name)
+      or _PUBLIC_BUNDLE_RE.fullmatch(candidate.name)
     ):
       continue
     try:

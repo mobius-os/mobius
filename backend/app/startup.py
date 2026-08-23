@@ -1,9 +1,9 @@
-"""Named, ordered startup tasks for the owner-facing service.
+"""Two-phase startup for the owner-facing service.
 
-Most reconciliation work fails open while database initialization remains
-boot-critical. This module makes that ordering and criticality explicit without
-turning startup into a plugin system: the task list is fixed application code
-and every task is an ordinary function.
+Process setup and schema verification run first. Database-backed ownership,
+reconciliation, and background work run only after the live database matches
+the ORM. A schema-incompatible process can therefore serve bounded diagnostics
+without executing partial maintenance against a database it cannot understand.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ class StartupContext:
   app: StartupApp
   settings: StartupSettings
   boot_id: str
-  init_db: Callable[[], None]
+  init_db: Callable[[], list[str]]
   install_pm_commit_launcher: Callable[[Path, Path], bool]
   assert_provider_defaults: Callable[[object], None]
   logger: logging.Logger = field(
@@ -45,6 +45,7 @@ class StartupContext:
   restart_authorization: str | None = None
   manual_reconciled_chats: list[str] = field(default_factory=list)
   restart_fallback_chats: list[str] = field(default_factory=list)
+  schema_gaps: list[str] = field(default_factory=list)
 
 
 TaskAction = Callable[[StartupContext], object | Awaitable[object]]
@@ -88,6 +89,26 @@ async def run_startup_tasks(
         record_memory_checkpoint(task.checkpoint)
 
 
+async def run_startup_plan(context: StartupContext) -> bool:
+  """Run process setup, then database services only when schema-safe.
+
+  Returns whether the database-backed application was started. The caller uses
+  that same outcome to decide which long-lived supervisors may start, keeping
+  one schema-serviceability decision for the entire boot.
+  """
+  await run_startup_tasks(context, PROCESS_STARTUP_TASKS)
+  if context.schema_gaps:
+    context.logger.critical(
+      "database schema mismatch; skipped %d database startup task(s): %s",
+      len(DATABASE_STARTUP_TASKS),
+      ", ".join(context.schema_gaps),
+    )
+    record_memory_checkpoint("startup_schema_degraded")
+    return False
+  await run_startup_tasks(context, DATABASE_STARTUP_TASKS)
+  return True
+
+
 def _refresh_commit_launcher(context: StartupContext) -> None:
   context.install_pm_commit_launcher(
     Path(__file__).resolve().parents[1] / "scripts" / "pm-commit",
@@ -109,7 +130,7 @@ def _remove_legacy_auto_resume_setting(context: StartupContext) -> None:
 
 
 def _initialize_database(context: StartupContext) -> None:
-  context.init_db()
+  context.schema_gaps = context.init_db()
 
 
 def _purge_expired_chats(context: StartupContext) -> None:
@@ -306,7 +327,7 @@ def _route_diagnostics_to_chat_log(_context: StartupContext) -> None:
     logger.setLevel(level)
 
 
-STARTUP_TASKS = (
+PROCESS_STARTUP_TASKS = (
   StartupTask("refresh pm-commit launcher", _refresh_commit_launcher),
   StartupTask("validate provider defaults", _validate_provider_defaults),
   StartupTask(
@@ -319,6 +340,10 @@ STARTUP_TASKS = (
     critical=True,
     checkpoint="startup_database_initialized",
   ),
+)
+
+
+DATABASE_STARTUP_TASKS = (
   # Transcript migrations below are writer domain commands. Start ownership as
   # soon as the schema exists; later startup failures still fail open exactly
   # as they did when the writer started near the end of the plan.

@@ -50,8 +50,8 @@ function emptyChatDetail() {
     session_id: null,
     provider: 'codex',
     created_by_app_id: null,
-    agent_settings_json: null,
-    effective_agent_settings: { model: 'gpt-current', effort: 'medium' },
+    agent_settings_json: { model: 'gpt-5.6-sol' },
+    effective_agent_settings: { model: 'gpt-5.6-sol', effort: 'medium' },
     has_assistant_turns: false,
     auto_resume_on_limit: false,
     auto_resume_on_restart: true,
@@ -134,6 +134,15 @@ async function setup(
   } = {},
 ) {
   await page.setViewportSize(viewport)
+
+  await page.route('**/api/auth/providers/status', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    json: {
+      claude: { name: 'Claude Code', configured: false, authenticated: false },
+      codex: { name: 'Codex', configured: true, authenticated: true, error: null },
+    },
+  }))
 
   // Navigation is a client-side contract. Seed an explicit active chat and
   // mock the complete chat surface so the suite neither reads nor borrows
@@ -351,11 +360,94 @@ async function goForward(page) {
 test.use({ serviceWorkers: 'block' })
 
 test.describe('Navigation basics', () => {
+  test('a first send retires the cold activation gate it supersedes', async ({ page }) => {
+    let releaseChatDetail
+    const wait = new Promise(resolve => { releaseChatDetail = resolve })
+    const blank = {
+      ...NAV_CHATS[0],
+      title: 'Cold empty chat',
+      has_messages: false,
+    }
+
+    await setup(page, undefined, {
+      chats: [blank],
+      detailForChat: emptyChatDetail,
+      chatDetailGate: { id: blank.id, wait },
+    })
+
+    let releaseStream
+    const streamWait = new Promise(resolve => { releaseStream = resolve })
+    let sendRequests = 0
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/messages$/, route => {
+      sendRequests += 1
+      return route.fulfill({ status: 202, body: '{}' })
+    })
+    await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
+      await streamWait
+      return route.fulfill({ status: 204, body: '' })
+    })
+
+    try {
+      const composer = page.locator('#main-content')
+        .getByRole('textbox', { name: 'Message Möbius…' })
+      await expect(composer).toBeVisible()
+      await composer.fill('Visible after superseding the cold read')
+      await composer.press('Enter')
+
+      await expect.poll(() => sendRequests).toBe(1)
+      releaseChatDetail()
+
+      const painted = page.locator(
+        `[data-chat-surface="painted"][data-chat-id="${blank.id}"]`,
+      )
+      const userRow = painted.locator('.chat__msg--user')
+      await expect(userRow).toContainText('Visible after superseding the cold read')
+      await expect(userRow).toBeVisible()
+
+      const position = await userRow.evaluate((row) => {
+        const scroll = row.closest('.chat__scroll')
+        return Math.round(row.getBoundingClientRect().top - scroll.getBoundingClientRect().top)
+      })
+      expect(position).toBeGreaterThanOrEqual(-2)
+      expect(position).toBeLessThanOrEqual(10)
+    } finally {
+      releaseChatDetail()
+      releaseStream()
+    }
+  })
+
   test('1. Initial state — chat view, URL is /shell/', async ({ page }) => {
     await setup(page)
     const state = await getNavState(page)
     expect(state.hasChat).toBe(true)
     expect(state.url).toBe('/shell/')
+  })
+
+  test('owner-input status is named and outranks the active-work dot', async ({ page }) => {
+    const chats = NAV_CHATS.map((chat, index) => ({
+      ...chat,
+      running: index < 2,
+      owner_input_kind: index === 0 ? 'secure_input' : null,
+      pending_question_id: null,
+    }))
+    await setup(page, { width: 1512, height: 861 }, { chats })
+
+    const navigation = page.getByRole('navigation', {
+      name: 'Primary navigation',
+    })
+    const waiting = navigation.getByRole('button', {
+      name: `Your input is needed ${chats[0].title}`,
+      exact: true,
+    })
+    await expect(waiting.locator('.drawer__owner-input-dot')).toBeVisible()
+    await expect(waiting.locator('.drawer__streaming-dot')).toHaveCount(0)
+
+    const working = navigation.getByRole('button', {
+      name: `Currently streaming ${chats[1].title}`,
+      exact: true,
+    })
+    await expect(working.locator('.drawer__streaming-dot')).toBeVisible()
+    await expect(working.locator('.drawer__owner-input-dot')).toHaveCount(0)
   })
 
   test('2. Navigate between two chats — back returns to first', async ({ page }) => {

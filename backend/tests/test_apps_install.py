@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-from app import app_git
+from app import app_git, models
 from app.config import get_settings
 from test_app_fixtures import create_local_app
 
@@ -4040,7 +4040,7 @@ def _install_simple(client, auth, base, manifest, jsx=JSX):
 
 
 def test_install_response_includes_capability_flags(
-  client, auth, bypass_url_validation,
+  client, auth, db, bypass_url_validation,
 ):
   """The immediate install response must match the persisted app capabilities."""
   base = "https://caps.test/repo/"
@@ -4051,6 +4051,7 @@ def test_install_response_includes_capability_flags(
   manifest["permissions"]["manage_skills"] = True
   manifest["permissions"]["github_connect"] = True
   manifest["permissions"]["filesystem_access"] = True
+  manifest["permissions"]["connect_manage"] = True
 
   r = _install_simple(client, auth, base, manifest)
 
@@ -4071,6 +4072,8 @@ def test_install_response_includes_capability_flags(
   assert row["manage_skills"] is True
   assert row["github_connect"] is True
   assert row["filesystem_access"] is True
+  persisted = db.query(models.App).filter(models.App.id == payload["id"]).one()
+  assert persisted.connect_manage is True
 
 
 def test_install_rejects_non_boolean_filesystem_capability(
@@ -4170,18 +4173,45 @@ def test_rename_adopts_predecessor_row_and_moves_source_dir(
   assert r3.json()["id"] == gym_id
 
 
+def test_rename_restamps_identity_when_source_is_already_at_target(
+  client, auth, db, bypass_url_validation,
+):
+  """A partially completed rename converges instead of staying on its alias."""
+  from app import models
 
+  base = "https://rename-resume.test/repo/"
+  data_dir = Path(get_settings().data_dir)
 
+  first = _install_simple(client, auth, base, _simple_manifest("gym"))
+  assert first.status_code == 201, first.text
+  app_id = first.json()["id"]
 
+  old_source = data_dir / "apps" / "gym"
+  target_source = data_dir / "apps" / "workout"
+  os.rename(old_source, target_source)
+  row = db.query(models.App).filter_by(id=app_id).one()
+  row.slug = "workout"
+  row.source_dir = str(target_source)
+  db.commit()
 
+  resumed = _install_simple(
+    client, auth, base,
+    _simple_manifest("workout", version="2.0.0", previous_id="gym"),
+  )
 
+  assert resumed.status_code == 201, resumed.text
+  assert resumed.json()["id"] == app_id
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  assert row.slug == "workout"
+  assert row.source_dir == str(target_source)
+  assert row.manifest_url == base.rstrip("/") + "#manifest-id=workout"
+  assert not old_source.exists()
 
-
-
-
-
-
-
+  canonical = _install_simple(
+    client, auth, base, _simple_manifest("workout", version="3.0.0"),
+  )
+  assert canonical.status_code == 201, canonical.text
+  assert canonical.json()["id"] == app_id
 
 
 def test_previous_id_matching_nothing_is_a_fresh_install(

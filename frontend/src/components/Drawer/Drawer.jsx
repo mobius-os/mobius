@@ -105,6 +105,10 @@ export default function Drawer({
   // active across the whole app). Defaults to an empty Set so the
   // drawer renders cleanly if no parent supplies the prop.
   streamingChatIds,
+  // Set of chat ids with an interaction waiting on the owner. This state takes
+  // visual precedence over streaming because the agent cannot make progress
+  // until the owner acts.
+  ownerInputChatIds,
   // Set of chat ids whose latest background run finished while the
   // user was elsewhere. Rendered as a green attention dot, distinct by
   // colour from the accent streaming dot above (neither animates).
@@ -125,6 +129,7 @@ export default function Drawer({
   drawerRowGesturesRef,
 }) {
   const streamingSet = streamingChatIds || EMPTY_SET
+  const ownerInputSet = ownerInputChatIds || EMPTY_SET
   const attentionSet = attentionChatIds || EMPTY_SET
   const newAppSet = newAppIds || EMPTY_SET
   // One source of truth for which row the focused pane is showing, so a chat
@@ -516,6 +521,38 @@ export default function Drawer({
   async function renameApp(id, name) {
     const res = await api.apps.update(id, { name })
     if (res.ok) refreshApps()
+  }
+
+  async function publishHostedApp(id) {
+    const res = await api.apps.publishHosted(id)
+    if (!res.ok) {
+      let message = 'Could not update public access.'
+      try {
+        const payload = await res.json()
+        if (typeof payload?.detail === 'string') message = payload.detail
+      } catch {}
+      throw new Error(message)
+    }
+    const updated = await res.json()
+    setSharingApp(updated)
+    refreshApps()
+    return updated
+  }
+
+  async function stopHostedApp(id) {
+    const res = await api.apps.stopHosted(id)
+    if (!res.ok) {
+      let message = 'Could not stop public access.'
+      try {
+        const payload = await res.json()
+        if (typeof payload?.detail === 'string') message = payload.detail
+      } catch {}
+      throw new Error(message)
+    }
+    const updated = await res.json()
+    setSharingApp(updated)
+    refreshApps()
+    return updated
   }
 
   async function pinChat(id, pinned) {
@@ -1081,6 +1118,9 @@ export default function Drawer({
                       kind={kind}
                       item={item}
                       surface="drawer"
+                      needsOwnerInput={kind === 'chat'
+                        ? ownerInputSet.has(item.id)
+                        : !!(item.chat_id && ownerInputSet.has(item.chat_id))}
                       streaming={kind === 'chat' && streamingSet.has(item.id)}
                       building={kind === 'app' && !!(item.chat_id && streamingSet.has(item.chat_id))}
                       attention={kind === 'chat'
@@ -1121,6 +1161,9 @@ export default function Drawer({
                     kind={kind}
                     item={item}
                     surface="drawer"
+                    needsOwnerInput={kind === 'chat'
+                      ? ownerInputSet.has(item.id)
+                      : !!(item.chat_id && ownerInputSet.has(item.chat_id))}
                     streaming={kind === 'chat' && streamingSet.has(item.id)}
                     building={kind === 'app' && !!(item.chat_id && streamingSet.has(item.chat_id))}
                     attention={kind === 'chat'
@@ -1214,6 +1257,7 @@ export default function Drawer({
               item={app}
               variant="card"
               surface="directory"
+              needsOwnerInput={!!(app.chat_id && ownerInputSet.has(app.chat_id))}
               building={!!(app.chat_id && streamingSet.has(app.chat_id))}
               attention={newAppSet.has(Number(app.id))}
               active={activeView === 'canvas' && Number(activeAppId) === Number(app.id)}
@@ -1243,6 +1287,8 @@ export default function Drawer({
           app={sharingApp}
           apps={apps}
           onOpenApp={onApp}
+          onPublish={publishHostedApp}
+          onStop={stopHostedApp}
           onClose={() => setSharingApp(null)}
         />
       )}
@@ -1302,6 +1348,7 @@ const DrawerRow = memo(function DrawerRow({
   variant = 'row',
   surface = 'drawer',
   active,
+  needsOwnerInput,
   streaming,
   // App rows only: the app's owning chat is streaming, i.e. the agent is
   // actively building/editing this app right now. Reuses the streaming
@@ -1892,7 +1939,14 @@ const DrawerRow = memo(function DrawerRow({
         {/* Status dot. Sits before the text so the user's eye
             picks it up alongside the label rather than at the row's
             edge (where the pin lives). aria-label exposes the state. */}
-        {streaming ? (
+        {needsOwnerInput ? (
+          <span
+            className="drawer__owner-input-dot"
+            role="img"
+            aria-label="Your input is needed"
+            title="Your input is needed"
+          />
+        ) : streaming ? (
           <span
             className="drawer__streaming-dot"
             aria-label="Currently streaming"

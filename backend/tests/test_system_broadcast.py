@@ -37,7 +37,7 @@ from app.broadcast import (
   get_system_broadcast,
   set_active_broadcast,
 )
-from app.chat_writer import Barrier, get_writer
+from app.chat_writer import Barrier, StartTurn, get_writer
 from app.chat_transcript import materialized_messages
 from app.chat_event_sink import (
   ChatEventSink,
@@ -246,6 +246,50 @@ def test_question_event_is_saved_before_broadcast(db, chat):
     "its card is broadcast — broadcasting before the QuestionCommit ack would "
     "let a racing user Submit find no question block to attach the answer to"
   )
+
+
+def test_question_checkpoint_runs_after_broadcast_without_blocking_card(db, chat):
+  """Goal summary work starts after the durable card and never delays it."""
+  get_writer().submit(StartTurn(
+    chat_id=chat.id,
+    run_token="rt-goal-q",
+    user_msg={"role": "user", "content": "/goal Ship it", "ts": 1},
+    title_source="/goal Ship it",
+  )).result(timeout=5)
+  bc = _OrderedBroadcast(chat.id)
+
+  async def go():
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def checkpoint():
+      bc.timeline.append(("checkpoint", "start"))
+      started.set()
+      await release.wait()
+      finished.set()
+
+    sink = chat_mod._ChatEventSink(
+      bc,
+      chat.id,
+      run_token="rt-goal-q",
+      recall_binding=EMPTY_RECALL_BINDING,
+      on_question_checkpoint=checkpoint,
+    )
+    await sink.publish_question({
+      "type": "question",
+      "question_id": "q-goal",
+      "questions": [{"id": "q-goal", "question": "Proceed?"}],
+    })
+    assert not finished.is_set(), "the card waited for optional summary work"
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert bc.timeline.index(("publish", "question")) < bc.timeline.index(
+      ("checkpoint", "start")
+    )
+    release.set()
+    await asyncio.wait_for(finished.wait(), timeout=1)
+
+  asyncio.run(go())
 
 
 def test_publish_rejects_question_events(db, chat):
@@ -574,6 +618,13 @@ async def test_notify_catch_up_unsafe_event_is_system_bus_only(
     bc_mod.remove_broadcast("live-chat-2")
 
 
+def test_notify_rejects_server_owned_goal_activation(client, auth):
+  response = client.post(
+    "/api/notify", headers=auth, json={"type": "goal_activated"},
+  )
+  assert response.status_code == 422
+
+
 # --- Chat-scoped build_phase milestone rail (feature 212) --------------
 
 
@@ -874,6 +925,22 @@ async def test_snapshot_stream_sends_reduced_items_plus_control_tail(
   bc.publish({"type": "tool_start", "tool": "Bash", "tool_use_id": "u1"})
   bc.publish({"type": "build_phase", "phase": "rebuilding"})
   bc.publish({"type": "answers_applied", "question_id": "q1", "answers": {}})
+  bc.publish({
+    "type": "secure_input_request",
+    "request_id": "secure-1",
+    "title": "One-time secret",
+    "fields": [],
+  })
+  bc.publish({
+    "type": "secure_input_consuming",
+    "request_id": "secure-1",
+    "status": "consuming",
+  })
+  bc.publish({
+    "type": "secure_input_settled",
+    "request_id": "secure-1",
+    "status": "failed",
+  })
   bc.publish({"type": "steered_into_turn", "ts": 4, "content": "follow up"})
   bc.running = False
   bc_mod._broadcasts[bc.chat_id] = bc
@@ -910,6 +977,9 @@ async def test_snapshot_stream_sends_reduced_items_plus_control_tail(
     assert "steered_into_turn" in replay_types
     assert "text" not in replay_types
     assert "tool_start" not in replay_types
+    assert "secure_input_request" not in replay_types
+    assert "secure_input_consuming" not in replay_types
+    assert "secure_input_settled" not in replay_types
     assert replay_types[-2:] == ["catch_up_done", "done"]
   finally:
     bc_mod._broadcasts.pop(bc.chat_id, None)

@@ -1,0 +1,89 @@
+/* The secure-input block mirrors QuestionCard's calm inline geometry. */
+
+.secure-card {
+  box-sizing: border-box;
+  width: min(100%, 640px);
+  margin: 10px auto;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--green) 34%, var(--border));
+  border-radius: 14px;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--green) 7%, var(--surface)) 0%, var(--surface) 64%);
+}
+.secure-card--reveal {
+  border-color: color-mix(in srgb, var(--danger) 32%, var(--border));
+  background: linear-gradient(145deg, color-mix(in srgb, var(--danger) 6%, var(--surface)) 0%, var(--surface) 64%);
+}
+.secure-card__head { display: flex; align-items: center; gap: 11px; }
+.secure-card__lock {
+  position: relative;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border: 1px solid color-mix(in srgb, var(--green) 42%, var(--border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--green) 11%, var(--surface2));
+}
+.secure-card__lock::before {
+  content: '';
+  position: absolute;
+  left: 9px;
+  top: 6px;
+  width: 10px;
+  height: 9px;
+  border: 2px solid var(--green);
+  border-bottom: 0;
+  border-radius: 7px 7px 0 0;
+}
+.secure-card__lock::after {
+  content: '';
+  position: absolute;
+  left: 7px;
+  top: 14px;
+  width: 14px;
+  height: 10px;
+  border-radius: 3px;
+  background: var(--green);
+}
+.secure-card--reveal .secure-card__lock { border-color: color-mix(in srgb, var(--danger) 42%, var(--border)); background: color-mix(in srgb, var(--danger) 10%, var(--surface2)); }
+.secure-card--reveal .secure-card__lock::before { border-color: var(--danger); }
+.secure-card--reveal .secure-card__lock::after { background: var(--danger); }
+.secure-card__title { margin: 0; color: var(--text); font-size: 15px; font-weight: 650; line-height: 1.25; }
+.secure-card__description { margin: 12px 0 14px; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+.secure-card__form { display: grid; gap: 11px; }
+.secure-card__field { display: grid; gap: 5px; color: var(--text); font-size: 12px; font-weight: 600; }
+.secure-card__field input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 42px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+  background: var(--surface2, rgba(128,128,128,.1));
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 400;
+}
+.secure-card__field input[data-secure-masked='true'] { -webkit-text-security: disc; }
+.secure-card__field input:focus-visible { border-color: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 16%, transparent); }
+.secure-card--reveal .secure-card__field input:focus-visible { border-color: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 14%, transparent); }
+.secure-card__consent { display: flex; align-items: flex-start; gap: 9px; padding: 10px; border: 1px solid color-mix(in srgb, var(--danger) 25%, var(--border)); border-radius: 8px; color: var(--muted); font-size: 11.5px; line-height: 1.4; }
+.secure-card__consent input { flex: none; margin-top: 2px; accent-color: var(--danger); }
+.secure-card__error { margin: 0; padding: 9px 10px; border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--border)); border-radius: 8px; background: color-mix(in srgb, var(--danger) 7%, var(--surface)); color: color-mix(in srgb, var(--danger) 82%, var(--text)); font-size: 12px; line-height: 1.4; }
+.secure-card__submit { width: 100%; min-height: 42px; padding: 9px 12px; border: 0; border-radius: 8px; background: var(--green); color: var(--accent-fg, #fff); font-size: 13.5px; font-weight: 650; cursor: pointer; }
+.secure-card--reveal .secure-card__submit { background: var(--danger); }
+.secure-card__submit:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+.secure-card--reveal .secure-card__submit:focus-visible { outline-color: var(--danger); }
+.secure-card__submit:disabled { cursor: default; opacity: .55; }
+.secure-card__receipts { display: grid; gap: 7px; }
+.secure-card__receipt { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 34px; padding: 8px 10px; border: 1px solid var(--border-light, var(--border)); border-radius: 8px; background: color-mix(in srgb, var(--green) 6%, var(--surface2)); color: var(--text); font-size: 12px; line-height: 1.35; }
+.secure-card__receipt-prompt { display: flex; align-items: center; min-width: 0; gap: 7px; }
+.secure-card__receipt-lock { position: relative; flex: none; width: 12px; height: 10px; border-radius: 2px; background: color-mix(in srgb, var(--green) 78%, var(--text)); }
+.secure-card__receipt-lock::before { content: ''; position: absolute; left: 3px; top: -5px; width: 6px; height: 6px; box-sizing: border-box; border: 1.5px solid color-mix(in srgb, var(--green) 78%, var(--text)); border-bottom: 0; border-radius: 5px 5px 0 0; }
+.secure-card__receipt strong { color: var(--green); font-size: 11px; font-weight: 650; white-space: nowrap; }
+.secure-card--reveal .secure-card__receipt { background: color-mix(in srgb, var(--danger) 5%, var(--surface2)); }
+.secure-card--reveal .secure-card__receipt-lock { background: color-mix(in srgb, var(--danger) 78%, var(--text)); }
+.secure-card--reveal .secure-card__receipt-lock::before { border-color: color-mix(in srgb, var(--danger) 78%, var(--text)); }
+.secure-card--reveal .secure-card__receipt strong { color: var(--danger); }
+.secure-card__foot { margin: 12px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.35; }

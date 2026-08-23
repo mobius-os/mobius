@@ -1,0 +1,21 @@
+{
+  "format": 2,
+  "migrations": {
+    "0001_legacy_schema_convergence": "47add2ab54c9d9d16b2350e894737467b4da978a14720a77a2d405f97723ca13",
+    "0002_chat_run_goal_objective": "7eeb06a03232188995aa90c589a559773067ed510e94c53dd748dca619f4d8d2",
+    "0003_chat_run_root_identity": "f7edb86a81827fc077d97d73a3d23caa622152797c748dc90e4c0c3c1b4fb992",
+    "0004_app_identity_required": "45bf510a0e426a93bdb1ce2420ffbcc26a9dead3f168766656aef54c450f3a1e",
+    "0005_connectors": "64c18c2b5d95556dccc2d3ae6207affccbba79fe38e4257f6d06bd454c4f0321",
+    "0006_connector_capability_identity": "100c65be1b7258acc844b7afcff6adafd05c24003fb2751c49f0a66b5477d561",
+    "0007_chat_has_messages": "1322bb6a4b5e14925c3a1a8d8a2759490789b1c79a9162cc7ba465fdd1450aaa",
+    "0008_chat_search_documents": "fc17afdd48a6991ee2ba74c729b5ad52c33c1b06ec2cb29e4a7693d8e89a3c7d",
+    "0009_app_connections_manage": "4c7e7aa710ce404e24e7edf1837bd3cfc6eec55ff00ee1a16e232eb956824027",
+    "0010_chat_pending_question_id": "78c510c0506c4ae49a50cf4bdd1eb2cdd97605808c8591b175410b5db8e84ea8",
+    "0011_delegation_parent_wake": "beaf17a1887c950209fa8e695d5ba66dbd544db881b2c888e80a1a926fe41709",
+    "0012_connector_oauth_gcloud": "cc0f805478540ee55fd927786f10e03a020873f349cc3b0ee99a7b741cff45f1",
+    "0013_app_hosted_publication": "62d7ff873ded24c52da4031684ca5fd95ed244f416345ae1dcbae9cf880025ae",
+    "0014_chat_run_goal_plan": "28a1e1a60164ae48845a9cfb4227e7d8c58655852caed6b95e1e1725dd12a217",
+    "0015_chat_run_goal_identity": "aa63ad39a2b55b364b97c950f912041ff88cd59ebf315218a824bb567bc6bf77",
+    "0017_retire_restart_resume_toggle": "ef68e15bcea2a9799f0a0e2bbd212dd18d69818ea24c2bfe60c25ca72af61d4d"
+  }
+}

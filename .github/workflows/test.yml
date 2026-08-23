@@ -91,6 +91,13 @@ jobs:
       - name: Audit locked Python runtime dependencies
         working-directory: backend
         run: pip-audit --strict --disable-pip -r requirements.lock
+      - name: Run serviceability contracts
+        working-directory: backend
+        run: >-
+          pytest -q
+          tests/test_readiness.py
+          tests/test_db_migrations.py::test_previous_release_database_upgrades_to_current_orm
+          tests/test_db_migrations.py::test_published_schema_migration_history_is_unique_ordered_and_immutable
       - name: Validate bundled Caddy policy
         # Caddy expands these placeholders inside its container. Keep the
         # validation values non-empty and production-shaped so both site

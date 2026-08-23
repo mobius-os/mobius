@@ -29,8 +29,3 @@
   color: color-mix(in srgb, var(--text) 68%, var(--muted));
   font-weight: 550;
 }
-
-.chat__context-compaction-meta {
-  color: var(--muted);
-  font-size: 10.5px;
-}

@@ -63,6 +63,8 @@ import logging
 import os
 import signal
 import shutil
+import shlex
+import re
 from collections import deque
 from contextlib import ExitStack
 from typing import Any
@@ -84,7 +86,11 @@ from claude_agent_sdk.types import (
 )
 
 from app import activity
-from app.claude_events import _clip_task_text, dispatch_sdk_message
+from app.claude_events import (
+  _clip_task_text,
+  dispatch_sdk_message,
+  is_root_conversation_message,
+)
 from app.claude_sdk_contract import transport_exit_error, transport_process_pid
 from app.process_groups import (
   isolated_process_group_id,
@@ -101,8 +107,100 @@ from app.runtime_types import RunnerResult
 
 log = logging.getLogger(__name__)
 
+# --- Provider register (documented amendment to system_prompts.py's contract) ---
+# The per-chat snapshot in `system_prompts.py` is the identical behavioral
+# constitution handed to every provider. A runner MAY append its own small,
+# provider-authored behavioral register on top of that shared base — the narrow,
+# deliberate exception that module's contract now allows. The Codex runner
+# declares none, so it is unaffected. This is the Claude runner's concise
+# register: appended AFTER the constitution, never substituted for it.
+_CONCISE_REGISTER = r"""# Concise register
+
+Be concise by default: lead with the result, skip preamble and narration, keep only what the partner needs — full detail on request. Concision trims length and preamble, never substance: it never drops a required citation, the escaped `\$` for currency, a screenshot embedded before you describe it, the detail the platform summary or a future continuation needs, or the deliberate speech acts the constitution requires (the one-sentence intent opener, making non-obvious findings explicit, clarifying-question cards, destructive-op and restart confirmations, and the turn closeout)."""
+
+
+def _system_prompt_with_register(skill_text: str) -> str:
+  """Append this runner's provider-authored register to the shared constitution.
+
+  The SDK `system_prompt` is the shared per-chat snapshot (`skill_text`) plus the
+  Claude runner's own concise register. The register is appended, never
+  substituted, so the constitution the other provider receives is unchanged. An
+  empty register returns `skill_text` unchanged, keeping the seam behavior-neutral.
+  """
+  register = _CONCISE_REGISTER.strip()
+  if not register:
+    return skill_text
+  return skill_text.rstrip() + "\n\n" + register + "\n"
+
+
 _CLAUDE_CLI = "/usr/local/bin/claude"
 _ISOLATED_CLAUDE_CLI = "/app/scripts/claude-isolated"
+
+
+def _guarded_subagent_bash(
+  input_data: dict[str, Any],
+) -> dict[str, Any] | None:
+  """Return one canonical shell-safe durable-child invocation, or deny it."""
+  command = input_data.get("command")
+  if not isinstance(command, str) or len(command) > 24_000:
+    return None
+  try:
+    args = shlex.split(command, posix=True)
+  except ValueError:
+    return None
+  if len(args) < 9 or args[0] not in {"python", "python3"}:
+    return None
+  if args[1:3] != ["/data/apps/subagents/subagents.py", "run"]:
+    return None
+  valued = {
+    "--provider", "--name", "--scope", "--model", "--effort", "--cwd",
+    "--prompt",
+  }
+  # A delegated owner may choose blocking vs durable background execution,
+  # but it cannot claim the owner's explicit-provider override. A provider
+  # paused in Subagents remains paused for every descendant.
+  flags = {"--background"}
+  parsed: dict[str, str] = {}
+  index = 3
+  while index < len(args):
+    option = args[index]
+    if option in flags:
+      if option in parsed:
+        return None
+      parsed[option] = "true"
+      index += 1
+      continue
+    if option not in valued or option in parsed or index + 1 >= len(args):
+      return None
+    parsed[option] = args[index + 1]
+    index += 2
+  valid = bool(
+    parsed.get("--provider") in {"claude", "codex"}
+    and parsed.get("--scope") == "read"
+    and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", parsed.get("--name", ""))
+    and 0 < len(parsed.get("--prompt", "")) <= 20_000
+    and "\x00" not in parsed.get("--prompt", "")
+    and (
+      "--cwd" not in parsed
+      or (
+        (
+          parsed["--cwd"] == "/data"
+          or parsed["--cwd"].startswith("/data/")
+        )
+        and "\x00" not in parsed["--cwd"]
+      )
+    )
+    and all(
+      re.fullmatch(r"[A-Za-z0-9._:/+-]{1,256}", parsed[option])
+      for option in ("--model", "--effort") if option in parsed
+    )
+  )
+  if not valid:
+    return None
+  # Never execute the model-authored quoting. Rebuild the already-validated
+  # argv so command substitutions, redirects, and separators can only remain
+  # literal prompt/cwd text passed to the helper.
+  return {**input_data, "command": shlex.join(args)}
 
 
 def _claude_cli_path() -> str:
@@ -117,33 +215,28 @@ def _claude_cli_path() -> str:
 
 
 async def _drain_background_tasks(client, bc, inflight, session_id, chat_id):
-  """Let still-running background subagents/tasks finish before the turn reaps.
+  """Carry Claude's native background wake through its parent follow-up.
 
   The main agent's terminal ResultMessage ends the TURN, not the background
-  tasks it spawned — the SDK keeps the channel open past the result frame
-  ("result frame ends one turn, not necessarily the run"). The turn-end
-  process-group reap would kill any task still running and lose its work. So at a
-  genuine terminal we keep the connected client and keep reading its stream,
-  dispatching each event and clearing tasks as they settle, until every tracked
-  task finishes; then the caller returns into the normal reap.
-
-  Wait for the real work, not an arbitrary clock. Only drainable delegated-agent
-  tasks are tracked (``dispatch_sdk_message`` maintains ``inflight``), and those
-  reliably reach a terminal status, so this returns as soon as the subagents
-  actually settle — there is deliberately no time cap. Fail-safe: on ANY stream
-  error it returns so the reap proceeds; a real Stop raises CancelledError
-  (BaseException), which propagates untouched and aborts the wait at once.
+  work it spawned. Claude completes a native child, wakes its parent, and emits
+  another ResultMessage after the parent synthesizes the result. A task_done
+  notification is therefore not the drain boundary; keep the client connected
+  until that parent result arrives. Stop still cancels the surrounding task,
+  and a stream error fails safe into the ordinary reap.
   """
   try:
     async for sdk_msg in client.receive_messages():
-      dispatch_sdk_message(sdk_msg, bc, session_id, inflight)
-      if not inflight:
-        return
+      session_id, terminal = dispatch_sdk_message(
+        sdk_msg, bc, session_id, inflight,
+      )
+      if terminal is not None and not inflight:
+        return session_id, terminal
   except Exception as exc:
     log.warning(
       "background-task drain ended early chat_id=%s inflight=%d: %s",
       chat_id, len(inflight), exc,
     )
+  return session_id, None
 
 
 def _claude_process_group_id(client: ClaudeSDKClient) -> int | None:
@@ -863,6 +956,11 @@ async def run_claude_sdk_turn(
       if run_policy.scope == "read" and tool_name in {
         "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit",
       }:
+        guarded = (
+          _guarded_subagent_bash(input_data) if tool_name == "Bash" else None
+        )
+        if guarded is not None:
+          return PermissionResultAllow(updated_input=guarded)
         return PermissionResultDeny(
           message="This delegated task is read-only."
         )
@@ -983,19 +1081,15 @@ async def run_claude_sdk_turn(
   if _effort == "ultracode":
     _effort = "xhigh"
   turn_message = user_message + _ULTRACODE_REMINDER if _ultracode else user_message
-  # Cross-provider mismatch defense (mirrors codex_sdk_runner).
-  # Chats persisted before the snapshot logic learned to
-  # provider-validate (see chat.py snapshot-on-first-send and
-  # effective_agent_settings) can carry a Codex model on a Claude
-  # chat. Sending that through here would surface as an obscure SDK
-  # error. Quietly normalize so existing chats keep working.
-  from app.providers import _model_belongs_to_other_provider, DEFAULT_MODELS
+  # Cross-provider mismatch defense (mirrors codex_sdk_runner). Admission and
+  # effective settings normally reject this before the SDK boundary. Keep the
+  # boundary strict too: a legacy/corrupt value must never become an implicit
+  # provider-chosen model.
+  from app.providers import _model_belongs_to_other_provider
   if _model and _model_belongs_to_other_provider(_model, "claude"):
-    log.warning(
-      "claude turn started with non-claude model %r — normalizing to %r",
-      _model, DEFAULT_MODELS["claude"],
+    raise ValueError(
+      f"Selected model {_model!r} does not belong to provider 'claude'."
     )
-    _model = DEFAULT_MODELS["claude"]
   async def _run_once(model_override: str | None) -> RunnerResult:
     nonlocal current_session_id, cost_usd
     # Most recent provider rate-limit reset time seen this attempt (from any
@@ -1028,7 +1122,7 @@ async def run_claude_sdk_turn(
         stderr_tail.append(line.rstrip("\n")[:500])
 
     options_kwargs = {
-      "system_prompt": skill_text,
+      "system_prompt": _system_prompt_with_register(skill_text),
       "resume": session_id if session_id is not None else None,
       "cwd": cwd,
       "env": base_env,
@@ -1152,7 +1246,7 @@ async def run_claude_sdk_turn(
       inflight_tasks: set = set()
       while True:
         async for sdk_msg in client.receive_response():
-          # Persist the session id ONLY from real conversation messages.
+          # Persist the session id ONLY from ROOT conversation messages.
           # SystemMessage and its subclasses — notably HookEventMessage,
           # which the codex plugin's SessionStart hook emits on every
           # resumed turn — carry a PHANTOM session id that gets a
@@ -1161,10 +1255,13 @@ async def run_claude_sdk_turn(
           # the CLI cannot resume, so the next turn dies "No conversation
           # found". Only StreamEvent/Assistant/User/Result carry the
           # resumable id (the same types dispatch advances the session from).
+          # Native child-agent sidechains use those same classes but carry
+          # parent_tool_use_id; they must not repoint the chat at a child
+          # session or contribute content to the root row.
           if isinstance(
             sdk_msg,
             (StreamEvent, AssistantMessage, UserMessage, ResultMessage),
-          ):
+          ) and is_root_conversation_message(sdk_msg):
             incoming_session_id = getattr(sdk_msg, "session_id", None)
             if incoming_session_id and incoming_session_id != current_session_id:
               await _persist_session_id(db, chat_id, incoming_session_id)
@@ -1242,14 +1339,15 @@ async def run_claude_sdk_turn(
             terminal.setdefault("rate_limit_resets_at", rate_limit_resets_at)
           # Background subagents/tasks the agent launched but did not block on
           # are still live at this terminal result. The turn-end reap would kill
-          # them mid-work; keep the connected client and drain until they finish,
-          # THEN return into the reap. Skipped on a Stop — the owner asked to
-          # stop, so honor it immediately. Fail-safe: on any stream error the
-          # drain returns and the reap proceeds exactly as before.
+          # them mid-work. Keep the connected client through Claude's parent
+          # follow-up ResultMessage so the synthesized result is not discarded.
           if inflight_tasks and not active_client.interrupt_requested:
-            await _drain_background_tasks(
+            current_session_id, followup = await _drain_background_tasks(
               client, bc, inflight_tasks, current_session_id, chat_id,
             )
+            if followup is not None:
+              terminal = followup
+              cost_usd = terminal.get("cost_usd")
           return terminal
         else:
           # The stream ended without a terminal ResultMessage. Any buffered

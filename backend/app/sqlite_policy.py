@@ -7,6 +7,9 @@ builds an engine at module load, so a script needing this policy must be able
 to reach it without paying for that.
 """
 
+import sqlite3
+from datetime import date, datetime
+
 # Waits for a lock instead of raising "database is locked" the moment two
 # writers overlap. Must be installed before any pragma that can itself take a
 # lock — see connection_pragmas.
@@ -28,6 +31,20 @@ BUSY_TIMEOUT_MS = 5000
 # data volume. No formula: raise it if checkpoint churn shows up in write
 # latency, lower it if retained journal space becomes material.
 RETAINED_JOURNAL_LIMIT_BYTES = 64 * 1024 * 1024
+
+
+def install_adapters() -> None:
+  """Keep raw SQL datetime parameters stable after Python removes defaults.
+
+  SQLAlchemy converts values for typed columns itself, but migration and
+  maintenance statements intentionally use ``text()`` and therefore reach the
+  DBAPI without column-type processors. Python 3.12 deprecated sqlite3's
+  implicit date/datetime adapters. Register the same ISO encodings explicitly
+  so those durable statements do not depend on a disappearing interpreter
+  default.
+  """
+  sqlite3.register_adapter(date, lambda value: value.isoformat())
+  sqlite3.register_adapter(datetime, lambda value: value.isoformat(" "))
 
 
 def connection_pragmas() -> tuple[str, ...]:
