@@ -52,21 +52,13 @@ class FakeSsoExchange:
     return Result()
 
 
-def test_setup_creates_owner_and_resumes_bootstrap_jobs(client, monkeypatch):
-  from app.routes import auth as auth_routes
-
-  resumed = []
-  monkeypatch.setattr(
-    auth_routes, "_launch_first_owner_initializations",
-    lambda db: resumed.append(True),
-  )
+def test_setup_creates_owner(client):
   r = client.post("/api/auth/setup", json={
     "username": "admin",
     "password": "securepassword123",
   })
   assert r.status_code == 200
   assert "access_token" in r.json()
-  assert resumed == [True]
 
 
 def test_self_hosted_setup_status_stays_local(client):
@@ -105,11 +97,6 @@ def test_managed_sso_first_login_creates_bound_owner_and_one_time_handoff(
   }
   FakeSsoExchange.status_code = 200
   monkeypatch.setattr(auth_routes.httpx, "AsyncClient", FakeSsoExchange)
-  resumed = []
-  monkeypatch.setattr(
-    auth_routes, "_launch_first_owner_initializations",
-    lambda db: resumed.append(True),
-  )
 
   start = client.get(
     "/api/auth/sso/start",
@@ -148,7 +135,6 @@ def test_managed_sso_first_login_creates_bound_owner_and_one_time_handoff(
   assert owner.sso_subject == "user_managed123"
   assert owner.sso_email == "owner@example.com"
   assert auth_util.verify_password("anything", owner.hashed_password) is False
-  assert resumed == [True]
 
   session = client.post("/api/auth/sso/session")
 

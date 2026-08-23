@@ -79,8 +79,9 @@ def test_preview_returns_server_derived_contract_and_digest(
     "user_configurable": False,
     "initialize_on_install": True,
   }
-  assert body["capability_contract"]["schema"] == 4
+  assert body["capability_contract"]["schema"] == 5
   assert body["capability_contract"]["runtime"] == {}
+  assert body["capability_contract"]["public"] == {"network": []}
 
 
 def test_runtime_capability_is_independently_versioned_and_bounded():
@@ -288,11 +289,9 @@ def test_digest_mismatch_rejects_before_fetching_code_or_mutating(
 async def test_bootstrap_initialization_waits_for_backend_readiness(
   db, bypass_url_validation,
 ):
-  """An existing owner lets bootstrap initialization launch immediately."""
+  """Bootstrap and interactive installs share launch ownership but not timing."""
   from app.install import install_from_manifest
 
-  db.add(models.Owner(username="owner", hashed_password="unused"))
-  db.commit()
   base = "https://capability.test/bootstrap-memory/"
   manifest = _manifest(id="bootstrap-memory", name="Bootstrap Memory")
   _contract, digest = contract_and_digest(manifest)
@@ -325,38 +324,6 @@ async def test_bootstrap_initialization_waits_for_backend_readiness(
     wait_for_ready=True,
   )
   assert "initialization waiting for startup readiness" in warnings
-
-
-@pytest.mark.asyncio
-async def test_bootstrap_initialization_defers_until_first_owner(
-  db, bypass_url_validation,
-):
-  from app.install import install_from_manifest
-
-  base = "https://capability.test/bootstrap-memory/"
-  manifest = _manifest(id="bootstrap-memory", name="Bootstrap Memory")
-  _contract, digest = contract_and_digest(manifest)
-  responses = {
-    base + "mobius.json": (200, json.dumps(manifest).encode()),
-    base + "index.jsx": (200, JSX.encode()),
-    base + "memory-core.md": (200, b"Retrieve memory only on demand."),
-    base + "memory-job.sh": (200, b"#!/bin/sh\nexit 0\n"),
-  }
-  with patch(
-    "app.install.httpx.AsyncClient",
-    side_effect=_fake_async_client(responses),
-  ), patch("app.app_jobs.launch_app_job") as launch:
-    result = await install_from_manifest(
-      db,
-      base + "mobius.json",
-      None,
-      None,
-      source="bootstrap",
-      reviewed_capability_digest=digest,
-    )
-
-  launch.assert_not_called()
-  assert "initialization waiting for owner setup" in result.warnings
 
 
 def test_matching_digest_is_persisted_with_explicit_system_identity(
@@ -393,7 +360,4 @@ def test_matching_digest_is_persisted_with_explicit_system_identity(
     app.id, Path(app.source_dir) / "memory-job.sh", Path(app.source_dir),
     wait_for_ready=True,
   )
-  assert (
-    "initialization waiting for startup readiness"
-    in response.json()["warnings"]
-  )
+  assert "initialization waiting for startup readiness" in response.json()["warnings"]
