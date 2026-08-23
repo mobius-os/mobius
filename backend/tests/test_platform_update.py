@@ -1248,8 +1248,11 @@ async def test_apply_marks_restart_when_disk_already_ahead_of_running_backend(
   assert res["state"] == pu.PlatformUpdateState.RESTART_NEEDED.value
   assert res["needs_restart"] is True
   assert pu._read_activation_marker() == {
+    "version": 2,
     "target_sha": head,
+    "upstream_sha": target,
     "paths": ["backend/app/main.py"],
+    "image_paths": [],
   }
 
 
@@ -1271,6 +1274,48 @@ def test_platform_update_uses_explicit_activation_levels():
   assert classify(["frontend/src/App.jsx"])["level"] == "live"
   assert classify(["backend/tests/test_x.py"])["level"] == "live"
   assert classify(["docs/backend/app/notes.md"])["level"] == "live"
+
+
+def test_container_replacement_blocks_local_only_image_inputs(tmp_path, monkeypatch):
+  marker = tmp_path / "activation.json"
+  monkeypatch.setattr(pu, "RESTART_NEEDED_FLAG", marker)
+  pu._write_activation_marker(
+    "a" * 40,
+    ["Dockerfile", "backend/app/main.py"],
+    upstream_sha="b" * 40,
+    image_paths=[],
+  )
+
+  assert pu.container_replacement_blockers() == ["Dockerfile"]
+
+
+def test_container_replacement_accepts_image_input_covered_by_upstream(
+  tmp_path, monkeypatch,
+):
+  marker = tmp_path / "activation.json"
+  monkeypatch.setattr(pu, "RESTART_NEEDED_FLAG", marker)
+  pu._write_activation_marker(
+    "a" * 40,
+    ["Dockerfile"],
+    upstream_sha="a" * 40,
+    image_paths=["Dockerfile"],
+  )
+
+  assert pu.container_replacement_blockers() == []
+
+
+def test_legacy_activation_marker_cannot_claim_official_image_coverage(
+  tmp_path, monkeypatch,
+):
+  marker = tmp_path / "activation.json"
+  marker.write_text(
+    '{"target_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
+    '"paths":["Dockerfile"]}',
+    encoding="utf-8",
+  )
+  monkeypatch.setattr(pu, "RESTART_NEEDED_FLAG", marker)
+
+  assert pu.container_replacement_blockers() == ["Dockerfile"]
 
 
 def test_import_probe_classifier_excludes_constitution_only_change():
@@ -1395,9 +1440,60 @@ def test_boot_clears_restart_but_preserves_unverified_image_work(clone_env):
 
   assert res.status == "up_to_date"
   assert pu._read_activation_marker() == {
+    "version": 2,
     "target_sha": target,
+    "upstream_sha": None,
     "paths": ["frontend/package-lock.json"],
+    "image_paths": [],
   }
+
+
+def test_boot_rebuild_retires_only_upstream_covered_image_paths(
+  clone_env, monkeypatch,
+):
+  _, platform = clone_env
+  upstream = _served_sha(platform)
+  local = _local_commit(
+    platform,
+    edits={"frontend/package-lock.json": "local-only image input\n"},
+  )
+  pu._write_activation_marker(
+    local,
+    ["Dockerfile", "frontend/package-lock.json"],
+    upstream_sha=upstream,
+    image_paths=["Dockerfile"],
+  )
+  monkeypatch.setattr(pu, "current_build_sha", lambda: upstream)
+
+  pu._complete_boot_activation(platform)
+
+  assert pu._read_activation_marker() == {
+    "version": 2,
+    "target_sha": local,
+    "upstream_sha": upstream,
+    "paths": ["frontend/package-lock.json"],
+    "image_paths": [],
+  }
+
+
+def test_image_receipt_does_not_claim_compose_topology_was_applied(
+  clone_env, monkeypatch,
+):
+  _, platform = clone_env
+  upstream = _served_sha(platform)
+  pu._write_activation_marker(
+    upstream,
+    ["docker-compose.yml"],
+    upstream_sha=upstream,
+    image_paths=["docker-compose.yml"],
+  )
+  monkeypatch.setattr(pu, "current_build_sha", lambda: upstream)
+
+  pu._complete_boot_activation(platform)
+
+  marker = pu._read_activation_marker()
+  assert marker is not None
+  assert marker["paths"] == ["docker-compose.yml"]
 
 
 def test_boot_retires_in_place_python_dependency_sync(clone_env):
