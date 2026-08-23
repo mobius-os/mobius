@@ -300,10 +300,8 @@ async def apply_source_revision(
       # metadata. Their App row owns that identity; the editable source
       # contract has one fixed entry. Local apps retain the strict manifest
       # reader and its declared entry.
-      source = _entry_source(
-        snapshot_dir,
-        "index.jsx" if store_managed else manifest["entry"],
-      )
+      entry_relative = "index.jsx" if store_managed else manifest["entry"]
+      source = _entry_source(snapshot_dir, entry_relative)
       package_icon = (
         _manifest_icon(snapshot_dir, manifest)
         if manifest is not None
@@ -345,7 +343,7 @@ async def apply_source_revision(
         app.id,
         source,
         out_path=staged,
-        source_path=snapshot_dir / manifest["entry"],
+        source_path=snapshot_dir / entry_relative,
       )
 
       stable = await _git_operation(
