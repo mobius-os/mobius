@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { ownsRecoveryAction } from '../recoveryCard.js'
+import { upsertTerminalErrorItem } from '../streamReducers.js'
 
 // Provider-limit parking (design §2.4): a limit-killed turn persists an error
 // block carrying a single `pause` descriptor ({kind, resets_at?}), which
@@ -14,7 +15,6 @@ const streamingMessage = readFileSync(new URL('../StreamingMessage.jsx', import.
 const errorCard = readFileSync(new URL('../ErrorCard.jsx', import.meta.url), 'utf8')
 const resetTime = readFileSync(new URL('../resetTime.js', import.meta.url), 'utf8')
 const promotion = readFileSync(new URL('../streamPromotion.js', import.meta.url), 'utf8')
-const stream = readFileSync(new URL('../useStreamConnection.js', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const shell = readFileSync(new URL('../../Shell/Shell.jsx', import.meta.url), 'utf8')
@@ -85,16 +85,17 @@ test('streamItemToBlock carries the pause descriptor through promote', () => {
 })
 
 test('the live stream reducer carries the pause descriptor', () => {
-  assert.match(
-    stream,
-    /event\.pause \? \{ pause: event\.pause \}/,
-    'a live limit/restart note must render as the pause card before promote too',
-  )
-  assert.match(
-    stream,
-    /event\.resumable \? \{ resumable: true \}/,
-    'a live paused note must carry resumable',
-  )
+  const block = upsertTerminalErrorItem([], {
+    message: 'Usage limit reached.',
+    resumable: true,
+    pause: { kind: 'limit', resets_at: '2026-08-24T09:00:00Z' },
+  })[0]
+  assert.deepEqual(block, {
+    type: 'error',
+    message: 'Usage limit reached.',
+    resumable: true,
+    pause: { kind: 'limit', resets_at: '2026-08-24T09:00:00Z' },
+  }, 'a live limit note must render as the pause card before promote too')
 })
 
 test('the parked card has styling distinct from a plain error', () => {
