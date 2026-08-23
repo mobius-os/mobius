@@ -36,6 +36,7 @@ def test_installer_enables_boot_time_reconciliation():
 
   assert "mobius-rebuild-reconcile.service" in source
   assert "ExecStart=/usr/local/libexec/mobius-rebuild-host reconcile" in source
+  assert "Before=mobius-rebuild.path" in source
   assert "WantedBy=multi-user.target" in source
   assert "systemctl enable mobius-rebuild-reconcile.service" in source
 
@@ -163,6 +164,76 @@ def test_request_is_claimed_on_the_control_filesystem(tmp_path, monkeypatch):
   assert host.run() == 0
   assert len(claims) == 1
   assert not claims[0].exists()
+
+
+def test_worker_locks_before_exposing_claim_to_reconcile(tmp_path, monkeypatch):
+  _config, inbox = _worker_paths(tmp_path, monkeypatch)
+  expected = "1" * 40
+  request = inbox / "request.json"
+  request.write_text(
+    f'{{"version":1,"expected_sha":"{expected}"}}', encoding="utf-8",
+  )
+  order = []
+  real_replace = host.os.replace
+  real_flock = host.fcntl.flock
+
+  def record_flock(fd, operation):
+    order.append("lock")
+    return real_flock(fd, operation)
+
+  def record_replace(source, target):
+    if Path(source) == request:
+      order.append("claim")
+    return real_replace(source, target)
+
+  monkeypatch.setattr(host.fcntl, "flock", record_flock)
+  monkeypatch.setattr(host.os, "replace", record_replace)
+  monkeypatch.setattr(host, "app_container", lambda _config: ("cid", "same"))
+  monkeypatch.setattr(host, "require_pull_space", lambda _image: None)
+  monkeypatch.setattr(host.subprocess, "run", lambda *_args, **_kwargs: None)
+  monkeypatch.setattr(host, "inspect_image", lambda _image, template: (
+    expected if "revision" in template else
+    host.IMAGE_SOURCE if "source" in template else
+    "amd64" if "Architecture" in template else "same"
+  ))
+  monkeypatch.setattr(host, "retain_images", lambda *_args: None)
+  monkeypatch.setattr(host, "write_status", lambda _config, **fields: fields)
+
+  assert host.run() == 0
+  assert order[:2] == ["lock", "claim"]
+
+
+def test_worker_waits_for_boot_reconcile_before_claiming(tmp_path, monkeypatch):
+  _config, inbox = _worker_paths(tmp_path, monkeypatch)
+  expected = "2" * 40
+  request = inbox / "request.json"
+  request.write_text(
+    f'{{"version":1,"expected_sha":"{expected}"}}', encoding="utf-8",
+  )
+  attempts = []
+
+  def reconcile_then_release(_fd, _operation):
+    attempts.append("lock")
+    if len(attempts) == 1:
+      raise BlockingIOError
+
+  monkeypatch.setattr(host.fcntl, "flock", reconcile_then_release)
+  monkeypatch.setattr(host.time, "monotonic", lambda: 0)
+  monkeypatch.setattr(host.time, "sleep", lambda _delay: None)
+  monkeypatch.setattr(host, "app_container", lambda _config: ("cid", "same"))
+  monkeypatch.setattr(host, "require_pull_space", lambda _image: None)
+  monkeypatch.setattr(host.subprocess, "run", lambda *_args, **_kwargs: None)
+  monkeypatch.setattr(host, "inspect_image", lambda _image, template: (
+    expected if "revision" in template else
+    host.IMAGE_SOURCE if "source" in template else
+    "amd64" if "Architecture" in template else "same"
+  ))
+  monkeypatch.setattr(host, "retain_images", lambda *_args: None)
+  monkeypatch.setattr(host, "write_status", lambda _config, **fields: fields)
+
+  assert host.run() == 0
+  assert attempts == ["lock", "lock"]
+  assert not request.exists()
 
 
 def test_failed_request_claim_is_terminal_and_retryable(tmp_path, monkeypatch):

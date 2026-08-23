@@ -35,6 +35,19 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def acquire_lock(lock, timeout: float = 2.0) -> None:
+    """Acquire the worker lock, allowing a boot reconciler to finish first."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
 def read_json(path: Path) -> dict:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -286,10 +299,13 @@ def run() -> int:
     replacement_started = False
     ready: Path | None = None
     try:
-        os.replace(request, claimed)
-        request_claimed = True
         with LOCK.open("a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquire_lock(lock)
+            # Reconciliation uses this same lock when removing abandoned
+            # claims. Claim only after ownership is established so a boot-time
+            # reconcile can never mistake a live worker's request for debris.
+            os.replace(request, claimed)
+            request_claimed = True
             payload = read_json(claimed)
             if set(payload) != {"version", "expected_sha"} or payload["version"] != 1:
                 raise ValueError("invalid replacement request")

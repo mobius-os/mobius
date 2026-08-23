@@ -138,6 +138,7 @@ cat >/etc/systemd/system/mobius-rebuild-reconcile.service <<'EOF'
 Description=Reconcile interrupted Möbius container replacement state
 After=docker.service
 Requires=docker.service
+Before=mobius-rebuild.path
 
 [Service]
 Type=oneshot
