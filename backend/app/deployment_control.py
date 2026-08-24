@@ -253,7 +253,10 @@ async def read_rebuild_status() -> RebuildStatus:
       deployment,
       supported=False,
       code="not_configured",
-      message="Container replacement is not set up on this installation.",
+      message=(
+        "Finish the one-time host setup by running sudo "
+        "scripts/install-rebuild-helper.sh from the trusted Möbius checkout."
+      ),
     )
   raw = await asyncio.to_thread(_read_host_status)
   if not _current_handoff(raw):
@@ -277,7 +280,8 @@ async def request_rebuild() -> RebuildStatus:
   if not _configured():
     raise DeploymentControlError(
       "not_configured",
-      "Container replacement is not set up on this installation.",
+      "Finish the one-time host setup by running sudo "
+      "scripts/install-rebuild-helper.sh from the trusted Möbius checkout.",
       status_code=409,
     )
   host_status = await asyncio.to_thread(_read_host_status)
