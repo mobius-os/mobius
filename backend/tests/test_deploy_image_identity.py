@@ -177,6 +177,87 @@ def test_scratch_preflight_runs_the_compose_image_not_the_old_reference():
   assert "RUNNING_IMAGE_REF" not in preflight
 
 
+def _recreation_harness(assertions: str, *, desired_hash: str | None) -> str:
+  function = _function_source(
+    "compose_recreation_needed", "prepare_chat_cutover()",
+  )
+  desired = (
+    "desired_compose_config_hash() { return 1; }\n"
+    if desired_hash is None
+    else f"desired_compose_config_hash() {{ printf '%s\\n' {desired_hash!r}; }}\n"
+  )
+  return textwrap.dedent("""\
+    info() { :; }
+    warn() { :; }
+    valid_compose_config_hash() {
+      [[ "${1:-}" =~ ^[0-9a-fA-F]{64}$ ]]
+    }
+  """) + desired + function + assertions
+
+
+def test_same_image_changed_compose_config_requires_handoff():
+  old_hash = "a" * 64
+  new_hash = "b" * 64
+  assertions = textwrap.dedent(f"""\
+    PREV_IMAGE=sha256:same
+    RUNNING_CONFIG_HASH={old_hash}
+    if compose_recreation_needed sha256:same; then
+      printf 'needed=%s force=%s target=%s\\n' 1 "$FORCE_APP_RECREATE" "$TARGET_CONFIG_HASH"
+    else
+      printf 'needed=0\\n'
+    fi
+  """)
+  result = subprocess.run(
+    ["bash", "-c", _recreation_harness(assertions, desired_hash=new_hash)],
+    capture_output=True,
+    text=True,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert result.stdout == f"needed=1 force=0 target={new_hash}\n"
+
+
+def test_same_image_same_compose_config_is_a_true_noop():
+  config_hash = "a" * 64
+  assertions = textwrap.dedent(f"""\
+    PREV_IMAGE=sha256:same
+    RUNNING_CONFIG_HASH={config_hash}
+    if compose_recreation_needed sha256:same; then
+      printf 'needed=1\\n'
+    else
+      printf 'needed=0 force=%s target=%s\\n' "$FORCE_APP_RECREATE" "$TARGET_CONFIG_HASH"
+    fi
+  """)
+  result = subprocess.run(
+    ["bash", "-c", _recreation_harness(assertions, desired_hash=config_hash)],
+    capture_output=True,
+    text=True,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert result.stdout == f"needed=0 force=0 target={config_hash}\n"
+
+
+def test_unknown_compose_hash_forces_a_handed_off_app_recreation():
+  assertions = textwrap.dedent("""\
+    PREV_IMAGE=sha256:same
+    RUNNING_CONFIG_HASH=
+    if compose_recreation_needed sha256:same; then
+      printf 'needed=%s force=%s\\n' 1 "$FORCE_APP_RECREATE"
+    else
+      printf 'needed=0\\n'
+    fi
+  """)
+  result = subprocess.run(
+    ["bash", "-c", _recreation_harness(assertions, desired_hash=None)],
+    capture_output=True,
+    text=True,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert result.stdout == "needed=1 force=1\n"
+
+
 def test_rollback_retags_previous_id_then_recreates_compose_image(tmp_path):
   docker_log = tmp_path / "docker.log"
   rollback = _function_source(

@@ -48,6 +48,20 @@ test('unchanged runtime polls do not publish a persisted-cache update', () => {
   assert.equal(cache.value().messages, transcript)
 })
 
+test('unchanged durable waits do not republish the persisted chat cache', () => {
+  const waits = [{ id: 'wait-1', description: 'CI finishes', status: 'armed' }]
+  const cache = cacheHarness({ messages: [], waits })
+
+  updateChatRuntimeCache(
+    cache.queryClient,
+    ['chat-messages', 'chat-1'],
+    { waits: [{ id: 'wait-1', description: 'CI finishes', status: 'armed' }] },
+  )
+
+  assert.equal(cache.updates(), 0)
+  assert.equal(cache.value().waits, waits)
+})
+
 test('a runtime transition patches only runtime fields', () => {
   const transcript = [{ role: 'assistant', content: 'history' }]
   const cache = cacheHarness({

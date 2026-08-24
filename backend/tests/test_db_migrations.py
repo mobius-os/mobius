@@ -1,24 +1,73 @@
-import ast
 import asyncio
 import hashlib
 import json
-from datetime import datetime
+import sqlite3
+import subprocess
+import sys
+import importlib.util
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import String, create_engine, inspect, text
+from sqlalchemy import String, create_engine, event, inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import models
-import app.database as database
+import app.schema_migrations as migrations
 from app.config import get_settings
-from app.database import (
+from app.schema_migrations import (
   _agent_lifecycle_width_migrations,
   run_migrations,
   schema_migration_history,
 )
+
+
+def _migration_versions_before(target: str) -> list[str]:
+  versions: list[str] = []
+  for version, _migration in migrations._SCHEMA_MIGRATIONS:
+    if version == target:
+      return versions
+    versions.append(version)
+  raise AssertionError(f"Unknown migration: {target}")
+
+
+PREVIOUS_RELEASE_SCHEMA = (
+  Path(__file__).parent / "fixtures" / "schema_0013.sql"
+)
+
+
+def test_previous_release_database_upgrades_to_current_orm(tmp_path):
+  """The real boot order must close every ORM gap on an existing install.
+
+  Fresh databases are insufficient evidence because ``create_all`` creates
+  current tables and columns before migrations run. The frozen SQL fixture is
+  the empty schema from the release immediately preceding migration 0014,
+  including its already-applied ledger. Loading that artifact first makes a
+  newly declared column observable unless a genuinely new migration adds it.
+  """
+  db_path = tmp_path / "previous-release.db"
+  with sqlite3.connect(db_path) as connection:
+    connection.executescript(PREVIOUS_RELEASE_SCHEMA.read_text(encoding="utf-8"))
+
+  eng = create_engine(f"sqlite:///{db_path}")
+  before = {column["name"] for column in inspect(eng).get_columns("chat_runs")}
+  assert "goal_plan_json" not in before
+  assert "goal_plan_revision" not in before
+
+  # Production creates new tables first, then upgrades existing ones. Keep the
+  # test on that exact ordering: reversing it would prove a different system.
+  models.Base.metadata.create_all(bind=eng)
+  run_migrations(eng)
+  first_history = schema_migration_history(eng)
+  run_migrations(eng)
+
+  assert migrations.orm_schema_gaps(eng) == []
+  assert schema_migration_history(eng) == first_history
+  assert [row["version"] for row in first_history] == [
+    version for version, _migration in migrations._SCHEMA_MIGRATIONS
+  ]
 
 
 def test_run_migrations_drops_removed_image_generation_columns(tmp_path):
@@ -78,12 +127,13 @@ def test_run_migrations_removes_retired_job_authority_receipts(
   with Session(eng) as session:
     contract = session.get(models.App, app_id).capability_contract
   assert contract == {
-    "schema": 4,
+    "schema": 5,
     "data": {"shared_memory": "write"},
     "background": {
       "job": "fetch.sh",
       "mode": "scheduled",
     },
+    "public": {"network": []},
   }
 
 
@@ -110,7 +160,7 @@ def test_run_migrations_adds_manifest_url_to_existing_apps_table(tmp_path):
   indexes = {i["name"] for i in inspector.get_indexes("apps")}
 
   assert "manifest_url" in cols
-  assert "share_manifest_url" in cols
+  assert "published_manifest_url" in cols
   assert "ix_apps_manifest_url" in indexes
   # Reversible-uninstall tombstone column is added on an existing apps table
   # (feature 110) — the path that runs on a real prod boot, not create_all.
@@ -920,17 +970,112 @@ def test_run_migrations_adds_owner_auto_resume_default(tmp_path):
   cols = {c["name"]: c for c in inspect(eng).get_columns("owner")}
   assert "auto_resume_on_limit_default" in cols
   assert cols["auto_resume_on_limit_default"]["nullable"] is False
-  assert "auto_resume_on_restart_default" in cols
-  assert cols["auto_resume_on_restart_default"]["nullable"] is False
+  # Restart continuation is always on and has no owner-default seed.
+  assert "auto_resume_on_restart_default" not in cols
   with eng.connect() as conn:
     value = conn.execute(text(
       "SELECT auto_resume_on_limit_default FROM owner WHERE id = 1"
     )).scalar_one()
-    restart_value = conn.execute(text(
-      "SELECT auto_resume_on_restart_default FROM owner WHERE id = 1"
-    )).scalar_one()
   assert value in (False, 0)
-  assert restart_value in (True, 1)
+
+
+def test_retire_restart_resume_toggle_lifts_stranded_chats(tmp_path):
+  """The one-time retirement drops the owner seed column and lifts every chat a
+  prior toggle latched off, while preserving a cancelled delegation child's
+  internal do-not-resurrect latch."""
+  from app.schema_migrations import _retire_restart_resume_toggle
+
+  db_path = tmp_path / "retire.db"
+  eng = create_engine(f"sqlite:///{db_path}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE owner (id INTEGER PRIMARY KEY, "
+      "auto_resume_on_restart_default BOOLEAN NOT NULL DEFAULT TRUE)"
+    ))
+    conn.execute(text(
+      "CREATE TABLE chats (id VARCHAR PRIMARY KEY, "
+      "auto_resume_on_restart BOOLEAN NOT NULL DEFAULT TRUE)"
+    ))
+    conn.execute(text(
+      "CREATE TABLE delegations (id VARCHAR PRIMARY KEY, "
+      "child_chat_id VARCHAR, cancelled_at DATETIME NULL)"
+    ))
+    conn.execute(text(
+      "INSERT INTO chats (id, auto_resume_on_restart) VALUES "
+      "('stranded', 0), ('kept', 1), ('cancelled-child', 0), "
+      "('active-child', 0)"
+    ))
+    # Only a CANCELLED delegation child keeps its latch; a live delegation
+    # child is lifted like any other chat.
+    conn.execute(text(
+      "INSERT INTO delegations (id, child_chat_id, cancelled_at) VALUES "
+      "('d1', 'cancelled-child', '2026-08-01 00:00:00'), "
+      "('d2', 'active-child', NULL)"
+    ))
+
+  _retire_restart_resume_toggle(eng)
+  # Idempotent: the dropped seed column means a second pass is a clean no-op.
+  _retire_restart_resume_toggle(eng)
+
+  assert "auto_resume_on_restart_default" not in {
+    c["name"] for c in inspect(eng).get_columns("owner")
+  }
+  with eng.connect() as conn:
+    rows = dict(conn.execute(text(
+      "SELECT id, auto_resume_on_restart FROM chats"
+    )).all())
+  assert rows["stranded"] in (True, 1)
+  assert rows["kept"] in (True, 1)
+  assert rows["active-child"] in (True, 1)
+  # The cancelled delegation child keeps its internal latch.
+  assert rows["cancelled-child"] in (False, 0)
+
+
+def test_retire_restart_resume_toggle_retries_as_one_transaction(tmp_path):
+  """A failed schema retirement must not hide a half-applied migration."""
+  from app.schema_migrations import _retire_restart_resume_toggle
+
+  eng = create_engine(f"sqlite:///{tmp_path / 'retire-retry.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE owner (id INTEGER PRIMARY KEY, "
+      "auto_resume_on_restart_default BOOLEAN NOT NULL DEFAULT TRUE)"
+    ))
+    conn.execute(text(
+      "CREATE TABLE chats (id VARCHAR PRIMARY KEY, "
+      "auto_resume_on_restart BOOLEAN NOT NULL DEFAULT TRUE)"
+    ))
+    conn.execute(text(
+      "INSERT INTO chats (id, auto_resume_on_restart) VALUES ('stranded', 0)"
+    ))
+
+  def refuse_drop(_conn, _cursor, statement, _parameters, _context, _many):
+    if statement.startswith("ALTER TABLE owner DROP COLUMN"):
+      raise RuntimeError("simulated locked schema")
+
+  event.listen(eng, "before_cursor_execute", refuse_drop)
+  try:
+    with pytest.raises(RuntimeError, match="simulated locked schema"):
+      _retire_restart_resume_toggle(eng)
+  finally:
+    event.remove(eng, "before_cursor_execute", refuse_drop)
+
+  assert "auto_resume_on_restart_default" in {
+    c["name"] for c in inspect(eng).get_columns("owner")
+  }
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT auto_resume_on_restart FROM chats WHERE id = 'stranded'"
+    )).scalar_one() in (False, 0)
+
+  _retire_restart_resume_toggle(eng)
+  assert "auto_resume_on_restart_default" not in {
+    c["name"] for c in inspect(eng).get_columns("owner")
+  }
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT auto_resume_on_restart FROM chats WHERE id = 'stranded'"
+    )).scalar_one() in (True, 1)
 
 
 def test_fresh_owner_schema_has_auto_resume_default():
@@ -940,11 +1085,8 @@ def test_fresh_owner_schema_has_auto_resume_default():
   assert column.default is not None
   assert column.server_default is not None
   assert str(column.server_default.arg).lower() == "false"
-  restart = models.Owner.__table__.c.auto_resume_on_restart_default
-  assert restart.nullable is False
-  assert restart.default is not None
-  assert restart.server_default is not None
-  assert str(restart.server_default.arg).lower() == "true"
+  # Restart continuation is always on: there is no owner-default column.
+  assert not hasattr(models.Owner.__table__.c, "auto_resume_on_restart_default")
 
 
 def test_run_migrations_adds_read_at_and_backfills_notifications(tmp_path):
@@ -1016,8 +1158,225 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0010_chat_pending_question_id",
     "0011_delegation_parent_wake",
     "0012_connector_oauth_gcloud",
+    "0013_app_hosted_publication",
+    "0014_chat_run_goal_plan",
+    "0015_chat_run_goal_identity",
+    "0016_app_connect_manage",
+    "0017_retire_restart_resume_toggle",
+    "0018_explicit_legacy_chat_models",
   ]
   assert second == first
+
+
+def test_legacy_chat_models_pin_only_established_unselected_chats(
+  tmp_path, monkeypatch,
+):
+  """0018 repairs invisible defaults without creating a new default path."""
+  data_dir = tmp_path / "data"
+  shared = data_dir / "shared"
+  shared.mkdir(parents=True)
+  (shared / "agent-settings.json").write_text(json.dumps({
+    "model": "gpt-5.6-sol",
+    "effort": "xhigh",
+  }))
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'legacy-chat-models.db'}")
+  models.Base.metadata.create_all(eng)
+  established = [
+    {"role": "user", "content": "hello"},
+    {"role": "assistant", "content": "hi"},
+  ]
+  with Session(eng) as session:
+    session.add(models.Owner(
+      username="owner",
+      hashed_password="hash",
+      provider="codex",
+    ))
+    rows = [
+      models.Chat(
+        id="claude-source-old", title="Old Claude choice", provider="claude",
+        messages=[], agent_settings_json={"model": "claude-sonnet-4-6"},
+        activity_at=datetime(2026, 8, 20),
+      ),
+      models.Chat(
+        id="claude-source-current", title="Current Claude choice",
+        provider="claude", messages=[],
+        agent_settings_json={"model": "claude-opus-4-8"},
+        activity_at=datetime(2026, 8, 22),
+      ),
+      # A newer app-owned model is not evidence of the owner's picker choice.
+      models.Chat(
+        id="claude-app-source", title="App model", provider="claude",
+        messages=[], agent_settings_json={"model": "claude-fable-5"},
+        created_by_app_id=99, activity_at=datetime(2026, 8, 23),
+      ),
+      models.Chat(
+        id="legacy-claude", title="Legacy Claude", provider="claude",
+        messages=established, agent_settings_json=None,
+      ),
+      models.Chat(
+        id="legacy-codex", title="Legacy Codex", provider="codex",
+        messages=established,
+        agent_settings_json={"effort": "high", "project_id": "alpha"},
+      ),
+      models.Chat(
+        id="legacy-app", title="Legacy app", provider="claude",
+        messages=established, created_by_app_id=99,
+        agent_settings_json={"report_kind": "reflection"},
+      ),
+      models.Chat(
+        id="empty-chat", title="First run", provider="codex",
+        messages=[{"role": "user", "content": "not completed"}],
+        agent_settings_json={"effort": "medium"},
+      ),
+      models.Chat(
+        id="deleted-chat", title="Deleted", provider="codex",
+        messages=established, agent_settings_json=None,
+        deleted_at=datetime(2026, 8, 22),
+      ),
+      models.Chat(
+        id="explicit-chat", title="Explicit", provider="codex",
+        messages=established,
+        agent_settings_json={"model": "gpt-5.5", "effort": "low"},
+      ),
+    ]
+    session.add_all(rows)
+    session.commit()
+
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version in _migration_versions_before(
+      "0018_explicit_legacy_chat_models",
+    ):
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) "
+        "VALUES (:version, '2026-08-23 00:00:00')"
+      ), {"version": version})
+
+  run_migrations(eng)
+  with Session(eng) as session:
+    settings = {
+      row.id: row.agent_settings_json
+      for row in session.query(models.Chat).all()
+    }
+  assert settings["legacy-claude"] == {"model": "claude-opus-4-8"}
+  assert settings["legacy-codex"] == {
+    "effort": "high",
+    "project_id": "alpha",
+    "model": "gpt-5.6-sol",
+  }
+  assert settings["legacy-app"] == {
+    "report_kind": "reflection",
+    "model": "claude-opus-4-8",
+  }
+  assert settings["empty-chat"] == {"effort": "medium"}
+  assert settings["deleted-chat"] is None
+  assert settings["explicit-chat"] == {"model": "gpt-5.5", "effort": "low"}
+
+  # Simulate a crash after the data commit but before the ledger insert. The
+  # retry must no-op rather than revising any newly explicit conversation.
+  with eng.begin() as conn:
+    conn.execute(text(
+      "DELETE FROM schema_migrations "
+      "WHERE version = '0018_explicit_legacy_chat_models'"
+    ))
+  run_migrations(eng)
+  with Session(eng) as session:
+    assert session.get(models.Chat, "legacy-codex").agent_settings_json == {
+      "effort": "high",
+      "project_id": "alpha",
+      "model": "gpt-5.6-sol",
+    }
+
+
+def test_legacy_chat_models_never_invent_a_provider_default(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  shared = data_dir / "shared"
+  shared.mkdir(parents=True)
+  (shared / "agent-settings.json").write_text(json.dumps({
+    "model": "gpt-5.6-sol",
+  }))
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'no-invented-model.db'}")
+  models.Base.metadata.create_all(eng)
+  transcript = [
+    {"role": "user", "content": "hello"},
+    {"role": "assistant", "content": "hi"},
+  ]
+  with Session(eng) as session:
+    session.add(models.Owner(
+      username="owner",
+      hashed_password="hash",
+      provider="codex",
+    ))
+    session.add_all([
+      models.Chat(
+        id="known-provider-choice", title="Codex", provider="codex",
+        messages=transcript, agent_settings_json=None,
+      ),
+      models.Chat(
+        id="no-provider-choice", title="Claude", provider="claude",
+        messages=transcript, agent_settings_json=None,
+      ),
+    ])
+    session.commit()
+
+  migrations._pin_established_legacy_chat_models(eng)
+  migrations._pin_established_legacy_chat_models(eng)
+
+  with Session(eng) as session:
+    assert session.get(
+      models.Chat, "known-provider-choice",
+    ).agent_settings_json == {"model": "gpt-5.6-sol"}
+    assert session.get(
+      models.Chat, "no-provider-choice",
+    ).agent_settings_json is None
+
+
+def test_legacy_chat_models_preserve_malformed_settings(tmp_path, monkeypatch):
+  data_dir = tmp_path / "data"
+  shared = data_dir / "shared"
+  shared.mkdir(parents=True)
+  (shared / "agent-settings.json").write_text(json.dumps({
+    "model": "gpt-5.6-sol",
+  }))
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  eng = create_engine(f"sqlite:///{tmp_path / 'malformed-settings.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as session:
+    session.add(models.Owner(
+      username="owner",
+      hashed_password="hash",
+      provider="codex",
+    ))
+    session.add(models.Chat(
+      id="malformed-settings",
+      title="Malformed settings",
+      provider="codex",
+      messages=[
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+      ],
+      agent_settings_json=None,
+    ))
+    session.commit()
+  with eng.begin() as conn:
+    conn.execute(text(
+      "UPDATE chats SET agent_settings_json = '{malformed' "
+      "WHERE id = 'malformed-settings'"
+    ))
+
+  migrations._pin_established_legacy_chat_models(eng)
+
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT agent_settings_json FROM chats WHERE id = 'malformed-settings'"
+    )).scalar_one() == "{malformed"
 
 
 def test_pending_question_migration_backfills_only_active_latest_question(
@@ -1060,8 +1419,8 @@ def test_pending_question_migration_backfills_only_active_latest_question(
       "('r-superseded', 'superseded', 'running')"
     ))
 
-  database._add_chat_pending_question_id(eng)
-  database._add_chat_pending_question_id(eng)
+  migrations._add_chat_pending_question_id(eng)
+  migrations._add_chat_pending_question_id(eng)
 
   assert "pending_question_id" in {
     column["name"] for column in inspect(eng).get_columns("chats")
@@ -1117,6 +1476,115 @@ def test_connections_manage_reaches_a_ledgered_database(tmp_path):
   assert "0009_app_connections_manage" in {
     entry["version"] for entry in schema_migration_history(eng)
   }
+
+
+def test_hosted_publication_reaches_a_fully_ledgered_private_app(tmp_path):
+  """0013 adds snapshot fields and a closed public contract to old rows."""
+  eng = create_engine(f"sqlite:///{tmp_path / 'ledgered-public-apps.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps ("
+      "id INTEGER PRIMARY KEY, name VARCHAR(255), slug VARCHAR(128), "
+      "token_nonce VARCHAR(32), capability_contract JSON)"
+    ))
+    conn.execute(text(
+      "INSERT INTO apps VALUES "
+      "(1, 'Old app', 'old-app', 'nonce', :contract)"
+    ), {"contract": json.dumps({"schema": 4, "runtime": {}})})
+    conn.execute(text(
+      "CREATE TABLE schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version in _migration_versions_before("0013_app_hosted_publication"):
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) "
+        "VALUES (:version, '2026-08-15 00:00:00')"
+      ), {"version": version})
+
+  run_migrations(eng)
+  columns = {c["name"] for c in inspect(eng).get_columns("apps")}
+  assert "public_enabled" not in columns
+  assert "public_bundle_path" in columns
+  with eng.connect() as conn:
+    public_bundle, raw_contract = conn.execute(text(
+      "SELECT public_bundle_path, capability_contract FROM apps WHERE id = 1"
+    )).one()
+  contract = json.loads(raw_contract) if isinstance(raw_contract, str) else raw_contract
+  assert public_bundle is None
+  assert contract["schema"] == 5
+  assert contract["public"] == {"network": []}
+  assert "0013_app_hosted_publication" in {
+    entry["version"] for entry in schema_migration_history(eng)
+  }
+
+
+def test_hosted_publication_migrates_the_unmerged_live_flag_to_a_snapshot(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
+  compiled = tmp_path / "compiled"
+  compiled.mkdir()
+  module = b"export default function App(){return null}\n"
+  digest = hashlib.sha256(module).hexdigest()
+  installed_bundle = compiled / f"app-1-{digest}.js"
+  installed_bundle.write_bytes(module)
+  eng = create_engine(f"sqlite:///{tmp_path / 'flag-to-snapshot.db'}")
+  contract = {"schema": 5, "public": {"network": []}}
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE apps ("
+      "id INTEGER PRIMARY KEY, name VARCHAR(255), slug VARCHAR(128), "
+      "token_nonce VARCHAR(32), compiled_path VARCHAR(512), "
+      "source_commit VARCHAR(64), capability_contract JSON, "
+      "share_manifest_url VARCHAR(1024), "
+      "public_enabled BOOLEAN NOT NULL DEFAULT FALSE)"
+    ))
+    conn.execute(text(
+      "INSERT INTO apps VALUES "
+      "(1, 'Live app', 'live-app', 'nonce', :bundle, :commit, :contract, "
+      ":manifest, TRUE)"
+    ), {
+      "bundle": str(installed_bundle),
+      "commit": "a" * 40,
+      "contract": json.dumps(contract),
+      "manifest": "https://example.test/live-app/mobius.json",
+    })
+    conn.execute(text(
+      "CREATE TABLE schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version in _migration_versions_before("0013_app_hosted_publication"):
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) "
+        "VALUES (:version, '2026-08-15 00:00:00')"
+      ), {"version": version})
+
+  run_migrations(eng)
+
+  columns = {c["name"] for c in inspect(eng).get_columns("apps")}
+  assert "public_enabled" not in columns
+  assert "share_manifest_url" not in columns
+  with eng.connect() as conn:
+    row = conn.execute(text(
+      "SELECT published_manifest_url, public_bundle_path, "
+      "public_name, public_bundle_digest, public_source_commit, "
+      "public_access_contract, "
+      "public_token_nonce "
+      "FROM apps WHERE id = 1"
+    )).one()
+  assert row.published_manifest_url == "https://example.test/live-app/mobius.json"
+  assert row.public_name == "Live app"
+  assert Path(row.public_bundle_path).read_bytes() == module
+  assert Path(row.public_bundle_path) != installed_bundle
+  assert row.public_bundle_digest == digest
+  assert row.public_source_commit == "a" * 40
+  public_access = (
+    json.loads(row.public_access_contract)
+    if isinstance(row.public_access_contract, str)
+    else row.public_access_contract
+  )
+  assert public_access == {"network": []}
+  assert len(row.public_token_nonce) == 32
 
 
 def test_connector_oauth_gcloud_migration_upgrades_legacy_rows_idempotently(
@@ -1209,7 +1677,8 @@ def test_connector_oauth_gcloud_migration_upgrades_legacy_rows_idempotently(
 
 
 def test_orm_schema_gaps_reports_missing_columns(tmp_path):
-  from app.database import Base, orm_schema_gaps
+  from app.database import Base
+  from app.schema_migrations import orm_schema_gaps
 
   eng = create_engine(f"sqlite:///{tmp_path / 'parity.db'}")
   Base.metadata.create_all(bind=eng)
@@ -1414,7 +1883,7 @@ def test_chat_search_migration_emits_plain_postgres_documents_without_fts():
     def execute(self, statement):
       statements.append(str(statement))
 
-  database._create_chat_search_tables(RecordingConnection())
+  migrations._create_chat_search_tables(RecordingConnection())
 
   emitted = "\n".join(statements)
   assert "DROP TABLE IF EXISTS chat_search_docs" in emitted
@@ -1470,7 +1939,7 @@ def test_goal_migration_backfills_only_the_running_turns_initiating_goal(
   eng = create_engine(f"sqlite:///{tmp_path / 'goal-run.db'}")
   models.Base.metadata.create_all(eng)
   started_at = datetime(2026, 7, 31, 12, 0, 0)
-  started_ms = int(started_at.replace(tzinfo=database.UTC).timestamp() * 1000)
+  started_ms = int(started_at.replace(tzinfo=UTC).timestamp() * 1000)
   with Session(eng) as session:
     session.add(models.Chat(
       id="goal-chat",
@@ -1511,19 +1980,95 @@ def test_goal_migration_backfills_only_the_running_turns_initiating_goal(
   assert objective == "finish the migration"
 
 
-def test_applied_legacy_schema_migration_is_immutable():
-  """Editing migration 0001 must require an intentional new migration."""
-  source = Path(database.__file__).read_text(encoding="utf-8")
-  module = ast.parse(source)
-  migration = next(
-    node for node in module.body
-    if isinstance(node, ast.FunctionDef)
-    and node.name == "_converge_legacy_schema"
+def test_goal_plan_migration_adds_snapshot_and_revision_to_existing_runs(
+  tmp_path,
+):
+  eng = create_engine(f"sqlite:///{tmp_path / 'goal-plan.db'}")
+  models.Base.metadata.create_all(eng)
+  with eng.begin() as conn:
+    conn.execute(text("ALTER TABLE chat_runs DROP COLUMN goal_plan_json"))
+    conn.execute(text("ALTER TABLE chat_runs DROP COLUMN goal_plan_revision"))
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version in _migration_versions_before("0014_chat_run_goal_plan"):
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) "
+        "VALUES (:version, :at)"
+      ), {"version": version, "at": datetime(2026, 8, 18)})
+
+  run_migrations(eng)
+  run_migrations(eng)
+
+  columns = {column["name"]: column for column in inspect(eng).get_columns("chat_runs")}
+  assert "goal_plan_json" in columns
+  assert "goal_plan_revision" in columns
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT COUNT(*) FROM schema_migrations "
+      "WHERE version = '0014_chat_run_goal_plan'"
+    )).scalar_one() == 1
+
+
+def test_goal_identity_migration_preserves_distinct_historical_roots_and_index(
+  tmp_path,
+):
+  eng = create_engine(f"sqlite:///{tmp_path / 'goal-identity.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as session:
+    session.add(models.Chat(id="goal-chat", title="Goal", messages=[]))
+    session.add_all([
+      models.ChatRun(
+        id="planned", root_run_id="planned", chat_id="goal-chat",
+        status="interrupted", provider="codex", goal_objective="Ship",
+        goal_plan_json={"version": 1, "tasks": []},
+        started_at=datetime(2026, 8, 18, 10),
+      ),
+      models.ChatRun(
+        id="recovered", root_run_id="recovered", chat_id="goal-chat",
+        status="running", provider="codex", goal_objective="Ship",
+        started_at=datetime(2026, 8, 18, 11),
+      ),
+    ])
+    session.commit()
+  with eng.begin() as conn:
+    conn.execute(text("DROP INDEX ix_chat_runs_goal_id"))
+    conn.execute(text("ALTER TABLE chat_runs DROP COLUMN goal_id"))
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version in _migration_versions_before("0015_chat_run_goal_identity"):
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) "
+        "VALUES (:version, :at)"
+      ), {"version": version, "at": datetime(2026, 8, 18)})
+
+  run_migrations(eng)
+
+  with eng.connect() as conn:
+    rows = conn.execute(text(
+      "SELECT id, goal_id FROM chat_runs ORDER BY started_at"
+    )).all()
+  assert rows == [("planned", "planned"), ("recovered", "recovered")]
+  assert any(
+    index["name"] == "ix_chat_runs_goal_id"
+    for index in inspect(eng).get_indexes("chat_runs")
   )
-  semantic_shape = ast.dump(migration, include_attributes=False).encode()
-  assert hashlib.sha256(semantic_shape).hexdigest() == (
-    "4f7b1f167534e0f692eaa004e40c124b36b655c387671f93b66f4932a6e242ec"
-  ), "0001 is applied history; append a new numbered migration instead"
+
+
+def test_published_schema_migration_history_is_unique_ordered_and_immutable():
+  """Published migrations are history; current work always appends."""
+  script = Path(__file__).parents[1] / "scripts" / "check-schema-migrations.py"
+  completed = subprocess.run(
+    [sys.executable, str(script)],
+    text=True,
+    capture_output=True,
+    check=False,
+  )
+  assert completed.returncode == 0, completed.stderr
+  assert "append-only migrations verified" in completed.stdout
 
 
 def test_failed_migration_is_not_recorded_and_can_retry(tmp_path, monkeypatch):
@@ -1540,7 +2085,7 @@ def test_failed_migration_is_not_recorded_and_can_retry(tmp_path, monkeypatch):
     raise RuntimeError("interrupted migration")
 
   monkeypatch.setattr(
-    database,
+    migrations,
     "_SCHEMA_MIGRATIONS",
     (("9000_retry_contract", fail_once),),
   )

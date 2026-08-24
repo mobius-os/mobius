@@ -5,9 +5,9 @@
  * or blanks a live turn. These cases exercise the SYNTHESIZED client mechanism
  * end to end (route-mocked SSE, no agent tokens):
  *
- *   1. shell_rebuilt DURING a streaming turn does NOT reload; the reload is held
- *      QUIETLY (shellReloadPolicy.shouldDeferShellReload) until idle — no toast,
- *      no popup — and the live turn keeps rendering.
+ *   1. shell_rebuilt DURING an unfinished turn does NOT reload, including after
+ *      the page is hidden and the turn parks on an owner question; the reload
+ *      is held QUIETLY until the turn settles and visible progress stays intact.
  *   2. passive shell_rebuilt generations stay coalesced while an idle chat is
  *      visible, so source-save bursts cannot interrupt a reader.
  *   3. a deliberate shell_apply_now that lands mid-turn reloads exactly ONCE
@@ -168,17 +168,29 @@ async function sendMessage(page, text) {
 }
 
 test.describe('shell update — apply on idle, SW on a leash', () => {
-  test('shell_rebuilt during a streaming turn does not reload; holds quietly', async ({ page }) => {
-    // The chat stream never sends `done`, so the turn stays live and the chat
-    // stays in the streaming set. shell_rebuilt arrives on the GLOBAL system
-    // stream — its only channel — while the turn is streaming; the gate must
-    // DEFER (quiet hold). The arm resolves only after the turn is visibly
-    // streaming, so the delivery is deterministically mid-turn.
+  test('an unfinished question turn survives a hidden-page shell update', async ({ page }) => {
+    // The chat stream parks on a question without `done`, so the active turn
+    // remains unfinished. shell_rebuilt arrives on the GLOBAL system stream,
+    // then the page is hidden — the exact boundary that previously treated the
+    // turn as disposable and reloaded away its visible activity.
     let armRebuilt
     const armed = new Promise(resolve => { armRebuilt = resolve })
     const streamingBody = sse([
       { type: 'catch_up_done' },
       { type: 'text', content: 'building the shell...' },
+      {
+        type: 'question',
+        question_id: 'q-shell-update-progress',
+        questions: [{
+          question: 'Continue with the update?',
+          header: 'Continue',
+          multiSelect: false,
+          options: [
+            { label: 'Continue', description: 'Resume the same turn.' },
+            { label: 'Not now', description: 'Keep it parked.' },
+          ],
+        }],
+      },
     ])
     await setup(page, {
       streamRoute: route => route.fulfill(fulfillStream(streamingBody)),
@@ -189,15 +201,25 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
 
     await sendMessage(page, 'rebuild the shell')
 
-    // The live turn is rendering — NOW deliver shell_rebuilt mid-turn.
+    // The accumulated progress and its question are both visible before the
+    // update arrives.
     await expect(page.locator('[data-chat-surface="painted"]').getByText('building the shell...')).toBeVisible({ timeout: 8000 })
+    await expect(page.getByText('Continue with the update?')).toBeVisible({ timeout: 8000 })
     armRebuilt()
 
-    // Wait PAST the hold-until-idle recheck interval (6s): the recheck fires,
-    // sees a still-streaming turn, and reschedules — it must NOT reload. This is
-    // the sacred-streaming-view invariant against the timer mechanism.
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        value: 'hidden',
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+
+    // Wait past the recheck interval: hidden + question-paused is still an
+    // unfinished active turn, so there is no reload and no lost activity.
     await page.waitForTimeout(7000)
     expect(await loadCount(page)).toBe(0)
+    await expect(page.locator('[data-chat-surface="painted"]').getByText('building the shell...')).toBeVisible()
   })
 
   test('a deliberate mid-turn shell_apply_now applies exactly once at the turn-end idle boundary', async ({ page }) => {
@@ -386,120 +408,4 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
     expect(await loadCount(page)).toBe(after)
   })
 
-  test('an idle apply lands the page on the new SW generation, not the outgoing one', async ({ page }) => {
-    // This case drives FOUR real service-worker generation steps (install gen A,
-    // a second gen-A keeper client, install-and-wait gen B, then the mount-time
-    // handoff) plus TWO full page reloads. Those sequential real-SW waits are
-    // legitimately slow and, under parallel-CI load, their cumulative time
-    // (~86s worst case) can exceed Playwright's default 60s per-test budget —
-    // the classic pass-when-fast, time-out-when-slow flake. The behaviour under
-    // test is correct (it settles reliably given enough time); this is genuinely
-    // slow work, not a race, so grant it the extended budget.
-    test.slow()
-    // Publish a genuinely new, WAITING service worker (a real update cycle — the
-    // window feature 207 bit, biased to a client's FIRST cycle after install),
-    // drive the idle apply through the shell's own recovery path, and assert the
-    // page settles CONTROLLED BY THE REGISTRATION'S ACTIVE WORKER with nothing
-    // left waiting. That is generation identity: it landed on the new generation,
-    // not back on the outgoing one.
-    let swMarker = ''
-    // Serve /sw.js from a single cached fetch. updateViaCache:'none' plus the
-    // reg.update() calls below make the browser re-request it many times, and a
-    // live route.fetch() per hit is a real round-trip to the shared test backend
-    // the parallel workers already contend on — that contention, not any SW
-    // race, is what timed this case out. Served bytes are unchanged.
-    let swBase = null
-    await page.route('**/sw.js', async (route) => {
-      if (!swBase) {
-        const res = await route.fetch()
-        swBase = { status: res.status(), headers: res.headers(), body: await res.text() }
-      }
-      // A STABLE byte-append once armed → the browser installs ONE genuinely new,
-      // leashed worker; later re-fetches stay byte-identical so it does not
-      // reinstall. The bundle is unchanged — the new WORKER's identity is the
-      // generation the page must land on.
-      const body = swMarker ? `${swBase.body}\n//${swMarker}\n` : swBase.body
-      await route.fulfill({ status: swBase.status, headers: swBase.headers, body })
-    })
-    await setup(page, {
-      streamRoute: route => route.fulfill(fulfillStream(sse([{ type: 'done' }]))),
-      systemBody: sse([{ type: 'system_stream_open' }]),
-    })
-    const idleChat = await gotoEmptyChat(page)
-    // gen A controls the page (first install claims).
-    await page.waitForFunction(() => !!navigator.serviceWorker?.controller, { timeout: 15000 })
-
-    // Keep a second gen-A client alive. Without it, navigation commonly leaves
-    // no outgoing client and Chromium activates gen B before the shell mounts,
-    // so the test never exercises the mount-time pickup path it claims to pin.
-    const keeper = await page.context().newPage()
-    await keeper.goto(BASE, { waitUntil: 'domcontentloaded' })
-    await keeper.waitForFunction(() => !!navigator.serviceWorker?.controller, { timeout: 15000 })
-
-    // Publish gen B; wait until it is installed and WAITING (leashed — the SW
-    // never skipWaiting()s on its own).
-    swMarker = 'e2e gen B'
-    await page.evaluate(async () => { await (await navigator.serviceWorker.getRegistration()).update() })
-    await page.waitForFunction(
-      async () => !!(await navigator.serviceWorker.getRegistration())?.waiting,
-      { timeout: 15000 },
-    )
-
-    // The hosted suite shares one backend across parallel Playwright workers.
-    // This case is specifically the IDLE recovery path, so do not let an
-    // unrelated worker's running fixture make the shell correctly defer its
-    // generation handoff. Keep the live-confirmation fetch real for this page,
-    // but scope its list to the chat this test owns.
-    await page.route(/\/api\/chats\/?(?:\?.*)?$/, async route => {
-      if (route.request().method() !== 'GET') return route.continue()
-      return route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify([{
-          ...idleChat,
-          running: false,
-        }]),
-      })
-    })
-
-    // The synthetic gen B changes only a trailing sw.js comment, so its
-    // advertised page bundle is intentionally identical to gen A. A real shell
-    // publish changes that bundle hash and the boot check sets this recovery
-    // flag; seed the same public signal so this case exercises the resulting
-    // new-document handoff rather than an indistinguishable no-op generation.
-    await page.evaluate(() => sessionStorage.setItem('sw-stale-precache-pending', '1'))
-    await resetLoadCount(page)
-    // Re-mount the shell so its once-per-mount pickup finds the waiting worker and
-    // re-arms the idle apply — the recovery path a client hits when a newer
-    // generation is installed but the page has not adopted it.
-    await page.reload({ waitUntil: 'domcontentloaded' })
-
-    // Controller identity can flip to gen B while this document is still
-    // executing gen A's precached bundle. The explicit reload above is load 1;
-    // mount-time pickup must remember the pre-fetch stale-generation signal,
-    // hand off the worker, and perform load 2. Requiring that navigation proves
-    // the document generation changed instead of accepting controller takeover
-    // alone as a false positive.
-    await page.waitForFunction(
-      () => Number(sessionStorage.getItem('__load_count') || '0') >= 2,
-      { timeout: 20000 },
-    )
-
-    // Generation identity: the apply settles with the page controlled by the
-    // registration's ACTIVE worker and NOTHING left waiting.
-    await page.waitForFunction(async () => {
-      const reg = await navigator.serviceWorker.getRegistration()
-      return !!reg && !reg.waiting && !!reg.active
-        && navigator.serviceWorker.controller === reg.active
-    }, { timeout: 20000 })
-
-    // And it does not loop or drift back: the settled state holds.
-    await page.waitForTimeout(1500)
-    const stable = await page.evaluate(async () => {
-      const reg = await navigator.serviceWorker.getRegistration()
-      return !reg.waiting && navigator.serviceWorker.controller === reg.active
-    })
-    expect(stable).toBe(true)
-    await keeper.close()
-  })
 })

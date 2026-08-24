@@ -276,6 +276,20 @@ def standalone_manifest(
           "purpose": "any maskable",
         },
       ],
+      # Screenshots upgrade Chromium's install prompt from the mini-infobar
+      # to the richer install sheet (narrow serves phones, wide serves
+      # desktop). Generated covers, not live captures — see
+      # `_render_screenshot_png` for why this stays privacy-safe.
+      "screenshots": [
+        {
+          "src": f"{base}{shot_name}?v={v}",
+          "sizes": f"{w}x{h}",
+          "type": "image/png",
+          "form_factor": form,
+          "label": app.name or slug,
+        }
+        for shot_name, (w, h, form) in _SCREENSHOT_SPECS.items()
+      ],
     },
     media_type="application/manifest+json",
     # Revalidate on every fetch so a freshly-renamed app never serves a
@@ -294,6 +308,84 @@ def standalone_manifest(
 # else 404s — we don't want the route accidentally serving arbitrary
 # sizes that aren't declared in the manifest.
 _ICON_NAME = re.compile(r"^icon-(\d+)\.png$")
+
+# Manifest `screenshots` assets. With at least one narrow and one wide entry,
+# Chromium replaces the minimal install mini-infobar with the richer
+# app-store-style install sheet — which also makes "Install" visually
+# unmistakable next to "Create shortcut". Fixed names only; the cache can't
+# be flooded with arbitrary dimensions.
+_SCREENSHOT_SPECS = {
+  "screenshot-narrow.png": (1080, 1920, "narrow"),
+  "screenshot-wide.png": (1920, 1080, "wide"),
+}
+
+
+def _render_screenshot_png(
+  icon_png: bytes | None, name: str, slug: str, bg_hex: str,
+  width: int, height: int,
+) -> bytes:
+  """Generated install-sheet cover: the app's icon and name on the app's own
+  background color, arranged like a launcher tile.
+
+  Deliberately NOT a live capture of the running app. This route is public —
+  the OS fetches manifest assets before any login — so a real screenshot
+  could leak app content to an unauthenticated visitor. A generated cover
+  carries the same information class as the icon route and is a pure
+  function of the same inputs, so it shares the icon cache's keying.
+  """
+  from PIL import Image, ImageDraw, ImageFont
+  r = int(bg_hex[1:3], 16)
+  g = int(bg_hex[3:5], 16)
+  b = int(bg_hex[5:7], 16)
+  img = Image.new("RGB", (width, height), (r, g, b))
+
+  # The icon reuses the standalone render (uploaded art composited onto the
+  # background, or the generated letter mark), rounded like a launcher icon.
+  icon_size = int(min(width, height) * 0.34)
+  icon = Image.open(io.BytesIO(
+    _render_standalone_icon(icon_png, name, slug, bg_hex, icon_size)
+  )).convert("RGB")
+  radius = int(icon_size * 0.22)
+  mask = Image.new("L", (icon_size, icon_size), 0)
+  ImageDraw.Draw(mask).rounded_rectangle(
+    (0, 0, icon_size - 1, icon_size - 1), radius=radius, fill=255,
+  )
+  icon_x = (width - icon_size) // 2
+  icon_y = (height // 2) - int(icon_size * 0.75)
+  img.paste(icon, (icon_x, icon_y), mask)
+
+  # Name below, in whichever of light/dark ink reads on this background.
+  luminance = 0.299 * r + 0.587 * g + 0.114 * b
+  fg = (28, 28, 30) if luminance > 150 else (255, 255, 255)
+  draw = ImageDraw.Draw(img)
+  font = None
+  for path in (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+  ):
+    try:
+      font = ImageFont.truetype(path, int(min(width, height) * 0.052))
+      break
+    except OSError:
+      continue
+  if font is None:
+    font = ImageFont.load_default()
+  label = (name or slug).strip() or slug
+  max_w = int(width * 0.86)
+  bbox = draw.textbbox((0, 0), label, font=font)
+  while len(label) > 1 and bbox[2] - bbox[0] > max_w:
+    label = label[:-2].rstrip() + "…"
+    bbox = draw.textbbox((0, 0), label, font=font)
+  draw.text(
+    (
+      (width - (bbox[2] - bbox[0])) / 2 - bbox[0],
+      icon_y + icon_size + int(icon_size * 0.18) - bbox[1],
+    ),
+    label, fill=fg, font=font,
+  )
+  buf = io.BytesIO()
+  img.save(buf, format="PNG", optimize=True)
+  return buf.getvalue()
 
 
 def _render_standalone_icon(
@@ -359,15 +451,18 @@ async def standalone_icon(
   `max-age` + `stale-while-revalidate` keep warm opens free; an icon change
   advances the validator so a stale icon is never pinned.
   """
-  m = _ICON_NAME.match(icon_name)
-  if not m:
+  shot_spec = _SCREENSHOT_SPECS.get(icon_name)
+  m = None if shot_spec else _ICON_NAME.match(icon_name)
+  if not shot_spec and not m:
     raise HTTPException(status_code=404, detail="Not found.")
-  size = int(m.group(1))
-  if size < 16 or size > 1024:
-    raise HTTPException(status_code=400, detail="Invalid icon size.")
+  size = 0
+  if m:
+    size = int(m.group(1))
+    if size < 16 or size > 1024:
+      raise HTTPException(status_code=400, detail="Invalid icon size.")
   app = _get_app_by_slug(db, slug)
   ts_us = int(app.updated_at.timestamp() * 1e6) if app.updated_at else 0
-  etag = f'W/"{ts_us}-{size}"'
+  etag = f'W/"{ts_us}-{icon_name if shot_spec else size}"'
   headers = {
     "ETag": etag,
     "Cache-Control": "public, max-age=3600, stale-while-revalidate=86400",
@@ -385,6 +480,24 @@ async def standalone_icon(
   name = app.name
   app_slug = app.slug
   bg_inputs = (app.background_color, app.theme_color)
+
+  if shot_spec:
+    shot_w, shot_h, _form = shot_spec
+
+    def _compute_shot() -> bytes:
+      bg_hex = _resolve_bg_hex(bg_inputs[0], bg_inputs[1], icon_png)
+      return _render_screenshot_png(
+        icon_png, name, app_slug, bg_hex, shot_w, shot_h,
+      )
+
+    body = await icon_cache.get_or_compute(
+      app_id=app_id,
+      updated_us=ts_us,
+      kind="standalone-shot",
+      size=shot_w,
+      compute=_compute_shot,
+    )
+    return Response(content=body, media_type="image/png", headers=headers)
 
   def _compute() -> bytes:
     bg_hex = _resolve_bg_hex(bg_inputs[0], bg_inputs[1], icon_png)

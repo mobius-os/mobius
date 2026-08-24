@@ -16,6 +16,11 @@
   position: absolute;
   inset: 0;
   display: grid;
+  /* One definite full-viewport cell. Without explicit tracks the implicit row
+   * is sized by its content, so the image's percentage max-height resolves
+   * cyclically against the image's own height and never clamps — a tall
+   * screenshot then overflows the hidden overlay and appears cropped. */
+  grid-template: 100% / 100%;
   place-items: center;
   overflow: hidden;
 }
@@ -129,6 +134,11 @@
 @media (max-width: 34rem) {
   .lightbox-image {
     max-width: calc(100% - 16px);
+    max-height: calc(100% - 16px);
+  }
+
+  /* Only a gallery renders the bottom nav chevrons this clearance is for. */
+  .lightbox-image--gallery {
     max-height: calc(100% - 96px);
   }
 

@@ -43,7 +43,7 @@ def test_cron_parser_resolves_wall_clock_gate_to_real_job():
   )
 
 
-def test_only_bootstrap_commands_request_a_readiness_wait():
+def test_initialization_commands_request_a_readiness_wait():
   job = Path("/data/apps/memory/memory-job.sh")
 
   assert app_jobs.runner_command(57, job, wait_for_ready=True)[-3:] == [
@@ -250,7 +250,7 @@ def test_live_check_calls_real_app_endpoint(monkeypatch):
   }
 
 
-def test_bootstrap_waits_for_ready_before_minting_a_job_token(
+def test_initialization_uses_the_token_returned_by_readiness(
   tmp_path, monkeypatch,
 ):
   runner = _load_runner()
@@ -263,10 +263,11 @@ def test_bootstrap_waits_for_ready_before_minting_a_job_token(
   monkeypatch.setattr(runner.os, "getsid", lambda _pid: os.getpid())
   events = []
   monkeypatch.setattr(
-    runner, "_wait_for_ready", lambda: events.append("ready") or True,
+    runner, "_wait_for_ready", lambda app_id: events.append(("ready", app_id)) or "token",
   )
   monkeypatch.setattr(
-    runner, "_mint_app_token", lambda _app_id: events.append("mint") or "token",
+    runner, "_mint_app_token",
+    lambda _app_id: pytest.fail("readiness already owns token minting"),
   )
   monkeypatch.setattr(runner, "_app_is_live", lambda *_args: True)
   monkeypatch.setattr(
@@ -283,10 +284,10 @@ def test_bootstrap_waits_for_ready_before_minting_a_job_token(
   ])
 
   assert runner.run() == 0
-  assert events == ["ready", "mint"]
+  assert events == [("ready", 57)]
 
 
-def test_bootstrap_readiness_timeout_never_mints_a_job_token(
+def test_initialization_readiness_timeout_does_not_retry_outside_its_owner(
   tmp_path, monkeypatch,
 ):
   runner = _load_runner()
@@ -297,7 +298,7 @@ def test_bootstrap_readiness_timeout_never_mints_a_job_token(
   job.write_text("#!/bin/sh\nexit 0\n")
   monkeypatch.setattr(runner, "DATA_DIR", data_dir)
   monkeypatch.setattr(runner.os, "getsid", lambda _pid: os.getpid())
-  monkeypatch.setattr(runner, "_wait_for_ready", lambda: False)
+  monkeypatch.setattr(runner, "_wait_for_ready", lambda _app_id: None)
   monkeypatch.setattr(
     runner, "_emit_cron_outcome",
     lambda *_args: pytest.fail("a preflight failure must not emit cron telemetry"),
@@ -310,6 +311,29 @@ def test_bootstrap_readiness_timeout_never_mints_a_job_token(
 
   assert runner.run() == 4
   assert minted == []
+
+
+def test_readiness_waits_until_the_service_credential_can_mint(monkeypatch):
+  runner = _load_runner()
+  attempts = []
+
+  class Response:
+    status = 200
+    def __enter__(self): return self
+    def __exit__(self, *_args): return False
+
+  monkeypatch.setattr(runner.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
+  monkeypatch.setattr(
+    runner,
+    "_mint_app_token",
+    lambda app_id: attempts.append(app_id) or ("scoped" if len(attempts) == 2 else None),
+  )
+  ticks = iter((0.0, 0.0, 0.1, 0.1))
+  monkeypatch.setattr(runner.time, "monotonic", lambda: next(ticks, 0.1))
+  monkeypatch.setattr(runner.time, "sleep", lambda _seconds: None)
+
+  assert runner._wait_for_ready(57, timeout_seconds=1) == "scoped"
+  assert attempts == [57, 57]
 
 
 def test_wrapper_publishes_lease_before_live_check_and_cleans_it(

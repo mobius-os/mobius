@@ -1,9 +1,13 @@
 """Capture immutable, provider-neutral per-chat prompts.
 
-The resulting snapshot is the complete behavioral constitution supplied to
-both Claude and Codex. Provider runners may add only the permission, tool, and
-runtime metadata their transports require; they must not substitute a
-provider-authored personality or behavioral prompt.
+The resulting snapshot is the shared behavioral constitution handed to every
+provider identically; keeping that base identical is what preserves consistent
+behavior no matter which provider backs a chat. A provider runner MAY append its
+own small, provider-authored behavioral register on top of that shared base — a
+narrow, deliberate exception (see the concise register in ``claude_sdk_runner``)
+— but it must not otherwise substitute or replace the shared constitution, and
+beyond that register it adds only the permission, tool, and runtime metadata its
+transport requires.
 
 An app opts into this privileged surface by declaring a root-level
 ``system_prompt`` markdown file in its manifest.  The installer stores only the

@@ -36,11 +36,13 @@ from app.chat_writer import (
   PersistSessionId,
   PersistTranscript,
   PromotePending,
+  PromotePendingBlockedByPendingQuestion,
   QuestionCommit,
   RecoverWedgedRun,
   ReplaceTranscript,
   StartTurn,
   StartTurnBlockedByPendingQuestion,
+  UpdatePending,
 )
 from app.database import SessionLocal
 
@@ -513,6 +515,59 @@ def test_concurrent_append_cancel_promote_preserve_order(actor):
   assert "m3" not in promoted["promoted"]["content"]
 
 
+def test_update_pending_preserves_non_text_fields(actor):
+  """UpdatePending replaces only the matched row's text; identity, ordering,
+  and attachments on it and its neighbours are untouched."""
+  _seed_chat(pending=[
+    {
+      "role": "user", "content": "before", "ts": 10, "cid": "c-edit",
+      "position": 1, "attachments": [{"name": "notes.txt"}],
+    },
+    {"role": "user", "content": "next", "ts": 20, "cid": "c-next"},
+  ])
+  result = _await(actor.submit(UpdatePending(
+    chat_id="c1", run_token="", cid="c-edit", content="after",
+  )))
+  assert result["updated"] is True
+  assert result["pending"] == [
+    {
+      "role": "user", "content": "after", "ts": 10, "cid": "c-edit",
+      "position": 1, "attachments": [{"name": "notes.txt"}],
+    },
+    {"role": "user", "content": "next", "ts": 20, "cid": "c-next"},
+  ]
+
+
+def test_update_pending_missing_cid_is_a_noop(actor):
+  """Editing a cid no longer queued reports updated:False and rewrites nothing
+  (the promote/cancel race the UI reconciles instead of assuming success)."""
+  _seed_chat(pending=[
+    {"role": "user", "content": "keep", "ts": 10, "cid": "c-keep"},
+  ])
+  result = _await(actor.submit(UpdatePending(
+    chat_id="c1", run_token="", cid="c-gone", content="late",
+  )))
+  assert result["updated"] is False
+  assert result["pending"] == [
+    {"role": "user", "content": "keep", "ts": 10, "cid": "c-keep"},
+  ]
+
+
+def test_update_pending_same_text_reports_present_without_change(actor):
+  """Editing a queued row to its current text still reports it present
+  (updated:True) and returns the row byte-for-byte unchanged, so an idempotent
+  retry is a no-op rather than a phantom 'gone'."""
+  seeded = {
+    "role": "user", "content": "same", "ts": 10, "cid": "c-same", "position": 1,
+  }
+  _seed_chat(pending=[dict(seeded)])
+  result = _await(actor.submit(UpdatePending(
+    chat_id="c1", run_token="", cid="c-same", content="same",
+  )))
+  assert result["updated"] is True
+  assert result["pending"] == [seeded]
+
+
 # -- cid identity: dedup + idempotency ------------------------------------
 def test_append_pending_duplicate_cid_is_idempotent(actor):
   """A retried queue POST carries the SAME cid; the writer returns the
@@ -635,6 +690,26 @@ def test_start_turn_keeps_a_useful_first_message_title_preview(actor):
   assert _load_chat()["title"] == first_message[:80]
 
 
+def test_start_turn_strips_goal_control_syntax_from_title_preview(actor):
+  """A long-running Goal gets a useful drawer name before its first summary."""
+  objective = (
+    "Review every finished local change and prepare the safe contribution "
+    "without losing any owner work"
+  )
+  _seed_chat(messages=[])
+
+  _await(actor.submit(
+    StartTurn(
+      chat_id="c1",
+      run_token="rt-goal-title-preview",
+      user_msg={"role": "user", "content": f"/goal {objective}", "ts": 5},
+      title_source=f"/goal {objective}",
+    )
+  ))
+
+  assert _load_chat()["title"] == objective[:80]
+
+
 def test_start_turn_preserves_an_owner_title_before_the_first_message(actor):
   _seed_chat(messages=[], title="My chosen title", title_locked=True)
 
@@ -707,6 +782,74 @@ def test_start_turn_does_not_bypass_pending_owner_question(actor):
   assert chat["live_assistant"] is None
   assert chat["running_status"] is None
   assert _load_run("blocked-run") is None
+
+
+def test_promote_pending_does_not_bypass_pending_owner_question(actor):
+  question = _question_msg("owner-decision", content="Choose a direction.")
+  queued = [{
+    "role": "user",
+    "content": "<wait_result>checks completed</wait_result>",
+    "hidden": True,
+    "ts": 5,
+    "cid": "wait-result",
+  }]
+  _seed_chat(
+    messages=[question],
+    pending=queued,
+    pending_question_id="owner-decision",
+  )
+
+  result = _await(actor.submit(PromotePending(
+    chat_id="c1",
+    run_token="blocked-promotion",
+  )))
+
+  assert result == PromotePendingBlockedByPendingQuestion("owner-decision")
+  chat = _load_chat()
+  assert chat["messages"] == [question]
+  assert chat["pending_messages"] == queued
+  assert chat["pending_question_id"] == "owner-decision"
+  assert chat["live_assistant"] is None
+  assert chat["running_status"] is None
+  assert _load_run("blocked-promotion") is None
+
+
+def test_answering_owner_question_releases_pending_promotion(actor):
+  """The owner barrier is monotonic but not sticky after a saved answer."""
+  question = _question_msg("owner-decision", content="Choose a direction.")
+  queued = [{
+    "role": "user",
+    "content": "<wait_result>checks completed</wait_result>",
+    "hidden": True,
+    "ts": 5,
+    "cid": "wait-result",
+  }]
+  _seed_chat(
+    messages=[question],
+    pending=queued,
+    pending_question_id="owner-decision",
+  )
+
+  assert _await(actor.submit(AnswerQuestion(
+    chat_id="c1",
+    run_token="",
+    question_id="owner-decision",
+    answers={"Choose a direction.": "Continue"},
+  ))) is True
+  promoted = _await(actor.submit(PromotePending(
+    chat_id="c1",
+    run_token="released-promotion",
+  )))
+
+  assert promoted["promoted"]["cid"] == "wait-result"
+  chat = _load_chat()
+  assert chat["messages"][0]["blocks"][0]["answers"] == {
+    "Choose a direction.": "Continue",
+  }
+  assert chat["pending_question_id"] is None
+  assert chat["pending_messages"] == []
+  assert chat["running_status"] == "running"
+  assert _load_run("released-promotion")["status"] == "running"
 
 
 def test_persist_session_id_updates_chat_without_touching_transcript(actor):

@@ -200,8 +200,8 @@ def test_image_deduplicates_agent_cli_payloads_without_breaking_sdk_contracts():
     "pip install --no-cache-dir --require-hashes -r requirements.lock"
     in requirements_layer
   )
-  assert "claude-agent-sdk==0.2.128" in requirements
-  assert "claude-agent-sdk==0.2.128" in requirements_lock
+  assert "claude-agent-sdk==0.2.139" in requirements
+  assert "claude-agent-sdk==0.2.139" in requirements_lock
   assert (
     'Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"'
     in requirements_layer
@@ -290,7 +290,7 @@ def test_identity_verifier_allows_the_mobius_owned_platform_repo():
   assert 'f"safe.directory={PLATFORM_ROOT}"' in verifier
 
 
-def test_pre_push_rejects_main_and_defers_backend_to_pr_ci():
+def test_pre_push_rejects_main_and_keeps_schema_history_local():
   hook = (ROOT / "scripts" / "githooks" / "pre-push").read_text(
     encoding="utf-8"
   )
@@ -300,6 +300,8 @@ def test_pre_push_rejects_main_and_defers_backend_to_pr_ci():
   assert '${MOBIUS_PREPUSH_FULL:-0}' in hook
   assert 'this push does not update main' in hook
   assert 'full suite currently ~10m' in hook
+  assert "check-schema-migrations.py" in hook
+  assert "schema-migration-history" in hook
 
 
 def test_git_doctor_compares_installed_hooks_to_landed_main():
@@ -578,6 +580,7 @@ def test_manual_and_pull_request_runs_cover_suites_and_main_image():
   image_workflow = (
     ROOT / ".github" / "workflows" / "main-image.yml"
   ).read_text(encoding="utf-8")
+  dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
   assert not (
     ROOT / ".github" / "workflows" / "external-recovery-image.yml"
   ).exists()
@@ -610,6 +613,23 @@ def test_manual_and_pull_request_runs_cover_suites_and_main_image():
   assert "BUILD_SHA=${{ github.sha }}" in image_workflow
   assert "MOBIUS_IMAGE_REPOSITORY }}:sha-${{ github.sha }}" in image_workflow
   assert "MOBIUS_IMAGE_REPOSITORY }}:main" in image_workflow
+  assert "mobius-main-image-promotion" in image_workflow
+  assert "gh api \"repos/$GITHUB_REPOSITORY/commits/main\"" in image_workflow
+  assert (
+    "docker buildx imagetools create --prefer-index=false"
+    in image_workflow
+  )
+  assert '--tag "$MAIN_IMAGE" "$SHA_IMAGE"' in image_workflow
+  assert image_workflow.count("--format '{{json .Manifest}}'") == 2
+  assert "--format '{{json .Image.Config.Labels}}'" in image_workflow
+  assert '."org.opencontainers.image.revision"' in image_workflow
+  assert '."org.opencontainers.image.source"' in image_workflow
+  assert 'org.opencontainers.image.revision="${BUILD_SHA}"' in dockerfile
+  assert (
+    'org.opencontainers.image.source="https://github.com/mobius-os/mobius"'
+    in dockerfile
+  )
+  assert image_workflow.count("for _ in $(seq 1 12)") == 2
   assert "recovery" not in image_workflow.lower()
   assert "core-releases" not in image_workflow
   assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in image_workflow

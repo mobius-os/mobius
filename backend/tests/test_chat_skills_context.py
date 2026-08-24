@@ -157,14 +157,64 @@ def test_core_prompt_owns_freshness_and_source_policy():
   assert "Cite the supporting link close to the claim" in core
 
 
+def test_core_prompt_requires_approval_before_changing_guarded_invariants():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
+  normalized = " ".join(core.split())
+
+  assert "**Treat guards as evidence, not obstacles.**" in core
+  assert "first determine why that guard exists" in normalized
+  assert "Do not relax it merely to make the new behavior pass" in normalized
+  assert "explain the conflict and its user impact" in normalized
+  assert "ask the partner before changing it" in normalized
+  assert "preserves the same contract does not require escalation" in normalized
+
+
+def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
+  planning = (
+    repo / "backend" / "scripts" / "seed-skills" / "goal-planning.md"
+  ).read_text(encoding="utf-8")
+  core_normalized = " ".join(core.split())
+  planning_normalized = " ".join(planning.split())
+
+  assert "Before the first material tool call" in core_normalized
+  assert "labels such as “synthetic,” “fixture,” or “test”" in core_normalized
+  assert "after an owner choice resolves" in core_normalized
+  assert "not merely at the next user message" in core_normalized
+  assert "`promote_goal` tool when available" in core_normalized
+  assert "### Recheck when the work changes phase" in planning
+  assert "before the first material action" in planning_normalized
+  assert "for **every** ordinary top-level delegated outcome" in planning_normalized
+  assert "not a keyword trigger" in planning_normalized
+  assert "Its answer removes that blocker" in planning_normalized
+  assert "first-class `promote_goal` tool" in planning_normalized
+  assert "resilience, not an equivalent convenience path" in planning_normalized
+  assert "an attempted tool call returns a failure" in planning_normalized
+
+
+def test_core_prompt_distinguishes_durable_delegation_and_owner_led_contribution():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
+  normalized = " ".join(core.split())
+
+  assert "An in-turn fleet dies with the turn" in normalized
+  assert "durable background delegation may outlive the turn" in normalized
+  assert "installed capability explicitly owns that lifecycle" in normalized
+  assert "Contribution preparation is owner-initiated" in normalized
+  assert "leave local changes local without adding an approval card" in normalized
+  assert "offer once through the clarifying-question tool" not in core
+
+
 def test_restart_guidance_requires_activation_proof_and_fresh_approval():
   repo = Path(__file__).resolve().parents[2]
   core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
-  recovery = (
-    repo / "backend" / "scripts" / "seed-skills" / "recovery.md"
+  maintenance = (
+    repo / "backend" / "scripts" / "seed-skills" / "platform-maintenance.md"
   ).read_text(encoding="utf-8")
   normalized_core = " ".join(core.split())
-  normalized_recovery = " ".join(recovery.split())
+  normalized_maintenance = " ".join(maintenance.split())
 
   assert "**Server restarts**: ALWAYS ask" in core
   assert "If no changed runtime owner requires a restart, do not offer one" in (
@@ -172,39 +222,39 @@ def test_restart_guidance_requires_activation_proof_and_fresh_approval():
   )
   assert "immediately before each restart" in normalized_core
   assert "authorizes one restart call only" in normalized_core
-  assert "## Choose the smallest activation action" in recovery
-  assert "No shell rebuild or server restart" in recovery
-  assert "No server restart" in recovery
-  assert "### Dependencies — live first, durable second" in recovery
-  assert "install only the named dependency" in recovery
+  assert "## Choose the smallest activation action" in maintenance
+  assert "No shell rebuild or server restart" in maintenance
+  assert "No server restart" in maintenance
+  assert "### Dependencies — live first, durable second" in maintenance
+  assert "install only the named dependency" in maintenance
   assert "Do not run blanket upgrades or ad-hoc remote installers" in (
-    normalized_recovery
+    normalized_maintenance
   )
   assert "a global Node install does not satisfy a project's imports" in (
-    normalized_recovery
+    normalized_maintenance
   )
-  assert "not for ordinary writes under `/data`" in recovery
-  assert "the owning manifest and lockfile" in recovery
+  assert "not for ordinary writes under `/data`" in maintenance
+  assert "the owning manifest and lockfile" in maintenance
   assert "These declarations are durability metadata, not an activation action" in (
-    normalized_recovery
+    normalized_maintenance
   )
-  assert "Treat a container rebuild as a last resort" in recovery
-  assert "do not require an immediate rebuild" in recovery
-  assert "Do not restart between iterations" in recovery
+  assert "Treat a container rebuild as a last resort" in maintenance
+  assert "do not require an immediate rebuild" in maintenance
+  assert "Do not restart between iterations" in maintenance
   assert "For a constitution-only change, default to leaving it pending" in (
-    normalized_recovery
+    normalized_maintenance
   )
   assert (
     "A **Restart now** answer authorizes exactly one safe restart call"
-    in recovery
+    in maintenance
   )
-  assert "A second restart" in recovery
-  assert "service may be unavailable for tens of seconds" in normalized_recovery
+  assert "A second restart" in maintenance
+  assert "service may be unavailable for tens of seconds" in normalized_maintenance
   assert "delegation of the complete backend-fix loop does not approve" in (
-    normalized_recovery
+    normalized_maintenance
   )
   assert "explicitly delegated the restart or the complete backend-fix loop" not in (
-    core + recovery
+    core + maintenance
   )
 
 
@@ -252,17 +302,98 @@ def test_visual_testing_selector_guidance_requires_observed_evidence():
   assert "an accessible name, not evidence" in visual
   assert 'button[aria-label="..."]' not in visual
   assert '[data-testid="..."]' not in visual
+  assert "**Served before spoken.**" in visual
+  assert "## Close the browser session when you are done" in visual
 
 
-def test_image_skill_publishes_exact_generated_path():
+def test_seeded_guidance_uses_current_preview_recovery_and_resolver_contracts():
+  repo = Path(__file__).resolve().parents[2]
+  seed_dir = repo / "backend" / "scripts" / "seed-skills"
+  quickstart = (seed_dir / "building-apps-quickstart.md").read_text()
+  resolving = (seed_dir / "resolving-app-git.md").read_text()
+  theming = (seed_dir / "theming.md").read_text()
+  reflection = (seed_dir / "reflection.md").read_text()
+
+  assert "preview_app.sh" in quickstart
+  assert "--review" in resolving
+  assert "--finalize --reviewed-tree" in resolving
+  assert "deployment's external Recovery action" in theming
+  assert "`/recover` →" not in theming
+  assert "`/recover/chat`" not in theming
+  assert "Reconcile the active instruction with its shipped owner" in reflection
+  assert "Do not turn this trigger into an unconditional nightly diff" in reflection
+
+
+def test_core_routes_operational_recipes_to_their_owning_skills():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text()
+  seed_dir = repo / "backend" / "scripts" / "seed-skills"
+  maintenance = (seed_dir / "platform-maintenance.md").read_text()
+  notifications = (seed_dir / "notifications.md").read_text()
+
+  assert "/api/debug/status" not in core
+  assert '"type":"open_item"' not in core
+  assert "/api/debug/status" in maintenance
+  assert "/api/debug/memory" in maintenance
+  assert "/api/debug/logs" in maintenance
+  assert '"type":"open_item"' in notifications
+  assert "Default `activation` to `background`" in notifications
+
+
+def test_advanced_app_skill_does_not_duplicate_the_component_catalog():
+  repo = Path(__file__).resolve().parents[2]
+  advanced = (
+    repo / "backend" / "scripts" / "seed-skills" / "building-apps.md"
+  ).read_text()
+
+  assert "## UI conventions stay in the base workflow" in advanced
+  assert "## Design conventions" not in advanced
+  assert "### The AppShell skeleton" not in advanced
+  assert "/* mobius-ui:Button" not in advanced
+
+
+def test_reflection_seed_uses_staged_evidence_and_avoids_template_duplication():
+  repo = Path(__file__).resolve().parents[2]
+  reflection = (
+    repo / "backend" / "scripts" / "seed-skills" / "reflection.md"
+  ).read_text()
+
+  assert "inputs/chats.md" in reflection
+  assert "ordered `cron_outcome` events" in reflection
+  assert "/data/cli-auth/" not in reflection
+  assert "this wasted a turn on 2026" not in reflection
+  assert "The seeded template owns the exact HTML and styling" in reflection
+  assert "Copy this skeleton" not in reflection
+
+
+def test_agent_coaching_is_the_single_neutral_coaching_skill():
+  repo = Path(__file__).resolve().parents[2]
+  seed_dir = repo / "backend" / "scripts" / "seed-skills"
+  coaching = (seed_dir / "agent-coaching.md").read_text(encoding="utf-8")
+  reflection = (seed_dir / "reflection.md").read_text(encoding="utf-8")
+
+  assert not (seed_dir / "manager-session.md").exists()
+  assert "neutral learning conversation" in coaching
+  assert "what the agent did well" in coaching
+  assert "what could improve" in coaching
+  assert "What is the most general lesson" in coaching
+  assert "platform primitive" in coaching
+  assert "exact_session_fork" in coaching
+  assert "`/data/shared/skills/agent-coaching.md` completely" in reflection
+  assert "what should Reflection itself change" in reflection
+  assert "/data/platform/backend/scripts/reflection-evidence.py" in reflection
+
+
+def test_image_skill_returns_tool_result_without_touching_protected_storage():
   repo = Path(__file__).resolve().parents[2]
   images = (
     repo / "backend" / "scripts" / "seed-skills" / "images.md"
   ).read_text(encoding="utf-8")
 
-  assert "publish_chat_image.py" in images
-  assert "<exact path returned by imagegen>" in images
-  assert "IMG=$(ls -t" not in images
+  assert "generated-image result directly" in images
+  assert "inspect, locate, or republish a backing file" in images
+  assert "/data/cli-auth/" not in images
+  assert "publish_chat_image.py" not in images
 
 
 def test_quickstart_reuses_apply_receipt_id_without_relisting():

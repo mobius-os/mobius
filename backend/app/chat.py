@@ -76,6 +76,7 @@ from app.chat_logging import (
 from app.chat_writer import (
   AppendPending,
   Barrier,
+  CancelPending,
   ClearPending,
   FinishRun,
   Finalize,
@@ -328,6 +329,23 @@ def _restart_manual_hold_for_chat(db: Session, chat_id: str) -> bool:
   )
 
 
+def programmatic_start_blocked(db: Session, chat_id: str) -> bool:
+  """Whether a product wake (delegation result, wait resume) must queue
+  instead of starting a turn.
+
+  A limit-parked or restart-held chat has no live process, so
+  ``is_chat_running`` reads False — but a fresh ``StartTurn`` supersedes the
+  parked row as if the owner resumed the chat themselves, silently destroying
+  the park's promised auto-resume. Machine wakes are not owner intent: they
+  append to ``pending_messages``, which the park's own resume path promotes
+  after the interrupted turn settles (or the owner's manual Resume releases).
+  """
+  return (
+    _parked_until_for_chat(db, chat_id) is not None
+    or _restart_manual_hold_for_chat(db, chat_id)
+  )
+
+
 def forget_chat(chat_id: str) -> None:
   """Drops any per-chat bookkeeping so a deleted chat doesn't leak.
 
@@ -504,10 +522,11 @@ async def _recover_wedged_run_strict(chat_id: str, run_token: str) -> None:
 
 @dataclass(frozen=True)
 class StartupReconcileResult:
-  """Distinct boot outcomes: manual crash recovery vs authenticated replay."""
+  """Distinct boot outcomes: manual, replayable, or question-waiting."""
 
   manual: list[str]
   restart_parks: list[str]
+  restart_waiting: list[str]
 
 
 def reconcile_startup_chats(
@@ -570,15 +589,18 @@ def reconcile_startup_chats(
   different from a generic crash. After the same transcript finalization, an
   opted-in owner turn with no unanswered question or app-attributed work is
   converted to a due ``restart`` park. The initial continuation sweep then
-  resumes it before lifespan yields. Every other stranded turn remains the
-  conservative manual-resume outcome.
+  resumes it before lifespan yields. An authenticated turn blocked on an
+  unanswered question instead preserves that durable question handoff without
+  automatic Continue or a false manual-Resume notification. Every other
+  stranded turn remains the conservative manual-resume outcome.
 
-  Returns both outcomes separately so startup can notify only genuinely manual
+  Returns the outcomes separately so startup can notify only genuinely manual
   recoveries and can report authenticated fallbacks without conflating them.
   """
   log = _get_logger()
   manual: list[str] = []
   restart_parks: list[str] = []
+  restart_waiting: list[str] = []
   try:
     from app.run_state import running_chat_ids
     stale_ids = running_chat_ids(db)
@@ -590,7 +612,11 @@ def reconcile_startup_chats(
     ) if stale_ids else []
   except Exception:
     log.exception("reconcile_startup_chats: query failed")
-    return StartupReconcileResult(manual=manual, restart_parks=restart_parks)
+    return StartupReconcileResult(
+      manual=manual,
+      restart_parks=restart_parks,
+      restart_waiting=restart_waiting,
+    )
 
   for chat in stale:
     # Belt-and-suspenders: if a live registry entry somehow exists for
@@ -630,6 +656,13 @@ def reconcile_startup_chats(
         isinstance(msg, dict)
         and msg.get("_initiated_by_app_id") is not None
         for msg in pending
+      )
+      restart_question_wait = bool(
+        restart_run is not None
+        and restart_run.initiated_by_app_id is None
+        and chat.auto_resume_on_restart
+        and not app_work_queued
+        and _has_unanswered_question(chat)
       )
       restart_eligible = bool(
         restart_run is not None
@@ -786,6 +819,13 @@ def reconcile_startup_chats(
       db.expire_all()
       if restart_eligible:
         restart_parks.append(chat.id)
+      elif restart_question_wait:
+        # The question card is already the durable continuation boundary.
+        # Starting a synthetic "continue" would compete with the owner's
+        # required answer (and could accidentally advance an approval gate).
+        # Keep it distinct from a generic crash/manual Resume so startup does
+        # not send the false "tap to resume" notification.
+        restart_waiting.append(chat.id)
       else:
         manual.append(chat.id)
     except Exception:
@@ -805,6 +845,11 @@ def reconcile_startup_chats(
       "recovered %d authenticated restart fallback(s) for immediate "
       "continuation: %s",
       len(restart_parks), ", ".join(restart_parks),
+    )
+  if restart_waiting:
+    log.info(
+      "preserved %d authenticated restart question handoff(s): %s",
+      len(restart_waiting), ", ".join(restart_waiting),
     )
 
   # A running row whose chat is gone or soft-deleted cannot receive transcript
@@ -858,6 +903,7 @@ def reconcile_startup_chats(
   return StartupReconcileResult(
     manual=manual,
     restart_parks=restart_parks,
+    restart_waiting=restart_waiting,
   )
 
 
@@ -1027,7 +1073,11 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
     # the rows were released. The queue is the candidate index; load one full
     # Chat only after its projected pending head proves old enough to recover.
     candidates = (
-      db.query(models.Chat.id, models.Chat.pending_messages)
+      db.query(
+        models.Chat.id,
+        models.Chat.pending_messages,
+        models.Chat.pending_question_id,
+      )
       .filter(models.Chat.deleted_at.is_(None))
       .all()
     )
@@ -1040,6 +1090,8 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
     chat_id = candidate.id
     pending = list(candidate.pending_messages or [])
     if not _pending_head_is_stale(pending, now_ms):
+      continue
+    if candidate.pending_question_id is not None:
       continue
     # A limit-parked queue is NOT abandoned work: LIMIT_PARKED preserves
     # pending precisely so it is not fired back into the exhausted limit
@@ -1069,6 +1121,7 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
             if (
               has_running_run(db, chat_id)
               or not _pending_head_is_stale(pending, now_ms)
+              or chat.pending_question_id is not None
               or _parked_until_for_chat(db, chat_id) is not None
               or _restart_manual_hold_for_chat(db, chat_id)
               or not mark_starting(chat_id)
@@ -1103,6 +1156,12 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
       if claimed:
         discard_starting(chat_id)
       raise
+    except chat_queue.PendingQuestionBlocksPromotion:
+      if claimed:
+        discard_starting(chat_id)
+      # The actor closed a check-to-commit race by observing a question that
+      # opened after the locked preflight. Leaving the queue untouched is the
+      # intended outcome, not a failed recovery attempt.
     except Exception:
       if claimed:
         discard_starting(chat_id)
@@ -1291,8 +1350,8 @@ async def drain_all_for_restart(
         stopped = False
       if not stopped:
         log.warning(
-          "drain-for-restart stop timed out; authenticated boot recovery "
-          "will continue chat_id=%s kind=%s",
+          "drain-for-restart stop timed out; authenticated boot "
+          "reconciliation will preserve chat_id=%s kind=%s",
           chat_id, getattr(handle, "kind", "?"),
         )
         all_interrupted = False
@@ -1627,6 +1686,11 @@ async def _auto_resume_chat(
           if not mark_starting(chat_id):
             return False
           claimed = True
+          continuation_cid = (
+            f"restart-resume-{park_token or chat_id}"
+            if resume_reason == "restart"
+            else f"limit-resume-{park_token or chat_id}"
+          )
           ack = get_writer().submit(
             AppendPending(
               chat_id=chat_id,
@@ -1639,22 +1703,31 @@ async def _auto_resume_chat(
                 "continuation_reason": resume_reason,
                 # A retry after AppendPending succeeded but a later step failed
                 # must not enqueue a second synthetic continuation.
-                "cid": (
-                  f"restart-resume-{park_token or chat_id}"
-                  if resume_reason == "restart"
-                  else f"limit-resume-{park_token or chat_id}"
-                ),
+                "cid": continuation_cid,
               },
               initiated_by_app_id=resume_app_id,
             )
           )
           await _await_ack(ack)
           drain_token = alloc_run_token()
-          next_messages, next_user, next_session_id = (
-            await chat_queue.promote_pending_messages_locked(
-              None, chat_id, drain_token,
+          try:
+            next_messages, next_user, next_session_id = (
+              await chat_queue.promote_pending_messages_locked(
+                None, chat_id, drain_token,
+              )
             )
-          )
+          except chat_queue.PendingQuestionBlocksPromotion:
+            # A question committed between the locked preflight and the actor
+            # transition. Remove only this synthetic retry marker; real queued
+            # owner/product rows stay behind the question.
+            await _await_ack(get_writer().submit(CancelPending(
+              chat_id=chat_id,
+              run_token="",
+              cid=continuation_cid,
+            )))
+            discard_starting(chat_id)
+            claimed = False
+            return False
           if not next_user:
             discard_starting(chat_id)
             claimed = False
@@ -2207,6 +2280,8 @@ async def stop_chat_for(
         "queue for reconciliation", chat_id, exc_info=True,
       )
   questions.cancel(chat_id)
+  from app import secure_inputs
+  secure_inputs.cancel_chat(chat_id)
   all_stopped = True
   escalated = False
   for handle in handles:
@@ -2999,7 +3074,8 @@ async def _complete_turn(
        disposition: `CONTINUATION_PROMOTED` (a head was promoted — marker
        stays set, schedule the continuation), `EMPTY_TERMINAL_CLEARED` (the
        drain already cleared the marker + forgot the chat under the lock),
-       or `STALE_NO_ACTION` (a newer gen owns the chat).
+       `QUESTION_PARKED` (queued work stayed behind the owner barrier), or
+       `STALE_NO_ACTION` (a newer gen owns the chat).
 
   A drain that RAISES — the `PromotePending` / `FinishRun` ack failed
   or timed out, OR the terminal lock acquisition exceeded
@@ -3407,7 +3483,8 @@ async def run_chat(
     # still owns. Every other disposition handled its own marker INSIDE the
     # locked terminal transition: EMPTY_TERMINAL_CLEARED + the setup-error
     # cleanups already cleared it; CONTINUATION_PROMOTED leaves it set for
-    # the next turn; STALE_NO_ACTION leaves a newer run's marker untouched;
+    # the next turn; QUESTION_PARKED preserves it for the owner;
+    # STALE_NO_ACTION leaves a newer run's marker untouched;
     # FAILED_LEAVE_MARKER leaves it set for reconciliation. Here we clear ONLY
     # when this run was Stop-bumped AND Stop still owns the immediate
     # successor generation (current == run_gen + 1) — never a newer run's
@@ -3557,14 +3634,16 @@ def _chat_note_mtime(data_dir: str, chat_id: str) -> float:
 # its title-sync sibling) fires. STOP_HANDOFF_CLEARED only results when NO
 # fresh claim raced in — a stopped chat genuinely settled — and a Stop is often
 # the day's last touch on a chat; skipping it left the chat note-less for the
-# night's reflection. LIMIT_PARKED is settled too. Its publisher is forced onto
-# the deterministic path so it never retries the provider that just hit a
-# limit, while still preserving the final parked state for compaction/recovery.
+# night's reflection. LIMIT_PARKED and QUESTION_PARKED are settled too. The
+# former is forced onto the deterministic path so it never retries the provider
+# that just hit a limit; the latter preserves the owner handoff in the ordinary
+# summary without advancing the chat.
 _NOTE_SETTLED_DISPOSITIONS = frozenset({
   chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED,
   chat_queue.TerminalDisposition.PROVIDER_FREE_COMPLETED,
   chat_queue.TerminalDisposition.STOP_HANDOFF_CLEARED,
   chat_queue.TerminalDisposition.LIMIT_PARKED,
+  chat_queue.TerminalDisposition.QUESTION_PARKED,
 })
 
 
@@ -3589,11 +3668,26 @@ def _should_ensure_chat_note(
   )
 
 
+def _run_owns_active_goal(
+  db: Session, *, chat_id: str, run_token: str | None,
+) -> bool:
+  """Whether the exact physical run currently owns committed Goal state."""
+  if not chat_id or not run_token:
+    return False
+  return db.query(models.ChatRun.id).filter(
+    models.ChatRun.id == run_token,
+    models.ChatRun.chat_id == chat_id,
+    models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+    models.ChatRun.goal_objective.isnot(None),
+  ).first() is not None
+
+
 async def _ensure_chat_note(
   data_dir: str,
   chat_id: str,
   *,
   deterministic: bool = False,
+  active_goal_checkpoint: bool = False,
 ) -> None:
   """Run the platform-owned turn-end chat-summary publisher.
 
@@ -3616,9 +3710,12 @@ async def _ensure_chat_note(
   env["DATA_DIR"] = data_dir
   if deterministic:
     env["CHAT_NOTE_PROVIDER"] = "deterministic"
+  args = ["python3", str(script), chat_id]
+  if active_goal_checkpoint:
+    args.append("--active-goal-checkpoint")
   try:
     proc = await asyncio.create_subprocess_exec(
-      "python3", str(script), chat_id,
+      *args,
       stdout=asyncio.subprocess.DEVNULL,
       stderr=asyncio.subprocess.PIPE,
       env=env,
@@ -3881,6 +3978,25 @@ async def _run_chat_impl_with_db(
   goal_clear = _goal_clear_requested(raw_user_message)
   goal_mode = _chat_has_goal_intent(messages)
   goal_continue = (raw_user_message or "").strip().lower() == "continue"
+  question_checkpoint = None
+  if settings.ensure_chat_note and chat_id:
+    async def question_checkpoint() -> None:
+      # Automatic promotion happens after this runner has started, so
+      # transcript intent captured above is not authoritative here. Read the
+      # exact physical run at checkpoint time and summarize only if it owns a
+      # committed Goal then.
+      from app.database import SessionLocal
+      with SessionLocal() as checkpoint_db:
+        active_goal = _run_owns_active_goal(
+          checkpoint_db, chat_id=chat_id, run_token=run_token,
+        )
+      if not active_goal:
+        return
+      await _ensure_chat_note(
+        settings.data_dir,
+        chat_id,
+        active_goal_checkpoint=True,
+      )
   is_slash_command = _is_cli_slash_command(user_message)
   if is_slash_command:
     # The CLI dispatches a slash command only when it sits at position 0, so the
@@ -4079,10 +4195,9 @@ async def _run_chat_impl_with_db(
 
   # A planned restart can replace the parent provider process while durable
   # child tasks keep running. Re-attach their immutable ids/statuses to every
-  # ordinary parent turn so a resumed agent waits on the existing child rather
-  # than launching a duplicate. Delegated children never receive this block,
-  # which also enforces the depth-one boundary.
-  if run_policy is None and chat_id and run_token:
+  # parent turn so both the root agent and a nested delegated owner wait on
+  # their existing direct children rather than launching duplicates.
+  if chat_id and run_token:
     from app.delegations import active_parent_context
     delegation_context = active_parent_context(db, chat_id, run_token)
     if delegation_context:
@@ -4135,13 +4250,11 @@ async def _run_chat_impl_with_db(
     return disposition
 
   if run_policy is not None:
-    from app.delegations import mint_app_token
-    agent_token = mint_app_token(db, run_policy)
+    from app.delegations import delegation_execution_token
+    agent_token = delegation_execution_token(db, run_policy, run_token or "")
   else:
-    agent_token = auth.create_access_token(
-      {"sub": owner.username},
-      expires_delta=timedelta(hours=2),
-      token_epoch=owner.token_epoch,
+    agent_token = auth.create_agent_token(
+      chat_id, run_token, owner.username, owner.token_epoch,
     )
 
   # Build the base environment shared by all providers.
@@ -4160,12 +4273,18 @@ async def _run_chat_impl_with_db(
     "CHAT_ID": chat_id,
   })
   base_env.update(app_context_env)
-  if run_policy is not None:
+  if run_policy is None:
+    base_env["MOBIUS_RUN_TOKEN"] = run_token
+  else:
     base_env.update({
-      "MOBIUS_SUBAGENT_DEPTH": "1",
+      "MOBIUS_SUBAGENT_DEPTH": str(run_policy.depth),
       "MOBIUS_DELEGATION_ID": run_policy.delegation_id,
       "MOBIUS_SUBAGENT_PROVIDER": run_policy.provider,
     })
+    if run_policy.provider == "claude":
+      base_env["MOBIUS_SUBAGENT_HELPER"] = (
+        "/data/apps/subagents/subagents.py"
+      )
   # Overrides any inherited TMPDIR from _safe_keys: agent scratch belongs on
   # the bounded data volume, never the container's unbounded overlay. TMP and
   # TEMP travel with it so a tool reading either does not escape back to /tmp.
@@ -4217,15 +4336,15 @@ async def _run_chat_impl_with_db(
     )
   )
 
-  # Snapshot-on-first-send: if the chat has no overrides yet (created
-  # empty, never had the picker touched), freeze the current effective
-  # settings onto the row so subsequent turns in THIS chat don't drift
-  # when the global default changes in another chat. Without this, a
+  # Snapshot-on-first-send: if the chat has no per-chat choices yet, freeze the
+  # current explicit model/effort onto the row so subsequent turns in THIS
+  # chat don't drift when another chat changes the owner's latest choices.
+  # Without this, a
   # user who starts a Codex/high conversation and later picks Codex/low
   # in a sibling chat would silently get the new effort on their next
   # turn in the original — a real "why did my model change?" surprise.
   # The picker's PATCH path is the other commit point; this one covers
-  # the "just typed and sent without opening the picker" path.
+  # the path where a prior explicit selection is inherited by a new chat.
   # Invariant: keep this block await-free through the commit below. A
   # picker PATCH from another coroutine can only interleave at await
   # points; if one is added here, a concurrent PATCH could clobber the
@@ -4236,10 +4355,10 @@ async def _run_chat_impl_with_db(
       if k not in agent_settings:
         continue
       value = agent_settings.get(k)
-      # ``model: None`` is meaningful: this chat started before the
-      # owner manually pinned a default model, so keep it on the
-      # provider SDK's own default instead of letting a later global
-      # model choice drift into this already-started chat.
+      # Interactive sends never reach this point without a model. A ``None``
+      # model is retained only for non-interactive programmatic/background
+      # starts, whose separately configured policy may deliberately choose the
+      # provider SDK's native model instead of the composer's picker contract.
       if value is None and k != "model":
         continue
       snapshot[k] = value
@@ -4450,7 +4569,11 @@ async def _run_chat_impl_with_db(
       chat_id=chat_id,
     )
     sink = _ChatEventSink(
-      bc, chat_id, run_token=run_token, recall_binding=recall_binding,
+      bc,
+      chat_id,
+      run_token=run_token,
+      recall_binding=recall_binding,
+      on_question_checkpoint=question_checkpoint,
     )
     register_active_sink(chat_id, sink)
     runner_result: dict = {}
@@ -4621,7 +4744,11 @@ async def _run_chat_impl_with_db(
       # warning log is the operator-facing signal.
       claude_session_id = None
     sink = _ChatEventSink(
-      bc, chat_id, run_token=run_token, recall_binding=recall_binding,
+      bc,
+      chat_id,
+      run_token=run_token,
+      recall_binding=recall_binding,
+      on_question_checkpoint=question_checkpoint,
     )
     register_active_sink(chat_id, sink)
     # As in the Codex path, do not pin a pooled connection while the provider

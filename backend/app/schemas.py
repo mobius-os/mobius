@@ -1,6 +1,8 @@
 """Pydantic request and response schemas."""
 
 from datetime import UTC, datetime
+from pathlib import PurePath
+import re
 from typing import Literal
 from urllib.parse import quote, urlsplit
 
@@ -40,6 +42,28 @@ class SetupStatus(BaseModel):
 class TokenResponse(BaseModel):
   access_token: str
   token_type: str = "bearer"
+
+
+class AppSourceManifest(BaseModel):
+  """Fetchable manifest identity for a Store-managed installed app."""
+
+  id: str
+  url: str
+
+
+class AppDistributionManifest(AppSourceManifest):
+  """Install/remix handoff and the lifecycle that owns it."""
+
+  kind: Literal["published", "source"]
+
+
+class AppHostedPublication(BaseModel):
+  """Owner-visible state for one exact anonymous hosted snapshot."""
+
+  path: str
+  revision: str
+  published_at: datetime
+  has_unpublished_changes: bool
 
 
 # A one-time sign-in pass handed to a mini-app being installed to the iOS home
@@ -129,16 +153,16 @@ class AppUpdate(BaseModel):
   # Public install manifest attached after a local app is published. Empty
   # string clears it; None means omitted. This is deliberately separate from
   # App.manifest_url, which controls Store install/update identity.
-  share_manifest_url: str | None = Field(default=None, max_length=1024)
+  published_manifest_url: str | None = Field(default=None, max_length=1024)
   # Owner-only DOWNGRADE of skills authority: False revokes immediately (the
   # request gate reads the live row, so already-minted app JWTs lose access on
   # their next call). Granting (True) is rejected — that path stays with the
   # reviewed manifest install.
   manage_skills: bool | None = None
 
-  @field_validator("share_manifest_url")
+  @field_validator("published_manifest_url")
   @classmethod
-  def validate_share_manifest_url(cls, value: str | None) -> str | None:
+  def validate_published_manifest_url(cls, value: str | None) -> str | None:
     if value is None:
       return None
     value = value.strip()
@@ -151,7 +175,7 @@ class AppUpdate(BaseModel):
       or parsed.username is not None
       or parsed.password is not None
     ):
-      raise ValueError("Share manifest URL must be a public HTTPS URL.")
+      raise ValueError("Published manifest URL must be a public HTTPS URL.")
     return value
 
 
@@ -197,9 +221,16 @@ class AppOut(BaseModel):
   # POST /api/apps/install). Null for user-built apps. The install
   # endpoint matches by this for update-vs-install discrimination.
   manifest_url: str | None = None
-  # Optional public install manifest attached to a locally-built app after
-  # publication. Drawer sharing prefers this without changing Store identity.
-  share_manifest_url: str | None = None
+  # Internal publication inputs. Clients receive the typed projections below,
+  # never the nullable persistence fields or executable path.
+  published_manifest_url: str | None = Field(default=None, exclude=True)
+  public_name: str | None = Field(default=None, exclude=True)
+  public_bundle_path: str | None = Field(default=None, exclude=True)
+  public_bundle_digest: str | None = Field(default=None, exclude=True)
+  public_source_commit: str | None = Field(default=None, exclude=True)
+  public_access_contract: dict | None = Field(default=None, exclude=True)
+  public_access_digest: str | None = Field(default=None, exclude=True)
+  public_published_at: datetime | None = Field(default=None, exclude=True)
   # The manifest version currently installed (e.g. "1.7.0"). Null for
   # user-built apps and for rows installed before the column existed
   # (they backfill on their next update). The store reads this to show
@@ -237,12 +268,78 @@ class AppOut(BaseModel):
     version = quote(self.updated_at.isoformat(), safe="")
     return f"/api/apps/{self.id}/icon?v={version}"
 
+  @computed_field
+  @property
+  def source_manifest(self) -> AppSourceManifest | None:
+    """Return the public source contract without exposing identity parsing."""
+    if not self.manifest_url:
+      return None
+    base, marker, manifest_id = self.manifest_url.rpartition("#manifest-id=")
+    if not marker or not base or not manifest_id:
+      return None
+    return AppSourceManifest(
+      id=manifest_id,
+      url=f"{base.rstrip('/')}/mobius.json",
+    )
+
+  @computed_field
+  @property
+  def distribution_manifest(self) -> AppDistributionManifest | None:
+    """Return one install/remix handoff without leaking persistence identity."""
+    if self.published_manifest_url:
+      return AppDistributionManifest(
+        id=self.slug,
+        url=self.published_manifest_url,
+        kind="published",
+      )
+    source = self.source_manifest
+    if source is None:
+      return None
+    return AppDistributionManifest(**source.model_dump(), kind="source")
+
+  @computed_field
+  @property
+  def hosted_publication(self) -> AppHostedPublication | None:
+    """Project the active snapshot and whether a newer private draft exists."""
+    if (
+      not self.public_name
+      or not self.public_bundle_path
+      or not self.public_bundle_digest
+      or self.public_published_at is None
+    ):
+      return None
+    current_match = re.fullmatch(
+      rf"app-{self.id}-(?P<digest>[0-9a-f]{{64}})\.js",
+      PurePath(self.compiled_path).name,
+    )
+    current_bundle_digest = (
+      current_match.group("digest") if current_match is not None else None
+    )
+    from app.app_capabilities import (
+      capability_digest,
+      public_access_declaration_from_contract,
+    )
+    current_access_digest = capability_digest(
+      public_access_declaration_from_contract(self.capability_contract),
+    )
+    return AppHostedPublication(
+      path=f"/{quote(self.slug, safe='')}",
+      revision=self.public_bundle_digest[:12],
+      published_at=self.public_published_at,
+      has_unpublished_changes=(
+        self.name != self.public_name
+        or current_bundle_digest != self.public_bundle_digest
+        or current_access_digest != self.public_access_digest
+      ),
+    )
+
   model_config = {"from_attributes": True}
 
 
 class AppApplyOut(BaseModel):
   mode: Literal["created", "updated", "unchanged"]
   app: AppOut
+  warnings: list[str] = Field(default_factory=list)
 
 
 class AppInstall(BaseModel):
@@ -548,8 +645,6 @@ class ChatPatch(BaseModel):
   pinned: bool | None = None
   # Per-chat automatic continuation after a paid provider limit.
   auto_resume_on_limit: bool | None = None
-  # Per-chat automatic continuation after a supervisor-authenticated restart.
-  auto_resume_on_restart: bool | None = None
   # Naming precedence. by_agent marks an AGENT title-sync — it fills the name
   # only when the owner hasn't locked it via a manual rename. clear_title resets
   # the name (unlock + drop to the first-message default; re-derived next turn).
@@ -658,6 +753,13 @@ class SendMessage(BaseModel):
     if self.continuation == "manual" and self.content.strip().lower() != "continue":
       raise ValueError("manual continuation content must be 'continue'")
     return self
+
+
+class PendingMessageUpdate(BaseModel):
+  # New text for one already-queued message. Only the content is client-
+  # supplied; the row's stable `cid`, ordering `ts`, attachments, and queue
+  # position are preserved server-side and never taken from the request.
+  content: str
 
 
 class PushKeys(BaseModel):

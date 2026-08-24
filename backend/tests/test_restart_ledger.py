@@ -47,6 +47,14 @@ def _bind(supervisor, root: Path, monkeypatch) -> None:
   monkeypatch.setattr(
     supervisor, "BOOT_PATH", root / ".restart-ledger" / "boot-id",
   )
+  monkeypatch.setattr(
+    supervisor, "CUTOVER_CHALLENGE_PATH",
+    root / ".restart-ledger" / "cutover-challenge.json",
+  )
+  monkeypatch.setattr(
+    supervisor, "CUTOVER_RECEIPT_PATH",
+    root / ".restart-ledger" / "cutover-receipt.json",
+  )
   monkeypatch.setattr(supervisor, "SUPERVISOR_UID", os.getuid())
   monkeypatch.setattr(supervisor, "SUPERVISOR_GID", os.getgid())
   monkeypatch.setattr(
@@ -91,6 +99,88 @@ def test_exact_accepted_restart_is_bound_to_immediately_following_boot(
 
   assert _authorized(tmp_path, target_boot) == nonce
   assert _authorized(tmp_path, source_boot) is None
+
+
+def test_root_opened_cutover_binds_replacement_boot_without_self_restart(
+  tmp_path, monkeypatch,
+):
+  supervisor = _load_supervisor()
+  _bind(supervisor, tmp_path, monkeypatch)
+  now = time.time()
+  source_boot = "boot-source-1234"
+  target_boot = "boot-target-1234"
+  cutover_id = "cutover-12345678"
+  nonce = "nonce-12345678"
+
+  supervisor.begin_boot(source_boot, now=now)
+  assert supervisor.open_cutover(cutover_id, now=now + 1)
+  assert platform_ledger.authorized_cutover_challenge(
+    cutover_id,
+    boot_id=source_boot,
+    now=now + 1,
+    trusted_uid=os.getuid(),
+    trusted_gid=os.getgid(),
+  )
+  platform_ledger.publish_cutover_intent(
+    boot_id=source_boot,
+    nonce=nonce,
+    cutover_id=cutover_id,
+    runs=[{"chat_id": "chat-12345678", "run_token": "run-12345678"}],
+    now=now + 1,
+  )
+
+  assert supervisor.accept_cutover(cutover_id, now=now + 2)
+  assert not supervisor.REQUEST_PATH.exists()
+  assert supervisor.begin_boot(target_boot, now=now + 3)
+  assert _authorized(tmp_path, target_boot) == nonce
+
+
+def test_cutover_requires_matching_root_challenge(tmp_path, monkeypatch):
+  supervisor = _load_supervisor()
+  _bind(supervisor, tmp_path, monkeypatch)
+  now = time.time()
+  source_boot = "boot-source-1234"
+  supervisor.begin_boot(source_boot, now=now)
+  platform_ledger.publish_cutover_intent(
+    boot_id=source_boot,
+    nonce="nonce-12345678",
+    cutover_id="cutover-12345678",
+    runs=[],
+    now=now,
+  )
+
+  assert not supervisor.accept_cutover("cutover-12345678", now=now + 1)
+  assert not supervisor.ACCEPTED_PATH.exists()
+
+
+def test_failed_cutover_can_rearm_exact_rollback_then_finalize(
+  tmp_path, monkeypatch,
+):
+  supervisor = _load_supervisor()
+  _bind(supervisor, tmp_path, monkeypatch)
+  now = time.time()
+  source_boot = "boot-source-1234"
+  failed_boot = "boot-failed-1234"
+  rollback_boot = "boot-rollback-1234"
+  cutover_id = "cutover-12345678"
+  nonce = "nonce-12345678"
+
+  supervisor.begin_boot(source_boot, now=now)
+  supervisor.open_cutover(cutover_id, now=now + 1)
+  platform_ledger.publish_cutover_intent(
+    boot_id=source_boot,
+    nonce=nonce,
+    cutover_id=cutover_id,
+    runs=[],
+    now=now + 1,
+  )
+  assert supervisor.accept_cutover(cutover_id, now=now + 2)
+  assert supervisor.begin_boot(failed_boot, now=now + 3)
+  assert supervisor.rearm_cutover(cutover_id, now=now + 4)
+  assert supervisor.begin_boot(rollback_boot, now=now + 5)
+  assert _authorized(tmp_path, rollback_boot) == nonce
+  assert supervisor.finalize_cutover(cutover_id, now=now + 6)
+  assert not supervisor.rearm_cutover(cutover_id, now=now + 7)
 
 
 def test_restart_intent_keeps_exact_runs_for_older_frozen_supervisors(

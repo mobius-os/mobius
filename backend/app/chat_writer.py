@@ -384,17 +384,24 @@ class ReconcileStartupChat(_Command):
 # These own the read-modify-write of the chat's `messages` /
 # `pending_messages` blobs: initial-send (`StartTurn`, from
 # routes/chats_stream.py), append (`AppendPending`), cancel
-# (`CancelPending`), promote (`PromotePending`, from chat_queue.py), and
-# clear / run markers (`ClearPending`, from chat.py).  The routes/queue
-# submit these instead of mutating the row directly, so every mutation is
-# serialized on the actor thread.  Each is must-persist (commit-before-ack,
-# non-coalescing) and fences any pending coalescible snapshot for its
-# (chat_id, run_token) key on submit.
+# (`CancelPending`), edit (`UpdatePending`), promote (`PromotePending`, from
+# chat_queue.py), and clear / run markers (`ClearPending`, from chat.py).  The
+# routes/queue submit these instead of mutating the row directly, so every
+# mutation is serialized on the actor thread.  Each is must-persist (commit-
+# before-ack, non-coalescing) and fences any pending coalescible snapshot for
+# its (chat_id, run_token) key on submit.
 
 
 @dataclass(frozen=True)
 class StartTurnBlockedByPendingQuestion:
   """Expected non-start when the chat is waiting for its owner."""
+
+  question_id: str
+
+
+@dataclass(frozen=True)
+class PromotePendingBlockedByPendingQuestion:
+  """Expected non-promotion while an owner question is open."""
 
   question_id: str
 
@@ -419,6 +426,22 @@ class StartTurn(_Command):
   title_source: str = ""
   default_provider: str = "claude"
   initiated_by_app_id: int | None = None
+
+
+@dataclass(frozen=True)
+class GoalPromotionRejected:
+  """Expected refusal when a run cannot accept the requested Goal."""
+
+  reason: str
+
+
+@dataclass
+class PromoteRunToGoal(_Command):
+  """Attach the exact currently-running physical turn to a visible Goal."""
+
+  chat_id: str = ""
+  run_token: str = ""
+  objective: str = ""
 
 
 @dataclass
@@ -486,12 +509,13 @@ class PromotePending(_Command):
   committing (so a malformed entry can't silently consume a turn — building
   the validated schema surfaces it), moves pending rows into `messages`,
   sets the durable run marker, stamps `updated_at`, and commits. Returns
-  `{"history", "promoted", "session_id"}`; `promoted` is None (queue
-  unchanged) only when there was nothing to promote. Newer code persists
-  each promoted pending row as its own visible user message, while
-  `promoted.content` remains the combined provider-facing text for the
-  continuation turn. A malformed pending entry that can't build a valid
-  history instead RAISES `_PersistFailed` — the turn-end drain maps that to
+  `{"history", "promoted", "session_id"}` with `promoted=None` only when
+  there was nothing to promote. Returns
+  ``PromotePendingBlockedByPendingQuestion`` when an owner question is open.
+  Newer code persists each promoted pending row as its own visible user message,
+  while `promoted.content` remains the combined provider-facing text for the
+  continuation turn. A malformed pending entry that can't build a valid history
+  instead RAISES `_PersistFailed` — the turn-end drain maps that to
   FAILED_LEAVE_MARKER (leave the marker for reconciliation) rather than
   confusing it with an empty queue and clearing the marker on stranded work.
   """
@@ -516,6 +540,22 @@ class CancelPending(_Command):
   chat_id: str = ""
   run_token: str = ""
   cid: str = ""
+
+
+@dataclass
+class UpdatePending(_Command):
+  """Replace one still-queued message's text without changing its identity.
+
+  The stable `cid`, ordering `ts`, attachments, and queue position stay
+  untouched. Returns `{"updated", "pending"}`; `updated` is False when a
+  racing promotion or cancellation already pulled the row from the queue, so
+  the caller can tell a real edit from a no-op instead of assuming success.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  cid: str = ""
+  content: str = ""
 
 
 @dataclass
@@ -771,6 +811,7 @@ _FENCE_COMMANDS = (
   AppendSteeredUserMessage,
   PromotePending,
   CancelPending,
+  UpdatePending,
   ClearPending,
   ReplaceTranscript,
   FinishRun,
@@ -1494,6 +1535,8 @@ class ChatWriterActor:
       return self._reconcile_startup_chat(db, cmd)
     if isinstance(cmd, StartTurn):
       return self._start_turn(db, cmd)
+    if isinstance(cmd, PromoteRunToGoal):
+      return self._promote_run_to_goal(db, cmd)
     if isinstance(cmd, AppendPending):
       return self._append_pending(db, cmd)
     if isinstance(cmd, AppendSteeredUserMessage):
@@ -1506,6 +1549,8 @@ class ChatWriterActor:
       return self._promote_pending(db, cmd)
     if isinstance(cmd, CancelPending):
       return self._cancel_pending(db, cmd)
+    if isinstance(cmd, UpdatePending):
+      return self._update_pending(db, cmd)
     if isinstance(cmd, ClearPending):
       return self._clear_pending(db, cmd)
     if isinstance(cmd, ReplaceTranscript):
@@ -1849,6 +1894,11 @@ class ChatWriterActor:
         messages=cmd.messages,
         has_messages=bool(cmd.messages),
         live_assistant=None,
+        # Startup repair owns the durable transcript after a process loss.
+        # Rebuild the protocol barrier from that repaired source instead of
+        # preserving a marker that Finalize may have cleared just before the
+        # process died (or that an older write may have left stale).
+        pending_question_id=_tail_open_question_id(cmd.messages),
       )
     )
     if chat_update.rowcount != 1:
@@ -2168,8 +2218,8 @@ class ChatWriterActor:
     # so any still-running row is a prior run whose clear was dropped — mark it
     # interrupted before opening this one (at most one run is ever live).
     from app.models import ChatRun
-    from app.run_state import goal_objective_for_run_start
-    goal_objective = goal_objective_for_run_start(
+    from app.run_state import goal_identity_for_run_start
+    goal_objective, goal_id = goal_identity_for_run_start(
       db, cmd.chat_id, cmd.user_msg,
     )
     self._close_nonterminal_runs(db, cmd.chat_id, "interrupted")
@@ -2179,6 +2229,7 @@ class ChatWriterActor:
       provider=chat.provider, started_at=started_at,
       initiated_by_app_id=cmd.initiated_by_app_id,
       goal_objective=goal_objective,
+      goal_id=goal_id,
     ))
     if not _commit_or_rollback(db):
       raise _PersistFailed("StartTurn did not persist")
@@ -2188,6 +2239,54 @@ class ChatWriterActor:
       "history": history,
       "session_id": chat.session_id,
       "provider": chat.provider,
+    }
+
+  def _promote_run_to_goal(
+    self, db, cmd: PromoteRunToGoal,
+  ) -> dict | GoalPromotionRejected:
+    """Atomically bind one exact live turn and its logical root to a Goal."""
+    run = db.query(models.ChatRun).filter(
+      models.ChatRun.id == cmd.run_token,
+      models.ChatRun.chat_id == cmd.chat_id,
+    ).first()
+    if run is None or run.status != "running":
+      db.rollback()
+      return GoalPromotionRejected("run_not_active")
+
+    from app.run_state import latest_run
+
+    latest = latest_run(db, cmd.chat_id)
+    if latest is None or latest.id != run.id:
+      db.rollback()
+      return GoalPromotionRejected("run_not_current")
+    if run.goal_objective not in (None, cmd.objective):
+      db.rollback()
+      return GoalPromotionRejected("different_goal_active")
+
+    root_id = run.root_run_id or run.id
+    root = db.query(models.ChatRun).filter(
+      models.ChatRun.id == root_id,
+      models.ChatRun.chat_id == cmd.chat_id,
+    ).first()
+    if root is None:
+      db.rollback()
+      return GoalPromotionRejected("logical_root_missing")
+    if root.goal_objective not in (None, cmd.objective):
+      db.rollback()
+      return GoalPromotionRejected("different_goal_active")
+
+    changed = run.goal_objective is None or root.goal_objective is None
+    run.goal_objective = cmd.objective
+    root.goal_objective = cmd.objective
+    if changed and not _commit_or_rollback(db):
+      raise _PersistFailed("PromoteRunToGoal did not persist")
+    if not changed:
+      db.rollback()
+    return {
+      "objective": cmd.objective,
+      "root_run_id": root_id,
+      "run_id": run.id,
+      "state": "promoted" if changed else "active",
     }
 
   def _append_pending(self, db, cmd: AppendPending) -> dict:
@@ -2318,6 +2417,12 @@ class ChatWriterActor:
     stored_messages: list[dict] = []
     for raw_msg in raw_user_msgs:
       new_msg = dict(raw_msg)
+      # This provenance is part of the durable transcript contract, not a UI
+      # hint.  A normal Q1/A1/Q2/A2 exchange is indistinguishable from a
+      # mid-turn steer after reload unless the committed Q2 row names the
+      # boundary.  The renderer may then join an exact provider replay without
+      # guessing from content alone; every non-steer row fails closed.
+      new_msg["steered"] = True
       key = ensure_user_cid(new_msg)
       if key is not None and key in seen_cids:
         log.warning(
@@ -2484,7 +2589,9 @@ class ChatWriterActor:
       raise _PersistFailed("PersistCompaction did not persist")
     return {"status": "committed", "stored": new_msg}
 
-  def _promote_pending(self, db, cmd: PromotePending) -> dict:
+  def _promote_pending(
+    self, db, cmd: PromotePending,
+  ) -> dict | PromotePendingBlockedByPendingQuestion:
     """Move pending follow-ups into the transcript and mark the run.
 
     Replicates `promote_pending_messages_locked`: builds the next-turn
@@ -2500,6 +2607,14 @@ class ChatWriterActor:
     chat = _active_chat(db, cmd.chat_id)
     if chat is None:
       raise _PersistFailed("PromotePending: chat not found or deleted")
+    # Moving queued rows into the transcript is a turn-admission operation,
+    # just like StartTurn. Keep the owner-question barrier
+    # at the actor-owned commit boundary so every caller — including recovery
+    # sweepers and future programmatic wakes — gets the same TOCTOU-safe rule.
+    if chat.pending_question_id is not None:
+      question_id = chat.pending_question_id
+      db.rollback()
+      return PromotePendingBlockedByPendingQuestion(question_id)
     pending = list(chat.pending_messages or [])
     if not pending:
       return {"history": [], "promoted": None, "session_id": chat.session_id}
@@ -2585,10 +2700,15 @@ class ChatWriterActor:
     # SAME commit as the queue handoff.
     from app.models import ChatRun
     from app.continuations import is_continuation_message
-    from app.run_state import goal_objective_for_run_start
-    goal_objective = goal_objective_for_run_start(
+    from app.run_state import goal_identity_for_run_start
+    goal_objective, goal_id = goal_identity_for_run_start(
       db, cmd.chat_id, agent_pending,
     )
+    # This event-only metadata lets the mounted UI cross the physical-turn
+    # boundary without briefly clearing a Goal while the runtime refetch lands.
+    # It is not written into the transcript row.
+    returned_promoted["_goal_objective"] = goal_objective
+    returned_promoted["_goal_id"] = goal_id
     prior_run = (
       db.query(ChatRun)
       .filter(
@@ -2612,6 +2732,7 @@ class ChatWriterActor:
       provider=chat.provider, started_at=started_at,
       initiated_by_app_id=initiated_by_app_id,
       goal_objective=goal_objective,
+      goal_id=goal_id,
     ))
     if not _commit_or_rollback(db):
       raise _PersistFailed("PromotePending did not persist")
@@ -2645,6 +2766,44 @@ class ChatWriterActor:
       if not _commit_or_rollback(db):
         raise _PersistFailed("CancelPending did not persist")
     return {"pending": remaining}
+
+  def _update_pending(self, db, cmd: UpdatePending) -> dict:
+    """Replace one still-queued message's text, preserving every other field.
+
+    Matches on `cid_of` like `_cancel_pending`. `updated` reports whether the
+    row is still queued (True even for a no-op edit to identical text); the
+    commit and `updated_at` bump happen only when the content actually changed,
+    mirroring `_cancel_pending`. `updated` is False only when a racing promote
+    or cancel already removed the row, so the caller can distinguish a real
+    edit from a message that has already left the queue.
+    """
+    from datetime import UTC, datetime
+
+    from app.models import Chat
+
+    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+    if chat is None:
+      raise _PersistFailed("UpdatePending: chat not found")
+    pending = list(chat.pending_messages or [])
+    updated = False
+    changed = False
+    next_pending = []
+    for message in pending:
+      if not updated and cid_of(message) == cmd.cid:
+        updated = True
+        if message.get("content") == cmd.content:
+          next_pending.append(message)
+        else:
+          next_pending.append({**message, "content": cmd.content})
+          changed = True
+      else:
+        next_pending.append(message)
+    if changed:
+      chat.pending_messages = next_pending
+      chat.updated_at = datetime.now(UTC)
+      if not _commit_or_rollback(db):
+        raise _PersistFailed("UpdatePending did not persist")
+    return {"updated": updated, "pending": next_pending}
 
   def _clear_pending(self, db, cmd: ClearPending) -> dict:
     """Empty the pending queue; return the count + the cleared cids.
@@ -3711,7 +3870,7 @@ def _tail_open_question_id(messages) -> str | None:
   tail is an unanswered question." Deriving it from the messages is the single
   rule every writer that needs to (re)establish the marker can share, so the
   marker cannot drift from the transcript. This mirrors the one-time boot
-  backfill in database._add_chat_pending_question_id and applies the same
+  backfill in schema_migrations._add_chat_pending_question_id and applies the same
   1..64-char id validation the column accepts.
   """
   for message in reversed(messages or []):

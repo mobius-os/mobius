@@ -142,6 +142,54 @@ def test_reconcile_merges_bounded_live_snapshot_before_restart_note(db):
   assert row.messages[-1]["blocks"][-1]["type"] == "error"
 
 
+def test_reconcile_rebuilds_open_question_barrier_from_repaired_tail(db):
+  """A pre-crash Finalize clear cannot orphan an unanswered card.
+
+  The transcript is the recovery source: the restart note belongs before the
+  trailing question and the durable admission marker must name that question,
+  even if the pre-restart marker was already null.
+  """
+  _make_chat(
+    db,
+    "question-recovery",
+    running=True,
+    messages=[
+      {"role": "user", "content": "Review PR #787", "ts": 1},
+      {
+        "role": "assistant",
+        "ts": 2,
+        "blocks": [{
+          "type": "question",
+          "question_id": "owner-decision",
+          "questions": [{
+            "id": "push_requeue_787",
+            "question": "Push and requeue PR #787?",
+          }],
+        }],
+      },
+    ],
+    pending_messages=[{
+      "role": "user",
+      "content": "<wait_result>PR checks completed</wait_result>",
+      "hidden": True,
+      "ts": 3,
+      "cid": "wait-result-787",
+    }],
+    pending_question_id=None,
+  )
+
+  assert chat_mod.reconcile_interrupted_chats(db) == ["question-recovery"]
+
+  db.expire_all()
+  row = db.get(models.Chat, "question-recovery")
+  blocks = row.messages[-1]["blocks"]
+  assert [block["type"] for block in blocks[-2:]] == ["error", "question"]
+  assert blocks[-1]["question_id"] == "owner-decision"
+  assert blocks[-1].get("answers") is None
+  assert row.pending_question_id == "owner-decision"
+  assert [item["cid"] for item in row.pending_messages] == ["wait-result-787"]
+
+
 def test_reconcile_appends_turn_when_no_assistant_message(db):
   """If the process died before any assistant content persisted, the
   interruption becomes a standalone assistant turn rather than mutating

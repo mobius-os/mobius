@@ -44,6 +44,7 @@ from app.continuations import (
   continuation_actor_label,
   is_continuation_message,
 )
+from app.secure_inputs import redact_reveal_markers
 
 # Per-excerpt char cap for the list view, and per-message char cap for
 # the single-chat view. Excerpts are a teaser; full-message bodies in
@@ -112,6 +113,7 @@ def scrub_secrets(text: str) -> str:
   """
   if not text:
     return text
+  text = redact_reveal_markers(text)
   for pattern, repl in _SECRET_PATTERNS:
     text = pattern.sub(repl, text)
   return text

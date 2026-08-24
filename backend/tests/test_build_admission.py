@@ -195,3 +195,27 @@ def test_all_frontend_native_build_entrypoints_enter_admission():
     source = (scripts / name).read_text(encoding="utf-8")
     assert "from './build-admission.mjs'" in source
     assert "enterBuildAdmission(" in source
+
+
+def test_refusal_names_psi_not_headroom_when_psi_trips():
+  """The message must name the tripped condition. A fixed headroom template
+  once produced "5260 MiB headroom; 512 MiB is required" during a PSI spike."""
+  one_gib = 1024 * 1024 * 1024
+  psi_spike = _memory(working_set=128 * 1024 * 1024, limit=one_gib)
+  psi_spike["pressure"] = {"some": {"avg60": 2.0}, "full": {"avg60": 0.0}}
+
+  assert vite_build_admitted(psi_spike) is False
+  with pytest.raises(ViteBuildDeferred) as exc:
+    require_vite_build_admission(psi_spike)
+  message = str(exc.value)
+  assert "PSI some avg60 2.0" in message
+  assert "headroom" not in message
+
+
+def test_refusal_names_footprint_ratio_when_ratio_trips():
+  one_gib = 1024 * 1024 * 1024
+  hot = _memory(working_set=int(one_gib * 0.8), limit=one_gib)
+
+  with pytest.raises(ViteBuildDeferred) as exc:
+    require_vite_build_admission(hot)
+  assert "unreclaimable footprint is 80% of the limit" in str(exc.value)

@@ -11,7 +11,6 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import HTTPException, Request
-from pydantic import BaseModel
 
 from app import github_auth, models
 from app.config import get_settings
@@ -22,24 +21,20 @@ _API_BASE = "https://api.github.com"
 _GITHUB_LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}$")
 _CONNECTION_LOCK_TIMEOUT = 70.0
 _device_flow_poll_lock = asyncio.Lock()
-_CLASSIC_TOKEN_URL = (
-  "https://github.com/settings/tokens/new"
-  "?scopes=public_repo&description=Mobius%20Contribute"
-)
-_CLASSIC_WORKFLOW_TOKEN_URL = (
-  "https://github.com/settings/tokens/new"
-  "?scopes=public_repo,workflow&description=Mobius%20Contribute"
-)
+_FULL_PR_SCOPES = ("public_repo", "workflow")
 
 log = logging.getLogger("moebius.github")
 
 
-class GithubTokenRequest(BaseModel):
-  token: str
-
-
-class GithubConnectStartRequest(BaseModel):
-  workflow: bool = False
+def has_full_pr_access(scopes: object) -> bool:
+  """Return whether one credential can publish every reviewed PR shape."""
+  if not isinstance(scopes, (list, tuple, set, frozenset)):
+    return False
+  granted = {str(scope) for scope in scopes}
+  return (
+    "workflow" in granted
+    and ("public_repo" in granted or "repo" in granted)
+  )
 
 
 def _bounded_provider_int(
@@ -119,7 +114,6 @@ async def _github_user(token: str) -> tuple[int, str, int | None, list[str]]:
 
 async def _start_device_attempt(
   request: Request,
-  body: GithubConnectStartRequest | None,
 ) -> dict:
   """Request and persist one device code while the connection lock is held."""
   if await request.is_disconnected():
@@ -130,12 +124,12 @@ async def _start_device_attempt(
       status_code=409,
       detail=(
         "Device flow is not configured on this instance "
-        "(GITHUB_OAUTH_CLIENT_ID is unset). Connect with a classic "
-        "personal access token instead."
+        "(GITHUB_OAUTH_CLIENT_ID is unset). Configure the Möbius GitHub "
+        "OAuth app before connecting."
       ),
     )
   try:
-    scopes = "public_repo workflow" if body and body.workflow else "public_repo"
+    scopes = " ".join(_FULL_PR_SCOPES)
     async with httpx.AsyncClient(timeout=15.0) as client:
       r = await client.post(
         _DEVICE_CODE_URL,
@@ -153,7 +147,7 @@ async def _start_device_attempt(
       status_code=409,
       detail=(
         "The configured GitHub OAuth app has the device flow disabled. "
-        "Connect with a classic personal access token instead."
+        "Enable device flow for that OAuth app before connecting."
       ),
     )
   if r.status_code != 200 or "device_code" not in payload:
@@ -212,6 +206,8 @@ def _device_attempt_result(flow: dict, *, now: float | None = None) -> dict:
   }
   if flow.get("reason"):
     response["reason"] = flow["reason"]
+  if flow.get("message"):
+    response["message"] = flow["message"]
   if flow.get("login"):
     response["login"] = flow["login"]
   if response["status"] == "waiting":
@@ -239,43 +235,3 @@ def _current_device_attempt(attempt_id: str) -> dict:
       detail="This GitHub connection attempt no longer exists.",
     )
   return flow
-
-
-async def _connect_token_locked(body: GithubTokenRequest) -> dict:
-  """Validate and install a PAT while the connection lock is held."""
-  token = body.token.strip()
-  if token.startswith("github_pat_"):
-    raise HTTPException(
-      status_code=400,
-      detail=(
-        "That's a fine-grained personal access token (github_pat_…). "
-        "Fine-grained tokens can only reach repositories you own or are "
-        "explicitly granted, so they can't push to or open pull requests "
-        "on the upstream public repos Contribute targets. Create a classic "
-        "token with the public_repo scope instead — this link pre-fills it: "
-        f"{_CLASSIC_TOKEN_URL} (or use the device flow)."
-      ),
-    )
-  if not token:
-    raise HTTPException(status_code=400, detail="Token is empty.")
-  status, login, user_id, scopes = await _github_user(token)
-  if status != 200 or not _GITHUB_LOGIN.fullmatch(login):
-    raise HTTPException(
-      status_code=400, detail="GitHub rejected the token.",
-    )
-  if "repo" not in scopes and "public_repo" not in scopes:
-    granted = ", ".join(scopes) if scopes else "none"
-    raise HTTPException(
-      status_code=400,
-      detail=(
-        "The token lacks the public_repo (or repo) scope needed to "
-        f"contribute — its scopes are: {granted}."
-      ),
-    )
-  github_auth.write_credentials(
-    token=token, login=login, user_id=user_id, scopes=scopes, source="pat",
-  )
-  # PAT success supersedes any device attempt. Clearing both disk and cache
-  # ensures an older tab cannot later complete and overwrite these credentials.
-  github_auth.set_device_flow(None)
-  return {"login": login}

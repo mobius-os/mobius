@@ -41,7 +41,9 @@ self.addEventListener('push', (e) => {
   const options = {
     body: data.body || '',
     icon: data.icon || '/icons/icon-192.png',
-    badge: '/icons/icon-192.png',
+    // Android renders `badge` as the tiny monochrome status-bar glyph.
+    // Keep it separate from the full-colour notification card icon.
+    badge: '/icons/notification-badge.png',
     data: { target: data.target || '/', actions: data.actions },
     actions: (data.actions || []).slice(0, 2).map(a => ({
       action: a.action,

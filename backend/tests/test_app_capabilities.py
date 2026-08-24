@@ -79,8 +79,9 @@ def test_preview_returns_server_derived_contract_and_digest(
     "user_configurable": False,
     "initialize_on_install": True,
   }
-  assert body["capability_contract"]["schema"] == 4
+  assert body["capability_contract"]["schema"] == 5
   assert body["capability_contract"]["runtime"] == {}
+  assert body["capability_contract"]["public"] == {"network": []}
 
 
 def test_runtime_capability_is_independently_versioned_and_bounded():
@@ -357,6 +358,6 @@ def test_matching_digest_is_persisted_with_explicit_system_identity(
   assert response.json()["capability_contract"] == contract
   launch.assert_called_once_with(
     app.id, Path(app.source_dir) / "memory-job.sh", Path(app.source_dir),
-    wait_for_ready=False,
+    wait_for_ready=True,
   )
-  assert "initialization started" in response.json()["warnings"]
+  assert "initialization waiting for startup readiness" in response.json()["warnings"]

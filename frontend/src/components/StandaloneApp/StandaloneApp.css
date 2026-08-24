@@ -185,6 +185,50 @@
   font-weight: 600;
 }
 
+/* The bounded wait for Chromium's install eligibility: a quiet status line,
+   not a panel — the card is waiting, not instructing. */
+.standalone-install__warming {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+  text-align: center;
+  color: var(--muted, #aaa);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.standalone-install__spinner {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 2px solid color-mix(in srgb, var(--accent, #a78bfa) 30%, transparent);
+  border-top-color: var(--accent, #a78bfa);
+  animation: standalone-install-spin 0.9s linear infinite;
+}
+
+@keyframes standalone-install-spin {
+  to { transform: rotate(360deg); }
+}
+
+.standalone-install__warming-skip {
+  min-height: 44px;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  color: var(--accent, #a78bfa);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .standalone-install__spinner { animation: none; opacity: 0.6; }
+}
+
 .standalone-install__arrow {
   display: flex;
   align-items: center;

@@ -28,9 +28,10 @@
  *     non-capable app's /apps/<slug>/ page is never stored, so its offline
  *     open keeps showing the branded offline page exactly as before. Only the
  *     in-shell read path (frame/module) is flag-independent.
- *   - HTML/shell navigations: served from the Workbox precache via a pathname
- *     route bound to `/index.html` — NOT StaleWhileRevalidate; the shell
- *     deliberately avoids SWR.
+ *   - HTML/shell navigations: network-first while online, with the matching
+ *     precached shell as the offline fallback. We never put navigation HTML in
+ *     a separate runtime cache: the worker's precached document and hashed
+ *     bundle remain one internally-consistent offline generation.
  *   - Several `/api/*` routes are cached rather than going straight to
  *     network: `/api/theme` is StaleWhileRevalidate, `/api/chats` and
  *     `/api/apps/` are NetworkFirst (cache fallback when offline), and
@@ -40,7 +41,7 @@
 
 import {
   precacheAndRoute, cleanupOutdatedCaches, matchPrecache,
-  createHandlerBoundToURL, addPlugins,
+  addPlugins,
 } from 'workbox-precaching'
 import { registerRoute, setCatchHandler } from 'workbox-routing'
 import {
@@ -76,6 +77,11 @@ import {
 } from './sw-cache-policy.js'
 import { RETAINED_RUNTIME_ASSETS } from './sw-precache-assets.js'
 import { isShellNavigationDenied } from './lib/swNavigationPolicy.js'
+import { serveShellNavigation } from './lib/swShellNavigation.js'
+import {
+  findOutgoingShellEntries,
+  refreshOutgoingShellEntries,
+} from './lib/swOutgoingShell.js'
 
 const isOpaqueFramePublicAssetRequest = request => {
   try {
@@ -144,13 +150,16 @@ const outgoingDocumentPolicy = caches.match('/index.html', { ignoreSearch: true 
   .then(response => (response ? response.headers.get('content-security-policy') || '' : null))
   .catch(() => null)
 
-async function documentPolicyChanged() {
-  const [outgoing, fresh] = await Promise.all([
-    outgoingDocumentPolicy,
-    fetch('/index.html', { cache: 'reload', credentials: 'same-origin' })
-      .then(response => response.headers.get('content-security-policy') || '')
-      .catch(() => ''),
-  ])
+// Snapshot the outgoing worker's revisioned document keys before Workbox
+// creates this generation's precache. A pre-network-first worker will keep
+// requesting one of these exact keys until it is replaced; refreshing the
+// response lets an ordinary navigation bootstrap into the current shell while
+// this worker remains safely waiting.
+const outgoingShellEntries = findOutgoingShellEntries(caches)
+
+async function documentPolicyChanged(freshDocument) {
+  const outgoing = await outgoingDocumentPolicy
+  const fresh = freshDocument?.headers.get('content-security-policy') || ''
   // No cached document, or offline: leave the leash in place.
   return outgoing !== null && fresh !== '' && fresh !== outgoing
 }
@@ -159,9 +168,15 @@ let isFirstInstall = false
 self.addEventListener('install', (event) => {
   isFirstInstall = !self.registration.active
   if (isFirstInstall) return
-  event.waitUntil(documentPolicyChanged().then(async (changed) => {
-    if (changed) await self.skipWaiting()
-  }).catch(() => {}))
+  event.waitUntil((async () => {
+    const entries = await outgoingShellEntries
+    const freshDocument = await fetch('/index.html', {
+      cache: 'reload',
+      credentials: 'same-origin',
+    }).catch(() => null)
+    await refreshOutgoingShellEntries(caches, entries, freshDocument)
+    if (await documentPolicyChanged(freshDocument)) await self.skipWaiting()
+  })().catch(() => {}))
 })
 self.addEventListener('message', (event) => {
   // The page reached its idle apply-boundary and asked us to take over.
@@ -652,27 +667,34 @@ registerRoute(
   appCodeHandler(OFFLINE_APPS_CACHE, { gated: false }),
 )
 
-// Shell + bare-domain navigations: serve the PRECACHED index.html — the
-// canonical Workbox app-shell pattern. Instant offline (a precache read, no
-// network race, no timeout — this is what removes the multi-second cold-open
-// wait), and ALWAYS consistent with the precached bundle.
+// Shell + bare-domain navigations: the server owns online freshness. This is
+// the crucial boundary: an outgoing worker may continue controlling a live
+// page to protect an active turn, but it must never make an ordinary refresh or
+// reopen return that worker's obsolete shell. A hard refresh and a normal
+// refresh therefore resolve to the same current document while online.
 //
-// Why precache, NOT a separate StaleWhileRevalidate cache (the bug this fixes):
-// a SWR `mobius-shell-nav` cache stored the full index.html, INCLUDING its
-// content-hashed `<script src="/assets/index-<hash>.js">`, and that cache was
-// never purged on an SW update. After a deploy bumped the bundle hash, the new
-// SW's cleanupOutdatedCaches() deleted the OLD precache (old bundle gone), but
-// the stale index.html survived in mobius-shell-nav. Offline — where the
-// updatefound watchdog can't fire (it needs a network sw.js fetch) and the
-// background revalidate can't reach the network — the navigation served that
-// stale HTML, whose `<script>` pointed at a hash that no longer existed in the
-// precache OR on the server → the bundle never loaded → index.html's 8s
-// watchdog showed "Shell failed to load". createHandlerBoundToURL resolves the
-// precached index.html, which Workbox keeps in lockstep with the precached
-// bundle (shared revision manifest + cleanupOutdatedCaches), so HTML and bundle
-// can never disagree. For the FULL shell, the cached (non-theme-injected)
-// HTML renders correctly because Shell mounts useTheme(), which reapplies
-// the persisted theme client-side after first paint.
+// We deliberately do not use Workbox NetworkFirst here. Its runtime cache would
+// create a second document cache whose HTML could drift away from the hashed
+// assets in the precache. On a network failure we fall back directly to this
+// worker's precached index, which is revisioned in lockstep with its bundle.
+async function shellNavigationHandler({ request }) {
+  return serveShellNavigation({
+    request,
+    fetchFresh: current => boundedFetch((signal) => {
+      try {
+        return new Request(current, { cache: 'reload', signal })
+      } catch {
+        return new Request(current.url, {
+          cache: 'reload',
+          credentials: 'same-origin',
+          signal,
+        })
+      }
+    }),
+    matchPrecache,
+    errorResponse: () => Response.error(),
+  })
+}
 //
 // `/shell/embed/*` is the exception, and the second reason for this denylist.
 // The embed branch (App.jsx) renders ChatEmbed OUTSIDE Shell. Before ChatEmbed
@@ -696,7 +718,7 @@ registerRoute(
 registerRoute(
   ({ request, url }) =>
     request.mode === 'navigate' && !isShellNavigationDenied(url.pathname),
-  createHandlerBoundToURL('/index.html'),
+  shellNavigationHandler,
 )
 
 // Standalone mini-app navigations: network-first, then stored for

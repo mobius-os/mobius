@@ -260,30 +260,56 @@ def _memory_pressure(memory: dict[str, Any]) -> dict[str, Any]:
   some_avg60 = _float(some.get("avg60"))
   full_avg60 = _float(full.get("avg60"))
 
+  # Name each tripped signal so downstream refusals can say WHY instead of
+  # reciting all three values. A gate message that printed generous headroom
+  # while refusing on a PSI spike sent a debugging session in the wrong
+  # direction; the owner of the thresholds is the right place to know which
+  # comparison actually fired.
+  def _signals(ratio_at: float, some_at: float, full_at: float) -> list[str]:
+    tripped = []
+    if ratio >= ratio_at:
+      tripped.append(
+        f"unreclaimable footprint is {ratio:.0%} of the limit"
+        f" (threshold {ratio_at:.0%})"
+      )
+    if some_avg60 >= some_at:
+      tripped.append(
+        f"PSI some avg60 {some_avg60:.1f} >= {some_at:.1f}"
+      )
+    if full_avg60 >= full_at:
+      tripped.append(
+        f"PSI full avg60 {full_avg60:.1f} >= {full_at:.1f}"
+      )
+    return tripped
+
   state = "normal"
   reason = None
-  if (
-    ratio >= _MEMORY_CRITICAL_RATIO
-    or some_avg60 >= _MEMORY_CRITICAL_SOME_AVG60
-    or full_avg60 >= _MEMORY_CRITICAL_FULL_AVG60
-  ):
+  critical_signals = _signals(
+    _MEMORY_CRITICAL_RATIO,
+    _MEMORY_CRITICAL_SOME_AVG60,
+    _MEMORY_CRITICAL_FULL_AVG60,
+  )
+  constrained_signals = _signals(
+    _MEMORY_CONSTRAINED_RATIO,
+    _MEMORY_CONSTRAINED_SOME_AVG60,
+    _MEMORY_CONSTRAINED_FULL_AVG60,
+  )
+  if critical_signals:
     state = "critical"
     reason = {
       "resource": "memory",
       "code": "memory_pressure_critical",
+      "signals": critical_signals,
       "working_set_ratio": ratio,
       "some_avg60": some_avg60,
       "full_avg60": full_avg60,
     }
-  elif (
-    ratio >= _MEMORY_CONSTRAINED_RATIO
-    or some_avg60 >= _MEMORY_CONSTRAINED_SOME_AVG60
-    or full_avg60 >= _MEMORY_CONSTRAINED_FULL_AVG60
-  ):
+  elif constrained_signals:
     state = "constrained"
     reason = {
       "resource": "memory",
       "code": "memory_pressure_constrained",
+      "signals": constrained_signals,
       "working_set_ratio": ratio,
       "some_avg60": some_avg60,
       "full_avg60": full_avg60,

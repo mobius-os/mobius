@@ -465,6 +465,12 @@ export const api = {
       'chats', `/chats/${chatId}/recover`, { method: 'POST' },
     ),
   },
+  secureInputs: {
+    submit: (chatId, requestId, payload) => apiFetch(
+      `/secure-inputs/${encodeURIComponent(chatId)}/${encodeURIComponent(requestId)}/submit`,
+      { method: 'POST', body: JSON.stringify(payload) },
+    ),
+  },
   apps: {
     list: () => apiFetch('/apps/'),
     markOpened: (appId) => apiFetch(`/apps/${appId}/opened`, {
@@ -482,6 +488,12 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(payload),
     }),
+    publishHosted: (appId) => listAffectingMutation(
+      'apps', `/apps/${appId}/hosted-publication`, { method: 'PUT' },
+    ),
+    stopHosted: (appId) => listAffectingMutation(
+      'apps', `/apps/${appId}/hosted-publication`, { method: 'DELETE' },
+    ),
     remove: (appId) => listAffectingMutation(
       'apps', `/apps/${appId}`, { method: 'DELETE' },
     ),
@@ -586,6 +598,8 @@ export const api = {
   },
   admin: {
     restart: () => apiFetch('/admin/restart', { method: 'POST' }),
+    rebuildStatus: () => apiFetch('/admin/rebuild'),
+    rebuild: () => apiFetch('/admin/rebuild', { method: 'POST' }),
   },
   platform: {
     status: () => apiFetch('/platform/status'),

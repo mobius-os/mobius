@@ -15,6 +15,9 @@ env:
 
 jobs:
   publish:
+    # Forks inherit workflow files. Never allocate a runner or attempt a
+    # package write outside the one repository that owns this image channel.
+    if: github.repository == 'mobius-os/mobius'
     runs-on: ubuntu-latest
     outputs:
       digest: ${{ steps.publish.outputs.digest }}
@@ -71,7 +74,23 @@ jobs:
             exit 1
           fi
 
+          labels="$(
+            docker buildx imagetools inspect "$SHA_IMAGE" \
+              --format '{{json .Image.Config.Labels}}'
+          )"
+          revision="$(jq -er '."org.opencontainers.image.revision"' <<<"$labels")"
+          source="$(jq -er '."org.opencontainers.image.source"' <<<"$labels")"
+          if [ "$revision" != "$GITHUB_SHA" ]; then
+            echo "Immutable SHA image reports revision $revision, expected $GITHUB_SHA." >&2
+            exit 1
+          fi
+          if [ "$source" != "https://github.com/mobius-os/mobius" ]; then
+            echo "Immutable SHA image reports unexpected source $source." >&2
+            exit 1
+          fi
+
   promote-main:
+    if: github.repository == 'mobius-os/mobius'
     needs: publish
     runs-on: ubuntu-latest
     concurrency:
@@ -101,13 +120,20 @@ jobs:
             exit 0
           fi
 
-          docker buildx imagetools create --tag "$MAIN_IMAGE" "$SHA_IMAGE"
-          main_manifest="$(
-            docker buildx imagetools inspect "$MAIN_IMAGE" \
-              --format '{{json .Manifest}}'
-          )"
-          main_digest="$(jq -er '.digest' <<<"$main_manifest")"
-          if [ "$main_digest" != "$EXPECTED_DIGEST" ]; then
-            echo "Moving main tag resolved to $main_digest, expected $EXPECTED_DIGEST." >&2
-            exit 1
-          fi
+          docker buildx imagetools create --prefer-index=false \
+            --tag "$MAIN_IMAGE" "$SHA_IMAGE"
+
+          main_digest=""
+          for _ in $(seq 1 12); do
+            if main_manifest="$(
+              docker buildx imagetools inspect "$MAIN_IMAGE" \
+                --format '{{json .Manifest}}' 2>/dev/null
+            )" && main_digest="$(jq -er '.digest' <<<"$main_manifest")"; then
+              if [ "$main_digest" = "$EXPECTED_DIGEST" ]; then
+                exit 0
+              fi
+            fi
+            sleep 5
+          done
+          echo "Moving main tag resolved to ${main_digest:-nothing}, expected $EXPECTED_DIGEST." >&2
+          exit 1

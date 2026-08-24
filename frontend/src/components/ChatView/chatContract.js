@@ -110,6 +110,14 @@ export const CHAT_CONTRACT = [
       + 'chosen) is covered by chooseActiveAssistantSurface\'s own unit tests.',
   },
   {
+    id: 'continuous-steer-replay',
+    title: 'Render exact steer replay as one continuous answer',
+    summary:
+      'A durable steer boundary may suppress only the exact assistant-text '
+      + 'prefix already visible above its user row. Stored content is unchanged; '
+      + 'ordinary sends, mismatches, and unsafe Markdown cuts render in full.',
+  },
+  {
     id: 'anchor-held-through-toggle',
     title: 'Hold the reader through disclosure toggles',
     summary:

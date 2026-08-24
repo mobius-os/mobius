@@ -169,6 +169,36 @@ def test_removed_job_authority_permissions_fail_clearly(
     _validate_manifest(manifest)
 
 
+def test_requires_accepts_recognized_capabilities(tmp_path):
+  _write_app(tmp_path, "export default function App(){ return <div /> }")
+  manifest = json.loads((tmp_path / "mobius.json").read_text())
+  manifest["requires"] = ["identity_manage", "railway_manage"]
+  validate_manifest_contract(manifest)  # does not raise on a build that has them
+
+
+def test_requires_unrecognized_capability_fails_loudly(tmp_path):
+  _write_app(tmp_path, "export default function App(){ return <div /> }")
+  manifest = json.loads((tmp_path / "mobius.json").read_text())
+  manifest["requires"] = ["identity_manage", "does_not_exist"]
+  (tmp_path / "mobius.json").write_text(json.dumps(manifest))
+
+  result = _run(tmp_path)
+  assert result.returncode == 1
+  assert "does not provide" in result.stderr
+  with pytest.raises(ManifestContractError, match="Update Möbius"):
+    validate_manifest_contract(manifest)
+  with pytest.raises(HTTPException, match="does not provide"):
+    _validate_manifest(manifest)
+
+
+def test_requires_must_be_a_list_of_capability_names(tmp_path):
+  _write_app(tmp_path, "export default function App(){ return <div /> }")
+  manifest = json.loads((tmp_path / "mobius.json").read_text())
+  manifest["requires"] = "identity_manage"
+  with pytest.raises(ManifestContractError, match="must be a list"):
+    validate_manifest_contract(manifest)
+
+
 def test_validator_materializes_declared_static_asset_destinations(tmp_path):
   _write_app(
     tmp_path,

@@ -27,6 +27,8 @@ TEST_IMAGE="${MOBIUS_IMAGE:-mobius-test:ci}"
 # suite remains the required --backend/--all closeout gate.
 FAST_TESTS=(
   "tests/test_readiness.py"
+  "tests/test_db_migrations.py::test_previous_release_database_upgrades_to_current_orm"
+  "tests/test_db_migrations.py::test_published_schema_migration_history_is_unique_ordered_and_immutable"
   "tests/test_auth_helpers.py"
   "tests/test_app_compile_contract.py"
   "tests/test_source_status.py"
@@ -73,8 +75,11 @@ EOF
 # run` chew through a 3-minute build with no explanation.
 check_backend_prereqs() {
   if ! command -v docker >/dev/null 2>&1; then
-    die "Docker is not available in this runtime. Use --fast for local iteration;
-    run --backend on a Docker-capable host or rely on the complete CI gate."
+    die "Docker is unavailable. In the normal Möbius app container this is an
+    intentional trust boundary: no daemon or host socket is exposed. Use
+    --fast plus focused scripts/wt-pytest.sh tests for local evidence; run
+    --backend on a Docker-capable host, use Contribute's Run GitHub checks for
+    early full coverage, or rely on the merge queue's complete gate."
   fi
   if ! docker compose version >/dev/null 2>&1; then
     die "Docker Compose is not available. Install the compose plugin before --backend."

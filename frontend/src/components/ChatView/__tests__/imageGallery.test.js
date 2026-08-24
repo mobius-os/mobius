@@ -135,7 +135,7 @@ test('lightbox navigation keeps the painted image until its replacement decodes'
   assert.match(lightboxSource, /const imageIsPending = paintedSrc !== activeSrc/)
   assert.match(lightboxSource, /await image\.decode\?\.\(\)/)
   assert.match(lightboxSource, /imgRef\.current !== image/)
-  assert.match(lightboxSource, /lightbox-image lightbox-image--previous/)
+  assert.match(lightboxSource, /lightbox-image\$\{hasGallery [^}]+\} lightbox-image--previous/)
   assert.match(lightboxSource, /key=\{paintedSrc\}/)
   assert.match(lightboxSource, /imageIsPending \? ' is-pending' : ''/)
   assert.match(lightboxSource, /if \(nextIndex !== null\) goToIndex\(nextIndex\)/)

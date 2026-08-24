@@ -67,6 +67,8 @@ ALLOW_STALE="${ALLOW_STALE:-0}"
 ALLOW_LOW_DISK="${ALLOW_LOW_DISK:-0}"
 BUILT_THIS_RUN=0  # set to 1 once we actually build, so the verify step only
                   # compares the served SHA when THIS run produced the image
+CUTOVER_ID=""
+CUTOVER_PREPARED=0
 PREFLIGHT_WAIT_SECONDS="${PREFLIGHT_WAIT_SECONDS:-120}"
 DEPLOY_MIN_FREE_GB="${DEPLOY_MIN_FREE_GB:-15}"
 DEPLOY_BUILD_CACHE_MAX_AGE_HOURS="${DEPLOY_BUILD_CACHE_MAX_AGE_HOURS:-24}"
@@ -247,6 +249,112 @@ presence_gate() {
   done
   [ "$waited" -gt 0 ] && ok "owner turn finished — proceeding with $1"
   return 0
+}
+
+# Run one command through the frozen root-owned restart ledger. Prefer the live
+# container; during a failed cutover it may be crash-looping, so fall back to a
+# one-shot process using the previously serving image and the same /data mount.
+cutover_ledger() {
+  if docker exec "$CONTAINER" python3 -P \
+    /app/runtime/restart_ledger.py "$@" >/dev/null 2>&1; then
+    return 0
+  fi
+  [ -n "${PREV_IMAGE:-}" ] || return 1
+  docker run --rm --volumes-from "$CONTAINER" --entrypoint python3 \
+    "$PREV_IMAGE" -P /app/runtime/restart_ledger.py "$@" \
+    >/dev/null 2>&1
+}
+
+cutover_supported() {
+  docker exec "$CONTAINER" python3 -P \
+    /app/runtime/restart_ledger.py capabilities 2>/dev/null \
+    | grep -qx 'external-cutover-v1'
+}
+
+valid_compose_config_hash() {
+  [[ "${1:-}" =~ ^[0-9a-fA-F]{64}$ ]]
+}
+
+desired_compose_config_hash() {
+  local output hash
+  output=$(docker compose "${COMPOSE_ARGS[@]}" config --hash app 2>/dev/null) \
+    || return 1
+  hash=$(printf '%s\n' "$output" | awk '$1 == "app" && NF == 2 { print $2 }')
+  valid_compose_config_hash "$hash" || return 1
+  printf '%s\n' "$hash"
+}
+
+# Compose can replace a container even when its image ID is unchanged: an env,
+# mount, network, label, or other rendered service change is enough. Draining
+# only on image changes therefore loses active turns on a same-image recreate.
+# Compare both inputs Compose owns. If this Compose version cannot expose its
+# service hash, fail safe by deliberately forcing the app recreation *after*
+# the exact handoff rather than gambling that `up` will be a no-op.
+compose_recreation_needed() {
+  local target_image="$1"
+  TARGET_CONFIG_HASH=""
+  FORCE_APP_RECREATE=0
+
+  if [ "$target_image" != "$PREV_IMAGE" ]; then
+    info "replacement required: app image changed"
+    return 0
+  fi
+
+  if ! valid_compose_config_hash "${RUNNING_CONFIG_HASH:-}"; then
+    warn "the live container has no usable Compose config hash."
+    warn "Preparing an exact handoff and forcing only the app recreation."
+    FORCE_APP_RECREATE=1
+    return 0
+  fi
+  if ! TARGET_CONFIG_HASH=$(desired_compose_config_hash); then
+    warn "Docker Compose could not report the rendered app config hash."
+    warn "Preparing an exact handoff and forcing only the app recreation."
+    FORCE_APP_RECREATE=1
+    return 0
+  fi
+  if [ "$TARGET_CONFIG_HASH" != "$RUNNING_CONFIG_HASH" ]; then
+    info "replacement required: rendered app configuration changed"
+    return 0
+  fi
+  return 1
+}
+
+prepare_chat_cutover() {
+  CUTOVER_ID="cutover-$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+  if ! cutover_ledger open-cutover "$CUTOVER_ID"; then
+    CUTOVER_ID=""
+    return 1
+  fi
+  if ! docker exec "$CONTAINER" python3 \
+    /data/platform/backend/scripts/prepare-container-cutover.py "$CUTOVER_ID"; then
+    CUTOVER_ID=""
+    return 1
+  fi
+  if ! cutover_ledger accept-cutover "$CUTOVER_ID"; then
+    CUTOVER_ID=""
+    return 1
+  fi
+  CUTOVER_PREPARED=1
+  return 0
+}
+
+rearm_chat_cutover() {
+  [ "$CUTOVER_PREPARED" = "1" ] || return 0
+  if cutover_ledger rearm-cutover "$CUTOVER_ID"; then
+    return 0
+  fi
+  warn "the replacement failed before the exact chat handoff could be re-armed; chats may need manual Resume after rollback."
+  return 1
+}
+
+finalize_chat_cutover() {
+  [ "$CUTOVER_PREPARED" = "1" ] || return 0
+  if cutover_ledger finalize-cutover "$CUTOVER_ID"; then
+    CUTOVER_PREPARED=0
+    return 0
+  fi
+  warn "the new container is healthy, but its cutover receipt could not be retired; the receipt is inert unless a root Host command explicitly re-arms it."
+  return 1
 }
 
 source_env_file() {
@@ -674,15 +782,39 @@ served_version_field() {  # $1 = json key
     | head -n1 || true
 }
 
-# The HTTP status of the writer-aware readiness probe. /api/health is
-# liveness only — it returns 200 even when the single-writer chat-persistence
-# actor failed to start, went fatal, or is stopping, so a deploy could green
-# while every chat write fails. /api/ready returns 200 only when the writer
-# can actually persist; "000" if the container is down / curl couldn't reach
-# it. The deploy gate fails on anything but 200, so a process that can't
-# persist a chat does not pass as deployed.
+# The HTTP status of the complete serviceability probe. /api/health is
+# reachability only; /api/ready also requires an ORM-compatible database and a
+# usable single-writer persistence actor. "000" means the container is down or
+# curl could not reach it.
+readiness_code() {
+  local target="$1"
+  docker exec "$target" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/ready'" 2>/dev/null || echo "000"
+}
+
 ready_code() {
-  docker exec "$CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/ready'" 2>/dev/null || echo "000"
+  readiness_code "$CONTAINER"
+}
+
+report_readiness_failure() {
+  local target="${1:-$CONTAINER}" body
+  body=$(docker exec "$target" sh -c "curl -sS '${INTERNAL_BASE}/api/ready'" 2>/dev/null || true)
+  case "$body" in
+    *'"reason":"schema_mismatch"'*)
+      fail "the database schema does not match this release; run Recovery, then restart cleanly."
+      ;;
+    *'"reason":'*)
+      fail "the persistence service is not ready."
+      ;;
+    '')
+      fail "the readiness endpoint could not be reached."
+      ;;
+    *)
+      fail "the readiness endpoint returned an unrecognized failure."
+      ;;
+  esac
+  if [ -n "$body" ]; then
+    printf '    /api/ready: %s\n' "$body" >&2
+  fi
 }
 
 # Tell already-open PWAs to reload after a successful frontend rebuild.
@@ -876,6 +1008,11 @@ PREV_IMAGE=$(docker inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || echo "")
 RUNNING_IMAGE_REF=$(
   docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null || echo ""
 )
+RUNNING_CONFIG_HASH=$(
+  docker inspect -f \
+    '{{ index .Config.Labels "com.docker.compose.config-hash" }}' \
+    "$CONTAINER" 2>/dev/null || echo ""
+)
 # Ask Compose once instead of duplicating the prod and test defaults here. This
 # also honors an image configured in .env before we freeze the result for the
 # preflight, cutover, and rollback paths.
@@ -929,6 +1066,10 @@ attempt_rollback() {
     fail "no previous image captured — cannot auto-roll back; recover ${CONTAINER} manually."
     return 1
   fi
+  # The accepted handoff is one-boot by design. If the replacement boot never
+  # became serviceable, root explicitly re-arms the same receipt for the
+  # rollback boot; an unrelated later restart can never inherit it.
+  rearm_chat_cutover || true
   warn "auto-rolling back ${CONTAINER} to the previous image (${IMAGE_TAG} = ${PREV_IMAGE:0:19}…)"
   # With an external edge proxy on 80/443, an unselected recreate would also
   # start the bundled caddy service, whose port bindings collide with the
@@ -949,6 +1090,7 @@ attempt_rollback() {
   for i in $(seq 1 "$CUTOVER_WAIT_SECONDS"); do
     code=$(docker exec "$CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/health'" 2>/dev/null || echo "000")
     if [ "$code" = "200" ]; then
+      finalize_chat_cutover || true
       ok "rolled back — ${CONTAINER} healthy on the previous image again"
       return 0
     fi
@@ -962,8 +1104,9 @@ attempt_rollback() {
 # never does. Consolidates the four formerly-near-identical cutover waits so
 # the window is honest and configurable in ONE place. Args:
 #   $1 probe command (a string eval'd each poll; must echo an HTTP status)
-#   $2 success label   (e.g. "healthy", "writer ready")
+#   $2 success label   (e.g. "healthy", "serviceable")
 #   $3 failure summary (printed before rollback, names what didn't come up)
+#   $4 optional diagnostic command to run before rollback
 #
 # Two behaviors replace the old `for i in $(seq 1 120); … if [ "$i" = "30" ]`
 # loops, whose 120 bound was dead code: the i==30 trap rolled back at 30s, so
@@ -979,7 +1122,7 @@ attempt_rollback() {
 #      runtime failure (bad migration on the populated volume, OOM-kill), worth
 #      catching fast — while a steady count keeps waiting through a slow boot.
 wait_for_cutover() {
-  local probe="$1" ok_label="$2" fail_summary="$3"
+  local probe="$1" ok_label="$2" fail_summary="$3" diagnostic="${4:-}"
   local code="000" baseline_restarts now_restarts i
   baseline_restarts=$(container_restart_count)
   for i in $(seq 1 "$CUTOVER_WAIT_SECONDS"); do
@@ -1001,12 +1144,14 @@ wait_for_cutover() {
        [ "$baseline_restarts" -ge 0 ] 2>/dev/null &&
        [ $((now_restarts - baseline_restarts)) -ge "$CRASH_RESTART_THRESHOLD" ]; then
       fail "${fail_summary} (last: ${code}); ${CONTAINER} restarted $((now_restarts - baseline_restarts))× — it is crash-looping, not just slow."
+      [ -z "$diagnostic" ] || eval "$diagnostic"
       attempt_rollback || true
       exit 1
     fi
     sleep 1
   done
   fail "${fail_summary} after ${CUTOVER_WAIT_SECONDS}s (last: ${code}) — the new image is not serving."
+  [ -z "$diagnostic" ] || eval "$diagnostic"
   attempt_rollback || true
   exit 1
 }
@@ -1203,7 +1348,7 @@ else
   fi
   # Keep exactly one last-known-good image before compose reuses IMAGE_TAG for
   # the new build. Once the currently-running image is pinned, the superseded
-  # rollback is no longer part of the recovery set and can be removed now. This
+  # rollback is no longer in the retained rollback set and can be removed. This
   # must happen before `docker compose build`: a failed build must not strand an
   # untagged old rollback image whose ID is forgotten on the next run.
   if [ -n "$PREV_IMAGE" ] && [ -n "$ROLLBACK_TAG" ]; then
@@ -1286,18 +1431,19 @@ if [ "$BUILT_THIS_RUN" = "1" ] && [ -n "$IMAGE_TAG" ]; then
   _pf_ready=0
   info "waiting up to ${PREFLIGHT_WAIT_SECONDS}s for preflight ${INTERNAL_BASE}/api/ready"
   for i in $(seq 1 "$PREFLIGHT_WAIT_SECONDS"); do
-    rcode=$(docker exec "$PREFLIGHT_CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/ready'" 2>/dev/null || echo "000")
+    rcode=$(readiness_code "$PREFLIGHT_CONTAINER")
     if [ "$rcode" = "200" ]; then ok "preflight /api/ready: 200 after ${i}s"; _pf_ready=1; break; fi
     sleep 1
   done
   if [ "$_pf_ready" != "1" ]; then
     fail "preflight: the new image's /api/ready never returned 200 in ${PREFLIGHT_WAIT_SECONDS}s (last: ${rcode})."
-    fail "the chat-persistence writer fails to start — the LIVE ${CONTAINER} was NOT touched. Last 40 log lines:"
+    report_readiness_failure "$PREFLIGHT_CONTAINER"
+    fail "the LIVE ${CONTAINER} was NOT touched. Last 40 log lines:"
     docker logs "$PREFLIGHT_CONTAINER" --tail 40 2>&1 | sed 's/^/    /' >&2 || true
     exit 1
   fi
   _cleanup_preflight
-  ok "preflight passed — the new image boots and the writer is ready; cutting over"
+  ok "preflight passed — the new image is serviceable; cutting over"
 elif [ "$SKIP_BUILD" = "1" ]; then
   info "preflight skipped (--skip-build): reusing the already-live image; nothing new to pre-check"
 fi
@@ -1305,15 +1451,44 @@ fi
 # ── step 2: recreate container with the new image ──────────────────────
 step "[2/4] docker compose up -d (recreates ${CONTAINER})"
 presence_gate "cutover (recreate ${CONTAINER})"
+TARGET_IMAGE=$(docker image inspect -f '{{.Id}}' "$IMAGE_TAG" 2>/dev/null || true)
+FORCE_APP_RECREATE=0
+if [ "$TARGET" = "prod" ] && [ -n "$TARGET_IMAGE" ] && \
+   compose_recreation_needed "$TARGET_IMAGE"; then
+  if cutover_supported; then
+    info "preparing exact active-chat continuation for the replacement boot"
+    if ! prepare_chat_cutover; then
+      fail "the Host cutover handoff was not accepted; the live container was not replaced."
+      fail "The drained worker self-recovers through an ordinary restart if the Host abandons this cutover."
+      exit 1
+    fi
+    ok "active chats parked and bound to the exact replacement boot"
+  else
+    warn "the running image predates the external-cutover helper; this one replacement uses the legacy presence gate."
+    warn "After this image is live, later Host replacements preserve active chats automatically."
+  fi
+fi
 if external_prod_caddy_running; then
   info "external edge-caddy owns ports 80/443; updating app service"
   ensure_edge_network
   docker rm -f "${CONTAINER}-caddy-1" >/dev/null 2>&1 || true
-  intent "docker compose ${COMPOSE_ARGS[*]} up -d app"
-  docker compose "${COMPOSE_ARGS[@]}" up -d app
+  recreate_args=()
+  [ "$FORCE_APP_RECREATE" = "1" ] && recreate_args=(--force-recreate)
+  intent "docker compose ${COMPOSE_ARGS[*]} up -d ${recreate_args[*]} app"
+  if ! docker compose "${COMPOSE_ARGS[@]}" up -d "${recreate_args[@]}" app; then
+    fail "container replacement command failed before health verification"
+    attempt_rollback || true
+    exit 1
+  fi
 else
-  intent "docker compose ${COMPOSE_ARGS[*]} up -d"
-  docker compose "${COMPOSE_ARGS[@]}" up -d
+  recreate_args=()
+  [ "$FORCE_APP_RECREATE" = "1" ] && recreate_args=(--force-recreate app)
+  intent "docker compose ${COMPOSE_ARGS[*]} up -d ${recreate_args[*]}"
+  if ! docker compose "${COMPOSE_ARGS[@]}" up -d "${recreate_args[@]}"; then
+    fail "container replacement command failed before health verification"
+    attempt_rollback || true
+    exit 1
+  fi
 fi
 info "waiting up to ${CUTOVER_WAIT_SECONDS}s for ${INTERNAL_BASE}/api/health"
 wait_for_cutover \
@@ -1321,14 +1496,17 @@ wait_for_cutover \
   "healthy" \
   "health check never returned 200"
 
-# Liveness alone is not enough: the chat-persistence writer must be ready
-# (started, alive, not fatal, not stopping) or every chat write fails on a
-# process that still answers /api/health 200. Give it the same budget —
-# start_writer runs in the lifespan before serving, so this is normally
-# already 200 by the time /api/health was.
+# Liveness alone is not enough: the database schema and persistence writer must
+# both be serviceable. Give the complete readiness contract the same budget.
 info "waiting up to ${CUTOVER_WAIT_SECONDS}s for ${INTERNAL_BASE}/api/ready"
-wait_for_cutover "ready_code" "writer ready" \
-  "readiness check never returned 200 — the chat-persistence writer is not serving"
+wait_for_cutover "ready_code" "serviceable" \
+  "readiness check never returned 200" \
+  "report_readiness_failure"
+
+# Readiness means startup reconciliation has consumed the exact authorization.
+# Retire the root receipt now; it remains available only through this point so
+# an unhealthy first boot can explicitly authorize one rollback boot.
+finalize_chat_cutover || true
 
 run_deploy_canary
 
@@ -1513,15 +1691,14 @@ else
   exit 1
 fi
 
-# Writer-aware readiness: liveness 200 isn't enough — fail the deploy if the
-# chat-persistence writer can't actually serve (so we never report a deploy
-# as complete on a process where every chat write fails).
+# Complete readiness: fail if either schema parity or persistence ownership is
+# unavailable, even though the process still answers the reachability probe.
 rcode=$(ready_code)
 if [ "$rcode" = "200" ]; then
   ok "internal /api/ready:  ${rcode}"
 else
   fail "internal /api/ready:  ${rcode}"
-  fail "the process is live but the chat-persistence writer is not ready — chat writes would fail."
+  report_readiness_failure
   exit 1
 fi
 

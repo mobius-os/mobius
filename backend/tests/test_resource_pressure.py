@@ -222,3 +222,17 @@ def test_resource_status_keeps_facts_and_pressure_separate():
 
   assert set(status) == {"facts", "pressure"}
   assert status["pressure"]["state"] == "normal"
+
+
+def test_memory_reason_names_each_tripped_signal():
+  constrained = assess_memory_pressure({
+    "available": True,
+    "working_set_bytes": 800 * MIB,
+    "limit_bytes": 1000 * MIB,
+    "pressure": {"some": {"avg60": 1.5}, "full": {"avg60": 0.0}},
+  })
+  assert constrained["state"] == "constrained"
+  signals = constrained["reason"]["signals"]
+  assert any("unreclaimable footprint is 80%" in s for s in signals)
+  assert any("PSI some avg60 1.5" in s for s in signals)
+  assert not any("PSI full" in s for s in signals)

@@ -47,6 +47,7 @@ def test_apply_prints_compact_reusable_identity_receipt(
     "urlopen",
     lambda request, timeout: _Response({
       "mode": "created",
+      "warnings": ["skill guide.md: left unchanged"],
       "app": {
         "id": 73,
         "name": "Same name",
@@ -70,6 +71,7 @@ def test_apply_prints_compact_reusable_identity_receipt(
     "chat_id": "building-chat",
     "preview_path": "/app/73",
     "open_path": "/shell/?app=73",
+    "warnings": ["skill guide.md: left unchanged"],
   }
 
 

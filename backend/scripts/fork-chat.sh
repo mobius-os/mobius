@@ -1,10 +1,11 @@
 #!/bin/bash
-# fork-chat.sh <chat_id> "<interview prompt>"
+# fork-chat.sh [--json] <chat_id> "<coaching prompt>"
 #
-# Forks a past chat into a THROWAWAY copy and interviews the agent that did the
-# work, so the nightly Reflection agent can ask it what happened, what to prepare
-# for the user, what was hard, how well it used its skills, and how the
-# knowledge graph could improve. Prints the agent's answer to stdout.
+# Recovers a past chat in a THROWAWAY context so Agent Coaching, Reflection, or
+# another general caller can ask the historical agent what shaped its work and
+# what it learned. Prints the agent's answer to stdout. ``--json`` adds
+# trustworthy provenance so callers can distinguish a byte-exact
+# provider-session fork from a same-provider transcript reseed.
 #
 # Same-provider by construction: you can only resume a Claude session with
 # Claude and a Codex thread with Codex, and the matching agent gives the best
@@ -16,31 +17,55 @@
 # `session-env/<id>` dir but no transcript) or one the CLI's ~30-day cleanup
 # deleted. `--resume` against a missing transcript dies "No conversation
 # found", which (piped to /dev/null) used to make this script silently print
-# nothing — so Reflection's interviews quietly failed for most older chats.
+# nothing — so historical coaching quietly failed for most older chats.
 # Instead we check the transcript exists; when it doesn't, we reseed a fresh
-# same-provider session from the chat's stored transcript so the interview
+# same-provider session from the chat's stored transcript so the coaching
 # still runs. Continuity then comes from the DB, not a byte-exact fork.
 #
 # Exit codes: 0 ok · 2 bad args · 4 unknown provider · 5 DB read failed ·
-# 6 no transcript to interview (refused rather than fabricate one).
+# 6 no transcript to coach · 7 deleted chat (refused rather than forked).
 #
 # Fail-loud, don't fabricate: the DB reads below used to swallow errors
 # (`2>/dev/null` + no set -e), so a missing/locked/corrupt DB silently
 # defaulted the provider to Claude with EMPTY messages — yet the reseed prompt
 # still tells Claude "you previously worked on this chat," so it would
-# hallucinate an interview and Reflection would extract durable "facts" from
+# hallucinate coaching testimony and callers could extract durable "facts" from
 # it. We now check every DB read and refuse the fork (non-zero, no CLI call)
-# when the read fails or the chat has no transcript to interview.
+# when the read fails or the chat has no transcript to coach.
 set -uo pipefail
+
+OUTPUT_FORMAT="text"
+if [[ "${1:-}" == "--json" ]]; then
+  OUTPUT_FORMAT="json"
+  shift
+fi
 
 CHAT_ID="${1:-}"; PROMPT="${2:-}"
 if [[ -z "$CHAT_ID" || -z "$PROMPT" ]]; then
-  echo "usage: fork-chat.sh <chat_id> \"<interview prompt>\"" >&2; exit 2
+  echo "usage: fork-chat.sh [--json] <chat_id> \"<coaching prompt>\"" >&2; exit 2
 fi
 DATA_DIR="${DATA_DIR:-/data}"
 DB="$DATA_DIR/db/ultimate.db"
 export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$DATA_DIR/cli-auth/claude}"
 export CODEX_HOME="${CODEX_HOME:-$DATA_DIR/cli-auth/codex}"
+
+emit_answer() {
+  local method="$1" provider="$2" answer="$3"
+  echo "fork-chat: method=$method provider=$provider chat_id=$CHAT_ID" >&2
+  if [[ "$OUTPUT_FORMAT" == "json" ]]; then
+    printf '%s' "$answer" | \
+      METHOD="$method" PROVIDER="$provider" CHAT_ID="$CHAT_ID" \
+      python3 -c 'import json, os, sys; print(json.dumps({
+        "chat_id": os.environ["CHAT_ID"],
+        "provider": os.environ["PROVIDER"],
+        "method": os.environ["METHOD"],
+        "exact_session_fork": os.environ["METHOD"] == "session_fork",
+        "answer": sys.stdin.read(),
+      }, ensure_ascii=False))'
+  else
+    printf '%s\n' "$answer"
+  fi
+}
 
 # The chat runner records Claude sessions under the project dir for cwd=/data,
 # which the CLI encodes by stripping the leading slash and turning every '/'
@@ -87,7 +112,7 @@ except ValueError:
   # Not a JSON array (legacy/odd row) — emit a char-boundary raw tail under
   # the `raw` sentinel so the prompt never claims it is structured JSON. A
   # whitespace-only tail carries no conversational signal: print nothing so
-  # the caller refuses (exit 6) instead of interviewing over blank text.
+  # the caller refuses (exit 6) instead of coaching over blank text.
   tail = raw[-int(os.environ["BUDGET"]):]
   if tail.strip():
     sys.stdout.write("raw\n" + tail)
@@ -108,7 +133,7 @@ PY
 
 # Prints the chat's sentinel-tagged transcript for a reseed, or RETURNS
 # non-zero (5 = DB read failed, 6 = no transcript) so the caller refuses the
-# fork instead of fabricating an interview. It `return`s (not `exit`s) because
+# fork instead of fabricating coaching testimony. It `return`s (not `exit`) because
 # it's meant to be called via `MSGS="$(require_recent_messages)"; rc=$?` — the
 # caller must then check rc and exit; an `exit` here would only leave the
 # substitution subshell.
@@ -116,11 +141,11 @@ require_recent_messages() {
   local msgs rc fmt
   msgs="$(recent_messages)"; rc=$?
   if [[ $rc -ne 0 ]]; then
-    echo "fork-chat: DB read failed for $CHAT_ID (rc=$rc); refusing to fabricate an interview" >&2
+    echo "fork-chat: DB read failed for $CHAT_ID (rc=$rc); refusing to fabricate coaching" >&2
     return 5
   fi
   if [[ -z "$msgs" ]]; then
-    echo "fork-chat: $CHAT_ID has no stored transcript; refusing to fabricate an interview" >&2
+    echo "fork-chat: $CHAT_ID has no stored transcript; refusing to fabricate coaching" >&2
     return 6
   fi
   # A missing/unknown sentinel means the reader half of the contract broke —
@@ -128,7 +153,7 @@ require_recent_messages() {
   # a sentinel with no payload line after it.)
   fmt="${msgs%%$'\n'*}"
   if [[ "$fmt" == "$msgs" || ( "$fmt" != json && "$fmt" != raw ) ]]; then
-    echo "fork-chat: transcript for $CHAT_ID arrived without a format sentinel; refusing to fabricate an interview" >&2
+    echo "fork-chat: transcript for $CHAT_ID arrived without a format sentinel; refusing to fabricate coaching" >&2
     return 5
   fi
   printf '%s' "$msgs"
@@ -167,7 +192,7 @@ run_codex_reseed() {
   rc=$?
   if [[ $rc -ne 0 ]]; then
     cat "$log_tmp" >&2
-    echo "fork-chat: codex interview failed for $CHAT_ID (rc=$rc)" >&2
+    echo "fork-chat: codex coaching failed for $CHAT_ID (rc=$rc)" >&2
     rm -f "$out" "$log_tmp"
     return "$rc"
   fi
@@ -182,17 +207,24 @@ run_codex_reseed() {
 row="$(CHAT_ID="$CHAT_ID" DB="$DB" python3 - <<'PY'
 import os, sqlite3, sys
 con = sqlite3.connect(os.environ["DB"])
-r = con.execute(
-  "select coalesce(provider,'claude'), coalesce(session_id,'') from chats where id=?",
-  (os.environ["CHAT_ID"],),
-).fetchone()
+columns = {row[1] for row in con.execute("pragma table_info(chats)")}
+select = "coalesce(provider,'claude'), coalesce(session_id,'')"
+if "deleted_at" in columns:
+  select += ", deleted_at"
+r = con.execute(f"select {select} from chats where id=?", (os.environ["CHAT_ID"],)).fetchone()
 if r is None:
-  sys.exit(3)  # no such chat — nothing to interview
+  sys.exit(3)  # no such chat — nothing to coach
+if len(r) > 2 and r[2] is not None:
+  sys.exit(7)  # deleted chats are evidence-only; never revive their provider session
 print(r[0] + "|" + (r[1] or ""))
 PY
 )"; row_rc=$?
+if [[ $row_rc -eq 7 ]]; then
+  echo "fork-chat: $CHAT_ID is deleted; refusing to fork its provider session" >&2
+  exit 7
+fi
 if [[ $row_rc -ne 0 || -z "$row" ]]; then
-  echo "fork-chat: could not read chat $CHAT_ID metadata (rc=$row_rc); refusing to fabricate an interview" >&2
+  echo "fork-chat: could not read chat $CHAT_ID metadata (rc=$row_rc); refusing to fabricate coaching" >&2
   exit 5
 fi
 PROVIDER="${row%%|*}"; SID="${row#*|}"
@@ -203,28 +235,40 @@ case "$PROVIDER" in
     if transcript_exists "$SID"; then
       # True fork: --fork-session branches the original transcript byte-for-byte
       # into a throwaway session; the original chat is untouched.
-      ( cd "$DATA_DIR" && claude --resume "$SID" --fork-session -p "$PROMPT" \
-          --output-format text 2>/dev/null )
+      ANSWER="$(cd "$DATA_DIR" && claude --resume "$SID" --fork-session \
+        -p "$PROMPT" --output-format text 2>/dev/null)"; coaching_rc=$?
+      if [[ $coaching_rc -ne 0 ]]; then
+        echo "fork-chat: claude session fork failed for $CHAT_ID (rc=$coaching_rc)" >&2
+        exit "$coaching_rc"
+      fi
+      emit_answer "session_fork" "claude" "$ANSWER"
     else
       # No resumable transcript (phantom / expired / unset id) — reseed a fresh
-      # session from the DB transcript so the interview still produces an answer.
+      # session from the DB transcript so the coaching still produces an answer.
       # Capture at the top level so a "no transcript" refusal actually exits.
       echo "fork-chat: $CHAT_ID has no resumable transcript; reseeding from DB" >&2
       MSGS="$(require_recent_messages)"; msgs_rc=$?
       [[ $msgs_rc -eq 0 ]] || exit "$msgs_rc"
-      ( cd "$DATA_DIR" && claude -p "$(reseed_prompt "$MSGS")" \
-          --output-format text 2>/dev/null )
+      ANSWER="$(cd "$DATA_DIR" && claude -p "$(reseed_prompt "$MSGS")" \
+        --output-format text 2>/dev/null)"; coaching_rc=$?
+      if [[ $coaching_rc -ne 0 ]]; then
+        echo "fork-chat: claude transcript reseed failed for $CHAT_ID (rc=$coaching_rc)" >&2
+        exit "$coaching_rc"
+      fi
+      emit_answer "transcript_reseed" "claude" "$ANSWER"
     fi
     ;;
   codex)
     # Codex thread-resume isn't exposed as a clean CLI fork; reseed from the
     # chat's recent messages (same provider, not a byte-exact fork). Pin
     # CODEX_HOME to the same auth dir real chat turns use and allow /data,
-    # which is intentionally not a git repo; otherwise Reflection's Codex
-    # interviews fail the CLI trust check and print nothing useful.
+    # which is intentionally not a git repo; otherwise Codex coaching fails
+    # the CLI trust check and prints nothing useful.
     MSGS="$(require_recent_messages)"; msgs_rc=$?
     [[ $msgs_rc -eq 0 ]] || exit "$msgs_rc"
-    run_codex_reseed "$(reseed_prompt "$MSGS")"
+    ANSWER="$(run_codex_reseed "$(reseed_prompt "$MSGS")")"; coaching_rc=$?
+    [[ $coaching_rc -eq 0 ]] || exit "$coaching_rc"
+    emit_answer "transcript_reseed" "codex" "$ANSWER"
     ;;
   *)
     echo "fork-chat: unknown provider '$PROVIDER'" >&2; exit 4 ;;

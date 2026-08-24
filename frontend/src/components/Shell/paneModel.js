@@ -2,10 +2,10 @@
 //
 // tabModel.js owns a single flat open set and computes active-ness against one
 // global nav focus. This module generalizes that to a binary split tree of
-// panes: each pane holds its own set of tabModel tabs plus its own active tab,
-// and the workspace tracks which pane has focus. A single pane is the trivial
-// leaf. The state shape, normalize() invariants, reducer contract, and rendering
-// constraints are documented in ARCHITECTURE.md.
+// panes: each pane holds its own set of tabModel tabs, active tab, and recency
+// order, while the workspace tracks which pane has focus. A single pane is the
+// trivial leaf. The state shape, normalize() invariants, reducer contract, and
+// rendering constraints are documented in ARCHITECTURE.md.
 //
 // Everything here is pure and dependency-free except tabModel.js. Tab identity,
 // construction, the numeric-app-id posture, and nav mapping all stay in
@@ -196,6 +196,45 @@ function dedupTabs(tabs) {
   return out
 }
 
+// The pre-recency close policy walked left from the active tab and wrapped from
+// the first tab to the end. Use that exact order to seed an older workspace, so
+// installing the recency field is behavior-preserving until the owner visits a
+// different tab. The visible tab order itself remains untouched.
+function legacyRecentTabKeys(keys, activeKey) {
+  if (keys.length === 0) return []
+  const activeIndex = keys.indexOf(activeKey)
+  const start = activeIndex === -1 ? keys.length - 1 : activeIndex
+  return keys.map((_, offset) => keys[(start - offset + keys.length) % keys.length])
+}
+
+// Every non-empty pane stores one permutation of its live keys, most-recent
+// first. `activeTabKey` remains the render-facing selection for compatibility;
+// normalize keeps it equal to the first recency entry. Missing/corrupt history
+// is repaired from the old close policy, so the v1 workspace blob needs no
+// migration branch or parallel persistence format.
+function normalizeRecentTabKeys(tabs, activeKey, rawRecent) {
+  const keys = tabs.map(tabModel.tabKey)
+  const live = new Set(keys)
+  const recent = []
+  const seen = new Set()
+  const add = (key) => {
+    if (typeof key !== 'string' || !live.has(key) || seen.has(key)) return
+    seen.add(key)
+    recent.push(key)
+  }
+
+  // An explicit live selection is always the most recent entry.
+  add(activeKey)
+  if (Array.isArray(rawRecent)) rawRecent.forEach(add)
+
+  // Append any new/background tabs in the deterministic legacy order. For an
+  // older blob this seeds the whole list; for a current blob it normally adds
+  // only a newly opened tab at the cold end.
+  const fallbackActive = live.has(activeKey) ? activeKey : keys.at(-1)
+  legacyRecentTabKeys(keys, fallbackActive).forEach(add)
+  return recent
+}
+
 // Structural equality that ignores object key order, so a normalized rebuild can
 // be compared against its input to preserve reference identity on a no-op.
 function deepEqual(a, b) {
@@ -292,6 +331,7 @@ export function normalize(ws) {
       id,
       tabs: sanitizeTabs(src && Array.isArray(src.tabs) ? src.tabs : []),
       activeTabKey: src ? src.activeTabKey : null,
+      recentTabKeys: src ? src.recentTabKeys : null,
     })
   }
 
@@ -322,23 +362,26 @@ export function normalize(ws) {
     const rootId = (typeof ws.focusedPaneId === 'string' && cleaned.has(ws.focusedPaneId))
       ? ws.focusedPaneId
       : (orderedIds[0] || 'p0')
-    cleaned.set(rootId, { id: rootId, tabs: [], activeTabKey: null })
+    cleaned.set(rootId, { id: rootId, tabs: [], activeTabKey: null, recentTabKeys: [] })
     placed.clear()
     placed.add(rootId)
     layout = rootId
   }
 
-  // Rebuild the panes map from the surviving leaves only, coercing each active
-  // tab to a real member (else the last tab, else null for an empty root).
+  // Rebuild the panes map from the surviving leaves only. Recency owns fallback
+  // selection: removing the active key exposes the most recently used survivor.
   const panes = {}
   for (const id of placed) {
     const pane = cleaned.get(id)
-    const keys = pane.tabs.map(tabModel.tabKey)
-    let active = pane.activeTabKey
-    if (active == null || !keys.includes(active)) {
-      active = keys.length ? keys[keys.length - 1] : null
+    const recentTabKeys = normalizeRecentTabKeys(
+      pane.tabs, pane.activeTabKey, pane.recentTabKeys,
+    )
+    panes[id] = {
+      id,
+      tabs: pane.tabs,
+      activeTabKey: recentTabKeys[0] ?? null,
+      recentTabKeys,
     }
-    panes[id] = { id, tabs: pane.tabs, activeTabKey: active }
   }
 
   // Focus must name a live pane; else the nearest surviving leaf.
@@ -422,6 +465,7 @@ export function seedFromFlatTabs(tabs) {
         id: paneId,
         tabs: clean,
         activeTabKey: keys.length ? keys[keys.length - 1] : null,
+        recentTabKeys: [...keys].reverse(),
       },
     },
     focusedPaneId: paneId,
@@ -841,19 +885,15 @@ export function openTabAt(ws, tab, target) {
   return openTab(ws, clean)
 }
 
-// Close a tab; if it was the pane's active tab, activate the neighbour before it
-// (else the new last tab) — fixing today's close-the-viewed-tab-into-nothing.
+// Close a tab. If it was active, clearing the render-facing selection lets
+// normalize expose the first surviving recentTabKeys entry. Closing a background
+// tab leaves the current selection untouched.
 export function closeTab(ws, tabKey) {
   const pane = paneOf(ws, tabKey)
   if (!pane) return ws
   const removedIndex = pane.tabs.findIndex(tab => tabModel.tabKey(tab) === tabKey)
   const tabs = pane.tabs.filter((_, i) => i !== removedIndex)
-  let active = pane.activeTabKey
-  if (active === tabKey) {
-    if (tabs.length === 0) active = null
-    else if (removedIndex - 1 >= 0) active = tabModel.tabKey(tabs[removedIndex - 1])
-    else active = tabModel.tabKey(tabs[tabs.length - 1])
-  }
+  const active = pane.activeTabKey === tabKey ? null : pane.activeTabKey
   return commit(ws, {
     ...ws,
     panes: { ...ws.panes, [pane.id]: { ...pane, tabs, activeTabKey: active } },
@@ -901,6 +941,29 @@ export function closeTabsToRight(ws, tabKey) {
   const index = pane.tabs.findIndex(tab => tabModel.tabKey(tab) === tabKey)
   if (index < 0 || index === pane.tabs.length - 1) return ws
   const tabs = pane.tabs.slice(0, index + 1)
+  const activeSurvives = tabs.some(tab => tabModel.tabKey(tab) === pane.activeTabKey)
+  return commit(ws, {
+    ...ws,
+    panes: {
+      ...ws.panes,
+      [pane.id]: {
+        ...pane,
+        tabs,
+        activeTabKey: activeSurvives ? pane.activeTabKey : tabKey,
+      },
+    },
+  })
+}
+
+// Close only the tabs before the named tab in its pane. If the active tab is
+// among those removed, the named tab becomes active; otherwise focus stays
+// where it was. Other panes are untouched and the operation is reversible.
+export function closeTabsToLeft(ws, tabKey) {
+  const pane = paneOf(ws, tabKey)
+  if (!pane) return ws
+  const index = pane.tabs.findIndex(tab => tabModel.tabKey(tab) === tabKey)
+  if (index <= 0) return ws
+  const tabs = pane.tabs.slice(index)
   const activeSurvives = tabs.some(tab => tabModel.tabKey(tab) === pane.activeTabKey)
   return commit(ws, {
     ...ws,
@@ -1509,6 +1572,7 @@ function isValidWorkspace(ws) {
   for (const id of ids) {
     const pane = ws.panes[id]
     const keys = pane.tabs.map(tabModel.tabKey)
+    const keySet = new Set(keys)
     for (const tab of pane.tabs) {
       if (tab.kind === 'app' && !Number.isFinite(Number(tab.id))) return false
       const key = tabModel.tabKey(tab)
@@ -1516,7 +1580,12 @@ function isValidWorkspace(ws) {
       seenTab.add(key)
     }
     if (pane.activeTabKey == null && keys.length > 0) return false
-    if (pane.activeTabKey != null && !keys.includes(pane.activeTabKey)) return false
+    if (pane.activeTabKey != null && !keySet.has(pane.activeTabKey)) return false
+    if (!Array.isArray(pane.recentTabKeys)) return false
+    if (pane.recentTabKeys.length !== keys.length) return false
+    if (new Set(pane.recentTabKeys).size !== keys.length) return false
+    if (pane.recentTabKeys.some(key => !keySet.has(key))) return false
+    if ((pane.recentTabKeys[0] ?? null) !== pane.activeTabKey) return false
   }
   return true
 }
@@ -1696,6 +1765,12 @@ export function workspaceReducer(state, action) {
       const next = closeTabsToRight(ws, action.tabKey)
       if (next === ws) return state
       const label = action.label || 'Closed tabs to the right'
+      return { ws: next, undo: { ws, label, toast: label } }
+    }
+    case 'CLOSE_TABS_TO_LEFT': {
+      const next = closeTabsToLeft(ws, action.tabKey)
+      if (next === ws) return state
+      const label = action.label || 'Closed tabs to the left'
       return { ws: next, undo: { ws, label, toast: label } }
     }
     case 'MOVE_TAB': {

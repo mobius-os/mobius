@@ -55,6 +55,32 @@ log = logging.getLogger("mobius.app_apply")
 class ApplyResult:
   app: models.App
   mode: Literal["created", "updated", "unchanged"]
+  warnings: tuple[str, ...] = ()
+
+
+async def _sync_accepted_app_skills(
+  db: Session, app: models.App, manifest: dict | None,
+) -> tuple[str, ...]:
+  """Refresh declared skills at the same acceptance boundary as app source."""
+  from app import install
+
+  if manifest is None:
+    contract = app.capability_contract or {}
+    agent = contract.get("agent") if isinstance(contract, dict) else None
+    skills = agent.get("skills") if isinstance(agent, dict) else None
+    manifest = {
+      # Store metadata remains authoritative for WHICH skills are approved;
+      # the accepted local source revision owns their current bytes.
+      "skills": skills if isinstance(skills, list) else [],
+      "version": "accepted-local-revision",
+    }
+  warnings: list[str] = []
+  try:
+    await install._sync_app_skills(db, app, manifest, warnings)
+  except Exception as exc:
+    log.exception("app apply: skill sync failed post-commit")
+    warnings.append(f"skills: sync failed — {exc!r}")
+  return tuple(warnings)
 
 
 async def _git_operation(label: str, fn, *args):
@@ -111,24 +137,24 @@ def _read_manifest(snapshot_dir: Path) -> dict:
   return dict(manifest)
 
 
-def _entry_source(snapshot_dir: Path, manifest: dict) -> str:
-  entry = snapshot_dir / manifest["entry"]
+def _entry_source(snapshot_dir: Path, relative: str) -> str:
+  entry = snapshot_dir / relative
   try:
     raw = entry.read_bytes()
   except FileNotFoundError as exc:
     raise AppApplyError(
       "entry_missing",
-      f"Manifest entry {manifest['entry']!r} does not exist.",
+      f"App entry {relative!r} does not exist.",
     ) from exc
   except OSError as exc:
     raise AppApplyError(
-      "entry_unreadable", f"Could not read {manifest['entry']}: {exc}",
+      "entry_unreadable", f"Could not read {relative}: {exc}",
     ) from exc
   try:
     source = raw.decode("utf-8")
   except UnicodeDecodeError as exc:
     raise AppApplyError(
-      "entry_invalid", f"Manifest entry {manifest['entry']!r} is not UTF-8.",
+      "entry_invalid", f"App entry {relative!r} is not UTF-8.",
     ) from exc
   if not source.strip():
     raise AppApplyError("entry_empty", "Manifest entry index.jsx is empty.")
@@ -266,13 +292,19 @@ async def apply_source_revision(
         candidate.tree_oid,
         snapshot_dir,
       )
-      manifest = _read_manifest(snapshot_dir)
-      if app is None or app.manifest_url is None:
+      store_managed = app is not None and app.manifest_url is not None
+      manifest = None if store_managed else _read_manifest(snapshot_dir)
+      if manifest is not None:
         _validate_local_identity(source_path, manifest)
-      source = _entry_source(snapshot_dir, manifest)
+      # Store-installed source trees intentionally exclude reviewed package
+      # metadata. Their App row owns that identity; the editable source
+      # contract has one fixed entry. Local apps retain the strict manifest
+      # reader and its declared entry.
+      entry_relative = "index.jsx" if store_managed else manifest["entry"]
+      source = _entry_source(snapshot_dir, entry_relative)
       package_icon = (
         _manifest_icon(snapshot_dir, manifest)
-        if app is None or app.manifest_url is None
+        if manifest is not None
         else None
       )
 
@@ -301,7 +333,7 @@ async def apply_source_revision(
         app.jsx_source,
         app.compiled_path,
         app.source_commit,
-        app.share_manifest_url,
+        app.published_manifest_url,
         app.icon_png,
         app.icon_override_png,
       )
@@ -311,7 +343,7 @@ async def apply_source_revision(
         app.id,
         source,
         out_path=staged,
-        source_path=snapshot_dir / manifest["entry"],
+        source_path=snapshot_dir / entry_relative,
       )
 
       stable = await _git_operation(
@@ -333,7 +365,10 @@ async def apply_source_revision(
         if "offline_capable" in runtime_fields:
           app.offline_capable = runtime_fields["offline_capable"]
         app.capability_contract = contract_from_app_state(
-          app, capabilities=runtime_fields["capabilities"],
+          app,
+          capabilities=runtime_fields["capabilities"],
+          public_access=runtime_fields["public_access"],
+          contract_permissions=manifest.get("permissions") or {},
         )
       if chat_id is not None:
         app.chat_id = chat_id
@@ -354,10 +389,10 @@ async def apply_source_revision(
         app.manifest_url is None
         and app.source_commit != previous_state[7]
       ):
-        # A share URL is a statement about one exact accepted package. Once
+        # A distribution manifest is a statement about one exact accepted package. Once
         # local source advances, require publication verification again rather
         # than silently offering a stale repository to other people.
-        app.share_manifest_url = None
+        app.published_manifest_url = None
       published = publish_staged_bundle(app.id, staged)
       staged = None
 
@@ -373,14 +408,15 @@ async def apply_source_revision(
           source,
           str(published),
           app.source_commit,
-          app.share_manifest_url,
+          app.published_manifest_url,
           app.icon_png,
           app.icon_override_png,
         )
       )
       if not changed:
         db.rollback()
-        return ApplyResult(app=app, mode="unchanged")
+        warnings = await _sync_accepted_app_skills(db, app, manifest)
+        return ApplyResult(app=app, mode="unchanged", warnings=warnings)
 
       app.jsx_source = source
       app.compiled_path = str(published)
@@ -395,7 +431,12 @@ async def apply_source_revision(
       if previous_bundle != published:
         unlink_app_bundle(app.id, previous_bundle)
       db.refresh(app)
-      return ApplyResult(app=app, mode="created" if created else "updated")
+      warnings = await _sync_accepted_app_skills(db, app, manifest)
+      return ApplyResult(
+        app=app,
+        mode="created" if created else "updated",
+        warnings=warnings,
+      )
   except Exception:
     db.rollback()
     if staged is not None:

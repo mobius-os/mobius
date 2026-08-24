@@ -113,6 +113,10 @@ class TerminalDisposition(enum.Enum):
   # (the "limit storm"). The queue is preserved and self-heals on the user's
   # next send via the stale-pending drain. No auto-resume: the user resends
   # (or waits for the limit to reset) themselves.
+  QUESTION_PARKED = "question_parked"
+  # Pending work was deliberately left queued because an unanswered owner
+  # question is the transcript's protocol barrier. The exact run is closed as
+  # interrupted without clearing that question; no continuation is scheduled.
   DRAINED_FOR_RESTART = "drained_for_restart"
   # The turn was interrupted by a drain-gated restart (design §2.2), NOT by
   # Stop. Its partial blocks + a "paused for a platform update" note were
@@ -122,6 +126,14 @@ class TerminalDisposition(enum.Enum):
   # preserved marker and marks the note resumable so the owner's one-tap Resume
   # works; the queue self-heals on the next send. Never promoted at drain time —
   # promoting would start a turn while the worker is shutting down.
+
+
+class PendingQuestionBlocksPromotion(RuntimeError):
+  """Expected refusal to start queued work past an owner question."""
+
+  def __init__(self, question_id: str):
+    super().__init__("an owner question must be answered before promotion")
+    self.question_id = question_id
 
 
 _locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = (
@@ -220,17 +232,23 @@ async def promote_pending_messages_locked(
 
   Returns (next_messages, promoted_message, session_id) on success.
   Returns ([], None, session_id) when the pending queue is empty. Raises
-  if the actor ack fails — missing row / dropped commit / a MALFORMED
-  pending entry (the actor leaves the queue intact and fails the ack rather
-  than returning promoted=None, which would be indistinguishable from an
-  empty queue and let the caller clear the marker on stranded work) — so
-  the turn-end caller surfaces a transport error / leaves the marker
-  rather than promoting a write that never landed.
+  ``PendingQuestionBlocksPromotion`` when the owner must answer first. Other
+  actor-ack failures — missing row / dropped commit / a MALFORMED pending
+  entry (the actor leaves the queue intact and fails the ack rather than
+  returning promoted=None, which would be indistinguishable from an empty
+  queue and let the caller clear the marker on stranded work) — propagate so
+  the turn-end caller surfaces a transport error / leaves the marker rather
+  than promoting a write that never landed.
   """
   del db  # the actor owns the JSON-blob write on its own session
   if not chat_id:
     return [], None, None
-  from app.chat_writer import PromotePending, await_ack, get_writer
+  from app.chat_writer import (
+    PromotePending,
+    PromotePendingBlockedByPendingQuestion,
+    await_ack,
+    get_writer,
+  )
 
   ack = get_writer().submit(
     PromotePending(
@@ -240,6 +258,8 @@ async def promote_pending_messages_locked(
     )
   )
   result = await await_ack(ack)
+  if isinstance(result, PromotePendingBlockedByPendingQuestion):
+    raise PendingQuestionBlocksPromotion(result.question_id)
   promoted = result["promoted"]
   if promoted is None:
     # Empty queue — nothing to promote (the actor returned promoted=None
@@ -307,6 +327,10 @@ async def drain_and_release(
       Promoted follow-ups → `CONTINUATION_PROMOTED`: the marker stays
       continuously set (PromotePending re-set it for the next turn) and
       ownership passes to the scheduled continuation; do NOT clear/forget.
+    - An open owner question makes PromotePending refuse without mutating the
+      queue. Close the exact finishing run as interrupted while preserving the
+      question marker, release the in-process claim, and return
+      `QUESTION_PARKED`; no continuation is scheduled.
     - If nothing to promote AND we_own_gen, clears the durable run marker
       (strict `FinishRun`, identity-keyed on `ending_run_token`), then
       releases _starting, then forgets the chat — the clear-before-forget
@@ -334,10 +358,11 @@ async def drain_and_release(
   Bounding: the lock acquisition is wrapped in
   `asyncio.timeout(TERMINAL_LOCK_TIMEOUT_SECS)`. A lock-acquisition timeout
   (another task holds the lock past the bound) OR a failed strict ack
-  (PromotePending / FinishRun didn't land, timed out, or hit a
-  malformed pending entry) raises out of this function; the caller maps that
-  to `FAILED_LEAVE_MARKER`, leaving the marker set for reconciliation
-  rather than scheduling a continuation / clearing on a lost write.
+  (PromotePending / FinishRun didn't land, timed out, or hit a malformed
+  pending entry) raises out of this function; the caller maps that to
+  `FAILED_LEAVE_MARKER`, leaving the marker set for reconciliation rather than
+  scheduling a continuation / clearing on a lost write. The typed open-question
+  refusal is handled as the expected `QUESTION_PARKED` outcome instead.
 
   `discard_starting`, `forget_chat`, and `finish_run_strict` are
   injected so this module stays free of an import cycle back into chat.py /
@@ -358,11 +383,24 @@ async def drain_and_release(
       we_own_gen = run_gen is None or current_generation(chat_id) == run_gen
       if not we_own_gen:
         return None, [], None, TerminalDisposition.STALE_NO_ACTION
-      next_messages, first_pending, next_session_id = (
-        await promote_pending_messages_locked(
-          db, chat_id, run_token, ending_status=ending_status,
+      try:
+        next_messages, first_pending, next_session_id = (
+          await promote_pending_messages_locked(
+            db, chat_id, run_token, ending_status=ending_status,
+          )
         )
-      )
+      except PendingQuestionBlocksPromotion:
+        # A late durable QuestionCommit can win after Finalize's ordinary
+        # marker clear. That is a valid parked state, not a persistence error:
+        # close only this physical run as interrupted (FinishRun deliberately
+        # preserves the question marker for that status), leave every queued
+        # row untouched, and release the in-process claim without scheduling.
+        await finish_run_strict(
+          chat_id, ending_run_token, "interrupted",
+        )
+        discard_starting(chat_id)
+        forget_chat(chat_id)
+        return None, [], None, TerminalDisposition.QUESTION_PARKED
       if first_pending is None:
         # Clear-before-forget, all under this one lock: clear the durable
         # marker (strict — a failed ack raises and the caller leaves the

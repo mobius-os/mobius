@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 import pytest
 from sqlalchemy import create_engine, inspect, text
 
-from app.database import run_migrations
+from app.schema_migrations import run_migrations
 from app.manifest_contract import ManifestContractError, validate_manifest_offline
 
 

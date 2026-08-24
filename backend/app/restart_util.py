@@ -22,6 +22,7 @@ import logging
 import os
 import signal
 import threading
+from pathlib import Path
 
 log = logging.getLogger("mobius.restart")
 
@@ -30,9 +31,54 @@ log = logging.getLogger("mobius.restart")
 # fallback a plain SIGTERM hangs the worker in shutdown limbo: it stops serving
 # but never exits, so tini (PID 1) never exits and the container never restarts.
 _FORCE_KILL_AFTER_SECONDS = 5.0
+_CUTOVER_FAILSAFE_SECONDS = 90.0
 
 
-async def restart_this_worker() -> None:
+async def _drain_exact_restart() -> tuple[str, str, list[dict[str, str]]]:
+  """Gate admission and bind every live run to one fresh restart nonce."""
+  from app import chat
+  from app.broadcast import get_system_broadcast
+
+  get_system_broadcast().publish({"type": "server_restarting"})
+  chat.begin_drain()
+
+  from app import restart_ledger
+
+  boot_id = restart_ledger.current_boot_id()
+  restart_nonce = restart_ledger.new_nonce()
+  restart_runs: list[dict[str, str]] = []
+  try:
+    restart_runs = await asyncio.wait_for(
+      chat.prepare_restart_intents(restart_nonce),
+      timeout=min(10.0, chat.DRAIN_TIMEOUT),
+    )
+  except Exception:
+    log.warning(
+      "restart-intent preparation failed; fallbacks will remain manual",
+      exc_info=True,
+    )
+  try:
+    drained_runs = await asyncio.wait_for(
+      chat.drain_all_for_restart(
+        timeout=chat.DRAIN_TIMEOUT,
+        restart_nonce=restart_nonce,
+        prepared_runs=restart_runs,
+      ),
+      timeout=chat.DRAIN_TIMEOUT,
+    )
+    known = {
+      (item["chat_id"], item["run_token"]) for item in restart_runs
+    }
+    restart_runs.extend(
+      item for item in drained_runs
+      if (item["chat_id"], item["run_token"]) not in known
+    )
+  except Exception:
+    log.warning("drain-for-restart failed; restarting anyway", exc_info=True)
+  return boot_id, restart_nonce, restart_runs
+
+
+async def restart_this_worker(ready_path: Path | None = None) -> None:
   """Drain live turns, then restart this uvicorn worker with the current code.
 
   Runs as an async BackgroundTask (after the response is flushed), so the drain
@@ -62,9 +108,6 @@ async def restart_this_worker() -> None:
   """
   from app import chat
 
-  # Gate new sends ASAP so the whole restart window queues rather than starts.
-  chat.begin_drain()
-
   pid = os.getpid()
 
   def _force_exit() -> None:
@@ -78,47 +121,7 @@ async def restart_this_worker() -> None:
 
   from app import restart_ledger
 
-  boot_id = restart_ledger.current_boot_id()
-  restart_nonce = restart_ledger.new_nonce()
-  restart_runs: list[dict[str, str]] = []
-  try:
-    # Bind the authenticated nonce to every exact live run BEFORE provider
-    # interruption. This small writer-only transaction is independent of
-    # transcript serialization and survives a later stop/finalize timeout.
-    restart_runs = await asyncio.wait_for(
-      chat.prepare_restart_intents(restart_nonce),
-      timeout=min(10.0, chat.DRAIN_TIMEOUT),
-    )
-  except Exception:
-    # Fail closed: without an exact DB binding the next boot treats stranded
-    # turns as generic crash recovery and leaves them for manual Resume.
-    log.warning(
-      "restart-intent preparation failed; fallbacks will remain manual",
-      exc_info=True,
-    )
-  try:
-    drained_runs = await asyncio.wait_for(
-      chat.drain_all_for_restart(
-        timeout=chat.DRAIN_TIMEOUT,
-        restart_nonce=restart_nonce,
-        prepared_runs=restart_runs,
-      ),
-      timeout=chat.DRAIN_TIMEOUT,
-    )
-    # The drain may discover a just-materialized handle after the initial
-    # snapshot. Keep every exact run it successfully authenticated.
-    known = {
-      (item["chat_id"], item["run_token"]) for item in restart_runs
-    }
-    restart_runs.extend(
-      item for item in drained_runs
-      if (item["chat_id"], item["run_token"]) not in known
-    )
-  except Exception:
-    # Never let a drain failure block the restart — the backstop timer and the
-    # fallback path still reboots the worker. Exact runs already transitioned
-    # remain due; nonce-stamped running markers use authenticated boot recovery.
-    log.warning("drain-for-restart failed; restarting anyway", exc_info=True)
+  boot_id, restart_nonce, restart_runs = await _drain_exact_restart()
 
   try:
     if not boot_id:
@@ -131,6 +134,8 @@ async def restart_this_worker() -> None:
       nonce=restart_nonce,
       runs=restart_runs,
     )
+    if ready_path is not None:
+      ready_path.write_text("ready\n", encoding="utf-8")
   except Exception:
     # Restart reliability and continuation authorization are independent.
     # If the external handshake cannot be published, restart directly; the
@@ -142,3 +147,71 @@ async def restart_this_worker() -> None:
       exc_info=True,
     )
     os.kill(pid, signal.SIGTERM)
+
+
+async def prepare_container_cutover(cutover_id: str) -> dict[str, object]:
+  """Drain once for a Host-owned replacement without self-terminating.
+
+  The root supervisor must first open the exact cutover challenge.  This
+  process then parks and nonce-binds active turns, but publishes no shutdown
+  sentinel: Docker/Compose owns the stop, so the accepted authorization binds
+  to the replacement boot rather than an accidental intermediate restart.
+  """
+  from app import restart_ledger
+
+  if not restart_ledger.authorized_cutover_challenge(cutover_id):
+    raise RuntimeError("the Host did not authorize this cutover")
+
+  boot_id, restart_nonce, restart_runs = await _drain_exact_restart()
+  try:
+    if not boot_id:
+      raise RuntimeError("entrypoint boot id is unavailable")
+    restart_ledger.publish_cutover_intent(
+      boot_id=boot_id,
+      nonce=restart_nonce,
+      cutover_id=cutover_id,
+      runs=restart_runs,
+    )
+  except Exception:
+    # A failed external handoff must not strand a live-but-drained worker.
+    # Convert it into the ordinary supervised restart using the same exact run
+    # bindings.  If even that cannot publish, fail closed to manual recovery.
+    log.warning(
+      "container-cutover handoff failed; falling back to a normal restart",
+      exc_info=True,
+    )
+    try:
+      restart_ledger.request_restart(
+        boot_id=boot_id,
+        nonce=restart_nonce,
+        runs=restart_runs,
+      )
+    except Exception:
+      os.kill(os.getpid(), signal.SIGTERM)
+    raise
+
+  pid = os.getpid()
+
+  def _recover_abandoned_cutover() -> None:
+    try:
+      restart_ledger.request_restart(
+        boot_id=boot_id,
+        nonce=restart_nonce,
+        runs=restart_runs,
+      )
+    except Exception:
+      log.warning(
+        "abandoned container cutover could not self-recover",
+        exc_info=True,
+      )
+      os.kill(pid, signal.SIGTERM)
+
+  watchdog = threading.Timer(_CUTOVER_FAILSAFE_SECONDS, _recover_abandoned_cutover)
+  watchdog.daemon = True
+  watchdog.start()
+  return {
+    "status": "prepared",
+    "cutover_id": cutover_id,
+    "boot_id": boot_id,
+    "run_count": len(restart_runs),
+  }

@@ -3,9 +3,10 @@
 Startup reconciliation is owned by ``startup.py``. This module owns only work
 that remains alive after readiness: watcher processes, periodic chat recovery,
 durable continuation wakeups, writer health, background compression, and
-browser-profile quota enforcement. ``RuntimeSupervisors.start`` and ``stop``
-are the complete lifecycle boundary so lifespan never needs individual task
-handles or cancellation ordering knowledge.
+browser-profile quota enforcement. Process-only and database-backed services
+have distinct start boundaries so a schema-degraded boot can keep source
+diagnostics alive without starting database work. ``stop`` remains the single
+shutdown boundary.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from app.database import SessionLocal
 
 
 RESTART_BACKLOG_DRAIN_INTERVAL_SECS = 2.0
+CHAT_WAIT_SWEEP_INTERVAL_SECS = 30.0
 
 
 class RuntimeSettings(Protocol):
@@ -49,9 +51,12 @@ class RuntimeSupervisors:
       coroutine, name=f"mobius:{name}",
     )
 
-  async def start(self) -> None:
-    """Start every supervisor; individual wiring failures fail open."""
+  async def start_process_services(self) -> None:
+    """Start services that are safe without a serviceable database."""
     await self._start_frontend_watcher()
+
+  async def start_database_services(self) -> None:
+    """Start long-lived database work; individual wiring failures fail open."""
     try:
       await self._start_chat_supervisors()
     except Exception as exc:
@@ -184,6 +189,17 @@ class RuntimeSupervisors:
             "writer supervisor tick failed: %s", exc, exc_info=True,
           )
 
+    async def chat_wait_loop():
+      from app.chat_waits import sweep_due_waits
+      while True:
+        await asyncio.sleep(CHAT_WAIT_SWEEP_INTERVAL_SECS)
+        try:
+          await sweep_due_waits()
+        except asyncio.CancelledError:
+          raise
+        except Exception as exc:
+          self.log.error("chat-wait sweep failed: %s", exc, exc_info=True)
+
     async def browser_profile_loop():
       await asyncio.sleep(300)
       while True:
@@ -269,6 +285,7 @@ class RuntimeSupervisors:
 
     self._spawn("wedged-marker-sweep", wedged_marker_loop())
     self._spawn("reset-park-sweep", reset_park_loop())
+    self._spawn("chat-wait-sweep", chat_wait_loop())
     self._spawn("writer-supervisor", writer_supervisor_loop())
     self._spawn("browser-profile-quota", browser_profile_loop())
     self._spawn("agent-scratch-retention", agent_scratch_loop())

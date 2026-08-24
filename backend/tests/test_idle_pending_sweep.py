@@ -17,6 +17,8 @@ def _seed_pending(
   *,
   age_secs: float,
   running: bool = False,
+  pending_question_id: str | None = None,
+  messages: list[dict] | None = None,
 ) -> None:
   now_ms = int(time.time() * 1000)
   db = SessionLocal()
@@ -25,13 +27,18 @@ def _seed_pending(
       id=chat_id,
       title="pending",
       provider="claude",
-      messages=[{"role": "user", "content": "first", "ts": 1}],
+      messages=(
+        messages
+        if messages is not None
+        else [{"role": "user", "content": "first", "ts": 1}]
+      ),
       pending_messages=[{
         "role": "user",
         "content": "recover me",
         "ts": now_ms - int(age_secs * 1000),
         "cid": f"cid-{chat_id}",
       }],
+      pending_question_id=pending_question_id,
     )
     db.add(chat)
     db.flush()
@@ -132,6 +139,53 @@ def test_idle_pending_sweep_respects_age_gate(monkeypatch):
   status, _messages, pending = _read(chat_id)
   assert status is None
   assert [cid_of(row) for row in pending] == [f"cid-{chat_id}"]
+  assert not registry.is_alive(chat_id)
+
+
+def test_idle_pending_sweep_never_crosses_owner_question(monkeypatch):
+  """An aged product wake stays queued until the owner answers.
+
+  This is the restart failure shape from the reported chat: boot has closed
+  the interrupted run, the open question is durable, and a queued wake is old
+  enough for generic idle recovery. Age is not owner authorization.
+  """
+  chat_id = "question-blocked-old-pending"
+  question = {
+    "role": "assistant",
+    "content": "Choose how to proceed.",
+    "ts": 2,
+    "blocks": [{
+      "type": "question",
+      "question_id": "owner-decision",
+      "questions": [{
+        "id": "push_requeue_787",
+        "question": "Push and requeue PR #787?",
+      }],
+    }],
+  }
+  _seed_pending(
+    chat_id,
+    age_secs=180,
+    pending_question_id="owner-decision",
+    messages=[
+      {"role": "user", "content": "Review PR #787", "ts": 1},
+      question,
+    ],
+  )
+
+  swept, scheduled = _sweep(monkeypatch)
+
+  assert swept == []
+  assert scheduled == []
+  status, messages, pending = _read(chat_id)
+  assert status is None
+  assert messages[-1] == question
+  assert [cid_of(row) for row in pending] == [f"cid-{chat_id}"]
+  db = SessionLocal()
+  try:
+    assert db.get(models.Chat, chat_id).pending_question_id == "owner-decision"
+  finally:
+    db.close()
   assert not registry.is_alive(chat_id)
 
 

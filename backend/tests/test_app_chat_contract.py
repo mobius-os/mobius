@@ -29,7 +29,9 @@ def test_app_token_can_create_and_send_to_own_chat(client, owner_token, db):
 
   # Create an app-owned chat.
   r = client.post(
-    "/api/app-chats", json={"title": "App conversation"},
+    "/api/app-chats", json={
+      "title": "App conversation", "model": "claude-opus-4-8",
+    },
     headers={"Authorization": f"Bearer {app_token}"},
   )
   assert r.status_code == 201, r.text
@@ -79,7 +81,11 @@ def test_app_chat_first_send_preserves_provider_selected_at_create(
   for sender_token in (app_token, owner_token):
     created = client.post(
       "/api/app-chats",
-      json={"title": "Codex workflow", "provider": "codex"},
+      json={
+        "title": "Codex workflow",
+        "provider": "codex",
+        "model": "gpt-5.6-sol",
+      },
       headers={"Authorization": f"Bearer {app_token}"},
     )
     assert created.status_code == 201, created.text
@@ -101,7 +107,7 @@ def test_app_chat_first_send_preserves_provider_selected_at_create(
     assert run.provider == "codex"
 
 
-def test_owner_chat_first_send_still_uses_live_default(
+def test_owner_chat_first_send_still_uses_latest_selected_provider(
   client, owner_token, db, monkeypatch,
 ):
   """The app-chat exception must not freeze an ordinary empty chat."""
@@ -117,10 +123,13 @@ def test_owner_chat_first_send_still_uses_live_default(
   monkeypatch.setattr(
     chats_stream, "resolve_default_provider", lambda *_: "codex",
   )
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  row.agent_settings_json = {"model": "gpt-5.6-sol"}
+  db.commit()
 
   sent = client.post(
     f"/api/chats/{chat_id}/messages",
-    json={"content": "use my current default"},
+    json={"content": "use my latest selected provider"},
     headers={"Authorization": f"Bearer {owner_token}"},
   )
   assert sent.status_code == 202, sent.text
@@ -499,8 +508,13 @@ def test_owner_can_still_send_to_app_owned_chat(client, owner_token, db):
   db.add(app)
   db.commit()
   db.refresh(app)
-  chat = models.Chat(id="app-owned", title="app's", messages=[],
-                     created_by_app_id=app.id)
+  chat = models.Chat(
+    id="app-owned",
+    title="app's",
+    messages=[],
+    created_by_app_id=app.id,
+    agent_settings_json={"model": "claude-opus-4-8"},
+  )
   db.add(chat)
   db.commit()
 

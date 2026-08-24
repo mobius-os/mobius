@@ -21,7 +21,6 @@ test('runtime policy derives resumability from the cached chat contract', () => 
       chatInfo: {
         provider: 'codex',
         auto_resume_on_limit: true,
-        auto_resume_on_restart: false,
       },
     },
     hidden: false,
@@ -31,7 +30,6 @@ test('runtime policy derives resumability from the cached chat contract', () => 
 
   assert.equal(result.current.chatInfo.provider, 'codex')
   assert.equal(result.current.autoResumeEnabled, true)
-  assert.equal(result.current.restartResumeEnabled, false)
 })
 
 test('a completed provider switch settles through one owner and clears its store', () => {
@@ -89,7 +87,7 @@ test('chat-info patches preserve the provider when the response omits it', () =>
   assert.deepEqual(result.current.chatInfo.effective, { effort: 'high' })
 })
 
-test('policy actions persist both resume settings and update one chat owner', async () => {
+test('the auto-resume action persists the setting and updates one chat owner', async () => {
   resetProviderSwitchMemoryForTests()
   const calls = []
   const request = async (url, options) => {
@@ -106,7 +104,6 @@ test('policy actions persist both resume settings and update one chat owner', as
       chatInfo: {
         provider: 'codex',
         auto_resume_on_limit: false,
-        auto_resume_on_restart: false,
       },
     },
     hidden: false,
@@ -115,13 +112,10 @@ test('policy actions persist both resume settings and update one chat owner', as
   })
 
   await result.current.handleAutoResumeSettingsChange(true)
-  await result.current.handleRestartResumeChange(true)
 
-  assert.equal(calls.length, 2)
+  assert.equal(calls.length, 1)
   assert.equal(result.current.autoResumeEnabled, true)
-  assert.equal(result.current.restartResumeEnabled, true)
   assert.equal(result.current.autoResumeSaving, false)
-  assert.equal(result.current.restartResumeSaving, false)
   result.current.clearAutoResumeError()
   assert.equal(result.current.autoResumeError, '')
 })

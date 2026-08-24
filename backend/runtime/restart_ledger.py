@@ -39,11 +39,14 @@ LEDGER_DIR = DATA_DIR / ".restart-ledger"
 ACCEPTED_PATH = LEDGER_DIR / "accepted.json"
 ACK_PATH = LEDGER_DIR / "ack.json"
 BOOT_PATH = LEDGER_DIR / "boot-id"
+CUTOVER_CHALLENGE_PATH = LEDGER_DIR / "cutover-challenge.json"
+CUTOVER_RECEIPT_PATH = LEDGER_DIR / "cutover-receipt.json"
 
 PROTOCOL_VERSION = 1
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_REQUEST_AGE_SECONDS = 120
 MAX_ACCEPTED_AGE_SECONDS = 10 * 60
+MAX_CUTOVER_RECEIPT_AGE_SECONDS = 60 * 60
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._:-]{8,160}$")
 SUPERVISOR_UID = 0
 SUPERVISOR_GID = 0
@@ -192,6 +195,51 @@ def _valid_intent(
   }
 
 
+def _valid_cutover_intent(
+  intent: dict[str, Any] | None,
+  challenge: dict[str, Any] | None,
+  boot_id: str,
+  cutover_id: str,
+  now: float,
+) -> dict[str, Any] | None:
+  """Validate the platform half against a fresh root-opened challenge."""
+  if not intent or not challenge or not _valid_token(cutover_id):
+    return None
+  if (
+    intent.get("version") != PROTOCOL_VERSION
+    or intent.get("action") != "external_cutover"
+    or intent.get("cutover_id") != cutover_id
+    or challenge.get("version") != PROTOCOL_VERSION
+    or challenge.get("cutover_id") != cutover_id
+    or challenge.get("source_boot_id") != boot_id
+  ):
+    return None
+  nonce = intent.get("nonce")
+  if not _valid_token(nonce) or intent.get("source_boot_id") != boot_id:
+    return None
+  try:
+    created_at = float(intent.get("created_at"))
+    challenge_at = float(challenge.get("created_at"))
+  except (TypeError, ValueError):
+    return None
+  if (
+    created_at > now + 5
+    or challenge_at > now + 5
+    or now - created_at > MAX_REQUEST_AGE_SECONDS
+    or now - challenge_at > MAX_REQUEST_AGE_SECONDS
+  ):
+    return None
+  return {
+    "version": PROTOCOL_VERSION,
+    "action": "external_cutover",
+    "cutover_id": cutover_id,
+    "nonce": nonce,
+    "source_boot_id": boot_id,
+    "created_at": created_at,
+    "accepted_at": now,
+  }
+
+
 def begin_boot(boot_id: str, *, now: float | None = None) -> bool:
   """Bind a previously accepted restart to this one boot, or retire it."""
   if not _valid_token(boot_id):
@@ -201,6 +249,7 @@ def begin_boot(boot_id: str, *, now: float | None = None) -> bool:
   accepted = _read_bounded_json(ACCEPTED_PATH)
   if not _remove(ACK_PATH):
     raise OSError("could not retire the prior boot acknowledgement")
+  _remove(CUTOVER_CHALLENGE_PATH)
   authorized_payload: dict[str, Any] | None = None
   if accepted:
     try:
@@ -246,7 +295,13 @@ def harden(boot_id: str) -> bool:
     if BOOT_PATH.read_text(encoding="utf-8").strip() != boot_id:
       _remove(ACK_PATH)
       return False
-    for path in (BOOT_PATH, ACK_PATH, ACCEPTED_PATH):
+    for path in (
+      BOOT_PATH,
+      ACK_PATH,
+      ACCEPTED_PATH,
+      CUTOVER_CHALLENGE_PATH,
+      CUTOVER_RECEIPT_PATH,
+    ):
       if not path.exists():
         continue
       st = path.lstat()
@@ -254,7 +309,10 @@ def harden(boot_id: str) -> bool:
         _remove(path)
         continue
       os.chown(path, SUPERVISOR_UID, SUPERVISOR_GID)
-      os.chmod(path, 0o444 if path != ACCEPTED_PATH else 0o600)
+      os.chmod(
+        path,
+        0o600 if path in {ACCEPTED_PATH, CUTOVER_RECEIPT_PATH} else 0o444,
+      )
     os.chown(LEDGER_DIR, SUPERVISOR_UID, SUPERVISOR_GID)
     os.chmod(LEDGER_DIR, 0o755)
     return _trusted_ledger_dir()
@@ -285,18 +343,155 @@ def accept(boot_id: str, *, now: float | None = None) -> bool:
   return accepted is not None
 
 
+def open_cutover(cutover_id: str, *, now: float | None = None) -> bool:
+  """Open one short-lived root challenge before the app may drain chats."""
+  if not _valid_token(cutover_id):
+    return False
+  current = time.time() if now is None else now
+  _prepare_ledger_dir()
+  try:
+    boot_id = BOOT_PATH.read_text(encoding="utf-8").strip()
+  except OSError:
+    return False
+  if not _valid_token(boot_id):
+    return False
+  _remove(CUTOVER_CHALLENGE_PATH)
+  _write_json(CUTOVER_CHALLENGE_PATH, {
+    "version": PROTOCOL_VERSION,
+    "cutover_id": cutover_id,
+    "source_boot_id": boot_id,
+    "created_at": current,
+  }, 0o444)
+  return True
+
+
+def accept_cutover(cutover_id: str, *, now: float | None = None) -> bool:
+  """Accept an exact externally driven cutover without stopping the worker."""
+  current = time.time() if now is None else now
+  _prepare_ledger_dir()
+  try:
+    boot_id = BOOT_PATH.read_text(encoding="utf-8").strip()
+  except OSError:
+    boot_id = ""
+  accepted = _valid_cutover_intent(
+    _read_bounded_json(INTENT_PATH),
+    _read_bounded_json(CUTOVER_CHALLENGE_PATH),
+    boot_id,
+    cutover_id,
+    current,
+  )
+  _remove(ACCEPTED_PATH)
+  if accepted is not None:
+    _write_json(ACCEPTED_PATH, accepted, 0o600)
+    _write_json(CUTOVER_RECEIPT_PATH, accepted, 0o600)
+  _remove(CUTOVER_CHALLENGE_PATH)
+  _remove(INTENT_PATH)
+  _remove(REQUEST_PATH)
+  return accepted is not None
+
+
+def _matching_cutover_receipt(
+  cutover_id: str,
+  *,
+  now: float,
+) -> dict[str, Any] | None:
+  receipt = _read_bounded_json(CUTOVER_RECEIPT_PATH)
+  if not receipt or not _valid_token(cutover_id):
+    return None
+  try:
+    accepted_at = float(receipt.get("accepted_at"))
+  except (TypeError, ValueError):
+    return None
+  if (
+    receipt.get("version") != PROTOCOL_VERSION
+    or receipt.get("action") != "external_cutover"
+    or receipt.get("cutover_id") != cutover_id
+    or not _valid_token(receipt.get("nonce"))
+    or not _valid_token(receipt.get("source_boot_id"))
+    or accepted_at > now + 5
+    or now - accepted_at > MAX_CUTOVER_RECEIPT_AGE_SECONDS
+  ):
+    return None
+  return receipt
+
+
+def rearm_cutover(cutover_id: str, *, now: float | None = None) -> bool:
+  """Authorize one explicit rollback boot from the same root receipt."""
+  current = time.time() if now is None else now
+  _prepare_ledger_dir()
+  receipt = _matching_cutover_receipt(cutover_id, now=current)
+  if receipt is None:
+    return False
+
+  existing = _read_bounded_json(ACCEPTED_PATH)
+  if (
+    existing
+    and existing.get("nonce") == receipt.get("nonce")
+    and existing.get("cutover_id") == cutover_id
+  ):
+    return True
+
+  ack = _read_bounded_json(ACK_PATH)
+  if (
+    not ack
+    or ack.get("nonce") != receipt.get("nonce")
+    or ack.get("cutover_id") != cutover_id
+    or not _valid_token(ack.get("target_boot_id"))
+  ):
+    return False
+  _write_json(ACCEPTED_PATH, {
+    **receipt,
+    "source_boot_id": ack["target_boot_id"],
+    "accepted_at": current,
+  }, 0o600)
+  return True
+
+
+def finalize_cutover(cutover_id: str, *, now: float | None = None) -> bool:
+  """Retire the rollback receipt after the replacement is serviceable."""
+  current = time.time() if now is None else now
+  _prepare_ledger_dir()
+  receipt = _matching_cutover_receipt(cutover_id, now=current)
+  ack = _read_bounded_json(ACK_PATH)
+  if (
+    receipt is None
+    or not ack
+    or ack.get("nonce") != receipt.get("nonce")
+    or ack.get("cutover_id") != cutover_id
+    or not _valid_token(ack.get("target_boot_id"))
+  ):
+    return False
+  return _remove(CUTOVER_RECEIPT_PATH)
+
+
 def _main(argv: list[str]) -> int:
+  if len(argv) == 2 and argv[1] == "capabilities":
+    print("external-cutover-v1")
+    return 0
   if len(argv) != 3:
-    print("usage: restart_ledger.py begin-boot|harden|accept BOOT_ID", file=sys.stderr)
+    print(
+      "usage: restart_ledger.py begin-boot|harden|accept BOOT_ID | "
+      "open-cutover|accept-cutover|rearm-cutover|finalize-cutover CUTOVER_ID | "
+      "capabilities",
+      file=sys.stderr,
+    )
     return 2
-  command, boot_id = argv[1:]
+  command, value = argv[1:]
   try:
     if command == "begin-boot":
-      result = begin_boot(boot_id)
+      result = begin_boot(value)
     elif command == "harden":
-      result = harden(boot_id)
+      result = harden(value)
     elif command == "accept":
-      result = accept(boot_id)
+      result = accept(value)
+    elif command == "open-cutover":
+      result = open_cutover(value)
+    elif command == "accept-cutover":
+      result = accept_cutover(value)
+    elif command == "rearm-cutover":
+      result = rearm_cutover(value)
+    elif command == "finalize-cutover":
+      result = finalize_cutover(value)
     else:
       return 2
   except Exception as exc:
@@ -306,7 +501,10 @@ def _main(argv: list[str]) -> int:
   # A boot with no accepted prior intent is ordinary success. By contrast,
   # hardening and request acceptance are security gates: a false result must be
   # observable by the root entrypoint and must not trigger a restart.
-  if command in {"accept", "harden"} and not result:
+  if command in {
+    "accept", "harden", "open-cutover", "accept-cutover",
+    "rearm-cutover", "finalize-cutover",
+  } and not result:
     return 1
   return 0
 

@@ -122,13 +122,13 @@ def test_update_app_rejects_cross_site_request(client, auth):
   assert cross.status_code == 403
 
 
-def test_update_app_attaches_share_url_without_changing_install_identity(
+def test_update_app_attaches_distribution_manifest_without_changing_install_identity(
   client, auth, db,
 ):
   app = create_local_app(
     client, auth, name="Published later", description="test",
   )
-  share_url = "https://raw.githubusercontent.com/example/app/main/mobius.json"
+  distribution_url = "https://raw.githubusercontent.com/example/app/main/mobius.json"
   row = db.query(models.App).filter(models.App.id == app["id"]).one()
   candidate = _published_candidate(row)
 
@@ -136,28 +136,30 @@ def test_update_app_attaches_share_url_without_changing_install_identity(
   with patch("app.install.fetch_install_candidate", new=fetch):
     response = client.patch(
       f"/api/apps/{app['id']}",
-      json={"share_manifest_url": share_url},
+      json={"published_manifest_url": distribution_url},
       headers=auth,
     )
 
     assert response.status_code == 200, response.text
-    assert response.json()["share_manifest_url"] == share_url
+    assert response.json()["distribution_manifest"] == {
+      "id": app["slug"], "url": distribution_url, "kind": "published",
+    }
     assert response.json()["manifest_url"] is None
     db.refresh(row)
-    assert row.share_manifest_url == share_url
+    assert row.published_manifest_url == distribution_url
     assert row.manifest_url is None
 
     cleared = client.patch(
       f"/api/apps/{app['id']}",
-      json={"share_manifest_url": ""},
+      json={"published_manifest_url": ""},
       headers=auth,
     )
     assert cleared.status_code == 200, cleared.text
-    assert cleared.json()["share_manifest_url"] is None
-  fetch.assert_awaited_once_with(share_url)
+    assert cleared.json()["distribution_manifest"] is None
+  fetch.assert_awaited_once_with(distribution_url)
 
 
-def test_update_app_rejects_share_package_that_is_not_the_accepted_revision(
+def test_update_app_rejects_distribution_package_that_is_not_the_accepted_revision(
   client, auth, db,
 ):
   app = create_local_app(
@@ -174,7 +176,7 @@ def test_update_app_rejects_share_package_that_is_not_the_accepted_revision(
     response = client.patch(
       f"/api/apps/{app['id']}",
       json={
-        "share_manifest_url": (
+        "published_manifest_url": (
           "https://raw.githubusercontent.com/example/app/main/mobius.json"
         ),
       },
@@ -182,15 +184,15 @@ def test_update_app_rejects_share_package_that_is_not_the_accepted_revision(
     )
 
   assert response.status_code == 409, response.text
-  assert response.json()["detail"]["code"] == "share_package_mismatch"
+  assert response.json()["detail"]["code"] == "distribution_package_mismatch"
   db.expire_all()
   assert (
     db.query(models.App).filter(models.App.id == app["id"]).one()
-    .share_manifest_url
+    .published_manifest_url
   ) is None
 
 
-def test_update_app_rejects_share_manifest_for_a_different_app(
+def test_update_app_rejects_distribution_manifest_for_a_different_app(
   client, auth, db,
 ):
   app = create_local_app(
@@ -210,7 +212,7 @@ def test_update_app_rejects_share_manifest_for_a_different_app(
     response = client.patch(
       f"/api/apps/{app['id']}",
       json={
-        "share_manifest_url": (
+        "published_manifest_url": (
           "https://raw.githubusercontent.com/example/app/main/mobius.json"
         ),
       },
@@ -218,16 +220,16 @@ def test_update_app_rejects_share_manifest_for_a_different_app(
     )
 
   assert response.status_code == 409, response.text
-  assert response.json()["detail"]["code"] == "share_identity_mismatch"
+  assert response.json()["detail"]["code"] == "distribution_identity_mismatch"
 
 
-def test_update_app_rejects_non_public_share_url(client, auth):
+def test_update_app_rejects_non_public_distribution_manifest(client, auth):
   app = create_local_app(
     client, auth, name="Private share", description="test",
   )
   response = client.patch(
     f"/api/apps/{app['id']}",
-    json={"share_manifest_url": "http://localhost/mobius.json"},
+    json={"published_manifest_url": "http://localhost/mobius.json"},
     headers=auth,
   )
   assert response.status_code == 422
@@ -352,6 +354,33 @@ def test_app_footprint_is_a_fast_manage_apps_projection(client, auth):
 
   assert response.status_code == 200, response.text
   assert response.json() == {"app_id": app["id"], "bytes": 123_456}
+
+
+def test_list_apps_exposes_one_fetchable_source_manifest_contract(
+  client, auth, db,
+):
+  app = models.App(
+    source_dir="/tmp/mobius-tests/source-manifest-contract",
+    name="Published app",
+    description="Installed from a published manifest",
+    jsx_source="export default function App() { return null }",
+    slug="published-app",
+    manifest_url=(
+      "https://raw.githubusercontent.com/example/app/main"
+      "#manifest-id=published-app"
+    ),
+  )
+  db.add(app)
+  db.commit()
+
+  response = client.get("/api/apps/", headers=auth)
+
+  assert response.status_code == 200
+  payload = next(item for item in response.json() if item["id"] == app.id)
+  assert payload["source_manifest"] == {
+    "id": "published-app",
+    "url": "https://raw.githubusercontent.com/example/app/main/mobius.json",
+  }
 
 
 def test_delete_then_purge_removes_non_slug_source_dir(client, auth, db):

@@ -6,10 +6,15 @@ import {
 const TOUCH_PRIMARY_QUERY = '(hover: none) and (pointer: coarse)'
 const leaseOwners = new WeakMap()
 
+export function composerDraftWantsKeyboard(draft) {
+  return String(draft?.input ?? '').length > 0
+    || (Array.isArray(draft?.attachments) && draft.attachments.length > 0)
+}
+
 /**
- * Keep the software keyboard open across an async New-chat allocation. The
- * lease is focused synchronously inside the owner's tap; the real composer
- * takes that focus once its chat-bound surface mounts.
+ * Keep the software keyboard open across a chat-composer handoff. The lease is
+ * focused synchronously at the navigation boundary; the real composer takes
+ * that focus once its chat-bound surface mounts.
  */
 export function beginTouchComposerFocusLease(el, {
   matchMediaImpl = globalThis.matchMedia,
@@ -17,9 +22,14 @@ export function beginTouchComposerFocusLease(el, {
   owner = null,
   initialValue = '',
 } = {}) {
-  if (!el || activeElement === el || typeof matchMediaImpl !== 'function') return false
+  if (!el || typeof matchMediaImpl !== 'function') return false
   if (matchMediaImpl(TOUCH_PRIMARY_QUERY)?.matches !== true) return false
   el.value = typeof initialValue === 'string' ? initialValue : ''
+  if (activeElement === el) {
+    leaseOwners.set(el, owner)
+    placeCaretAtTextEnd(el)
+    return true
+  }
   const focused = focusComposerElement(el)
   if (focused) leaseOwners.set(el, owner)
   return focused

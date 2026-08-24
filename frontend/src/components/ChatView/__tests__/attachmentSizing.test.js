@@ -14,18 +14,25 @@ function ruleBody(selector) {
 
 test('roomy composer images match sent attachment size and corners', () => {
   const composer = ruleBody('.chat__attach-card--image')
+  const sentFrame = ruleBody('.chat__attach-thumb-frame')
   const sentButton = ruleBody('.chat__attach-thumb-button')
   const sent = ruleBody('.chat__attach-thumb')
 
   // Pending and sent squares share one roomy-size token instead of repeating a
   // literal. A pending card may compact below that ceiling when the keyboard
   // leaves very little room; its fallback must still be the sent-card token so
-  // the normal layout and a token change remain in step.
+  // the normal layout and a token change remain in step. The permanent frame,
+  // not the authorization-gated image, owns the sent footprint.
   assert.match(ruleBody('.chat'), /--attach-card:\s*96px/)
   assert.match(composer, /height:\s*var\(--composer-attach-card,\s*var\(--attach-card/)
-  assert.match(sent, /width:\s*var\(--attach-card/)
-  assert.match(sent, /height:\s*var\(--attach-card/)
+  assert.match(sentFrame, /width:\s*var\(--attach-card/)
+  assert.match(sentFrame, /height:\s*var\(--attach-card/)
+  assert.match(sentButton, /width:\s*100%/)
+  assert.match(sentButton, /height:\s*100%/)
+  assert.match(sent, /width:\s*100%/)
+  assert.match(sent, /height:\s*100%/)
   assert.match(composer, /border-radius:\s*14px/)
+  assert.match(sentFrame, /border-radius:\s*14px/)
   assert.match(sentButton, /border-radius:\s*14px/)
   assert.match(sent, /border-radius:\s*14px/)
 })

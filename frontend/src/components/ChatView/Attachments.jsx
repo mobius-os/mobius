@@ -30,7 +30,9 @@ export default function Attachments({ attachments, chatId }) {
           {images.map((img, i) => (
             <AttachImage
               key={i}
-              src={`${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(img.name)}${tokenParam}`}
+              src={tokenParam
+                ? `${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(img.name)}${tokenParam}`
+                : ''}
               alt={img.name}
             />
           ))}
@@ -54,14 +56,19 @@ export default function Attachments({ attachments, chatId }) {
 }
 
 function AttachImage({ src, alt }) {
-  // Don't render the image until we have a token (src would 403 without one).
-  if (!src.includes('?token=')) return null
   return (
-    <ImagePreviewButton
-      src={src}
-      alt={alt || 'attached image'}
-      buttonClassName="chat__attach-thumb-button"
-      imageClassName="chat__attach-thumb"
-    />
+    // Authorization controls when the image bytes can render, not when the
+    // message gets its layout. Keeping this frame mounted transfers the fixed
+    // attachment-card geometry from composer to transcript in one send paint.
+    <span className="chat__attach-thumb-frame" aria-hidden={!src || undefined}>
+      {src && (
+        <ImagePreviewButton
+          src={src}
+          alt={alt || 'attached image'}
+          buttonClassName="chat__attach-thumb-button"
+          imageClassName="chat__attach-thumb"
+        />
+      )}
+    </span>
   )
 }

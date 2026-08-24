@@ -48,7 +48,8 @@ function installBrowserEnvironment({ observers = [], frames = null } = {}) {
     removeEventListener() {},
   }
   globalThis.ResizeObserver = class {
-    constructor() {
+    constructor(callback) {
+      this.callback = callback
       this.disconnected = false
       observers.push(this)
     }
@@ -224,6 +225,68 @@ test('nested controls cannot relatch the transcript while they own the input', (
     })
     assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM',
       'the same gesture may chain to the transcript at the nested edge')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('question response resumes the exact follow intent captured at submit', () => {
+  const observers = []
+  const restoreBrowser = installBrowserEnvironment({ observers })
+  try {
+    const { hook, listeners, scroll } = mountTailController('question-follow-owner')
+    const target = { parentElement: scroll, closest: () => null }
+
+    listeners.get('wheel')({
+      type: 'wheel', deltaY: 80, shiftKey: false, target,
+    })
+    assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM')
+
+    const submission = hook.result.current.freezeQuestionSubmission()
+    assert.equal(submission.mode.kind, 'ANCHOR_AT')
+    assert.equal(submission.mode.questionSubmitBaseMode.kind, 'FOLLOW_BOTTOM')
+    assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT')
+
+    scroll.clientHeight = 620
+    observers[0].callback([{ target: scroll }])
+    assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT',
+      'keyboard close cannot release the submission before response activity')
+
+    hook.result.current.resumeQuestionSubmissionOnResponse(submission)
+    assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM',
+      'the first visible continuation restores the captured follow mode')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('question response cannot restore follow after a newer reader scroll', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, listeners, scroll } = mountTailController(
+      'question-reader-override-owner',
+    )
+    const target = { parentElement: scroll, closest: () => null }
+
+    listeners.get('wheel')({
+      type: 'wheel', deltaY: 80, shiftKey: false, target,
+    })
+    assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM')
+
+    listeners.get('wheel')({
+      type: 'wheel', deltaY: -120, shiftKey: false, target,
+    })
+    scroll.scrollTop -= 120
+    listeners.get('scroll')()
+
+    const submission = hook.result.current.freezeQuestionSubmission()
+    assert.equal(submission.mode.questionSubmitBaseMode.kind, 'ANCHOR_AT')
+
+    hook.result.current.resumeQuestionSubmissionOnResponse(submission)
+    assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT',
+      'new response content cannot revive follow after the reader moved')
     hook.unmount()
   } finally {
     restoreBrowser()

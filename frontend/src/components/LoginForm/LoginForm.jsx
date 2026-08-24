@@ -48,7 +48,7 @@ export default function LoginForm({ onLogin }) {
   }
 
   return (
-    <div className="login">
+    <div className="login" data-auth-surface="login">
       <div className="login__card">
         <img src="/moebius.png" alt="Möbius" className="login__logo" />
         <h1 className="login__title">Möbius</h1>

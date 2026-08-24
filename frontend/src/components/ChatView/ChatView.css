@@ -111,6 +111,34 @@
   overflow: hidden;
 }
 
+/* An external Explorer/Finder drag claims the whole conversation, rather than
+   requiring a precise drop on the compact composer. The overlay is visual
+   only and pointer-transparent; the chat root owns the actual drop. */
+.chat__file-drop-target {
+  position: absolute;
+  inset: 8px;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  border: 2px dashed color-mix(in srgb, var(--accent) 72%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--accent) 9%, var(--bg));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.chat__file-drop-card {
+  padding: 10px 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border-light));
+  border-radius: 999px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface) 92%, var(--accent));
+  box-shadow: 0 8px 28px color-mix(in srgb, #000 18%, transparent);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
 /* Empty state: centered in the available chat area, with a FIXED
    bottom reservation so the composer doesn't overlap the logo.
    Centering means the cluster moves up when the visible viewport
@@ -350,6 +378,10 @@
   align-items: flex-start;
 }
 
+/* Event-only owner for Markdown-aware native selection copy. `contents` keeps
+   every prose/tool child in the message row's existing flex and gap geometry. */
+.chat__assistant-copy-surface { display: contents; }
+
 /* A search jump is a one-shot held position, not a new scrolling mode. The
    restrained row wash and text highlight make the destination legible without
    competing with ordinary user/assistant surfaces. */
@@ -554,6 +586,25 @@
   border-radius: 18px 18px 5px 18px;
   max-width: min(85%, 75ch);
   white-space: pre-wrap;
+}
+
+.chat__goal-message {
+  display: inline;
+}
+
+.chat__goal-message-tag {
+  display: inline-block;
+  margin-right: 9px;
+  padding: 1px 7px;
+  border: 1px solid rgb(255 255 255 / 22%);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 14%);
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1.55;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+  vertical-align: 0.08em;
 }
 
 .chat__text--assistant {
@@ -1992,6 +2043,7 @@
   /* Opaque footer cards need a wider physical gap to read as equally
      separated from the composer as the translucent progress rail. */
   --chat-foot-card-gap: 6px;
+  --chat-foot-pad-block: 8px;
   position: absolute;
   /* Interactive controls must stay wholly inside the device safe rectangle.
      Android Chrome paints the shell's gesture backdrop in the unsafe band;
@@ -2001,7 +2053,7 @@
   bottom: env(safe-area-inset-bottom, 0px);
   left: 0;
   right: 0;
-  padding: 8px 12px;
+  padding: var(--chat-foot-pad-block) 12px;
   background: transparent;
   pointer-events: none;
   z-index: 5;
@@ -2055,6 +2107,7 @@
 .chat__foot .queued,
 .chat__foot .connection-status,
 .chat__foot .chat__attach-tray,
+.chat__foot .chat__history-retry,
 .chat__foot .chat__question-nudge,
 .chat__foot .chat__resume-nudge,
 .chat__foot .chat__jump-latest,
@@ -2064,8 +2117,10 @@
 .chat__foot .composer-plus { pointer-events: auto; }
 
 /* One geometry-neutral stack for every control that floats above the measured
-   footer. Keeping cards and viewport cues in this same lane makes them clear
-   one another without changing --composer-h or the transcript scroll tail. */
+   footer. The safe default keeps transient-only controls clear of the composer.
+   When a contribution card actually renders, it becomes the lower anchor and
+   the transient lane grows upward from it without changing --composer-h or the
+   transcript scroll tail. */
 .chat__floating-actions {
   position: absolute;
   left: 12px;
@@ -2075,6 +2130,22 @@
   flex-direction: column;
   gap: var(--chat-foot-card-gap);
   pointer-events: none;
+}
+
+/* Only the contribution card gets the goal-rail-like close dock. Using the
+   rendered child as the state owner avoids lowering jump/resume/open-app
+   controls when the async contribution query has nothing to show. */
+.chat__floating-actions:has(> .contrib-card-stack) {
+  bottom: calc(
+    100% - var(--chat-foot-pad-block) - var(--chat-foot-pad-block)
+    + var(--chat-foot-card-gap)
+  );
+}
+
+.chat__floating-transients {
+  display: flex;
+  flex-direction: column;
+  gap: var(--chat-foot-card-gap);
 }
 
 /* Embedded composer: the app sheet (not the chat) owns the device
@@ -2492,6 +2563,8 @@
 /* ── + button (composer popover trigger) ──────────────── */
 .composer-plus {
   position: relative;
+  display: flex;
+  gap: 8px;
   flex-shrink: 0;
   align-self: flex-end;
 }
@@ -2558,6 +2631,18 @@
   box-shadow: none;
 }
 
+/* ── Brain usage button (model picker + weekly-usage gauge) ──
+   Same 48×48 frosted-glass circle as .chat__plus (shares the base
+   rule); this block only adds the small deltas so the pair reads as
+   a matched set: it never gets the plus's --active purple fill,
+   since ComposerPopover.jsx decides open/closed for THIS button
+   too and there is nothing separate here to mark active. */
+.chat__brain-usage {
+  align-self: flex-end;
+}
+.chat__brain-usage:focus { outline: none; }
+.chat__brain-usage:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 /* ── Composer popover (Attach + Model picker) ────────── */
 
 /* Drops UP from the trigger — composer sits at the bottom of the
@@ -2592,6 +2677,28 @@
      the keyboard or scroll the chat behind it. */
   touch-action: pan-y;
   overscroll-behavior: contain;
+}
+
+/* Shell scrollbars stay hidden by default (see index.css) — normally gated
+   back on with `(hover: hover) and (pointer: fine)` for pointer-accurate
+   clients only (see .chat__tool-diff-scroll). This panel opts in
+   unconditionally instead: the model list can run well past the popover's
+   capped height (two providers, several models each, plus the effort
+   stepper and automation toggles), and a hidden, discovery-only scrollbar
+   left that overflow with no visible affordance at all on a touch client,
+   which is exactly the environment the hover/pointer gate was written for. */
+.composer-popover {
+  --shell-scrollbar-width: thin;
+  --shell-scrollbar-display: block;
+  scrollbar-color: color-mix(in srgb, var(--muted) 32%, transparent) transparent;
+}
+
+.composer-popover::-webkit-scrollbar { width: 10px; }
+.composer-popover::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 32%, transparent);
+  background-clip: padding-box;
 }
 
 [data-theme="light"] .composer-popover {
@@ -2960,9 +3067,22 @@
   gap: 6px;
 }
 
+.chat__attach-thumb-frame {
+  /* The token fetch may finish after the optimistic message commits. Layout
+     readiness cannot depend on that authorization hop: reserve the exact
+     composer-card footprint immediately, then paint the image inside it. */
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: var(--attach-card, 96px);
+  height: var(--attach-card, 96px);
+  border-radius: 14px;
+  background: var(--surface2);
+}
+
 .chat__attach-thumb-button {
   display: inline-flex;
-  width: fit-content;
+  width: 100%;
+  height: 100%;
   padding: 0;
   border: 0;
   border-radius: 14px;
@@ -2980,8 +3100,8 @@
   /* Match the composer's attachment card after send — same `--attach-card`
      token, so the two can't drift. The thumbnail is a consistent square
      crop; tapping it still opens the full source image. */
-  width: var(--attach-card, 96px);
-  height: var(--attach-card, 96px);
+  width: 100%;
+  height: 100%;
   object-fit: cover;
   border-radius: 14px;
   border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
@@ -3185,6 +3305,15 @@
   animation: progress-rail-in 0.22s ease both;
 }
 
+/* The compact rail can stay frosted, but an expanded todo list needs a solid
+   reading surface: several lines of chat showing through the list materially
+   reduces task-title and dependency-label contrast. */
+.chat__progress-rail:has(.chat__goal-plan) {
+  background: var(--surface);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
 @keyframes progress-rail-in {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: none; }
@@ -3208,11 +3337,16 @@
 
 .chat__progress-step--button {
   appearance: none;
-  padding: 0;
+  flex: 1 0 100%;
+  width: 100%;
+  margin: -3px -4px;
+  padding: 3px 4px;
   border: 0;
+  border-radius: 7px;
   background: transparent;
   font: inherit;
   text-align: left;
+  justify-content: space-between;
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -3222,8 +3356,7 @@
 
 .chat__progress-step--toggle:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 3px;
-  border-radius: 3px;
+  outline-offset: 2px;
 }
 
 .chat__progress-step--expanded {
@@ -3252,9 +3385,328 @@
   font-weight: 600;
 }
 
+.chat__progress-toggle-mark {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  margin-left: 1px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: translateY(-1px) rotate(45deg);
+  transition: transform 0.16s ease;
+}
+
+.chat__progress-step[aria-expanded="true"] .chat__progress-toggle-mark {
+  transform: translateY(2px) rotate(225deg);
+}
+
+.chat__waits {
+  max-width: 720px;
+  margin: 0 auto var(--chat-foot-rail-gap);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat__wait-chip {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 7px 12px;
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+}
+
+.chat__wait-tag {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+.chat__wait-pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: chat-wait-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes chat-wait-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.72); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat__wait-pulse { animation: none; }
+}
+
+.chat__wait-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.chat__wait-meta {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.chat__wait-cancel {
+  flex: 0 0 auto;
+  margin-left: auto;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .chat__wait-cancel:hover {
+    background: color-mix(in srgb, var(--text) 10%, transparent);
+    color: var(--text);
+  }
+}
+
+.chat__wait-cancel:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.chat__goal-plan {
+  flex: 1 0 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: min(42vh, 360px);
+  overflow-y: auto;
+  margin-top: 2px;
+  padding: 7px 0 1px;
+  border-top: 1px solid var(--border-light);
+  scrollbar-width: thin;
+}
+
+.chat__goal-history {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--green) 30%, var(--border-light));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--green) 6%, var(--surface));
+}
+
+.chat__goal-history--failed {
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--border-light));
+  background: color-mix(in srgb, var(--danger) 5%, var(--surface));
+}
+
+.chat__goal-history-marker {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+.chat__goal-history-marker::after {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 3px;
+  width: 4px;
+  height: 8px;
+  border-right: 2px solid var(--bg);
+  border-bottom: 2px solid var(--bg);
+  transform: rotate(45deg);
+}
+
+.chat__goal-history--failed .chat__goal-history-marker {
+  background: var(--danger);
+}
+
+.chat__goal-history--failed .chat__goal-history-marker::after {
+  content: '!';
+  inset: 0;
+  width: auto;
+  height: auto;
+  border: 0;
+  color: white;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 18px;
+  text-align: center;
+  transform: none;
+}
+
+.chat__goal-history-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chat__goal-history-kicker {
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+.chat__goal-history--failed .chat__goal-history-kicker { color: var(--danger); }
+
+.chat__goal-history-objective {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.chat__goal-history-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.chat__goal-history-details { margin-top: 5px; }
+
+.chat__goal-history-details > summary {
+  width: fit-content;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chat__goal-history-details[open] > summary { color: var(--text); }
+
+.chat__goal-task {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 5px 4px;
+  border-radius: 7px;
+  color: var(--muted);
+}
+
+.chat__goal-task--running,
+.chat__goal-task--starting,
+.chat__goal-task--resuming,
+.chat__goal-task--paused,
+.chat__goal-task--ready,
+.chat__goal-task--verify {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.chat__goal-task-marker {
+  position: relative;
+  width: 12px;
+  height: 12px;
+  margin-top: 1px;
+  border: 1.5px solid color-mix(in srgb, currentColor 58%, transparent);
+  border-radius: 50%;
+}
+
+.chat__goal-task--running .chat__goal-task-marker {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.chat__goal-task--starting .chat__goal-task-marker,
+.chat__goal-task--resuming .chat__goal-task-marker,
+.chat__goal-task--paused .chat__goal-task-marker {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.chat__goal-task--ready .chat__goal-task-marker {
+  border-color: var(--accent);
+}
+
+.chat__goal-task--completed .chat__goal-task-marker {
+  border-color: var(--green);
+  background: var(--green);
+}
+
+.chat__goal-task--completed .chat__goal-task-marker::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 1px;
+  width: 3px;
+  height: 6px;
+  border-right: 1.5px solid var(--bg);
+  border-bottom: 1.5px solid var(--bg);
+  transform: rotate(45deg);
+}
+
+.chat__goal-task--failed .chat__goal-task-marker,
+.chat__goal-task--blocked .chat__goal-task-marker {
+  border-color: var(--danger);
+}
+
+.chat__goal-task--cancelled {
+  opacity: 0.68;
+}
+
+.chat__goal-task-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.chat__goal-task-title {
+  color: inherit;
+  font-weight: 550;
+  overflow-wrap: anywhere;
+}
+
+.chat__goal-task--completed .chat__goal-task-title,
+.chat__goal-task--cancelled .chat__goal-task-title {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.chat__goal-task-meta {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .chat__progress-rail,
   .chat__copy-toast { animation: none; }
+  .chat__progress-toggle-mark { transition: none; }
 }
 
 /* ── Queued messages tray ──────────────────────────── */
@@ -3406,6 +3858,65 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.queued__row--editing {
+  padding: 6px;
+  background: var(--bg);
+}
+
+.queued__editor {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 4px;
+}
+
+.queued__editor-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 56px;
+  max-height: 160px;
+  padding: 8px 10px;
+  /* Grow to fit the message being edited (capped by max-height, then scroll)
+     so a longer draft is visible instead of scrolling a cramped fixed box.
+     Browsers without field-sizing fall back to autoGrowTextarea's measurement. */
+  field-sizing: content;
+  overflow-y: auto;
+  resize: none;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  outline: none;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  /* Keep at 16px: iOS Safari zooms focused inputs below 16px (see contract above). */
+  font-size: 16px;
+  line-height: 1.4;
+}
+
+.queued__editor-input:focus {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.queued__editor-actions {
+  display: flex;
+  align-items: flex-start;
+}
+
+.queued__edit-save:not(:disabled) {
+  color: var(--accent);
+}
+
+.queued__editor-error {
+  grid-column: 1 / -1;
+  padding: 0 4px 2px;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.3;
 }
 
 .queued__action {

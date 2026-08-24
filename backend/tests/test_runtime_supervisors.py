@@ -65,7 +65,8 @@ async def test_start_fails_open_when_chat_supervisor_wiring_breaks(monkeypatch):
   monkeypatch.setattr(supervisors, "_start_frontend_watcher", frontend)
   monkeypatch.setattr(supervisors, "_start_chat_supervisors", broken_chat_wiring)
 
-  await supervisors.start()
+  await supervisors.start_process_services()
+  await supervisors.start_database_services()
 
   assert frontend_started is True
   assert supervisors._tasks == {}

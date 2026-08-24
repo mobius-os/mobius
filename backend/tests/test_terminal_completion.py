@@ -75,6 +75,7 @@ def _seed_chat(chat_id, messages=None, pending=None, running=None,
       messages=messages if messages is not None else [],
       pending_messages=pending if pending is not None else [],
       session_id=session_id, provider="claude",
+      agent_settings_json={"model": "claude-sonnet-4-6"},
     )
     db.add(chat)
     if running:

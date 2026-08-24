@@ -14,8 +14,15 @@ from sqlalchemy import Text, case, cast, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import activity, auth, chat_search, models, providers, questions
+from app import (
+  activity, auth, chat_search, models, providers, questions, secure_inputs,
+)
 from app.chat_visibility import coerce_agent_settings, visible_in_owner_drawer
+from app.chat_waits import (
+  armed_wait_chat_ids,
+  armed_waits_for_chat,
+  serialize_wait,
+)
 from app.config import get_settings
 from app.chat import (
   _finish_run,
@@ -30,6 +37,7 @@ from app.chat_retention import purge_expired_chat_tombstones
 from app.chat_titles import first_user_message_title
 from app.database import get_db
 from app.memory_observability import record_memory_checkpoint_once
+from app.owner_input import OwnerInputKind
 from app.deps import (
   Principal, get_owner_or_chat_embed_principal, get_current_owner, get_principal,
   reject_cross_site,
@@ -323,7 +331,13 @@ def issue_media_token(
   return {"token": token, "expires_in": 900}
 
 
-def _owner_chat_summary(chat, *, durable_running: bool = False) -> dict:
+def _owner_chat_summary(
+  chat,
+  *,
+  durable_running: bool = False,
+  durable_waiting: bool = False,
+  transient_owner_input_kind: OwnerInputKind | None = None,
+) -> dict:
   """Canonical owner-list shape for a Chat or its lightweight projection."""
   return {
     "id": chat.id,
@@ -334,11 +348,23 @@ def _owner_chat_summary(chat, *, durable_running: bool = False) -> dict:
     "has_messages": bool(chat.has_messages),
     "created_by_app_id": chat.created_by_app_id,
     "running": durable_running or is_chat_running(chat.id),
+    # Waiting is durable idle work, distinct from an agent actively streaming.
+    # The drawer renders it explicitly rather than making an armed chat look
+    # inactive or overloading the running indicator.
+    "waiting": durable_waiting,
     # A turn parked on the owner's AskUserQuestion answer is `running` but is
     # NOT streaming — nothing to interrupt, and the card is durable — so the
     # shell excludes it from the reload-defer's active-turn test. The durable
     # column is the source of truth (see `_open_question_id_for`).
     "pending_question_id": chat.pending_question_id,
+    # The shell only needs to know which non-secret interaction is waiting.
+    # Questions win if a transient interaction somehow overlaps because their
+    # durable id also governs answer routing and restart recovery.
+    "owner_input_kind": (
+      "question"
+      if chat.pending_question_id is not None
+      else transient_owner_input_kind
+    ),
   }
 
 
@@ -492,12 +518,24 @@ def _chat_detail_response(
     chat_id=chat.id,
     data_dir=get_settings().data_dir,
   )
+  from app.goal_plans import terminal_goal_summaries_by_message_index
+  summaries_by_index = terminal_goal_summaries_by_message_index(
+    db, chat.id, all_msgs,
+  )
+  if summaries_by_index:
+    next_page = list(page)
+    for relative_index, message in enumerate(page):
+      summaries = summaries_by_index.get(start + relative_index)
+      if not summaries:
+        continue
+      projected_message = dict(message)
+      projected_message["goal_summaries"] = summaries
+      next_page[relative_index] = projected_message
+    page = next_page
 
   provider = chat.provider or "claude"
   settings_obj = _coerce_agent_settings(chat.agent_settings_json) or None
-  active_goal_objective = (
-    running_goal_objective(db, chat.id) if running else None
-  )
+  active_goal_objective = running_goal_objective(db, chat.id)
   response = {
     "id": chat.id,
     "title": chat.title,
@@ -516,7 +554,6 @@ def _chat_detail_response(
     "provider": provider,
     "created_by_app_id": chat.created_by_app_id,
     "auto_resume_on_limit": bool(chat.auto_resume_on_limit),
-    "auto_resume_on_restart": bool(chat.auto_resume_on_restart),
     "agent_settings_json": settings_obj,
     "effective_agent_settings": effective_agent_settings(
       get_settings().data_dir,
@@ -526,6 +563,15 @@ def _chat_detail_response(
     "has_assistant_turns": any(
       message.get("role") == "assistant" for message in all_msgs
     ),
+    # Armed durable waits: the visible "Waiting for …" state. Refreshed by the
+    # detail refetches the run lifecycle already triggers, so declare (during a
+    # run) and resume (a new run) both reach the UI without extra plumbing.
+    # Owner surface only — wait check commands are backend operational detail
+    # an embedded app frame has no business reading (same boundary as
+    # session_id).
+    "waits": [
+      serialize_wait(row) for row in armed_waits_for_chat(db, chat.id)
+    ] if expose_session else [],
   }
   if requested_anchor_found is not None:
     response["requested_anchor_found"] = requested_anchor_found
@@ -582,13 +628,20 @@ def list_chats(
     # owner conversation into the drawer by setting owner_visible at creation.
     chats = [c for c in chats if _visible_in_owner_drawer(c)]
   durable_running = running_chat_ids(db, (chat.id for chat in chats))
+  durable_waiting = armed_wait_chat_ids(db)
+  secure_input_chats = secure_inputs.pending_chat_ids()
   record_memory_checkpoint_once(
     "shell_chat_list_first_response",
     chat_count=len(chats),
   )
   return [
     _owner_chat_summary(
-      chat, durable_running=chat.id in durable_running,
+      chat,
+      durable_running=chat.id in durable_running,
+      durable_waiting=chat.id in durable_waiting,
+      transient_owner_input_kind=(
+        "secure_input" if chat.id in secure_input_chats else None
+      ),
     )
     for chat in chats
   ]
@@ -779,15 +832,15 @@ def create_chat(
 ):
   """Creates a new chat.
 
-  Leaves `agent_settings_json` NULL so the chat reads the live global
-  defaults from `/data/shared/agent-settings.json` until the user
+  Leaves `agent_settings_json` NULL so the chat reads the owner's latest
+  picker choices from `/data/shared/agent-settings.json` until the user
   picks something specific. Snapshotting at creation time used to
   freeze whatever the defaults were when the empty chat was first
   created, and the frontend's empty-chat reuse path then surfaced
   that stale snapshot — silently ignoring whichever model/effort the
   user had since picked. The snapshot now happens lazily, at the
   first commit point: a PATCH from the picker (see `patch_chat`
-  below) or the first message send (see `chat.py:_snapshot_initial_settings`).
+  below) or the first admitted message send (see `chat.py`).
   Either path freezes the chat's settings so subsequent global
   changes from OTHER chats don't bleed in. Provider is still
   inherited from owner.provider — the implicit "default = last
@@ -832,9 +885,6 @@ def create_chat(
     agent_settings_json=None,
     auto_resume_on_limit=(
       bool(owner.auto_resume_on_limit_default) if owner else False
-    ),
-    auto_resume_on_restart=(
-      bool(owner.auto_resume_on_restart_default) if owner else True
     ),
   )
   db.add(chat)
@@ -1009,7 +1059,6 @@ async def patch_chat(
     body.title is not None
     or body.pinned is not None
     or body.auto_resume_on_limit is not None
-    or body.auto_resume_on_restart is not None
     or body.by_agent
     or body.clear_title
   ):
@@ -1071,12 +1120,6 @@ async def patch_chat(
       # chat, matching other "last picked" defaults without making the setting
       # global at runtime.
       principal.owner.auto_resume_on_limit_default = body.auto_resume_on_limit
-
-    if body.auto_resume_on_restart is not None:
-      chat.auto_resume_on_restart = body.auto_resume_on_restart
-      principal.owner.auto_resume_on_restart_default = (
-        body.auto_resume_on_restart
-      )
 
     # Determine the effective target provider. The body may set it
     # explicitly, OR it may be implied by a model-only PATCH whose
@@ -1241,7 +1284,6 @@ async def patch_chat(
       "agent_settings_json": _coerce_agent_settings(chat.agent_settings_json) or None,
       "provider": chat.provider or "claude",
       "auto_resume_on_limit": bool(chat.auto_resume_on_limit),
-      "auto_resume_on_restart": bool(chat.auto_resume_on_restart),
       "effective": effective_agent_settings(
         data_dir,
         _coerce_agent_settings(chat.agent_settings_json) or None,
@@ -1333,6 +1375,9 @@ def get_chat_runtime(
     "pending_messages": list(chat.pending_messages or []),
     "pending_question_id": _open_question_id_for(chat),
     "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
+    "waits": [
+      serialize_wait(row) for row in armed_waits_for_chat(db, chat.id)
+    ] if principal.scope != "chat_embed" else [],
   }
 
 
@@ -1751,6 +1796,14 @@ async def delete_chat(
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
+  """Soft-deletes a chat under its send/delegation admission gate."""
+  from app.chat_queue import get_transition_lock
+
+  async with get_transition_lock(chat_id):
+    await _delete_chat_locked(chat_id, db)
+
+
+async def _delete_chat_locked(chat_id: str, db: Session) -> None:
   """Soft-deletes a chat and stops any running agent for it."""
   # Only attempt to stop if the chat is actually running. An idle chat
   # has no proc/SDK client/session to interrupt, so calling
@@ -1770,6 +1823,21 @@ async def delete_chat(
         status_code=409,
         detail="Could not stop active agent; retry",
       )
+  from app.delegations import (
+    active_delegation_ids_for_chat,
+    cancel_delegation_execution,
+  )
+  for delegation_id in active_delegation_ids_for_chat(db, chat_id):
+    # This runs under get_transition_lock(chat_id); a delegation whose child
+    # chat IS this chat must not try to re-acquire that same non-reentrant lock.
+    if not await cancel_delegation_execution(
+      delegation_id, held_chat_locks=frozenset({chat_id}),
+    ):
+      raise HTTPException(
+        status_code=409,
+        detail="Could not stop active delegated work; retry",
+      )
+  db.rollback()
   # Bump generation BEFORE the soft-delete commit so that any run
   # that started in the TOCTOU window between the is_chat_running
   # check above and now sees `we_own_gen == False` on its next gen
@@ -1778,6 +1846,12 @@ async def delete_chat(
   bump_run_generation(chat_id)
   chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
   if chat:
+    # Deleting a chat is also owner intent to stop its future work. Stage the
+    # cancellation in the same transaction as the tombstone so an in-flight
+    # probe cannot re-arm or deliver after deletion; recovery does not revive
+    # a promise the owner explicitly removed.
+    from app.chat_waits import stage_cancel_waits_for_chat
+    stage_cancel_waits_for_chat(db, chat_id)
     chat.deleted_at = now_naive_utc()
     db.commit()
     # Publish the committed tombstone before best-effort run cleanup. If that
@@ -1793,6 +1867,8 @@ async def delete_chat(
   # the delete-ABA case — reads `we_own_gen=False` and skips finalizing onto
   # the soft-deleted row. recover_chat restores it with a strictly-newer gen.
   questions.cancel(chat_id)
+  from app import secure_inputs
+  secure_inputs.cancel_chat(chat_id)
   mark_chat_deleted(chat_id)
   # Close the chat's durable run state as part of the delete. A delete with a
   # LIVE handle stops the runner but hands durable closure to run_chat's finally,

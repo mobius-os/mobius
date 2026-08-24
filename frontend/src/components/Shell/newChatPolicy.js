@@ -2,6 +2,35 @@ function normalizedId(value) {
   return value == null ? null : String(value)
 }
 
+/** Persist an autosend handoff and prove it is readable before claiming it. */
+export function stageVerifiedNewChatHandoff(chatId, input, {
+  stageHandoff,
+  readHandoff,
+} = {}) {
+  const text = typeof input === 'string' ? input : ''
+  if (!text.trim() || typeof stageHandoff !== 'function'
+      || typeof readHandoff !== 'function') return false
+
+  stageHandoff(chatId, text, { autoSend: true })
+  return readHandoff(chatId)?.autoSendDraft === text
+}
+
+/** A failed allocation retries only after the shared owner proves recovery. */
+export function shouldRetryNewChatAllocation(presentation, recoveryGeneration) {
+  if (!presentation?.failure || presentation.failure === 'queue') return false
+  if (presentation.materialized || presentation.releasing) return false
+  return recoveryGeneration > (presentation.failedAtRecoveryGeneration ?? 0)
+}
+
+/** Preserve live presentation state when an asynchronous allocation fails. */
+export function failedNewChatPresentation(current, verdict, recoveryGeneration) {
+  return {
+    ...current,
+    failure: verdict === 'offline' ? 'offline' : 'error',
+    failedAtRecoveryGeneration: recoveryGeneration,
+  }
+}
+
 /**
  * Whether an immediate New Chat surface still owns what the user is seeing.
  *
@@ -194,7 +223,6 @@ export function createdChatDetailCache(created) {
       effective: detail.effective_agent_settings,
       has_assistant_turns: detail.has_assistant_turns,
       auto_resume_on_limit: !!detail.auto_resume_on_limit,
-      auto_resume_on_restart: !!detail.auto_resume_on_restart,
     },
   }
 }

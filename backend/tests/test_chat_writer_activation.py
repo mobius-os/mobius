@@ -702,6 +702,8 @@ def test_append_steered_user_message_lands_at_end_of_transcript():
   roles = [m["role"] for m in chat["messages"]]
   assert roles == ["user", "assistant", "user"]
   assert chat["messages"][-1]["content"] == "steered"
+  assert chat["messages"][-1]["steered"] is True
+  assert stored["steered"] is True
   # ts bumped past every transcript + pending ts (max was the queued 9).
   assert stored["ts"] > 9
   # The pending queue was untouched — a steer is NOT a queue append.
@@ -728,3 +730,5 @@ def test_append_steered_user_message_appends_when_no_assistant_yet():
 
   chat = _load("c-steer2")
   assert [m["content"] for m in chat["messages"]] == ["start", "steered"]
+  assert "steered" not in chat["messages"][0]
+  assert chat["messages"][1]["steered"] is True

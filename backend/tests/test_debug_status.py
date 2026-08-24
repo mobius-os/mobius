@@ -69,6 +69,15 @@ def test_debug_status_shape_matches_golden(client, auth):
     "omitted": True,
     "detail_url": "/api/debug/memory",
   }
+  public_apps = payload.pop("public_apps")
+  assert set(public_apps) == {"apps", "transport"}
+  assert all(str(app_id).isdigit() for app_id in public_apps["apps"])
+  assert set(public_apps["transport"]) == {
+    "clients", "active_requests", "active_limit", "clients_created",
+    "clients_evicted",
+  }
+  assert public_apps["transport"]["active_limit"] > 0
+  assert all(value >= 0 for value in public_apps["transport"].values())
   golden_path = Path(__file__).with_name("golden_debug_status.json")
   expected = json.loads(golden_path.read_text(encoding="utf-8"))
   assert payload == expected

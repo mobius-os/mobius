@@ -409,6 +409,7 @@ def test_authenticated_restart_fallback_becomes_due_park():
 
   assert result.manual == []
   assert result.restart_parks == [cid]
+  assert result.restart_waiting == []
   assert _chat(cid)["running_status"] is None
   run = _run(cid)
   assert run["status"] == "parked"
@@ -441,6 +442,7 @@ def test_unacknowledged_restart_intent_remains_manual():
 
   assert result.manual == [cid]
   assert result.restart_parks == []
+  assert result.restart_waiting == []
   run = _run(cid)
   assert run["status"] == "interrupted"
   assert run["restart_nonce"] is None
@@ -499,6 +501,7 @@ def test_five_chat_restart_recovers_timeouts_and_finalize_failure(
     db.close()
   assert set(result.restart_parks) == {*timeout_ids, finalize_id}
   assert result.manual == []
+  assert result.restart_waiting == []
   assert all(_run(cid)["status"] == "parked" for cid in all_ids)
 
   scheduled = []
@@ -607,6 +610,49 @@ def test_reconcile_question_tail_note_is_not_resumable():
   assert not note.get("resumable")
 
 
+def test_authenticated_restart_question_stays_waiting_not_manual():
+  """An exact restart must preserve a question without claiming it failed.
+
+  The owner still has to answer the card; neither automatic Continue nor the
+  generic "tap to resume" crash notification is a valid continuation.
+  """
+  cid = "reco-authenticated-question"
+  nonce = "restart-nonce-question"
+  _seed(cid, messages=[
+    {"role": "user", "content": "hi", "ts": 1},
+    {"role": "assistant", "ts": 2, "content": "", "blocks": [
+      {"type": "text", "content": "I need your approval."},
+      {"type": "question", "id": "q1", "text": "Restart now?"},
+    ]},
+  ])
+  db = SessionLocal()
+  try:
+    run = db.query(models.ChatRun).filter(
+      models.ChatRun.id == f"rt-{cid}",
+    ).one()
+    chat = db.query(models.Chat).filter(models.Chat.id == cid).one()
+    run.restart_nonce = nonce
+    chat.pending_question_id = "q1"
+    db.commit()
+    result = chat_mod.reconcile_startup_chats(
+      db, restart_authorization=nonce,
+    )
+  finally:
+    db.close()
+
+  assert result.manual == []
+  assert result.restart_parks == []
+  assert result.restart_waiting == [cid]
+  run = _run(cid)
+  assert run["status"] == "interrupted"
+  assert run["restart_nonce"] is None
+  blocks = _chat(cid)["messages"][-1]["blocks"]
+  assert blocks[-1]["type"] == "question"
+  note = next(block for block in blocks if block["type"] == "error")
+  assert "answer is still needed" in note["message"]
+  assert not note.get("resumable")
+
+
 def test_reconcile_restart_note_normalizes_before_open_question():
   """A fallback marker may contain either historical block ordering."""
   cid = "reco-restart-question-order"
@@ -702,7 +748,12 @@ def test_send_while_draining_queues_instead_of_starting(client, auth):
   cid = str(uuid.uuid4())
   db = SessionLocal()
   try:
-    db.add(models.Chat(id=cid, title="t", messages=[]))
+    db.add(models.Chat(
+      id=cid,
+      title="t",
+      messages=[],
+      agent_settings_json={"model": "claude-opus-4-8"},
+    ))
     db.commit()
   finally:
     db.close()
@@ -732,7 +783,12 @@ def test_force_steer_while_draining_queues_too(client, auth):
   cid = str(uuid.uuid4())
   db = SessionLocal()
   try:
-    db.add(models.Chat(id=cid, title="t", messages=[]))
+    db.add(models.Chat(
+      id=cid,
+      title="t",
+      messages=[],
+      agent_settings_json={"model": "claude-opus-4-8"},
+    ))
     db.commit()
   finally:
     db.close()

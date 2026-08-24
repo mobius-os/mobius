@@ -28,7 +28,7 @@ fail() { echo "GATE FAIL: $1" >&2; exit 1; }
 # PRESHIP_OVERRIDE=1 when you've eyeballed CI yourself or main has no runs
 # yet (brand-new repo). NOTE: this check assumes GitHub CI exists
 # (.github/workflows/ + a remote); it is NOT omitted-as-moot — CI is live.
-echo "[1/5] main CI status (fail-closed)"
+echo "[1/6] main CI status (fail-closed)"
 if [ "${PRESHIP_OVERRIDE:-0}" = "1" ]; then
   echo "  SKIPPED — PRESHIP_OVERRIDE=1"
 elif ! command -v gh >/dev/null 2>&1; then
@@ -44,7 +44,7 @@ else
   echo "  ok — latest completed main CI: success"
 fi
 
-echo "[2/5] conflict markers"
+echo "[2/6] conflict markers"
 # `git grep` only tracked content; check working tree too.
 if grep -rnE '^(<{7}|={7}|>{7})( |$)' --include='*.py' --include='*.js' \
    --include='*.jsx' --include='*.mjs' --include='*.html' \
@@ -53,7 +53,7 @@ if grep -rnE '^(<{7}|={7}|>{7})( |$)' --include='*.py' --include='*.js' \
 fi
 echo "  ok — none"
 
-echo "[3/5] python syntax (changed + key files)"
+echo "[3/6] python syntax (changed + key files)"
 python3 - <<'PY' || fail "python syntax error (above)"
 import ast, glob, sys
 bad = 0
@@ -66,13 +66,17 @@ sys.exit(1 if bad else 0)
 PY
 echo "  ok — all backend .py parse"
 
+echo "[4/6] immutable schema migration history"
+python3 backend/scripts/check-schema-migrations.py \
+  || fail "published migration history changed"
+
 if [ "$FULL" = "0" ]; then
-  echo "[4/5] SKIPPED full pytest (use --full)"
-  echo "[5/5] SKIPPED frontend build (use --full)"
+  echo "[5/6] SKIPPED full pytest (use --full)"
+  echo "[6/6] SKIPPED frontend build (use --full)"
   echo "GATE PASS (fast)"; exit 0
 fi
 
-echo "[4/5] full backend pytest (worktree-scoped container)"
+echo "[5/6] full backend pytest (worktree-scoped container)"
 slug="$(basename "$PWD" | sed 's/^session-//')"
 # pytest's EXIT CODE is the source of truth (non-zero on any failure or a
 # non-pytest error like a missing image) — grepping "N passed" off the tail
@@ -86,7 +90,7 @@ if ! docker compose -p "mobius-test-$slug" -f docker-compose.test.yml \
 fi
 echo "  ok — $(grep -oE '[0-9]+ passed' /tmp/preship-pytest.log | tail -1)"
 
-echo "[5/5] frontend build (Node 24) + offline-build check"
+echo "[6/6] frontend build (Node 24) + offline-build check"
 "$PWD/scripts/docker-probe.sh" --timeout 900 -- \
   -v "$PWD/frontend":/app -w /app node:24-trixie-slim sh -c \
   "npm install --no-audit --no-fund >/tmp/preship-npm.log 2>&1 && \

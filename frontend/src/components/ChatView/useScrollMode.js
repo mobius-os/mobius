@@ -13,15 +13,14 @@
  *                                  — user msg at top (post-send), keyed on
  *                                    the stable client `cid` (data-cid)
  *   { kind: 'FOLLOW_BOTTOM' }     — sticky-bottom for streaming
- *   { kind: 'ANCHOR_AT', key, offset, part?, questionSubmitViewportH?,
- *     questionSubmitBaseMode? }
+ *   { kind: 'ANCHOR_AT', key, offset, part?, questionSubmitBaseMode? }
  *                                  — anchored at a message and, when that row
  *                                    is taller than the viewport, an ordered
  *                                    child-index path within it; `offset` is
  *                                    measured from the addressed element's
  *                                    top. An in-message question may
  *                                    temporarily preserve its submit-time
- *                                    position at one viewport size
+ *                                    position across responsive geometry
  *
  * Send pinning has one rule for direct, queued, and steered messages: the
  * first visible user message always pins; every later message pins only at the
@@ -40,9 +39,10 @@
  * active scroll-box height, so a keyboard first removes now-hidden blank room;
  * only content that no longer fits makes FOLLOW_BOTTOM move. The one explicit
  * exception is the transient
- * question-submit anchor: it reserves exactly enough tail room for a stable
- * same-viewport handoff. A keyboard resize restores the pre-submit mode before
- * sizing, so the answered card moves exactly as the unanswered card would.
+ * question-submit anchor: it reserves exactly enough tail room to preserve the
+ * same visible card offset through keyboard, toolbar, pane, and orientation
+ * changes. Visible response activity may restore a captured follow; a prior
+ * hold remains exact until newer reader intent replaces it.
  * Gesture-driven bottom detection reads the scroll container's geometry in
  * the scroll event itself. There is no second sentinel/observer authority
  * that can lag behind the reader and contradict the current viewport.
@@ -623,13 +623,8 @@ export function _anchorModeIntersectsContent(target, mode, viewportHeight) {
 
 
 function _durableQuestionSubmissionMode(mode) {
-  if (mode?.kind !== 'ANCHOR_AT') return mode
-  if (!Object.hasOwn(mode, 'questionSubmitViewportH')
-      && !Object.hasOwn(mode, 'questionSubmitBaseMode')) {
-    return mode
-  }
+  if (!isQuestionSubmissionMode(mode)) return mode
   const {
-    questionSubmitViewportH: _transientViewport,
     questionSubmitBaseMode: _transientBaseMode,
     ...durable
   } = mode
@@ -637,19 +632,13 @@ function _durableQuestionSubmissionMode(mode) {
 }
 
 
-/** A question answer temporarily overlays the reader's existing scroll mode
- * only while the viewport size is unchanged. Keyboard movement belongs to the
- * pre-submit mode: release the overlay before spacer sizing so the answered
- * card receives the same resize behavior as the unanswered card. */
-export function releaseQuestionSubmissionForViewport(mode, viewportHeight) {
-  if (mode?.kind !== 'ANCHOR_AT'
-      || !Number.isFinite(mode.questionSubmitViewportH)
-      || !Number.isFinite(viewportHeight)
-      || Math.abs(mode.questionSubmitViewportH - viewportHeight) <= 1) {
-    return mode
-  }
-  return mode.questionSubmitBaseMode
-    || _durableQuestionSubmissionMode(mode)
+/** A submitted in-message question temporarily overlays the reader's prior
+ * mode. The overlay is semantic rather than viewport-sized: keyboard, toolbar,
+ * pane, and orientation geometry must preserve it. Visible response activity
+ * may restore captured follow; otherwise newer reader intent replaces it. */
+export function isQuestionSubmissionMode(mode) {
+  return mode?.kind === 'ANCHOR_AT'
+    && Object.hasOwn(mode, 'questionSubmitBaseMode')
 }
 
 /** The ANCHOR_AT twin of `_pinReapplyNeeded` — the SAME two-case repair. A
@@ -750,6 +739,7 @@ export function entryRestoreDecision({ mode, saved, messages, scrollEl, phase })
   const savedPresent = !!saved
   const restorePhase = phase === 'cache-validating'
     || phase === 'cached'
+    || phase === 'stream-catchup'
     || phase === 'ready'
   if (mode?.kind !== 'INITIAL' || !restorePhase) {
     return { action: 'idle', resolved: false, savedPresent }
@@ -784,8 +774,8 @@ export function _modeForPersistence(mode, messages, scrollEl) {
 
 /** Spacer height needed so the latest user message can sit near the
  *  top of the viewport, with the PIN_OFFSET breathing room above it, or so a
- *  transient question-submit anchor remains reachable while the submit-time
- *  viewport size is unchanged.
+ *  transient question-submit anchor remains reachable through responsive
+ *  viewport changes.
  *
  *  Tail geometry is the defining invariant. Reservation exists before a
  *  downward gesture reaches the latest row, so scrollHeight cannot grow at the
@@ -808,8 +798,8 @@ export function _modeForPersistence(mode, messages, scrollEl) {
  *  end-of-scroll rest ever feels cramped.)
  *
  *  A question-submit anchor instead reserves only its exact reachability
- *  deficit for a same-viewport handoff. A keyboard resize restores the mode
- *  that owned the unanswered card before this function runs again.
+ *  deficit. Viewport changes recompute that deficit and reapply the same
+ *  anchor, so submission remains visually fixed through its handoff policy.
  */
 const PIN_OFFSET = 4
 const PIN_BOTTOM_ROOM = 0
@@ -821,8 +811,7 @@ export function _computeSpacerH(
 ) {
   if (!scrollEl || !listEl) return 0
   const viewH = scrollEl.clientHeight
-  if (mode?.kind === 'ANCHOR_AT'
-      && Number.isFinite(mode.questionSubmitViewportH)) {
+  if (isQuestionSubmissionMode(mode)) {
     const anchorEl = _anchorEl(scrollEl, mode)
     if (!anchorEl) return 0
     const anchorTarget = Math.max(
@@ -1032,10 +1021,11 @@ const FOLLOW_ENTRY_EVENTS = new Set([
  */
 export function modeForScrollTransition(previousMode, proposedMode, event) {
   if (!proposedMode) return previousMode
-  const restoresQuestionSubmissionBase =
-    event === 'layout:question-viewport-release'
-    && previousMode?.kind === 'ANCHOR_AT'
-    && Number.isFinite(previousMode.questionSubmitViewportH)
+  const restoresQuestionSubmissionBase = (
+    event === 'stream:question-response-follow'
+      && proposedMode?.kind === 'FOLLOW_BOTTOM'
+  )
+    && isQuestionSubmissionMode(previousMode)
     && previousMode.questionSubmitBaseMode === proposedMode
   if (restoresQuestionSubmissionBase) return proposedMode
 
@@ -1303,22 +1293,42 @@ export function modeForDisclosureToggle(scrollEl, currentMode) {
 
 
 /** Submitting an in-message question answer resumes output inside the same
- * assistant row and may replace the card's controls immediately. It is not a
- * request to follow the live tail. Freeze the exact visible row/offset before
- * that card-to-stream handoff so neither the control reflow nor resumed output
- * moves the reader. The overlay remembers the mode that owned the unanswered
- * card and is scoped to the current viewport height; a keyboard resize returns
- * to that base mode before layout is recomputed. */
+ * assistant row and may replace the card's controls immediately. Freeze the
+ * exact visible row/offset during that card-to-stream handoff. The overlay
+ * remembers the mode that owned the unanswered card: an accepted same-turn
+ * answer may restore its prior FOLLOW_BOTTOM, while a reading hold remains a
+ * hold. Keyboard, toolbar, pane, and orientation changes preserve the overlay;
+ * visible response activity may restore prior follow, while newer reader intent
+ * replaces an exact hold. */
 export function modeForQuestionSubmission(scrollEl, currentMode) {
   if (!scrollEl) return currentMode
   const anchor = anchorModeFromScroll(scrollEl)
   if (!anchor) return currentMode
   return {
     ...anchor,
-    questionSubmitViewportH: scrollEl.clientHeight,
     questionSubmitBaseMode:
       currentMode?.questionSubmitBaseMode || currentMode,
   }
+}
+
+
+/** Restore live following when the first post-answer activity starts only
+ * when the submitted card was itself being followed and no newer reader
+ * scroll or semantic location has replaced that temporary hold. Acceptance
+ * alone leaves the card anchored: it is not yet a visible continuation. */
+export function modeAfterQuestionResponseStart({
+  currentMode,
+  submission,
+  currentReaderIntentVersion,
+}) {
+  const submittedMode = submission?.mode
+  const baseMode = submittedMode?.questionSubmitBaseMode
+  if (baseMode?.kind !== 'FOLLOW_BOTTOM'
+      || submission?.readerIntentVersion !== currentReaderIntentVersion) {
+    return currentMode
+  }
+  if (currentMode === baseMode) return currentMode
+  return currentMode === submittedMode ? baseMode : currentMode
 }
 
 
@@ -1390,9 +1400,10 @@ export function modeForQueuedSubmission(scrollEl, currentMode) {
  * @param {'history'|'cache-validating'|'cached'|'stream-catchup'|'preparing'|'ready'} args.initialEntryPhase
  *   History blocks reveal, cached is a caller-validated restoration window,
  *   cache-validating mounts a complete cached window behind the gate so its
- *   exact nested coordinate can be checked, stream-catchup holds a running
- *   transcript until replay commits, preparing is a hidden progressive
- *   cold render, and ready means authoritative history has settled.
+ *   exact nested coordinate can be checked, stream-catchup is an authoritative
+ *   running frame whose transport replay may still reconcile in place,
+ *   preparing is a hidden progressive cold render, and ready means settled
+ *   authoritative history.
  * @param {() => void} [args.onCachedCoordinateReady]
  *   Promotes a hidden validation cache after its exact saved part resolves.
  * @param {boolean} args.ownsReadingPosition
@@ -1460,6 +1471,11 @@ export default function useScrollMode({
   // settlement still waiting on the quiet edge. The effect publishes its
   // local cancel closure here so those actions cannot be overwritten later.
   const discardPendingReaderSettleRef = useRef(null)
+  // Question Submit must snapshot before it retires a pending gesture, while
+  // the gesture's dirty state lives inside the layout effect. This bridge reads
+  // the exact hold only on that rare semantic boundary, never in the hot scroll
+  // path.
+  const capturePendingReaderHoldRef = useRef(null)
   // Monotonic generation for actual reader scroll intent. Send/steer snapshots
   // and every deferred/automatic geometry commit use this same authority:
   // once a newer gesture lands, older work can never regain ownership merely
@@ -1536,6 +1552,7 @@ export default function useScrollMode({
       // is assigned only after the caller proves saved-coordinate coverage.
       if (
         initialEntryPhaseRef.current !== 'cached'
+        && initialEntryPhaseRef.current !== 'stream-catchup'
         && initialEntryPhaseRef.current !== 'ready'
       ) return
       if (forceRevealRef.current) forceRevealRef.current()
@@ -1806,17 +1823,48 @@ export default function useScrollMode({
   }, [scrollRef, transitionMode])
 
   const freezeQuestionSubmission = useCallback(() => {
-    const nextMode = modeForQuestionSubmission(scrollRef.current, modeRef.current)
+    const pendingReaderHold = capturePendingReaderHoldRef.current?.()
+    const nextMode = modeForQuestionSubmission(
+      scrollRef.current,
+      pendingReaderHold || modeRef.current,
+    )
+    const readerIntentVersion = readerIntentVersionRef.current
     // Submit is a newer semantic reading action. Its current-geometry snapshot
     // must not be replaced a few milliseconds later by the quiet settlement of
     // the scroll that positioned the question card.
-    supersedePendingReaderGesture()
     readerLocationExplicitRef.current = true
-    return transitionMode(
+    supersedePendingReaderGesture()
+    const mode = transitionMode(
       nextMode,
       'send:question-freeze',
     )
+    return {
+      mode,
+      readerIntentVersion,
+    }
   }, [scrollRef, supersedePendingReaderGesture, transitionMode])
+
+  const resumeQuestionSubmissionOnResponse = useCallback((submission) => {
+    const nextMode = modeAfterQuestionResponseStart({
+      currentMode: modeRef.current,
+      submission,
+      currentReaderIntentVersion: readerIntentVersionRef.current,
+    })
+    if (nextMode === modeRef.current) return modeRef.current
+    const mode = transitionMode(nextMode, 'stream:question-response-follow')
+    const scrollEl = scrollRef.current
+    if (mode === nextMode && scrollEl) {
+      writeMode(
+        scrollEl,
+        mode,
+        'stream:question-response-follow',
+        submission.readerIntentVersion,
+      )
+      lastAppliedModeRef.current = mode
+      persistMode()
+    }
+    return mode
+  }, [persistMode, scrollRef, transitionMode, writeMode])
 
   const anchorPagination = useCallback((key, offset) => {
     if (!key) return modeRef.current
@@ -2179,23 +2227,9 @@ export default function useScrollMode({
       viewportChange = false,
       authorityVersion = currentAuthority(),
     } = {}) {
-      // Question submission freezes the card-to-stream handoff, not the
-      // keyboard. Restore the unanswered card's mode before sizing a changed
-      // viewport so its ordinary reservation and clamp remain authoritative.
-      if (viewportChange) {
-        const released = releaseQuestionSubmissionForViewport(
-          modeRef.current,
-          scrollEl.clientHeight,
-        )
-        if (released !== modeRef.current) {
-          transitionMode(released, 'layout:question-viewport-release')
-          persistMode()
-        }
-      }
-      // Releasing the submitted-question overlay is a semantic state change,
-      // not a scroll write. It must happen even while the input gate retains
-      // viewport ownership; the deferred layout pass below then applies the
-      // restored mode after the reader yields.
+      // Responsive geometry never releases a submitted question. The same
+      // semantic anchor is resized and reapplied below; only its response
+      // handoff policy or newer reader intent may replace it.
       if (!layoutOwnsScroll(authorityVersion)) {
         deferLayoutUntilReaderYields(authorityVersion)
         return false
@@ -2269,6 +2303,7 @@ export default function useScrollMode({
     let revealTimer = 0
     let mountMutationObserver = null
     const entryReady = () => initialEntryPhaseRef.current === 'cached'
+      || initialEntryPhaseRef.current === 'stream-catchup'
       || initialEntryPhaseRef.current === 'ready'
     const requestRevealOnQuiet = () => {
       clearTimeout(revealTimer)
@@ -2441,6 +2476,10 @@ export default function useScrollMode({
       disclosureInputOwnsGesture = false
     }
     discardPendingReaderSettleRef.current = discardPendingReaderSettle
+    const capturePendingReaderHold = () => (
+      readerScrollDirty ? anchorModeFromScroll(scrollEl) : null
+    )
+    capturePendingReaderHoldRef.current = capturePendingReaderHold
 
     const settleReaderScroll = () => {
       clearTimeout(readerSettleTimer)
@@ -2916,6 +2955,9 @@ export default function useScrollMode({
       if (discardPendingReaderSettleRef.current === discardPendingReaderSettle) {
         discardPendingReaderSettleRef.current = null
       }
+      if (capturePendingReaderHoldRef.current === capturePendingReaderHold) {
+        capturePendingReaderHoldRef.current = null
+      }
       clearTimeout(revealTimer)
       clearTimeout(deferredGestureLayoutTimer)
       if (resumeLayoutAfterGestureRef.current === resumeLayoutAfterGesture) {
@@ -3117,6 +3159,7 @@ export default function useScrollMode({
     freezeForegroundReturn,
     freezeQuestionSubmission,
     freezeQueuedSubmission,
+    resumeQuestionSubmissionOnResponse,
     revealConversationTail,
     revealAnchor,
     reapplyActiveMode,

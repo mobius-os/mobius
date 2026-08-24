@@ -4,6 +4,10 @@ import useDialogFocus from '../../../hooks/useDialogFocus.js'
 import {
   clampImageScale,
   clampImageTransform,
+  hasPanRoom,
+  imageScaleCeiling,
+  readingZoomScale,
+  wheelScrollPans,
   zoomImageAround,
 } from './imageTransform.js'
 import { gallerySwipeTarget } from './imageGallery.js'
@@ -87,6 +91,10 @@ export default function ImageLightbox({
         viewport?.height || window.innerHeight,
         space,
       ),
+      // Measurements, not policy: imageTransform.js derives the zoom ceiling
+      // and reading zoom from these.
+      naturalWidth: img?.naturalWidth || 0,
+      dpr: window.devicePixelRatio || 1,
     }
   }, [])
 
@@ -107,13 +115,13 @@ export default function ImageLightbox({
     }
   }, [metrics])
 
-  const zoomAt = useCallback((nextScale, x, y, space = captureRootLayoutSpace()) => {
+  const zoomAt = useCallback((nextScale, x, y, space = captureRootLayoutSpace(), m = metrics(space)) => {
     setTransform((current) => zoomImageAround(
       current,
       nextScale,
       { x, y },
       baseCenter(current, space),
-      metrics(space),
+      m,
     ))
   }, [baseCenter, metrics])
 
@@ -159,20 +167,63 @@ export default function ImageLightbox({
     return () => document.removeEventListener('keydown', onKeyDown, true)
   }, [canNext, canPrevious, goToIndex, hasGallery, index])
 
-  // Trackpad/mouse-wheel zoom follows the pointer rather than the image centre.
+  // Plain scrolling pans an enlarged image (a long screenshot reads
+  // top-to-bottom); pinch — delivered as ctrl/cmd+wheel — always zooms; a
+  // wheel with nothing to pan (fitted image, or a wide one scrolled
+  // vertically) zooms so wheel input is never dead. A zoom begun that way
+  // stays a zoom while the wheel keeps moving, so crossing 1× mid-gesture
+  // cannot flip it into a pan; pinch never latches, so the scroll right
+  // after a pinch pans immediately.
+  const WHEEL_ZOOM_CONTINUES_MS = 400
+  const wheelZoomUntilRef = useRef(0)
   const handleWheel = useCallback((event) => {
     event.preventDefault()
-    const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? window.innerHeight : 1)
-    const nextScale = transformRef.current.scale * Math.exp(-delta * 0.0015)
+    const unitX = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? window.innerWidth : 1
+    const unitY = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? window.innerHeight : 1
+    const deltaX = event.deltaX * unitX
+    const deltaY = event.deltaY * unitY
     const space = captureRootLayoutSpace()
+    const m = metrics(space)
+    const pinching = event.ctrlKey || event.metaKey
+    const zooms = pinching
+      || event.timeStamp < wheelZoomUntilRef.current
+      || !wheelScrollPans(transformRef.current, deltaX, deltaY, m)
+
+    if (!zooms) {
+      const dx = clientLengthToLayout(deltaX, space)
+      const dy = clientLengthToLayout(deltaY, space)
+      setTransform((current) => clampImageTransform({
+        ...current,
+        x: current.x - dx,
+        y: current.y - dy,
+      }, m))
+      return
+    }
+    if (!pinching) wheelZoomUntilRef.current = event.timeStamp + WHEEL_ZOOM_CONTINUES_MS
+    const nextScale = transformRef.current.scale * Math.exp(-deltaY * 0.0015)
     const point = rootLayoutPoint(event.clientX, event.clientY, space)
-    zoomAt(nextScale, point.x, point.y, space)
-  }, [zoomAt])
+    zoomAt(nextScale, point.x, point.y, space, m)
+  }, [metrics, zoomAt])
+
+  // React binds onWheel through a passive root listener, so preventDefault
+  // there is a no-op and the page behind the overlay would scroll, page-zoom
+  // on ctrl+wheel, or back-swipe with the gesture. Bind natively with
+  // passive: false, like the touch handlers below.
+  useEffect(() => {
+    const el = imgRef.current
+    if (!el) return undefined
+    el.addEventListener('wheel', handleWheel, { passive: false })
+    return () => el.removeEventListener('wheel', handleWheel)
+  }, [handleWheel, activeSrc])
 
   const toggleZoomAt = useCallback((x, y, space = captureRootLayoutSpace()) => {
-    if (transformRef.current.scale > 1) reset()
-    else zoomAt(2, x, y, space)
-  }, [reset, zoomAt])
+    if (transformRef.current.scale > 1) {
+      reset()
+      return
+    }
+    const m = metrics(space)
+    zoomAt(readingZoomScale(m), x, y, space, m)
+  }, [metrics, reset, zoomAt])
 
   const handleDoubleClick = useCallback((event) => {
     event.preventDefault()
@@ -184,9 +235,10 @@ export default function ImageLightbox({
 
   // Mouse/stylus drag-to-pan. Touch uses the pinch-aware handlers below.
   const handlePointerDown = useCallback((event) => {
-    if (event.pointerType === 'touch' || event.button !== 0 || transformRef.current.scale <= 1) return
-    event.currentTarget.setPointerCapture(event.pointerId)
+    if (event.pointerType === 'touch' || event.button !== 0) return
     const space = captureRootLayoutSpace()
+    if (!hasPanRoom(transformRef.current.scale, metrics(space))) return
+    event.currentTarget.setPointerCapture(event.pointerId)
     const point = rootLayoutPoint(event.clientX, event.clientY, space)
     pointerPanRef.current = {
       id: event.pointerId,
@@ -198,7 +250,7 @@ export default function ImageLightbox({
     }
     setDragging(true)
     event.preventDefault()
-  }, [])
+  }, [metrics])
 
   const handlePointerMove = useCallback((event) => {
     const pan = pointerPanRef.current
@@ -250,7 +302,7 @@ export default function ImageLightbox({
         const touch = event.touches[0]
         const point = rootLayoutPoint(touch.clientX, touch.clientY, space)
         tapStartRef.current = { x: touch.clientX, y: touch.clientY, moved: false }
-        if (current.scale > 1) {
+        if (hasPanRoom(current.scale, metrics(space))) {
           panRef.current = {
             space,
             x: point.x - current.x,
@@ -285,13 +337,17 @@ export default function ImageLightbox({
         event.preventDefault()
         const pinch = pinchRef.current
         const mid = midpoint(event.touches[0], event.touches[1], pinch.space)
-        const scale = clampImageScale(pinch.scale * (distance(event.touches[0], event.touches[1]) / pinch.distance))
+        const pinchMetrics = metrics(pinch.space)
+        const scale = clampImageScale(
+          pinch.scale * (distance(event.touches[0], event.touches[1]) / pinch.distance),
+          imageScaleCeiling(pinchMetrics),
+        )
         setTransform(clampImageTransform({
           scale,
           x: mid.x - pinch.center.x - pinch.imageX * scale,
           y: mid.y - pinch.center.y - pinch.imageY * scale,
-        }, metrics(pinch.space)))
-      } else if (event.touches.length === 1 && panRef.current && transformRef.current.scale > 1) {
+        }, pinchMetrics))
+      } else if (event.touches.length === 1 && panRef.current) {
         event.preventDefault()
         const touch = event.touches[0]
         const pan = panRef.current
@@ -412,7 +468,7 @@ export default function ImageLightbox({
             key={paintedSrc}
             src={paintedSrc}
             alt=""
-            className="lightbox-image lightbox-image--previous"
+            className={`lightbox-image${hasGallery ? ' lightbox-image--gallery' : ''} lightbox-image--previous`}
             aria-hidden="true"
             draggable={false}
           />
@@ -422,12 +478,11 @@ export default function ImageLightbox({
           ref={imgRef}
           src={activeSrc}
           alt={activeAlt}
-          className={`lightbox-image${imageIsPending ? ' is-pending' : ''}${dragging ? ' is-dragging' : ''}`}
+          className={`lightbox-image${hasGallery ? ' lightbox-image--gallery' : ''}${imageIsPending ? ' is-pending' : ''}${dragging ? ' is-dragging' : ''}`}
           onLoad={revealActiveImage}
           onError={revealImageError}
           onClick={(event) => event.stopPropagation()}
           onDoubleClick={handleDoubleClick}
-          onWheel={handleWheel}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={endPointerPan}

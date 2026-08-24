@@ -199,6 +199,26 @@ def test_subagent_activity_is_natively_modeled_and_fallback_removed():
   assert not hasattr(codex_sdk_runner, "_is_subagent_activity_resume_validation_error")
 
 
+def test_context_compaction_item_is_available_to_the_runner():
+  """Pin the canonical item lifecycle that makes Codex compaction visible.
+
+  Current app-server v2 emits ``contextCompaction`` through item completion
+  and suppresses the deprecated ``thread/compacted`` notification. A runtime
+  bump that drops or renames this generated item must fail here rather than
+  silently removing every compaction marker from the chat timeline.
+  """
+  pytest.importorskip("openai_codex")
+  from openai_codex.generated import v2_all
+  from app import codex_sdk_runner
+
+  schema = json.dumps(v2_all.ThreadItem.model_json_schema())
+  assert getattr(v2_all, "ContextCompactionThreadItem", None) is not None
+  assert "contextCompaction" in schema
+  assert codex_sdk_runner._sdk_imports()["ContextCompactionThreadItem"] is (
+    v2_all.ContextCompactionThreadItem
+  )
+
+
 def test_native_image_view_item_is_wired_to_tool_dispatch():
   """Codex image inspection must not disappear from the visible transcript."""
   import inspect

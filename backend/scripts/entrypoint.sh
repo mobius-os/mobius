@@ -83,6 +83,22 @@ if ! DATA_DIR=/data python3 -P /app/runtime/restart_ledger.py \
   echo "WARNING: planned-restart ledger could not be re-hardened; automatic restart continuation is disabled." >&2
 fi
 
+# A self-host replacement install deliberately keeps its control root and
+# status mirror host-owned while granting the app only its fixed inbox. The
+# compatibility chown above crosses that boundary on every recreation, so
+# restore it before the app can issue another replacement request.
+if [ -d /data/mobius-rebuild ]; then
+  if chown -R root:root /data/mobius-rebuild 2>/dev/null; then
+    chmod 755 /data/mobius-rebuild 2>/dev/null || true
+    if [ -d /data/mobius-rebuild/inbox ]; then
+      chown -R mobius:mobius /data/mobius-rebuild/inbox 2>/dev/null || true
+      chmod 700 /data/mobius-rebuild/inbox 2>/dev/null || true
+    fi
+  else
+    echo "WARNING: container-replacement control ownership could not be restored; host replacement remains unavailable." >&2
+  fi
+fi
+
 # App credentials live outside ordinary app storage and the outer /data git
 # repo. Prefer a mobius-owned 0700 root. On managed volumes that reject chown,
 # use a root-owned write+traverse-only directory: mobius can create its own
@@ -670,7 +686,7 @@ if not owner:
 # AND not revoked. A "sign out everywhere" bumps owner.token_epoch, which
 # strands the on-disk service token even though it hasn't expired — so we
 # re-mint when the stored token's epoch is behind the owner's current one.
-# This restart is the documented recovery path for the service token after
+# This restart is the documented refresh path for the service token after
 # revocation (see routes/admin.py:sign_out_everywhere).
 token_file = '/data/service-token.txt'
 if os.path.exists(token_file):
@@ -961,9 +977,9 @@ find /data -regextype posix-extended -mindepth 2 -maxdepth 4 \
 # refuses cross-owner operations with "dubious ownership", so any git
 # command we run as mobius (the else branch's untrack loop) needs the
 # repo mobius-owned first. A `docker pull` plus a recreated volume can
-# leave a previously-mobius-owned /data/.git root-owned again (e.g.
-# some recovery installs bake /data/.git into the image layer); without
-# this the agent's commits also fail. No-op via `|| true` if /data/.git
+# leave a previously-mobius-owned /data/.git root-owned again (e.g. some
+# historical images or install paths bake /data/.git into the image layer);
+# without this the agent's commits also fail. No-op via `|| true` if /data/.git
 # doesn't exist yet — the fresh-init branch below creates it and
 # re-chowns in that case.
 chown -R mobius:mobius /data/.git 2>/dev/null || true
@@ -1117,6 +1133,15 @@ _health_url="http://127.0.0.1:${_public_port}/api/health"
   echo "Platform health probe: /api/health did not return 200 within 90s — boot failure." >&2
   exit 1
 ) &
+
+# Make the mapi helper callable by bare name in agent shells. The Bash tool's
+# shell snapshot hard-sets PATH (clobbering any exported prefix), but
+# /usr/local/bin is on it — so expose the helper there via a stable symlink.
+_mapi=/data/platform/backend/scripts/mapi
+[ -x "$_mapi" ] || _mapi=/app/scripts/mapi
+if [ -x "$_mapi" ]; then
+  ln -sfn "$_mapi" /usr/local/bin/mapi 2>/dev/null || true
+fi
 
 # --timeout-graceful-shutdown bounds uvicorn's SIGTERM drain. Without it,
 # uvicorn waits FOREVER for open connections to close on SIGTERM — and the chat

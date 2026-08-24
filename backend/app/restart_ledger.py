@@ -15,6 +15,8 @@ from app.config import get_settings
 
 PROTOCOL_VERSION = 1
 MAX_ACK_BYTES = 64 * 1024
+MAX_CUTOVER_CHALLENGE_AGE_SECONDS = 120
+_CUTOVER_ID_MAX = 160
 
 
 def current_boot_id() -> str:
@@ -32,6 +34,36 @@ def _paths() -> tuple[Path, Path, Path]:
     root / ".platform-restart-requested",
     root / ".restart-ledger",
   )
+
+
+def _read_trusted_json(
+  path: Path,
+  *,
+  mode: int,
+  trusted_uid: int = 0,
+  trusted_gid: int = 0,
+) -> dict[str, Any] | None:
+  """Read one small immutable supervisor record, failing closed."""
+  try:
+    st = path.lstat()
+    if (
+      not stat.S_ISREG(st.st_mode)
+      or st.st_uid != trusted_uid
+      or st.st_gid != trusted_gid
+      or stat.S_IMODE(st.st_mode) != mode
+      or st.st_size > MAX_ACK_BYTES
+    ):
+      return None
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+      raw = os.read(fd, MAX_ACK_BYTES + 1)
+    finally:
+      os.close(fd)
+    value = json.loads(raw.decode("utf-8"))
+    return value if isinstance(value, dict) else None
+  except (OSError, UnicodeError, json.JSONDecodeError):
+    return None
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -90,6 +122,74 @@ def request_restart(
   })
 
 
+def publish_cutover_intent(
+  *,
+  boot_id: str,
+  nonce: str,
+  cutover_id: str,
+  runs: list[dict[str, str]],
+  now: float | None = None,
+) -> None:
+  """Publish a Host-accepted cutover intent without self-terminating.
+
+  Unlike :func:`request_restart`, this deliberately does not create the
+  entrypoint sentinel.  The root Host helper must accept the exact cutover id;
+  Docker/Compose then owns the stop and the immediately following boot.
+  """
+  if not cutover_id or len(cutover_id) > _CUTOVER_ID_MAX:
+    raise ValueError("invalid cutover id")
+  intent_path, _request_path, _ledger_dir = _paths()
+  created_at = time.time() if now is None else now
+  normalized = [
+    {"chat_id": str(item["chat_id"]), "run_token": str(item["run_token"])}
+    for item in runs
+  ]
+  _atomic_json(intent_path, {
+    "version": PROTOCOL_VERSION,
+    "action": "external_cutover",
+    "cutover_id": cutover_id,
+    "nonce": nonce,
+    "source_boot_id": boot_id,
+    "created_at": created_at,
+    "runs": normalized,
+  })
+
+
+def authorized_cutover_challenge(
+  cutover_id: str,
+  *,
+  boot_id: str | None = None,
+  now: float | None = None,
+  trusted_uid: int = 0,
+  trusted_gid: int = 0,
+) -> bool:
+  """Whether the root supervisor opened this cutover on the current boot."""
+  expected_boot = boot_id if boot_id is not None else current_boot_id()
+  if not expected_boot or not cutover_id:
+    return False
+  _, _, ledger_dir = _paths()
+  value = _read_trusted_json(
+    ledger_dir / "cutover-challenge.json",
+    mode=0o444,
+    trusted_uid=trusted_uid,
+    trusted_gid=trusted_gid,
+  )
+  if not value:
+    return False
+  try:
+    created_at = float(value.get("created_at"))
+  except (TypeError, ValueError):
+    return False
+  current = time.time() if now is None else now
+  return bool(
+    value.get("version") == PROTOCOL_VERSION
+    and value.get("source_boot_id") == expected_boot
+    and value.get("cutover_id") == cutover_id
+    and created_at <= current + 5
+    and current - created_at <= MAX_CUTOVER_CHALLENGE_AGE_SECONDS
+  )
+
+
 def authorized_restart_nonce(
   boot_id: str | None = None,
   *,
@@ -104,28 +204,23 @@ def authorized_restart_nonce(
   ack_path = ledger_dir / "ack.json"
   try:
     dir_st = ledger_dir.lstat()
-    ack_st = ack_path.lstat()
     if (
       not stat.S_ISDIR(dir_st.st_mode)
       or stat.S_ISLNK(dir_st.st_mode)
       or dir_st.st_uid != trusted_uid
       or dir_st.st_gid != trusted_gid
       or dir_st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-      or not stat.S_ISREG(ack_st.st_mode)
-      or ack_st.st_uid != trusted_uid
-      or ack_st.st_gid != trusted_gid
-      or ack_st.st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)
-      or ack_st.st_size > MAX_ACK_BYTES
     ):
       return None
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(ack_path, flags)
-    try:
-      raw = os.read(fd, MAX_ACK_BYTES + 1)
-    finally:
-      os.close(fd)
-    value = json.loads(raw.decode("utf-8"))
-  except (OSError, UnicodeError, json.JSONDecodeError):
+  except OSError:
+    return None
+  value = _read_trusted_json(
+    ack_path,
+    mode=0o444,
+    trusted_uid=trusted_uid,
+    trusted_gid=trusted_gid,
+  )
+  if value is None:
     return None
   if (
     not isinstance(value, dict)

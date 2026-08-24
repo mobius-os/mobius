@@ -18,6 +18,7 @@ import {
   delayedSendWillPin,
   gestureLayoutRetryDelay,
   isNearPhysicalBottom,
+  isQuestionSubmissionMode,
   layoutMayOwnScroll,
   modeForChatExit,
   modeForDisclosureToggle,
@@ -35,7 +36,6 @@ import {
   readerInputMayScroll,
   readerInputNeedsFrameRelease,
   readerScrollEscapeDirection,
-  releaseQuestionSubmissionForViewport,
   settledPinMode,
   shouldPinSend,
 } from '../useScrollMode.js'
@@ -491,32 +491,22 @@ test('question submission freezes the visible row before same-turn output resume
       kind: 'ANCHOR_AT',
       key: 'assistant-with-question',
       offset: 60,
-      questionSubmitViewportH: 600,
       questionSubmitBaseMode: { kind: 'FOLLOW_BOTTOM' },
     },
   )
 })
 
-test('question submission releases to the unanswered mode only after viewport size changes', () => {
+test('question submission is a viewport-independent transient anchor', () => {
   const baseMode = { kind: 'PIN_USER_MSG', cid: 'latest' }
   const heldMode = {
     kind: 'ANCHOR_AT',
     key: 'assistant-with-question',
     offset: 60,
-    questionSubmitViewportH: 400,
     questionSubmitBaseMode: baseMode,
   }
 
-  assert.equal(
-    releaseQuestionSubmissionForViewport(heldMode, 400),
-    heldMode,
-    'same-size card reflow keeps the submit anchor exact',
-  )
-  assert.equal(
-    releaseQuestionSubmissionForViewport(heldMode, 700),
-    baseMode,
-    'keyboard growth restores the mode that owned the unanswered card',
-  )
+  assert.equal(isQuestionSubmissionMode(heldMode), true)
+  assert.equal(isQuestionSubmissionMode(baseMode), false)
 })
 
 test('question submission keeps the current mode when there is no visible row', () => {
@@ -1202,7 +1192,6 @@ test('question-only viewport overlay is never restored as durable reader state',
     kind: 'ANCHOR_AT',
     key: 'assistant-question',
     offset: 100,
-    questionSubmitViewportH: 400,
     questionSubmitBaseMode: { kind: 'FOLLOW_BOTTOM' },
   }
   const scrollEl = {
@@ -1655,7 +1644,6 @@ test('question submission reserves the exact room that keeps its anchor reachabl
     kind: 'ANCHOR_AT',
     key: 'assistant-question',
     offset: 60,
-    questionSubmitViewportH: 600,
     questionSubmitBaseMode: { kind: 'PIN_USER_MSG', cid: 'c-1' },
   }
   const listEl = { offsetHeight: 1400 }
@@ -1673,11 +1661,11 @@ test('question submission reserves the exact room that keeps its anchor reachabl
   assert.equal(
     _computeSpacerH(scrollEl, listEl, latestUser, mode),
     440,
-    'the same-viewport overlay keeps the exact anchor until resize releases it',
+    'the submission overlay keeps the exact anchor across responsive geometry',
   )
 })
 
-test('answered question uses the unanswered card spacer when the keyboard closes', () => {
+test('answered question keeps its exact submission anchor when the keyboard closes', () => {
   const anchor = { offsetTop: 1200, offsetHeight: 220 }
   const scrollEl = {
     clientHeight: 700,
@@ -1690,7 +1678,6 @@ test('answered question uses the unanswered card spacer when the keyboard closes
     kind: 'ANCHOR_AT',
     key: 'assistant-question',
     offset: 60,
-    questionSubmitViewportH: 400,
     questionSubmitBaseMode: baseMode,
   }
   const listEl = { offsetHeight: 1400 }
@@ -1703,21 +1690,14 @@ test('answered question uses the unanswered card spacer when the keyboard closes
   assert.equal(
     _computeSpacerH(scrollEl, listEl, latestUser, heldMode),
     440,
-    'without release the answered card would remain locked',
+    'the larger viewport reserves the exact 1140px anchor target',
   )
-  const released = releaseQuestionSubmissionForViewport(heldMode, 700)
-  const answeredSpacer = _computeSpacerH(
-    scrollEl, listEl, latestUser, released,
-  )
-  const unansweredSpacer = _computeSpacerH(
-    scrollEl, listEl, latestUser, baseMode,
-  )
-  assert.equal(answeredSpacer, unansweredSpacer)
-  assert.equal(answeredSpacer, 396)
   assert.equal(
-    listEl.offsetHeight + answeredSpacer - scrollEl.clientHeight,
-    1096,
-    'ordinary geometry moves the card instead of preserving scrollTop 1140',
+    listEl.offsetHeight
+      + _computeSpacerH(scrollEl, listEl, latestUser, heldMode)
+      - scrollEl.clientHeight,
+    1140,
+    'keyboard close keeps the question at the same 60px viewport offset',
   )
 })
 

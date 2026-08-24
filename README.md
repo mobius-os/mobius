@@ -5,131 +5,104 @@
 <h1 align="center">Möbius</h1>
 
 <p align="center">
-  An open-source AGI app platform. Build the apps you need, shape the workspace around your life, and help useful work improve productivity for everyone.
+  Your portal to the world of AI agents. One home for your agent, on web, on your phone, on a server you control. Make it yours, put it to work, and build with other agents and other people.
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://hub.docker.com"><img src="https://img.shields.io/badge/Docker-single--container-2496ED?logo=docker&logoColor=white" alt="Docker"></a>
-  <a href="#launch-your-möbius"><img src="https://img.shields.io/badge/PWA-installable-5A0FC8?logo=pwa&logoColor=white" alt="Installable PWA"></a>
+  <a href="#yours-to-run-yours-to-change"><img src="https://img.shields.io/badge/PWA-installable-5A0FC8?logo=pwa&logoColor=white" alt="Installable PWA"></a>
 </p>
 
 <p align="center">
-  <a href="https://mobius.you/"><strong>Launch Möbius</strong></a> ·
-  <a href="https://mobius-os.github.io/apps/">Browse apps</a> ·
-  <a href="#ask-for-what-you-need">Ask your agent</a> ·
+  <a href="https://mobius.you/"><strong>Start for free</strong></a> ·
+  <a href="https://mobius.you/#build">See it working</a> ·
+  <a href="https://github.com/orgs/mobius-os/repositories?q=app-">Browse apps</a> ·
   <a href="#contribute-to-the-platform">Contribute</a>
 </p>
 
-## Build apps around the way you work
+![Möbius on the web, with the same workspace on a phone](assets/product/web-and-phone.png)
 
-Möbius is a self-hosted workspace where your agent builds apps beside the conversation. Describe what you need, inspect the result, and keep the app in the same place where you use it.
+## One agent. Here is what it does for you.
 
-You do not need to know how Möbius apps are built. Start with a community app or tell your agent what would make your work easier. It can create the missing piece, adapt an existing app, and keep refining it from your feedback.
+Möbius is the harness and the interface for working with AI agents: a self-hosted workspace where apps, agents, memory, skills, files, and source live together, on your computer and on your phone. Everything here is shown live at [mobius.you](https://mobius.you/), with the real shell and real apps.
 
-<table>
-  <tr>
-    <td width="34%"><img src="assets/product/tandem-iphone.png" alt="Tandem showing a bilingual story with a selected word translated on an iPhone"></td>
-    <td width="66%"><img src="assets/product/atlas-desktop.png" alt="Atlas showing a country sidebar beside an interactive globe"></td>
-  </tr>
-  <tr>
-    <td><strong>Tandem:</strong> read generated stories in two languages at your chosen level.</td>
-    <td><strong>Atlas:</strong> collect the places you have visited and save where you want to go next.</td>
-  </tr>
-</table>
+| | |
+|---|---|
+| **Your agent, everywhere** | On the web, on your phone, on a server you control. |
+| **It learns how you work** | Memory, a nightly Reflection, and Skills you browse and install. |
+| **Work that runs on its own** | Goals, scheduled Tasks, workflows of helpers, follow-ups that wait their turn. |
+| **Apps on the fly** | Describe an app. It is built beside the chat and lands on your phone. |
+| **Connected to your tools** | Connections: Notion, Linear, Google Cloud, GitLab, Stripe, Supabase, and any remote MCP service. |
+| **Community, and fun** | An App Store, contributing with humans and agents, games to play. |
 
-Other apps can be as personal as the trip they support. Brazil 2026 keeps an itinerary, local phrases, weather, packing, and a journal together. News prepares a daily digest around the topics you care about.
+## Your agent starts as an intern and matures through your feedback
 
-## Ask for what you need
+The agent you get on day one is a generalist. The one you have a month later knows your projects, your preferences, and the way you like things done, because everything it learns stays with it.
 
-Open a chat and describe the outcome you want in your own words. For example:
+- **Memory.** Every conversation leaves something behind: a decision, a preference, how a project is wired. Your agent keeps it, links it, and cites it the next time it matters.
+- **Feedback that sticks.** Correct it once and the correction outlives the chat. Skills, memory, and the apps it built all move with what you told it.
+- **Reflection.** Every night it goes over the day, sharpens the skills, apps, and memory your agents work from, and leaves you a morning brief. Each change is small and reversible; together they compound.
+- **Skills.** The playbooks behind the work, browsable and installable, sharpened by Reflection and by you.
 
-- “Build me a simple meal planner that remembers our favourite recipes.”
-- “Add a weekly view and quicker task entry to my planner.”
-- “Make the whole workspace calmer and easier to read on my phone.”
+![Memory as a graph of linked notes, and this morning's Reflection brief on a phone](assets/product/memory-reflection.png)
 
-Your agent takes care of building it, opens a working version beside the conversation, and checks it as it works. You can react to what you see and keep asking for changes. The result can stay private to your Möbius or, when it could help others, be prepared for review as a community contribution.
+## Put it to work
 
-## Use the same workspace on phone and web
+- **Goals.** Type `/goal` and a to-do list becomes a goal the agent keeps pursuing across turns, breaking each item into steps and checking in only when it needs you.
+- **Tasks.** Scheduled jobs: a morning brief, a daily check, a weekly report, each a run you can read afterwards.
+- **Workflows and Subagents.** Every run on a readable timeline: which helpers your agent created, when, and what each came back with. Delegation to Claude and Codex stays visible.
+- **Queue.** Send a follow-up while the agent works. It waits in line, ready to edit or drop, and runs the moment the turn ends.
 
-Möbius runs as a progressive web app (PWA). Your apps, files, chat, memory, and settings stay together across a computer and phone.
+A usage limit parks the run and picks it back up on its own. An API key goes in through a secure input the model never sees. A voice model on your device answers out loud, and nothing leaves your Möbius. It works the same with Claude Code and with ChatGPT (Codex).
 
-![Editor showing the same app project across web and iPhone](assets/product/editor-continuity.png)
-
-## Personalize the whole platform
-
-The workspace can change with you. Themes reshape the shell, Memory keeps durable context available, and Reflection reviews completed work for improvements worth carrying forward.
+![Workflows showing one run's timeline of helpers beside the Subagents roster on two phones](assets/product/workflows-subagents.png)
 
 <table>
   <tr>
-    <td width="36%"><img src="assets/product/memory-graph-iphone.png" alt="Memory showing connected notes on an iPhone"></td>
-    <td width="64%"><img src="assets/product/themes.png" alt="Möbius in its default theme and a custom expressive theme"></td>
+    <td width="50%"><img src="assets/product/goals-phone.png" alt="A goal with three items, each broken into steps, two of them done"></td>
+    <td width="50%"><img src="assets/product/limits-phone.png" alt="A run parked on the plan's usage limit, then resumed automatically"></td>
   </tr>
   <tr>
-    <td><strong>Memory:</strong> connect facts, decisions, preferences, and projects.</td>
-    <td><strong>Themes:</strong> change the full workspace, not one isolated app.</td>
+    <td><strong>Goals:</strong> three things to get done, each broken into steps as the agent reaches it.</td>
+    <td><strong>Limits:</strong> a usage limit parks the run; it resumes on its own and finishes the job.</td>
   </tr>
 </table>
 
-## Grow an open-source AGI
+## Build apps on the fly
 
-Möbius is an open-source AGI app platform that grows with the needs of its users. Anyone can build an app or platform change for their own work. When an idea helps beyond one person, Contribute gives it a path back to the community. Shared apps and platform improvements can raise productivity for everyone.
+Say what you need in your own words: “Build a News app for the topics I follow.” “Build a simple habits app.” The agent builds it beside the conversation, opens the working result in its own pane, and keeps refining it from your feedback. On your phone the same flow ends with the app on your home screen, opening as its own app.
 
 <table>
   <tr>
-    <td width="96" align="center"><img src="assets/product/memory-icon.png" width="72" alt="Memory app icon"></td>
-    <td><strong>Memory</strong><br>Personalize the platform with context worth keeping.</td>
+    <td width="33%"><img src="assets/product/phone-build-pane.png" alt="Habits being built in a pane below the chat on a phone"></td>
+    <td width="33%"><img src="assets/product/phone-build-home.png" alt="The phone home screen with Möbius and the new Habits app"></td>
+    <td width="33%"><img src="assets/product/phone-build-standalone.png" alt="Habits open as its own app, without Möbius chrome"></td>
   </tr>
   <tr>
-    <td width="96" align="center"><img src="assets/product/reflection-icon.png" width="72" alt="Reflection app icon"></td>
-    <td><strong>Reflection</strong><br>Turn repeated friction into the next improvement.</td>
-  </tr>
-  <tr>
-    <td width="96" align="center"><img src="assets/product/contribute-icon.png" width="72" alt="Contribute app icon"></td>
-    <td><strong>Contribute</strong><br>Share apps and platform changes that can help others.</td>
+    <td><strong>Build:</strong> the pane rises below the chat while the agent works.</td>
+    <td><strong>Install:</strong> hold the app in the drawer and add it to the home screen.</td>
+    <td><strong>Open:</strong> the finished app owns the screen.</td>
   </tr>
 </table>
 
-Build for a real need, make it yours, improve what gets in the way, then share what generalizes. Community review can turn that work into a building block that makes the whole ecosystem more capable.
+Apps can be anything: a daily news brief, a drum machine, a 3D runner, a bilingual reader with its own agent inside. Install what others built from the App Store, then publish your own. Every app is a public repository under the [Möbius OS organization](https://github.com/mobius-os).
 
-Möbius deliberately supports coding agents that can work across a real repository. Today, that means OpenAI Codex and Claude Code. The owner chat agent can edit the frontend and backend, while git history keeps those changes reversible.
+![The App Store: the official catalog, searchable](assets/product/app-store.png)
 
-No autonomous rewrite ships without a person in the loop. Agents can prepare changes, run tests, and explain their reasoning. People still decide what becomes part of the shared platform.
+## Collaborate with humans and agents alike
 
-## Start with the community catalog
+Contribute keeps your projects, your agents, and your decisions in one place: spin up agents on a project, review what each of them did, and have only the decisions that matter brought to you. What generalizes can go back to the community as a reviewed contribution. No autonomous rewrite ships without a person in the loop.
 
-The App Store includes tools for notes, tasks, skills, memory, reflection, development, news, health, and learning. Each app is a public repository under the [Möbius OS GitHub organization](https://github.com/mobius-os).
+<p align="center"><img src="assets/product/contribute-phone.png" width="320" alt="Contribute on a phone: two projects, two agents at work, one decision for you"></p>
 
-![The Möbius App Store](assets/product/app-store.png)
+## Yours to run. Yours to change.
 
-Install a community app from the catalog, then ask your agent to make it yours. Updates preserve the app's data and your local changes.
+Möbius is open source, MIT licensed. The agent, your apps, your memory, and the platform itself run on a server you control. Bring the provider plan you already pay for; no separate API key is needed.
 
-## Bring agent access
+**Hosted for you.** [mobius.you](https://mobius.you/) creates a private deployment in a Railway account you control: sign in with Google or Apple, connect Railway, open your Möbius. Up to $5 in hosting credit for 30 days, no card required. Your chats, files, apps, credentials, and agent activity stay inside that deployment.
 
-Möbius uses an agent account you already control. Connect one of these providers during setup:
-
-- **OpenAI Codex**: sign in with a ChatGPT plan that includes Codex access. Usage limits depend on the plan.
-- **Claude Code**: sign in with a supported Claude Code plan
-
-Möbius uses provider sign-in, so the default setup does not require a separate API key. Reflection is its adaptive overnight meta-loop: it learns from recent work, anticipates likely needs, improves recurring workflows, and evolves its own operating model over time.
-
-## Launch your Möbius
-
-[Möbius Launch](https://mobius.you/) creates a private deployment in a Railway account you control:
-
-1. Sign in to Möbius Launch
-2. Connect your Railway workspace
-3. Review the deployment and open your Möbius instance
-
-![Möbius Launch showing workspace health, included Railway credit, and live resource usage](assets/product/mobius-launch-deployment.png)
-
-During normal use, your chats, files, apps, credentials, and agent activity stay inside that deployment. Möbius Launch stores the account and infrastructure data needed to manage it.
-
-If the Möbius interface is unavailable, open its deployment card in Möbius Launch and choose **Open Recovery**. The launcher creates a separate temporary worker, where you connect Codex or Claude and work on the exact live container through Railway's native Secure Shell (SSH) endpoint. Recovery does not restart or redeploy Möbius, and the worker is removed when you finish or the session expires.
-
-### Deploy on your own server
-
-Use a Linux server with Docker, a domain name, and Codex or Claude Code access:
+**On your own server.** You need Docker, a domain name, and a Claude Code or ChatGPT (Codex) account:
 
 ```bash
 git clone https://github.com/mobius-os/mobius.git
@@ -141,25 +114,11 @@ BUILD_DATE="$(git show -s --format=%cs HEAD)" \
 docker compose up -d --build
 ```
 
-Caddy configures HTTPS. Open `https://mobius.example.com` and follow setup. Use
-Settings → Möbius to review and apply updates. For host-level maintenance, open
-a root shell in the running container without recreating it:
-
-```bash
-docker compose exec -u 0 app bash
-```
-
-The in-product agent has passwordless full root inside its Möbius container by
-default. To use the operator kill switch, set `MOBIUS_AGENT_SUDO=0` in `.env`
-and recreate the app with `docker compose up -d --force-recreate app`.
-
-To connect a full web service such as Tandoor, point a sibling DNS name at the same server. For example, use `services.mobius.example.com`, then set it as `MOBIUS_SERVICE_GATEWAY_ORIGIN` in `.env`. Caddy serves integrations below `/services/<slug>`, so you do not need wildcard DNS or a new record for each service. See [.env.example](.env.example) for setup and [ARCHITECTURE.md](ARCHITECTURE.md#app-execution-tiers) for the trust boundaries.
+Caddy configures HTTPS. Open `https://mobius.example.com`, connect your provider, and start asking. Settings → Möbius applies platform updates; `docker compose exec -u 0 app bash` opens a root shell in the running container. See [.env.example](.env.example) and [ARCHITECTURE.md](ARCHITECTURE.md) for the trust boundaries.
 
 ## Contribute to the platform
 
-Möbius grows through apps, platform changes, testing, and discussion. A local improvement can stay private or become a reviewed contribution through the Contribute app and GitHub.
-
-If you want to work on the platform itself, read [CONTRIBUTING.md](CONTRIBUTING.md) for the development loop and [ARCHITECTURE.md](ARCHITECTURE.md) for the system map.
+Möbius grows through apps, platform changes, testing, and discussion. A local improvement can stay private or become a reviewed contribution through the Contribute app and GitHub. To work on the platform itself, read [CONTRIBUTING.md](CONTRIBUTING.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## License
 

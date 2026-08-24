@@ -379,8 +379,8 @@ def test_skill_reads_stay_distinctive_in_compact_history():
     "tool": "Bash",
     "tool_use_id": "cmd-skills",
     "status": "done",
-    "skills": ["recovery", "theming"],
-    "input": "cat /data/shared/skills/recovery.md",
+    "skills": ["platform-maintenance", "theming"],
+    "input": "cat /data/shared/skills/platform-maintenance.md",
     "output": "skill text",
   }
   messages = [{
@@ -614,6 +614,7 @@ def test_runtime_route_does_not_select_transcript_json(
     "pending_messages": [],
     "pending_question_id": None,
     "updated_at": created.json()["updated_at"],
+    "waits": [],
   }
   chat_select = next(
     statement

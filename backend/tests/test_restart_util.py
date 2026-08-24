@@ -144,3 +144,58 @@ def test_restart_handshake_failure_restarts_without_authorization(monkeypatch):
   asyncio.run(ru.restart_this_worker())
 
   assert calls == [(os.getpid(), signal.SIGTERM)]
+
+
+def test_external_cutover_drains_without_requesting_self_restart(monkeypatch):
+  _FakeTimer.instances = []
+  calls = []
+  published = []
+  fallback_requests = []
+  monkeypatch.setattr(ru.os, "kill", lambda pid, sig: calls.append((pid, sig)))
+  monkeypatch.setattr(ru.threading, "Timer", _FakeTimer)
+  monkeypatch.setattr(
+    restart_ledger, "authorized_cutover_challenge", lambda value: value == "cutover-12345678",
+  )
+  monkeypatch.setattr(restart_ledger, "current_boot_id", lambda: "boot-12345678")
+  monkeypatch.setattr(restart_ledger, "new_nonce", lambda: "nonce-12345678")
+  monkeypatch.setattr(
+    restart_ledger, "publish_cutover_intent",
+    lambda **kwargs: published.append(kwargs),
+  )
+  monkeypatch.setattr(
+    restart_ledger, "request_restart",
+    lambda **kwargs: fallback_requests.append(kwargs),
+  )
+
+  async def _prepare(_nonce):
+    return [{"chat_id": "chat-12345678", "run_token": "run-12345678"}]
+
+  async def _drain(timeout=0, *, restart_nonce="", prepared_runs=None):
+    del timeout, restart_nonce
+    return prepared_runs or []
+
+  monkeypatch.setattr(chat_mod, "prepare_restart_intents", _prepare)
+  monkeypatch.setattr(chat_mod, "drain_all_for_restart", _drain)
+  chat_mod.draining = False
+
+  result = asyncio.run(ru.prepare_container_cutover("cutover-12345678"))
+
+  assert result["status"] == "prepared"
+  assert result["run_count"] == 1
+  assert calls == []
+  assert fallback_requests == []
+  assert published == [{
+    "boot_id": "boot-12345678",
+    "nonce": "nonce-12345678",
+    "cutover_id": "cutover-12345678",
+    "runs": [{"chat_id": "chat-12345678", "run_token": "run-12345678"}],
+  }]
+  assert len(_FakeTimer.instances) == 1
+  watchdog = _FakeTimer.instances[0]
+  assert watchdog.interval == ru._CUTOVER_FAILSAFE_SECONDS
+  watchdog.fn()
+  assert fallback_requests == [{
+    "boot_id": "boot-12345678",
+    "nonce": "nonce-12345678",
+    "runs": [{"chat_id": "chat-12345678", "run_token": "run-12345678"}],
+  }]

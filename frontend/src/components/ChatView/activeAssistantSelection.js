@@ -5,7 +5,7 @@ import {
   chooseActiveAssistantMirrorIndex,
   chooseActiveAssistantSurface,
   findTrailingAssistantPartialIndex,
-  promoteAssistantStream,
+  promoteAssistantStreamWithFollowingMessages,
 } from './streamPromotion.js'
 
 
@@ -99,11 +99,16 @@ export function commitAssistantPromotion({
   paintedItems,
   promotedItems,
   bridgeTs,
+  followingMessages = [],
   commitMessages,
 }) {
   retiredItemsRef.current = paintedItems
   commitMessages(
-    prev => promoteAssistantStream(prev, { items: promotedItems, bridgeTs }),
+    prev => promoteAssistantStreamWithFollowingMessages(prev, {
+      items: promotedItems,
+      bridgeTs,
+      followingMessages,
+    }),
     undefined,
     { force: true },
   )

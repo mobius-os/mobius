@@ -61,6 +61,7 @@ test('the workspace tab menu stays close-only, edge-clamped, and keyboard naviga
   assert.match(shell, /aria-label="Tab actions"/)
   assert.match(menuMarkup, /Close tab/)
   assert.match(menuMarkup, /Close all other tabs/)
+  assert.match(menuMarkup, /Close tabs to the left/)
   assert.match(menuMarkup, /Close tabs to the right/)
   assert.doesNotMatch(
     menuMarkup,
@@ -256,6 +257,9 @@ test('the context menu offers pane-scoped bulk close actions only when useful', 
   assert.match(shell, /const hasSiblingTabs = Boolean\(menuPane && menuPane\.tabs\.length > 1\)/)
   assert.match(shell, /type: 'CLOSE_OTHER_TABS',[\s\S]*?tabKey: tabMenu\.tabKey/)
   assert.match(shell, /Close all other tabs/)
+  assert.match(shell, /const hasTabsToLeft = Boolean\(/)
+  assert.match(shell, /type: 'CLOSE_TABS_TO_LEFT',[\s\S]*?tabKey: tabMenu\.tabKey/)
+  assert.match(shell, /Close tabs to the left/)
   assert.match(shell, /const hasTabsToRight = Boolean\(/)
   assert.match(shell, /type: 'CLOSE_TABS_TO_RIGHT',[\s\S]*?tabKey: tabMenu\.tabKey/)
   assert.match(shell, /Close tabs to the right/)
@@ -779,7 +783,7 @@ test('an active overflowing chat title cycles once, then becomes idle', () => {
     'clipped titles must not share a fixed duration; distance owns the cadence')
   assert.doesNotMatch(paneStrip, /TITLE_CYCLE_MAX_MS|Math\.min/,
     'long titles must not accelerate through a duration cap')
-  assert.match(paneStrip, /const TITLE_CYCLE_MS_PER_PX = 1000 \/ 12/)
+  assert.match(paneStrip, /const TITLE_CYCLE_MS_PER_PX = 1000 \/ 14\.4/)
   assert.match(paneStrip, /className="shell__tab-text-inner"/)
   const cycle = shellCss.match(/\.shell__tabstrip:not\(\.workspace__strip\)[\s\S]*?shell-tab-title-cycle var\(--tab-title-duration\) linear 700ms 1 both/)?.[0] || ''
   assert.match(cycle, /\.workspace__strip--focused/)
@@ -858,7 +862,17 @@ test('opening navigation is presentation-only and never refetches whole lists', 
     'a run started in another live client must still advance drawer recency')
 })
 
-test('chat drawer dots distinguish active work from unseen completion', () => {
+test('chat drawer indicators distinguish owner input, active work, waiting, and unseen completion', () => {
+  assert.match(
+    shell,
+    /ev\.type === 'chat_owner_input_changed'[\s\S]*?markChatOwnerInput\(ev\.chatId, ownerInputChangeFromEvent\(ev\)\)[\s\S]*?invalidateShellListCache\('chats'\)\.then\(refreshChats\)/,
+    'an owner-input event must project immediately and reconcile the durable PWA cache',
+  )
+  assert.match(
+    shell,
+    /ev\.type === 'chat_wait_changed'[\s\S]*?markChatRunReconcile\(ev\.chatId\)[\s\S]*?invalidateShellListCache\('chats'\)\.then\(refreshChats\)/,
+    'a wait change must refresh both the visible chat and durable drawer state',
+  )
   assert.match(
     shell,
     /ev\.type === 'chat_run_started'[\s\S]*?markStreamingStart\(ev\.chatId\)/,
@@ -876,10 +890,13 @@ test('chat drawer dots distinguish active work from unseen completion', () => {
   )
   assert.match(
     drawer,
-    /streaming \? \([\s\S]*?drawer__streaming-dot[\s\S]*?: attention \? \([\s\S]*?drawer__attention-dot/,
-    'active work must take precedence over unseen completion in a row',
+    /needsOwnerInput \? \([\s\S]*?drawer__owner-input-dot[\s\S]*?: streaming \? \([\s\S]*?drawer__streaming-dot[\s\S]*?: waiting \? \([\s\S]*?drawer__waiting-icon[\s\S]*?: attention \? \([\s\S]*?drawer__attention-dot/,
+    'owner input and active work must precede durable waiting and unseen completion',
   )
+  assert.match(drawerCss, /\.drawer__owner-input-dot\s*\{[\s\S]*?transform:\s*rotate\(45deg\)/)
+  assert.match(drawerCss, /\.drawer__owner-input-dot\s*\{[\s\S]*?var\(--owner-input, #f59e0b\)/)
   assert.match(drawerCss, /\.drawer__streaming-dot\s*\{[\s\S]*?background:\s*var\(--accent\)/)
+  assert.match(drawerCss, /\.drawer__waiting-icon\s*\{[\s\S]*?color:\s*var\(--accent\)/)
   assert.match(drawerCss, /\.drawer__attention-dot\s*\{[\s\S]*?border:\s*1\.5px solid var\(--green\)/)
 })
 
@@ -1074,6 +1091,18 @@ test('a manual platform reconcile refreshes the persistent Settings surface', ()
   )
 })
 
+test('boot delegates the complete shell generation decision to one inspector', () => {
+  assert.match(
+    shell,
+    /const \{ updateAvailable \} = await inspectShellUpdate\(\{[\s\S]*?serviceWorker: navigator\.serviceWorker,[\s\S]*?\}\)/,
+  )
+})
+
+test('shell resume is a deliberate apply, not a passive visible-chat hold', () => {
+  assert.match(shell, /watchForShellUpdateOnResume\(\{[\s\S]*?rearm: \(\) => requestShellReload\(\),/)
+  assert.doesNotMatch(shell, /rearm: \(\) => requestShellReload\(\{ passive: true \}\)/)
+})
+
 test('the builder no-full-screen invariant scopes to DESTINATIONS, not transient dialogs (§2)', () => {
   // The invariant governs navigable destinations (Settings, takeover views,
   // immersive), NOT dismissible dialogs layered over the workspace. Those stay
@@ -1260,8 +1289,8 @@ test('round4-3: the New Chat landing renders for a null slot and reuses ChatView
   assert.doesNotMatch(newChatLanding, /attachTriggerRef/,
     'the pre-allocation surface must not expose server-bound attachment behavior')
   assert.match(chatInputBar,
-    /function handlePaste\(e\) \{\s*if \(attachmentsDisabled\) return/,
-    'disabled attachments must leave clipboard paste to the browser')
+    /const files = attachmentsDisabled \? \[\] : pastedFiles\(e\.clipboardData\)/,
+    'disabled attachments must suppress only pasted files, not text handling')
   assert.match(chatInputBar, /\{!attachmentsDisabled && \(\s*<input/,
     'disabled attachments must not mount a hidden file picker')
   // Seamless swap: the landing reuses ChatView's exact empty treatment.

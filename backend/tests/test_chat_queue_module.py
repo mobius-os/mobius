@@ -127,6 +127,71 @@ def test_promote_pending_messages_locked_returns_none_on_empty_queue(db):
   assert sid == "sess-empty"
 
 
+def test_drain_parks_queued_work_behind_owner_question(db):
+  """A terminal handoff cannot turn an owner barrier into a continuation."""
+  question = {
+    "role": "assistant",
+    "ts": 2,
+    "blocks": [{
+      "type": "question",
+      "question_id": "owner-decision",
+      "questions": [{"id": "choice", "question": "Which direction?"}],
+    }],
+  }
+  queued = [{
+    "role": "user",
+    "content": "<wait_result>checks completed</wait_result>",
+    "hidden": True,
+    "ts": 3,
+    "cid": "wait-result",
+  }]
+  chat = models.Chat(
+    id="cq-question-barrier",
+    title="t",
+    messages=[question],
+    pending_messages=queued,
+    pending_question_id="owner-decision",
+    session_id="sess-question",
+  )
+  db.add(chat)
+  db.commit()
+  discarded = []
+  forgotten = []
+  finished = []
+
+  async def finish(chat_id, run_token, status):
+    finished.append((chat_id, run_token, status))
+
+  async def go():
+    return await chat_queue.drain_and_release(
+      db,
+      chat.id,
+      run_gen=7,
+      run_token="rt-next",
+      ending_run_token="rt-question",
+      discard_starting=discarded.append,
+      forget_chat=forgotten.append,
+      finish_run_strict=finish,
+      current_generation=lambda _chat_id: 7,
+    )
+
+  head, history, sid, disposition = asyncio.run(go())
+
+  assert head is None
+  assert history == []
+  assert sid is None
+  assert disposition is chat_queue.TerminalDisposition.QUESTION_PARKED
+  assert finished == [(
+    "cq-question-barrier", "rt-question", "interrupted",
+  )]
+  assert discarded == ["cq-question-barrier"]
+  assert forgotten == ["cq-question-barrier"]
+  db.refresh(chat)
+  assert chat.messages == [question]
+  assert chat.pending_messages == queued
+  assert chat.pending_question_id == "owner-decision"
+
+
 def test_drain_and_release_promotes_then_holds_starting(db):
   """When the queue has a head, drain_and_release returns it and
   does NOT call discard_starting / forget_chat (the next turn owns

@@ -319,6 +319,7 @@ def _fake_sdk(async_codex_cls):
     "CommandExecutionOutputDeltaNotification": _Dummy,
     "CommandExecutionThreadItem": _Dummy,
     "ContextCompactedNotification": _Dummy,
+    "ContextCompactionThreadItem": _Dummy,
     "DynamicToolCallThreadItem": _Dummy,
     "ErrorNotification": _FakeErrorNotification,
     "FileChangePatchUpdatedNotification": _Dummy,
@@ -2011,16 +2012,37 @@ def test_run_codex_sdk_turn_cleans_up_active_session_on_stream_exception(
   assert mark_finished_calls == [True]
 
 
-def test_run_codex_sdk_turn_publishes_context_compaction_marker(monkeypatch):
+@pytest.mark.parametrize(
+  "event_kind",
+  ["context_compaction_item", "legacy_notification"],
+)
+def test_run_codex_sdk_turn_publishes_marker_from_current_and_legacy_events(
+  monkeypatch, event_kind,
+):
+  class ContextCompactionThreadItem:
+    pass
+
   class ContextCompactedNotification:
     pass
 
-  completed_turn = SimpleNamespace(id="turn-1", usage=None, error=None)
-  turn_handle = _FakeTurnHandle([
-    SimpleNamespace(
+  class ItemCompletedNotification:
+    def __init__(self, item):
+      self.item = SimpleNamespace(root=item)
+
+  if event_kind == "context_compaction_item":
+    event = SimpleNamespace(
+      method="item/completed",
+      payload=ItemCompletedNotification(ContextCompactionThreadItem()),
+    )
+  else:
+    event = SimpleNamespace(
       method="thread/compacted",
       payload=ContextCompactedNotification(),
-    ),
+    )
+
+  completed_turn = SimpleNamespace(id="turn-1", usage=None, error=None)
+  turn_handle = _FakeTurnHandle([
+    event,
     SimpleNamespace(
       method="turn/completed",
       payload=_FakeTurnCompletedNotification(completed_turn),
@@ -2043,6 +2065,8 @@ def test_run_codex_sdk_turn_publishes_context_compaction_marker(monkeypatch):
 
   sdk = _fake_sdk(FakeAsyncCodex)
   sdk["ContextCompactedNotification"] = ContextCompactedNotification
+  sdk["ContextCompactionThreadItem"] = ContextCompactionThreadItem
+  sdk["ItemCompletedNotification"] = ItemCompletedNotification
   monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
 
   bc = _FakeBroadcast()
@@ -2058,10 +2082,14 @@ def test_run_codex_sdk_turn_publishes_context_compaction_marker(monkeypatch):
   ))
 
   assert result["error"] is None
-  assert {
+  markers = [
+    event for event in bc.events
+    if event.get("type") == "context_compacted"
+  ]
+  assert markers == [{
     "type": "context_compacted",
     "provider": "codex",
-  } in bc.events
+  }]
 
 
 class _KilledTransportError(_SdkTransportClosedError):
@@ -3248,6 +3276,24 @@ def test_codex_config_overrides_enable_native_goal_runtime(monkeypatch):
   assert "features.goals=true" in codex_sdk_runner._codex_config_overrides()
 
 
+def test_ordinary_codex_turns_do_not_expose_provider_private_goal_tools():
+  assert codex_sdk_runner._needs_native_goal_control(
+    goal_mode=False,
+    goal_objective=None,
+    goal_clear=False,
+    fallback_goal_objective=None,
+  ) is False
+  assert "features.goals=true" not in codex_sdk_runner._codex_config_overrides(
+    allow_goals=False,
+  )
+  assert codex_sdk_runner._needs_native_goal_control(
+    goal_mode=True,
+    goal_objective="Ship and verify",
+    goal_clear=False,
+    fallback_goal_objective=None,
+  ) is True
+
+
 def test_codex_app_server_launch_args_preserve_overrides_under_setsid(
   monkeypatch,
 ):
@@ -3921,7 +3967,13 @@ def test_run_codex_sdk_turn_controls_prompt_layers(monkeypatch, session_id):
   )
   assert captured["thread_options"]["developer_instructions"] == ""
   assert captured["thread_options"]["personality"] == "none"
-  assert captured["thread_options"]["config"] == connector_plan.codex_config
+  thread_mcp = captured["thread_options"]["config"]["mcp_servers"]
+  assert thread_mcp["search"] == (
+    connector_plan.codex_config["mcp_servers"]["search"]
+  )
+  assert thread_mcp["mobius_control"]["args"][0].endswith(
+    "/scripts/mobius_control_mcp.py"
+  )
   process_env = captured["process_config"].kwargs["env"]
   assert process_env["MOBIUS_CONNECTOR_3_SEARCH"] == "private-key"
   assert "private-key" not in repr(captured["thread_options"]["config"])

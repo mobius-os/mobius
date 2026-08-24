@@ -60,13 +60,15 @@ def _start_ticks(pid: int) -> int:
   return int(tail[19])
 
 
-def _wait_for_ready(timeout_seconds: int = READY_WAIT_SECONDS) -> bool:
-  """Wait only for the platform startup dependency bootstrap jobs require.
+def _wait_for_ready(
+  app_id: int, timeout_seconds: int = READY_WAIT_SECONDS,
+) -> str | None:
+  """Wait for both the backend and a usable scoped app credential.
 
-  A bootstrap install runs during FastAPI lifespan, while the app-job runner
-  needs the backend to mint a scoped token and return job context.  `/api/ready`
-  is the platform's existing readiness contract; polling it here avoids a
-  startup ordering race without adding a second scheduler or retry system.
+  First-install jobs can start during FastAPI lifespan or before first-owner
+  setup has written the service credential. Readiness is not useful until the
+  runner can mint the token required by every subsequent check, so one bounded
+  loop owns both startup dependencies.
   """
   deadline = time.monotonic() + max(0, timeout_seconds)
   while True:
@@ -74,12 +76,14 @@ def _wait_for_ready(timeout_seconds: int = READY_WAIT_SECONDS) -> bool:
       request = urllib.request.Request(f"{API_BASE_URL}/api/ready")
       with urllib.request.urlopen(request, timeout=2) as response:
         if response.status == 200:
-          return True
+          token = _mint_app_token(app_id)
+          if token:
+            return token
     except Exception:
       pass
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-      return False
+      return None
     time.sleep(min(1, remaining))
 
 
@@ -304,12 +308,13 @@ def _execute_job(
   }
   _atomic_json(lease, lease_value)
   try:
-    if wait_for_ready and not _wait_for_ready():
-      _log(app_id, "failed: timed out waiting for platform readiness")
-      return 4
-    app_token = _mint_app_token(app_id)
+    app_token = (
+      _wait_for_ready(app_id)
+      if wait_for_ready
+      else _mint_app_token(app_id)
+    )
     if not app_token:
-      _log(app_id, "failed: could not mint app token (backend down or bad service token)")
+      _log(app_id, "failed: timed out waiting for backend and app credential")
       return 4
     # Publication-before-check closes uninstall races: if uninstall already
     # won, this fails; if it follows, it sees and terminates this process group.

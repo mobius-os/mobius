@@ -32,6 +32,10 @@ import {
   drainCreatedChats,
   registerCreatedChats,
 } from './_chatFixtureRegistry.mjs'
+import {
+  installMockAgentProvider,
+  persistTestChatModel,
+} from './_chatTestPrerequisites.mjs'
 
 export { registerCreatedChats } from './_chatFixtureRegistry.mjs'
 
@@ -99,20 +103,44 @@ async function getToken(request) {
  * so callers don't have to plumb `testInfo` through every helper
  * signature. Falls back to a no-title POST outside a test scope.
  */
-export async function createTaggedChat(page, label = '') {
+export async function createTaggedChat(
+  page,
+  label = '',
+  { mockProvider = true } = {},
+) {
   let info = null
   try { info = test.info() } catch (_) { /* not in a test */ }
   const title = info
     ? workerChatTitle(info.workerIndex, label || info.title)
     : null
   const token = await page.evaluate(() => localStorage.getItem('token'))
+  // Browser behavior specs mock the agent transport, so they also need an
+  // explicit connected provider. Install that boundary before callers reload
+  // or deep-link to the fixture chat; production correctly refuses to send on
+  // a selected model whose provider is disconnected.
+  if (mockProvider) await installMockAgentProvider(page)
   const response = await page.request.post(`${BASE}/api/chats`, {
     headers: { Authorization: `Bearer ${token}` },
     data: title ? { title } : {},
     failOnStatusCode: false,
   })
   const result = response.ok() ? await response.json() : null
-  if (info && result?.id) registerCreatedChats(info.workerIndex, result.id)
+  if (result?.id) {
+    if (info) registerCreatedChats(info.workerIndex, result.id)
+    // Most browser tests exercise chat behavior after the first-send choice,
+    // not the picker itself. Keep that prerequisite explicit in the shared
+    // fixture now that production no longer inherits an SDK default.
+    const selected = await persistTestChatModel(page, {
+      base: BASE,
+      chatId: result.id,
+      token,
+    })
+    if (!selected.ok()) {
+      throw new Error(
+        `Could not select the test chat model (${selected.status()})`,
+      )
+    }
+  }
   return result
 }
 

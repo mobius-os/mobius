@@ -114,6 +114,78 @@ def test_apply_updates_multifile_revision_once(client, auth, db):
   ]
 
 
+def test_apply_refreshes_manifest_declared_skill_on_create_and_update(
+  client, auth,
+):
+  source = _source()
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["skills"] = ["guide.md"]
+  manifest["source_files"] = ["guide.md"]
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  (source / "guide.md").write_text("# First guidance\n")
+
+  created = _apply(client, auth, source)
+
+  assert created.status_code == 200, created.text
+  shared = Path(get_settings().data_dir) / "shared" / "skills" / "guide.md"
+  assert shared.read_text() == "# First guidance\n"
+  assert created.json()["warnings"] == []
+
+  (source / "guide.md").write_text("# Revised guidance\n")
+  updated = _apply(client, auth, source)
+
+  assert updated.status_code == 200, updated.text
+  assert shared.read_text() == "# Revised guidance\n"
+  assert updated.json()["warnings"] == []
+
+
+def test_store_managed_apply_refreshes_only_previously_approved_skills(
+  client, auth, db,
+):
+  source = _source()
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["skills"] = ["guide.md"]
+  manifest["source_files"] = ["guide.md"]
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  (source / "guide.md").write_text("# Installed guidance\n")
+  created = _apply(client, auth, source)
+  app_id = created.json()["app"]["id"]
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  row.manifest_url = "https://example.test/demo/mobius.json"
+  contract = dict(row.capability_contract or {})
+  contract["agent"] = {**(contract.get("agent") or {}), "skills": ["guide.md"]}
+  row.capability_contract = contract
+  db.commit()
+  (source / "guide.md").write_text("# Locally revised guidance\n")
+
+  updated = _apply(client, auth, source)
+
+  assert updated.status_code == 200, updated.text
+  shared = Path(get_settings().data_dir) / "shared" / "skills" / "guide.md"
+  assert shared.read_text() == "# Locally revised guidance\n"
+  assert updated.json()["warnings"] == []
+
+
+def test_apply_route_forwards_skill_sync_warnings(client, auth, monkeypatch):
+  # A partial skill sync (oversize skill, snapshot failure, ownership conflict)
+  # is non-fatal but must reach the apply receipt, not be silently dropped at
+  # the HTTP boundary — that silent staleness is exactly what this path fixes.
+  from app import install
+
+  async def _warn(_db, _app, _manifest, warnings):
+    warnings.append("skill guide.md: exceeds 262144 bytes — skipped")
+
+  monkeypatch.setattr(install, "_sync_app_skills", _warn)
+
+  created = _apply(client, auth, _source())
+
+  assert created.status_code == 200, created.text
+  assert (
+    "skill guide.md: exceeds 262144 bytes — skipped"
+    in created.json()["warnings"]
+  )
+
+
 def test_startup_retires_integrated_app_provenance(client, auth, db):
   source = _source()
   created = _apply(client, auth, source)
@@ -416,14 +488,14 @@ def test_reapply_unchanged_source_has_no_commit_or_timestamp_change(
   assert app_git.head_sha(source, app_git.LOCAL_BRANCH) == head
 
 
-def test_local_source_revision_clears_previously_verified_share_url(
+def test_local_source_revision_clears_previously_verified_distribution_manifest(
   client, auth, db,
 ):
   source = _source()
   created = _apply(client, auth, source)
   app_id = created.json()["app"]["id"]
   row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
-  row.share_manifest_url = (
+  row.published_manifest_url = (
     "https://raw.githubusercontent.com/example/demo/main/mobius.json"
   )
   db.commit()
@@ -435,9 +507,9 @@ def test_local_source_revision_clears_previously_verified_share_url(
 
   assert updated.status_code == 200, updated.text
   assert updated.json()["mode"] == "updated"
-  assert updated.json()["app"]["share_manifest_url"] is None
+  assert updated.json()["app"]["distribution_manifest"] is None
   db.refresh(row)
-  assert row.share_manifest_url is None
+  assert row.published_manifest_url is None
 
 
 def test_local_manifest_identity_is_immutable(client, auth, db):
@@ -523,6 +595,61 @@ def test_store_local_apply_preserves_reviewed_manifest_authority(
   assert row.offline_capable is True
   assert row.capability_contract == reviewed_contract
   assert app_git._run(source, "status", "--porcelain").stdout == ""
+
+
+def test_store_local_apply_accepts_installer_managed_tree_without_manifest(
+  client, auth, db,
+):
+  """Installed app repos intentionally exclude the reviewed mobius.json."""
+  source = Path(get_settings().data_dir) / "apps" / "store-demo"
+  source.mkdir(parents=True)
+  (source / "index.jsx").write_text(
+    "export default function App() { return <div>installed</div> }\n"
+  )
+  app_git.ensure_repo(source)
+  app_git.commit_local(source, "install source")
+  installed_head = app_git.head_sha(source, app_git.LOCAL_BRANCH)
+  row = models.App(
+    name="Reviewed name",
+    description="Reviewed description",
+    jsx_source=(source / "index.jsx").read_text(),
+    compiled_path="",
+    source_dir=str(source),
+    source_commit=installed_head,
+    slug="store-demo",
+    manifest_url="https://store.example/store-demo/mobius.json",
+    offline_capable=True,
+    capability_contract={"schema": 2, "reviewed": "store"},
+  )
+  db.add(row)
+  db.commit()
+  app_id = row.id
+  (source / "index.jsx").write_text(
+    "export default function App() { return <div>local edit</div> }\n"
+  )
+
+  updated = _apply(client, auth, source)
+
+  assert updated.status_code == 200, updated.text
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  assert "local edit" in row.jsx_source
+  assert row.source_commit != installed_head
+  assert row.name == "Reviewed name"
+  assert row.capability_contract == {"schema": 2, "reviewed": "store"}
+  assert "mobius.json" not in app_git.read_ref_tree(
+    source, app_git.LOCAL_BRANCH,
+  )
+  assert app_git._run(source, "status", "--porcelain").stdout == ""
+
+
+def test_local_apply_without_manifest_still_fails_closed(client, auth):
+  source = _source()
+  (source / "mobius.json").unlink()
+
+  failed = _apply(client, auth, source)
+
+  assert failed.status_code == 422
+  assert failed.json()["detail"]["code"] == "manifest_missing"
 
 
 def test_legacy_inline_source_mutation_routes_are_retired(client, auth):
