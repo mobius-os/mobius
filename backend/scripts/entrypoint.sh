@@ -152,6 +152,8 @@ _restart_poller_started=0
 
 _start_platform_restart_poller() {
   [ "$_restart_poller_started" -eq 1 ] && return 0
+  : > /data/run/managed-cutover-ready
+  chown mobius:mobius /data/run/managed-cutover-ready 2>/dev/null || true
   (
     while true; do
       if [ -f /data/.platform-restart-requested ]; then
@@ -170,6 +172,16 @@ _start_platform_restart_poller() {
         # pid1 is now draining + exiting; give it a moment, then stop polling.
         sleep 5
         exit 0
+      fi
+      if [ -f /data/.managed-cutover-request.json ]; then
+        # Railway owns the eventual stop. This root-owned helper only opens
+        # and accepts the one-shot continuation intent; unlike an ordinary
+        # restart it must leave pid 1 alive until Railway performs cutover.
+        if ! DATA_DIR=/data python3 -P /app/runtime/restart_ledger.py \
+          managed-cutover "$MOBIUS_BOOT_ID"; then
+          rm -f /data/.managed-cutover-request.json 2>/dev/null || true
+          echo "O1: rejected managed cutover handoff; container stays running." >&2
+        fi
       fi
       sleep 2
     done

@@ -55,6 +55,10 @@ def _bind(supervisor, root: Path, monkeypatch) -> None:
     supervisor, "CUTOVER_RECEIPT_PATH",
     root / ".restart-ledger" / "cutover-receipt.json",
   )
+  monkeypatch.setattr(
+    supervisor, "MANAGED_CUTOVER_REQUEST_PATH",
+    root / ".managed-cutover-request.json",
+  )
   monkeypatch.setattr(supervisor, "SUPERVISOR_UID", os.getuid())
   monkeypatch.setattr(supervisor, "SUPERVISOR_GID", os.getgid())
   monkeypatch.setattr(
@@ -131,6 +135,38 @@ def test_root_opened_cutover_binds_replacement_boot_without_self_restart(
 
   assert supervisor.accept_cutover(cutover_id, now=now + 2)
   assert not supervisor.REQUEST_PATH.exists()
+  assert supervisor.begin_boot(target_boot, now=now + 3)
+  assert _authorized(tmp_path, target_boot) == nonce
+
+
+def test_managed_cutover_poller_opens_then_accepts_exact_handoff(
+  tmp_path, monkeypatch,
+):
+  supervisor = _load_supervisor()
+  _bind(supervisor, tmp_path, monkeypatch)
+  now = time.time()
+  source_boot = "boot-source-1234"
+  target_boot = "boot-target-1234"
+  cutover_id = "replace_12345678"
+  nonce = "nonce-12345678"
+
+  supervisor.begin_boot(source_boot, now=now)
+  platform_ledger.request_managed_cutover(
+    boot_id=source_boot, cutover_id=cutover_id, now=now + 1,
+  )
+  assert supervisor.service_managed_cutover(source_boot, now=now + 1)
+  assert platform_ledger.authorized_cutover_challenge(
+    cutover_id, boot_id=source_boot, now=now + 1,
+    trusted_uid=os.getuid(), trusted_gid=os.getgid(),
+  )
+  platform_ledger.publish_cutover_intent(
+    boot_id=source_boot, nonce=nonce, cutover_id=cutover_id, runs=[], now=now + 2,
+  )
+  assert supervisor.service_managed_cutover(source_boot, now=now + 2)
+  assert platform_ledger.accepted_cutover_receipt(
+    cutover_id, boot_id=source_boot, now=now + 2,
+    trusted_uid=os.getuid(), trusted_gid=os.getgid(),
+  )
   assert supervisor.begin_boot(target_boot, now=now + 3)
   assert _authorized(tmp_path, target_boot) == nonce
 

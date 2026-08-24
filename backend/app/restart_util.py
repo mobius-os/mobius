@@ -149,7 +149,9 @@ async def restart_this_worker(ready_path: Path | None = None) -> None:
     os.kill(pid, signal.SIGTERM)
 
 
-async def prepare_container_cutover(cutover_id: str) -> dict[str, object]:
+async def prepare_container_cutover(
+  cutover_id: str, *, abandoned_timeout: float | None = _CUTOVER_FAILSAFE_SECONDS,
+) -> dict[str, object]:
   """Drain once for a Host-owned replacement without self-terminating.
 
   The root supervisor must first open the exact cutover challenge.  This
@@ -206,12 +208,23 @@ async def prepare_container_cutover(cutover_id: str) -> dict[str, object]:
       )
       os.kill(pid, signal.SIGTERM)
 
-  watchdog = threading.Timer(_CUTOVER_FAILSAFE_SECONDS, _recover_abandoned_cutover)
-  watchdog.daemon = True
-  watchdog.start()
+  if abandoned_timeout is not None:
+    watchdog = threading.Timer(abandoned_timeout, _recover_abandoned_cutover)
+    watchdog.daemon = True
+    watchdog.start()
   return {
     "status": "prepared",
     "cutover_id": cutover_id,
     "boot_id": boot_id,
     "run_count": len(restart_runs),
   }
+
+
+async def prepare_managed_container_cutover(cutover_id: str) -> dict[str, object]:
+  """Prepare a cutover whose provider, rather than this process, stops it.
+
+  Once the account service accepts the operation it durably owns deployment
+  and rollback, so a local watchdog must not race Railway's volume-backed
+  cutover by restarting the old container mid-deploy.
+  """
+  return await prepare_container_cutover(cutover_id, abandoned_timeout=None)

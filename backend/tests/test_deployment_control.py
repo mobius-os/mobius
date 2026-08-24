@@ -28,16 +28,87 @@ def test_normalize_rejects_unknown_controller_state():
 
 
 @pytest.mark.asyncio
-async def test_railway_is_explicitly_deferred(monkeypatch):
+async def test_railway_requires_baked_managed_cutover_support(tmp_path, monkeypatch):
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
+  monkeypatch.setattr(dc, "get_settings", lambda: type("S", (), {"data_dir": str(tmp_path)})())
+  monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "a" * 40)
+  monkeypatch.setattr(dc.platform_update, "container_replacement_blockers", lambda: [])
 
   status = await dc.read_rebuild_status()
   assert status["supported"] is False
-  assert status["code"] == "not_supported"
+  assert status["code"] == "controller_upgrade_required"
 
   with pytest.raises(dc.DeploymentControlError) as exc:
     await dc.request_rebuild()
-  assert exc.value.code == "not_supported"
+  assert exc.value.code == "controller_upgrade_required"
+
+
+@pytest.mark.asyncio
+async def test_railway_status_uses_account_service(tmp_path, monkeypatch):
+  (tmp_path / "run").mkdir()
+  (tmp_path / "run" / "managed-cutover-ready").touch()
+  settings = type("S", (), {"data_dir": str(tmp_path)})()
+  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
+  monkeypatch.setattr(dc, "get_settings", lambda: settings)
+  monkeypatch.setattr(dc, "_managed_request", lambda method, suffix: {
+    "operation_id": "replace_123", "state": "deploying",
+    "expected_sha": "a" * 40, "message": "Railway is replacing the container.",
+  })
+
+  status = await dc.read_rebuild_status()
+
+  assert status["supported"] is True
+  assert status["deployment"] == "railway"
+  assert status["state"] == "replacing"
+  assert status["expected_sha"] == "a" * 40
+
+
+@pytest.mark.asyncio
+async def test_request_rebuild_selects_managed_railway_handoff(tmp_path, monkeypatch):
+  from app import restart_ledger, restart_util
+
+  (tmp_path / "run").mkdir()
+  (tmp_path / "run" / "managed-cutover-ready").touch()
+  settings = type("S", (), {"data_dir": str(tmp_path)})()
+  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
+  monkeypatch.setattr(dc, "get_settings", lambda: settings)
+  monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "a" * 40)
+  monkeypatch.setattr(dc.platform_update, "container_replacement_blockers", lambda: [])
+  calls = []
+
+  def managed_request(method, suffix, payload=None):
+    calls.append((method, suffix, payload))
+    if suffix == "prepare":
+      return {
+        "operation_id": "replace_12345678", "handoff_nonce": "nonce-secret",
+        "state": "awaiting_handoff", "expected_sha": "a" * 40,
+      }
+    return {
+      "operation_id": "replace_12345678", "state": "queued",
+      "expected_sha": "a" * 40, "message": "Replacement queued.",
+    }
+
+  async def prepare(cutover_id):
+    assert cutover_id == "replace_12345678"
+    return {"status": "prepared"}
+
+  monkeypatch.setattr(dc, "_managed_request", managed_request)
+  monkeypatch.setattr(restart_ledger, "current_boot_id", lambda: "boot-12345678")
+  monkeypatch.setattr(restart_ledger, "request_managed_cutover", lambda **_kw: None)
+  monkeypatch.setattr(restart_ledger, "authorized_cutover_challenge", lambda _id: True)
+  monkeypatch.setattr(restart_ledger, "accepted_cutover_receipt", lambda _id: True)
+  monkeypatch.setattr(restart_util, "prepare_managed_container_cutover", prepare)
+
+  status = await dc.request_rebuild()
+
+  assert status["deployment"] == "railway"
+  assert status["state"] == "queued"
+  assert calls == [
+    ("POST", "prepare", {"expected_sha": "a" * 40}),
+    ("POST", "start", {
+      "operation_id": "replace_12345678", "handoff_nonce": "nonce-secret",
+    }),
+  ]
 
 
 @pytest.mark.asyncio

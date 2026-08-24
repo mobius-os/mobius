@@ -1,9 +1,10 @@
-"""Self-hosted container replacement control for Settings.
+"""Container replacement control for Settings.
 
 The browser can request only one fixed operation: replace this installation's
-app container with the official image for its applied upstream revision.  The
-request and durable status cross the existing /data mount; a root-owned
-systemd.path job owns Docker, Compose topology, verification, and rollback.
+app container with the official image for its applied upstream revision.
+Self-hosting crosses the /data mount to a narrow host helper; managed Railway
+uses its account service, while the root-owned restart ledger preserves chat
+continuation across either cutover.
 """
 
 from __future__ import annotations
@@ -13,6 +14,9 @@ import json
 import os
 import re
 import secrets
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
@@ -150,6 +154,97 @@ def _normalize_status(
   )
 
 
+def _managed_headers() -> dict[str, str]:
+  settings = get_settings()
+  if not settings.mobius_sso_enabled:
+    raise DeploymentControlError(
+      "not_configured",
+      "This Railway deployment is not linked to its Möbius account service.",
+      status_code=409,
+    )
+  return {
+    "Authorization": f"Bearer {settings.mobius_sso_client_secret}",
+    "X-Mobius-Instance-Id": settings.mobius_sso_instance_id,
+    "Accept": "application/json",
+  }
+
+
+class _NoManagedRedirect(urllib.request.HTTPRedirectHandler):
+  def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
+    return None
+
+
+def _managed_request(method: str, suffix: str, payload: dict[str, str] | None = None) -> dict[str, Any]:
+  settings = get_settings()
+  body = None
+  headers = _managed_headers()
+  if payload is not None:
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    headers["Content-Type"] = "application/json"
+  request_object = urllib.request.Request(
+    settings.mobius_account_origin + "/api/instance/v1/container-replacement/" + suffix,
+    data=body,
+    headers=headers,
+    method=method,
+  )
+  try:
+    with urllib.request.build_opener(_NoManagedRedirect()).open(
+      request_object, timeout=15,
+    ) as response:
+      raw = response.read(64 * 1024 + 1)
+      if len(raw) > 64 * 1024:
+        raise DeploymentControlError(
+          "controller_invalid_response", "The account service returned too much data."
+        )
+      value = json.loads(raw.decode("utf-8"))
+  except urllib.error.HTTPError as exc:
+    try:
+      error = json.loads(exc.read(16 * 1024).decode("utf-8"))
+      detail = str(error.get("detail") or error.get("message") or "")
+    except (ValueError, UnicodeError, AttributeError):
+      detail = ""
+    raise DeploymentControlError(
+      "controller_rejected",
+      detail[:360] or "The account service rejected container replacement.",
+      status_code=409 if exc.code in {400, 409} else 503,
+    ) from exc
+  except (urllib.error.URLError, TimeoutError, OSError, ValueError, UnicodeError) as exc:
+    raise DeploymentControlError(
+      "controller_unavailable", "The Möbius account service is unavailable."
+    ) from exc
+  if not isinstance(value, dict):
+    raise DeploymentControlError(
+      "controller_invalid_response", "The account service returned invalid status."
+    )
+  return value
+
+
+def _normalize_managed_status(raw: dict[str, Any]) -> RebuildStatus:
+  remote_state = str(raw.get("state") or "idle").lower()
+  states: dict[str, RebuildState] = {
+    "idle": "idle", "awaiting_handoff": "preparing", "queued": "queued",
+    "updating": "preparing", "deploying": "replacing",
+    "rolling_back": "verifying", "no_change": "no_change",
+    "succeeded": "succeeded", "rolled_back": "rolled_back",
+    "failed": "failed", "needs_recovery": "needs_recovery",
+  }
+  if remote_state not in states:
+    raise DeploymentControlError(
+      "controller_invalid_response", "The account service returned an unknown state."
+    )
+  expected = str(raw.get("expected_sha") or "").lower()
+  return RebuildStatus(
+    supported=True,
+    deployment="railway",
+    operation_id=str(raw.get("operation_id") or "") or None,
+    state=states[remote_state],
+    expected_sha=expected if _SHA_RE.fullmatch(expected) else None,
+    code=None,
+    message=str(raw.get("message") or "")[:360] or None,
+    updated_at=str(raw.get("updated_at") or "") or None,
+  )
+
+
 def _read_host_status() -> dict[str, Any]:
   try:
     value = json.loads(_status_path().read_text(encoding="utf-8"))
@@ -242,12 +337,18 @@ def replacement_ready_path(operation_id: str) -> Path:
 async def read_rebuild_status() -> RebuildStatus:
   deployment = platform_activation.deployment_kind()
   if deployment == "railway":
-    return _empty_status(
-      deployment,
-      supported=False,
-      code="not_supported",
-      message="Container replacement is not available on Railway yet.",
-    )
+    if not (Path(get_settings().data_dir) / "run" / "managed-cutover-ready").is_file():
+      return _empty_status(
+        deployment,
+        supported=False,
+        code="controller_upgrade_required",
+        message=(
+          "Install the current Möbius image once to enable managed container "
+          "replacement on Railway."
+        ),
+      )
+    raw = await asyncio.to_thread(_managed_request, "GET", "status")
+    return _normalize_managed_status(raw)
   if not _configured():
     return _empty_status(
       deployment,
@@ -271,24 +372,11 @@ async def read_rebuild_status() -> RebuildStatus:
 
 async def request_rebuild() -> RebuildStatus:
   deployment = platform_activation.deployment_kind()
-  if deployment == "railway":
-    raise DeploymentControlError(
-      "not_supported",
-      "Container replacement is not available on Railway yet.",
-      status_code=409,
-    )
-  if not _configured():
+  if deployment != "railway" and not _configured():
     raise DeploymentControlError(
       "not_configured",
       "Finish the one-time host setup by running sudo "
       "scripts/install-rebuild-helper.sh from the trusted Möbius checkout.",
-      status_code=409,
-    )
-  host_status = await asyncio.to_thread(_read_host_status)
-  if not _current_handoff(host_status):
-    raise DeploymentControlError(
-      "controller_upgrade_required",
-      _UPGRADE_MESSAGE,
       status_code=409,
     )
   expected_sha = _expected_upstream_sha()
@@ -306,6 +394,16 @@ async def request_rebuild() -> RebuildStatus:
       "Commit them upstream or remove them before replacing this container.",
       status_code=409,
     )
+  if deployment == "railway":
+    return await _request_managed_rebuild(expected_sha)
+
+  host_status = await asyncio.to_thread(_read_host_status)
+  if not _current_handoff(host_status):
+    raise DeploymentControlError(
+      "controller_upgrade_required",
+      _UPGRADE_MESSAGE,
+      status_code=409,
+    )
   current = _normalize_status(host_status)
   if current["state"] in _ACTIVE_STATES:
     raise DeploymentControlError(
@@ -319,3 +417,64 @@ async def request_rebuild() -> RebuildStatus:
     "expected_sha": expected_sha,
     "message": "Container replacement queued.",
   }, expected_sha=expected_sha)
+
+
+async def _request_managed_rebuild(expected_sha: str) -> RebuildStatus:
+  from app import restart_ledger, restart_util
+
+  marker = Path(get_settings().data_dir) / "run" / "managed-cutover-ready"
+  if not marker.is_file():
+    raise DeploymentControlError(
+      "controller_upgrade_required",
+      "Install the current Möbius image once to enable managed container replacement.",
+      status_code=409,
+    )
+  prepared = await asyncio.to_thread(
+    _managed_request, "POST", "prepare", {"expected_sha": expected_sha},
+  )
+  if prepared.get("state") == "no_change":
+    return _normalize_managed_status(prepared)
+  operation_id = str(prepared.get("operation_id") or "")
+  handoff_nonce = str(prepared.get("handoff_nonce") or "")
+  boot_id = restart_ledger.current_boot_id()
+  if not operation_id or not handoff_nonce or not boot_id:
+    raise DeploymentControlError(
+      "controller_invalid_response", "The managed replacement handoff is incomplete."
+    )
+  restart_ledger.request_managed_cutover(
+    boot_id=boot_id, cutover_id=operation_id,
+  )
+  deadline = time.monotonic() + 15
+  while not restart_ledger.authorized_cutover_challenge(operation_id):
+    if time.monotonic() >= deadline:
+      raise DeploymentControlError(
+        "controller_upgrade_required",
+        "The current container cannot authorize a Railway replacement.",
+      )
+    await asyncio.sleep(0.25)
+
+  drained = False
+  try:
+    await restart_util.prepare_managed_container_cutover(operation_id)
+    drained = True
+    deadline = time.monotonic() + 15
+    while not restart_ledger.accepted_cutover_receipt(operation_id):
+      if time.monotonic() >= deadline:
+        raise DeploymentControlError(
+          "controller_unavailable", "The container could not finish the Railway handoff."
+        )
+      await asyncio.sleep(0.25)
+    started = await asyncio.to_thread(
+      _managed_request,
+      "POST",
+      "start",
+      {"operation_id": operation_id, "handoff_nonce": handoff_nonce},
+    )
+    return _normalize_managed_status(started)
+  except Exception:
+    if drained:
+      # The provider never accepted ownership. Restart locally so parked chats
+      # are not left waiting indefinitely; this path fails closed to the normal
+      # restart ledger if the managed receipt cannot be reused.
+      asyncio.create_task(restart_util.restart_this_worker())
+    raise
