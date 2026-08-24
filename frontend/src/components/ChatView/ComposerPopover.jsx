@@ -36,7 +36,7 @@
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { FileDocument, InfoCircle, Paperclip, Plus } from '@openai/apps-sdk-ui/components/Icon'
+import { DollarCircle, FileDocument, InfoCircle, Paperclip, Plus } from '@openai/apps-sdk-ui/components/Icon'
 import ChatSettingsPanel from './ChatSettingsPanel.jsx'
 import { popoverMaxHeight, nearestClipTop } from './composerPopoverHeight.js'
 import { focusComposerElement } from './composerFocusPolicy.js'
@@ -70,6 +70,7 @@ export default function ComposerPopover({
   modelSelectionRequest = 0,
   onOpenInspector,
   onOpenSummary,
+  onOpenUsage,
   embedded = false,
   pending = false,
   modelTriggerIcon = null,
@@ -222,6 +223,11 @@ export default function ComposerPopover({
     onOpenSummary?.()
   }
 
+  function handleOpenUsage() {
+    setMode(null)
+    onOpenUsage?.()
+  }
+
   function toggleMode(nextMode, nextTriggerRef) {
     const el = composerInputRef?.current
     const wasFocused = document.activeElement === el
@@ -344,6 +350,21 @@ export default function ComposerPopover({
                 <span className="composer-popover__row-title">What the agent knows</span>
                 <span className="composer-popover__row-sub">
                   System prompt and recent chats
+                </span>
+              </span>
+            </button>
+            <button
+              type="button"
+              className="composer-popover__row"
+              onClick={handleOpenUsage}
+            >
+              <span className="composer-popover__row-icon" aria-hidden="true">
+                <DollarCircle width={18} height={18} />
+              </span>
+              <span className="composer-popover__row-main">
+                <span className="composer-popover__row-title">Token usage &amp; cost</span>
+                <span className="composer-popover__row-sub">
+                  Per-turn breakdown for this chat
                 </span>
               </span>
             </button>

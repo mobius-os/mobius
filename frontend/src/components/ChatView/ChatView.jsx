@@ -13,7 +13,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
 import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
-import { chatMessagesQueryKey, settingsQueries } from '../../hooks/queries.js'
+import { chatMessagesQueryKey, chatQueries, settingsQueries } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode, {
   FOLLOW_STICK_BAND_PX,
@@ -43,6 +43,9 @@ import ChatInputBar from './ChatInputBar.jsx'
 import { hasSendablePayload } from './composerSubmission.js'
 import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
+import ChatUsageInspector from './ChatUsageInspector.jsx'
+import ChatUsageStrip from './ChatUsageStrip.jsx'
+import { formatUsageAriaSummary } from './chatUsageFormat.js'
 import ComposerPopover from './ComposerPopover.jsx'
 import BrainUsageButton from './BrainUsageButton.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
@@ -330,6 +333,14 @@ export default function ChatView({
   onDisplayReady = null,
 }) {
   const queryClient = useQueryClient()
+  // Cheap per-chat token/cost summary for the always-visible composer badge
+  // and the full breakdown panel. Not fetched for embedded app-owned chats
+  // (matches BrainUsageButton's own usageEnabled gate) since the owner never
+  // sees the composer chrome there.
+  const chatUsageQuery = chatQueries.usage.useQuery(chatId, {
+    enabled: !embedded && !!chatId,
+  })
+  const chatUsageAriaSummary = formatUsageAriaSummary(chatUsageQuery.data?.totals)
   const hiddenRef = useRef(hidden)
   hiddenRef.current = hidden
   // A drawer search may target a ChatView that is already mounted. Subscribe
@@ -534,6 +545,7 @@ export default function ChatView({
   // cards themselves use to publish the node being observed.
   const [showInspector, setShowInspector] = useState(false)
   const [showSummary, setShowSummary] = useState(false)
+  const [showUsage, setShowUsage] = useState(false)
   const [visibleMessageMetaKey, setVisibleMessageMetaKey] = useState(null)
   const messageMetaTimerRef = useRef(null)
   const [previewReadyStatus, setPreviewReadyStatus] = useState('')
@@ -1373,6 +1385,13 @@ export default function ChatView({
         }
         setPinnedSettleSeq(seq => seq + 1)
       }
+      // A finished turn (successful or not) may have persisted a new run
+      // with its own cost/token usage row. Cost isn't in this stream event
+      // (Claude only reports it in the terminal DB write, not the wire
+      // payload), so the always-visible usage badge stays correct by
+      // refetching the cheap per-chat summary here rather than threading a
+      // second usage-carrying event through the whole reducer pipeline.
+      chatQueries.usage.invalidate(queryClient, chatId)
       onStreamEnd?.({ continues })
     },
     onSystemEvent: event => {
@@ -4484,6 +4503,12 @@ export default function ChatView({
           onClose={() => setShowSummary(false)}
         />
       )}
+      {!embedded && showUsage && (
+        <ChatUsageInspector
+          chatId={chatId}
+          onClose={() => setShowUsage(false)}
+        />
+      )}
       {showEmpty && (
         <div className="chat__empty-wrap">
           {embedded ? (
@@ -4835,6 +4860,12 @@ export default function ChatView({
             focusComposer={() => focusComposerElement(inputRef.current)}
           />
         )}
+        {!embedded && (
+          <ChatUsageStrip
+            totals={chatUsageQuery.data?.totals}
+            onOpen={() => setShowUsage(true)}
+          />
+        )}
         <ChatInputBar
           chatId={chatId}
           input={input}
@@ -4870,7 +4901,7 @@ export default function ChatView({
               {({ icon, ariaLabel }) => (
               <ComposerPopover
                 modelTriggerIcon={icon}
-                modelTriggerAriaLabel={ariaLabel}
+                modelTriggerAriaLabel={`${ariaLabel}. ${chatUsageAriaSummary}`}
                 triggerAriaLabel={embedded ? 'Attach files' : 'Attach files or view chat info'}
                 chatInfo={showPicker ? chatInfo : null}
                 chatId={chatId}
@@ -4901,6 +4932,7 @@ export default function ChatView({
                 modelSelectionRequest={modelSelectionRequest}
                 onOpenInspector={() => setShowInspector(true)}
                 onOpenSummary={() => setShowSummary(true)}
+                onOpenUsage={() => setShowUsage(true)}
                 embedded={embedded}
               />
               )}

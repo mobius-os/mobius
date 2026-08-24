@@ -377,10 +377,26 @@ export const appQueries = {
   },
 }
 
+async function fetchChatUsage(chatId) {
+  const res = await api.chats.usage(chatId)
+  return jsonOrThrow(res, 'chat usage fetch failed:')
+}
+
+function useChatUsageQuery(chatId, { enabled = true } = {}) {
+  return useQuery({
+    queryKey: ['chat-usage', chatId],
+    queryFn: () => fetchChatUsage(chatId),
+    enabled: enabled && Boolean(chatId),
+    staleTime: 30_000,
+    retry: 1,
+  })
+}
+
 export const chatQueries = {
   keys: {
     all: chatsKey,
     messages: (chatId) => ['chat-messages', chatId],
+    usage: (chatId) => ['chat-usage', chatId],
   },
   list: {
     key: chatsKey,
@@ -392,6 +408,12 @@ export const chatQueries = {
     key: (chatId) => ['chat-messages', chatId],
     fetch: fetchChatMessages,
     remove: (queryClient, chatId) => queryClient.removeQueries({ queryKey: ['chat-messages', chatId] }),
+  },
+  usage: {
+    key: (chatId) => ['chat-usage', chatId],
+    fetch: fetchChatUsage,
+    useQuery: useChatUsageQuery,
+    invalidate: (queryClient, chatId) => queryClient.invalidateQueries({ queryKey: ['chat-usage', chatId] }),
   },
 }
 
