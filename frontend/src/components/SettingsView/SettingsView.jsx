@@ -42,7 +42,7 @@ import UpdateReviewModal from './UpdateReviewModal.jsx'
 import ProviderUsage from './ProviderUsage.jsx'
 import {
   formatPlanStatus,
-  formatUsageExpiry,
+  formatTrialTimeLeft,
   providerAllowance,
   providerAllowanceSummary,
 } from './providerUsage.js'
@@ -493,7 +493,7 @@ export default function SettingsView({
           : (
               typeof mobiusAllowance.usedPercent === 'number'
                 ? providerAllowanceSummary('mobius', mobiusAllowance)
-                : formatUsageExpiry(mobiusExpiryRaw) || 'Trial usage unavailable'
+                : formatTrialTimeLeft(mobiusExpiryRaw) || 'Trial usage unavailable'
             )
       )
     : 'Sign in from Möbius · You to activate your trial.'

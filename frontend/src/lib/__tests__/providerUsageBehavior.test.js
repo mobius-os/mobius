@@ -42,13 +42,14 @@ test('Möbius follows typed API-credit usage instead of weekly windows', () => {
   })
 })
 
-test('Möbius allowance copy reports integer percent used and trial expiry', () => {
+test('Möbius allowance copy matches the consumed brain gauge at integer precision', () => {
+  const now = new Date('2026-08-25T20:00:00Z')
   assert.equal(providerAllowanceSummary('mobius', {
     usedPercent: 0.0163,
     expiresAt: '2026-09-07T19:40:34.682998+00:00',
-  }), '0% used · Trial expires 7 Sep')
+  }, now), '0% used · 13d left')
   assert.equal(providerAllowanceSummary('mobius', {
     usedPercent: 2.5,
     expiresAt: '2026-09-07T19:40:34.682998+00:00',
-  }), '3% used · Trial expires 7 Sep')
+  }, now), '3% used · 13d left')
 })

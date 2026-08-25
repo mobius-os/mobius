@@ -1806,8 +1806,9 @@ def _latest_model_input_tokens(run: models.ChatRun) -> int | None:
   direct = usage.get("latest_model_input_tokens")
   if isinstance(direct, (int, float)) and not isinstance(direct, bool):
     return max(0, int(direct))
-  if run.provider != "codex":
-    return None
+  # Some app-owned providers speak the Codex usage protocol while retaining
+  # their own provider identity on the run. Read the normalized shape rather
+  # than assuming only a direct Codex run can contain it.
   model_calls = usage.get("model_calls")
   if isinstance(model_calls, list) and model_calls:
     latest = model_calls[-1]

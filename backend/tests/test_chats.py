@@ -323,6 +323,43 @@ def test_current_chat_usage_reads_normalized_claude_call_occupancy(
   }
 
 
+def test_current_chat_usage_reads_codex_shaped_app_provider_metrics(
+  client, auth, chat, db,
+):
+  chat.provider = "mobius"
+  chat.session_id = "mobius-session"
+  db.add(models.ChatRun(
+    id="mobius-evolve-run",
+    chat_id=chat.id,
+    status="completed",
+    provider="mobius",
+    provider_session_id="mobius-session",
+    model_context_window=235_929,
+    usage_json={
+      "provider": "codex",
+      "model_calls": [
+        {"input_tokens": 12_000},
+        {"input_tokens": 20_220},
+      ],
+    },
+    started_at=datetime.now(UTC),
+  ))
+  db.commit()
+
+  response = client.get(
+    f"/api/chats/{chat.id}/usage/current",
+    headers=auth,
+  )
+
+  assert response.status_code == 200
+  assert response.json() == {
+    "provider": "mobius",
+    "provider_session_id": "mobius-session",
+    "input_tokens": 20_220,
+    "context_window": 235_929,
+  }
+
+
 def test_current_chat_usage_returns_unknown_for_a_fresh_session(
   client, auth, chat,
 ):

@@ -7,7 +7,7 @@ import {
   clampUsagePercent,
   formatPlanStatus,
   formatUsagePercent,
-  formatUsageExpiry,
+  formatTrialTimeLeft,
   formatUsageReset,
   visibleUsageWindows,
 } from '../../components/SettingsView/providerUsage.js'
@@ -39,12 +39,19 @@ test('usage percentages are bounded and retain useful precision', () => {
   assert.equal(formatUsagePercent(54), '54')
 })
 
-test('credit expiry formatting is concise and pinned to its UTC trial date', () => {
+test('trial time remaining stays compact and is derived from the exact expiry', () => {
   assert.equal(
-    formatUsageExpiry('2026-09-07T23:40:34.682998-07:00'),
-    'Trial expires 8 Sep',
+    formatTrialTimeLeft(
+      '2026-09-07T20:00:00Z',
+      new Date('2026-08-25T20:00:01Z'),
+    ),
+    '13d left',
   )
-  assert.equal(formatUsageExpiry('not-a-date'), '')
+  assert.equal(formatTrialTimeLeft(
+    '2026-08-25T19:59:59Z',
+    new Date('2026-08-25T20:00:00Z'),
+  ), 'Ended')
+  assert.equal(formatTrialTimeLeft('not-a-date'), '')
 })
 
 test('reset formatting distinguishes today from another day', () => {

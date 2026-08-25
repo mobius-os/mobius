@@ -17,18 +17,13 @@ export function formatUsagePercent(value) {
   return Number.isInteger(numeric) ? String(numeric) : numeric.toFixed(1)
 }
 
-export function formatUsageExpiry(value) {
+export function formatTrialTimeLeft(value, now = new Date()) {
   if (!value) return ''
   const expiry = new Date(value)
   if (Number.isNaN(expiry.getTime())) return ''
-  const parts = new Intl.DateTimeFormat(undefined, {
-    day: 'numeric',
-    month: 'short',
-    timeZone: 'UTC',
-  }).formatToParts(expiry)
-  const day = parts.find(part => part.type === 'day')?.value
-  const month = parts.find(part => part.type === 'month')?.value
-  return day && month ? `Trial expires ${day} ${month}` : ''
+  const remainingMs = expiry.getTime() - now.getTime()
+  if (remainingMs <= 0) return 'Ended'
+  return `${Math.ceil(remainingMs / 86_400_000)}d left`
 }
 
 export function formatUsageReset(value, now = new Date()) {
@@ -73,11 +68,11 @@ export function providerAllowance(provider, snapshot) {
   }
 }
 
-export function providerAllowanceSummary(provider, allowance) {
+export function providerAllowanceSummary(provider, allowance, now = new Date()) {
   if (provider === 'mobius' && typeof allowance?.usedPercent === 'number') {
     return [
       `${Math.round(allowance.usedPercent)}% used`,
-      formatUsageExpiry(allowance.expiresAt),
+      formatTrialTimeLeft(allowance.expiresAt, now),
     ].filter(Boolean).join(' · ')
   }
   if (typeof allowance?.usedPercent === 'number') {
