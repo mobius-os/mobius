@@ -2201,6 +2201,63 @@ def _select_install_target(
   )
 
 
+async def _sync_manifest_cron_unlocked(
+  *,
+  app: models.App,
+  manifest: dict,
+  drop_prior_cron: bool,
+  bundled_job: bool,
+  warnings: list[str],
+) -> None:
+  """Converge one accepted manifest's cron while its source lock is held.
+
+  Store installs and explicit local-source applies are two acceptance paths for
+  the same manifest contract. Keeping cron convergence here prevents either
+  path from becoming add-only: an accepted update that drops its schedule must
+  retire both the live entry and its replayable declaration.
+  """
+  schedule = manifest.get("schedule")
+  job_name = schedule.get("job") if schedule else None
+  cron_job_name = job_name or "job.sh"
+  has_cron = bool(schedule and schedule.get("default"))
+  if not (bundled_job or has_cron or drop_prior_cron):
+    return
+
+  app_data_dir = Path(app.source_dir)
+  app_data_dir.mkdir(parents=True, exist_ok=True)
+  if drop_prior_cron:
+    await asyncio.to_thread(_drop_app_cron, app_data_dir)
+  job_path = app_data_dir / cron_job_name
+  if job_name and job_path.exists() and not os.access(job_path, os.X_OK):
+    warnings.append(
+      f"schedule.job {cron_job_name} is not executable — cron/run-job "
+      "will fail until the app repo commits the executable bit"
+    )
+  active_cron_scaffold = app_cron.cron_scaffold(CRON_SCAFFOLD)
+  if has_cron and active_cron_scaffold.exists():
+    await asyncio.to_thread(
+      app_cron.register_cron,
+      app.slug,
+      schedule["default"],
+      job_path,
+      app.id,
+      scaffold=active_cron_scaffold,
+    )
+  elif has_cron:
+    sentinel = app_data_dir / ".cron-pending.json"
+    sentinel.write_text(
+      json.dumps({
+        "expr": schedule["default"],
+        "job": cron_job_name,
+        "status": "pending — init-cron-scaffold.sh not on PATH",
+      }),
+      encoding="utf-8",
+    )
+    warnings.append(
+      "cron: scaffold script not available — registration pending"
+    )
+
+
 async def _run_post_commit_effects(
   db: Session,
   *,
@@ -2217,53 +2274,21 @@ async def _run_post_commit_effects(
   manifest = candidate.manifest
   schedule = manifest.get("schedule")
   job_name = schedule.get("job") if schedule else None
-  cron_job_name = job_name or "job.sh"
   has_cron = bool(schedule and schedule.get("default"))
   drop_prior_cron = mode == "update"
   if candidate.bundled_job or has_cron or drop_prior_cron:
-    slug = app.slug
-    data_dir = Path(get_settings().data_dir)
     app_data_dir = Path(app.source_dir)
     try:
       async with fs_locks.source_dir_lock(str(app_data_dir)):
         if not db.query(models.App.id).filter(models.App.id == app.id).first():
           raise HTTPException(404, "App removed before cron registration.")
-        app_data_dir.mkdir(parents=True, exist_ok=True)
-        if drop_prior_cron:
-          await asyncio.to_thread(_drop_app_cron, app_data_dir)
-        job_path = app_data_dir / cron_job_name
-        if (
-          job_name
-          and job_path.exists()
-          and not os.access(job_path, os.X_OK)
-        ):
-          warnings.append(
-            f"schedule.job {cron_job_name} is not executable — cron/run-job "
-            "will fail until the app repo commits the executable bit"
-          )
-        active_cron_scaffold = app_cron.cron_scaffold(CRON_SCAFFOLD)
-        if has_cron and active_cron_scaffold.exists():
-          await asyncio.to_thread(
-            app_cron.register_cron,
-            slug,
-            schedule["default"],
-            job_path,
-            app.id,
-            scaffold=active_cron_scaffold,
-          )
-        elif has_cron:
-          sentinel = app_data_dir / ".cron-pending.json"
-          sentinel.write_text(
-            json.dumps({
-              "expr": schedule["default"],
-              "job": cron_job_name,
-              "status": "pending — init-cron-scaffold.sh not on PATH",
-            }),
-            encoding="utf-8",
-          )
-          warnings.append(
-            "cron: scaffold script not available — registration pending"
-          )
+        await _sync_manifest_cron_unlocked(
+          app=app,
+          manifest=manifest,
+          drop_prior_cron=drop_prior_cron,
+          bundled_job=bool(candidate.bundled_job),
+          warnings=warnings,
+        )
     except HTTPException as exc:
       log.warning(
         "install: job-script/cron step failed post-commit — %s",
