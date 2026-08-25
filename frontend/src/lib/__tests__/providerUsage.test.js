@@ -7,6 +7,7 @@ import {
   clampUsagePercent,
   formatPlanStatus,
   formatUsagePercent,
+  formatUsageExpiry,
   formatUsageReset,
   visibleUsageWindows,
 } from '../../components/SettingsView/providerUsage.js'
@@ -36,6 +37,14 @@ test('usage percentages are bounded and retain useful precision', () => {
   assert.equal(clampUsagePercent(140), 100)
   assert.equal(formatUsagePercent(34.2), '34.2')
   assert.equal(formatUsagePercent(54), '54')
+})
+
+test('credit expiry formatting is concise and pinned to its UTC trial date', () => {
+  assert.equal(
+    formatUsageExpiry('2026-09-07T23:40:34.682998-07:00'),
+    'Trial expires 8 Sep',
+  )
+  assert.equal(formatUsageExpiry('not-a-date'), '')
 })
 
 test('reset formatting distinguishes today from another day', () => {

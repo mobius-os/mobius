@@ -72,6 +72,12 @@ test('new provider connections use the curated unattended defaults', () => {
   assert.match(view, /effort: defaultEffort\(provider\)/)
 })
 
+test('Möbius subscription status uses the same consumed-credit copy as the brain', () => {
+  assert.match(view, /enabled: active && providerReady && mobiusAvailable && mobiusAuthenticated/)
+  assert.match(view, /providerAllowanceSummary\('mobius', mobiusAllowance\)/)
+  assert.doesNotMatch(view, /mobiusRemaining|spendable_units/)
+})
+
 test('appearance indicator waits for the same seeded theme repaint as the palette', () => {
   assert.doesNotMatch(view, /setThemeMode\(newMode\)/)
   assert.match(view, /await themeService\.toggleTheme\(queryClient, currentMode, api\)/)

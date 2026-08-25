@@ -83,8 +83,61 @@ def test_normalize_codex_usage_reads_primary_secondary_and_credits():
   assert snapshot["credit_balance"] == "18.50 credits"
 
 
+def test_normalize_mobius_usage_reads_consumed_credit_and_active_expiry():
+  from app.provider_usage import normalize_mobius_usage
+
+  snapshot = normalize_mobius_usage({
+    "plan": {"label": "Trial"},
+    "balance": {
+      "spendable_units": 650_000,
+      "grants": [{
+        "amount_units": 2_000_000,
+        "available_units": 650_000,
+        "revoked": False,
+        "expires_at": "2026-09-07T19:40:34.682998Z",
+      }],
+    },
+  })
+
+  assert snapshot == {
+    "state": "ready",
+    "plan_label": "Trial",
+    "windows": [{
+      "id": "api_credits",
+      "kind": "api_credits",
+      "label": "API credits",
+      "used_percent": 67.5,
+      "resets_at": None,
+      "expires_at": "2026-09-07T19:40:34.682998+00:00",
+    }],
+    "credit_balance": None,
+  }
+
+
+def test_normalize_mobius_usage_keeps_an_exhausted_grant_measurable():
+  from app.provider_usage import normalize_mobius_usage
+
+  snapshot = normalize_mobius_usage({
+    "balance": {
+      "spendable_units": 0,
+      "grants": [{
+        "amount_units": 2_000_000,
+        "available_units": 0,
+        "revoked": False,
+      }],
+    },
+  })
+
+  assert snapshot["windows"][0]["used_percent"] == 100
+  assert snapshot["credit_balance"] is None
+
+
 def test_normalizers_report_unavailable_without_inventing_limits():
-  from app.provider_usage import normalize_claude_usage, normalize_codex_usage
+  from app.provider_usage import (
+    normalize_claude_usage,
+    normalize_codex_usage,
+    normalize_mobius_usage,
+  )
 
   claude = normalize_claude_usage({}, subscription_type="pro")
   codex = normalize_codex_usage({"rate_limits": {}}, plan_type="team")
@@ -101,6 +154,14 @@ def test_normalizers_report_unavailable_without_inventing_limits():
     "windows": [],
     "credit_balance": None,
   }
+  assert normalize_mobius_usage({"balance": {"spendable_units": 500}}) == {
+    "state": "unavailable",
+    "plan_label": "Möbius subscription",
+    "windows": [],
+    "credit_balance": None,
+  }
+
+
 def test_provider_usage_reads_only_requested_plan(monkeypatch):
   from app import provider_usage
 

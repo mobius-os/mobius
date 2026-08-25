@@ -17,6 +17,20 @@ export function formatUsagePercent(value) {
   return Number.isInteger(numeric) ? String(numeric) : numeric.toFixed(1)
 }
 
+export function formatUsageExpiry(value) {
+  if (!value) return ''
+  const expiry = new Date(value)
+  if (Number.isNaN(expiry.getTime())) return ''
+  const parts = new Intl.DateTimeFormat(undefined, {
+    day: 'numeric',
+    month: 'short',
+    timeZone: 'UTC',
+  }).formatToParts(expiry)
+  const day = parts.find(part => part.type === 'day')?.value
+  const month = parts.find(part => part.type === 'month')?.value
+  return day && month ? `Trial expires ${day} ${month}` : ''
+}
+
 export function formatUsageReset(value, now = new Date()) {
   if (!value) return ''
   const reset = new Date(value)
@@ -43,17 +57,31 @@ export function visibleUsageWindows(snapshot) {
     .slice(0, 4)
 }
 
-export function providerAllowance(snapshot) {
-  const kind = 'weekly'
-  const label = 'Weekly usage'
+export function providerAllowance(provider, snapshot) {
+  const kind = provider === 'mobius' ? 'api_credits' : 'weekly'
+  const label = kind === 'api_credits' ? 'API credits usage' : 'Weekly usage'
   if (snapshot?.state !== 'ready' || !Array.isArray(snapshot.windows)) {
-    return { kind, label, usedPercent: null }
+    return { kind, label, usedPercent: null, expiresAt: null }
   }
   const window = snapshot.windows.find(candidate => candidate?.kind === kind)
-  const used = Number(window?.used_percent)
+  const used = window?.used_percent == null ? Number.NaN : Number(window.used_percent)
   return {
     kind,
     label,
     usedPercent: Number.isFinite(used) ? clampUsagePercent(used) : null,
+    expiresAt: typeof window?.expires_at === 'string' ? window.expires_at : null,
   }
+}
+
+export function providerAllowanceSummary(provider, allowance) {
+  if (provider === 'mobius' && typeof allowance?.usedPercent === 'number') {
+    return [
+      `${Math.round(allowance.usedPercent)}% used`,
+      formatUsageExpiry(allowance.expiresAt),
+    ].filter(Boolean).join(' · ')
+  }
+  if (typeof allowance?.usedPercent === 'number') {
+    return `${Math.round(allowance.usedPercent)}% ${allowance.label.toLowerCase()}`
+  }
+  return allowance?.label || 'Usage'
 }

@@ -543,9 +543,11 @@ export default function ChatSettingsPanel({
 
   const currentProviderConfigured = availability.configuredProviders.has(draftProvider)
   const currentProviderLabel = PROVIDER_INFO[draftProvider]?.label || draftProvider
-  const allowanceUsageLabel = typeof providerUsage?.allowanceUsedPercent === 'number'
+  const allowanceUsageLabel = providerUsage?.allowanceSummary || (
+    typeof providerUsage?.allowanceUsedPercent === 'number'
     ? `${Math.round(providerUsage.allowanceUsedPercent)}% ${providerUsage.allowanceLabel.toLowerCase()}`
     : (providerUsage?.allowanceLabel || 'Usage')
+  )
   const contextUsageLabel = (
     typeof providerUsage?.contextTokensUsed === 'number'
     && typeof providerUsage?.contextTokensMaximum === 'number'

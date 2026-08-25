@@ -40,7 +40,12 @@ import { modelEfforts, validEffort } from '../ui/modelEfforts.js'
 import ManageModelsModal from '../ChatView/ManageModelsModal.jsx'
 import UpdateReviewModal from './UpdateReviewModal.jsx'
 import ProviderUsage from './ProviderUsage.jsx'
-import { formatPlanStatus } from './providerUsage.js'
+import {
+  formatPlanStatus,
+  formatUsageExpiry,
+  providerAllowance,
+  providerAllowanceSummary,
+} from './providerUsage.js'
 import { PROVIDER_INFO, PROVIDER_ORDER } from '../ChatView/providerRegistry.jsx'
 import '../ui/StatusDot.css'
 import '../ui/ModelSheet.css'
@@ -436,24 +441,12 @@ export default function SettingsView({
   const mobiusAvailable = providerStatusQuery.data?.mobius?.available === true
   const mobiusAuthenticated = configuredProviders.has('mobius')
   const mobiusTrial = providerStatusQuery.data?.mobius?.trial
-  const mobiusRemainingUnits = Number(mobiusTrial?.balance?.spendable_units)
-  const mobiusRemaining = Number.isFinite(mobiusRemainingUnits)
-    ? `$${(mobiusRemainingUnits / 1_000_000).toFixed(2)} remaining`
-    : 'Trial balance unavailable'
   const mobiusExpiryRaw = mobiusTrial?.trial_expires_at
     || mobiusTrial?.account?.trial_expires_at
     || mobiusTrial?.balance?.grants?.find(grant => grant?.kind === 'trial')?.expires_at
   const mobiusExpiryTime = Date.parse(mobiusExpiryRaw || '')
   const mobiusHasExpiry = Number.isFinite(mobiusExpiryTime)
-  const mobiusExpiryLabel = mobiusHasExpiry
-    ? new Intl.DateTimeFormat(undefined, {
-        year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC',
-      }).format(new Date(mobiusExpiryTime))
-    : ''
   const mobiusExpired = mobiusHasExpiry && mobiusExpiryTime <= Date.now()
-  const mobiusTrialSubtitle = mobiusAuthenticated
-    ? `${mobiusRemaining}. ${mobiusExpired ? 'Expired' : 'Expires'} ${mobiusExpiryLabel || 'after the trial period'}.`
-    : 'Sign in from Möbius · You to activate your trial.'
   // Live-probed CLI versions (null when the CLI isn't installed or
   // didn't respond). Read-only — updates happen via the agent, not here.
   const claudeVersion = settingsQuery.data?.claude_version
@@ -489,6 +482,21 @@ export default function SettingsView({
       && expandedUsage.claude
     ),
   })
+  const mobiusUsageQuery = settingsQueries.providerUsage.useQuery('mobius', {
+    enabled: active && providerReady && mobiusAvailable && mobiusAuthenticated,
+  })
+  const mobiusAllowance = providerAllowance('mobius', mobiusUsageQuery.data)
+  const mobiusTrialSubtitle = mobiusAuthenticated
+    ? (
+        mobiusExpired
+          ? 'Trial expired'
+          : (
+              typeof mobiusAllowance.usedPercent === 'number'
+                ? providerAllowanceSummary('mobius', mobiusAllowance)
+                : formatUsageExpiry(mobiusExpiryRaw) || 'Trial usage unavailable'
+            )
+      )
+    : 'Sign in from Möbius · You to activate your trial.'
   // Registry and provider/settings probes are independent. Starting them
   // together avoids an unnecessary request waterfall on a first open.
   const modelRegistryQuery = modelQueries.registry.useQuery()

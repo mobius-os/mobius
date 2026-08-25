@@ -75,10 +75,11 @@ KNOWN_MODELS = {
     "gpt-5.4-mini",
     "gpt-5.3-codex-spark",
   ],
-  "mobius": ["inkling"],
+  "mobius": ["spark", "inkling"],
 }
 
 MODEL_LABELS = {
+  "spark": "Spark",
   # Public product name. Keep the stable wire id so existing chats and the
   # signed compute contract survive a display-name change without migration.
   "inkling": "Evolve",
@@ -96,14 +97,14 @@ MODEL_EFFORT_LEVELS: dict[str, list[str]] = {
   "gpt-5.6-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
   "gpt-5.6-terra": ["low", "medium", "high", "xhigh", "max", "ultra"],
   "gpt-5.6-luna": ["low", "medium", "high", "xhigh", "max"],
-  # The subscription currently exposes one product model with a graduated
-  # effort scale. Future product tiers belong here under their public names.
+  # The subscription product models share one graduated effort scale.
+  "spark": ["minimal", "low", "medium", "high", "max"],
   "inkling": ["minimal", "low", "medium", "high", "max"],
 }
 
-# Usable input context before the provider runtime compacts. The live Codex
-# catalog overrides these values below; the exact map keeps empty chats honest
-# when discovery is offline. Claude's model endpoint does not publish a
+# Usable input context before the provider runtime compacts. Live Codex and
+# Möbius catalogs override these values below; the exact map keeps empty chats
+# honest when discovery is offline. Claude's model endpoint does not publish a
 # context field, so its documented per-model limits live at this adapter seam.
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
   "claude-fable-5": 1_000_000,
@@ -124,6 +125,8 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
   "gpt-5.4": 258_400,
   "gpt-5.4-mini": 258_400,
   "gpt-5.3-codex-spark": 121_600,
+  "spark": 235_930,
+  "inkling": 235_930,
 }
 
 # Runtime recovery defaults are intentionally independent of picker order.
@@ -152,7 +155,7 @@ DEFAULT_VISIBLE_MODEL_ORDER: dict[str, tuple[str, ...]] = {
     "gpt-5.6-luna",
     "gpt-5.5",
   ),
-  "mobius": ("inkling",),
+  "mobius": ("spark", "inkling"),
 }
 DEFAULT_VISIBLE_MODELS: dict[str, frozenset[str]] = {
   provider_id: frozenset(models)
@@ -1609,6 +1612,10 @@ async def _fetch_provider_models(
         "id": row["id"],
         "label": MODEL_LABELS[row["id"]],
         "effort_levels": MODEL_EFFORT_LEVELS[row["id"]],
+        "context_window": (
+          _catalog_context_window(row)
+          or MODEL_CONTEXT_WINDOWS[row["id"]]
+        ),
       }
       for row in rows
       if isinstance(row, dict) and row.get("id") in KNOWN_MODELS["mobius"]

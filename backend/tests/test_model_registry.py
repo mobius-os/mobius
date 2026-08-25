@@ -368,6 +368,9 @@ def test_claude_fallback_context_matches_documented_model_limit():
 
 
 def test_mobius_effort_scale_uses_the_public_product_model():
+  assert providers.MODEL_EFFORT_LEVELS["spark"] == [
+    "minimal", "low", "medium", "high", "max",
+  ]
   assert providers.MODEL_EFFORT_LEVELS["inkling"] == [
     "minimal", "low", "medium", "high", "max",
   ]

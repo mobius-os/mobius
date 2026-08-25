@@ -1,6 +1,9 @@
 import { chatQueries, modelQueries, settingsQueries } from '../../hooks/queries.js'
 import BrainUsageIcon from './BrainUsageIcon.jsx'
-import { providerAllowance } from '../SettingsView/providerUsage.js'
+import {
+  providerAllowance,
+  providerAllowanceSummary,
+} from '../SettingsView/providerUsage.js'
 import {
   contextUsedPercent,
   formatRoundedTokenCount,
@@ -32,8 +35,9 @@ export default function BrainUsageButton({
     enabled: usageEnabled && Boolean(provider && model),
   })
   const allowance = providerUsageQuery.isLoading
-    ? providerAllowance(null)
-    : providerAllowance(providerUsageQuery.data)
+    ? providerAllowance(provider, null)
+    : providerAllowance(provider, providerUsageQuery.data)
+  const allowanceSummary = providerAllowanceSummary(provider, allowance)
   const leftPercent = allowance.usedPercent
   const contextSnapshot = (
     contextUsageQuery.isLoading
@@ -57,8 +61,8 @@ export default function BrainUsageButton({
 
   const usageSummary = [
     leftPercent === null
-      ? `${providerLabel} ${allowance.label.toLowerCase()}: unknown`
-      : `${providerLabel} ${allowance.label.toLowerCase()}: ${Math.round(leftPercent)}%`,
+      ? `${providerLabel} usage: unknown`
+      : (provider === 'mobius' ? allowanceSummary : `${providerLabel} ${allowanceSummary}`),
     contextTokens === null || rightPercent === null
       ? 'Context used: unknown'
       : `Context used: ${formatRoundedTokenCount(contextTokens.used)} of ${formatRoundedTokenCount(contextTokens.maximum)} tokens (${Math.round(rightPercent)}%); ${Math.round(100 - rightPercent)}% remains before compaction`,
@@ -73,6 +77,7 @@ export default function BrainUsageButton({
       allowanceKind: allowance.kind,
       allowanceLabel: allowance.label,
       allowanceUsedPercent: leftPercent,
+      allowanceSummary,
       contextTokensUsed: contextTokens?.used ?? null,
       contextTokensMaximum: contextTokens?.maximum ?? null,
     },

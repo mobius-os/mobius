@@ -1,4 +1,4 @@
-"""Read-only provider-plan usage snapshots for the Settings surface."""
+"""Read-only provider-plan usage snapshots for Settings and the chat brain."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from app import providers
+from app.runtime_identity import broker_request
 
 log = logging.getLogger(__name__)
 
@@ -222,6 +223,95 @@ def normalize_codex_usage(
   }
 
 
+def _units(raw: Any) -> float | None:
+  if isinstance(raw, bool):
+    return None
+  try:
+    value = float(raw)
+  except (TypeError, ValueError):
+    return None
+  return value if value >= 0 else None
+
+
+def _first_units(source: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+  for key in keys:
+    value = _units(source.get(key))
+    if value is not None:
+      return value
+  return None
+
+
+def normalize_mobius_usage(payload: Any) -> dict[str, Any]:
+  """Normalize the subscription's balance into a used-credit gauge."""
+  source = payload if isinstance(payload, dict) else {}
+  balance = source.get("balance")
+  balance = balance if isinstance(balance, dict) else source
+  plan = source.get("plan")
+  plan = plan if isinstance(plan, dict) else {}
+  raw_plan_label = plan.get("label")
+  mobius_plan_label = (
+    raw_plan_label.strip()
+    if isinstance(raw_plan_label, str) and raw_plan_label.strip()
+    else "Möbius subscription"
+  )
+
+  remaining = _first_units(balance, ("spendable_units", "remaining_units"))
+  used = _first_units(balance, ("used_units", "spent_units", "consumed_units"))
+  total = _first_units(
+    balance,
+    ("total_units", "granted_units", "credit_limit_units", "limit_units"),
+  )
+  grants = balance.get("grants")
+  grants = grants if isinstance(grants, list) else []
+  eligible_grants = [
+    grant for grant in grants
+    if isinstance(grant, dict) and grant.get("revoked") is not True
+  ]
+  if total is None:
+    grant_totals = [
+      _first_units(
+        grant,
+        ("original_units", "granted_units", "amount_units", "total_units"),
+      )
+      for grant in eligible_grants
+    ]
+    known_totals = [value for value in grant_totals if value is not None]
+    if known_totals:
+      total = sum(known_totals)
+  if total is None and used is not None and remaining is not None:
+    total = used + remaining
+  if used is None and total is not None and remaining is not None:
+    used = max(0, total - remaining)
+
+  used_percent = _used_percent(
+    balance.get("used_percent", balance.get("usedPercent"))
+  )
+  if used_percent is None and used is not None and total is not None and total > 0:
+    used_percent = _used_percent((used / total) * 100)
+
+  window = (
+    _window("api_credits", "api_credits", "API credits", used_percent, None)
+    if used_percent is not None else None
+  )
+  if window is not None:
+    active_grants = [
+      grant for grant in eligible_grants
+      if (_first_units(grant, ("available_units",)) or 0) > 0
+    ]
+    expiries = [
+      normalized
+      for grant in active_grants
+      if (normalized := _reset_iso(grant.get("expires_at"))) is not None
+    ]
+    window["expires_at"] = min(expiries) if expiries else None
+  return {
+    "state": "ready" if window is not None else "unavailable",
+    "plan_label": mobius_plan_label,
+    "windows": [window] if window is not None else [],
+    "credit_balance": None,
+  }
+
+
 async def _fetch_claude_usage(data_dir: str) -> dict[str, Any]:
   subscription_type = providers.claude_subscription_type(data_dir)
   token = await providers.claude_access_token(data_dir)
@@ -314,6 +404,11 @@ async def _fetch_codex_usage(data_dir: str) -> dict[str, Any]:
   return normalize_codex_usage(raw, plan_type=_codex_plan_type(account))
 
 
+async def _fetch_mobius_usage() -> dict[str, Any]:
+  payload = await broker_request("GET", "/v1/balance", timeout=5.0)
+  return normalize_mobius_usage(payload)
+
+
 def _unavailable(plan_label: str | None = None) -> dict[str, Any]:
   return {
     "state": "unavailable",
@@ -337,14 +432,19 @@ async def _provider_snapshot(provider_id: str, data_dir: str) -> dict[str, Any]:
       return await _fetch_claude_usage(data_dir)
     if provider_id == "codex":
       return await _fetch_codex_usage(data_dir)
+    if provider_id == "mobius":
+      return await _fetch_mobius_usage()
   except Exception as exc:  # best-effort read; Settings must still open
     log.warning("%s plan usage unavailable: %s", provider_id, exc)
-    subscription = (
-      providers.claude_subscription_type(data_dir)
-      if provider_id == "claude"
-      else providers.codex_subscription_type(data_dir)
-    )
-    plan = plan_label(subscription)
+    if provider_id == "mobius":
+      plan = "Möbius subscription"
+    else:
+      subscription = (
+        providers.claude_subscription_type(data_dir)
+        if provider_id == "claude"
+        else providers.codex_subscription_type(data_dir)
+      )
+      plan = plan_label(subscription)
     return _unavailable(plan)
   return _unavailable()
 

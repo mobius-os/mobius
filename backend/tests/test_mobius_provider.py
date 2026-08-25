@@ -36,16 +36,20 @@ def test_trial_provider_config_uses_only_local_broker_marker(tmp_path):
   assert "secret" not in config.lower()
 
 
-def test_subscription_catalog_exposes_one_product_model():
+def test_subscription_catalog_exposes_spark_and_evolve_without_backing_details():
   payload = json.loads(providers.MobiusProvider._catalog_path().read_text())
-  assert [row["slug"] for row in payload["models"]] == ["inkling"]
-  assert [row["display_name"] for row in payload["models"]] == ["Evolve"]
+  assert [row["slug"] for row in payload["models"]] == ["spark", "inkling"]
+  assert [row["display_name"] for row in payload["models"]] == ["Spark", "Evolve"]
+  assert all(row["supports_parallel_tool_calls"] is False for row in payload["models"])
+  assert all(row["support_verbosity"] is False for row in payload["models"])
+  assert providers.MODEL_LABELS["spark"] == "Spark"
   assert providers.MODEL_LABELS["inkling"] == "Evolve"
   assert providers.DEFAULT_MODELS["mobius"] == "inkling"
   assert providers.provider_runtime_kind("mobius") == "codex_sdk"
   fallback = providers._fallback_models("mobius")
-  assert [row["id"] for row in fallback] == ["inkling"]
-  assert [row["label"] for row in fallback] == ["Evolve"]
+  assert [row["id"] for row in fallback] == ["spark", "inkling"]
+  assert [row["label"] for row in fallback] == ["Spark", "Evolve"]
+  assert all(row["context_window"] == 235_930 for row in fallback)
 
 
 def test_evolve_is_valid_for_atomic_provider_handoff():
