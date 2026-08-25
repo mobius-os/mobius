@@ -90,10 +90,14 @@ async function ensureNavigationOpen(page) {
  *  real pointer path (not the deterministic Shift+Enter). The completed hold
  *  suppresses the trailing click, so it never also toggles the drawer. */
 async function holdLogo(page, brand) {
+  await brand.scrollIntoViewIfNeeded()
   const box = await brand.boundingBox()
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
   await page.mouse.down()
-  await page.waitForTimeout(650) // comfortably past the 450ms hold threshold
+  await expect(brand).toHaveClass(/is-holding/)
+  // Completion clears the hold class while the pointer is still down. Observe
+  // that owned boundary instead of sleeping past an assumed animation frame.
+  await expect(brand).not.toHaveClass(/is-holding/, { timeout: 3000 })
   await page.mouse.up()
 }
 
@@ -818,13 +822,17 @@ async function expectCaretAligned(page, caret, target, label) {
 /** Press on a source element, arm past slop, glide to a target point, release —
  *  the mouse-path drag Chromium delivers as real pointer events. */
 async function mouseDrag(page, sourceLocator, toX, toY, { release = true } = {}) {
+  await sourceLocator.scrollIntoViewIfNeeded()
   const box = await sourceLocator.boundingBox()
   const sx = box.x + box.width / 2
   const sy = box.y + box.height / 2
   await page.mouse.move(sx, sy)
   await page.mouse.down()
   await page.mouse.move(sx + 10, sy, { steps: 3 }) // clear the 5px slop → arm
+  await expect(page.locator('.workspace__drag-chip')).toBeVisible({ timeout: 3000 })
   await page.mouse.move(toX, toY, { steps: 14 })
+  await expect(page.locator('.workspace__drop-preview.is-visible'))
+    .toBeVisible({ timeout: 3000 })
   if (release) await page.mouse.up()
 }
 
@@ -1948,11 +1956,7 @@ test.describe('Logo activation + middle-click', () => {
 
     const brand = page.getByRole('button', { name: 'Toggle navigation' })
     const navBefore = await brand.getAttribute('aria-expanded')
-    const box = await page.locator('.shell__brand').boundingBox()
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
-    await page.mouse.down()
-    await page.waitForTimeout(650) // hold past the ~450ms threshold (rAF completes it)
-    await page.mouse.up()
+    await holdLogo(page, brand)
 
     await expect.poll(async () => (await readWs(page)).viewMode, {
       timeout: 3000, message: 'a completed hold flips to builder mode',
