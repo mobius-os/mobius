@@ -31,6 +31,7 @@ import {
   appMediaSessionEvent,
   applyVirtualStorageMutation,
   attributedFrameVersion,
+  attributedShellShortcutAction,
   serveClipboardWrite,
   serveModuleRequest,
   serveStorageRpc,
@@ -164,7 +165,13 @@ function appFrameRequestUrl(appId, version, frameRev) {
 //      shell wrapper. The live frame signals the parent so its pane becomes the
 //      focused owner of keyboard and immersive state.
 //
-//   9. moebius:account-link-*                               three-party broker
+//   9. {type:'moebius:frame-shortcuts', shortcuts}         parent → frame
+//      and {type:'moebius:shell-shortcut', actionId}       frame → parent
+//      The shell advertises only its reserved named actions to the live,
+//      interactive frame. Exact source + focus gating prevents arbitrary
+//      keylogging or a hidden frame dispatching workspace behavior.
+//
+//  10. moebius:account-link-*                              three-party broker
 //      The CSP-sandboxed app frame has an opaque origin, so an external OAuth
 //      completion page cannot safely target it by the shell's concrete origin.
 //      A live, visible frame with the reviewed identity_manage grant registers
@@ -294,9 +301,10 @@ const AppCanvas = forwardRef(function AppCanvas({
   // background content cannot keep coasting beneath the drawer.
   interactive = visible,
   pendingIntent = null,
+  shellShortcuts = null,
   onNavPush, onNavPop, onNavReset, onNavForwardResult,
   onAppFocus, onImmersive, onIntentDelivered, onAppError, onHostRequest,
-  onMediaSession,
+  onMediaSession, onShellShortcut,
 }, hostRef) {
   const queryClient = useQueryClient()
   const [serviceSurface, setServiceSurface] = useState(null)
@@ -516,6 +524,10 @@ const AppCanvas = forwardRef(function AppCanvas({
   frameVisibleRef.current = frameVisible
   const capabilityContractRef = useRef(capabilityContract)
   capabilityContractRef.current = capabilityContract
+  const shellShortcutsRef = useRef(Array.isArray(shellShortcuts) ? shellShortcuts : [])
+  shellShortcutsRef.current = Array.isArray(shellShortcuts) ? shellShortcuts : []
+  const onShellShortcutRef = useRef(onShellShortcut)
+  onShellShortcutRef.current = onShellShortcut
   const capabilityHostRef = useRef(null)
   if (!capabilityHostRef.current) {
     capabilityHostRef.current = createCapabilityHost({
@@ -615,6 +627,10 @@ const AppCanvas = forwardRef(function AppCanvas({
         bg: eff?.bg ?? theme?.bg,
         storage: readAppFrameStorage(appId, undefined, appSlug),
         capabilityContract,
+        shellShortcuts: v === liveVersionRef.current && activeRef.current
+          && visibleRef.current && interactiveRef.current
+          ? shellShortcutsRef.current
+          : [],
       },
       '*',
     )
@@ -899,6 +915,14 @@ const AppCanvas = forwardRef(function AppCanvas({
 
       if (msg.type === 'moebius:frame-focus') {
         onAppFocus?.(appId)
+        return
+      }
+
+      if (msg.type === 'moebius:shell-shortcut') {
+        if (srcVersion !== liveVersionRef.current
+            || !activeRef.current || !visibleRef.current || !interactiveRef.current) return
+        const actionId = attributedShellShortcutAction(msg, shellShortcutsRef.current)
+        if (actionId) onShellShortcutRef.current?.(actionId)
         return
       }
 
@@ -1275,6 +1299,15 @@ const AppCanvas = forwardRef(function AppCanvas({
     })
   }
 
+  function sendShellShortcuts(v) {
+    const enabled = v === liveVersionRef.current
+      && activeRef.current && visibleRef.current && interactiveRef.current
+    postToFrame(v, {
+      type: 'moebius:frame-shortcuts',
+      shortcuts: enabled ? shellShortcutsRef.current : [],
+    })
+  }
+
   useEffect(() => {
     if (loadedDocsRef.current.has(swap.liveVersion)) {
       sendVisibility(swap.liveVersion, frameVisible)
@@ -1293,6 +1326,13 @@ const AppCanvas = forwardRef(function AppCanvas({
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [interactive, frameVisible, swap.liveVersion])
+
+  useLayoutEffect(() => {
+    for (const v of framesRef.current.keys()) {
+      if (loadedDocsRef.current.has(v)) sendShellShortcuts(v)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, visible, interactive, shellShortcuts, swap.liveVersion])
 
   useEffect(() => {
     for (const v of framesRef.current.keys()) {
@@ -1485,6 +1525,7 @@ const AppCanvas = forwardRef(function AppCanvas({
     sendOnlineStatus(v)
     sendInsets(v)
     sendImmersiveState(v)
+    sendShellShortcuts(v)
     // A booting incoming frame is invisible by construction and must not
     // start audio/rAF work before promotion, so it learns `visible:false`
     // here; the live frame gets the real visible verdict. Promotion re-sends

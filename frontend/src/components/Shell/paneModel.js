@@ -1740,7 +1740,13 @@ export function workspaceReducer(state, action) {
       if (next === ws) return state
       const closeLabel = action.label || 'Closed tab'
       const { ws: closed, autoReturned } = completeCloseTransition(ws, next)
-      return { ws: closed, undo: { ws, label: closeLabel, toast: closeLabel, restoreViewMode: autoReturned } }
+      return {
+        ws: closed,
+        undo: {
+          ws, label: closeLabel, toast: closeLabel,
+          restoreViewMode: autoReturned, reopenable: true,
+        },
+      }
     }
     case 'CLOSE_PANE': {
       // Closing a pane closes all its tabs at once (a keyboard/menu affordance —
@@ -1750,7 +1756,13 @@ export function workspaceReducer(state, action) {
       if (next === ws) return state
       const paneLabel = action.label || 'Closed pane'
       const { ws: closed, autoReturned } = completeCloseTransition(ws, next)
-      return { ws: closed, undo: { ws, label: paneLabel, toast: paneLabel, restoreViewMode: autoReturned } }
+      return {
+        ws: closed,
+        undo: {
+          ws, label: paneLabel, toast: paneLabel,
+          restoreViewMode: autoReturned, reopenable: true,
+        },
+      }
     }
     case 'CLOSE_OTHER_TABS': {
       // Keep only the named tab in its pane. The kept tab survives, so the pane
@@ -1759,19 +1771,19 @@ export function workspaceReducer(state, action) {
       const next = closeOtherTabs(ws, action.tabKey)
       if (next === ws) return state
       const label = action.label || 'Closed other tabs'
-      return { ws: next, undo: { ws, label, toast: label } }
+      return { ws: next, undo: { ws, label, toast: label, reopenable: true } }
     }
     case 'CLOSE_TABS_TO_RIGHT': {
       const next = closeTabsToRight(ws, action.tabKey)
       if (next === ws) return state
       const label = action.label || 'Closed tabs to the right'
-      return { ws: next, undo: { ws, label, toast: label } }
+      return { ws: next, undo: { ws, label, toast: label, reopenable: true } }
     }
     case 'CLOSE_TABS_TO_LEFT': {
       const next = closeTabsToLeft(ws, action.tabKey)
       if (next === ws) return state
       const label = action.label || 'Closed tabs to the left'
-      return { ws: next, undo: { ws, label, toast: label } }
+      return { ws: next, undo: { ws, label, toast: label, reopenable: true } }
     }
     case 'MOVE_TAB': {
       const next = moveTab(ws, action.tabKey, action.target)

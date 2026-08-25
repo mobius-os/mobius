@@ -570,6 +570,7 @@
     let initialized = false;
     let currentToken = null;
     let currentCapabilityContract = null;
+    let shellShortcuts = [];
     let tokenRefreshPromise = null;
     let tokenRefreshResolve = null;
     let mountedRoot = null;
@@ -587,6 +588,39 @@
     // well as the document scroller, without walking every node when the drawer
     // opens. Nested third-party frames stay covered by the outer iframe guard.
     const gestureScrollers = new Set();
+
+    function setShellShortcuts(value) {
+      shellShortcuts = (Array.isArray(value) ? value : []).slice(0, 64).filter(function (item) {
+        return item && typeof item.actionId === 'string'
+          && item.binding && typeof item.binding.key === 'string';
+      });
+    }
+
+    function frameShortcutMatches(event, binding) {
+      if (!event || !binding || event.isComposing || event.repeat) return false;
+      const eventKey = typeof event.key === 'string' ? event.key.toLocaleLowerCase() : '';
+      const bindingKey = String(binding.key || '').toLocaleLowerCase();
+      if (!bindingKey || eventKey !== bindingKey) return false;
+      if (Boolean(event.metaKey || event.ctrlKey) !== Boolean(binding.mod)) return false;
+      if (Boolean(event.shiftKey) !== Boolean(binding.shift)) return false;
+      if (Boolean(event.altKey) !== Boolean(binding.alt)) return false;
+      return true;
+    }
+
+    // App code retains every ordinary/editor shortcut. Only the exact global
+    // chords advertised by the shell are captured and forwarded as named
+    // actions; raw keystrokes never cross the iframe boundary.
+    document.addEventListener('keydown', function (event) {
+      const shortcut = shellShortcuts.find(function (item) {
+        return frameShortcutMatches(event, item.binding);
+      });
+      if (!shortcut) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      window.parent.postMessage({
+        type: 'moebius:shell-shortcut', actionId: shortcut.actionId
+      }, window.location.origin);
+    }, true);
 
     // App intent listeners live in app code, alongside this runtime listener.
     // The parent keeps an opaque cover over the frame until we acknowledge.
@@ -1164,6 +1198,10 @@
         setFrameInteractivity(msg.interactive === true, msg.suspendScrolling === true);
         return;
       }
+      if (msg.type === 'moebius:frame-shortcuts') {
+        setShellShortcuts(msg.shortcuts);
+        return;
+      }
       if (msg.type === 'moebius:frame-font-check') {
         const requestId = typeof msg.requestId === 'string' ? msg.requestId : '';
         if (!requestId || requestId.length > 160) return;
@@ -1206,6 +1244,7 @@
         currentCapabilityContract = msg.capabilityContract || null;
         acceptToken(msg.token);
         if (initialized) return;
+        setShellShortcuts(msg.shellShortcuts);
         initialized = true;
         if (typeof window.__mobiusHydrateLocalStorage === 'function') {
           window.__mobiusHydrateLocalStorage(msg.storage);
