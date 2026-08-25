@@ -74,7 +74,6 @@
     "src/lib/__tests__/routeSplitting.test.js",
     "src/lib/__tests__/serviceSurfaceControls.test.js",
     "src/lib/__tests__/settingsViewAppearance.test.js",
-    "src/lib/__tests__/shellControllerReload.test.js",
     "src/lib/__tests__/shellReloadExport.test.js",
     "src/lib/__tests__/shellViewportZoom.test.js",
     "src/lib/__tests__/standaloneHostContract.test.js",

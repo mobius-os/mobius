@@ -1296,18 +1296,21 @@ regression pins the cached entry as packaged content rather than shell HTML.
 
 Install-time precache includes the Vite shell plus the D3/Pixi classic scripts Memory loads by URL. Package imports are already inside each compiled app artifact and must not be duplicated in the shell precache. Runtime `/vendor/` remains `CacheFirst` for explicit public assets. `setCatchHandler()` returns precached `index.html` outside `/apps/` and `offline.html` for standalone/app-asset failures, avoiding native offline chrome. Two anti-patterns: do NOT reintroduce a `mobius-shell-nav` HTML cache (navigations bind to the precached `index.html` so HTML and hashed bundles advance together), and do NOT gate in-shell frame/module reads on `offline_capable` (that flag gates standalone offline opens + write semantics, while frame/module speed + warmup are universal). There is no hand-edited `VERSION` constant: `activate` deletes stale runtime caches via `isStaleRuntimeCache`, and Workbox handles content-versioned precache cleanup separately.
 
-Shell rebuilds apply on idle: `Shell.jsx` defers `shell_rebuilt` while the chat the
-owner is actively viewing is streaming, then performs the controlled SW handoff/reload.
-Background chat runs are server-owned and reconnect after the reload; they must not
-strand a repaired shell indefinitely when several agents are working. The idle boundary alone
-is not a transcript-persistence boundary—terminal promotion updates the in-memory
-TanStack cache synchronously while its normal IndexedDB mirror is throttled. Before
-the intentional reload, `flushPersistedQueryCache()` writes the current allowlisted
-cache directly; this normally guarantees the reloaded ChatView hydrates the terminal
-assistant row rather than the previous partial while its authoritative GET revalidates.
-The wait is bounded by `awaitCacheFlushBeforeReload()`: IndexedDB can be blocked by
-another browser lifecycle transaction, and a best-effort cache write must never strand
-a waiting service-worker generation. The write may still finish after the deadline.
+Shell rebuilds never own document navigation. `shell_rebuilt`, agent-authored
+`shell_apply_now`, and resume-time worker discovery collapse into one
+`updateAvailable` bit in `useShellUpdateController`; ordinary chat/app navigation
+does not read or mutate that state. The shell offers one explicit **Update now**
+action, and only that owner action performs the controlled worker handoff and hard
+navigation. A newly opened online document is already fresh because shell navigation
+is network-first; a warm document that missed a transient event discovers the waiting
+generation on a later foreground boundary and advertises it without interrupting work.
+
+Before the explicit navigation, `flushPersistedQueryCache()` writes the current
+allowlisted cache directly; this normally guarantees the reloaded ChatView hydrates
+the latest assistant row rather than a previous partial while its authoritative GET
+revalidates. The wait is bounded by `awaitCacheFlushBeforeReload()`: IndexedDB can be
+blocked by another browser lifecycle transaction, and a best-effort cache write must
+never strand an owner-requested refresh. The write may still finish after the deadline.
 
 ## Mini-app manifest (mobius.json)
 
