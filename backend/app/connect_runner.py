@@ -19,6 +19,7 @@ Manage the installed service:
 """
 import argparse
 from collections import deque
+import ipaddress
 import json
 import os
 import platform
@@ -42,6 +43,61 @@ LAUNCHD_PLIST = os.path.expanduser("~/Library/LaunchAgents/%s.plist" % LAUNCHD_L
 SYSTEMD_UNIT = os.path.expanduser("~/.config/systemd/user/mobius-connect.service")
 
 
+def _validated_base_url(raw):
+    """Return a credential-safe Mobius origin or reject it.
+
+    Connect sends a long-lived host bearer on every request. Plain HTTP is
+    therefore acceptable only on the local loopback used for development;
+    remote instances must use HTTPS. Credentials and query/fragment material
+    do not belong in the persisted base URL.
+    """
+    value = str(raw or "").strip().rstrip("/")
+    parsed = urllib.parse.urlsplit(value)
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Connect requires a valid Mobius HTTPS URL.")
+    try:
+        hostname = parsed.hostname or ""
+        # Accessing port also validates malformed/non-numeric port text.
+        parsed.port
+    except ValueError as exc:
+        raise ValueError("Connect requires a valid Mobius HTTPS URL.") from exc
+    if not hostname:
+        raise ValueError("Connect requires a valid Mobius HTTPS URL.")
+    if parsed.scheme == "http":
+        local = hostname.casefold() == "localhost"
+        if not local:
+            try:
+                local = ipaddress.ip_address(hostname).is_loopback
+            except ValueError:
+                local = False
+        if not local:
+            raise ValueError(
+                "Connect refuses plaintext HTTP for a remote instance; use HTTPS."
+            )
+    return value
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Fail closed instead of forwarding pairing codes or host bearers."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open_url(request, *, timeout, context=None):
+    handlers = [_NoRedirect()]
+    if context is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=context))
+    return urllib.request.build_opener(*handlers).open(request, timeout=timeout)
+
+
 def _load_config():
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
@@ -63,11 +119,12 @@ def _post(url, payload, token=None):
     req.add_header("Content-Type", "application/json")
     if token:
         req.add_header("Authorization", "Bearer " + token)
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with _open_url(req, timeout=30) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
 def _pair(base, code):
+    base = _validated_base_url(base)
     out = _post(base + "/api/connect/pair", {"code": code})
     cfg = {"url": base, "host_id": out["host_id"], "token": out["token"]}
     _save_config(cfg)
@@ -89,7 +146,7 @@ def _run_required(cmd, action):
 
 def _self_download(base):
     os.makedirs(CONFIG_DIR, exist_ok=True)
-    with urllib.request.urlopen(base + "/api/connect/runner", timeout=30) as resp:
+    with _open_url(base + "/api/connect/runner", timeout=30) as resp:
         src = resp.read()
     with open(RUNNER_PATH, "wb") as fh:
         fh.write(src)
@@ -501,7 +558,7 @@ class _CommandRunner:
 
 
 def _serve(cfg):
-    base = cfg["url"].rstrip("/")
+    base = _validated_base_url(cfg["url"])
     token = cfg["token"]
     ctx = ssl.create_default_context()
     plat = "%s %s" % (platform.system(), platform.release())
@@ -531,7 +588,7 @@ def _serve(cfg):
             req = urllib.request.Request(stream_url)
             req.add_header("Authorization", "Bearer " + token)
             req.add_header("Accept", "text/event-stream")
-            with urllib.request.urlopen(
+            with _open_url(
                 req, timeout=None, context=ctx,
             ) as stream:
                 print("Connected. This machine is now reachable from Mobius.")
@@ -620,12 +677,18 @@ def main():
         return
 
     cfg = _load_config()
-    if args.pair:
-        base = (args.url or cfg.get("url") or "").rstrip("/")
-        if not base:
-            print("Missing --url")
-            sys.exit(2)
-        cfg = _pair(base, args.pair.strip())
+    try:
+        if args.pair:
+            base = args.url or cfg.get("url") or ""
+            if not base:
+                print("Missing --url")
+                sys.exit(2)
+            cfg = _pair(base, args.pair.strip())
+        elif cfg.get("url"):
+            cfg["url"] = _validated_base_url(cfg["url"])
+    except ValueError as exc:
+        print(str(exc))
+        sys.exit(2)
     if not cfg.get("token"):
         print("Not paired. Run with --pair CODE --url URL first.")
         sys.exit(2)

@@ -975,7 +975,7 @@ def test_runner_uses_standard_urllib_for_protocol_three_stream(monkeypatch):
     opened.append((request, kwargs))
     return Stream()
 
-  monkeypatch.setattr(connect_runner.urllib.request, "urlopen", fake_urlopen)
+  monkeypatch.setattr(connect_runner, "_open_url", fake_urlopen)
   monkeypatch.setattr(
     connect_runner, "_uninstall_service", lambda stop_running: None,
   )
@@ -1244,3 +1244,48 @@ def test_connect_manage_reaches_a_ledgered_database(tmp_path: Path):
   assert "0016_app_connect_manage" in {
     entry["version"] for entry in schema_migration_history(eng)
   }
+
+
+@pytest.mark.parametrize("url", [
+  "https://mobius.example",
+  "https://mobius.example:8443/base",
+  "http://localhost:8000",
+  "http://127.0.0.1:8000",
+  "http://[::1]:8000",
+])
+def test_connect_runner_accepts_credential_safe_base_urls(url):
+  assert connect_runner._validated_base_url(url + "/") == url
+
+
+@pytest.mark.parametrize("url", [
+  "http://mobius.example",
+  "http://localhost.example",
+  "file:///tmp/runner.py",
+  "https://",
+  "https://:443",
+  "https://user:password@mobius.example",
+  "https://mobius.example?redirect=elsewhere",
+  "https://mobius.example/#fragment",
+  "mobius.example",
+])
+def test_connect_runner_rejects_urls_that_can_leak_or_redirect_credentials(url):
+  with pytest.raises(ValueError):
+    connect_runner._validated_base_url(url)
+
+
+def test_connect_runner_never_redirects_an_authenticated_request():
+  request = connect_runner.urllib.request.Request(
+    "https://mobius.example/api/connect/result",
+    headers={"Authorization": "Bearer secret"},
+  )
+
+  redirected = connect_runner._NoRedirect().redirect_request(
+    request,
+    None,
+    302,
+    "Found",
+    {},
+    "https://elsewhere.example/collect",
+  )
+
+  assert redirected is None
