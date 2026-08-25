@@ -213,6 +213,34 @@ def test_chat_detail_pristine_provider_follows_global_model_over_drift(
   assert body["effective_agent_settings"]["model"] == "gpt-5.6-sol"
 
 
+def test_chat_detail_user_only_chat_keeps_its_committed_provider(
+  client, auth, db,
+):
+  """A failed/unfinished first turn is no longer pristine: its next send keeps
+  the provider committed when that turn began, even before an assistant row
+  exists."""
+  from app import models
+
+  _write_global_settings({"model": "gpt-5.6-sol", "effort": "high"})
+  cid = client.post(
+    "/api/chats",
+    headers=auth,
+    json={
+      "title": "started",
+      "messages": [{"role": "user", "content": "hello"}],
+    },
+  ).json()["id"]
+  row = db.query(models.Chat).filter(models.Chat.id == cid).first()
+  row.provider = "claude"
+  row.agent_settings_json = None
+  db.commit()
+
+  body = client.get(f"/api/chats/{cid}", headers=auth).json()
+  assert body["has_assistant_turns"] is False
+  assert body["provider"] == "claude"
+  assert body["effective_agent_settings"]["model"] is None
+
+
 def test_patch_chat_writes_override(client, auth, chat):
   """PATCH /chats/{id} sets agent_settings_json and returns effective."""
   _write_global_settings({"model": "default-model"})

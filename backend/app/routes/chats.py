@@ -28,6 +28,7 @@ from app.chat import (
   _finish_run,
   bump_run_generation,
   is_chat_running,
+  is_draining,
   mark_chat_deleted,
   recover_chat_generation,
   stop_chat_for,
@@ -541,16 +542,24 @@ def _chat_detail_response(
   # stored provider was frozen at creation; if the global model's family has
   # since changed, effective_agent_settings(provider=chat.provider) resolves no
   # model and the picker shows nothing. Derive the display provider the same way
-  # the send path does: an explicit per-chat model wins; otherwise a pristine
-  # chat follows the current global model (the single source of truth); a chat
-  # that already ran keeps its committed provider.
+  # the send path does: an explicit per-chat model wins; otherwise a genuinely
+  # pristine owner chat follows the current global model (the single source of
+  # truth). User/app history, queued work, a live run, and drain-mode sends all
+  # keep the chat's committed provider.
   _has_assistant_turns = any(m.get("role") == "assistant" for m in all_msgs)
+  _uses_live_default_provider = (
+    chat.created_by_app_id is None
+    and not all_msgs
+    and not (chat.pending_messages or [])
+    and not running
+    and not is_draining()
+  )
   provider = (
     providers.provider_of_model((settings_obj or {}).get("model"))
     or (
-      chat.provider or "claude"
-      if _has_assistant_turns
-      else providers.owner_default_provider(get_settings().data_dir, chat.provider)
+      providers.owner_default_provider(get_settings().data_dir, chat.provider)
+      if _uses_live_default_provider
+      else chat.provider or "claude"
     )
   )
   active_goal_objective = running_goal_objective(db, chat.id)
