@@ -3,7 +3,6 @@
 import {
   forwardRef,
   useCallback,
-  useEffect,
   useImperativeHandle,
   useRef,
   useState,
@@ -11,15 +10,11 @@ import {
 import { useQueryClient } from '@tanstack/react-query'
 import GlobalSearch, { GlobalSearchButton } from '../GlobalSearch/GlobalSearch.jsx'
 import NotificationsView from '../NotificationsView/NotificationsView.jsx'
-import {
-  SHELL_SHORTCUTS,
-  shortcutMatches,
-} from '../../lib/keyboardShortcuts.js'
 import NotificationBell from './NotificationBell.jsx'
 import useNotificationCenter from './useNotificationCenter.js'
 
 const NotificationCenter = forwardRef(function NotificationCenter(
-  { onOpenTarget },
+  { commands, onOpenTarget, onRunCommand },
   eventActionsRef,
 ) {
   const queryClient = useQueryClient()
@@ -30,13 +25,6 @@ const NotificationCenter = forwardRef(function NotificationCenter(
     actions: { toggle, close, clearAll, reconcile, onCreated },
     meta: { rootRef, bellRef },
   } = useNotificationCenter(queryClient)
-
-  // System events stay a narrow nudge from Shell while all interactive state
-  // remains local to this component.
-  useImperativeHandle(eventActionsRef, () => ({
-    reconcile,
-    onCreated,
-  }), [onCreated, reconcile])
 
   const openTarget = useCallback((target) => {
     close()
@@ -49,6 +37,14 @@ const NotificationCenter = forwardRef(function NotificationCenter(
     setSearchOpen(true)
   }, [close])
 
+  // System events and the shell command dispatcher stay narrow nudges while
+  // all interactive overlay state remains local to this component.
+  useImperativeHandle(eventActionsRef, () => ({
+    reconcile,
+    onCreated,
+    openSearch,
+  }), [onCreated, openSearch, reconcile])
+
   const toggleSearch = useCallback(() => {
     close()
     setSearchOpen(value => !value)
@@ -58,16 +54,6 @@ const NotificationCenter = forwardRef(function NotificationCenter(
     setSearchOpen(false)
     toggle()
   }, [toggle])
-
-  useEffect(() => {
-    const onKeyDown = (event) => {
-      if (!shortcutMatches(event, SHELL_SHORTCUTS.openSearch)) return
-      event.preventDefault()
-      openSearch()
-    }
-    document.addEventListener('keydown', onKeyDown)
-    return () => document.removeEventListener('keydown', onKeyDown)
-  }, [openSearch])
 
   return (
     <div ref={rootRef} className="notification-center">
@@ -91,8 +77,10 @@ const NotificationCenter = forwardRef(function NotificationCenter(
       )}
       {searchOpen && (
         <GlobalSearch
+          commands={commands}
           onClose={() => setSearchOpen(false)}
           onOpenTarget={openTarget}
+          onRunCommand={onRunCommand}
         />
       )}
     </div>

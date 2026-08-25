@@ -1,4 +1,4 @@
-/* GlobalSearch is the keyboard-openable search dialog for chats and installed apps. */
+/* GlobalSearch is the shell command palette and cross-workspace search dialog. */
 import { createPortal } from 'react-dom'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -27,6 +27,7 @@ import {
   rememberRecentSelection,
   resolveRecentSelections,
   resolvedSearchSelection,
+  searchCommands,
   searchInstalledApps,
   visibleChatSearchState,
 } from './globalSearchModel.js'
@@ -60,6 +61,34 @@ function GlobalSearchResult({
     onPointerMove: event => onPointerActivity(index, event),
     onFocus: () => onSelect(index),
     onClick: () => onOpen(row),
+  }
+
+  if (row.kind === 'command') {
+    const command = row.value
+    const unavailable = command.enabled === false
+    return (
+      <button
+        {...sharedProps}
+        className={`${resultClass} global-search__result--command`}
+        aria-disabled={unavailable || undefined}
+        title={unavailable ? command.unavailableReason : undefined}
+      >
+        <span className="global-search__result-icon global-search__command-icon" aria-hidden="true">
+          ⌘
+        </span>
+        <span className="global-search__result-main">
+          <span className="global-search__result-title">{command.title}</span>
+          <span className="global-search__result-detail">
+            {unavailable && command.unavailableReason
+              ? command.unavailableReason
+              : command.description}
+          </span>
+        </span>
+        <span className="global-search__command-bindings" aria-label={command.shortcutLabels.join(' or ')}>
+          {command.shortcutLabels.map(label => <kbd key={label}>{label}</kbd>)}
+        </span>
+      </button>
+    )
   }
 
   if (row.kind === 'app') {
@@ -127,7 +156,7 @@ function GlobalSearchResult({
 
 export function GlobalSearchButton({ active = false, buttonRef, onClick }) {
   const shortcut = shortcutLabel(SHELL_SHORTCUTS.openSearch)
-  const label = active ? 'Close search' : 'Search chats and apps'
+  const label = active ? 'Close search' : 'Search and commands'
   return (
     <button
       ref={buttonRef}
@@ -144,7 +173,7 @@ export function GlobalSearchButton({ active = false, buttonRef, onClick }) {
   )
 }
 
-export default function GlobalSearch({ onClose, onOpenTarget }) {
+export default function GlobalSearch({ commands = [], onClose, onOpenTarget, onRunCommand }) {
   const dialogRef = useRef(null)
   const inputRef = useRef(null)
   const contentRef = useRef(null)
@@ -225,6 +254,10 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
     () => searchInstalledApps(appsQuery.data, normalizedQuery),
     [appsQuery.data, normalizedQuery],
   )
+  const commandResults = useMemo(
+    () => searchCommands(commands, normalizedQuery).filter(command => command.id !== 'search.open'),
+    [commands, normalizedQuery],
+  )
   const recentSelectionRows = useMemo(
     () => resolveRecentSelections(
       recentSelectionRefs,
@@ -260,9 +293,23 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
     onOpenTarget?.(chatSearchOpenTarget(chat))
   }, [onClose, onOpenTarget])
 
+  const openCommand = useCallback((command) => {
+    if (!command?.id || command.enabled === false) return
+    onClose()
+    onRunCommand?.(command.id)
+  }, [onClose, onRunCommand])
+
   const resultGroups = useMemo(() => {
     const groups = normalizedQuery
       ? [
+          ...(commandResults.length ? [{
+            headingId: 'global-search-commands',
+            listId: 'global-search-command-results',
+            label: 'Commands',
+            rows: commandResults.map(command => ({
+              kind: 'command', value: command,
+            })),
+          }] : []),
           ...(appResults.length ? [{
             headingId: 'global-search-apps',
             listId: 'global-search-app-results',
@@ -282,6 +329,14 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
           },
         ]
       : [
+          ...(commandResults.length ? [{
+            headingId: 'global-search-commands',
+            listId: 'global-search-command-results',
+            label: 'Commands',
+            rows: commandResults.map(command => ({
+              kind: 'command', value: command,
+            })),
+          }] : []),
           ...(recentSelectionRows.length ? [{
             headingId: 'global-search-recent-selections',
             listId: 'global-search-recent-selection-results',
@@ -301,7 +356,7 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
       ...group,
       rows: group.rows.map(row => ({ ...row, index: nextIndex++ })),
     }))
-  }, [appResults, normalizedQuery, recentSelectionRows, visibleChats])
+  }, [appResults, commandResults, normalizedQuery, recentSelectionRows, visibleChats])
 
   const selectableResults = useMemo(
     () => resultGroups.flatMap(group => group.rows),
@@ -317,10 +372,11 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
     .join(' ')
 
   const openResult = useCallback((row) => {
+    if (row?.kind === 'command') openCommand(row.value)
     if (row?.kind === 'app') openApp(row.value)
     if (row?.kind === 'chat' && row.recent) openRecentChat(row.value)
     if (row?.kind === 'chat' && !row.recent) openChat(row.value)
-  }, [openApp, openChat, openRecentChat])
+  }, [openApp, openChat, openCommand, openRecentChat])
 
   const openSelectedResult = useCallback(() => {
     openResult(selectableResults[activeResultIndex])
@@ -369,6 +425,7 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
     && visibleChats.status === 'ready'
     && visibleChats.results.length === 0
     && appResults.length === 0
+    && commandResults.length === 0
   const loadingRecentSelections = !normalizedQuery
     && resultGroups.length === 0
     && recentSelectionRefs.some(selection => (
@@ -393,8 +450,8 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
       >
         <header className="global-search__header">
           <div>
-            <h2 id="global-search-title" className="global-search__title">Search</h2>
-            <p className="global-search__subtitle">Chats and installed apps</p>
+            <h2 id="global-search-title" className="global-search__title">Search &amp; commands</h2>
+            <p className="global-search__subtitle">Workspace actions, chats, and installed apps</p>
           </div>
           <button
             type="button"
@@ -418,8 +475,8 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
               if (contentRef.current) contentRef.current.scrollTop = 0
             }}
             onKeyDown={handleSearchKeyDown}
-            placeholder="Search chats, apps, and app details"
-            aria-label="Search chats, apps, and app details"
+            placeholder="Search commands, chats, apps, and app details"
+            aria-label="Search commands, chats, apps, and app details"
             role="combobox"
             aria-autocomplete="list"
             aria-controls={resultListIds || undefined}
@@ -445,11 +502,11 @@ export default function GlobalSearch({ onClose, onOpenTarget }) {
               <span className="global-search__empty-icon" aria-hidden="true">
                 <MagnifyingGlassSearch width={30} height={30} />
               </span>
-              <h3>{loadingRecentSelections ? 'Loading recent selections…' : 'No recent selections yet'}</h3>
+              <h3>{loadingRecentSelections ? 'Loading workspace actions…' : 'No commands are available'}</h3>
               <p>
                 {loadingRecentSelections
-                  ? 'The chats and apps you opened through search will appear here.'
-                  : 'Search for a chat or app and open it. It will appear here the next time you use ⌘K.'}
+                  ? 'Commands and the chats and apps you opened through search will appear here.'
+                  : 'Search for a command, chat, or app.'}
               </p>
             </div>
           )}

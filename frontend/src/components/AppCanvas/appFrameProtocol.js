@@ -13,6 +13,16 @@ export function attributedFrameVersion(frames, source) {
   return null
 }
 
+export function attributedShellShortcutAction(message, advertisedShortcuts) {
+  if (!message || message.type !== 'moebius:shell-shortcut') return null
+  const actionId = typeof message.actionId === 'string' ? message.actionId : ''
+  if (!actionId) return null
+  return (Array.isArray(advertisedShortcuts) ? advertisedShortcuts : [])
+    .some(shortcut => shortcut?.actionId === actionId)
+    ? actionId
+    : null
+}
+
 const MEDIA_EVENTS = new Set(['open', 'update', 'close'])
 const MEDIA_STATES = new Set(['loading', 'playing', 'paused'])
 
