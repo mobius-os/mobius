@@ -2219,6 +2219,12 @@ async def _sync_manifest_cron_unlocked(
   the same manifest contract. Keeping cron convergence here prevents either
   path from becoming add-only: an accepted update that drops its schedule must
   retire both the live entry and its replayable declaration.
+
+  ``drop_prior_cron`` means the previously accepted declaration may be obsolete
+  — a changed manifest can rename its job or drop the schedule outright, and
+  re-registering fixes neither. A caller re-accepting an IDENTICAL manifest
+  passes ``False`` instead: the scaffold already replaces its own entry, so
+  dropping first would only expose a healthy schedule to a failed re-register.
   """
   schedule = manifest.get("schedule")
   job_name = schedule.get("job") if schedule else None

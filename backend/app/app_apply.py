@@ -447,8 +447,12 @@ async def apply_source_revision(
       )
       if not changed:
         db.rollback()
+        # An unchanged revision re-declares the SAME manifest, so no prior
+        # declaration can be obsolete and re-registration is idempotent. A
+        # pre-drop here would only widen the window in which a failed
+        # registration leaves a previously healthy schedule retired.
         warnings = await _sync_accepted_app_side_effects(
-          db, app, manifest, drop_prior_cron=not created,
+          db, app, manifest, drop_prior_cron=False,
         )
         return ApplyResult(app=app, mode="unchanged", warnings=warnings)
 

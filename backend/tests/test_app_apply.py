@@ -184,6 +184,34 @@ def test_unchanged_local_reapply_retries_failed_schedule_sync(client, auth):
   register.assert_called_once()
 
 
+def test_unchanged_local_reapply_keeps_a_live_schedule_when_cron_fails(
+  client, auth,
+):
+  source = _source()
+  _declare_schedule(source)
+  with patch("app.app_cron.register_cron"):
+    created = _apply(client, auth, source)
+
+  assert created.status_code == 200, created.text
+  # Stand in for the durable declaration written by the real scaffold.
+  init_cron = source / "init-cron.sh"
+  init_cron.write_text("#!/bin/sh\nexit 0\n")
+
+  with patch("app.install._unregister_cron") as unregister, patch(
+    "app.app_cron.register_cron", side_effect=RuntimeError("cron unavailable"),
+  ):
+    repeated = _apply(client, auth, source)
+
+  assert repeated.status_code == 200, repeated.text
+  assert repeated.json()["mode"] == "unchanged"
+  # Re-accepting the same schedule must never retire the working one first.
+  unregister.assert_not_called()
+  assert init_cron.exists()
+  assert repeated.json()["warnings"] == [
+    "cron: registration failed — RuntimeError('cron unavailable')"
+  ]
+
+
 def test_apply_refreshes_manifest_declared_skill_on_create_and_update(
   client, auth,
 ):
