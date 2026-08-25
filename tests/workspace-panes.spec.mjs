@@ -910,10 +910,19 @@ async function touchDrag(
 async function resolveBuilderContentCenter(page) {
   // Arming a drag from Standard unfolds Builder as a render-only preview.
   // Target geometry therefore belongs to that newly mounted world, not the
-  // Standard content box measured before pointerdown.
+  // Standard content box measured before pointerdown. The shell content's
+  // geometric center can be the divider between two panes, so use the focused
+  // pane strip for the x-axis and the content box for the y-axis.
   await expect(page.locator('.workspace__chrome')).toHaveCount(1, { timeout: 3000 })
-  const content = await page.locator('.shell__content').boundingBox()
-  return { x: content.x + content.width / 2, y: content.y + content.height / 2 }
+  const focusedPaneId = await page.evaluate(
+    key => JSON.parse(localStorage.getItem(key)).focusedPaneId,
+    paneModel.STORAGE_KEY,
+  )
+  const [strip, content] = await Promise.all([
+    page.locator(`[data-pane-strip="${focusedPaneId}"]`).boundingBox(),
+    page.locator('.shell__content').boundingBox(),
+  ])
+  return { x: strip.x + strip.width / 2, y: content.y + content.height / 2 }
 }
 
 async function bootThreeTab(page, tag, workspaceFixture = twoPanesThreeTabs, expectTiled = true) {
