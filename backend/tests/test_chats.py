@@ -1,7 +1,7 @@
 """Chat route regression tests."""
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import io
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -168,6 +168,42 @@ def test_chat_reads_keep_goal_identity_after_a_mid_turn_question(
   assert runtime.status_code == 200
   assert detail.json()["active_goal_objective"] == "finish the review"
   assert runtime.json()["active_goal_objective"] == "finish the review"
+  assert detail.json()["goal"] == {
+    "id": "active-goal-run",
+    "objective": "finish the review",
+    "status": "active",
+    "resumable": False,
+  }
+  assert runtime.json()["goal"] == detail.json()["goal"]
+
+
+def test_chat_reads_retain_completed_and_paused_goals(client, auth, chat, db):
+  completed_at = datetime.now(UTC)
+  db.add_all([
+    models.ChatRun(
+      id="completed-goal", root_run_id="completed-goal", chat_id=chat.id,
+      status="completed", provider="codex", goal_objective="Finished work",
+      goal_id="completed-id", started_at=completed_at,
+    ),
+    models.ChatRun(
+      id="paused-goal", root_run_id="paused-goal", chat_id=chat.id,
+      status="stopped", provider="codex", goal_objective="Paused work",
+      goal_id="paused-id", started_at=completed_at + timedelta(seconds=1),
+    ),
+  ])
+  db.commit()
+
+  detail = client.get(f"/api/chats/{chat.id}", headers=auth).json()
+  runtime = client.get(f"/api/chats/{chat.id}/runtime", headers=auth).json()
+  assert detail["active_goal_objective"] is None
+  assert runtime["active_goal_objective"] is None
+  assert detail["goal"] == {
+    "id": "paused-id",
+    "objective": "Paused work",
+    "status": "paused",
+    "resumable": True,
+  }
+  assert runtime["goal"] == detail["goal"]
 
 
 def test_chat_usage_reports_totals_and_historic_coverage(

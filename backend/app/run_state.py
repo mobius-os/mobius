@@ -14,7 +14,11 @@ import uuid
 from sqlalchemy.orm import Session
 
 from app import models
-from app.goal_commands import goal_objective, is_goal_continue
+from app.goal_commands import (
+  goal_clear_requested,
+  goal_objective,
+  is_goal_continue,
+)
 
 
 def goal_identity_for_run_start(
@@ -26,6 +30,14 @@ def goal_identity_for_run_start(
   from app.continuations import is_continuation_message
 
   content = message.get("content") if message is not None else ""
+  if goal_clear_requested(content if isinstance(content, str) else ""):
+    from app.goal_plans import presented_goal_rows
+
+    rows = presented_goal_rows(db, chat_id)
+    # A clear turn remains an ordinary non-Goal run, but references the Goal it
+    # dismissed. That null-objective identity is the durable presentation
+    # tombstone consumed by presented_goal_rows.
+    return None, rows[0].goal_id if rows is not None else None
   objective = goal_objective(content if isinstance(content, str) else "")
   if objective is not None:
     return objective, str(uuid.uuid4())
@@ -73,6 +85,16 @@ def goal_identity_for_run_start(
   previous = latest_run(db, chat_id)
   semantic_continuation = is_continuation_message(message)
   literal_continue = is_goal_continue(str(content or ""))
+  if literal_continue:
+    from app.goal_plans import presented_goal_rows, serialize_goal
+
+    rows = presented_goal_rows(db, chat_id)
+    if rows is None:
+      return None, None
+    presentation = serialize_goal(db, *rows)
+    if presentation["status"] == "paused":
+      return rows[0].goal_objective, rows[0].goal_id
+    return None, None
   if not semantic_continuation and not literal_continue:
     return None, None
   if (

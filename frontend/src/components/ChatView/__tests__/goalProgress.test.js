@@ -4,11 +4,14 @@ import { readFileSync } from 'node:fs'
 
 import {
   compactGoalObjective,
+  draftGoalObjective,
   goalObjectiveForQueuedStart,
   goalObjectiveAtRunStart,
   goalObjectiveFromText,
-  goalObjectiveFromRuntime,
   goalMessageObjectiveFromText,
+  goalPresentationAtRunStart,
+  goalPresentationForQueuedStart,
+  goalPresentationFromRuntime,
   goalTaskDisplayStatus,
   latestGoalObjective,
   newestGoalPlan,
@@ -126,12 +129,40 @@ test('a resumable continue keeps the same goal through live start and cold attac
 })
 
 test('a queued child-result continuation keeps the committed Goal without jitter', () => {
-  assert.equal(goalObjectiveForQueuedStart({
+  const message = {
     content: '<delegation_results>[]</delegation_results>',
     hidden: true,
     kind: 'delegation_result',
     _goal_objective: 'Ship the audited result',
-  }, []), 'Ship the audited result')
+  }
+  assert.equal(
+    goalObjectiveForQueuedStart(message, []),
+    'Ship the audited result',
+  )
+  assert.deepEqual(
+    goalPresentationForQueuedStart(message, [], {
+      id: 'settled-goal', objective: 'Old goal', status: 'completed',
+    }),
+    {
+      id: null,
+      objective: 'Ship the audited result',
+      status: 'active',
+      resumable: false,
+    },
+  )
+})
+
+test('an ordinary queued turn retains a settled Goal presentation', () => {
+  const completed = {
+    id: 'goal-1', objective: 'Finish the migration', status: 'completed',
+  }
+  assert.deepEqual(
+    goalPresentationForQueuedStart({
+      content: 'ordinary follow-up',
+      _goal_objective: null,
+    }, [], completed),
+    { ...completed, resumable: false },
+  )
 })
 
 test('continuation recovery preserves only an active goal', () => {
@@ -153,26 +184,46 @@ test('continuation recovery preserves only an active goal', () => {
     { role: 'assistant', blocks: [{ type: 'error', resumable: true }] },
     { role: 'user', content: 'continue' },
   ]), '')
-  assert.equal(goalObjectiveFromRuntime({
-    running: true,
-    active_goal_objective: null,
-  }, 'finish the migration'), 'finish the migration')
-  assert.equal(goalObjectiveFromRuntime({
-    running: true,
-    active_goal_objective: 'authoritative goal',
-  }, 'stale goal'), 'authoritative goal')
-  assert.equal(goalObjectiveFromRuntime({
-    running: true,
-    active_goal_objective: 'Review every issue\nthen verify the result',
-  }), 'Review every issue then verify the result')
-  assert.equal(goalObjectiveFromRuntime({
+})
+
+test('durable Goal presentation survives terminal runtime states', () => {
+  const paused = {
+    id: 'goal-1', objective: 'Finish the migration', status: 'paused',
+    resumable: true,
+  }
+  assert.deepEqual(goalPresentationFromRuntime({
     running: false,
-    active_goal_objective: null,
-  }, 'finished goal'), '')
-  assert.equal(goalObjectiveFromRuntime({
+    goal: paused,
+  }), paused)
+  assert.deepEqual(goalPresentationFromRuntime({
     running: false,
-    active_goal_objective: 'Waiting for delegated checks',
-  }, 'stale goal'), 'Waiting for delegated checks')
+    goal: {
+      id: 'goal-1', objective: 'Finish the migration', status: 'completed',
+    },
+  }), {
+    id: 'goal-1', objective: 'Finish the migration', status: 'completed',
+    resumable: false,
+  })
+  assert.equal(goalPresentationFromRuntime({ running: false, goal: null }), null)
+})
+
+test('ordinary turns retain settled Goals while Resume reactivates a pause', () => {
+  const paused = {
+    id: 'goal-1', objective: 'Finish the migration', status: 'paused',
+  }
+  assert.deepEqual(
+    goalPresentationAtRunStart('ordinary question', [], paused),
+    { ...paused, resumable: true },
+  )
+  assert.deepEqual(
+    goalPresentationAtRunStart('continue', [], paused),
+    { ...paused, status: 'active', resumable: false },
+  )
+  assert.deepEqual(
+    goalPresentationAtRunStart('/goal Start another', [], paused),
+    { id: null, objective: 'Start another', status: 'active', resumable: false },
+  )
+  assert.equal(goalPresentationAtRunStart('/goal clear', [], paused), null)
 })
 
 test('the goal reuses the progress rail and stays as context for build phases', () => {
@@ -183,6 +234,7 @@ test('the goal reuses the progress rail and stays as context for build phases', 
       label: 'Goal · Build the indicator',
       current: true,
       expandable: true,
+      tone: 'active',
     }],
   )
   assert.deepEqual(
@@ -196,11 +248,28 @@ test('the goal reuses the progress rail and stays as context for build phases', 
         label: 'Goal · Build the indicator',
         current: false,
         expandable: true,
+        tone: 'active',
       },
       { key: 'phase-1', label: 'First slice ready', current: false },
       { key: 'phase-2', label: 'Verifying', current: true },
     ],
   )
+})
+
+test('paused and completed Goals are visibly distinct', () => {
+  const plan = {
+    summary: { completed: 2, total: 3 },
+    tasks: [{ id: 'verify', title: 'Verify', status: 'running' }],
+  }
+  assert.equal(progressRailViewModel({
+    objective: 'Ship it', status: 'paused',
+  }, [], plan)[0].label, 'Goal · Paused · 2/3 · Verify')
+  assert.equal(progressRailViewModel({
+    objective: 'Ship it', status: 'completed',
+  }, [], {
+    ...plan,
+    summary: { completed: 3, total: 3 },
+  })[0].label, 'Goal · Completed · 3/3')
 })
 
 test('stale plan data cannot show tasks after the active goal has ended', () => {
@@ -227,7 +296,8 @@ test('a planned goal shows every running branch and dependency progress', () => 
       label: 'Goal · 1/4 · Run A · 2/3 + Run B',
       expandable: true,
       title: 'Goal: Ship it',
-      ariaLabel: 'Goal for Ship it; 1 of 4 complete',
+      ariaLabel: 'Goal active for Ship it; 1 of 4 complete',
+      tone: 'active',
       current: true,
     },
   ])
@@ -342,7 +412,7 @@ test('live delegated execution outranks a stale completed task presentation', ()
   assert.equal(goalTaskDisplayStatus(task, { status: 'completed' }), 'completed')
 })
 
-test('ChatView binds goal state to explicit run boundaries, not transport liveness', () => {
+test('ChatView retains settled goals independently of transport liveness', () => {
   const runtimePoll = chatView.match(
     /const reconcileRuntimeState = useCallback[\s\S]*?const handleCompactionStored/,
   )?.[0] || ''
@@ -361,8 +431,8 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
   for (const suffix of runStarts) {
     assert.match(
       suffix.slice(0, 380),
-      /setActiveGoalState\(goalObjective(?:AtRunStart|ForQueuedStart)\(/,
-      'goal and build progress must reset together at each run boundary',
+      /setGoalAtRunStart\(|setGoalState\(goalPresentationForQueuedStart\(/,
+      'goal and build progress must reconcile together at each run boundary',
     )
   }
   assert.doesNotMatch(
@@ -372,13 +442,13 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
   )
   assert.match(
     chatView,
-    /setServerRunningState\(false\)[\s\S]{0,180}activeGoalPlan\?\.summary\?\.can_complete !== false[\s\S]{0,100}setActiveGoalState\(''\)/,
-    'a terminal stream should retain an unfinished delegated Goal but retire a settled one',
+    /setServerRunningState\(false\)[\s\S]{0,500}const endingGoal = goalPresentationRef\.current[\s\S]{0,200}setGoalState\(\{ \.\.\.endingGoal, status: 'completed' \}\)/,
+    'a terminal stream boundary must settle rather than remove its goal',
   )
   assert.match(
     chatView,
-    /disconnect\(\{ clearStreaming: true \}\)\s*promoteStreamToMessages\(\)\s*setSending\(false\)\s*setServerRunningLocalState\(false\)[\s\S]{0,500}setActiveGoalObjective\(''\)/,
-    'a confirmed Stop must retire its goal indication',
+    /disconnect\(\{ clearStreaming: true \}\)\s*promoteStreamToMessages\(\)\s*setSending\(false\)\s*setServerRunningLocalState\(false\)[\s\S]{0,700}status: 'paused'/,
+    'a confirmed Stop must preserve the goal as paused',
   )
   assert.match(
     chatView,
@@ -397,13 +467,13 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
   )
   assert.match(
     chatView,
-    /activeGoalObjective: compactObjective/,
+    /goal: normalized/,
     'the existing chat cache should retain a goal across chat switches and steers',
   )
   assert.match(
     chatView,
-    /goalObjectiveFromRuntime\(\s*runtime,\s*latestGoalObjective\(visibleMessages\)/,
-    'a cold chat read should restore the objective from the durable active run',
+    /goalPresentationFromRuntime\(\s*runtime,/,
+    'a cold chat read should restore the durable Goal presentation',
   )
   assert.match(
     chatView,
@@ -454,4 +524,75 @@ test('ChatView binds goal state to explicit run boundaries, not transport livene
     /status=\{goalTaskDisplayStatus\(task, execution\)\}/,
     'live delegated execution should own the row presentation state',
   )
+})
+test('draftGoalObjective keeps the goal visual open while typing the objective', () => {
+  // Requires the whitespace that dismisses the slash menu, so the chip takes
+  // over exactly as the picker closes — a bare `/goal` still belongs to it.
+  assert.equal(draftGoalObjective('/goal'), null)
+  assert.equal(draftGoalObjective('/goalise the plan'), null)
+  // The space-only draft arms the chip with no objective yet.
+  assert.equal(draftGoalObjective('/goal '), '')
+  assert.equal(draftGoalObjective('/goal Ship the review'), 'Ship the review')
+  assert.equal(
+    draftGoalObjective('/goal   Build the first slice\nthen verify'),
+    'Build the first slice then verify',
+  )
+  // A leading-newline draft still counts (backend tolerates leading newlines).
+  assert.equal(draftGoalObjective('\n/goal Ship it'), 'Ship it')
+  // Not a goal command → no chip.
+  assert.equal(draftGoalObjective('please /goal later'), null)
+  assert.equal(draftGoalObjective(' /goal indented is prose'), null)
+  assert.equal(draftGoalObjective('/data/apps/x'), null)
+  // `/goal clear` is a control phrase, not a new objective.
+  assert.equal(draftGoalObjective('/goal clear'), null)
+  assert.equal(draftGoalObjective('/goal  clear'), null)
+  // A near-miss like "clearance" is still a real objective.
+  assert.equal(draftGoalObjective('/goal clearance sale'), 'clearance sale')
+  assert.equal(draftGoalObjective(null), null)
+})
+
+test('the goal rail step carries a clear affordance, sourced domain-neutrally', () => {
+  // The X sends the same `/goal clear` typing it would, so behaviour matches
+  // the documented command instead of a parallel clearing path.
+  assert.match(chatView, /handleClearGoal\s*=\s*useCallback\(\(\)\s*=>\s*\{[\s\S]*?doSend\('\/goal clear'/,
+    'the clear handler must reuse the /goal clear command path')
+  assert.match(chatView, /clearable:\s*true/,
+    'the goal rail item must be marked clearable')
+  assert.match(chatView, /onClearItem=\{handleClearGoal\}/,
+    'ChatView must wire the clear handler into the rail')
+  // The rail itself stays domain-neutral: the label text comes from item data.
+  assert.match(progressRail, /className="chat__progress-clear"/,
+    'the rail must render the clear button')
+  assert.match(progressRail, /aria-label=\{item\.clearLabel \|\| 'Clear'\}/,
+    'the clear label must be item-supplied with a domain-neutral fallback')
+  assert.match(chatView, /actionLabel: 'Resume'/,
+    'a paused Goal should expose the one-tap resume action')
+  assert.match(chatView, /actionIcon: <Play width=\{13\} height=\{13\}/,
+    'the paused Goal action should spend only icon-sized visual space')
+  assert.match(progressRail, /className="chat__progress-action"/,
+    'the shared rail must render item-supplied actions without encoding Goal semantics')
+  assert.match(progressRail, /item\.actionIcon \|\| item\.actionLabel/,
+    'an accessible action label may render as a compact supplied icon')
+  assert.doesNotMatch(progressRail, /chat__progress-toggle-mark/,
+    'the whole goal label should expand naturally without a disclosure arrow')
+  assert.match(
+    chatView,
+    /handleResumeGoal[\s\S]{0,300}doSend\('continue', \{[\s\S]{0,160}continuation: 'manual',[\s\S]{0,80}hidden: true/,
+    'goal resume must reactivate through a hidden product continuation, not a visible continue message',
+  )
+})
+
+test('a /goal draft renders the composer goal chip', () => {
+  assert.match(chatView, /function GoalDraftChip\(\{ objective \}\)/,
+    'the draft visual must be defined in the same independently shippable layer')
+  assert.match(chatView, /role="status" aria-label="Goal draft"/,
+    'the changing draft visual must have one accessible status owner')
+  assert.match(chatView, /const draftGoal = draftGoalObjective\(input\)/,
+    'ChatView must derive the draft objective from the live composer text')
+  assert.match(chatView, /draftGoal !== null && <GoalDraftChip objective=\{draftGoal\} \/>/,
+    'the draft chip must render only for an actual /goal draft')
+  assert.match(chatCss, /\.chat__goal-draft\s*\{/,
+    'the draft chip needs its frosted-card styling')
+  assert.match(chatCss, /\.chat__progress-clear\s*\{/,
+    'the clear X needs its button styling')
 })

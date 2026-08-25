@@ -10,8 +10,13 @@ function samePendingMessages(current, next) {
 }
 
 function runtimeFieldMatches(current, field, value) {
-  if (field === 'pending_messages') {
-    return samePendingMessages(current?.pending_messages || [], value || [])
+  if (field === 'pending_messages' || field === 'goal') {
+    const currentValue = field === 'pending_messages'
+      ? current?.pending_messages || []
+      : current?.goal || null
+    const nextValue = field === 'pending_messages' ? value || [] : value || null
+    if (currentValue === nextValue) return true
+    return JSON.stringify(currentValue) === JSON.stringify(nextValue)
   }
   // Waits arrive as a fresh array every response, so a reference compare
   // would defeat the skip guard and persist the whole chat again.

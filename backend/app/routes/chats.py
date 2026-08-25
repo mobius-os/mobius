@@ -36,6 +36,7 @@ from app.broadcast import get_system_broadcast
 from app.chat_retention import purge_expired_chat_tombstones
 from app.chat_titles import first_user_message_title
 from app.database import get_db
+from app.goal_plans import presented_goal
 from app.memory_observability import record_memory_checkpoint_once
 from app.owner_input import OwnerInputKind
 from app.deps import (
@@ -538,6 +539,7 @@ def _chat_detail_response(
   provider = chat.provider or "claude"
   settings_obj = _coerce_agent_settings(chat.agent_settings_json) or None
   active_goal_objective = running_goal_objective(db, chat.id)
+  goal = presented_goal(db, chat.id)
   response = {
     "id": chat.id,
     "title": chat.title,
@@ -551,6 +553,7 @@ def _chat_detail_response(
     "offset": start,
     "running": running,
     "active_goal_objective": active_goal_objective,
+    "goal": goal,
     "pending_question_id": _open_question_id_for(chat),
     "session_id": chat.session_id if expose_session else None,
     "provider": provider,
@@ -1381,6 +1384,7 @@ def get_chat_runtime(
   return {
     "running": is_chat_running(chat.id),
     "active_goal_objective": running_goal_objective(db, chat.id),
+    "goal": presented_goal(db, chat.id),
     "pending_messages": list(chat.pending_messages or []),
     "pending_question_id": _open_question_id_for(chat),
     "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,

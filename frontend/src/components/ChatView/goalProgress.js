@@ -33,6 +33,24 @@ export function goalMessageObjectiveFromText(text) {
   return goalCommandObjective(text)
 }
 
+/**
+ * The objective a `/goal ` composer draft is building, or null when the draft
+ * is not a goal command.
+ *
+ * The draft chip takes over once the whitespace after `/goal` closes the slash
+ * picker. An empty string means the command is armed but no objective has been
+ * typed yet. `/goal clear` is a control phrase, never a new objective.
+ */
+export function draftGoalObjective(text) {
+  if (typeof text !== 'string') return null
+  const normalized = text.replace(/^\n+/, '')
+  const match = normalized.match(/^\/goal\s([\s\S]*)$/)
+  if (!match) return null
+  const objective = compactGoalObjective(match[1])
+  if (objective.toLowerCase() === 'clear') return null
+  return objective
+}
+
 /** Keep a live event from being regressed by an older initial fetch. */
 export function newestGoalPlan(current, incoming) {
   if (!incoming) return current || null
@@ -50,6 +68,47 @@ export function newestGoalPlan(current, incoming) {
 
 function isContinue(text) {
   return typeof text === 'string' && text.trim().toLowerCase() === 'continue'
+}
+
+function isGoalClear(text) {
+  if (typeof text !== 'string') return false
+  const normalized = text.replace(/^\n+/, '')
+  const match = normalized.match(/^\/goal(?:\s+([\s\S]*))?$/)
+  return (match?.[1] || '').trim().toLowerCase() === 'clear'
+}
+
+const GOAL_PRESENTATION_STATUSES = new Set([
+  'active', 'paused', 'completed', 'failed',
+])
+
+/** Normalize the durable Goal presentation shared by detail/runtime reads. */
+export function normalizeGoalPresentation(goal) {
+  if (!goal || typeof goal !== 'object') return null
+  const objective = compactGoalObjective(goal.objective)
+  if (!objective || !GOAL_PRESENTATION_STATUSES.has(goal.status)) return null
+  return {
+    id: goal.id == null ? null : String(goal.id),
+    objective,
+    status: goal.status,
+    resumable: goal.status === 'paused',
+  }
+}
+
+/** Resolve a server runtime snapshot, with one rolling-server fallback. */
+export function goalPresentationFromRuntime(runtime, fallback = null) {
+  if (runtime && Object.prototype.hasOwnProperty.call(runtime, 'goal')) {
+    return normalizeGoalPresentation(runtime.goal)
+  }
+  const normalizedFallback = typeof fallback === 'string'
+    ? normalizeGoalPresentation({ objective: fallback, status: 'active' })
+    : normalizeGoalPresentation(fallback)
+  if (!runtime?.running) return normalizedFallback
+  const objective = compactGoalObjective(
+    runtime.active_goal_objective || normalizedFallback?.objective,
+  )
+  return objective
+    ? normalizeGoalPresentation({ objective, status: 'active' })
+    : null
 }
 
 function hasResumableTail(message) {
@@ -123,21 +182,44 @@ export function goalObjectiveForQueuedStart(message, messages) {
   return goalObjectiveAtRunStart(message?.content, messages)
 }
 
-/** Keep a known goal through a rolling/recovered active runtime; idle ends it. */
-export function goalObjectiveFromRuntime(runtime, fallbackObjective = '') {
-  if (runtime?.active_goal_objective) {
-    return compactGoalObjective(runtime.active_goal_objective)
+/** Keep settled Goals visible across ordinary turns; reactivate only Resume. */
+export function goalPresentationAtRunStart(text, messages, current = null) {
+  if (isGoalClear(text)) return null
+  const directObjective = goalObjectiveAtRunStart(text, messages)
+  if (directObjective) {
+    return normalizeGoalPresentation({
+      objective: directObjective,
+      status: 'active',
+    })
   }
-  if (!runtime?.running) return ''
-  return compactGoalObjective(fallbackObjective)
+  const normalizedCurrent = normalizeGoalPresentation(current)
+  if (isContinue(text) && normalizedCurrent?.status === 'paused') {
+    return { ...normalizedCurrent, status: 'active', resumable: false }
+  }
+  return normalizedCurrent
 }
 
 /**
- * Put the active goal and ordinary build phases on one existing progress rail.
+ * Prefer the Goal identity committed with a promoted queue row, while keeping
+ * an already-settled Goal visible for ordinary queued turns.
+ */
+export function goalPresentationForQueuedStart(message, messages, current = null) {
+  if (message && Object.hasOwn(message, '_goal_objective')) {
+    const objective = compactGoalObjective(message._goal_objective)
+    if (objective) {
+      return normalizeGoalPresentation({ objective, status: 'active' })
+    }
+  }
+  return goalPresentationAtRunStart(message?.content, messages, current)
+}
+
+/**
+ * Put the retained Goal and ordinary build phases on one existing progress rail.
  *
- * The last item is current: before a build phase arrives that is the goal
- * itself; afterwards the goal remains as quiet context while the newest phase
- * carries emphasis.
+ * The last item is current: before a build phase arrives that is the Goal
+ * itself; afterwards the Goal remains as quiet context while the newest phase
+ * carries emphasis. Settled Goal status belongs to this same item rather than
+ * a second completion banner.
  */
 function progressLabel(task) {
   const progress = task?.progress
@@ -210,25 +292,36 @@ export function visibleGoalTasks(goalPlan) {
   return deepestPlanTasks(tasks, tasks.filter(task => task?.ready === true))
 }
 
-export function progressRailViewModel(goalObjective, buildPhases, goalPlan = null) {
+export function progressRailViewModel(goal, buildPhases, goalPlan = null) {
   const items = []
+  const presentation = typeof goal === 'string'
+    ? normalizeGoalPresentation({ objective: goal, status: 'active' })
+    : normalizeGoalPresentation(goal)
+  const goalObjective = presentation?.objective || ''
   if (goalObjective) {
     const completed = goalPlan?.summary?.completed
     const total = goalPlan?.summary?.total
     const planned = Number.isInteger(completed) && Number.isInteger(total)
     const activeTasks = visibleGoalTasks(goalPlan)
     const activeLabels = activeTasks.map(progressLabel).filter(Boolean)
+    const statusLabel = {
+      paused: 'Paused',
+      completed: 'Completed',
+      failed: 'Needs attention',
+    }[presentation.status]
+    const progressSummary = planned ? `${completed}/${total}` : goalObjective
     items.push({
       key: 'goal',
-      label: planned
-        ? `Goal · ${completed}/${total}${
-          activeLabels.length ? ` · ${activeLabels.join(' + ')}` : ''
-        }`
-        : `Goal · ${goalObjective}`,
+      label: `Goal${statusLabel ? ` · ${statusLabel}` : ''} · ${progressSummary}${
+        activeLabels.length && presentation.status !== 'completed'
+          ? ` · ${activeLabels.join(' + ')}`
+          : ''
+      }`,
       expandable: true,
+      tone: presentation.status,
       ...(goalPlan ? {
         title: `Goal: ${goalObjective}`,
-        ariaLabel: `Goal for ${goalObjective}; ${completed} of ${total} complete`,
+        ariaLabel: `Goal ${presentation.status} for ${goalObjective}; ${completed} of ${total} complete`,
       } : {}),
     })
   }
