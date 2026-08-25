@@ -451,10 +451,8 @@ export default function Shell({ onInitialVisualReady }) {
   // so their identity never churns and the listener never re-registers.
   const navToRef = useRef(navTo)
   navToRef.current = navTo
-  // PaneChatView is memoized, so do not defeat its per-chat run-signal boundary
-  // with the per-render navTo identity. Pane handlers call through this stable
-  // facade and still reach the latest navigation implementation via the ref.
-  const stablePaneNavTo = useCallback((view, opts) => navToRef.current(view, opts), [])
+  // Stable shell callbacks reach the current per-render navigator through this
+  // ref; useAppIntentNavigation owns the pane-aware app doorway used by chats.
   const handleNowPlayingOpen = useCallback((appId) => {
     navToRef.current('canvas', { appId })
   }, [])
@@ -4225,7 +4223,7 @@ export default function Shell({ onInitialVisualReady }) {
                 refreshChats={refreshChats}
                 markChatOwnerActivity={markChatOwnerActivity}
                 loadTheme={loadTheme}
-                navTo={stablePaneNavTo}
+                openAppWithIntent={openAppWithIntent}
                 onInternalNav={handleChatInternalNav}
                 onChatMissing={handlePaneChatMissing}
                 onFirstMessage={handlePaneChatFirstMessage}

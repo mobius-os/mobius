@@ -131,6 +131,28 @@ def stamp_grant(
   return row
 
 
+def refresh_granted_head(
+  db: Session,
+  app_id: int,
+  record_id: str,
+  *,
+  head_sha: str,
+) -> bool:
+  """Advance an existing grant after an owner-approved PR update.
+
+  Unlike ``stamp_grant``, this never creates, re-enables, or retargets a grant.
+  It only keeps an already-authorized follow-up loop pinned to the new public
+  head after the owner explicitly approves that fast-forward.
+  """
+  row = get_row(db, app_id, record_id)
+  if row is None:
+    return False
+  row.granted_head_sha = head_sha
+  row.updated_at = now_naive_utc()
+  db.commit()
+  return True
+
+
 def _lease_expired(row: models.ContributionAutopilot) -> bool:
   return bool(
     row.state == "responding"

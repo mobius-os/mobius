@@ -635,24 +635,27 @@ export const api = {
     }),
     restart: () => apiFetch('/platform/restart', { method: 'POST' }),
   },
-  // The chat's contribution review card. A read-only projection of the same
-  // ledger the Contribute app shows, plus the one owner-confirmed public action.
-  // Send deliberately calls the SAME submit endpoint as the app's button, so the
-  // server-side freshness, attribution, and fork checks are never bypassed.
+  // The chat card is a compact projection of the same reviewed ledger Contribute
+  // owns. Its direct action calls the same guarded routes as the app; the card
+  // never pushes or talks to GitHub itself.
   contributions: {
     forChat: (appId, chatId) => apiFetch(
       `/github/contributions/${appId}/for-chat/${encodeURIComponent(chatId)}`,
     ),
-    submit: (appId, recordId, { autopilot }) => apiFetch(
-      `/github/contributions/${appId}/${encodeURIComponent(recordId)}/submit`,
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          autopilot: !!autopilot,
-          submitter: 'chat-review-card',
-        }),
-      },
-    ),
+    publish: (appId, record, { autopilot = false } = {}) => {
+      const update = record?.action === 'pr_update'
+      const action = update ? 'update-existing' : 'submit'
+      return apiFetch(
+        `/github/contributions/${appId}/${encodeURIComponent(record.id)}/${action}`,
+        {
+          method: 'POST',
+          body: JSON.stringify(update ? {} : {
+            autopilot,
+            submitter: 'chat-review-card',
+          }),
+        },
+      )
+    },
   },
   push: {
     vapidKey: () => apiFetch('/push/vapid-key'),

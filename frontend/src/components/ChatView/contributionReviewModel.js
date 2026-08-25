@@ -1,12 +1,7 @@
 // Pure model for the chat's contribution review card (view in
-// ContributionReviewCard.jsx). Every decision the card makes about what to show
-// and whether Send may be offered lives here, so the rules are unit-testable
-// without a DOM and the component stays a renderer.
-//
-// The card is a SECOND view over the ledger the Contribute app owns. It never
-// relaxes a gate: Send calls the same submit endpoint as the app's button, and
-// that endpoint re-runs every freshness, attribution, and fork check before it
-// pushes anything public. Nothing here can authorize a publish on its own.
+// ContributionReviewCard.jsx). The card keeps the reviewed happy path in the
+// conversation where the work happened and opens Contribute for deeper review,
+// stacks, or recovery. Both surfaces call the same platform-owned mutations.
 
 // The ledger lives in the Contribute app's storage, so the card resolves that
 // app by slug. Not installed → nothing staged → the card never renders.
@@ -31,82 +26,79 @@ export function actionableRecords(payload) {
   )
 }
 
-/**
- * Why this record cannot be sent right now, or null when it can be.
- *
- * The server already ran the same local preflight the Contribute app's review
- * cards use; this only turns its verdict into one owner-facing sentence. A
- * missing verdict fails closed. The submit endpoint remains authoritative, but
- * this one-tap public action must not claim that an absent review is ready.
- */
+/** Why direct publication is unavailable, or null when the exact review can send. */
 export function sendBlocker(record, { connected } = {}) {
   if (!record || record.status !== 'prepared') return null
   if (record.stack || record.is_stack) {
-    return 'This is one layer of a stacked set — review and send the whole chain in Contribute.'
+    return 'Review and send this linked set together in Contribute.'
   }
-  if (connected === false) return 'Connect GitHub in Contribute first.'
-  const review = record.review
-  if (!review) return 'Open Contribute to review this before sending.'
-  if (review.state === 'ready') return null
-  return review.message
-    || 'This needs to be prepared again before it can be sent.'
+  if (connected === false) return 'Connect GitHub in Contribute before sending.'
+  if (record.quality_review_ready !== true) {
+    return 'Finish the exact agent review before sending.'
+  }
+  if (record.review?.state === 'ready') return null
+  return record.review?.message
+    || 'Refresh this review in Contribute before sending.'
 }
 
-/**
- * Whether a successful send should grant the background review-response loop.
- *
- * Mirrors the Contribute app's Send: the owner's stored default, and only when
- * the backend advertises the capability. An unreadable/absent default means ON,
- * exactly as the app treats it, so the two surfaces cannot disagree about what a
- * press authorizes.
- */
+/** Match Contribute's default follow-up grant for a newly opened PR. */
 export function autopilotOnSend(payload) {
-  if (!payload || payload.autopilot_available !== true) return false
-  return payload.autopilot_default !== false
+  return payload?.autopilot_available === true
+    && payload.autopilot_default !== false
 }
 
-// The platform's own repository. A contribution to it reaches every Möbius
-// owner, which is what the card's action and payoff line can honestly promise;
-// an app's repository reaches that app's users instead.
+/** Copy for the one public action represented by this prepared record. */
+export function publicationAction(record) {
+  return record?.action === 'pr_update'
+    ? { label: 'Update PR', busyLabel: 'Updating PR', progress: 'Updating the reviewed pull request…' }
+    : { label: 'Send PR', busyLabel: 'Sending PR', progress: 'Opening the reviewed pull request…' }
+}
+
+// The platform repository remains useful in tests and record grouping, but the
+// card no longer changes its action copy by repository: every target opens the
+// same exact Contribute review contract.
 export const PLATFORM_REPO = 'mobius-os/mobius'
+
+const RECORD_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/
+
+/** The opaque app intent for one exact contribution review. */
+export function contributionReviewIntent(record) {
+  const id = typeof record?.id === 'string' ? record.id.trim() : ''
+  return RECORD_ID.test(id) ? `review:${id}` : null
+}
+
+/** A stack opens through one of its records; Contribute resolves the whole unit. */
+export function reviewItemIntent(item) {
+  if (item?.kind === 'record') return contributionReviewIntent(item.record)
+  if (item?.kind !== 'stack') return null
+  return contributionReviewIntent(item.records?.[0])
+}
 
 /** The one-line status word shown on a card the chat can act on. */
 export function statusLabel(record) {
   if (record?.status === 'submitting') return 'Publishing'
+  if (typeof record?.last_submit_error === 'string' && record.last_submit_error.trim()) {
+    return 'Needs attention'
+  }
   if (record?.stack || record?.is_stack) return 'Review together'
-  return 'Ready to contribute'
+  if (record?.quality_review_ready === true && record?.review?.state === 'ready') {
+    return record?.action === 'pr_update' ? 'Ready to update' : 'Ready to send'
+  }
+  return 'Review ready'
 }
 
-/**
- * The action label.
- *
- * "Contribute" carries the value of the act where "Send for review" only named
- * the mechanism, and it avoids "upstream" — precise to anyone who works with
- * open source, and opaque to everyone else. The destination is only named when
- * we actually know it is the platform, so the button can never point someone at
- * the wrong project.
- */
-export function contributeLabel(record) {
-  return record?.repo === PLATFORM_REPO
-    ? 'Contribute to Möbius'
-    : 'Contribute this improvement'
-}
-
-/**
- * One quiet line making the payoff concrete.
- *
- * It carries the motivation the button cannot, and stays honest about the
- * review: acceptance is the maintainers' call, not a consequence of the tap.
- */
-export function payoffLine(record) {
-  return record?.repo === PLATFORM_REPO
-    ? "If it's accepted, everyone running Möbius gets this."
-    : "If it's accepted, everyone using this app gets it."
+export function reviewDestinationLabel(record) {
+  if (record?.status === 'submitting') return 'View in Contribute'
+  if (typeof record?.last_submit_error === 'string' && record.last_submit_error.trim()) {
+    return 'Resolve in Contribute'
+  }
+  if (record?.stack || record?.is_stack) return 'Review stack in Contribute'
+  return 'Review in Contribute'
 }
 
 /**
  * Reduce git's multi-line per-file table to the aggregate final line for the
- * docked summary card. Full file details remain available in the disclosure.
+ * docked summary card. Full file details remain in the selected Contribute review.
  */
 export function diffStatSummary(value) {
   if (typeof value !== 'string') return ''
@@ -117,10 +109,8 @@ export function diffStatSummary(value) {
 /**
  * The failure this card should currently explain, or null when there is none.
  *
- * A send that failed is a fact about the record, not about this render: the
- * card must still explain it after a reload, and must never keep showing the
- * previous attempt's reason while a new one is in flight. `attempt` is this
- * card's own latest outcome and always wins; otherwise the stored one speaks.
+ * A send that failed is a fact about the record, not about this render, so the
+ * compact doorway still explains it after a reload. Contribute owns retrying.
  */
 export function submitFailure(record, { attempt = null, sending = false } = {}) {
   if (sending) return null
@@ -139,8 +129,8 @@ export function reviewPanelSummary(pendingCount) {
   const count = Math.max(0, Number(pendingCount) || 0)
   return {
     count,
-    title: `${count} ${count === 1 ? 'review' : 'reviews'} ready`,
-    copy: 'Each item keeps its own review and action.',
+    title: 'Reviews ready',
+    copy: 'Each opens at its exact decision in Contribute.',
   }
 }
 
@@ -295,19 +285,7 @@ function reviewItemDismissIdentity(item) {
 
 export function visibleReviewItems(payload, storage) {
   return reviewItems(payload).filter(
-    item => {
-      if (isDismissed(reviewItemDismissIdentity(item), storage)) return false
-      // Chat is the quick happy path. If a single contribution needs repair,
-      // Contribute remains its durable home; rendering a disabled attention
-      // card above the composer only creates a dead end. Stacks are different:
-      // their one useful chat action is to open the ordered review in Contribute.
-      if (item.kind === 'record') {
-        return !sendBlocker(item.record, {
-          connected: payload?.connected !== false,
-        })
-      }
-      return true
-    },
+    item => !isDismissed(reviewItemDismissIdentity(item), storage),
   )
 }
 

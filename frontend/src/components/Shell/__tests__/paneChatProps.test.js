@@ -28,7 +28,7 @@ function propBag(overrides = {}) {
     refreshChats: () => {},
     markChatOwnerActivity: () => {},
     loadTheme: () => {},
-    navTo: () => {},
+    openAppWithIntent: () => {},
     onInternalNav: () => {},
     onChatMissing: () => {},
     onFirstMessage: () => {},
@@ -112,12 +112,12 @@ test('Shell hands the pane only identity-stable props', () => {
     'no pane prop may be an inline object literal — useMemo it')
   assert.doesNotMatch(slice, /=\{\[/,
     'no pane prop may be an inline array literal — useMemo it')
-  // navTo is declared per render in useNavigation; the pane gets the ref-backed
-  // wrapper instead so its identity never churns.
-  assert.match(slice, /navTo=\{stablePaneNavTo\}/)
+  // The intent navigator is a stable callback and preserves this pane while it
+  // opens the app at an exact in-app review.
+  assert.match(slice, /openAppWithIntent=\{openAppWithIntent\}/)
   assert.match(slice, /previewPresented=\{chatSurfaceInteractive\}/,
     'preview expiry must use the shell surface that is actually presented')
-  assert.match(shell, /const stablePaneNavTo = useCallback\(/)
+  assert.doesNotMatch(shell, /const stablePaneNavTo = useCallback\(/)
   // loadTheme is a dependency of handleSystemEvent, which is itself a pane prop.
   assert.match(useTheme, /const loadTheme = useCallback\(/)
 })

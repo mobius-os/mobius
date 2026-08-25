@@ -154,6 +154,7 @@ from app.github_contributions import (
   _mark_stack_land_success,
   _mark_submit_failure,
   _mark_submit_success,
+  _mark_existing_pr_update_success,
   _mark_stack_submit_failure,
   _stack_record_snapshots,
   _parse_pr_number,
@@ -214,6 +215,7 @@ _COAUTHOR_TRAILER = (
 _SUBMIT_TIMEOUT = 90
 _PUSH_RETRIES = 3
 _PUSH_RETRY_BASE_SECONDS = 0.5
+_PREPARED_PR_ACTIONS = frozenset(("pr", "pr_update"))
 
 class GithubConnectAttemptRequest(BaseModel):
   attempt_id: str
@@ -665,7 +667,7 @@ def _inspect_prepared_review(
   if (
     not plan
     or record.get("type") != "pr"
-    or plan.get("action") != "pr"
+    or plan.get("action") not in _PREPARED_PR_ACTIONS
   ):
     return _review_status_problem(record_id, code="invalid_plan")
   try:
@@ -736,6 +738,9 @@ async def contribution_review_status(
         if record is not None and record.get("id"):
           records.append(record)
 
+  # Include malformed/legacy prepared rows as well: the inspector below owns
+  # the invalid-plan verdict, and silently omitting one would strand its review
+  # card without an actionable explanation.
   prepared = [record for record in records if record.get("status") == "prepared"]
   # The credential metadata is a file-backed resource shared by every review;
   # snapshot it once instead of reopening it for each prepared stack layer.
@@ -1118,6 +1123,7 @@ def _chat_review_projection(record: dict, app_id: int) -> dict:
     "id": record_id,
     "type": text(record.get("type")),
     "status": text(record.get("status")),
+    "action": text(plan.get("action")),
     "title": text(plan.get("title") or record.get("title")),
     "summary": text(record.get("summary")),
     "repo": text(plan.get("repo") or record.get("repo")),
@@ -1129,6 +1135,13 @@ def _chat_review_projection(record: dict, app_id: int) -> dict:
     "last_submit_error": text(record.get("last_submit_error")),
     "last_submit_error_detail": text(record.get("last_submit_error_detail")),
     "updated_at": text(record.get("updated_at")),
+    "quality_review_ready": bool(
+      isinstance(record.get("quality_review"), dict)
+      and record["quality_review"].get("state") == "all_clear"
+      and str(record["quality_review"].get("reviewed_head_sha") or "").lower()
+      == str(plan.get("head_sha") or "").lower()
+      and bool(plan.get("head_sha"))
+    ),
     # `is_stack` keeps an invalid/legacy stack safely non-sendable. `stack`
     # carries only the display identity/order the chat needs to collapse every
     # valid layer into one review-together card; branch ancestry stays private.
@@ -1384,6 +1397,204 @@ async def submit_contribution(
       log.warning("autopilot grant stamp failed %s/%s", app_id, record_id,
                   exc_info=True)
   return {"record": submitted, "url": pr_url, "number": number}
+
+
+def _prepared_existing_pr_target(record: dict) -> tuple[str, int, str, str]:
+  """Return the exact open-PR identity carried by one reviewed update card."""
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  repo = _validate_repo_slug(plan.get("repo") or record.get("repo"))
+  branch = _validate_branch(plan.get("branch") or record.get("branch"))
+  head_repository = _validate_repo_slug(
+    record.get("head_repository") or plan.get("head_repository")
+  )
+  try:
+    number = int(record.get("number"))
+  except (TypeError, ValueError):
+    raise ContributionSubmitError(
+      "This prepared update no longer identifies its pull request."
+    ) from None
+  url = str(record.get("url") or "").rstrip("/")
+  expected_url = f"https://github.com/{repo}/pull/{number}"
+  if number <= 0 or url != expected_url:
+    raise ContributionSubmitError(
+      "This prepared update no longer matches its reviewed pull request."
+    )
+  return repo, number, head_repository, branch
+
+
+@router.post(
+  "/contributions/{app_id}/{record_id}/update-existing",
+  dependencies=[Depends(reject_cross_site)],
+)
+@_limiter.limit("10/minute")
+async def update_existing_contribution(
+  request: Request,
+  app_id: int,
+  record_id: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Apply one owner-approved reviewed fast-forward to an existing open PR.
+
+  A prepared ``pr_update`` record temporarily brings the existing contribution
+  back to the private review queue. The owner's Update PR click claims that
+  exact head and diff, verifies the live PR identity before any push, then
+  reuses the ordinary guarded push path in existing-PR mode. Normal Send keeps
+  refusing existing branches, so an agent cannot turn an ordinary PR card into
+  a silent rewrite.
+  """
+  expected_nonce = _validate_submit_app(app_id, principal, db)
+  from app import contribution_autopilot as autopilot
+  row = autopilot.get_row(db, app_id, record_id)
+  if row is not None and row.enabled and row.state == "responding":
+    raise HTTPException(
+      status_code=409,
+      detail="Autopilot is already updating this pull request. Try again when it finishes.",
+    )
+  db.close()
+  async with fs_locks.app_storage_lock(app_id):
+    claimed, record_path, diff_path = _claim_record(
+      app_id=app_id,
+      record_id=record_id,
+      db=db,
+      expected_nonce=expected_nonce,
+      submitter="contribute-update-button",
+      expected_action="pr_update",
+    )
+  db.close()
+
+  try:
+    repo, number, head_repository, branch = _prepared_existing_pr_target(claimed)
+    target_error = await asyncio.to_thread(
+      _autopilot_live_target_error,
+      repo,
+      number,
+      head_repository,
+      branch,
+    )
+    if target_error:
+      raise ContributionSubmitError(
+        "The open pull request changed since this update was prepared. Nothing was pushed.",
+        detail=target_error,
+      )
+
+    plan = claimed.get("plan") or {}
+    repo_path = _safe_repo_path(plan.get("repo_path"))
+    lock_paths = {str(repo_path)}
+    try:
+      equivalence_repos = _equivalence_source_repo(claimed)
+      if equivalence_repos is not None:
+        lock_paths.add(str(equivalence_repos[0]))
+    except Exception:
+      pass
+    async with AsyncExitStack() as source_locks:
+      for lock_path in sorted(lock_paths):
+        await source_locks.enter_async_context(
+          fs_locks.source_dir_lock(lock_path)
+        )
+      pr_url, returned_number, record_patch = await asyncio.to_thread(
+        _submit_prepared_pr,
+        claimed,
+        diff_path,
+        expected_existing_pr_number=number,
+        expected_existing_head_repository=head_repository,
+      )
+      if returned_number != number:
+        raise ContributionSubmitError(
+          "GitHub returned a different pull request for this reviewed update."
+        )
+      try:
+        await _record_pending_equivalence_locked(
+          {**claimed, **(record_patch or {})},
+          already_locked=frozenset(lock_paths),
+        )
+      except Exception:
+        log.warning(
+          "contribution update equivalence witness failed %s/%s",
+          app_id,
+          record_id,
+          exc_info=True,
+        )
+  except ContributionSubmitError as exc:
+    async with fs_locks.app_storage_lock(app_id):
+      _recheck_submit_app(db, app_id, expected_nonce)
+      db.close()
+      record = _mark_submit_failure(
+        app_id=app_id,
+        record_path=record_path,
+        message=exc.message,
+        record_patch=exc.record_patch,
+        detail=exc.detail,
+      )
+    raise HTTPException(
+      status_code=exc.status_code,
+      detail={
+        "message": exc.message,
+        "detail": exc.detail,
+        "record": record,
+        **({"code": exc.code} if exc.code else {}),
+      },
+    )
+  except Exception as exc:
+    log.exception("Contribution update failed for %s/%s", app_id, record_id)
+    message = "Could not update this pull request. Nothing else was published."
+    async with fs_locks.app_storage_lock(app_id):
+      _recheck_submit_app(db, app_id, expected_nonce)
+      db.close()
+      record = _mark_submit_failure(
+        app_id=app_id,
+        record_path=record_path,
+        message=message,
+      )
+    raise HTTPException(
+      status_code=500,
+      detail={"message": message, "record": record},
+    ) from exc
+
+  async with fs_locks.app_storage_lock(app_id):
+    _recheck_submit_app(db, app_id, expected_nonce)
+    db.close()
+    current = _read_record(record_path)
+    if current.get("status") != "submitting":
+      raise HTTPException(
+        status_code=409,
+        detail="This contribution changed while the pull request was updating.",
+      )
+    updated = _mark_existing_pr_update_success(
+      record_path=record_path,
+      record=current,
+      pr_url=pr_url,
+      number=number,
+      record_patch=record_patch,
+    )
+
+  pushed_head = str(
+    (record_patch or {}).get("last_submit_push_sha")
+    or ((updated.get("plan") or {}).get("head_sha"))
+    or ""
+  )
+  if pushed_head:
+    # The public update is already complete. Keeping an existing follow-up
+    # grant pinned to that new head is useful metadata, but it must never turn a
+    # successful owner-approved push into an apparent failure or invite a retry
+    # of the same public action.
+    try:
+      if autopilot.refresh_granted_head(
+        db,
+        app_id,
+        record_id,
+        head_sha=pushed_head,
+      ):
+        await autopilot.mirror_to_ledger(app_id, record_id)
+        updated = _read_record(record_path)
+    except Exception:
+      log.warning(
+        "autopilot grant refresh failed after contribution update %s/%s",
+        app_id,
+        record_id,
+        exc_info=True,
+      )
+  return {"record": updated, "url": pr_url, "number": number}
 
 
 @router.post(
@@ -2046,6 +2257,18 @@ async def autopilot_respond(
     # No grant / paused — the app should notify the owner the classic way.
     return {"status": "not_granted"}
 
+  # A prepared update has crossed back into private owner review. Serialize
+  # this status read with the same ledger lock used by the owner's Update PR
+  # click so a newly detected event cannot start an autopilot round while that
+  # exact head is waiting for explicit approval.
+  async with fs_locks.app_storage_lock(app_id):
+    try:
+      live_record = _read_record(_record_paths(app_id, record_id)[0])
+    except HTTPException:
+      return {"status": "not_granted"}
+    if live_record.get("status") not in {"open", "draft"}:
+      return {"status": "not_granted"}
+
   # Use the owner's existing background-agent choice; no Contribute-specific
   # resource policy lives here.
   provider = autopilot.resolve_round_provider(db)
@@ -2507,6 +2730,7 @@ async def autopilot_update(
       pr_url, number, record_patch = await asyncio.to_thread(
         _submit_prepared_pr, record, diff_path,
         expected_existing_pr_number=int(row.target_pr_number),
+        expected_existing_head_repository=str(row.target_head_repository),
       )
   except ContributionSubmitError as exc:
     raise HTTPException(
