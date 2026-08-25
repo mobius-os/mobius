@@ -73,11 +73,11 @@ def test_app_chat_first_send_preserves_provider_selected_at_create(
   client, owner_token, db, monkeypatch,
 ):
   """An unrelated owner default cannot replace an app chat's provider."""
-  from app.routes import chats_stream
+  from app import chat_provider
 
   _, app_token = _make_app(client, owner_token, "provider-preserving-chat")
   monkeypatch.setattr(
-    chats_stream, "owner_default_provider", lambda *_: "claude",
+    chat_provider.providers, "owner_default_provider", lambda *_: "claude",
   )
 
   for sender_token in (app_token, owner_token):
@@ -92,6 +92,11 @@ def test_app_chat_first_send_preserves_provider_selected_at_create(
     )
     assert created.status_code == 201, created.text
     chat_id = created.json()["id"]
+    # Use a live-discovered model id whose family the static catalog cannot
+    # infer, so this test isolates the app-owned provider gate.
+    row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+    row.agent_settings_json = {"model": "codex-live-model"}
+    db.commit()
 
     sent = client.post(
       f"/api/chats/{chat_id}/messages",
@@ -113,7 +118,7 @@ def test_owner_chat_first_send_still_uses_latest_selected_provider(
   client, owner_token, db, monkeypatch,
 ):
   """The app-chat exception must not freeze an ordinary empty chat."""
-  from app.routes import chats_stream
+  from app import chat_provider
 
   created = client.post(
     "/api/chats",
@@ -123,15 +128,54 @@ def test_owner_chat_first_send_still_uses_latest_selected_provider(
   assert created.status_code == 200, created.text
   chat_id = created.json()["id"]
   monkeypatch.setattr(
-    chats_stream, "owner_default_provider", lambda *_: "codex",
+    chat_provider.providers, "owner_default_provider", lambda *_: "codex",
   )
   row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
-  row.agent_settings_json = {"model": "gpt-5.6-sol"}
+  # A live-discovered model cannot decide its provider by catalog lookup, so
+  # the pristine owner-chat fallback remains the behavior under test.
+  row.agent_settings_json = {"model": "codex-live-model"}
   db.commit()
 
   sent = client.post(
     f"/api/chats/{chat_id}/messages",
     json={"content": "use my latest selected provider"},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert sent.status_code == 202, sent.text
+  db.expire_all()
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  assert row.provider == "codex"
+  run = db.query(models.ChatRun).filter(
+    models.ChatRun.chat_id == chat_id,
+  ).order_by(models.ChatRun.started_at.desc()).first()
+  assert run is not None
+  assert run.provider == "codex"
+
+
+def test_first_send_repairs_provider_from_explicit_per_chat_model(
+  client, owner_token, db, monkeypatch,
+):
+  """Display and execution share the model-priority repair for legacy drift."""
+  from app import chat_provider
+
+  created = client.post(
+    "/api/chats",
+    json={"title": "Drifted provider"},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert created.status_code == 200, created.text
+  chat_id = created.json()["id"]
+  monkeypatch.setattr(
+    chat_provider.providers, "owner_default_provider", lambda *_: "claude",
+  )
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  row.provider = "claude"
+  row.agent_settings_json = {"model": "gpt-5.6-sol"}
+  db.commit()
+
+  sent = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={"content": "use the model's provider"},
     headers={"Authorization": f"Bearer {owner_token}"},
   )
   assert sent.status_code == 202, sent.text

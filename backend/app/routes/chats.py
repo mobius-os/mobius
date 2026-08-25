@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app import (
   activity, auth, chat_search, models, providers, questions, secure_inputs,
 )
+from app.chat_provider import resolve_chat_provider
 from app.chat_visibility import coerce_agent_settings, visible_in_owner_drawer
 from app.chat_waits import (
   armed_wait_chat_ids,
@@ -537,30 +538,12 @@ def _chat_detail_response(
     page = next_page
 
   settings_obj = _coerce_agent_settings(chat.agent_settings_json) or None
-  # The picker's current model must match what a message would actually use. A
-  # chat with no per-chat model reads the LIVE global default model, but its
-  # stored provider was frozen at creation; if the global model's family has
-  # since changed, effective_agent_settings(provider=chat.provider) resolves no
-  # model and the picker shows nothing. Derive the display provider the same way
-  # the send path does: an explicit per-chat model wins; otherwise a genuinely
-  # pristine owner chat follows the current global model (the single source of
-  # truth). User/app history, queued work, a live run, and drain-mode sends all
-  # keep the chat's committed provider.
   _has_assistant_turns = any(m.get("role") == "assistant" for m in all_msgs)
-  _uses_live_default_provider = (
-    chat.created_by_app_id is None
-    and not all_msgs
-    and not (chat.pending_messages or [])
-    and not running
-    and not is_draining()
-  )
-  provider = (
-    providers.provider_of_model((settings_obj or {}).get("model"))
-    or (
-      providers.owner_default_provider(get_settings().data_dir, chat.provider)
-      if _uses_live_default_provider
-      else chat.provider or "claude"
-    )
+  provider = resolve_chat_provider(
+    chat,
+    data_dir=get_settings().data_dir,
+    running=running,
+    draining=is_draining(),
   )
   active_goal_objective = running_goal_objective(db, chat.id)
   response = {
