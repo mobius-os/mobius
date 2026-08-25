@@ -2116,7 +2116,9 @@
 .chat__foot .slash-menu,
 .chat__foot .chat__pill,
 .chat__foot .composer-plus,
-.chat__foot .chat__usage-strip { pointer-events: auto; }
+.chat__foot .chat__usage-strip,
+.chat__foot .chat__reply-select-row,
+.chat__foot .chat__reply-tray { pointer-events: auto; }
 
 /* One geometry-neutral stack for every control that floats above the measured
    footer. The safe default keeps transient-only controls clear of the composer.
@@ -4091,4 +4093,214 @@
   position: absolute;
   /* chat__attach-card-remove is 20×20; expand to 40px on each axis */
   inset: -10px;
+}
+
+/* ── Reply-to-quote: selection row, stacked chip tray, note editor ─────────
+   See assistantSelection.js / ReplySelectionRow.jsx / ReplyChips.jsx /
+   ReplyNoteEditor.jsx. Deliberately kept OUT of .chat__pill (the file-attach
+   tray's growth-cap geometry above is load-bearing for keyboard-viewport
+   math); both render as their own rows above .chat__input-row instead, so
+   neither participates in --composer-reserve/--composer-room at all.
+
+   The selection row lives in the COMPOSER, not floating over the transcript
+   or pinned elsewhere on screen: earlier attempts at a toolbar positioned
+   near (or fixed away from) the selection either collided with the OS's own
+   copy/paste callout or just read as a stray floating pill with no clear
+   home. The composer is already the expected landing spot for "things about
+   to join my next message" (file chips, reply chips) — this is the same
+   idea one step earlier, for the selection that hasn't become a chip yet. */
+.chat__reply-select-row {
+  /* Same opaque material as the pill/+ button pair (CONTRACT #4 above) —
+     this sits in the transparent gutter beside them, not inside the pill
+     itself, so it needs its own backdrop or scrolling transcript text
+     shows straight through it. */
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: fit-content;
+  box-sizing: border-box;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  backdrop-filter: blur(16px) saturate(140%);
+  color: var(--accent);
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  padding: 7px 14px 7px 10px;
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+}
+.chat__reply-select-row:hover,
+.chat__reply-select-row:focus-visible {
+  background: var(--surface2);
+}
+.chat__reply-select-row-icon { flex-shrink: 0; opacity: 0.9; }
+.chat__reply-select-row-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat__reply-tray {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 0 2px 6px;
+}
+
+.chat__reply-chip {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  background: var(--surface2);
+  border: 1px solid var(--border-light);
+  border-radius: 999px;
+  padding: 5px 22px 5px 10px;
+  font-size: 12px;
+  color: var(--text);
+}
+.chat__reply-chip-icon {
+  flex-shrink: 0;
+  color: var(--accent);
+  opacity: 0.9;
+}
+.chat__reply-chip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat__reply-chip-remove {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 12px;
+  border: none;
+  cursor: pointer;
+}
+[data-theme="light"] .chat__reply-chip-remove {
+  background: rgba(0, 0, 0, 0.35);
+}
+.chat__reply-chip-remove::after {
+  content: '';
+  position: absolute;
+  /* 16×16 visual control, expanded to a real 36px tap target */
+  inset: -10px;
+}
+
+.chat__reply-editor-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.50);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 1000;
+  padding: 16px;
+  padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+  box-sizing: border-box;
+}
+[data-theme="light"] .chat__reply-editor-overlay {
+  background: rgba(15, 18, 25, 0.32);
+}
+@media (min-width: 640px) {
+  .chat__reply-editor-overlay { align-items: center; }
+}
+
+.chat__reply-editor {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  width: min(420px, 100%);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+.chat__reply-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.chat__reply-editor-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+}
+.chat__reply-editor-close {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px;
+}
+.chat__reply-editor-quote {
+  margin: 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent);
+  background: var(--surface2);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  font-style: italic;
+  max-height: 5.6em;
+  overflow-y: auto;
+}
+.chat__reply-editor-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 64px;
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 14px;
+  font-family: var(--font);
+}
+.chat__reply-editor-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.chat__reply-editor-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.chat__reply-editor-btn {
+  background: var(--accent);
+  color: var(--accent-fg, #ffffff);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.chat__reply-editor-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.chat__reply-editor-btn--ghost {
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--border);
 }

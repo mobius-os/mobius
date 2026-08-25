@@ -61,6 +61,7 @@ function AssistantCopySurface({ msg, markdownByIndex, children }) {
   return (
     <div
       className="chat__assistant-copy-surface"
+      data-reply-source="assistant"
       onCopy={(event) => copyAssistantSelection(event, markdownForBlock)}
     >
       {children}

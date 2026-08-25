@@ -40,6 +40,9 @@ import useComposerDraftState from './hooks/useComposerDraftState.js'
 import useChatRuntimePolicy from './hooks/useChatRuntimePolicy.js'
 import useOffscreenNudge, { useNudgeTargetRef } from './hooks/useOffscreenNudge.js'
 import ChatInputBar from './ChatInputBar.jsx'
+import ReplyNoteEditor from './ReplyNoteEditor.jsx'
+import { useAssistantSelection } from './assistantSelection.js'
+import { makeReplyId, formatPendingRepliesForSend } from './replyQuotes.js'
 import { hasSendablePayload } from './composerSubmission.js'
 import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
@@ -629,6 +632,33 @@ export default function ChatView({
     setArmedWaits(Array.isArray(runtime?.waits) ? runtime.waits : [])
   }, [chatId, queryClient])
 
+  // Stacked "reply to a quote" drafts (ReplySelectionRow → ReplyNoteEditor
+  // → ReplyChips) — session-only state, mirroring pendingFiles' shape but
+  // deliberately NOT routed through useComposerDraftState: nothing here
+  // survives a reload, only a chat switch. replyDraftQuote holds the quote
+  // text between "Reply" tapped and the note actually saved (or cancelled).
+  const [pendingReplies, setPendingReplies] = useState([])
+  const [replyDraftQuote, setReplyDraftQuote] = useState(null)
+  useEffect(() => {
+    setPendingReplies([])
+    setReplyDraftQuote(null)
+  }, [chatId])
+  const handleReplySelected = useCallback((quoteText) => {
+    setReplyDraftQuote(quoteText)
+    // Release the live selection now that its text is captured — leaving it
+    // highlighted while the note editor sits on top just invites the owner
+    // to re-trigger the OS's own copy/paste callout on top of our dialog.
+    window.getSelection?.()?.removeAllRanges()
+  }, [])
+  const handleReplyNoteSave = useCallback((note) => {
+    setPendingReplies(prev => [...prev, { id: makeReplyId(), quote: replyDraftQuote, note }])
+    setReplyDraftQuote(null)
+  }, [replyDraftQuote])
+  const handleReplyNoteCancel = useCallback(() => setReplyDraftQuote(null), [])
+  const handleReplyRemove = useCallback((id) => {
+    setPendingReplies(prev => prev.filter(r => r.id !== id))
+  }, [])
+
   useEffect(() => {
     let cancelled = false
     if (!activeGoalObjective) {
@@ -663,6 +693,10 @@ export default function ChatView({
 
   // DOM refs
   const scrollRef = useRef(null)
+  // Live text selection inside an assistant message, or null. Drives
+  // ReplySelectionRow (rendered by ChatInputBar, not floated over the
+  // transcript — see assistantSelection.js for why).
+  const selectedAssistantText = useAssistantSelection(scrollRef)
   const spacerRef = useRef(null)
   const lastUserMsgRef = useRef(null)
   // Stable callback ref attached to the last user message <div>. An
@@ -3315,6 +3349,16 @@ export default function ChatView({
     }
   }, [streamSend, commitMessages, fetchMessages, freezeQuestionSubmission])
 
+  // Stacked replies become plain visible message text, prepended ahead of
+  // whatever the owner typed — never a hidden augmentation. Cleared
+  // optimistically at submit time, same spirit as doSend's own
+  // clearComposerFilesForSend: a failed send still restores the FULL
+  // combined text into the plain textarea (doSend's restoreComposerText),
+  // so nothing is silently lost, it just loses its chip identity on retry.
+  function composerTextWithReplies() {
+    return formatPendingRepliesForSend(pendingReplies) + input.trim()
+  }
+
   function handleSubmit(e) {
     e.preventDefault()
     if (isProviderSwitchBlocking(chatId)) return
@@ -3322,7 +3366,9 @@ export default function ChatView({
       setModelSelectionRequest(request => request + 1)
       return
     }
-    doSend(input.trim())
+    const text = composerTextWithReplies()
+    setPendingReplies([])
+    doSend(text)
   }
 
   function handleSubmitSteer(e) {
@@ -3334,7 +3380,9 @@ export default function ChatView({
     }
     if (submitSteerInFlightRef.current) return
     submitSteerInFlightRef.current = true
-    void doSend(input.trim(), { directSteer: true })
+    const text = composerTextWithReplies()
+    setPendingReplies([])
+    void doSend(text, { directSteer: true })
       .finally(() => { submitSteerInFlightRef.current = false })
   }
 
@@ -4778,6 +4826,14 @@ export default function ChatView({
       </div>
       )}
 
+      {replyDraftQuote != null && (
+        <ReplyNoteEditor
+          quote={replyDraftQuote}
+          onSave={handleReplyNoteSave}
+          onClose={handleReplyNoteCancel}
+        />
+      )}
+
       <div ref={footRef} className="chat__foot">
         {/* Foot order, top to bottom:
             floating actions overlay the transcript without joining the measured
@@ -4922,6 +4978,10 @@ export default function ChatView({
           pendingFiles={pendingFiles}
           onAddFiles={handleComposerAddFiles}
           onRemoveFile={handleComposerRemoveFile}
+          pendingReplies={pendingReplies}
+          onRemoveReply={handleReplyRemove}
+          selectedAssistantText={embedded ? null : selectedAssistantText}
+          onReplyToSelection={handleReplySelected}
           attachTriggerRef={attachTriggerRef}
           messageHistory={messageHistory}
           provider={chatInfo?.provider}

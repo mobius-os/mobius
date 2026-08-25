@@ -97,6 +97,8 @@ import {
 } from './composerShortcuts.js'
 import { isTouchPrimary } from '../../lib/pointerPrimary.js'
 import SlashMenu from './SlashMenu.jsx'
+import ReplyChips from './ReplyChips.jsx'
+import ReplySelectionRow from './ReplySelectionRow.jsx'
 import {
   applySlashCommand,
   matchSlashCommands,
@@ -453,6 +455,14 @@ function FileChips({ files, onRemove, chatId }) {
  *   pendingFiles       — file upload chips state
  *   onAddFiles         — receives FileList from file picker
  *   onRemoveFile       — receives chip id
+ *   pendingReplies     — stacked reply-to-quote drafts (see ReplyChips /
+ *                        replyQuotes.js). Rendered above the input row;
+ *                        bundled into the next send by ChatView, not here.
+ *   onRemoveReply      — receives a reply id
+ *   selectedAssistantText — live selection text from an assistant message
+ *                        (see assistantSelection.js), or null. Renders the
+ *                        "Reply to selection" row above the input row.
+ *   onReplyToSelection — tapped on that row; opens ReplyNoteEditor
  *   leftButtons        — buttons rendered to the LEFT of the pill
  *                        (e.g., <ComposerPopover /> — owns its own
  *                        "+" trigger; the bar no longer ships a
@@ -508,6 +518,10 @@ export default function ChatInputBar({
   pendingFiles,
   onAddFiles,
   onRemoveFile,
+  pendingReplies = [],
+  onRemoveReply,
+  selectedAssistantText,
+  onReplyToSelection,
   leftButtons,
   rightButtons,
   attachTriggerRef,
@@ -630,8 +644,10 @@ export default function ChatInputBar({
 
   // A completed attachment is a complete message in its own right. Feed that
   // through the same primary-action and keyboard-shortcut gate as typed text
-  // so an image/file-only draft exposes Send instead of Mic.
-  const hasInput = hasSendablePayload(input, pendingFiles)
+  // so an image/file-only draft exposes Send instead of Mic. A stacked reply
+  // is the same: it becomes real message text on send, so its presence alone
+  // must expose Send even with an otherwise-empty textarea.
+  const hasInput = hasSendablePayload(input, pendingFiles) || pendingReplies.length > 0
   const hasUploading = pendingFiles?.some(c => c.status === 'uploading') ?? false
 
   function restoreFocusAfterFilePicker() {
@@ -860,6 +876,8 @@ export default function ChatInputBar({
         listId={slashListId}
         optionId={slashOptionId}
       />
+      <ReplySelectionRow selectedText={selectedAssistantText} onReply={onReplyToSelection} />
+      <ReplyChips replies={pendingReplies} onRemove={onRemoveReply} />
       <div className="chat__input-row">
         {leftButtons}
         <div className={`chat__pill${hasFiles ? ' chat__pill--with-attach' : ''}`}>
