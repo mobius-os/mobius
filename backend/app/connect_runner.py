@@ -317,10 +317,10 @@ class _CommandRunner:
         self.flush_lock = threading.Lock()
         self.active = None
         self.outbox = deque()
-
-    def _retain(self, message):
-        with self.lock:
-            self.outbox.append(message)
+        # A rotating stream can deliver the same event from the retiring and
+        # replacement connection. Request ids are idempotency keys: once this
+        # process accepts one, never spawn it a second time.
+        self.seen_request_ids = deque(maxlen=64)
 
     def pending_messages(self):
         with self.lock:
@@ -357,7 +357,9 @@ class _CommandRunner:
                 self.acknowledge_message(message)
         return True
 
-    def _post_result(self, request_id, stdout, stderr, exit_code, outcome):
+    def _post_result(
+        self, request_id, stdout, stderr, exit_code, outcome, record=None,
+    ):
         message = {
             "type": "result",
             "request_id": request_id,
@@ -370,7 +372,13 @@ class _CommandRunner:
         # Retain before attempting the network request. A concurrent stream
         # rotation can now always announce this pending id, so the server will
         # never mistake the just-finished command for lost work and replay it.
-        self._retain(message)
+        # Releasing the active slot and retaining its result must be one
+        # atomic state transition. Otherwise a reconnect can observe neither
+        # and tell the server that successfully completed work was lost.
+        with self.lock:
+            self.outbox.append(message)
+            if record is not None and self.active is record:
+                self.active = None
         self.flush_pending_results()
 
     def _post_started(self, request_id):
@@ -386,6 +394,14 @@ class _CommandRunner:
 
     def start(self, evt):
         request_id = str(evt.get("request_id") or "")
+        with self.lock:
+            if request_id in self.seen_request_ids:
+                return
+            if self.active is not None:
+                refused = True
+            else:
+                refused = False
+                self.seen_request_ids.append(request_id)
         not_after = float(evt.get("not_after") or 0)
         if not_after and time.time() > not_after:
             self._post_result(
@@ -400,18 +416,14 @@ class _CommandRunner:
             "reason": None,
             "timeout": max(1, int(evt.get("timeout", 60))),
         }
-        with self.lock:
-            if self.active is not None:
-                refused = True
-            else:
-                refused = False
-                self.active = record
         if refused:
             self._post_result(
                 request_id, "", "runner refused a parallel command", 125,
                 "expired",
             )
             return
+        with self.lock:
+            self.active = record
 
         try:
             self._post_started(request_id)
@@ -420,12 +432,9 @@ class _CommandRunner:
             # deadline again at the last possible point before spawning so an
             # expired request can never become delayed work on this machine.
             if not_after and time.time() > not_after:
-                with self.lock:
-                    if self.active is record:
-                        self.active = None
                 self._post_result(
                     request_id, "", "command expired before it could start",
-                    124, "expired",
+                    124, "expired", record=record,
                 )
                 return
             proc = _spawn_command(evt.get("cmd", ""), evt.get("cwd"))
@@ -435,11 +444,9 @@ class _CommandRunner:
             if reason is not None:
                 _terminate_process_tree(proc)
         except Exception as exc:  # noqa: BLE001 - report the spawn boundary
-            with self.lock:
-                if self.active is record:
-                    self.active = None
             self._post_result(
                 request_id, "", "runner error: %s" % exc, 1, "completed",
+                record=record,
             )
             return
 
@@ -465,8 +472,6 @@ class _CommandRunner:
 
         with self.lock:
             reason = record["reason"]
-            if self.active is record:
-                self.active = None
         if reason == "timed_out":
             outcome, exit_code = "timed_out", 124
             stderr = stderr or "command timed out after %ss" % record["timeout"]
@@ -477,6 +482,7 @@ class _CommandRunner:
             outcome, exit_code = "completed", proc.returncode
         self._post_result(
             record["request_id"], stdout, stderr, exit_code, outcome,
+            record=record,
         )
 
     def cancel(self, request_id, reason="canceled"):

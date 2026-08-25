@@ -4,6 +4,7 @@ import asyncio
 import json
 import shlex
 import sys
+import threading
 import time
 import urllib.error
 from pathlib import Path
@@ -928,6 +929,52 @@ def test_runner_retries_a_result_until_ordinary_https_succeeds(monkeypatch):
   assert runner.flush_pending_results() is True
   assert runner.pending_messages() == []
   assert len(attempts) == 2
+
+
+def test_runner_finishes_into_pending_result_atomically(monkeypatch):
+  runner = connect_runner._CommandRunner("https://example.test", "token")
+  record = {
+    "request_id": "a" * 16,
+    "proc": None,
+    "reason": None,
+    "timeout": 30,
+  }
+  runner.active = record
+  monkeypatch.setattr(runner, "flush_pending_results", lambda: False)
+
+  runner._post_result(
+    record["request_id"], "done", "", 0, "completed", record=record,
+  )
+
+  active_id, pending_ids = runner.snapshot()
+  assert active_id is None
+  assert pending_ids == [record["request_id"]]
+
+
+def test_runner_ignores_duplicate_delivery_of_an_accepted_request(monkeypatch):
+  runner = connect_runner._CommandRunner("https://example.test", "token")
+  spawned = []
+  monkeypatch.setattr(
+    connect_runner,
+    "_spawn_command",
+    lambda cmd, cwd: spawned.append((cmd, cwd)) or object(),
+  )
+  monkeypatch.setattr(runner, "_post_started", lambda _request_id: None)
+  monkeypatch.setattr(threading.Thread, "start", lambda self: None)
+  event = {
+    "request_id": "b" * 16,
+    "cmd": "do it once",
+    "cwd": None,
+    "timeout": 30,
+    "not_after": time.time() + 10,
+  }
+
+  runner.start(event)
+  runner.start(event)
+
+  assert spawned == [("do it once", None)]
+  assert runner.active["request_id"] == event["request_id"]
+  assert runner.pending_messages() == []
 
 
 def test_runner_rechecks_expiry_after_start_ack_before_spawning(monkeypatch):
