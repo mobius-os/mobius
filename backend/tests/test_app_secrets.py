@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 from fastapi import Response
 
 from app import models
@@ -268,6 +269,29 @@ def test_credentialed_fetch_rejects_undeclared_origin_path_and_key(
   assert client.get(endpoint, headers=headers, params={
     "url": "https://attacker.example/v3/staticmap",
   }).status_code == 403
+
+
+@pytest.mark.parametrize("path", [
+  "/v3/staticmap/../config/district",
+  "/v3/staticmap/%2e%2e/config/district",
+  "/v3/staticmap/%252e%252e/config/district",
+  "/v3/staticmap%2f..%2fconfig/district",
+  "/v3/staticmap%252f..%252fconfig/district",
+  "/v3/staticmap/%5c..%5cconfig/district",
+])
+def test_credentialed_fetch_rejects_ambiguous_path_segments(
+  client, db, tmp_path, path,
+):
+  app = _create_app(db, "Traversal-safe map")
+  _declare_credentialed_fetch(db, app, tmp_path / "traversal-safe-map")
+
+  response = client.get(
+    f"/api/apps/{app.id}/credentialed-fetch/amap",
+    headers=_app_auth(db, app),
+    params={"url": f"https://restapi.amap.com{path}"},
+  )
+
+  assert response.status_code == 403
 
 
 def test_credentialed_fetch_rejects_oversized_response(

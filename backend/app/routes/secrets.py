@@ -6,7 +6,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
@@ -112,6 +112,29 @@ def _path_is_allowed(path: str, allowed: list[str]) -> bool:
     if path == prefix or path.startswith(prefix + "/"):
       return True
   return False
+
+
+def _path_has_ambiguous_segments(path: str) -> bool:
+  """Reject path spellings an upstream service could normalize later.
+
+  The reviewed prefix check operates on URL text, while providers commonly
+  percent-decode and remove dot segments before routing. Inspect every bounded
+  decoding layer and reject any spelling that can become a dot segment or add
+  a new separator after Möbius has attached the credential.
+  """
+  decoded = path
+  for _ in range(len(path) + 1):
+    if "\\" in decoded or any(
+      segment in (".", "..") for segment in decoded.split("/")
+    ):
+      return True
+    next_decoded = unquote(decoded)
+    if next_decoded == decoded:
+      return False
+    if next_decoded.count("/") != decoded.count("/"):
+      return True
+    decoded = next_decoded
+  return True
 
 
 async def _credentialed_response(
@@ -266,6 +289,7 @@ async def credentialed_fetch(
     or parsed.username is not None
     or parsed.password is not None
     or request_origin != declared_origin
+    or _path_has_ambiguous_segments(parsed.path)
     or not _path_is_allowed(parsed.path, allowed_paths)
   ):
     raise HTTPException(status_code=403, detail="Provider URL is not allowlisted.")
