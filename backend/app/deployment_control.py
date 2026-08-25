@@ -471,10 +471,10 @@ async def _request_managed_rebuild(expected_sha: str) -> RebuildStatus:
       {"operation_id": operation_id, "handoff_nonce": handoff_nonce},
     )
     return _normalize_managed_status(started)
-  except Exception:
-    if drained:
-      # The provider never accepted ownership. Restart locally so parked chats
-      # are not left waiting indefinitely; this path fails closed to the normal
-      # restart ledger if the managed receipt cannot be reused.
+  except DeploymentControlError as exc:
+    if drained and exc.code == "controller_rejected":
+      # A definitive rejection proves the provider did not accept ownership.
+      # Ambiguous transport or response failures must not start a second,
+      # competing worker transition after Railway may have accepted the cutover.
       asyncio.create_task(restart_util.restart_this_worker())
     raise
