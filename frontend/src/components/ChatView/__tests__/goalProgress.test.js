@@ -223,7 +223,11 @@ test('ordinary turns retain settled Goals while Resume reactivates a pause', () 
     goalPresentationAtRunStart('/goal Start another', [], paused),
     { id: null, objective: 'Start another', status: 'active', resumable: false },
   )
-  assert.equal(goalPresentationAtRunStart('/goal clear', [], paused), null)
+  assert.deepEqual(
+    goalPresentationAtRunStart('/goal clear', [], paused),
+    { ...paused, resumable: true },
+    'the retired text command must not optimistically hide a durable Goal',
+  )
 })
 
 test('the goal reuses the progress rail and stays as context for build phases', () => {
@@ -551,20 +555,30 @@ test('draftGoalObjective keeps the goal visual open while typing the objective',
   assert.equal(draftGoalObjective(null), null)
 })
 
-test('the goal rail step carries a clear affordance, sourced domain-neutrally', () => {
-  // The X sends the same `/goal clear` typing it would, so behaviour matches
-  // the documented command instead of a parallel clearing path.
-  assert.match(chatView, /handleClearGoal\s*=\s*useCallback\(\(\)\s*=>\s*\{[\s\S]*?doSend\('\/goal clear'/,
-    'the clear handler must reuse the /goal clear command path')
-  assert.match(chatView, /clearable:\s*true/,
-    'the goal rail item must be marked clearable')
+test('the goal rail confirms and clears directly, sourced domain-neutrally', () => {
+  assert.match(
+    chatView,
+    /handleClearGoal\s*=\s*useCallback\(async \(item\)[\s\S]*?apiFetch\(`\/chats\/\$\{chatId\}\/goal`[\s\S]*?method:\s*'DELETE'[\s\S]*?goal_id:\s*goalId/,
+    'the confirmed clear must call the exact-id lifecycle route directly',
+  )
+  assert.doesNotMatch(
+    chatView,
+    /doSend\('\/goal clear'/,
+    'the Goal rail must never fabricate a /goal clear chat message',
+  )
+  assert.match(chatView, /clearable:\s*!!goalPresentation\?\.id/,
+    'only an identified durable Goal may expose clearing')
   assert.match(chatView, /onClearItem=\{handleClearGoal\}/,
     'ChatView must wire the clear handler into the rail')
   // The rail itself stays domain-neutral: the label text comes from item data.
-  assert.match(progressRail, /className="chat__progress-clear"/,
+  assert.match(progressRail, /className=\{`chat__progress-clear\$\{clearConfirmed/,
     'the rail must render the clear button')
-  assert.match(progressRail, /aria-label=\{item\.clearLabel \|\| 'Clear'\}/,
-    'the clear label must be item-supplied with a domain-neutral fallback')
+  assert.match(progressRail, /if \(clearConfirmed\) onClear\(item\)[\s\S]*?else setClearConfirmed\(true\)/,
+    'the first click must arm confirmation and only the second may clear')
+  assert.match(progressRail, /clearConfirmed[\s\S]*?<Check width=\{14\} height=\{14\}/,
+    'the armed clear control must turn into a confirm check')
+  assert.match(progressRail, /item\.clearConfirmLabel \|\| 'Confirm clear'/,
+    'the confirmation label must be item-supplied with a neutral fallback')
   assert.match(chatView, /actionLabel: 'Resume'/,
     'a paused Goal should expose the one-tap resume action')
   assert.match(chatView, /actionIcon: <Play width=\{13\} height=\{13\}/,

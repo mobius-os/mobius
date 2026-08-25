@@ -1849,6 +1849,22 @@ def _pin_established_legacy_chat_models(eng) -> None:
       })
 
 
+def _add_chat_goal_dismissal(eng) -> None:
+  """Give Goal presentation a first-class chat-owned dismissal pointer."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chats" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chats")}
+  if "dismissed_goal_id" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE chats ADD COLUMN dismissed_goal_id VARCHAR(64) NULL"
+    ))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -1868,6 +1884,7 @@ _SCHEMA_MIGRATIONS = (
   ("0016_app_connect_manage", _add_app_connect_manage),
   ("0017_retire_restart_resume_toggle", _retire_restart_resume_toggle),
   ("0018_explicit_legacy_chat_models", _pin_established_legacy_chat_models),
+  ("0019_chat_goal_dismissal", _add_chat_goal_dismissal),
 )
 
 

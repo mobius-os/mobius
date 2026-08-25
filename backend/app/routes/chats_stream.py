@@ -47,6 +47,7 @@ from app.runner_registry import RunnerKind, registry
 from app.config import get_settings
 from app.database import get_db
 from app.memory_observability import record_memory_checkpoint_once
+from app.goal_commands import goal_clear_requested
 from app.owner_input import publish_owner_input_changed
 from app.deps import (
   Principal, get_chat_view_principal, get_owner_or_chat_embed_principal,
@@ -594,6 +595,14 @@ async def send_message(
   """
   require_chat_embed_operation(principal, "chat:send")
   chat = get_active_chat_for_principal(db, chat_id, principal)
+  if goal_clear_requested(body.content or ""):
+    raise HTTPException(
+      status_code=409,
+      detail={
+        "code": "goal_clear_retired",
+        "message": "Clear the Goal from its confirmed × control instead.",
+      },
+    )
   if _delegation_manages_chat(db, chat_id):
     raise HTTPException(
       status_code=409,

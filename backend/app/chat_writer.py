@@ -431,10 +431,45 @@ class StartTurn(_Command):
 
 
 @dataclass(frozen=True)
+class StartContinuationAttached:
+  """The exact physical continuation run was already persisted."""
+
+
+@dataclass(frozen=True)
+class StartContinuationBlocked:
+  """Expected non-start because the controller chat is not idle."""
+
+  reason: str
+
+
+@dataclass(frozen=True)
 class GoalPromotionRejected:
   """Expected refusal when a run cannot accept the requested Goal."""
 
   reason: str
+
+
+@dataclass
+class StartContinuation(_Command):
+  """Atomically append and open one owner-authority continuation.
+
+  Durable coordinators reserve ``run_token`` and ``cid`` before asking the
+  writer to resume an already-settled logical root.  The transcript append,
+  pending-queue recovery, and ChatRun insert are one transaction so a crash
+  can never leave only the synthetic pending row behind.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  root_run_id: str = ""
+  content: str = ""
+  cid: str = ""
+  reason: str = ""
+  initiated_by_app_id: int | None = None
+  # A restart continuation atomically replaces its exact parked physical run.
+  # Other programmatic continuations require an already-idle logical root.
+  supersedes_run_token: str | None = None
+  consume_pending: bool = False
 
 
 @dataclass
@@ -444,6 +479,14 @@ class PromoteRunToGoal(_Command):
   chat_id: str = ""
   run_token: str = ""
   objective: str = ""
+
+
+@dataclass
+class ClearPresentedGoal(_Command):
+  """Dismiss one exact Goal identity without fabricating a chat message."""
+
+  chat_id: str = ""
+  expected_goal_id: str = ""
 
 
 @dataclass
@@ -809,6 +852,7 @@ _FENCE_COMMANDS = (
   QuestionCommit,
   AnswerQuestion,
   StartTurn,
+  StartContinuation,
   AppendPending,
   AppendSteeredUserMessage,
   PromotePending,
@@ -1305,7 +1349,7 @@ class ChatWriterActor:
         # post-abandon commit strands a turn. The `finally` still GCs the
         # key's fence epoch for the skipped command.
         if (
-          isinstance(cmd, (StartTurn, PromotePending))
+          isinstance(cmd, (StartTurn, StartContinuation, PromotePending))
           and cmd.ack is not None
           and cmd.ack.done()
         ):
@@ -1541,8 +1585,12 @@ class ChatWriterActor:
       return self._reconcile_startup_chat(db, cmd)
     if isinstance(cmd, StartTurn):
       return self._start_turn(db, cmd)
+    if isinstance(cmd, StartContinuation):
+      return self._start_continuation(db, cmd)
     if isinstance(cmd, PromoteRunToGoal):
       return self._promote_run_to_goal(db, cmd)
+    if isinstance(cmd, ClearPresentedGoal):
+      return self._clear_presented_goal(db, cmd)
     if isinstance(cmd, AppendPending):
       return self._append_pending(db, cmd)
     if isinstance(cmd, AppendSteeredUserMessage):
@@ -2261,6 +2309,212 @@ class ChatWriterActor:
       "provider": chat.provider,
     }
 
+  def _start_continuation(
+    self, db, cmd: StartContinuation,
+  ) -> dict | StartContinuationAttached | StartContinuationBlocked:
+    """Append and open an idle, same-root continuation in one commit.
+
+    A deterministic ``run_token`` makes a retry attach to an already-created
+    physical run.  A deterministic ``cid`` also lets this command repair the
+    one legacy crash shape produced by the former two-command implementation:
+    exactly the expected synthetic row was appended to ``pending_messages``
+    but never promoted. Ordinary coordinator calls reject foreign pending
+    work. Restart recovery may instead consume the current owner group while
+    preserving group order and every later group.
+    """
+    from datetime import UTC, datetime
+
+    from app.continuations import is_continuation_message
+    from app.models import ChatRun
+
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None:
+      raise _PersistFailed("StartContinuation: chat not found or deleted")
+
+    existing_run = db.query(ChatRun).filter(
+      ChatRun.id == cmd.run_token,
+      ChatRun.chat_id == cmd.chat_id,
+    ).first()
+    if existing_run is not None:
+      if (existing_run.root_run_id or existing_run.id) != cmd.root_run_id:
+        raise _PersistFailed(
+          "StartContinuation: run token belongs to a different logical root"
+        )
+      if existing_run.initiated_by_app_id != cmd.initiated_by_app_id:
+        raise _PersistFailed(
+          "StartContinuation: run token has different app attribution"
+        )
+      db.rollback()
+      return StartContinuationAttached()
+
+    root = db.query(ChatRun.id).filter(
+      ChatRun.id == cmd.root_run_id,
+      ChatRun.chat_id == cmd.chat_id,
+    ).first()
+    if root is None:
+      raise _PersistFailed(
+        "StartContinuation: logical root does not belong to chat"
+      )
+    if chat.pending_question_id is not None:
+      db.rollback()
+      return StartContinuationBlocked("pending_question")
+    other_run = db.query(ChatRun).filter(
+      ChatRun.chat_id == cmd.chat_id,
+      ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+    ).first()
+    superseded = None
+    if cmd.supersedes_run_token is not None:
+      if (
+        other_run is None
+        or other_run.id != cmd.supersedes_run_token
+        or other_run.status != "resume_pending"
+      ):
+        db.rollback()
+        return StartContinuationBlocked("superseded_run_changed")
+      superseded = other_run
+    elif other_run is not None:
+      db.rollback()
+      return StartContinuationBlocked("active_run")
+
+    existing = list(chat.messages or [])
+    pending = list(chat.pending_messages or [])
+    for row in existing:
+      if row.get("role") == "user" and cid_of(row) == cmd.cid:
+        raise _PersistFailed(
+          "StartContinuation: continuation cid exists without its ChatRun"
+        )
+
+    source = {
+      "role": "user",
+      "content": cmd.content,
+      "ts": next_message_ts(existing + pending),
+      "cid": cmd.cid,
+      "kind": "continuation",
+      "continuation_reason": cmd.reason,
+    }
+    if cmd.initiated_by_app_id is not None:
+      source["_initiated_by_app_id"] = cmd.initiated_by_app_id
+
+    selected_pending: list[dict] = []
+    remaining_pending: list[dict] = []
+    if cmd.consume_pending and pending:
+      head_hidden = bool(pending[0].get("hidden"))
+      promote_count = 0
+      for row in pending:
+        if bool(row.get("hidden")) != head_hidden:
+          break
+        promote_count += 1
+      selected_pending = pending[:promote_count]
+      remaining_pending = pending[promote_count:]
+    elif pending:
+      # Recover only the exact row the retired AppendPending -> PromotePending
+      # sequence could have stranded.  Never consume a real owner queue or an
+      # app-attributed row in order to make coordinator progress.
+      if len(pending) != 1:
+        db.rollback()
+        return StartContinuationBlocked("foreign_pending")
+      queued = pending[0]
+      expected = (
+        queued.get("role") == "user"
+        and cid_of(queued) == cmd.cid
+        and queued.get("content") == cmd.content
+        and queued.get("kind") == "continuation"
+        and queued.get("continuation_reason") == cmd.reason
+        and queued.get("_initiated_by_app_id") == cmd.initiated_by_app_id
+      )
+      if not expected:
+        db.rollback()
+        return StartContinuationBlocked("foreign_pending")
+      source = dict(queued)
+
+    # Programmatic continuations have no browser request of their own. Carry
+    # the latest owner viewport/timezone forward so visual testing exercises
+    # the partner's real dimensions rather than provider defaults.
+    for key in ("viewport", "timezone"):
+      if source.get(key) is not None:
+        continue
+      for prior in reversed(existing):
+        if prior.get("role") == "user" and prior.get(key) is not None:
+          source[key] = copy.deepcopy(prior[key])
+          break
+
+    ensure_user_cid(source)
+    # Restart recovery consumes any already-queued owner group and writes its
+    # product continuation marker directly to history in the same commit. The
+    # marker is never a pending row. A hidden group stays hidden provider input;
+    # the visible restart marker remains transcript-only in that case.
+    provider_sources = list(selected_pending)
+    if not provider_sources or not bool(provider_sources[0].get("hidden")):
+      provider_sources.append(source)
+    agent_message = _combine_pending_messages(provider_sources)
+    stored_rows = _pending_messages_for_transcript(
+      [*selected_pending, source], existing,
+    )
+    try:
+      history = [
+        schemas.ChatMessage(
+          role=row.get("role", "user"),
+          content=row.get("content", "") or "",
+        )
+        for row in existing
+      ]
+      history.append(schemas.ChatMessage(
+        role="user", content=agent_message.get("content", "") or "",
+      ))
+    except Exception as exc:
+      raise _PersistFailed(
+        "StartContinuation: malformed controller transcript"
+      ) from exc
+
+    chat.messages = existing + stored_rows
+    chat.pending_messages = remaining_pending
+    chat.live_assistant = {
+      "role": "assistant",
+      "blocks": [],
+      "ts": next_message_ts(chat.messages),
+    }
+    started_at = datetime.now(UTC)
+    chat.updated_at = started_at
+    provider = chat.provider or "claude"
+    from app.run_state import goal_identity_for_run_start
+    goal_objective, goal_id = goal_identity_for_run_start(
+      db, cmd.chat_id, agent_message,
+    )
+    if superseded is not None:
+      superseded.status = "completed"
+      superseded.ended_at = started_at
+      superseded.restart_nonce = None
+    db.add(ChatRun(
+      id=cmd.run_token,
+      chat_id=cmd.chat_id,
+      status="running",
+      root_run_id=(
+        cmd.root_run_id
+        if is_continuation_message(agent_message)
+        else cmd.run_token
+      ),
+      provider=provider,
+      started_at=started_at,
+      initiated_by_app_id=cmd.initiated_by_app_id,
+      goal_objective=goal_objective,
+      goal_id=goal_id,
+    ))
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("StartContinuation did not persist")
+    self._run_token_owner[cmd.chat_id] = cmd.run_token
+    return {
+      "history": history,
+      "promoted": {
+        **agent_message,
+        "_messages": stored_rows,
+        "_consumed_cids": [
+          cid_of(row) for row in selected_pending if cid_of(row) is not None
+        ],
+      },
+      "session_id": chat.session_id,
+      "provider": provider,
+    }
+
   def _promote_run_to_goal(
     self, db, cmd: PromoteRunToGoal,
   ) -> dict | GoalPromotionRejected:
@@ -2308,6 +2562,50 @@ class ChatWriterActor:
       "run_id": run.id,
       "state": "promoted" if changed else "active",
     }
+
+  def _clear_presented_goal(
+    self, db, cmd: ClearPresentedGoal,
+  ) -> dict:
+    """Record an exact Goal dismissal while preserving its run history."""
+    from datetime import UTC, datetime
+
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None:
+      raise _PersistFailed("ClearPresentedGoal: chat not found or deleted")
+    physical = (
+      db.query(models.ChatRun)
+      .filter(
+        models.ChatRun.chat_id == cmd.chat_id,
+        models.ChatRun.goal_objective.isnot(None),
+      )
+      .order_by(
+        models.ChatRun.started_at.desc(), models.ChatRun.id.desc(),
+      )
+      .first()
+    )
+    if physical is None:
+      db.rollback()
+      return {"status": "missing", "goal_id": None}
+    goal_id = physical.goal_id or physical.root_run_id or physical.id
+    if goal_id != cmd.expected_goal_id:
+      db.rollback()
+      return {"status": "conflict", "goal_id": goal_id}
+    if chat.dismissed_goal_id == goal_id:
+      db.rollback()
+      return {"status": "cleared", "goal_id": goal_id}
+    chat.dismissed_goal_id = goal_id
+    cleared_at = datetime.now(UTC)
+    for run in db.query(models.ChatRun).filter(
+      models.ChatRun.chat_id == cmd.chat_id,
+      models.ChatRun.goal_id == goal_id,
+      models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+    ).all():
+      run.status = "stopped"
+      run.ended_at = run.ended_at or cleared_at
+      run.restart_nonce = None
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("ClearPresentedGoal did not persist")
+    return {"status": "cleared", "goal_id": goal_id}
 
   def _append_pending(self, db, cmd: AppendPending) -> dict:
     """Queue `user_msg` behind the active turn; optionally apply answers.
@@ -2636,7 +2934,22 @@ class ChatWriterActor:
       db.rollback()
       return PromotePendingBlockedByPendingQuestion(question_id)
     pending = list(chat.pending_messages or [])
+    # `/goal clear` is no longer a runnable message. Retire any row queued by
+    # an older shell before it can reach a provider, while preserving every
+    # real follow-up around it. New sends are rejected at the HTTP boundary;
+    # this is the durable-upgrade path for already-stored queues.
+    from app.goal_commands import goal_clear_requested
+    without_retired_goal_clear = [
+      row for row in pending
+      if not goal_clear_requested(str(row.get("content") or ""))
+    ]
+    retired_goal_clear = len(without_retired_goal_clear) != len(pending)
+    if retired_goal_clear:
+      pending = without_retired_goal_clear
+      chat.pending_messages = pending
     if not pending:
+      if retired_goal_clear and not _commit_or_rollback(db):
+        raise _PersistFailed("PromotePending could not retire /goal clear")
       return {"history": [], "promoted": None, "session_id": chat.session_id}
     existing = list(chat.messages or [])
     head_hidden = bool(pending[0].get("hidden"))

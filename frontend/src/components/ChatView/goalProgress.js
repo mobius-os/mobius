@@ -70,13 +70,6 @@ function isContinue(text) {
   return typeof text === 'string' && text.trim().toLowerCase() === 'continue'
 }
 
-function isGoalClear(text) {
-  if (typeof text !== 'string') return false
-  const normalized = text.replace(/^\n+/, '')
-  const match = normalized.match(/^\/goal(?:\s+([\s\S]*))?$/)
-  return (match?.[1] || '').trim().toLowerCase() === 'clear'
-}
-
 const GOAL_PRESENTATION_STATUSES = new Set([
   'active', 'paused', 'completed', 'failed',
 ])
@@ -184,7 +177,6 @@ export function goalObjectiveForQueuedStart(message, messages) {
 
 /** Keep settled Goals visible across ordinary turns; reactivate only Resume. */
 export function goalPresentationAtRunStart(text, messages, current = null) {
-  if (isGoalClear(text)) return null
   const directObjective = goalObjectiveAtRunStart(text, messages)
   if (directObjective) {
     return normalizeGoalPresentation({

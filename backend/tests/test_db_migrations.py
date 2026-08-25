@@ -1164,6 +1164,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0016_app_connect_manage",
     "0017_retire_restart_resume_toggle",
     "0018_explicit_legacy_chat_models",
+    "0019_chat_goal_dismissal",
   ]
   assert second == first
 
@@ -2069,6 +2070,31 @@ def test_published_schema_migration_history_is_unique_ordered_and_immutable():
   )
   assert completed.returncode == 0, completed.stderr
   assert "append-only migrations verified" in completed.stdout
+
+
+def test_goal_dismissal_migration_adds_nullable_chat_pointer(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'goal-dismissal.db'}")
+  models.Base.metadata.create_all(eng)
+  with eng.begin() as conn:
+    conn.execute(text("ALTER TABLE chats DROP COLUMN dismissed_goal_id"))
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version in _migration_versions_before("0019_chat_goal_dismissal"):
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
+      ), {"v": version, "at": datetime(2026, 8, 22)})
+
+  run_migrations(eng)
+
+  columns = {column["name"] for column in inspect(eng).get_columns("chats")}
+  assert "dismissed_goal_id" in columns
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT COUNT(*) FROM schema_migrations "
+      "WHERE version = '0019_chat_goal_dismissal'"
+    )).scalar_one() == 1
 
 
 def test_failed_migration_is_not_recorded_and_can_retry(tmp_path, monkeypatch):

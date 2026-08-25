@@ -214,12 +214,12 @@ def _needs_native_goal_control(
   *,
   goal_mode: bool,
   goal_objective: str | None,
-  goal_clear: bool,
+  clear_dismissed_goal: bool,
   fallback_goal_objective: str | None,
 ) -> bool:
   """Whether this turn already belongs to Codex's explicit Goal lifecycle."""
   return bool(
-    goal_mode or goal_objective is not None or goal_clear
+    goal_mode or goal_objective is not None or clear_dismissed_goal
     or fallback_goal_objective is not None
   )
 
@@ -657,6 +657,27 @@ class ActiveCodexTurn:
       )
       return
 
+  async def clear_goal(self) -> None:
+    """Clear a native Goal when present, otherwise stop this Goal-owned turn."""
+    self._interrupt_requested = True
+    self._reject_pending_steer()
+    clear_goal = getattr(self.turn, "clear_goal", None)
+    try:
+      if callable(clear_goal):
+        await clear_goal()
+      else:
+        await self.turn.interrupt()
+    except Exception as exc:
+      log.warning("codex direct goal clear raised: %s", exc)
+      try:
+        await self.turn.interrupt()
+      except Exception as interrupt_exc:
+        log.warning("codex fallback interrupt raised: %s", interrupt_exc)
+    try:
+      await asyncio.wait_for(asyncio.shield(self._finished), timeout=5.0)
+    except asyncio.TimeoutError:
+      raise RuntimeError("Codex Goal did not stop after direct clear")
+
   async def stop(self, timeout: float = 2.0) -> bool:
     """Interrupts the active turn and waits up to `timeout` seconds."""
     try:
@@ -910,6 +931,13 @@ class _CodexGoalTurn:
     # its current physical turn.  A later thread/resume can therefore restore
     # the same objective and counters rather than starting a replacement chat.
     await self._client.cancel_goal_operation(self._state)
+
+  async def clear_goal(self) -> None:
+    """Remove the persisted objective, then interrupt its physical turn."""
+    try:
+      await self._client.thread_goal_clear(self._state.thread_id)
+    finally:
+      await self._client.cancel_goal_operation(self._state)
 
   async def steer(self, message: str) -> None:
     physical_turn_id = await asyncio.to_thread(self._state.active_turn)
@@ -1479,7 +1507,7 @@ async def run_codex_sdk_turn(
   resumed_context: str | None = None,
   should_abort: Callable[[], bool] | None = None,
   goal_objective: str | None = None,
-  goal_clear: bool = False,
+  clear_dismissed_goal: bool = False,
   goal_mode: bool = False,
   goal_continue: bool = False,
   fallback_goal_objective: str | None = None,
@@ -1598,7 +1626,7 @@ async def run_codex_sdk_turn(
   needs_goal_control = _needs_native_goal_control(
     goal_mode=goal_mode,
     goal_objective=goal_objective,
-    goal_clear=goal_clear,
+    clear_dismissed_goal=clear_dismissed_goal,
     fallback_goal_objective=fallback_goal_objective,
   )
   config_overrides = _codex_config_overrides(
@@ -1626,7 +1654,6 @@ async def run_codex_sdk_turn(
   thread = None
   turn = None
   goal_state = None
-  goal_cleared = False
   goal_steer_message: str | None = None
   active_turn: ActiveCodexTurn | None = None
   current_session_id = session_id
@@ -1779,7 +1806,7 @@ async def run_codex_sdk_turn(
       )
       persisted_goal = None
       goal_store_available = True
-      if session_id is not None and goal_mode:
+      if session_id is not None and (goal_mode or clear_dismissed_goal):
         try:
           persisted_goal = await _codex_thread_goal(
             goal_client, sdk, session_id,
@@ -1792,10 +1819,9 @@ async def run_codex_sdk_turn(
           # run before resume to register an active goal route in time, but a
           # stale session id should still be allowed to resume as a new thread.
           goal_store_available = False
-        if goal_clear:
+        if clear_dismissed_goal:
           if persisted_goal is not None:
-            cleared = await goal_client.thread_goal_clear(session_id)
-            goal_cleared = bool(getattr(cleared, "cleared", True))
+            await goal_client.thread_goal_clear(session_id)
           persisted_goal = None
         elif goal_objective is not None and persisted_goal is not None:
           # An explicit new /goal replaces the stored operation.  Clear it
@@ -1910,20 +1936,6 @@ async def run_codex_sdk_turn(
         "type": "session_init",
         "session_id": current_session_id,
       })
-
-      if goal_clear:
-        await _persist_session_id(db, chat_id, current_session_id)
-        bc.publish({
-          "type": "text",
-          "content": (
-            "Goal cleared." if goal_cleared else "No active goal to clear."
-          ),
-        })
-        return {
-          "session_id": current_session_id,
-          "cost_usd": None,
-          "error": None,
-        }
 
       native_goal_objective = (
         (goal_objective or fallback_goal_objective)

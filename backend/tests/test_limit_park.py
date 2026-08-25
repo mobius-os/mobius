@@ -921,8 +921,59 @@ def test_restart_park_auto_continues_with_product_marker(
     assert marker["kind"] == "continuation"
     assert marker["continuation_reason"] == "restart"
     assert marker["cid"] == f"restart-resume-{token}"
+    state = _chat_row(cid)
+    assert state["pending"] == []
+    assert state["messages"][-1]["cid"] == f"restart-resume-{token}"
+    assert _run_row(token)["status"] == "completed"
     assert notifications[0]["title"] == "Möbius restarted"
     assert "limit" not in notifications[0]["body"].lower()
+  finally:
+    chat_mod.discard_starting(cid)
+
+
+def test_restart_consumes_a_hidden_owner_group_without_queueing_continue(
+  owner_token, monkeypatch,
+):
+  del owner_token
+  monkeypatch.setattr(
+    "app.push.notify_owner_async", _async_notify(lambda *args, **kwargs: "notif-id"),
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+  cid = "restart-hidden-owner-group"
+  token = f"rt-{cid}"
+  nonce = "restart-nonce-hidden-owner-group"
+  monkeypatch.setattr(
+    "app.restart_ledger.authorized_restart_nonce", lambda: nonce,
+  )
+  _due_park(
+    cid,
+    token,
+    auto_restart=True,
+    park_reason="restart",
+    restart_nonce=nonce,
+    pending=[{
+      "role": "user",
+      "content": "hidden recovery payload",
+      "ts": 3,
+      "cid": "hidden-recovery",
+      "hidden": True,
+    }],
+  )
+
+  try:
+    assert _run_sweep() == [cid]
+    assert len(scheduled) == 1
+    assert scheduled[0]["next_user"]["content"] == "hidden recovery payload"
+    assert scheduled[0]["next_user"]["hidden"] is True
+    state = _chat_row(cid)
+    assert state["pending"] == []
+    assert [row["cid"] for row in state["messages"][-2:]] == [
+      "hidden-recovery", f"restart-resume-{token}",
+    ]
   finally:
     chat_mod.discard_starting(cid)
 
@@ -1289,18 +1340,28 @@ def test_restart_spawn_failure_retires_one_shot_authorization(
     )
 
   row = _run_row(token)
-  assert row["status"] == "interrupted"
+  assert row["status"] == "completed"
   assert row["restart_nonce"] is None
   state = _chat_row(cid)
-  assert state["running_status"] is None
-  assert state["pending"][-1]["cid"] == f"restart-resume-{token}"
+  assert state["running_status"] == "running"
+  assert state["pending"] == []
+  assert state["messages"][-1]["cid"] == f"restart-resume-{token}"
   assert _run_sweep() == []
+
+  # The promoted-but-unscheduled run is recoverable evidence, not a queued
+  # control message. The next startup turns it into the ordinary interrupted
+  # boundary rather than trying to replay an already-consumed restart nonce.
   db = SessionLocal()
   try:
-    assert chat_mod._restart_manual_hold_for_chat(db, cid) is True
-    assert asyncio.run(chat_mod.sweep_idle_pending_chats(db)) == []
+    recovered = chat_mod.reconcile_interrupted_chats(db)
   finally:
     db.close()
+  assert recovered == [cid]
+  assert _chat_row(cid)["pending"] == []
+  assert _chat_row(cid)["running_status"] is None
+  get_writer().submit(FinishRun(
+    chat_id=cid, run_token="",
+  )).result(timeout=5)
 
 
 def test_unacknowledged_restart_pending_cannot_bypass_via_idle_sweep(

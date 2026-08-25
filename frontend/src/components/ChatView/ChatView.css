@@ -3464,8 +3464,8 @@
   color: var(--danger);
 }
 
-/* Goal step + its clear X. The wrapper stays a full-width row; the toggle takes
-   the remaining width so the X can sit flush at the right edge. */
+/* Goal step + its confirmed clear control. The wrapper stays a full-width row;
+   the toggle takes the remaining width so the icon sits flush at the right. */
 .chat__progress-step--clearable {
   flex: 1 0 100%;
   gap: 4px;
@@ -3538,6 +3538,17 @@
 .chat__progress-clear:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+.chat__progress-clear--confirm {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.chat__progress-error {
+  flex: 1 0 100%;
+  color: var(--danger);
+  font-size: 11px;
 }
 
 /* Composer draft echo of the goal visual — same frosted card as the rail, shown
