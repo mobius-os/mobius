@@ -15,27 +15,64 @@ const PUSH_SW_URL = '/sw-push.js'
 // Removable once no install can still be running the pre-/shell/push/ shell.
 const LEGACY_PUSH_SCOPES = ['/']
 
-/** Register the push worker and resolve once it has an active worker. */
-async function activatePushWorker(container) {
-  const registration = await container.register(
-    PUSH_SW_URL, { scope: PUSH_SW_SCOPE },
-  )
-  if (registration.active) return registration
-  const worker = registration.installing
-  if (!worker) return registration
-  // register() resolves while the worker is still installing, and
-  // pushManager.subscribe() needs an active one. `redundant` resolves too, so
-  // a failed install surfaces as a subscribe error instead of hanging here
-  // forever on a promise nobody can settle.
-  await new Promise((resolve) => {
+function waitForWorkerActivation(worker) {
+  if (worker.state === 'activated' || worker.state === 'redundant') {
+    return Promise.resolve(worker.state)
+  }
+  return new Promise((resolve) => {
     const onChange = () => {
       if (worker.state === 'activated' || worker.state === 'redundant') {
         worker.removeEventListener('statechange', onChange)
-        resolve()
+        resolve(worker.state)
       }
     }
     worker.addEventListener('statechange', onChange)
   })
+}
+
+async function checkForUpdatedWorker(registration) {
+  let worker = null
+  const onUpdateFound = () => {
+    worker = registration.installing || registration.waiting || worker
+  }
+  registration.addEventListener('updatefound', onUpdateFound)
+  try {
+    await registration.update()
+    worker = registration.installing || registration.waiting || worker
+    if (!worker) {
+      // The registration publishes `installing` in a queued task on some
+      // browsers, after update() itself has resolved.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      worker = registration.installing || registration.waiting || worker
+    }
+  } finally {
+    registration.removeEventListener('updatefound', onUpdateFound)
+  }
+  return worker
+}
+
+/** Register the push worker and resolve once the newest worker is active. */
+async function activatePushWorker(container) {
+  const registration = await container.register(PUSH_SW_URL, {
+    scope: PUSH_SW_SCOPE,
+    updateViaCache: 'none',
+  })
+
+  let worker = registration.installing || registration.waiting
+  if (!worker && registration.active) {
+    // register() may legitimately reuse an active worker without checking its
+    // script yet. Force that check so a phone cannot keep the pre-badge worker
+    // and render Chrome's generic bell after Möbius has shipped a new glyph.
+    worker = await checkForUpdatedWorker(registration)
+  }
+  if (!worker) return registration
+
+  // pushManager.subscribe() only needs SOME active worker, but using the old
+  // active worker while its replacement installs leaves the very next push on
+  // stale display code. Wait for the candidate; a failed update is retried by
+  // subscribeToPushWithRetry instead of silently reusing the stale worker.
+  const state = await waitForWorkerActivation(worker)
+  if (state === 'redundant') throw new Error('Push worker activation failed.')
   return registration
 }
 

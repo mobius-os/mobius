@@ -34,12 +34,46 @@ function fakeSubscription(endpoint) {
  *   retire, `null` for a caching worker that never held one, `'throws'` for a
  *   registration whose pushManager is unusable, or `'missing'` for none at all.
  */
-function fakeContainer({ legacy = null, installing = false } = {}) {
+function fakeContainer({
+  legacy = null,
+  installing = false,
+  updating = false,
+  delayedUpdate = false,
+} = {}) {
   const registered = []
+  const refreshedWorker = (updating || delayedUpdate) ? fakeInstallingWorker() : null
+  const updateListeners = []
+  let resolveUpdatePublished = null
+  const updatePublished = delayedUpdate
+    ? new Promise((resolve) => { resolveUpdatePublished = resolve })
+    : null
   const pushWorker = {
     scope: `${ORIGIN}${PUSH_SW_SCOPE}`,
     active: installing ? null : {},
     installing: installing ? fakeInstallingWorker() : null,
+    waiting: null,
+    updateCalls: 0,
+    addEventListener(type, listener) {
+      if (type === 'updatefound') updateListeners.push(listener)
+    },
+    removeEventListener(type, listener) {
+      if (type !== 'updatefound') return
+      const index = updateListeners.indexOf(listener)
+      if (index !== -1) updateListeners.splice(index, 1)
+    },
+    async update() {
+      this.updateCalls += 1
+      if (refreshedWorker) {
+        const publish = () => {
+          this.installing = refreshedWorker
+          updateListeners.slice().forEach((listener) => listener())
+          resolveUpdatePublished?.()
+        }
+        if (delayedUpdate) setTimeout(publish, 0)
+        else publish()
+      }
+      return this
+    },
     pushManager: {
       subscribe: async (options) => {
         // The browser rejects with InvalidStateError when the registration has
@@ -54,6 +88,9 @@ function fakeContainer({ legacy = null, installing = false } = {}) {
   return {
     registered,
     pushWorker,
+    refreshedWorker,
+    updateListeners,
+    updatePublished,
     register: async (url, options) => {
       registered.push({ url, ...options })
       return pushWorker
@@ -104,8 +141,9 @@ test('the push worker is registered inside the shell PWA scope', async () => {
   // The URL is a three-way contract with vite.config.js globIgnores and the
   // backend's worker delivery contract, so pin the literals, not the constants.
   assert.deepEqual(container.registered, [
-    { url: '/sw-push.js', scope: '/shell/push/' },
+    { url: '/sw-push.js', scope: '/shell/push/', updateViaCache: 'none' },
   ])
+  assert.equal(container.pushWorker.updateCalls, 1, 'an active worker is checked for updates')
   assert.ok(
     PUSH_SW_SCOPE.startsWith(SHELL_MANIFEST_SCOPE),
     `${PUSH_SW_SCOPE} must sit inside the shell scope ${SHELL_MANIFEST_SCOPE}`,
@@ -161,6 +199,50 @@ test('a failed install settles instead of hanging forever', async () => {
   // No active worker, so subscribe() rejects — the caller's catch surfaces it.
   // The point is that this resolves at all rather than stranding the promise.
   await assert.rejects(done)
+})
+
+test('an existing worker refresh waits for its replacement before subscribing',
+  async () => {
+    const container = fakeContainer({ updating: true })
+    const worker = container.refreshedWorker
+    const push = fakePush()
+
+    const done = subscribeToPush({ container, push })
+    await new Promise((resolve) => setImmediate(resolve))
+
+    assert.equal(container.pushWorker.updateCalls, 1)
+    assert.deepEqual(push.sent, [], 'does not subscribe through the stale active worker')
+    assert.equal(worker.listeners.length, 1, 'waits for the refreshed worker')
+
+    container.pushWorker.active = worker
+    container.pushWorker.installing = null
+    worker.settle('activated')
+    await done
+
+    assert.equal(push.sent.length, 1)
+    assert.deepEqual(worker.listeners, [], 'the refresh listener is released')
+    assert.deepEqual(container.updateListeners, [], 'the update listener is released')
+  })
+
+test('a replacement published after update resolves is still awaited', async () => {
+  const container = fakeContainer({ delayedUpdate: true })
+  const worker = container.refreshedWorker
+  const push = fakePush()
+
+  const done = subscribeToPush({ container, push })
+  await container.updatePublished
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.deepEqual(push.sent, [], 'does not miss the queued worker announcement')
+  assert.equal(worker.listeners.length, 1, 'waits for the late-published worker')
+
+  container.pushWorker.active = worker
+  container.pushWorker.installing = null
+  worker.settle('activated')
+  await done
+
+  assert.equal(push.sent.length, 1)
+  assert.deepEqual(container.updateListeners, [], 'the update listener is released')
 })
 
 test('a subscription left on the caching worker is retired', async () => {
@@ -319,6 +401,14 @@ test('the retry drives the real subscribe from a redundant first install to succ
       scope: `${ORIGIN}${PUSH_SW_SCOPE}`,
       active: null,
       installing: redundantWorker,
+      waiting: null,
+      updateCalls: 0,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      async update() {
+        this.updateCalls += 1
+        return this
+      },
       pushManager: {
         subscribe: async (options) => {
           if (!pushWorker.active) throw new Error('InvalidStateError')
@@ -346,6 +436,7 @@ test('the retry drives the real subscribe from a redundant first install to succ
 
     assert.equal(ok, true)
     assert.equal(registrations, 2, 're-registered on the retry')
+    assert.equal(pushWorker.updateCalls, 1, 'the retry checks the active worker')
     assert.equal(push.sent.length, 1, 'the subscription finally landed')
   })
 
