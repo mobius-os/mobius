@@ -57,6 +57,8 @@ from fastapi import (
 )
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from app import models
 from app.config import get_settings
@@ -67,6 +69,7 @@ router = APIRouter(
   tags=["connect"],
   dependencies=[Depends(reject_cross_site)],
 )
+_pair_limiter = Limiter(key_func=get_remote_address)
 
 # How long a freshly minted pairing code stays redeemable.
 _PAIRING_TTL_SECONDS = 15 * 60
@@ -960,7 +963,8 @@ async def _reconcile_runner(
 # Runner surface (host-token authenticated)
 # --------------------------------------------------------------------------- #
 @router.post("/pair")
-async def pair(body: PairBody) -> dict:
+@_pair_limiter.limit("10/minute")
+async def pair(request: Request, body: PairBody) -> dict:
   code = (body.code or "").strip().upper()
   if not code:
     raise HTTPException(status_code=400, detail="Missing pairing code.")

@@ -25,9 +25,11 @@ from app.schema_migrations import run_migrations, schema_migration_history
 def _clear_connect_channels():
   connect_routes._channels.clear()
   connect_routes._commands.clear()
+  connect_routes._pair_limiter.reset()
   yield
   connect_routes._channels.clear()
   connect_routes._commands.clear()
+  connect_routes._pair_limiter.reset()
 
 
 def _app_auth(client, auth, *, granted: bool) -> dict[str, str]:
@@ -61,6 +63,16 @@ def _paired_host(client, auth, name="Workstation"):
   )
   assert paired.status_code == 200, paired.text
   return pairing, paired.json()["token"]
+
+
+def test_pairing_code_exchange_is_rate_limited(client):
+  for _ in range(10):
+    response = client.post("/api/connect/pair", json={"code": "AAAA-AAAA"})
+    assert response.status_code == 400
+
+  blocked = client.post("/api/connect/pair", json={"code": "AAAA-AAAA"})
+
+  assert blocked.status_code == 429
 
 
 def test_app_token_requires_connect_manage(client, auth):
