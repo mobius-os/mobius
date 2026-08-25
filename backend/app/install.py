@@ -1308,6 +1308,10 @@ def _drop_app_cron(source_dir: Path) -> None:
     (source_dir / "init-cron.sh").unlink()
   except OSError:
     pass
+  try:
+    (source_dir / ".cron-pending.json").unlink()
+  except OSError:
+    pass
 
 
 def _storage_path(app_id: int, sub: str) -> Path:

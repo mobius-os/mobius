@@ -143,6 +143,8 @@ def test_local_apply_converges_schedule_creation_and_removal(client, auth):
   # Stand in for the durable declaration written by the real scaffold.
   init_cron = source / "init-cron.sh"
   init_cron.write_text("#!/bin/sh\nexit 0\n")
+  pending_cron = source / ".cron-pending.json"
+  pending_cron.write_text('{"status":"pending"}\n')
   manifest = json.loads((source / "mobius.json").read_text())
   manifest.pop("schedule")
   (source / "mobius.json").write_text(json.dumps(manifest))
@@ -155,6 +157,7 @@ def test_local_apply_converges_schedule_creation_and_removal(client, auth):
   assert updated.json()["mode"] == "updated"
   unregister.assert_called_once_with(source)
   assert not init_cron.exists()
+  assert not pending_cron.exists()
   assert updated.json()["warnings"] == []
 
 
