@@ -68,22 +68,57 @@ export function overlayAcceptedChatDetail(detail, accepted, requestUrl) {
 
 export async function mockAcceptedMessages(page) {
   const acceptedByChat = new Map()
+  const pendingSettlementByChat = new Map()
+
+  const acceptMessage = (chatId, message) => {
+    acceptedByChat.set(chatId, [
+      ...(acceptedByChat.get(chatId) || []),
+      message,
+    ])
+  }
+
+  const beginAssistantSettlement = chatId => {
+    let resolve
+    const promise = new Promise(done => { resolve = done })
+    const settlement = {
+      promise,
+      complete(message) {
+        acceptMessage(chatId, message)
+        if (pendingSettlementByChat.get(chatId) === settlement) {
+          pendingSettlementByChat.delete(chatId)
+        }
+        resolve()
+      },
+    }
+    pendingSettlementByChat.set(chatId, settlement)
+    return settlement
+  }
 
   await page.route(/\/api\/chats\/[0-9a-f-]+(?:\?.*)?$/, async route => {
     const request = route.request()
     if (request.method() !== 'GET') return route.fallback()
 
     const chatId = new URL(request.url()).pathname.split('/').pop()
-    const accepted = acceptedByChat.get(chatId)
-    if (!accepted?.length) return route.fallback()
+    if (!acceptedByChat.get(chatId)?.length) return route.fallback()
 
     const response = await route.fetch()
     if (!response.ok()) return route.fulfill({ response })
 
+    // A terminal stream event means the backend has already persisted its
+    // assistant row. If the app reconciles immediately after `done`, hold the
+    // mocked detail response at that same durability boundary instead of
+    // letting a user-only snapshot erase the just-promoted reply.
+    const settlement = pendingSettlementByChat.get(chatId)
+    if (settlement) await settlement.promise
+
     const detail = await response.json()
     return route.fulfill({
       response,
-      json: overlayAcceptedChatDetail(detail, accepted, request.url()),
+      json: overlayAcceptedChatDetail(
+        detail,
+        acceptedByChat.get(chatId) || [],
+        request.url(),
+      ),
     })
   })
 
@@ -103,7 +138,7 @@ export async function mockAcceptedMessages(page) {
       ...(body.timezone ? { timezone: body.timezone } : {}),
       ...(body.viewport ? { viewport: body.viewport } : {}),
     }
-    acceptedByChat.set(chatId, [...(acceptedByChat.get(chatId) || []), message])
+    acceptMessage(chatId, message)
 
     return route.fulfill({
       status: 202,
@@ -111,4 +146,6 @@ export async function mockAcceptedMessages(page) {
       json: { status: 'started', message },
     })
   })
+
+  return { beginAssistantSettlement }
 }

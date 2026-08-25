@@ -77,6 +77,17 @@ async function sendMessage(page, text) {
   ))
 }
 
+/** Wait for the terminal assistant row, not merely an already-absent Stop. */
+async function waitForSettledAssistant(page) {
+  const surface = page.locator('[data-chat-surface="painted"]')
+  await expect(surface.locator('.chat__msg--assistant').last())
+    .toBeVisible({ timeout: 10000 })
+  await expect(surface.locator('.chat__stop')).toHaveCount(0, { timeout: 10000 })
+  await page.evaluate(() => new Promise(resolve =>
+    requestAnimationFrame(() => requestAnimationFrame(resolve))
+  ))
+}
+
 /** Click the stop button and wait for sending state to clear. */
 async function stopAgent(page) {
   await page.evaluate(() => document.querySelector('[data-chat-surface="painted"] .chat__stop')?.click())
@@ -189,15 +200,47 @@ async function simulateLazyResize(page, extraHeight) {
 async function setupWithSSE(page, events, viewport = { width: 412, height: 915 }) {
   await page.setViewportSize(viewport)
 
-  await mockAcceptedMessages(page)
+  const acceptedMessages = await mockAcceptedMessages(page)
   await page.route('**/api/chat/stop', route =>
     route.fulfill({ status: 200, body: '{}' })
   )
 
   // Serve the fake SSE stream.  Events are delivered as one burst.
-  const sseBody = events.map(e => `data: ${JSON.stringify(e)}\n\n`).join('')
-  await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, route =>
-    route.fulfill({
+  let assistantSequence = 0
+  await page.route(/\/api\/chats\/[0-9a-f-]+\/stream$/, async route => {
+    const chatId = new URL(route.request().url()).pathname.split('/').at(-2)
+    const assistantId = `e2e-assistant-${++assistantSequence}`
+    const identifiedEvents = events.map(event => ({
+      ...event,
+      assistant_message_id: assistantId,
+    }))
+    const blocks = []
+    for (const event of identifiedEvents) {
+      if (event.type === 'text') {
+        const previous = blocks.at(-1)
+        if (previous?.type === 'text') previous.content += event.content || ''
+        else blocks.push({ type: 'text', content: event.content || '' })
+      } else if (event.type === 'tool_start') {
+        blocks.push({
+          type: 'tool',
+          tool: event.tool,
+          input: event.input || '',
+          output: '',
+          status: 'running',
+        })
+      } else if (event.type === 'tool_output') {
+        const tool = blocks.findLast(block => block.type === 'tool')
+        if (tool) tool.output += event.content || ''
+      } else if (event.type === 'tool_end') {
+        const tool = blocks.findLast(block => block.type === 'tool')
+        if (tool) tool.status = 'done'
+      }
+    }
+    const settlement = acceptedMessages.beginAssistantSettlement(chatId)
+    const sseBody = identifiedEvents
+      .map(event => `data: ${JSON.stringify(event)}\n\n`)
+      .join('')
+    await route.fulfill({
       status: 200,
       headers: {
         'Content-Type': 'text/event-stream',
@@ -205,7 +248,17 @@ async function setupWithSSE(page, events, viewport = { width: 412, height: 915 }
       },
       body: sseBody,
     })
-  )
+    settlement.complete({
+      id: assistantId,
+      role: 'assistant',
+      content: blocks
+        .filter(block => block.type === 'text')
+        .map(block => block.content)
+        .join('\n\n'),
+      blocks,
+      ts: Date.now(),
+    })
+  })
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(
@@ -610,11 +663,7 @@ test.describe('SSE streaming (real React path)', () => {
     await sendMessage(page, 'SSE test')
 
     // Wait for the stream to be processed and promote to happen.
-    await page.waitForFunction(
-      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
-      { timeout: 10000 }
-    )
-    await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+    await waitForSettledAssistant(page)
 
     const m = await measure(page)
     // Should have user msg + promoted assistant msg.
@@ -635,11 +684,7 @@ test.describe('SSE streaming (real React path)', () => {
     await newChat(page)
     await sendMessage(page, 'SSE tool test')
 
-    await page.waitForFunction(
-      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
-      { timeout: 10000 }
-    )
-    await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+    await waitForSettledAssistant(page)
 
     const m = await measure(page)
     expect(m.msgCount).toBeGreaterThanOrEqual(2)
@@ -679,11 +724,7 @@ test.describe('SSE streaming (real React path)', () => {
     await setupWithSSE(page, events)
     await newChat(page)
     await sendMessage(page, 'Near-foot disclosure test')
-    await page.waitForFunction(
-      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
-      { timeout: 10000 }
-    )
-    await page.evaluate(() => new Promise(r => setTimeout(r, 350)))
+    await waitForSettledAssistant(page)
 
     // Enter FOLLOW_BOTTOM through the same input→scroll sequence as a reader,
     // rather than assigning scrollTop as app-owned test setup.
@@ -771,11 +812,7 @@ test.describe('SSE streaming (real React path)', () => {
     await newChat(page)
     await sendMessage(page, 'SSE long test')
 
-    await page.waitForFunction(
-      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
-      { timeout: 10000 }
-    )
-    await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+    await waitForSettledAssistant(page)
 
     const m = await measure(page)
     // Content should overflow the viewport.
@@ -881,11 +918,7 @@ test.describe('Autoscroll behavior', () => {
     await newChat(page)
     await sendMessage(page, 'SSE autoscroll test')
 
-    await page.waitForFunction(
-      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
-      { timeout: 10000 }
-    )
-    await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+    await waitForSettledAssistant(page)
 
     const m = await measure(page)
     // Content should exceed viewport.
@@ -912,11 +945,7 @@ test.describe('Autoscroll behavior', () => {
     await newChat(page)
     await sendMessage(page, 'Pin test')
 
-    await page.waitForFunction(
-      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
-      { timeout: 10000 }
-    )
-    await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+    await waitForSettledAssistant(page)
 
     const m = await measure(page)
     assertUserMsgAtTop(m, 'after stream completion')
@@ -966,11 +995,7 @@ test.describe('Scroll edge cases', () => {
     await sendMessage(page, 'Scroll preservation test')
 
     // Wait for stream to complete.
-    await page.waitForFunction(
-      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
-      { timeout: 10000 }
-    )
-    await page.evaluate(() => new Promise(r => setTimeout(r, 500)))
+    await waitForSettledAssistant(page)
 
     // Verify content overflows.
     const before = await measure(page)
@@ -1311,10 +1336,7 @@ test.describe('Scroll edge cases', () => {
     await newChat(page)
 
     await sendMessage(page, 'First message')
-    await page.waitForFunction(
-      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
-      { timeout: 10000 }
-    )
+    await waitForSettledAssistant(page)
     await page.evaluate(() => new Promise(r => setTimeout(r, 300)))
 
     // Overflowing content confirmed, then scroll up to read via a real
@@ -1417,10 +1439,7 @@ test.describe('Scroll edge cases', () => {
     await setupWithSSE(page, events, { width: 412, height: 615 })
     await newChat(page)
     await sendMessage(page, 'First message')
-    await page.waitForFunction(
-      () => !document.querySelector('[data-chat-surface="painted"] .chat__stop'),
-      { timeout: 10000 }
-    )
+    await waitForSettledAssistant(page)
 
     const overflow = await measure(page)
     expect(overflow.scrollH).toBeGreaterThan(overflow.clientH + 100)
