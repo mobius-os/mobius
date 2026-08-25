@@ -5,7 +5,7 @@
 <h1 align="center">Möbius</h1>
 
 <p align="center">
-  Your portal to the world of AI agents. One home for your agent, on web, on your phone, on a server you control. Make it yours, put it to work, and build with other agents and other people.
+  Your portal to the world of AI agents. A chatbot answers; an agent does the work. Möbius is the home for yours: on the web, on your phone, on a server you control. It learns how you work, gets things done while you are away, and builds apps with you and with other people.
 </p>
 
 <p align="center">
@@ -29,16 +29,16 @@ Möbius is the harness and the interface for working with AI agents: a self-host
 
 | | |
 |---|---|
+| **More done, less tending** | Give it a goal, schedule a task, or let it run a team of helpers while you are away. Only the decisions that need you reach you. |
+| **It learns how you work** | It remembers what matters, reviews each day overnight, and picks up new skills. A month in, it works the way you do. |
+| **Apps on the fly** | Describe an app. It is built beside the chat, lands on your phone, and keeps improving from your feedback. |
+| **Build and share, together** | Share a pool of agents with the people you work with, publish apps to the App Store, and send what generalizes back to the community. |
+| **Connected to your tools** | Notion, Linear, Google Cloud, GitLab, Stripe, Supabase, and any remote MCP service. |
 | **Your agent, everywhere** | On the web, on your phone, on a server you control. |
-| **It learns how you work** | Memory, a nightly Reflection, and Skills you browse and install. |
-| **Work that runs on its own** | Goals, scheduled Tasks, workflows of helpers, follow-ups that wait their turn. |
-| **Apps on the fly** | Describe an app. It is built beside the chat and lands on your phone. |
-| **Connected to your tools** | Connections: Notion, Linear, Google Cloud, GitLab, Stripe, Supabase, and any remote MCP service. |
-| **Community, and fun** | An App Store, contributing with humans and agents, games to play. |
 
 ## Your agent starts as an intern and matures through your feedback
 
-The agent you get on day one is a generalist. The one you have a month later knows your projects, your preferences, and the way you like things done, because everything it learns stays with it.
+The agent you get on day one is a generalist. The one you have a month later knows your projects, your preferences, and the way you like things done, because everything it learns stays with it. That is where the productivity comes from: not a smarter model, a more personal one.
 
 - **Memory.** Every conversation leaves something behind: a decision, a preference, how a project is wired. Your agent keeps it, links it, and cites it the next time it matters.
 - **Feedback that sticks.** Correct it once and the correction outlives the chat. Skills, memory, and the apps it built all move with what you told it.
@@ -48,6 +48,8 @@ The agent you get on day one is a generalist. The one you have a month later kno
 ![Memory as a graph of linked notes, and this morning's Reflection brief on a phone](assets/product/memory-reflection.png)
 
 ## Put it to work
+
+Hand over whole pieces of work, not single questions.
 
 - **Goals.** Type `/goal` and a to-do list becomes a goal the agent keeps pursuing across turns, breaking each item into steps and checking in only when it needs you.
 - **Tasks.** Scheduled jobs: a morning brief, a daily check, a weekly report, each a run you can read afterwards.
@@ -69,9 +71,9 @@ A usage limit parks the run and picks it back up on its own. An API key goes in 
   </tr>
 </table>
 
-## Build apps on the fly
+## Build apps on the fly, and build them together
 
-Say what you need in your own words: “Build a News app for the topics I follow.” “Build a simple habits app.” The agent builds it beside the conversation, opens the working result in its own pane, and keeps refining it from your feedback. On your phone the same flow ends with the app on your home screen, opening as its own app.
+Say what you need in your own words: “Build a News app for the topics I follow.” “Build a simple habits app.” The agent builds it beside the conversation, opens the working result in its own pane, and keeps refining it from your feedback. On your phone the same flow ends with the app on your home screen, opening as its own app. The app you asked for is yours; the apps you like from others are one install away.
 
 <table>
   <tr>
@@ -86,13 +88,13 @@ Say what you need in your own words: “Build a News app for the topics I follow
   </tr>
 </table>
 
-Apps can be anything: a daily news brief, a drum machine, a 3D runner, a bilingual reader with its own agent inside. Install what others built from the App Store, then publish your own. Every app is a public repository under the [Möbius OS organization](https://github.com/mobius-os).
+Apps can be anything: a daily news brief, a drum machine, a 3D runner, a bilingual reader with its own agent inside. Install what others built from the App Store, then publish your own. Every app is a public repository under the [Möbius OS organization](https://github.com/mobius-os), so sharing an app is sharing a repo.
 
 ![The App Store: the official catalog, searchable](assets/product/app-store.png)
 
-## Collaborate with humans and agents alike
+## 100x your productivity, together
 
-Contribute keeps your projects, your agents, and your decisions in one place: spin up agents on a project, review what each of them did, and have only the decisions that matter brought to you. What generalizes can go back to the community as a reviewed contribution. No autonomous rewrite ships without a person in the loop.
+Share a pool of agents with the people you work with. Contribute keeps your projects, your agents, and your decisions in one place: spin up agents on a project, review what each of them did, and have only the decisions that matter brought to you. What generalizes goes back to the community as a reviewed contribution. No autonomous rewrite ships without a person in the loop.
 
 <p align="center"><img src="assets/product/contribute-phone.png" width="320" alt="Contribute on a phone: two projects, two agents at work, one decision for you"></p>
 
@@ -100,7 +102,7 @@ Contribute keeps your projects, your agents, and your decisions in one place: sp
 
 Möbius is open source, MIT licensed. The agent, your apps, your memory, and the platform itself run on a server you control. Bring the provider plan you already pay for; no separate API key is needed.
 
-**Hosted for you.** [mobius.you](https://mobius.you/) creates a private deployment in a Railway account you control: sign in with Google or Apple, connect Railway, open your Möbius. Up to $5 in hosting credit for 30 days, no card required. Your chats, files, apps, credentials, and agent activity stay inside that deployment.
+**Hosted for you.** [mobius.you](https://mobius.you/) creates a private deployment in a Railway account you control: sign in with Google or Apple, connect Railway, open your Möbius. A $5 free trial for your agent's home, no card required. Use the ChatGPT (Codex) or Claude Code plan you already have, or try the Möbius agent, tuned for Möbius, with $2 of free credit; Möbius subscriptions are coming soon. Your chats, files, apps, credentials, and agent activity stay inside that deployment.
 
 **On your own server.** You need Docker, a domain name, and a Claude Code or ChatGPT (Codex) account:
 
