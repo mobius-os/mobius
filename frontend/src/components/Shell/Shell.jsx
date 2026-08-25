@@ -668,10 +668,6 @@ export default function Shell({ onInitialVisualReady }) {
       return next
     })
   }, [])
-  // A ready update is coalesced separately from transient toasts. If another
-  // action owns the toast slot when the build lands, the update notice waits
-  // for that action to settle rather than replacing it.
-  const shellUpdateNoticeShownRef = useRef(false)
   const [composerRequest, setComposerRequest] = useState(null)
   const composerRequestRef = useRef(null)
   const composerRequestTokenRef = useRef(0)
@@ -2116,15 +2112,6 @@ export default function Shell({ onInitialVisualReady }) {
     activeViewRef,
     drawerOpenRef,
   })
-
-  useEffect(() => {
-    if (!shellUpdateAvailable || toast || shellUpdateNoticeShownRef.current) return
-    shellUpdateNoticeShownRef.current = true
-    showToast('A Möbius update is ready.', {
-      duration: 0,
-      action: { label: 'Update now', onAction: applyShellUpdate },
-    })
-  }, [applyShellUpdate, shellUpdateAvailable, showToast, toast])
 
   // Stable callbacks for ChatView — identity must not change across
   // renders or ChatView's onStreamEnd-handler memoization breaks. The
@@ -4396,6 +4383,8 @@ export default function Shell({ onInitialVisualReady }) {
             commands={shellCommands}
             onOpenTarget={handleNotificationOpen}
             onRunCommand={runShellShortcut}
+            updateAvailable={shellUpdateAvailable}
+            onUpdateNow={applyShellUpdate}
           />
         </div>
       </header>

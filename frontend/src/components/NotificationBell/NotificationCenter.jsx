@@ -3,6 +3,7 @@
 import {
   forwardRef,
   useCallback,
+  useEffect,
   useImperativeHandle,
   useRef,
   useState,
@@ -14,17 +15,36 @@ import NotificationBell from './NotificationBell.jsx'
 import useNotificationCenter from './useNotificationCenter.js'
 
 const NotificationCenter = forwardRef(function NotificationCenter(
-  { commands, onOpenTarget, onRunCommand },
+  {
+    commands,
+    onOpenTarget,
+    onRunCommand,
+    updateAvailable = false,
+    onUpdateNow,
+  },
   eventActionsRef,
 ) {
   const queryClient = useQueryClient()
   const searchButtonRef = useRef(null)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [updateNoticeSeen, setUpdateNoticeSeen] = useState(false)
   const {
     state: { open, unreadCount },
     actions: { toggle, close, clearAll, reconcile, onCreated },
     meta: { rootRef, bellRef },
   } = useNotificationCenter(queryClient)
+  const updateNoticeActive = updateAvailable && typeof onUpdateNow === 'function'
+  const visibleUnreadCount = unreadCount + (
+    updateNoticeActive && !updateNoticeSeen ? 1 : 0
+  )
+
+  useEffect(() => {
+    if (!updateNoticeActive) {
+      setUpdateNoticeSeen(false)
+    } else if (open) {
+      setUpdateNoticeSeen(true)
+    }
+  }, [open, updateNoticeActive])
 
   const openTarget = useCallback((target) => {
     close()
@@ -52,8 +72,21 @@ const NotificationCenter = forwardRef(function NotificationCenter(
 
   const toggleNotifications = useCallback(() => {
     setSearchOpen(false)
+    if (updateNoticeActive) setUpdateNoticeSeen(true)
     toggle()
-  }, [toggle])
+  }, [toggle, updateNoticeActive])
+
+  const applyUpdate = useCallback(() => {
+    setUpdateNoticeSeen(true)
+    close()
+    onUpdateNow?.()
+  }, [close, onUpdateNow])
+
+  const deferUpdate = useCallback(() => {
+    setUpdateNoticeSeen(true)
+    close()
+    bellRef.current?.focus()
+  }, [bellRef, close])
 
   return (
     <div ref={rootRef} className="notification-center">
@@ -64,7 +97,7 @@ const NotificationCenter = forwardRef(function NotificationCenter(
       />
       <NotificationBell
         buttonRef={bellRef}
-        unreadCount={unreadCount}
+        unreadCount={visibleUnreadCount}
         active={open}
         onClick={toggleNotifications}
       />
@@ -73,6 +106,9 @@ const NotificationCenter = forwardRef(function NotificationCenter(
           active
           onOpenTarget={openTarget}
           onClearAll={clearAll}
+          updateAvailable={updateNoticeActive}
+          onUpdateNow={applyUpdate}
+          onUpdateLater={deferUpdate}
         />
       )}
       {searchOpen && (
