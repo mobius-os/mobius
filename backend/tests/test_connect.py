@@ -763,6 +763,133 @@ async def test_protocol_two_does_not_claim_offline_cancellation(client, auth):
 
 
 @pytest.mark.asyncio
+async def test_legacy_timeout_without_result_releases_the_host(client, auth):
+  pairing, _ = _paired_host(client, auth)
+  channel = connect_routes._Channel(protocol_version=1)
+  connect_routes._channels[pairing["id"]] = channel
+  request_id = "1" * 16
+  command = connect_routes._ActiveCommand(
+    request_id,
+    1,
+    cmd="legacy task",
+    started_at=time.time() - 2,
+    state="running",
+  )
+  connect_routes._commands[pairing["id"]] = command
+  connect_routes._persist_command(pairing["id"], command)
+
+  with pytest.raises(connect_routes.HTTPException) as raised:
+    await connect_routes._await_command_result(pairing["id"], command)
+
+  assert raised.value.status_code == 504
+  assert connect_routes._ensure_command(pairing["id"]) is None
+  last = connect_routes._load_host(pairing["id"])["last_command"]
+  assert last["id"] == request_id
+  assert last["result"]["outcome"] == "lost"
+
+  next_request_id = "2" * 16
+  next_request = asyncio.create_task(connect_routes.exec_on_host(
+    pairing["id"],
+    connect_routes.ExecBody(
+      cmd="next task", timeout=30, request_id=next_request_id,
+    ),
+    _owner=object(),
+  ))
+  dispatched = await asyncio.wait_for(channel.queue.get(), timeout=1)
+  assert dispatched["request_id"] == next_request_id
+  connect_routes._finish_command(pairing["id"], next_request_id, {
+    "stdout": "ready", "stderr": "", "exit_code": 0,
+    "outcome": "completed",
+  })
+  assert (await next_request)["stdout"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_protocol_two_cancel_result_deadline_survives_restart(
+  client, auth, monkeypatch,
+):
+  pairing, _ = _paired_host(client, auth)
+  channel = connect_routes._Channel(protocol_version=2)
+  connect_routes._channels[pairing["id"]] = channel
+  request_id = "3" * 16
+  command = connect_routes._ActiveCommand(
+    request_id, 1, started_at=time.time() - 2, state="running",
+  )
+  connect_routes._commands[pairing["id"]] = command
+  connect_routes._persist_command(pairing["id"], command)
+
+  with pytest.raises(connect_routes.HTTPException) as raised:
+    await connect_routes._await_command_result(pairing["id"], command)
+
+  assert raised.value.status_code == 504
+  assert await asyncio.wait_for(channel.queue.get(), timeout=1) == {
+    "type": "cancel", "request_id": request_id,
+  }
+  persisted = connect_routes._load_host(pairing["id"])["active_command"]
+  assert persisted["state"] == "canceling"
+  assert persisted["cancel_not_after"] > time.time()
+
+  # A backend restart loses the in-memory command object, but the persisted
+  # reporting deadline still releases the host when it is next observed.
+  connect_routes._commands.clear()
+  monkeypatch.setattr(
+    connect_routes, "_now", lambda: persisted["cancel_not_after"] + 1,
+  )
+  public = connect_routes._public_host(
+    connect_routes._load_host(pairing["id"]),
+  )
+  assert public["busy"] is False
+  host = connect_routes._load_host(pairing["id"])
+  assert host["active_command"] is None
+  assert host["last_command"]["result"]["outcome"] == "lost"
+
+
+@pytest.mark.asyncio
+async def test_current_runner_keeps_retryable_result_after_server_timeout(
+  client, auth, monkeypatch,
+):
+  pairing, _ = _paired_host(client, auth)
+  channel = connect_routes._Channel(protocol_version=3)
+  connect_routes._channels[pairing["id"]] = channel
+  request_id = "4" * 16
+  command = connect_routes._ActiveCommand(
+    request_id, 1, started_at=time.time() - 2, state="running",
+  )
+  connect_routes._commands[pairing["id"]] = command
+  connect_routes._persist_command(pairing["id"], command)
+
+  with pytest.raises(connect_routes.HTTPException) as raised:
+    await connect_routes._await_command_result(pairing["id"], command)
+
+  assert raised.value.status_code == 504
+  assert await asyncio.wait_for(channel.queue.get(), timeout=1) == {
+    "type": "cancel", "request_id": request_id,
+  }
+  persisted = connect_routes._load_host(pairing["id"])["active_command"]
+  assert persisted["state"] == "canceling"
+  assert persisted["cancel_not_after"] is None
+
+  # Current runners retry terminal results after reconnect, so a long
+  # transport loss must not be mistaken for a permanently lost result.
+  connect_routes._commands.clear()
+  monkeypatch.setattr(connect_routes, "_now", lambda: time.time() + 3600)
+  assert connect_routes._public_host(
+    connect_routes._load_host(pairing["id"]),
+  )["busy"] is True
+  connect_routes._runner_result(pairing["id"], connect_routes.ResultBody(
+    request_id=request_id,
+    stdout="reported after reconnect",
+    exit_code=124,
+    timed_out=True,
+    outcome="timed_out",
+  ))
+  assert connect_routes._ensure_command(pairing["id"]) is None
+  assert connect_routes._load_host(
+    pairing["id"],
+  )["last_command"]["result"]["outcome"] == "timed_out"
+
+
+@pytest.mark.asyncio
 async def test_unacknowledged_dispatch_expires_and_sends_cancel(
   client, auth, monkeypatch,
 ):

@@ -95,6 +95,10 @@ _SSE_PROTOCOL_VERSION = 3
 _STREAM_ROTATION_SECONDS = 10 * 60
 _START_ACK_TIMEOUT = 10
 _RESULT_GRACE_SECONDS = 15
+# Protocol 2 can acknowledge cancellation but cannot retry a dropped result.
+# Keep its command slot reserved briefly for the terminal report, then release
+# it on the next read if that one-shot report never arrived.
+_LEGACY_CANCEL_RESULT_GRACE_SECONDS = 15
 _RESULT_RETENTION_SECONDS = 15 * 60
 
 
@@ -202,6 +206,7 @@ class _ActiveCommand:
     started_at: float | None = None,
     state: str = "dispatching",
     not_after: float | None = None,
+    cancel_not_after: float | None = None,
     fingerprint: str | None = None,
   ) -> None:
     loop = asyncio.get_running_loop()
@@ -213,6 +218,7 @@ class _ActiveCommand:
     self.started_at = started_at
     self.state = state
     self.not_after = not_after
+    self.cancel_not_after = cancel_not_after
     self.fingerprint = fingerprint or _command_fingerprint(cmd, cwd, timeout)
     self.started = asyncio.Event()
     if started_at is not None:
@@ -236,6 +242,10 @@ class _ActiveCommand:
         float(record["not_after"])
         if record.get("not_after") is not None else None
       ),
+      cancel_not_after=(
+        float(record["cancel_not_after"])
+        if record.get("cancel_not_after") is not None else None
+      ),
       fingerprint=str(record.get("fingerprint") or ""),
     )
 
@@ -247,6 +257,7 @@ class _ActiveCommand:
       "started_at": self.started_at,
       "state": self.state,
       "not_after": self.not_after,
+      "cancel_not_after": self.cancel_not_after,
       "fingerprint": self.fingerprint,
     }
     # Replay needs the command only during the short pre-start dispatch window.
@@ -280,18 +291,6 @@ def _active_public(command: _ActiveCommand | None) -> dict | None:
   }
 
 
-def _active_record_public(record: object) -> dict | None:
-  if not isinstance(record, dict) or not record.get("id"):
-    return None
-  return {
-    "id": record["id"],
-    "state": record.get("state") or "dispatching",
-    "created_at": record.get("created_at"),
-    "started_at": record.get("started_at"),
-    "timeout": record.get("timeout") or _DEFAULT_EXEC_TIMEOUT,
-  }
-
-
 def _persist_command(host_id: str, command: _ActiveCommand | None) -> None:
   host = _load_host(host_id)
   if host is None:
@@ -300,7 +299,7 @@ def _persist_command(host_id: str, command: _ActiveCommand | None) -> None:
   _save_host(host)
 
 
-def _ensure_command(host_id: str) -> _ActiveCommand | None:
+def _restore_command(host_id: str) -> _ActiveCommand | None:
   command = _commands.get(host_id)
   if command is not None:
     return command
@@ -310,6 +309,24 @@ def _ensure_command(host_id: str) -> _ActiveCommand | None:
     return None
   command = _ActiveCommand.from_record(record)
   _commands[host_id] = command
+  return command
+
+
+def _ensure_command(host_id: str) -> _ActiveCommand | None:
+  command = _restore_command(host_id)
+  if command is None:
+    return None
+  if (
+    command.state == "canceling"
+    and command.cancel_not_after is not None
+    and _now() >= command.cancel_not_after
+  ):
+    _finish_command_as_lost(
+      host_id,
+      command.request_id,
+      "legacy runner did not report a final result after cancellation",
+    )
+    return None
   return command
 
 
@@ -327,7 +344,7 @@ def _mark_command_started(host_id: str, request_id: str) -> bool:
 
 
 def _finish_command(host_id: str, request_id: str, result: dict) -> bool:
-  command = _ensure_command(host_id)
+  command = _restore_command(host_id)
   if command is None or command.request_id != request_id:
     return False
   public_result = _format_result(request_id, result)
@@ -358,6 +375,19 @@ def _finish_command(host_id: str, request_id: str, result: dict) -> bool:
   return True
 
 
+def _finish_command_as_lost(
+  host_id: str,
+  request_id: str,
+  stderr: str,
+) -> bool:
+  return _finish_command(host_id, request_id, {
+    "stdout": "",
+    "stderr": stderr,
+    "exit_code": 125,
+    "outcome": "lost",
+  })
+
+
 async def _request_command_cancel(
   host_id: str,
   command: _ActiveCommand,
@@ -370,8 +400,22 @@ async def _request_command_cancel(
   )
   if known_protocol < 2 or (ch is None and known_protocol < 3):
     return False
+  changed = False
   if command.state != "canceling":
     command.state = "canceling"
+    changed = True
+  if known_protocol < _RUNNER_PROTOCOL_VERSION:
+    if command.cancel_not_after is None:
+      command.cancel_not_after = (
+        _now() + _LEGACY_CANCEL_RESULT_GRACE_SECONDS
+      )
+      changed = True
+  elif command.cancel_not_after is not None:
+    # A current runner retries terminal results after reconnect, so it must not
+    # inherit a legacy one-shot reporting deadline after an in-place upgrade.
+    command.cancel_not_after = None
+    changed = True
+  if changed:
     _persist_command(host_id, command)
   if ch is not None:
     await ch.queue.put({"type": "cancel", "request_id": command.request_id})
@@ -475,11 +519,7 @@ def _public_host(host: dict) -> dict:
   """Registry view safe to hand to the owner/app (no token hash)."""
   ch = _channels.get(host["id"])
   _prune_last_command(host)
-  active = _commands.get(host["id"])
-  active_public = (
-    _active_public(active)
-    if active is not None else _active_record_public(host.get("active_command"))
-  )
+  active_public = _active_public(_ensure_command(host["id"]))
   runner_protocol = (
     ch.protocol_version if ch is not None
     else host.get("runner_protocol")
@@ -622,6 +662,11 @@ async def _await_command_result(
     cancel_sent = await _request_command_cancel(host_id, command)
     detail = "The command timed out and Connect asked the machine to stop it."
     if not cancel_sent:
+      _finish_command_as_lost(
+        host_id,
+        command.request_id,
+        "runner did not report a final result before its reporting grace elapsed",
+      )
       detail = (
         "The command timed out, but this machine’s runner is too old to stop "
         "it remotely. Update the runner in Connect."
@@ -839,7 +884,6 @@ async def cancel_host_command(
   host = _load_host(host_id)
   if host is None:
     raise HTTPException(status_code=404, detail="No such host.")
-  ch = _channels.get(host_id)
   command = _ensure_command(host_id)
   if command is None or command.request_id != request_id:
     raise HTTPException(status_code=404, detail="That command is no longer running.")
@@ -934,6 +978,9 @@ async def _reconcile_runner(
   if command.request_id == runner_active:
     _mark_command_started(host_id, command.request_id)
     if command.state == "canceling":
+      if ch.protocol_version >= _RUNNER_PROTOCOL_VERSION:
+        command.cancel_not_after = None
+        _persist_command(host_id, command)
       await ch.queue.put({"type": "cancel", "request_id": command.request_id})
     return
   if command.request_id in pending_ids:
