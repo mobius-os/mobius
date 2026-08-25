@@ -264,6 +264,57 @@ def test_chat_detail_per_chat_model_outranks_stored_provider(
   assert body["effective_agent_settings"]["model"] == "gpt-5.6-sol"
 
 
+def test_chat_detail_app_created_chat_keeps_its_committed_provider(
+  client, auth, db,
+):
+  """An app-owned chat is never pristine, even with no messages: the app chose
+  its provider, so the detail must not re-derive one from the owner's picker."""
+  from app import models
+
+  _write_global_settings({"model": "gpt-5.6-sol", "effort": "high"})
+  cid = client.post(
+    "/api/chats", headers=auth, json={"title": "app owned"},
+  ).json()["id"]
+  app = models.App(
+    slug="provider-gate-app",
+    source_dir="/tmp/mobius-tests/provider-gate-app",
+    name="Gate", description="", jsx_source="",
+  )
+  db.add(app)
+  db.flush()
+  row = db.query(models.Chat).filter(models.Chat.id == cid).first()
+  row.provider = "claude"
+  row.agent_settings_json = None
+  row.created_by_app_id = app.id
+  db.commit()
+
+  body = client.get(f"/api/chats/{cid}", headers=auth).json()
+  assert body["provider"] == "claude"
+  assert body["effective_agent_settings"]["model"] is None
+
+
+def test_chat_detail_draining_chat_keeps_its_committed_provider(
+  client, auth, db,
+):
+  """While the instance drains, a send keeps the chat's committed provider, so
+  the picker must show that provider too instead of the live global default."""
+  from app import models
+
+  _write_global_settings({"model": "gpt-5.6-sol", "effort": "high"})
+  cid = client.post(
+    "/api/chats", headers=auth, json={"title": "draining"},
+  ).json()["id"]
+  row = db.query(models.Chat).filter(models.Chat.id == cid).first()
+  row.provider = "claude"
+  row.agent_settings_json = None
+  db.commit()
+
+  with patch("app.routes.chats.is_draining", return_value=True):
+    body = client.get(f"/api/chats/{cid}", headers=auth).json()
+  assert body["provider"] == "claude"
+  assert body["effective_agent_settings"]["model"] is None
+
+
 def test_patch_chat_writes_override(client, auth, chat):
   """PATCH /chats/{id} sets agent_settings_json and returns effective."""
   _write_global_settings({"model": "default-model"})
