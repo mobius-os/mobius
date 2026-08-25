@@ -76,11 +76,20 @@ export default defineConfig({
   // adds ~30s wall-clock to a full suite run but eliminates the noise
   // entirely; real regressions surface deterministically.
   workers: 2,
-  // CI emits both `list` (for stdout / Actions log) and `html` (for
-  // the playwright-report/ artifact uploaded on failure). Locally
-  // just stdout.
+  // CI keeps the readable console + rich seven-day HTML report, and also a
+  // compact JUnit history. The latter is cheap enough to retain for a month,
+  // which lets repeated failures be clustered after screenshots/traces expire.
+  // Locally just use stdout.
   reporter: isCI
-    ? [['list'], ['html', { outputFolder: 'playwright-report', open: 'never' }]]
+    ? [
+        ['list'],
+        ['html', { outputFolder: 'playwright-report', open: 'never' }],
+        ['junit', {
+          outputFile: 'playwright-results.xml',
+          stripANSIControlSequences: true,
+          includeProjectInTestName: true,
+        }],
+      ]
     : 'list',
   use: {
     headless: true,

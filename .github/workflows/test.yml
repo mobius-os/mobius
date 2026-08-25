@@ -307,7 +307,26 @@ jobs:
 
       - name: Container logs
         if: failure() || (steps.pw.outcome != 'skipped' && steps.pw.outputs.exit != '0')
-        run: docker logs mobius-test --tail 400 2>&1 || true
+        run: |
+          # Preserve the complete backend history for later clustering. Merely
+          # printing the last 400 lines lost an early traceback after the suite
+          # continued for several minutes; keep stdout bounded but archive the
+          # full disposable-test log below.
+          docker logs --timestamps mobius-test > e2e-container.log 2>&1 || true
+          tail -n 400 e2e-container.log
+
+      - name: Upload compact E2E failure history
+        if: always() && steps.pw.outcome != 'skipped' && steps.pw.outputs.exit != '0'
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-failure-history
+          path: |
+            playwright-results.xml
+            e2e-container.log
+          # Rich traces remain short-lived below. These small text artifacts
+          # retain the failing tests and their backend causes across a month.
+          retention-days: 30
+          if-no-files-found: warn
 
       - name: Upload Playwright HTML report
         if: always() && steps.pw.outcome != 'skipped' && steps.pw.outputs.exit != '0'
