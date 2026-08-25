@@ -6,31 +6,30 @@ import { clearProviderSwitch } from '../providerSwitch.js'
  * a no-op: discard it so reopening the picker shows the current model, not a
  * lingering "confirm?" for a model the owner picked but never confirmed.
  *
- * `ComposerPopover` stays mounted across the picker's open/close (only the
- * panel unmounts), so the composer `mode` leaving `'model'` is the reliable
+ * `ComposerPopover` stays mounted across the unified brain menu's open/close
+ * (only the panel unmounts), so `pickerOpen` becoming false is the reliable
  * signal that the picker closed. Only the staged `'confirming'` state is
  * dropped — an in-flight `'switching'` or a committed `'success'` is left
  * alone, and entering the picker or any transition without a staged switch is
  * a no-op. Chat navigation remounts this component, so it is not a picker
  * close and keeps its existing restore behavior.
  *
- * @param {string|null} mode - the composer popover mode (`'model'` when the
- *   picker is open).
+ * @param {boolean} pickerOpen - whether the unified composer picker is open.
  * @param {string|undefined} providerSwitchStatus - the staged switch status for
  *   this chat (`'confirming' | 'switching' | 'success' | 'error' | 'idle'`).
  * @param {string} chatId - the chat whose staged switch is discarded.
  */
 export default function useDiscardUnconfirmedSwitchOnPickerClose(
-  mode,
+  pickerOpen,
   providerSwitchStatus,
   chatId,
 ) {
-  const prevModeRef = useRef(mode)
+  const wasOpenRef = useRef(pickerOpen)
   useEffect(() => {
-    const leftModelPicker = prevModeRef.current === 'model' && mode !== 'model'
-    prevModeRef.current = mode
-    if (leftModelPicker && providerSwitchStatus === 'confirming') {
+    const closedPicker = wasOpenRef.current && !pickerOpen
+    wasOpenRef.current = pickerOpen
+    if (closedPicker && providerSwitchStatus === 'confirming') {
       clearProviderSwitch(chatId)
     }
-  }, [mode, providerSwitchStatus, chatId])
+  }, [pickerOpen, providerSwitchStatus, chatId])
 }

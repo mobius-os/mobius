@@ -20,6 +20,12 @@ const providerUsageRootKey = ['settings', 'provider-usage']
 const providerUsageKey = (provider) => [...providerUsageRootKey, provider]
 const appsKey = ['apps']
 const chatsKey = ['chats']
+const chatCurrentUsageRootKey = ['chat-current-usage']
+const chatCurrentUsageKey = (chatId, provider) => [
+  ...chatCurrentUsageRootKey,
+  chatId,
+  provider,
+]
 const providersStatusKey = ['auth', 'providers', 'status']
 const modelRegistryKey = ['models', 'registry']
 const modelPrefsKey = ['owner', 'model-prefs']
@@ -134,6 +140,31 @@ async function fetchChatMessages(chatId, { signal } = {}) {
   })
   const data = await jsonOrThrow(res, 'chat fetch failed:')
   return chatDetailCacheValue(data)
+}
+
+async function fetchChatCurrentUsage(
+  chatId,
+  { signal } = {},
+) {
+  const res = await api.chats.currentUsage(chatId, { signal })
+  return jsonOrThrow(res, 'current chat usage fetch failed:')
+}
+
+function useChatCurrentUsageQuery(
+  chatId,
+  provider,
+  { enabled = true } = {},
+) {
+  return useQuery({
+    queryKey: chatCurrentUsageKey(chatId, provider),
+    queryFn: context => fetchChatCurrentUsage(
+      chatId,
+      context,
+    ),
+    enabled: enabled && Boolean(chatId && provider),
+    staleTime: 60_000,
+    retry: 0,
+  })
 }
 
 function useChatsQuery({ reconcile } = {}) {
@@ -411,6 +442,7 @@ export const chatQueries = {
   keys: {
     all: chatsKey,
     messages: (chatId) => ['chat-messages', chatId],
+    currentUsage: chatCurrentUsageKey,
     usage: (chatId) => ['chat-usage', chatId],
     usageSummary: (chatId) => ['chat-usage-summary', chatId],
   },
@@ -424,6 +456,16 @@ export const chatQueries = {
     key: (chatId) => ['chat-messages', chatId],
     fetch: fetchChatMessages,
     remove: (queryClient, chatId) => queryClient.removeQueries({ queryKey: ['chat-messages', chatId] }),
+  },
+  currentUsage: {
+    key: chatCurrentUsageKey,
+    fetch: fetchChatCurrentUsage,
+    useQuery: useChatCurrentUsageQuery,
+    invalidate: (queryClient, chatId) => queryClient.invalidateQueries({
+      queryKey: chatId
+        ? [...chatCurrentUsageRootKey, chatId]
+        : chatCurrentUsageRootKey,
+    }),
   },
   usage: {
     key: (chatId) => ['chat-usage', chatId],

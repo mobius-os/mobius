@@ -1,28 +1,80 @@
-import { settingsQueries } from '../../hooks/queries.js'
+import { chatQueries, modelQueries, settingsQueries } from '../../hooks/queries.js'
 import BrainUsageIcon from './BrainUsageIcon.jsx'
-import { mostConstrainedRemainingPercent } from '../SettingsView/providerUsage.js'
+import { providerAllowance } from '../SettingsView/providerUsage.js'
+import {
+  contextUsedPercent,
+  formatRoundedTokenCount,
+  resolvedContextTokenCounts,
+} from './brainUsage.js'
 
-export default function BrainUsageButton({ children, usageEnabled = true }) {
-  const codexUsage = settingsQueries.providerUsage.useQuery('codex', {
-    enabled: usageEnabled,
+const PROVIDER_LABELS = {
+  claude: 'Claude',
+  codex: 'Codex',
+  mobius: 'Möbius',
+}
+
+export default function BrainUsageButton({
+  children,
+  usageEnabled = true,
+  chatId = null,
+  provider = null,
+  model = null,
+}) {
+  const providerUsageQuery = settingsQueries.providerUsage.useQuery(provider, {
+    enabled: usageEnabled && Boolean(provider),
   })
-  const claudeUsage = settingsQueries.providerUsage.useQuery('claude', {
-    enabled: usageEnabled,
+  const contextUsageQuery = chatQueries.currentUsage.useQuery(
+    chatId,
+    provider,
+    { enabled: usageEnabled },
+  )
+  const modelRegistryQuery = modelQueries.registry.useQuery({
+    enabled: usageEnabled && Boolean(provider && model),
   })
-  const leftPercent = codexUsage.isLoading
+  const allowance = providerUsageQuery.isLoading
+    ? providerAllowance(null)
+    : providerAllowance(providerUsageQuery.data)
+  const leftPercent = allowance.usedPercent
+  const contextSnapshot = (
+    contextUsageQuery.isLoading
+    || contextUsageQuery.data?.provider !== provider
+  )
     ? null
-    : mostConstrainedRemainingPercent(codexUsage.data)
-  const rightPercent = claudeUsage.isLoading
+    : contextUsageQuery.data
+  const contextTokens = resolvedContextTokenCounts(
+    contextSnapshot,
+    modelRegistryQuery.isLoading ? null : modelRegistryQuery.data,
+    provider,
+    model,
+  )
+  const rightPercent = contextTokens === null
     ? null
-    : mostConstrainedRemainingPercent(claudeUsage.data)
+    : contextUsedPercent({
+      input_tokens: contextTokens.used,
+      context_window: contextTokens.maximum,
+    })
+  const providerLabel = PROVIDER_LABELS[provider] || 'Current model'
 
   const usageSummary = [
-    leftPercent === null ? 'Codex usage: unknown' : `Codex usage left: ${Math.round(leftPercent)}%`,
-    rightPercent === null ? 'Claude usage: unknown' : `Claude usage left: ${Math.round(rightPercent)}%`,
+    leftPercent === null
+      ? `${providerLabel} ${allowance.label.toLowerCase()}: unknown`
+      : `${providerLabel} ${allowance.label.toLowerCase()}: ${Math.round(leftPercent)}%`,
+    contextTokens === null || rightPercent === null
+      ? 'Context used: unknown'
+      : `Context used: ${formatRoundedTokenCount(contextTokens.used)} of ${formatRoundedTokenCount(contextTokens.maximum)} tokens (${Math.round(rightPercent)}%); ${Math.round(100 - rightPercent)}% remains before compaction`,
   ].join(' · ')
 
   return children({
     icon: <BrainUsageIcon leftPercent={leftPercent} rightPercent={rightPercent} />,
-    ariaLabel: `Choose model. ${usageSummary}`,
+    ariaLabel: `Chat options. ${usageSummary}`,
+    providerUsage: {
+      provider,
+      providerLabel,
+      allowanceKind: allowance.kind,
+      allowanceLabel: allowance.label,
+      allowanceUsedPercent: leftPercent,
+      contextTokensUsed: contextTokens?.used ?? null,
+      contextTokensMaximum: contextTokens?.maximum ?? null,
+    },
   })
 }

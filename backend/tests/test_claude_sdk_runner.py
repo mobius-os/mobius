@@ -1905,6 +1905,21 @@ def test_dispatch_task_updated_nonterminal_is_silent():
 
 def test_dispatch_result_message_returns_terminal():
   bus = _Bus()
+  usage_state = {}
+  dispatch_sdk_message(
+    AssistantMessage(
+      content=[],
+      model="claude-sonnet",
+      usage={
+        "input_tokens": 50,
+        "cache_creation_input_tokens": 10,
+        "cache_read_input_tokens": 40,
+      },
+    ),
+    bus,
+    None,
+    usage_state=usage_state,
+  )
   msg = ResultMessage(
     subtype="success",
     duration_ms=1000,
@@ -1916,7 +1931,9 @@ def test_dispatch_result_message_returns_terminal():
     total_cost_usd=0.05,
     usage={"input_tokens": 100, "output_tokens": 200},
   )
-  new_sid, terminal = dispatch_sdk_message(msg, bus, None)
+  new_sid, terminal = dispatch_sdk_message(
+    msg, bus, None, usage_state=usage_state,
+  )
   assert new_sid == "sess-1"
   assert terminal is not None
   assert terminal["cost_usd"] == 0.05
@@ -1934,6 +1951,7 @@ def test_dispatch_result_message_returns_terminal():
     "reasoning_output_tokens": 0,
     "total_tokens": 300,
     "model_context_window": None,
+    "latest_model_input_tokens": 100,
     "provider_usage": {"input_tokens": 100, "output_tokens": 200},
     "provider_model_usage": None,
   }

@@ -236,6 +236,110 @@ def test_chat_usage_reports_totals_and_historic_coverage(
   assert summary["runs"] == []
 
 
+def test_current_chat_usage_is_bounded_to_selected_provider_session(
+  client, auth, chat, db,
+):
+  now = datetime.now(UTC)
+  chat.provider = "codex"
+  chat.session_id = "thread-current"
+  db.add_all([
+    models.ChatRun(
+      id="older-thread",
+      chat_id=chat.id,
+      status="completed",
+      provider="codex",
+      provider_session_id="thread-old",
+      model_context_window=200_000,
+      usage_json={
+        "provider": "codex",
+        "model_calls": [{"input_tokens": 150_000}],
+      },
+      started_at=now,
+    ),
+    models.ChatRun(
+      id="selected-thread",
+      chat_id=chat.id,
+      status="completed",
+      provider="codex",
+      provider_session_id="thread-current",
+      model_context_window=258_400,
+      usage_json={
+        "provider": "codex",
+        "model_calls": [
+          {"input_tokens": 80_000},
+          {"input_tokens": 193_800},
+        ],
+      },
+      started_at=now,
+    ),
+  ])
+  db.commit()
+
+  response = client.get(
+    f"/api/chats/{chat.id}/usage/current",
+    headers=auth,
+  )
+
+  assert response.status_code == 200
+  assert response.json() == {
+    "provider": "codex",
+    "provider_session_id": "thread-current",
+    "input_tokens": 193_800,
+    "context_window": 258_400,
+  }
+
+
+def test_current_chat_usage_reads_normalized_claude_call_occupancy(
+  client, auth, chat, db,
+):
+  chat.provider = "claude"
+  chat.session_id = "claude-session-current"
+  db.add(models.ChatRun(
+    id="selected-claude-session",
+    chat_id=chat.id,
+    status="completed",
+    provider="claude",
+    provider_session_id="claude-session-current",
+    model_context_window=200_000,
+    usage_json={
+      "provider": "claude",
+      "latest_model_input_tokens": 123_456,
+    },
+    started_at=datetime.now(UTC),
+  ))
+  db.commit()
+
+  response = client.get(
+    f"/api/chats/{chat.id}/usage/current",
+    headers=auth,
+  )
+
+  assert response.status_code == 200
+  assert response.json() == {
+    "provider": "claude",
+    "provider_session_id": "claude-session-current",
+    "input_tokens": 123_456,
+    "context_window": 200_000,
+  }
+
+
+def test_current_chat_usage_returns_unknown_for_a_fresh_session(
+  client, auth, chat,
+):
+  response = client.get(
+    f"/api/chats/{chat.id}/usage/current",
+    headers=auth,
+  )
+
+  assert response.status_code == 200
+  assert response.json() == {
+    "provider": "claude",
+    "provider_session_id": None,
+    "input_tokens": None,
+    "context_window": None,
+  }
+
+
 def test_create_chat_rejects_cross_site_request(client, auth):
   cross = client.post(
     "/api/chats",

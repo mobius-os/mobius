@@ -45,6 +45,7 @@ def _plain(value: Any) -> Any:
 def normalize_claude_usage(
   usage: dict[str, Any] | None,
   model_usage: dict[str, Any] | None = None,
+  latest_model_usage: dict[str, Any] | None = None,
 ) -> dict | None:
   """Normalize Claude's terminal turn aggregate.
 
@@ -60,6 +61,16 @@ def normalize_claude_usage(
   cache_read = _count(usage.get("cache_read_input_tokens"))
   output = _count(usage.get("output_tokens"))
   input_total = uncached + cache_write + cache_read
+  latest_input_total = None
+  if latest_model_usage:
+    latest_input_total = sum(
+      _count(latest_model_usage.get(field))
+      for field in (
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+      )
+    )
   context_windows = [
     _count(details.get("contextWindow"))
     for details in (model_usage or {}).values()
@@ -77,6 +88,10 @@ def normalize_claude_usage(
     "reasoning_output_tokens": _count(usage.get("reasoning_tokens")),
     "total_tokens": input_total + output,
     "model_context_window": max(context_windows, default=0) or None,
+    # ResultMessage usage is a turn aggregate. AssistantMessage usage belongs
+    # to one model call, so its input total is the honest context occupancy at
+    # the end of the turn rather than a sum that can exceed the context window.
+    "latest_model_input_tokens": latest_input_total,
     "provider_usage": _plain(usage),
     "provider_model_usage": _plain(model_usage),
   }

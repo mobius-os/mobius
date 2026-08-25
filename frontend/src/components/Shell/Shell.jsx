@@ -727,12 +727,14 @@ export default function Shell({ onInitialVisualReady }) {
     return true
   }
 
-  // Browser traversal bypasses the drawer and tab selection handlers. Reserve
-  // the touch keyboard at useNavigation's validated restore boundary, before
-  // the outgoing chat or app can become inert.
+  // Browser traversal bypasses the drawer and tab selection handlers. Use the
+  // same destination-composer handoff as direct chat selection at
+  // useNavigation's validated restore boundary, before the outgoing chat or
+  // app can become inert. On touch this still reserves the software keyboard
+  // only for a saved draft; on desktop it restores keyboard focus.
   beforeRestoreRouteRef.current = (route) => {
     if (route?.view !== 'chat' || route.chatId == null) return
-    reserveTouchDraftComposer(route.chatId)
+    focusSelectedChatComposer(route.chatId)
   }
 
   // A restored single-screen chat has no click handler to request focus. Keep

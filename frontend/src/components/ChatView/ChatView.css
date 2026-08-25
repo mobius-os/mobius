@@ -2357,6 +2357,16 @@
   opacity: 0;
 }
 
+/* ArrowUp keeps its established 24px SDK box, but its long straight edges read
+   optically light. Add a hairline around the existing path rather than
+   enlarging the glyph. The idle microphone owns its lighter 22px treatment in
+   ComposerMicIcon. */
+.chat__action-glyph--send path {
+  stroke: currentColor;
+  stroke-width: 0.24;
+  stroke-linejoin: round;
+}
+
 .chat__action-glyphs--send .chat__action-glyph--send,
 .chat__action-glyphs--steer .chat__action-glyph--steer {
   opacity: 1;
@@ -2552,9 +2562,9 @@
 }
 
 
-/* Row aligns children to the BOTTOM so the `+` button stays 38×38
+/* Row aligns children to the BOTTOM so the brain button stays 48×48
    pinned at the bottom-left when the pill grows multi-line. Without
-   this the row would `stretch` the `+` button to the pill's grown
+   this the row would `stretch` the brain button to the pill's grown
    height (top edge follows the pill upward). */
 .chat__input-row {
   display: flex;
@@ -2562,20 +2572,17 @@
   gap: 8px;
 }
 
-/* ── + button (composer popover trigger) ──────────────── */
+/* ── Brain button (composer popover + usage gauge) ──────────────── */
 .composer-plus {
   position: relative;
-  display: flex;
-  gap: 8px;
   flex-shrink: 0;
   align-self: flex-end;
 }
 
-/* + button: 48×48, matched 1:1 to the pill's min-height — same
+/* Brain button: 48×48, matched 1:1 to the pill's min-height — same
    frosted-glass surface tint (60%) and same hairline border so
-   the two read as a unified pair. When the popover opens the
-   trigger switches to a solid accent fill to signal active
-   state. */
+   the two read as a unified pair. When the popover opens, the
+   accent border marks the active state without obscuring the gauge. */
 .chat__plus {
   width: 48px;
   height: 48px;
@@ -2608,7 +2615,7 @@
   color: var(--muted);
 }
 
-/* Keyboard-only focus ring on the + button. No :focus rule (pointer
+/* Keyboard-only focus ring on the brain button. No :focus rule (pointer
    focus must not show a ring — the one-halo invariant). :focus-visible
    fires only for keyboard navigation. When the popover is active the
    accent fill already signals the state, so we suppress the ring on
@@ -2633,18 +2640,20 @@
   box-shadow: none;
 }
 
-/* ── Brain usage button (model picker + weekly-usage gauge) ──
-   Same 48×48 frosted-glass circle as .chat__plus (shares the base
-   rule); this block only adds the small deltas so the pair reads as
-   a matched set: it never gets the plus's --active purple fill,
-   since ComposerPopover.jsx decides open/closed for THIS button
-   too and there is nothing separate here to mark active. */
+/* Keep the solid gauge fills legible while the popover is open. A purple
+   active disc would swallow the left half, so the brain uses a quieter
+   selected surface and the existing accent border for open state. */
 .chat__brain-usage {
   align-self: flex-end;
   position: relative;
 }
 .chat__brain-usage:focus { outline: none; }
 .chat__brain-usage:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chat__plus.chat__brain-usage.chat__plus--active {
+  background-color: color-mix(in srgb, var(--surface2) 82%, transparent) !important;
+  border-color: var(--accent);
+  color: var(--text);
+}
 
 /* Always-visible cost/token readout directly above the composer — moved
    here (from an overlay badge on the brain icon) so it has room for more

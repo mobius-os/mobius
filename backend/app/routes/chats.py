@@ -1798,6 +1798,86 @@ def get_chat_usage(
   }
 
 
+def _latest_model_input_tokens(run: models.ChatRun) -> int | None:
+  """Read one call's context input from a normalized durable usage row."""
+  usage = run.usage_json
+  if not isinstance(usage, dict):
+    return None
+  direct = usage.get("latest_model_input_tokens")
+  if isinstance(direct, (int, float)) and not isinstance(direct, bool):
+    return max(0, int(direct))
+  if run.provider != "codex":
+    return None
+  model_calls = usage.get("model_calls")
+  if isinstance(model_calls, list) and model_calls:
+    latest = model_calls[-1]
+    if isinstance(latest, dict):
+      value = latest.get("input_tokens", latest.get("inputTokens"))
+      if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return max(0, int(value))
+  provider_usage = usage.get("provider_usage")
+  if isinstance(provider_usage, dict):
+    final = provider_usage.get("final")
+    if isinstance(final, dict):
+      latest = final.get("last")
+      if isinstance(latest, dict):
+        value = latest.get("input_tokens", latest.get("inputTokens"))
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+          return max(0, int(value))
+  return None
+
+
+@router.get("/{chat_id}/usage/current")
+def get_current_chat_usage(
+  chat_id: str,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Return the latest exact model-call context occupancy for one session.
+
+  The diagnostic ``/usage`` route intentionally returns every raw run. The
+  composer gauge needs only one bounded projection and is mounted for every
+  open chat pane, so it must not download an ever-growing usage history.
+  """
+  chat = get_active_chat_or_404(
+    db,
+    chat_id,
+    load_fields=(models.Chat.id, models.Chat.provider, models.Chat.session_id),
+  )
+  if not chat.session_id:
+    return {
+      "provider": chat.provider,
+      "provider_session_id": None,
+      "input_tokens": None,
+      "context_window": None,
+    }
+  run = (
+    db.query(models.ChatRun)
+    .filter(
+      models.ChatRun.chat_id == chat_id,
+      models.ChatRun.provider == chat.provider,
+      models.ChatRun.provider_session_id == chat.session_id,
+      models.ChatRun.usage_json.isnot(None),
+      models.ChatRun.model_context_window.isnot(None),
+    )
+    .order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc())
+    .first()
+  )
+  if run is None:
+    return {
+      "provider": chat.provider,
+      "provider_session_id": chat.session_id,
+      "input_tokens": None,
+      "context_window": None,
+    }
+  return {
+    "provider": run.provider,
+    "provider_session_id": run.provider_session_id,
+    "input_tokens": _latest_model_input_tokens(run),
+    "context_window": run.model_context_window,
+  }
+
+
 @router.delete(
   "/{chat_id}", status_code=204, dependencies=[Depends(reject_cross_site)],
 )

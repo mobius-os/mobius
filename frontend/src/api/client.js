@@ -461,6 +461,10 @@ export const api = {
         { signal, timeoutMs },
       )
     },
+    currentUsage: (chatId, { signal } = {}) => apiFetch(
+      `/chats/${encodeURIComponent(chatId)}/usage/current`,
+      { signal },
+    ),
     update: (chatId, payload) => listAffectingMutation('chats', `/chats/${chatId}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),

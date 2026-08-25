@@ -103,7 +103,9 @@ def test_fallback_models_shape_matches_registry_entries():
   entries = providers._fallback_models("claude")
   assert entries, "fallback must be non-empty for a known provider"
   for e in entries:
-    assert set(e) == {"id", "label", "provider", "available"}
+    assert set(e) == {
+      "id", "label", "provider", "available", "context_window",
+    }
     assert e["provider"] == "claude"
     assert e["available"] is True
   ids = [e["id"] for e in entries]
@@ -320,6 +322,8 @@ def test_codex_model_entries_preserve_live_catalog_metadata():
       {
         "slug": "gpt-5.6-sol",
         "display_name": "GPT-5.6-Sol",
+        "context_window": 272_000,
+        "effective_context_window_percent": 95,
         "supported_reasoning_levels": [
           {"effort": "medium"},
           {"effort": "max"},
@@ -336,6 +340,7 @@ def test_codex_model_entries_preserve_live_catalog_metadata():
       "id": "gpt-5.6-sol",
       "label": "GPT-5.6-Sol",
       "effort_levels": ["medium", "max", "ultra"],
+      "context_window": 258_400,
     },
     {"id": "gpt-future"},
     {"id": "gpt-string-shape"},
@@ -350,6 +355,16 @@ def test_codex_fallback_efforts_match_current_catalog():
   assert by_id["gpt-5.6-sol"]["effort_levels"][-2:] == ["max", "ultra"]
   assert by_id["gpt-5.6-terra"]["effort_levels"][-2:] == ["max", "ultra"]
   assert by_id["gpt-5.6-luna"]["effort_levels"][-1] == "max"
+  assert by_id["gpt-5.6-sol"]["context_window"] == 258_400
+
+
+def test_claude_fallback_context_matches_documented_model_limit():
+  by_id = {
+    entry["id"]: entry
+    for entry in providers._fallback_models("claude")
+  }
+  assert by_id["claude-opus-4-8"]["context_window"] == 1_000_000
+  assert by_id["claude-haiku-4-5-20251001"]["context_window"] == 200_000
 
 
 def test_mobius_effort_scale_uses_the_public_product_model():

@@ -1015,6 +1015,7 @@ test.describe('Touch navigation', () => {
     await expect(presentation.getByText("What's on your mind?", { exact: true })).toBeVisible()
     await expect(pendingOptions).toBeVisible()
     await expect(pendingOptions).toBeDisabled()
+    await expect(pendingOptions.locator(':scope > svg')).toBeVisible()
     const pendingOptionsBox = await pendingOptions.boundingBox()
     await expect(immediateComposer).toBeFocused()
     await page.keyboard.type('Typed while opening')
@@ -1044,10 +1045,11 @@ test.describe('Touch navigation', () => {
       end: element.selectionEnd,
       length: element.value.length,
     }))).toEqual({ start: 19, end: 19, length: 19 })
-    const readyOptions = page.locator('[data-chat-surface="painted"]')
-      .getByRole('button', { name: 'Attach files or view chat info' })
+    const readySurface = page.locator('[data-chat-surface="painted"]')
+    const readyOptions = readySurface.getByRole('button', { name: /Chat options/ })
     await expect(readyOptions).toBeVisible()
     await expect(readyOptions).toBeEnabled()
+    await expect(readySurface.locator('.composer-plus > button')).toHaveCount(1)
     const readyOptionsBox = await readyOptions.boundingBox()
     expect(pendingOptionsBox).not.toBeNull()
     expect(readyOptionsBox).not.toBeNull()
@@ -1762,6 +1764,25 @@ test.describe('Drawer state machine — extended invariants', () => {
     // Forward rebuilt the semantic edges, so Back works again normally.
     await goBack(page)
     expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
+  })
+
+  test('20a. returning to a chat through browser history restores composer focus', async ({ page }) => {
+    await setup(page, { width: 1280, height: 800 })
+
+    const paintedComposer = page.locator(
+      '[data-chat-surface="painted"] textarea[aria-label="Message Möbius…"]',
+    )
+    await paintedComposer.focus()
+    await expect(paintedComposer).toBeFocused()
+
+    // Cmd+,/. invokes this same browser traversal outside the app. The route
+    // restore must carry the outgoing chat's keyboard-forward intent back to
+    // its real composer, rather than leaving focus on the document body.
+    await page.getByRole('button', { name: 'Apps', exact: true }).click()
+    await expect(page.getByRole('region', { name: 'Installed apps' })).toBeVisible()
+
+    await goBack(page)
+    await expect(paintedComposer).toBeFocused()
   })
 
   test('20b. Forward to an unconsumed drawer sentinel reopens the drawer', async ({ page }) => {

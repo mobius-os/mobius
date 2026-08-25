@@ -43,11 +43,17 @@ export function visibleUsageWindows(snapshot) {
     .slice(0, 4)
 }
 
-export function mostConstrainedRemainingPercent(snapshot) {
-  if (snapshot?.state !== 'ready' || !Array.isArray(snapshot.windows)) return null
-  const used = snapshot.windows
-    .map(window => Number(window?.used_percent))
-    .filter(Number.isFinite)
-  if (used.length === 0) return null
-  return 100 - Math.max(...used.map(clampUsagePercent))
+export function providerAllowance(snapshot) {
+  const kind = 'weekly'
+  const label = 'Weekly usage'
+  if (snapshot?.state !== 'ready' || !Array.isArray(snapshot.windows)) {
+    return { kind, label, usedPercent: null }
+  }
+  const window = snapshot.windows.find(candidate => candidate?.kind === kind)
+  const used = Number(window?.used_percent)
+  return {
+    kind,
+    label,
+    usedPercent: Number.isFinite(used) ? clampUsagePercent(used) : null,
+  }
 }

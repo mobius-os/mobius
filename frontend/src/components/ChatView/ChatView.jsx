@@ -3924,9 +3924,10 @@ export default function ChatView({
   useEffect(() => {
     if (wasTurnActiveRef.current && !turnActive) {
       settingsQueries.providerUsage.invalidate(queryClient)
+      chatQueries.currentUsage.invalidate(queryClient, chatId)
     }
     wasTurnActiveRef.current = turnActive
-  }, [turnActive, queryClient])
+  }, [chatId, turnActive, queryClient])
 
   useEffect(() => {
     if (!turnActive) return
@@ -4926,12 +4927,19 @@ export default function ChatView({
           messageHistory={messageHistory}
           provider={chatInfo?.provider}
           leftButtons={
-            <BrainUsageButton usageEnabled={!embedded}>
-              {({ icon, ariaLabel }) => (
+            <BrainUsageButton
+              usageEnabled={!embedded}
+              chatId={chatId}
+              provider={chatInfo?.provider}
+              model={chatInfo?.effective?.model}
+            >
+              {({ icon, ariaLabel, providerUsage }) => (
               <ComposerPopover
-                modelTriggerIcon={icon}
-                modelTriggerAriaLabel={`${ariaLabel}. ${chatUsageAriaSummary}`}
-                triggerAriaLabel={embedded ? 'Attach files' : 'Attach files or view chat info'}
+                triggerIcon={icon}
+                providerUsage={providerUsage}
+                triggerAriaLabel={embedded
+                  ? 'Attach files'
+                  : `${ariaLabel}. ${chatUsageAriaSummary}`}
                 chatInfo={showPicker ? chatInfo : null}
                 chatId={chatId}
                 onAttachClick={() => attachTriggerRef.current?.()}

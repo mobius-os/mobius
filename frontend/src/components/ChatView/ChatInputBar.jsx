@@ -45,9 +45,10 @@
  * ║      Without it, tapping × steals focus → iOS collapses kb.      ║
  * ║                                                                  ║
  * ║   4. ICONS COME FROM THE APPS-SDK-UI PACKAGE                     ║
- * ║      Primary action: `ArrowUp` (22) for send, `Mic` (24), and    ║
- * ║      `Stop` (28). The package ships these — don't substitute     ║
- * ║      hand-rolled paths.                                          ║
+ * ║      Primary action: `ArrowUp` (24) for send, filtered SDK       ║
+ * ║      `Mic` (22) for idle, and `Stop` (28) while streaming.       ║
+ * ║      The package ships these — don't substitute hand-rolled      ║
+ * ║      paths.                                                       ║
  * ║                                                                  ║
  * ║   5. ATTACH CARD CLASSIFIER (`classifyFile`) drives the badge    ║
  * ║      colour (PDF red, DOC blue, others muted). `stripExt`        ║
@@ -83,7 +84,7 @@ import { useRef, useState, useEffect, useLayoutEffect } from 'react'
 import { createPortal } from 'react-dom'
 import ImageLightbox from './markdown/ImageLightbox.jsx'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
-import { ArrowUp, DoubleChevronRight, Mic, Stop } from '@openai/apps-sdk-ui/components/Icon'
+import { ArrowUp, DoubleChevronRight, Stop } from '@openai/apps-sdk-ui/components/Icon'
 import { BASE } from '../../api/client.js'
 import { mediaTokenParam } from '../../api/mediaToken.js'
 import {
@@ -96,6 +97,7 @@ import {
   resolveComposerEnterAction,
 } from './composerShortcuts.js'
 import { isTouchPrimary } from '../../lib/pointerPrimary.js'
+import ComposerMicIcon from './ComposerMicIcon.jsx'
 import SlashMenu from './SlashMenu.jsx'
 import {
   applySlashCommand,
@@ -140,7 +142,7 @@ import {
 function PrimaryActionGlyphs({ action }) {
   return (
     <span className={`chat__action-glyphs chat__action-glyphs--${action}`} aria-hidden="true">
-      <ArrowUp className="chat__action-glyph chat__action-glyph--send" width={22} height={22} />
+      <ArrowUp className="chat__action-glyph chat__action-glyph--send" width={24} height={24} />
       <DoubleChevronRight className="chat__action-glyph chat__action-glyph--steer" width={20} height={20} />
       <Stop className="chat__action-glyph chat__action-glyph--stop" width={28} height={28} />
     </span>
@@ -225,7 +227,7 @@ function PrimaryAction({
       aria-label={listening ? 'Stop recording' : 'Voice input'}
       disabled={submissionBlocked && !listening}
     >
-      <Mic width={24} height={24} />
+      <ComposerMicIcon />
     </button>
   )
 }

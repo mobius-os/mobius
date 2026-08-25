@@ -11,18 +11,17 @@ import {
 import useDiscardUnconfirmedSwitchOnPickerClose from '../useDiscardUnconfirmedSwitchOnPickerClose.js'
 import { renderHook } from './react-hook-shim.mjs'
 
-// Renders the hook already "inside" the open picker (mode 'model'), then
-// returns a `closePicker` that drives the 'model' -> null transition the
-// component sees when the picker closes.
+// Renders the hook inside the unified open picker, then returns a close action
+// that drives the true -> false transition the component sees on dismissal.
 function openPicker(chatId, status) {
   const { rerender } = renderHook(
     useDiscardUnconfirmedSwitchOnPickerClose,
-    'model',
+    true,
     status,
     chatId,
   )
   return {
-    closePicker: () => rerender(null, status, chatId),
+    closePicker: () => rerender(false, status, chatId),
     rerender,
   }
 }
@@ -81,15 +80,15 @@ test('opening the picker does not discard a confirming switch', () => {
   const chatId = 'chat-open'
   stageProviderSwitch(chatId, { chatId, switchId: 'switch-1' })
 
-  // Start with the picker closed, then open it (null -> 'model'). Entering the
+  // Start with the picker closed, then open it (false -> true). Entering the
   // picker is not a close, so the staged switch must survive to be shown.
   const { rerender } = renderHook(
     useDiscardUnconfirmedSwitchOnPickerClose,
-    null,
+    false,
     'confirming',
     chatId,
   )
-  rerender('model', 'confirming', chatId)
+  rerender(true, 'confirming', chatId)
 
   assert.equal(getProviderSwitchState(chatId).status, 'confirming')
 })

@@ -36,6 +36,10 @@ def test_claude_input_includes_cache_reads_and_writes():
       "inputTokens": 150,
       "outputTokens": 40,
     },
+  }, {
+    "input_tokens": 40,
+    "cache_creation_input_tokens": 10,
+    "cache_read_input_tokens": 100,
   })
 
   assert usage is not None
@@ -46,6 +50,7 @@ def test_claude_input_includes_cache_reads_and_writes():
   assert usage["output_tokens"] == 40
   assert usage["total_tokens"] == 190
   assert usage["model_context_window"] == 200_000
+  assert usage["latest_model_input_tokens"] == 150
   assert usage["provider_model_usage"]["claude-main"]["inputTokens"] == 150
 
 

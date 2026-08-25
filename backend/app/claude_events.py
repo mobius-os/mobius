@@ -246,6 +246,7 @@ def dispatch_sdk_message(
   bc,
   current_session_id: str | None,
   inflight: set | None = None,
+  usage_state: dict[str, Any] | None = None,
 ) -> tuple[str | None, dict | None]:
   """Translates one SDK message into broadcast events.
 
@@ -261,6 +262,11 @@ def dispatch_sdk_message(
   from the very branches that already classify those task messages. The
   runner keeps a live client draining until that set empties so
   parallel subagents finish instead of being reaped at turn end.
+
+  ``usage_state`` carries the latest root AssistantMessage usage to the
+  terminal ResultMessage. Claude's result usage aggregates the whole agent
+  turn; the assistant usage is the one-call value needed to measure current
+  context occupancy without counting every tool-loop refill.
 
   Extracted from the runner loop so unit tests can exercise the
   full dispatch matrix (named events, unknown fallthrough, usage
@@ -436,6 +442,8 @@ def dispatch_sdk_message(
   if isinstance(sdk_msg, AssistantMessage):
     if sdk_msg.session_id:
       current_session_id = sdk_msg.session_id
+    if usage_state is not None and sdk_msg.usage:
+      usage_state["latest_model_usage"] = dict(sdk_msg.usage)
     server_tools: dict[str, str] = {}
     for content_index, block in enumerate(sdk_msg.content):
       if isinstance(block, ToolUseBlock):
@@ -606,7 +614,9 @@ def dispatch_sdk_message(
       "cost_usd": sdk_msg.total_cost_usd,
       "usage": dict(sdk_msg.usage) if sdk_msg.usage else None,
       "usage_metrics": normalize_claude_usage(
-        sdk_msg.usage, sdk_msg.model_usage,
+        sdk_msg.usage,
+        sdk_msg.model_usage,
+        (usage_state or {}).get("latest_model_usage"),
       ),
       "model_usage": (
         dict(sdk_msg.model_usage) if sdk_msg.model_usage else None

@@ -272,7 +272,9 @@ def _claude_cli_path() -> str:
   return _CLAUDE_CLI
 
 
-async def _drain_background_tasks(client, bc, inflight, session_id, chat_id):
+async def _drain_background_tasks(
+  client, bc, inflight, session_id, chat_id, usage_state,
+):
   """Carry Claude's native background wake through its parent follow-up.
 
   The main agent's terminal ResultMessage ends the TURN, not the background
@@ -285,7 +287,7 @@ async def _drain_background_tasks(client, bc, inflight, session_id, chat_id):
   try:
     async for sdk_msg in client.receive_messages():
       session_id, terminal = dispatch_sdk_message(
-        sdk_msg, bc, session_id, inflight,
+        sdk_msg, bc, session_id, inflight, usage_state,
       )
       if terminal is not None and not inflight:
         return session_id, terminal
@@ -1332,6 +1334,10 @@ async def run_claude_sdk_turn(
       # task_ids of background subagents/tasks still running, tracked across the
       # requery loop so a terminal result knows whether to drain before reaping.
       inflight_tasks: set = set()
+      # Root AssistantMessage usage is per model call, unlike the terminal
+      # ResultMessage aggregate. Keep the latest call across retries, steers,
+      # and native background follow-ups so context occupancy stays exact.
+      usage_state: dict[str, Any] = {}
       while True:
         async for sdk_msg in client.receive_response():
           # Persist the session id ONLY from ROOT conversation messages.
@@ -1358,7 +1364,7 @@ async def run_claude_sdk_turn(
             if _resets is not None:
               rate_limit_resets_at = _resets
           current_session_id, terminal = dispatch_sdk_message(
-            sdk_msg, bc, current_session_id, inflight_tasks,
+            sdk_msg, bc, current_session_id, inflight_tasks, usage_state,
           )
           if terminal is None:
             # A steer fires its interrupt synchronously in
@@ -1432,6 +1438,7 @@ async def run_claude_sdk_turn(
           if inflight_tasks and not active_client.interrupt_requested:
             current_session_id, followup = await _drain_background_tasks(
               client, bc, inflight_tasks, current_session_id, chat_id,
+              usage_state,
             )
             if followup is not None:
               terminal = followup
