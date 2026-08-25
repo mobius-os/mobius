@@ -591,6 +591,7 @@ def test_job_context_is_nonsecret_and_self_scoped(client, owner_token, db):
   body = response.json()
   assert body["app_id"] == own.id
   assert body["source_dir"] == own.source_dir
+  assert body["public_origin"].startswith("http")
   serialized = json.dumps(body).lower()
   assert "token" not in serialized
   assert "credential" not in serialized

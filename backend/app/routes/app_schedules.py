@@ -464,6 +464,7 @@ def get_app_job_context(
     "source_dir": app.source_dir,
     "primary": choices.get("primary"),
     "fallback": choices.get("fallback"),
+    "public_origin": get_settings().frontend_origin.rstrip("/"),
     # This is the same normalized, non-secret receipt the owner reviewed.
     # Jobs such as Memory may verify their installed data/schedule contract
     # against it; it is not a filesystem sandbox or mount plan.

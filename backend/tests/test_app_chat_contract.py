@@ -177,6 +177,7 @@ def test_owner_chat_list_includes_only_owner_visible_app_chats(
   row = db.query(models.Chat).filter(models.Chat.id == visible_id).first()
   assert row.created_by_app_id == app_id
   assert row.agent_settings_json["owner_visible"] is True
+  assert row.title_locked is True
 
   drawer = client.get("/api/chats", headers=auth)
   assert drawer.status_code == 200, drawer.text
@@ -189,6 +190,93 @@ def test_owner_chat_list_includes_only_owner_visible_app_chats(
   assert all_chats.status_code == 200, all_chats.text
   all_ids = {c["id"] for c in all_chats.json()}
   assert {owner.json()["id"], visible.json()["id"], hidden.json()["id"]} <= all_ids
+
+
+def test_app_can_promote_and_retitle_an_existing_chat(client, owner_token, db):
+  _, app_token = _make_app(client, owner_token, "promoted-chat")
+  app_auth = {"Authorization": f"Bearer {app_token}"}
+  owner_auth = {"Authorization": f"Bearer {owner_token}"}
+  created = client.post(
+    "/api/app-chats", json={"title": "Old bridge title"}, headers=app_auth,
+  )
+  chat_id = created.json()["id"]
+
+  patched = client.patch(
+    f"/api/app-chats/{chat_id}",
+    json={"title": "Bridge · Test user · Aug 24, 20:44", "owner_visible": True},
+    headers=app_auth,
+  )
+  assert patched.status_code == 200, patched.text
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  assert row.title == "Bridge · Test user · Aug 24, 20:44"
+  assert row.title_locked is True
+  assert row.agent_settings_json["owner_visible"] is True
+  row.pending_question_id = "question-owned-by-this-chat"
+  db.commit()
+  assert chat_id in {
+    item["id"] for item in client.get("/api/chats", headers=owner_auth).json()
+  }
+
+  summary = client.get("/api/app-chats", headers=app_auth).json()[0]
+  assert summary["owner_visible"] is True
+  assert summary["title_locked"] is True
+  assert summary["pending_question_id"] == "question-owned-by-this-chat"
+
+
+def test_app_output_media_token_is_read_only_and_bound_to_own_chat(
+  client, owner_token, db,
+):
+  from pathlib import Path
+  from app.auth import decode_access_token
+  from app.config import get_settings
+
+  app_id, app_token = _make_app(client, owner_token, "output-media")
+  app_auth = {"Authorization": f"Bearer {app_token}"}
+  created = client.post(
+    "/api/app-chats", json={"title": "Build"}, headers=app_auth,
+  )
+  chat_id = created.json()["id"]
+  media_dir = Path(get_settings().data_dir) / "chats" / chat_id / "media"
+  media_dir.mkdir(parents=True, exist_ok=True)
+  (media_dir / "app-123.png").write_bytes(b"\x89PNG\r\n")
+
+  minted = client.post(
+    f"/api/app-chats/{chat_id}/output-media-token", headers=app_auth,
+  )
+  assert minted.status_code == 200, minted.text
+  assert minted.json()["expires_in"] == 900
+  token = minted.json()["token"]
+  claims = decode_access_token(token)
+  assert claims["scope"] == "app_chat_output_media"
+  assert claims["app_id"] == app_id
+  assert claims["media_chat"] == chat_id
+
+  assert client.get(
+    f"/api/chats/{chat_id}/media/app-123.png", params={"token": token},
+  ).status_code == 200
+  assert client.get(
+    f"/api/chats/{chat_id}/uploads/app-123.png", params={"token": token},
+  ).status_code == 403
+  assert client.get(
+    f"/api/chats/{chat_id}/tmp-images/app-123.png", params={"token": token},
+  ).status_code == 403
+  other = client.post(
+    "/api/app-chats", json={"title": "Other build"}, headers=app_auth,
+  ).json()["id"]
+  assert client.get(
+    f"/api/chats/{other}/media/app-123.png", params={"token": token},
+  ).status_code == 403
+  assert client.post(
+    f"/api/app-chats/{chat_id}/output-media-token",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  ).status_code == 403
+
+  app = db.query(models.App).filter(models.App.id == app_id).one()
+  app.token_nonce = "rotated-output-media-nonce"
+  db.commit()
+  assert client.get(
+    f"/api/chats/{chat_id}/media/app-123.png", params={"token": token},
+  ).status_code == 401
 
 
 def test_app_chat_create_and_patch_store_custom_system_prompt(

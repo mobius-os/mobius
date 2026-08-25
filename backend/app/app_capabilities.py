@@ -434,6 +434,8 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "connections_manage": bool(perms.get("connections_manage", False)),
       "connect_manage": bool(perms.get("connect_manage", False)),
       "identity_manage": bool(perms.get("identity_manage", False)),
+      "credentialed_fetch": deepcopy(perms.get("credentialed_fetch") or {}),
+      "owner_screenshot": bool(perms.get("owner_screenshot", False)),
       "railway_manage": bool(perms.get("railway_manage", False)),
     },
     "background": (
@@ -522,6 +524,12 @@ def contract_from_app_state(
       # projection. Do not inherit an older accepted value: omission revokes.
       "identity_manage": bool(
         (contract_permissions or {}).get("identity_manage", False)
+      ),
+      "credentialed_fetch": deepcopy(
+        (contract_permissions or {}).get("credentialed_fetch") or {}
+      ),
+      "owner_screenshot": bool(
+        (contract_permissions or {}).get("owner_screenshot", False)
       ),
       "railway_manage": bool(
         (contract_permissions or {}).get("railway_manage", False)

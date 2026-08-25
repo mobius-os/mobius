@@ -215,6 +215,34 @@ def create_media_token(chat_id: str, owner_username: str, token_epoch: int) -> s
   )
 
 
+def create_app_chat_output_media_token(
+  *,
+  owner_username: str,
+  token_epoch: int,
+  app_id: int,
+  app_nonce: str,
+  chat_id: str,
+  expires_delta: timedelta = timedelta(minutes=15),
+) -> str:
+  """Create read-only media access for one live app-owned chat.
+
+  This capability is intended for an app's background job to hand a durable
+  output image URL to a third-party renderer. It cannot read uploads or temp
+  images, and every use rechecks both the app nonce and chat ownership.
+  """
+  return create_access_token(
+    {
+      "sub": owner_username,
+      "scope": "app_chat_output_media",
+      "app_id": app_id,
+      "app_nonce": app_nonce,
+      "media_chat": chat_id,
+    },
+    expires_delta=expires_delta,
+    token_epoch=token_epoch,
+  )
+
+
 def create_chat_embed_media_token(
   *,
   owner_username: str,

@@ -35,6 +35,24 @@ def test_sandboxed_frame_preflight_is_answered_with_a_wildcard(client):
   assert _origin(r) == "*"
 
 
+def test_sandboxed_frame_can_preflight_secret_existence_head(client):
+  """Encrypted app secrets deliberately expose existence through HEAD.
+  Authorization makes the otherwise-safelisted method preflight, so HEAD must
+  be present in Access-Control-Allow-Methods or the setup screen can save a key
+  but can never recognize it after remounting."""
+  r = client.options(
+    "/api/apps/1/secrets/provider-key",
+    headers={
+      "Origin": "null",
+      "Access-Control-Request-Method": "HEAD",
+      "Access-Control-Request-Headers": "authorization",
+    },
+  )
+  assert r.status_code == 200
+  allowed = r.headers.get("access-control-allow-methods", "").upper()
+  assert "HEAD" in {method.strip() for method in allowed.split(",")}
+
+
 def test_connector_mutation_preflight_allows_the_generation_header(client):
   """The Connections app's frame is opaque-origin: every toggle/re-check
   sends X-Mobius-Connector-Generation, which the browser preflights. If the
