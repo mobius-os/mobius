@@ -18,6 +18,7 @@ from app import (
   activity, auth, chat_search, models, providers, questions, secure_inputs,
 )
 from app.chat_visibility import coerce_agent_settings, visible_in_owner_drawer
+from app.chat_event_sink import active_sink_assistant_message_id
 from app.chat_waits import (
   armed_wait_chat_ids,
   armed_waits_for_chat,
@@ -79,6 +80,24 @@ def _open_question_id_for(chat: models.Chat) -> str | None:
     return chat.pending_question_id
   pending = questions.get(chat.id)
   return pending.question_id if pending is not None else None
+
+
+def _active_assistant_message_id(
+  chat: models.Chat,
+) -> str | None:
+  """Return the one assistant row allowed to own a live browser surface.
+
+  The in-process sink wins during a steer because it rotates before its next
+  snapshot commits. Otherwise the actor-owned durable scalar covers both the
+  bounded live snapshot and a question already merged into history. The latter
+  is why this cannot be inferred from `live_assistant`: QuestionCommit clears
+  that JSON value by design while the parked card still owns the browser row.
+  """
+  sink_id = active_sink_assistant_message_id(chat.id)
+  if sink_id:
+    return sink_id
+  value = chat.active_assistant_message_id
+  return str(value) if value else None
 
 # Separate router for the app-attributed chat contract (design §1). It
 # lives under its own /api/app-chats prefix so the owner-only /api/chats
@@ -550,6 +569,7 @@ def _chat_detail_response(
     "total": total,
     "offset": start,
     "running": running,
+    "active_assistant_message_id": _active_assistant_message_id(chat),
     "active_goal_objective": active_goal_objective,
     "pending_question_id": _open_question_id_for(chat),
     "session_id": chat.session_id if expose_session else None,
@@ -1375,11 +1395,13 @@ def get_chat_runtime(
     load_fields=(
       models.Chat.pending_messages,
       models.Chat.pending_question_id,
+      models.Chat.active_assistant_message_id,
       models.Chat.updated_at,
     ),
   )
   return {
     "running": is_chat_running(chat.id),
+    "active_assistant_message_id": _active_assistant_message_id(chat),
     "active_goal_objective": running_goal_objective(db, chat.id),
     "pending_messages": list(chat.pending_messages or []),
     "pending_question_id": _open_question_id_for(chat),

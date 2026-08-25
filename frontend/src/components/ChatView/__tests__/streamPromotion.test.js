@@ -6,6 +6,7 @@ import assert from 'node:assert/strict'
 import { assistantAnchorKey, messageKey } from '../../../lib/chatDetailCache.js'
 
 import {
+  assistantStreamBelongsToActiveMessage,
   streamItemsToAssistantPayload,
   carryQuestionAnswers,
   promoteAssistantStream,
@@ -21,6 +22,21 @@ import {
   chooseActiveAssistantMirrorIndex,
   chooseActiveAssistantDataKey,
 } from '../streamPromotion.js'
+
+test('only the server-owned assistant stream may promote into history', () => {
+  assert.equal(assistantStreamBelongsToActiveMessage(
+    'assistant-current', 'assistant-current',
+  ), true)
+  assert.equal(assistantStreamBelongsToActiveMessage(
+    'assistant-before-restart', 'assistant-current',
+  ), false)
+  assert.equal(assistantStreamBelongsToActiveMessage(
+    null, 'assistant-current',
+  ), false, 'unidentified regenerable state fails closed once an owner exists')
+  assert.equal(assistantStreamBelongsToActiveMessage(
+    'legacy-stream', null,
+  ), true, 'rolling servers retain the legacy transcript-boundary fallback')
+})
 
 // Lever 2a: the live tool item carries tool_use_id, and streamItemToBlock
 // spreads ...item, so the identity flows onto the promoted DB-shaped block for

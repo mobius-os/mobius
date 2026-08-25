@@ -610,6 +610,7 @@ def test_runtime_route_does_not_select_transcript_json(
   assert runtime.status_code == 200
   assert runtime.json() == {
     "running": True,
+    "active_assistant_message_id": None,
     "active_goal_objective": None,
     "pending_messages": [],
     "pending_question_id": None,
@@ -623,4 +624,99 @@ def test_runtime_route_does_not_select_transcript_json(
   )
   assert "chats.pending_messages" in chat_select
   assert "chats.updated_at" in chat_select
+  assert "chats.active_assistant_message_id" in chat_select
   assert "chats.messages as" not in chat_select
+  assert not any(
+    "json_extract(chats.live_assistant" in statement
+    for statement in statements
+  )
+
+
+def test_detail_and_runtime_expose_the_durable_assistant_owner(
+  client,
+  auth,
+  db,
+  monkeypatch,
+):
+  created = client.post(
+    "/api/chats",
+    headers=auth,
+    json={"title": "Assistant owner"},
+  )
+  chat_id = created.json()["id"]
+  chat = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  chat.active_assistant_message_id = "assistant-current"
+  db.commit()
+  monkeypatch.setattr("app.routes.chats.is_chat_running", lambda _: True)
+
+  detail = client.get(f"/api/chats/{chat_id}", headers=auth)
+  runtime = client.get(f"/api/chats/{chat_id}/runtime", headers=auth)
+
+  assert detail.status_code == 200
+  assert runtime.status_code == 200
+  assert detail.json()["active_assistant_message_id"] == "assistant-current"
+  assert runtime.json()["active_assistant_message_id"] == "assistant-current"
+
+
+def test_parked_question_exposes_its_tail_owner_without_live_json(
+  client,
+  auth,
+  db,
+):
+  """A restart-safe parked card still owns one assistant row after commit.
+
+  This is the real failure topology: an older answered card, a hidden
+  continuation boundary, then the current unanswered card. The lightweight
+  runtime must name the final row without reading transcript/live JSON.
+  """
+  created = client.post(
+    "/api/chats",
+    headers=auth,
+    json={"title": "Parked assistant owner"},
+  )
+  chat_id = created.json()["id"]
+  chat = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  chat.messages = [
+    {"role": "user", "content": "earlier", "ts": 1},
+    {
+      "id": "assistant-older",
+      "role": "assistant",
+      "ts": 2,
+      "blocks": [{
+        "type": "question",
+        "question_id": "question-older",
+        "questions": [{"id": "old", "question": "Old choice?"}],
+        "answers": {"old": "Done"},
+      }],
+    },
+    {
+      "role": "user",
+      "kind": "wait_result",
+      "hidden": True,
+      "content": "checks finished",
+      "ts": 3,
+    },
+    {
+      "id": "assistant-current",
+      "role": "assistant",
+      "ts": 4,
+      "blocks": [{
+        "type": "question",
+        "question_id": "question-current",
+        "questions": [{"id": "current", "question": "Current choice?"}],
+      }],
+    },
+  ]
+  chat.pending_question_id = "question-current"
+  chat.live_assistant = None
+  chat.active_assistant_message_id = "assistant-current"
+  db.commit()
+
+  detail = client.get(f"/api/chats/{chat_id}", headers=auth)
+  runtime = client.get(f"/api/chats/{chat_id}/runtime", headers=auth)
+
+  assert detail.status_code == 200
+  assert runtime.status_code == 200
+  assert detail.json()["active_assistant_message_id"] == "assistant-current"
+  assert runtime.json()["active_assistant_message_id"] == "assistant-current"
+  assert runtime.json()["pending_question_id"] == "question-current"

@@ -106,6 +106,18 @@ def get_active_sink(chat_id: str) -> "ChatEventSink | None":
   return _active_sinks.get(chat_id)
 
 
+def active_sink_assistant_message_id(chat_id: str) -> str | None:
+  """Return the assistant segment currently owned by the live reducer.
+
+  The sink rotates this identity synchronously at a steer cut, before the
+  replacement snapshot can reach persistence. Read APIs use this narrow view
+  to avoid briefly reporting the sealed segment as current.
+  """
+  sink = get_active_sink(chat_id)
+  message_id = getattr(sink, "assistant_message_id", None)
+  return str(message_id) if message_id else None
+
+
 def active_sink_stream_snapshot(chat_id: str, broadcast) -> dict | None:
   """Freeze the current assistant segment for one snapshot-capable subscriber.
 

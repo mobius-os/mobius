@@ -1164,6 +1164,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0016_app_connect_manage",
     "0017_retire_restart_resume_toggle",
     "0018_explicit_legacy_chat_models",
+    "0019_chat_active_assistant_identity",
   ]
   assert second == first
 
@@ -1434,6 +1435,119 @@ def test_pending_question_migration_backfills_only_active_latest_question(
     "completed": None,
     "superseded": None,
   }
+
+
+def test_active_assistant_identity_migration_backfills_live_and_parked_rows(
+  tmp_path,
+):
+  eng = create_engine(f"sqlite:///{tmp_path / 'assistant-identity.db'}")
+  parked_messages = [
+    {
+      "id": "assistant-older",
+      "role": "assistant",
+      "blocks": [{
+        "type": "question",
+        "question_id": "q-older",
+        "answers": {"pick": "done"},
+      }],
+    },
+    {"role": "user", "hidden": True, "kind": "wait_result"},
+    {
+      "id": "assistant-current",
+      "role": "assistant",
+      "blocks": [{
+        "type": "question",
+        "question_id": "q-current",
+      }],
+    },
+  ]
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE chats ("
+      "id VARCHAR(64) PRIMARY KEY, messages JSON, live_assistant JSON, "
+      "pending_question_id VARCHAR(64), deleted_at DATETIME NULL)"
+    ))
+    rows = (
+      (
+        "live",
+        [],
+        {"id": "assistant-live", "role": "assistant", "blocks": []},
+        None,
+        None,
+      ),
+      ("parked", parked_messages, None, "q-current", None),
+      (
+        "parked-with-stale-live",
+        parked_messages,
+        {"id": "assistant-stale", "role": "assistant", "blocks": []},
+        "q-current",
+        None,
+      ),
+      ("missing-question", parked_messages, None, "q-missing", None),
+      ("historical-only", parked_messages, None, None, None),
+      ("idless", [{
+        "role": "assistant",
+        "blocks": [{"type": "question", "question_id": "q-idless"}],
+      }], None, "q-idless", None),
+      (
+        "deleted",
+        [],
+        {"id": "assistant-deleted", "role": "assistant", "blocks": []},
+        None,
+        "2026-08-25 12:00:00",
+      ),
+    )
+    for chat_id, messages, live, pending_question_id, deleted_at in rows:
+      conn.execute(text(
+        "INSERT INTO chats "
+        "(id, messages, live_assistant, pending_question_id, deleted_at) "
+        "VALUES (:id, :messages, :live, :pending, :deleted_at)"
+      ), {
+        "id": chat_id,
+        "messages": json.dumps(messages),
+        "live": json.dumps(live) if live is not None else None,
+        "pending": pending_question_id,
+        "deleted_at": deleted_at,
+      })
+
+  migrations._add_chat_active_assistant_identity(eng)
+  # Simulate a process death after SQLite committed the ALTER/backfill but
+  # before the ledger marker: a retry sees the column and must still repair any
+  # row whose scalar did not land.
+  with eng.begin() as conn:
+    conn.execute(text(
+      "UPDATE chats SET active_assistant_message_id = NULL "
+      "WHERE id IN ('parked', 'idless')"
+    ))
+  migrations._add_chat_active_assistant_identity(eng)
+
+  assert "active_assistant_message_id" in {
+    column["name"] for column in inspect(eng).get_columns("chats")
+  }
+  with eng.connect() as conn:
+    migrated = conn.execute(text(
+      "SELECT id, active_assistant_message_id, messages "
+      "FROM chats ORDER BY id"
+    )).mappings().all()
+  owners = {
+    row["id"]: row["active_assistant_message_id"] for row in migrated
+  }
+  assert owners == {
+    "deleted": None,
+    "historical-only": None,
+    "idless": "assistant-question-q-idless",
+    "live": "assistant-live",
+    "missing-question": None,
+    "parked": "assistant-current",
+    "parked-with-stale-live": "assistant-current",
+  }
+  idless = next(row for row in migrated if row["id"] == "idless")
+  idless_messages = (
+    json.loads(idless["messages"])
+    if isinstance(idless["messages"], str)
+    else idless["messages"]
+  )
+  assert idless_messages[-1]["id"] == "assistant-question-q-idless"
 
 
 def test_connections_manage_reaches_a_ledgered_database(tmp_path):

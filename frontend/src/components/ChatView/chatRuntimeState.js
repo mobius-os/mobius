@@ -205,6 +205,20 @@ export function shouldRecoverSettledRuntime({
     && !localStartInFlight
 }
 
+/**
+ * Do not let an idle response captured before a local start/stop/stream
+ * transition retire that transition's assistant owner. A running response has
+ * crossed StartTurn's atomic boundary and is safe to adopt; an explicit
+ * authoritative transcript refresh is safe for the same reason.
+ */
+export function shouldAdoptRuntimeAssistantOwner({
+  runtimeRunning = false,
+  localAuthoritative = false,
+  authoritativeRefresh = false,
+} = {}) {
+  return !!authoritativeRefresh || !!runtimeRunning || !localAuthoritative
+}
+
 function coldBlockRenderCost(block) {
   if (block?.type !== 'text') return 1
   // Markdown reports create work roughly in proportion to their source size,

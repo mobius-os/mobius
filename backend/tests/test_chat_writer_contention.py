@@ -54,6 +54,7 @@ def _seed_chat(
   pending=None,
   session_id="sess-1",
   pending_question_id=None,
+  active_assistant_message_id=None,
   title="Test chat",
   title_locked=False,
 ):
@@ -69,6 +70,7 @@ def _seed_chat(
       session_id=session_id,
       provider="claude",
       pending_question_id=pending_question_id,
+      active_assistant_message_id=active_assistant_message_id,
     )
     db.add(chat)
     db.commit()
@@ -116,6 +118,7 @@ def _load_chat(chat_id="c1"):
       "live_assistant": chat.live_assistant,
       "pending_messages": list(chat.pending_messages or []),
       "pending_question_id": chat.pending_question_id,
+      "active_assistant_message_id": chat.active_assistant_message_id,
       "session_id": chat.session_id,
       "provider": chat.provider,
       "title": chat.title,
@@ -143,12 +146,15 @@ def _load_run(run_token):
     db.close()
 
 
-def _assistant_msg(blocks, content=""):
+def _assistant_msg(blocks, content="", message_id=None):
   """Build an assistant-message snapshot the persist helpers accept."""
-  return {"role": "assistant", "content": content, "blocks": list(blocks)}
+  message = {"role": "assistant", "content": content, "blocks": list(blocks)}
+  if message_id is not None:
+    message["id"] = message_id
+  return message
 
 
-def _question_msg(question_id, content=""):
+def _question_msg(question_id, content="", message_id=None):
   """An assistant message carrying a single AskUserQuestion block."""
   return _assistant_msg(
     [
@@ -159,6 +165,7 @@ def _question_msg(question_id, content=""):
       }
     ],
     content=content,
+    message_id=message_id,
   )
 
 
@@ -224,13 +231,18 @@ def test_question_commit_commits_before_ack(actor):
   question."""
   _seed_chat(messages=[{"role": "user", "content": "hi", "ts": 1}])
   fut = actor.submit(
-    QuestionCommit(chat_id="c1", run_token="rt1", snapshot=_question_msg("q1"))
+    QuestionCommit(
+      chat_id="c1",
+      run_token="rt1",
+      snapshot=_question_msg("q1", message_id="assistant-question"),
+    )
   )
   assert _await(fut) is True
   # The ack has resolved; the row MUST already carry the question block.
   chat = _load_chat()
   assert chat["messages"][-1]["blocks"][0]["question_id"] == "q1"
   assert chat["pending_question_id"] == "q1"
+  assert chat["active_assistant_message_id"] == "assistant-question"
 
 
 # -- 3. question not broadcast on QuestionCommit fail ----------------------
@@ -472,6 +484,42 @@ def test_replace_transcript_broad_fences_other_token_snapshot(actor):
   assert chat["messages"][-1]["blocks"][0]["content"] == "replaced"
 
 
+def test_replace_transcript_rebuilds_question_and_owner_as_one_state(actor):
+  """A full transcript replacement cannot leave either derived scalar stale."""
+  _seed_chat(
+    messages=[{"role": "user", "content": "old", "ts": 1}],
+    pending_question_id="old-question",
+    active_assistant_message_id="assistant-old",
+  )
+  replacement = [
+    {"role": "user", "content": "new", "ts": 2},
+    {
+      "id": "assistant-current",
+      "role": "assistant",
+      "ts": 3,
+      "blocks": [{
+        "type": "question",
+        "question_id": "current-question",
+        "questions": [{"id": "pick", "question": "Choose?"}],
+      }],
+    },
+  ]
+
+  assert _await(actor.submit(ReplaceTranscript(
+    chat_id="c1", messages=replacement,
+  ))) is True
+  chat = _load_chat()
+  assert chat["pending_question_id"] == "current-question"
+  assert chat["active_assistant_message_id"] == "assistant-current"
+
+  assert _await(actor.submit(ReplaceTranscript(
+    chat_id="c1", messages=[{"role": "user", "content": "settled", "ts": 4}],
+  ))) is True
+  chat = _load_chat()
+  assert chat["pending_question_id"] is None
+  assert chat["active_assistant_message_id"] is None
+
+
 # -- 6. concurrent append/cancel/promote preserve order -------------------
 def test_concurrent_append_cancel_promote_preserve_order(actor):
   """Concurrent AppendPending / CancelPending / PromotePending never lose a
@@ -668,6 +716,7 @@ def test_start_turn_is_atomic(actor):
   assert chat["provider"] == "codex"
   assert chat["running_status"] == "running"
   assert chat["running_started_at"] is not None
+  assert chat["active_assistant_message_id"] == "rt1"
 
 
 def test_start_turn_keeps_a_useful_first_message_title_preview(actor):
@@ -828,6 +877,7 @@ def test_answering_owner_question_releases_pending_promotion(actor):
     messages=[question],
     pending=queued,
     pending_question_id="owner-decision",
+    active_assistant_message_id="assistant-owner-decision",
   )
 
   assert _await(actor.submit(AnswerQuestion(
@@ -836,6 +886,12 @@ def test_answering_owner_question_releases_pending_promotion(actor):
     question_id="owner-decision",
     answers={"Choose a direction.": "Continue"},
   ))) is True
+  answered = _load_chat()
+  assert answered["pending_question_id"] is None
+  assert (
+    answered["active_assistant_message_id"]
+    == "assistant-owner-decision"
+  )
   promoted = _await(actor.submit(PromotePending(
     chat_id="c1",
     run_token="released-promotion",
@@ -849,6 +905,7 @@ def test_answering_owner_question_releases_pending_promotion(actor):
   assert chat["pending_question_id"] is None
   assert chat["pending_messages"] == []
   assert chat["running_status"] == "running"
+  assert chat["active_assistant_message_id"] == "released-promotion"
   assert _load_run("released-promotion")["status"] == "running"
 
 
@@ -886,6 +943,7 @@ def test_promote_pending_collapses_all_followups(actor):
   assert [m["content"] for m in chat["messages"][-2:]] == ["first", "second"]
   assert chat["pending_messages"] == []
   assert chat["running_status"] == "running"
+  assert chat["active_assistant_message_id"] == "rt1"
 
 
 def test_promote_pending_names_a_new_chat_recovered_from_the_queue(actor):
@@ -1304,6 +1362,35 @@ def test_answer_question_no_block_raises(actor):
     _await(fut)
 
 
+def test_recovered_answer_retires_old_assistant_before_continuation(actor):
+  question = _question_msg(
+    "q-recovered", message_id="assistant-before-recovery",
+  )
+  _seed_chat(
+    messages=[{"role": "user", "content": "go", "ts": 1}, question],
+    pending_question_id="q-recovered",
+    active_assistant_message_id="assistant-before-recovery",
+  )
+
+  result = _await(actor.submit(AppendPending(
+    chat_id="c1",
+    user_msg={"role": "user", "content": "answer", "hidden": True, "ts": 3},
+    answers={"q-recovered": "Blue"},
+    question_id="q-recovered",
+    front=True,
+    require_answer_match=True,
+  )))
+
+  chat = _load_chat()
+  assert result["stored"]["content"] == "answer"
+  assert chat["messages"][-1]["blocks"][0]["answers"] == {
+    "q-recovered": "Blue",
+  }
+  assert chat["pending_question_id"] is None
+  assert chat["active_assistant_message_id"] is None
+  assert chat["pending_messages"][0]["content"] == "answer"
+
+
 # -- 12. stop-races-answer never resolves a cancelled future --------------
 def test_stop_races_answer_never_resolves_cancelled_future(actor):
   """If the caller's ack future is cancelled before the answer commits (the
@@ -1456,10 +1543,13 @@ def test_clear_pending_empty_queue_is_noop(actor):
   assert chat["pending_messages"] == []
 
 
-def test_finish_run_closes_durable_run(actor):
+def test_finish_run_closes_durable_run_and_retires_assistant_owner(actor):
   from datetime import UTC, datetime
 
-  cid = _seed_chat(messages=[{"role": "user", "content": "hi", "ts": 1}])
+  cid = _seed_chat(
+    messages=[{"role": "user", "content": "hi", "ts": 1}],
+    active_assistant_message_id="rt1",
+  )
   # Seed the run via a throwaway session.
   db = SessionLocal()
   try:
@@ -1478,6 +1568,43 @@ def test_finish_run_closes_durable_run(actor):
   chat = _load_chat()
   assert chat["running_status"] is None
   assert chat["running_started_at"] is None
+  assert chat["active_assistant_message_id"] is None
+
+
+def test_interrupted_finish_preserves_parked_question_owner(actor):
+  from datetime import UTC, datetime
+
+  question = _question_msg(
+    "owner-decision", message_id="assistant-owner-decision",
+  )
+  cid = _seed_chat(
+    messages=[question],
+    pending_question_id="owner-decision",
+    active_assistant_message_id="assistant-owner-decision",
+  )
+  db = SessionLocal()
+  try:
+    db.add(models.ChatRun(
+      id="rt-question",
+      chat_id=cid,
+      status="running",
+      provider="claude",
+      started_at=datetime.now(UTC),
+    ))
+    db.commit()
+  finally:
+    db.close()
+
+  _await(actor.submit(FinishRun(
+    chat_id=cid,
+    run_token="rt-question",
+    terminal_status="interrupted",
+  )))
+
+  chat = _load_chat(cid)
+  assert chat["running_status"] is None
+  assert chat["pending_question_id"] == "owner-decision"
+  assert chat["active_assistant_message_id"] == "assistant-owner-decision"
 
 
 def test_stale_finish_run_cannot_clear_successor_question(actor):
@@ -1498,7 +1625,7 @@ def test_stale_finish_run_cannot_clear_successor_question(actor):
   _await(actor.submit(QuestionCommit(
     chat_id="c1",
     run_token="new-run",
-    snapshot=_question_msg("new-question"),
+    snapshot=_question_msg("new-question", message_id="new-run"),
   )))
 
   _await(actor.submit(FinishRun(
@@ -1507,6 +1634,7 @@ def test_stale_finish_run_cannot_clear_successor_question(actor):
 
   chat = _load_chat()
   assert chat["pending_question_id"] == "new-question"
+  assert chat["active_assistant_message_id"] == "new-run"
   assert chat["running_status"] == "running"
   assert _load_run("old-run")["status"] == "interrupted"
   assert _load_run("new-run")["status"] == "running"
@@ -1514,7 +1642,9 @@ def test_stale_finish_run_cannot_clear_successor_question(actor):
   _await(actor.submit(FinishRun(
     chat_id="c1", run_token="new-run", terminal_status="completed",
   )))
-  assert _load_chat()["pending_question_id"] is None
+  chat = _load_chat()
+  assert chat["pending_question_id"] is None
+  assert chat["active_assistant_message_id"] is None
 
 
 def test_stale_wedged_recovery_cannot_clobber_new_run(actor):
@@ -1544,6 +1674,7 @@ def test_stale_wedged_recovery_cannot_clobber_new_run(actor):
   assert result is False
   chat = _load_chat()
   assert chat["running_status"] == "running"
+  assert chat["active_assistant_message_id"] == "new-run"
   assert [message["content"] for message in chat["messages"]] == ["old", "new"]
   assert _load_run("old-run")["status"] == "interrupted"
   assert _load_run("new-run")["status"] == "running"

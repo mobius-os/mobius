@@ -350,6 +350,7 @@ def test_recovered_answer_clears_pending_question_marker(
     try:
       row = db.query(models.Chat).filter(models.Chat.id == chat.id).first()
       row.pending_question_id = qid
+      row.active_assistant_message_id = "assistant-before-recovered-answer"
       db.commit()
     finally:
       db.close()
@@ -384,6 +385,7 @@ def test_recovered_answer_clears_pending_question_marker(
       # The marker MUST be cleared so the composer unblocks with the answer,
       # not only when the recovered turn eventually ends.
       assert row.pending_question_id is None
+      assert row.active_assistant_message_id == scheduled[0]["run_token"]
     finally:
       db.close()
 

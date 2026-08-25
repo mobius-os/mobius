@@ -118,7 +118,13 @@ import {
   isPendingQuestionSendFailure,
   sendFailureMessage,
 } from './sendFailure.js'
-import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, findTrailingAssistantPartialIndex, streamItemsHaveRenderableContent } from './streamPromotion.js'
+import {
+  assistantStreamBelongsToActiveMessage,
+  assistantStreamCoversMessage,
+  chooseActiveAssistantDataKey,
+  findTrailingAssistantPartialIndex,
+  streamItemsHaveRenderableContent,
+} from './streamPromotion.js'
 import {
   commitAssistantPromotion,
   deriveActiveAssistantSelection,
@@ -140,6 +146,7 @@ import {
   runtimeStreamAttachAction,
   shouldRetireRestoredQuestionSnapshot,
   shouldAttachRunningStream,
+  shouldAdoptRuntimeAssistantOwner,
   shouldRecoverSettledRuntime,
   shouldRetryStopAfterConfirm,
   stopConfirmedIdle,
@@ -483,6 +490,20 @@ export default function ChatView({
       { running },
     )
   }
+  // The server names the only assistant row allowed to own regenerable live
+  // stream state. Keep a synchronous ref for terminal/promotion callbacks;
+  // React state drives source selection for ordinary renders.
+  const [activeAssistantMessageId, setActiveAssistantMessageIdState] = useState(
+    () => cached?.activeAssistantMessageId ?? null,
+  )
+  const activeAssistantMessageIdRef = useRef(
+    cached?.activeAssistantMessageId ?? null,
+  )
+  const setActiveAssistantMessageId = useCallback((value) => {
+    const next = typeof value === 'string' && value ? value : null
+    activeAssistantMessageIdRef.current = next
+    setActiveAssistantMessageIdState(next)
+  }, [])
   const {
     input,
     inputValueRef,
@@ -1107,6 +1128,14 @@ export default function ChatView({
         data, latestGoalObjective(msgs),
       )
       setActiveGoalObjective(runtimeGoalObjective)
+      const adoptAssistantOwner = shouldAdoptRuntimeAssistantOwner({
+        runtimeRunning: !!data.running,
+        localAuthoritative: preserveLocalTurn,
+        authoritativeRefresh: authoritative,
+      })
+      if (adoptAssistantOwner) {
+        setActiveAssistantMessageId(data.active_assistant_message_id || null)
+      }
       setLiveQuestionId(data.pending_question_id || null)
       if (Array.isArray(data.waits)) setArmedWaits(data.waits)
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
@@ -1114,6 +1143,9 @@ export default function ChatView({
         activeGoalObjective: runtimeGoalObjective,
         pending_messages: data.pending_messages || [],
         pending_question_id: data.pending_question_id || null,
+        ...(adoptAssistantOwner ? {
+          activeAssistantMessageId: data.active_assistant_message_id || null,
+        } : {}),
         waits: data.waits || [],
       })
       // Reconcile pending queue against authoritative server state.
@@ -1127,6 +1159,7 @@ export default function ChatView({
       }
       return {
         running: !!data.running,
+        activeAssistantMessageId: data.active_assistant_message_id || null,
         pendingQuestionId: data.pending_question_id || null,
         pendingLimitResume: !!tailResumableBlock(msgs)?.pause?.resets_at,
       }
@@ -1141,6 +1174,7 @@ export default function ChatView({
     commitMessages,
     pendingQueue.hydrate,
     queryClient,
+    setActiveAssistantMessageId,
   ])
 
   // Active-turn runtime reconciliation. The SSE stream is authoritative for
@@ -1165,6 +1199,7 @@ export default function ChatView({
       const serverPending = data.pending_messages || []
       const runtime = {
         running: !!data.running,
+        activeAssistantMessageId: data.active_assistant_message_id || null,
         pendingQuestionId: data.pending_question_id || null,
       }
       // The SSE stream is the source of truth for "a turn is live" — this poll
@@ -1179,6 +1214,13 @@ export default function ChatView({
         localStartRequestRef.current?.chatId === String(chatId)
       const localAuthoritative =
         handlingStopRef.current || localStartInFlight || isStreamingRef.current
+      const adoptAssistantOwner = shouldAdoptRuntimeAssistantOwner({
+        runtimeRunning: runtime.running,
+        localAuthoritative,
+      })
+      if (adoptAssistantOwner) {
+        setActiveAssistantMessageId(runtime.activeAssistantMessageId)
+      }
       if (shouldRecoverSettledRuntime({
         runtimeWasObservedRunning: serverRunningRef.current,
         runtimeRunning: !!data.running,
@@ -1244,6 +1286,9 @@ export default function ChatView({
         activeGoalObjective: runtimeGoalObjective,
         pending_messages: serverPending,
         pending_question_id: pendingQuestionId,
+        ...(adoptAssistantOwner ? {
+          activeAssistantMessageId: runtime.activeAssistantMessageId,
+        } : {}),
         waits: data.waits || [],
       })
       // Don't let the fallback poll add/clobber the queue while a turn is live
@@ -1280,6 +1325,7 @@ export default function ChatView({
     messagesRef,
     pendingQueue.hydrate,
     queryClient,
+    setActiveAssistantMessageId,
   ])
 
   const handleCompactionStored = useCallback(
@@ -1355,8 +1401,15 @@ export default function ChatView({
       // one transcript boundary. A restored assistant may be bridged in place
       // above a newer local row, so committing the following rows separately
       // at the list tail makes a restart marker flash below that newer row.
-      promoteStreamToMessages({ followingMessages: promotedRows })
+      promoteStreamToMessages({
+        followingMessages: promotedRows,
+        authoritativeCut: true,
+      })
       if (continues) {
+        // The next physical run has been created but its assistant identity is
+        // established by the successor stream/runtime snapshot. Do not let the
+        // completed run's owner reject that fresh surface in the handoff gap.
+        setActiveAssistantMessageId(null)
         // Backend auto-promoted queued follow-ups into the next turn. Newer
         // backend code persists the visible rows separately while sending
         // combined text to the provider; older code returned one combined row.
@@ -1386,6 +1439,7 @@ export default function ChatView({
         setSending(true)
         setServerRunningState(true)
       } else {
+        setActiveAssistantMessageId(null)
         setSending(false)
         sendingRef.current = false
         setServerRunningState(false)
@@ -1431,6 +1485,7 @@ export default function ChatView({
     },
     onNeedsRefresh: fetchMessages,
     onQueuedTurnStarting: ({ ts, message } = {}) => {
+      setActiveAssistantMessageId(null)
       // A queued message is being promoted into its OWN run — the rail's
       // run-start boundary for queue drains. useStreamConnection fires this
       // callback during catch-up replay too, in event order, so a reconnect
@@ -1470,6 +1525,7 @@ export default function ChatView({
       content,
       messages: steeredBatch,
       assistantMessageId,
+      nextAssistantMessageId,
       sealedItems,
     }) => {
       // The steer's transcript split has COMMITTED (fired for both providers,
@@ -1516,7 +1572,12 @@ export default function ChatView({
         keepTurnOpen: true,
         items: sealedItems,
         assistantMessageId,
+        authoritativeCut: true,
       })
+      // The sealed segment was promoted under the previous owner above. The
+      // sink rotates synchronously at this cut, so adopt its successor before
+      // the hook re-bases streamItems onto the new segment after this callback.
+      setActiveAssistantMessageId(nextAssistantMessageId)
       const steeredIsFirstUser = isFirstVisibleUserMessage()
       // Arm the scroll mode BEFORE rendering the steered row. EventSource
       // callbacks are outside React's synthetic event layer, and query-cache
@@ -1793,6 +1854,7 @@ export default function ChatView({
     followingMessages = [],
     items: explicitItems = null,
     assistantMessageId: explicitAssistantMessageId = undefined,
+    authoritativeCut = false,
   } = {}) {
     const following = Array.isArray(followingMessages)
       ? followingMessages.filter(Boolean)
@@ -1805,6 +1867,21 @@ export default function ChatView({
       ? latestAssistantMessageIdRef.current
       : explicitAssistantMessageId
     if (items.length === 0 && following.length === 0) return
+    if (!authoritativeCut && !assistantStreamBelongsToActiveMessage(
+      assistantMessageId,
+      activeAssistantMessageIdRef.current,
+    )) {
+      // A restart can leave an old sessionStorage snapshot alive after the
+      // server has moved to another assistant. Regenerable stream state may be
+      // discarded, but continuation rows delivered with this boundary are
+      // durable and still belong at their timestamp-defined positions.
+      if (following.length > 0) {
+        commitMessages(prev => insertMessageBatchByTs(prev, following))
+      }
+      clearStreamItems?.()
+      promotedRef.current = !keepTurnOpen
+      return
+    }
     // A steer can cut over before the assistant emitted any real output — the
     // only buffered item is an empty/whitespace token. Sealing it would leave a
     // stray empty assistant bubble before the steered user row (the card-166
@@ -2044,6 +2121,9 @@ export default function ChatView({
         pendingQuestionId: runtime.pending_question_id,
       })
       setServerRunningLocalState(running)
+      setActiveAssistantMessageId(
+        runtime.active_assistant_message_id || null,
+      )
       setActiveGoalObjective(goalObjectiveFromRuntime(
         runtime, latestGoalObjective(visibleMessages),
       ))
@@ -2168,6 +2248,8 @@ export default function ChatView({
         )
         updateChatRuntimeCache(queryClient, queryKey, {
           running: !!runtime.running,
+          activeAssistantMessageId:
+            runtime.active_assistant_message_id || null,
           activeGoalObjective: runtimeGoalObjective,
           pending_messages: runtime.pending_messages || [],
           pending_question_id: runtime.pending_question_id || null,
@@ -2324,7 +2406,14 @@ export default function ChatView({
       loadingOlder.current = false
       disconnect()
     }
-  }, [chatId, loadNonce, hidden, searchReveal?.id, searchReveal?.anchorKey])
+  }, [
+    chatId,
+    hidden,
+    loadNonce,
+    searchReveal?.anchorKey,
+    searchReveal?.id,
+    setActiveAssistantMessageId,
+  ])
 
 
   // Paginate older messages. Captures a pre-prepend anchor so we can
@@ -4189,10 +4278,12 @@ export default function ChatView({
     messages,
     streamItems,
     streamAssistantMessageId,
+    activeAssistantMessageId,
     liveItemsRetired: retiredAssistantItemsRef.current === streamItems,
     findBridgeIndex: bridgeHook.findBridgeIndex,
   }), [
     bridgeMountInputs,
+    activeAssistantMessageId,
     messages,
     streamAssistantMessageId,
     streamItems,

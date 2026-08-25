@@ -95,6 +95,7 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
     offset: 12,
     total: 13,
     running: false,
+    active_assistant_message_id: 'assistant-current',
     active_goal_objective: 'Finish the migration',
     pending_messages: [{ id: 'queued' }],
     pending_question_id: 'question-1',
@@ -111,6 +112,7 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
   assert.equal(cached.restorationWindowComplete, true)
   assert.equal(cached.messages[0].blocks[0].status, 'done')
   assert.equal(cached.updated_at, source.updated_at)
+  assert.equal(cached.activeAssistantMessageId, 'assistant-current')
   assert.equal(source.messages[0].blocks[0].status, 'running', 'projection does not mutate the response')
   assert.equal(cached.offset, 12)
   assert.equal(cached.activeGoalObjective, 'Finish the migration')
@@ -222,6 +224,27 @@ test('idle foreground reconciliation refetches only a disproven unowned snapshot
   }), false, 'an active runtime remains owned by the stream path')
   assert.equal(shouldRefetchTranscriptForRuntime(cached, moved, true), false,
     'an optimistic local turn cannot be overwritten by a foreground poll')
+})
+
+test('a retained running snapshot requires the current assistant owner', () => {
+  const updated_at = '2026-07-30T12:00:00Z'
+  const cached = {
+    updated_at,
+    activeAssistantMessageId: 'assistant-before-restart',
+    messages: [],
+  }
+  assert.equal(chatSnapshotMatchesRuntime(cached, {
+    updated_at,
+    active_assistant_message_id: 'assistant-before-restart',
+  }), true)
+  assert.equal(chatSnapshotMatchesRuntime(cached, {
+    updated_at,
+    active_assistant_message_id: 'assistant-current',
+  }), false)
+  assert.equal(chatSnapshotMatchesRuntime({ updated_at, messages: [] }, {
+    updated_at,
+    active_assistant_message_id: 'assistant-current',
+  }), false, 'a legacy cache cannot claim a newly identified live owner')
 })
 
 test('pending question lookup requires the exact unanswered owner row', () => {
