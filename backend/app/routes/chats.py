@@ -1722,6 +1722,7 @@ def get_chat_agent_context(
 @router.get("/{chat_id}/usage")
 def get_chat_usage(
   chat_id: str,
+  include_runs: bool = True,
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
@@ -1784,7 +1785,7 @@ def get_chat_usage(
         "usage": run.usage_json,
       }
       for run in runs
-    ],
+    ] if include_runs else [],
   }
 
 

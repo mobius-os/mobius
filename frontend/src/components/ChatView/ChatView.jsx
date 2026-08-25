@@ -337,7 +337,7 @@ export default function ChatView({
   // and the full breakdown panel. Not fetched for embedded app-owned chats
   // (matches BrainUsageButton's own usageEnabled gate) since the owner never
   // sees the composer chrome there.
-  const chatUsageQuery = chatQueries.usage.useQuery(chatId, {
+  const chatUsageQuery = chatQueries.usageSummary.useQuery(chatId, {
     enabled: !embedded && !!chatId,
   })
   const chatUsageAriaSummary = formatUsageAriaSummary(chatUsageQuery.data?.totals)
@@ -1392,6 +1392,7 @@ export default function ChatView({
       // refetching the cheap per-chat summary here rather than threading a
       // second usage-carrying event through the whole reducer pipeline.
       chatQueries.usage.invalidate(queryClient, chatId)
+      chatQueries.usageSummary.invalidate(queryClient, chatId)
       onStreamEnd?.({ continues })
     },
     onSystemEvent: event => {

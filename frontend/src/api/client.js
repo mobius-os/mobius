@@ -467,6 +467,9 @@ export const api = {
     usage: (chatId, options = {}) => apiFetch(
       `/chats/${encodeURIComponent(chatId)}/usage`, options,
     ),
+    usageSummary: (chatId, options = {}) => apiFetch(
+      `/chats/${encodeURIComponent(chatId)}/usage?include_runs=false`, options,
+    ),
   },
   secureInputs: {
     submit: (chatId, requestId, payload) => apiFetch(
