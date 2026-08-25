@@ -241,6 +241,29 @@ def test_chat_detail_user_only_chat_keeps_its_committed_provider(
   assert body["effective_agent_settings"]["model"] is None
 
 
+def test_chat_detail_per_chat_model_outranks_stored_provider(
+  client, auth, db,
+):
+  """An explicit per-chat model decides the picker's provider. Stored provider
+  and global default both say claude here, so only the model-priority branch can
+  report the codex model's provider — and without it the response would filter
+  that per-chat model away to no model at all."""
+  from app import models
+
+  _write_global_settings({"model": "claude-sonnet-5", "effort": "high"})
+  cid = client.post(
+    "/api/chats", headers=auth, json={"title": "per-chat model"},
+  ).json()["id"]
+  row = db.query(models.Chat).filter(models.Chat.id == cid).first()
+  row.provider = "claude"
+  row.agent_settings_json = {"model": "gpt-5.6-sol"}
+  db.commit()
+
+  body = client.get(f"/api/chats/{cid}", headers=auth).json()
+  assert body["provider"] == "codex"
+  assert body["effective_agent_settings"]["model"] == "gpt-5.6-sol"
+
+
 def test_patch_chat_writes_override(client, auth, chat):
   """PATCH /chats/{id} sets agent_settings_json and returns effective."""
   _write_global_settings({"model": "default-model"})
