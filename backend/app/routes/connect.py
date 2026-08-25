@@ -1100,21 +1100,23 @@ async def legacy_command_socket(websocket: WebSocket) -> None:
   sender = asyncio.create_task(send_events())
   receiver = asyncio.create_task(receive_events())
   superseded = asyncio.create_task(ch.closed.wait())
+  tasks = {sender, receiver, superseded}
   try:
-    done, pending = await asyncio.wait(
-      {sender, receiver, superseded}, return_when=asyncio.FIRST_COMPLETED,
+    done, _ = await asyncio.wait(
+      tasks, return_when=asyncio.FIRST_COMPLETED,
     )
-    for task in pending:
-      task.cancel()
-    await asyncio.gather(*pending, return_exceptions=True)
     for task in done:
       try:
         task.result()
       except WebSocketDisconnect:
         pass
-  except WebSocketDisconnect:
+  except (asyncio.CancelledError, WebSocketDisconnect):
     pass
   finally:
+    for task in tasks:
+      if not task.done():
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
     if _channels.get(host_id) is ch:
       del _channels[host_id]
     for fut in ch.control_pending.values():
