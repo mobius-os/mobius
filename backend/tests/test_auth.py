@@ -567,7 +567,7 @@ def test_providers_models_returns_known_models_on_missing_creds(
   ]
   assert set(claude_ids) == DEFAULT_VISIBLE_MODELS["claude"]
   assert set(codex_ids) == DEFAULT_VISIBLE_MODELS["codex"]
-  assert [m["id"] for m in body["mobius"]] == ["inkling"]
+  assert [m["id"] for m in body["mobius"]] == ["spark", "inkling"]
   # Claude rows carry a tier derived from the id.
   by_id = {m["id"]: m for m in body["claude"]}
   assert by_id["claude-opus-4-8"]["name"] == "claude-opus-4-8"
@@ -577,6 +577,7 @@ def test_providers_models_returns_known_models_on_missing_creds(
   for row in body["codex"]:
     assert "tier" not in row
     assert "id" in row and "name" in row
+  assert [m["name"] for m in body["mobius"]] == ["Spark", "Evolve"]
   # `available` / `provider` from the shell-facing /api/models response
   # are NOT leaked through; mini-apps see only id + name (+ tier).
   for rows in body.values():

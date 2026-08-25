@@ -743,7 +743,9 @@ def test_model_registry_returns_known_models_on_missing_creds(client, auth):
   assert codex_ids == KNOWN_MODELS["codex"]
   mobius_ids = [m["id"] for m in body["providers"]["mobius"]]
   assert mobius_ids == KNOWN_MODELS["mobius"]
-  assert body["providers"]["mobius"][0]["label"] == "Evolve"
+  assert [m["label"] for m in body["providers"]["mobius"]] == [
+    "Spark", "Evolve",
+  ]
   # Offline fallbacks use the exact model id; live catalogs own display names.
   by_id = {m["id"]: m for m in body["providers"]["claude"]}
   assert by_id["claude-opus-4-8"]["label"] == "claude-opus-4-8"
