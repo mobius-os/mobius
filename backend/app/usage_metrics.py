@@ -137,8 +137,10 @@ def normalize_codex_usage(
   first_usage: Any | None,
   final_usage: Any | None,
   call_usages: list[Any] | None = None,
+  *,
+  model: str | None = None,
 ) -> dict | None:
-  """Derive one turn aggregate plus exact per-model-call billing inputs."""
+  """Derive one turn aggregate plus its model and billing inputs."""
   if final_usage is None:
     return None
   first_usage = first_usage or final_usage
@@ -178,6 +180,7 @@ def normalize_codex_usage(
   ]
   return {
     "provider": "codex",
+    "model": model,
     "scope": "turn",
     "calculation": calculation,
     "input_tokens": input_total,
@@ -199,15 +202,14 @@ def normalize_codex_usage(
   }
 
 
-# OpenAI Codex per-token USD rates as (uncached_input, cached_input_read,
-# output) dollars per 1,000,000 tokens. Sourced from OpenAI's published API
-# pricing (July 2026); cached reads are the standard 90%-discounted input rate.
-# Update these as OpenAI revises pricing; a model absent from this table is left
-# uncharged (cost None) rather than mispriced.
+# OpenAI Codex standard rates as (uncached input, cached input, output) USD per
+# 1M tokens, refreshed from the published rate card on 2026-08-21. Sol's entry
+# includes the promotion announced that day. A model absent from this table is
+# left unpriced rather than guessed.
 CODEX_MODEL_RATES: dict[str, tuple[float, float, float]] = {
-  "gpt-5.6-sol": (5.00, 0.50, 30.00),
-  "gpt-5.6-terra": (2.50, 0.25, 15.00),
-  "gpt-5.6-luna": (1.00, 0.10, 6.00),
+  "gpt-5.6-sol": (4.00, 0.40, 20.00),
+  "gpt-5.6-terra": (2.00, 0.20, 12.00),
+  "gpt-5.6-luna": (0.20, 0.02, 1.20),
   "gpt-5.5": (5.00, 0.50, 30.00),
   "gpt-5.4": (2.50, 0.25, 15.00),
   "gpt-5.4-mini": (0.75, 0.075, 4.50),

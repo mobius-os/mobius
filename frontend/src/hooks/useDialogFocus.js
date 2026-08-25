@@ -6,12 +6,18 @@ const FOCUSABLE = [
   'input:not([disabled])',
   'select:not([disabled])',
   'textarea:not([disabled])',
+  'summary',
   '[tabindex]:not([tabindex="-1"])',
 ].join(',')
 
 let bodyScrollLockCount = 0
 let bodyOverflowBeforeLock = ''
 const dialogStack = []
+
+export function dialogFocusableElements(container) {
+  return [...container.querySelectorAll(FOCUSABLE)]
+    .filter(element => !element.hidden && element.getClientRects().length > 0)
+}
 
 function lockBodyScroll() {
   if (bodyScrollLockCount === 0) {
@@ -76,7 +82,7 @@ export default function useDialogFocus({
         || dialogStack.at(-1) !== stackEntry
       ) return
       const target = initialFocusRef?.current
-        || container.querySelector(FOCUSABLE)
+        || dialogFocusableElements(container)[0]
         || container
       target?.focus?.({ preventScroll: true })
     }
@@ -93,8 +99,7 @@ export default function useDialogFocus({
         return
       }
       if (event.key !== 'Tab') return
-      const focusable = [...container.querySelectorAll(FOCUSABLE)]
-        .filter(element => !element.hidden && element.getClientRects().length > 0)
+      const focusable = dialogFocusableElements(container)
       if (focusable.length === 0) {
         event.preventDefault()
         container.focus?.()

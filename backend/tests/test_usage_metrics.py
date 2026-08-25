@@ -88,9 +88,10 @@ def test_codex_thread_delta_sums_every_model_call_in_the_turn():
     model_context_window=200_000,
   )
 
-  usage = normalize_codex_usage(first, final)
+  usage = normalize_codex_usage(first, final, model="gpt-5.6-sol")
 
   assert usage is not None
+  assert usage["model"] == "gpt-5.6-sol"
   assert usage["calculation"] == "thread_delta"
   assert usage["input_tokens"] == 900
   assert usage["cache_read_input_tokens"] == 500
@@ -279,25 +280,25 @@ def test_codex_impossible_final_total_uses_latest_call_fallback():
 def test_codex_cost_usd_prices_known_models():
   from app.usage_metrics import codex_cost_usd
 
-  # gpt-5.6-sol: $5 uncached / $0.50 cached-read / $30 output per 1M tokens.
+  # gpt-5.6-sol: $4 uncached / $0.40 cached-read / $20 output per 1M tokens.
   metrics = {
     "uncached_input_tokens": 200_000,
     "cache_read_input_tokens": 800_000,
     "output_tokens": 100_000,
   }
-  # (200000*5 + 800000*0.5 + 100000*30) / 1e6 = 4.4
-  assert codex_cost_usd("gpt-5.6-sol", metrics) == 4.4
+  # (200000*4 + 800000*0.4 + 100000*20) / 1e6 = 3.12
+  assert codex_cost_usd("gpt-5.6-sol", metrics) == 3.12
 
   # Each column priced in isolation, 1M tokens each.
   assert codex_cost_usd(
     "gpt-5.6-terra", {"uncached_input_tokens": 1_000_000}
-  ) == 2.5
+  ) == 2.0
   assert codex_cost_usd(
     "gpt-5.6-sol", {"cache_read_input_tokens": 1_000_000}
-  ) == 0.5
+  ) == 0.4
   assert codex_cost_usd(
     "gpt-5.6-luna", {"output_tokens": 1_000_000}
-  ) == 6.0
+  ) == 1.2
   assert codex_cost_usd(
     "gpt-5.4-mini", {"uncached_input_tokens": 1_000_000}
   ) == 0.75
@@ -330,10 +331,10 @@ def test_codex_cache_writes_are_normalized_and_priced():
   assert metrics["cache_read_input_tokens"] == 100
   assert metrics["cache_creation_input_tokens"] == 600
 
-  # Sol cache writes cost 1.25 × its $5/M uncached-input rate.
+  # Sol cache writes cost 1.25 × its $4/M uncached-input rate.
   assert codex_cost_usd("gpt-5.6-sol", {
     "cache_creation_input_tokens": 1_000_000,
-  }) == 6.25
+  }) == 5.0
 
 
 def test_codex_long_context_is_priced_per_model_call():
@@ -345,10 +346,10 @@ def test_codex_long_context_is_priced_per_model_call():
     "cache_write_input_tokens": 0,
     "output_tokens": 100_000,
   }
-  # Sol's full >272K request: input 2× ($10/M), output 1.5× ($45/M).
+  # Sol's full >272K request: input 2× ($8/M), output 1.5× ($30/M).
   assert codex_cost_usd("gpt-5.6-sol", {
     "model_calls": [long_call],
-  }) == 7.5
+  }) == 5.4
 
   # Two ordinary calls must not be mistaken for one 400K-token request.
   ordinary_call = {
@@ -359,7 +360,7 @@ def test_codex_long_context_is_priced_per_model_call():
   }
   assert codex_cost_usd("gpt-5.6-sol", {
     "model_calls": [ordinary_call, ordinary_call],
-  }) == 2.0
+  }) == 1.6
 
 
 def test_codex_cost_usd_none_for_unpriced_or_missing():
@@ -395,7 +396,7 @@ def test_codex_cost_usd_flows_from_normalized_usage():
   assert metrics["uncached_input_tokens"] == 1_000
   assert metrics["cache_read_input_tokens"] == 0
   assert metrics["output_tokens"] == 500
-  # gpt-5.6-terra: 1000 uncached * $2.50 + 500 output * $15, per 1M = 0.01.
+  # gpt-5.6-terra: 1000 uncached * $2 + 500 output * $12, per 1M = 0.008.
   assert codex_cost_usd("gpt-5.6-terra", metrics) == round(
-    (1_000 * 2.5 + 500 * 15.0) / 1_000_000, 6
+    (1_000 * 2.0 + 500 * 12.0) / 1_000_000, 6
   )

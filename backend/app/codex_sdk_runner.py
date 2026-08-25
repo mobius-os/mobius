@@ -1674,6 +1674,7 @@ async def run_codex_sdk_turn(
         first_token_usage,
         final_token_usage,
         call_token_usages,
+        model=model,
       )
       result["usage_metrics"] = metrics
       # Codex reports tokens but no dollar cost; derive it from the rate card so
