@@ -189,6 +189,30 @@ def test_settings_view_provider_follows_remembered_model_over_drift(
   assert body["agent_settings"]["model"] == "gpt-5.6-sol"
 
 
+def test_chat_detail_pristine_provider_follows_global_model_over_drift(
+  client, auth, db,
+):
+  """A pristine chat's picker shows the model it would actually use. With a
+  drifted stored provider and no per-chat model, the detail derives the provider
+  from the live global model instead of surfacing no model at all."""
+  from app import models
+
+  _write_global_settings({"model": "gpt-5.6-sol", "effort": "high"})
+  cid = client.post(
+    "/api/chats", headers=auth, json={"title": "drifted"},
+  ).json()["id"]
+  # Simulate a chat created before the global model's family changed: stored
+  # provider frozen on claude, no per-chat model, no assistant turns.
+  row = db.query(models.Chat).filter(models.Chat.id == cid).first()
+  row.provider = "claude"
+  row.agent_settings_json = None
+  db.commit()
+
+  body = client.get(f"/api/chats/{cid}", headers=auth).json()
+  assert body["provider"] == "codex"
+  assert body["effective_agent_settings"]["model"] == "gpt-5.6-sol"
+
+
 def test_patch_chat_writes_override(client, auth, chat):
   """PATCH /chats/{id} sets agent_settings_json and returns effective."""
   _write_global_settings({"model": "default-model"})

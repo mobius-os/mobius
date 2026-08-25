@@ -535,8 +535,24 @@ def _chat_detail_response(
       next_page[relative_index] = projected_message
     page = next_page
 
-  provider = chat.provider or "claude"
   settings_obj = _coerce_agent_settings(chat.agent_settings_json) or None
+  # The picker's current model must match what a message would actually use. A
+  # chat with no per-chat model reads the LIVE global default model, but its
+  # stored provider was frozen at creation; if the global model's family has
+  # since changed, effective_agent_settings(provider=chat.provider) resolves no
+  # model and the picker shows nothing. Derive the display provider the same way
+  # the send path does: an explicit per-chat model wins; otherwise a pristine
+  # chat follows the current global model (the single source of truth); a chat
+  # that already ran keeps its committed provider.
+  _has_assistant_turns = any(m.get("role") == "assistant" for m in all_msgs)
+  provider = (
+    providers.provider_of_model((settings_obj or {}).get("model"))
+    or (
+      chat.provider or "claude"
+      if _has_assistant_turns
+      else providers.owner_default_provider(get_settings().data_dir, chat.provider)
+    )
+  )
   active_goal_objective = running_goal_objective(db, chat.id)
   response = {
     "id": chat.id,
@@ -562,9 +578,7 @@ def _chat_detail_response(
       settings_obj,
       provider=provider,
     ),
-    "has_assistant_turns": any(
-      message.get("role") == "assistant" for message in all_msgs
-    ),
+    "has_assistant_turns": _has_assistant_turns,
     # Armed durable waits: the visible "Waiting for …" state. Refreshed by the
     # detail refetches the run lifecycle already triggers, so declare (during a
     # run) and resume (a new run) both reach the UI without extra plumbing.
