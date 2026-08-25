@@ -1764,6 +1764,25 @@ test.describe('Drawer state machine — extended invariants', () => {
     expect(await page.evaluate(() => !!document.querySelector('.settings'))).toBe(true)
   })
 
+  test('20a. returning to a chat through browser history restores composer focus', async ({ page }) => {
+    await setup(page, { width: 1280, height: 800 })
+
+    const paintedComposer = page.locator(
+      '[data-chat-surface="painted"] textarea[aria-label="Message Möbius…"]',
+    )
+    await paintedComposer.focus()
+    await expect(paintedComposer).toBeFocused()
+
+    // Cmd+,/. invokes this same browser traversal outside the app. The route
+    // restore must carry the outgoing chat's keyboard-forward intent back to
+    // its real composer, rather than leaving focus on the document body.
+    await page.getByRole('button', { name: 'Apps', exact: true }).click()
+    await expect(page.getByRole('region', { name: 'Installed apps' })).toBeVisible()
+
+    await goBack(page)
+    await expect(paintedComposer).toBeFocused()
+  })
+
   test('20b. Forward to an unconsumed drawer sentinel reopens the drawer', async ({ page }) => {
     await setup(page)
     await openDrawer(page)

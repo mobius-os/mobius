@@ -325,8 +325,8 @@ test('direct chat actions hand focus to the destination composer', () => {
   assert.match(shell, /className="shell__composer-focus-lease"[\s\S]*aria-label="Restoring message draft"/,
     'the hidden lease must not impersonate the visible Message Möbius composer in the accessibility tree')
   assert.match(shell,
-    /beforeRestoreRouteRef\.current = \(route\) => \{[\s\S]*route\?\.view !== 'chat'[\s\S]*reserveTouchDraftComposer\(route\.chatId\)/,
-    'Back and Forward must use the same draft-only touch focus handoff')
+    /beforeRestoreRouteRef\.current = \(route\) => \{[\s\S]*route\?\.view !== 'chat'[\s\S]*focusSelectedChatComposer\(route\.chatId\)/,
+    'Back and Forward must use the same destination-composer focus handoff')
   assert.match(shell, /const beforeRestoreRouteRef = useRef\(null\)/)
   assert.match(shell, /beforeRestoreRouteRef,\s*\}\)/)
   assert.match(
