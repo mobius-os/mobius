@@ -30,7 +30,7 @@ export function formatUsageStripText(totals) {
   const total = formatTokenCount(totals.total_tokens)
   if (cost === null && !input && !output && !total) return null
   const parts = ['Usage']
-  if (cost !== null) parts.push(`Est. ${cost}`)
+  if (cost !== null) parts.push(cost)
   if (input || output) {
     parts.push([
       input && `${input} in`,
@@ -45,7 +45,7 @@ export function formatUsageAriaSummary(totals) {
   const cost = formatCostUsd(totals.cost_usd)
   const tokens = formatTokenCount(totals.total_tokens)
   const parts = []
-  if (cost !== null) parts.push(`estimated cost ${cost}`)
+  if (cost !== null) parts.push(`reported cost ${cost}`)
   if (tokens) parts.push(`${tokens} tokens`)
   return parts.length ? `Chat usage so far: ${parts.join(', ')}` : 'Usage not yet available for this chat'
 }

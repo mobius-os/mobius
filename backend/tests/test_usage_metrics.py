@@ -277,36 +277,7 @@ def test_codex_impossible_final_total_uses_latest_call_fallback():
   assert usage["total_tokens"] == 240
 
 
-def test_codex_cost_usd_prices_known_models():
-  from app.usage_metrics import codex_cost_usd
-
-  # gpt-5.6-sol: $4 uncached / $0.40 cached-read / $20 output per 1M tokens.
-  metrics = {
-    "uncached_input_tokens": 200_000,
-    "cache_read_input_tokens": 800_000,
-    "output_tokens": 100_000,
-  }
-  # (200000*4 + 800000*0.4 + 100000*20) / 1e6 = 3.12
-  assert codex_cost_usd("gpt-5.6-sol", metrics) == 3.12
-
-  # Each column priced in isolation, 1M tokens each.
-  assert codex_cost_usd(
-    "gpt-5.6-terra", {"uncached_input_tokens": 1_000_000}
-  ) == 2.0
-  assert codex_cost_usd(
-    "gpt-5.6-sol", {"cache_read_input_tokens": 1_000_000}
-  ) == 0.4
-  assert codex_cost_usd(
-    "gpt-5.6-luna", {"output_tokens": 1_000_000}
-  ) == 1.2
-  assert codex_cost_usd(
-    "gpt-5.4-mini", {"uncached_input_tokens": 1_000_000}
-  ) == 0.75
-
-
-def test_codex_cache_writes_are_normalized_and_priced():
-  from app.usage_metrics import codex_cost_usd
-
+def test_codex_cache_writes_are_normalized_without_guessing_cost():
   usage = SimpleNamespace(
     last=_breakdown(
       input_tokens=1_000,
@@ -330,73 +301,3 @@ def test_codex_cache_writes_are_normalized_and_priced():
   assert metrics["uncached_input_tokens"] == 300
   assert metrics["cache_read_input_tokens"] == 100
   assert metrics["cache_creation_input_tokens"] == 600
-
-  # Sol cache writes cost 1.25 × its $4/M uncached-input rate.
-  assert codex_cost_usd("gpt-5.6-sol", {
-    "cache_creation_input_tokens": 1_000_000,
-  }) == 5.0
-
-
-def test_codex_long_context_is_priced_per_model_call():
-  from app.usage_metrics import codex_cost_usd
-
-  long_call = {
-    "input_tokens": 300_000,
-    "cached_input_tokens": 0,
-    "cache_write_input_tokens": 0,
-    "output_tokens": 100_000,
-  }
-  # Sol's full >272K request: input 2× ($8/M), output 1.5× ($30/M).
-  assert codex_cost_usd("gpt-5.6-sol", {
-    "model_calls": [long_call],
-  }) == 5.4
-
-  # Two ordinary calls must not be mistaken for one 400K-token request.
-  ordinary_call = {
-    "input_tokens": 200_000,
-    "cached_input_tokens": 0,
-    "cache_write_input_tokens": 0,
-    "output_tokens": 0,
-  }
-  assert codex_cost_usd("gpt-5.6-sol", {
-    "model_calls": [ordinary_call, ordinary_call],
-  }) == 1.6
-
-
-def test_codex_cost_usd_none_for_unpriced_or_missing():
-  from app.usage_metrics import codex_cost_usd
-
-  metrics = {"uncached_input_tokens": 1_000_000}
-  # Unpriced model (e.g. the codex-spark tier is absent) is left uncharged,
-  # never guessed — same as the pre-existing cost_usd=None behavior.
-  assert codex_cost_usd("gpt-5.3-codex-spark", metrics) is None
-  assert codex_cost_usd(None, metrics) is None
-  assert codex_cost_usd("gpt-5.6-sol", None) is None
-  assert codex_cost_usd("gpt-5.6-sol", {}) is None
-
-
-def test_codex_cost_usd_flows_from_normalized_usage():
-  # End-to-end: real normalize_codex_usage output feeds the pricer, proving the
-  # field names line up (uncached_input_tokens / cache_read_input_tokens /
-  # output_tokens) rather than only testing a hand-built dict.
-  from app.usage_metrics import codex_cost_usd, normalize_codex_usage
-
-  usage = SimpleNamespace(
-    last=_breakdown(
-      input_tokens=1_000, cached_input_tokens=0,
-      output_tokens=500, reasoning_output_tokens=200, total_tokens=1_500,
-    ),
-    total=_breakdown(
-      input_tokens=1_000, cached_input_tokens=0,
-      output_tokens=500, reasoning_output_tokens=200, total_tokens=1_500,
-    ),
-    model_context_window=200_000,
-  )
-  metrics = normalize_codex_usage(usage, usage)
-  assert metrics["uncached_input_tokens"] == 1_000
-  assert metrics["cache_read_input_tokens"] == 0
-  assert metrics["output_tokens"] == 500
-  # gpt-5.6-terra: 1000 uncached * $2 + 500 output * $12, per 1M = 0.008.
-  assert codex_cost_usd("gpt-5.6-terra", metrics) == round(
-    (1_000 * 2.0 + 500 * 12.0) / 1_000_000, 6
-  )

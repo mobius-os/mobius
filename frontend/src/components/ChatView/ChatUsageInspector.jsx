@@ -69,8 +69,8 @@ function RunSummary({ run, expandable }) {
   const when = formatTimestamp(run.started_at) || 'Unknown time'
   const cost = formatCostUsd(run.cost_usd)
   const outcome = cost
-    ? `Est. ${cost}`
-    : (run.status === 'completed' ? 'No estimate' : statusLabel(run.status))
+    ? cost
+    : (run.status === 'completed' ? 'Cost unavailable' : statusLabel(run.status))
   const content = (
     <>
       <span className="cui-run__when">{when}</span>
@@ -134,15 +134,15 @@ function UsageData({ data }) {
   return (
     <>
       <div className="cui-totals">
-        <TotalsCell label="Estimated cost" value={formatCostUsd(totals.cost_usd)} />
+        <TotalsCell label="Reported cost" value={formatCostUsd(totals.cost_usd)} />
         <TotalsCell label="Fresh input" value={formatTokenCount(freshInputTokens(totals))} />
         <TotalsCell label="Cached input" value={formatTokenCount(totals.cache_read_input_tokens)} />
         <TotalsCell label="Output" value={formatTokenCount(totals.output_tokens)} />
       </div>
       <p className="cui__note">
         <InfoCircle width={14} height={14} aria-hidden="true" />
-        Estimates use published standard provider rates; plan charges can differ.
-        Reasoning is included in output.
+        Cost appears only when the provider reports it; token counts remain
+        available without a price. Reasoning is included in output.
       </p>
       {missingUsage && (
         <p className="cui__note">
@@ -184,7 +184,7 @@ export default function ChatUsageInspector({ chatId, onClose }) {
         <header className="cui__head">
           <div>
             <h2 id="cui-title" className="cui__title">Usage</h2>
-            <p className="cui__subtitle">Tokens and estimated API cost for this chat.</p>
+            <p className="cui__subtitle">Tokens and provider-reported cost for this chat.</p>
           </div>
           {onClose && (
             <button

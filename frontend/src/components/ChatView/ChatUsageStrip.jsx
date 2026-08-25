@@ -12,7 +12,7 @@ export default function ChatUsageStrip({ totals, onOpen }) {
         type="button"
         className="chat__usage-strip"
         onClick={onOpen}
-        aria-label={`${text} for this chat. Open usage and estimated cost breakdown.`}
+        aria-label={`${text} for this chat. Open usage and reported cost breakdown.`}
       >
         <span>{text}</span>
         <ChevronRight width={14} height={14} aria-hidden="true" />

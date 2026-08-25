@@ -114,7 +114,7 @@ from app.question_bridge import (
   park_question,
 )
 from app.runtime_types import RunnerResult
-from app.usage_metrics import codex_cost_usd, normalize_codex_usage
+from app.usage_metrics import normalize_codex_usage
 from app.runner_registry import RunnerKind, registry
 from app.memory_observability import record_memory_checkpoint_once
 
@@ -1677,12 +1677,6 @@ async def run_codex_sdk_turn(
         model=model,
       )
       result["usage_metrics"] = metrics
-      # Codex reports tokens but no dollar cost; derive it from the rate card so
-      # a Codex chat records real spend like a Claude chat instead of always
-      # $0. Only overrides the caller's None when a priced model + usage exist.
-      cost = codex_cost_usd(model, metrics)
-      if cost is not None:
-        result["cost_usd"] = cost
     return result
 
   def aborted_result() -> RunnerResult:
