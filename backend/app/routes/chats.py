@@ -1227,10 +1227,10 @@ async def patch_chat(
     db.commit()
     db.refresh(chat)
     if chat.title != previous_title:
-      # The platform summary publisher PATCHes the generated name immediately
-      # after its durable note CAS. Publish only committed truth so every open
-      # shell can refresh its drawer and tab labels without waiting for another
-      # drawer open or chat-list poll. Manual-title precedence still lives above.
+      # Manual rename and compatibility callers share this projection path.
+      # The normal summary publisher commits in-process through
+      # `_sync_generated_chat_title`; publish only committed route truth here
+      # so older callers update every open drawer and tab without a later poll.
       get_system_broadcast().publish(renamed_event(chat))
     # Record a real provider switch (Claude <-> Codex) once, after this first
     # commit — NOT after the owner-provider mirror commit below, which would
