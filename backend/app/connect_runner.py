@@ -18,6 +18,7 @@ Manage the installed service:
     python3 ~/.mobius-connect/runner.py --uninstall
 """
 import argparse
+from collections import deque
 import json
 import os
 import platform
@@ -25,6 +26,7 @@ import signal
 import ssl
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -140,7 +142,9 @@ def _install_systemd(py):
     with open(SYSTEMD_UNIT, "w", encoding="utf-8") as fh:
         fh.write(unit)
     _run(["systemctl", "--user", "daemon-reload"])
-    r = _run(["systemctl", "--user", "enable", "--now", "mobius-connect.service"])
+    r = _run(["systemctl", "--user", "enable", "mobius-connect.service"])
+    if r.returncode == 0:
+        r = _run(["systemctl", "--user", "restart", "mobius-connect.service"])
     if r.returncode != 0:
         print("systemctl --user failed: %s" % r.stderr.strip())
         return _install_background(py)
@@ -269,7 +273,7 @@ def _terminate_process_tree(proc):
             proc.wait()
 
 
-def _run_command(cmd, cwd, timeout):
+def _spawn_command(cmd, cwd):
     popen_args = {
         "shell": True,
         "stdout": subprocess.PIPE,
@@ -281,9 +285,13 @@ def _run_command(cmd, cwd, timeout):
         popen_args["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         popen_args["start_new_session"] = True
+    return subprocess.Popen(cmd, **popen_args)
+
+
+def _run_command(cmd, cwd, timeout):
     proc = None
     try:
-        proc = subprocess.Popen(cmd, **popen_args)
+        proc = _spawn_command(cmd, cwd)
         stdout, stderr = proc.communicate(timeout=timeout)
         return stdout, stderr, proc.returncode, False
     except subprocess.TimeoutExpired:
@@ -299,31 +307,246 @@ def _run_command(cmd, cwd, timeout):
         return "", "runner error: %s" % exc, 1, False
 
 
+class _CommandRunner:
+    """Own one subprocess and retain lifecycle messages across reconnects."""
+
+    def __init__(self, base, token):
+        self.base = base
+        self.token = token
+        self.lock = threading.Lock()
+        self.flush_lock = threading.Lock()
+        self.active = None
+        self.outbox = deque()
+
+    def _retain(self, message):
+        with self.lock:
+            self.outbox.append(message)
+
+    def pending_messages(self):
+        with self.lock:
+            return list(self.outbox)
+
+    def acknowledge_message(self, message):
+        with self.lock:
+            for index, pending in enumerate(self.outbox):
+                if pending is message:
+                    del self.outbox[index]
+                    return
+
+    def snapshot(self):
+        with self.lock:
+            active_id = self.active["request_id"] if self.active else None
+            pending = [
+                message.get("request_id") for message in self.outbox
+                if message.get("type") == "result" and message.get("request_id")
+            ]
+        return active_id, pending
+
+    def flush_pending_results(self):
+        """Retry retained results without holding the subprocess-state lock."""
+        with self.flush_lock:
+            for message in self.pending_messages():
+                try:
+                    _post(
+                        self.base + "/api/connect/result", message,
+                        token=self.token,
+                    )
+                except (urllib.error.URLError, urllib.error.HTTPError) as exc:
+                    print("failed to report result: %s" % exc)
+                    return False
+                self.acknowledge_message(message)
+        return True
+
+    def _post_result(self, request_id, stdout, stderr, exit_code, outcome):
+        message = {
+            "type": "result",
+            "request_id": request_id,
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": exit_code,
+            "timed_out": outcome in ("timed_out", "expired"),
+            "outcome": outcome,
+        }
+        # Retain before attempting the network request. A concurrent stream
+        # rotation can now always announce this pending id, so the server will
+        # never mistake the just-finished command for lost work and replay it.
+        self._retain(message)
+        self.flush_pending_results()
+
+    def _post_started(self, request_id):
+        try:
+            _post(self.base + "/api/connect/state", {
+                "request_id": request_id, "state": "started",
+            }, token=self.token)
+        except urllib.error.HTTPError as exc:
+            # A runner can be upgraded before its server. Protocol v1 has no
+            # start endpoint but still accepts this runner's final result.
+            if exc.code not in (404, 405):
+                raise
+
+    def start(self, evt):
+        request_id = str(evt.get("request_id") or "")
+        not_after = float(evt.get("not_after") or 0)
+        if not_after and time.time() > not_after:
+            self._post_result(
+                request_id, "", "command expired before it could start", 124,
+                "expired",
+            )
+            return
+
+        record = {
+            "request_id": request_id,
+            "proc": None,
+            "reason": None,
+            "timeout": max(1, int(evt.get("timeout", 60))),
+        }
+        with self.lock:
+            if self.active is not None:
+                refused = True
+            else:
+                refused = False
+                self.active = record
+        if refused:
+            self._post_result(
+                request_id, "", "runner refused a parallel command", 125,
+                "expired",
+            )
+            return
+
+        try:
+            self._post_started(request_id)
+            # The state acknowledgement itself crosses the network and can
+            # outlive the server's dispatch window. Check the absolute
+            # deadline again at the last possible point before spawning so an
+            # expired request can never become delayed work on this machine.
+            if not_after and time.time() > not_after:
+                with self.lock:
+                    if self.active is record:
+                        self.active = None
+                self._post_result(
+                    request_id, "", "command expired before it could start",
+                    124, "expired",
+                )
+                return
+            proc = _spawn_command(evt.get("cmd", ""), evt.get("cwd"))
+            record["proc"] = proc
+            with self.lock:
+                reason = record["reason"]
+            if reason is not None:
+                _terminate_process_tree(proc)
+        except Exception as exc:  # noqa: BLE001 - report the spawn boundary
+            with self.lock:
+                if self.active is record:
+                    self.active = None
+            self._post_result(
+                request_id, "", "runner error: %s" % exc, 1, "completed",
+            )
+            return
+
+        threading.Thread(
+            target=self._wait, args=(record,), daemon=True,
+            name="mobius-connect-command",
+        ).start()
+
+    def _wait(self, record):
+        proc = record["proc"]
+        stdout = ""
+        stderr = ""
+        try:
+            stdout, stderr = proc.communicate(timeout=record["timeout"])
+        except subprocess.TimeoutExpired:
+            with self.lock:
+                if record["reason"] is None:
+                    record["reason"] = "timed_out"
+            _terminate_process_tree(proc)
+            stdout, stderr = proc.communicate()
+        except Exception as exc:  # noqa: BLE001 - preserve a final result
+            stderr = "runner error: %s" % exc
+
+        with self.lock:
+            reason = record["reason"]
+            if self.active is record:
+                self.active = None
+        if reason == "timed_out":
+            outcome, exit_code = "timed_out", 124
+            stderr = stderr or "command timed out after %ss" % record["timeout"]
+        elif reason is not None:
+            outcome, exit_code = "canceled", 130
+            stderr = stderr or "command canceled"
+        else:
+            outcome, exit_code = "completed", proc.returncode
+        self._post_result(
+            record["request_id"], stdout, stderr, exit_code, outcome,
+        )
+
+    def cancel(self, request_id, reason="canceled"):
+        with self.lock:
+            record = self.active
+            if record is None or (
+                request_id is not None and record["request_id"] != request_id
+            ):
+                return False
+            if record["reason"] is None:
+                record["reason"] = reason
+            proc = record["proc"]
+        if proc is not None:
+            _terminate_process_tree(proc)
+        return True
+
+
 def _serve(cfg):
     base = cfg["url"].rstrip("/")
     token = cfg["token"]
     ctx = ssl.create_default_context()
     plat = "%s %s" % (platform.system(), platform.release())
-    stream_url = base + "/api/connect/stream?platform=" + urllib.parse.quote(plat)
+    commands = _CommandRunner(base, token)
     backoff = 1
     print("Connecting to %s ..." % base)
     while True:
         try:
+            # Results are ordinary HTTPS requests. Attempt them before the
+            # next stream hello so its pending list reflects what still needs
+            # recovery, then again after connecting to close any race.
+            commands.flush_pending_results()
+            active_id, pending_ids = commands.snapshot()
+            query = [
+                ("protocol", "3"),
+                ("platform", plat),
+            ]
+            if active_id:
+                query.append(("active_request_id", active_id))
+            query.extend(
+                ("pending_result_id", request_id)
+                for request_id in pending_ids
+            )
+            stream_url = base + "/api/connect/stream?" + urllib.parse.urlencode(
+                query,
+            )
             req = urllib.request.Request(stream_url)
             req.add_header("Authorization", "Bearer " + token)
             req.add_header("Accept", "text/event-stream")
-            with urllib.request.urlopen(req, timeout=None, context=ctx) as stream:
+            with urllib.request.urlopen(
+                req, timeout=None, context=ctx,
+            ) as stream:
                 print("Connected. This machine is now reachable from Mobius.")
                 backoff = 1
+                commands.flush_pending_results()
                 for raw in stream:
-                    line = raw.decode("utf-8", "replace").rstrip("\n")
+                    # Heartbeat comments make this retry path run even while
+                    # the host has no new commands.
+                    commands.flush_pending_results()
+                    line = raw.decode("utf-8", "replace").rstrip("\r\n")
                     if not line.startswith("data:"):
                         continue
                     try:
                         evt = json.loads(line[5:].strip())
                     except ValueError:
                         continue
+                    if evt.get("type") == "cancel":
+                        commands.cancel(evt.get("request_id"))
+                        continue
                     if evt.get("type") == "disconnect":
+                        commands.cancel(None, "disconnect")
                         try:
                             _uninstall_service(stop_running=False)
                             payload = {
@@ -331,31 +554,31 @@ def _serve(cfg):
                                 "stdout": "Connect daemon removed.",
                                 "stderr": "", "exit_code": 0,
                             }
-                        except Exception as exc:  # report local cleanup failure
+                        except Exception as exc:  # local cleanup failure
                             payload = {
                                 "request_id": evt.get("request_id"),
-                                "stdout": "", "stderr": str(exc), "exit_code": 1,
+                                "stdout": "", "stderr": str(exc),
+                                "exit_code": 1,
                             }
                         try:
-                            _post(base + "/api/connect/result", payload, token=token)
-                        except urllib.error.URLError as exc:
+                            _post(
+                                base + "/api/connect/result", payload,
+                                token=token,
+                            )
+                        except (
+                            urllib.error.URLError,
+                            urllib.error.HTTPError,
+                        ) as exc:
                             print("failed to report disconnect: %s" % exc)
                         return
                     if evt.get("type") != "exec":
                         continue
                     print("$ " + evt.get("cmd", ""))
-                    out, err, rc, timed_out = _run_command(
-                        evt.get("cmd", ""), evt.get("cwd"),
-                        int(evt.get("timeout", 60)),
-                    )
-                    try:
-                        _post(base + "/api/connect/result", {
-                            "request_id": evt.get("request_id"),
-                            "stdout": out, "stderr": err, "exit_code": rc,
-                            "timed_out": timed_out,
-                        }, token=token)
-                    except urllib.error.URLError as exc:
-                        print("failed to report result: %s" % exc)
+                    commands.start(evt)
+            # Protocol v3 streams intentionally end before a hosting proxy's
+            # response cap. A command belongs to this runner, not the stream,
+            # so clean rotation is the same recovery path as any network loss.
+            print("stream rotated; reconnecting")
         except KeyboardInterrupt:
             print("\nStopped.")
             return
