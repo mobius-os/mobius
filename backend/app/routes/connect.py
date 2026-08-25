@@ -1101,7 +1101,6 @@ async def legacy_command_socket(websocket: WebSocket) -> None:
   receiver = asyncio.create_task(receive_events())
   superseded = asyncio.create_task(ch.closed.wait())
   tasks = {sender, receiver, superseded}
-  cancelled = False
   try:
     done, _ = await asyncio.wait(
       tasks, return_when=asyncio.FIRST_COMPLETED,
@@ -1112,18 +1111,20 @@ async def legacy_command_socket(websocket: WebSocket) -> None:
       except WebSocketDisconnect:
         pass
   except asyncio.CancelledError:
-    # Starlette's supported httpx2 test transport cancels the ASGI task as its
-    # WebSocket context closes. Finish channel teardown before preserving that
-    # cancellation; swallowing it leaves the transport future canceled, while
-    # re-raising from inside the cleanup can skip the offline transition.
-    cancelled = True
+    # A normal Starlette WebSocket context close can cancel this ASGI task.
+    # Treat that as transport shutdown: the finally block still owns complete
+    # channel teardown, but re-raising intermittently leaks CancelledError to
+    # the caller after an otherwise successful close.
+    pass
   except WebSocketDisconnect:
     pass
   finally:
     for task in tasks:
       if not task.done():
         task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+    # Retire the channel before yielding again. The transport is allowed to
+    # cancel this ASGI task while it closes, so an awaited child collection
+    # cannot be the gate in front of the durable offline transition.
     if _channels.get(host_id) is ch:
       del _channels[host_id]
     for fut in ch.control_pending.values():
@@ -1131,8 +1132,12 @@ async def legacy_command_socket(websocket: WebSocket) -> None:
         fut.cancel()
     ch.closed.set()
     _touch(host_id)
-  if cancelled:
-    raise asyncio.CancelledError
+    try:
+      await asyncio.gather(*tasks, return_exceptions=True)
+    except asyncio.CancelledError:
+      # The state transition above is complete; a repeated transport
+      # cancellation must not escape an otherwise normal WebSocket close.
+      pass
 
 
 @router.get("/stream")
