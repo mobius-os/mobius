@@ -153,12 +153,16 @@ export function findShellShortcut(event, commands) {
   return null
 }
 
-export function frameShortcutBindings(commands) {
+export function frameShortcutBindings(commands, { reserveUnavailable = false } = {}) {
   return (Array.isArray(commands) ? commands : []).flatMap(command => (
-    command.captureInMiniApps
+    command.captureInMiniApps && (reserveUnavailable || command.enabled !== false)
       ? command.bindings.map(binding => ({ actionId: command.id, binding }))
       : []
   ))
+}
+
+export function shouldReserveShellShortcut(handled, standalone) {
+  return handled === true || standalone === true
 }
 
 export function shortcutLockCodes(commands) {

@@ -3,6 +3,7 @@ import {
   findShellShortcut,
   frameShortcutBindings,
   resolveShellCommands,
+  shouldReserveShellShortcut,
   shortcutLabel,
   shortcutLockCodes,
 } from '../lib/keyboardShortcuts.js'
@@ -13,6 +14,7 @@ export default function useShellShortcuts(actions) {
   actionsRef.current = actions
 
   const catalog = useMemo(() => resolveShellCommands(), [])
+  const standalone = isStandaloneDisplay()
   const runAction = useCallback((actionId) => {
     const action = actionsRef.current?.[actionId]
     if (!action || action.enabled === false || typeof action.run !== 'function') return false
@@ -23,16 +25,17 @@ export default function useShellShortcuts(actions) {
     const onKeyDown = (event) => {
       const command = findShellShortcut(event, catalog)
       if (!command) return
-      // A reserved chord belongs to the shell even when its action is currently
-      // unavailable. Preventing the native default keeps Cmd+W from closing the
-      // installed app just because Standard mode has no closable Builder tab.
+      const handled = runAction(command.id)
+      // An unavailable chord is reserved only in an installed display, where
+      // allowing Cmd/Ctrl+W through would close the whole app. In an ordinary
+      // browser tab, preserve the browser/app default when Möbius did nothing.
+      if (!shouldReserveShellShortcut(handled, standalone)) return
       event.preventDefault()
       event.stopImmediatePropagation?.()
-      runAction(command.id)
     }
     document.addEventListener('keydown', onKeyDown, true)
     return () => document.removeEventListener('keydown', onKeyDown, true)
-  }, [catalog, runAction])
+  }, [catalog, runAction, standalone])
 
   // Browser-reserved chords are not uniformly overridable by web content. In an
   // installed display, make one best-effort Keyboard Lock request from the first
@@ -69,6 +72,16 @@ export default function useShellShortcuts(actions) {
     }
   }), [actions, catalog])
 
-  const frameBindings = useMemo(() => frameShortcutBindings(catalog), [catalog])
+  const disabledFrameActionIds = commands
+    .filter(command => command.enabled === false)
+    .map(command => command.id)
+    .join('\u0000')
+  const frameBindings = useMemo(() => {
+    const disabled = new Set(disabledFrameActionIds.split('\u0000').filter(Boolean))
+    return frameShortcutBindings(catalog.map(command => ({
+      ...command,
+      enabled: !disabled.has(command.id),
+    })), { reserveUnavailable: standalone })
+  }, [catalog, disabledFrameActionIds, standalone])
   return { commands, frameBindings, runAction }
 }

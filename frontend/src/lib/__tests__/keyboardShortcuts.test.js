@@ -6,6 +6,7 @@ import {
   frameShortcutBindings,
   resolveShellCommands,
   shortcutLabel,
+  shouldReserveShellShortcut,
   shortcutLockCodes,
   shortcutMatches,
 } from '../keyboardShortcuts.js'
@@ -38,6 +39,26 @@ test('only advertised global commands cross the mini-app boundary', () => {
   assert.deepEqual(shortcutLockCodes(commands), [
     'KeyK', 'KeyN', 'KeyT', 'KeyW', 'Backslash', 'Comma', 'Period',
   ])
+})
+
+test('disabled chords keep native browser behavior but stay reserved in an installed app', () => {
+  const commands = resolveShellCommands().map(command => ({
+    ...command,
+    enabled: command.id !== 'tab.close',
+  }))
+
+  assert.equal(
+    frameShortcutBindings(commands).some(item => item.actionId === 'tab.close'),
+    false,
+  )
+  assert.equal(
+    frameShortcutBindings(commands, { reserveUnavailable: true })
+      .some(item => item.actionId === 'tab.close'),
+    true,
+  )
+  assert.equal(shouldReserveShellShortcut(false, false), false)
+  assert.equal(shouldReserveShellShortcut(true, false), true)
+  assert.equal(shouldReserveShellShortcut(false, true), true)
 })
 
 test('shortcut labels adapt to the owner platform', () => {
