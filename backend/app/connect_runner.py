@@ -297,6 +297,11 @@ def _run_command(cmd, cwd, timeout):
         if proc is not None:
             _terminate_process_tree(proc)
         return "", "runner error: %s" % exc, 1, False
+    finally:
+        if proc is not None:
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    stream.close()
 
 
 def _serve(cfg):

@@ -400,6 +400,7 @@ async def test_exec_timeout_clears_its_pending_request(client, auth, monkeypatch
   assert channel.pending == {}
 
 
+@pytest.mark.filterwarnings("error")
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group contract")
 def test_runner_timeout_terminates_the_entire_command_tree(tmp_path: Path):
   """A timed-out command must not leave descendants running on the machine."""
