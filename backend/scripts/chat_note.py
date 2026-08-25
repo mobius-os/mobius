@@ -8,9 +8,10 @@ revisions so an older turn cannot overwrite newer state.
 
 Tool-free by design (the anti-exfil pattern — see the agent-tool-scope memory):
 the summarizer subagent gets the transcript in its PROMPT and runs with NO tools
-(it only PRODUCES the note text). THIS script does the privileged writes — the
-note file and the title PATCH. So a prompt-injected chat can't make the subagent
-write outside the note or exfiltrate anything.
+(it only PRODUCES the note text). THIS script performs the privileged note write
+and returns the generated name to its parent server process. So a prompt-
+injected chat can't make the subagent write outside the note or exfiltrate
+anything.
 
 Usage: chat_note.py <chat_id> [--active-goal-checkpoint]
 Exit 0 ok (or nothing-to-do) · 2 bad args · 3 summarizer failed (one-line
@@ -31,7 +32,6 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
@@ -41,8 +41,6 @@ DB = DATA_DIR / "db" / "ultimate.db"
 MEMORY_DIR = DATA_DIR / "shared" / "memory"
 CLAUDE_CONFIG_DIR = DATA_DIR / "cli-auth" / "claude"
 CLI_PATH = "/usr/local/bin/claude"
-API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000")
-SERVICE_TOKEN_FILE = DATA_DIR / "service-token.txt"
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
   sys.path.insert(0, str(BACKEND_DIR))
@@ -729,29 +727,20 @@ def _normalize_chat_name(description: str) -> str:
   return title
 
 
-def _patch_title(chat_id: str, description: str) -> None:
-  """Best-effort title sync (by_agent so it defers to a manual rename)."""
-  description = _normalize_chat_name(description)
-  try:
-    token = SERVICE_TOKEN_FILE.read_text(encoding="utf-8").strip()
-  except OSError:
+def _emit_title_result(note: str) -> None:
+  """Return the generated name to the owning server process.
+
+  The publisher subprocess owns the note CAS, but it deliberately does not
+  authenticate back into its own server. The parent applies this result under
+  the chat transition lock, where manual-title precedence and live projection
+  events already belong.
+  """
+  match = re.search(r"^description:\s*(.+)$", note, re.MULTILINE)
+  if not match:
     return
-  if not token or not description:
-    return
-  body = json.dumps({"title": description[:200], "by_agent": True}).encode()
-  req = urllib.request.Request(
-    f"{API_BASE_URL}/api/chats/{chat_id}",
-    data=body,
-    method="PATCH",
-    headers={
-      "Authorization": f"Bearer {token}",
-      "Content-Type": "application/json",
-    },
-  )
-  try:
-    urllib.request.urlopen(req, timeout=10).read()
-  except Exception:
-    pass
+  title = _normalize_chat_name(match.group(1))[:200]
+  if title:
+    print(json.dumps({"title": title}, separators=(",", ":")))
 
 
 def run() -> int:
@@ -777,17 +766,14 @@ def run() -> int:
     return 2
 
   # --sync-title: compatibility/repair mode with NO summarizer (no LLM, no
-  # tools). Normal publication performs this after its CAS succeeds; older
-  # callers can cheaply resync an existing note's gist. by_agent:true defers to
-  # a manual rename.
+  # tools). The parent process applies the emitted name under the same lock and
+  # manual-title precedence as an ordinary turn-end publication.
   if sync_title_only:
     try:
       text = _note_path(chat_id).read_text(encoding="utf-8")
     except OSError:
       return 0
-    m = re.search(r"^description:\s*(.+)$", text, re.MULTILINE)
-    if m:
-      _patch_title(chat_id, m.group(1).strip())
+    _emit_title_result(text)
     return 0
 
   snapshot = _read_chat_snapshot(
@@ -807,6 +793,10 @@ def run() -> int:
   previous_cursor = _source_cursor(existing)
   current_cursor = snapshot.cursor()
   if previous_cursor is not None and previous_cursor == current_cursor:
+    # Publication may have succeeded while the old HTTP title PATCH failed.
+    # Re-emit the current name so any later settled turn repairs convergence
+    # without another summarizer run.
+    _emit_title_result(existing)
     return 0
   start_index = _incremental_start(snapshot, previous_cursor)
   transcript = (
@@ -841,9 +831,7 @@ def run() -> int:
   if not published:
     return 0
 
-  m = re.search(r"^description:\s*(.+)$", out, re.MULTILINE)
-  if m:
-    _patch_title(chat_id, m.group(1).strip())
+  _emit_title_result(out)
   return 0
 
 
