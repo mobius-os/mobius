@@ -358,6 +358,22 @@ class MigrateChat(_Command):
 
 
 @dataclass
+class BackfillAssistantIdentity(_Command):
+  """Repair one legacy chat's scalar assistant owner during boot.
+
+  The schema migration can add and backfill the scalar for rows that already
+  carry an assistant message id, but it must not rewrite ``Chat.messages``.
+  This actor-owned command handles the one legacy exception: a parked,
+  unanswered question whose assistant row predates message identities. It
+  gives that exact row a deterministic id and stores the same id in the scalar
+  in one transaction. New writes already establish both values together, so
+  this is idempotent upgrade work rather than a second live-write path.
+  """
+
+  chat_id: str = ""
+
+
+@dataclass
 class RewriteChatMediaPaths(_Command):
   """Atomically rewrite one chat's legacy media URLs during boot."""
 
@@ -1535,6 +1551,8 @@ class ChatWriterActor:
       return self._stash_thinking_trace(db, cmd)
     if isinstance(cmd, MigrateChat):
       return self._migrate_chat(db, cmd)
+    if isinstance(cmd, BackfillAssistantIdentity):
+      return self._backfill_assistant_identity(db, cmd)
     if isinstance(cmd, RewriteChatMediaPaths):
       return self._rewrite_chat_media_paths(db, cmd)
     if isinstance(cmd, ReconcileStartupChat):
@@ -1897,6 +1915,71 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("RewriteChatMediaPaths did not persist")
     return len(values)
+
+  def _backfill_assistant_identity(
+    self, db, cmd: "BackfillAssistantIdentity",
+  ) -> int:
+    """Backfill one pre-identity assistant owner through the writer actor."""
+    from app.models import Chat
+
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None or chat.active_assistant_message_id is not None:
+      return 0
+
+    owner_id = None
+    repaired_messages = None
+    question_id = chat.pending_question_id
+    if isinstance(question_id, str) and 0 < len(question_id) <= 64:
+      messages = list(chat.messages or [])
+      for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, dict) or message.get("hidden"):
+          continue
+        if message.get("role") != "assistant":
+          continue
+        matches_question = any(
+          isinstance(block, dict)
+          and block.get("type") == "question"
+          and block.get("question_id") == question_id
+          and not block.get("answers")
+          for block in (message.get("blocks") or [])
+        )
+        if not matches_question:
+          continue
+        owner_id = _assistant_message_id(message)
+        if owner_id is None:
+          generated = f"assistant-question-{question_id}"
+          if len(generated) <= 128:
+            owner_id = generated
+            repaired_messages = list(messages)
+            repaired = dict(message)
+            repaired["id"] = owner_id
+            repaired_messages[index] = repaired
+        break
+
+    if owner_id is None:
+      owner_id = _assistant_message_id(chat.live_assistant)
+    if owner_id is None:
+      return 0
+
+    values = {"active_assistant_message_id": owner_id}
+    if repaired_messages is not None:
+      values["messages"] = repaired_messages
+    result = db.execute(
+      update(Chat)
+      .where(
+        Chat.id == cmd.chat_id,
+        Chat.deleted_at.is_(None),
+        Chat.active_assistant_message_id.is_(None),
+      )
+      .values(**values)
+    )
+    if result.rowcount != 1:
+      db.rollback()
+      return 0
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("BackfillAssistantIdentity did not persist")
+    return 1
 
   def _reconcile_startup_chat(
     self, db, cmd: "ReconcileStartupChat",

@@ -1535,7 +1535,7 @@ def test_active_assistant_identity_migration_backfills_live_and_parked_rows(
   assert owners == {
     "deleted": None,
     "historical-only": None,
-    "idless": "assistant-question-q-idless",
+    "idless": None,
     "live": "assistant-live",
     "missing-question": None,
     "parked": "assistant-current",
@@ -1547,7 +1547,7 @@ def test_active_assistant_identity_migration_backfills_live_and_parked_rows(
     if isinstance(idless["messages"], str)
     else idless["messages"]
   )
-  assert idless_messages[-1]["id"] == "assistant-question-q-idless"
+  assert "id" not in idless_messages[-1]
 
 
 def test_connections_manage_reaches_a_ledgered_database(tmp_path):

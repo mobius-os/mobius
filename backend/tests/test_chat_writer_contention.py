@@ -26,6 +26,7 @@ from app.chat_writer import (
   AnswerQuestion,
   AppendPending,
   AppendSteeredUserMessage,
+  BackfillAssistantIdentity,
   Barrier,
   CancelPending,
   ChatWriterActor,
@@ -243,6 +244,34 @@ def test_question_commit_commits_before_ack(actor):
   assert chat["messages"][-1]["blocks"][0]["question_id"] == "q1"
   assert chat["pending_question_id"] == "q1"
   assert chat["active_assistant_message_id"] == "assistant-question"
+
+
+def test_legacy_parked_question_identity_is_repaired_by_writer(actor):
+  """Upgrade repair mutates the transcript only through a domain command."""
+  _seed_chat(
+    messages=[
+      {"role": "user", "content": "pick", "ts": 1},
+      _question_msg("q-legacy"),
+    ],
+    pending_question_id="q-legacy",
+  )
+
+  assert _await(actor.submit(
+    BackfillAssistantIdentity(chat_id="c1"),
+  )) == 1
+  chat = _load_chat()
+  assert chat["messages"][-1]["id"] == "assistant-question-q-legacy"
+  assert (
+    chat["active_assistant_message_id"]
+    == "assistant-question-q-legacy"
+  )
+
+  # The startup task may run again after an interrupted boot; the exact same
+  # row and scalar remain untouched.
+  assert _await(actor.submit(
+    BackfillAssistantIdentity(chat_id="c1"),
+  )) == 0
+  assert _load_chat() == chat
 
 
 # -- 3. question not broadcast on QuestionCommit fail ----------------------

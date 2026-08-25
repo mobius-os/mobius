@@ -252,6 +252,41 @@ def _start_chat_writer(_context: StartupContext) -> None:
   start_writer()
 
 
+def _backfill_active_assistant_identities(context: StartupContext) -> None:
+  """Route the legacy parked-question identity repair through chat_writer."""
+  from app import models
+  from app.chat_writer import (
+    BackfillAssistantIdentity,
+    get_writer,
+    wait_ack,
+  )
+
+  with SessionLocal() as db:
+    candidate_ids = [
+      row[0] for row in (
+        db.query(models.Chat.id)
+        .filter(
+          models.Chat.deleted_at.is_(None),
+          models.Chat.active_assistant_message_id.is_(None),
+          # The schema migration already backfills ordinary live snapshots.
+          # Only id-less parked-question rows need a transcript rewrite, so
+          # keep boot work proportional to that narrow legacy population.
+          models.Chat.pending_question_id.isnot(None),
+        )
+        .all()
+      )
+    ]
+  changed = 0
+  for chat_id in candidate_ids:
+    changed += int(wait_ack(get_writer().submit(
+      BackfillAssistantIdentity(chat_id=chat_id),
+    )) or 0)
+  if changed:
+    context.logger.info(
+      "backfilled active assistant identity for %d legacy chat(s)", changed,
+    )
+
+
 def _initialize_push(_context: StartupContext) -> None:
   from app.push import init_vapid
 
@@ -348,6 +383,10 @@ DATABASE_STARTUP_TASKS = (
   # soon as the schema exists; later startup failures still fail open exactly
   # as they did when the writer started near the end of the plan.
   StartupTask("start chat writer", _start_chat_writer),
+  StartupTask(
+    "backfill active assistant identities",
+    _backfill_active_assistant_identities,
+  ),
   StartupTask("purge expired chat tombstones", _purge_expired_chats),
   StartupTask("backfill session links", _backfill_session_links),
   StartupTask("backfill prompt snapshots", _backfill_prompt_snapshots),

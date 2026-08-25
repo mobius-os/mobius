@@ -1690,11 +1690,12 @@ def _add_chat_active_assistant_identity(eng) -> None:
 
   A pending question is the stronger protocol boundary, so locate the exact
   unanswered card it names first. Otherwise backfill from the bounded live
-  snapshot. This also repairs a stale pre-upgrade live value instead of letting
-  it outrank a committed owner decision. Everything is self-contained because
-  migration history is immutable after publication.
+  snapshot. Rows whose exact parked-question owner predates assistant message
+  ids stay null here: startup repairs that transcript through the chat-writer
+  actor, then stores both identities in one serialized transaction. Schema
+  migrations never rewrite ``Chat.messages``.
   """
-  from sqlalchemy import JSON as SAJSON, bindparam, inspect as sa_inspect, text
+  from sqlalchemy import inspect as sa_inspect, text
 
   inspector = sa_inspect(eng)
   if "chats" not in inspector.get_table_names():
@@ -1736,10 +1737,6 @@ def _add_chat_active_assistant_identity(eng) -> None:
     def bounded_id(value):
       return value if isinstance(value, str) and 0 < len(value) <= 128 else None
 
-    update_messages = text(
-      "UPDATE chats SET messages = :messages WHERE id = :chat_id"
-    ).bindparams(bindparam("messages", type_=SAJSON))
-
     for row in rows:
       owner_id = None
       pending_question_id = row.get("pending_question_id")
@@ -1764,22 +1761,6 @@ def _add_chat_active_assistant_identity(eng) -> None:
             )
             if matching_question:
               owner_id = bounded_id(message.get("id"))
-              if owner_id is None:
-                # Pre-identity assistant rows still have one unambiguous owner:
-                # the exact unanswered card named by the durable marker. Give
-                # only that row a deterministic id and persist the same value in
-                # the scalar; inventing an id without updating the transcript
-                # would point the browser at a row that does not exist.
-                generated = f"assistant-question-{pending_question_id}"
-                owner_id = bounded_id(generated)
-                if owner_id is not None:
-                  repaired = dict(message)
-                  repaired["id"] = owner_id
-                  messages[index] = repaired
-                  conn.execute(update_messages, {
-                    "chat_id": row["id"],
-                    "messages": messages,
-                  })
               break
       if owner_id is None:
         live = decoded(row.get("live_assistant"))
