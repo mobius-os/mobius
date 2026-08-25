@@ -349,6 +349,10 @@ def test_provisional_websocket_runner_stays_online_for_in_place_update(
     assert "--install" in host["update_command"]
     assert host["platform"] == "ProvisionalOS 1"
 
+  deadline = time.monotonic() + 1
+  while pairing["id"] in connect_routes._channels and time.monotonic() < deadline:
+    time.sleep(0.01)
+  assert pairing["id"] not in connect_routes._channels
   host = client.get("/api/connect/hosts", headers=auth).json()["hosts"][0]
   assert host["online"] is False
   assert host["runner_update_available"] is True

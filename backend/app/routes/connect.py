@@ -1101,6 +1101,7 @@ async def legacy_command_socket(websocket: WebSocket) -> None:
   receiver = asyncio.create_task(receive_events())
   superseded = asyncio.create_task(ch.closed.wait())
   tasks = {sender, receiver, superseded}
+  cancelled = False
   try:
     done, _ = await asyncio.wait(
       tasks, return_when=asyncio.FIRST_COMPLETED,
@@ -1110,7 +1111,13 @@ async def legacy_command_socket(websocket: WebSocket) -> None:
         task.result()
       except WebSocketDisconnect:
         pass
-  except (asyncio.CancelledError, WebSocketDisconnect):
+  except asyncio.CancelledError:
+    # Starlette's supported httpx2 test transport cancels the ASGI task as its
+    # WebSocket context closes. Finish channel teardown before preserving that
+    # cancellation; swallowing it leaves the transport future canceled, while
+    # re-raising from inside the cleanup can skip the offline transition.
+    cancelled = True
+  except WebSocketDisconnect:
     pass
   finally:
     for task in tasks:
@@ -1124,6 +1131,8 @@ async def legacy_command_socket(websocket: WebSocket) -> None:
         fut.cancel()
     ch.closed.set()
     _touch(host_id)
+  if cancelled:
+    raise asyncio.CancelledError
 
 
 @router.get("/stream")
