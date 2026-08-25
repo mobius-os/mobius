@@ -483,10 +483,17 @@ class PromoteRunToGoal(_Command):
 
 @dataclass
 class ClearPresentedGoal(_Command):
-  """Dismiss one exact Goal identity without fabricating a chat message."""
+  """Dismiss one exact Goal identity without fabricating a chat message.
+
+  A completed visible plan can be dismissed while its physical turn is still
+  writing the final response.  In that case the live execution remains the
+  owner of its ChatRun and closes itself normally; unfinished Goal clears still
+  retire nonterminal rows after their runner has stopped.
+  """
 
   chat_id: str = ""
   expected_goal_id: str = ""
+  preserve_execution: bool = False
 
 
 @dataclass
@@ -2594,15 +2601,16 @@ class ChatWriterActor:
       db.rollback()
       return {"status": "cleared", "goal_id": goal_id}
     chat.dismissed_goal_id = goal_id
-    cleared_at = datetime.now(UTC)
-    for run in db.query(models.ChatRun).filter(
-      models.ChatRun.chat_id == cmd.chat_id,
-      models.ChatRun.goal_id == goal_id,
-      models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
-    ).all():
-      run.status = "stopped"
-      run.ended_at = run.ended_at or cleared_at
-      run.restart_nonce = None
+    if not cmd.preserve_execution:
+      cleared_at = datetime.now(UTC)
+      for run in db.query(models.ChatRun).filter(
+        models.ChatRun.chat_id == cmd.chat_id,
+        models.ChatRun.goal_id == goal_id,
+        models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+      ).all():
+        run.status = "stopped"
+        run.ended_at = run.ended_at or cleared_at
+        run.restart_nonce = None
     if not _commit_or_rollback(db):
       raise _PersistFailed("ClearPresentedGoal did not persist")
     return {"status": "cleared", "goal_id": goal_id}

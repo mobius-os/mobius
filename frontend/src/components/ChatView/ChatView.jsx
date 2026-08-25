@@ -3447,8 +3447,9 @@ export default function ChatView({
   }
 
   // Goal clearing is lifecycle control, never chat content. The rail confirms
-  // first, then this exact-id request stops active Goal execution and dismisses
-  // its presentation without entering the pending-message transport.
+  // first, then this exact-id request dismisses completed work without
+  // interrupting its final response; unfinished Goals still stop through the
+  // same control path without entering the pending-message transport.
   const handleClearGoal = useCallback(async (item) => {
     const goalId = item?.goalId
     if (!goalId || goalClearInFlightRef.current) return
