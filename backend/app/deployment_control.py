@@ -17,6 +17,7 @@ import secrets
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
@@ -61,6 +62,7 @@ _KNOWN_STATES = {
 }
 _ACTIVE_STATES = {"queued", "preparing", "replacing", "verifying"}
 _HANDOFF_VERSION = "external-cutover-v1"
+_managed_recovery_tasks: set[asyncio.Task[None]] = set()
 _UPGRADE_MESSAGE = (
   "The Host replacement helper predates safe chat continuation. Re-run "
   "scripts/install-rebuild-helper.sh from the current trusted checkout."
@@ -84,6 +86,15 @@ def _empty_status(
     message=message,
     updated_at=None,
   )
+
+
+def _schedule_managed_recovery(
+  restart: Callable[[], Awaitable[None]],
+) -> None:
+  """Keep the sole post-rejection restart alive until it settles."""
+  task = asyncio.create_task(restart())
+  _managed_recovery_tasks.add(task)
+  task.add_done_callback(_managed_recovery_tasks.discard)
 
 
 def _expected_upstream_sha() -> str | None:
@@ -476,5 +487,5 @@ async def _request_managed_rebuild(expected_sha: str) -> RebuildStatus:
       # A definitive rejection proves the provider did not accept ownership.
       # Ambiguous transport or response failures must not start a second,
       # competing worker transition after Railway may have accepted the cutover.
-      asyncio.create_task(restart_util.restart_this_worker())
+      _schedule_managed_recovery(restart_util.restart_this_worker)
     raise

@@ -163,6 +163,63 @@ async def test_managed_start_failure_restarts_only_after_definitive_rejection(
 
 
 @pytest.mark.asyncio
+async def test_definitive_rejection_owns_recovery_until_restart_settles(
+  tmp_path, monkeypatch,
+):
+  from app import restart_ledger, restart_util
+
+  _install_control(tmp_path, monkeypatch)
+  (tmp_path / "run").mkdir()
+  (tmp_path / "run" / "managed-cutover-ready").touch()
+  settings = type("S", (), {"data_dir": str(tmp_path)})()
+  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
+  monkeypatch.setattr(dc, "get_settings", lambda: settings)
+  monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "a" * 40)
+  monkeypatch.setattr(dc.platform_update, "container_replacement_blockers", lambda: [])
+
+  def managed_request(method, suffix, _payload=None):
+    if suffix == "prepare":
+      return {
+        "state": "awaiting_handoff",
+        "operation_id": "replace_12345678",
+        "handoff_nonce": "nonce-secret",
+      }
+    raise dc.DeploymentControlError("controller_rejected", "rejected")
+
+  started = asyncio.Event()
+  release = asyncio.Event()
+
+  async def restart():
+    started.set()
+    await release.wait()
+
+  owned = set()
+  monkeypatch.setattr(dc, "_managed_recovery_tasks", owned)
+  monkeypatch.setattr(dc, "_managed_request", managed_request)
+  monkeypatch.setattr(restart_ledger, "current_boot_id", lambda: "boot-12345678")
+  monkeypatch.setattr(restart_ledger, "request_managed_cutover", lambda **_kw: None)
+  monkeypatch.setattr(restart_ledger, "authorized_cutover_challenge", lambda _id: True)
+  monkeypatch.setattr(restart_ledger, "accepted_cutover_receipt", lambda _id: True)
+  monkeypatch.setattr(
+    restart_util, "prepare_managed_container_cutover", lambda _id: asyncio.sleep(0),
+  )
+  monkeypatch.setattr(restart_util, "restart_this_worker", restart)
+
+  with pytest.raises(dc.DeploymentControlError, match="rejected"):
+    await dc.request_rebuild()
+  await started.wait()
+
+  assert len(owned) == 1
+  task = next(iter(owned))
+  assert not task.done()
+
+  release.set()
+  await task
+  await asyncio.sleep(0)
+  assert owned == set()
+
+
+@pytest.mark.asyncio
 async def test_request_writes_only_the_derived_sha(tmp_path, monkeypatch):
   _control, inbox = _install_control(tmp_path, monkeypatch)
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "self_hosted")
