@@ -222,7 +222,7 @@ function readDeviceInsets() {
 // accent-forward rather than a generic gray spinner: the app name is present,
 // and shimmer skeleton bars hint a header + list are on their way. Shared by
 // both loading branches (no-token and online-fetching) so they never drift.
-// Presentational only; the 80ms fade-in guard lives on .canvas-loading.
+// Presentational only; the delayed fade-in guard lives on .canvas-loading.
 function CanvasLoadingBrand({ appName }) {
   return (
     <>
