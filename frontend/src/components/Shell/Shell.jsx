@@ -544,6 +544,7 @@ export default function Shell({ onInitialVisualReady }) {
     reconcile: reconcileCreatedChats,
   })
   const apps = appsQuery.data ?? EMPTY_LIST
+  const artifactsAppId = apps.find(app => app.slug === 'artifacts')?.id ?? null
   const chats = chatsQuery.data ?? EMPTY_LIST
   const appsStatus = apps.length > 0 || appsQuery.isSuccess
     ? 'success'
@@ -4083,6 +4084,7 @@ export default function Shell({ onInitialVisualReady }) {
                 chatId={chatId}
                 paneId={paneId}
                 apps={apps}
+                artifactsAppId={artifactsAppId}
                 // Runtime activity and painting are independent during a handoff:
                 // staging owns the work while held remains the visual cover.
                 runtimeActive={surfaceVisible && chatPanesVisible && role !== 'held'}
@@ -4114,6 +4116,7 @@ export default function Shell({ onInitialVisualReady }) {
                 markChatOwnerActivity={markChatOwnerActivity}
                 loadTheme={loadTheme}
                 navTo={stablePaneNavTo}
+                openAppWithIntent={openAppWithIntent}
                 onInternalNav={handleChatInternalNav}
                 onChatMissing={handlePaneChatMissing}
                 onFirstMessage={handlePaneChatFirstMessage}

@@ -1569,6 +1569,82 @@ def get_tool_output_by_id(
   )
 
 
+@router.get("/{chat_id}/edit-diffs")
+def get_chat_edit_diffs(
+  chat_id: str,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+) -> dict:
+  """Return only the file changes recorded by one chat, with full sidecars.
+
+  The ordinary chat payload keeps edit previews bounded. This explicit owner
+  action is the lazy expansion boundary: it scans the transcript for edit
+  blocks, fences already-queued sidecar writes, and substitutes complete diff
+  text wherever the block names one. Orphaned sidecars are never enumerable.
+  """
+  from app.chat_transcript import materialized_messages
+
+  chat = get_active_chat_or_404(db, chat_id)
+  _drain_writer_before_sidecar_read(db, chat_id, "chat changes")
+  chat = get_active_chat_or_404(db, chat_id)
+  messages = materialized_messages(chat)
+
+  entries: list[dict] = []
+  full_ids: set[str] = set()
+  for message_index, message in enumerate(messages):
+    blocks = message.get("blocks") if isinstance(message, dict) else None
+    if not isinstance(blocks, list):
+      continue
+    for block_index, block in enumerate(blocks):
+      if not isinstance(block, dict) or block.get("type") != "tool":
+        continue
+      preview = block.get("edit_preview")
+      if not (
+        isinstance(preview, dict)
+        and isinstance(preview.get("diff"), str)
+        and preview["diff"]
+      ):
+        continue
+      projected_preview = {
+        "diff": preview["diff"],
+        "truncated": preview.get("truncated") is True,
+        **({"relative": True} if preview.get("relative") is True else {}),
+      }
+      full_id = preview.get("full_id")
+      if isinstance(full_id, str) and full_id:
+        projected_preview["full_id"] = full_id
+        full_ids.add(full_id)
+      entries.append({
+        "id": block.get("tool_use_id") or f"message-{message_index}-block-{block_index}",
+        "tool": block.get("tool") or "Edit",
+        "ts": message.get("ts"),
+        "preview": projected_preview,
+      })
+
+  full_by_id: dict[str, str] = {}
+  if full_ids:
+    rows = db.query(
+      models.ToolOutput.tool_use_id,
+      cast(models.ToolOutput.output, Text),
+    ).filter(
+      models.ToolOutput.chat_id == chat_id,
+      models.ToolOutput.tool_use_id.in_(full_ids),
+    ).all()
+    full_by_id = {
+      full_id: decode_tool_output(stored)
+      for full_id, stored in rows
+    }
+
+  for entry in entries:
+    preview = entry["preview"]
+    full = full_by_id.get(preview.get("full_id"))
+    if full is not None:
+      preview["diff"] = full
+      preview["truncated"] = False
+
+  return {"entries": entries}
+
+
 @router.get(
   "/{chat_id}/thinking-trace/{thinking_id}",
   response_class=PlainTextResponse,

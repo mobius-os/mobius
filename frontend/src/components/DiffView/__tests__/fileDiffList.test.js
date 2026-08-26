@@ -8,6 +8,7 @@ import FileDiffList, {
   bidiSafeDirectory,
   buildFileRows,
   collapseFileRows,
+  expandedFileKeys,
   filePreviewState,
   splitPath,
 } from '../FileDiffList.jsx'
@@ -142,6 +143,15 @@ test('collapse decision keeps eight rows and samples six above the threshold', (
     collapsed: false,
     visibleRows: nine,
   })
+})
+
+test('global expansion commands address every file without changing row order', () => {
+  const rows = buildFileRows([
+    { path: 'first.js', hunks: [] },
+    { path: 'second.js', hunks: [] },
+  ])
+  assert.deepEqual([...expandedFileKeys(rows, true)], rows.map(row => row.key))
+  assert.equal(expandedFileKeys(rows, false).size, 0)
 })
 
 test('collapsed rows expose valid disclosure and announced stat semantics', () => {

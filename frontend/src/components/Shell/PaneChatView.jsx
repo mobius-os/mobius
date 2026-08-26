@@ -25,6 +25,7 @@ function PaneChatView({
   chatId,
   paneId,
   apps,
+  artifactsAppId = null,
   runtimeActive = true,
   previewPresented = false,
   keepTranscriptPainted = false,
@@ -46,6 +47,7 @@ function PaneChatView({
   markChatOwnerActivity,
   loadTheme,
   navTo,
+  openAppWithIntent,
   onInternalNav,
   onChatMissing,
   onFirstMessage,
@@ -106,6 +108,16 @@ function PaneChatView({
     acknowledgeAppPreview?.(app, true)
   }, [acknowledgeAppPreview])
 
+  const handleOpenArtifact = useCallback((artifactId) => {
+    if (artifactsAppId == null || artifactId == null) return
+    void openAppWithIntent(
+      artifactsAppId,
+      `artifact:${artifactId}`,
+      () => true,
+      { paneId },
+    )
+  }, [artifactsAppId, openAppWithIntent, paneId])
+
   const handleChatMissing = useCallback((missingId) => {
     onChatMissing?.(missingId, chatId)
   }, [chatId, onChatMissing])
@@ -146,6 +158,8 @@ function PaneChatView({
         builtApps={builtApps}
         onOpenApp={handleOpenApp}
         onDismissApp={handleDismissApp}
+        artifactsAppId={artifactsAppId}
+        onOpenArtifact={handleOpenArtifact}
         onInternalNav={onInternalNav}
         onMessageStart={handleMessageStart}
         onOwnerActivity={handleOwnerActivity}

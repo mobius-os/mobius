@@ -43,6 +43,7 @@ import ChatInputBar from './ChatInputBar.jsx'
 import { hasSendablePayload } from './composerSubmission.js'
 import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
+import ChatDiffViewer from './ChatDiffViewer.jsx'
 import ChatUsageInspector from './ChatUsageInspector.jsx'
 import ChatUsageStrip from './ChatUsageStrip.jsx'
 import { formatUsageAriaSummary } from './chatUsageFormat.js'
@@ -169,6 +170,7 @@ import {
   resetComposerTextarea,
 } from './composerTextareaSizing.js'
 import { needsModelSelection } from './modelSelectionPolicy.js'
+import { collectChatDiffs } from './chatDiffs.js'
 import {
   EMPTY_BUILD_PHASE_RAIL,
   accumulateBuildPhase,
@@ -332,6 +334,8 @@ export default function ChatView({
   // chat has a stable frame to paint. Empty/error chats are already stable;
   // transcript chats wait for useScrollMode's existing hide-then-reveal gate.
   onDisplayReady = null,
+  artifactsAppId = null,
+  onOpenArtifact = null,
 }) {
   const queryClient = useQueryClient()
   // Cheap per-chat token/cost summary for the always-visible composer badge
@@ -546,6 +550,7 @@ export default function ChatView({
   // cards themselves use to publish the node being observed.
   const [showInspector, setShowInspector] = useState(false)
   const [showSummary, setShowSummary] = useState(false)
+  const [showChanges, setShowChanges] = useState(false)
   const [showUsage, setShowUsage] = useState(false)
   const [visibleMessageMetaKey, setVisibleMessageMetaKey] = useState(null)
   const messageMetaTimerRef = useRef(null)
@@ -4227,6 +4232,10 @@ export default function ChatView({
   const pendingStreamQuestion = activeAssistantIsStreaming
     ? streamItems.find(it => it.type === 'question' && !it.answers)
     : null
+  const chatDiffEntries = useMemo(() => collectChatDiffs([
+    ...messages,
+    { role: 'assistant', blocks: streamItems },
+  ]), [messages, streamItems])
   const hasPendingQuestion = !!pendingStreamQuestion || !!liveQuestionId
 
   // Answerability id: prefer the durable pending_question_id marker; during the
@@ -4531,6 +4540,13 @@ export default function ChatView({
         <ChatSummaryViewer
           chatId={chatId}
           onClose={() => setShowSummary(false)}
+        />
+      )}
+      {!embedded && showChanges && (
+        <ChatDiffViewer
+          chatId={chatId}
+          initialEntries={chatDiffEntries}
+          onClose={() => setShowChanges(false)}
         />
       )}
       {!embedded && showUsage && (
@@ -4969,6 +4985,9 @@ export default function ChatView({
                 modelSelectionRequest={modelSelectionRequest}
                 onOpenInspector={() => setShowInspector(true)}
                 onOpenSummary={() => setShowSummary(true)}
+                onOpenChanges={() => setShowChanges(true)}
+                artifactsAppId={artifactsAppId}
+                onOpenArtifact={onOpenArtifact}
                 onOpenUsage={() => setShowUsage(true)}
                 embedded={embedded}
               />

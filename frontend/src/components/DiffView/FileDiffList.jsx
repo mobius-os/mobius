@@ -2,7 +2,7 @@
 // React and its own flat sibling modules. Styles ship as a JavaScript string
 // because the mini-app compiler rejects CSS side-output.
 
-import { useId, useState } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
 import DiffView from './DiffView.jsx'
 import { decodeGitPath } from './parseUnifiedDiff.js'
 import { ensureDiffViewerStyles } from './styles.js'
@@ -152,6 +152,10 @@ export function collapseFileRows(rows, showAll = false) {
   }
 }
 
+export function expandedFileKeys(rows, expanded) {
+  return new Set(expanded ? rows.map(row => row.key) : [])
+}
+
 export function filePreviewState(row, truncated, truncatedTail) {
   const hasTextDiff = (row?.file?.hunks?.length || 0) > 0
   if (
@@ -222,14 +226,24 @@ export default function FileDiffList({
   files,
   summaryOverrides,
   diffTruncated = false,
+  expansionCommand = null,
 }) {
-  const parsedFiles = Array.isArray(files) ? files : []
-  const rows = buildFileRows(parsedFiles, summaryOverrides)
+  const parsedFiles = useMemo(() => (Array.isArray(files) ? files : []), [files])
+  const rows = useMemo(
+    () => buildFileRows(parsedFiles, summaryOverrides),
+    [parsedFiles, summaryOverrides],
+  )
   const [openFiles, setOpenFiles] = useState(() => new Set())
   const [showAll, setShowAll] = useState(false)
   const listId = useId()
   const lastParsedFile = parsedFiles.at(-1)
   const { collapsed, visibleRows } = collapseFileRows(rows, showAll)
+
+  useEffect(() => {
+    if (!expansionCommand) return
+    setOpenFiles(expandedFileKeys(rows, expansionCommand.expanded === true))
+    if (expansionCommand.expanded === true) setShowAll(true)
+  }, [expansionCommand, rows])
 
   function toggleFile(key) {
     setOpenFiles((current) => {
