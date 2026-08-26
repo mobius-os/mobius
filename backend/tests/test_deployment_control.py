@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 from types import SimpleNamespace
+import urllib.error
 
 import pytest
 
@@ -21,6 +23,72 @@ def _install_control(tmp_path, monkeypatch):
   )
   monkeypatch.setattr(dc, "_control_dir", lambda: control)
   return control, inbox
+
+
+@pytest.mark.parametrize("status", [400, 409])
+def test_managed_request_recognizes_only_structured_client_rejections(
+  monkeypatch, status,
+):
+  settings = SimpleNamespace(
+    mobius_account_origin="https://account.example",
+    mobius_sso_enabled=True,
+    mobius_sso_client_secret="secret",
+    mobius_sso_instance_id="instance",
+  )
+  response = urllib.error.HTTPError(
+    "https://account.example/start", status, "rejected", {},
+    io.BytesIO(b'{"detail":"Replacement handoff rejected."}'),
+  )
+
+  def open_request(*_args, **_kwargs):
+    raise response
+
+  opener = SimpleNamespace(open=open_request)
+  monkeypatch.setattr(dc, "get_settings", lambda: settings)
+  monkeypatch.setattr(dc.urllib.request, "build_opener", lambda *_args: opener)
+
+  with pytest.raises(dc.DeploymentControlError) as exc:
+    dc._managed_request("POST", "start", {"operation_id": "replacement"})
+
+  assert exc.value.code == "controller_rejected"
+  assert exc.value.status_code == 409
+
+
+@pytest.mark.parametrize(
+  ("status", "body"),
+  [
+    (409, b"not-json"),
+    (502, b'{"detail":"Replacement could not start."}'),
+    (503, b'{"detail":"Replacement could not start."}'),
+    (504, b'{"detail":"Replacement could not start."}'),
+  ],
+)
+def test_managed_request_keeps_ambiguous_http_failures_ambiguous(
+  monkeypatch, status, body,
+):
+  settings = SimpleNamespace(
+    mobius_account_origin="https://account.example",
+    mobius_sso_enabled=True,
+    mobius_sso_client_secret="secret",
+    mobius_sso_instance_id="instance",
+  )
+  response = urllib.error.HTTPError(
+    "https://account.example/start", status, "gateway failure", {},
+    io.BytesIO(body),
+  )
+
+  def open_request(*_args, **_kwargs):
+    raise response
+
+  opener = SimpleNamespace(open=open_request)
+  monkeypatch.setattr(dc, "get_settings", lambda: settings)
+  monkeypatch.setattr(dc.urllib.request, "build_opener", lambda *_args: opener)
+
+  with pytest.raises(dc.DeploymentControlError) as exc:
+    dc._managed_request("POST", "start", {"operation_id": "replacement"})
+
+  assert exc.value.code == "controller_unavailable"
+  assert exc.value.status_code == 503
 
 
 def test_normalize_rejects_unknown_controller_state():

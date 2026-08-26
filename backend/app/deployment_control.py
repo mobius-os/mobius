@@ -211,13 +211,20 @@ def _managed_request(method: str, suffix: str, payload: dict[str, str] | None = 
   except urllib.error.HTTPError as exc:
     try:
       error = json.loads(exc.read(16 * 1024).decode("utf-8"))
-      detail = str(error.get("detail") or error.get("message") or "")
-    except (ValueError, UnicodeError, AttributeError):
+      detail = (
+        str(error.get("detail") or error.get("message") or "")
+        if isinstance(error, dict) else ""
+      )
+    except (ValueError, UnicodeError):
       detail = ""
+    if exc.code not in {400, 409} or not detail:
+      raise DeploymentControlError(
+        "controller_unavailable", "The Möbius account service is unavailable."
+      ) from exc
     raise DeploymentControlError(
       "controller_rejected",
-      detail[:360] or "The account service rejected container replacement.",
-      status_code=409 if exc.code in {400, 409} else 503,
+      detail[:360],
+      status_code=409,
     ) from exc
   except (urllib.error.URLError, TimeoutError, OSError, ValueError, UnicodeError) as exc:
     raise DeploymentControlError(
