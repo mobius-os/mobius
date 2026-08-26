@@ -201,6 +201,41 @@ test('a failed install settles instead of hanging forever', async () => {
   await assert.rejects(done)
 })
 
+test('worker activation cannot miss a state change during listener setup', async () => {
+  const container = fakeContainer({ installing: true })
+  const worker = container.pushWorker.installing
+  const addEventListener = worker.addEventListener
+  worker.addEventListener = (type, listener) => {
+    addEventListener.call(worker, type, listener)
+    worker.state = 'activated'
+  }
+  container.pushWorker.active = worker
+  const push = fakePush()
+
+  await subscribeToPush({ container, push })
+
+  assert.equal(push.sent.length, 1)
+  assert.deepEqual(worker.listeners, [], 'the activation listener is released')
+})
+
+test('a wedged worker activation rejects after the bounded wait', async () => {
+  const container = fakeContainer({ installing: true })
+  const worker = container.pushWorker.installing
+  const push = fakePush()
+
+  await assert.rejects(
+    subscribeToPush({
+      container,
+      push,
+      workerActivationTimeoutMs: 0,
+    }),
+    /activation timed out/,
+  )
+
+  assert.deepEqual(worker.listeners, [], 'the timed-out listener is released')
+  assert.deepEqual(push.sent, [], 'subscription never uses the wedged worker')
+})
+
 test('an existing worker refresh waits for its replacement before subscribing',
   async () => {
     const container = fakeContainer({ updating: true })

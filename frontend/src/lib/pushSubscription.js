@@ -7,6 +7,7 @@ import { api } from '../api/client.js'
  */
 export const PUSH_SW_SCOPE = '/shell/push/'
 const PUSH_SW_URL = '/sw-push.js'
+const PUSH_WORKER_ACTIVATION_TIMEOUT_MS = 5000
 
 // Scopes an earlier release subscribed on. This is an ALLOWLIST on purpose:
 // "retire every registration that isn't ours" would silently unsubscribe a
@@ -15,18 +16,37 @@ const PUSH_SW_URL = '/sw-push.js'
 // Removable once no install can still be running the pre-/shell/push/ shell.
 const LEGACY_PUSH_SCOPES = ['/']
 
-function waitForWorkerActivation(worker) {
+function waitForWorkerActivation(worker, {
+  timeoutMs = PUSH_WORKER_ACTIVATION_TIMEOUT_MS,
+  setTimeoutFn = (typeof setTimeout !== 'undefined' ? setTimeout : null),
+  clearTimeoutFn = (typeof clearTimeout !== 'undefined' ? clearTimeout : null),
+} = {}) {
   if (worker.state === 'activated' || worker.state === 'redundant') {
     return Promise.resolve(worker.state)
   }
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    let timer = null
+    const finish = (state) => {
+      if (settled) return
+      settled = true
+      worker.removeEventListener('statechange', onChange)
+      if (timer != null && clearTimeoutFn) clearTimeoutFn(timer)
+      if (state === 'timeout') {
+        reject(new Error('Push worker activation timed out.'))
+      } else {
+        resolve(state)
+      }
+    }
     const onChange = () => {
       if (worker.state === 'activated' || worker.state === 'redundant') {
-        worker.removeEventListener('statechange', onChange)
-        resolve(worker.state)
+        finish(worker.state)
       }
     }
     worker.addEventListener('statechange', onChange)
+    if (setTimeoutFn) timer = setTimeoutFn(() => finish('timeout'), timeoutMs)
+    // The worker can settle between the state read above and listener setup.
+    onChange()
   })
 }
 
@@ -52,7 +72,7 @@ async function checkForUpdatedWorker(registration) {
 }
 
 /** Register the push worker and resolve once the newest worker is active. */
-async function activatePushWorker(container) {
+async function activatePushWorker(container, { activationTimeoutMs } = {}) {
   const registration = await container.register(PUSH_SW_URL, {
     scope: PUSH_SW_SCOPE,
     updateViaCache: 'none',
@@ -71,7 +91,9 @@ async function activatePushWorker(container) {
   // active worker while its replacement installs leaves the very next push on
   // stale display code. Wait for the candidate; a failed update is retried by
   // subscribeToPushWithRetry instead of silently reusing the stale worker.
-  const state = await waitForWorkerActivation(worker)
+  const state = await waitForWorkerActivation(worker, {
+    timeoutMs: activationTimeoutMs,
+  })
   if (state === 'redundant') throw new Error('Push worker activation failed.')
   return registration
 }
@@ -118,11 +140,12 @@ function applicationServerKey(publicKey) {
 export async function subscribeToPush({
   container = navigator.serviceWorker,
   push = api.push,
+  workerActivationTimeoutMs,
 } = {}) {
   // Independent: the worker's first install is a real fetch, and holding the
   // key request behind it costs a round trip on every fresh install.
   const [registration, res] = await Promise.all([
-    activatePushWorker(container),
+    activatePushWorker(container, { activationTimeoutMs: workerActivationTimeoutMs }),
     push.vapidKey(),
   ])
   // Throw (don't silently return) on a cold-backend failure so a first-boot
