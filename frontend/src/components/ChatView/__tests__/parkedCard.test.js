@@ -209,6 +209,14 @@ test('a benign pause (no reset time) renders the calm "Paused" family, not red E
     'ANY pause gets the soft treatment')
   assert.match(errorCard, /block\.pause \? 'Paused' : 'Error'/,
     'a benign pause reads "Paused"; only genuine failures read "Error"')
+  assert.match(errorCard, /\) : vm\.benign \? \([\s\S]*className="chat__recovery-title"/,
+    'a benign pause uses the neutral recovery hierarchy rather than the red error label')
+  assert.match(errorCard, /Möbius will continue automatically when the restart is complete\./,
+    'the restart pause briefly states its expected automatic outcome')
+  assert.match(chatView, /Response paused for restart\. Möbius will continue automatically\./,
+    'the screen-reader status matches the visible automatic continuation promise')
+  assert.match(chatView, /Paused for restart — continuing automatically/,
+    'the offscreen-card nudge keeps the same concise informational language')
   assert.match(errorCard, /role=\{vm\.benign \? undefined : 'alert'\}/,
     'the global live region announces waits; only genuine failures alert here')
   assert.match(errorCard, /className="chat__error-status"[\s\S]*<\/div>\s*\{children\}/,

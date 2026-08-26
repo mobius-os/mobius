@@ -144,6 +144,73 @@ test.describe('Bug 1: AskUserQuestion', () => {
   })
 
 
+  test('a restart pause renders before the unanswered question without a refresh', async ({ page }) => {
+    // Exact planned-restart sequence: the question is already live when the
+    // drain publishes its terminal pause. The durable reducer has always
+    // normalized this to text -> pause -> question; the in-browser reducer
+    // must do the same immediately rather than waiting for a reload.
+    const streamBody = [
+      'data: {"type":"text","content":"The change is ready."}\n\n',
+      `data: ${JSON.stringify({
+        type: 'question',
+        question_id: 'q-restart-order',
+        questions: [{
+          question: 'Restart now?',
+          header: 'Restart',
+          multiSelect: false,
+          options: [
+            { label: 'Restart now' },
+            { label: 'Not now' },
+          ],
+        }],
+      })}\n\n`,
+      `data: ${JSON.stringify({
+        type: 'error',
+        message: 'Paused for a platform update.',
+        resumable: true,
+        pause: { kind: 'restart' },
+      })}\n\n`,
+      'data: {"type":"done"}\n\n',
+    ].join('')
+    await setupWithStreamMock(page, streamBody)
+    await mockPendingQuestionState(page, 'q-restart-order')
+    await newChat(page)
+    await sendMessage(page, 'Prepare the change and ask before restarting')
+
+    const assistant = page.locator(
+      '[data-chat-surface="painted"] .chat__msg--assistant',
+    ).last()
+    await expect(assistant.locator('.qcard')).toBeVisible({ timeout: 5000 })
+    const pauseCard = assistant.locator('.chat__text--error')
+    await expect(pauseCard).toBeVisible()
+    await expect(pauseCard.locator('.chat__recovery-title')).toHaveText('Paused')
+    await expect(pauseCard.locator('.chat__recovery-copy')).toHaveText(
+      'Möbius will continue automatically when the restart is complete.',
+    )
+    const pauseColors = await pauseCard.evaluate(card => {
+      const rootStyle = getComputedStyle(document.documentElement)
+      return {
+        title: getComputedStyle(card.querySelector('.chat__recovery-title')).color,
+        text: rootStyle.getPropertyValue('--text').trim(),
+        danger: rootStyle.getPropertyValue('--danger').trim(),
+      }
+    })
+    expect(pauseColors.title).toBe(pauseColors.text)
+    expect(pauseColors.title).not.toBe(pauseColors.danger)
+
+    const order = await assistant.evaluate(element => (
+      [...element.querySelectorAll('.chat__text--assistant, .chat__text--error, .qcard')]
+        .map(node => {
+          if (node.classList.contains('qcard')) return 'question'
+          if (node.classList.contains('chat__text--error')) return 'error'
+          return 'text'
+        })
+    ))
+    expect(order).toEqual(['text', 'error', 'question'])
+    await expect(assistant.locator('.chat__resume')).toHaveCount(0)
+  })
+
+
   test('a failed answer keeps the question and choice retryable', async ({ page }) => {
     const questionStream = [
       `data: ${JSON.stringify({

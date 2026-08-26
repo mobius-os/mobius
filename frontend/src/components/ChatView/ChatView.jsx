@@ -4454,6 +4454,9 @@ export default function ChatView({
         ? `Usage limit reached. Usage resets ${label}. Automatic continuation available.`
         : 'Usage limit reached. Automatic continuation available.'
     }
+    if (pendingResumeBlock.pause?.kind === 'restart') {
+      return 'Response paused for restart. Möbius will continue automatically.'
+    }
     return 'Turn paused — Resume available.'
   })()
   const ariaStatus = turnActive
@@ -4852,7 +4855,9 @@ export default function ChatView({
                           : limitResetElapsed
                             ? 'Usage available — tap to continue'
                             : 'Usage limit reached — continuation available'
-                        : 'Turn paused — tap to resume'}
+                        : pendingResumeBlock?.pause?.kind === 'restart'
+                          ? 'Paused for restart — continuing automatically'
+                          : 'Turn paused — tap to resume'}
                     </button>
                   )}
                   {jumpToLatestVisible && (

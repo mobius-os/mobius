@@ -83,6 +83,15 @@ export default function ErrorCard({
               </details>
             )}
           </>
+        ) : vm.benign ? (
+          <>
+            <div className="chat__recovery-title">{vm.label}</div>
+            <div className="chat__recovery-copy">
+              {block.pause?.kind === 'restart'
+                ? 'Möbius will continue automatically when the restart is complete.'
+                : (block.message || 'Möbius will continue automatically.')}
+            </div>
+          </>
         ) : (
           <>
             <span className="chat__error-label">{vm.label}</span>
