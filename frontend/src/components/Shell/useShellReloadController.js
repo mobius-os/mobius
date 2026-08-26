@@ -212,8 +212,20 @@ export default function useShellReloadController(inputs) {
       // supporting browsers to retain the outgoing pixels until the incoming
       // shell reports its destination ready. Reload is excluded from
       // cross-document view transitions.
-      win.__mobiusPrepareShellReloadTransition?.()
-      win.location.replace('/shell/')
+      const transitionPrepared = (
+        win.__mobiusPrepareShellReloadTransition?.() === true
+      )
+      const navigate = () => win.location.replace('/shell/')
+      if (transitionPrepared && typeof win.requestAnimationFrame === 'function') {
+        // The cross-document opt-in is injected dynamically so unrelated
+        // navigations keep ordinary browser semantics. Give the browser one
+        // rendering boundary to activate that rule before replacement;
+        // navigating in the insertion task makes `pageswap.viewTransition`
+        // nondeterministically null in Chromium.
+        win.requestAnimationFrame(navigate)
+      } else {
+        navigate()
+      }
     }
     // Release the worker, but never wait for its activation to make the
     // navigation fresh. Online shell navigation owns freshness; activation

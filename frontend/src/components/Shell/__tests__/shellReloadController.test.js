@@ -254,3 +254,36 @@ test('an expired non-navigation interaction cannot starve an old pending apply',
     globalThis.history = previousHistory
   }
 })
+
+test('a prepared cross-document transition activates before replacement', async () => {
+  const previousHistory = globalThis.history
+  globalThis.history = { state: null, replaceState() {} }
+  try {
+    const harness = controllerHarness()
+    const frames = []
+    let prepared = 0
+    harness.win.__mobiusPrepareShellReloadTransition = () => {
+      prepared += 1
+      return true
+    }
+    harness.win.requestAnimationFrame = callback => {
+      frames.push(callback)
+      return frames.length
+    }
+    const { result } = renderHook(useShellReloadController, harness.inputs)
+
+    result.current.requestShellReload()
+    await tick()
+    await tick()
+
+    assert.equal(prepared, 1)
+    assert.equal(harness.replacements.length, 0,
+      'replacement must not race the dynamically inserted navigation rule')
+    assert.equal(frames.length, 1)
+
+    frames.shift()()
+    assert.deepEqual(harness.replacements, ['/shell/'])
+  } finally {
+    globalThis.history = previousHistory
+  }
+})
