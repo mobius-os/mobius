@@ -90,7 +90,9 @@ export default function ErrorCard({
             </div>
             <div className="chat__recovery-copy">
               {block.pause?.kind === 'restart'
-                ? 'Möbius will continue automatically when the restart is complete.'
+                ? block.resumable
+                  ? 'Möbius will continue automatically when the restart is complete.'
+                  : (block.message || 'This response is paused.')
                 : (block.message || 'Möbius will continue automatically.')}
             </div>
           </>
