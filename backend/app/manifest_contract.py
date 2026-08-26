@@ -5,11 +5,7 @@ from urllib.parse import unquote, urlparse
 import re
 
 REQUIRED_STRING_FIELDS = ("id", "name", "version", "description", "entry")
-# Capability permissions this Möbius build recognizes. An app MAY list any of
-# these in `requires` to demand the platform actually provides them; requiring a
-# name absent here fails the install loudly instead of granting nothing in
-# silence. Extending a capability (e.g. the identity bridge) adds its name here.
-RECOGNIZED_CAPABILITIES = (
+BOOLEAN_PERMISSION_FIELDS = (
   "manage_apps",
   "manage_skills",
   "github_access",
@@ -20,6 +16,16 @@ RECOGNIZED_CAPABILITIES = (
   "identity_manage",
   "owner_screenshot",
   "railway_manage",
+)
+# Capabilities this Möbius build recognizes. An app MAY list any of these in
+# `requires` to demand the platform actually provides them; requiring a name
+# absent here fails the install loudly instead of granting nothing in silence.
+# Keep this compatibility registry distinct from boolean permission validation:
+# some capabilities, such as credentialed_fetch, use a structured declaration.
+RECOGNIZED_CAPABILITIES = (
+  *BOOLEAN_PERMISSION_FIELDS,
+  "credentialed_fetch",
+  "app_chat_output_media",
 )
 SOURCE_FILES_COUNT_MAX = 50
 SKILLS_COUNT_MAX = 5
@@ -230,7 +236,7 @@ def validate_manifest_contract(manifest) -> None:
       f"Manifest permission {names} has been removed; server-side app jobs "
       "run as ordinary Möbius processes."
     )
-  for field in RECOGNIZED_CAPABILITIES:
+  for field in BOOLEAN_PERMISSION_FIELDS:
     if field in permissions and not isinstance(permissions[field], bool):
       _fail(f"Manifest `permissions.{field}` must be a boolean.")
 

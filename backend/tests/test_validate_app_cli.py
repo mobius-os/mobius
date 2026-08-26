@@ -203,7 +203,13 @@ def test_removed_job_authority_permissions_fail_clearly(
 def test_requires_accepts_recognized_capabilities(tmp_path):
   _write_app(tmp_path, "export default function App(){ return <div /> }")
   manifest = json.loads((tmp_path / "mobius.json").read_text())
-  manifest["requires"] = ["identity_manage", "railway_manage"]
+  manifest["requires"] = [
+    "identity_manage",
+    "railway_manage",
+    "credentialed_fetch",
+    "app_chat_output_media",
+    "owner_screenshot",
+  ]
   validate_manifest_contract(manifest)  # does not raise on a build that has them
 
 
