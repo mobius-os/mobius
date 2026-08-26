@@ -147,8 +147,10 @@ test('ChatView routes both offscreen attention nudges through the controller', (
     'the nudge shows only when the resume card is offscreen')
   assert.match(chatView, /Turn paused — tap to resume/,
     'the non-park nudge copy names the pause')
-  assert.match(chatView, /Rate limit reached — tap to resume/,
-    'the park variant names the rate limit')
+  assert.match(chatView, /Queued to continue/,
+    'an automatic park nudge names the queued outcome')
+  assert.match(chatView, /Usage available — tap to continue/,
+    'an elapsed manual park names its now-available action')
   assert.match(
     chatView,
     /className="chat__question-nudge"\s+onClick=\{revealConversationTail\}/,
@@ -254,11 +256,8 @@ test('both attention nudges observe a node published by the card, not a lookup',
   // shared single-slot ref would then be nulled by whichever unmounts first and
   // the cue would go dark with the real button still offscreen. The tail is also
   // what arms the cue (tailResumableBlock), so both must name the same block.
-  const resumeButton = sliceElement(msgContent, '<button')
-  assert.match(resumeButton, /className="chat__resume"/,
-    'the sliced element is the Resume button')
-  assert.match(resumeButton, /ref=\{i === lastEntryIdx \? resumeCardRef : undefined\}/,
-    'only the TAIL resumable note may publish the observed node')
+  assert.match(msgContent, /cardRef=\{resumable && i === lastEntryIdx \? resumeCardRef : undefined\}/,
+    'only the TAIL resumable note publishes the complete recovery card')
   const questionCard = readFileSync(new URL('../QuestionCard.jsx', import.meta.url), 'utf8')
   const qcard = sliceElement(questionCard, '<div\n      className={`qcard')
   assert.match(qcard, /ref=\{answered \? (null|undefined) : pendingCardRef\}/,
@@ -268,8 +267,10 @@ test('both attention nudges observe a node published by the card, not a lookup',
 test('ariaStatus announces the recovery state instead of "Response ready."', () => {
   assert.match(chatView, /Turn paused — Resume available\./,
     'a paused turn announces the recovery state, not readiness')
-  assert.match(chatView, /Rate limit reached, resets \$\{label\} — Resume available\./,
-    'a park announces the reset label and that Resume is available')
+  assert.match(chatView, /Usage limit reached\. Queued to continue \$\{label\}\./,
+    'an automatic park announces the queued state')
+  assert.match(chatView, /Usage is available again\. Continue available\./,
+    'an elapsed manual park announces the available action')
   assert.match(chatView, /resumeStatus\s*\n?\s*\?\?/,
     'the recovery status takes precedence over the "Response ready." fallback')
 })

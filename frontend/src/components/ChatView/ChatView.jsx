@@ -114,6 +114,7 @@ import { composerHistoryFromMessages } from './composerHistory.js'
 import { createFileDragHandlers } from './dragUpload.js'
 import useOpenAppCtaAutoDismiss from './hooks/useOpenAppCtaAutoDismiss.js'
 import {
+  isAmbiguousSendFailure,
   isModelSelectionRequiredFailure,
   isPendingQuestionSendFailure,
   sendFailureMessage,
@@ -505,6 +506,32 @@ export default function ChatView({
     restoreComposerText,
     restoreDurableDraft,
   } = useComposerDraftState({ chatId, hidden, inputRef })
+
+  // An ambiguous POST restores the exact cid-tagged draft until server truth
+  // proves where it landed. Reconcile on every authoritative transcript read,
+  // not only on mount: an SSE/runtime update can reveal the committed user row
+  // after the draft was restored, and showing both is never a valid state.
+  const reconcileFailedSendAttempt = useCallback((
+    visibleMessages,
+    pendingMessages,
+    { reportMissing = false } = {},
+  ) => {
+    const failedAttempt = failedSendAttemptRef.current
+    if (!failedAttempt) return 'none'
+    if (!sendAttemptIsDurable(failedAttempt, visibleMessages, pendingMessages)) {
+      if (reportMissing) {
+        setSendFailure(
+          'That message didn’t reach the chat. It’s safe here—send it again when ready.',
+        )
+      }
+      return 'missing'
+    }
+    clearFailedAttempt()
+    setComposerInput('')
+    clearFiles()
+    setSendFailure(null)
+    return 'durable'
+  }, [clearFailedAttempt, clearFiles, setComposerInput, setSendFailure])
 
   const [embeddedRunSignal, setEmbeddedRunSignal] = useState(
     EMPTY_CHAT_RUN_SIGNAL,
@@ -1063,6 +1090,11 @@ export default function ChatView({
           }
         }
       }
+      reconcileFailedSendAttempt(
+        msgs,
+        data.pending_messages || [],
+        { reportMissing: true },
+      )
       const preserveLocalTurn =
         !authoritative
         && force
@@ -1141,6 +1173,9 @@ export default function ChatView({
     commitMessages,
     pendingQueue.hydrate,
     queryClient,
+    reconcileFailedSendAttempt,
+    setActiveAssistantMessageId,
+    setGoalPresentationLocalState,
   ])
 
   // Active-turn runtime reconciliation. The SSE stream is authoritative for
@@ -2141,23 +2176,11 @@ export default function ChatView({
         return
       }
       const msgs = detailCache.messages
-      const failedAttempt = failedSendAttemptRef.current
-      if (failedAttempt) {
-        if (sendAttemptIsDurable(
-          failedAttempt,
-          msgs,
-          runtime.pending_messages,
-        )) {
-          clearFailedAttempt()
-          setComposerInput('')
-          clearFiles()
-          setSendFailure(null)
-        } else {
-          setSendFailure(
-            'That message didn’t reach the chat. It’s ready in the composer—try again.',
-          )
-        }
-      }
+      reconcileFailedSendAttempt(
+        msgs,
+        runtime.pending_messages,
+        { reportMissing: true },
+      )
 
       if (reused) {
         // One narrow cache publication updates queue/liveness only. Reconcile
@@ -2324,7 +2347,16 @@ export default function ChatView({
       loadingOlder.current = false
       disconnect()
     }
-  }, [chatId, loadNonce, hidden, searchReveal?.id, searchReveal?.anchorKey])
+  }, [
+    chatId,
+    hidden,
+    loadNonce,
+    searchReveal?.anchorKey,
+    searchReveal?.id,
+    reconcileFailedSendAttempt,
+    setActiveAssistantMessageId,
+    setGoalPresentationLocalState,
+  ])
 
 
   // Paginate older messages. Captures a pre-prepend anchor so we can
@@ -2859,6 +2891,9 @@ export default function ChatView({
         setSendFailure(modelSelectionBlocked
           ? null
           : sendFailureMessage(err, { online: getOnlineSnapshot() }))
+        if (isAmbiguousSendFailure(err)) {
+          void fetchMessages({ force: true })
+        }
         if (modelSelectionBlocked) {
           setModelSelectionRequest(request => request + 1)
         } else if (pendingQuestionBlocked) {
@@ -3062,6 +3097,9 @@ export default function ChatView({
       setSendFailure(modelSelectionBlocked
         ? null
         : sendFailureMessage(err, { online: getOnlineSnapshot() }))
+      if (isAmbiguousSendFailure(err)) {
+        void fetchMessages({ force: true })
+      }
       if (modelSelectionBlocked) {
         setModelSelectionRequest(request => request + 1)
         onStreamEndRef.current?.({ continues: false })
@@ -4431,9 +4469,15 @@ export default function ChatView({
     if (!pendingResumeBlock) return null
     if (pendingResumeBlock.pause?.resets_at) {
       const label = formatResetTime(pendingResumeBlock.pause.resets_at)
+      if (autoResumeEnabled) {
+        return label
+          ? `Usage limit reached. Queued to continue ${label}.`
+          : 'Usage limit reached. Queued to continue automatically.'
+      }
+      if (limitResetElapsed) return 'Usage is available again. Continue available.'
       return label
-        ? `Rate limit reached, resets ${label} — Resume available.`
-        : 'Rate limit reached — Resume available.'
+        ? `Usage limit reached. Usage resets ${label}. Automatic continuation available.`
+        : 'Usage limit reached. Automatic continuation available.'
     }
     return 'Turn paused — Resume available.'
   })()
@@ -4702,6 +4746,7 @@ export default function ChatView({
                 onAutoResumeChange={
                   isLastMsg ? handleAutoResumeChange : undefined
                 }
+                limitResetElapsed={isLastMsg && limitResetElapsed}
                 submissionBlocked={providerSwitching}
                 isLastMsg={isLastMsg}
                 liveQuestionId={answerableQuestionId}
@@ -4736,6 +4781,7 @@ export default function ChatView({
                 autoResumeErrorSource === 'card' ? autoResumeError : ''
               }
               onAutoResumeChange={handleAutoResumeChange}
+              limitResetElapsed={limitResetElapsed}
               submissionBlocked={providerSwitching}
               liveQuestionId={answerableQuestionId}
               // Same publication channel as the durable rows above: while the
@@ -4819,7 +4865,18 @@ export default function ChatView({
                       onClick={revealConversationTail}
                     >
                       {pendingResumeBlock?.pause?.resets_at
-                        ? 'Rate limit reached — tap to resume'
+                        ? autoResumeEnabled
+                          ? (() => {
+                              const label = formatResetTime(
+                                pendingResumeBlock.pause.resets_at,
+                              )
+                              return label
+                                ? `Queued to continue ${label}`
+                                : 'Queued to continue automatically'
+                            })()
+                          : limitResetElapsed
+                            ? 'Usage available — tap to continue'
+                            : 'Usage limit reached — continuation available'
                         : 'Turn paused — tap to resume'}
                     </button>
                   )}

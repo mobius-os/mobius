@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 
 // Provider-limit parking (design §2.4): a limit-killed turn persists an error
 // block carrying a single `pause` descriptor ({kind, resets_at?}), which
-// renders as a live "Rate limit — resets at … · Resume now" card. That one
+// renders as one calm queued/paused recovery card. That one
 // field must survive all three client seams: the live stream reducer,
 // promote-to-block, and the shared ErrorCard renderer. MsgContent owns the
 // block tree for BOTH persisted and live data, so those sources cannot diverge.
@@ -30,12 +30,12 @@ const settingsView = readFileSync(
 test('ErrorCard renders a parked card for a block whose pause has a reset time', () => {
   assert.match(errorCard, /block\.pause\?\.resets_at/,
     'the card must key the parked classification on block.pause.resets_at')
-  assert.match(errorCard, /Rate limit/,
-    'a parked block must be labeled as a rate limit, not a generic error')
-  assert.match(errorCard, /Resets \{vm\.resetLabel\}/,
-    'the card must show the reset time (label carries its own preposition)')
-  assert.match(msgContent, /\{parked \? 'Resume now' : 'Resume'\}/,
-    'the tail resume button reads "Resume now" on a parked card')
+  assert.match(errorCard, /Usage resets/,
+    'a parked block must lead with a plain-language reset outcome')
+  assert.match(errorCard, /Queued to continue/,
+    'enabled automatic continuation is the authoritative state')
+  assert.match(msgContent, /\{parked \? 'Continue now' : 'Resume'\}/,
+    'an elapsed park offers Continue now rather than a premature retry')
 })
 
 test('the one block renderer owns ErrorCard for both active sources', () => {
@@ -103,19 +103,19 @@ test('the parked card has styling distinct from a plain error', () => {
     'the reset line has its own style')
 })
 
-test('auto-resume is a chat-local switch shown only on the active rate-limit card', () => {
+test('the rate-limit card presents one recovery action at a time', () => {
   assert.match(msgContent, /resumable && parked && autoResumeAvailable && onAutoResumeChange/,
-    'the switch must require the tail resumable rate-limit state')
-  assert.match(msgContent, /Automatically continue after usage limits/,
-    'the switch label describes the automatic behavior directly')
-  assert.match(msgContent, /htmlFor=\{autoResumeSwitchId\}/,
-    'the visible switch label must also be its accessible name')
-  assert.doesNotMatch(msgContent, /This chat only/,
-    'the card keeps the control copy concise')
-  assert.match(msgContent, /onCheckedChange=\{onAutoResumeChange\}/,
-    'toggling changes the chat preference rather than sending continue')
-  assert.match(css, /\.chat__limit-option\s*\{/,
-    'the in-card control has a dedicated layout')
+    'the action must require the tail resumable rate-limit state')
+  assert.match(msgContent, /Continue automatically/,
+    'a future reset offers the safe automatic path')
+  assert.match(msgContent, /Cancel automatic continue/,
+    'an enabled policy stays cancellable without a competing retry')
+  assert.match(msgContent, /manualResumeAvailable[\s\S]*!limitResetElapsed[\s\S]*!autoResumeEnabled|manualResumeAvailable[\s\S]*limitResetElapsed && !autoResumeEnabled/,
+    'manual continuation appears only after reset and only when auto continuation is off')
+  assert.doesNotMatch(msgContent, /<Switch/,
+    'the card must not present a switch beside a competing action')
+  assert.match(css, /\.chat__recovery-actions\s*\{/,
+    'the in-card action has a dedicated layout')
   assert.doesNotMatch(settingsView, /auto_resume_on_limit|Auto.?resume/i,
     'the removed global automatic option must not reappear in Settings')
   assert.match(chatSettingsPanel, /Automatically continue after usage limits/,
@@ -200,13 +200,13 @@ test('a benign pause (no reset time) renders the calm "Paused" family, not red E
     'interactive recovery controls must remain separate from the error body')
 })
 
-test('the park card reassures that a reset push is coming', () => {
-  assert.match(errorCard, /chat__parked-note/,
-    'a muted reassurance line renders inside the parked branch')
-  assert.match(errorCard, /notification when it resets/,
-    'the note names the incoming reset push')
-  assert.match(errorCard, /keep trying to continue this chat after the limit resets/,
-    'the note reflects the enabled per-chat behavior')
-  assert.match(css, /\.chat__parked-note\s*\{/,
-    'the reassurance line has its own muted style')
+test('the park card keeps provider mechanics behind progressive disclosure', () => {
+  assert.match(errorCard, /chat__recovery-copy/,
+    'the plain-language outcome is the visible supporting copy')
+  assert.match(errorCard, /Technical details/,
+    'the raw provider payload stays available on demand')
+  assert.match(errorCard, /Möbius will continue automatically/,
+    'the enabled state promises only the behavior the policy owns')
+  assert.match(css, /\.chat__recovery-details\s*\{/,
+    'technical detail has a quiet disclosure style')
 })

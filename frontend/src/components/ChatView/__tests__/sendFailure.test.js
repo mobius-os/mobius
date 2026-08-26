@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  isAmbiguousSendFailure,
   isModelSelectionRequiredFailure,
   isPendingQuestionSendFailure,
   sendFailureMessage,
@@ -15,12 +16,12 @@ import {
 test('send failures distinguish connection, timeout, service, and generic errors', () => {
   assert.match(
     sendFailureMessage(new ChatTransportError(new TypeError('Failed to fetch'))),
-    /couldn’t confirm the send/,
+    /Checking whether that message reached the chat/,
   )
 
   const timeout = new Error('aborted')
   timeout.name = 'AbortError'
-  assert.match(sendFailureMessage(timeout), /too long/)
+  assert.match(sendFailureMessage(timeout), /Checking whether that message reached the chat/)
 
   const unavailable = new Error('HTTP 503')
   unavailable.status = 503
@@ -29,6 +30,17 @@ test('send failures distinguish connection, timeout, service, and generic errors
   assert.match(sendFailureMessage(new Error('HTTP 400')), /couldn’t send the message/)
   assert.match(sendFailureMessage({ status: 429 }), /too many requests/)
   assert.match(sendFailureMessage({ status: 401 }), /sign in again/)
+})
+
+test('only transport and timeout failures need an authoritative transcript check', () => {
+  assert.equal(
+    isAmbiguousSendFailure(new ChatTransportError(new TypeError('Failed to fetch'))),
+    true,
+  )
+  const timeout = new Error('aborted')
+  timeout.name = 'AbortError'
+  assert.equal(isAmbiguousSendFailure(timeout), true)
+  assert.equal(isAmbiguousSendFailure({ status: 503 }), false)
 })
 
 test('an unrelated programming TypeError is not mislabeled as offline', () => {

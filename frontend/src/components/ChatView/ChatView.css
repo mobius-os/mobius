@@ -651,45 +651,77 @@
   background: color-mix(in srgb, var(--accent) 8%, transparent);
   border-color: color-mix(in srgb, var(--accent) 32%, var(--border-light));
 }
-.chat__text--parked .chat__error-label {
-  color: var(--accent);
+.chat__recovery-title {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.35;
 }
-.chat__parked-reset {
+.chat__recovery-copy {
   margin-top: 4px;
-  font-size: 12px;
-  opacity: 0.8;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
 }
-/* Reassurance under a park: a reset push is coming, and tapping Resume now
-   before the reset may re-park. Muted so it reads as a calm footnote, not a
-   second warning. */
-.chat__parked-note {
-  margin-top: 6px;
+.chat__recovery-details {
+  margin-top: 4px;
+  color: var(--muted);
   font-size: 12px;
-  line-height: 1.4;
-  opacity: 0.7;
 }
-.chat__limit-option {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+.chat__recovery-details summary {
+  display: flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 44px;
+  cursor: pointer;
+}
+.chat__recovery-details[open] summary {
+  color: var(--text);
+}
+.chat__recovery-details .md {
+  padding-bottom: 4px;
+}
+.chat__recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px 12px;
+  margin-top: 4px;
+}
+.chat__recovery-action {
   min-height: 44px;
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border-light));
-}
-.chat__limit-option-copy {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-}
-.chat__limit-option-label {
-  color: var(--text);
+  padding: 8px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border-light));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface));
+  color: var(--accent);
+  font: inherit;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.08s;
 }
-.chat__limit-option-error {
-  grid-column: 1 / -1;
+.chat__recovery-action:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 26%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border-light));
+}
+.chat__recovery-action:active:not(:disabled) { transform: scale(0.97); }
+.chat__recovery-action--quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+.chat__recovery-action--quiet:hover:not(:disabled) {
+  border-color: var(--border-light);
+  background: color-mix(in srgb, var(--surface2) 72%, transparent);
+  color: var(--text);
+}
+.chat__recovery-action:disabled {
+  cursor: default;
+  opacity: 0.56;
+}
+.chat__recovery-action-error {
+  flex-basis: 100%;
   color: var(--danger);
   font-size: 12px;
 }
@@ -723,7 +755,8 @@
 .chat-policy-switch button[role="switch"][data-disabled][data-state="checked"] {
   background: var(--switch-track-color-checked-disabled);
 }
-/* One-tap Resume on a turn paused by a drain-gated restart (design §2.2).
+/* One-tap Resume on a turn paused by a drain-gated restart, or Continue after
+   an elapsed provider reset (design §2.2/§2.4).
    Rendered only on the tail resumable interrupt note; re-sends "continue".
    This is the single most important recovery gesture, so it clears the 44px
    touch floor (an inline-flex box, not a 31px text pill) and carries an
