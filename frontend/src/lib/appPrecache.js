@@ -4,8 +4,8 @@
  *
  * Two signals feed the warm set:
  *   - the drawer pin (`app.pinned_at`) — deliberate, long-term intent;
- *   - the iframe LRU in Shell.jsx — actual recent use. The in-memory
- *     LRU starts empty on every load, so its rotations are merged into
+ *   - the shell's app-frame LRU — actual recent use. The in-memory LRU
+ *     starts empty on every load, so its rotations are merged into
  *     localStorage (mergeAppLru) and read back on the next shell load
  *     (parseStoredAppLru). That persisted list is the cross-session
  *     "most-recent apps" signal.
@@ -18,8 +18,9 @@ export const APP_LRU_STORAGE_KEY = 'mobius-app-lru'
 
 // Upper bound on apps warmed per shell load AND on the persisted LRU
 // depth. Each warmed app costs one token fetch + two bounded SW fetches
-// (frame + module), all idle-scheduled — six keeps the whole pass cheap
-// on a phone while covering pins + everything the user touched lately.
+// (frame + module), all idle-scheduled. Keep this network budget independent
+// from the live iframe budget: a high-memory device may retain more mounted
+// frames without multiplying speculative requests on its next shell load.
 export const WARM_APP_LIMIT = 6
 
 // Resolve the worker that owns the app-code cache. A first-load page may not
@@ -65,9 +66,8 @@ export function parseStoredAppLru(raw) {
 // Folds the live in-memory LRU into the previously stored one: current
 // entries first (they are the freshest recency), then stored entries
 // that haven't reappeared, deduped, capped. The merge — rather than a
-// plain overwrite — is what gives the list cross-session depth: the
-// in-memory LRU holds only 4 ids, so overwriting would forget last
-// session's apps the moment one app is opened today.
+// plain overwrite — preserves older recency whenever the current mounted set
+// is shallower than the persisted warming budget.
 export function mergeAppLru(current, stored, cap = WARM_APP_LIMIT) {
   const merged = []
   const seen = new Set()
