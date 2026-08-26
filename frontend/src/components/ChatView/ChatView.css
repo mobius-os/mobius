@@ -671,6 +671,11 @@
   color: var(--muted);
   font-size: 12px;
 }
+/* The chevron is the only disclosure indicator. Blink and Gecko drop the native
+   marker once summary stops being display: list-item; older WebKit keeps
+   painting ::-webkit-details-marker regardless of display, so it needs its own
+   reset. Matches the other custom summaries (ChatUsageInspector,
+   ContributionReviewCard, AgentContextInspector). */
 .chat__recovery-details summary {
   display: flex;
   align-items: center;
@@ -678,6 +683,10 @@
   width: fit-content;
   min-height: 44px;
   cursor: pointer;
+  list-style: none;
+}
+.chat__recovery-details summary::-webkit-details-marker {
+  display: none;
 }
 .chat__recovery-details-chevron {
   flex: 0 0 auto;
