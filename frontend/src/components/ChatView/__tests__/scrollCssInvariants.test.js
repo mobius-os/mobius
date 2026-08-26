@@ -60,6 +60,16 @@ test('the composer backdrop fills the safe area without moving controls into it'
   assert.match(embeddedBackdrop, /bottom:\s*0/)
 })
 
+test('the durable-wait cancel control can receive taps through the footer', () => {
+  const foot = ruleBody('.chat__foot')
+  assert.match(foot, /pointer-events:\s*none/)
+  assert.match(
+    css,
+    /\.chat__foot \.chat__wait-cancel,[\s\S]*?\{\s*pointer-events:\s*auto;\s*\}/,
+    'the pointer-transparent footer must opt its visible wait cancel button back in',
+  )
+})
+
 test('.spacer-dynamic has no CSS transition (instant height change)', () => {
   // A transition on the spacer height makes every pin/anchor correction animate
   // and desyncs the scrollTop math from the painted layout.
