@@ -180,6 +180,8 @@ def test_controlled_skills_have_fix_forward_migrations():
   }
   assert module._UNMODIFIED_MIGRATIONS["notifications.md"] == {
     "309e5969df6f589cc82c17b450e7596a00bae87ef77ab2923a9b0de061ed146e",
+    "6fa9c177db508ef05dfc73de224cd3f33350c79d8f807ac9909942d761f21103",
+    "db0c1138ffd0890936ccdeba6ced4ccde867ba3044eeef0a5c87cdf2f279eaaa",
   }
   assert module._UNMODIFIED_MIGRATIONS["building-apps.md"] == {
     "4126b40d209c422184e0135f611bb9f4197ea280fa27e63cd71c806f8b5ebd79",
@@ -216,6 +218,8 @@ def test_controlled_skills_have_fix_forward_migrations():
   assert module._UNMODIFIED_MIGRATIONS["theming.md"] == {
     "7fb5ed4c1e29e6822b56394c089984a1a7e5da1bdf552a21ff0cbdc6413bd998",
     "1d655ec09d7f25c831e105411d59b8428b07defc6f58416f8290a8c1b08ca594",
+    "7994321819a43708debb77104edea12f785beb46d0933c2b94f93cf418f510ee",
+    "cd4d6f03f6ba87d8b3d1799aa81c3ab5444900362e56edc3e48803fa1f1fee4b",
   }
   assert "recovery.md" not in module._UNMODIFIED_MIGRATIONS
   assert (

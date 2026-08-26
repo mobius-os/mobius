@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Call the Möbius backend with the current agent's base URL and owner auth.
+# Literal or multiline request bodies can be streamed unchanged with
+# `--data-binary @-`; body-bearing calls receive application/json unless the
+# caller supplies an explicit Content-Type.
 set -euo pipefail
 : "${AGENT_TOKEN:?mapi: AGENT_TOKEN is not set in this environment}"
 : "${API_BASE_URL:?mapi: API_BASE_URL is not set in this environment}"
@@ -7,7 +10,7 @@ set -euo pipefail
 option_takes_value() {
   case "$1" in
     -X|--request|-H|--header|-d|--data|--data-raw|--data-binary|--data-urlencode|\
-    -F|--form|-T|--upload-file|-o|--output|-w|--write-out|\
+    -F|--form|-T|--upload-file|-o|--output|-D|--dump-header|-w|--write-out|\
     --connect-timeout|--max-time|--retry|--retry-delay|--cacert|--cert|--key)
       return 0
       ;;
