@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -160,6 +161,61 @@ async def test_managed_start_failure_restarts_only_after_definitive_rejection(
 
   assert exc.value.code == error_code
   assert len(restarts) == restart_count
+
+
+@pytest.mark.asyncio
+async def test_pre_start_receipt_timeout_recovers_the_drained_worker(
+  tmp_path, monkeypatch,
+):
+  from app import restart_ledger, restart_util
+
+  _install_control(tmp_path, monkeypatch)
+  (tmp_path / "run").mkdir()
+  (tmp_path / "run" / "managed-cutover-ready").touch()
+  settings = type("S", (), {"data_dir": str(tmp_path)})()
+  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
+  monkeypatch.setattr(dc, "get_settings", lambda: settings)
+  monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "a" * 40)
+  monkeypatch.setattr(dc.platform_update, "container_replacement_blockers", lambda: [])
+
+  requests = []
+
+  def managed_request(method, suffix, payload=None):
+    requests.append((method, suffix, payload))
+    return {
+      "state": "awaiting_handoff",
+      "operation_id": "replace_12345678",
+      "handoff_nonce": "nonce-secret",
+    }
+
+  restarts = []
+
+  async def restart():
+    restarts.append(True)
+
+  times = iter((0, 0, 16))
+  monkeypatch.setattr(
+    dc, "time", SimpleNamespace(monotonic=lambda: next(times)),
+  )
+  monkeypatch.setattr(dc, "_managed_request", managed_request)
+  monkeypatch.setattr(restart_ledger, "current_boot_id", lambda: "boot-12345678")
+  monkeypatch.setattr(restart_ledger, "request_managed_cutover", lambda **_kw: None)
+  monkeypatch.setattr(restart_ledger, "authorized_cutover_challenge", lambda _id: True)
+  monkeypatch.setattr(restart_ledger, "accepted_cutover_receipt", lambda _id: False)
+  monkeypatch.setattr(
+    restart_util, "prepare_managed_container_cutover", lambda _id: asyncio.sleep(0),
+  )
+  monkeypatch.setattr(restart_util, "restart_this_worker", restart)
+
+  with pytest.raises(dc.DeploymentControlError) as exc:
+    await dc.request_rebuild()
+  await asyncio.sleep(0)
+
+  assert exc.value.code == "controller_unavailable"
+  assert requests == [(
+    "POST", "prepare", {"expected_sha": "a" * 40},
+  )]
+  assert restarts == [True]
 
 
 @pytest.mark.asyncio

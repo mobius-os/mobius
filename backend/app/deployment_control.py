@@ -465,6 +465,7 @@ async def _request_managed_rebuild(expected_sha: str) -> RebuildStatus:
     await asyncio.sleep(0.25)
 
   drained = False
+  provider_start_attempted = False
   try:
     await restart_util.prepare_managed_container_cutover(operation_id)
     drained = True
@@ -475,6 +476,7 @@ async def _request_managed_rebuild(expected_sha: str) -> RebuildStatus:
           "controller_unavailable", "The container could not finish the Railway handoff."
         )
       await asyncio.sleep(0.25)
+    provider_start_attempted = True
     started = await asyncio.to_thread(
       _managed_request,
       "POST",
@@ -483,9 +485,11 @@ async def _request_managed_rebuild(expected_sha: str) -> RebuildStatus:
     )
     return _normalize_managed_status(started)
   except DeploymentControlError as exc:
-    if drained and exc.code == "controller_rejected":
-      # A definitive rejection proves the provider did not accept ownership.
-      # Ambiguous transport or response failures must not start a second,
-      # competing worker transition after Railway may have accepted the cutover.
+    if drained and (
+      not provider_start_attempted or exc.code == "controller_rejected"
+    ):
+      # Before the start request, the provider cannot own the transition. After
+      # it, only a definitive rejection proves local recovery cannot race an
+      # accepted Railway cutover.
       _schedule_managed_recovery(restart_util.restart_this_worker)
     raise
