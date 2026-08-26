@@ -301,8 +301,15 @@ test('divider hover feedback stays compositor-only', () => {
   const rule = css.match(/\.workspace__divider-bar\s*\{[\s\S]*?\}/)?.[0] || ''
   assert.match(rule, /transition:\s*background 120ms ease, transform 120ms ease/)
   assert.doesNotMatch(rule, /transition:[^;]*(?:width|height)/)
-  assert.match(css, /workspace__divider--v:focus-visible \.workspace__divider-bar \{ transform: scaleX\(3\); \}/)
-  assert.match(css, /workspace__divider--h:focus-visible \.workspace__divider-bar \{ transform: scaleY\(3\); \}/)
+  assert.match(css, /workspace__divider--v:focus-visible \.workspace__divider-bar,[\s\S]*?transform: scaleX\(3\)/)
+  assert.match(css, /workspace__divider--h:focus-visible \.workspace__divider-bar,[\s\S]*?transform: scaleY\(3\)/)
+})
+
+test('divider drag exposes the sticky screen-center snap without React work per frame', () => {
+  assert.match(chrome, /const centerCandidate = screenCenterRatio\(divider, contentRect\)/)
+  assert.match(chrome, /snapRatioToScreenCenter\(raw, centerTarget, divider\.span, centerSnapped\)/)
+  assert.match(chrome, /toggleAttribute\('data-center-snapped'/)
+  assert.match(css, /workspace__divider\[data-center-snapped\] \.workspace__divider-bar/)
 })
 
 test('pane strips use a complete horizontal tab keyboard and ownership contract', () => {

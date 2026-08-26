@@ -520,10 +520,11 @@ export function toggleViewMode(ws) {
 
 // ── Single-screen slot ops (two-worlds design) ──────────────────────────────
 //
-// The slot is the single world's ENTIRE memory: exactly one screen, the last
-// concrete item opened while in single mode. These ops NEVER touch the pane tree
-// (design: opens in single mode must not mutate the tree), so builder and single
-// keep independent navigation contexts.
+// The slot is the single world's ENTIRE memory: exactly one selected screen.
+// These ops NEVER touch the pane tree
+// (design: opens in single mode must not mutate the tree). Exiting Builder is
+// the deliberate handoff between those worlds: it replaces the slot with the
+// focused pane's selected tab so Standard opens what the owner just chose.
 
 // The `chat:<id>` / `app:<id>` key of the slot item, or null for an empty/home
 // slot. Shell unions this with the builder tab keys to keep the slot's iframe /
@@ -584,14 +585,12 @@ function focusedSlotSeed(ws) {
   return null
 }
 
-// Seed the slot ONCE, on the first builder→single switch, using property ABSENCE
-// as the migration marker (design §Recommended state). A blob that already carries
-// an explicit slot (including explicit `null` = initialized empty) is left
-// untouched — an initialized empty screen is never reseeded from builder focus.
-// Same reference when the slot is already present.
-export function seedSingleScreenIfAbsent(ws) {
-  if ('singleScreen' in ws) return ws
-  return { ...ws, singleScreen: focusedSlotSeed(ws) }
+// Hand the focused Builder selection to Standard on every explicit exit. This is
+// intentionally not a seed-once migration: the visible selection is the user's
+// current navigation intent and must beat the older Standard slot. Same reference
+// when the selected item already occupies the slot.
+export function selectFocusedBuilderTabForStandard(ws) {
+  return setSingleScreen(ws, focusedSlotSeed(ws))
 }
 
 // True when the whole workspace holds no tabs.
@@ -1848,11 +1847,11 @@ export function workspaceReducer(state, action) {
       // seed its empty hidden tree from Standard, but that seed is part of the
       // destination representation rather than a separate editable gesture.
       const flipped = action.mode === 'toggle' ? toggleViewMode(ws) : setViewMode(ws, action.mode)
-      // On the FIRST-ever builder→single switch the slot is seeded from the focused
-      // concrete item (two-worlds design: seed once, using property absence as the
-      // migration marker). Every later switch leaves the slot exactly as the single
-      // world last left it — builder work never rewrites the single screen.
-      const next = flipped.viewMode === 'single' ? seedSingleScreenIfAbsent(flipped) : flipped
+      // Exiting Builder opens the tab the owner currently selected in the focused
+      // pane, not whichever Standard item happened to be visited before Builder.
+      // Repeating SET_VIEW_MODE while already single remains a true no-op.
+      const leavingBuilder = ws.viewMode !== 'single' && flipped.viewMode === 'single'
+      const next = leavingBuilder ? selectFocusedBuilderTabForStandard(flipped) : flipped
       if (next === ws) return state
       // INV 8 (review §3, P1): an explicit later mode intent REBASES a mode-COUPLED
       // undo to tree-only. A coupled undo (restoreViewMode: a single-leaf drop flip
@@ -1908,9 +1907,10 @@ export function workspaceReducer(state, action) {
         // First boot of a legacy/flat active chat into Standard: the derivations no
         // longer borrow Builder focus, so seed the slot from the reset's focused item
         // or the surface renders the empty New-Chat home instead of that chat. Only
-        // the genuine uninitialized case (no slot on the current ws) seeds here; a
-        // later toggle/close still owns the slot via seedSingleScreenIfAbsent /
-        // completeCloseTransition, and an explicit null slot stays New Chat.
+        // the genuine uninitialized case (no slot on the current ws) seeds here;
+        // a later explicit Builder exit / close owns the slot via
+        // selectFocusedBuilderTabForStandard / completeCloseTransition, and an
+        // explicit null slot stays New Chat until one of those visible handoffs.
         const seed = focusedSlotSeed(seeded)
         if (seed) candidate.singleScreen = seed
       }
