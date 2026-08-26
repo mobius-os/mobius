@@ -1153,8 +1153,6 @@ export default function ChatView({
     pendingQueue.hydrate,
     queryClient,
     reconcileFailedSendAttempt,
-    setActiveAssistantMessageId,
-    setGoalPresentationLocalState,
   ])
 
   // Active-turn runtime reconciliation. The SSE stream is authoritative for
@@ -2333,8 +2331,6 @@ export default function ChatView({
     searchReveal?.anchorKey,
     searchReveal?.id,
     reconcileFailedSendAttempt,
-    setActiveAssistantMessageId,
-    setGoalPresentationLocalState,
   ])
 
 
