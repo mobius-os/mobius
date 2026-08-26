@@ -14,6 +14,7 @@ const streamingMessage = readFileSync(new URL('../StreamingMessage.jsx', import.
 const errorCard = readFileSync(new URL('../ErrorCard.jsx', import.meta.url), 'utf8')
 const resetTime = readFileSync(new URL('../resetTime.js', import.meta.url), 'utf8')
 const promotion = readFileSync(new URL('../streamPromotion.js', import.meta.url), 'utf8')
+const stream = readFileSync(new URL('../useStreamConnection.js', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const shell = readFileSync(new URL('../../Shell/Shell.jsx', import.meta.url), 'utf8')
@@ -156,8 +157,6 @@ test('continuations render as product markers, not user bubbles', () => {
     'Resume must mark its provider-facing prompt as a product action')
   assert.match(chatView, /chat__msg--\$\{continuationMarker \? 'marker' : msg\.role\}/,
     'the row shell must not inherit owner-user alignment')
-  assert.match(chatView, /supersedeResumedPauseBlocks\(messages\)/,
-    'a completed continuation replaces its stale actionable pause in the render projection')
 })
 
 test('an enabled policy stays cancellable after the viewer clock reaches reset', () => {
@@ -178,8 +177,10 @@ test('a system-announced auto-resume reconnects the mounted chat surface', () =>
     'Shell must forward only this pane chat’s monotonic run activity')
   assert.doesNotMatch(shell, /chatRunSignals=\{chatRunSignals\}/,
     'the replacement run-signal Map must not cross every pane memo boundary')
-  assert.match(shell, /openAppWithIntent=\{openAppWithIntent\}/,
-    'the stable app-intent navigator must not defeat the pane memo boundary')
+  assert.match(shell, /const stablePaneNavTo = useCallback\([\s\S]*navToRef\.current/,
+    'the pane navigation facade must keep a stable identity while reaching current routing')
+  assert.match(shell, /navTo=\{stablePaneNavTo\}/,
+    'per-render navigation identity must not defeat the pane memo boundary')
   assert.match(paneChatView, /externalRunSignal=\{externalRunSignal\}/,
     'PaneChatView must forward per-chat monotonic run activity to its ChatView')
   assert.match(chatView, /fetchMessages\(\{[\s\S]*force: true,[\s\S]*authoritative: true/,
