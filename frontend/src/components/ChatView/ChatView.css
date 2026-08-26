@@ -657,6 +657,9 @@
   font-weight: 650;
   line-height: 1.35;
 }
+.chat__recovery-title--paused {
+  color: var(--accent);
+}
 .chat__recovery-copy {
   margin-top: 4px;
   color: var(--muted);

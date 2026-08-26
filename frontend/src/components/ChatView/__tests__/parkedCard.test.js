@@ -209,8 +209,10 @@ test('a benign pause (no reset time) renders the calm "Paused" family, not red E
     'ANY pause gets the soft treatment')
   assert.match(errorCard, /block\.pause \? 'Paused' : 'Error'/,
     'a benign pause reads "Paused"; only genuine failures read "Error"')
-  assert.match(errorCard, /\) : vm\.benign \? \([\s\S]*className="chat__recovery-title"/,
+  assert.match(errorCard, /\) : vm\.benign \? \([\s\S]*chat__recovery-title--paused/,
     'a benign pause uses the neutral recovery hierarchy rather than the red error label')
+  assert.match(css, /\.chat__recovery-title--paused\s*\{[\s\S]*?color: var\(--accent\)/,
+    'the Paused heading uses the exact same accent token as Resume')
   assert.match(errorCard, /Möbius will continue automatically when the restart is complete\./,
     'the restart pause briefly states its expected automatic outcome')
   assert.match(chatView, /Response paused for restart\. Möbius will continue automatically\./,

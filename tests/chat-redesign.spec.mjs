@@ -187,16 +187,11 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await expect(pauseCard.locator('.chat__recovery-copy')).toHaveText(
       'Möbius will continue automatically when the restart is complete.',
     )
-    const pauseColors = await pauseCard.evaluate(card => {
-      const rootStyle = getComputedStyle(document.documentElement)
-      return {
-        title: getComputedStyle(card.querySelector('.chat__recovery-title')).color,
-        text: rootStyle.getPropertyValue('--text').trim(),
-        danger: rootStyle.getPropertyValue('--danger').trim(),
-      }
-    })
-    expect(pauseColors.title).toBe(pauseColors.text)
-    expect(pauseColors.title).not.toBe(pauseColors.danger)
+    const pauseColors = await pauseCard.evaluate(card => ({
+      title: getComputedStyle(card.querySelector('.chat__recovery-title')).color,
+      resume: getComputedStyle(card.querySelector('.chat__resume')).color,
+    }))
+    expect(pauseColors.title).toBe(pauseColors.resume)
 
     const order = await assistant.evaluate(element => (
       [...element.querySelectorAll('.chat__text--assistant, .chat__text--error, .qcard')]
