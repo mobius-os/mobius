@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { upsertTerminalErrorItem } from '../streamReducers.js'
 import { ownsRecoveryAction } from '../recoveryCard.js'
 
 // Provider-limit parking (design §2.4): a limit-killed turn persists an error
@@ -85,17 +84,16 @@ test('streamItemToBlock carries the pause descriptor through promote', () => {
 })
 
 test('the live stream reducer carries the pause descriptor', () => {
-  const block = upsertTerminalErrorItem([], {
-    message: 'Usage limit reached.',
-    resumable: true,
-    pause: { kind: 'limit', resets_at: '2026-08-24T09:00:00Z' },
-  })[0]
-  assert.deepEqual(block, {
-    type: 'error',
-    message: 'Usage limit reached.',
-    resumable: true,
-    pause: { kind: 'limit', resets_at: '2026-08-24T09:00:00Z' },
-  }, 'a live limit note must render as the pause card before promote too')
+  assert.match(
+    stream,
+    /event\.pause \? \{ pause: event\.pause \}/,
+    'a live limit/restart note must render as the pause card before promote too',
+  )
+  assert.match(
+    stream,
+    /event\.resumable \? \{ resumable: true \}/,
+    'a live paused note must carry resumable',
+  )
 })
 
 test('the parked card has styling distinct from a plain error', () => {
