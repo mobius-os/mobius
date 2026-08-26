@@ -81,7 +81,7 @@ export function failedSendReconciliation(
 ) {
   if (!attempt) return { status: 'none' }
   if (sendAttemptIsDurable(attempt, messages, pendingMessages)) {
-    return { status: 'durable', clearDraft: true, sendFailure: null }
+    return { status: 'durable', sendFailure: null }
   }
   return {
     status: 'missing',

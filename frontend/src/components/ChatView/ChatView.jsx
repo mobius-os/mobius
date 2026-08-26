@@ -156,10 +156,7 @@ import {
   cidForSendAttempt,
   sendDraftIdentity,
 } from './sendAttemptIdentity.js'
-import {
-  clearFailedSendAttempt,
-  failedSendReconciliation,
-} from './sendAttemptRecovery.js'
+import { clearFailedSendAttempt } from './sendAttemptRecovery.js'
 import {
   clearComposerDraft,
   consumeComposerHandoff,
@@ -496,6 +493,7 @@ export default function ChatView({
     failedSendAttemptRef,
     clearFailedAttempt,
     rememberFailedAttempt,
+    reconcileFailedAttempt: reconcileFailedSendAttempt,
     pendingFiles,
     clearFiles,
     restoreFiles,
@@ -506,39 +504,6 @@ export default function ChatView({
     restoreComposerText,
     restoreDurableDraft,
   } = useComposerDraftState({ chatId, hidden, inputRef })
-
-  // An ambiguous POST restores the exact cid-tagged draft until server truth
-  // proves where it landed. Reconcile on every authoritative transcript read,
-  // not only on mount: an SSE/runtime update can reveal the committed user row
-  // after the draft was restored, and showing both is never a valid state.
-  const reconcileFailedSendAttempt = useCallback((
-    visibleMessages,
-    pendingMessages,
-    { reportMissing = false } = {},
-  ) => {
-    const failedAttempt = failedSendAttemptRef.current
-    const reconciliation = failedSendReconciliation(
-      failedAttempt,
-      visibleMessages,
-      pendingMessages,
-      { reportMissing },
-    )
-    if (reconciliation.status !== 'durable') {
-      if (reconciliation.sendFailure) setSendFailure(reconciliation.sendFailure)
-      return reconciliation.status
-    }
-    clearFailedAttempt()
-    setComposerInput('')
-    clearFiles()
-    setSendFailure(null)
-    return 'durable'
-  }, [
-    clearFailedAttempt,
-    clearFiles,
-    failedSendAttemptRef,
-    setComposerInput,
-    setSendFailure,
-  ])
 
   const [embeddedRunSignal, setEmbeddedRunSignal] = useState(
     EMPTY_CHAT_RUN_SIGNAL,
@@ -4411,10 +4376,10 @@ export default function ChatView({
   )
 
   // The resume card publishes the same way, from the TAIL resumable note only
-  // — the same block tailResumableBlock arms the cue on. (MsgContent renders a
-  // Resume button on every resumable block of the last message, so the tail
-  // gate lives at the publication site; one shared ref can only hold one
-  // node.) A tap on the nudge scrolls that node in.
+  // — the same block tailResumableBlock arms the cue on. MsgContent applies
+  // that tail ownership to the card and its actions together, so this shared
+  // ref always names the single actionable recovery surface. A tap on the
+  // nudge scrolls that node in.
   const [resumeCardEl, resumeCardRef] = useNudgeTargetRef()
   const resumeCardOffscreen = useOffscreenNudge(
     scrollRef, hasPendingResume, resumeCardEl,

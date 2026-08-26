@@ -1,5 +1,6 @@
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import { formatResetTime } from './resetTime.js'
+import { ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 
 // The single renderer for the error/pause/park card family. MsgContent consumes
 // both persisted blocks and the converted live stream, so source selection
@@ -47,10 +48,10 @@ export default function ErrorCard({
     : null
   const recoveryCopy = vm.parked
     ? autoResume
-      ? 'Your work is safe. Möbius will continue automatically.'
+      ? 'Your work is safe. Möbius will continue automatically here and at future usage limits in this chat.'
       : resetElapsed
         ? 'Your work is safe. Continue when you’re ready.'
-        : 'Your work is safe. Continue automatically when usage resets.'
+        : 'Your work is safe. Turn on auto-continue for this and future usage limits in this chat.'
     : null
   return (
     <div className={vm.className} ref={cardRef}>
@@ -67,7 +68,15 @@ export default function ErrorCard({
             <div className="chat__recovery-copy">{recoveryCopy}</div>
             {block.message && (
               <details className="chat__recovery-details">
-                <summary>Technical details</summary>
+                <summary>
+                  <ChevronRight
+                    className="chat__recovery-details-chevron"
+                    width={14}
+                    height={14}
+                    aria-hidden="true"
+                  />
+                  Technical details
+                </summary>
                 {/* Provider payloads sometimes carry useful quota links. Keep
                     them available without making internal codes the headline. */}
                 <StandardMarkdown text={block.message} />

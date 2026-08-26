@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { upsertTerminalErrorItem } from '../streamReducers.js'
+import { ownsRecoveryAction } from '../recoveryCard.js'
 
 // Provider-limit parking (design §2.4): a limit-killed turn persists an error
 // block carrying a single `pause` descriptor ({kind, resets_at?}), which
@@ -13,7 +15,6 @@ const streamingMessage = readFileSync(new URL('../StreamingMessage.jsx', import.
 const errorCard = readFileSync(new URL('../ErrorCard.jsx', import.meta.url), 'utf8')
 const resetTime = readFileSync(new URL('../resetTime.js', import.meta.url), 'utf8')
 const promotion = readFileSync(new URL('../streamPromotion.js', import.meta.url), 'utf8')
-const stream = readFileSync(new URL('../useStreamConnection.js', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const shell = readFileSync(new URL('../../Shell/Shell.jsx', import.meta.url), 'utf8')
@@ -84,16 +85,17 @@ test('streamItemToBlock carries the pause descriptor through promote', () => {
 })
 
 test('the live stream reducer carries the pause descriptor', () => {
-  assert.match(
-    stream,
-    /event\.pause \? \{ pause: event\.pause \}/,
-    'a live limit/restart note must render as the pause card before promote too',
-  )
-  assert.match(
-    stream,
-    /event\.resumable \? \{ resumable: true \}/,
-    'a live paused note must carry resumable',
-  )
+  const block = upsertTerminalErrorItem([], {
+    message: 'Usage limit reached.',
+    resumable: true,
+    pause: { kind: 'limit', resets_at: '2026-08-24T09:00:00Z' },
+  })[0]
+  assert.deepEqual(block, {
+    type: 'error',
+    message: 'Usage limit reached.',
+    resumable: true,
+    pause: { kind: 'limit', resets_at: '2026-08-24T09:00:00Z' },
+  }, 'a live limit note must render as the pause card before promote too')
 })
 
 test('the parked card has styling distinct from a plain error', () => {
@@ -104,13 +106,13 @@ test('the parked card has styling distinct from a plain error', () => {
 })
 
 test('the rate-limit card presents one recovery action at a time', () => {
-  assert.match(msgContent, /resumable && parked && autoResumeAvailable && onAutoResumeChange/,
+  assert.match(msgContent, /recoveryOwner && parked && autoResumeAvailable && onAutoResumeChange/,
     'the action must require the tail resumable rate-limit state')
-  assert.match(msgContent, /Continue automatically/,
-    'a future reset offers the safe automatic path')
-  assert.match(msgContent, /Cancel automatic continue/,
-    'an enabled policy stays cancellable without a competing retry')
-  assert.match(msgContent, /manualResumeAvailable = resumable && \([\s\S]*!parked \|\| \(!!limitResetElapsed && !autoResumeEnabled\)/,
+  assert.match(msgContent, /Auto-continue this chat/,
+    'a future reset names the persistent chat policy')
+  assert.match(msgContent, /Turn off auto-continue/,
+    'an enabled policy stays reversible without a competing retry')
+  assert.match(msgContent, /manualResumeAvailable = recoveryOwner && \([\s\S]*!parked \|\| \(!!limitResetElapsed && !autoResumeEnabled\)/,
     'manual continuation appears only after reset and only when auto continuation is off')
   assert.doesNotMatch(msgContent, /<Switch/,
     'the card must not present a switch beside a competing action')
@@ -130,6 +132,20 @@ test('the rate-limit card presents one recovery action at a time', () => {
     'the chat switch restores the SDK checked track after the button reset')
 })
 
+test('only the visible tail block owns recovery controls', () => {
+  const block = { type: 'error', resumable: true, pause: { resets_at: 'later' } }
+  const context = {
+    block,
+    lastEntryIndex: 3,
+    isLastMessage: true,
+    canResume: true,
+  }
+  assert.equal(ownsRecoveryAction({ ...context, entryIndex: 2 }), false)
+  assert.equal(ownsRecoveryAction({ ...context, entryIndex: 3 }), true)
+  assert.equal(ownsRecoveryAction({ ...context, entryIndex: 3, isLastMessage: false }), false)
+  assert.equal(ownsRecoveryAction({ ...context, entryIndex: 3, canResume: false }), false)
+})
+
 test('continuations render as product markers, not user bubbles', () => {
   assert.match(msgContent, /isContinuationMessage\(msg\)/,
     'legacy automatic and current continuation rows share the marker branch')
@@ -142,6 +158,8 @@ test('continuations render as product markers, not user bubbles', () => {
     'Resume must mark its provider-facing prompt as a product action')
   assert.match(chatView, /chat__msg--\$\{continuationMarker \? 'marker' : msg\.role\}/,
     'the row shell must not inherit owner-user alignment')
+  assert.match(chatView, /supersedeResumedPauseBlocks\(messages\)/,
+    'a completed continuation replaces its stale actionable pause in the render projection')
 })
 
 test('an enabled policy stays cancellable after the viewer clock reaches reset', () => {
@@ -162,10 +180,8 @@ test('a system-announced auto-resume reconnects the mounted chat surface', () =>
     'Shell must forward only this pane chat’s monotonic run activity')
   assert.doesNotMatch(shell, /chatRunSignals=\{chatRunSignals\}/,
     'the replacement run-signal Map must not cross every pane memo boundary')
-  assert.match(shell, /const stablePaneNavTo = useCallback\([\s\S]*navToRef\.current/,
-    'the pane navigation facade must keep a stable identity while reaching current routing')
-  assert.match(shell, /navTo=\{stablePaneNavTo\}/,
-    'per-render navigation identity must not defeat the pane memo boundary')
+  assert.match(shell, /openAppWithIntent=\{openAppWithIntent\}/,
+    'the stable app-intent navigator must not defeat the pane memo boundary')
   assert.match(paneChatView, /externalRunSignal=\{externalRunSignal\}/,
     'PaneChatView must forward per-chat monotonic run activity to its ChatView')
   assert.match(chatView, /fetchMessages\(\{[\s\S]*force: true,[\s\S]*authoritative: true/,
@@ -209,4 +225,8 @@ test('the park card keeps provider mechanics behind progressive disclosure', () 
     'the enabled state promises only the behavior the policy owns')
   assert.match(css, /\.chat__recovery-details\s*\{/,
     'technical detail has a quiet disclosure style')
+  assert.match(errorCard, /chat__recovery-details-chevron/,
+    'technical detail has an explicit visible disclosure indicator')
+  assert.match(css, /\[open\] \.chat__recovery-details-chevron[\s\S]*rotate\(90deg\)/,
+    'the disclosure indicator reflects its open state')
 })

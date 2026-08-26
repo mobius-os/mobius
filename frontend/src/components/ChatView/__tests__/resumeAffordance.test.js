@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { sameMessageList } from '../chatMessageList.js'
+import { ownsRecoveryAction } from '../recoveryCard.js'
 
 // The one-tap Resume affordance (design §2.2): a turn paused by a drain-gated
 // restart (or interrupted by a crash) persists a `resumable` error note; the
@@ -98,13 +99,20 @@ function sliceElement(source, openTag) {
 test('MsgContent gates the Resume button on a resumable tail note', () => {
   assert.match(msgContent, /onResume/,
     'MsgContent must accept an onResume prop')
-  assert.match(
-    msgContent,
-    /block\.resumable\s*&&\s*isLastMsg\s*&&\s*onResume/,
-    'Resume must be gated on block.resumable AND isLastMsg AND onResume — so ' +
-      'only the tail interrupt note (not scrolled-back history or a live ' +
-      'provider error) shows the button',
-  )
+  assert.equal(ownsRecoveryAction({
+    block: { resumable: true },
+    entryIndex: 4,
+    lastEntryIndex: 4,
+    isLastMessage: true,
+    canResume: true,
+  }), true, 'the resumable visible tail owns the action')
+  assert.equal(ownsRecoveryAction({
+    block: { resumable: true },
+    entryIndex: 3,
+    lastEntryIndex: 4,
+    isLastMessage: true,
+    canResume: true,
+  }), false, 'an earlier resumable block cannot own a second action')
   assert.match(
     msgContent,
     /className="chat__resume"[\s\S]*?onClick=\{\(\)\s*=>\s*onResume\('continue',\s*\{[\s\S]*?continuation:\s*'manual'[\s\S]*?pin:\s*false/,
@@ -251,12 +259,9 @@ test('both attention nudges observe a node published by the card, not a lookup',
   // or a scrolled-back history card is not somewhere to send the owner back to.
   assert.match(msgContent, /pendingCardRef=\{answerable \? pendingQuestionRef : undefined\}/,
     'only the answerable tail question publishes its node')
-  // ONE publisher per ref. `resumable` gates on isLastMsg, not tail position, so
-  // a last message with two resumable blocks renders two Resume buttons; a
-  // shared single-slot ref would then be nulled by whichever unmounts first and
-  // the cue would go dark with the real button still offscreen. The tail is also
-  // what arms the cue (tailResumableBlock), so both must name the same block.
-  assert.match(msgContent, /cardRef=\{resumable && i === lastEntryIdx \? resumeCardRef : undefined\}/,
+  // ONE publisher per ref. The same pure tail-owner decision gates both the
+  // action and its card ref, so a historical block cannot null the shared slot.
+  assert.match(msgContent, /cardRef=\{recoveryOwner \? resumeCardRef : undefined\}/,
     'only the TAIL resumable note publishes the complete recovery card')
   const questionCard = readFileSync(new URL('../QuestionCard.jsx', import.meta.url), 'utf8')
   const qcard = sliceElement(questionCard, '<div\n      className={`qcard')

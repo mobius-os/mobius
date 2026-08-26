@@ -71,7 +71,7 @@ test('a later visible transcript update retires the restored ambiguous draft', (
   )
   assert.deepEqual(
     failedSendReconciliation(attempt, [{ role: 'user', cid: 'cid-1' }], []),
-    { status: 'durable', clearDraft: true, sendFailure: null },
+    { status: 'durable', sendFailure: null },
     'the same cid arriving later clears the duplicate draft and warning together',
   )
 })

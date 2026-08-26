@@ -671,9 +671,17 @@
 .chat__recovery-details summary {
   display: flex;
   align-items: center;
+  gap: 4px;
   width: fit-content;
   min-height: 44px;
   cursor: pointer;
+}
+.chat__recovery-details-chevron {
+  flex: 0 0 auto;
+  transition: transform 0.15s ease;
+}
+.chat__recovery-details[open] .chat__recovery-details-chevron {
+  transform: rotate(90deg);
 }
 .chat__recovery-details[open] summary {
   color: var(--text);

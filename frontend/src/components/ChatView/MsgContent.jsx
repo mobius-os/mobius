@@ -16,6 +16,7 @@ import {
 } from './streamReducers.js'
 import { stripAugmentation } from './msgText.js'
 import ErrorCard from './ErrorCard.jsx'
+import { ownsRecoveryAction } from './recoveryCard.js'
 import ContextCompactionMarker from './ContextCompactionMarker.jsx'
 import { assistantBlockKey } from './streamPromotion.js'
 import { copyAssistantSelection } from './markdownClipboard.js'
@@ -330,10 +331,16 @@ function MsgContentInner({
         // owner. A provider-limit park never offers a retry before its reset:
         // it enables automatic continuation instead, then exposes Continue
         // only when the deadline has actually elapsed (design §2.4).
-        const resumable = !!(block.resumable && isLastMsg && onResume)
+        const recoveryOwner = ownsRecoveryAction({
+          block,
+          entryIndex: i,
+          lastEntryIndex: lastEntryIdx,
+          isLastMessage: isLastMsg,
+          canResume: !!onResume,
+        })
         const parked = !!block.pause?.resets_at
-        const automaticContinuation = resumable && parked && !!autoResumeEnabled
-        const manualResumeAvailable = resumable && (
+        const automaticContinuation = recoveryOwner && parked && !!autoResumeEnabled
+        const manualResumeAvailable = recoveryOwner && (
           !parked || (!!limitResetElapsed && !autoResumeEnabled)
         )
         return (
@@ -342,9 +349,9 @@ function MsgContentInner({
             block={block}
             autoResume={automaticContinuation}
             resetElapsed={!!limitResetElapsed}
-            cardRef={resumable && i === lastEntryIdx ? resumeCardRef : undefined}
+            cardRef={recoveryOwner ? resumeCardRef : undefined}
           >
-            {resumable && parked && autoResumeAvailable && onAutoResumeChange && (
+            {recoveryOwner && parked && autoResumeAvailable && onAutoResumeChange && (
               <div className="chat__recovery-actions">
                 <button
                   type="button"
@@ -357,8 +364,8 @@ function MsgContentInner({
                   {autoResumeSaving
                     ? 'Saving…'
                     : autoResumeEnabled
-                      ? 'Cancel automatic continue'
-                      : 'Continue automatically'}
+                      ? 'Turn off auto-continue'
+                      : 'Auto-continue this chat'}
                 </button>
                 {autoResumeError && (
                   <span className="chat__recovery-action-error" role="alert">
