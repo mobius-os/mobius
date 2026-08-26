@@ -1219,6 +1219,16 @@ export default function useNavigation({
             },
             tabModel.makeTab('chat', claimedReloadDestination.chatId),
           )
+        } else if (claimedReloadDestination.view === 'apps') {
+          bootDeepLink(
+            {
+              view: 'apps',
+              appId: null,
+              chatId: null,
+              paneId: bootPaneId,
+            },
+            tabModel.appsTab(),
+          )
         } else if (
           claimedReloadDestination.view === 'settings'
           && workspaceStateRef.current.ws.viewMode === 'panes'
