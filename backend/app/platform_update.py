@@ -57,6 +57,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Literal, TypedDict
@@ -230,6 +231,10 @@ class PlatformStatus(TypedDict):
   # Unlike recorded_upstream_sha, this remains correct after a manual/agent
   # merge that did not run the updater's marker-maintenance path.
   contained_upstream_sha: str | None
+  contained_upstream_committed_at: str | None
+  # Timestamp of the most recent successful fetch represented by this status.
+  # GET /status remains fetch-free; POST /check advances FETCH_HEAD first.
+  upstream_checked_at: str | None
   seed_required: bool
   conflict_paths: list[str]
   # The resolver chat opened for an in-progress conflict, so Settings can link
@@ -1771,6 +1776,39 @@ def _short(sha: str | None) -> str:
   return sha[:8] if sha else "-"
 
 
+def _commit_timestamp(repo: Path, sha: str | None) -> str | None:
+  """Return one commit's ISO timestamp without trusting display metadata."""
+  if not sha:
+    return None
+  value = _git(
+    "show", "-s", "--format=%cI", sha, repo=repo, check=False,
+  ).stdout.strip()
+  try:
+    datetime.fromisoformat(value)
+    return value
+  except ValueError:
+    return None
+
+
+def _last_fetch_timestamp(repo: Path) -> str | None:
+  """Return when Git last completed a fetch for this checkout."""
+  raw = _git(
+    "rev-parse", "--git-path", "FETCH_HEAD", repo=repo, check=False,
+  ).stdout.strip()
+  if not raw:
+    return None
+  path = Path(raw)
+  if not path.is_absolute():
+    path = repo / path
+  try:
+    current = path.stat()
+  except OSError:
+    return None
+  if not stat.S_ISREG(current.st_mode):
+    return None
+  return datetime.fromtimestamp(current.st_mtime, timezone.utc).isoformat()
+
+
 def reconcile_clone_sync() -> str:
   """Boot entry point (called from a throwaway ``python3 -c`` as mobius, cwd the
   served backend).
@@ -1846,6 +1884,10 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
   target = _rev(repo, DEFAULT_TARGET_REF)
   target_contained = bool(target) and _is_ancestor(repo, target, local)
   contained_upstream_sha = target if target_contained else upstream_sha
+  contained_upstream_committed_at = _commit_timestamp(
+    repo, contained_upstream_sha,
+  )
+  upstream_checked_at = _last_fetch_timestamp(repo)
 
   if conflict:
     flag = _read_conflict_flag() or {}
@@ -1864,6 +1906,8 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
       current_build_sha=image_sha,
       recorded_upstream_sha=upstream_sha,
       contained_upstream_sha=contained_upstream_sha,
+      contained_upstream_committed_at=contained_upstream_committed_at,
+      upstream_checked_at=upstream_checked_at,
       seed_required=False,
       conflict_paths=paths, conflict_chat_id=flag.get("chat_id"),
       newer_updates_available=newer_available,
@@ -1887,6 +1931,8 @@ def platform_status(repo: Path = PLATFORM_REPO) -> PlatformStatus:
     activation=activation,
     current_build_sha=image_sha, recorded_upstream_sha=upstream_sha,
     contained_upstream_sha=contained_upstream_sha,
+    contained_upstream_committed_at=contained_upstream_committed_at,
+    upstream_checked_at=upstream_checked_at,
     seed_required=False, conflict_paths=[], conflict_chat_id=None,
     newer_updates_available=False,
   )
