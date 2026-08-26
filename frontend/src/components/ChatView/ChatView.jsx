@@ -158,7 +158,7 @@ import {
 } from './sendAttemptIdentity.js'
 import {
   clearFailedSendAttempt,
-  sendAttemptIsDurable,
+  failedSendReconciliation,
 } from './sendAttemptRecovery.js'
 import {
   clearComposerDraft,
@@ -517,21 +517,28 @@ export default function ChatView({
     { reportMissing = false } = {},
   ) => {
     const failedAttempt = failedSendAttemptRef.current
-    if (!failedAttempt) return 'none'
-    if (!sendAttemptIsDurable(failedAttempt, visibleMessages, pendingMessages)) {
-      if (reportMissing) {
-        setSendFailure(
-          'That message didn’t reach the chat. It’s safe here—send it again when ready.',
-        )
-      }
-      return 'missing'
+    const reconciliation = failedSendReconciliation(
+      failedAttempt,
+      visibleMessages,
+      pendingMessages,
+      { reportMissing },
+    )
+    if (reconciliation.status !== 'durable') {
+      if (reconciliation.sendFailure) setSendFailure(reconciliation.sendFailure)
+      return reconciliation.status
     }
     clearFailedAttempt()
     setComposerInput('')
     clearFiles()
     setSendFailure(null)
     return 'durable'
-  }, [clearFailedAttempt, clearFiles, setComposerInput, setSendFailure])
+  }, [
+    clearFailedAttempt,
+    clearFiles,
+    failedSendAttemptRef,
+    setComposerInput,
+    setSendFailure,
+  ])
 
   const [embeddedRunSignal, setEmbeddedRunSignal] = useState(
     EMPTY_CHAT_RUN_SIGNAL,
@@ -680,6 +687,13 @@ export default function ChatView({
   // synchronous access (handleStop's pre-await clear, fetchMessages'
   // cid preservation).
   const pendingQueue = usePendingQueue(cached?.pending_messages || [])
+  useEffect(() => {
+    // The POST error and the server's durable transcript can settle in either
+    // order. If a later SSE/reconcile render proves this exact cid is already
+    // visible, retire the restored draft immediately instead of waiting for a
+    // remount or another network read.
+    reconcileFailedSendAttempt(messages, pendingQueue.pendingMessages)
+  }, [messages, pendingQueue.pendingMessages, reconcileFailedSendAttempt])
   // Every delayed visible user row carries one opaque scroll intent under the
   // same stable cid that owns its queue/transcript identity. A queued
   // continuation temporarily moves its rows + intent into one envelope while

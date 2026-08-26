@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   clearFailedSendAttempt,
+  failedSendReconciliation,
   loadFailedSendAttempt,
   saveFailedSendAttempt,
   sendAttemptIsDurable,
@@ -58,6 +59,36 @@ test('authoritative transcript or pending queue settles an ambiguous send', () =
   assert.equal(sendAttemptIsDurable(attempt, [], [
     { role: 'user', cid: 'cid-1' },
   ]), true)
+})
+
+test('a later visible transcript update retires the restored ambiguous draft', () => {
+  const attempt = { cid: 'cid-1' }
+
+  assert.deepEqual(
+    failedSendReconciliation(attempt, [], []),
+    { status: 'missing' },
+    'an unconfirmed send keeps its restored draft while server truth is pending',
+  )
+  assert.deepEqual(
+    failedSendReconciliation(attempt, [{ role: 'user', cid: 'cid-1' }], []),
+    { status: 'durable', clearDraft: true, sendFailure: null },
+    'the same cid arriving later clears the duplicate draft and warning together',
+  )
+})
+
+test('a confirmed missing send keeps the draft and offers a safe retry', () => {
+  assert.deepEqual(
+    failedSendReconciliation(
+      { cid: 'cid-1' },
+      [{ role: 'user', cid: 'other' }],
+      [],
+      { reportMissing: true },
+    ),
+    {
+      status: 'missing',
+      sendFailure: 'That message didn’t reach the chat. It’s safe here—send it again when ready.',
+    },
+  )
 })
 
 test('clearing a failed attempt prevents stale cid reuse', () => {

@@ -99,8 +99,8 @@ test('the live stream reducer carries the pause descriptor', () => {
 test('the parked card has styling distinct from a plain error', () => {
   assert.match(css, /\.chat__text--parked\s*\{/,
     'a .chat__text--parked style must exist (wait state, not failure)')
-  assert.match(css, /\.chat__parked-reset\s*\{/,
-    'the reset line has its own style')
+  assert.match(css, /\.chat__recovery-title\s*\{/,
+    'the authoritative recovery outcome has its own hierarchy')
 })
 
 test('the rate-limit card presents one recovery action at a time', () => {
@@ -110,7 +110,7 @@ test('the rate-limit card presents one recovery action at a time', () => {
     'a future reset offers the safe automatic path')
   assert.match(msgContent, /Cancel automatic continue/,
     'an enabled policy stays cancellable without a competing retry')
-  assert.match(msgContent, /manualResumeAvailable[\s\S]*!limitResetElapsed[\s\S]*!autoResumeEnabled|manualResumeAvailable[\s\S]*limitResetElapsed && !autoResumeEnabled/,
+  assert.match(msgContent, /manualResumeAvailable = resumable && \([\s\S]*!parked \|\| \(!!limitResetElapsed && !autoResumeEnabled\)/,
     'manual continuation appears only after reset and only when auto continuation is off')
   assert.doesNotMatch(msgContent, /<Switch/,
     'the card must not present a switch beside a competing action')

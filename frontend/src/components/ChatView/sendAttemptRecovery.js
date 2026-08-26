@@ -1,5 +1,8 @@
 const STORE_VERSION = 1
 
+export const SEND_ATTEMPT_MISSING_MESSAGE =
+  'That message didn’t reach the chat. It’s safe here—send it again when ready.'
+
 function storageKey(chatId) {
   return `mobius:send-attempt:v${STORE_VERSION}:${chatId}`
 }
@@ -68,4 +71,20 @@ export function sendAttemptIsDurable(attempt, messages, pendingMessages) {
   if (!attempt?.cid) return false
   return [...(messages || []), ...(pendingMessages || [])]
     .some(message => message?.role === 'user' && message.cid === attempt.cid)
+}
+
+export function failedSendReconciliation(
+  attempt,
+  messages,
+  pendingMessages,
+  { reportMissing = false } = {},
+) {
+  if (!attempt) return { status: 'none' }
+  if (sendAttemptIsDurable(attempt, messages, pendingMessages)) {
+    return { status: 'durable', clearDraft: true, sendFailure: null }
+  }
+  return {
+    status: 'missing',
+    ...(reportMissing ? { sendFailure: SEND_ATTEMPT_MISSING_MESSAGE } : {}),
+  }
 }
