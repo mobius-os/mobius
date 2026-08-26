@@ -56,7 +56,7 @@ from fastapi import (
   WebSocketDisconnect,
 )
 from fastapi.responses import PlainTextResponse, StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -88,8 +88,15 @@ _DISCONNECT_COMMAND = "python3 ~/.mobius-connect/runner.py --uninstall"
 _LEGACY_DISCONNECT_COMMAND = f'{_DISCONNECT_COMMAND}; kill -TERM "$PPID"'
 _DISCONNECT_ACK_TIMEOUT = 4
 _LEGACY_DISCONNECT_TIMEOUT = 4
-_RUNNER_PROTOCOL_VERSION = 3
-_SSE_PROTOCOL_VERSION = 3
+_RUNNER_PROTOCOL_VERSION = 4
+_SSE_PROTOCOL_VERSION = 4
+# Protocol 3 introduced durable start/result acknowledgement. Keep those
+# lifecycle guarantees independent from later transport features so upgrading
+# the runner does not accidentally make an already-safe v3 runner "legacy".
+_COMMAND_LIFECYCLE_PROTOCOL_VERSION = 3
+# Protocol 4 carries literal scripts separately from command-line strings.
+_LITERAL_SCRIPT_PROTOCOL_VERSION = 4
+_LEGACY_WEBSOCKET_PROTOCOL_VERSION = 3
 # Railway permits active HTTP responses for 15 minutes. Rotate current-runner
 # streams well inside that bound; the host-owned command continues separately.
 _STREAM_ROTATION_SECONDS = 10 * 60
@@ -165,9 +172,25 @@ def _now() -> float:
   return time.time()
 
 
-def _command_fingerprint(cmd: str, cwd: str | None, timeout: int) -> str:
+def _command_fingerprint(
+  cmd: str | None,
+  cwd: str | None,
+  timeout: int,
+  *,
+  script: str | None = None,
+  shell: str | None = None,
+) -> str:
+  # Preserve the v1-v3 command fingerprint shape so a backend restart during
+  # an in-flight legacy command does not turn the caller's retry into a false
+  # request-id conflict. Scripts use a tagged shape that cannot collide with a
+  # command containing the same text.
+  payload_value = (
+    [cmd or "", cwd, timeout]
+    if script is None
+    else {"script": script, "shell": shell, "cwd": cwd, "timeout": timeout}
+  )
   payload = json.dumps(
-    [cmd, cwd, timeout], ensure_ascii=False, separators=(",", ":"),
+    payload_value, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
   )
   return sha256(payload.encode("utf-8")).hexdigest()
 
@@ -200,7 +223,9 @@ class _ActiveCommand:
     request_id: str,
     timeout: int,
     *,
-    cmd: str = "",
+    cmd: str | None = None,
+    script: str | None = None,
+    shell: str | None = None,
     cwd: str | None = None,
     created_at: float | None = None,
     started_at: float | None = None,
@@ -213,13 +238,17 @@ class _ActiveCommand:
     self.request_id = request_id
     self.timeout = timeout
     self.cmd = cmd
+    self.script = script
+    self.shell = shell
     self.cwd = cwd
     self.created_at = created_at if created_at is not None else _now()
     self.started_at = started_at
     self.state = state
     self.not_after = not_after
     self.cancel_not_after = cancel_not_after
-    self.fingerprint = fingerprint or _command_fingerprint(cmd, cwd, timeout)
+    self.fingerprint = fingerprint or _command_fingerprint(
+      cmd, cwd, timeout, script=script, shell=shell,
+    )
     self.started = asyncio.Event()
     if started_at is not None:
       self.started.set()
@@ -230,7 +259,11 @@ class _ActiveCommand:
     return cls(
       str(record["id"]),
       max(1, int(record.get("timeout") or _DEFAULT_EXEC_TIMEOUT)),
-      cmd=str(record.get("cmd") or ""),
+      cmd=(str(record["cmd"]) if record.get("cmd") is not None else None),
+      script=(
+        str(record["script"]) if record.get("script") is not None else None
+      ),
+      shell=(str(record["shell"]) if record.get("shell") is not None else None),
       cwd=record.get("cwd"),
       created_at=float(record.get("created_at") or _now()),
       started_at=(
@@ -264,19 +297,28 @@ class _ActiveCommand:
     # Do not retain command text (which may contain sensitive arguments) for the
     # remainder of a long-running command.
     if self.state == "dispatching":
-      record["cmd"] = self.cmd
+      if self.script is not None:
+        record["script"] = self.script
+        record["shell"] = self.shell
+      else:
+        record["cmd"] = self.cmd
       record["cwd"] = self.cwd
     return record
 
   def event(self) -> dict:
-    return {
+    event = {
       "type": "exec",
       "request_id": self.request_id,
-      "cmd": self.cmd,
       "cwd": self.cwd,
       "timeout": self.timeout,
       "not_after": self.not_after,
     }
+    if self.script is not None:
+      event["script"] = self.script
+      event["shell"] = self.shell
+    else:
+      event["cmd"] = self.cmd
+    return event
 
 
 def _active_public(command: _ActiveCommand | None) -> dict | None:
@@ -404,7 +446,7 @@ async def _request_command_cancel(
   if command.state != "canceling":
     command.state = "canceling"
     changed = True
-  if known_protocol < _RUNNER_PROTOCOL_VERSION:
+  if known_protocol < _COMMAND_LIFECYCLE_PROTOCOL_VERSION:
     if command.cancel_not_after is None:
       command.cancel_not_after = (
         _now() + _LEGACY_CANCEL_RESULT_GRACE_SECONDS
@@ -476,12 +518,22 @@ class ResultBody(BaseModel):
 
 
 class ExecBody(BaseModel):
-  cmd: str = Field(min_length=1, max_length=64 * 1024)
+  cmd: str | None = Field(default=None, min_length=1, max_length=64 * 1024)
+  script: str | None = Field(default=None, min_length=1, max_length=64 * 1024)
+  shell: str | None = Field(default=None, min_length=1, max_length=4096)
   cwd: str | None = Field(default=None, max_length=4096)
   timeout: int = Field(default=_DEFAULT_EXEC_TIMEOUT, ge=1, le=3600)
   request_id: str | None = Field(
     default=None, min_length=16, max_length=64, pattern=r"^[a-f0-9]+$",
   )
+
+  @model_validator(mode="after")
+  def validate_work(self) -> ExecBody:
+    if (self.cmd is None) == (self.script is None):
+      raise ValueError("Provide exactly one of cmd or script.")
+    if self.shell is not None and self.script is None:
+      raise ValueError("shell is only valid with script.")
+    return self
 
 
 class CommandStateBody(BaseModel):
@@ -797,7 +849,13 @@ async def exec_on_host(
     raise HTTPException(status_code=404, detail="No such host.")
   ch = _channels.get(host_id)
   request_id = body.request_id or secrets.token_hex(8)
-  fingerprint = _command_fingerprint(body.cmd, body.cwd, body.timeout)
+  fingerprint = _command_fingerprint(
+    body.cmd,
+    body.cwd,
+    body.timeout,
+    script=body.script,
+    shell=body.shell,
+  )
   _prune_last_command(host)
   last = host.get("last_command")
   if isinstance(last, dict) and last.get("id") == request_id:
@@ -833,23 +891,36 @@ async def exec_on_host(
       status_code=409,
       detail=f"{host.get('name') or 'That machine'} is offline right now.",
     )
+  if (
+    body.script is not None
+    and ch.protocol_version < _LITERAL_SCRIPT_PROTOCOL_VERSION
+  ):
+    raise HTTPException(
+      status_code=409,
+      detail=(
+        "This machine’s runner must be updated before it can receive literal "
+        "scripts. Update it in Connect, or send a command instead."
+      ),
+    )
   timeout = body.timeout
   not_after = _now() + _START_ACK_TIMEOUT
   command = _ActiveCommand(
     request_id,
     timeout,
     cmd=body.cmd,
+    script=body.script,
+    shell=body.shell,
     cwd=body.cwd,
     not_after=not_after,
     fingerprint=fingerprint,
   )
   _commands[host_id] = command
   _persist_command(host_id, command)
-  if ch.protocol_version < _RUNNER_PROTOCOL_VERSION:
+  if ch.protocol_version < _COMMAND_LIFECYCLE_PROTOCOL_VERSION:
     _mark_command_started(host_id, request_id)
   await ch.queue.put(command.event())
   try:
-    if ch.protocol_version >= _RUNNER_PROTOCOL_VERSION:
+    if ch.protocol_version >= _COMMAND_LIFECYCLE_PROTOCOL_VERSION:
       try:
         await asyncio.wait_for(
           command.started.wait(), timeout=_START_ACK_TIMEOUT,
@@ -978,7 +1049,7 @@ async def _reconcile_runner(
   if command.request_id == runner_active:
     _mark_command_started(host_id, command.request_id)
     if command.state == "canceling":
-      if ch.protocol_version >= _RUNNER_PROTOCOL_VERSION:
+      if ch.protocol_version >= _COMMAND_LIFECYCLE_PROTOCOL_VERSION:
         command.cancel_not_after = None
         _persist_command(host_id, command)
       await ch.queue.put({"type": "cancel", "request_id": command.request_id})
@@ -1058,13 +1129,13 @@ async def legacy_command_socket(websocket: WebSocket) -> None:
 
   host_id = host["id"]
   ch = _Channel(
-    protocol_version=_RUNNER_PROTOCOL_VERSION,
+    protocol_version=_LEGACY_WEBSOCKET_PROTOCOL_VERSION,
     transport="websocket",
   )
   platform_name = str(hello.get("platform") or "")[:80]
   if platform_name:
     host["platform"] = platform_name
-  host["runner_protocol"] = _RUNNER_PROTOCOL_VERSION
+  host["runner_protocol"] = _LEGACY_WEBSOCKET_PROTOCOL_VERSION
   host["runner_transport"] = "websocket"
   _save_host(host)
   _replace_channel(host_id, ch)
