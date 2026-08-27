@@ -7,6 +7,11 @@ import { ARROW_STEP_RATIO } from '../../lib/splitHelper.js'
 import { PaneStrip } from './PaneStrip.jsx'
 import { modeViewTransitionStyle } from './useModeViewTransition.js'
 import { captureLayoutSpace, clientPointToLayout } from '../../lib/layoutSpace.js'
+import {
+  dividerDistanceFromScreenCenter,
+  screenCenterRatio,
+  snapRatioToScreenCenter,
+} from './dividerCenterSnap.js'
 
 // The chrome layer for a tiled (≥2 visible leaves) workspace (design §2). It is
 // a sibling AFTER the flat content wrappers, absolute inset:0, pointer-events
@@ -165,6 +170,19 @@ export default function WorkspaceChrome({
     }
 
     let committed = divider.ratio
+    let centerSnapped = false
+    // Resolve the one reachable ratio that puts this divider on the viewport's
+    // actual midpoint. Re-project once to prove pane minimums do not clamp that
+    // candidate elsewhere; an unreachable center is not advertised as a snap.
+    const centerCandidate = screenCenterRatio(divider, contentRect)
+    const centeredProjection = centerCandidate == null
+      ? null
+      : projectLayout(workspace, mode, contentRect, { splitId, ratio: centerCandidate })
+    const centeredDivider = centeredProjection?.dividers.find(d => d.splitId === splitId)
+    const centerTarget = centeredDivider
+      && dividerDistanceFromScreenCenter(centeredDivider, contentRect) <= 1
+      ? centeredDivider.ratio
+      : null
 
     const paint = (clientX, clientY) => {
       const point = clientPointToLayout({ x: clientX, y: clientY }, contentSpace)
@@ -174,7 +192,9 @@ export default function WorkspaceChrome({
       const raw = divider.span > 0
         ? divider.ratio + (pointerAxis - startAxis) / divider.span
         : 0.5
-      const proj = projectLayout(workspace, mode, contentRect, { splitId, ratio: raw })
+      const snap = snapRatioToScreenCenter(raw, centerTarget, divider.span, centerSnapped)
+      centerSnapped = snap.snapped
+      const proj = projectLayout(workspace, mode, contentRect, { splitId, ratio: snap.ratio })
       committed = proj.dividers.find(d => d.splitId === splitId)?.ratio ?? committed
       for (const paneId of proj.visibleLeaves) {
         const rect = proj.rects[paneId]
@@ -188,6 +208,7 @@ export default function WorkspaceChrome({
         if (!el) continue
         setRect(el, dividerHitRect(d))
         el.setAttribute('aria-valuenow', String(Math.round(d.ratio * 100)))
+        el.toggleAttribute('data-center-snapped', d.splitId === splitId && centerSnapped)
       }
     }
 
@@ -222,6 +243,7 @@ export default function WorkspaceChrome({
       window.removeEventListener('lostpointercapture', end)
       window.removeEventListener('blur', end)
       try { handle.releasePointerCapture(e.pointerId) } catch { /* released */ }
+      handle.removeAttribute('data-center-snapped')
       document.body.style.userSelect = prevUserSelect
       dispatchWorkspace({ type: 'SET_RATIO', splitId, ratio: committed })
     }

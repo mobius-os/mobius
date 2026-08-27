@@ -533,13 +533,8 @@ test('round4-3: a persisted NULL single slot stays New Chat even with historical
   await expect(page.locator('.shell__view--active .chat__empty-title')).toBeVisible()
 })
 
-test('an explicit New Chat keeps its draft when an older NULL-slot allocation settles', async ({ page }) => {
+test('leaving Builder replaces an empty Standard slot without allocating a chat', async ({ page }) => {
   let createCount = 0
-  let explicitId = null
-  let releaseDeferred
-  let releaseExplicit
-  const deferredGate = new Promise(resolve => { releaseDeferred = resolve })
-  const explicitGate = new Promise(resolve => { releaseExplicit = resolve })
 
   await page.route(/\/api\/chats(?:\?.*)?$/, async (route) => {
     const method = route.request().method()
@@ -554,101 +549,24 @@ test('an explicit New Chat keeps its draft when an older NULL-slot allocation se
       })
     }
     if (method !== 'POST') return route.fallback()
-
     createCount += 1
-    const body = route.request().postDataJSON()
-    if (createCount === 1) {
-      expect(body.id).toBeUndefined()
-      await deferredGate
-      return route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          id: 'deferred-empty',
-          title: 'New chat',
-          has_messages: false,
-        }),
-      })
-    }
-
-    expect(createCount).toBe(2)
-    explicitId = body.id
-    expect(explicitId).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-    )
-    await explicitGate
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(createdEmptyChat(explicitId)),
+      body: JSON.stringify(createdEmptyChat(`unexpected-${createCount}`)),
     })
   })
 
   await bootSeededWorkspace(page, WIDE, twoPaneBuilder(null))
   await toggleMode(page)
   await expect.poll(() => builderActive(page)).toBe(false)
-  await expect.poll(() => createCount, { timeout: 3000 }).toBe(1)
-
-  await openNavigation(page)
-  const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
-  await navigation.getByRole('button', { name: 'New chat', exact: true }).click()
-
-  const presentation = page.locator('[data-new-chat-presentation]')
-  const composer = presentation.getByRole('textbox', { name: 'Message Möbius…' })
-  await expect.poll(() => createCount).toBe(2)
-  await expect(composer).toBeFocused()
-  await composer.fill('Explicit draft wins')
-  await expect.poll(() => page.evaluate(({ id, key }) => ({
-    slot: JSON.parse(localStorage.getItem(key))?.singleScreen ?? null,
-    intent: JSON.parse(sessionStorage.getItem('new-chat-intent')),
-    draft: JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input,
-  }), { id: explicitId, key: paneModel.STORAGE_KEY })).toEqual({
-    slot: null,
-    intent: { chatId: explicitId, status: 'allocating' },
-    draft: 'Explicit draft wins',
-  })
-
-  const staleResponse = page.waitForResponse(response => (
-    /\/api\/chats(?:\?.*)?$/.test(response.url())
-      && response.request().method() === 'POST'
-      && response.request().postDataJSON()?.id == null
-  ))
-  releaseDeferred()
-  await staleResponse
-  await page.evaluate(() => new Promise(resolve => (
-    requestAnimationFrame(() => requestAnimationFrame(resolve))
-  )))
-
-  // The old automatic materializer may have committed its own empty row, but
-  // its late result must not own any client-visible state after the explicit tap.
-  await expect.poll(() => page.evaluate(({ id, key }) => ({
-    slot: JSON.parse(localStorage.getItem(key))?.singleScreen ?? null,
-    intent: JSON.parse(sessionStorage.getItem('new-chat-intent')),
-    draft: JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input,
-    focused: document.activeElement === document.querySelector(
-      '[data-new-chat-presentation] textarea',
-    ),
-  }), { id: explicitId, key: paneModel.STORAGE_KEY })).toEqual({
-    slot: null,
-    intent: { chatId: explicitId, status: 'allocating' },
-    draft: 'Explicit draft wins',
-    focused: true,
-  })
-  await expect(presentation).toBeVisible()
-  await expect(composer).toHaveValue('Explicit draft wins')
-
-  releaseExplicit()
-  const painted = page.locator(`[data-chat-surface="painted"][data-chat-id="${explicitId}"]`)
-  await expect(painted.getByRole('textbox', { name: 'Message Möbius…' })).toBeFocused()
-  await expect(painted.getByRole('textbox', { name: 'Message Möbius…' }))
-    .toHaveValue('Explicit draft wins')
-  await expect(presentation).toHaveCount(0)
   await expect.poll(() => page.evaluate(key => (
     JSON.parse(localStorage.getItem(key))?.singleScreen
-  ), paneModel.STORAGE_KEY)).toEqual({ kind: 'chat', id: explicitId })
+  ), paneModel.STORAGE_KEY)).toEqual({ kind: 'chat', id: 'aaa' })
+  expect(createCount, 'the selected Builder tab avoids an unnecessary New Chat row').toBe(0)
 })
 
-test('retiring an explicit Builder cover repairs the newly empty Standard slot', async ({ page }) => {
+test('retiring an explicit Builder cover returns the selected tab and preserves its draft', async ({ page }) => {
   let explicitId = null
   let explicitCreates = 0
   let automaticCreates = 0
@@ -703,13 +621,13 @@ test('retiring an explicit Builder cover repairs the newly empty Standard slot',
   await toggleMode(page)
   await expect.poll(() => builderActive(page)).toBe(false)
   await expect(presentation).toHaveCount(0)
-  await expect.poll(() => automaticCreates, { timeout: 4000 }).toBe(1)
   await expect.poll(() => page.evaluate(key => (
     JSON.parse(localStorage.getItem(key))?.singleScreen
   ), paneModel.STORAGE_KEY), { timeout: 4000 }).toEqual({
     kind: 'chat',
-    id: 'retired-home',
+    id: 'aaa',
   })
+  expect(automaticCreates, 'returning the selected tab must not allocate a replacement').toBe(0)
   await expect.poll(() => page.evaluate(id => ({
     intent: JSON.parse(sessionStorage.getItem('new-chat-intent')),
     draft: JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input,
@@ -729,10 +647,10 @@ test('retiring an explicit Builder cover repairs the newly empty Standard slot',
     requestAnimationFrame(resolve)
   ))))
 
-  expect(automaticCreates, 'retirement repairs the slot exactly once').toBe(1)
+  expect(automaticCreates, 'the late explicit response must not allocate a replacement').toBe(0)
   await expect.poll(() => page.evaluate(key => (
     JSON.parse(localStorage.getItem(key))?.singleScreen
-  ), paneModel.STORAGE_KEY)).toEqual({ kind: 'chat', id: 'retired-home' })
+  ), paneModel.STORAGE_KEY)).toEqual({ kind: 'chat', id: 'aaa' })
   await expect.poll(() => page.evaluate(id => ({
     intent: JSON.parse(sessionStorage.getItem('new-chat-intent')),
     draft: JSON.parse(sessionStorage.getItem(`draft:${id}`))?.input,
@@ -742,7 +660,7 @@ test('retiring an explicit Builder cover repairs the newly empty Standard slot',
   })
 })
 
-test('round4-3: a superseding NULL-slot request drains after the older POST without duplicating it', async ({ page }) => {
+test('a selected Builder tab supersedes an in-flight NULL-slot allocation', async ({ page }) => {
   let createCount = 0
   let releaseFirstCreate
   const firstCreateGate = new Promise(resolve => { releaseFirstCreate = resolve })
@@ -769,12 +687,12 @@ test('round4-3: a superseding NULL-slot request drains after the older POST with
     }
     return route.fallback()
   })
-  await bootSeededWorkspace(page, WIDE, twoPaneBuilder(null))
-  await toggleMode(page) // builder -> null single; token 1 starts after the exit beat
+  const emptyStandard = { ...twoPaneBuilder(null), viewMode: 'single' }
+  await bootSeededWorkspace(page, WIDE, emptyStandard)
   await expect.poll(() => createCount, { timeout: 3000 }).toBe(1)
 
-  // Supersede token 1 while its POST is held: enter builder, then exit to the same
-  // null single destination again. The latest token must run once the old await ends.
+  // Enter Builder while the automatic allocation is held, then return to Standard.
+  // The focused Builder tab is now the newer visible intent and owns the slot.
   await toggleMode(page)
   await expect.poll(() => builderActive(page)).toBe(true)
   await toggleMode(page)
@@ -784,9 +702,9 @@ test('round4-3: a superseding NULL-slot request drains after the older POST with
   await expect.poll(() => page.evaluate(
     key => JSON.parse(localStorage.getItem(key))?.singleScreen?.id || null,
     paneModel.STORAGE_KEY,
-  ), { timeout: 4000 }).toBe('fresh-race-1')
-  expect(createCount, 'the newer request reuses the already-created untouched row').toBe(1)
-  await expect(page.locator('.shell__view--active .chat__empty-title')).toBeVisible()
+  ), { timeout: 4000 }).toBe('aaa')
+  expect(createCount, 'the stale allocation settles without duplicating or taking the slot').toBe(1)
+  await expect(page.locator('[data-new-chat-presentation]')).toHaveCount(0)
 })
 
 // R4: same-batch descriptor atomicity for the last-tab-close auto-return. A one-tab
