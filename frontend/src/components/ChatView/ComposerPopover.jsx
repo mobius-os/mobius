@@ -60,6 +60,7 @@ import {
 } from '../../lib/layoutSpace.js'
 import useModelSelectionPopover from './hooks/useModelSelectionPopover.js'
 import useDiscardUnconfirmedSwitchOnPickerClose from './hooks/useDiscardUnconfirmedSwitchOnPickerClose.js'
+import { resolvedChatSettings } from './modelSelectionPolicy.js'
 import './ChatWork.css'
 
 export default function ComposerPopover({
@@ -425,7 +426,7 @@ export default function ComposerPopover({
                 chatId={chatId}
                 chat={chatInfo}
                 provider={chatInfo.provider}
-                effective={chatInfo.effective}
+                effective={resolvedChatSettings(chatInfo)}
                 hasAssistantTurns={hasAssistantTurns}
                 autoResumeEnabled={autoResumeEnabled}
                 autoResumeSaving={autoResumeSaving}
