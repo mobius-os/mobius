@@ -9,6 +9,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse, Response
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import Text, case, cast, func
 from sqlalchemy.exc import IntegrityError
@@ -1200,8 +1201,8 @@ async def patch_chat(
       from app.providers import get_provider, provider_requirement_error
       candidate = get_provider(target_provider)
       requirement_error = provider_requirement_error(candidate, db)
-      auth_error = requirement_error or candidate.check_auth(
-        get_app_settings().data_dir
+      auth_error = requirement_error or await run_in_threadpool(
+        candidate.check_auth, get_app_settings().data_dir
       )
       if auth_error is not None:
         raise HTTPException(
@@ -2203,7 +2204,7 @@ async def _compact_chat_locked(
   candidate = providers.get_provider(body.provider)
   auth_error = providers.provider_requirement_error(candidate, db)
   if auth_error is None:
-    auth_error = candidate.check_auth(data_dir)
+    auth_error = await run_in_threadpool(candidate.check_auth, data_dir)
   if auth_error is not None:
     raise HTTPException(status_code=409, detail=auth_error)
 

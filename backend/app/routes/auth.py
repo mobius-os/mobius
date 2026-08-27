@@ -25,8 +25,11 @@ from app import auth, models, schemas
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
+  Principal,
+  get_chat_view_principal,
   get_current_owner, get_current_owner_or_app,
   get_owner_app_or_chat_embed_for_models, reject_cross_site,
+  require_chat_embed_operation,
 )
 from app.timeutil import now_naive_utc
 
@@ -864,7 +867,7 @@ async def provider_status(
 
 @router.get("/providers/status")
 async def providers_status(
-  _: models.Owner = Depends(get_owner_app_or_chat_embed_for_models),
+  principal: Principal = Depends(get_chat_view_principal),
   db: Session = Depends(get_db),
 ):
   """Returns local credential status for ALL registered providers.
@@ -874,7 +877,14 @@ async def providers_status(
   map, using app tokens, so their model pickers can disable disconnected
   providers instead of guessing. `configured` is the durable semantic field;
   `authenticated` is retained for compatibility with installed mini-apps.
+
+  Availability is safe to share across the app/embed boundary; the owner's
+  Möbius trial balance is not. `trial` is therefore attached only for a true
+  owner caller, so an app or chat-embed principal sees the same availability
+  fields without the owner's credit units and grant expiries.
   """
+  require_chat_embed_operation(principal, "models:read")
+  is_owner_caller = principal.app_id is None and principal.scope == "owner"
   from starlette.concurrency import run_in_threadpool
   from app.providers import PROVIDERS, provider_requirement_error
   data_dir = get_settings().data_dir
@@ -893,7 +903,7 @@ async def providers_status(
     }
     if provider.required_app_slug:
       out[pid]["available"] = requirement_error is None
-    if pid == "mobius" and requirement_error is None:
+    if pid == "mobius" and requirement_error is None and is_owner_caller:
       if error is None:
         try:
           out[pid]["trial"] = await run_in_threadpool(provider.trial_status)
