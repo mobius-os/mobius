@@ -1165,7 +1165,7 @@ def _diff_file_paths(diff_path: Path, limit: int = 40) -> list[str]:
 
 
 def _chat_review_projection(record: dict, app_id: int) -> dict:
-  """The small, display-only view of one ledger record for the chat card."""
+  """The small, display-only view shared by chat actions and Changes."""
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
   raw_stack = plan.get("stack") if isinstance(plan.get("stack"), dict) else None
   record_id = str(record.get("id") or "")
@@ -1204,12 +1204,19 @@ def _chat_review_projection(record: dict, app_id: int) -> dict:
     "title": text(plan.get("title") or record.get("title")),
     "summary": text(record.get("summary")),
     "repo": text(plan.get("repo") or record.get("repo")),
+    "source_root": text(plan.get("source_repo_path")),
     "number": (
       record["number"]
       if isinstance(record.get("number"), int)
       and not isinstance(record.get("number"), bool)
       and record["number"] > 0
       else None
+    ),
+    "url": (
+      record["url"]
+      if isinstance(record.get("url"), str)
+      and record["url"].startswith("https://github.com/")
+      else ""
     ),
     "needs_attention": record.get("needs_attention") is True,
     "branch": text(plan.get("branch") or record.get("branch")),
@@ -1250,16 +1257,15 @@ async def contributions_for_chat(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
-  """Contribution lifecycle records from ONE chat, for that chat's card.
+  """Complete contribution lifecycle records from ONE chat.
 
-  The chat card is a second view over the same ledger the Contribute app reads.
-  The owner can approve a staged PR and follow it through sent/merged/closed
-  where the work happened. It is strictly read-only and stays a projection:
-  Send still goes through the submit endpoint below, which owns every
-  freshness, attribution, and fork check.
+  Chat uses the actionable subset while Changes keeps the complete lifecycle.
+  Both are read-only projections over the same ledger the Contribute app reads;
+  Send still goes through the guarded submit endpoint below.
 
-  Only prepared records receive the local preflight. Ledger records are small
-  and bounded on read; later lifecycle states are display-only and cheap.
+  Only prepared records receive the local preflight. Later lifecycle states are
+  display-only and cheap. Do not silently truncate this chat-scoped set: the
+  old five-row window made healthy work disappear without telling the owner.
   """
   _validate_submit_app(app_id, principal, db)
   db.close()
@@ -1267,16 +1273,7 @@ async def contributions_for_chat(
   async with fs_locks.app_storage_lock(app_id):
     records = []
     if contribution_dir.exists():
-      # Prefer the most recently changed ledger entries. Record ids are not
-      # chronological, so lexicographic truncation can permanently hide a newly
-      # staged review after a long-lived instance crosses the scan cap.
-      paths_with_mtime = []
       for path in contribution_dir.glob("*.json"):
-        try:
-          paths_with_mtime.append((path.stat().st_mtime_ns, path))
-        except OSError:
-          continue
-      for _mtime, path in sorted(paths_with_mtime, reverse=True)[:500]:
         record = _read_record_tolerant(path)
         if (
           record is not None
@@ -1293,7 +1290,6 @@ async def contributions_for_chat(
     app_settings = _read_record_tolerant(settings_path) or {}
 
   records.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
-  records = records[:5]
 
   github_state = github_auth.read_state() or {}
   projections = []

@@ -5601,6 +5601,8 @@ def test_for_chat_returns_only_this_chat_s_prepared_reviews(client, owner_token)
   assert record["files"] == ["index.jsx"]
   assert record["labels"] == ["bug", "area: ui"]
   assert record["diff_stat"].startswith("1 file changed")
+  assert record["source_root"] == ""
+  assert record["url"] == ""
   assert record["review"] == {
     "id": "mine",
     "state": "ready",
@@ -5612,6 +5614,34 @@ def test_for_chat_returns_only_this_chat_s_prepared_reviews(client, owner_token)
   assert body["autopilot_available"] is True
   # No stored preference means the same default the Contribute app applies.
   assert body["autopilot_default"] is True
+
+
+def test_for_chat_returns_the_complete_lifecycle_without_a_hidden_five_card_cap(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  for index in range(7):
+    _prepared_for_chat(
+      app_id,
+      f"complete-{index}",
+      "chat-complete",
+      status="open",
+      number=index + 1,
+      url=f"https://github.com/mobius-os/app-demo/pull/{index + 1}",
+      updated_at=f"2026-08-27T10:00:0{index}Z",
+    )
+  headers = {"Authorization": f"Bearer {owner_token}"}
+
+  r = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-complete",
+    headers=headers,
+  )
+  assert r.status_code == 200, r.text
+  records = r.json()["records"]
+  assert len(records) == 7
+  assert [record["number"] for record in records] == [7, 6, 5, 4, 3, 2, 1]
+  assert records[0]["url"].endswith("/7")
 
 
 def test_diff_file_paths_reads_headers_not_source_that_looks_like_one(tmp_path):

@@ -6,8 +6,6 @@ import { appQueries } from '../../hooks/queries.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 import {
   autopilotOnSend,
-  contributeApp as findContributeApp,
-  contributeAppId,
   contributionRecoveryAction,
   contributionReviewRunPhase,
   contributionReviewIntent,
@@ -27,30 +25,33 @@ import {
   trackingStatusLabel,
   visibleReviewItems,
 } from './contributionReviewModel.js'
+import {
+  chatChangesOverview,
+  isUnsortedDismissed,
+  rememberUnsortedDismissed,
+} from './chatChangesLifecycle.js'
+import { useChatContributions } from './useChatChangesOverview.js'
 import './ContributionReviewCard.css'
 
 export default function ContributionReviewCard({
-  chatId, turnActive, onOpenApp, onOpenChat, onContinueInChat,
+  chatId,
+  turnActive,
+  initialChangeEntries = [],
+  onOpenApp,
+  onOpenChat,
+  onContinueInChat,
+  onOpenChanges,
+  onPrepareChanges,
 }) {
   const queryClient = useQueryClient()
-  const { data: apps } = appQueries.list.useQuery()
-  const appId = contributeAppId(apps)
-  const contributeApp = findContributeApp(apps, appId)
-  const { data: appToken } = appQueries.token.useQuery(appId)
-
-  const queryKey = useMemo(
-    () => ['contributions-for-chat', appId, chatId],
-    [appId, chatId],
-  )
-  // Read-only. A 404 (older backend) resolves to null and the card stays hidden.
-  const { data } = useQuery({
+  const contributionQuery = useChatContributions(chatId)
+  const {
+    appId,
+    app: contributeApp,
+    data,
     queryKey,
-    queryFn: () => api.contributions.forChat(appId, chatId)
-      .then(r => (r.ok ? r.json() : null)),
-    enabled: !!appId && !!chatId,
-    staleTime: 15000,
-    retry: false,
-  })
+  } = contributionQuery
+  const { data: appToken } = appQueries.token.useQuery(appId)
 
   // The agent stages a review during a turn, so refetch exactly once when a turn
   // SETTLES — not on every render and not on a timer. Nothing else can add a
@@ -68,7 +69,17 @@ export default function ContributionReviewCard({
   const [dismissRevision, setDismissRevision] = useState(0)
 
   const storage = typeof localStorage !== 'undefined' ? localStorage : null
-  const pendingItems = visibleReviewItems(data, storage)
+  const overview = useMemo(
+    () => chatChangesOverview(initialChangeEntries, data),
+    [initialChangeEntries, data],
+  )
+  const unsortedVisible = !turnActive
+    && overview.counts.unsorted > 0
+    && !isUnsortedDismissed(chatId, overview.unsortedRevision, storage)
+  const pendingItems = [
+    ...(unsortedVisible ? [{ kind: 'unsorted', id: `unsorted:${overview.unsortedRevision}` }] : []),
+    ...visibleReviewItems(data, storage),
+  ]
   const panel = reviewPanelSummary(pendingItems)
   const grouped = panel.count > 1
   void dismissRevision
@@ -146,6 +157,21 @@ export default function ContributionReviewCard({
         </div>
       )}
       {pendingItems.map(item => {
+        if (item.kind === 'unsorted') {
+          return (
+            <UnsortedChangesRow
+              key={item.id}
+              fileCount={overview.counts.unsorted}
+              updateCount={overview.unsortedEntries.length}
+              onOpenChanges={onOpenChanges}
+              onPrepareChanges={onPrepareChanges}
+              onDismiss={() => {
+                rememberUnsortedDismissed(chatId, overview.unsortedRevision, storage)
+                setDismissRevision(value => value + 1)
+              }}
+            />
+          )
+        }
         const onDismiss = () => {
           rememberReviewItemDismissed(item, storage)
           setDismissRevision(value => value + 1)
@@ -194,6 +220,54 @@ export default function ContributionReviewCard({
           />
         )
       })}
+    </div>
+  )
+}
+
+function UnsortedChangesRow({
+  fileCount, updateCount, onOpenChanges, onPrepareChanges, onDismiss,
+}) {
+  const cardRef = useSwipeToDismiss(onDismiss)
+  return (
+    <div ref={cardRef} className="contrib-card contrib-card--unsorted">
+      <div className="contrib-card__topline">
+        <span>Ready to organize</span>
+        <button
+          type="button"
+          className="contrib-card__dismiss"
+          aria-label="Dismiss — keeps the work in Changes"
+          onClick={() => onDismiss?.()}
+        >
+          <X width={14} height={14} aria-hidden="true" />
+        </button>
+      </div>
+      <p className="contrib-card__summary">
+        {fileCount} {fileCount === 1 ? 'file has' : 'files have'} changes that are not yet organized.
+      </p>
+      <p className="contrib-card__meta">
+        {updateCount} {updateCount === 1 ? 'recorded update' : 'recorded updates'} from this chat
+      </p>
+      <p className="contrib-card__payoff">
+        The agent can sort reusable work into private reviews. Nothing is published.
+      </p>
+      <div className="contrib-card__actions">
+        <button
+          type="button"
+          className="contrib-card__send"
+          disabled={typeof onPrepareChanges !== 'function'}
+          onClick={() => onPrepareChanges?.()}
+        >
+          Prepare contributions
+        </button>
+        <button
+          type="button"
+          className="contrib-card__review"
+          disabled={typeof onOpenChanges !== 'function'}
+          onClick={() => onOpenChanges?.()}
+        >
+          View changes
+        </button>
+      </div>
     </div>
   )
 }

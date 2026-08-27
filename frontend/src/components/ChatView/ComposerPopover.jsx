@@ -64,6 +64,8 @@ import {
 import useModelSelectionPopover from './hooks/useModelSelectionPopover.js'
 import useDiscardUnconfirmedSwitchOnPickerClose from './hooks/useDiscardUnconfirmedSwitchOnPickerClose.js'
 import { resolvedChatSettings } from './modelSelectionPolicy.js'
+import { compactChangesSummary } from './chatChangesLifecycle.js'
+import { useChatChangesOverview } from './useChatChangesOverview.js'
 import './ChatWork.css'
 
 export default function ComposerPopover({
@@ -128,6 +130,9 @@ export default function ComposerPopover({
     ),
     enabled: Boolean(open && !embedded && artifactsAppId && chatId),
     staleTime: 0,
+  })
+  const changesOverview = useChatChangesOverview(chatId, [], {
+    enabled: Boolean(open && !embedded && chatId),
   })
   const chatArtifacts = artifactsQuery.data || []
   const artifactItems = chatArtifactPickerItems(appArtifacts, chatArtifacts)
@@ -360,7 +365,11 @@ export default function ComposerPopover({
                 </span>
                 <span className="composer-popover__row-main">
                   <span className="composer-popover__row-title">Changes</span>
-                  <span className="composer-popover__row-sub">View this chat’s file changes</span>
+                  <span className="composer-popover__row-sub">
+                    {changesOverview.loading && !changesOverview.hasWork
+                      ? 'Checking this chat’s work…'
+                      : compactChangesSummary(changesOverview)}
+                  </span>
                 </span>
               </button>
             )}

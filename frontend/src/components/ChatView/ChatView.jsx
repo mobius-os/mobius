@@ -4887,6 +4887,8 @@ export default function ChatView({
           initialEntries={chatDiffEntries}
           onClose={() => setShowChanges(false)}
           onPrepareChanges={handlePrepareChatChanges}
+          onOpenApp={onOpenApp}
+          onContinueInChat={handleContributionFollowup}
           turnActive={turnActive}
         />
       )}
@@ -5234,8 +5236,11 @@ export default function ChatView({
             <ContributionReviewCard
               chatId={chatId}
               turnActive={turnActive}
+              initialChangeEntries={chatDiffEntries}
               onOpenApp={onOpenApp}
               onContinueInChat={handleContributionFollowup}
+              onOpenChanges={() => setShowChanges(true)}
+              onPrepareChanges={handlePrepareChatChanges}
               onOpenChat={(targetChatId) => {
                 if (!internalNav || !targetChatId) return
                 internalNav(new URL(
