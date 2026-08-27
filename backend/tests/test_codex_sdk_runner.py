@@ -784,6 +784,32 @@ def test_active_codex_turn_interrupt_waits_for_runner_finish():
   asyncio.run(_scenario())
 
 
+def test_active_codex_turn_clear_uses_goal_control_and_waits_for_finish():
+  class GoalTurn(_FakeTurnHandle):
+    def __init__(self):
+      super().__init__()
+      self.clear_calls = 0
+
+    async def clear_goal(self):
+      self.clear_calls += 1
+
+  async def _scenario() -> None:
+    turn = GoalTurn()
+    active = codex_sdk_runner.ActiveCodexTurn(
+      object(), turn, chat_id="chat-goal-clear",
+    )
+    task = asyncio.create_task(active.clear_goal())
+    await asyncio.sleep(0)
+    assert turn.clear_calls == 1
+    assert turn.interrupt_calls == 0
+    assert active.interrupt_requested is True
+    assert task.done() is False
+    active.mark_finished()
+    await asyncio.wait_for(task, timeout=1)
+
+  asyncio.run(_scenario())
+
+
 def test_active_codex_turn_interrupt_logs_and_still_waits(caplog):
   async def _scenario() -> None:
     turn = _FakeTurnHandle(interrupt_exc=RuntimeError("interrupt failed"))
@@ -1255,6 +1281,23 @@ def test_goal_turn_interrupt_uses_sdk_pause_and_interrupt_operation():
   asyncio.run(scenario())
 
 
+def test_goal_turn_clear_removes_objective_then_interrupts_operation():
+  async def scenario():
+    client = _FakeGoalClient()
+    state = _FakeGoalState("thread-1", started=True)
+    turn = codex_sdk_runner._CodexGoalTurn(
+      client,
+      state,
+      _FakeAsyncGoalNotificationStream,
+      RuntimeError,
+    )
+    await turn.clear_goal()
+    assert client.clear_calls == ["thread-1"]
+    assert client.cancel_calls == [state]
+
+  asyncio.run(scenario())
+
+
 def test_goal_turn_steer_follows_physical_turn_rollover():
   async def scenario():
     sdk = _fake_sdk(object)
@@ -1287,7 +1330,7 @@ def test_goal_turn_steer_follows_physical_turn_rollover():
   asyncio.run(scenario())
 
 
-def test_goal_clear_uses_sdk_without_starting_an_ordinary_turn(monkeypatch):
+def test_dismissed_goal_is_cleared_before_the_next_ordinary_turn(monkeypatch):
   goal = SimpleNamespace(status=_FakeThreadGoalStatus.active)
   ordinary_turn = _FakeTurnHandle(_goal_completion_notifications())
   thread = _FakeThread("thread-1", ordinary_turn)
@@ -1315,7 +1358,7 @@ def test_goal_clear_uses_sdk_without_starting_an_ordinary_turn(monkeypatch):
 
   bc = _FakeBroadcast()
   result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
-    user_message="/goal clear",
+    user_message="ordinary follow-up",
     session_id="thread-1",
     base_env={},
     cwd="/tmp",
@@ -1323,14 +1366,17 @@ def test_goal_clear_uses_sdk_without_starting_an_ordinary_turn(monkeypatch):
     bc=bc,
     pending_questions={},
     db=None,
-    goal_clear=True,
+    clear_dismissed_goal=True,
     goal_mode=True,
   ))
 
   assert result["error"] is None
   assert FakeAsyncCodex.last._client.clear_calls == ["thread-1"]
-  assert thread.turn_args is None
-  assert {"type": "text", "content": "Goal cleared."} in bc.events
+  assert thread.turn_args is not None
+  assert thread.turn_args[0] == "ordinary follow-up"
+  assert not any(
+    event.get("content") == "Goal cleared." for event in bc.events
+  )
 
 
 def test_run_codex_sdk_turn_reports_all_model_calls_in_turn(monkeypatch):
@@ -3280,7 +3326,7 @@ def test_ordinary_codex_turns_do_not_expose_provider_private_goal_tools():
   assert codex_sdk_runner._needs_native_goal_control(
     goal_mode=False,
     goal_objective=None,
-    goal_clear=False,
+    clear_dismissed_goal=False,
     fallback_goal_objective=None,
   ) is False
   assert "features.goals=true" not in codex_sdk_runner._codex_config_overrides(
@@ -3289,7 +3335,7 @@ def test_ordinary_codex_turns_do_not_expose_provider_private_goal_tools():
   assert codex_sdk_runner._needs_native_goal_control(
     goal_mode=True,
     goal_objective="Ship and verify",
-    goal_clear=False,
+    clear_dismissed_goal=False,
     fallback_goal_objective=None,
   ) is True
 

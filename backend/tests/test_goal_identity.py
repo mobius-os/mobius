@@ -3,7 +3,10 @@
 from app import models
 from app.chat_writer import AppendPending, Barrier, PromotePending, get_writer
 from app.goal_plans import presented_goal
-from app.run_state import goal_identity_for_run_start
+from app.run_state import (
+  goal_identity_for_run_start,
+  latest_provider_goal_is_dismissed,
+)
 
 
 def test_explicit_goals_mint_identity_and_continuations_inherit_it(db, chat):
@@ -153,27 +156,47 @@ def test_stopped_unplanned_goal_stays_resumable_after_ordinary_turns(db, chat):
   ) == ("Pause safely", "paused-id")
 
 
-def test_goal_clear_writes_an_identity_tombstone_that_prevents_resume(db, chat):
+def test_direct_goal_dismissal_prevents_resume_without_a_tombstone_run(db, chat):
   db.add(models.ChatRun(
     id="paused-goal", root_run_id="paused-goal", chat_id=chat.id,
     status="stopped", provider="codex", goal_objective="Pause safely",
     goal_id="paused-id",
   ))
-  db.commit()
-
-  assert goal_identity_for_run_start(
-    db, chat.id, {"content": "/goal clear"},
-  ) == (None, "paused-id")
-  db.add(models.ChatRun(
-    id="clear-run", root_run_id="clear-run", chat_id=chat.id,
-    status="completed", provider="codex", goal_id="paused-id",
-  ))
+  chat.dismissed_goal_id = "paused-id"
   db.commit()
 
   assert presented_goal(db, chat.id) is None
+  assert latest_provider_goal_is_dismissed(db, chat.id) is True
   assert goal_identity_for_run_start(
     db, chat.id, {"content": "continue"},
   ) == (None, None)
+
+
+def test_new_goal_remains_visible_after_the_previous_identity_was_dismissed(
+  db, chat,
+):
+  db.add_all([
+    models.ChatRun(
+      id="old-goal", root_run_id="old-goal", chat_id=chat.id,
+      status="stopped", provider="codex", goal_objective="Old",
+      goal_id="old-id",
+    ),
+    models.ChatRun(
+      id="new-goal", root_run_id="new-goal", chat_id=chat.id,
+      status="running", provider="codex", goal_objective="New",
+      goal_id="new-id",
+    ),
+  ])
+  chat.dismissed_goal_id = "old-id"
+  db.commit()
+
+  assert presented_goal(db, chat.id) == {
+    "id": "new-id",
+    "objective": "New",
+    "status": "active",
+    "resumable": False,
+  }
+  assert latest_provider_goal_is_dismissed(db, chat.id) is False
 
 
 def test_delegation_result_inherits_only_its_originating_goal(db, chat):

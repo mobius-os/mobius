@@ -28,6 +28,7 @@ from app import (
   memory,
   models,
   questions,
+  run_state,
   schemas,
   skills as skills_platform,
 )
@@ -59,7 +60,6 @@ from app.chat_context import (
   _chat_has_goal_intent,
   _chat_settings_dict,
   _custom_system_prompt,
-  _goal_clear_requested,
   _goal_objective,
   _goal_resume_requested,
   _human_elapsed,
@@ -79,6 +79,7 @@ from app.chat_writer import (
   AppendPending,
   Barrier,
   CancelPending,
+  ClearPresentedGoal,
   ClearPending,
   FinishRun,
   Finalize,
@@ -90,6 +91,8 @@ from app.chat_writer import (
   RecoverWedgedRun,
   ResolvePark,
   RollbackAutoResume,
+  StartContinuation,
+  StartContinuationBlocked,
   alloc_run_token,
   await_ack as _await_ack,
   cid_of,
@@ -1726,53 +1729,80 @@ async def _auto_resume_chat(
               "restart" if restart_park else "usage_limit"
             )
             resume_app_id = (
-              park.initiated_by_app_id if restart_park else None
+              # A real owner follow-up already waiting behind an app-owned
+              # turn takes ownership of the resumed turn. This matches normal
+              # pending promotion, where the first queued row owns attribution.
+              park.initiated_by_app_id
+              if restart_park and not pending else None
             )
           if not mark_starting(chat_id):
             return False
           claimed = True
+          drain_token = alloc_run_token()
           continuation_cid = (
             f"restart-resume-{park_token or chat_id}"
             if resume_reason == "restart"
             else f"limit-resume-{park_token or chat_id}"
           )
-          ack = get_writer().submit(
-            AppendPending(
-              chat_id=chat_id,
-              run_token="",
-              user_msg={
-                "role": "user",
-                "content": "continue",
-                "ts": int(time.time() * 1000),
-                "kind": "continuation",
-                "continuation_reason": resume_reason,
-                # A retry after AppendPending succeeded but a later step failed
-                # must not enqueue a second synthetic continuation.
-                "cid": continuation_cid,
-              },
-              initiated_by_app_id=resume_app_id,
-            )
-          )
-          await _await_ack(ack)
-          drain_token = alloc_run_token()
-          try:
-            next_messages, next_user, next_session_id = (
-              await chat_queue.promote_pending_messages_locked(
-                None, chat_id, drain_token,
+          if restart_park:
+            promoted = await _await_ack(get_writer().submit(
+              StartContinuation(
+                chat_id=chat_id,
+                run_token=drain_token,
+                root_run_id=park.root_run_id or park.id,
+                content="continue",
+                cid=continuation_cid,
+                reason=resume_reason,
+                initiated_by_app_id=resume_app_id,
+                supersedes_run_token=park.id,
+                consume_pending=True,
               )
-            )
-          except chat_queue.PendingQuestionBlocksPromotion:
-            # A question committed between the locked preflight and the actor
-            # transition. Remove only this synthetic retry marker; real queued
-            # owner/product rows stay behind the question.
-            await _await_ack(get_writer().submit(CancelPending(
-              chat_id=chat_id,
-              run_token="",
-              cid=continuation_cid,
-            )))
-            discard_starting(chat_id)
-            claimed = False
-            return False
+            ))
+            if isinstance(promoted, StartContinuationBlocked):
+              discard_starting(chat_id)
+              claimed = False
+              return False
+            next_messages = promoted["history"]
+            next_user = promoted["promoted"]
+            next_session_id = promoted["session_id"]
+          else:
+            # Provider-limit recovery stays retryable if task creation fails.
+            # Its existing queue rollback owns that paid-usage policy; planned
+            # restarts use the atomic continuation above and never expose the
+            # synthetic control marker as pending UI.
+            await _await_ack(get_writer().submit(
+              AppendPending(
+                chat_id=chat_id,
+                run_token="",
+                user_msg={
+                  "role": "user",
+                  "content": "continue",
+                  "ts": int(time.time() * 1000),
+                  "kind": "continuation",
+                  "continuation_reason": resume_reason,
+                  "cid": continuation_cid,
+                },
+                initiated_by_app_id=resume_app_id,
+              )
+            ))
+            try:
+              next_messages, next_user, next_session_id = (
+                await chat_queue.promote_pending_messages_locked(
+                  None, chat_id, drain_token,
+                )
+              )
+            except chat_queue.PendingQuestionBlocksPromotion:
+              # A question committed between the locked preflight and the
+              # actor transition. Remove only this synthetic retry marker;
+              # real queued owner/product rows stay behind the question.
+              await _await_ack(get_writer().submit(CancelPending(
+                chat_id=chat_id,
+                run_token="",
+                cid=continuation_cid,
+              )))
+              discard_starting(chat_id)
+              claimed = False
+              return False
           if not next_user:
             discard_starting(chat_id)
             claimed = False
@@ -1790,23 +1820,22 @@ async def _auto_resume_chat(
             run_token=drain_token,
           )
           if scheduled is False:
-            # PromotePending committed before task creation. Reverse only this
-            # exact speculative handoff while the queue lock is still held.
-            # Provider-limit parks remain retryable; one-shot restart parks
-            # retire to manual recovery while preserving the queue.
-            rolled_back = await _await_ack(get_writer().submit(
-              RollbackAutoResume(
-                chat_id=chat_id,
-                run_token=park_token or "",
-                promoted_run_token=drain_token,
-                promoted_pending=list(
-                  next_user.get("_promoted_pending") or []
-                ),
-                retry_park=resume_reason != "restart",
-              )
-            ))
-            if rolled_back:
-              forget_chat(chat_id)
+            if not restart_park:
+              # PromotePending committed before task creation. Reverse only
+              # this paid-limit handoff so the later sweep can retry it.
+              rolled_back = await _await_ack(get_writer().submit(
+                RollbackAutoResume(
+                  chat_id=chat_id,
+                  run_token=park_token or "",
+                  promoted_run_token=drain_token,
+                  promoted_pending=list(
+                    next_user.get("_promoted_pending") or []
+                  ),
+                  retry_park=True,
+                )
+              ))
+              if rolled_back:
+                forget_chat(chat_id)
             claimed = False
             return False
           return True
@@ -2043,12 +2072,30 @@ async def sweep_reset_parks(
         else:
           limit_resume_started = True
       elif restart_auto_resume:
-        restart_deferred = True
-        log.warning(
-          "restart continuation remained pending after scheduling attempt "
-          "chat_id=%s run_token=%s; next event/fallback sweep will retry",
-          chat_id, run.id,
-        )
+        # The atomic restart handoff may already have opened a durable running
+        # continuation before task creation failed. It deliberately leaves no
+        # pending control row to retry; startup reconciliation (or the owner's
+        # next send) recovers that exact opened run. If the handoff was blocked
+        # before it committed, the original resume_pending park remains due and
+        # the supervisor should sweep it again.
+        db.expire_all()
+        still_parked = db.query(models.ChatRun.id).filter(
+          models.ChatRun.id == run.id,
+          models.ChatRun.status == "resume_pending",
+        ).first() is not None
+        if still_parked:
+          restart_deferred = True
+          log.warning(
+            "restart continuation remains durably parked after handoff "
+            "chat_id=%s run_token=%s; next event/fallback sweep will retry",
+            chat_id, run.id,
+          )
+        else:
+          log.warning(
+            "restart continuation opened durably but could not schedule "
+            "chat_id=%s run_token=%s; startup reconciliation will recover it",
+            chat_id, run.id,
+          )
       continue
 
     # Notify-only/app/deleted path: resolve before the best-effort push so a
@@ -2289,6 +2336,68 @@ async def stop_chat_for(
 
   Waits for the process to die with a bounded timeout.
   """
+  async with chat_queue.get_transition_lock(chat_id):
+    return await _stop_chat_for_locked(chat_id, db=db)
+
+
+async def clear_goal_for(chat_id: str, expected_goal_id: str) -> dict:
+  """Stop one Goal execution and dismiss its exact durable identity.
+
+  Unlike ordinary Stop, this preserves the pending queue and does not bump the
+  chat generation. The interrupted runner therefore performs its normal
+  terminal handoff, including starting real owner follow-ups already queued
+  behind the Goal. The writer command then suppresses only the cleared Goal;
+  its transcript, plan, and metrics remain durable history.
+  """
+  async with chat_queue.get_transition_lock(chat_id):
+    # Fence a stale confirmation before touching any live runner. The writer
+    # repeats this exact-id check when it commits the dismissal, so a newer Goal
+    # that appears during interruption is also preserved rather than hidden.
+    from app.database import SessionLocal
+    from app.goal_plans import presented_goal
+    with SessionLocal() as state_db:
+      current_goal = presented_goal(state_db, chat_id)
+    if current_goal is None:
+      return {"status": "missing", "goal_id": None}
+    if current_goal["id"] != expected_goal_id:
+      return {"status": "conflict", "goal_id": current_goal["id"]}
+
+    handles = registry.get_handles(chat_id)
+    all_stopped = True
+    for handle in handles:
+      clear_goal = getattr(handle, "clear_goal", None)
+      if callable(clear_goal):
+        try:
+          await clear_goal()
+          stopped = True
+        except asyncio.CancelledError:
+          raise
+        except Exception:
+          _get_logger().warning(
+            "direct Goal clear failed chat_id=%s kind=%s",
+            chat_id, getattr(handle, "kind", "?"), exc_info=True,
+          )
+          stopped = False
+      else:
+        stopped, _ = await _stop_handle_with_escalation(
+          chat_id, handle, source="clear_goal_for",
+        )
+      all_stopped = all_stopped and stopped
+    if not all_stopped:
+      return {"status": "still_running", "goal_id": expected_goal_id}
+    questions.cancel(chat_id)
+    from app import secure_inputs
+    secure_inputs.cancel_chat(chat_id)
+    return await _await_ack(get_writer().submit(ClearPresentedGoal(
+      chat_id=chat_id,
+      expected_goal_id=expected_goal_id,
+    )))
+
+
+async def _stop_chat_for_locked(
+  chat_id: str, db: Session = None,
+) -> tuple[bool, list[str]]:
+  """Stop one chat while its per-chat lifecycle transition is exclusive."""
   stopped_gen = current_run_generation(chat_id)
   bump_run_generation(chat_id)
   handles = registry.get_handles(chat_id)
@@ -4020,8 +4129,11 @@ async def _run_chat_impl_with_db(
   raw_user_message = messages[-1].content
   user_message = raw_user_message
   goal_objective = _goal_objective(raw_user_message)
-  goal_clear = _goal_clear_requested(raw_user_message)
   goal_mode = _chat_has_goal_intent(messages)
+  clear_dismissed_provider_goal = (
+    run_state.latest_provider_goal_is_dismissed(db, chat_id)
+    if chat_id else False
+  )
   goal_continue = is_goal_continue(raw_user_message or "")
   question_checkpoint = None
   if settings.ensure_chat_note and chat_id:
@@ -4095,7 +4207,7 @@ async def _run_chat_impl_with_db(
     # Delegation prompts are plain bounded tasks even if their text happens to
     # begin with an owner-only slash command.
     goal_objective = None
-    goal_clear = False
+    clear_dismissed_provider_goal = False
     goal_mode = False
     goal_continue = False
     is_slash_command = False
@@ -4660,7 +4772,7 @@ async def _run_chat_impl_with_db(
         resumed_context=resumed_context_fallback,
         should_abort=lambda: _run_generation_superseded(chat_id, run_gen),
         goal_objective=goal_objective,
-        goal_clear=goal_clear,
+        clear_dismissed_goal=clear_dismissed_provider_goal,
         goal_mode=goal_mode,
         goal_continue=goal_continue,
         fallback_goal_objective=fallback_goal_objective,
