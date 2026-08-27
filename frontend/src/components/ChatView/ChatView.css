@@ -754,6 +754,7 @@
 /* ── Reasoning lane (reused by the activity stretch) ── */
 
 .chat__cursor {
+  position: absolute;
   display: inline-block;
   width: 6px;
   height: 6px;
@@ -762,6 +763,13 @@
   margin-left: 4px;
   vertical-align: middle;
   animation: cursorPulse 1.5s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat__cursor {
+    animation: none;
+    opacity: 0.65;
+  }
 }
 
 @keyframes cursorPulse {

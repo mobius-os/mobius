@@ -55,6 +55,6 @@ test('gesture settlement replays deferred footer geometry and mode in one task',
   const settleEnd = controller.indexOf('\n    const releasePendingGesture', settleStart)
   assert.ok(settleStart >= 0 && settleEnd > settleStart, 'reader settlement exists')
   const settle = controller.slice(settleStart, settleEnd)
-  assert.match(settle, /if \(!replayDeferredLayoutNow\(\)\)\s*\{\s*sizeSpacer\(currentAuthority\(\)\)/,
+  assert.match(settle, /if \(!replayDeferredLayoutNow\(\)\)\s*\{[\s\S]*?syncLayout\(\{ forceApply: true, authorityVersion: currentAuthority\(\) \}\)/,
     'settlement must not publish footer geometry before its compensating mode write')
 })

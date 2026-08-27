@@ -12,6 +12,7 @@ const chatSurfaceModel = readFileSync(new URL('../chatSurfaceModel.js', import.m
 const workspaceChrome = readFileSync(new URL('../WorkspaceChrome.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../../ChatView/ChatView.jsx', import.meta.url), 'utf8')
 const scrollMode = readFileSync(new URL('../../ChatView/useScrollMode.js', import.meta.url), 'utf8')
+const scrollRestore = readFileSync(new URL('../../ChatView/scroll/restore.js', import.meta.url), 'utf8')
 const detailCache = readFileSync(new URL('../../../lib/chatDetailCache.js', import.meta.url), 'utf8')
 const searchTermHighlight = readFileSync(new URL('../../../lib/searchTermHighlight.js', import.meta.url), 'utf8')
 const apiClient = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
@@ -116,11 +117,11 @@ test('activation presents a confirmed running transcript while stream catch-up r
   assert.match(chatView,
     /cacheIsSafeFallback[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND[\s\S]*applyMessagesToView\(\[\], 0\)[\s\S]*setLoadError\(!cacheIsSafeFallback\)/,
     'an incomplete or contradictory cache must be cleared before the error surface paints')
-  assert.match(scrollMode,
+  assert.match(`${scrollRestore}\n${scrollMode}`,
     /mode\?\.kind !== 'INITIAL'[\s\S]*phase === 'cache-validating' && !resolved[\s\S]*action: 'wait'[\s\S]*initialEntryPhaseRef\.current === 'cache-validating'[\s\S]*onCachedCoordinateReady\?\.\(\)/,
     'the scroll controller admits a nested cache only after the exact DOM part resolves')
   assert.match(scrollMode,
-    /savedLocationUnresolvedRef\.current[\s\S]*Object\.hasOwn\(_scrollModes, chatId\)/,
+    /savedLocationUnresolvedRef\.current[\s\S]*hasReadingPosition\(chatId\)/,
     'an activation error before ready must not erase the unconsumed saved coordinate')
   assert.match(
     chatView,
