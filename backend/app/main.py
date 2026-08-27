@@ -792,7 +792,14 @@ def health(response: Response):
     "mode": "normal",
     "build_sha": settings.build_sha,
     "boot_id": _BOOT_ID,
+    # The managed account service uses this baked-image witness only for the
+    # one-time Railway bootstrap. Served source can be newer than the running
+    # image, so build_sha alone cannot prove the root cutover supervisor exists.
+    "container_replacement_handoff": None,
   }
+  from app.deployment_control import managed_cutover_ready
+  if managed_cutover_ready():
+    payload["container_replacement_handoff"] = "external-cutover-v1"
   if _SCHEMA_GAPS:
     # Still HTTP 200: the shell's reachability probe requires response.ok,
     # and a schema gap must not masquerade as "device offline". The strict

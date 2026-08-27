@@ -32,6 +32,9 @@ def test_health_exposes_stable_normal_target_identity(client):
   assert body["mode"] == "normal"
   assert isinstance(body["build_sha"], str) and body["build_sha"]
   assert isinstance(body["boot_id"], str) and body["boot_id"]
+  assert body["container_replacement_handoff"] in {
+    None, "external-cutover-v1",
+  }
 
 
 def test_version_exposes_explicit_test_runtime_marker(client, monkeypatch):

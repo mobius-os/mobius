@@ -155,7 +155,7 @@ _restart_poller_started=0
 
 _start_platform_restart_poller() {
   [ "$_restart_poller_started" -eq 1 ] && return 0
-  : > /data/run/managed-cutover-ready
+  printf '%s\n' "$MOBIUS_BOOT_ID" > /data/run/managed-cutover-ready
   chown mobius:mobius /data/run/managed-cutover-ready 2>/dev/null || true
   (
     while true; do
