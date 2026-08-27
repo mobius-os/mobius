@@ -1,5 +1,9 @@
 /* Chat-scoped projection of records owned by the installed Artifacts app. */
 
+import { artifactRelatedToApps } from './artifactAppRelations.js'
+
+export { artifactRelatedToApps } from './artifactAppRelations.js'
+
 const ARTIFACT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
 
 function recordFromEntry(entry) {
@@ -19,14 +23,16 @@ function timestamp(value) {
   return Number.isFinite(parsed) ? parsed : 0
 }
 
-export function artifactTouchForChat(record, chatId) {
+export function artifactTouchForChat(record, chatId, relatedApps = []) {
   if (!record || typeof record !== 'object') return null
   if (!ARTIFACT_ID_RE.test(record.id || '')) return null
   const owner = String(chatId || '')
   if (!owner) return null
   const versionTouches = (Array.isArray(record.versions) ? record.versions : [])
     .filter(version => String(version?.chat_id || '') === owner)
-  if (versionTouches.length === 0 && String(record.chat_id || '') !== owner) {
+  const hasOriginTouch = versionTouches.length > 0 || String(record.chat_id || '') === owner
+  const hasRelatedApp = artifactRelatedToApps(record, relatedApps)
+  if (!hasOriginTouch && !hasRelatedApp) {
     return null
   }
   const latestVersionTouch = versionTouches.reduce((latest, version) => (
@@ -35,8 +41,9 @@ export function artifactTouchForChat(record, chatId) {
       : latest
   ), null)
   const touchedAt = latestVersionTouch?.created_at
-    || record.created_at
+    || (hasOriginTouch ? record.created_at : record.updated_at)
     || record.updated_at
+    || record.created_at
     || ''
   return {
     id: record.id,
@@ -50,17 +57,38 @@ export function artifactTouchForChat(record, chatId) {
   }
 }
 
-export function artifactsTouchedByChat(records, chatId) {
+export function artifactsTouchedByChat(records, chatId, relatedApps = []) {
   return (Array.isArray(records) ? records : [])
-    .map(record => artifactTouchForChat(record, chatId))
+    .map(record => artifactTouchForChat(record, chatId, relatedApps))
     .filter(Boolean)
     .sort((left, right) => timestamp(right.touchedAt) - timestamp(left.touchedAt))
 }
 
-export async function loadChatArtifacts(appId, chatId, { signal, request } = {}) {
+async function appsMaintainedByChat(chatId, request, signal) {
+  try {
+    const response = await request('/apps/', { signal })
+    if (!response.ok) return []
+    const apps = await response.json()
+    const owner = String(chatId || '')
+    return (Array.isArray(apps) ? apps : [])
+      .filter(app => String(app?.chat_id || '') === owner)
+  } catch (error) {
+    if (signal?.aborted) throw error
+    return []
+  }
+}
+
+export async function loadChatArtifacts(
+  appId,
+  chatId,
+  { signal, request, includeRelatedApps = false } = {},
+) {
   if (typeof request !== 'function') {
     throw new Error('Artifact loading requires a request function.')
   }
+  const relatedAppsPromise = includeRelatedApps
+    ? appsMaintainedByChat(chatId, request, signal)
+    : Promise.resolve([])
   const records = []
   let cursor = null
   do {
@@ -78,5 +106,5 @@ export async function loadChatArtifacts(appId, chatId, { signal, request } = {})
     }
     cursor = page?.next_cursor || null
   } while (cursor)
-  return artifactsTouchedByChat(records, chatId)
+  return artifactsTouchedByChat(records, chatId, await relatedAppsPromise)
 }

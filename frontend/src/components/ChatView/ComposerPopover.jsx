@@ -115,11 +115,14 @@ export default function ComposerPopover({
     composerInputRef,
   )
   const artifactsQuery = useQuery({
-    queryKey: ['chat-work-artifacts', String(artifactsAppId || ''), String(chatId || '')],
+    queryKey: [
+      'chat-work-artifacts', String(artifactsAppId || ''), String(chatId || ''),
+      'related-apps-v1',
+    ],
     queryFn: ({ signal }) => loadChatArtifacts(
       artifactsAppId,
       chatId,
-      { signal, request: apiFetch },
+      { signal, request: apiFetch, includeRelatedApps: true },
     ),
     enabled: Boolean(open && !embedded && artifactsAppId && chatId),
     staleTime: 0,
