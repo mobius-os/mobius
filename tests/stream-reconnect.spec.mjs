@@ -12,8 +12,12 @@
  */
 import { test, expect } from '@playwright/test'
 import { streamSnapshotKey } from '../frontend/src/components/ChatView/streamSnapshotCache.js'
+import { createTaggedChat, attachCleanup } from './_chatTracker.mjs'
+import { testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
+
+attachCleanup()
 
 function sseBody(events) {
   return events.map(e => `data: ${JSON.stringify(e)}\n\n`).join('')
@@ -36,6 +40,15 @@ async function setupChat(page) {
           || document.querySelector('.chat__form')),
     { timeout: 10000 }
   )
+  const chat = await createTaggedChat(page, 'stream-reconnect')
+  await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
+    waitUntil: 'domcontentloaded',
+  })
+  await page.waitForFunction(
+    () => !!document.querySelector('[data-chat-surface="painted"] .chat__form'),
+    { timeout: 10000 },
+  )
+  return chat
 }
 
 async function send(page, text) {
@@ -763,6 +776,8 @@ test.describe('Stream reconnection', () => {
           ],
           total: 2,
           offset: 0,
+          provider: 'claude',
+          ...testChatAgentSettings(),
         }),
       })
     })
@@ -785,7 +800,8 @@ test.describe('Stream reconnection', () => {
     })
 
     // Install the fetch shim before any app code runs. It captures the
-    // FIRST /stream fetch and parks it (a held Response), exposing
+    // first explicitly armed /stream fetch and parks it (a held Response),
+    // exposing
     // window.__releaseStaleStream() to resolve it with a 204 on demand —
     // crucially WITHOUT honoring the AbortSignal, simulating a response
     // already buffered by the browser before the abort. All later
@@ -793,12 +809,14 @@ test.describe('Stream reconnection', () => {
     await page.addInitScript(() => {
       const realFetch = window.fetch.bind(window)
       let staleParked = false
+      let staleArmed = false
       let resolveStale
       window.__staleStreamRequested = false
+      window.__armStaleStream = () => { staleArmed = true }
       window.__releaseStaleStream = () => { if (resolveStale) resolveStale() }
       window.fetch = (input, init) => {
         const url = typeof input === 'string' ? input : (input && input.url) || ''
-        if (!staleParked && /\/api\/chats\/[0-9a-f-]+\/stream$/.test(url)) {
+        if (staleArmed && !staleParked && /\/api\/chats\/[0-9a-f-]+\/stream$/.test(url)) {
           staleParked = true
           window.__staleStreamRequested = true
           // Park: resolve only when the test signals, then hand back a
@@ -814,6 +832,10 @@ test.describe('Stream reconnection', () => {
     })
 
     await setupChat(page)
+    // Bootstrap and fixture navigation may reconnect the previously active
+    // chat. Arm only after the isolated, model-selected chat is painted so
+    // that incidental hydration traffic cannot consume the held response.
+    await page.evaluate(() => window.__armStaleStream())
 
     // Cancel-queued (DELETE /pending/{cid}) → 200 with an empty queue, so the
     // tray-X clear below resolves cleanly without an error-path refetch.

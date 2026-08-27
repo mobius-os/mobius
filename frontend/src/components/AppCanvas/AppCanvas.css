@@ -89,9 +89,10 @@
   max-width: 300px;
 }
 
-/* Shown until the iframe fires `load`. The iframe is below it (DOM
-   order — overlay is rendered after iframe in the React tree).
-   Fades in slightly to avoid a hard flash on very-fast loads. */
+/* Shown until the iframe reports its first committed app paint. The iframe is
+   below it (DOM order — overlay follows the iframe in the React tree). Delay
+   the reveal long enough that a cached frame can settle without ever painting
+   placeholder chrome; genuinely slow opens still get a smooth loading state. */
 .canvas-loading {
   position: absolute;
   inset: 0;
@@ -103,7 +104,7 @@
   background: var(--bg);
   pointer-events: none;
   z-index: 1;
-  animation: canvas-loading-in 80ms ease-out;
+  animation: canvas-loading-in 80ms 120ms ease-out both;
 }
 
 /* The ordinary first-load fade intentionally lets a fast app feel immediate.

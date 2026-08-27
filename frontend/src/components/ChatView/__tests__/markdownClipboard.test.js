@@ -7,6 +7,7 @@ import {
   markdownClipboardHtml,
   markdownFromFragment,
   plainTextFromFragment,
+  queueClipboardTextUndoably,
 } from '../markdownClipboard.js'
 
 function text(value) {
@@ -150,6 +151,42 @@ test('Markdown insertion preserves the selected caret range', () => {
   )
 })
 
+test('Markdown insertion waits until after paste before entering the native undo stack', () => {
+  const calls = []
+  const queued = []
+  const textarea = {
+    ownerDocument: {
+      defaultView: { queueMicrotask: callback => queued.push(callback) },
+      execCommand: (...args) => {
+        calls.push(args)
+        return true
+      },
+    },
+  }
+
+  assert.equal(queueClipboardTextUndoably(textarea, '**new**'), true)
+  assert.deepEqual(calls, [], 'the command must not run inside the cancelled paste event')
+  assert.equal(queued.length, 1)
+  queued[0]()
+  assert.deepEqual(calls, [['insertText', false, '**new**']])
+})
+
+test('Markdown insertion can fall back when the browser rejects native editing', () => {
+  assert.equal(queueClipboardTextUndoably(null, '**new**'), false)
+  assert.equal(queueClipboardTextUndoably({ ownerDocument: {} }, '**new**'), false)
+
+  let rejected = 0
+  let runQueued
+  assert.equal(queueClipboardTextUndoably({
+    ownerDocument: {
+      defaultView: { queueMicrotask: callback => { runQueued = callback } },
+      execCommand: () => { throw new Error('blocked') },
+    },
+  }, '**new**', () => { rejected += 1 }), true)
+  runQueued()
+  assert.equal(rejected, 1)
+})
+
 test('assistant prose and the composer share the Markdown clipboard boundary', () => {
   const message = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
   const composer = readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8')
@@ -159,6 +196,8 @@ test('assistant prose and the composer share the Markdown clipboard boundary', (
     'a partial cold render must not fall back to the hidden full message source')
   assert.match(composer, /assistantClipboardText\(\s*e\.clipboardData,\s*preferPlainText/)
   assert.match(composer, /pasteAsPlainTextRef\.current = isPlainTextPasteShortcut\(e\)/)
+  assert.match(composer, /if \(queueClipboardTextUndoably\(/,
+    'Markdown paste should enter the browser undo stack before using the controlled fallback')
   assert.match(composer, /pendingComposerCaretRef\.current = next/,
     'paste and sent-message history should share the controlled caret handoff')
   assert.doesNotMatch(composer, /setSelectionRange\(next\.caret/,

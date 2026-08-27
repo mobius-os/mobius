@@ -21,11 +21,17 @@ never stored. Use it when the partner asks to open an item or when a completed
 item should be visible now:
 
 ```bash
-curl -s -X POST "$API_BASE_URL/api/notify" \
-  -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"type":"open_item","itemKind":"app","itemId":"42","sourceKind":"chat","sourceId":"'"$CHAT_ID"'","placement":"beside-source","activation":"background"}'
+mapi -X POST /api/notify --data-binary @- <<JSON
+{"type":"open_item","itemKind":"app","itemId":"42","sourceKind":"chat","sourceId":"$CHAT_ID","placement":"beside-source","activation":"background"}
+JSON
 ```
+
+(`mapi` fills in auth + base URL.) For literal or multiline JSON, pass stdin
+with `--data-binary @-` instead of building a shell-escaped `-d` argument.
+Quote the heredoc delimiter when no variable expansion is needed. The examples
+that expand `$CHAT_ID` leave it unquoted only for that machine-generated ID;
+generate arbitrary or user-authored values with a real JSON encoder instead of
+splicing them into JSON text.
 
 - Default `activation` to `background`; use `foreground` only when the partner
   just asked to open that exact item.
@@ -44,33 +50,31 @@ Title: "Möbius needs your answer". Body: the first ~80 chars of your question. 
 
 ---
 
-## The curl forms
+## The authenticated JSON forms
 
 Minimum viable:
 
 ```bash
-curl -s -X POST "$API_BASE_URL/api/notifications/send" \
-  -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"title":"Task complete","body":"Your expense tracker app is ready."}'
+mapi -X POST /api/notifications/send --data-binary @- <<'JSON'
+{"title":"Task complete","body":"Your expense tracker app is ready."}
+JSON
 ```
 
 `source_type` defaults to `"agent"`; `source_id` is optional. Full form when you want a deep link + actions:
 
 ```bash
-curl -s -X POST "$API_BASE_URL/api/notifications/send" \
-  -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
+mapi -X POST /api/notifications/send --data-binary @- <<JSON
+{
     "title": "Task complete",
     "body": "Your expense tracker app is ready.",
-    "source_id": "'"$CHAT_ID"'",
+    "source_id": "$CHAT_ID",
     "target": "/shell/?app=APP_ID_HERE",
     "actions": [
       {"action": "open_app", "title": "Open App", "target": "/shell/?app=APP_ID_HERE"},
-      {"action": "open_chat", "title": "View Chat", "target": "/shell/?chat='"$CHAT_ID"'"}
+      {"action": "open_chat", "title": "View Chat", "target": "/shell/?chat=$CHAT_ID"}
     ]
-  }'
+}
+JSON
 ```
 
 ---

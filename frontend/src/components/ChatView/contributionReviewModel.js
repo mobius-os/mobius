@@ -1,20 +1,25 @@
 // Pure model for the chat's contribution review card (view in
-// ContributionReviewCard.jsx). Every decision the card makes about what to show
-// and whether Send may be offered lives here, so the rules are unit-testable
-// without a DOM and the component stays a renderer.
-//
-// The card is a SECOND view over the ledger the Contribute app owns. It never
-// relaxes a gate: Send calls the same submit endpoint as the app's button, and
-// that endpoint re-runs every freshness, attribution, and fork check before it
-// pushes anything public. Nothing here can authorize a publish on its own.
+// ContributionReviewCard.jsx). The card keeps the reviewed happy path in the
+// conversation where the work happened and opens Contribute for deeper review,
+// stacks, or recovery. Both surfaces call the same platform-owned mutations.
 
 // The ledger lives in the Contribute app's storage, so the card resolves that
 // app by slug. Not installed → nothing staged → the card never renders.
 export const CONTRIBUTE_SLUG = 'contribute'
 
-// Records the owner can still act on. Settled ones (open/merged/closed) are
-// history and belong in the Contribute app, not above the composer.
+// Records that still expose a publication decision in chat.
 export const ACTIONABLE_STATUSES = new Set(['prepared', 'submitting'])
+
+// Once sent, the same source chat remains the lightweight place to follow the
+// contribution. Contribute owns cross-chat triage, stacks, and deeper history.
+export const TRACKING_STATUSES = new Set([
+  'draft', 'open', 'landing', 'merged', 'superseded', 'closed',
+])
+
+export const CHAT_VISIBLE_STATUSES = new Set([
+  ...ACTIONABLE_STATUSES,
+  ...TRACKING_STATUSES,
+])
 
 export function contributeAppId(apps) {
   const match = (apps || []).find(app => app && app.slug === CONTRIBUTE_SLUG)
@@ -31,82 +36,125 @@ export function actionableRecords(payload) {
   )
 }
 
-/**
- * Why this record cannot be sent right now, or null when it can be.
- *
- * The server already ran the same local preflight the Contribute app's review
- * cards use; this only turns its verdict into one owner-facing sentence. A
- * missing verdict fails closed. The submit endpoint remains authoritative, but
- * this one-tap public action must not claim that an absent review is ready.
- */
+export function chatContributionRecords(payload) {
+  return (payload?.records || []).filter(
+    record => CHAT_VISIBLE_STATUSES.has(record?.status),
+  )
+}
+
+export function isTrackingRecord(record) {
+  return TRACKING_STATUSES.has(record?.status)
+}
+
+export function trackingStatusLabel(record) {
+  if (record?.needs_attention === true) return 'Needs attention'
+  return {
+    draft: 'Draft PR open',
+    open: 'PR open',
+    landing: 'Merging',
+    merged: 'Merged',
+    superseded: 'Already shared',
+    closed: 'Not merged',
+  }[record?.status] || 'Contribution'
+}
+
+export function trackingNarration(record) {
+  if (record?.needs_attention === true) {
+    return 'Checks or review need attention. Ask the agent here to sort it out.'
+  }
+  return {
+    draft: 'The pull request is open as a draft. Its latest status stays attached to this chat.',
+    open: 'The pull request is open for review. Its latest status stays attached to this chat.',
+    landing: 'The verified contribution is being merged now.',
+    merged: 'This improvement has landed.',
+    superseded: 'Equivalent work reached the project another way.',
+    closed: 'This pull request closed without merging.',
+  }[record?.status] || ''
+}
+
+export function contributionFollowupPrompt(record) {
+  const id = String(record?.id || '').trim()
+  const title = String(record?.title || record?.summary || 'this contribution').trim()
+  return [
+    `Inspect and resolve the current attention on contribution ${id} ("${title}").`,
+    '',
+    'Refresh its GitHub and review state first, then make only the necessary local or private changes. Keep every further public update behind explicit approval in this chat.',
+  ].join('\n')
+}
+
+/** Why direct publication is unavailable, or null when the exact review can send. */
 export function sendBlocker(record, { connected } = {}) {
   if (!record || record.status !== 'prepared') return null
   if (record.stack || record.is_stack) {
-    return 'This is one layer of a stacked set — review and send the whole chain in Contribute.'
+    return 'Review and send this linked set together in Contribute.'
   }
-  if (connected === false) return 'Connect GitHub in Contribute first.'
-  const review = record.review
-  if (!review) return 'Open Contribute to review this before sending.'
-  if (review.state === 'ready') return null
-  return review.message
-    || 'This needs to be prepared again before it can be sent.'
+  if (connected === false) return 'Connect GitHub in Contribute before sending.'
+  if (record.quality_review_ready !== true) {
+    return 'Finish the exact agent review before sending.'
+  }
+  if (record.review?.state === 'ready') return null
+  return record.review?.message
+    || 'Refresh this review in Contribute before sending.'
 }
 
-/**
- * Whether a successful send should grant the background review-response loop.
- *
- * Mirrors the Contribute app's Send: the owner's stored default, and only when
- * the backend advertises the capability. An unreadable/absent default means ON,
- * exactly as the app treats it, so the two surfaces cannot disagree about what a
- * press authorizes.
- */
+/** Match Contribute's default follow-up grant for a newly opened PR. */
 export function autopilotOnSend(payload) {
-  if (!payload || payload.autopilot_available !== true) return false
-  return payload.autopilot_default !== false
+  return payload?.autopilot_available === true
+    && payload.autopilot_default !== false
 }
 
-// The platform's own repository. A contribution to it reaches every Möbius
-// owner, which is what the card's action and payoff line can honestly promise;
-// an app's repository reaches that app's users instead.
+/** Copy for the one public action represented by this prepared record. */
+export function publicationAction(record) {
+  return record?.action === 'pr_update'
+    ? { label: 'Update PR', busyLabel: 'Updating PR', progress: 'Updating the reviewed pull request…' }
+    : { label: 'Send PR', busyLabel: 'Sending PR', progress: 'Opening the reviewed pull request…' }
+}
+
+// The platform repository remains useful in tests and record grouping, but the
+// card no longer changes its action copy by repository: every target opens the
+// same exact Contribute review contract.
 export const PLATFORM_REPO = 'mobius-os/mobius'
+
+const RECORD_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/
+
+/** The opaque app intent for one exact contribution review. */
+export function contributionReviewIntent(record) {
+  const id = typeof record?.id === 'string' ? record.id.trim() : ''
+  return RECORD_ID.test(id) ? `review:${id}` : null
+}
+
+/** A stack opens through one of its records; Contribute resolves the whole unit. */
+export function reviewItemIntent(item) {
+  if (item?.kind === 'record') return contributionReviewIntent(item.record)
+  if (item?.kind !== 'stack') return null
+  return contributionReviewIntent(item.records?.[0])
+}
 
 /** The one-line status word shown on a card the chat can act on. */
 export function statusLabel(record) {
   if (record?.status === 'submitting') return 'Publishing'
+  if (typeof record?.last_submit_error === 'string' && record.last_submit_error.trim()) {
+    return 'Needs attention'
+  }
   if (record?.stack || record?.is_stack) return 'Review together'
-  return 'Ready to contribute'
+  if (record?.quality_review_ready === true && record?.review?.state === 'ready') {
+    return record?.action === 'pr_update' ? 'Ready to update' : 'Ready to send'
+  }
+  return 'Review ready'
 }
 
-/**
- * The action label.
- *
- * "Contribute" carries the value of the act where "Send for review" only named
- * the mechanism, and it avoids "upstream" — precise to anyone who works with
- * open source, and opaque to everyone else. The destination is only named when
- * we actually know it is the platform, so the button can never point someone at
- * the wrong project.
- */
-export function contributeLabel(record) {
-  return record?.repo === PLATFORM_REPO
-    ? 'Contribute to Möbius'
-    : 'Contribute this improvement'
-}
-
-/**
- * One quiet line making the payoff concrete.
- *
- * It carries the motivation the button cannot, and stays honest about the
- * review: acceptance is the maintainers' call, not a consequence of the tap.
- */
-export function payoffLine(record) {
-  return record?.repo === PLATFORM_REPO
-    ? "If it's accepted, everyone running Möbius gets this."
-    : "If it's accepted, everyone using this app gets it."
+export function reviewDestinationLabel(record) {
+  if (record?.status === 'submitting') return 'View in Contribute'
+  if (typeof record?.last_submit_error === 'string' && record.last_submit_error.trim()) {
+    return 'Resolve in Contribute'
+  }
+  if (record?.stack || record?.is_stack) return 'Review stack in Contribute'
+  return 'Review in Contribute'
 }
 
 /**
  * Reduce git's multi-line per-file table to the aggregate final line for the
- * docked summary card. Full file details remain available in the disclosure.
+ * docked summary card. Full file details remain in the selected Contribute review.
  */
 export function diffStatSummary(value) {
   if (typeof value !== 'string') return ''
@@ -117,10 +165,8 @@ export function diffStatSummary(value) {
 /**
  * The failure this card should currently explain, or null when there is none.
  *
- * A send that failed is a fact about the record, not about this render: the
- * card must still explain it after a reload, and must never keep showing the
- * previous attempt's reason while a new one is in flight. `attempt` is this
- * card's own latest outcome and always wins; otherwise the stored one speaks.
+ * A send that failed is a fact about the record, not about this render, so the
+ * compact doorway still explains it after a reload. Contribute owns retrying.
  */
 export function submitFailure(record, { attempt = null, sending = false } = {}) {
   if (sending) return null
@@ -131,16 +177,97 @@ export function submitFailure(record, { attempt = null, sending = false } = {}) 
   const message = typeof source.message === 'string' ? source.message.trim() : ''
   if (!message) return null
   const detail = typeof source.detail === 'string' ? source.detail.trim() : ''
-  return { message, detail }
+  const code = typeof source.code === 'string'
+    ? source.code
+    : String(record?.last_submit_error_code || '')
+  const reviewedHead = String(record?.plan?.head_sha || '')
+  const exactBranchReachedGitHub = record?.last_submit_stage === 'pushed'
+    && reviewedHead
+    && String(record?.last_submit_push_sha || '') === reviewedHead
+  if (code !== 'review_refresh_needed' && !exactBranchReachedGitHub) {
+    return { message, detail }
+  }
+  const calmMessage = code === 'review_refresh_needed'
+    ? 'The pull request changed after this review was prepared.'
+    : 'Contribute could not confirm the update after the reviewed branch reached GitHub.'
+  return {
+    message: calmMessage,
+    detail: [message, detail].filter(Boolean).join('\n\n'),
+    code,
+  }
+}
+
+/** The private agent intent behind the chat card's primary recovery action. */
+export function contributionRecoveryDraft(record) {
+  const id = String(record?.id || '').trim()
+  const title = String(record?.title || 'untitled').trim()
+  return [
+    `Fix and review contribution ${id} ("${title}").`,
+    '',
+    'Refresh the recorded pull request and branch first. If the exact reviewed head already reached the pull request, reconcile the contribution record and inspect its current checks. If the branch moved, rebuild the private review on its current head and run the relevant checks.',
+    '',
+    'Keep any further public update behind the existing approval button.',
+  ].join('\n')
+}
+
+function contributionRecoveryScope(record) {
+  const id = String(record?.id || '').trim()
+  if (!id) return ''
+  const head = String(record?.plan?.head_sha || '')
+  const input = `recovery\u0000${id}\u0000${head}`
+  let hash = 0xcbf29ce484222325n
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= BigInt(input.charCodeAt(index))
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n)
+  }
+  return `contribute-review:${hash.toString(16).padStart(16, '0')}`
+}
+
+/** One exact failed prepared head owns one app-attributed recovery run. */
+export function contributionRecoveryAction(record) {
+  const scope = contributionRecoveryScope(record)
+  if (!scope) return null
+  return {
+    title: `Fix and review ${record?.title || 'contribution'}`,
+    scope,
+    scopeLabel: 'Fix and review contribution',
+    draft: contributionRecoveryDraft(record),
+  }
+}
+
+export function contributionReviewRunPhase(runtime) {
+  if (!runtime || typeof runtime !== 'object') return 'existing'
+  if (runtime.running) return 'running'
+  if (runtime.pending_question_id) return 'waiting'
+  if (Array.isArray(runtime.pending_messages) && runtime.pending_messages.length > 0) {
+    return 'running'
+  }
+  const goal = runtime.goal
+  if (goal?.status === 'running') return 'running'
+  if (goal?.status === 'paused') return 'paused'
+  return 'existing'
 }
 
 /** Copy for the grouped panel while it still has pending work. */
-export function reviewPanelSummary(pendingCount) {
-  const count = Math.max(0, Number(pendingCount) || 0)
+export function reviewPanelSummary(items) {
+  const list = Array.isArray(items) ? items : []
+  const count = list.length
+  const tracking = list.filter(
+    item => item?.kind === 'record' && isTrackingRecord(item.record),
+  ).length
+  if (tracking === 0) {
+    return {
+      count,
+      title: 'Reviews ready',
+      copy: 'Each opens at its exact decision in Contribute.',
+    }
+  }
   return {
     count,
-    title: `${count} ${count === 1 ? 'review' : 'reviews'} ready`,
-    copy: 'Each item keeps its own review and action.',
+    title: 'Contributions from this chat',
+    copy: tracking === count
+      ? 'Follow the latest status where the work happened.'
+      : 'Review what is ready and follow what was sent.',
   }
 }
 
@@ -239,12 +366,14 @@ function stackDescriptor(record) {
   }
 }
 
-/** Collapse every valid contribution stack into one logical review item. */
+/** Collapse prepared stacks; sent lifecycle records remain individually legible. */
 export function reviewItems(payload) {
   const items = []
   const stacks = new Map()
-  for (const record of actionableRecords(payload)) {
-    const stack = stackDescriptor(record)
+  for (const record of chatContributionRecords(payload)) {
+    const stack = ACTIONABLE_STATUSES.has(record.status)
+      ? stackDescriptor(record)
+      : null
     if (!stack) {
       items.push({ kind: 'record', id: record.id, record })
       continue
@@ -295,19 +424,7 @@ function reviewItemDismissIdentity(item) {
 
 export function visibleReviewItems(payload, storage) {
   return reviewItems(payload).filter(
-    item => {
-      if (isDismissed(reviewItemDismissIdentity(item), storage)) return false
-      // Chat is the quick happy path. If a single contribution needs repair,
-      // Contribute remains its durable home; rendering a disabled attention
-      // card above the composer only creates a dead end. Stacks are different:
-      // their one useful chat action is to open the ordered review in Contribute.
-      if (item.kind === 'record') {
-        return !sendBlocker(item.record, {
-          connected: payload?.connected !== false,
-        })
-      }
-      return true
-    },
+    item => !isDismissed(reviewItemDismissIdentity(item), storage),
   )
 }
 

@@ -441,10 +441,6 @@ export function makeChat({ appId, getToken, storage }) {
     if (!content) {
       throw new Error('window.mobius.chat.start: opts.draft must not be empty')
     }
-    const chatId = await createChat({
-      ...opts,
-      ownerVisible: opts.ownerVisible !== false,
-    })
     const cid = (
       typeof crypto !== 'undefined'
       && typeof crypto.randomUUID === 'function'
@@ -459,6 +455,50 @@ export function makeChat({ appId, getToken, storage }) {
     if (typeof window !== 'undefined') {
       body.viewport = agentViewport(window)
     }
+
+    // A scope names one exact app-owned job. Create + first-send must cross
+    // the backend as one atomic admission decision: two panes (or two taps)
+    // can otherwise both observe "missing" and create duplicate agent turns.
+    // Unscoped starts retain the ordinary create/send contract because they
+    // deliberately represent a fresh conversation every time.
+    const scope = opts.scope == null ? '' : String(opts.scope).trim()
+    if (scope) {
+      const res = await appChatFetch('/api/app-chats/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: opts.title || 'App chat',
+          ...appChatMetadataBody({
+            ...opts,
+            scope,
+            ownerVisible: opts.ownerVisible !== false,
+          }, {
+            includeProvider: true,
+            includeOwnerVisible: true,
+          }),
+          ...body,
+        }),
+      })
+      if (!res.ok) {
+        throw new Error(`window.mobius.chat.start: scoped start failed (${res.status})`)
+      }
+      const data = await res.json().catch(() => null)
+      if (!data?.chat_id) {
+        throw new Error('window.mobius.chat.start: scoped start failed (missing chat id)')
+      }
+      const outcome = data.outcome === 'reused' ? 'reused' : 'started'
+      return {
+        chatId: String(data.chat_id),
+        outcome,
+        reused: outcome === 'reused',
+        response: data.response ?? null,
+      }
+    }
+
+    const chatId = await createChat({
+      ...opts,
+      ownerVisible: opts.ownerVisible !== false,
+    })
     const res = await appChatFetch(
       `/api/chats/${encodeURIComponent(chatId)}/messages`,
       {

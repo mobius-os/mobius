@@ -42,7 +42,7 @@ COMPILED_RUNTIME_ABI = 1
 # compiled-runtime change that remains host-compatible. Keep ABI for actual
 # host/runtime incompatibilities: a revision-only rollout is safe while the
 # live checkout and backend process briefly run different generations.
-COMPILED_RUNTIME_ARTIFACT_REVISION = 7
+COMPILED_RUNTIME_ARTIFACT_REVISION = 8
 COMPILED_RUNTIME_GLOBAL = "__mobiusCompiledRuntime"
 COMPILED_RUNTIME_BANNER = (
   f"/* mobius-compiled-runtime-abi:{COMPILED_RUNTIME_ABI};"
@@ -73,9 +73,16 @@ def runtime_node_path() -> Path:
 
 
 def mobius_runtime_path() -> Path:
+  """Locate the frame runtime the compiler embeds into every app bundle.
+
+  The live platform clone wins. The baked copy is an image floor for a broken
+  or absent clone, and preferring it silently pins compiled apps to the runtime
+  that shipped with the image: source rebuilds can look healthy while every
+  app keeps executing an older capability contract.
+  """
   candidates = [
-    Path("/app/shell-src/public/mobius-runtime.js"),
     Path(__file__).resolve().parents[2] / "frontend" / "public" / "mobius-runtime.js",
+    Path("/app/shell-src/public/mobius-runtime.js"),
   ]
   return next((path for path in candidates if path.is_file()), candidates[-1])
 

@@ -68,6 +68,7 @@ async def get_platform_status(
       activation=platform_activation.classify_activation([]),
       current_build_sha=None,
       recorded_upstream_sha=None, contained_upstream_sha=None,
+      contained_upstream_committed_at=None, upstream_checked_at=None,
       seed_required=False, conflict_paths=[],
       conflict_chat_id=None, newer_updates_available=False,
     )

@@ -9,6 +9,8 @@ drive end-to-end — they assert on the AUTHORIZATION boundary (which
 status code each actor gets), which is decided before any runner work.
 """
 
+from fastapi.responses import JSONResponse
+
 from app import models
 from test_app_fixtures import create_local_app
 
@@ -22,6 +24,20 @@ def _make_app(client, owner_token, name):
     headers={"Authorization": f"Bearer {owner_token}"},
   ).json()["token"]
   return app_id, tok
+
+
+def _stub_first_turn(monkeypatch, db):
+  """Accept one first turn without launching a provider subprocess."""
+  from app.routes import chats_stream
+
+  async def accept(body, chat_id, principal, request_db):
+    row = request_db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+    row.messages = [{"role": "user", "content": body.content, "cid": body.cid}]
+    row.has_messages = True
+    request_db.commit()
+    return JSONResponse({"status": "started"}, status_code=202)
+
+  monkeypatch.setattr(chats_stream, "send_message", accept)
 
 
 def test_app_token_can_create_and_send_to_own_chat(client, owner_token, db):
@@ -69,15 +85,151 @@ def test_app_token_can_create_and_send_to_own_chat(client, owner_token, db):
   assert r.status_code == 202, r.text
 
 
+def test_scoped_app_chat_start_reuses_one_exact_first_turn(
+  client, owner_token, db, monkeypatch,
+):
+  from app import activity
+
+  app_id, app_token = _make_app(client, owner_token, "atomic-scoped-chat")
+  _stub_first_turn(monkeypatch, db)
+  events = []
+  monkeypatch.setattr(
+    activity, "log_event", lambda ev, **fields: events.append((ev, fields)) or True,
+  )
+  auth = {"Authorization": f"Bearer {app_token}"}
+  payload = {
+    "title": "Exact review",
+    "scope": "contribute-review:head-1",
+    "scope_label": "Review contribution",
+    "owner_visible": True,
+    "content": "private review prompt",
+    "cid": "first-cid",
+    "timezone": "Europe/London",
+  }
+
+  first = client.post("/api/app-chats/start", json=payload, headers=auth)
+  second = client.post(
+    "/api/app-chats/start",
+    json={**payload, "cid": "second-cid"},
+    headers=auth,
+  )
+
+  assert first.status_code == 200, first.text
+  assert second.status_code == 200, second.text
+  assert first.json()["outcome"] == "started"
+  assert second.json() == {
+    "chat_id": first.json()["chat_id"],
+    "outcome": "reused",
+    "response": None,
+  }
+  rows = db.query(models.Chat).filter(
+    models.Chat.created_by_app_id == app_id,
+  ).all()
+  assert len(rows) == 1
+  assert [message["cid"] for message in rows[0].messages] == ["first-cid"]
+  handoffs = [fields for ev, fields in events if ev == "app_chat_handoff"]
+  assert [row["outcome"] for row in handoffs] == ["started", "reused"]
+  assert all(row["scope"] == payload["scope"] for row in handoffs)
+  assert all(row["chat_id"] == first.json()["chat_id"] for row in handoffs)
+  assert all("content" not in row for row in handoffs)
+
+
+def test_scoped_app_chat_start_retries_rejected_first_turn_in_same_row(
+  client, owner_token, db, monkeypatch,
+):
+  from app.routes import chats_stream
+
+  app_id, app_token = _make_app(client, owner_token, "retry-scoped-chat")
+  calls = []
+
+  async def reject_then_accept(body, chat_id, principal, request_db):
+    calls.append(chat_id)
+    if len(calls) == 1:
+      return JSONResponse({"status": "busy"}, status_code=409)
+    row = request_db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+    row.messages = [{"role": "user", "content": body.content, "cid": body.cid}]
+    row.has_messages = True
+    request_db.commit()
+    return JSONResponse({"status": "started"}, status_code=202)
+
+  monkeypatch.setattr(chats_stream, "send_message", reject_then_accept)
+  auth = {"Authorization": f"Bearer {app_token}"}
+  payload = {
+    "scope": "contribute-review:retry-head",
+    "content": "private review prompt",
+    "cid": "retry-cid",
+  }
+
+  rejected = client.post("/api/app-chats/start", json=payload, headers=auth)
+  assert rejected.status_code == 502, rejected.text
+  detail = rejected.json()["detail"]
+  assert detail["code"] == "first_turn_rejected"
+  chat_id = detail["chat_id"]
+
+  rows = db.query(models.Chat).filter(
+    models.Chat.created_by_app_id == app_id,
+  ).all()
+  assert [row.id for row in rows] == [chat_id]
+  assert rows[0].messages == []
+  assert rows[0].has_messages is False
+
+  retried = client.post("/api/app-chats/start", json=payload, headers=auth)
+  assert retried.status_code == 200, retried.text
+  assert retried.json() == {
+    "chat_id": chat_id,
+    "outcome": "started",
+    "response": None,
+  }
+  assert calls == [chat_id, chat_id]
+  db.expire_all()
+  rows = db.query(models.Chat).filter(
+    models.Chat.created_by_app_id == app_id,
+  ).all()
+  assert [row.id for row in rows] == [chat_id]
+  assert [message["cid"] for message in rows[0].messages] == ["retry-cid"]
+
+
+def test_scoped_app_chat_start_keeps_different_scopes_independent(
+  client, owner_token, db, monkeypatch,
+):
+  app_id, app_token = _make_app(client, owner_token, "independent-scoped-chat")
+  _stub_first_turn(monkeypatch, db)
+  auth = {"Authorization": f"Bearer {app_token}"}
+
+  responses = [
+    client.post("/api/app-chats/start", json={
+      "scope": scope,
+      "content": f"review {scope}",
+    }, headers=auth)
+    for scope in ("review:one", "review:two")
+  ]
+
+  assert all(response.status_code == 200 for response in responses)
+  assert {response.json()["outcome"] for response in responses} == {"started"}
+  assert len({response.json()["chat_id"] for response in responses}) == 2
+  assert db.query(models.Chat).filter(
+    models.Chat.created_by_app_id == app_id,
+  ).count() == 2
+
+
+def test_owner_cannot_start_an_app_attributed_scoped_chat(client, owner_token):
+  response = client.post(
+    "/api/app-chats/start",
+    json={"scope": "review:owner", "content": "not app attributed"},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert response.status_code == 403
+
+
 def test_app_chat_first_send_preserves_provider_selected_at_create(
   client, owner_token, db, monkeypatch,
 ):
   """An unrelated owner default cannot replace an app chat's provider."""
-  from app.routes import chats_stream
+  from app import chat_provider
 
   _, app_token = _make_app(client, owner_token, "provider-preserving-chat")
   monkeypatch.setattr(
-    chats_stream, "owner_default_provider", lambda *_: "claude",
+    chat_provider.providers, "owner_default_provider", lambda *_: "claude",
   )
 
   for sender_token in (app_token, owner_token):
@@ -92,6 +244,11 @@ def test_app_chat_first_send_preserves_provider_selected_at_create(
     )
     assert created.status_code == 201, created.text
     chat_id = created.json()["id"]
+    # Use a live-discovered model id whose family the static catalog cannot
+    # infer, so this test isolates the app-owned provider gate.
+    row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+    row.agent_settings_json = {"model": "codex-live-model"}
+    db.commit()
 
     sent = client.post(
       f"/api/chats/{chat_id}/messages",
@@ -113,7 +270,7 @@ def test_owner_chat_first_send_still_uses_latest_selected_provider(
   client, owner_token, db, monkeypatch,
 ):
   """The app-chat exception must not freeze an ordinary empty chat."""
-  from app.routes import chats_stream
+  from app import chat_provider
 
   created = client.post(
     "/api/chats",
@@ -123,15 +280,54 @@ def test_owner_chat_first_send_still_uses_latest_selected_provider(
   assert created.status_code == 200, created.text
   chat_id = created.json()["id"]
   monkeypatch.setattr(
-    chats_stream, "owner_default_provider", lambda *_: "codex",
+    chat_provider.providers, "owner_default_provider", lambda *_: "codex",
   )
   row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
-  row.agent_settings_json = {"model": "gpt-5.6-sol"}
+  # A live-discovered model cannot decide its provider by catalog lookup, so
+  # the pristine owner-chat fallback remains the behavior under test.
+  row.agent_settings_json = {"model": "codex-live-model"}
   db.commit()
 
   sent = client.post(
     f"/api/chats/{chat_id}/messages",
     json={"content": "use my latest selected provider"},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert sent.status_code == 202, sent.text
+  db.expire_all()
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  assert row.provider == "codex"
+  run = db.query(models.ChatRun).filter(
+    models.ChatRun.chat_id == chat_id,
+  ).order_by(models.ChatRun.started_at.desc()).first()
+  assert run is not None
+  assert run.provider == "codex"
+
+
+def test_first_send_repairs_provider_from_explicit_per_chat_model(
+  client, owner_token, db, monkeypatch,
+):
+  """Display and execution share the model-priority repair for legacy drift."""
+  from app import chat_provider
+
+  created = client.post(
+    "/api/chats",
+    json={"title": "Drifted provider"},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert created.status_code == 200, created.text
+  chat_id = created.json()["id"]
+  monkeypatch.setattr(
+    chat_provider.providers, "owner_default_provider", lambda *_: "claude",
+  )
+  row = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  row.provider = "claude"
+  row.agent_settings_json = {"model": "gpt-5.6-sol"}
+  db.commit()
+
+  sent = client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={"content": "use the model's provider"},
     headers={"Authorization": f"Bearer {owner_token}"},
   )
   assert sent.status_code == 202, sent.text

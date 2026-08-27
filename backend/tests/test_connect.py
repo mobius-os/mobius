@@ -415,7 +415,7 @@ async def test_protocol_three_stream_rotates_without_losing_running_command(
   host = connect_routes._load_host(pairing["id"])
   assert host["runner_protocol"] == 3
   assert host["platform"] == "TestOS 1"
-  assert connect_routes._public_host(host)["runner_update_available"] is False
+  assert connect_routes._public_host(host)["runner_update_available"] is True
 
   assert await response.body_iterator.__anext__() == ": connected\n\n"
   with pytest.raises(StopAsyncIteration):
@@ -426,7 +426,7 @@ async def test_protocol_three_stream_rotates_without_losing_running_command(
   assert not caller.done()
   host = connect_routes._load_host(pairing["id"])
   assert host["runner_transport"] == "sse"
-  assert connect_routes._public_host(host)["runner_update_available"] is False
+  assert connect_routes._public_host(host)["runner_update_available"] is True
   connect_routes._runner_result(pairing["id"], connect_routes.ResultBody(
     request_id=request_id,
     stdout="rotating",
@@ -527,6 +527,76 @@ async def test_exec_correlates_the_runner_result(client, auth):
     "canceled": False,
   }
   assert connect_routes._ensure_command(pairing["id"]) is None
+
+
+@pytest.mark.asyncio
+async def test_protocol_four_carries_a_literal_script_separately(
+  client, auth,
+):
+  pairing, _ = _paired_host(client, auth)
+  channel = connect_routes._Channel(protocol_version=4)
+  connect_routes._channels[pairing["id"]] = channel
+  request_id = "d" * 16
+  script = "set -eu\nname='$literal'\nprintf '%s\\n' \"$name\"\n"
+
+  request = asyncio.create_task(connect_routes.exec_on_host(
+    pairing["id"],
+    connect_routes.ExecBody(
+      script=script,
+      shell="bash",
+      cwd="/srv/app",
+      timeout=7,
+      request_id=request_id,
+    ),
+    _owner=object(),
+  ))
+  event = await asyncio.wait_for(channel.queue.get(), timeout=1)
+
+  assert event["script"] == script
+  assert event["shell"] == "bash"
+  assert event["cwd"] == "/srv/app"
+  assert "cmd" not in event
+  persisted = connect_routes._load_host(pairing["id"])["active_command"]
+  assert persisted["script"] == script
+  assert persisted["shell"] == "bash"
+
+  connect_routes._mark_command_started(pairing["id"], request_id)
+  persisted = connect_routes._load_host(pairing["id"])["active_command"]
+  assert "script" not in persisted
+  assert "shell" not in persisted
+  connect_routes._finish_command(pairing["id"], request_id, {
+    "stdout": "$literal\n", "stderr": "", "exit_code": 0,
+    "outcome": "completed",
+  })
+  assert (await request)["stdout"] == "$literal\n"
+
+
+@pytest.mark.asyncio
+async def test_literal_script_requires_an_updated_runner(client, auth):
+  pairing, _ = _paired_host(client, auth)
+  channel = connect_routes._Channel(protocol_version=3)
+  connect_routes._channels[pairing["id"]] = channel
+
+  with pytest.raises(connect_routes.HTTPException) as raised:
+    await connect_routes.exec_on_host(
+      pairing["id"],
+      connect_routes.ExecBody(script="printf ready\n"),
+      _owner=object(),
+    )
+
+  assert raised.value.status_code == 409
+  assert "runner must be updated" in raised.value.detail
+  assert channel.queue.empty()
+  assert connect_routes._ensure_command(pairing["id"]) is None
+
+
+def test_exec_body_requires_exactly_one_work_form():
+  with pytest.raises(ValueError, match="exactly one"):
+    connect_routes.ExecBody()
+  with pytest.raises(ValueError, match="exactly one"):
+    connect_routes.ExecBody(cmd="echo ready", script="echo ready")
+  with pytest.raises(ValueError, match="only valid with script"):
+    connect_routes.ExecBody(cmd="echo ready", shell="bash")
 
 
 @pytest.mark.asyncio
@@ -960,7 +1030,7 @@ def test_runner_does_not_mislabel_command_exit_124_as_timeout():
   assert timed_out is False
 
 
-def test_runner_uses_standard_urllib_for_protocol_three_stream(monkeypatch):
+def test_runner_uses_standard_urllib_for_protocol_four_stream(monkeypatch):
   opened = []
   posted = []
 
@@ -993,7 +1063,7 @@ def test_runner_uses_standard_urllib_for_protocol_three_stream(monkeypatch):
 
   request, kwargs = opened[0]
   assert request.full_url.startswith(
-    "https://mobius.test/api/connect/stream?protocol=3&platform=",
+    "https://mobius.test/api/connect/stream?protocol=4&platform=",
   )
   assert request.get_header("Authorization") == "Bearer secret"
   assert request.get_header("Accept") == "text/event-stream"
@@ -1107,6 +1177,72 @@ def test_runner_ignores_duplicate_delivery_of_an_accepted_request(monkeypatch):
   assert spawned == [("do it once", None)]
   assert runner.active["request_id"] == event["request_id"]
   assert runner.pending_messages() == []
+
+
+def test_runner_keeps_literal_script_off_the_process_command_line(monkeypatch):
+  runner = connect_runner._CommandRunner("https://example.test", "token")
+  spawned = []
+  script = "for value in '$literal' one; do printf '%s\\n' \"$value\"; done\n"
+
+  def spawn(cmd, cwd, *, script=None, shell=None):
+    spawned.append((cmd, cwd, script, shell))
+    return object()
+
+  monkeypatch.setattr(connect_runner, "_spawn_command", spawn)
+  monkeypatch.setattr(runner, "_post_started", lambda _request_id: None)
+  monkeypatch.setattr(threading.Thread, "start", lambda self: None)
+
+  runner.start({
+    "request_id": "e" * 16,
+    "script": script,
+    "shell": "bash",
+    "cwd": "/srv/app",
+    "timeout": 30,
+    "not_after": time.time() + 10,
+  })
+
+  assert spawned == [(None, "/srv/app", script, "bash")]
+  assert runner.active["input"] == script
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell contract")
+def test_runner_executes_literal_posix_script_through_stdin():
+  script = "name='$literal'\nfor value in \"$name\" two; do printf '<%s>\\n' \"$value\"; done\n"
+  proc = connect_runner._spawn_command(
+    None, None, script=script, shell="sh",
+  )
+
+  stdout, stderr = proc.communicate(input=script, timeout=2)
+
+  assert proc.args == ["sh"]
+  assert stdout == "<$literal>\n<two>\n"
+  assert stderr == ""
+  assert proc.returncode == 0
+
+
+def test_windows_literal_script_uses_a_fixed_powershell_argv():
+  argv = connect_runner._script_argv(None, is_windows=True)
+  assert argv[:-1] == [
+    "powershell.exe",
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+  ]
+  assert argv[-1] == connect_runner._POWERSHELL_STDIN_BOOTSTRAP
+  assert "FromBase64String" in argv[-1]
+  assert connect_runner._script_argv("pwsh", is_windows=True)[0] == "pwsh"
+  with pytest.raises(ValueError, match="powershell or pwsh"):
+    connect_runner._script_argv("cmd.exe", is_windows=True)
+
+
+def test_windows_literal_script_stdin_is_unicode_safe_ascii():
+  script = "Write-Output 'café 🛰 $literal'\n"
+  encoded = connect_runner._script_input(script, is_windows=True)
+
+  assert encoded.isascii()
+  assert connect_runner.base64.b64decode(encoded).decode("utf-8") == script
+  assert connect_runner._script_input(script, is_windows=False) == script
 
 
 def test_runner_rechecks_expiry_after_start_ack_before_spawning(monkeypatch):

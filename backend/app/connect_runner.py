@@ -18,6 +18,7 @@ Manage the installed service:
     python3 ~/.mobius-connect/runner.py --uninstall
 """
 import argparse
+import base64
 from collections import deque
 import ipaddress
 import json
@@ -41,6 +42,13 @@ PID_PATH = os.path.join(CONFIG_DIR, "runner.pid")
 LAUNCHD_LABEL = "sh.mobius.connect"
 LAUNCHD_PLIST = os.path.expanduser("~/Library/LaunchAgents/%s.plist" % LAUNCHD_LABEL)
 SYSTEMD_UNIT = os.path.expanduser("~/.config/systemd/user/mobius-connect.service")
+RUNNER_PROTOCOL_VERSION = 4
+_POWERSHELL_STDIN_BOOTSTRAP = (
+    "$encoded=[Console]::In.ReadToEnd();"
+    "$script=[Text.Encoding]::UTF8.GetString("
+    "[Convert]::FromBase64String($encoded));"
+    "& ([ScriptBlock]::Create($script))"
+)
 
 
 def _validated_base_url(raw):
@@ -330,19 +338,63 @@ def _terminate_process_tree(proc):
             proc.wait()
 
 
-def _spawn_command(cmd, cwd):
+def _script_argv(shell, *, is_windows=None):
+    """Select one interpreter without placing script text on a command line."""
+    windows = os.name == "nt" if is_windows is None else is_windows
+    if windows:
+        executable = shell or "powershell.exe"
+        allowed = {
+            "powershell": "powershell.exe",
+            "powershell.exe": "powershell.exe",
+            "pwsh": "pwsh",
+            "pwsh.exe": "pwsh.exe",
+        }
+        executable = allowed.get(executable.casefold())
+        if executable is None:
+            raise ValueError(
+                "Windows script mode supports powershell or pwsh"
+            )
+        return [
+            executable,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            _POWERSHELL_STDIN_BOOTSTRAP,
+        ]
+    return [shell or "sh"]
+
+
+def _script_input(script, *, is_windows=None):
+    """Encode Windows stdin as ASCII so console code pages cannot alter it."""
+    windows = os.name == "nt" if is_windows is None else is_windows
+    if windows:
+        return base64.b64encode(script.encode("utf-8")).decode("ascii")
+    return script
+
+
+def _spawn_command(cmd, cwd, *, script=None, shell=None):
     popen_args = {
-        "shell": True,
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
         "text": True,
         "cwd": (cwd or None),
     }
+    if script is not None:
+        if cmd is not None:
+            raise ValueError("runner received both cmd and script")
+        if "\x00" in script:
+            raise ValueError("a script cannot contain a NUL byte")
+        popen_args["stdin"] = subprocess.PIPE
+        command = _script_argv(shell)
+    else:
+        popen_args["shell"] = True
+        command = cmd
     if os.name == "nt":
         popen_args["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         popen_args["start_new_session"] = True
-    return subprocess.Popen(cmd, **popen_args)
+    return subprocess.Popen(command, **popen_args)
 
 
 def _run_command(cmd, cwd, timeout):
@@ -477,6 +529,7 @@ class _CommandRunner:
             "proc": None,
             "reason": None,
             "timeout": max(1, int(evt.get("timeout", 60))),
+            "input": None,
         }
         if refused:
             self._post_result(
@@ -499,7 +552,17 @@ class _CommandRunner:
                     124, "expired", record=record,
                 )
                 return
-            proc = _spawn_command(evt.get("cmd", ""), evt.get("cwd"))
+            script = evt.get("script")
+            if script is not None:
+                proc = _spawn_command(
+                    None,
+                    evt.get("cwd"),
+                    script=script,
+                    shell=evt.get("shell"),
+                )
+                record["input"] = _script_input(script)
+            else:
+                proc = _spawn_command(evt.get("cmd", ""), evt.get("cwd"))
             record["proc"] = proc
             with self.lock:
                 reason = record["reason"]
@@ -522,7 +585,9 @@ class _CommandRunner:
         stdout = ""
         stderr = ""
         try:
-            stdout, stderr = proc.communicate(timeout=record["timeout"])
+            stdout, stderr = proc.communicate(
+                input=record["input"], timeout=record["timeout"],
+            )
         except subprocess.TimeoutExpired:
             with self.lock:
                 if record["reason"] is None:
@@ -578,7 +643,7 @@ def _serve(cfg):
             commands.flush_pending_results()
             active_id, pending_ids = commands.snapshot()
             query = [
-                ("protocol", "3"),
+                ("protocol", str(RUNNER_PROTOCOL_VERSION)),
                 ("platform", plat),
             ]
             if active_id:

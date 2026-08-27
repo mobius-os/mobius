@@ -121,6 +121,20 @@ export function chatSnapshotMatchesRuntime(cached, runtime) {
     && typeof runtime?.updated_at === 'string'
     && cached.updated_at === runtime.updated_at
   if (!sameVersion) return false
+  // A live snapshot can rotate assistant segments without advancing the
+  // transcript version (notably at a steer cut). Once the server exposes the
+  // owner, a legacy cache with no owner—or a cache for the sealed segment—is
+  // not authoritative even when its transcript timestamp still matches.
+  if (Object.prototype.hasOwnProperty.call(
+    runtime || {}, 'active_assistant_message_id',
+  )) {
+    if (!Object.prototype.hasOwnProperty.call(
+      cached || {}, 'activeAssistantMessageId',
+    )) return false
+    const cachedId = cached.activeAssistantMessageId || null
+    const runtimeId = runtime.active_assistant_message_id || null
+    if (cachedId !== runtimeId) return false
+  }
   return !runtime.pending_question_id
     || hasPendingQuestionMessage(
       cached.messages,
@@ -163,6 +177,7 @@ export function chatDetailCacheValue(data = {}) {
     restorationWindowComplete: sourceWindowValid
       && data.offset + messages.length === data.total,
     updated_at: typeof data.updated_at === 'string' ? data.updated_at : null,
+    activeAssistantMessageId: data.active_assistant_message_id || null,
     messages,
     total,
     offset,

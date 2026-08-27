@@ -7,6 +7,10 @@ import { api, clearQueryCache, clearToken } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
 import { platformVersionIdentity } from '../../lib/platformVersionIdentity.js'
 import {
+  formatUpstreamCheckTime,
+  formatUpstreamCommitDate,
+} from '../../lib/platformProvenance.js'
+import {
   rebuildIsActive,
   rebuildPollShouldContinue,
   rebuildProgressMessage,
@@ -1482,6 +1486,12 @@ export default function SettingsView({
   const buildDate = version?.build_date && version.build_date !== 'unknown'
     ? version.build_date
     : null
+  const upstreamCommitDate = formatUpstreamCommitDate(
+    platform?.contained_upstream_committed_at,
+  )
+  const upstreamCheckTime = formatUpstreamCheckTime(
+    platform?.upstream_checked_at,
+  )
   // Derived state for the single "Möbius" update row (see the section below).
   const platformConflict = platform?.state === 'conflict'
   // A text-clean update that failed the post-merge import probe was rolled back
@@ -1835,11 +1845,20 @@ export default function SettingsView({
                 {platformUpdateStatusLabel(platform)}
               </StatusDot>
               {mobiusVersion.primarySha && (
-                <p className="settings__build">
-                  {mobiusVersion.synced ? 'Synced to ' : 'Serving '}
-                  <span className="settings__standard-highlight">{mobiusVersion.primarySha}</span>
-                  {!mobiusVersion.synced && buildDate ? ` · ${buildDate}` : ''}
-                </p>
+                <>
+                  <p className="settings__build">
+                    {mobiusVersion.synced ? 'Current with upstream ' : 'Serving '}
+                    <span className="settings__standard-highlight">{mobiusVersion.primarySha}</span>
+                    {mobiusVersion.synced && upstreamCommitDate
+                      ? ` · ${upstreamCommitDate}`
+                      : !mobiusVersion.synced && buildDate
+                        ? ` · ${buildDate}`
+                        : ''}
+                  </p>
+                  {mobiusVersion.synced && upstreamCheckTime && (
+                    <p className="settings__update-check">{upstreamCheckTime}</p>
+                  )}
+                </>
               )}
             </div>
             {platformConflict ? (

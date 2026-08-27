@@ -77,9 +77,10 @@ test('warm selection skips recents no longer installed', () => {
   assert.deepEqual(picked.map(a => a.id), [2])
 })
 
-test('warm selection caps at the limit', () => {
+test('speculative app-code warming stays capped at six apps', () => {
   const apps = Array.from({ length: 10 }, (_, i) => app(i + 1, `2026-06-0${(i % 9) + 1}`))
   const picked = selectAppsToWarm(apps, [10, 9, 8, 7, 6, 5, 4, 3])
+  assert.equal(WARM_APP_LIMIT, 6)
   assert.equal(picked.length, WARM_APP_LIMIT)
 })
 

@@ -17,6 +17,7 @@ export default function useAppIntentNavigation({
     target,
     rawIntent,
     shouldContinue = () => true,
+    { paneId } = {},
   ) => {
     let app = findAppForOpenTarget(appsRef.current, target)
     if (!app) {
@@ -38,7 +39,10 @@ export default function useAppIntentNavigation({
         [String(app.id)]: { intent, nonce: Date.now() },
       }))
     }
-    navToRef.current('canvas', { appId: app.id })
+    navToRef.current('canvas', {
+      appId: app.id,
+      ...(typeof paneId === 'string' && paneId ? { paneId } : {}),
+    })
   }, [refreshApps, showToast])
 
   const handleChatInternalNav = useCallback((url) => {

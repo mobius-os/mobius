@@ -46,6 +46,7 @@ from app.memory_recall import (
 )
 from app.runtime_types import ChatEvent
 from app.secure_inputs import redact_reveal_markers
+from app.tool_edit_preview import edit_diff_sidecar_id
 
 
 _active_sinks: dict[str, "ChatEventSink"] = {}
@@ -104,6 +105,18 @@ def register_active_sink(chat_id: str, sink: "ChatEventSink") -> None:
 def get_active_sink(chat_id: str) -> "ChatEventSink | None":
   """Return the live sink for `chat_id`, or None when no turn is streaming."""
   return _active_sinks.get(chat_id)
+
+
+def active_sink_assistant_message_id(chat_id: str) -> str | None:
+  """Return the assistant segment currently owned by the live reducer.
+
+  The sink rotates this identity synchronously at a steer cut, before the
+  replacement snapshot can reach persistence. Read APIs use this narrow view
+  to avoid briefly reporting the sealed segment as current.
+  """
+  sink = get_active_sink(chat_id)
+  message_id = getattr(sink, "assistant_message_id", None)
+  return str(message_id) if message_id else None
 
 
 def active_sink_stream_snapshot(chat_id: str, broadcast) -> dict | None:
@@ -539,6 +552,38 @@ class ChatEventSink:
     )
     return True
 
+  def _stash_full_edit_diff(self, event: ChatEvent) -> None:
+    """Move a truncated edit preview's complete diff off-wire.
+
+    Provider adapters attach ``_full_diff`` only as an in-process handoff.
+    This funnel removes it before reduction, persistence, catch-up replay, or
+    SSE can observe the event, then records a stable sidecar id on the bounded
+    preview. Repeated patch updates for the same tool overwrite that sidecar,
+    so the final complete patch wins without growing Chat.messages.
+    """
+    preview = event.get("edit_preview")
+    if not isinstance(preview, dict):
+      return
+    clean_preview = dict(preview)
+    full_diff = clean_preview.pop("_full_diff", None)
+    event["edit_preview"] = clean_preview
+    if not isinstance(full_diff, str) or not full_diff:
+      return
+    tool_use_id = event.get("tool_use_id")
+    if not self.chat_id or not isinstance(tool_use_id, str) or not tool_use_id:
+      _get_logger().warning(
+        "full edit diff arrived without a stable owner chat_id=%s tool_use_id=%s",
+        self.chat_id, tool_use_id,
+      )
+      return
+    sidecar_id = edit_diff_sidecar_id(self.chat_id, tool_use_id)
+    clean_preview["full_id"] = sidecar_id
+    self._submit_fire_and_forget(
+      StashToolOutput(
+        chat_id=self.chat_id, tool_use_id=sidecar_id, output=full_diff,
+      )
+    )
+
   def record_lifecycle(self, event: dict) -> None:
     """Queue private lifecycle metadata without broadcasting it.
 
@@ -595,6 +640,13 @@ class ChatEventSink:
     assert event_type != "question", (
       "question events must go through publish_question(), not publish()"
     )
+
+    # Edit diffs have the same inline-vs-full split as large tool output, but
+    # their bounded preview is nested on tool_start/tool_input. Strip and stash
+    # its private complete-text handoff before the event reaches any durable or
+    # live transcript surface.
+    if event_type in ("tool_start", "tool_input"):
+      self._stash_full_edit_diff(event)
 
     # Contract rule 6: reduce a large tool_output to a bounded excerpt and stash
     # its full text BEFORE process_event (which copies content onto the block)

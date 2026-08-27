@@ -24,6 +24,7 @@ const REACT_SHIM = new URL(
 // blanket: most files here are read as source text, and a global alias would
 // silently swap React out from under anything that later imports for real.
 const REACT_SHIMMED_MODULES = [
+  '/components/AppIcon.jsx',
   '/components/Shell/useAppIntentNavigation.js',
   '/components/Shell/useShellReloadController.js',
   '/hooks/useSystemEventStream.js',

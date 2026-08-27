@@ -17,6 +17,7 @@ from app.chat_writer import (
     StashToolOutput,
     get_writer,
 )
+from app.chat_event_sink import ChatEventSink
 from app.events import (
     TOOL_OUTPUT_INLINE_THRESHOLD,
     process_event,
@@ -111,7 +112,89 @@ def test_stash_ignores_empty_key(db):
     assert fut.result(timeout=5) is False
 
 
+def test_sink_stashes_full_edit_diff_and_keeps_private_text_off_wire(db):
+    class Bus:
+        def __init__(self):
+            self.events = []
+
+        def publish(self, event):
+            self.events.append(json.loads(json.dumps(event)))
+
+    bus = Bus()
+    sink = ChatEventSink(
+        bus,
+        "chat-edit",
+        recall_binding=EMPTY_RECALL_BINDING,
+    )
+    full = "diff --git a/a b/a\n" + ("+large line\n" * 2500)
+    event = {
+        "type": "tool_start",
+        "tool": "Edit",
+        "tool_use_id": "edit-1",
+        "edit_preview": {
+            "diff": full[:20000],
+            "truncated": True,
+            "_full_diff": full,
+        },
+    }
+
+    sink.publish(event)
+    _flush_writer()
+
+    preview = bus.events[0]["edit_preview"]
+    assert "_full_diff" not in preview
+    assert preview["full_id"].startswith("edit-diff-")
+    assert sink.assistant_blocks[0]["edit_preview"] == preview
+    assert decode_tool_output(_raw_tool_output(
+        db, "chat-edit", preview["full_id"],
+    )) == full
+
+
 # -- endpoint -------------------------------------------------------------
+def test_chat_edit_diffs_endpoint_expands_only_linked_sidecars(client, auth, db):
+    chat_id = str(uuid.uuid4())
+    full_id = "edit-diff-" + ("a" * 64)
+    orphan_id = "edit-diff-" + ("b" * 64)
+    preview = "diff --git a/a b/a\n@@ -1 +1 @@\n-old\n+partial"
+    full = preview + " complete"
+    db.add(models.Chat(
+        id=chat_id,
+        title="t",
+        messages=[{
+            "role": "assistant",
+            "ts": 123,
+            "blocks": [{
+                "type": "tool",
+                "tool": "Edit",
+                "tool_use_id": "edit-1",
+                "edit_preview": {
+                    "diff": preview,
+                    "truncated": True,
+                    "full_id": full_id,
+                },
+            }],
+        }],
+    ))
+    db.add(models.ToolOutput(chat_id=chat_id, tool_use_id=full_id, output=full))
+    db.add(models.ToolOutput(chat_id=chat_id, tool_use_id=orphan_id, output="secret orphan"))
+    db.commit()
+
+    response = client.get(f"/api/chats/{chat_id}/edit-diffs", headers=auth)
+
+    assert response.status_code == 200
+    assert response.json() == {"entries": [{
+        "id": "edit-1",
+        "tool": "Edit",
+        "ts": 123,
+        "preview": {
+            "diff": full,
+            "truncated": False,
+            "full_id": full_id,
+        },
+    }]}
+    assert "secret orphan" not in response.text
+
+
 def test_tool_output_by_id_endpoint_serves_full_text(client, auth, db):
     chat_id = str(uuid.uuid4())
     db.add(models.Chat(id=chat_id, title="t", messages=[]))

@@ -105,6 +105,44 @@ test('a cached assistant identity followed by a newer turn is not current', () =
   assert.equal(result.activeMirrorMsgIdx, 3)
 })
 
+test('the server owner rejects an old cached question across a hidden restart run', () => {
+  const stale = {
+    id: 'assistant-before-restart',
+    role: 'assistant',
+    ts: 2,
+    blocks: [{ type: 'question', question_id: 'old-question', questions: [] }],
+  }
+  const current = {
+    id: 'assistant-current',
+    role: 'assistant',
+    ts: 4,
+    blocks: [{ type: 'text', content: 'current work' }],
+  }
+  const messages = [
+    { role: 'user', ts: 1, content: 'request' },
+    stale,
+    { role: 'user', ts: 3, kind: 'wait_result', hidden: true },
+    current,
+  ]
+
+  const result = deriveActiveAssistantSelection({
+    turnActive: true,
+    messages,
+    streamItems: [{
+      type: 'question', question_id: 'old-question', questions: [],
+    }],
+    streamAssistantMessageId: 'assistant-before-restart',
+    activeAssistantMessageId: 'assistant-current',
+    findBridgeIndex: () => -1,
+  })
+
+  assert.equal(result.hasLiveAssistantPayload, false,
+    'the cached question cannot compete with the current run')
+  assert.equal(result.activeMirrorMsg, current)
+  assert.equal(result.activeMirrorMsgIdx, 3)
+  assert.equal(result.useDbActivePayload, true)
+})
+
 
 test('same-turn hidden answer does not release the identified assistant row', () => {
   const active = {
@@ -116,7 +154,10 @@ test('same-turn hidden answer does not release the identified assistant row', ()
   const messages = [
     { role: 'user', ts: 1, content: 'request' },
     active,
-    { role: 'user', ts: 3, hidden: true, content: 'answer' },
+    {
+      role: 'user', ts: 3, kind: 'continuation', hidden: true,
+      content: 'answer',
+    },
   ]
 
   const result = deriveActiveAssistantSelection({
@@ -124,6 +165,7 @@ test('same-turn hidden answer does not release the identified assistant row', ()
     messages,
     streamItems: [{ type: 'question', question_id: 'q1', questions: [] }],
     streamAssistantMessageId: 'assistant-live',
+    activeAssistantMessageId: 'assistant-live',
     findBridgeIndex: () => -1,
   })
 

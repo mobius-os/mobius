@@ -162,10 +162,8 @@ test('a system-announced auto-resume reconnects the mounted chat surface', () =>
     'Shell must forward only this pane chat’s monotonic run activity')
   assert.doesNotMatch(shell, /chatRunSignals=\{chatRunSignals\}/,
     'the replacement run-signal Map must not cross every pane memo boundary')
-  assert.match(shell, /const stablePaneNavTo = useCallback\([\s\S]*navToRef\.current/,
-    'the pane navigation facade must keep a stable identity while reaching current routing')
-  assert.match(shell, /navTo=\{stablePaneNavTo\}/,
-    'per-render navigation identity must not defeat the pane memo boundary')
+  assert.match(shell, /openAppWithIntent=\{openAppWithIntent\}/,
+    'the stable app-intent navigator must not defeat the pane memo boundary')
   assert.match(paneChatView, /externalRunSignal=\{externalRunSignal\}/,
     'PaneChatView must forward per-chat monotonic run activity to its ChatView')
   assert.match(chatView, /fetchMessages\(\{[\s\S]*force: true,[\s\S]*authoritative: true/,

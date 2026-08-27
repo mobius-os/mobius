@@ -22,8 +22,9 @@ test('frame suspension reaches the live app before paint', () => {
   assert.match(canvas, /moebius:frame-interactivity/)
 })
 
-test('hidden app-frame history is bounded to six without limiting open tabs', () => {
-  assert.match(frameCacheModel, /const APP_CACHE_MAX = 6/)
+test('hidden app-frame history stays device-bounded without limiting open tabs', () => {
+  assert.match(frameCacheModel, /const BASE_APP_CACHE_MAX = 6/)
+  assert.match(frameCacheModel, /const HIGH_MEMORY_APP_CACHE_MAX = 10/)
   assert.doesNotMatch(shell, /openTabs\.slice\(/)
 })
 

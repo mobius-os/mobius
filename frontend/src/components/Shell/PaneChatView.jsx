@@ -25,6 +25,7 @@ function PaneChatView({
   chatId,
   paneId,
   apps,
+  artifactsAppId = null,
   runtimeActive = true,
   previewPresented = false,
   keepTranscriptPainted = false,
@@ -45,7 +46,7 @@ function PaneChatView({
   refreshChats,
   markChatOwnerActivity,
   loadTheme,
-  navTo,
+  openAppWithIntent,
   onInternalNav,
   onChatMissing,
   onFirstMessage,
@@ -94,10 +95,11 @@ function PaneChatView({
   // Open the app the CTA points at into THIS pane (design §5, finding D-ii), so
   // a background chat's "Open app" lands beside it rather than in the globally
   // focused pane.
-  const handleOpenApp = useCallback((app, { final = false } = {}) => {
-    navTo('canvas', { appId: app.id, paneId })
+  const handleOpenApp = useCallback((app, { final = false, intent = '' } = {}) => {
+    const target = app?.id ?? app?.slug ?? app
+    void openAppWithIntent(target, intent, () => true, { paneId })
     acknowledgeAppPreview?.(app, final)
-  }, [navTo, paneId, acknowledgeAppPreview])
+  }, [openAppWithIntent, paneId, acknowledgeAppPreview])
 
   // Auto-dismiss (the settled CTA timing out) is the same durable "final"
   // acknowledgement opening performs, minus the navigation — the button retires
@@ -105,6 +107,16 @@ function PaneChatView({
   const handleDismissApp = useCallback((app) => {
     acknowledgeAppPreview?.(app, true)
   }, [acknowledgeAppPreview])
+
+  const handleOpenArtifact = useCallback((artifactId) => {
+    if (artifactsAppId == null || artifactId == null) return
+    void openAppWithIntent(
+      artifactsAppId,
+      `artifact:${artifactId}`,
+      () => true,
+      { paneId },
+    )
+  }, [artifactsAppId, openAppWithIntent, paneId])
 
   const handleChatMissing = useCallback((missingId) => {
     onChatMissing?.(missingId, chatId)
@@ -146,6 +158,8 @@ function PaneChatView({
         builtApps={builtApps}
         onOpenApp={handleOpenApp}
         onDismissApp={handleDismissApp}
+        artifactsAppId={artifactsAppId}
+        onOpenArtifact={handleOpenArtifact}
         onInternalNav={onInternalNav}
         onMessageStart={handleMessageStart}
         onOwnerActivity={handleOwnerActivity}

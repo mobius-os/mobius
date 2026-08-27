@@ -168,6 +168,73 @@ async def test_goal_checkpoint_publisher_uses_the_active_mode(monkeypatch):
   assert captured["args"][-1] == "--active-goal-checkpoint"
 
 
+@pytest.mark.asyncio
+async def test_publisher_applies_emitted_title_in_process(monkeypatch):
+  captured = {}
+
+  class Proc:
+    returncode = 0
+
+    async def communicate(self):
+      return b'{"title":"Preparing and reconciling Mobius changes"}', b""
+
+  async def spawn(*_args, **_kwargs):
+    return Proc()
+
+  async def sync(chat_id, title):
+    captured.update(chat_id=chat_id, title=title)
+    return True
+
+  monkeypatch.setattr(chat.asyncio, "create_subprocess_exec", spawn)
+  monkeypatch.setattr(chat, "_sync_generated_chat_title", sync)
+
+  await chat._ensure_chat_note("/tmp/data", "c1")
+
+  assert captured == {
+    "chat_id": "c1",
+    "title": "Preparing and reconciling Mobius changes",
+  }
+
+
+@pytest.mark.asyncio
+async def test_generated_title_sync_preserves_manual_lock_and_broadcasts(
+  db, chat: models.Chat, monkeypatch,
+):
+  from app import chat as chat_runtime
+
+  events = []
+  monkeypatch.setattr(
+    chat_runtime, "get_system_broadcast",
+    lambda: types.SimpleNamespace(publish=events.append),
+  )
+  chat.title = "could you go over..."
+  chat.title_locked = False
+  db.commit()
+
+  assert await chat_runtime._sync_generated_chat_title(
+    chat.id, "Preparing and reconciling Mobius changes",
+  )
+  db.expire_all()
+  refreshed = db.query(models.Chat).filter_by(id=chat.id).one()
+  assert refreshed.title == "Preparing and reconciling Mobius changes"
+  assert events == [{
+    "type": "chat_renamed",
+    "chatId": chat.id,
+    "title": "Preparing and reconciling Mobius changes",
+    "updatedAt": refreshed.updated_at.isoformat(),
+  }]
+
+  refreshed.title = "Owner's name"
+  refreshed.title_locked = True
+  db.commit()
+  assert not await chat_runtime._sync_generated_chat_title(
+    chat.id, "A later generated name",
+  )
+  db.expire_all()
+  assert db.query(models.Chat).filter_by(id=chat.id).one().title == "Owner's name"
+  assert len(events) == 1
+
+
 def test_still_fires_if_a_legacy_writer_touched_the_note(tmp_path):
   # A legacy agent/tool write cannot take ownership away from the platform.
   # chat_note.py snapshots that content and publishes with its durable CAS.
@@ -451,20 +518,19 @@ def test_clean_note_output_preserves_human_label_inside_body():
   assert cleaned.endswith("- intent: debug")
 
 
-def test_sync_title_only_patches_from_note_without_summarizing(tmp_path, monkeypatch):
-  # --sync-title reads the note's gist and PATCHes the title, NO summarizer run.
+def test_sync_title_only_emits_note_name_without_summarizing(
+  tmp_path, monkeypatch, capsys,
+):
+  # --sync-title returns the note's name to the server, with NO summarizer run.
   cn = _load_chat_note()
   mem = tmp_path / "shared" / "memory"
   monkeypatch.setattr(cn, "MEMORY_DIR", mem)
-  patched = {}
-  monkeypatch.setattr(cn, "_patch_title",
-                      lambda cid, desc: patched.update(cid=cid, desc=desc))
   note = mem / "chats" / "c9" / "index.md"
   note.parent.mkdir(parents=True)
   note.write_text("---\ntype: chat\ndescription: building a brew timer\n---\n## Summary\nx")
   monkeypatch.setattr(cn.sys, "argv", ["chat_note.py", "c9", "--sync-title"])
   assert cn.run() == 0
-  assert patched == {"cid": "c9", "desc": "building a brew timer"}
+  assert json.loads(capsys.readouterr().out) == {"title": "Building a brew timer"}
   # the note is untouched (the summarizer never ran)
   assert "building a brew timer" in note.read_text()
 
@@ -472,11 +538,37 @@ def test_sync_title_only_patches_from_note_without_summarizing(tmp_path, monkeyp
 def test_sync_title_only_noop_when_note_absent(tmp_path, monkeypatch):
   cn = _load_chat_note()
   monkeypatch.setattr(cn, "MEMORY_DIR", tmp_path / "shared" / "memory")
-  called = []
-  monkeypatch.setattr(cn, "_patch_title", lambda *a: called.append(a))
   monkeypatch.setattr(cn.sys, "argv", ["chat_note.py", "nope", "--sync-title"])
   assert cn.run() == 0
-  assert called == []
+
+
+def test_unchanged_note_reemits_title_for_automatic_repair(
+  tmp_path, monkeypatch, capsys,
+):
+  cn = _load_chat_note()
+  mem = tmp_path / "shared" / "memory"
+  monkeypatch.setattr(cn, "MEMORY_DIR", mem)
+  messages = [{"role": "user", "content": "align the repositories"}]
+  snapshot = cn.ChatSnapshot(
+    transcript="user: align the repositories",
+    updated_at="2026-08-25 17:00:00",
+    messages=messages,
+  )
+  note_text = cn._set_source_cursor(
+    "---\ntype: chat\ndescription: repository alignment\n---\n"
+    "## Digest\nshort\n\n## Summary\nbody",
+    snapshot.cursor(),
+  )
+  note = mem / "chats" / "c9" / "index.md"
+  note.parent.mkdir(parents=True)
+  note.write_text(note_text)
+  monkeypatch.setattr(cn, "_read_chat_snapshot", lambda *_a, **_k: snapshot)
+  monkeypatch.setattr(cn.sys, "argv", ["chat_note.py", "c9"])
+
+  assert cn.run() == 0
+  assert json.loads(capsys.readouterr().out) == {
+    "title": "Repository alignment",
+  }
 
 
 def test_dead_claude_falls_back_to_complete_local_note(tmp_path, monkeypatch):
@@ -707,7 +799,7 @@ def test_unauthenticated_claude_falls_back_without_spawning(
 
 
 def test_first_summary_publication_replaces_the_opening_message_title(
-  tmp_path, monkeypatch,
+  tmp_path, monkeypatch, capsys,
 ):
   """The raw first-message title is only a fallback until a note is ready."""
   cn = _load_chat_note()
@@ -728,14 +820,10 @@ def test_first_summary_publication_replaces_the_opening_message_title(
 
   monkeypatch.setattr(cn, "_summarize", summarize)
   monkeypatch.setattr(cn, "_publish_if_current", lambda *args: True)
-  patched = []
-  monkeypatch.setattr(
-    cn, "_patch_title", lambda cid, name: patched.append((cid, name)),
-  )
   monkeypatch.setattr(cn.sys, "argv", ["chat_note.py", "c1"])
 
   assert cn.run() == 0
-  assert patched == [("c1", "Current work")]
+  assert json.loads(capsys.readouterr().out) == {"title": "Current work"}
   assert summarized["provider"] == "codex"
 
 

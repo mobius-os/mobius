@@ -5,12 +5,14 @@ import {
   _pinReapplyNeeded,
   anchorModeFromScroll,
   applyMode,
+} from '../scroll/geometry.js'
+import {
   modeAfterReaderGesture,
   modeForScrollTransition,
   readerIntentAfterScroll,
   scrollAuthorityAllowsCommit,
   terminalLayoutAuthority,
-} from '../useScrollMode.js'
+} from '../scroll/policy.js'
 
 test('anchor repair never moves backward over an unchanged reader position', () => {
   // target = 960, but the viewport is now farther down at 1080. With an

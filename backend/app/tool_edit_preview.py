@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 from typing import Any
 
@@ -18,11 +19,26 @@ def _bounded_preview(diff: str, *, relative: bool = False) -> dict | None:
   if not diff:
     return None
   truncated = len(diff) > MAX_EDIT_PREVIEW_CHARS
-  return {
+  preview = {
     "diff": diff[:MAX_EDIT_PREVIEW_CHARS],
     "truncated": truncated,
     **({"relative": True} if relative else {}),
   }
+  # The transcript and live event keep the bounded preview above. The sink
+  # removes this private handoff before either surface sees it and stores the
+  # complete text in the existing compressed sidecar table. Only truncated
+  # previews need a sidecar; ordinary edits remain one inline value.
+  if truncated:
+    preview["_full_diff"] = diff
+  return preview
+
+
+def edit_diff_sidecar_id(chat_id: str, tool_use_id: str) -> str:
+  """Stable bounded key for one tool's complete edit diff sidecar."""
+  digest = hashlib.sha256(
+    f"{chat_id}\0{tool_use_id}".encode("utf-8", errors="surrogatepass")
+  ).hexdigest()
+  return f"edit-diff-{digest}"
 
 
 def _quoted_path(path: str) -> str:

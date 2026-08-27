@@ -52,6 +52,21 @@ function includesEvery(text, tokens) {
   return tokens.every(token => text.includes(token))
 }
 
+export function searchCommands(commands, query, limit = 12) {
+  const tokens = queryTokens(query)
+  const rows = Array.isArray(commands) ? commands : []
+  if (!tokens.length) return rows.slice(0, Math.max(0, limit))
+  return rows
+    .filter(command => includesEvery(normalize([
+      command?.title,
+      command?.description,
+      command?.category,
+      ...(Array.isArray(command?.keywords) ? command.keywords : []),
+      ...(Array.isArray(command?.shortcutLabels) ? command.shortcutLabels : []),
+    ].filter(Boolean).join(' ')), tokens))
+    .slice(0, Math.max(0, limit))
+}
+
 export function searchInstalledApps(apps, query, limit = 8) {
   const tokens = queryTokens(query)
   if (!tokens.length) return []
