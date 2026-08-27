@@ -137,7 +137,7 @@ test('artifact loading resolves only apps maintained by the current chat', async
 
 test('artifact loading falls back to origin provenance when app lookup fails', async () => {
   const request = async (path) => {
-    if (path === '/apps/') return { ok: false }
+    if (path === '/apps/') throw new Error('offline')
     return {
       ok: true,
       json: async () => ({
