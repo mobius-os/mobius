@@ -84,12 +84,15 @@ test('artifacts related to an app appear in its maintaining chat only', () => {
   assert.equal(artifactTouchForChat(record, 'origin-chat')?.version, 5)
 })
 
-test('related app matching survives a changed local app id through its stable slug', () => {
+test('related app matching treats the stable slug as authoritative', () => {
   const record = {
     related_apps: [{ id: 39, slug: 'app-store' }],
   }
   assert.equal(artifactRelatedToApps(record, [{ id: 104, slug: 'app-store' }]), true)
-  assert.equal(artifactRelatedToApps(record, [{ id: 39, slug: 'renamed-store' }]), true)
+  assert.equal(artifactRelatedToApps(record, [{ id: 39, slug: 'renamed-store' }]), false)
+  assert.equal(artifactRelatedToApps({ related_apps: [{ id: 39 }] }, [
+    { id: 39, slug: 'app-store' },
+  ]), true)
   assert.equal(artifactRelatedToApps({ related_apps: ['app-store'] }, [
     { id: 39, slug: 'app-store' },
   ]), false)
@@ -124,11 +127,35 @@ test('artifact loading resolves only apps maintained by the current chat', async
 
   const loaded = await loadChatArtifacts(88, 'app-chat', {
     request,
-    includeRelatedApps: true,
   })
   assert.deepEqual(loaded.map(item => item.id), ['store-concepts-a690'])
   assert.deepEqual(calls, [
     '/apps/',
     '/storage/apps-list/88/artifacts/?limit=500&include_content=true',
   ])
+})
+
+test('artifact loading falls back to origin provenance when app lookup fails', async () => {
+  const request = async (path) => {
+    if (path === '/apps/') return { ok: false }
+    return {
+      ok: true,
+      json: async () => ({
+        entries: [
+          { content: { id: 'origin-artifact', chat_id: 'app-chat' } },
+          {
+            content: {
+              id: 'related-artifact',
+              chat_id: 'other-chat',
+              related_apps: [{ slug: 'app-store' }],
+            },
+          },
+        ],
+        next_cursor: null,
+      }),
+    }
+  }
+
+  const loaded = await loadChatArtifacts(88, 'app-chat', { request })
+  assert.deepEqual(loaded.map(item => item.id), ['origin-artifact'])
 })

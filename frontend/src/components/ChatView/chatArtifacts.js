@@ -1,9 +1,5 @@
 /* Chat-scoped projection of records owned by the installed Artifacts app. */
 
-import { artifactRelatedToApps } from './artifactAppRelations.js'
-
-export { artifactRelatedToApps } from './artifactAppRelations.js'
-
 const ARTIFACT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
 
 function recordFromEntry(entry) {
@@ -21,6 +17,28 @@ function recordFromEntry(entry) {
 function timestamp(value) {
   const parsed = Date.parse(value)
   return Number.isFinite(parsed) ? parsed : 0
+}
+
+function appId(app) {
+  if (!app || typeof app !== 'object' || Array.isArray(app)) return null
+  const id = Number(app.id ?? app.app_id)
+  return Number.isInteger(id) && id > 0 ? id : null
+}
+
+function appSlug(app) {
+  if (!app || typeof app !== 'object' || Array.isArray(app)) return ''
+  return String(app.slug || '').trim()
+}
+
+export function artifactRelatedToApps(record, apps) {
+  const related = Array.isArray(record?.related_apps) ? record.related_apps : []
+  const candidates = Array.isArray(apps) ? apps : []
+  return related.some((app) => {
+    const slug = appSlug(app)
+    if (slug) return candidates.some(candidate => appSlug(candidate) === slug)
+    const id = appId(app)
+    return id !== null && candidates.some(candidate => appId(candidate) === id)
+  })
 }
 
 export function artifactTouchForChat(record, chatId, relatedApps = []) {
@@ -81,14 +99,12 @@ async function appsMaintainedByChat(chatId, request, signal) {
 export async function loadChatArtifacts(
   appId,
   chatId,
-  { signal, request, includeRelatedApps = false } = {},
+  { signal, request } = {},
 ) {
   if (typeof request !== 'function') {
     throw new Error('Artifact loading requires a request function.')
   }
-  const relatedAppsPromise = includeRelatedApps
-    ? appsMaintainedByChat(chatId, request, signal)
-    : Promise.resolve([])
+  const relatedAppsPromise = appsMaintainedByChat(chatId, request, signal)
   const records = []
   let cursor = null
   do {
