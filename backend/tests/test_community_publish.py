@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import subprocess
@@ -5,7 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.community_publish import CommunityPublicationError, build_public_snapshot
+from app.community_publish import (
+  CommunityPublicationError,
+  build_public_snapshot,
+  public_store_listing,
+)
 
 
 def _git(repo, *args):
@@ -23,6 +28,73 @@ def _git(repo, *args):
     text=True,
     check=True,
   ).stdout.strip()
+
+
+def _public_file(path, content=b""):
+  return {
+    "path": path,
+    "mode": "100644",
+    "content_base64": base64.b64encode(content).decode("ascii"),
+  }
+
+
+def test_listing_art_is_direct_versioned_source_not_a_runtime_asset():
+  manifest = {
+    "id": "pocket-list",
+    "name": "Pocket List",
+    "description": "A small list.",
+    "version": "1.0.0",
+    "entry": "index.jsx",
+    "icon": "icon.png",
+    "store": {
+      "tagline": "Small and exact.",
+      "description": "A calm list for the things that matter.",
+      "hero": "static/store/hero.png",
+      "screenshots": [{
+        "src": "static/store/screen.png",
+        "alt": "Pocket List showing three items.",
+      }],
+    },
+  }
+  files = [
+    _public_file("mobius.json", json.dumps(manifest).encode()),
+    _public_file("index.jsx", b"export default function App() {}"),
+    _public_file("icon.png", b"icon"),
+    _public_file("static/store/hero.png", b"hero"),
+    _public_file("static/store/screen.png", b"screen"),
+  ]
+
+  listing = public_store_listing(files)
+
+  assert listing["hero"] == {"path": "static/store/hero.png"}
+  assert listing["screenshots"][0]["src"] == "static/store/screen.png"
+  assert "static_assets" not in manifest
+
+
+def test_listing_art_must_use_the_existing_local_static_route():
+  manifest = {
+    "id": "pocket-list",
+    "name": "Pocket List",
+    "description": "A small list.",
+    "version": "1.0.0",
+    "entry": "index.jsx",
+    "icon": "icon.png",
+    "store": {
+      "tagline": "Small and exact.",
+      "description": "A calm list for the things that matter.",
+      "screenshots": [{"src": "listing/screen.png", "alt": "Pocket List"}],
+    },
+  }
+  files = [
+    _public_file("mobius.json", json.dumps(manifest).encode()),
+    _public_file("icon.png", b"icon"),
+    _public_file("listing/screen.png", b"screen"),
+  ]
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    public_store_listing(files)
+
+  assert raised.value.code == "listing_incomplete"
 
 
 def _app_repo(tmp_path, *, source="export default function App(){return null}"):

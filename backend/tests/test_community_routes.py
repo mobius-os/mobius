@@ -81,6 +81,59 @@ def test_store_github_surface_requires_both_app_grants(
 
 
 @pytest.mark.asyncio
+async def test_local_publication_preview_is_bound_to_the_accepted_listing(
+  monkeypatch,
+):
+  app = SimpleNamespace(
+    id=42,
+    slug="pocket-list",
+    name="Pocket List",
+    source_dir="/data/apps/pocket-list",
+    updated_at="2026-08-27 12:00:00",
+  )
+
+  class Query:
+    def filter(self, *_):
+      return self
+
+    def first(self):
+      return app
+
+  class DB:
+    def query(self, *_):
+      return Query()
+
+  @asynccontextmanager
+  async def source_lock(_):
+    yield
+
+  listing = {
+    "tagline": "Small and exact.",
+    "description": "The accepted listing.",
+    "icon": "icon.png",
+    "hero": None,
+    "screenshots": [{
+      "src": "static/store/screen.png",
+      "alt": "Pocket List's main screen.",
+    }],
+    "featured": False,
+  }
+  files = [{"path": "mobius.json", "content_base64": "e30="}]
+  monkeypatch.setattr(community.fs_locks, "source_dir_lock", source_lock)
+  monkeypatch.setattr(
+    community, "build_public_snapshot", lambda _: ("a" * 40, files),
+  )
+  monkeypatch.setattr(community, "public_store_listing", lambda value: listing)
+
+  preview = await community.preview_local_app_publication(42, DB(), None)
+
+  assert preview["accepted_commit"] == "a" * 40
+  assert preview["repository_name"] == "pocket-list"
+  assert preview["asset_base"] == "/app-assets/by-id/42/"
+  assert preview["listing"] is listing
+
+
+@pytest.mark.asyncio
 async def test_publication_lifecycle_reads_through_identity_broker(monkeypatch):
   captured = {}
 
@@ -252,6 +305,7 @@ async def test_local_app_publish_creates_public_github_source_then_lists_exact_c
       }],
     ),
   )
+  monkeypatch.setattr(community, "public_store_listing", lambda _: {})
   monkeypatch.setattr(community.httpx, "AsyncClient", lambda **kwargs: Client())
   monkeypatch.setattr(community, "_github_json", fake_github)
   monkeypatch.setattr(community, "_publish_existing_github_revision", fake_list)
@@ -359,6 +413,7 @@ async def test_local_app_publish_reuses_identical_managed_main_without_new_write
     community, "build_public_snapshot",
     lambda _: ("a" * 40, [{"path": "mobius.json", "mode": "100644", "content_base64": "e30="}]),
   )
+  monkeypatch.setattr(community, "public_store_listing", lambda _: {})
   monkeypatch.setattr(community.httpx, "AsyncClient", lambda **kwargs: Client())
   monkeypatch.setattr(community, "_github_json", fake_github)
   monkeypatch.setattr(community, "_publish_existing_github_revision", fake_list)
@@ -455,6 +510,7 @@ async def test_local_app_update_only_fast_forwards_its_managed_main(monkeypatch)
     community, "build_public_snapshot",
     lambda _: ("a" * 40, [{"path": "mobius.json", "mode": "100644", "content_base64": "e30="}]),
   )
+  monkeypatch.setattr(community, "public_store_listing", lambda _: {})
   monkeypatch.setattr(community.httpx, "AsyncClient", lambda **kwargs: Client())
   monkeypatch.setattr(community, "_github_json", fake_github)
   monkeypatch.setattr(community, "_publish_existing_github_revision", fake_list)

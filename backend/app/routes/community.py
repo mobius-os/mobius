@@ -24,6 +24,7 @@ from app.community_broker import (
 from app.community_publish import (
   CommunityPublicationError,
   build_public_snapshot,
+  public_store_listing,
 )
 from app.database import get_db
 from app.deps import (
@@ -277,6 +278,7 @@ async def publish_local_app_to_github(
   try:
     async with fs_locks.source_dir_lock(str(app.source_dir)):
       accepted_commit, files = await asyncio.to_thread(build_public_snapshot, app)
+      await asyncio.to_thread(public_store_listing, files)
   except CommunityPublicationError as exc:
     raise HTTPException(
       exc.status_code, {"code": exc.code, "message": exc.detail},
@@ -428,6 +430,40 @@ async def publish_local_app_to_github(
   response.headers["X-Mobius-Accepted-Source-Commit"] = accepted_commit
   response.headers["X-Mobius-GitHub-Repository"] = repository
   return response
+
+
+@router.get("/publications/github/preview")
+async def preview_local_app_publication(
+  app_id: int = Query(gt=0),
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+) -> dict[str, Any]:
+  """Return the exact accepted listing that the next publish would use."""
+  app = (
+    db.query(models.App)
+    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+    .first()
+  )
+  if app is None:
+    raise HTTPException(404, "App not found.")
+  try:
+    async with fs_locks.source_dir_lock(str(app.source_dir)):
+      accepted_commit, files = await asyncio.to_thread(build_public_snapshot, app)
+      listing = await asyncio.to_thread(public_store_listing, files)
+  except CommunityPublicationError as exc:
+    raise HTTPException(
+      exc.status_code, {"code": exc.code, "message": exc.detail},
+    ) from exc
+  return {
+    "app_id": app.id,
+    "name": app.name,
+    "slug": app.slug,
+    "accepted_commit": accepted_commit,
+    "repository_name": app.slug,
+    "icon_url": f"/api/apps/{app.id}/icon?size=128&v={quote(str(app.updated_at), safe='')}",
+    "asset_base": f"/app-assets/by-id/{app.id}/",
+    "listing": listing,
+  }
 
 
 async def _publish_existing_github_revision(

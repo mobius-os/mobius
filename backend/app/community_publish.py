@@ -15,6 +15,7 @@ from app import app_git, models
 MAX_SOURCE_FILES = 250
 MAX_SOURCE_BYTES = 64 * 1024 * 1024
 MAX_PATH_BYTES = 512
+MAX_STORE_SCREENSHOTS = 5
 _OID = re.compile(r"^[0-9a-f]{40,64}$")
 _SOURCE_SEGMENT = re.compile(r"^[A-Za-z0-9._@+ -]+$")
 _SENSITIVE_DIRS = {
@@ -102,6 +103,120 @@ def _scan_content(path: str, content: bytes) -> None:
       f"A likely credential was found in {path}. Remove it before publishing.",
       "secret_detected",
     )
+
+
+def public_store_listing(files: list[dict[str, str]]) -> dict:
+  """Validate and project storefront metadata from one accepted snapshot.
+
+  Store-only artwork lives below ``static/store/`` so the existing local asset
+  route can preview it without a copy step. It remains ordinary source rather
+  than ``static_assets`` package input, so installs do not fetch marketing
+  media unless the app independently declares it as a runtime asset.
+  """
+  by_path = {
+    str(item.get("path") or ""): item
+    for item in files
+    if isinstance(item, dict)
+  }
+  manifest_item = by_path.get("mobius.json")
+  if manifest_item is None:
+    raise CommunityPublicationError(
+      "The accepted revision must include mobius.json before it can be public.",
+      "invalid_manifest",
+    )
+  try:
+    manifest = json.loads(base64.b64decode(manifest_item["content_base64"]))
+  except (KeyError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    raise CommunityPublicationError(
+      "mobius.json is not valid JSON.", "invalid_manifest",
+    ) from exc
+  if not isinstance(manifest, dict):
+    raise CommunityPublicationError("mobius.json must be an object.", "invalid_manifest")
+
+  store = manifest.get("store")
+  if not isinstance(store, dict):
+    raise CommunityPublicationError(
+      "Add a Store listing with a tagline, description, and screenshots before publishing.",
+      "listing_incomplete",
+    )
+
+  def clean_text(field: str, maximum: int) -> str:
+    value = store.get(field)
+    if not isinstance(value, str):
+      raise CommunityPublicationError(
+        f"The Store {field} is required.", "listing_incomplete",
+      )
+    value = value.strip()
+    if not value or len(value.encode("utf-8")) > maximum or "\x00" in value:
+      raise CommunityPublicationError(
+        f"The Store {field} must be 1–{maximum} bytes.", "listing_incomplete",
+      )
+    return value
+
+  icon = str(manifest.get("icon") or "").strip()
+  if not icon or icon not in by_path:
+    raise CommunityPublicationError(
+      "Add a tracked app icon before publishing.", "listing_incomplete",
+    )
+
+  def listing_asset(value: object, label: str) -> str:
+    if not isinstance(value, str):
+      raise CommunityPublicationError(
+        f"The Store {label} is required.", "listing_incomplete",
+      )
+    source = value.strip()
+    _validate_path(source)
+    if not source.startswith("static/store/") or source not in by_path:
+      raise CommunityPublicationError(
+        f"The Store {label} must be a tracked file under static/store/.",
+        "listing_incomplete",
+      )
+    return source
+
+  hero = None
+  if store.get("hero") not in (None, ""):
+    hero = listing_asset(store.get("hero"), "hero")
+  screenshots = store.get("screenshots")
+  if not isinstance(screenshots, list) or not 1 <= len(screenshots) <= MAX_STORE_SCREENSHOTS:
+    raise CommunityPublicationError(
+      f"Add 1–{MAX_STORE_SCREENSHOTS} Store screenshots before publishing.",
+      "listing_incomplete",
+    )
+  projected = []
+  for index, item in enumerate(screenshots, start=1):
+    if not isinstance(item, dict):
+      raise CommunityPublicationError(
+        f"Store screenshot {index} is invalid.", "listing_incomplete",
+      )
+    alt = item.get("alt")
+    if not isinstance(alt, str) or not alt.strip() or len(alt.encode("utf-8")) > 300:
+      raise CommunityPublicationError(
+        f"Store screenshot {index} needs concise alternative text.",
+        "listing_incomplete",
+      )
+    label = item.get("label")
+    if label is not None and (
+      not isinstance(label, str)
+      or not label.strip()
+      or len(label.encode("utf-8")) > 120
+    ):
+      raise CommunityPublicationError(
+        f"Store screenshot {index} has an invalid label.", "listing_incomplete",
+      )
+    projected.append({
+      "src": listing_asset(item.get("src"), f"screenshot {index}"),
+      "alt": alt.strip(),
+      **({"label": label.strip()} if isinstance(label, str) else {}),
+    })
+
+  return {
+    "tagline": clean_text("tagline", 120),
+    "description": clean_text("description", 4000),
+    "icon": icon,
+    **({"hero": {"path": hero}} if hero else {"hero": None}),
+    "screenshots": projected,
+    "featured": store.get("featured") is True,
+  }
 
 
 def build_public_snapshot(app: models.App) -> tuple[str, list[dict[str, str]]]:
