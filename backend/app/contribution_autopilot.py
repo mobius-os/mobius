@@ -56,9 +56,11 @@ FAILURE_ESCALATION_THRESHOLD = 2
 MAX_ROUND_LOG = 30
 MAX_IGNORED_EVENT_URLS = 20
 
-# Outcomes that mean the round did useful work (resets the failure counter and
-# advances the round count/cursor). Anything else is a non-productive round.
+# Outcomes that settle the claimed attention (reset the failure counter and
+# advance the round count/cursor). Public actions prove ``pushed``/``replied``;
+# the agent may explicitly settle an exact no-change review as ``handled``.
 PRODUCTIVE_OUTCOMES = frozenset({"pushed", "replied"})
+SETTLED_OUTCOMES = PRODUCTIVE_OUTCOMES | {"handled"}
 
 
 # ─────────────────────────── row access ────────────────────────────
@@ -455,20 +457,27 @@ def complete_round(
 
   ``event_at`` is accepted for compatibility but deliberately ignored: the
   cursor advances only to the canonical timestamp stored by the claim.
-  Requires the live claim's run_id. Productive outcomes reset the failure
-  counter, bump ``rounds_used``, and advance the handled-event cursor; a
-  non-productive ``failed`` counts toward escalation. Returns
+  Requires the live claim's run_id. Settled outcomes reset the failure counter,
+  bump ``rounds_used``, and advance the handled-event cursor; a failed round
+  counts toward escalation. Public action endpoints prove ``pushed`` and
+  ``replied``; ``handled`` is reserved for an exact no-change review. Returns
   ``{"status": "ok"|"stale", "escalate": bool}``.
   """
   row = get_row(db, app_id, record_id)
   if not verify_claim(row, run_id):
     return {"status": "stale", "escalate": False, "productive": False}
 
-  # Public action endpoints, not the caller, decide whether the round did work.
-  recorded_outcome = (
-    row.round_action if row.round_action in PRODUCTIVE_OUTCOMES else "failed"
-  )
-  productive = recorded_outcome in PRODUCTIVE_OUTCOMES
+  # Public action endpoints, not the caller, decide whether a push or reply
+  # happened. A no-change review is different: the claimed agent may settle
+  # the exact attention item as ``handled`` without manufacturing public noise.
+  # Any successful public action still wins over that caller-declared outcome.
+  if row.round_action in PRODUCTIVE_OUTCOMES:
+    recorded_outcome = row.round_action
+  elif outcome == "handled":
+    recorded_outcome = "handled"
+  else:
+    recorded_outcome = "failed"
+  productive = recorded_outcome in SETTLED_OUTCOMES
   entry = {
     "attention_key": row.attention_key,
     "run_id": run_id,

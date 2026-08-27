@@ -37,7 +37,7 @@ const {
   retireSavedReadingPosition,
   savedReadingAnchorHasNestedPart,
   savedReadingAnchorKey,
-} = await import('../useScrollMode.js')
+} = await import('../scroll/readingPositions.js')
 
 after(() => {
   if (previousLocalStorage === undefined) delete globalThis.localStorage

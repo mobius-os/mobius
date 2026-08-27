@@ -1,11 +1,25 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { renderHook } from '../../ChatView/hooks/__tests__/react-hook-shim.mjs'
+import AppIcon from '../../AppIcon.jsx'
 import {
   appIconIsReady,
   appIconUrl,
   appInitials,
   preloadAppIcons,
 } from '../../appIcon.js'
+
+function iconImages(element) {
+  return element.props.children
+    .flat(Infinity)
+    .filter(child => child?.type === 'img')
+}
+
+function displayedIconUrl(element) {
+  return iconImages(element)
+    .find(image => image.props.className === 'app-icon__image--displayed')
+    ?.props.src || null
+}
 
 test('app initials remain useful when custom artwork is missing', () => {
   assert.equal(appInitials('Beat Machine'), 'BM')
@@ -78,4 +92,78 @@ test('preloaded artwork is decoded and ready for the launcher first render', asy
   assert.deepEqual(result, [true])
   assert.equal(decodeCount, 1)
   assert.equal(appIconIsReady(url), true)
+})
+
+test('an app update keeps painted artwork until its replacement loads', () => {
+  const oldApp = { id: 42, icon_url: '/api/apps/42/icon?v=old' }
+  const nextApp = { id: 42, icon_url: '/api/apps/42/icon?v=next' }
+  const retryApp = { id: 42, icon_url: '/api/apps/42/icon?v=retry' }
+  const { result, rerender } = renderHook(AppIcon, {
+    item: oldApp,
+    label: 'Example',
+  })
+
+  assert.equal(displayedIconUrl(result.current), null)
+  iconImages(result.current)[0].props.onLoad()
+  assert.equal(displayedIconUrl(result.current), `${oldApp.icon_url}&size=128`)
+
+  rerender({ item: nextApp, label: 'Example' })
+  assert.equal(
+    displayedIconUrl(result.current),
+    `${oldApp.icon_url}&size=128`,
+    'the already-painted node remains visible while the new URL loads',
+  )
+  assert.deepEqual(
+    iconImages(result.current).map(image => image.props.src),
+    [`${oldApp.icon_url}&size=128`, `${nextApp.icon_url}&size=128`],
+  )
+
+  const candidate = iconImages(result.current)[1]
+  candidate.props.onError()
+  assert.equal(
+    displayedIconUrl(result.current),
+    `${oldApp.icon_url}&size=128`,
+    'a failed replacement cannot blank known-good artwork',
+  )
+
+  rerender({ item: retryApp, label: 'Example' })
+  iconImages(result.current)[1].props.onLoad()
+  assert.equal(displayedIconUrl(result.current), `${retryApp.icon_url}&size=128`)
+  assert.equal(iconImages(result.current).length, 1)
+})
+
+test('a superseded icon load cannot replace the current candidate', () => {
+  const oldApp = { id: 42, icon_url: '/api/apps/42/icon?v=old-race' }
+  const supersededApp = { id: 42, icon_url: '/api/apps/42/icon?v=superseded' }
+  const currentApp = { id: 42, icon_url: '/api/apps/42/icon?v=current' }
+  const { result, rerender } = renderHook(AppIcon, {
+    item: oldApp,
+    label: 'Example',
+  })
+
+  iconImages(result.current)[0].props.onLoad()
+  rerender({ item: supersededApp, label: 'Example' })
+  const staleLoad = iconImages(result.current)[1].props.onLoad
+  rerender({ item: currentApp, label: 'Example' })
+
+  staleLoad()
+  assert.equal(displayedIconUrl(result.current), `${oldApp.icon_url}&size=128`)
+  iconImages(result.current)[1].props.onLoad()
+  assert.equal(displayedIconUrl(result.current), `${currentApp.icon_url}&size=128`)
+})
+
+test('artwork from a different app is never retained as an update fallback', () => {
+  const first = { id: 1, icon_url: '/api/apps/1/icon?v=ready' }
+  const second = { id: 2, icon_url: '/api/apps/2/icon?v=pending' }
+  const { result, rerender } = renderHook(AppIcon, { item: first, label: 'First' })
+
+  iconImages(result.current)[0].props.onLoad()
+  assert.equal(displayedIconUrl(result.current), `${first.icon_url}&size=128`)
+
+  rerender({ item: second, label: 'Second' })
+  assert.equal(displayedIconUrl(result.current), null)
+  assert.deepEqual(
+    iconImages(result.current).map(image => image.props.src),
+    [`${second.icon_url}&size=128`],
+  )
 })

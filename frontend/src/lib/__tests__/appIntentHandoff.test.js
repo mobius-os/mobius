@@ -23,6 +23,7 @@ test('a direct app intent stays covered until the exact live frame applies it', 
   assert.match(canvas, /\(!swap\.liveLoaded \|\| intentHandoffPending\)/)
   assert.match(canvas, /canvas--intent-pending/)
   assert.match(canvasCss, /\.canvas--intent-pending\s*\{[\s\S]*pointer-events:\s*none/)
+  assert.match(canvasCss, /\.canvas-loading\s*\{[\s\S]*animation:\s*canvas-loading-in 80ms 120ms ease-out both/)
   assert.match(canvasCss, /\.canvas-loading--intent-handoff\s*\{[\s\S]*animation:\s*none/)
 })
 

@@ -75,6 +75,7 @@ function CustomAnswerArea({
       ref={textareaRef}
       className={`qcard__input${active ? ' qcard__input--active' : ''}`}
       data-chat-scroll-region
+      data-chat-inline-editor="question-answer"
       aria-label={`Custom answer for: ${question}`}
       placeholder={answered ? 'No custom answer' : 'Or type your own answer…'}
       autoComplete="off"

@@ -40,6 +40,8 @@ test('unanswered question cards do not have a stale gray state', () => {
     'the custom answer should stay mounted and retain submitted custom text')
   assert.match(component, /rows=\{1\}/,
     'the custom answer should begin as one compact writing line')
+  assert.match(component, /data-chat-inline-editor="question-answer"/,
+    'the scroll controller should recognize the editor through a semantic marker')
   assert.match(component, /onFocus=\{e => placeCaretAtTextEnd\(e\.currentTarget\)\}/,
     'returning to a custom answer should put the caret after its saved text')
   assert.match(component, /readOnly=\{answered\}[\s\S]*?disabled=\{disabled && !answered\}/,

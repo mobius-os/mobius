@@ -15,16 +15,19 @@ import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
 import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey, chatQueries, settingsQueries } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
-import useScrollMode, {
+import useScrollMode from './useScrollMode.js'
+import {
   FOLLOW_STICK_BAND_PX,
   isNearPhysicalBottom,
   olderHistoryRetryShown,
   olderHistoryShouldLoad,
+} from './scroll/policy.js'
+import {
   remapSavedReadingAnchor,
   retireSavedReadingPosition,
   savedReadingAnchorHasNestedPart,
   savedReadingAnchorKey,
-} from './useScrollMode.js'
+} from './scroll/readingPositions.js'
 import useVoiceInput from './useVoiceInput.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import {
@@ -463,6 +466,11 @@ export default function ChatView({
   // back-stack — and contradicts the project's no-hard-reload principle).
   const [loadNonce, setLoadNonce] = useState(0)
   const [sending, setSending] = useState(() => !!cached?.running)
+  // Authoritative transcript reads can replace a locally promoted live answer
+  // with its compact settled projection without changing the row count. Bump
+  // this alongside that commit so the scroll owner can re-apply the semantic
+  // reading mode against the new geometry before paint.
+  const [transcriptReconcileSeq, setTranscriptReconcileSeq] = useState(0)
   // Terminal live-to-settled commits bump this sequence. The corresponding
   // layout effect settles an armed prompt pin against the committed DOM.
   const [pinnedSettleSeq, setPinnedSettleSeq] = useState(0)
@@ -959,6 +967,7 @@ export default function ChatView({
     settleStreamingPin,
     composerEdited,
     paneResized,
+    pinning,
     following,
     followLatest,
   } = useScrollMode({
@@ -1124,6 +1133,7 @@ export default function ChatView({
           preserveLocalSuffix: true,
         })
         commitMessages(refreshed.messages, refreshed.offset)
+        setTranscriptReconcileSeq(seq => seq + 1)
       } else if (!staleSnapshot) {
         const refreshed = mergeRecentMessagesIntoLoadedWindow({
           loadedMessages: messagesRef.current,
@@ -1132,6 +1142,7 @@ export default function ChatView({
           recentOffset: data.offset || 0,
         })
         commitMessages(refreshed.messages, refreshed.offset)
+        setTranscriptReconcileSeq(seq => seq + 1)
       }
       if (data.running) {
         setSending(true)
@@ -3297,11 +3308,10 @@ export default function ChatView({
     const wasServerRunning = serverRunningRef.current
     sendingRef.current = true
     promotedRef.current = false
-    // Hidden answer is a continuation, NOT a new visible send. The
-    // user may be reading somewhere else; don't yank them with a PIN.
-    // freezeQuestionSubmission above already converted the exact visible
-    // position into ANCHOR_AT, so resumed output grows inside the existing
-    // assistant row without creating tail-follow intent.
+    // Hidden answer is a continuation, NOT a new visible send. The user may be
+    // reading somewhere else, so it never creates a PIN. The transient
+    // question hold preserves that exact position; an accepted in-process
+    // answer may release it back to a FOLLOW_BOTTOM that already existed.
     try {
       // Mint a cid for symmetry so the persisted hidden row carries a stable
       // identity for reload dedup. It is inert here — a hidden answer send
@@ -4082,20 +4092,15 @@ export default function ChatView({
     }
   }, [freezeForegroundReturn, turnActive])
 
-  // Cloak the first post-reconnect catch-up commit (contract v2 item 2, lever
-  // 3). freezeStreamingReturn above already anchors the mode at the moment the
-  // tab returns; the atomic catch-up commit lands async AFTER that, and even the
-  // in-place reconcile (lever 2c) can re-settle heights. Re-hold the anchor the
-  // instant the commit's DOM mutation lands — in a layout effect, before paint,
-  // so a real reconnect (Path B) or a Path-A commit after the reveal cap never
-  // blinks the reader's position. reapplyActiveMode no-ops before reveal, and a
-  // quick-wake kept socket never reconnects (no commit → seq stays put), so a
-  // glance at the notification shade cannot trigger it. The seq starts at 0 and
-  // only a commit bumps it, so this skips the initial mount.
+  // Reconnect catch-up and authoritative compact reads are the two atomic
+  // transcript-source handoffs. Either can re-settle row geometry without
+  // changing the message count. Re-apply the mode already owned by the scroll
+  // controller in the same pre-paint commit; before reveal, hide-then-reveal
+  // already owns the position and reapplyActiveMode deliberately no-ops.
   useLayoutEffect(() => {
-    if (catchUpCommitSeq === 0) return
+    if (catchUpCommitSeq === 0 && transcriptReconcileSeq === 0) return
     reapplyActiveMode()
-  }, [catchUpCommitSeq, reapplyActiveMode])
+  }, [catchUpCommitSeq, transcriptReconcileSeq, reapplyActiveMode])
 
   // Promotion and this sequence update share one React batch, so the terminal
   // pin decision runs after the settled assistant DOM is committed and before
@@ -4494,7 +4499,12 @@ export default function ChatView({
   const questionNudgeShown = hasPendingQuestion && pendingCardOffscreen
   const resumeNudgeShown = hasPendingResume && resumeCardOffscreen
   const jumpToLatestVisible = jumpToLatestShown({
-    awayFromTail: awayFromLatest && !following,
+    // A send-owned PIN_USER_MSG is the expected latest-turn location, not a
+    // reader escape. Its keyboard-close reachability floor can temporarily
+    // extend the physical tail before the viewport grows, so suppress the
+    // navigation affordance until either the pin hands off or the reader
+    // scrolls into an ordinary anchor.
+    awayFromTail: awayFromLatest && !following && !pinning,
     questionNudgeShown,
     resumeNudgeShown,
   })

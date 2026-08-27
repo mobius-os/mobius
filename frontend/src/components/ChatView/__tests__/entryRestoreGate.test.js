@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { entryRestoreDecision } from '../useScrollMode.js'
+import { entryRestoreDecision } from '../scroll/restore.js'
 
 // Behavioral coverage for the entry (restore) gate. Kept in its own file with
 // NO source reads so the structural-test ratchet does not count these
