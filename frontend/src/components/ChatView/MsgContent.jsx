@@ -348,6 +348,7 @@ function MsgContentInner({
             key={assistantBlockKey(block, i)}
             block={block}
             autoResume={automaticContinuation}
+            restartAutoContinue={recoveryOwner && block.pause?.kind === 'restart'}
             resetElapsed={!!limitResetElapsed}
             cardRef={recoveryOwner ? resumeCardRef : undefined}
           >

@@ -213,7 +213,10 @@ test('a benign pause (no reset time) renders the calm "Paused" family, not red E
     'the Paused heading uses the exact same accent token as Resume')
   assert.match(errorCard, /Möbius will continue automatically when the restart is complete\./,
     'the restart pause briefly states its expected automatic outcome')
-  assert.match(errorCard, /block\.resumable[\s\S]*?This response is paused\./,
+  assert.match(errorCard, /restartAutoContinue[\s\S]*?This response is paused\./,
+    'only an owned restart continuation may promise an automatic outcome')
+  assert.match(msgContent,
+    /restartAutoContinue=\{recoveryOwner && block\.pause\?\.kind === 'restart'\}/,
     'a question-held restart cannot promise continuation before the owner answers')
   assert.match(chatView, /Response paused for restart\. Möbius will continue automatically\./,
     'the screen-reader status matches the visible automatic continuation promise')
