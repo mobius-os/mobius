@@ -16,4 +16,6 @@ test('notification header clears immediately and closes through the bell boundar
     css,
     /@media \(hover: hover\) and \(pointer: fine\)[\s\S]*?\.notifications__clear:hover/,
   )
+  const clearRule = css.match(/\.notifications__clear\s*\{([^}]*)\}/)?.[1] ?? ''
+  assert.match(clearRule, /color:\s*var\(--text\)/)
 })
