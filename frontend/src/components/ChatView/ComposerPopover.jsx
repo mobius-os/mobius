@@ -115,9 +115,7 @@ export default function ComposerPopover({
     composerInputRef,
   )
   const artifactsQuery = useQuery({
-    queryKey: [
-      'chat-work-artifacts', String(artifactsAppId || ''), String(chatId || ''),
-    ],
+    queryKey: ['chat-work-artifacts', String(artifactsAppId || ''), String(chatId || '')],
     queryFn: ({ signal }) => loadChatArtifacts(
       artifactsAppId,
       chatId,
