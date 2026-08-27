@@ -42,6 +42,18 @@ export function chatContributionRecords(payload) {
   )
 }
 
+// Chat is an action surface, not a second history feed. Healthy public and
+// settled work stays in Changes and Contribute; only a decision or attention
+// returns above the composer.
+export function chatCardRecords(payload) {
+  return chatContributionRecords(payload).filter(
+    record => ACTIONABLE_STATUSES.has(record?.status)
+      || record?.needs_attention === true
+      || Boolean(String(record?.last_submit_error || '').trim())
+      || record?.review?.state === 'needs_refresh',
+  )
+}
+
 export function isTrackingRecord(record) {
   return TRACKING_STATUSES.has(record?.status)
 }
@@ -252,9 +264,26 @@ export function contributionReviewRunPhase(runtime) {
 export function reviewPanelSummary(items) {
   const list = Array.isArray(items) ? items : []
   const count = list.length
+  const unsorted = list.filter(item => item?.kind === 'unsorted').length
   const tracking = list.filter(
     item => item?.kind === 'record' && isTrackingRecord(item.record),
   ).length
+  if (unsorted > 0) {
+    return {
+      count,
+      title: count === 1 ? 'Changes ready to organize' : 'Changes need you',
+      copy: count === 1
+        ? 'Sort reusable work into private reviews.'
+        : 'Prepare new work or review what is ready.',
+    }
+  }
+  if (tracking === count && tracking > 0) {
+    return {
+      count,
+      title: 'Needs attention',
+      copy: 'Continue the work in this chat.',
+    }
+  }
   if (tracking === 0) {
     return {
       count,
@@ -268,6 +297,36 @@ export function reviewPanelSummary(items) {
     copy: tracking === count
       ? 'Follow the latest status where the work happened.'
       : 'Review what is ready and follow what was sent.',
+  }
+}
+
+/** One explicit action for a group of compact review cards. */
+export function reviewGroupDefault(items, { connected } = {}) {
+  const list = (Array.isArray(items) ? items : []).filter(Boolean)
+  if (list.length < 2) return null
+  if (list.some(item => item?.kind === 'unsorted')) return null
+  if (list.some(
+    item => item?.kind === 'record' && isTrackingRecord(item.record),
+  )) return null
+  const records = list.flatMap(item => item?.kind === 'record' ? [item.record] : [])
+  const canPublishTogether = records.length === list.length && records.every(
+    record => record?.status === 'prepared' && !sendBlocker(record, { connected }),
+  )
+  if (canPublishTogether) {
+    const updates = records.filter(record => record?.action === 'pr_update').length
+    return {
+      kind: 'publish',
+      records,
+      label: updates === records.length
+        ? `Update all ${records.length}`
+        : `Send all ${records.length}`,
+      busyLabel: `Sending 0 of ${records.length}`,
+    }
+  }
+  return {
+    kind: 'review',
+    intent: 'reviews:queue',
+    label: `Review all ${list.length}`,
   }
 }
 
@@ -370,7 +429,7 @@ function stackDescriptor(record) {
 export function reviewItems(payload) {
   const items = []
   const stacks = new Map()
-  for (const record of chatContributionRecords(payload)) {
+  for (const record of chatCardRecords(payload)) {
     const stack = ACTIONABLE_STATUSES.has(record.status)
       ? stackDescriptor(record)
       : null
