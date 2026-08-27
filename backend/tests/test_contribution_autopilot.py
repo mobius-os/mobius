@@ -179,6 +179,49 @@ def test_completion_cannot_claim_unrecorded_public_work(db):
   assert row.rounds_json[-1]["outcome"] == "failed"
 
 
+def test_no_change_round_can_settle_exact_attention_without_public_noise(db):
+  autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
+  v = autopilot.claim_for_round(
+    db, 1, "rec", attention_key="review:all-clear",
+    event_at="2026-07-01T00:00:00Z",
+  )
+
+  result = autopilot.complete_round(
+    db, 1, "rec", run_id=v["run_id"], outcome="handled",
+    summary="The exact review was all clear; no reply was needed.",
+  )
+
+  assert result == {
+    "status": "ok", "escalate": False, "productive": True,
+  }
+  row = autopilot.get_row(db, 1, "rec")
+  assert row.rounds_used == 1
+  assert row.consecutive_failures == 0
+  assert row.last_handled_attention_key == "review:all-clear"
+  assert row.last_handled_event_at == "2026-07-01T00:00:00.000000Z"
+  assert row.rounds_json[-1]["outcome"] == "handled"
+
+
+def test_public_action_outcome_wins_over_handled_completion(db):
+  autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
+  v = autopilot.claim_for_round(
+    db, 1, "rec", attention_key="review:fixed",
+    event_at="2026-07-01T00:00:00Z",
+  )
+  assert autopilot.record_action(
+    db, 1, "rec", run_id=v["run_id"], action="pushed", head_sha="def",
+  )
+
+  autopilot.complete_round(
+    db, 1, "rec", run_id=v["run_id"], outcome="handled",
+    summary="The review is settled.",
+  )
+
+  row = autopilot.get_row(db, 1, "rec")
+  assert row.granted_head_sha == "def"
+  assert row.rounds_json[-1]["outcome"] == "pushed"
+
+
 def test_reply_action_mirrors_exact_event_urls(db):
   autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
   v = autopilot.claim_for_round(
