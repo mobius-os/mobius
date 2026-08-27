@@ -2,9 +2,12 @@ import { readFile, readdir } from 'node:fs/promises'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+
 const frontendRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 const sourceRoot = join(frontendRoot, 'src')
-const allowlistPath = join(frontendRoot, 'structural-test-allowlist.json')
+const budgetPath = join(frontendRoot, 'structural-test-budget.json')
+const testCall = /^\s*(?:test|it)(?:\.[A-Za-z]+)?\s*\(/gm
+
 
 async function testFiles(directory) {
   const entries = await readdir(directory, { withFileTypes: true })
@@ -16,42 +19,43 @@ async function testFiles(directory) {
   return nested.flat()
 }
 
+
 async function structuralInventory() {
   const inventory = []
   for (const path of await testFiles(sourceRoot)) {
     const source = await readFile(path, 'utf8')
     const readsSource = (
-      /from\s+['"]node:fs(?:\/promises)?['"]/.test(source)
-      && /\breadFile(?:Sync)?\b/.test(source)
+      /from\s+['"]node:fs['"]/.test(source)
+      && /\breadFile(?:Sync)?\s*\(/.test(source)
     )
     if (!readsSource) continue
-    inventory.push(relative(frontendRoot, path))
+    inventory.push({
+      path: relative(frontendRoot, path),
+      cases: [...source.matchAll(testCall)].length,
+    })
   }
-  return inventory.sort()
+  return inventory
 }
 
-const allowlist = JSON.parse(await readFile(allowlistPath, 'utf8'))
+
+const budget = JSON.parse(await readFile(budgetPath, 'utf8'))
 const inventory = await structuralInventory()
-const allowed = new Set(allowlist.allowed_files || [])
-const actual = new Set(inventory)
+const cases = inventory.reduce((sum, item) => sum + item.cases, 0)
 const failures = []
-for (const path of inventory) {
-  if (!allowed.has(path)) failures.push(`new source-reading test: ${path}`)
+if (inventory.length > budget.maximum_files) {
+  failures.push(`${inventory.length} source-reading files exceeds ${budget.maximum_files}`)
 }
-for (const path of allowed) {
-  if (!actual.has(path)) failures.push(`obsolete allowlist entry: ${path}`)
+if (cases > budget.maximum_cases) {
+  failures.push(`${cases} source-reading cases exceeds ${budget.maximum_cases}`)
 }
 
 if (failures.length) {
-  console.error('Structural-test migration list is stale:')
+  console.error('Structural-test debt grew:')
   for (const failure of failures) console.error(`  - ${failure}`)
-  console.error(
-    'Replace new implementation-text assertions with behavioral coverage. '
-    + 'When a listed file becomes behavioral, remove its allowlist entry.',
-  )
+  console.error('Replace implementation-text assertions with behavioral coverage; do not raise the budget.')
   process.exitCode = 1
 } else {
   console.log(
-    `Structural-test migration allowlist: ${inventory.length} known files; new files forbidden`,
+    `Structural-test ratchet: ${inventory.length}/${budget.maximum_files} files, ${cases}/${budget.maximum_cases} cases`,
   )
 }

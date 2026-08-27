@@ -1,5 +1,5 @@
 /**
- * ComposerPopover — the brain button in the chat composer and the popover
+ * ComposerPopover — the `+` button in the chat composer and the popover
  * it opens. Three sections in one popover:
  *
  *   1. Attach files  — calls `onAttachClick` (parent owns the hidden
@@ -12,8 +12,8 @@
  *
  * Open/close state, outside-click, and Escape live here. The trigger
  * is positioned as a sibling of the pill in `.chat__form`. The popover
- * is absolutely positioned relative to `.composer-plus` (the legacy-named
- * wrapper around the brain button), which has `position: relative`. Don't
+ * is absolutely positioned relative to `.composer-plus` (the wrapper
+ * around the `+` button), which has `position: relative`. Don't
  * remove that `position: relative` thinking `.chat__form` is the
  * anchor — the form is only relative so other absolutely-positioned
  * children (none today) could anchor to it.
@@ -25,7 +25,7 @@
  * second lookalike button that can drift from the real control.
  *
  * Soft-keyboard contract: opening or using this popover preserves whether the
- * owning textarea was focused. The brain trigger suppresses native button focus
+ * owning textarea was focused. The + trigger suppresses native button focus
  * and records that state synchronously. The popover has one bubbling
  * pointer boundary that suppresses descendant focus and restores the textarea
  * on the next frame only when it was focused before opening. That next-frame
@@ -36,8 +36,7 @@
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { DollarCircle, FileDocument, InfoCircle, Paperclip } from '@openai/apps-sdk-ui/components/Icon'
-import BrainUsageIcon from './BrainUsageIcon.jsx'
+import { DollarCircle, FileDocument, InfoCircle, Paperclip, Plus } from '@openai/apps-sdk-ui/components/Icon'
 import ChatSettingsPanel from './ChatSettingsPanel.jsx'
 import { popoverMaxHeight, nearestClipTop } from './composerPopoverHeight.js'
 import { focusComposerElement } from './composerFocusPolicy.js'
@@ -75,33 +74,34 @@ export default function ComposerPopover({
   onOpenUsage,
   embedded = false,
   pending = false,
-  triggerIcon = null,
-  providerUsage = null,
-  triggerAriaLabel = 'Chat options',
+  modelTriggerIcon = null,
+  modelTriggerAriaLabel = 'Choose model',
+  triggerAriaLabel = 'Attach files',
 }) {
   const wrapRef = useRef(null)
   const triggerRef = useRef(null)
+  const modelTriggerRef = useRef(null)
+  const activeTriggerRef = useRef(null)
   // Tracks whether the chat textarea was focused at the moment the
   // popover opened. If yes, refocus after a picker action so the
-  // soft keyboard stays open. If no (user tapped the brain with keyboard
+  // soft keyboard stays open. If no (user tapped + with keyboard
   // down), don't refocus — popping the keyboard up unexpectedly is
   // worse than the textarea losing focus.
   //
-  // Captured SYNCHRONOUSLY inside the brain button's onClick so we
+  // Captured SYNCHRONOUSLY inside the `+` button's onClick so we
   // read activeElement at the exact moment of the tap. A previous
   // version captured this in a useEffect on `[open]`, which fires
   // AFTER React commits — on iOS Safari the focus state can shift
   // between the click handler and the post-commit effect, leaving
   // the ref stale. Sync capture in onClick is reliable.
-  const { open, setOpen, wasInputFocusedRef } = useModelSelectionPopover(
+  const { mode, setMode, wasInputFocusedRef } = useModelSelectionPopover(
     modelSelectionRequest,
     composerInputRef,
   )
-  useDiscardUnconfirmedSwitchOnPickerClose(
-    open,
-    providerSwitchState?.status,
-    chatId,
-  )
+  const open = mode !== null
+
+  useDiscardUnconfirmedSwitchOnPickerClose(mode, providerSwitchState?.status, chatId)
+
   // Measured cap on the panel's height: the space above the trigger inside both
   // the chat pane (which clips with `overflow: hidden`) and the keyboard-shrunk
   // visible viewport. See composerPopoverHeight.js for why CSS viewport units
@@ -115,9 +115,15 @@ export default function ComposerPopover({
   }
 
   useLayoutEffect(() => {
+    if (mode === 'model' && !activeTriggerRef.current) {
+      activeTriggerRef.current = modelTriggerRef.current
+    }
+  }, [mode])
+
+  useLayoutEffect(() => {
     if (!open) return
     const measure = () => {
-      const trigger = triggerRef.current
+      const trigger = activeTriggerRef.current
       if (!trigger) return
       const rect = trigger.getBoundingClientRect()
       const rootSpace = captureLayoutSpace(document.documentElement)
@@ -153,7 +159,7 @@ export default function ComposerPopover({
     const resizeObserver = typeof ResizeObserver !== 'undefined'
       ? new ResizeObserver(measure)
       : null
-    const form = triggerRef.current?.closest('.chat__form')
+    const form = activeTriggerRef.current?.closest('.chat__form')
     if (form) resizeObserver?.observe(form)
     return () => {
       window.removeEventListener('resize', measure)
@@ -182,14 +188,14 @@ export default function ComposerPopover({
           if (el && document.activeElement !== el) focusComposerElement(el)
         })
       }
-      setOpen(false)
+      setMode(null)
     }
     function onKey(e) {
       if (e.key === 'Escape') {
-        setOpen(false)
+        setMode(null)
         // Return focus to the trigger so keyboard users don't get
         // stranded on document.body after Escape.
-        triggerRef.current?.focus()
+        activeTriggerRef.current?.focus()
       }
     }
     document.addEventListener('pointerdown', onPointer)
@@ -198,13 +204,13 @@ export default function ComposerPopover({
       document.removeEventListener('pointerdown', onPointer)
       document.removeEventListener('keydown', onKey)
     }
-  }, [open, composerInputRef, setOpen, wasInputFocusedRef])
+  }, [open, composerInputRef, setMode, wasInputFocusedRef])
 
   function handleAttach() {
-    setOpen(false)
+    setMode(null)
     // Refocus the chat textarea ONLY if the keyboard was already
     // up when the popover opened. Otherwise leave focus alone —
-    // tapping the brain on a closed-keyboard chat shouldn't pop it open.
+    // tapping + on a closed-keyboard chat shouldn't pop it open.
     if (wasInputFocusedRef.current) {
       focusComposerElement(composerInputRef?.current)
     }
@@ -212,25 +218,26 @@ export default function ComposerPopover({
   }
 
   function handleOpenInspector() {
-    setOpen(false)
+    setMode(null)
     onOpenInspector?.()
   }
 
   function handleOpenSummary() {
-    setOpen(false)
+    setMode(null)
     onOpenSummary?.()
   }
 
   function handleOpenUsage() {
-    setOpen(false)
+    setMode(null)
     onOpenUsage?.()
   }
 
-  function togglePopover() {
+  function toggleMode(nextMode, nextTriggerRef) {
     const el = composerInputRef?.current
     const wasFocused = document.activeElement === el
     if (!open) wasInputFocusedRef.current = wasFocused
-    setOpen(current => !current)
+    activeTriggerRef.current = nextTriggerRef.current
+    setMode(current => current === nextMode ? null : nextMode)
     if (!wasFocused && el) {
       requestAnimationFrame(() => {
         if (document.activeElement === el) el.blur()
@@ -243,32 +250,47 @@ export default function ComposerPopover({
       <button
         ref={triggerRef}
         type="button"
-        className={`chat__plus chat__brain-usage${pending ? ' chat__plus--pending' : ''}`
-          + `${open && !pending ? ' chat__plus--active' : ''}`}
+        className={`chat__plus${pending ? ' chat__plus--pending' : ''}`
+          + `${mode === 'options' && !pending ? ' chat__plus--active' : ''}`}
         disabled={pending}
         // PointerDown preventDefault stops the focus from moving off
         // the textarea — keeps the soft keyboard open when the user
-        // taps the brain mid-typing. Without this, focus shifts to the
+        // taps `+` mid-typing. Without this, focus shifts to the
         // button, the textarea blurs, and the keyboard collapses
         // before the popover even renders.
         onPointerDown={(e) => e.preventDefault()}
-        onClick={togglePopover}
+        onClick={() => toggleMode('options', triggerRef)}
         aria-label={pending
           ? 'Chat options unavailable until this chat is ready'
           : triggerAriaLabel}
         aria-haspopup={pending ? undefined : 'dialog'}
-        aria-expanded={pending ? undefined : open}
+        aria-expanded={pending ? undefined : mode === 'options'}
       >
-        {triggerIcon || <BrainUsageIcon />}
+        <Plus width={26} height={26} />
       </button>
+      {modelTriggerIcon && !pending && (
+        <button
+          ref={modelTriggerRef}
+          type="button"
+          className={`chat__plus chat__brain-usage${mode === 'model' ? ' chat__plus--active' : ''}`}
+          onPointerDown={(event) => event.preventDefault()}
+          onClick={() => toggleMode('model', modelTriggerRef)}
+          aria-label={modelTriggerAriaLabel}
+          aria-haspopup="dialog"
+          aria-expanded={mode === 'model'}
+        >
+          {modelTriggerIcon}
+        </button>
+      )}
       {open && !pending && (
         <div
           className="composer-popover"
           role="dialog"
-          aria-label="Chat options"
+          aria-label={mode === 'model' ? 'Choose model' : 'Attach & chat info'}
           onPointerDown={preservePickerInputFocus}
           style={maxHeight !== null ? { maxHeight: `${maxHeight}px` } : undefined}
         >
+          {mode === 'options' && (
           <div className="composer-popover__section">
             <button
               type="button"
@@ -284,7 +306,8 @@ export default function ComposerPopover({
               </span>
             </button>
           </div>
-          {chatInfo && chatId && (
+          )}
+          {mode === 'model' && chatInfo && chatId && (
             <div className="composer-popover__section composer-popover__section--picker">
               <ChatSettingsPanel
                 chatId={chatId}
@@ -299,11 +322,10 @@ export default function ComposerPopover({
                 onChange={onChangeChatInfo}
                 providerSwitchState={providerSwitchState}
                 settingsSaveTailRef={settingsSaveTailRef}
-                providerUsage={providerUsage}
               />
             </div>
           )}
-          {!embedded && (
+          {mode === 'options' && !embedded && (
           <div className="composer-popover__section composer-popover__section--context">
             <button
               type="button"

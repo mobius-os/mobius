@@ -18,8 +18,6 @@ Manage the installed service:
     python3 ~/.mobius-connect/runner.py --uninstall
 """
 import argparse
-from collections import deque
-import ipaddress
 import json
 import os
 import platform
@@ -27,7 +25,6 @@ import signal
 import ssl
 import subprocess
 import sys
-import threading
 import time
 import urllib.error
 import urllib.parse
@@ -41,61 +38,6 @@ PID_PATH = os.path.join(CONFIG_DIR, "runner.pid")
 LAUNCHD_LABEL = "sh.mobius.connect"
 LAUNCHD_PLIST = os.path.expanduser("~/Library/LaunchAgents/%s.plist" % LAUNCHD_LABEL)
 SYSTEMD_UNIT = os.path.expanduser("~/.config/systemd/user/mobius-connect.service")
-
-
-def _validated_base_url(raw):
-    """Return a credential-safe Mobius origin or reject it.
-
-    Connect sends a long-lived host bearer on every request. Plain HTTP is
-    therefore acceptable only on the local loopback used for development;
-    remote instances must use HTTPS. Credentials and query/fragment material
-    do not belong in the persisted base URL.
-    """
-    value = str(raw or "").strip().rstrip("/")
-    parsed = urllib.parse.urlsplit(value)
-    if (
-        parsed.scheme not in ("http", "https")
-        or not parsed.netloc
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise ValueError("Connect requires a valid Mobius HTTPS URL.")
-    try:
-        hostname = parsed.hostname or ""
-        # Accessing port also validates malformed/non-numeric port text.
-        parsed.port
-    except ValueError as exc:
-        raise ValueError("Connect requires a valid Mobius HTTPS URL.") from exc
-    if not hostname:
-        raise ValueError("Connect requires a valid Mobius HTTPS URL.")
-    if parsed.scheme == "http":
-        local = hostname.casefold() == "localhost"
-        if not local:
-            try:
-                local = ipaddress.ip_address(hostname).is_loopback
-            except ValueError:
-                local = False
-        if not local:
-            raise ValueError(
-                "Connect refuses plaintext HTTP for a remote instance; use HTTPS."
-            )
-    return value
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Fail closed instead of forwarding pairing codes or host bearers."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-def _open_url(request, *, timeout, context=None):
-    handlers = [_NoRedirect()]
-    if context is not None:
-        handlers.append(urllib.request.HTTPSHandler(context=context))
-    return urllib.request.build_opener(*handlers).open(request, timeout=timeout)
 
 
 def _load_config():
@@ -119,12 +61,11 @@ def _post(url, payload, token=None):
     req.add_header("Content-Type", "application/json")
     if token:
         req.add_header("Authorization", "Bearer " + token)
-    with _open_url(req, timeout=30) as resp:
+    with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
 def _pair(base, code):
-    base = _validated_base_url(base)
     out = _post(base + "/api/connect/pair", {"code": code})
     cfg = {"url": base, "host_id": out["host_id"], "token": out["token"]}
     _save_config(cfg)
@@ -146,7 +87,7 @@ def _run_required(cmd, action):
 
 def _self_download(base):
     os.makedirs(CONFIG_DIR, exist_ok=True)
-    with _open_url(base + "/api/connect/runner", timeout=30) as resp:
+    with urllib.request.urlopen(base + "/api/connect/runner", timeout=30) as resp:
         src = resp.read()
     with open(RUNNER_PATH, "wb") as fh:
         fh.write(src)
@@ -199,9 +140,7 @@ def _install_systemd(py):
     with open(SYSTEMD_UNIT, "w", encoding="utf-8") as fh:
         fh.write(unit)
     _run(["systemctl", "--user", "daemon-reload"])
-    r = _run(["systemctl", "--user", "enable", "mobius-connect.service"])
-    if r.returncode == 0:
-        r = _run(["systemctl", "--user", "restart", "mobius-connect.service"])
+    r = _run(["systemctl", "--user", "enable", "--now", "mobius-connect.service"])
     if r.returncode != 0:
         print("systemctl --user failed: %s" % r.stderr.strip())
         return _install_background(py)
@@ -330,7 +269,7 @@ def _terminate_process_tree(proc):
             proc.wait()
 
 
-def _spawn_command(cmd, cwd):
+def _run_command(cmd, cwd, timeout):
     popen_args = {
         "shell": True,
         "stdout": subprocess.PIPE,
@@ -342,13 +281,9 @@ def _spawn_command(cmd, cwd):
         popen_args["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         popen_args["start_new_session"] = True
-    return subprocess.Popen(cmd, **popen_args)
-
-
-def _run_command(cmd, cwd, timeout):
     proc = None
     try:
-        proc = _spawn_command(cmd, cwd)
+        proc = subprocess.Popen(cmd, **popen_args)
         stdout, stderr = proc.communicate(timeout=timeout)
         return stdout, stderr, proc.returncode, False
     except subprocess.TimeoutExpired:
@@ -362,259 +297,33 @@ def _run_command(cmd, cwd, timeout):
         if proc is not None:
             _terminate_process_tree(proc)
         return "", "runner error: %s" % exc, 1, False
-    finally:
-        if proc is not None:
-            for stream in (proc.stdout, proc.stderr):
-                if stream is not None:
-                    stream.close()
-
-
-class _CommandRunner:
-    """Own one subprocess and retain lifecycle messages across reconnects."""
-
-    def __init__(self, base, token):
-        self.base = base
-        self.token = token
-        self.lock = threading.Lock()
-        self.flush_lock = threading.Lock()
-        self.active = None
-        self.outbox = deque()
-        # A rotating stream can deliver the same event from the retiring and
-        # replacement connection. Request ids are idempotency keys: once this
-        # process accepts one, never spawn it a second time.
-        self.seen_request_ids = deque(maxlen=64)
-
-    def pending_messages(self):
-        with self.lock:
-            return list(self.outbox)
-
-    def acknowledge_message(self, message):
-        with self.lock:
-            for index, pending in enumerate(self.outbox):
-                if pending is message:
-                    del self.outbox[index]
-                    return
-
-    def snapshot(self):
-        with self.lock:
-            active_id = self.active["request_id"] if self.active else None
-            pending = [
-                message.get("request_id") for message in self.outbox
-                if message.get("type") == "result" and message.get("request_id")
-            ]
-        return active_id, pending
-
-    def flush_pending_results(self):
-        """Retry retained results without holding the subprocess-state lock."""
-        with self.flush_lock:
-            for message in self.pending_messages():
-                try:
-                    _post(
-                        self.base + "/api/connect/result", message,
-                        token=self.token,
-                    )
-                except (urllib.error.URLError, urllib.error.HTTPError) as exc:
-                    print("failed to report result: %s" % exc)
-                    return False
-                self.acknowledge_message(message)
-        return True
-
-    def _post_result(
-        self, request_id, stdout, stderr, exit_code, outcome, record=None,
-    ):
-        message = {
-            "type": "result",
-            "request_id": request_id,
-            "stdout": stdout,
-            "stderr": stderr,
-            "exit_code": exit_code,
-            "timed_out": outcome in ("timed_out", "expired"),
-            "outcome": outcome,
-        }
-        # Retain before attempting the network request. A concurrent stream
-        # rotation can now always announce this pending id, so the server will
-        # never mistake the just-finished command for lost work and replay it.
-        # Releasing the active slot and retaining its result must be one
-        # atomic state transition. Otherwise a reconnect can observe neither
-        # and tell the server that successfully completed work was lost.
-        with self.lock:
-            self.outbox.append(message)
-            if record is not None and self.active is record:
-                self.active = None
-        self.flush_pending_results()
-
-    def _post_started(self, request_id):
-        try:
-            _post(self.base + "/api/connect/state", {
-                "request_id": request_id, "state": "started",
-            }, token=self.token)
-        except urllib.error.HTTPError as exc:
-            # A runner can be upgraded before its server. Protocol v1 has no
-            # start endpoint but still accepts this runner's final result.
-            if exc.code not in (404, 405):
-                raise
-
-    def start(self, evt):
-        request_id = str(evt.get("request_id") or "")
-        with self.lock:
-            if request_id in self.seen_request_ids:
-                return
-            if self.active is not None:
-                refused = True
-            else:
-                refused = False
-                self.seen_request_ids.append(request_id)
-        not_after = float(evt.get("not_after") or 0)
-        if not_after and time.time() > not_after:
-            self._post_result(
-                request_id, "", "command expired before it could start", 124,
-                "expired",
-            )
-            return
-
-        record = {
-            "request_id": request_id,
-            "proc": None,
-            "reason": None,
-            "timeout": max(1, int(evt.get("timeout", 60))),
-        }
-        if refused:
-            self._post_result(
-                request_id, "", "runner refused a parallel command", 125,
-                "expired",
-            )
-            return
-        with self.lock:
-            self.active = record
-
-        try:
-            self._post_started(request_id)
-            # The state acknowledgement itself crosses the network and can
-            # outlive the server's dispatch window. Check the absolute
-            # deadline again at the last possible point before spawning so an
-            # expired request can never become delayed work on this machine.
-            if not_after and time.time() > not_after:
-                self._post_result(
-                    request_id, "", "command expired before it could start",
-                    124, "expired", record=record,
-                )
-                return
-            proc = _spawn_command(evt.get("cmd", ""), evt.get("cwd"))
-            record["proc"] = proc
-            with self.lock:
-                reason = record["reason"]
-            if reason is not None:
-                _terminate_process_tree(proc)
-        except Exception as exc:  # noqa: BLE001 - report the spawn boundary
-            self._post_result(
-                request_id, "", "runner error: %s" % exc, 1, "completed",
-                record=record,
-            )
-            return
-
-        threading.Thread(
-            target=self._wait, args=(record,), daemon=True,
-            name="mobius-connect-command",
-        ).start()
-
-    def _wait(self, record):
-        proc = record["proc"]
-        stdout = ""
-        stderr = ""
-        try:
-            stdout, stderr = proc.communicate(timeout=record["timeout"])
-        except subprocess.TimeoutExpired:
-            with self.lock:
-                if record["reason"] is None:
-                    record["reason"] = "timed_out"
-            _terminate_process_tree(proc)
-            stdout, stderr = proc.communicate()
-        except Exception as exc:  # noqa: BLE001 - preserve a final result
-            stderr = "runner error: %s" % exc
-
-        with self.lock:
-            reason = record["reason"]
-        if reason == "timed_out":
-            outcome, exit_code = "timed_out", 124
-            stderr = stderr or "command timed out after %ss" % record["timeout"]
-        elif reason is not None:
-            outcome, exit_code = "canceled", 130
-            stderr = stderr or "command canceled"
-        else:
-            outcome, exit_code = "completed", proc.returncode
-        self._post_result(
-            record["request_id"], stdout, stderr, exit_code, outcome,
-            record=record,
-        )
-
-    def cancel(self, request_id, reason="canceled"):
-        with self.lock:
-            record = self.active
-            if record is None or (
-                request_id is not None and record["request_id"] != request_id
-            ):
-                return False
-            if record["reason"] is None:
-                record["reason"] = reason
-            proc = record["proc"]
-        if proc is not None:
-            _terminate_process_tree(proc)
-        return True
 
 
 def _serve(cfg):
-    base = _validated_base_url(cfg["url"])
+    base = cfg["url"].rstrip("/")
     token = cfg["token"]
     ctx = ssl.create_default_context()
     plat = "%s %s" % (platform.system(), platform.release())
-    commands = _CommandRunner(base, token)
+    stream_url = base + "/api/connect/stream?platform=" + urllib.parse.quote(plat)
     backoff = 1
     print("Connecting to %s ..." % base)
     while True:
         try:
-            # Results are ordinary HTTPS requests. Attempt them before the
-            # next stream hello so its pending list reflects what still needs
-            # recovery, then again after connecting to close any race.
-            commands.flush_pending_results()
-            active_id, pending_ids = commands.snapshot()
-            query = [
-                ("protocol", "3"),
-                ("platform", plat),
-            ]
-            if active_id:
-                query.append(("active_request_id", active_id))
-            query.extend(
-                ("pending_result_id", request_id)
-                for request_id in pending_ids
-            )
-            stream_url = base + "/api/connect/stream?" + urllib.parse.urlencode(
-                query,
-            )
             req = urllib.request.Request(stream_url)
             req.add_header("Authorization", "Bearer " + token)
             req.add_header("Accept", "text/event-stream")
-            with _open_url(
-                req, timeout=None, context=ctx,
-            ) as stream:
+            with urllib.request.urlopen(req, timeout=None, context=ctx) as stream:
                 print("Connected. This machine is now reachable from Mobius.")
                 backoff = 1
-                commands.flush_pending_results()
                 for raw in stream:
-                    # Heartbeat comments make this retry path run even while
-                    # the host has no new commands.
-                    commands.flush_pending_results()
-                    line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                    line = raw.decode("utf-8", "replace").rstrip("\n")
                     if not line.startswith("data:"):
                         continue
                     try:
                         evt = json.loads(line[5:].strip())
                     except ValueError:
                         continue
-                    if evt.get("type") == "cancel":
-                        commands.cancel(evt.get("request_id"))
-                        continue
                     if evt.get("type") == "disconnect":
-                        commands.cancel(None, "disconnect")
                         try:
                             _uninstall_service(stop_running=False)
                             payload = {
@@ -622,31 +331,31 @@ def _serve(cfg):
                                 "stdout": "Connect daemon removed.",
                                 "stderr": "", "exit_code": 0,
                             }
-                        except Exception as exc:  # local cleanup failure
+                        except Exception as exc:  # report local cleanup failure
                             payload = {
                                 "request_id": evt.get("request_id"),
-                                "stdout": "", "stderr": str(exc),
-                                "exit_code": 1,
+                                "stdout": "", "stderr": str(exc), "exit_code": 1,
                             }
                         try:
-                            _post(
-                                base + "/api/connect/result", payload,
-                                token=token,
-                            )
-                        except (
-                            urllib.error.URLError,
-                            urllib.error.HTTPError,
-                        ) as exc:
+                            _post(base + "/api/connect/result", payload, token=token)
+                        except urllib.error.URLError as exc:
                             print("failed to report disconnect: %s" % exc)
                         return
                     if evt.get("type") != "exec":
                         continue
                     print("$ " + evt.get("cmd", ""))
-                    commands.start(evt)
-            # Protocol v3 streams intentionally end before a hosting proxy's
-            # response cap. A command belongs to this runner, not the stream,
-            # so clean rotation is the same recovery path as any network loss.
-            print("stream rotated; reconnecting")
+                    out, err, rc, timed_out = _run_command(
+                        evt.get("cmd", ""), evt.get("cwd"),
+                        int(evt.get("timeout", 60)),
+                    )
+                    try:
+                        _post(base + "/api/connect/result", {
+                            "request_id": evt.get("request_id"),
+                            "stdout": out, "stderr": err, "exit_code": rc,
+                            "timed_out": timed_out,
+                        }, token=token)
+                    except urllib.error.URLError as exc:
+                        print("failed to report result: %s" % exc)
         except KeyboardInterrupt:
             print("\nStopped.")
             return
@@ -682,18 +391,12 @@ def main():
         return
 
     cfg = _load_config()
-    try:
-        if args.pair:
-            base = args.url or cfg.get("url") or ""
-            if not base:
-                print("Missing --url")
-                sys.exit(2)
-            cfg = _pair(base, args.pair.strip())
-        elif cfg.get("url"):
-            cfg["url"] = _validated_base_url(cfg["url"])
-    except ValueError as exc:
-        print(str(exc))
-        sys.exit(2)
+    if args.pair:
+        base = (args.url or cfg.get("url") or "").rstrip("/")
+        if not base:
+            print("Missing --url")
+            sys.exit(2)
+        cfg = _pair(base, args.pair.strip())
     if not cfg.get("token"):
         print("Not paired. Run with --pair CODE --url URL first.")
         sys.exit(2)

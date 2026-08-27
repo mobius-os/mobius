@@ -1,0 +1,5 @@
+{
+  "maximum_files": 88,
+  "maximum_cases": 779,
+  "policy": "This is a ceiling, not a target. New tests exercise exported behavior; each related refactor lowers this baseline."
+}

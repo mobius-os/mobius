@@ -52,6 +52,7 @@ import BrainUsageButton from './BrainUsageButton.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
 import ProgressRail from './ProgressRail.jsx'
 import GoalPlanDetails from './GoalPlanDetails.jsx'
+import GoalDraftChip from './GoalDraftChip.jsx'
 import WaitingChip from './WaitingChip.jsx'
 import ActiveAssistantSurface from './ActiveAssistantSurface.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
@@ -199,18 +200,6 @@ const MESSAGE_META_VISIBLE_MS = 5000
 // reader escape can reveal the control even while the latest row is visible.
 // Using the same band the controller sticks within removes the old dead zone
 // where a dropped follow left the reader with neither autoscroll nor a button.
-
-function GoalDraftChip({ objective }) {
-  const text = typeof objective === 'string' ? objective.trim() : ''
-  return (
-    <div className="chat__goal-draft" role="status" aria-label="Goal draft">
-      <span className="chat__goal-draft-tag" aria-hidden="true">Goal</span>
-      <span className={`chat__goal-draft-text${text ? '' : ' chat__goal-draft-text--hint'}`}>
-        {text || 'Describe the goal…'}
-      </span>
-    </div>
-  )
-}
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -4041,10 +4030,9 @@ export default function ChatView({
   useEffect(() => {
     if (wasTurnActiveRef.current && !turnActive) {
       settingsQueries.providerUsage.invalidate(queryClient)
-      chatQueries.currentUsage.invalidate(queryClient, chatId)
     }
     wasTurnActiveRef.current = turnActive
-  }, [chatId, turnActive, queryClient])
+  }, [turnActive, queryClient])
 
   useEffect(() => {
     if (!turnActive) return
@@ -5078,19 +5066,12 @@ export default function ChatView({
           messageHistory={messageHistory}
           provider={chatInfo?.provider}
           leftButtons={
-            <BrainUsageButton
-              usageEnabled={!embedded}
-              chatId={chatId}
-              provider={chatInfo?.provider}
-              model={chatInfo?.effective?.model}
-            >
-              {({ icon, ariaLabel, providerUsage }) => (
+            <BrainUsageButton usageEnabled={!embedded}>
+              {({ icon, ariaLabel }) => (
               <ComposerPopover
-                triggerIcon={icon}
-                providerUsage={providerUsage}
-                triggerAriaLabel={embedded
-                  ? 'Attach files'
-                  : `${ariaLabel}. ${chatUsageAriaSummary}`}
+                modelTriggerIcon={icon}
+                modelTriggerAriaLabel={`${ariaLabel}. ${chatUsageAriaSummary}`}
+                triggerAriaLabel={embedded ? 'Attach files' : 'Attach files or view chat info'}
                 chatInfo={showPicker ? chatInfo : null}
                 chatId={chatId}
                 onAttachClick={() => attachTriggerRef.current?.()}

@@ -13,7 +13,7 @@
     "speech-worker:check": "node scripts/build-tts-worker.mjs --check",
     "speech-runtime:check": "node scripts/embed-xn-runtime.mjs --check",
     "lint": "eslint . --max-warnings 47",
-    "test:structure": "node scripts/check-structural-test-allowlist.mjs",
+    "test:structure": "node scripts/check-structural-test-budget.mjs",
     "pretest:lib": "npm run runtime:check && npm run speech-runtime:check && npm run speech-worker:check && npm run test:structure",
     "test": "npm run test:lib && npm run test:hooks",
     "test:lib": "node --loader=./src/lib/__tests__/vite-env-loader.mjs --test $(find src/lib src/utils src/hooks src/components/DiffView src/components/GlobalSearch src/components/ProviderAuth src/components/NotificationsView src/components/ChatView/__tests__ src/components/Shell/__tests__ -name '*.test.js')",

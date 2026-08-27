@@ -6,7 +6,6 @@ from urllib.parse import urlparse
 from fastapi import Depends, Header, HTTPException, Request
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
-from starlette.requests import HTTPConnection
 
 from app import auth, models
 from app.config import get_settings
@@ -16,7 +15,7 @@ from app.timeutil import now_naive_utc
 _oauth2 = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
 
 
-def reject_cross_site(request: HTTPConnection) -> None:
+def reject_cross_site(request: Request) -> None:
   """Defense-in-depth CSRF guard for state-changing endpoints.
 
   Möbius's baseline CSRF posture is "Authorization: Bearer + CORS" —

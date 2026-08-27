@@ -57,12 +57,6 @@ export function workerChatTitle(workerIndex, label = '') {
   return `${workerPrefix(workerIndex)}${rand}${safeLabel ? '_' + safeLabel : ''}`
 }
 
-async function failedResponse(action, response) {
-  const body = await response.text().catch(() => '')
-  const detail = body.trim().slice(0, 1000)
-  return `${action} (${response.status()})${detail ? `: ${detail}` : ''}`
-}
-
 // Worker-process-scoped token cache. The `/api/auth/token` endpoint
 // is rate-limited (5/min); afterAll cleanup across 4 workers + a
 // retry burst can blow through that and leave chats undeleted. We
@@ -130,13 +124,7 @@ export async function createTaggedChat(
     data: title ? { title } : {},
     failOnStatusCode: false,
   })
-  if (!response.ok()) {
-    throw new Error(await failedResponse(
-      'Could not create the test chat',
-      response,
-    ))
-  }
-  const result = await response.json()
+  const result = response.ok() ? await response.json() : null
   if (result?.id) {
     if (info) registerCreatedChats(info.workerIndex, result.id)
     // Most browser tests exercise chat behavior after the first-send choice,
@@ -148,10 +136,9 @@ export async function createTaggedChat(
       token,
     })
     if (!selected.ok()) {
-      throw new Error(await failedResponse(
-        'Could not select the test chat model',
-        selected,
-      ))
+      throw new Error(
+        `Could not select the test chat model (${selected.status()})`,
+      )
     }
   }
   return result

@@ -1,6 +1,6 @@
 /**
  * ChatSettingsPanel — the per-chat model + effort picker inside the
- * composer's brain popover. Renders the model rows and effort slider, and owns
+ * composer's `+` popover. Renders the model rows and effort slider, and owns
  * the confirmation and atomic handoff flow used for cross-provider switches
  * after a chat has assistant turns.
  *
@@ -95,7 +95,6 @@ import {
   visibleProviderModels,
 } from '../../lib/providerAvailability.js'
 import { detailToMessage } from '../../lib/errorDetail.js'
-import { formatRoundedTokenCount } from './brainUsage.js'
 import './ChatSettingsPanel.css'
 
 /* Provider metadata + ordering live in their own light module so the picker,
@@ -150,7 +149,6 @@ export default function ChatSettingsPanel({
   // what keeps navigation away/back from unlocking a live handoff or losing
   // its retry id and error feedback.
   providerSwitchState,
-  providerUsage = null,
 }) {
   const [saving, setSaving] = useState(false)
   const [localError, setLocalError] = useState('')
@@ -543,33 +541,10 @@ export default function ChatSettingsPanel({
 
   const currentProviderConfigured = availability.configuredProviders.has(draftProvider)
   const currentProviderLabel = PROVIDER_INFO[draftProvider]?.label || draftProvider
-  const allowanceUsageLabel = typeof providerUsage?.allowanceUsedPercent === 'number'
-    ? `${Math.round(providerUsage.allowanceUsedPercent)}% ${providerUsage.allowanceLabel.toLowerCase()}`
-    : (providerUsage?.allowanceLabel || 'Usage')
-  const contextUsageLabel = (
-    typeof providerUsage?.contextTokensUsed === 'number'
-    && typeof providerUsage?.contextTokensMaximum === 'number'
-  )
-    ? `${formatRoundedTokenCount(providerUsage.contextTokensUsed)} / ${formatRoundedTokenCount(providerUsage.contextTokensMaximum)} tokens`
-    : 'Context'
+
   return (
     <div className="csp">
-      <div className="csp__heading">
-        <div className="csp__label">Model</div>
-        <div
-          className="csp__usage-key"
-          aria-label="Brain fill shows provider allowance and context tokens consumed"
-        >
-          <span className="csp__usage-key-item">
-            <span className="csp__usage-key-line csp__usage-key-line--provider" aria-hidden="true" />
-            <span>{allowanceUsageLabel}</span>
-          </span>
-          <span className="csp__usage-key-item">
-            <span className="csp__usage-key-line csp__usage-key-line--context" aria-hidden="true" />
-            <span>{contextUsageLabel}</span>
-          </span>
-        </div>
-      </div>
+      <div className="csp__label">Model</div>
       {!dataReady && (
         <>
           {modelLoadError ? (

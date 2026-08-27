@@ -8,10 +8,7 @@ python-multipart>=0.0.18
 pydantic[email]>=2.7.0
 pydantic-settings>=2.5.0
 slowapi>=0.1.10
-# Runtime integrations use httpx; the self-testing runtime's Starlette
-# TestClient imports httpx2 instead of its deprecated httpx fallback.
 httpx>=0.28.0
-httpx2>=2.12.0
 Pillow>=11.0.0
 pywebpush>=2.0.0
 pytest>=8.0

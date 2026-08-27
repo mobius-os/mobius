@@ -109,7 +109,6 @@ def _humanize_window_id(window_id: str) -> str:
 
 def _window(
   window_id: str,
-  kind: str,
   label: str,
   used_percent: Any,
   resets_at: Any,
@@ -119,7 +118,6 @@ def _window(
     return None
   return {
     "id": window_id,
-    "kind": kind,
     "label": label,
     "used_percent": used,
     "resets_at": _reset_iso(resets_at),
@@ -144,7 +142,6 @@ def normalize_claude_usage(
       continue
     normalized = _window(
       window_id,
-      "weekly" if window_id == "seven_day" else "other",
       _CLAUDE_WINDOW_LABELS.get(window_id, _humanize_window_id(window_id)),
       raw.get("utilization", raw.get("used_percentage")),
       raw.get("resets_at", raw.get("resetsAt")),
@@ -172,13 +169,6 @@ def _codex_window_label(raw: dict[str, Any], fallback: str) -> str:
   return fallback
 
 
-def _codex_window_kind(raw: dict[str, Any], window_id: str) -> str:
-  duration = raw.get("window_duration_mins", raw.get("windowDurationMins"))
-  if duration == 10_080 or (duration is None and window_id == "secondary"):
-    return "weekly"
-  return "other"
-
-
 def normalize_codex_usage(
   payload: Any,
   *,
@@ -196,7 +186,6 @@ def normalize_codex_usage(
       continue
     normalized = _window(
       key,
-      _codex_window_kind(raw, key),
       _codex_window_label(raw, fallback),
       raw.get("used_percent", raw.get("usedPercent")),
       raw.get("resets_at", raw.get("resetsAt")),

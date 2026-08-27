@@ -14,13 +14,6 @@ SHA = "a" * 40
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_starlette_test_client_uses_supported_httpx2_transport():
-  import httpx2
-  from starlette.testclient import TestClient
-
-  assert issubclass(TestClient, httpx2.Client)
-
-
 def _version(**overrides):
   value = {
     "test_runtime": True,

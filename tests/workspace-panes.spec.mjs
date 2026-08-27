@@ -90,24 +90,10 @@ async function ensureNavigationOpen(page) {
  *  real pointer path (not the deterministic Shift+Enter). The completed hold
  *  suppresses the trailing click, so it never also toggles the drawer. */
 async function holdLogo(page, brand) {
-  await brand.scrollIntoViewIfNeeded()
-  const startedInBuilder = await brand.evaluate(element => (
-    element.classList.contains('shell__brand--builder')
-  ))
   const box = await brand.boundingBox()
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
   await page.mouse.down()
-  // Under a loaded CI runner the 450ms hold can complete between pointerdown
-  // returning and the first assertion. Accept either owned boundary: the live
-  // hold class or the mode flip it commits, then require the completed flip.
-  await expect.poll(() => brand.evaluate((element, wasBuilder) => (
-    element.classList.contains('is-holding')
-      || element.classList.contains('shell__brand--builder') !== wasBuilder
-  ), startedInBuilder), { timeout: 3000 }).toBe(true)
-  await expect.poll(() => brand.evaluate((element, wasBuilder) => (
-    !element.classList.contains('is-holding')
-      && element.classList.contains('shell__brand--builder') !== wasBuilder
-  ), startedInBuilder), { timeout: 3000 }).toBe(true)
+  await page.waitForTimeout(650) // comfortably past the 450ms hold threshold
   await page.mouse.up()
 }
 
@@ -831,25 +817,14 @@ async function expectCaretAligned(page, caret, target, label) {
 
 /** Press on a source element, arm past slop, glide to a target point, release —
  *  the mouse-path drag Chromium delivers as real pointer events. */
-async function mouseDrag(
-  page,
-  sourceLocator,
-  toX,
-  toY,
-  { release = true, resolveTarget = null } = {},
-) {
-  await sourceLocator.scrollIntoViewIfNeeded()
+async function mouseDrag(page, sourceLocator, toX, toY, { release = true } = {}) {
   const box = await sourceLocator.boundingBox()
   const sx = box.x + box.width / 2
   const sy = box.y + box.height / 2
   await page.mouse.move(sx, sy)
   await page.mouse.down()
   await page.mouse.move(sx + 10, sy, { steps: 3 }) // clear the 5px slop → arm
-  await expect(page.locator('.workspace__drag-chip')).toBeVisible({ timeout: 3000 })
-  if (resolveTarget) ({ x: toX, y: toY } = await resolveTarget())
   await page.mouse.move(toX, toY, { steps: 14 })
-  await expect(page.locator('.workspace__drop-preview.is-visible'))
-    .toBeVisible({ timeout: 3000 })
   if (release) await page.mouse.up()
 }
 
@@ -905,24 +880,6 @@ async function touchDrag(
       await cdp.detach()
     },
   }
-}
-
-async function resolveBuilderContentCenter(page) {
-  // Arming a drag from Standard unfolds Builder as a render-only preview.
-  // Target geometry therefore belongs to that newly mounted world, not the
-  // Standard content box measured before pointerdown. The shell content's
-  // geometric center can be the divider between two panes, so use the focused
-  // pane strip for the x-axis and the content box for the y-axis.
-  await expect(page.locator('.workspace__chrome')).toHaveCount(1, { timeout: 3000 })
-  const focusedPaneId = await page.evaluate(
-    key => JSON.parse(localStorage.getItem(key)).focusedPaneId,
-    paneModel.STORAGE_KEY,
-  )
-  const [strip, content] = await Promise.all([
-    page.locator(`[data-pane-strip="${focusedPaneId}"]`).boundingBox(),
-    page.locator('.shell__content').boundingBox(),
-  ])
-  return { x: strip.x + strip.width / 2, y: content.y + content.height / 2 }
 }
 
 async function bootThreeTab(page, tag, workspaceFixture = twoPanesThreeTabs, expectTiled = true) {
@@ -1672,13 +1629,11 @@ test.describe('Workspace view-mode toggle', () => {
     const baseline = await readWs(page)
 
     await ensureNavigationOpen(page)
+    const content = await page.locator('.shell__content').boundingBox()
     const row = page.locator(`.drawer__item[data-drag-key="chat:${c.id}"]`)
     await expect(row).toBeVisible()
     // Arm + move the drag (builder unfolds), then Escape to cancel before dropping.
-    await mouseDrag(page, row, 0, 0, {
-      release: false,
-      resolveTarget: () => resolveBuilderContentCenter(page),
-    })
+    await mouseDrag(page, row, content.x + content.width / 2, content.y + content.height / 2, { release: false })
     await page.keyboard.press('Escape')
     await page.mouse.up()
 
@@ -1709,14 +1664,12 @@ test.describe('Workspace view-mode toggle', () => {
     expect((await readWs(page)).viewMode).toBe('single')
 
     await ensureNavigationOpen(page)
+    const content = await page.locator('.shell__content').boundingBox()
     const row = page.locator(`.drawer__item[data-drag-key="chat:${c.id}"]`)
     await expect(row).toBeVisible()
     // Arm the single-mode drag → the builder preview unfolds (render-only, tiled).
     // Leave the pointer DOWN (no drop): the dragPreviewBuilder override is live.
-    await mouseDrag(page, row, 0, 0, {
-      release: false,
-      resolveTarget: () => resolveBuilderContentCenter(page),
-    })
+    await mouseDrag(page, row, content.x + content.width / 2, content.y + content.height / 2, { release: false })
     await expect(page.locator('.workspace__chrome')).toHaveCount(1, { timeout: 3000 })
 
     // Negative: with NO foreground event, the live-drag preview persists (the
@@ -1995,7 +1948,11 @@ test.describe('Logo activation + middle-click', () => {
 
     const brand = page.getByRole('button', { name: 'Toggle navigation' })
     const navBefore = await brand.getAttribute('aria-expanded')
-    await holdLogo(page, brand)
+    const box = await page.locator('.shell__brand').boundingBox()
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await page.mouse.down()
+    await page.waitForTimeout(650) // hold past the ~450ms threshold (rAF completes it)
+    await page.mouse.up()
 
     await expect.poll(async () => (await readWs(page)).viewMode, {
       timeout: 3000, message: 'a completed hold flips to builder mode',

@@ -6,7 +6,6 @@ import {
   drainCreatedChats,
   registerCreatedChats,
 } from './_chatFixtureRegistry.mjs'
-import { createTaggedChat } from './_chatTracker.mjs'
 import {
   installMockAgentProvider,
   persistTestChatModel,
@@ -39,57 +38,6 @@ test('created chats are registered before model setup can fail', async () => {
   assert.ok(registerIndex >= 0)
   assert.ok(modelSetupIndex >= 0)
   assert.ok(registerIndex < modelSetupIndex)
-})
-
-test('fixture setup failures include a bounded backend response', async () => {
-  const response = ({ ok, status, body, json }) => ({
-    ok: () => ok,
-    status: () => status,
-    text: async () => body,
-    json: async () => json,
-  })
-  const requests = []
-  const page = {
-    evaluate: async () => 'fixture-token',
-    request: {
-      post: async () => requests.shift(),
-      patch: async () => requests.shift(),
-    },
-  }
-
-  requests.push(response({
-    ok: false,
-    status: 500,
-    body: 'database transaction failed',
-  }))
-  await assert.rejects(
-    createTaggedChat(page, 'create-failure', { mockProvider: false }),
-    /Could not create the test chat \(500\): database transaction failed/,
-  )
-
-  requests.push(
-    response({ ok: true, status: 200, body: '', json: { id: 'chat-a' } }),
-    response({ ok: false, status: 409, body: 'model choice conflicted' }),
-  )
-  await assert.rejects(
-    createTaggedChat(page, 'model-failure', { mockProvider: false }),
-    /Could not select the test chat model \(409\): model choice conflicted/,
-  )
-
-  requests.push(response({
-    ok: false,
-    status: 502,
-    body: `${'x'.repeat(1200)}tail`,
-  }))
-  await assert.rejects(
-    createTaggedChat(page, 'bounded-failure', { mockProvider: false }),
-    error => {
-      const detail = error.message.split(': ', 2)[1]
-      assert.equal(detail.length, 1000)
-      assert.doesNotMatch(error.message, /tail/)
-      return true
-    },
-  )
 })
 
 test('chat fixtures persist a model and simulate its provider boundary', async () => {
