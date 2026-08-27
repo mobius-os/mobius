@@ -8,7 +8,7 @@ const { makeTab } = tabModel
 // The two-worlds single-screen slot (codex-modecontext-design.md). The slot is
 // the single world's entire memory — one concrete item, independent of the
 // builder pane tree. These tests lock the state semantics: forgiving parse,
-// seed-once, deletion reconciliation, and the UNDO/RESET_FLAT world-isolation.
+// selected-tab handoff, deletion reconciliation, and UNDO/RESET_FLAT isolation.
 
 function reduce(state, action) { return paneModel.workspaceReducer(state, action) }
 function init(ws) { return paneModel.initialWorkspaceState(ws) }
@@ -145,39 +145,35 @@ test('activeKeyForOwner treats a legacy absent slot as empty — never the focus
   )
 })
 
-// ── Seed-once on first builder→single switch ─────────────────────────────────
+// ── Builder→Standard selected-tab handoff ─────────────────────────────────
 
-test('SET_VIEW_MODE to single seeds the slot from the focused item, once', () => {
-  const ws = tiledBuilder() // focused chat 5
-  // Model a legacy uninitialized builder (no slot) so the first builder→single toggle
-  // must seed from focus — a fresh seed now pre-fills the slot, which would bypass it.
-  delete ws.singleScreen
+test('SET_VIEW_MODE to single selects the focused Builder tab on every exit', () => {
+  const ws = { ...tiledBuilder(), singleScreen: { kind: 'app', id: '42' } }
   const s1 = reduce(init(ws), { type: 'SET_VIEW_MODE', mode: 'single' })
-  assert.deepEqual(s1.ws.singleScreen, { kind: 'chat', id: '5' }, 'seeded from focus')
-  // Back to panes, focus the app, back to single: the slot is NOT reseeded.
+  assert.deepEqual(s1.ws.singleScreen, { kind: 'chat', id: '5' },
+    'the focused chat replaces the older Standard app')
+  // Back to panes, select the sibling app, then exit again: the current Builder
+  // selection wins instead of the chat that Standard most recently displayed.
   const s2 = reduce(s1, { type: 'SET_VIEW_MODE', mode: 'panes' })
   const appPane = paneModel.paneOf(s2.ws, 'app:42')
   const s3 = reduce(s2, { type: 'FOCUS', paneId: appPane.id })
   const s4 = reduce(s3, { type: 'SET_VIEW_MODE', mode: 'single' })
-  assert.deepEqual(s4.ws.singleScreen, { kind: 'chat', id: '5' },
-    'builder focus change never rewrites the single screen')
+  assert.deepEqual(s4.ws.singleScreen, { kind: 'app', id: '42' },
+    'the newly selected Builder app becomes the Standard screen')
 })
 
-test('seeding a Settings-focused builder pane uses its underlying concrete tab', () => {
-  let ws = paneModel.seedFromFlatTabs([makeTab('chat', '5')])
-  // Model a legacy uninitialized builder (no slot) so the toggle seeds from focus and
-  // exercises the Settings-skip in focusedSlotSeed rather than the pre-seeded slot.
-  delete ws.singleScreen
+test('exiting a Settings-focused Builder pane uses its underlying concrete tab', () => {
+  let ws = builderSeed([makeTab('chat', '5')])
   ws = paneModel.openTab(ws, tabModel.settingsTab(), { paneId: ws.focusedPaneId, activate: true })
   const s = reduce(init(ws), { type: 'SET_VIEW_MODE', mode: 'single' })
   assert.deepEqual(s.ws.singleScreen, { kind: 'chat', id: '5' },
     'Settings itself is skipped without blanking the single world')
 })
 
-test('seedSingleScreenIfAbsent leaves an explicit null untouched', () => {
+test('the Builder exit replaces an explicitly empty Standard slot', () => {
   const ws = { ...tiledBuilder(), singleScreen: null }
-  const seeded = paneModel.seedSingleScreenIfAbsent(ws)
-  assert.equal(seeded, ws, 'an initialized empty screen is never reseeded from focus')
+  const selected = paneModel.selectFocusedBuilderTabForStandard(ws)
+  assert.deepEqual(selected.singleScreen, { kind: 'chat', id: '5' })
 })
 
 // ── SET_SINGLE_SCREEN — the single world's one navigation write ──────────────
