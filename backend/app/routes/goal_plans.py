@@ -173,7 +173,7 @@ async def clear_presented_goal(
   principal: Principal = Depends(get_owner_or_chat_embed_principal),
   db: Session = Depends(get_db),
 ):
-  """Stop and dismiss one exact Goal without creating a chat message."""
+  """Dismiss one exact Goal; stop execution only while work is unfinished."""
   require_chat_embed_operation(principal, "chat:stop")
   get_active_chat_for_principal(db, chat_id, principal)
   from app.chat import clear_goal_for

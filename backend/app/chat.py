@@ -2341,56 +2341,72 @@ async def stop_chat_for(
 
 
 async def clear_goal_for(chat_id: str, expected_goal_id: str) -> dict:
-  """Stop one Goal execution and dismiss its exact durable identity.
+  """Dismiss one exact Goal, stopping only work that remains unfinished.
 
-  Unlike ordinary Stop, this preserves the pending queue and does not bump the
-  chat generation. The interrupted runner therefore performs its normal
-  terminal handoff, including starting real owner follow-ups already queued
-  behind the Goal. The writer command then suppresses only the cleared Goal;
-  its transcript, plan, and metrics remain durable history.
+  A plan whose tasks and delegations are all settled is presentation-only: its
+  physical turn may still be composing the final response and must finish
+  normally. An unfinished Goal clear retains the existing cancellation
+  behavior. Unlike ordinary Stop, that path preserves the pending queue and
+  does not bump the chat generation, so real owner follow-ups still hand off
+  normally. Both paths retain the transcript, plan, and metrics as history.
   """
   async with chat_queue.get_transition_lock(chat_id):
     # Fence a stale confirmation before touching any live runner. The writer
     # repeats this exact-id check when it commits the dismissal, so a newer Goal
     # that appears during interruption is also preserved rather than hidden.
     from app.database import SessionLocal
-    from app.goal_plans import presented_goal
+    from app.goal_plans import (
+      presented_goal_rows,
+      serialize_goal,
+      serialize_plan,
+    )
     with SessionLocal() as state_db:
-      current_goal = presented_goal(state_db, chat_id)
+      goal_rows = presented_goal_rows(state_db, chat_id)
+      current_goal = (
+        serialize_goal(state_db, *goal_rows) if goal_rows is not None else None
+      )
+      current_plan = (
+        serialize_plan(state_db, *goal_rows) if goal_rows is not None else None
+      )
     if current_goal is None:
       return {"status": "missing", "goal_id": None}
     if current_goal["id"] != expected_goal_id:
       return {"status": "conflict", "goal_id": current_goal["id"]}
 
-    handles = registry.get_handles(chat_id)
-    all_stopped = True
-    for handle in handles:
-      clear_goal = getattr(handle, "clear_goal", None)
-      if callable(clear_goal):
-        try:
-          await clear_goal()
-          stopped = True
-        except asyncio.CancelledError:
-          raise
-        except Exception:
-          _get_logger().warning(
-            "direct Goal clear failed chat_id=%s kind=%s",
-            chat_id, getattr(handle, "kind", "?"), exc_info=True,
+    plan_complete = bool(
+      current_plan is not None and current_plan["summary"]["can_complete"]
+    )
+    if not plan_complete:
+      handles = registry.get_handles(chat_id)
+      all_stopped = True
+      for handle in handles:
+        clear_goal = getattr(handle, "clear_goal", None)
+        if callable(clear_goal):
+          try:
+            await clear_goal()
+            stopped = True
+          except asyncio.CancelledError:
+            raise
+          except Exception:
+            _get_logger().warning(
+              "direct Goal clear failed chat_id=%s kind=%s",
+              chat_id, getattr(handle, "kind", "?"), exc_info=True,
+            )
+            stopped = False
+        else:
+          stopped, _ = await _stop_handle_with_escalation(
+            chat_id, handle, source="clear_goal_for",
           )
-          stopped = False
-      else:
-        stopped, _ = await _stop_handle_with_escalation(
-          chat_id, handle, source="clear_goal_for",
-        )
-      all_stopped = all_stopped and stopped
-    if not all_stopped:
-      return {"status": "still_running", "goal_id": expected_goal_id}
-    questions.cancel(chat_id)
-    from app import secure_inputs
-    secure_inputs.cancel_chat(chat_id)
+        all_stopped = all_stopped and stopped
+      if not all_stopped:
+        return {"status": "still_running", "goal_id": expected_goal_id}
+      questions.cancel(chat_id)
+      from app import secure_inputs
+      secure_inputs.cancel_chat(chat_id)
     return await _await_ack(get_writer().submit(ClearPresentedGoal(
       chat_id=chat_id,
       expected_goal_id=expected_goal_id,
+      preserve_execution=plan_complete,
     )))
 
 
