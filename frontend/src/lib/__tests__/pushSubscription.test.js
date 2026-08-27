@@ -134,6 +134,20 @@ function fakePush() {
   return push
 }
 
+// Yield the macrotask queue until `predicate()` holds. subscribeToPush reaches
+// the refreshed worker through checkForUpdatedWorker's own setTimeout(0) hop,
+// which is not ordered against a single setImmediate — so a fixed one-tick wait
+// occasionally observed the worker before its activation listener was attached.
+// Waiting on the observable condition is deterministic; the tick budget keeps a
+// genuine regression failing fast instead of hanging.
+async function waitForCondition(predicate, { maxTicks = 50 } = {}) {
+  for (let tick = 0; tick <= maxTicks; tick += 1) {
+    if (predicate()) return
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+  throw new Error('waitForCondition: predicate not satisfied within tick budget')
+}
+
 test('the push worker is registered inside the shell PWA scope', async () => {
   const container = fakeContainer()
   await subscribeToPush({ container, push: fakePush() })
@@ -243,7 +257,7 @@ test('an existing worker refresh waits for its replacement before subscribing',
     const push = fakePush()
 
     const done = subscribeToPush({ container, push })
-    await new Promise((resolve) => setImmediate(resolve))
+    await waitForCondition(() => worker.listeners.length === 1)
 
     assert.equal(container.pushWorker.updateCalls, 1)
     assert.deepEqual(push.sent, [], 'does not subscribe through the stale active worker')
@@ -266,7 +280,7 @@ test('a replacement published after update resolves is still awaited', async () 
 
   const done = subscribeToPush({ container, push })
   await container.updatePublished
-  await new Promise((resolve) => setImmediate(resolve))
+  await waitForCondition(() => worker.listeners.length === 1)
 
   assert.deepEqual(push.sent, [], 'does not miss the queued worker announcement')
   assert.equal(worker.listeners.length, 1, 'waits for the late-published worker')
