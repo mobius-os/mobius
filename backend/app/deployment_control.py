@@ -390,13 +390,28 @@ async def read_rebuild_status() -> RebuildStatus:
 
 async def request_rebuild() -> RebuildStatus:
   deployment = platform_activation.deployment_kind()
-  if deployment != "railway" and not _configured():
-    raise DeploymentControlError(
-      "not_configured",
-      "Finish the one-time host setup by running sudo "
-      "scripts/install-rebuild-helper.sh from the trusted Möbius checkout.",
-      status_code=409,
-    )
+  if deployment != "railway":
+    if not _configured():
+      raise DeploymentControlError(
+        "not_configured",
+        "Finish the one-time host setup by running sudo "
+        "scripts/install-rebuild-helper.sh from the trusted Möbius checkout.",
+        status_code=409,
+      )
+    host_status = await asyncio.to_thread(_read_host_status)
+    if not _current_handoff(host_status):
+      raise DeploymentControlError(
+        "controller_upgrade_required",
+        _UPGRADE_MESSAGE,
+        status_code=409,
+      )
+    current = _normalize_status(host_status)
+    if current["state"] in _ACTIVE_STATES:
+      raise DeploymentControlError(
+        "already_running",
+        "A container replacement is already running.",
+        status_code=409,
+      )
   expected_sha = _expected_upstream_sha()
   if not expected_sha:
     raise DeploymentControlError(
@@ -414,21 +429,6 @@ async def request_rebuild() -> RebuildStatus:
     )
   if deployment == "railway":
     return await _request_managed_rebuild(expected_sha)
-
-  host_status = await asyncio.to_thread(_read_host_status)
-  if not _current_handoff(host_status):
-    raise DeploymentControlError(
-      "controller_upgrade_required",
-      _UPGRADE_MESSAGE,
-      status_code=409,
-    )
-  current = _normalize_status(host_status)
-  if current["state"] in _ACTIVE_STATES:
-    raise DeploymentControlError(
-      "already_running",
-      "A container replacement is already running.",
-      status_code=409,
-    )
   await asyncio.to_thread(_write_request, expected_sha)
   return _normalize_status({
     "state": "queued",
