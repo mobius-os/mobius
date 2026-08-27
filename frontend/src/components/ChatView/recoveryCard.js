@@ -6,9 +6,11 @@ export function ownsRecoveryAction({
   lastEntryIndex,
   isLastMessage,
   canResume,
+  questionOwnsTurn = false,
 }) {
   return !!(
     block?.resumable
+    && !questionOwnsTurn
     && isLastMessage
     && canResume
     && entryIndex === lastEntryIndex

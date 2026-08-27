@@ -141,6 +141,11 @@ test('only the visible tail block owns recovery controls', () => {
   }
   assert.equal(ownsRecoveryAction({ ...context, entryIndex: 2 }), false)
   assert.equal(ownsRecoveryAction({ ...context, entryIndex: 3 }), true)
+  assert.equal(
+    ownsRecoveryAction({ ...context, entryIndex: 3, questionOwnsTurn: true }),
+    false,
+    'an unanswered question owns the turn ahead of a resumable tail pause',
+  )
   assert.equal(ownsRecoveryAction({ ...context, entryIndex: 3, isLastMessage: false }), false)
   assert.equal(ownsRecoveryAction({ ...context, entryIndex: 3, canResume: false }), false)
 })

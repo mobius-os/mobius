@@ -195,6 +195,13 @@ function MsgContentInner({
     const lastEntryIdx = finalEntries.length
       ? finalEntries[finalEntries.length - 1].idx
       : -1
+    // A durable unanswered question remains the only action that can advance
+    // this turn, even when pause normalization places a resumable restart note
+    // at the visible tail. Recovery copy and controls must use that same owner
+    // rather than promising a second, impossible continuation path.
+    const questionOwnsTurn = finalEntries.some(({ item }) => (
+      isQuestionAnswerable(item)
+    ))
     const assistantMarkdownByIndex = new Map(
       msg.role !== 'assistant' ? [] : finalEntries.flatMap(({ item, idx }) => {
         if (item.type !== 'text' || !item.content) return []
@@ -337,6 +344,7 @@ function MsgContentInner({
           lastEntryIndex: lastEntryIdx,
           isLastMessage: isLastMsg,
           canResume: !!onResume,
+          questionOwnsTurn,
         })
         const parked = !!block.pause?.resets_at
         const automaticContinuation = recoveryOwner && parked && !!autoResumeEnabled
