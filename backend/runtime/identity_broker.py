@@ -19,6 +19,7 @@ import socketserver
 import stat
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,9 @@ GATEWAY_BASE_URL = os.environ.get(
   # authenticate every exact gateway route.
   "MOBIUS_AGENT_GATEWAY_URL", "https://www.mobius.you"
 ).rstrip("/")
+COMMUNITY_BASE_URL = os.environ.get(
+  "MOBIUS_COMMUNITY_REGISTRY_URL", IDENTITY_BASE_URL
+).rstrip("/")
 MAX_BODY = 2_000_000
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$")
 INSTANCE_RE = re.compile(r"^mob_[A-Za-z0-9_-]{3,160}$")
@@ -67,6 +71,57 @@ INFERENCE_ROUTES = {
     "inference:responses", "mobius-agent-gateway"
   ),
 }
+
+_COMMUNITY_ROUTES = (
+  ("GET", re.compile(r"/v1/community/apps"), "community:read"),
+  ("GET", re.compile(r"/v1/community/publications"), "community:read"),
+  ("GET", re.compile(r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}"), "community:read"),
+  (
+    "GET",
+    re.compile(
+      r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/revisions/"
+      r"[A-Za-z0-9_:-]{8,200}"
+    ),
+    "community:read",
+  ),
+  ("POST", re.compile(r"/v1/community/apps"), "community:publish"),
+  (
+    "POST",
+    re.compile(
+      r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/revisions/"
+      r"[A-Za-z0-9_:-]{8,200}/installs"
+    ),
+    "community:install",
+  ),
+)
+
+
+def _community_scope(method: str, route_path: str, query: str) -> str | None:
+  scope = next((
+    declared_scope
+    for declared_method, pattern, declared_scope in _COMMUNITY_ROUTES
+    if method == declared_method and pattern.fullmatch(route_path)
+  ), None)
+  if scope is None:
+    return None
+  if not query:
+    return scope
+  if method != "GET" or route_path not in {
+    "/v1/community/apps", "/v1/community/publications",
+  }:
+    return None
+  pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
+  allowed = (
+    {"q", "limit", "offset"}
+    if route_path == "/v1/community/apps"
+    else {"limit", "offset"}
+  )
+  keys = [key for key, _value in pairs]
+  if any(key not in allowed for key in keys) or len(keys) != len(set(keys)):
+    return None
+  if urllib.parse.urlencode(sorted(pairs)) != query:
+    return None
+  return scope
 
 
 def _b64(value: bytes) -> str:
@@ -375,6 +430,7 @@ class Broker:
     path: str,
     body: bytes,
     request_id: str,
+    idempotency_key: str = "",
   ) -> str:
     with self.lock:
       state = dict(self.state or {})
@@ -398,6 +454,10 @@ class Broker:
       "exp": now + 60,
       "audit_context": {"source": "runtime-broker"},
     }
+    if idempotency_key:
+      claims["idempotency_key_sha256"] = hashlib.sha256(
+        idempotency_key.encode("utf-8")
+      ).hexdigest()
     response = self.client.post(
       f"{IDENTITY_BASE_URL}/identity/capabilities",
       json={"assertion": self._sign(claims)},
@@ -417,12 +477,38 @@ class Broker:
     path: str,
     body: bytes,
     headers: dict[str, str],
+    allow_community: bool = False,
   ) -> httpx.Response:
-    route = INFERENCE_ROUTES.get((method, path))
+    split = urllib.parse.urlsplit(path)
+    route_path = split.path
+    if not route_path.startswith("/") or split.fragment:
+      raise FileNotFoundError("broker route not found")
+    declared = INFERENCE_ROUTES.get((method, route_path)) if not split.query else None
+    if declared is not None:
+      scope, audience = declared
+      route = (scope, audience, GATEWAY_BASE_URL)
+    else:
+      community_scope = (
+        _community_scope(method, route_path, split.query)
+        if allow_community
+        else None
+      )
+      route = (
+        (community_scope, "mobius-community-registry", COMMUNITY_BASE_URL)
+        if community_scope is not None
+        else None
+      )
     if route is None:
       raise FileNotFoundError("broker route not found")
-    scope, audience = route
+    scope, audience, target = route
     request_id = self._request_id(method, path, body, headers)
+    idempotency_key = headers.get("idempotency-key", "")
+    if idempotency_key and not re.fullmatch(
+      r"[A-Za-z0-9][A-Za-z0-9._:-]{15,127}", idempotency_key
+    ):
+      raise ValueError("invalid idempotency key")
+    if audience == "mobius-community-registry" and method != "GET" and not idempotency_key:
+      raise ValueError("an idempotency key is required")
     capability = self._capability(
       audience=audience,
       scope=scope,
@@ -430,6 +516,7 @@ class Broker:
       path=path,
       body=body,
       request_id=request_id,
+      idempotency_key=idempotency_key,
     )
     forwarded = {
       "Authorization": f"Bearer {capability}",
@@ -441,12 +528,14 @@ class Broker:
     metadata = headers.get("x-codex-turn-metadata")
     if metadata:
       forwarded["x-codex-turn-metadata"] = metadata
+    if idempotency_key:
+      forwarded["Idempotency-Key"] = idempotency_key
     request = self.client.build_request(
       method,
-      GATEWAY_BASE_URL + path,
+      target + path,
       content=body if body else None,
       headers=forwarded,
-      timeout=None if path == "/v1/responses" else 30.0,
+      timeout=None if route_path == "/v1/responses" else 30.0,
     )
     # Do not buffer Responses API streams in the privileged broker. Besides
     # preserving token-by-token UX, this bounds the broker's memory footprint
@@ -472,12 +561,12 @@ class _Handler(BaseHTTPRequestHandler):
     self.end_headers()
     self.wfile.write(body)
 
-  def _body(self) -> bytes:
+  def _body(self, *, maximum: int = MAX_BODY) -> bytes:
     try:
       length = int(self.headers.get("content-length", "0"))
     except ValueError as exc:
       raise ValueError("invalid content length") from exc
-    if length < 0 or length > MAX_BODY:
+    if length < 0 or length > maximum:
       raise ValueError("request body is too large")
     return self.rfile.read(length)
 
@@ -487,6 +576,7 @@ class _Handler(BaseHTTPRequestHandler):
     path = self.path
     route_path = path.split("?", 1)[0]
     is_unix = bool(getattr(self.server, "is_unix", False))
+    body_limit = MAX_BODY
     try:
       if is_unix and route_path.startswith("/identity") and path != route_path:
         raise FileNotFoundError("broker route not found")
@@ -504,13 +594,14 @@ class _Handler(BaseHTTPRequestHandler):
         subject = value.get("expected_subject") if isinstance(value, dict) else None
         self._json(200, broker.unlink(str(subject or "")))
         return
-      body = self._body()
+      body = self._body(maximum=body_limit)
       incoming = {key.lower(): value for key, value in self.headers.items()}
       upstream = broker.proxy(
         method=method,
         path=path,
         body=body,
         headers=incoming,
+        allow_community=is_unix,
       )
       try:
         self.send_response(upstream.status_code)

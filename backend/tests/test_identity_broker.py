@@ -311,12 +311,96 @@ def test_gateway_capability_wraps_the_exact_signed_request_binding(broker):
   )
 
 
-def test_handler_only_supports_identity_and_inference_http_methods():
+def test_handler_supports_allowlisted_community_http_methods():
   handler = broker_module._Handler
   assert handler.do_GET is handler._handle
   assert handler.do_POST is handler._handle
   assert not hasattr(handler, "do_PUT")
   assert not hasattr(handler, "do_DELETE")
+
+
+def test_community_proxy_is_uds_only_and_binds_the_exact_request(
+  broker, monkeypatch,
+):
+  seen = {}
+
+  class FakeClient:
+    def build_request(self, method, url, **kwargs):
+      seen["url"] = url
+      seen["headers"] = kwargs["headers"]
+      return httpx.Request(method, url, content=kwargs.get("content"), headers=kwargs["headers"])
+
+    def send(self, request, *, stream):
+      return httpx.Response(200, request=request, stream=httpx.ByteStream(b"{}"))
+
+    def close(self):
+      return None
+
+  capabilities = []
+  broker.client.close()
+  broker.client = FakeClient()
+  monkeypatch.setattr(
+    broker, "_capability",
+    lambda **kwargs: capabilities.append(kwargs) or "one-use",
+  )
+  target = "/v1/community/apps?limit=25&offset=0&q=latex"
+
+  with pytest.raises(FileNotFoundError):
+    broker.proxy(method="GET", path=target, body=b"", headers={})
+
+  response = broker.proxy(
+    method="GET", path=target, body=b"", headers={}, allow_community=True,
+  )
+  response.close()
+
+  assert seen["url"] == broker_module.COMMUNITY_BASE_URL + target
+  assert capabilities[0]["audience"] == "mobius-community-registry"
+  assert capabilities[0]["scope"] == "community:read"
+  assert capabilities[0]["path"] == target
+
+  for forbidden in (
+    "/v1/community/apps?offset=0&limit=25",
+    "/v1/community/apps?admin=true",
+    "/v1/community/apps/app_12345678?limit=2",
+    "/v1/community/private-audit",
+  ):
+    with pytest.raises(FileNotFoundError):
+      broker.proxy(
+        method="GET", path=forbidden, body=b"", headers={},
+        allow_community=True,
+      )
+
+
+def test_community_mutations_require_and_forward_idempotency(broker, monkeypatch):
+  seen = {}
+
+  class FakeClient:
+    def build_request(self, method, url, **kwargs):
+      seen["headers"] = kwargs["headers"]
+      return httpx.Request(method, url, content=kwargs.get("content"), headers=kwargs["headers"])
+
+    def send(self, request, *, stream):
+      return httpx.Response(200, request=request, stream=httpx.ByteStream(b"{}"))
+
+    def close(self):
+      return None
+
+  broker.client.close()
+  broker.client = FakeClient()
+  monkeypatch.setattr(broker, "_capability", lambda **_kwargs: "one-use")
+  path = "/v1/community/apps"
+  with pytest.raises(ValueError, match="idempotency key is required"):
+    broker.proxy(
+      method="POST", path=path, body=b'{"github":{}}', headers={},
+      allow_community=True,
+    )
+  response = broker.proxy(
+    method="POST", path=path, body=b'{"github":{}}',
+    headers={"idempotency-key": "publish:1234567890abcdef"},
+    allow_community=True,
+  )
+  response.close()
+  assert seen["headers"]["Idempotency-Key"] == "publish:1234567890abcdef"
 
 
 def test_unix_handler_rejects_identity_queries_and_forwards_inference():
@@ -330,7 +414,7 @@ def test_unix_handler_rejects_identity_queries_and_forwards_inference():
     def identity(self):
       return {"linked": True}
 
-    def proxy(self, *, method, path, body, headers):
+    def proxy(self, *, method, path, body, headers, allow_community=False):
       seen.append((method, path, body))
       request = httpx.Request(method, "https://central.test" + path)
       payload = json.dumps({"method": method}).encode()

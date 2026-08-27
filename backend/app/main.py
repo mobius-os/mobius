@@ -76,7 +76,7 @@ from app.routes import (
   public_apps_router,
   secrets_router, self_reminders_router, settings_router, skills_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
-  theme_router, uploads_router, platform_router,
+  theme_router, uploads_router, platform_router, community_router,
   published_router,
   connect_router,
 )
@@ -750,6 +750,7 @@ app.include_router(local_services_router)
 app.include_router(connect_router)
 app.include_router(client_error_router)
 app.include_router(client_signal_router)
+app.include_router(community_router)
 app.include_router(settings_router)
 app.include_router(platform_router)
 app.include_router(uploads_router)
