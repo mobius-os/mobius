@@ -104,7 +104,6 @@ export async function loadChatArtifacts(
   if (typeof request !== 'function') {
     throw new Error('Artifact loading requires a request function.')
   }
-  const relatedAppsPromise = appsMaintainedByChat(chatId, request, signal)
   const records = []
   let cursor = null
   do {
@@ -122,5 +121,6 @@ export async function loadChatArtifacts(
     }
     cursor = page?.next_cursor || null
   } while (cursor)
-  return artifactsTouchedByChat(records, chatId, await relatedAppsPromise)
+  const relatedApps = await appsMaintainedByChat(chatId, request, signal)
+  return artifactsTouchedByChat(records, chatId, relatedApps)
 }

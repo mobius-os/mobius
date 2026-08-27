@@ -130,8 +130,8 @@ test('artifact loading resolves only apps maintained by the current chat', async
   })
   assert.deepEqual(loaded.map(item => item.id), ['store-concepts-a690'])
   assert.deepEqual(calls, [
-    '/apps/',
     '/storage/apps-list/88/artifacts/?limit=500&include_content=true',
+    '/apps/',
   ])
 })
 
