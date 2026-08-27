@@ -211,6 +211,7 @@ def resolve_owner_only(token: str, db: Session) -> models.Owner:
 
 def resolve_media_or_header_owner(
   token: str, db: Session, *, chat_id: str, from_query: bool,
+  allow_app_output: bool = False,
 ) -> models.Owner:
   """Resolves an owner for media-serving routes.
 
@@ -243,7 +244,10 @@ def resolve_media_or_header_owner(
         ),
       )
     return owner
-  if scope not in {"media", "chat_embed_media"}:
+  allowed_scopes = {"media", "chat_embed_media"}
+  if allow_app_output:
+    allowed_scopes.add("app_chat_output_media")
+  if scope not in allowed_scopes:
     raise HTTPException(status_code=403, detail="Token scope is not valid for media.")
   if payload.get("media_chat") != chat_id:
     raise HTTPException(
@@ -287,6 +291,29 @@ def resolve_media_or_header_owner(
       raise HTTPException(
         status_code=401,
         detail="Embedded-chat media session is no longer valid.",
+      )
+  elif scope == "app_chat_output_media":
+    app_id = payload.get("app_id")
+    app_nonce = payload.get("app_nonce")
+    app = db.query(models.App).filter(
+      models.App.id == app_id,
+      models.App.deleted_at.is_(None),
+    ).first() if isinstance(app_id, int) else None
+    chat = db.query(models.Chat).filter(
+      models.Chat.id == chat_id,
+      models.Chat.deleted_at.is_(None),
+    ).first()
+    if (
+      not isinstance(app_id, int)
+      or not isinstance(app_nonce, str)
+      or app is None
+      or app.token_nonce != app_nonce
+      or chat is None
+      or chat.created_by_app_id != app_id
+    ):
+      raise HTTPException(
+        status_code=401,
+        detail="App-chat output media token is no longer valid.",
       )
   return owner
 

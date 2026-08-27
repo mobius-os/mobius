@@ -5,11 +5,7 @@ from urllib.parse import unquote, urlparse
 import re
 
 REQUIRED_STRING_FIELDS = ("id", "name", "version", "description", "entry")
-# Capability permissions this Möbius build recognizes. An app MAY list any of
-# these in `requires` to demand the platform actually provides them; requiring a
-# name absent here fails the install loudly instead of granting nothing in
-# silence. Extending a capability (e.g. the identity bridge) adds its name here.
-RECOGNIZED_CAPABILITIES = (
+BOOLEAN_PERMISSION_FIELDS = (
   "manage_apps",
   "manage_skills",
   "github_access",
@@ -18,7 +14,18 @@ RECOGNIZED_CAPABILITIES = (
   "connections_manage",
   "connect_manage",
   "identity_manage",
+  "owner_screenshot",
   "railway_manage",
+)
+# Capabilities this Möbius build recognizes. An app MAY list any of these in
+# `requires` to demand the platform actually provides them; requiring a name
+# absent here fails the install loudly instead of granting nothing in silence.
+# Keep this compatibility registry distinct from boolean permission validation:
+# some capabilities, such as credentialed_fetch, use a structured declaration.
+RECOGNIZED_CAPABILITIES = (
+  *BOOLEAN_PERMISSION_FIELDS,
+  "credentialed_fetch",
+  "app_chat_output_media",
 )
 SOURCE_FILES_COUNT_MAX = 50
 SKILLS_COUNT_MAX = 5
@@ -229,9 +236,70 @@ def validate_manifest_contract(manifest) -> None:
       f"Manifest permission {names} has been removed; server-side app jobs "
       "run as ordinary Möbius processes."
     )
-  for field in RECOGNIZED_CAPABILITIES:
+  for field in BOOLEAN_PERMISSION_FIELDS:
     if field in permissions and not isinstance(permissions[field], bool):
       _fail(f"Manifest `permissions.{field}` must be a boolean.")
+
+  credentialed_fetch = permissions.get("credentialed_fetch", {})
+  if not isinstance(credentialed_fetch, Mapping):
+    _fail("Manifest `permissions.credentialed_fetch` must be an object.")
+  if len(credentialed_fetch) > 8:
+    _fail("Manifest `permissions.credentialed_fetch` allows at most 8 providers.")
+  provider_name = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+  secret_name = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+  for provider, config in credentialed_fetch.items():
+    label = f"permissions.credentialed_fetch.{provider}"
+    if not isinstance(provider, str) or not provider_name.fullmatch(provider):
+      _fail("Credentialed-fetch provider names must be lowercase slugs.")
+    if not isinstance(config, Mapping):
+      _fail(f"Manifest `{label}` must be an object.")
+    config_keys = set(config)
+    base_keys = {"secret", "origin", "paths"}
+    placement_keys = config_keys - base_keys
+    if (
+      not base_keys.issubset(config_keys)
+      or placement_keys not in ({"query_parameter"}, {"path_prefix"})
+    ):
+      _fail(
+        f"Manifest `{label}` must contain secret, origin, paths, and exactly "
+        "one credential placement: query_parameter or path_prefix."
+      )
+    if not isinstance(config["secret"], str) or not secret_name.fullmatch(config["secret"]):
+      _fail(f"Manifest `{label}.secret` is invalid.")
+    origin = config["origin"]
+    if not isinstance(origin, str) or not re.fullmatch(
+      r"https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?", origin
+    ):
+      _fail(f"Manifest `{label}.origin` must be an HTTPS origin.")
+    paths = config["paths"]
+    if (
+      not isinstance(paths, list) or not paths or len(paths) > 16
+      or any(
+        not isinstance(path, str) or not path.startswith("/")
+        or "?" in path or "#" in path or ".." in path
+        for path in paths
+      )
+    ):
+      _fail(f"Manifest `{label}.paths` must be 1–16 absolute path prefixes.")
+    if "query_parameter" in config:
+      query_parameter = config["query_parameter"]
+      if not isinstance(query_parameter, str) or not re.fullmatch(
+        r"[A-Za-z][A-Za-z0-9_.-]{0,63}", query_parameter
+      ):
+        _fail(f"Manifest `{label}.query_parameter` is invalid.")
+    else:
+      path_prefix = config["path_prefix"]
+      if not isinstance(path_prefix, str) or not re.fullmatch(
+        r"/[A-Za-z0-9._~-]{1,63}", path_prefix
+      ):
+        _fail(f"Manifest `{label}.path_prefix` is invalid.")
+      if not any(
+        path == path_prefix + "/" or path.startswith(path_prefix + "/")
+        for path in paths
+      ):
+        _fail(
+          f"Manifest `{label}.paths` must include a path beneath path_prefix."
+        )
 
   # An app declares the platform capabilities it cannot function without. A name
   # this build does not recognize means the running Möbius predates the feature

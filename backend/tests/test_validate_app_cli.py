@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
+from app.app_capabilities import contract_from_manifest
 from app.install import _validate_manifest
 from app.manifest_contract import ManifestContractError, validate_manifest_contract
 
@@ -41,6 +42,44 @@ def test_validator_accepts_an_installable_app(tmp_path):
   result = _run(tmp_path)
   assert result.returncode == 0, result.stderr
   assert "OK" in result.stdout
+
+
+def test_manifest_accepts_one_path_prefix_credential_placement(tmp_path):
+  _write_app(tmp_path, "export default function App(){ return <div /> }")
+  manifest = json.loads((tmp_path / "mobius.json").read_text())
+  manifest["permissions"] = {
+    "credentialed_fetch": {
+      "telegram": {
+        "secret": "bot-token",
+        "origin": "https://api.telegram.org",
+        "paths": ["/bot/"],
+        "path_prefix": "/bot",
+      },
+    },
+  }
+  validate_manifest_contract(manifest)
+  _validate_manifest(manifest)
+  assert contract_from_manifest(manifest)["data"]["credentialed_fetch"] == {
+    "telegram": manifest["permissions"]["credentialed_fetch"]["telegram"]
+  }
+
+
+def test_manifest_rejects_two_credential_placements(tmp_path):
+  _write_app(tmp_path, "export default function App(){ return <div /> }")
+  manifest = json.loads((tmp_path / "mobius.json").read_text())
+  manifest["permissions"] = {
+    "credentialed_fetch": {
+      "telegram": {
+        "secret": "bot-token",
+        "origin": "https://api.telegram.org",
+        "paths": ["/bot/"],
+        "path_prefix": "/bot",
+        "query_parameter": "token",
+      },
+    },
+  }
+  with pytest.raises(ManifestContractError, match="exactly one"):
+    validate_manifest_contract(manifest)
 
 
 def test_validator_stays_zero_configuration_outside_a_runtime(tmp_path):
@@ -164,7 +203,13 @@ def test_removed_job_authority_permissions_fail_clearly(
 def test_requires_accepts_recognized_capabilities(tmp_path):
   _write_app(tmp_path, "export default function App(){ return <div /> }")
   manifest = json.loads((tmp_path / "mobius.json").read_text())
-  manifest["requires"] = ["identity_manage", "railway_manage"]
+  manifest["requires"] = [
+    "identity_manage",
+    "railway_manage",
+    "credentialed_fetch",
+    "app_chat_output_media",
+    "owner_screenshot",
+  ]
   validate_manifest_contract(manifest)  # does not raise on a build that has them
 
 

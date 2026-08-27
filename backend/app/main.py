@@ -627,7 +627,7 @@ app.add_middleware(
   # All sensitive endpoints are independently protected by JWT.
   allow_origins=[settings.frontend_origin, "null"],
   allow_credentials=False,
-  allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allow_methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   # The app runtime uses X-Mobius-Version to opt into ETag reads, then
   # If-Match / If-None-Match for conflict-safe writes. Sandboxed app frames
   # have the opaque `null` origin, so Chromium preflights these non-simple
