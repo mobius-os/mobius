@@ -1,7 +1,23 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { deriveRenderedAppIds } from '../appFrameCache.js'
+import {
+  BASE_APP_CACHE_MAX,
+  HIGH_MEMORY_APP_CACHE_MAX,
+  appFrameCacheMaxForDeviceMemory,
+  deriveRenderedAppIds,
+} from '../appFrameCache.js'
+
+test('unknown and lower-memory devices keep the established six-frame budget', () => {
+  assert.equal(appFrameCacheMaxForDeviceMemory(undefined), BASE_APP_CACHE_MAX)
+  assert.equal(appFrameCacheMaxForDeviceMemory(4), BASE_APP_CACHE_MAX)
+  assert.equal(BASE_APP_CACHE_MAX, 6)
+})
+
+test('the highest reported memory tier retains a larger warm working set', () => {
+  assert.equal(appFrameCacheMaxForDeviceMemory(8), HIGH_MEMORY_APP_CACHE_MAX)
+  assert.equal(HIGH_MEMORY_APP_CACHE_MAX, 10)
+})
 
 test('visible app frames remain mounted even when they exceed the warm limit', () => {
   assert.deepEqual(

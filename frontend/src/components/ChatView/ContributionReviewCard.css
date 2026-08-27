@@ -1,11 +1,6 @@
-/* The chat's contribution review card — floated over the transcript above the
-   composer, so approving the work happens where the work happened without its
-   arrival or confirmation moving the text. Deliberately quieter than a chat
-   message: it is a pending action, not part of the conversation. */
+/* Compact reviewed action above the composer. The happy path can publish here;
+   deeper review, grouped work, and recovery open the exact Contribute item. */
 
-/* The floating action layer is pointer-transparent so the transcript remains
-   usable around the card. The real card opts back in here. Without this it
-   renders perfectly and silently ignores every tap. */
 .contrib-card-stack,
 .contrib-card {
   pointer-events: auto;
@@ -24,11 +19,11 @@
 .contrib-card-stack--grouped {
   gap: 0;
   padding: 0;
+  max-height: min(52vh, 520px);
   overflow-y: auto;
   overscroll-behavior: contain;
-  max-height: min(52vh, 520px);
   border: 1px solid var(--border-light);
-  border-radius: 14px;
+  border-radius: 15px;
   background: var(--surface);
 }
 
@@ -36,13 +31,9 @@
   position: sticky;
   top: 0;
   z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
   padding: 12px 14px;
   border-bottom: 1px solid var(--border-light);
-  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  background: var(--surface);
 }
 
 .contrib-card-stack__title {
@@ -56,44 +47,25 @@
   margin-top: 2px;
   color: var(--muted);
   font-size: 0.71875rem;
-  line-height: 1.35;
-}
-
-.contrib-card-stack__count {
-  flex: none;
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
-  color: var(--accent);
-  font-size: 0.75rem;
-  font-weight: 700;
+  line-height: 1.4;
 }
 
 .contrib-card {
-  border: 1px solid var(--border-light);
-  border-left: 2px solid var(--accent);
-  border-radius: 10px;
-  background: var(--surface);
-  padding: 10px 12px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  /* Eases the snap-back and the flight off-screen. Suppressed mid-drag so the
-     card tracks the finger 1:1 instead of lagging behind it. */
-  transition: transform 160ms cubic-bezier(0.2, 0, 0.2, 1),
-              opacity 160ms linear;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--border-light);
+  border-radius: 15px;
+  background: var(--surface);
+  transition:
+    transform 160ms cubic-bezier(0.2, 0, 0.2, 1),
+    opacity 160ms linear;
 }
 
 .contrib-card-stack--grouped .contrib-card {
   flex: none;
-  gap: 5px;
-  padding: 11px 14px 12px;
   border: 0;
-  border-left: 2px solid var(--accent);
   border-radius: 0;
   background: transparent;
 }
@@ -102,58 +74,31 @@
   border-top: 1px solid var(--border-light);
 }
 
-.contrib-card-stack--grouped .contrib-card__badge {
-  margin: 0;
-  padding: 0;
-  border-bottom: 0;
-  background: transparent;
-}
-
-.contrib-card-stack--grouped .contrib-card__details {
-  max-height: none;
-  overflow: visible;
-  overscroll-behavior: auto;
-}
-
 .contrib-card--dragging {
   transition: none;
 }
 
-.contrib-card--stack {
-  border-left-color: color-mix(in srgb, var(--accent) 70%, var(--muted));
-}
-
-/* The status is a full-width header BAND, not a chip beside the text. As a chip
-   it sat next to a summary that wraps to several lines, leaving an obvious hole
-   under the short label. Spanning the card's padding (negative margins cancel it)
-   makes the band read as the card's header and removes that hole entirely. */
-.contrib-card__badge {
+.contrib-card__topline {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  margin: -10px -12px 0;
-  padding: 6px 12px;
-  border-bottom: 1px solid var(--border-light);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-  font-size: 0.6875rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  gap: 12px;
   color: var(--accent);
+  font-size: 0.71875rem;
+  font-weight: 650;
+  line-height: 1.35;
 }
 
-/* The swipe's visible equivalent. This follows the shell's quiet Lucide close
-   controls rather than the heavier filled icon that made the button look off. */
 .contrib-card__dismiss {
-  flex-shrink: 0;
+  flex: none;
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
+  margin: -7px -7px -7px 0;
   padding: 0;
-  border: none;
-  border-radius: 7px;
+  border: 0;
+  border-radius: 8px;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
@@ -161,42 +106,56 @@
 
 @media (hover: hover) {
   .contrib-card__dismiss:hover {
-    background: color-mix(in srgb, var(--text) 10%, transparent);
+    background: color-mix(in srgb, var(--text) 9%, transparent);
     color: var(--text);
   }
 }
 
-.contrib-card__dismiss:focus-visible {
+.contrib-card__dismiss:focus-visible,
+.contrib-card__send:focus-visible,
+.contrib-card__review:focus-visible,
+.contrib-card__failure-detail > summary:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline-offset: 2px;
+}
+
+.contrib-card__summary,
+.contrib-card__meta,
+.contrib-card__payoff,
+.contrib-card__error {
+  margin: 0;
 }
 
 .contrib-card__summary {
-  min-width: 0;
-  font-size: 0.875rem;
-  line-height: 1.35;
   color: var(--text);
+  font-size: 0.875rem;
+  font-weight: 520;
+  line-height: 1.4;
 }
 
-.contrib-card__meta,
-.contrib-card__error {
-  font-size: 0.75rem;
-  line-height: 1.35;
+.contrib-card__meta {
   color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.contrib-card__payoff,
+.contrib-card__error {
+  max-width: 70ch;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.45;
 }
 
 .contrib-card__error {
   color: var(--danger);
 }
 
-/* A failure states itself in one line. The transcript that proves it is
-   available but never the first thing read, and it is capped so a long build
-   log cannot push the card's own actions off the screen. */
 .contrib-card__failure-detail > summary {
   cursor: pointer;
-  font-size: 0.75rem;
-  line-height: 1.35;
   color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
   list-style: none;
 }
 
@@ -206,28 +165,25 @@
 
 .contrib-card__failure-detail > summary::before {
   content: '▸ ';
-  color: var(--muted);
 }
 
 .contrib-card__failure-detail[open] > summary::before {
   content: '▾ ';
 }
 
-/* Shares .contrib-card__body's monospace block styling; only the offset from
-   the summary and the scroll cap differ. */
 .contrib-card__failure-detail > pre {
-  margin-top: 6px;
   max-height: 210px;
+  margin: 6px 0 0;
+  padding: 8px;
   overflow: auto;
-}
-
-/* The motivation the button cannot carry on its own: who actually benefits.
-   Accent-tinted so it reads as encouragement rather than another metadata line,
-   and hidden whenever the card is showing a problem instead. */
-.contrib-card__payoff {
-  font-size: 0.75rem;
-  line-height: 1.35;
-  color: color-mix(in srgb, var(--accent) 78%, var(--text));
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .contrib-card__actions {
@@ -239,15 +195,26 @@
 
 .contrib-card__send {
   flex: 1;
-  min-height: 36px;
-  border: none;
-  border-radius: 8px;
+  min-height: 42px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 10px;
   background: var(--accent);
   color: var(--bg);
   font-family: var(--font);
   font-size: 0.8125rem;
-  font-weight: 600;
+  font-weight: 650;
   cursor: pointer;
+}
+
+@media (hover: hover) {
+  .contrib-card__send:hover:not(:disabled) {
+    filter: brightness(1.06);
+  }
+}
+
+.contrib-card__send:active:not(:disabled) {
+  transform: scale(0.99);
 }
 
 .contrib-card__send:disabled {
@@ -256,104 +223,37 @@
   cursor: default;
 }
 
-.contrib-card__toggle {
-  flex-shrink: 0;
-  min-height: 36px;
-  padding: 0 10px;
+.contrib-card__review {
+  flex: none;
+  min-height: 42px;
+  padding: 0 14px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 10px;
   background: transparent;
   color: var(--muted);
   font-family: var(--font);
   font-size: 0.8125rem;
+  font-weight: 600;
   cursor: pointer;
 }
 
-/* ONE scroller for the whole disclosure. An expanded review can be long (the
-   published text is quoted verbatim), and it floats above the composer, so it
-   must not push the conversation off the screen. Nesting a second scroller
-   inside the quoted text made the two fight on a phone. */
-.contrib-card__details {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding-top: 6px;
-  border-top: 1px solid var(--border-light);
-  max-height: 42vh;
-  overflow: auto;
-  overscroll-behavior: contain;
+@media (hover: hover) {
+  .contrib-card__review:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text) 7%, transparent);
+    color: var(--text);
+  }
 }
 
-.contrib-card__detail-title {
-  font-size: 0.8125rem;
-  font-weight: 600;
-  color: var(--text);
+.contrib-card__review:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
-.contrib-card__detail-line {
+.contrib-card__progress {
+  margin: -2px 0 0;
+  color: var(--muted);
   font-size: 0.75rem;
-  color: var(--muted);
-}
-
-.contrib-card__detail-label {
-  font-size: 0.6875rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
-  color: var(--muted);
-}
-
-.contrib-card__files {
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  font-family: var(--mono);
-  font-size: 0.6875rem;
-  color: var(--text);
-  /* Long paths stay inside the card rather than widening the chat column. */
-  overflow-wrap: anywhere;
-}
-
-.contrib-card__layers {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.contrib-card__layers li {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  font-size: 0.75rem;
-  line-height: 1.35;
-  color: var(--text);
-}
-
-.contrib-card__layers li > span {
-  font-weight: 600;
-}
-
-.contrib-card__layers p {
-  margin: 0;
-  color: var(--muted);
-}
-
-/* Quoted verbatim; it flows inside the disclosure's single scroller above. */
-.contrib-card__body {
-  margin: 0;
-  padding: 8px;
-  border-radius: 6px;
-  background: var(--bg);
-  font-family: var(--mono);
-  font-size: 0.6875rem;
-  line-height: 1.45;
-  color: var(--text);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  line-height: 1.4;
 }
 
 @media (max-width: 560px) {
@@ -362,8 +262,8 @@
   }
 
   .contrib-card-stack--grouped {
+    width: calc(100% - 24px);
     max-height: 46vh;
     margin-inline: 12px;
-    width: calc(100% - 24px);
   }
 }

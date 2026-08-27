@@ -4,6 +4,7 @@ import {
   isMobiusNavState,
   isTopmostAppEntry,
   navEntryId,
+  navEntryIndex,
   navTraversalDirection,
   ownerKeyOf,
   pushNavEntry,
@@ -106,8 +107,9 @@ export const coldRestoredCanvasAppId =
  * Navigation: an ADAPTER above the workspace reducer (design §1 ownership
  * boundary) + drawer-as-virtual-route + custom navStack.
  *
- * **READ ARCHITECTURE.md "Navigation back-stack + drawer model"** and
- * docs/design/split-pane-workspace.md §1/§5 before editing this file.
+ * **READ ARCHITECTURE.md "Workspace model" and "Navigation back-stack +
+ * drawer model"**, plus the focused navigation/workspace tests, before
+ * editing this file.
  *
  * The workspace reducer (paneModel.js) is the single live authority for what is
  * on screen: pane contents, per-pane active tabs, and `focusedPaneId`. This hook
@@ -318,6 +320,11 @@ export default function useNavigation({
   // stays put while traversing iframe-created phantom entries; the next tagged
   // destination can then still be compared with the last shell position.
   const currentNavStateRef = useRef(null)
+  // Highest shell-relative position on the CURRENT forward branch. Every
+  // pushState prunes the browser's former forward branch, so pushShellEntry
+  // replaces (rather than maxes) this value. This gives shortcut-triggered
+  // Forward a shell-owned boundary even where the Navigation API is absent.
+  const furthestNavIndexRef = useRef(navEntryIndex(history.state) ?? 0)
   // Transient shell surfaces (currently the chat image viewer) own real Back
   // sentinels but no route. The callback registry lets handleBack dismiss the
   // exact mounted surface without teaching it about that surface's React state.
@@ -501,6 +508,7 @@ export default function useNavigation({
       appNav,
     })
     currentNavStateRef.current = state
+    furthestNavIndexRef.current = navEntryIndex(state) ?? furthestNavIndexRef.current
     return state
   }, [])
 
@@ -1185,7 +1193,58 @@ export default function useNavigation({
         }
         bootPaneId = workspaceStateRef.current.ws.focusedPaneId
       }
-      if (deepLink?.view === 'canvas' && Number.isFinite(deepLink.appId)) {
+      const claimedReloadDestination = shellReload?.destinationClaimed
+        ? {
+            view: shellReload.activeView,
+            appId: shellReload.activeAppId ?? null,
+            chatId: shellReload.activeChatId ?? null,
+          }
+        : null
+      if (claimedReloadDestination) {
+        if (
+          claimedReloadDestination.view === 'canvas'
+          && Number.isFinite(claimedReloadDestination.appId)
+        ) {
+          bootDeepLink(
+            {
+              view: 'canvas',
+              appId: claimedReloadDestination.appId,
+              chatId: null,
+              paneId: bootPaneId,
+            },
+            tabModel.makeTab('app', claimedReloadDestination.appId),
+          )
+        } else if (
+          claimedReloadDestination.view === 'chat'
+          && claimedReloadDestination.chatId
+        ) {
+          bootDeepLink(
+            {
+              view: 'chat',
+              chatId: claimedReloadDestination.chatId,
+              appId: null,
+              paneId: bootPaneId,
+            },
+            tabModel.makeTab('chat', claimedReloadDestination.chatId),
+          )
+        } else if (claimedReloadDestination.view === 'apps') {
+          bootDeepLink(
+            {
+              view: 'apps',
+              appId: null,
+              chatId: null,
+              paneId: bootPaneId,
+            },
+            tabModel.appsTab(),
+          )
+        } else if (
+          claimedReloadDestination.view === 'settings'
+          && workspaceStateRef.current.ws.viewMode === 'panes'
+        ) {
+          applySettingsDestination(bootPaneId)
+          bootPaneId = workspaceStateRef.current.ws.focusedPaneId
+        }
+      } else if (deepLink?.view === 'canvas' && Number.isFinite(deepLink.appId)) {
         bootDeepLink(
           { view: 'canvas', appId: deepLink.appId, chatId: null, paneId: bootPaneId },
           tabModel.makeTab('app', deepLink.appId),
@@ -1229,6 +1288,7 @@ export default function useNavigation({
         ? navRoute('chat', lastChatIdRef.current, null, bootPaneId)
         : initialRoute
       currentNavStateRef.current = replaceNavEntry('base', '/shell/', baseRoute)
+      furthestNavIndexRef.current = navEntryIndex(currentNavStateRef.current) ?? 0
 
       // Seed HOME as the back-stack root when this load booted into a deep
       // destination (canvas/settings) so Back always reaches the chat surface.
@@ -1422,6 +1482,8 @@ export default function useNavigation({
               currentState: committed || registration.returnState,
               entryId: sourceEntryId,
             })
+            furthestNavIndexRef.current = navEntryIndex(rearmed)
+              ?? furthestNavIndexRef.current
           }
           if (rearmed) {
             currentNavStateRef.current = rearmed
@@ -1828,6 +1890,37 @@ export default function useNavigation({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  const navigateBackward = useCallback(() => {
+    const current = currentNavStateRef.current
+    const hasShellTarget = navStackRef.current.length > 0
+      || drawerOpenRef.current
+      || current?.kind === 'drawer'
+      || current?.kind === 'dismissible'
+      || current?.kind === 'app'
+      || _anyAppHasSentinels(appSentinelCountsRef.current)
+      || appLocalPopsRef.current.length > 0
+    if (!hasShellTarget) return false
+    if (typeof navigation !== 'undefined' && navigation.canGoBack === false) return false
+    try {
+      history.back()
+      return true
+    } catch {
+      return false
+    }
+  }, [])
+
+  const navigateForward = useCallback(() => {
+    const currentIndex = navEntryIndex(currentNavStateRef.current)
+    if (currentIndex == null || currentIndex >= furthestNavIndexRef.current) return false
+    if (typeof navigation !== 'undefined' && navigation.canGoForward === false) return false
+    try {
+      history.forward()
+      return true
+    } catch {
+      return false
+    }
+  }, [])
+
   // Keep the current physical entry self-contained. snapshotRoute() re-stamps
   // the current focused pane + content ids; a derived projection cannot be
   // repaired by a scalar setter, so this only refreshes the entry's route.
@@ -1886,6 +1979,8 @@ export default function useNavigation({
     closeDrawer,
     finishDrawerNavigationPresentation,
     navTo,
+    navigateBackward,
+    navigateForward,
     tabRevealRevision,
     applyModeDestination,
     dismissSettings,

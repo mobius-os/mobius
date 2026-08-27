@@ -5,6 +5,17 @@ function clampPercent(value) {
   return Math.min(100, Math.max(0, value))
 }
 
+export function visibleBrainFillBounds(percent, { top, bottom, inset }) {
+  const visibleTop = top + inset
+  const visibleBottom = bottom - inset
+  const clamped = clampPercent(percent) ?? 0
+  const fillHeight = ((visibleBottom - visibleTop) * clamped) / 100
+  return {
+    fillHeight,
+    fillY: visibleBottom - fillHeight,
+  }
+}
+
 export function contextTokenCounts(snapshot) {
   const input = snapshot?.input_tokens
   const window = snapshot?.context_window

@@ -189,6 +189,132 @@ def test_settings_view_provider_follows_remembered_model_over_drift(
   assert body["agent_settings"]["model"] == "gpt-5.6-sol"
 
 
+def test_chat_detail_pristine_provider_follows_global_model_over_drift(
+  client, auth, db,
+):
+  """A pristine chat's picker shows the model it would actually use. With a
+  drifted stored provider and no per-chat model, the detail derives the provider
+  from the live global model instead of surfacing no model at all."""
+  from app import models
+
+  _write_global_settings({"model": "gpt-5.6-sol", "effort": "high"})
+  cid = client.post(
+    "/api/chats", headers=auth, json={"title": "drifted"},
+  ).json()["id"]
+  # Simulate a chat created before the global model's family changed: stored
+  # provider frozen on claude, no per-chat model, no assistant turns.
+  row = db.query(models.Chat).filter(models.Chat.id == cid).first()
+  row.provider = "claude"
+  row.agent_settings_json = None
+  db.commit()
+
+  body = client.get(f"/api/chats/{cid}", headers=auth).json()
+  assert body["provider"] == "codex"
+  assert body["effective_agent_settings"]["model"] == "gpt-5.6-sol"
+
+
+def test_chat_detail_user_only_chat_keeps_its_committed_provider(
+  client, auth, db,
+):
+  """A failed/unfinished first turn is no longer pristine: its next send keeps
+  the provider committed when that turn began, even before an assistant row
+  exists."""
+  from app import models
+
+  _write_global_settings({"model": "gpt-5.6-sol", "effort": "high"})
+  cid = client.post(
+    "/api/chats",
+    headers=auth,
+    json={
+      "title": "started",
+      "messages": [{"role": "user", "content": "hello"}],
+    },
+  ).json()["id"]
+  row = db.query(models.Chat).filter(models.Chat.id == cid).first()
+  row.provider = "claude"
+  row.agent_settings_json = None
+  db.commit()
+
+  body = client.get(f"/api/chats/{cid}", headers=auth).json()
+  assert body["has_assistant_turns"] is False
+  assert body["provider"] == "claude"
+  assert body["effective_agent_settings"]["model"] is None
+
+
+def test_chat_detail_per_chat_model_outranks_stored_provider(
+  client, auth, db,
+):
+  """An explicit per-chat model decides the picker's provider. Stored provider
+  and global default both say claude here, so only the model-priority branch can
+  report the codex model's provider — and without it the response would filter
+  that per-chat model away to no model at all."""
+  from app import models
+
+  _write_global_settings({"model": "claude-sonnet-5", "effort": "high"})
+  cid = client.post(
+    "/api/chats", headers=auth, json={"title": "per-chat model"},
+  ).json()["id"]
+  row = db.query(models.Chat).filter(models.Chat.id == cid).first()
+  row.provider = "claude"
+  row.agent_settings_json = {"model": "gpt-5.6-sol"}
+  db.commit()
+
+  body = client.get(f"/api/chats/{cid}", headers=auth).json()
+  assert body["provider"] == "codex"
+  assert body["effective_agent_settings"]["model"] == "gpt-5.6-sol"
+
+
+def test_chat_detail_app_created_chat_keeps_its_committed_provider(
+  client, auth, db,
+):
+  """An app-owned chat is never pristine, even with no messages: the app chose
+  its provider, so the detail must not re-derive one from the owner's picker."""
+  from app import models
+
+  _write_global_settings({"model": "gpt-5.6-sol", "effort": "high"})
+  cid = client.post(
+    "/api/chats", headers=auth, json={"title": "app owned"},
+  ).json()["id"]
+  app = models.App(
+    slug="provider-gate-app",
+    source_dir="/tmp/mobius-tests/provider-gate-app",
+    name="Gate", description="", jsx_source="",
+  )
+  db.add(app)
+  db.flush()
+  row = db.query(models.Chat).filter(models.Chat.id == cid).first()
+  row.provider = "claude"
+  row.agent_settings_json = None
+  row.created_by_app_id = app.id
+  db.commit()
+
+  body = client.get(f"/api/chats/{cid}", headers=auth).json()
+  assert body["provider"] == "claude"
+  assert body["effective_agent_settings"]["model"] is None
+
+
+def test_chat_detail_draining_chat_keeps_its_committed_provider(
+  client, auth, db,
+):
+  """While the instance drains, a send keeps the chat's committed provider, so
+  the picker must show that provider too instead of the live global default."""
+  from app import models
+
+  _write_global_settings({"model": "gpt-5.6-sol", "effort": "high"})
+  cid = client.post(
+    "/api/chats", headers=auth, json={"title": "draining"},
+  ).json()["id"]
+  row = db.query(models.Chat).filter(models.Chat.id == cid).first()
+  row.provider = "claude"
+  row.agent_settings_json = None
+  db.commit()
+
+  with patch("app.routes.chats.is_draining", return_value=True):
+    body = client.get(f"/api/chats/{cid}", headers=auth).json()
+  assert body["provider"] == "claude"
+  assert body["effective_agent_settings"]["model"] is None
+
+
 def test_patch_chat_writes_override(client, auth, chat):
   """PATCH /chats/{id} sets agent_settings_json and returns effective."""
   _write_global_settings({"model": "default-model"})

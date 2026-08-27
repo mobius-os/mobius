@@ -21,6 +21,8 @@ read both):
   {"ev":"app_signal",     "ts", "app_id", "id", "occurred_at", "name", "payload"}
   {"ev":"chat_sent",      "ts", "chat_id", "provider", "app_id"?}  # one per user turn
   {"ev":"chat_created",   "ts", "chat_id"}
+  {"ev":"app_chat_handoff","ts", "app_id", "scope", "outcome",
+                           "chat_id"?, "duration_ms", "failure"?}
   {"ev":"provider_switch","ts", "chat_id", "provider", "from_provider"}
   {"ev":"chat_log_read",  "ts", "app_id", "scope", "count"}  # app read redacted logs
   {"ev":"slug_collision", "ts", "requested_slug", "assigned_slug", "source"}

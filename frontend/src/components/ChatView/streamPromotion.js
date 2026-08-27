@@ -8,6 +8,20 @@ import { assistantAnchorKey } from '../../lib/chatDetailCache.js'
 import { startsFollowingTurn } from './chatRuntimeState.js'
 import { questionKey } from './questionKey.js'
 
+
+/** Whether a regenerable stream snapshot is owned by the server's current
+ * assistant row. An absent server owner keeps the rolling-data fallback; once
+ * an owner is known, an unidentified or differently identified snapshot must
+ * never rewrite history. */
+export function assistantStreamBelongsToActiveMessage(
+  streamAssistantMessageId,
+  activeAssistantMessageId,
+) {
+  if (!activeAssistantMessageId) return true
+  if (!streamAssistantMessageId) return false
+  return String(streamAssistantMessageId) === String(activeAssistantMessageId)
+}
+
 export function streamItemToBlock(item, { finalize = true } = {}) {
   if (item.type === 'text') return { type: 'text', content: item.content }
   if (item.type === 'thinking') {

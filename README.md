@@ -114,9 +114,16 @@ sed -i 's/^DOMAIN=.*/DOMAIN=mobius.example.com/' .env
 BUILD_SHA="$(git rev-parse HEAD)" \
 BUILD_DATE="$(git show -s --format=%cs HEAD)" \
 docker compose up -d --build
+sudo scripts/install-rebuild-helper.sh
 ```
 
 Caddy configures HTTPS. Open `https://mobius.example.com`, connect your provider, and start asking. Settings → Möbius applies platform updates; `docker compose exec -u 0 app bash` opens a root shell in the running container. See [.env.example](.env.example) and [ARCHITECTURE.md](ARCHITECTURE.md) for the trust boundaries.
+
+The final setup step installs the narrow host controller used by **Settings →
+Replace container**. It grants only that fixed operation, not general host or
+Docker access. Existing installations created before this step was added need
+to run it once from their trusted host checkout; new installations get it as
+part of the normal setup above.
 
 ## Contribute to the platform
 

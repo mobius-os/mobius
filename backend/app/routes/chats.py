@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -15,9 +16,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import (
-  activity, auth, chat_search, models, providers, questions, secure_inputs,
+  activity, auth, chat_search, models, providers, questions, schemas,
+  secure_inputs,
 )
+from app.chat_provider import resolve_chat_provider
 from app.chat_visibility import coerce_agent_settings, visible_in_owner_drawer
+from app.chat_event_sink import active_sink_assistant_message_id
 from app.chat_waits import (
   armed_wait_chat_ids,
   armed_waits_for_chat,
@@ -28,13 +32,18 @@ from app.chat import (
   _finish_run,
   bump_run_generation,
   is_chat_running,
+  is_draining,
   mark_chat_deleted,
   recover_chat_generation,
   stop_chat_for,
 )
 from app.broadcast import get_system_broadcast
 from app.chat_retention import purge_expired_chat_tombstones
-from app.chat_titles import first_user_message_title
+from app.chat_titles import (
+  apply_generated_title,
+  first_user_message_title,
+  renamed_event,
+)
 from app.database import get_db
 from app.memory_observability import record_memory_checkpoint_once
 from app.owner_input import OwnerInputKind
@@ -79,6 +88,24 @@ def _open_question_id_for(chat: models.Chat) -> str | None:
     return chat.pending_question_id
   pending = questions.get(chat.id)
   return pending.question_id if pending is not None else None
+
+
+def _active_assistant_message_id(
+  chat: models.Chat,
+) -> str | None:
+  """Return the one assistant row allowed to own a live browser surface.
+
+  The in-process sink wins during a steer because it rotates before its next
+  snapshot commits. Otherwise the actor-owned durable scalar covers both the
+  bounded live snapshot and a question already merged into history. The latter
+  is why this cannot be inferred from `live_assistant`: QuestionCommit clears
+  that JSON value by design while the parked card still owns the browser row.
+  """
+  sink_id = active_sink_assistant_message_id(chat.id)
+  if sink_id:
+    return sink_id
+  value = chat.active_assistant_message_id
+  return str(value) if value else None
 
 # Separate router for the app-attributed chat contract (design §1). It
 # lives under its own /api/app-chats prefix so the owner-only /api/chats
@@ -535,8 +562,14 @@ def _chat_detail_response(
       next_page[relative_index] = projected_message
     page = next_page
 
-  provider = chat.provider or "claude"
   settings_obj = _coerce_agent_settings(chat.agent_settings_json) or None
+  _has_assistant_turns = any(m.get("role") == "assistant" for m in all_msgs)
+  provider = resolve_chat_provider(
+    chat,
+    data_dir=get_settings().data_dir,
+    running=running,
+    draining=is_draining(),
+  )
   active_goal_objective = running_goal_objective(db, chat.id)
   response = {
     "id": chat.id,
@@ -550,6 +583,7 @@ def _chat_detail_response(
     "total": total,
     "offset": start,
     "running": running,
+    "active_assistant_message_id": _active_assistant_message_id(chat),
     "active_goal_objective": active_goal_objective,
     "pending_question_id": _open_question_id_for(chat),
     "session_id": chat.session_id if expose_session else None,
@@ -562,9 +596,7 @@ def _chat_detail_response(
       settings_obj,
       provider=provider,
     ),
-    "has_assistant_turns": any(
-      message.get("role") == "assistant" for message in all_msgs
-    ),
+    "has_assistant_turns": _has_assistant_turns,
     # Armed durable waits: the visible "Waiting for …" state. Refreshed by the
     # detail refetches the run lifecycle already triggers, so declare (during a
     # run) and resume (a new run) both reach the UI without extra plumbing.
@@ -1093,8 +1125,7 @@ async def patch_chat(
       new_title = body.title.strip()
       if new_title:
         if body.by_agent:
-          if not chat.title_locked:
-            chat.title = new_title
+          apply_generated_title(chat, new_title)
         else:
           chat.title = new_title
           chat.title_locked = True
@@ -1224,16 +1255,11 @@ async def patch_chat(
     db.commit()
     db.refresh(chat)
     if chat.title != previous_title:
-      # The platform summary publisher PATCHes the generated name immediately
-      # after its durable note CAS. Publish only committed truth so every open
-      # shell can refresh its drawer and tab labels without waiting for another
-      # drawer open or chat-list poll. Manual-title precedence still lives above.
-      get_system_broadcast().publish({
-        "type": "chat_renamed",
-        "chatId": str(chat_id),
-        "title": chat.title,
-        "updatedAt": chat.updated_at.isoformat() if chat.updated_at else None,
-      })
+      # Manual rename and compatibility callers share this projection path.
+      # The normal summary publisher commits in-process through
+      # `_sync_generated_chat_title`; publish only committed route truth here
+      # so older callers update every open drawer and tab without a later poll.
+      get_system_broadcast().publish(renamed_event(chat))
     # Record a real provider switch (Claude <-> Codex) once, after this first
     # commit — NOT after the owner-provider mirror commit below, which would
     # double-log. Model/effort tweaks within a provider are deliberately not
@@ -1375,11 +1401,13 @@ def get_chat_runtime(
     load_fields=(
       models.Chat.pending_messages,
       models.Chat.pending_question_id,
+      models.Chat.active_assistant_message_id,
       models.Chat.updated_at,
     ),
   )
   return {
     "running": is_chat_running(chat.id),
+    "active_assistant_message_id": _active_assistant_message_id(chat),
     "active_goal_objective": running_goal_objective(db, chat.id),
     "pending_messages": list(chat.pending_messages or []),
     "pending_question_id": _open_question_id_for(chat),
@@ -1567,6 +1595,82 @@ def get_tool_output_by_id(
     decode_tool_output(row[0]),
     headers={"Cache-Control": "private, no-store"},
   )
+
+
+@router.get("/{chat_id}/edit-diffs")
+def get_chat_edit_diffs(
+  chat_id: str,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+) -> dict:
+  """Return only the file changes recorded by one chat, with full sidecars.
+
+  The ordinary chat payload keeps edit previews bounded. This explicit owner
+  action is the lazy expansion boundary: it scans the transcript for edit
+  blocks, fences already-queued sidecar writes, and substitutes complete diff
+  text wherever the block names one. Orphaned sidecars are never enumerable.
+  """
+  from app.chat_transcript import materialized_messages
+
+  chat = get_active_chat_or_404(db, chat_id)
+  _drain_writer_before_sidecar_read(db, chat_id, "chat changes")
+  chat = get_active_chat_or_404(db, chat_id)
+  messages = materialized_messages(chat)
+
+  entries: list[dict] = []
+  full_ids: set[str] = set()
+  for message_index, message in enumerate(messages):
+    blocks = message.get("blocks") if isinstance(message, dict) else None
+    if not isinstance(blocks, list):
+      continue
+    for block_index, block in enumerate(blocks):
+      if not isinstance(block, dict) or block.get("type") != "tool":
+        continue
+      preview = block.get("edit_preview")
+      if not (
+        isinstance(preview, dict)
+        and isinstance(preview.get("diff"), str)
+        and preview["diff"]
+      ):
+        continue
+      projected_preview = {
+        "diff": preview["diff"],
+        "truncated": preview.get("truncated") is True,
+        **({"relative": True} if preview.get("relative") is True else {}),
+      }
+      full_id = preview.get("full_id")
+      if isinstance(full_id, str) and full_id:
+        projected_preview["full_id"] = full_id
+        full_ids.add(full_id)
+      entries.append({
+        "id": block.get("tool_use_id") or f"message-{message_index}-block-{block_index}",
+        "tool": block.get("tool") or "Edit",
+        "ts": message.get("ts"),
+        "preview": projected_preview,
+      })
+
+  full_by_id: dict[str, str] = {}
+  if full_ids:
+    rows = db.query(
+      models.ToolOutput.tool_use_id,
+      cast(models.ToolOutput.output, Text),
+    ).filter(
+      models.ToolOutput.chat_id == chat_id,
+      models.ToolOutput.tool_use_id.in_(full_ids),
+    ).all()
+    full_by_id = {
+      full_id: decode_tool_output(stored)
+      for full_id, stored in rows
+    }
+
+  for entry in entries:
+    preview = entry["preview"]
+    full = full_by_id.get(preview.get("full_id"))
+    if full is not None:
+      preview["diff"] = full
+      preview["truncated"] = False
+
+  return {"entries": entries}
 
 
 @router.get(
@@ -2393,6 +2497,22 @@ class AppChatCreate(BaseModel):
     )
 
 
+class AppChatStart(AppChatCreate):
+  """One scoped app conversation plus the first durable agent turn."""
+
+  content: str = Field(min_length=1)
+  cid: str | None = None
+  timezone: str | None = None
+  viewport: dict | None = None
+
+  @field_validator("content")
+  @classmethod
+  def _validate_content(cls, value: str) -> str:
+    if not value.strip():
+      raise ValueError("content must not be empty")
+    return value
+
+
 class AppChatPatch(BaseModel):
   system_prompt: str | None = Field(default=None, max_length=20000)
   model: str | None = Field(default=None, max_length=256)
@@ -2528,6 +2648,19 @@ def _app_chat_summary(chat: models.Chat) -> dict:
   }
 
 
+def _app_chat_started(chat: models.Chat, db: Session) -> bool:
+  """Whether a scoped chat already owns a durable or live first turn."""
+  return bool(
+    chat.has_messages
+    or chat.messages
+    or chat.pending_messages
+    or chat.pending_question_id
+    or chat.session_id
+    or is_chat_running(chat.id)
+    or has_nonterminal_run(db, chat.id)
+  )
+
+
 @app_chat_router.get("")
 def list_app_chats(
   scope: str | None = None,
@@ -2633,6 +2766,123 @@ def create_app_chat(
     "title": chat.title,
     "created_by_app_id": chat.created_by_app_id,
   }
+
+
+@app_chat_router.post(
+  "/start", dependencies=[Depends(reject_cross_site)],
+)
+async def start_scoped_app_chat(
+  body: AppChatStart,
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+):
+  """Atomically create-or-reuse one app-owned scoped first turn.
+
+  Scope is the idempotency identity. The lock covers lookup, allocation, and
+  first-send admission so two panes cannot both observe an absent conversation.
+  A previously-created empty row is retried in place; any row that already owns
+  a durable/live turn is returned without submitting the prompt again.
+  """
+  if principal.app_id is None:
+    raise HTTPException(
+      status_code=403,
+      detail="Scoped app handoffs may only be started by an app token.",
+    )
+  if not body.scope:
+    raise HTTPException(status_code=422, detail="scope is required")
+
+  from app import chat_queue
+  from app.routes.chats_stream import send_message
+
+  app_id = principal.app_id
+  chat_id: str | None = None
+  outcome = "failed"
+  failure: str | None = None
+  started_at = time.monotonic()
+  try:
+    async with chat_queue.get_transition_lock(
+      f"app-scope:{app_id}:{body.scope}",
+    ):
+      # A concurrent request may have committed while this request waited.
+      db.rollback()
+      candidates = db.query(models.Chat).filter(
+        models.Chat.deleted_at.is_(None),
+        models.Chat.created_by_app_id == app_id,
+      ).all()
+      matches = [chat for chat in candidates if _app_chat_scope(chat) == body.scope]
+      matches.sort(key=_app_chat_sort_ts, reverse=True)
+      chat = matches[0] if matches else None
+
+      if chat is not None and _app_chat_started(chat, db):
+        chat_id = chat.id
+        outcome = "reused"
+        return {"chat_id": chat.id, "outcome": outcome, "response": None}
+
+      if chat is None:
+        created = create_app_chat(
+          AppChatCreate(**body.model_dump(exclude={
+            "content", "cid", "timezone", "viewport",
+          })),
+          principal,
+          db,
+        )
+        chat_id = str(created["id"])
+      else:
+        chat_id = chat.id
+
+      response = await send_message(
+        schemas.SendMessage(
+          content=body.content,
+          cid=body.cid,
+          timezone=body.timezone,
+          viewport=body.viewport,
+        ),
+        chat_id,
+        principal,
+        db,
+      )
+      status_code = getattr(response, "status_code", 202)
+      if status_code >= 400:
+        failure = "first_turn_rejected"
+        raise HTTPException(
+          status_code=502,
+          detail={
+            "code": failure,
+            "chat_id": chat_id,
+            "message": "The conversation exists, but its first turn was not accepted.",
+          },
+        )
+      outcome = "started"
+      return {"chat_id": chat_id, "outcome": outcome, "response": None}
+  except HTTPException:
+    failure = failure or "request_rejected"
+    raise
+  except Exception:
+    failure = "start_error"
+    log.exception(
+      "app chat handoff failed app_id=%s scope=%s chat_id=%s",
+      app_id, body.scope, chat_id,
+    )
+    raise HTTPException(
+      status_code=503,
+      detail={
+        "code": failure,
+        "chat_id": chat_id,
+        "message": "The app-owned conversation could not be started.",
+      },
+    )
+  finally:
+    fields = {
+      "app_id": app_id,
+      "scope": body.scope,
+      "outcome": outcome,
+      "duration_ms": max(0, round((time.monotonic() - started_at) * 1000)),
+    }
+    if chat_id:
+      fields["chat_id"] = chat_id
+    if failure:
+      fields["failure"] = failure
+    activity.log_event("app_chat_handoff", **fields)
 
 
 @app_chat_router.patch(

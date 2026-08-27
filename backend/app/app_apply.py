@@ -83,6 +83,38 @@ async def _sync_accepted_app_skills(
   return tuple(warnings)
 
 
+async def _sync_accepted_app_side_effects(
+  db: Session,
+  app: models.App,
+  manifest: dict | None,
+  *,
+  drop_prior_cron: bool,
+) -> tuple[str, ...]:
+  """Converge post-commit declarations for one accepted local revision.
+
+  The caller holds the app source lock. Store-managed worktrees have no local
+  manifest authority, so their reviewed schedule remains installer-owned.
+  """
+  warnings: list[str] = []
+  if manifest is not None:
+    from app import install
+
+    schedule = manifest.get("schedule")
+    try:
+      await install._sync_manifest_cron_unlocked(
+        app=app,
+        manifest=manifest,
+        drop_prior_cron=drop_prior_cron,
+        bundled_job=bool(schedule and schedule.get("job")),
+        warnings=warnings,
+      )
+    except Exception as exc:
+      log.exception("app apply: cron sync failed post-commit")
+      warnings.append(f"cron: registration failed — {exc!r}")
+  warnings.extend(await _sync_accepted_app_skills(db, app, manifest))
+  return tuple(warnings)
+
+
 async def _git_operation(label: str, fn, *args):
   """Run one app-repository operation with a stable client-facing failure.
 
@@ -415,7 +447,13 @@ async def apply_source_revision(
       )
       if not changed:
         db.rollback()
-        warnings = await _sync_accepted_app_skills(db, app, manifest)
+        # An unchanged revision re-declares the SAME manifest, so no prior
+        # declaration can be obsolete and re-registration is idempotent. A
+        # pre-drop here would only widen the window in which a failed
+        # registration leaves a previously healthy schedule retired.
+        warnings = await _sync_accepted_app_side_effects(
+          db, app, manifest, drop_prior_cron=False,
+        )
         return ApplyResult(app=app, mode="unchanged", warnings=warnings)
 
       app.jsx_source = source
@@ -431,7 +469,9 @@ async def apply_source_revision(
       if previous_bundle != published:
         unlink_app_bundle(app.id, previous_bundle)
       db.refresh(app)
-      warnings = await _sync_accepted_app_skills(db, app, manifest)
+      warnings = await _sync_accepted_app_side_effects(
+        db, app, manifest, drop_prior_cron=not created,
+      )
       return ApplyResult(
         app=app,
         mode="created" if created else "updated",

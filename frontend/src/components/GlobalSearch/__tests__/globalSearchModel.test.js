@@ -11,6 +11,7 @@ import {
   rememberRecentSelection,
   resolveRecentSelections,
   resolvedSearchSelection,
+  searchCommands,
   searchInstalledApps,
   visibleChatSearchState,
 } from '../globalSearchModel.js'
@@ -103,6 +104,23 @@ test('all query terms must match and result limits are stable', () => {
   }])
   assert.deepEqual(searchInstalledApps(apps, 'news missing'), [])
   assert.equal(searchInstalledApps(apps, 'news', 1).length, 1)
+})
+
+test('command search covers action copy, keywords, and shortcut labels', () => {
+  const commands = [
+    {
+      id: 'pane.newChat', title: 'New chat pane',
+      description: 'Open a new chat beside the focused pane.',
+      category: 'Tabs and panes', keywords: ['split'], shortcutLabels: ['⌘\\'],
+    },
+    {
+      id: 'history.back', title: 'Go back', description: 'Previous destination.',
+      category: 'Navigation', keywords: ['history'], shortcutLabels: ['⌘,'],
+    },
+  ]
+  assert.deepEqual(searchCommands(commands, 'split pane'), [commands[0]])
+  assert.deepEqual(searchCommands(commands, 'history'), [commands[1]])
+  assert.deepEqual(searchCommands(commands, ''), commands)
 })
 
 test('recent selections persist as a deduplicated most-recent-first list', () => {

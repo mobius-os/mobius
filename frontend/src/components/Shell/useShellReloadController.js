@@ -6,7 +6,10 @@ import {
   flushPersistedQueryCache,
 } from '../../queryClient.js'
 import * as paneModel from './paneModel.js'
-import { shouldDeferShellReload } from './shellReloadPolicy.js'
+import {
+  RECENT_SHELL_INTERACTION_MS,
+  shouldDeferShellReload,
+} from './shellReloadPolicy.js'
 import {
   inspectShellUpdate,
   releaseWaitingShellUpdate,
@@ -24,6 +27,7 @@ export function deriveShellReloadState({
   const destinationView = destination?.view
   const destinationIsSettings = destinationView === 'settings'
   return {
+    ...(destination ? { destinationClaimed: true } : {}),
     activeView: destinationIsSettings
       ? 'settings'
       : (destinationView || (activeView === 'settings' ? 'settings' : content.view)),
@@ -51,6 +55,7 @@ export default function useShellReloadController(inputs) {
   const passiveRef = useRef(false)
   const timerRef = useRef(null)
   const lastInteractionAtRef = useRef(0)
+  const lastNavigationGestureAtRef = useRef(0)
   const heldSinceRef = useRef(0)
   const performingRef = useRef(false)
   const performingPassiveRef = useRef(false)
@@ -71,6 +76,12 @@ export default function useShellReloadController(inputs) {
   function interactionGraceSpent() {
     return heldSinceRef.current > 0
       && Date.now() - heldSinceRef.current >= RECHECK_MS
+  }
+
+  function navigationGestureInProgress() {
+    const startedAt = lastNavigationGestureAtRef.current
+    return startedAt > 0
+      && Date.now() - startedAt < RECENT_SHELL_INTERACTION_MS
   }
 
   function hasStableVisibleHold(passive) {
@@ -103,7 +114,8 @@ export default function useShellReloadController(inputs) {
       streamingChatIds: streamingChatIdsRef.current,
       passiveRebuild: passive,
       voiceDictationActive: voiceDictationActiveRef.current,
-      lastUserInteractionAt: ignoreRecentInteraction || interactionGraceSpent()
+      lastUserInteractionAt: ignoreRecentInteraction
+        || (interactionGraceSpent() && !navigationGestureInProgress())
         ? 0
         : lastInteractionAtRef.current,
       visibilityState: doc.visibilityState,
@@ -196,7 +208,24 @@ export default function useShellReloadController(inputs) {
         destination: destinationRef.current,
       })))
       replaceNavEntry('base', '/shell/')
-      win.location.reload()
+      // A same-origin replacement keeps this history position while allowing
+      // supporting browsers to retain the outgoing pixels until the incoming
+      // shell reports its destination ready. Reload is excluded from
+      // cross-document view transitions.
+      const transitionPrepared = (
+        win.__mobiusPrepareShellReloadTransition?.() === true
+      )
+      const navigate = () => win.location.replace('/shell/')
+      if (transitionPrepared && typeof win.requestAnimationFrame === 'function') {
+        // The cross-document opt-in is injected dynamically so unrelated
+        // navigations keep ordinary browser semantics. Give the browser one
+        // rendering boundary to activate that rule before replacement;
+        // navigating in the insertion task makes `pageswap.viewTransition`
+        // nondeterministically null in Chromium.
+        win.requestAnimationFrame(navigate)
+      } else {
+        navigate()
+      }
     }
     // Release the worker, but never wait for its activation to make the
     // navigation fresh. Online shell navigation owns freshness; activation
@@ -257,7 +286,12 @@ export default function useShellReloadController(inputs) {
 
   useEffect(() => {
     const { win, doc } = inputsRef.current
-    const record = () => { lastInteractionAtRef.current = Date.now() }
+    const recordInteraction = () => { lastInteractionAtRef.current = Date.now() }
+    const recordNavigationGesture = () => {
+      const now = Date.now()
+      lastInteractionAtRef.current = now
+      lastNavigationGestureAtRef.current = now
+    }
     const releaseWhenHidden = () => {
       if (doc.visibilityState === 'hidden') checkPendingImpl()
     }
@@ -270,16 +304,16 @@ export default function useShellReloadController(inputs) {
     // a keydown, all of which are still recorded, and typing is separately
     // protected by hasProtectedEditingContent.
     const opts = { capture: true, passive: true }
-    win.addEventListener('pointerdown', record, opts)
-    win.addEventListener('touchstart', record, opts)
-    win.addEventListener('keydown', record, opts)
-    win.addEventListener('input', record, opts)
+    win.addEventListener('pointerdown', recordNavigationGesture, opts)
+    win.addEventListener('touchstart', recordNavigationGesture, opts)
+    win.addEventListener('keydown', recordNavigationGesture, opts)
+    win.addEventListener('input', recordInteraction, opts)
     doc.addEventListener('visibilitychange', releaseWhenHidden)
     return () => {
-      win.removeEventListener('pointerdown', record, opts)
-      win.removeEventListener('touchstart', record, opts)
-      win.removeEventListener('keydown', record, opts)
-      win.removeEventListener('input', record, opts)
+      win.removeEventListener('pointerdown', recordNavigationGesture, opts)
+      win.removeEventListener('touchstart', recordNavigationGesture, opts)
+      win.removeEventListener('keydown', recordNavigationGesture, opts)
+      win.removeEventListener('input', recordInteraction, opts)
       doc.removeEventListener('visibilitychange', releaseWhenHidden)
       if (timerRef.current) win.clearTimeout(timerRef.current)
     }

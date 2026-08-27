@@ -1685,6 +1685,94 @@ def _retire_restart_resume_toggle(eng) -> None:
     ))
 
 
+def _add_chat_active_assistant_identity(eng) -> None:
+  """Add the scalar owner of regenerable assistant browser state.
+
+  A pending question is the stronger protocol boundary, so locate the exact
+  unanswered card it names first. Otherwise backfill from the bounded live
+  snapshot. Rows whose exact parked-question owner predates assistant message
+  ids stay null here: startup repairs that transcript through the chat-writer
+  actor, then stores both identities in one serialized transaction. Schema
+  migrations never rewrite ``Chat.messages``.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chats" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chats")}
+  with eng.begin() as conn:
+    if "active_assistant_message_id" not in columns:
+      conn.execute(text(
+        "ALTER TABLE chats ADD COLUMN "
+        "active_assistant_message_id VARCHAR(128) NULL"
+      ))
+      columns.add("active_assistant_message_id")
+    if not {"id", "messages"}.issubset(columns):
+      return
+    # Keep the common upgrade path scalar-only. Historical transcripts can be
+    # large; hydrate one only for the small set of chats actually parked on a
+    # question instead of pulling every chat blob through the migration.
+    selected = ["id"]
+    if "live_assistant" in columns:
+      selected.append("live_assistant")
+    if "pending_question_id" in columns:
+      selected.append("pending_question_id")
+    filters = ["active_assistant_message_id IS NULL"]
+    if "deleted_at" in columns:
+      filters.append("deleted_at IS NULL")
+    rows = conn.execute(text(
+      "SELECT " + ", ".join(selected) + " FROM chats WHERE "
+      + " AND ".join(filters)
+    )).mappings().all()
+
+    def decoded(value):
+      if not isinstance(value, str):
+        return value
+      try:
+        return json.loads(value)
+      except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+    def bounded_id(value):
+      return value if isinstance(value, str) and 0 < len(value) <= 128 else None
+
+    for row in rows:
+      owner_id = None
+      pending_question_id = row.get("pending_question_id")
+      if isinstance(pending_question_id, str):
+        raw_messages = conn.execute(text(
+          "SELECT messages FROM chats WHERE id = :chat_id"
+        ), {"chat_id": row["id"]}).scalar_one_or_none()
+        messages = decoded(raw_messages)
+        if isinstance(messages, list):
+          for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if not isinstance(message, dict) or message.get("hidden"):
+              continue
+            if message.get("role") != "assistant":
+              continue
+            matching_question = any(
+              isinstance(block, dict)
+              and block.get("type") == "question"
+              and block.get("question_id") == pending_question_id
+              and not block.get("answers")
+              for block in (message.get("blocks") or [])
+            )
+            if matching_question:
+              owner_id = bounded_id(message.get("id"))
+              break
+      if owner_id is None:
+        live = decoded(row.get("live_assistant"))
+        if isinstance(live, dict):
+          owner_id = bounded_id(live.get("id"))
+      if owner_id is not None:
+        conn.execute(text(
+          "UPDATE chats SET active_assistant_message_id = :owner_id "
+          "WHERE id = :chat_id AND active_assistant_message_id IS NULL"
+        ), {"chat_id": row["id"], "owner_id": owner_id})
+
+
 def _pin_established_legacy_chat_models(eng) -> None:
   """Replace the retired interactive SDK default with explicit chat choices.
 
@@ -1868,6 +1956,7 @@ _SCHEMA_MIGRATIONS = (
   ("0016_app_connect_manage", _add_app_connect_manage),
   ("0017_retire_restart_resume_toggle", _retire_restart_resume_toggle),
   ("0018_explicit_legacy_chat_models", _pin_established_legacy_chat_models),
+  ("0019_chat_active_assistant_identity", _add_chat_active_assistant_identity),
 )
 
 

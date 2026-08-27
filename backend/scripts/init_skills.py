@@ -129,6 +129,11 @@ _UNMODIFIED_MIGRATIONS = {
     # The current seed retains its useful shell-scale invariant and removes the
     # dead route, so this exact known-bad generation is safe to reconcile.
     "1d655ec09d7f25c831e105411d59b8428b07defc6f58416f8290a8c1b08ca594",
+    # Untouched baked and locally curated mapi generations that still wrapped
+    # whole CSS documents inside hand-escaped JSON. Migrate both exact copies
+    # to the raw text boundary; any owner-authored variation remains protected.
+    "7994321819a43708debb77104edea12f785beb46d0933c2b94f93cf418f510ee",
+    "cd4d6f03f6ba87d8b3d1799aa81c3ab5444900362e56edc3e48803fa1f1fee4b",
   },
   "workflows-app.md": {
     # Resolved the app by slug=="workflows". An install whose preferred slug
@@ -149,6 +154,11 @@ _UNMODIFIED_MIGRATIONS = {
     # Pre-slimming seed: open_item mechanics still lived in core.md, leaving
     # this policy owner without the executable recipe.
     "309e5969df6f589cc82c17b450e7596a00bae87ef77ab2923a9b0de061ed146e",
+    # Untouched baked and locally curated mapi generations that interpolated
+    # ids through nested shell quotes. Replace only those exact copies with
+    # stdin-delimited JSON guidance.
+    "6fa9c177db508ef05dfc73de224cd3f33350c79d8f807ac9909942d761f21103",
+    "db0c1138ffd0890936ccdeba6ced4ccde867ba3044eeef0a5c87cdf2f279eaaa",
   },
   "building-apps.md": {
     "4126b40d209c422184e0135f611bb9f4197ea280fa27e63cd71c806f8b5ebd79",

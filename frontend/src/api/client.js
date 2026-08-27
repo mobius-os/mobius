@@ -9,7 +9,10 @@ import { clearLatchedTokens } from '../lib/appToken.js'
 import { clearOwnerDraftStorage } from '../lib/ownerDraftStorage.js'
 import { clearReadingPositions } from '../components/ChatView/useScrollMode.js'
 import { clearDurableComposerDrafts } from '../components/ChatView/composerDraft.js'
-import { verifyConnectivity } from '../lib/connectivityStore.js'
+import {
+  reportNetworkReachable,
+  verifyConnectivity,
+} from '../lib/connectivityStore.js'
 import { SHELL_DATA_CACHE } from '../sw-cache-policy.js'
 
 export const BASE = (import.meta.env.BASE_URL || '/').replace(/\/$/, '')
@@ -276,6 +279,22 @@ export async function apiFetch(path, options = {}) {
   return res
 }
 
+// Shell-owned UI sometimes needs to invoke a generic app-attributed contract
+// (for example, starting an app-owned agent handoff without navigating away).
+// Keep that short-lived authority separate from apiFetch's OWNER-session 401
+// handling: an expired app token must never sign the owner out.
+async function appScopedFetch(path, appToken, options = {}) {
+  if (!appToken) throw new Error('App authorization is unavailable')
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(options.headers || {}),
+    Authorization: `Bearer ${appToken}`,
+  }
+  const response = await fetch(`${BASE}/api${path}`, { ...options, headers })
+  reportNetworkReachable()
+  return response
+}
+
 /**
  * Evict one offline shell projection after a confirmed list-affecting write.
  *
@@ -488,6 +507,18 @@ export const api = {
       `/chats/${encodeURIComponent(chatId)}/usage?include_runs=false`, options,
     ),
   },
+  appChats: {
+    listWithToken: (appToken, { scope } = {}) => {
+      const query = scope ? `?scope=${encodeURIComponent(scope)}` : ''
+      return appScopedFetch(`/app-chats${query}`, appToken)
+    },
+    startWithToken: (appToken, payload) => appScopedFetch(
+      '/app-chats/start', appToken, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+    ),
+  },
   secureInputs: {
     submit: (chatId, requestId, payload) => apiFetch(
       `/secure-inputs/${encodeURIComponent(chatId)}/${encodeURIComponent(requestId)}/submit`,
@@ -639,24 +670,27 @@ export const api = {
     }),
     restart: () => apiFetch('/platform/restart', { method: 'POST' }),
   },
-  // The chat's contribution review card. A read-only projection of the same
-  // ledger the Contribute app shows, plus the one owner-confirmed public action.
-  // Send deliberately calls the SAME submit endpoint as the app's button, so the
-  // server-side freshness, attribution, and fork checks are never bypassed.
+  // The chat card is a compact projection of the same reviewed ledger Contribute
+  // owns. Its direct action calls the same guarded routes as the app; the card
+  // never pushes or talks to GitHub itself.
   contributions: {
     forChat: (appId, chatId) => apiFetch(
       `/github/contributions/${appId}/for-chat/${encodeURIComponent(chatId)}`,
     ),
-    submit: (appId, recordId, { autopilot }) => apiFetch(
-      `/github/contributions/${appId}/${encodeURIComponent(recordId)}/submit`,
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          autopilot: !!autopilot,
-          submitter: 'chat-review-card',
-        }),
-      },
-    ),
+    publish: (appId, record, { autopilot = false } = {}) => {
+      const update = record?.action === 'pr_update'
+      const action = update ? 'update-existing' : 'submit'
+      return apiFetch(
+        `/github/contributions/${appId}/${encodeURIComponent(record.id)}/${action}`,
+        {
+          method: 'POST',
+          body: JSON.stringify(update ? {} : {
+            autopilot,
+            submitter: 'chat-review-card',
+          }),
+        },
+      )
+    },
   },
   push: {
     vapidKey: () => apiFetch('/push/vapid-key'),

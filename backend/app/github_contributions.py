@@ -53,6 +53,8 @@ from app.deps import Principal
 _CONTRIBUTION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _PUSH_RETRIES = 3
 _PUSH_RETRY_BASE_SECONDS = 0.5
+_PR_VISIBILITY_RETRIES = 3
+_PR_VISIBILITY_RETRY_BASE_SECONDS = 0.5
 
 def _require_github_access_principal(
   principal: Principal, db: Session
@@ -450,6 +452,7 @@ def _cleanup_terminal_staging_checkout(record: dict) -> bool:
 def _claim_record(
   *, app_id: int, record_id: str, db: Session, expected_nonce: str | None,
   submitter: str = "contribute-button",
+  expected_action: str = "pr",
 ) -> tuple[dict, Path, Path]:
   record_path, diff_path = _record_paths(app_id, record_id)
   _recheck_submit_app(db, app_id, expected_nonce)
@@ -477,10 +480,14 @@ def _claim_record(
       status_code=409,
       detail="This older contribution needs agent review before it can submit.",
     )
-  if plan.get("action") != "pr" or record.get("type") != "pr":
+  if plan.get("action") != expected_action or record.get("type") != "pr":
     raise HTTPException(
       status_code=400,
-      detail="Direct approval currently supports pull requests.",
+      detail=(
+        "Direct approval currently supports pull requests."
+        if expected_action == "pr"
+        else "This approval action no longer matches the prepared PR update."
+      ),
     )
   if isinstance(plan.get("stack"), dict):
     raise HTTPException(
@@ -1003,6 +1010,37 @@ def _mark_submit_success(
   return next_record
 
 
+def _mark_existing_pr_update_success(
+  *,
+  record_path: Path,
+  record: dict,
+  pr_url: str,
+  number: int,
+  record_patch: dict | None = None,
+) -> dict:
+  """Settle an owner-approved fast-forward of an already-open PR.
+
+  Keep the original submission timestamp: this action updates one existing
+  public request rather than opening a new one. The reviewed update timestamp
+  gives the ledger an exact lifecycle witness without inventing a second PR.
+  """
+  now = _now_iso()
+  next_record = {
+    **record,
+    **(record_patch or {}),
+    "status": "open",
+    "url": pr_url,
+    "number": number,
+    "updated_at": now,
+    "last_updated_pr_at": now,
+  }
+  next_record.pop("last_submit_error", None)
+  next_record.pop("last_submit_error_detail", None)
+  next_record.pop("last_submit_error_code", None)
+  _write_record(record_path, next_record)
+  return next_record
+
+
 def _mark_stack_submit_failure(
   rows: list[dict],
   message: str,
@@ -1216,35 +1254,41 @@ def _find_existing_pr(
     "--json", "url,headRefName,headRefOid,headRepositoryOwner",
     "--limit", "10",
   ))
-  try:
-    proc = _git_ops._gh(
-      repo,
-      *args,
-      check=False,
-    )
-  except (subprocess.TimeoutExpired, OSError):
-    return None
-  if proc.returncode != 0:
-    return None
-  try:
-    rows = json.loads(proc.stdout or "[]")
-  except ValueError:
-    return None
-  if isinstance(rows, list):
-    for row in rows:
-      if not isinstance(row, dict):
-        continue
-      owner = row.get("headRepositoryOwner")
-      owner_login = owner.get("login") if isinstance(owner, dict) else ""
-      if str(owner_login or "").casefold() != expected_owner.casefold():
-        continue
-      if str(row.get("headRefName") or "") != branch:
-        continue
-      if str(row.get("headRefOid") or "") != expected_head_sha:
-        continue
-      url = row.get("url")
-      if isinstance(url, str) and url.startswith("https://github.com/"):
-        return url
+  # A successful branch update can precede the matching PR metadata by a few
+  # seconds. Repeat only this read-only exact-head proof; never repeat the push
+  # or PR creation that led here.
+  for attempt in range(_PR_VISIBILITY_RETRIES):
+    try:
+      proc = _git_ops._gh(
+        repo,
+        *args,
+        check=False,
+      )
+    except (subprocess.TimeoutExpired, OSError):
+      proc = None
+    rows = None
+    if proc is not None and proc.returncode == 0:
+      try:
+        rows = json.loads(proc.stdout or "[]")
+      except ValueError:
+        pass
+    if isinstance(rows, list):
+      for row in rows:
+        if not isinstance(row, dict):
+          continue
+        owner = row.get("headRepositoryOwner")
+        owner_login = owner.get("login") if isinstance(owner, dict) else ""
+        if str(owner_login or "").casefold() != expected_owner.casefold():
+          continue
+        if str(row.get("headRefName") or "") != branch:
+          continue
+        if str(row.get("headRefOid") or "") != expected_head_sha:
+          continue
+        url = row.get("url")
+        if isinstance(url, str) and url.startswith("https://github.com/"):
+          return url
+    if attempt + 1 < _PR_VISIBILITY_RETRIES:
+      time.sleep(_PR_VISIBILITY_RETRY_BASE_SECONDS * (2 ** attempt))
   return None
 
 
@@ -1547,6 +1591,7 @@ def _submit_prepared_pr(
   *,
   direct_base_branch: str | None = None,
   expected_existing_pr_number: int | None = None,
+  expected_existing_head_repository: str | None = None,
 ) -> tuple[str, int | None, dict]:
   if not shutil.which("git") or not shutil.which("gh"):
     raise ContributionSubmitError(
@@ -1568,6 +1613,24 @@ def _submit_prepared_pr(
   plan = record.get("plan") or {}
   upstream_repo = _git_ops._validate_repo_slug(plan.get("repo") or record.get("repo"))
   branch = _git_ops._validate_branch(plan.get("branch") or record.get("branch"))
+  existing_head_repository = None
+  if expected_existing_pr_number is not None:
+    if expected_existing_head_repository is None:
+      raise ContributionSubmitError(
+        "This existing pull request update is missing its verified head repository."
+      )
+    existing_head_repository = _git_ops._validate_repo_slug(
+      expected_existing_head_repository
+    )
+    if (
+      existing_head_repository.casefold() != upstream_repo.casefold()
+      and existing_head_repository.split("/", 1)[0].casefold()
+      != login.casefold()
+    ):
+      raise ContributionSubmitError(
+        "This pull request branch is not owned by the connected GitHub account. "
+        "Nothing was pushed."
+      )
   direct_base = (
     _git_ops._validate_branch(direct_base_branch) if direct_base_branch else None
   )
@@ -1681,6 +1744,15 @@ def _submit_prepared_pr(
         fork_slug = _ensure_owner_fork_remote(repo, upstream_repo, login)
       except ContributionSubmitError as exc:
         raise _git_ops._merge_error_patch(exc, record_patch) from exc
+      if (
+        existing_head_repository is not None
+        and fork_slug.casefold() != existing_head_repository.casefold()
+      ):
+        raise ContributionSubmitError(
+          "The connected GitHub fork no longer matches this pull request's "
+          "verified head repository. Nothing was pushed.",
+          record_patch=record_patch,
+        )
       record_patch = _git_ops._record_patch_with(record_patch, {"head_repository": fork_slug})
       push_source = "HEAD"
       last_push_error = _push_topic_branch(repo, branch, push_source)

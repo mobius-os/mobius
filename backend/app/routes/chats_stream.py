@@ -37,11 +37,11 @@ from app.chat_writer import (
   get_writer,
 )
 from app import claude_sdk_runner, codex_sdk_runner
+from app.chat_provider import resolve_chat_provider
 from app.chat_visibility import coerce_agent_settings
 from app.providers import (
   _load_agent_settings,
   effective_agent_settings,
-  owner_default_provider,
 )
 from app.runner_registry import RunnerKind, registry
 from app.config import get_settings
@@ -103,27 +103,14 @@ def _selected_model_for_chat(
   return model.strip() if isinstance(model, str) and model.strip() else None
 
 
-def _next_execution_provider(db: Session, chat: models.Chat) -> str:
+def _next_execution_provider(chat: models.Chat) -> str:
   """Match the provider the current send path will actually execute on."""
-  provider = chat.provider or "claude"
-  # StartTurn alone re-reads the owner's latest provider for a pristine owner
-  # chat. Queued, draining, app-owned, and already-started chats keep their
-  # durable provider, so the model check must evaluate against that same value.
-  if (
-    chat.created_by_app_id is None
-    and not (chat.messages or [])
-    and not (chat.pending_messages or [])
-    and not is_chat_running(chat.id)
-    and not is_draining()
-  ):
-    owner = db.query(models.Owner).first()
-    # Provider follows the last-selected model, matching new-chat creation, so a
-    # pristine chat's first send can't re-diverge onto a family whose remembered
-    # model belongs to the other provider.
-    return owner_default_provider(
-      get_settings().data_dir, owner.provider if owner else None,
-    )
-  return provider
+  return resolve_chat_provider(
+    chat,
+    data_dir=get_settings().data_dir,
+    running=is_chat_running(chat.id),
+    draining=is_draining(),
+  )
 
 # Keepalive interval for the SSE stream to prevent proxy timeouts.
 _KEEPALIVE_INTERVAL = 30  # seconds
@@ -871,7 +858,7 @@ async def _send_message_locked(
       status_code=403,
       detail="Only the owner can resume a paused chat.",
     )
-  next_execution_provider = _next_execution_provider(db, chat)
+  next_execution_provider = _next_execution_provider(chat)
   if _selected_model_for_chat(
     chat, provider=next_execution_provider,
   ) is None:

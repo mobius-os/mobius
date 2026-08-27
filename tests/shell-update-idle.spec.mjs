@@ -168,6 +168,34 @@ async function sendMessage(page, text) {
 }
 
 test.describe('shell update — apply on idle, SW on a leash', () => {
+  test('ordinary same-origin reload never opts into a document transition', async ({ page }) => {
+    await setup(page, {
+      streamRoute: route => route.fulfill(fulfillStream(sse([{ type: 'done' }]))),
+      systemBody: sse([{ type: 'system_stream_open' }]),
+    })
+    await page.evaluate(() => {
+      sessionStorage.removeItem('shell-reload')
+      sessionStorage.removeItem('__ordinary_navigation_transition')
+      window.addEventListener('pageswap', event => {
+        if (!event.viewTransition) {
+          sessionStorage.setItem('__ordinary_navigation_transition', 'unsupported')
+          return
+        }
+        event.viewTransition.ready.then(
+          () => sessionStorage.setItem('__ordinary_navigation_transition', 'retained'),
+          () => sessionStorage.setItem('__ordinary_navigation_transition', 'skipped'),
+        )
+      }, { once: true })
+    })
+
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await page.waitForFunction(() => (
+      sessionStorage.getItem('__ordinary_navigation_transition') === 'unsupported'
+    ))
+    await expect(page.locator('style[data-mobius-shell-navigation-opt-in]')).toHaveCount(0)
+    await expect(page.locator('html[data-shell-reload-transition]')).toHaveCount(0)
+  })
+
   test('an unfinished question turn survives a hidden-page shell update', async ({ page }) => {
     // The chat stream parks on a question without `done`, so the active turn
     // remains unfinished. shell_rebuilt arrives on the GLOBAL system stream,
@@ -383,6 +411,124 @@ test.describe('shell update — apply on idle, SW on a leash', () => {
       () => Number(sessionStorage.getItem('__load_count') || '0') === 1,
       { timeout: 8000 },
     )
+  })
+
+  test('an aged apply and the next chat press share one painted destination handoff', async ({ page }) => {
+    let armApply
+    const armed = new Promise(resolve => { armApply = resolve })
+    await setup(page, {
+      streamRoute: route => route.fulfill(fulfillStream(sse([{ type: 'done' }]))),
+      systemRoute: oneShotSystemEventRoute('shell_apply_now', armed),
+    })
+    const target = await createTaggedChat(page, 'handoff-target')
+    const current = await createTaggedChat(page, 'handoff-current')
+    // API-created fixtures are intentionally empty, while the production
+    // drawer omits chats until their first message. This scenario needs both
+    // rows because it exercises a real drawer press, so expose only these
+    // owned fixtures as populated instead of depending on incidental account
+    // history.
+    // Own the complete list boundary for this page. Merging the shared CI
+    // account's concurrently changing chats makes this navigation contract
+    // depend on unrelated workers and the drawer's virtualization window.
+    const visibleFixtures = [target, current].map(chat => ({
+      ...chat,
+      has_messages: true,
+    }))
+    await page.addInitScript(fixtures => {
+      const realFetch = window.fetch.bind(window)
+      window.fetch = (input, init) => {
+        const url = new URL(String(input?.url || input), window.location.href)
+        const method = String(init?.method || input?.method || 'GET').toUpperCase()
+        if (method === 'GET' && url.pathname === '/api/chats') {
+          return Promise.resolve(new Response(JSON.stringify(fixtures), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }))
+        }
+        return realFetch(input, init)
+      }
+    }, visibleFixtures)
+    await page.goto(`${BASE}/shell/?chat=${current.id}`, { waitUntil: 'domcontentloaded' })
+    await expect(page.locator(`[data-chat-id="${current.id}"][data-chat-surface="painted"]`)).toBeVisible({ timeout: 8000 })
+    await resetLoadCount(page)
+
+    await page.getByRole('button', { name: 'Toggle navigation' }).click()
+    const targetRow = page.locator(`[data-drawer-key="chat:${target.id}"]`)
+    await expect(targetRow).toBeVisible()
+
+    // Hold worker inspection so the test can place a fresh pointerdown inside
+    // the exact async gap that used to commit the old route before click.
+    await page.evaluate(() => {
+      const container = navigator.serviceWorker
+      let releaseInspection
+      const inspectionGate = new Promise(resolve => { releaseInspection = resolve })
+      const original = container.getRegistration.bind(container)
+      Object.defineProperty(container, 'getRegistration', {
+        configurable: true,
+        value: async () => {
+          await inspectionGate
+          return original()
+        },
+      })
+      window.__releaseShellInspection = releaseInspection
+      window.addEventListener('mobius:before-shell-reload', () => {
+        sessionStorage.setItem('__before_shell_reload_seen', '1')
+      })
+      window.addEventListener('pageswap', event => {
+        sessionStorage.setItem(
+          '__shell_reload_view_transition',
+          event.viewTransition ? 'yes' : 'no',
+        )
+      }, { once: true })
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        value: 'hidden',
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+
+    armApply()
+    await page.waitForTimeout(7000)
+    expect(await loadCount(page)).toBe(0)
+
+    await targetRow.evaluate(element => {
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true,
+        value: 'visible',
+      })
+      document.dispatchEvent(new Event('visibilitychange'))
+      // Use the actual navigation target for the fresh press. Dispatching on
+      // the document root is an outside press and correctly dismisses the
+      // mobile drawer before the paired click can supply its destination.
+      element.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        pointerType: 'touch',
+      }))
+      window.__releaseShellInspection()
+    })
+    await page.waitForFunction(
+      () => sessionStorage.getItem('__before_shell_reload_seen') === '1',
+      { timeout: 3000 },
+    )
+    // Let the first apply reach its final safety check. The press keeps it in
+    // this document; the click below then supplies the destination atomically.
+    await page.waitForTimeout(100)
+    expect(await loadCount(page)).toBe(0)
+
+    await targetRow.evaluate(element => element.click())
+    await page.waitForFunction(
+      () => Number(sessionStorage.getItem('__load_count') || '0') === 1,
+      { timeout: 8000 },
+    )
+    await expect(page.locator(
+      `[data-chat-id="${target.id}"][data-chat-surface="painted"]`,
+    )).toBeVisible({ timeout: 8000 })
+    expect(await page.evaluate(() => (
+      sessionStorage.getItem('__shell_reload_view_transition')
+    ))).toBe('yes')
+    await page.waitForTimeout(700)
+    expect(await page.locator('html[data-shell-reload-transition]').count()).toBe(0)
+    expect(await loadCount(page)).toBe(1)
   })
 
   test('shell_apply_now on the global system stream while idle applies immediately', async ({ page }) => {

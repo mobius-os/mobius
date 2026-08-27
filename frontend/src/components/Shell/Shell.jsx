@@ -158,6 +158,7 @@ import useWorkspaceSession from './useWorkspaceSession.js'
 import useShellReloadController from './useShellReloadController.js'
 import useAppFrameCache from './useAppFrameCache.js'
 import useShellVisualViewport from './useShellVisualViewport.js'
+import useShellShortcuts from '../../hooks/useShellShortcuts.js'
 import ShellBrand from './ShellBrand.jsx'
 import { createMediaSessionOwner } from './mediaSessionOwner.js'
 import { HistoryDismissProvider } from '../../hooks/useHistoryDismiss.jsx'
@@ -222,7 +223,8 @@ export default function Shell({ onInitialVisualReady }) {
     activeChatId,
     drawerOpen, settingsOverlayOpen, settingsOpenRaw, openDrawer, closeDrawer,
     drawerNavigationCover, finishDrawerNavigationPresentation,
-    navTo, tabRevealRevision, applyModeDestination, dismissSettings,
+    navTo, navigateBackward, navigateForward,
+    tabRevealRevision, applyModeDestination, dismissSettings,
     backFiredRef, drawerPushedRef, navStackRef, navigationEpochRef,
     activeViewRef, activeChatIdRef, activeAppIdRef,
     drawerOpenRef,
@@ -449,10 +451,8 @@ export default function Shell({ onInitialVisualReady }) {
   // so their identity never churns and the listener never re-registers.
   const navToRef = useRef(navTo)
   navToRef.current = navTo
-  // PaneChatView is memoized, so do not defeat its per-chat run-signal boundary
-  // with the per-render navTo identity. Pane handlers call through this stable
-  // facade and still reach the latest navigation implementation via the ref.
-  const stablePaneNavTo = useCallback((view, opts) => navToRef.current(view, opts), [])
+  // Stable shell callbacks reach the current per-render navigator through this
+  // ref; useAppIntentNavigation owns the pane-aware app doorway used by chats.
   const handleNowPlayingOpen = useCallback((appId) => {
     navToRef.current('canvas', { appId })
   }, [])
@@ -544,6 +544,7 @@ export default function Shell({ onInitialVisualReady }) {
     reconcile: reconcileCreatedChats,
   })
   const apps = appsQuery.data ?? EMPTY_LIST
+  const artifactsAppId = apps.find(app => app.slug === 'artifacts')?.id ?? null
   const chats = chatsQuery.data ?? EMPTY_LIST
   const appsStatus = apps.length > 0 || appsQuery.isSuccess
     ? 'success'
@@ -1555,50 +1556,117 @@ export default function Shell({ onInitialVisualReady }) {
   // the chord is inert while a cross-origin app iframe holds focus — in that
   // case click into the shell chrome (a strip tab or the divider) first, then
   // press the chord.
+  const applyWorkspaceUndo = useCallback(({ reopenOnly = false } = {}) => {
+    const wsState = workspaceStateRef.current
+    const undoSlot = wsState.undo
+    if (!undoSlot || (reopenOnly && !undoSlot.reopenable)) return false
+    // A mode-restoring undo (single-leaf drop, empty-builder auto-return) routes
+    // through the controller FIRST (INV 2/3) so its re-entry/exit deal fires as
+    // one gesture, not a passive sync a render later.
+    const restoredMode = undoSlot.restoreViewMode
+      ? undoSlot.ws.viewMode : wsState.ws.viewMode
+    if (restoredMode !== wsState.ws.viewMode) {
+      const scene = sceneInputsRef.current
+      const paneWorld = restoredMode === 'panes' ? undoSlot.ws : wsState.ws
+      const paneProjection = restoredMode === 'panes'
+        ? paneModel.projectLayout(paneWorld, scene.mode, scene.contentRect)
+        : scene.projection
+      const plan = deriveModeSnapshotPlan({
+        workspace: paneWorld,
+        projection: paneProjection,
+        contentRect: scene.contentRect,
+      })
+      modeView.run({
+        direction: restoredMode === 'panes' ? 'enter' : 'exit',
+        to: restoredMode,
+        cause: 'undo',
+        plan,
+        update: () => {
+          dispatchWorkspace({ type: 'UNDO_LAST' })
+        },
+      })
+      return true
+    }
+    dispatchWorkspace({ type: 'UNDO_LAST' })
+    return true
+  }, [dispatchWorkspace, modeView])
+
   useEffect(() => {
     const onKey = (e) => {
       if (!undoKeyPressed(e) || isEditableTarget(document.activeElement)) return
       e.preventDefault()
-      // A mode-restoring undo (single-leaf drop, empty-builder auto-return) routes
-      // through the controller FIRST (INV 2/3) so its re-entry/exit deal fires as one
-      // gesture, not a passive sync a render later. undo.restoreViewMode reverts the
-      // snapshot's mode; every other undo carries the current mode forward
-      // (restoredMode === current), so no mode presentation change is needed there. The presentation
-      // plan is built from the tree the beat animates: re-entering builder deals in
-      // the RESTORED tree; exiting to single deals the CURRENT tiled tree out.
-      const wsState = workspaceStateRef.current
-      const undoSlot = wsState.undo
-      if (undoSlot) {
-        const restoredMode = undoSlot.restoreViewMode
-          ? undoSlot.ws.viewMode : wsState.ws.viewMode
-        if (restoredMode !== wsState.ws.viewMode) {
-          const scene = sceneInputsRef.current
-          const paneWorld = restoredMode === 'panes' ? undoSlot.ws : wsState.ws
-          const paneProjection = restoredMode === 'panes'
-            ? paneModel.projectLayout(paneWorld, scene.mode, scene.contentRect)
-            : scene.projection
-          const plan = deriveModeSnapshotPlan({
-            workspace: paneWorld,
-            projection: paneProjection,
-            contentRect: scene.contentRect,
-          })
-          modeView.run({
-            direction: restoredMode === 'panes' ? 'enter' : 'exit',
-            to: restoredMode,
-            cause: 'undo',
-            plan,
-            update: () => {
-              dispatchWorkspace({ type: 'UNDO_LAST' })
-            },
-          })
-          return
-        }
-      }
-      dispatchWorkspace({ type: 'UNDO_LAST' })
+      applyWorkspaceUndo()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [dispatchWorkspace, modeView])
+  }, [applyWorkspaceUndo])
+
+  const shortcutFocusedPane = workspace.panes[workspace.focusedPaneId] || null
+  const shortcutBuilderActive = workspace.viewMode === 'panes'
+  const shortcutActions = {
+    'search.open': {
+      run: () => {
+        notificationCenterActionsRef.current?.openSearch()
+        return true
+      },
+    },
+    'chat.new': {
+      run: () => {
+        startUserChat()
+        return true
+      },
+    },
+    'tab.newChat': {
+      run: () => {
+        const ws = workspaceStateRef.current.ws
+        if (ws.viewMode === 'single') {
+          const transition = handleToggleViewMode('shortcut')
+          if (!transition.changed) return false
+        }
+        startUserNewChatPresentation({ forceNew: true })
+        return true
+      },
+    },
+    'tab.close': {
+      enabled: shortcutBuilderActive && !!shortcutFocusedPane?.activeTabKey,
+      unavailableReason: 'Open Builder to close an active tab.',
+      run: () => {
+        const ws = workspaceStateRef.current.ws
+        const pane = ws.panes[ws.focusedPaneId]
+        if (ws.viewMode !== 'panes' || !pane?.activeTabKey) return false
+        dispatchWorkspace({ type: 'CLOSE_TAB', tabKey: pane.activeTabKey })
+        return true
+      },
+    },
+    'workspace.reopenClosed': {
+      enabled: workspaceStateRef.current.undo?.reopenable === true,
+      unavailableReason: 'Close a tab or pane first.',
+      run: () => applyWorkspaceUndo({ reopenOnly: true }),
+    },
+    'pane.newChat': {
+      run: () => {
+        void openNewChatPane()
+        return true
+      },
+    },
+    'pane.close': {
+      enabled: shortcutBuilderActive && !!shortcutFocusedPane,
+      unavailableReason: 'Open Builder to close a pane.',
+      run: () => {
+        const ws = workspaceStateRef.current.ws
+        if (ws.viewMode !== 'panes' || !ws.panes[ws.focusedPaneId]) return false
+        dispatchWorkspace({ type: 'CLOSE_PANE', paneId: ws.focusedPaneId })
+        return true
+      },
+    },
+    'history.back': { run: navigateBackward },
+    'history.forward': { run: navigateForward },
+  }
+  const {
+    commands: shellCommands,
+    frameBindings: shellFrameShortcuts,
+    runAction: runShellShortcut,
+  } = useShellShortcuts(shortcutActions)
 
   // No per-mutation undo toast: the reducer still mints a fresh undo slot on
   // every workspace mutation (its `toast` label included, for the reducer's own
@@ -3300,6 +3368,47 @@ export default function Shell({ onInitialVisualReady }) {
     return startUserNewChatPresentation({ forceNew })
   }
 
+  async function openNewChatPane() {
+    let resolution
+    try {
+      resolution = await resolveNewChatId()
+    } catch (error) {
+      recordClientError({ where: 'new-chat-pane-resolution', error })
+      resolution = { chatId: null, reason: 'error' }
+    }
+    const { chatId, reason } = resolution
+    if (chatId == null) {
+      if (reason === 'offline') showToast("You're offline.")
+      else if (reason === 'error') {
+        showToast("Couldn't open a new chat pane — please try again.", { variant: 'error' })
+      }
+      return false
+    }
+
+    const wsState = workspaceStateRef.current
+    const ws = wsState.ws
+    const action = {
+      type: 'OPEN_TAB_AT',
+      tab: tabModel.makeTab('chat', chatId),
+      target: { paneId: ws.focusedPaneId, edge: 'right' },
+      flipViewMode: ws.viewMode === 'single' ? 'panes' : null,
+      label: 'Opened chat pane',
+    }
+    // Probe the owning pure reducer before dispatch. A max-depth/max-pane
+    // refusal falls back to an ordinary focused tab, so a successfully created
+    // chat is never stranded off-screen.
+    if (paneModel.workspaceReducer(wsState, action) === wsState) {
+      applyModeDestination({
+        view: 'chat', chatId, appId: null, paneId: ws.focusedPaneId,
+      })
+      showToast('No room for another pane — opened the chat in the focused pane.')
+    } else {
+      dispatchWorkspace(action)
+    }
+    requestComposer(chatId, { focus: true, restoreExistingDraft: true })
+    return true
+  }
+
   // Keep the latest-newChat ref current so handleAppError's crash-report
   // fallback starts a chat with this render's live closure.
   newChatRef.current = newChat
@@ -3739,7 +3848,9 @@ export default function Shell({ onInitialVisualReady }) {
           )}
           <NotificationCenter
             ref={notificationCenterActionsRef}
+            commands={shellCommands}
             onOpenTarget={handleNotificationOpen}
+            onRunCommand={runShellShortcut}
           />
         </div>
       </header>
@@ -3977,6 +4088,8 @@ export default function Shell({ onInitialVisualReady }) {
               onAppError={handleAppError}
               onHostRequest={handleAppHostRequest}
               onMediaSession={handleMediaSession}
+              shellShortcuts={shellFrameShortcuts}
+              onShellShortcut={runShellShortcut}
             />
             </ErrorBoundary>
           </div>
@@ -4083,6 +4196,7 @@ export default function Shell({ onInitialVisualReady }) {
                 chatId={chatId}
                 paneId={paneId}
                 apps={apps}
+                artifactsAppId={artifactsAppId}
                 // Runtime activity and painting are independent during a handoff:
                 // staging owns the work while held remains the visual cover.
                 runtimeActive={surfaceVisible && chatPanesVisible && role !== 'held'}
@@ -4113,7 +4227,7 @@ export default function Shell({ onInitialVisualReady }) {
                 refreshChats={refreshChats}
                 markChatOwnerActivity={markChatOwnerActivity}
                 loadTheme={loadTheme}
-                navTo={stablePaneNavTo}
+                openAppWithIntent={openAppWithIntent}
                 onInternalNav={handleChatInternalNav}
                 onChatMissing={handlePaneChatMissing}
                 onFirstMessage={handlePaneChatFirstMessage}

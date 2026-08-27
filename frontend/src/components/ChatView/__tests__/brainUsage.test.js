@@ -7,6 +7,7 @@ import {
   formatRoundedTokenCount,
   modelContextTokenCounts,
   resolvedContextTokenCounts,
+  visibleBrainFillBounds,
 } from '../brainUsage.js'
 
 test('context gauge measures the latest model call against its context window', () => {
@@ -73,4 +74,25 @@ test('missing usage in an established session remains unknown', () => {
     input_tokens: null,
     context_window: null,
   }, registry, 'codex', 'gpt-5.6-sol'), null)
+})
+
+test('the final ten percent remains visibly linear inside the inset mask', () => {
+  const geometry = percent => visibleBrainFillBounds(percent, {
+    top: 2.3,
+    bottom: 21.7,
+    inset: 1.75,
+  })
+  const at90 = geometry(90)
+  const at95 = geometry(95)
+  const at100 = geometry(100)
+
+  assert.ok(at95.fillHeight > at90.fillHeight)
+  assert.ok(at100.fillHeight > at95.fillHeight)
+  assert.ok(Math.abs(
+    (at95.fillHeight - at90.fillHeight)
+    - (at100.fillHeight - at95.fillHeight),
+  ) < 1e-12)
+  assert.ok(Math.abs(at100.fillY - 4.05) < 1e-12)
+  assert.deepEqual(geometry(105), at100)
+  assert.equal(geometry(-5).fillHeight, 0)
 })

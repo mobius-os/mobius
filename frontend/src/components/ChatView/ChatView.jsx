@@ -43,9 +43,11 @@ import ChatInputBar from './ChatInputBar.jsx'
 import { hasSendablePayload } from './composerSubmission.js'
 import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
+import ChatDiffViewer from './ChatDiffViewer.jsx'
 import ChatUsageInspector from './ChatUsageInspector.jsx'
 import ChatUsageStrip from './ChatUsageStrip.jsx'
 import { formatUsageAriaSummary } from './chatUsageFormat.js'
+import { chatContributionPrepareSubmission } from './chatContributionIntent.js'
 import ComposerPopover from './ComposerPopover.jsx'
 import BrainUsageButton from './BrainUsageButton.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
@@ -55,6 +57,7 @@ import WaitingChip from './WaitingChip.jsx'
 import ActiveAssistantSurface from './ActiveAssistantSurface.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import ContributionReviewCard from './ContributionReviewCard.jsx'
+import { contributionFollowupPrompt } from './contributionReviewModel.js'
 import MsgContent from './MsgContent.jsx'
 import MessageMetaRow from './MessageMetaRow.jsx'
 import ActivityLineHeader from './ActivityLineHeader.jsx'
@@ -119,7 +122,13 @@ import {
   isPendingQuestionSendFailure,
   sendFailureMessage,
 } from './sendFailure.js'
-import { assistantStreamCoversMessage, chooseActiveAssistantDataKey, findTrailingAssistantPartialIndex, streamItemsHaveRenderableContent } from './streamPromotion.js'
+import {
+  assistantStreamBelongsToActiveMessage,
+  assistantStreamCoversMessage,
+  chooseActiveAssistantDataKey,
+  findTrailingAssistantPartialIndex,
+  streamItemsHaveRenderableContent,
+} from './streamPromotion.js'
 import {
   commitAssistantPromotion,
   deriveActiveAssistantSelection,
@@ -141,6 +150,7 @@ import {
   runtimeStreamAttachAction,
   shouldRetireRestoredQuestionSnapshot,
   shouldAttachRunningStream,
+  shouldAdoptRuntimeAssistantOwner,
   shouldRecoverSettledRuntime,
   shouldRetryStopAfterConfirm,
   stopConfirmedIdle,
@@ -166,7 +176,8 @@ import {
   reconcileComposerTextarea,
   resetComposerTextarea,
 } from './composerTextareaSizing.js'
-import { needsModelSelection } from './modelSelectionPolicy.js'
+import { needsModelSelection, selectedChatModel } from './modelSelectionPolicy.js'
+import { collectChatDiffs } from './chatDiffs.js'
 import {
   EMPTY_BUILD_PHASE_RAIL,
   accumulateBuildPhase,
@@ -330,6 +341,8 @@ export default function ChatView({
   // chat has a stable frame to paint. Empty/error chats are already stable;
   // transcript chats wait for useScrollMode's existing hide-then-reveal gate.
   onDisplayReady = null,
+  artifactsAppId = null,
+  onOpenArtifact = null,
 }) {
   const queryClient = useQueryClient()
   // Cheap per-chat token/cost summary for the always-visible composer badge
@@ -481,6 +494,20 @@ export default function ChatView({
       { running },
     )
   }
+  // The server names the only assistant row allowed to own regenerable live
+  // stream state. Keep a synchronous ref for terminal/promotion callbacks;
+  // React state drives source selection for ordinary renders.
+  const [activeAssistantMessageId, setActiveAssistantMessageIdState] = useState(
+    () => cached?.activeAssistantMessageId ?? null,
+  )
+  const activeAssistantMessageIdRef = useRef(
+    cached?.activeAssistantMessageId ?? null,
+  )
+  const setActiveAssistantMessageId = useCallback((value) => {
+    const next = typeof value === 'string' && value ? value : null
+    activeAssistantMessageIdRef.current = next
+    setActiveAssistantMessageIdState(next)
+  }, [])
   const {
     input,
     inputValueRef,
@@ -545,6 +572,7 @@ export default function ChatView({
   // cards themselves use to publish the node being observed.
   const [showInspector, setShowInspector] = useState(false)
   const [showSummary, setShowSummary] = useState(false)
+  const [showChanges, setShowChanges] = useState(false)
   const [showUsage, setShowUsage] = useState(false)
   const [visibleMessageMetaKey, setVisibleMessageMetaKey] = useState(null)
   const messageMetaTimerRef = useRef(null)
@@ -1118,6 +1146,14 @@ export default function ChatView({
         data, latestGoalObjective(msgs),
       )
       setActiveGoalObjective(runtimeGoalObjective)
+      const adoptAssistantOwner = shouldAdoptRuntimeAssistantOwner({
+        runtimeRunning: !!data.running,
+        localAuthoritative: preserveLocalTurn,
+        authoritativeRefresh: authoritative,
+      })
+      if (adoptAssistantOwner) {
+        setActiveAssistantMessageId(data.active_assistant_message_id || null)
+      }
       setLiveQuestionId(data.pending_question_id || null)
       if (Array.isArray(data.waits)) setArmedWaits(data.waits)
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
@@ -1125,6 +1161,9 @@ export default function ChatView({
         activeGoalObjective: runtimeGoalObjective,
         pending_messages: data.pending_messages || [],
         pending_question_id: data.pending_question_id || null,
+        ...(adoptAssistantOwner ? {
+          activeAssistantMessageId: data.active_assistant_message_id || null,
+        } : {}),
         waits: data.waits || [],
       })
       // Reconcile pending queue against authoritative server state.
@@ -1138,6 +1177,7 @@ export default function ChatView({
       }
       return {
         running: !!data.running,
+        activeAssistantMessageId: data.active_assistant_message_id || null,
         pendingQuestionId: data.pending_question_id || null,
         pendingLimitResume: !!tailResumableBlock(msgs)?.pause?.resets_at,
       }
@@ -1153,6 +1193,7 @@ export default function ChatView({
     pendingQueue.hydrate,
     queryClient,
     reconcileFailedSendAttempt,
+    setActiveAssistantMessageId,
   ])
 
   // Active-turn runtime reconciliation. The SSE stream is authoritative for
@@ -1177,6 +1218,7 @@ export default function ChatView({
       const serverPending = data.pending_messages || []
       const runtime = {
         running: !!data.running,
+        activeAssistantMessageId: data.active_assistant_message_id || null,
         pendingQuestionId: data.pending_question_id || null,
       }
       // The SSE stream is the source of truth for "a turn is live" — this poll
@@ -1191,6 +1233,13 @@ export default function ChatView({
         localStartRequestRef.current?.chatId === String(chatId)
       const localAuthoritative =
         handlingStopRef.current || localStartInFlight || isStreamingRef.current
+      const adoptAssistantOwner = shouldAdoptRuntimeAssistantOwner({
+        runtimeRunning: runtime.running,
+        localAuthoritative,
+      })
+      if (adoptAssistantOwner) {
+        setActiveAssistantMessageId(runtime.activeAssistantMessageId)
+      }
       if (shouldRecoverSettledRuntime({
         runtimeWasObservedRunning: serverRunningRef.current,
         runtimeRunning: !!data.running,
@@ -1256,6 +1305,9 @@ export default function ChatView({
         activeGoalObjective: runtimeGoalObjective,
         pending_messages: serverPending,
         pending_question_id: pendingQuestionId,
+        ...(adoptAssistantOwner ? {
+          activeAssistantMessageId: runtime.activeAssistantMessageId,
+        } : {}),
         waits: data.waits || [],
       })
       // Don't let the fallback poll add/clobber the queue while a turn is live
@@ -1292,6 +1344,7 @@ export default function ChatView({
     messagesRef,
     pendingQueue.hydrate,
     queryClient,
+    setActiveAssistantMessageId,
   ])
 
   const handleCompactionStored = useCallback(
@@ -1367,8 +1420,15 @@ export default function ChatView({
       // one transcript boundary. A restored assistant may be bridged in place
       // above a newer local row, so committing the following rows separately
       // at the list tail makes a restart marker flash below that newer row.
-      promoteStreamToMessages({ followingMessages: promotedRows })
+      promoteStreamToMessages({
+        followingMessages: promotedRows,
+        authoritativeCut: true,
+      })
       if (continues) {
+        // The next physical run has been created but its assistant identity is
+        // established by the successor stream/runtime snapshot. Do not let the
+        // completed run's owner reject that fresh surface in the handoff gap.
+        setActiveAssistantMessageId(null)
         // Backend auto-promoted queued follow-ups into the next turn. Newer
         // backend code persists the visible rows separately while sending
         // combined text to the provider; older code returned one combined row.
@@ -1398,6 +1458,7 @@ export default function ChatView({
         setSending(true)
         setServerRunningState(true)
       } else {
+        setActiveAssistantMessageId(null)
         setSending(false)
         sendingRef.current = false
         setServerRunningState(false)
@@ -1443,6 +1504,7 @@ export default function ChatView({
     },
     onNeedsRefresh: fetchMessages,
     onQueuedTurnStarting: ({ ts, message } = {}) => {
+      setActiveAssistantMessageId(null)
       // A queued message is being promoted into its OWN run — the rail's
       // run-start boundary for queue drains. useStreamConnection fires this
       // callback during catch-up replay too, in event order, so a reconnect
@@ -1482,6 +1544,7 @@ export default function ChatView({
       content,
       messages: steeredBatch,
       assistantMessageId,
+      nextAssistantMessageId,
       sealedItems,
     }) => {
       // The steer's transcript split has COMMITTED (fired for both providers,
@@ -1528,7 +1591,12 @@ export default function ChatView({
         keepTurnOpen: true,
         items: sealedItems,
         assistantMessageId,
+        authoritativeCut: true,
       })
+      // The sealed segment was promoted under the previous owner above. The
+      // sink rotates synchronously at this cut, so adopt its successor before
+      // the hook re-bases streamItems onto the new segment after this callback.
+      setActiveAssistantMessageId(nextAssistantMessageId)
       const steeredIsFirstUser = isFirstVisibleUserMessage()
       // Arm the scroll mode BEFORE rendering the steered row. EventSource
       // callbacks are outside React's synthetic event layer, and query-cache
@@ -1805,6 +1873,7 @@ export default function ChatView({
     followingMessages = [],
     items: explicitItems = null,
     assistantMessageId: explicitAssistantMessageId = undefined,
+    authoritativeCut = false,
   } = {}) {
     const following = Array.isArray(followingMessages)
       ? followingMessages.filter(Boolean)
@@ -1817,6 +1886,21 @@ export default function ChatView({
       ? latestAssistantMessageIdRef.current
       : explicitAssistantMessageId
     if (items.length === 0 && following.length === 0) return
+    if (!authoritativeCut && !assistantStreamBelongsToActiveMessage(
+      assistantMessageId,
+      activeAssistantMessageIdRef.current,
+    )) {
+      // A restart can leave an old sessionStorage snapshot alive after the
+      // server has moved to another assistant. Regenerable stream state may be
+      // discarded, but continuation rows delivered with this boundary are
+      // durable and still belong at their timestamp-defined positions.
+      if (following.length > 0) {
+        commitMessages(prev => insertMessageBatchByTs(prev, following))
+      }
+      clearStreamItems?.()
+      promotedRef.current = !keepTurnOpen
+      return
+    }
     // A steer can cut over before the assistant emitted any real output — the
     // only buffered item is an empty/whitespace token. Sealing it would leave a
     // stray empty assistant bubble before the steered user row (the card-166
@@ -2056,6 +2140,9 @@ export default function ChatView({
         pendingQuestionId: runtime.pending_question_id,
       })
       setServerRunningLocalState(running)
+      setActiveAssistantMessageId(
+        runtime.active_assistant_message_id || null,
+      )
       setActiveGoalObjective(goalObjectiveFromRuntime(
         runtime, latestGoalObjective(visibleMessages),
       ))
@@ -2168,6 +2255,8 @@ export default function ChatView({
         )
         updateChatRuntimeCache(queryClient, queryKey, {
           running: !!runtime.running,
+          activeAssistantMessageId:
+            runtime.active_assistant_message_id || null,
           activeGoalObjective: runtimeGoalObjective,
           pending_messages: runtime.pending_messages || [],
           pending_question_id: runtime.pending_question_id || null,
@@ -2331,6 +2420,7 @@ export default function ChatView({
     searchReveal?.anchorKey,
     searchReveal?.id,
     reconcileFailedSendAttempt,
+    setActiveAssistantMessageId,
   ])
 
 
@@ -2501,6 +2591,7 @@ export default function ChatView({
 
     const pin = opts.pin !== false  // default true
     const continuation = opts.continuation === 'manual' ? 'manual' : undefined
+    const preserveComposer = opts.preserveComposer === true
     setSendFailure(null)
 
     // Stop voice recognition so a late onresult doesn't refill input
@@ -2562,7 +2653,7 @@ export default function ChatView({
       // in the composer. A failed request keeps the resumable card in place;
       // restoring the internal word "continue" as a draft would misattribute
       // it to the owner and make a retry look like ordinary prose.
-      if (!continuation) {
+      if (!continuation && !preserveComposer) {
         restoreComposerText(text, { preserveFailedAttempt: true })
       }
       if (usesComposerFiles) restoreFiles(composerFileSnapshot)
@@ -2619,9 +2710,9 @@ export default function ChatView({
       // to it (a user-driven scroll after send is the newer intent).
       const queuedPinIntent = sendPinIntent
       rememberSendIntent(cid, queuedPinIntent)
-      setComposerInput('')
+      if (!preserveComposer) setComposerInput('')
       clearComposerFilesForSend()
-      if (inputRef.current) {
+      if (!preserveComposer && inputRef.current) {
         resetComposerTextarea(inputRef.current)
         // Drop the multi-line `.chat__pill--tall` class so send/mic
         // re-center vertically. Without this, the pill stays in
@@ -2912,9 +3003,9 @@ export default function ChatView({
     }
     if (attachments.length > 0) userMsg.attachments = attachments
     commitMessages(prev => [...prev, userMsg])
-    setComposerInput('')
+    if (!preserveComposer) setComposerInput('')
     clearComposerFilesForSend()
-    if (inputRef.current) {
+    if (!preserveComposer && inputRef.current) {
       resetComposerTextarea(inputRef.current)
       // Drop the multi-line `.chat__pill--tall` class — see queue-path
       // comment above for the full rationale.
@@ -3926,6 +4017,20 @@ export default function ChatView({
   // (The fast-forward identity/readiness gates are computed separately below.)
   const turnActive = sending || isStreaming || serverRunning
 
+  const handlePrepareChatChanges = useCallback(() => {
+    setShowChanges(false)
+    const submission = chatContributionPrepareSubmission()
+    void doSend(submission.text, submission.options)
+  }, [doSend])
+
+  const handleContributionFollowup = useCallback((record) => {
+    setShowChanges(false)
+    void doSend(contributionFollowupPrompt(record), {
+      attachments: [],
+      preserveComposer: true,
+    })
+  }, [doSend])
+
   useOpenAppCtaAutoDismiss({
     builtApps,
     turnActive,
@@ -4202,10 +4307,12 @@ export default function ChatView({
     messages,
     streamItems,
     streamAssistantMessageId,
+    activeAssistantMessageId,
     liveItemsRetired: retiredAssistantItemsRef.current === streamItems,
     findBridgeIndex: bridgeHook.findBridgeIndex,
   }), [
     bridgeMountInputs,
+    activeAssistantMessageId,
     messages,
     streamAssistantMessageId,
     streamItems,
@@ -4240,6 +4347,10 @@ export default function ChatView({
   const pendingStreamQuestion = activeAssistantIsStreaming
     ? streamItems.find(it => it.type === 'question' && !it.answers)
     : null
+  const chatDiffEntries = useMemo(() => collectChatDiffs([
+    ...messages,
+    { role: 'assistant', blocks: streamItems },
+  ]), [messages, streamItems])
   const hasPendingQuestion = !!pendingStreamQuestion || !!liveQuestionId
 
   // Answerability id: prefer the durable pending_question_id marker; during the
@@ -4553,6 +4664,15 @@ export default function ChatView({
         <ChatSummaryViewer
           chatId={chatId}
           onClose={() => setShowSummary(false)}
+        />
+      )}
+      {!embedded && showChanges && (
+        <ChatDiffViewer
+          chatId={chatId}
+          initialEntries={chatDiffEntries}
+          onClose={() => setShowChanges(false)}
+          onPrepareChanges={handlePrepareChatChanges}
+          turnActive={turnActive}
         />
       )}
       {!embedded && showUsage && (
@@ -4900,6 +5020,14 @@ export default function ChatView({
               chatId={chatId}
               turnActive={turnActive}
               onOpenApp={onOpenApp}
+              onContinueInChat={handleContributionFollowup}
+              onOpenChat={(targetChatId) => {
+                if (!internalNav || !targetChatId) return
+                internalNav(new URL(
+                  `/?chat=${encodeURIComponent(targetChatId)}`,
+                  window.location.origin,
+                ))
+              }}
             />
           )}
         </div>
@@ -4968,7 +5096,7 @@ export default function ChatView({
               usageEnabled={!embedded}
               chatId={chatId}
               provider={chatInfo?.provider}
-              model={chatInfo?.effective?.model}
+              model={selectedChatModel(chatInfo)}
             >
               {({ icon, ariaLabel, providerUsage }) => (
               <ComposerPopover
@@ -5006,6 +5134,9 @@ export default function ChatView({
                 modelSelectionRequest={modelSelectionRequest}
                 onOpenInspector={() => setShowInspector(true)}
                 onOpenSummary={() => setShowSummary(true)}
+                onOpenChanges={() => setShowChanges(true)}
+                artifactsAppId={artifactsAppId}
+                onOpenArtifact={onOpenArtifact}
                 onOpenUsage={() => setShowUsage(true)}
                 embedded={embedded}
               />

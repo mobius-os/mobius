@@ -1091,6 +1091,7 @@ test('CLOSE_PANE closes a whole pane, is undoable, and names itself', () => {
   const closed = paneModel.workspaceReducer(start, { type: 'CLOSE_PANE', paneId })
   assert.equal(Object.keys(closed.ws.panes).length, 1, 'the pane collapsed away')
   assert.equal(closed.undo.toast, 'Closed pane')
+  assert.equal(closed.undo.reopenable, true)
   const undone = paneModel.workspaceReducer(closed, { type: 'UNDO_LAST' })
   assert.equal(undone.ws, ws, 'Undo restores the closed pane and its tabs')
 })
@@ -1256,6 +1257,7 @@ test('reducer CLOSE_TAB reason:deleted clears the slot; a user close snapshots',
     { type: 'CLOSE_TAB', tabKey: 'chat:b' },
   )
   assert.ok(userClose.undo, 'a user close is undoable')
+  assert.equal(userClose.undo.reopenable, true, 'and can power Reopen closed')
   assert.equal(
     paneModel.workspaceReducer(userClose, { type: 'UNDO_LAST' }).ws, seed,
     'and UNDO brings the tab back',

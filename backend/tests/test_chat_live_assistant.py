@@ -46,6 +46,7 @@ def test_stream_snapshot_updates_only_live_value(db):
   history_version = chat.updated_at
 
   assert update_live_assistant(db, chat.id, {
+    "id": "assistant-streaming",
     "role": "assistant",
     "blocks": [{"type": "text", "text": "streaming"}],
   }) is True
@@ -54,6 +55,7 @@ def test_stream_snapshot_updates_only_live_value(db):
   assert chat.messages == history
   assert chat.live_assistant["ts"] == 4
   assert chat.live_assistant["blocks"][0]["text"] == "streaming"
+  assert chat.active_assistant_message_id == "assistant-streaming"
   assert chat.updated_at == history_version
   assert materialized_messages(chat)[-1] == chat.live_assistant
 
@@ -83,6 +85,7 @@ def test_finalize_merges_live_turn_once_and_clears_snapshot(db):
   assert chat.messages[-1]["id"] == "assistant-current"
   assert chat.messages[-1]["ts"] == 4
   assert chat.messages[-1]["blocks"][0]["text"] == "complete"
+  assert chat.active_assistant_message_id == "assistant-current"
   assert chat.updated_at != history_version
 
 

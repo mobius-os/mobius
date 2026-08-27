@@ -166,6 +166,96 @@
     } catch (e) {}
   } catch (e) {}
 })();</script>
+    <!-- A controlled shell handoff is a same-origin replace navigation rather
+         than reload(), so supporting browsers can retain the old painted root
+         while the new bundle restores the chosen destination. Ordinary links,
+         auth redirects, and Back/Forward explicitly skip this opt-in below. -->
+    <style data-mobius-shell-reload-transition>
+      @keyframes mobius-shell-reload-reveal {
+        from { opacity: 1; }
+        to { opacity: 0; }
+      }
+      html[data-shell-reload-transition]::view-transition-group(root) {
+        animation: none;
+      }
+      html[data-shell-reload-transition]::view-transition-old(root) {
+        animation: mobius-shell-reload-reveal 140ms ease-out both paused;
+      }
+      html[data-shell-reload-transition]::view-transition-new(root) {
+        animation: none;
+        opacity: 0;
+      }
+      html[data-shell-reload-transition][data-shell-reload-ready]::view-transition-old(root) {
+        animation-play-state: running;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        html[data-shell-reload-transition]::view-transition-old(root) {
+          animation-duration: 1ms;
+        }
+      }
+    </style>
+    <script data-mobius-shell-reload-transition>(function () {
+      var root = document.documentElement;
+      function hasShellReload() {
+        try { return !!sessionStorage.getItem('shell-reload'); } catch (e) { return false; }
+      }
+      function supportsShellReloadTransition() {
+        return typeof document.startViewTransition === 'function'
+          && 'onpageswap' in window;
+      }
+      function installNavigationOptIn() {
+        if (document.querySelector('style[data-mobius-shell-navigation-opt-in]')) return;
+        var style = document.createElement('style');
+        style.setAttribute('data-mobius-shell-navigation-opt-in', '');
+        style.textContent = '@view-transition { navigation: auto; }';
+        document.head.appendChild(style);
+      }
+      if (hasShellReload() && supportsShellReloadTransition()) {
+        installNavigationOptIn();
+        root.setAttribute('data-shell-reload-transition', 'incoming');
+      }
+
+      // Cross-document view transitions are a document-wide opt-in. Installing
+      // that at-rule for every shell page and trying to skip unrelated
+      // navigations in `pageswap` is too late: the browser has already entered
+      // the transition lifecycle. Opt in only for the controlled replacement,
+      // immediately before navigation; the marked incoming document does the
+      // same above during pre-paint startup.
+      window.__mobiusPrepareShellReloadTransition = function () {
+        if (!supportsShellReloadTransition()) return false;
+        installNavigationOptIn();
+        root.setAttribute('data-shell-reload-transition', 'outgoing');
+        return true;
+      };
+
+      // Only a document that explicitly prepared the controlled replacement
+      // can receive a view transition here. Unrelated navigations never install
+      // the at-rule and therefore keep ordinary browser semantics.
+      window.addEventListener('pageswap', function (event) {
+        if (!event.viewTransition) return;
+        if (hasShellReload()) {
+          // Mark the outgoing document before its root snapshot animates. The
+          // incoming document sets the same attribute above, so both halves of
+          // the cross-document transition share the controlled timing.
+          root.setAttribute('data-shell-reload-transition', 'outgoing');
+          return;
+        }
+        // Defensive only: a stale marker must not retain unrelated pixels.
+        event.viewTransition.skipTransition();
+      });
+
+      // App releases this only after Shell reports a stable destination. The
+      // old root then fades directly to live React underneath; the static
+      // artwork-free theme cover never becomes the visible intermediate frame.
+      window.__mobiusReleaseShellReloadTransition = function () {
+        if (!root.hasAttribute('data-shell-reload-transition')) return;
+        root.setAttribute('data-shell-reload-ready', '');
+        setTimeout(function () {
+          root.removeAttribute('data-shell-reload-transition');
+          root.removeAttribute('data-shell-reload-ready');
+        }, 500);
+      };
+    })();</script>
   </head>
   <!-- Theme bg comes from var(--bg), set by the pre-paint script above. -->
   <body style="margin:0;background:var(--bg,#0d0d0d)">
@@ -215,6 +305,9 @@
             '. If it still won’t load, open Recovery from your deployment control panel.',
           )
           document.body.appendChild(d)
+          if (window.__mobiusReleaseShellReloadTransition) {
+            window.__mobiusReleaseShellReloadTransition()
+          }
         }
       }, 8000)
     </script>

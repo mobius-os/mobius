@@ -21,6 +21,9 @@ test('notification toggles are owned below the workspace shell', () => {
   )
   assert.match(center, /useNotificationCenter\(queryClient\)/)
   assert.match(center, /useImperativeHandle\(eventActionsRef/)
+  assert.match(center, /openSearch/)
+  assert.doesNotMatch(center, /document\.addEventListener\('keydown'/)
+  assert.match(shell, /useShellShortcuts\(shortcutActions\)/)
 })
 
 test('closed bell hover styling only applies to precise pointing devices', () => {

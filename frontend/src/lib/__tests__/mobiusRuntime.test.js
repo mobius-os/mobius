@@ -158,6 +158,57 @@ test('chat.start creates one owner-visible app chat and submits its first turn',
   }
 })
 
+test('chat.start admits a scoped first turn atomically and exposes reuse', async () => {
+  const previousFetch = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url, init })
+    if (url === '/api/app-chats/start') {
+      return new Response(JSON.stringify({
+        chat_id: 'existing-review-chat',
+        outcome: 'reused',
+        response: null,
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(null, { status: 404 })
+  }
+  try {
+    const chat = makeChat({
+      appId: 80,
+      getToken: async () => 'app-token',
+      storage: null,
+    })
+    const result = await chat.start({
+      title: 'Fix and review contribution',
+      draft: 'Review the exact prepared head.',
+      scope: 'contribute-review:exact-head',
+      scopeLabel: 'Fix and review contribution',
+    })
+
+    assert.deepEqual(result, {
+      chatId: 'existing-review-chat',
+      outcome: 'reused',
+      reused: true,
+      response: null,
+    })
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].url, '/api/app-chats/start')
+    const body = JSON.parse(calls[0].init.body)
+    assert.equal(body.title, 'Fix and review contribution')
+    assert.equal(body.scope, 'contribute-review:exact-head')
+    assert.equal(body.scope_label, 'Fix and review contribution')
+    assert.equal(body.owner_visible, true)
+    assert.equal(body.content, 'Review the exact prepared head.')
+    assert.equal(typeof body.cid, 'string')
+    assert.equal(typeof body.timezone, 'string')
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})
+
 test('chat.start rejects an empty first turn before creating a chat', async () => {
   const chat = makeChat({
     appId: 80,

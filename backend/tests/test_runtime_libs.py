@@ -101,6 +101,11 @@ def test_compile_command_bundles_the_complete_runtime_graph():
   assert mobius_runtime_path().is_file()
 
 
+def test_compiler_prefers_the_live_frame_runtime():
+  live_runtime = REPO_ROOT / "frontend" / "public" / "mobius-runtime.js"
+  assert mobius_runtime_path() == live_runtime
+
+
 def test_compile_command_selects_production_react_and_keeps_one_module(tmp_path):
   """The size win must come from the real production graph, not externals."""
   entry = tmp_path / "entry.jsx"

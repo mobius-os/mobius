@@ -64,6 +64,7 @@ def test_codex_patch_preview_keeps_multiple_file_kinds_and_bounds_payload():
   }])
   assert large["truncated"] is True
   assert len(large["diff"]) == MAX_EDIT_PREVIEW_CHARS
+  assert len(large["_full_diff"]) > len(large["diff"])
 
 
 def test_preview_quoting_preserves_unicode_paths():

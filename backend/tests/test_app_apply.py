@@ -51,6 +51,19 @@ def _declare_icon(source: Path, raw: bytes, name: str = "icon.png") -> None:
   (source / name).write_bytes(raw)
 
 
+def _declare_schedule(source: Path) -> None:
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["schedule"] = {
+    "default": "*/10 * * * *",
+    "user_configurable": False,
+    "job": "job.sh",
+  }
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  job = source / "job.sh"
+  job.write_text("#!/bin/sh\nexit 0\n")
+  job.chmod(0o755)
+
+
 def test_apply_creates_from_manifest_and_commits_exact_source(
   client, auth, db, chat,
 ):
@@ -111,6 +124,91 @@ def test_apply_updates_multifile_revision_once(client, auth, db):
       "appId": str(app_id),
       "chatId": "editing-chat",
     }),
+  ]
+
+
+def test_local_apply_converges_schedule_creation_and_removal(client, auth):
+  source = _source()
+  _declare_schedule(source)
+
+  with patch("app.app_cron.register_cron") as register:
+    created = _apply(client, auth, source)
+
+  assert created.status_code == 200, created.text
+  app_id = created.json()["app"]["id"]
+  assert register.call_args.args[:4] == (
+    "demo", "*/10 * * * *", source / "job.sh", app_id,
+  )
+
+  # Stand in for the durable declaration written by the real scaffold.
+  init_cron = source / "init-cron.sh"
+  init_cron.write_text("#!/bin/sh\nexit 0\n")
+  pending_cron = source / ".cron-pending.json"
+  pending_cron.write_text('{"status":"pending"}\n')
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest.pop("schedule")
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  (source / "job.sh").unlink()
+
+  with patch("app.install._unregister_cron") as unregister:
+    updated = _apply(client, auth, source)
+
+  assert updated.status_code == 200, updated.text
+  assert updated.json()["mode"] == "updated"
+  unregister.assert_called_once_with(source)
+  assert not init_cron.exists()
+  assert not pending_cron.exists()
+  assert updated.json()["warnings"] == []
+
+
+def test_unchanged_local_reapply_retries_failed_schedule_sync(client, auth):
+  source = _source()
+  _declare_schedule(source)
+  with patch(
+    "app.app_cron.register_cron", side_effect=RuntimeError("cron unavailable"),
+  ):
+    created = _apply(client, auth, source)
+
+  assert created.status_code == 200, created.text
+  assert created.json()["mode"] == "created"
+  assert created.json()["warnings"] == [
+    "cron: registration failed — RuntimeError('cron unavailable')"
+  ]
+
+  with patch("app.app_cron.register_cron") as register:
+    repeated = _apply(client, auth, source)
+
+  assert repeated.status_code == 200, repeated.text
+  assert repeated.json()["mode"] == "unchanged"
+  assert repeated.json()["warnings"] == []
+  register.assert_called_once()
+
+
+def test_unchanged_local_reapply_keeps_a_live_schedule_when_cron_fails(
+  client, auth,
+):
+  source = _source()
+  _declare_schedule(source)
+  with patch("app.app_cron.register_cron"):
+    created = _apply(client, auth, source)
+
+  assert created.status_code == 200, created.text
+  # Stand in for the durable declaration written by the real scaffold.
+  init_cron = source / "init-cron.sh"
+  init_cron.write_text("#!/bin/sh\nexit 0\n")
+
+  with patch("app.install._unregister_cron") as unregister, patch(
+    "app.app_cron.register_cron", side_effect=RuntimeError("cron unavailable"),
+  ):
+    repeated = _apply(client, auth, source)
+
+  assert repeated.status_code == 200, repeated.text
+  assert repeated.json()["mode"] == "unchanged"
+  # Re-accepting the same schedule must never retire the working one first.
+  unregister.assert_not_called()
+  assert init_cron.exists()
+  assert repeated.json()["warnings"] == [
+    "cron: registration failed — RuntimeError('cron unavailable')"
   ]
 
 

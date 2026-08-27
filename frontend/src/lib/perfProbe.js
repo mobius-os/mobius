@@ -234,6 +234,15 @@ function collectAnimations() {
   }
 }
 
+export function collectAnimationsForSample(reason) {
+  // Android may synchronously recalculate style/layout to answer
+  // document.getAnimations(). Recurring and lifecycle-triggered samples must
+  // only read browser entries already recorded for them; the animation census
+  // remains available for an explicit one-shot console sample.
+  if (reason !== 'manual') return null
+  return collectAnimations()
+}
+
 export function collectDom() {
   return {
     // Keep the interval sample O(1) with respect to style/layout. The former
@@ -348,7 +357,7 @@ function buildSample(reason) {
       p75DurationMs: sorted.length ? sorted[Math.floor(sorted.length * 0.25)].durationMs : 0,
     },
     cls: Math.round(cls * 1000) / 1000,
-    animations: collectAnimations(),
+    animations: collectAnimationsForSample(reason),
     dom: collectDom(),
     hotPaths: counters,
   }

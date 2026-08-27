@@ -74,6 +74,7 @@ from app.chat_logging import (
   get_logger as _get_logger,
   safe_commit as _safe_commit,
 )
+from app.chat_titles import apply_generated_title, renamed_event
 from app.goal_commands import is_goal_continue
 from app.chat_writer import (
   AppendPending,
@@ -3737,10 +3738,11 @@ async def _ensure_chat_note(
   """Run the platform-owned turn-end chat-summary publisher.
 
   Spawns the TOOL-FREE summarizer (scripts/chat_note.py) — it reads the chat's
-  transcript and writes chats/<id>/index.md (+ syncs the title); the subagent
-  has no tools, this script does the privileged write. Best-effort + bounded: it
-  runs AFTER the reply is sent, so it never adds user-facing latency, and any
-  failure/timeout is swallowed — a missing note must never break the turn — but
+  transcript and writes chats/<id>/index.md; the subagent has no tools and the
+  server applies its emitted title under the chat transition lock. Best-effort
+  + bounded: it runs AFTER the reply is sent, so it never adds user-facing
+  latency, and any failure/timeout is swallowed — a missing note must never
+  break the turn — but
   a nonzero exit leaves one WARN line (with the script's stderr reason) in
   chat.log, so CLI credits dying no longer silently stops notes. The caller
   gates this on ``ensure_chat_note`` plus the chat being settled."""
@@ -3761,17 +3763,29 @@ async def _ensure_chat_note(
   try:
     proc = await asyncio.create_subprocess_exec(
       *args,
-      stdout=asyncio.subprocess.DEVNULL,
+      stdout=asyncio.subprocess.PIPE,
       stderr=asyncio.subprocess.PIPE,
       env=env,
     )
-    _, err = await asyncio.wait_for(proc.communicate(), timeout=150)
+    out, err = await asyncio.wait_for(proc.communicate(), timeout=150)
     if proc.returncode:
       tail = " ".join((err or b"").decode("utf-8", "replace").split())[-300:]
       log.warning(
         "chat-note summarizer failed for chat %s (rc=%s): %s",
         chat_id, proc.returncode, tail,
       )
+    else:
+      try:
+        title = _chat_note_title_result(out)
+        if title is not None:
+          await _sync_generated_chat_title(chat_id, title)
+      except Exception:
+        # The note is already durable. Keep the turn successful, but make a
+        # partial title-sync failure observable instead of silently leaving
+        # the drawer on its first-message fallback.
+        log.warning(
+          "chat-note title sync failed for chat %s", chat_id, exc_info=True,
+        )
   except asyncio.TimeoutError:
     log.info("ensure_chat_note timed out for chat %s", chat_id)
     if proc is not None:
@@ -3783,12 +3797,45 @@ async def _ensure_chat_note(
     log.debug("ensure_chat_note failed", exc_info=True)
 
 
+def _chat_note_title_result(stdout: bytes | None) -> str | None:
+  """Parse the publisher's single structured title result, when present."""
+  raw = (stdout or b"").decode("utf-8", "replace").strip()
+  if not raw:
+    return None
+  result = json.loads(raw)
+  title = result.get("title") if isinstance(result, dict) else None
+  if not isinstance(title, str) or not title.strip():
+    raise ValueError("chat-note publisher returned an invalid title result")
+  return title.strip()[:200]
+
+
+async def _sync_generated_chat_title(chat_id: str, title: str) -> bool:
+  """Commit one generated title without a revocable self-HTTP credential."""
+  from app.database import SessionLocal
+
+  async with chat_queue.get_transition_lock(chat_id):
+    with SessionLocal() as db:
+      chat = db.query(models.Chat).filter(
+        models.Chat.id == chat_id,
+        models.Chat.deleted_at.is_(None),
+      ).one_or_none()
+      if chat is None or not apply_generated_title(chat, title):
+        return False
+      db.commit()
+      db.refresh(chat)
+      event = renamed_event(chat)
+
+  # Publish only committed truth, after releasing the database connection.
+  get_system_broadcast().publish(event)
+  return True
+
+
 async def _sync_chat_title(data_dir: str, chat_id: str) -> None:
   """Compatibility helper: sync a chat title from an existing note's gist.
 
-  Normal turn-end publication performs this inside ``chat_note.py`` after its
-  compare-and-swap succeeds. This tool-free helper remains useful to older
-  callers and operator repair paths.
+  Normal turn-end publication consumes the structured result emitted by
+  ``chat_note.py`` after its compare-and-swap succeeds. This tool-free helper
+  remains useful to older callers and operator repair paths.
   """
   log = _get_logger()
   script = Path(__file__).parent.parent / "scripts" / "chat_note.py"
@@ -3800,11 +3847,21 @@ async def _sync_chat_title(data_dir: str, chat_id: str) -> None:
   try:
     proc = await asyncio.create_subprocess_exec(
       "python3", str(script), chat_id, "--sync-title",
-      stdout=asyncio.subprocess.DEVNULL,
-      stderr=asyncio.subprocess.DEVNULL,
+      stdout=asyncio.subprocess.PIPE,
+      stderr=asyncio.subprocess.PIPE,
       env=env,
     )
-    await asyncio.wait_for(proc.communicate(), timeout=20)
+    out, err = await asyncio.wait_for(proc.communicate(), timeout=20)
+    if proc.returncode:
+      tail = " ".join((err or b"").decode("utf-8", "replace").split())[-300:]
+      log.warning(
+        "chat-note title repair failed for chat %s (rc=%s): %s",
+        chat_id, proc.returncode, tail,
+      )
+      return
+    title = _chat_note_title_result(out)
+    if title is not None:
+      await _sync_generated_chat_title(chat_id, title)
   except asyncio.TimeoutError:
     if proc is not None:
       try:
@@ -3812,7 +3869,7 @@ async def _sync_chat_title(data_dir: str, chat_id: str) -> None:
       except ProcessLookupError:
         pass
   except Exception:
-    log.debug("sync_chat_title failed", exc_info=True)
+    log.warning("sync_chat_title failed for chat %s", chat_id, exc_info=True)
 
 
 # Fallback viewport for turns no shell initiated (cron, reflection,

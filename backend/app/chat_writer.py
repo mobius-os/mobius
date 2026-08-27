@@ -358,6 +358,22 @@ class MigrateChat(_Command):
 
 
 @dataclass
+class BackfillAssistantIdentity(_Command):
+  """Repair one legacy chat's scalar assistant owner during boot.
+
+  The schema migration can add and backfill the scalar for rows that already
+  carry an assistant message id, but it must not rewrite ``Chat.messages``.
+  This actor-owned command handles the one legacy exception: a parked,
+  unanswered question whose assistant row predates message identities. It
+  gives that exact row a deterministic id and stores the same id in the scalar
+  in one transaction. New writes already establish both values together, so
+  this is idempotent upgrade work rather than a second live-write path.
+  """
+
+  chat_id: str = ""
+
+
+@dataclass
 class RewriteChatMediaPaths(_Command):
   """Atomically rewrite one chat's legacy media URLs during boot."""
 
@@ -1535,6 +1551,8 @@ class ChatWriterActor:
       return self._stash_thinking_trace(db, cmd)
     if isinstance(cmd, MigrateChat):
       return self._migrate_chat(db, cmd)
+    if isinstance(cmd, BackfillAssistantIdentity):
+      return self._backfill_assistant_identity(db, cmd)
     if isinstance(cmd, RewriteChatMediaPaths):
       return self._rewrite_chat_media_paths(db, cmd)
     if isinstance(cmd, ReconcileStartupChat):
@@ -1898,6 +1916,71 @@ class ChatWriterActor:
       raise _PersistFailed("RewriteChatMediaPaths did not persist")
     return len(values)
 
+  def _backfill_assistant_identity(
+    self, db, cmd: "BackfillAssistantIdentity",
+  ) -> int:
+    """Backfill one pre-identity assistant owner through the writer actor."""
+    from app.models import Chat
+
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None or chat.active_assistant_message_id is not None:
+      return 0
+
+    owner_id = None
+    repaired_messages = None
+    question_id = chat.pending_question_id
+    if isinstance(question_id, str) and 0 < len(question_id) <= 64:
+      messages = list(chat.messages or [])
+      for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, dict) or message.get("hidden"):
+          continue
+        if message.get("role") != "assistant":
+          continue
+        matches_question = any(
+          isinstance(block, dict)
+          and block.get("type") == "question"
+          and block.get("question_id") == question_id
+          and not block.get("answers")
+          for block in (message.get("blocks") or [])
+        )
+        if not matches_question:
+          continue
+        owner_id = _assistant_message_id(message)
+        if owner_id is None:
+          generated = f"assistant-question-{question_id}"
+          if len(generated) <= 128:
+            owner_id = generated
+            repaired_messages = list(messages)
+            repaired = dict(message)
+            repaired["id"] = owner_id
+            repaired_messages[index] = repaired
+        break
+
+    if owner_id is None:
+      owner_id = _assistant_message_id(chat.live_assistant)
+    if owner_id is None:
+      return 0
+
+    values = {"active_assistant_message_id": owner_id}
+    if repaired_messages is not None:
+      values["messages"] = repaired_messages
+    result = db.execute(
+      update(Chat)
+      .where(
+        Chat.id == cmd.chat_id,
+        Chat.deleted_at.is_(None),
+        Chat.active_assistant_message_id.is_(None),
+      )
+      .values(**values)
+    )
+    if result.rowcount != 1:
+      db.rollback()
+      return 0
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("BackfillAssistantIdentity did not persist")
+    return 1
+
   def _reconcile_startup_chat(
     self, db, cmd: "ReconcileStartupChat",
   ) -> bool:
@@ -1906,6 +1989,9 @@ class ChatWriterActor:
 
     if not cmd.chat_id or cmd.recovered_at is None:
       return False
+    pending_question_id, active_assistant_message_id = (
+      _tail_open_question_state(cmd.messages)
+    )
     chat_update = db.execute(
       update(Chat)
       .where(Chat.id == cmd.chat_id, Chat.deleted_at.is_(None))
@@ -1917,7 +2003,8 @@ class ChatWriterActor:
         # Rebuild the protocol barrier from that repaired source instead of
         # preserving a marker that Finalize may have cleared just before the
         # process died (or that an older write may have left stale).
-        pending_question_id=_tail_open_question_id(cmd.messages),
+        pending_question_id=pending_question_id,
+        active_assistant_message_id=active_assistant_message_id,
       )
     )
     if chat_update.rowcount != 1:
@@ -2226,6 +2313,7 @@ class ChatWriterActor:
       "blocks": [],
       "ts": next_message_ts(existing + pending),
     }
+    chat.active_assistant_message_id = cmd.run_token
     if len(existing) == 1:
       _name_chat_from_first_message(chat, cmd.title_source)
     started_at = datetime.now(UTC)
@@ -2358,12 +2446,12 @@ class ChatWriterActor:
     if applied:
       # The recovered-answer path (an answer submitted after a restart, when no
       # in-memory pending question survives) reaches AppendPending instead of
-      # AnswerQuestion, so clear the durable marker here too — mirroring
-      # _answer_question. Otherwise it stays set for the whole recovered turn and
-      # every read surface, the composer's queue/steer lock included, keeps
-      # treating the chat as awaiting an answer. Gated on `applied` so an
+      # AnswerQuestion. No physical runner remains to continue the old assistant
+      # row, so retire both its question marker and browser owner; the admitted
+      # continuation atomically installs its own owner. Gated on `applied` so an
       # ordinary queue-behind send never disturbs a genuinely open question.
       chat.pending_question_id = None
+      chat.active_assistant_message_id = None
     chat.updated_at = datetime.now(UTC)
     chat.activity_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
@@ -2709,6 +2797,7 @@ class ChatWriterActor:
         chat.messages + list(chat.pending_messages or [])
       ),
     }
+    chat.active_assistant_message_id = cmd.run_token
     started_at = datetime.now(UTC)
     chat.updated_at = datetime.now(UTC)
     # Restart recovery can route the first send through PromotePending instead
@@ -2867,6 +2956,10 @@ class ChatWriterActor:
     if cmd.messages is not None:
       chat.messages = cmd.messages
       chat.live_assistant = None
+      (
+        chat.pending_question_id,
+        chat.active_assistant_message_id,
+      ) = _tail_open_question_state(cmd.messages)
     chat.updated_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
       raise _PersistFailed("ReplaceTranscript did not persist")
@@ -2942,19 +3035,27 @@ class ChatWriterActor:
         db, cmd.chat_id, cmd.terminal_status
       )
     changed = run_changed
-    # A tokened terminal may clear the marker only when it actually closed that
-    # exact running row. Otherwise a delayed FinishRun from predecessor A could
-    # erase the open question written by successor B. The tokenless lifecycle
-    # path intentionally retires all work and may always clear it.
-    should_clear_question = (
-      cmd.terminal_status != "interrupted"
-      and (not cmd.run_token or run_changed)
-    )
-    if should_clear_question:
-      chat = _active_chat(db, cmd.chat_id)
-      if chat is not None and chat.pending_question_id is not None:
-        chat.pending_question_id = None
-        changed = True
+    # A tokened terminal may retire browser ownership only when it actually
+    # closed that exact run. Otherwise a delayed FinishRun from predecessor A
+    # could erase successor B's question/assistant owner. Tokenless lifecycle
+    # cleanup intentionally retires all work, including on a soft-deleted row.
+    should_retire_surface = not cmd.run_token or run_changed
+    if should_retire_surface:
+      from app.models import Chat
+
+      chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+      preserve_parked_question = bool(
+        chat is not None
+        and cmd.terminal_status == "interrupted"
+        and chat.pending_question_id is not None
+      )
+      if chat is not None and not preserve_parked_question:
+        if chat.pending_question_id is not None:
+          chat.pending_question_id = None
+          changed = True
+        if chat.active_assistant_message_id is not None:
+          chat.active_assistant_message_id = None
+          changed = True
     if changed and not _commit_or_rollback(db):
       raise _PersistFailed("FinishRun did not persist")
     if not cmd.run_token or owner == cmd.run_token:
@@ -3076,6 +3177,9 @@ class ChatWriterActor:
 
       chat.messages = messages
       chat.live_assistant = None
+      pending_question_id, question_owner_id = _tail_open_question_state(messages)
+      chat.pending_question_id = pending_question_id
+      chat.active_assistant_message_id = question_owner_id
       changed = True
 
     if changed and not _commit_or_rollback(db):
@@ -3141,7 +3245,10 @@ class ChatWriterActor:
     # the park so the run status and the marker land together.
     chat = _active_chat(db, cmd.chat_id)
     if chat is not None:
-      chat.pending_question_id = _tail_open_question_id(chat.messages)
+      (
+        chat.pending_question_id,
+        chat.active_assistant_message_id,
+      ) = _tail_open_question_state(chat.messages)
     if changed and not _commit_or_rollback(db):
       raise _PersistFailed("ParkRun did not persist")
     if owner is None or owner == cmd.run_token:
@@ -3910,15 +4017,24 @@ class _WriteOutcome(enum.Enum):
   DROPPED = "dropped"  # write attempted but the commit dropped (lock)
 
 
-def _tail_open_question_id(messages) -> str | None:
-  """question_id of the last assistant message's open AskUserQuestion, else None.
+def _assistant_message_id(message: object) -> str | None:
+  """Return a message id that fits the durable assistant-owner column."""
+  if not isinstance(message, dict):
+    return None
+  value = message.get("id")
+  return value if isinstance(value, str) and 0 < len(value) <= 128 else None
+
+
+def _tail_open_question_state(
+  messages,
+) -> tuple[str | None, str | None]:
+  """Open question id and its assistant row id at the transcript tail.
 
   The durable `pending_question_id` marker is, by definition, "the transcript
   tail is an unanswered question." Deriving it from the messages is the single
   rule every writer that needs to (re)establish the marker can share, so the
-  marker cannot drift from the transcript. This mirrors the one-time boot
-  backfill in schema_migrations._add_chat_pending_question_id and applies the same
-  1..64-char id validation the column accepts.
+  marker and assistant owner cannot drift from each other. This mirrors the
+  schema backfills and applies both columns' length constraints.
   """
   for message in reversed(messages or []):
     if not isinstance(message, dict) or message.get("hidden"):
@@ -3935,9 +4051,14 @@ def _tail_open_question_id(messages) -> str | None:
         and isinstance(candidate, str)
         and 0 < len(candidate) <= 64
       ):
-        return candidate
+        return candidate, _assistant_message_id(message)
     break
-  return None
+  return None, None
+
+
+def _tail_open_question_id(messages) -> str | None:
+  """Return only the open question id for callers that do not own its row."""
+  return _tail_open_question_state(messages)[0]
 
 
 def _active_chat(db, chat_id: str):
@@ -4043,6 +4164,9 @@ def _apply_last_assistant_message(db, chat_id: str, message: dict):
     msgs.append(message)
   chat.messages = msgs
   chat.live_assistant = None
+  message_owner_id = _assistant_message_id(message)
+  if message_owner_id is not None:
+    chat.active_assistant_message_id = message_owner_id
   return (
     _WriteOutcome.APPLIED
     if _commit_or_rollback(db)
@@ -4073,7 +4197,7 @@ def update_live_assistant(
   from app.models import Chat
 
   row = db.execute(
-    select(Chat.live_assistant).where(
+    select(Chat.live_assistant, Chat.active_assistant_message_id).where(
       Chat.id == chat_id,
       Chat.deleted_at.is_(None),
     )
@@ -4081,6 +4205,7 @@ def update_live_assistant(
   if row is None:
     return None if require_row else True
   existing = row[0] if isinstance(row[0], dict) else None
+  existing_owner_id = row[1] if isinstance(row[1], str) else None
   snapshot = json_safe(copy.deepcopy(message))
   if not isinstance(snapshot, dict):
     return True
@@ -4137,7 +4262,13 @@ def update_live_assistant(
     .where(Chat.id == chat_id, Chat.deleted_at.is_(None))
     # The stream is authoritative while this value changes. Bypass
     # updated_at's onupdate default so retained history remains reusable.
-    .values(live_assistant=snapshot, updated_at=Chat.updated_at)
+    .values(
+      live_assistant=snapshot,
+      active_assistant_message_id=(
+        _assistant_message_id(snapshot) or existing_owner_id
+      ),
+      updated_at=Chat.updated_at,
+    )
   )
   return _commit_or_rollback(db)
 

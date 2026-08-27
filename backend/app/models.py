@@ -154,6 +154,14 @@ class Chat(Base):
   # streaming update never rewrites every prior message. Finalize and startup
   # recovery merge this bounded value into `messages`.
   live_assistant = Column(JSON, nullable=True, default=None)
+  # The one assistant transcript row allowed to own regenerable browser state.
+  # Unlike `live_assistant`, this identity deliberately survives QuestionCommit:
+  # a parked unanswered card is durable history but can still be preceded by a
+  # stale browser replay after reconnect/restart. Start/steer snapshot writes
+  # rotate it, terminal run closure clears it, and startup recovery rebuilds it
+  # from the repaired open-question row. Keeping the scalar beside the JSON
+  # blobs lets /runtime enforce that ownership without hydrating either blob.
+  active_assistant_message_id = Column(String(128), nullable=True, default=None)
   # The AskUserQuestion this chat is currently parked on, or NULL. The single
   # durable source of truth for "a question is open": set when the card is
   # committed, cleared when it is answered or the turn ends, and KEPT across a

@@ -47,16 +47,19 @@ test('shell intent callbacks keep identity while navTo changes per render', asyn
   assert.strictEqual(result.current.openAppWithIntent, firstOpen)
   assert.strictEqual(result.current.handleChatInternalNav, firstInternalNav)
   await result.current.openAppWithIntent('42', null)
+  await result.current.openAppWithIntent('42', 'review:r1', () => true, { paneId: 'pane-9' })
   result.current.handleChatInternalNav(new URL('https://mobius.test/shell/?chat=c1'))
   assert.deepEqual(calls, [
     ['latest', 'canvas', { appId: 42 }],
+    ['intent', { 42: { intent: 'review:r1', nonce: calls[1][1][42].nonce } }],
+    ['latest', 'canvas', { appId: 42, paneId: 'pane-9' }],
     ['latest', 'chat', { chatId: 'c1' }],
   ])
 
   params.appsRef.current = []
   refreshedApps = [{ id: 43, slug: 'delayed' }]
   await result.current.openAppWithIntent('delayed', null, () => false)
-  assert.equal(calls.length, 2, 'cancelled delayed resolution must not navigate')
+  assert.equal(calls.length, 4, 'cancelled delayed resolution must not navigate')
 
   params.appsRef.current = []
   refreshedApps = []
@@ -99,4 +102,6 @@ test('shell resolves raw deep-link app targets through the intent rail', () => {
   assert.doesNotMatch(numericBoot, /navTo|openAppWithIntent/)
   assert.match(shell, /onInternalNav=\{handleChatInternalNav\}/)
   assert.match(pane, /onInternalNav=\{onInternalNav\}/)
+  assert.match(pane, /const target = app\?\.id \?\? app\?\.slug \?\? app/)
+  assert.match(pane, /openAppWithIntent\(target, intent, \(\) => true, \{ paneId \}\)/)
 })

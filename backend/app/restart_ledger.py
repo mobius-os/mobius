@@ -155,6 +155,58 @@ def publish_cutover_intent(
   })
 
 
+def request_managed_cutover(
+  *, boot_id: str, cutover_id: str, now: float | None = None,
+) -> None:
+  """Ask the baked root poller to open one managed-platform handoff."""
+  if not boot_id or not cutover_id or len(cutover_id) > _CUTOVER_ID_MAX:
+    raise ValueError("invalid managed cutover")
+  root = Path(get_settings().data_dir)
+  _atomic_json(root / ".managed-cutover-request.json", {
+    "version": PROTOCOL_VERSION,
+    "action": "managed_cutover",
+    "cutover_id": cutover_id,
+    "source_boot_id": boot_id,
+    "created_at": time.time() if now is None else now,
+  })
+
+
+def accepted_cutover_receipt(
+  cutover_id: str,
+  *,
+  boot_id: str | None = None,
+  now: float | None = None,
+  trusted_uid: int = 0,
+  trusted_gid: int = 0,
+) -> bool:
+  """Whether root accepted this cutover for the current source boot."""
+  expected_boot = boot_id if boot_id is not None else current_boot_id()
+  if not expected_boot or not cutover_id:
+    return False
+  _, _, ledger_dir = _paths()
+  value = _read_trusted_json(
+    ledger_dir / "cutover-receipt.json",
+    mode=0o444,
+    trusted_uid=trusted_uid,
+    trusted_gid=trusted_gid,
+  )
+  if not value:
+    return False
+  try:
+    accepted_at = float(value.get("accepted_at"))
+  except (TypeError, ValueError):
+    return False
+  current = time.time() if now is None else now
+  return bool(
+    value.get("version") == PROTOCOL_VERSION
+    and value.get("action") == "external_cutover"
+    and value.get("cutover_id") == cutover_id
+    and value.get("source_boot_id") == expected_boot
+    and accepted_at <= current + 5
+    and current - accepted_at <= 120
+  )
+
+
 def authorized_cutover_challenge(
   cutover_id: str,
   *,

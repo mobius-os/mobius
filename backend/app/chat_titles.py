@@ -1,9 +1,28 @@
-"""Chat naming policy for the immediate first-message fallback."""
+"""Chat naming policy shared by the fallback, owner, and summary paths."""
 
 from app.continuations import is_continuation_message
 from app.goal_commands import goal_objective
 
 FIRST_MESSAGE_TITLE_MAX_CHARS = 80
+
+
+def apply_generated_title(chat, title: str) -> bool:
+  """Apply an agent-generated name only while the owner has not locked one."""
+  title = title.strip()
+  if not title or chat.title_locked or chat.title == title:
+    return False
+  chat.title = title
+  return True
+
+
+def renamed_event(chat) -> dict[str, object]:
+  """Build the live projection event for one committed chat name."""
+  return {
+    "type": "chat_renamed",
+    "chatId": str(chat.id),
+    "title": chat.title,
+    "updatedAt": chat.updated_at.isoformat() if chat.updated_at else None,
+  }
 
 
 def first_message_title(content: object) -> str:

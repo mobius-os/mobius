@@ -11,7 +11,10 @@ import {
 } from '../../lib/appPrecache.js'
 import { coldRestoredCanvasAppId } from '../../hooks/useNavigation.js'
 import * as tabModel from './tabModel.js'
-import { APP_CACHE_MAX, deriveRenderedAppIds } from './appFrameCache.js'
+import {
+  appFrameCacheMaxForDeviceMemory,
+  deriveRenderedAppIds,
+} from './appFrameCache.js'
 
 /** Own mounted app-frame identity, bounded recency, warming, and eviction. */
 export default function useAppFrameCache({
@@ -27,6 +30,9 @@ export default function useAppFrameCache({
   tombstoneRoute,
   dispatchWorkspace,
 }) {
+  const [appCacheMax] = useState(() => appFrameCacheMaxForDeviceMemory(
+    typeof navigator === 'undefined' ? undefined : navigator.deviceMemory,
+  ))
   const warmLruRef = useRef(
     coldRestoredCanvasAppId != null ? [String(coldRestoredCanvasAppId)] : [],
   )
@@ -55,8 +61,9 @@ export default function useAppFrameCache({
       visibleAppIds,
       singleScreen: workspace.singleScreen,
       warmIds: warmLruRef.current,
+      max: appCacheMax,
     })
-  }, [visibleAppIds, warmVersion, workspace.singleScreen])
+  }, [appCacheMax, visibleAppIds, warmVersion, workspace.singleScreen])
 
   // Visible apps must enter the mounted set synchronously; this effect only
   // rotates the bounded hidden remainder for later renders.
@@ -66,14 +73,14 @@ export default function useAppFrameCache({
     const merged = [
       ...visible,
       ...previous.filter(id => !visible.includes(id)),
-    ].slice(0, APP_CACHE_MAX)
+    ].slice(0, appCacheMax)
     const changed = merged.length !== previous.length
       || merged.some((id, index) => id !== previous[index])
     if (changed) {
       warmLruRef.current = merged
       setWarmVersion(version => version + 1)
     }
-  }, [visibleAppIds])
+  }, [appCacheMax, visibleAppIds])
 
   const appsLiveFetched = appsQuery.isSuccess && appsQuery.isFetchedAfterMount
 

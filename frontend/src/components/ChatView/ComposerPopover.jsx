@@ -1,13 +1,14 @@
 /**
  * ComposerPopover — the brain button in the chat composer and the popover
- * it opens. Three sections in one popover:
+ * it opens. Four sections in one popover:
  *
- *   1. Attach files  — calls `onAttachClick` (parent owns the hidden
+ *   1. Attach files + chat changes — calls `onAttachClick` (parent owns the hidden
  *      <input type="file"> so it can clear .value after each pick).
- *   2. Model / effort / summary / automation — renders
+ *   2. Artifacts touched by this chat, with the latest always exposed.
+ *   3. Model / effort / summary / automation — renders
  *      <ChatSettingsPanel> when a chatInfo is available; omitted on a fresh
  *      empty chat where chatInfo hasn't loaded yet.
- *   3. Chat summary / agent context — opens the two owner-facing continuity
+ *   4. Chat summary / agent context — opens the two owner-facing continuity
  *      viewers after the picker.
  *
  * Open/close state, outside-click, and Escape live here. The trigger
@@ -36,9 +37,20 @@
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { DollarCircle, FileDocument, InfoCircle, Paperclip } from '@openai/apps-sdk-ui/components/Icon'
+import { useQuery } from '@tanstack/react-query'
+import {
+  ChevronDown,
+  Code,
+  DollarCircle,
+  FileDocument,
+  InfoCircle,
+  Paperclip,
+} from '@openai/apps-sdk-ui/components/Icon'
 import BrainUsageIcon from './BrainUsageIcon.jsx'
 import ChatSettingsPanel from './ChatSettingsPanel.jsx'
+import { loadChatArtifacts } from './chatArtifacts.js'
+import { apiFetch } from '../../api/client.js'
+import { formatRelativeTime } from '../../lib/relativeTime.js'
 import { popoverMaxHeight, nearestClipTop } from './composerPopoverHeight.js'
 import { focusComposerElement } from './composerFocusPolicy.js'
 import {
@@ -48,6 +60,8 @@ import {
 } from '../../lib/layoutSpace.js'
 import useModelSelectionPopover from './hooks/useModelSelectionPopover.js'
 import useDiscardUnconfirmedSwitchOnPickerClose from './hooks/useDiscardUnconfirmedSwitchOnPickerClose.js'
+import { resolvedChatSettings } from './modelSelectionPolicy.js'
+import './ChatWork.css'
 
 export default function ComposerPopover({
   chatInfo,
@@ -72,6 +86,9 @@ export default function ComposerPopover({
   modelSelectionRequest = 0,
   onOpenInspector,
   onOpenSummary,
+  onOpenChanges,
+  artifactsAppId = null,
+  onOpenArtifact,
   onOpenUsage,
   embedded = false,
   pending = false,
@@ -97,6 +114,22 @@ export default function ComposerPopover({
     modelSelectionRequest,
     composerInputRef,
   )
+  const artifactsQuery = useQuery({
+    queryKey: ['chat-work-artifacts', String(artifactsAppId || ''), String(chatId || '')],
+    queryFn: ({ signal }) => loadChatArtifacts(
+      artifactsAppId,
+      chatId,
+      { signal, request: apiFetch },
+    ),
+    enabled: Boolean(open && !embedded && artifactsAppId && chatId),
+    staleTime: 0,
+  })
+  const chatArtifacts = artifactsQuery.data || []
+  const latestArtifact = chatArtifacts[0] || null
+  const latestArtifactRelativeTime = latestArtifact
+    ? formatRelativeTime(latestArtifact.touchedAt)
+    : ''
+  const otherArtifacts = chatArtifacts.slice(1)
   useDiscardUnconfirmedSwitchOnPickerClose(
     open,
     providerSwitchState?.status,
@@ -221,6 +254,16 @@ export default function ComposerPopover({
     onOpenSummary?.()
   }
 
+  function handleOpenChanges() {
+    setOpen(false)
+    onOpenChanges?.()
+  }
+
+  function handleOpenArtifact(artifactId) {
+    setOpen(false)
+    onOpenArtifact?.(artifactId)
+  }
+
   function handleOpenUsage() {
     setOpen(false)
     onOpenUsage?.()
@@ -283,14 +326,107 @@ export default function ComposerPopover({
                 </span>
               </span>
             </button>
+            {!embedded && (
+              <button
+                type="button"
+                className="composer-popover__row"
+                onClick={handleOpenChanges}
+              >
+                <span className="composer-popover__row-icon" aria-hidden="true">
+                  <Code width={19} height={19} />
+                </span>
+                <span className="composer-popover__row-main">
+                  <span className="composer-popover__row-title">Changes</span>
+                  <span className="composer-popover__row-sub">View this chat’s file changes</span>
+                </span>
+              </button>
+            )}
           </div>
+          {!embedded && artifactsAppId && artifactsQuery.isLoading && (
+            <div className="composer-popover__section composer-popover__section--artifacts">
+              <span className="composer-popover__eyebrow">Latest artifact</span>
+              <div className="composer-popover__row" role="status">
+                <span className="composer-popover__row-icon" aria-hidden="true">
+                  <FileDocument width={18} height={18} />
+                </span>
+                <span className="composer-popover__row-main">
+                  <span className="composer-popover__row-title">Looking in this chat…</span>
+                </span>
+              </div>
+            </div>
+          )}
+          {!embedded && artifactsAppId && artifactsQuery.isError && (
+            <div className="composer-popover__section composer-popover__section--artifacts">
+              <button
+                type="button"
+                className="composer-popover__row"
+                onClick={() => artifactsQuery.refetch()}
+              >
+                <span className="composer-popover__row-icon" aria-hidden="true">
+                  <FileDocument width={18} height={18} />
+                </span>
+                <span className="composer-popover__row-main">
+                  <span className="composer-popover__row-title">Artifacts unavailable</span>
+                  <span className="composer-popover__row-sub">Tap to try again</span>
+                </span>
+              </button>
+            </div>
+          )}
+          {!embedded && latestArtifact && (
+            <div className="composer-popover__section composer-popover__section--artifacts">
+              <span className="composer-popover__eyebrow">Latest artifact</span>
+              <button
+                type="button"
+                className="composer-popover__row composer-popover__artifact-latest"
+                onClick={() => handleOpenArtifact(latestArtifact.id)}
+              >
+                <span className="composer-popover__row-icon" aria-hidden="true">
+                  <FileDocument width={18} height={18} />
+                </span>
+                <span className="composer-popover__row-main">
+                  <span className="composer-popover__row-title">{latestArtifact.title}</span>
+                  <span className="composer-popover__row-sub">
+                    {latestArtifactRelativeTime
+                      ? `Edited here ${latestArtifactRelativeTime} · v${latestArtifact.version}`
+                      : `Edited in this chat · v${latestArtifact.version}`}
+                  </span>
+                </span>
+              </button>
+              {otherArtifacts.length > 0 && (
+                <details className="composer-popover__artifact-more">
+                  <summary className="composer-popover__artifact-summary">
+                    <span>Other artifacts</span>
+                    <span>{otherArtifacts.length}</span>
+                    <ChevronDown width={15} height={15} aria-hidden="true" />
+                  </summary>
+                  <div className="composer-popover__artifact-list">
+                    {otherArtifacts.map(artifact => (
+                      <button
+                        key={artifact.id}
+                        type="button"
+                        className="composer-popover__row"
+                        onClick={() => handleOpenArtifact(artifact.id)}
+                      >
+                        <span className="composer-popover__row-main">
+                          <span className="composer-popover__row-title">{artifact.title}</span>
+                          <span className="composer-popover__row-sub">
+                            {formatRelativeTime(artifact.touchedAt) || `Version ${artifact.version}`}
+                          </span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </details>
+              )}
+            </div>
+          )}
           {chatInfo && chatId && (
             <div className="composer-popover__section composer-popover__section--picker">
               <ChatSettingsPanel
                 chatId={chatId}
                 chat={chatInfo}
                 provider={chatInfo.provider}
-                effective={chatInfo.effective}
+                effective={resolvedChatSettings(chatInfo)}
                 hasAssistantTurns={hasAssistantTurns}
                 autoResumeEnabled={autoResumeEnabled}
                 autoResumeSaving={autoResumeSaving}

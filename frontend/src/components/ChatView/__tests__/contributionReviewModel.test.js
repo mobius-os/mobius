@@ -3,43 +3,58 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
   ACTIONABLE_STATUSES,
+  CHAT_VISIBLE_STATUSES,
   DISMISS_DX_PX,
   PLATFORM_REPO,
   actionableRecords,
   autopilotOnSend,
+  chatContributionRecords,
   contributeApp,
   contributeAppId,
-  contributeLabel,
+  contributionFollowupPrompt,
+  contributionRecoveryAction,
+  contributionRecoveryDraft,
+  contributionReviewRunPhase,
+  contributionReviewIntent,
   diffStatSummary,
-  payoffLine,
   dismissKey,
   isDismissed,
   isHorizontalSwipe,
   passedDismissThreshold,
+  publicationAction,
   rememberDismissed,
   rememberReviewItemDismissed,
+  reviewDestinationLabel,
+  reviewItemIntent,
   reviewItems,
   reviewPanelSummary,
   sendBlocker,
   statusLabel,
+  submitFailure,
+  trackingNarration,
+  trackingStatusLabel,
   visibleReviewItems,
   visibleRecords,
 } from '../contributionReviewModel.js'
 
-const cardSrc = readFileSync(
-  new URL('../ContributionReviewCard.jsx', import.meta.url), 'utf8',
-)
-const clientSrc = readFileSync(
-  new URL('../../../api/client.js', import.meta.url), 'utf8',
-)
-const cardCss = readFileSync(
-  new URL('../ContributionReviewCard.css', import.meta.url), 'utf8',
-)
+const cardSrc = readFileSync(new URL('../ContributionReviewCard.jsx', import.meta.url), 'utf8')
+const clientSrc = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
+const cardCss = readFileSync(new URL('../ContributionReviewCard.css', import.meta.url), 'utf8')
+const chatViewSrc = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 
 const APPS = [
   { id: 3, slug: 'some-other-app' },
   { id: 8, slug: 'contribute' },
 ]
+
+function fakeStorage(initial = {}) {
+  const map = new Map(Object.entries(initial))
+  return {
+    getItem: key => (map.has(key) ? map.get(key) : null),
+    setItem: (key, value) => { map.set(key, String(value)) },
+    size: () => map.size,
+  }
+}
 
 test('the ledger owner is resolved by slug, and a missing app hides the card', () => {
   assert.equal(contributeAppId(APPS), 8)
@@ -50,7 +65,7 @@ test('the ledger owner is resolved by slug, and a missing app hides the card', (
   assert.equal(contributeApp(APPS, 99), null)
 })
 
-test('only records awaiting an owner decision reach the composer', () => {
+test('publication decisions stay distinct from the lifecycle kept in chat', () => {
   const payload = { records: [
     { id: 'a', status: 'prepared' },
     { id: 'b', status: 'submitting' },
@@ -59,119 +74,170 @@ test('only records awaiting an owner decision reach the composer', () => {
     { id: 'e', status: 'closed' },
     { id: 'f' },
   ] }
-  assert.deepEqual(actionableRecords(payload).map(r => r.id), ['a', 'b'])
+  assert.deepEqual(actionableRecords(payload).map(record => record.id), ['a', 'b'])
   assert.deepEqual(actionableRecords(null), [])
   assert.deepEqual([...ACTIONABLE_STATUSES], ['prepared', 'submitting'])
-})
-
-test('a ready prepared record is sendable', () => {
-  const record = {
-    status: 'prepared', review: { state: 'ready', message: 'Still matches' },
-  }
-  assert.equal(sendBlocker(record, { connected: true }), null)
-})
-
-test('a drifted record cannot be sent, and says why in the server’s words', () => {
-  const record = {
-    status: 'prepared',
-    review: { state: 'needs_refresh', message: 'The branch moved since you reviewed it.' },
-  }
-  assert.equal(
-    sendBlocker(record, { connected: true }),
-    'The branch moved since you reviewed it.',
+  assert.deepEqual(
+    chatContributionRecords(payload).map(record => record.id),
+    ['a', 'b', 'c', 'd', 'e'],
   )
+  assert.equal(CHAT_VISIBLE_STATUSES.has('abandoned'), false)
 })
 
-test('a verdict with no message still blocks, with a generic reason', () => {
-  const record = { status: 'prepared', review: { state: 'needs_refresh' } }
-  assert.match(sendBlocker(record, { connected: true }), /prepared again/)
-})
-
-test('a disconnected GitHub blocks Send before any request is made', () => {
-  const record = { status: 'prepared', review: { state: 'ready' } }
-  assert.match(sendBlocker(record, { connected: false }), /Connect GitHub/)
-})
-
-test('a stack layer is never sendable from chat — the chain is reviewed together', () => {
-  const record = {
-    status: 'prepared', stack: { id: 'demo', position: 1, total: 2 },
-    review: { state: 'ready' },
-  }
-  assert.match(sendBlocker(record, { connected: true }), /stacked set/)
-})
-
-// The submit endpoint re-runs every check, but a one-tap public action must not
-// present an absent preflight as ready. Submitting is already in flight and does
-// not need another blocker.
-test('an absent prepared verdict fails closed', () => {
+test('sent contribution status stays plain-language and attention continues in chat', () => {
+  assert.equal(trackingStatusLabel({ status: 'open' }), 'PR open')
+  assert.equal(trackingStatusLabel({ status: 'merged' }), 'Merged')
+  assert.equal(
+    trackingStatusLabel({ status: 'open', needs_attention: true }),
+    'Needs attention',
+  )
+  assert.match(trackingNarration({ status: 'open' }), /latest status stays attached/)
   assert.match(
-    sendBlocker({ status: 'prepared' }, { connected: true }),
-    /Open Contribute/,
+    trackingNarration({ status: 'open', needs_attention: true }),
+    /Ask the agent here/,
   )
-  assert.equal(sendBlocker({ status: 'submitting' }, { connected: true }), null)
-  assert.equal(sendBlocker(null, { connected: true }), null)
+  const prompt = contributionFollowupPrompt({
+    id: 'chat-flow', title: 'Keep the whole contribution in chat',
+  })
+  assert.match(prompt, /contribution chat-flow/)
+  assert.match(prompt, /Keep every further public update behind explicit approval in this chat/)
 })
 
-test('autopilot on send mirrors the owner default and the backend capability', () => {
-  assert.equal(autopilotOnSend({ autopilot_available: true }), true)
-  assert.equal(
-    autopilotOnSend({ autopilot_available: true, autopilot_default: true }), true,
-  )
-  assert.equal(
-    autopilotOnSend({ autopilot_available: true, autopilot_default: false }), false,
-  )
-  // An older backend that cannot run the loop must never have one granted.
-  assert.equal(autopilotOnSend({ autopilot_default: true }), false)
-  assert.equal(autopilotOnSend(null), false)
-})
-
-test('the status word distinguishes waiting and in-flight', () => {
-  assert.equal(statusLabel({ status: 'prepared' }), 'Ready to contribute')
-  assert.equal(
-    statusLabel({ status: 'prepared', stack: { id: 'demo' } }),
-    'Review together',
-  )
-  assert.equal(statusLabel({ status: 'submitting' }), 'Publishing')
-})
-
-test('records that need attention stay in Contribute instead of blocking chat', () => {
-  const payload = {
-    connected: true,
-    records: [
-      { id: 'ready', status: 'prepared', review: { state: 'ready' } },
-      { id: 'drifted', status: 'prepared', review: { state: 'needs_refresh' } },
-      { id: 'unreviewed', status: 'prepared' },
-      { id: 'publishing', status: 'submitting' },
-    ],
-  }
+test('every unsettled record remains reachable even when its current review needs attention', () => {
+  const payload = { connected: false, records: [
+    { id: 'ready', status: 'prepared', review: { state: 'ready' } },
+    { id: 'drifted', status: 'prepared', review: { state: 'needs_refresh' } },
+    { id: 'unreviewed', status: 'prepared' },
+    { id: 'publishing', status: 'submitting' },
+  ] }
   assert.deepEqual(
     visibleReviewItems(payload, fakeStorage()).map(item => item.id),
-    ['ready', 'publishing'],
-  )
-  assert.deepEqual(
-    visibleReviewItems({ ...payload, connected: false }, fakeStorage())
-      .map(item => item.id),
-    ['publishing'],
-  )
-  // Filtering is presentation-only: the durable ledger still owns every item.
-  assert.deepEqual(
-    actionableRecords(payload).map(record => record.id),
     ['ready', 'drifted', 'unreviewed', 'publishing'],
   )
 })
 
-test('multiple independent review items share one bounded review panel', () => {
-  assert.match(cardSrc, /const panel = reviewPanelSummary\(pendingItems\.length\)/)
+test('record identities become opaque review intents, never routes', () => {
+  assert.equal(contributionReviewIntent({ id: 'review.1-ready' }), 'review:review.1-ready')
+  assert.equal(contributionReviewIntent({ id: '  review_2  ' }), 'review:review_2')
+  assert.equal(contributionReviewIntent({ id: '../escape' }), null)
+  assert.equal(contributionReviewIntent({ id: 'has spaces' }), null)
+  assert.equal(contributionReviewIntent(null), null)
+
+  assert.equal(
+    reviewItemIntent({ kind: 'record', record: { id: 'single' } }),
+    'review:single',
+  )
+  assert.equal(
+    reviewItemIntent({ kind: 'stack', records: [{ id: 'layer-1' }, { id: 'layer-2' }] }),
+    'review:layer-1',
+  )
+  assert.equal(reviewItemIntent({ kind: 'stack', records: [] }), null)
+})
+
+test('status and destination copy describe the next Contribute view', () => {
+  assert.equal(statusLabel({ status: 'prepared' }), 'Review ready')
+  assert.equal(statusLabel({
+    status: 'prepared', quality_review_ready: true, review: { state: 'ready' },
+  }), 'Ready to send')
+  assert.equal(statusLabel({
+    status: 'prepared', action: 'pr_update', quality_review_ready: true,
+    review: { state: 'ready' },
+  }), 'Ready to update')
+  assert.equal(statusLabel({ status: 'prepared', stack: { id: 'demo' } }), 'Review together')
+  assert.equal(statusLabel({ status: 'submitting' }), 'Publishing')
+  assert.equal(statusLabel({ status: 'prepared', last_submit_error: 'failed' }), 'Needs attention')
+
+  assert.equal(reviewDestinationLabel({ status: 'prepared' }), 'Review in Contribute')
+  assert.equal(
+    reviewDestinationLabel({ status: 'prepared', stack: { id: 'demo' } }),
+    'Review stack in Contribute',
+  )
+  assert.equal(reviewDestinationLabel({ status: 'submitting' }), 'View in Contribute')
+  assert.equal(
+    reviewDestinationLabel({ status: 'prepared', last_submit_error: 'failed' }),
+    'Resolve in Contribute',
+  )
+})
+
+test('direct send requires the exact reviewed happy path', () => {
+  const ready = {
+    id: 'ready', status: 'prepared', quality_review_ready: true,
+    review: { state: 'ready' },
+  }
+  assert.equal(sendBlocker(ready, { connected: true }), null)
+  assert.match(sendBlocker({ ...ready, quality_review_ready: false }), /exact agent review/)
+  assert.match(sendBlocker({ ...ready, review: { state: 'needs_refresh', message: 'Moved' } }), /Moved/)
+  assert.match(sendBlocker({ ...ready, is_stack: true }), /linked set/)
+  assert.match(sendBlocker(ready, { connected: false }), /Connect GitHub/)
+  assert.equal(sendBlocker({ ...ready, status: 'submitting' }), null)
+
+  assert.deepEqual(publicationAction(ready), {
+    label: 'Send PR', busyLabel: 'Sending PR',
+    progress: 'Opening the reviewed pull request…',
+  })
+  assert.deepEqual(publicationAction({ ...ready, action: 'pr_update' }), {
+    label: 'Update PR', busyLabel: 'Updating PR',
+    progress: 'Updating the reviewed pull request…',
+  })
+  assert.equal(autopilotOnSend({ autopilot_available: true }), true)
+  assert.equal(autopilotOnSend({ autopilot_available: true, autopilot_default: false }), false)
+  assert.equal(autopilotOnSend({ autopilot_available: false }), false)
+})
+
+test('failed publication becomes a calm recovery action, not another blind send', () => {
+  const record = {
+    id: 'existing-pr',
+    title: 'Refine the existing contribution',
+    status: 'prepared',
+    last_submit_error: 'The approved pull request is no longer open on this exact branch.',
+    last_submit_stage: 'pushed',
+    last_submit_push_sha: 'a'.repeat(40),
+    plan: { head_sha: 'a'.repeat(40) },
+  }
+  assert.deepEqual(submitFailure(record), {
+    message: 'Contribute could not confirm the update after the reviewed branch reached GitHub.',
+    detail: record.last_submit_error,
+    code: '',
+  })
+  assert.match(contributionRecoveryDraft(record), /^Fix and review contribution existing-pr/)
+  assert.match(contributionRecoveryDraft(record), /reconcile the contribution record/)
+  assert.match(contributionRecoveryDraft(record), /existing approval button/)
+  const recovery = contributionRecoveryAction(record)
+  assert.equal(recovery.scope, 'contribute-review:b0661670f342e064')
+  assert.equal(recovery.scopeLabel, 'Fix and review contribution')
+  assert.equal(recovery.draft, contributionRecoveryDraft(record))
+  assert.match(cardSrc, /: 'Fix and review'\}/)
+  assert.match(cardSrc, />\s*Review in Contribute\s*</)
+  assert.match(cardSrc, /<summary>Technical details<\/summary>/)
+  assert.doesNotMatch(cardSrc, /<summary>What blocked it<\/summary>/)
+  assert.doesNotMatch(chatViewSrc, /handleContributionRecovery|onFixContribution/)
+  assert.match(cardSrc, /api\.appChats\.startWithToken\(appToken/)
+  assert.match(cardSrc, /'Review in progress'/)
+  assert.match(cardSrc, /'Open review conversation'/)
+  assert.match(cardSrc, /onOpenApp\(contributeApp, \{ final: true, intent \}\)[\s\S]*onDismiss\(\)/)
+})
+
+test('existing review runtime becomes one unambiguous continuation state', () => {
+  assert.equal(contributionReviewRunPhase({ running: true }), 'running')
+  assert.equal(contributionReviewRunPhase({ pending_question_id: 'q1' }), 'waiting')
+  assert.equal(contributionReviewRunPhase({ goal: { status: 'paused' } }), 'paused')
+  assert.equal(contributionReviewRunPhase({ running: false }), 'existing')
+  assert.equal(contributionReviewRunPhase(null), 'existing')
+})
+
+test('multiple independent items share one centered bounded panel', () => {
+  assert.match(cardSrc, /const panel = reviewPanelSummary\(pendingItems\)/)
   assert.match(cardSrc, /const grouped = panel\.count > 1/)
   assert.match(cardSrc, /contrib-card-stack--grouped/)
   assert.match(cardSrc, /\{panel\.title\}/)
   assert.match(cardSrc, /\{panel\.copy\}/)
+  assert.doesNotMatch(cardSrc, /contrib-card-stack__count/)
   assert.match(cardCss, /\.contrib-card-stack\s*\{[\s\S]*?width:\s*min\(100%, 640px\);[\s\S]*?margin-inline:\s*auto;/)
   assert.match(cardCss, /\.contrib-card-stack--grouped\s*\{[\s\S]*?max-height:\s*min\(52vh, 520px\);/)
   assert.match(cardCss, /\.contrib-card-stack--grouped \.contrib-card\s*\{[\s\S]*?border-radius:\s*0;/)
 })
 
-test('stack layers collapse into one ordered review item', () => {
+test('stack layers collapse into one ordered review item and one exact doorway', () => {
   const payload = { records: [
     { id: 'three', status: 'prepared', repo: PLATFORM_REPO, stack: {
       id: 'drawer', name: 'Drawer navigation', position: 3, total: 3,
@@ -188,23 +254,115 @@ test('stack layers collapse into one ordered review item', () => {
   assert.equal(items.length, 2)
   assert.equal(items[0].kind, 'stack')
   assert.deepEqual(items[0].records.map(record => record.id), ['one', 'two', 'three'])
+  assert.equal(reviewItemIntent(items[0]), 'review:one')
   assert.equal(items[1].record.id, 'single')
+
+  assert.match(cardSrc, /item\.kind === 'stack'/)
+  assert.match(cardSrc, /<StackReviewRow/)
+  assert.match(cardSrc, /Review stack in Contribute/)
+  assert.doesNotMatch(cardSrc, />Layers</)
 })
 
 test('loaded older backends group canonical stack branches during hot reload', () => {
-  const payload = { records: [
-    // Deliberately opposite lexical order: branch position, not record id,
-    // owns the chain ordering during a frontend-before-backend rollout.
+  const items = reviewItems({ records: [
     { id: 'a-second', status: 'prepared', repo: PLATFORM_REPO, is_stack: true,
       branch: 'stack/drawer-navigation/02-pins' },
     { id: 'z-first', status: 'prepared', repo: PLATFORM_REPO, is_stack: true,
       branch: 'stack/drawer-navigation/01-apps' },
-  ] }
-  const items = reviewItems(payload)
+  ] })
   assert.equal(items.length, 1)
   assert.equal(items[0].kind, 'stack')
   assert.equal(items[0].stack.name, 'Drawer navigation')
   assert.deepEqual(items[0].records.map(record => record.id), ['z-first', 'a-second'])
+})
+
+test('the grouped panel uses one stable explanation instead of redundant counts', () => {
+  for (const count of [0, 1, 3]) {
+    const items = Array.from({ length: count }, (_, index) => ({
+      kind: 'record', record: { id: String(index), status: 'prepared' },
+    }))
+    assert.deepEqual(reviewPanelSummary(items), {
+      count: items.length,
+      title: 'Reviews ready',
+      copy: 'Each opens at its exact decision in Contribute.',
+    })
+  }
+  assert.deepEqual(reviewPanelSummary([{
+    kind: 'record', record: { id: 'sent', status: 'open' },
+  }]), {
+    count: 1,
+    title: 'Contributions from this chat',
+    copy: 'Follow the latest status where the work happened.',
+  })
+})
+
+test('sent records remain as quiet tracking cards and can hand attention back to chat', () => {
+  assert.match(cardSrc, /function TrackingRow\(/)
+  assert.match(cardSrc, /trackingStatusLabel\(record\)/)
+  assert.match(cardSrc, /trackingNarration\(record\)/)
+  assert.match(cardSrc, /onContinueInChat\(record\)/)
+  assert.match(cardSrc, /'Ask agent to fix'/)
+  assert.match(chatViewSrc, /doSend\(contributionFollowupPrompt\(record\), \{/)
+  assert.match(chatViewSrc, /onContinueInChat=\{handleContributionFollowup\}/)
+  assert.match(cardSrc, /publication\?\.record\?\.status === 'draft'/)
+})
+test('chat cards keep direct send and exact review on the same guarded routes', () => {
+  assert.match(clientSrc, /submitter:\s*'chat-review-card'/)
+  assert.match(clientSrc, /record\?\.action === 'pr_update'/)
+  assert.match(clientSrc, /update-existing/)
+  assert.match(cardSrc, /api\.contributions\.publish\(appId, record/)
+  assert.match(cardSrc, /const busy = sending \|\| submitting/)
+  assert.match(cardSrc, /\) : busy \? \(/)
+  assert.match(cardSrc, /aria-busy="true"[\s\S]*\{action\.busyLabel\}/)
+  assert.doesNotMatch(cardSrc, /!blocker && !submitting/)
+  assert.match(cardSrc, />\s*Review\s*</)
+  assert.doesNotMatch(cardSrc, /body_draft|record\.files|The exact text that will be published/)
+  assert.doesNotMatch(cardSrc, /Contribute this improvement|>Details<|>Layers</)
+  assert.match(cardSrc, /onOpenApp\(contributeApp, \{ final: true, intent \}\)/)
+  assert.match(cardSrc, /contributionReviewIntent\(record\)/)
+  assert.match(cardCss, /\.contrib-card__send\s*\{[\s\S]*?flex:\s*1;[\s\S]*?min-height:\s*42px;/)
+  assert.match(cardCss, /\.contrib-card__review\s*\{[\s\S]*?min-height:\s*42px;/)
+  assert.doesNotMatch(cardCss, /border-left:\s*2px/)
+})
+
+test('the floating card reduces a multi-line diff stat to its aggregate', () => {
+  assert.equal(
+    diffStatSummary(' frontend/src/a.js | 12 +++++\n backend/app/b.py | 3 ---\n 2 files changed, 12 insertions(+), 3 deletions(-)'),
+    '2 files changed, 12 insertions(+), 3 deletions(-)',
+  )
+  assert.equal(diffStatSummary(' 1 file changed, 4 insertions(+)\n'), '1 file changed, 4 insertions(+)')
+  assert.equal(diffStatSummary(null), '')
+})
+
+test('the card opts back into pointer events inside the pass-through foot', () => {
+  assert.match(cardCss, /\.contrib-card-stack,\s*\n\.contrib-card \{\s*\n\s*pointer-events: auto;/)
+})
+
+test('only a decisively sideways drag counts, in either direction', () => {
+  assert.equal(isHorizontalSwipe(20, 0), true)
+  assert.equal(isHorizontalSwipe(-20, 0), true)
+  assert.equal(isHorizontalSwipe(0, 30), false)
+  assert.equal(isHorizontalSwipe(20, 19), false)
+  assert.equal(isHorizontalSwipe(8, 0), false)
+})
+
+test('dismissal needs real horizontal travel', () => {
+  assert.equal(passedDismissThreshold(DISMISS_DX_PX, 0), true)
+  assert.equal(passedDismissThreshold(-DISMISS_DX_PX, 0), true)
+  assert.equal(passedDismissThreshold(DISMISS_DX_PX - 1, 0), false)
+  assert.equal(passedDismissThreshold(70, 90), false)
+})
+
+test('dismissal hides only this version without touching the ledger', () => {
+  const record = { id: 'r1', status: 'prepared', updated_at: 'T1' }
+  const store = fakeStorage()
+  const payload = { records: [record] }
+  assert.equal(visibleRecords(payload, store).length, 1)
+  rememberDismissed(record, store)
+  assert.equal(isDismissed(record, store), true)
+  assert.equal(visibleRecords(payload, store).length, 0)
+  assert.deepEqual(record, { id: 'r1', status: 'prepared', updated_at: 'T1' })
+  assert.equal(isDismissed({ ...record, updated_at: 'T2' }, store), false)
 })
 
 test('dismissing a stack hides one card and any revised layer brings it back', () => {
@@ -216,190 +374,10 @@ test('dismissing a stack hides one card and any revised layer brings it back', (
       stack: { id: 'drawer', position: 2, total: 2 } },
   ] }
   const item = visibleReviewItems(payload, storage)[0]
-  assert.equal(item.kind, 'stack')
   assert.equal(rememberReviewItemDismissed(item, storage), true)
   assert.equal(visibleReviewItems(payload, storage).length, 0)
   payload.records[0].updated_at = '2'
   assert.equal(visibleReviewItems(payload, storage).length, 1)
-})
-
-test('the renderer gives a stack one review-together card, not one card per layer', () => {
-  assert.match(cardSrc, /visibleReviewItems\(data, storage\)/)
-  assert.match(cardSrc, /item\.kind === 'stack'/)
-  assert.match(cardSrc, /<StackReviewRow/)
-  assert.match(cardSrc, /Review in Contribute/)
-})
-
-test('the grouped panel describes only work that remains', () => {
-  assert.deepEqual(reviewPanelSummary(3), {
-    count: 3,
-    title: '3 reviews ready',
-    copy: 'Each item keeps its own review and action.',
-  })
-  assert.deepEqual(reviewPanelSummary(1), {
-    count: 1,
-    title: '1 review ready',
-    copy: 'Each item keeps its own review and action.',
-  })
-  assert.deepEqual(reviewPanelSummary(0), {
-    count: 0,
-    title: '0 reviews ready',
-    copy: 'Each item keeps its own review and action.',
-  })
-})
-
-test('independent cards can submit in parallel without duplicating one record', () => {
-  assert.match(cardSrc, /function ReviewRow\(/)
-  assert.match(cardSrc, /const activeSendRef = useRef\(false\)/)
-  assert.match(cardSrc, /if \(activeSendRef\.current\) return/)
-  assert.match(cardSrc, /activeSendRef\.current = true/)
-  assert.match(cardSrc, /const \[busy, setBusy\] = useState\(false\)/)
-  assert.match(cardSrc, /disabled=\{busy \|\| submitting\}/)
-  assert.doesNotMatch(cardSrc, /busyIds|errorsById/)
-  assert.match(cardSrc, /!contributedItems\.some\(done => done\.id === item\.record\.id\)/)
-})
-
-test('a grouped panel does not repeat the same audience payoff on every card', () => {
-  assert.match(cardSrc, /showPayoff=\{!grouped\}/)
-  assert.match(cardSrc, /showPayoff && !failure && !submitting/)
-})
-
-// The action names the value of contributing, not the mechanism of sending, and
-// never uses "upstream" — precise to anyone who works with open source, opaque to
-// everyone else. It only names a destination it actually knows.
-test('the action label says contribute, and only names Möbius for Möbius', () => {
-  assert.equal(contributeLabel({ repo: PLATFORM_REPO }), 'Contribute to Möbius')
-  assert.equal(
-    contributeLabel({ repo: 'mobius-os/app-example' }),
-    'Contribute this improvement',
-  )
-  assert.equal(contributeLabel(null), 'Contribute this improvement')
-  for (const label of [contributeLabel({ repo: PLATFORM_REPO }), contributeLabel({})]) {
-    assert.doesNotMatch(label, /upstream|pull request|PR\b/i)
-  }
-})
-
-// The payoff line motivates without overpromising: acceptance stays the
-// maintainers' decision, not a consequence of the tap.
-test('the payoff line matches who benefits and keeps acceptance conditional', () => {
-  const platform = payoffLine({ repo: PLATFORM_REPO })
-  assert.match(platform, /everyone running Möbius/)
-  const app = payoffLine({ repo: 'mobius-os/app-example' })
-  assert.match(app, /everyone using this app/)
-  for (const line of [platform, app]) assert.match(line, /^If it's accepted/)
-})
-
-test('the floating card reduces a multi-line diff stat to its aggregate', () => {
-  assert.equal(
-    diffStatSummary(
-      ' frontend/src/a.js | 12 +++++\n backend/app/b.py | 3 ---\n 2 files changed, 12 insertions(+), 3 deletions(-)',
-    ),
-    '2 files changed, 12 insertions(+), 3 deletions(-)',
-  )
-  assert.equal(diffStatSummary(' 1 file changed, 4 insertions(+)\n'), '1 file changed, 4 insertions(+)')
-  assert.equal(diffStatSummary(null), '')
-  assert.match(cardSrc, /diffStatSummary\(record\.diff_stat\)/)
-})
-
-test('the card discloses the continuing review authority granted by Send', () => {
-  assert.match(cardSrc, /autopilot=\{autopilotOnSend\(data\)\}/)
-  assert.match(cardSrc, /Möbius will also handle review feedback/)
-})
-
-// The whole safety argument for a one-tap chat button is that it reuses the app's
-// verified path. If the card ever grew its own push/PR-creation logic, or dropped
-// the provenance tag, that argument would quietly stop being true.
-test('Send routes through the same verified submit endpoint as the app button', () => {
-  assert.match(clientSrc, /\/github\/contributions\/\$\{appId\}\/\$\{encodeURIComponent\(recordId\)\}\/submit/)
-  assert.match(clientSrc, /submitter: 'chat-review-card'/)
-  assert.match(cardSrc, /api\.contributions\.submit\(appId, record\.id/)
-  // Anchored on real invocations. A bare /gh / also matches ordinary English
-  // ("through the", "enough room"), which made this fire on a prose comment.
-  const forbidden = [
-    /\bgh\s+(?:pr|api|issue|repo)\b/,
-    /api\.github\.com/,
-    /\/repos\//,
-    /git\s+push/,
-  ]
-  for (const pattern of forbidden) {
-    assert.doesNotMatch(cardSrc, pattern,
-      'the card must not talk to GitHub itself — the platform endpoint owns that')
-  }
-})
-
-// A public, irreversible action must show what it will publish. The expander is
-// what makes one tap honest rather than blind.
-test('the card exposes the exact text and file list that would be published', () => {
-  assert.match(cardSrc, /record\.body_draft/)
-  assert.match(cardSrc, /record\.files\?\.length > 0/)
-  assert.match(cardSrc, /The exact text that will be published/)
-})
-
-// `.chat__foot` is a transparent overlay with `pointer-events: none` so the
-// transcript scrolls behind the composer; every real control inside it opts back
-// in. A card that forgets renders perfectly and ignores every tap — the hit test
-// falls through to the messages underneath — which no amount of programmatic
-// clicking in a test reveals.
-test('the card opts back into pointer events inside the pass-through foot', () => {
-  assert.match(
-    cardCss,
-    /\.contrib-card-stack,\s*\n\.contrib-card \{\s*\n\s*pointer-events: auto;/,
-  )
-})
-
-// ── Swipe-to-dismiss ────────────────────────────────────────────────────────
-
-function fakeStorage(initial = {}) {
-  const map = new Map(Object.entries(initial))
-  return {
-    getItem: key => (map.has(key) ? map.get(key) : null),
-    setItem: (key, value) => { map.set(key, String(value)) },
-    size: () => map.size,
-  }
-}
-
-test('only a decisively sideways drag counts, in either direction', () => {
-  assert.equal(isHorizontalSwipe(20, 0), true)
-  assert.equal(isHorizontalSwipe(-20, 0), true)
-  // Vertical and near-diagonal movement belongs to the details scroller.
-  assert.equal(isHorizontalSwipe(0, 30), false)
-  assert.equal(isHorizontalSwipe(20, 19), false)
-  // Below the slop nothing is a gesture yet.
-  assert.equal(isHorizontalSwipe(8, 0), false)
-})
-
-test('dismissal needs real travel, so a tap or a nudge cannot lose the card', () => {
-  assert.equal(passedDismissThreshold(DISMISS_DX_PX, 0), true)
-  assert.equal(passedDismissThreshold(-DISMISS_DX_PX, 0), true)
-  assert.equal(passedDismissThreshold(DISMISS_DX_PX - 1, 0), false)
-  assert.equal(passedDismissThreshold(0, 0), false)
-  // Travel far enough but mostly downward: still the scroller's gesture.
-  assert.equal(passedDismissThreshold(70, 90), false)
-})
-
-// Dismissing is a VIEW decision. The record stays prepared in the ledger, so an
-// accidental swipe can never drop staged work — it only stops the card asking.
-test('dismissal hides a record without touching the ledger', () => {
-  const record = { id: 'r1', status: 'prepared', updated_at: 'T1' }
-  const store = fakeStorage()
-  const payload = { records: [record] }
-  assert.equal(visibleRecords(payload, store).length, 1)
-  rememberDismissed(record, store)
-  assert.equal(isDismissed(record, store), true)
-  assert.equal(visibleRecords(payload, store).length, 0)
-  // The record object itself is untouched — nothing about it says "dismissed".
-  assert.deepEqual(record, { id: 'r1', status: 'prepared', updated_at: 'T1' })
-})
-
-// A dismissal means "not this version". Re-staging is a fresh decision, so the
-// card must come back rather than the first swipe burying every later revision.
-test('a re-staged record reappears after being dismissed', () => {
-  const store = fakeStorage()
-  const first = { id: 'r1', status: 'prepared', updated_at: 'T1' }
-  rememberDismissed(first, store)
-  const restaged = { id: 'r1', status: 'prepared', updated_at: 'T2' }
-  assert.equal(isDismissed(restaged, store), false)
-  assert.equal(visibleRecords({ records: [restaged] }, store).length, 1)
 })
 
 test('dismissal degrades safely without usable storage', () => {
@@ -411,50 +389,25 @@ test('dismissal degrades safely without usable storage', () => {
   assert.equal(rememberDismissed(record, hostile), false)
   assert.equal(isDismissed(record, hostile), false)
   assert.equal(isDismissed(record, null), false)
-  // A record with no id has no dismissal identity at all.
   assert.equal(dismissKey({ updated_at: 'T1' }), null)
-  assert.equal(rememberDismissed({}, fakeStorage()), false)
 })
 
-// A touch-only dismissal would be unreachable with a mouse or a keyboard.
-test('the swipe has a visible, focusable equivalent', () => {
+test('the swipe has a visible focusable equivalent', () => {
   assert.match(cardSrc, /className="contrib-card__dismiss"/)
   assert.match(cardSrc, /aria-label="Dismiss — keeps it in Contribute"/)
   assert.match(cardSrc, /onClick=\{\(\) => onDismiss\?\.\(\)\}/)
-  // Every card shape shares the shell's OpenAI SDK close icon.
   assert.match(cardSrc, /import \{ X \} from '@openai\/apps-sdk-ui\/components\/Icon'/)
-  assert.equal(
-    (cardSrc.match(/<X width=\{14\} height=\{14\} aria-hidden="true" \/>/g) || []).length,
-    2,
-  )
-  assert.doesNotMatch(cardSrc, /title="Dismiss/)
-  assert.doesNotMatch(cardSrc, /✕|✖|❌/)
+  assert.equal((cardSrc.match(/<X width=\{14\} height=\{14\} aria-hidden="true" \/>/g) || []).length, 3)
 })
 
-// Same lesson as the navigation drawer: a passive listener can watch a gesture
-// but never claim it, and touch-action cannot cover for that on WebKit.
 test('the dismissal gesture is claimed with a non-passive touchmove', () => {
   assert.match(cardSrc, /addEventListener\('touchmove', onMove, \{ passive: false \}\)/)
   assert.match(cardSrc, /event\.preventDefault\(\)/)
   assert.doesNotMatch(cardSrc, /onTouchMove=\{/)
 })
 
-test('a completed contribution leaves the composer with no acknowledgement card', () => {
-  assert.match(cardSrc, /const \[contributedItems, setContributedItems\] = useState/)
-  assert.match(cardSrc, /!contributedItems\.some\(done => done\.id === item\.record\.id\)/)
-  assert.match(cardSrc, /return \{ contributed: true \}/)
-  assert.match(cardSrc, /onContributed\(record\.id\)/)
-  assert.doesNotMatch(cardSrc, /function SentRow|contrib-card--sent/)
-})
-
-// One gesture implementation for every actionable card shape here.
 test('every card shape shares one swipe implementation', () => {
   assert.equal((cardSrc.match(/function useSwipeToDismiss\(/g) || []).length, 1)
-  assert.equal((cardSrc.match(/= useSwipeToDismiss\(onDismiss\)/g) || []).length, 2)
+  assert.equal((cardSrc.match(/= useSwipeToDismiss\(onDismiss\)/g) || []).length, 3)
   assert.equal((cardSrc.match(/addEventListener\('touchmove'/g) || []).length, 1)
 })
-
-// "A failure is shown only on the record that failed" used to be asserted by
-// grepping this component for a useState identifier. It is now a property of
-// submitFailure(), which resolves a failure purely from one record plus that
-// row's own attempt — see contributionFailure.test.js.

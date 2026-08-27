@@ -19,6 +19,7 @@ import {
   runtimeStreamAttachAction,
   serverSnapshotBehindLocal,
   shouldAttachRunningStream,
+  shouldAdoptRuntimeAssistantOwner,
   shouldRetireRestoredQuestionSnapshot,
   shouldRecoverSettledRuntime,
   shouldRetryStopAfterConfirm,
@@ -211,6 +212,26 @@ test('a fresh running verdict repairs only an exhausted visible stream', () => {
     running: false,
     connectionError: 'disconnected',
   }), 'none', 'an idle server verdict must not resurrect a stream')
+})
+
+test('assistant ownership ignores only idle responses captured behind a local transition', () => {
+  assert.equal(shouldAdoptRuntimeAssistantOwner({
+    runtimeRunning: false,
+    localAuthoritative: true,
+  }), false, 'a pre-StartTurn idle response cannot retire the new local owner')
+  assert.equal(shouldAdoptRuntimeAssistantOwner({
+    runtimeRunning: true,
+    localAuthoritative: true,
+  }), true, 'a running response has crossed the atomic start boundary')
+  assert.equal(shouldAdoptRuntimeAssistantOwner({
+    runtimeRunning: false,
+    localAuthoritative: false,
+  }), true, 'an ordinary idle response retires the settled owner')
+  assert.equal(shouldAdoptRuntimeAssistantOwner({
+    runtimeRunning: false,
+    localAuthoritative: true,
+    authoritativeRefresh: true,
+  }), true, 'a canonical transcript refresh may settle a missed terminal event')
 })
 
 test('only a cold stream prefix missing the durable question is retired', () => {

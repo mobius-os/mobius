@@ -78,6 +78,8 @@ def _chat(chat_id: str):
     return {
       "messages": materialized_messages(row),
       "pending": list(row.pending_messages or []),
+      "pending_question_id": row.pending_question_id,
+      "active_assistant_message_id": row.active_assistant_message_id,
       "running_status": "running" if has_running_run(db, chat_id) else None,
     }
   finally:
@@ -620,9 +622,15 @@ def test_authenticated_restart_question_stays_waiting_not_manual():
   nonce = "restart-nonce-question"
   _seed(cid, messages=[
     {"role": "user", "content": "hi", "ts": 1},
-    {"role": "assistant", "ts": 2, "content": "", "blocks": [
+    {
+      "id": f"rt-{cid}",
+      "role": "assistant", "ts": 2, "content": "", "blocks": [
       {"type": "text", "content": "I need your approval."},
-      {"type": "question", "id": "q1", "text": "Restart now?"},
+      {
+        "type": "question",
+        "question_id": "q1",
+        "questions": [{"id": "q1", "question": "Restart now?"}],
+      },
     ]},
   ])
   db = SessionLocal()
@@ -646,11 +654,14 @@ def test_authenticated_restart_question_stays_waiting_not_manual():
   run = _run(cid)
   assert run["status"] == "interrupted"
   assert run["restart_nonce"] is None
-  blocks = _chat(cid)["messages"][-1]["blocks"]
+  chat = _chat(cid)
+  blocks = chat["messages"][-1]["blocks"]
   assert blocks[-1]["type"] == "question"
   note = next(block for block in blocks if block["type"] == "error")
   assert "answer is still needed" in note["message"]
   assert not note.get("resumable")
+  assert chat["pending_question_id"] == "q1"
+  assert chat["active_assistant_message_id"] == f"rt-{cid}"
 
 
 def test_reconcile_restart_note_normalizes_before_open_question():

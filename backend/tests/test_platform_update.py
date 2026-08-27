@@ -19,6 +19,7 @@ is still cleaned up because an update can cross this implementation boundary.
 """
 
 import hashlib
+import os
 import subprocess
 import stat
 import textwrap
@@ -766,6 +767,28 @@ def test_status_reports_contained_origin_when_updater_marker_is_stale(clone_env)
   assert status["state"] == pu.PlatformUpdateState.UP_TO_DATE.value
   assert status["recorded_upstream_sha"] == stale_marker
   assert status["contained_upstream_sha"] == new
+  assert status["contained_upstream_committed_at"] == _git(
+    platform, "show", "-s", "--format=%cI", new,
+  ).stdout.strip()
+  assert status["upstream_checked_at"] is not None
+
+
+def test_successful_update_check_refreshes_the_reported_fetch_time(clone_env):
+  _, platform = clone_env
+  assert pu._fetch(platform)
+  fetch_head = Path(_git(
+    platform, "rev-parse", "--git-path", "FETCH_HEAD",
+  ).stdout.strip())
+  if not fetch_head.is_absolute():
+    fetch_head = platform / fetch_head
+  os.utime(fetch_head, (1_700_000_000, 1_700_000_000))
+  before = pu.platform_status(platform)["upstream_checked_at"]
+
+  status = pu.check_for_updates(platform)
+
+  assert before == "2023-11-14T22:13:20+00:00"
+  assert status["upstream_checked_at"] is not None
+  assert status["upstream_checked_at"] > before
 
 
 # --- owner Apply rebuilds stale frontend dist after frontend updates ----------

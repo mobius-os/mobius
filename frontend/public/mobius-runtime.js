@@ -2135,10 +2135,6 @@ function makeChat({ appId, getToken, storage }) {
 	async function startChat(opts = {}) {
 		const content = String(opts.content ?? opts.draft ?? "").trim();
 		if (!content) throw new Error("window.mobius.chat.start: opts.draft must not be empty");
-		const chatId = await createChat({
-			...opts,
-			ownerVisible: opts.ownerVisible !== false
-		});
 		const cid = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `cid-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 		let timezone = "UTC";
 		try {
@@ -2150,6 +2146,39 @@ function makeChat({ appId, getToken, storage }) {
 			timezone
 		};
 		if (typeof window !== "undefined") body.viewport = agentViewport(window);
+		const scope = opts.scope == null ? "" : String(opts.scope).trim();
+		if (scope) {
+			const res = await appChatFetch("/api/app-chats/start", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					title: opts.title || "App chat",
+					...appChatMetadataBody({
+						...opts,
+						scope,
+						ownerVisible: opts.ownerVisible !== false
+					}, {
+						includeProvider: true,
+						includeOwnerVisible: true
+					}),
+					...body
+				})
+			});
+			if (!res.ok) throw new Error(`window.mobius.chat.start: scoped start failed (${res.status})`);
+			const data = await res.json().catch(() => null);
+			if (!data?.chat_id) throw new Error("window.mobius.chat.start: scoped start failed (missing chat id)");
+			const outcome = data.outcome === "reused" ? "reused" : "started";
+			return {
+				chatId: String(data.chat_id),
+				outcome,
+				reused: outcome === "reused",
+				response: data.response ?? null
+			};
+		}
+		const chatId = await createChat({
+			...opts,
+			ownerVisible: opts.ownerVisible !== false
+		});
 		const res = await appChatFetch(`/api/chats/${encodeURIComponent(chatId)}/messages`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },

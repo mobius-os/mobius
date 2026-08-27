@@ -190,6 +190,7 @@ def test_reconcile_rebuilds_open_question_barrier_from_repaired_tail(db):
     messages=[
       {"role": "user", "content": "Review PR #787", "ts": 1},
       {
+        "id": "assistant-question-recovery",
         "role": "assistant",
         "ts": 2,
         "blocks": [{
@@ -221,6 +222,7 @@ def test_reconcile_rebuilds_open_question_barrier_from_repaired_tail(db):
   assert blocks[-1]["question_id"] == "owner-decision"
   assert blocks[-1].get("answers") is None
   assert row.pending_question_id == "owner-decision"
+  assert row.active_assistant_message_id == "assistant-question-recovery"
   assert [item["cid"] for item in row.pending_messages] == ["wait-result-787"]
 
 

@@ -362,3 +362,30 @@ export function insertClipboardText(value, selectionStart, selectionEnd, text) {
     caret: start + inserted.length,
   }
 }
+
+/** Queue replacement of the focused textarea selection as one browser-owned edit.
+ *
+ * `execCommand('insertText')` is deliberately used at this narrow boundary:
+ * unlike assigning a controlled value or calling setRangeText(), browsers add
+ * the replacement to the textarea's native undo stack. The command emits the
+ * normal input event, so React's existing onChange path remains the sole owner
+ * of composer state. It must run just after the cancelled paste event; running
+ * it inside that event makes Chromium discard the edit's undo transaction. */
+export function queueClipboardTextUndoably(textarea, text, onRejected) {
+  const document = textarea?.ownerDocument
+  const queueMicrotask = document?.defaultView?.queueMicrotask
+  if (
+    !document
+    || typeof document.execCommand !== 'function'
+    || typeof queueMicrotask !== 'function'
+  ) return false
+
+  queueMicrotask.call(document.defaultView, () => {
+    let inserted = false
+    try {
+      inserted = document.execCommand('insertText', false, String(text || ''))
+    } catch { /* the controlled fallback below preserves paste itself */ }
+    if (!inserted) onRejected?.()
+  })
+  return true
+}

@@ -13,6 +13,7 @@ import { startInstallPromptCapture } from './lib/installPrompt.js'
 import { readInstallPass, withoutInstallPass } from './lib/installPassUrl.js'
 import { safeReturnPath } from './lib/safeReturnPath.js'
 import { readStandaloneBoot } from './lib/standaloneBoot.js'
+import { shellReloadNavigationTransitionIsActive } from './lib/shellReloadNavigationTransition.js'
 
 // These flows are mutually exclusive. Keep setup, login, the full shell, and
 // the opaque embed out of one another's startup path; first boot should not
@@ -365,6 +366,17 @@ function StartupError({ title, message, retrying = false, onRetry }) {
 
 function removeSplash() {
   const splash = document.getElementById('splash')
+  const shellReloadTransition = shellReloadNavigationTransitionIsActive(
+    document.documentElement,
+  )
+  if (shellReloadTransition) {
+    // The outgoing document is still the visible view-transition layer. Drop
+    // the incoming static cover before releasing that layer, so it fades
+    // directly onto Shell's stable destination instead of a blank theme frame.
+    splash?.remove()
+    window.__mobiusReleaseShellReloadTransition?.()
+    return
+  }
   if (splash) {
     // Drop pointer-events as we start the fade: the overlay is fixed at
     // z-index 9999 over the whole viewport and lingers ~400ms after opacity

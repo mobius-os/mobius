@@ -23,17 +23,22 @@ It prints `filename — first-sentence-of-docstring` for each file, so the listi
 Use `/data/shared/theme.css` for visual changes — colors, fonts, gradients, animations. Hot-reloaded instantly.
 
 ```bash
-curl -X PUT "$API_BASE_URL/api/storage/shared/theme.css" \
-  -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"content": "<css here>"}'
+mapi -X PUT /api/storage/shared/theme.css \
+  -H "Content-Type: text/css" --data-binary @- <<'CSS'
+:root {
+  /* theme CSS here; quotes, newlines, and $ stay literal */
+}
+CSS
 bash "$SCRIPTS_DIR/notify_theme.sh"
 ```
+
+(`mapi` fills in auth + base URL.) Raw CSS is the storage route's native text
+form, so do not hand-escape a CSS document into a JSON `-d` argument.
 
 **Read the current theme before modifying it:**
 
 ```bash
-curl -s "$API_BASE_URL/api/storage/shared/theme.css" -H "Authorization: Bearer $AGENT_TOKEN"
+mapi /api/storage/shared/theme.css
 ```
 
 Check `/data/shared/theme-mode` for `"light"` / `"dark"`. Make CSS work in both modes by using the standard variables (`--bg`, `--surface`, `--text`, `--accent`, `--border`, `--danger`, `--green`, `--font`, `--mono`, …) rather than hardcoded colors.
@@ -74,10 +79,9 @@ request the apply. This endpoint deliberately returns an empty `204` success, so
 discard its body — do **not** pipe it to a JSON parser:
 
 ```bash
-curl -fsS -o /dev/null -X POST "$API_BASE_URL/api/notify" \
-  -H "Authorization: Bearer $AGENT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"type":"shell_apply_now"}'
+mapi -o /dev/null -X POST /api/notify --data-binary @- <<'JSON'
+{"type":"shell_apply_now"}
+JSON
 ```
 
 The watcher builds within a few seconds of the last save; the rebuild events

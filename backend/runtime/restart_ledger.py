@@ -41,6 +41,7 @@ ACK_PATH = LEDGER_DIR / "ack.json"
 BOOT_PATH = LEDGER_DIR / "boot-id"
 CUTOVER_CHALLENGE_PATH = LEDGER_DIR / "cutover-challenge.json"
 CUTOVER_RECEIPT_PATH = LEDGER_DIR / "cutover-receipt.json"
+MANAGED_CUTOVER_REQUEST_PATH = DATA_DIR / ".managed-cutover-request.json"
 
 PROTOCOL_VERSION = 1
 MAX_REQUEST_BYTES = 64 * 1024
@@ -282,6 +283,7 @@ def begin_boot(boot_id: str, *, now: float | None = None) -> bool:
   # belongs to an unrelated prior boot and must never authorize this one.
   _remove(INTENT_PATH)
   _remove(REQUEST_PATH)
+  _remove(MANAGED_CUTOVER_REQUEST_PATH)
   return authorized
 
 
@@ -311,7 +313,7 @@ def harden(boot_id: str) -> bool:
       os.chown(path, SUPERVISOR_UID, SUPERVISOR_GID)
       os.chmod(
         path,
-        0o600 if path in {ACCEPTED_PATH, CUTOVER_RECEIPT_PATH} else 0o444,
+        0o600 if path == ACCEPTED_PATH else 0o444,
       )
     os.chown(LEDGER_DIR, SUPERVISOR_UID, SUPERVISOR_GID)
     os.chmod(LEDGER_DIR, 0o755)
@@ -383,11 +385,55 @@ def accept_cutover(cutover_id: str, *, now: float | None = None) -> bool:
   _remove(ACCEPTED_PATH)
   if accepted is not None:
     _write_json(ACCEPTED_PATH, accepted, 0o600)
-    _write_json(CUTOVER_RECEIPT_PATH, accepted, 0o600)
+    # The app must verify this root-authored receipt before asking a managed
+    # provider to deploy. Root ownership + immutable mode is the trust
+    # boundary; confidentiality is neither required nor useful here.
+    _write_json(CUTOVER_RECEIPT_PATH, accepted, 0o444)
   _remove(CUTOVER_CHALLENGE_PATH)
   _remove(INTENT_PATH)
   _remove(REQUEST_PATH)
   return accepted is not None
+
+
+def service_managed_cutover(boot_id: str, *, now: float | None = None) -> bool:
+  """Open or accept one app-requested managed-platform cutover.
+
+  This is deliberately only a restart-continuation primitive. It grants no
+  provider credential and performs no deployment action; the account service
+  independently restricts that action to the caller's own managed instance.
+  """
+  current = time.time() if now is None else now
+  _prepare_ledger_dir()
+  try:
+    ledger_boot = BOOT_PATH.read_text(encoding="utf-8").strip()
+  except OSError:
+    ledger_boot = ""
+  request = _read_bounded_json(MANAGED_CUTOVER_REQUEST_PATH)
+  if not request or ledger_boot != boot_id or request.get("version") != PROTOCOL_VERSION:
+    _remove(MANAGED_CUTOVER_REQUEST_PATH)
+    return False
+  cutover_id = request.get("cutover_id")
+  try:
+    created_at = float(request.get("created_at"))
+  except (TypeError, ValueError):
+    created_at = 0
+  if (
+    request.get("action") != "managed_cutover"
+    or request.get("source_boot_id") != boot_id
+    or not _valid_token(cutover_id)
+    or created_at > current + 5
+    or current - created_at > MAX_REQUEST_AGE_SECONDS
+  ):
+    _remove(MANAGED_CUTOVER_REQUEST_PATH)
+    return False
+  challenge = _read_bounded_json(CUTOVER_CHALLENGE_PATH)
+  if not challenge or challenge.get("cutover_id") != cutover_id:
+    return open_cutover(cutover_id, now=current)
+  if _read_bounded_json(INTENT_PATH) is None:
+    return True
+  accepted = accept_cutover(cutover_id, now=current)
+  _remove(MANAGED_CUTOVER_REQUEST_PATH)
+  return accepted
 
 
 def _matching_cutover_receipt(
@@ -488,6 +534,8 @@ def _main(argv: list[str]) -> int:
       result = open_cutover(value)
     elif command == "accept-cutover":
       result = accept_cutover(value)
+    elif command == "managed-cutover":
+      result = service_managed_cutover(value)
     elif command == "rearm-cutover":
       result = rearm_cutover(value)
     elif command == "finalize-cutover":
@@ -503,7 +551,7 @@ def _main(argv: list[str]) -> int:
   # observable by the root entrypoint and must not trigger a restart.
   if command in {
     "accept", "harden", "open-cutover", "accept-cutover",
-    "rearm-cutover", "finalize-cutover",
+    "rearm-cutover", "finalize-cutover", "managed-cutover",
   } and not result:
     return 1
   return 0

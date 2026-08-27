@@ -41,6 +41,7 @@ from app.chat_writer import Barrier, StartTurn, get_writer
 from app.chat_transcript import materialized_messages
 from app.chat_event_sink import (
   ChatEventSink,
+  active_sink_assistant_message_id,
   active_sink_stream_snapshot,
   get_active_sink,
   register_active_sink,
@@ -120,6 +121,9 @@ def test_active_sink_snapshot_is_frozen_and_broadcast_identity_keyed():
   sink.assistant_blocks = [{"type": "text", "content": "hello"}]
   register_active_sink(bc.chat_id, sink)
   try:
+    assert active_sink_assistant_message_id(
+      bc.chat_id,
+    ) == sink.assistant_message_id
     snapshot = active_sink_stream_snapshot(bc.chat_id, bc)
     assert snapshot == {
       "items": sink.assistant_blocks,
@@ -249,6 +253,7 @@ def test_question_event_is_saved_before_broadcast(db, chat):
       assert any(b.get("type") == "question" for b in blocks), (
         "question block must be persisted before the broadcast"
       )
+      assert row.active_assistant_message_id == "rt-q"
     finally:
       s.close()
 
@@ -343,6 +348,7 @@ def test_non_question_save_routes_to_actor_off_loop(db, chat):
   messages = materialized_messages(row)
   assert messages and messages[-1].get("role") == "assistant"
   assert any(b.get("type") == "tool" for b in messages[-1]["blocks"])
+  assert row.active_assistant_message_id == "rt-t"
 
 
 def test_streaming_commit_runs_off_the_event_loop_thread(db, chat):

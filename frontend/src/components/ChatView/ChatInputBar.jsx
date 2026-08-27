@@ -112,6 +112,7 @@ import { hasSendablePayload } from './composerSubmission.js'
 import {
   assistantClipboardText,
   insertClipboardText,
+  queueClipboardTextUndoably,
 } from './markdownClipboard.js'
 import {
   textareaUsesNativeSizing,
@@ -681,17 +682,28 @@ export default function ChatInputBar({
     if (pastedText === null) return
 
     e.preventDefault()
-    const next = insertClipboardText(
-      input,
-      e.currentTarget.selectionStart,
-      e.currentTarget.selectionEnd,
-      pastedText,
-    )
-    resetMessageHistory()
-    pendingComposerCaretRef.current = next
-    if (listeningRef?.current) onManualVoiceEdit?.(next.value)
-    onInputChange(next.value)
-    onInputIntent?.(e.nativeEvent)
+    const textarea = e.currentTarget
+    const selectionStart = textarea.selectionStart
+    const selectionEnd = textarea.selectionEnd
+    const pasteEvent = e.nativeEvent
+    const applyControlledFallback = () => {
+      // Some embedded browsers reject the native editing command. Keep the
+      // controlled fallback so Markdown paste itself still works there.
+      const next = insertClipboardText(
+        input,
+        selectionStart,
+        selectionEnd,
+        pastedText,
+      )
+      resetMessageHistory()
+      pendingComposerCaretRef.current = next
+      if (listeningRef?.current) onManualVoiceEdit?.(next.value)
+      onInputChange(next.value)
+      onInputIntent?.(pasteEvent)
+    }
+
+    if (queueClipboardTextUndoably(textarea, pastedText, applyControlledFallback)) return
+    applyControlledFallback()
   }
 
   function acceptSlashCommand(command) {
