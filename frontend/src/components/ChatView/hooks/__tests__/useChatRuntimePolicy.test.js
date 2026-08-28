@@ -87,6 +87,76 @@ test('chat-info patches preserve the provider when the response omits it', () =>
   assert.deepEqual(result.current.chatInfo.effective, { effort: 'high' })
 })
 
+test('a settled first turn adopts its provider session without a remount', () => {
+  resetProviderSwitchMemoryForTests()
+  const initial = {
+    chatInfo: {
+      provider: 'claude',
+      session_id: null,
+      effective: { model: 'claude-opus-4-8' },
+    },
+  }
+  const { result, rerender } = renderHook(useChatRuntimePolicy, {
+    chatId: 'policy-first-turn',
+    cached: initial,
+    hidden: false,
+    onProviderSwitchSettled() {},
+    request: unusedRequest,
+  })
+
+  assert.equal(result.current.chatInfo.session_id, null)
+
+  rerender({
+    chatId: 'policy-first-turn',
+    cached: {
+      chatInfo: {
+        ...initial.chatInfo,
+        session_id: 'claude-session-1',
+      },
+    },
+    hidden: false,
+    onProviderSwitchSettled() {},
+    request: unusedRequest,
+  })
+
+  assert.equal(result.current.chatInfo.session_id, 'claude-session-1')
+  assert.deepEqual(
+    result.current.chatInfo.effective,
+    { model: 'claude-opus-4-8' },
+  )
+})
+
+test('a late session from the outgoing provider is never adopted', () => {
+  resetProviderSwitchMemoryForTests()
+  const { result, rerender } = renderHook(useChatRuntimePolicy, {
+    chatId: 'policy-provider-bound-session',
+    cached: {
+      chatInfo: { provider: 'codex', session_id: null },
+    },
+    hidden: false,
+    onProviderSwitchSettled() {},
+    request: unusedRequest,
+  })
+
+  result.current.mergeChatInfo({
+    provider: 'claude',
+    agent_settings_json: { model: 'claude-opus-4-8' },
+    effective: { model: 'claude-opus-4-8' },
+  })
+  rerender({
+    chatId: 'policy-provider-bound-session',
+    cached: {
+      chatInfo: { provider: 'codex', session_id: 'codex-thread-late' },
+    },
+    hidden: false,
+    onProviderSwitchSettled() {},
+    request: unusedRequest,
+  })
+
+  assert.equal(result.current.chatInfo.provider, 'claude')
+  assert.equal(result.current.chatInfo.session_id, null)
+})
+
 test('the auto-resume action persists the setting and updates one chat owner', async () => {
   resetProviderSwitchMemoryForTests()
   const calls = []

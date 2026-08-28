@@ -100,6 +100,7 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
     pending_messages: [{ id: 'queued' }],
     pending_question_id: 'question-1',
     provider: 'codex',
+    session_id: 'thread-current',
     created_by_app_id: 7,
     agent_settings_json: { model: 'example' },
     effective_agent_settings: { effort: 'high' },
@@ -119,6 +120,7 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
   assert.equal(cached.pending_question_id, 'question-1')
   assert.deepEqual(cached.chatInfo, {
     provider: 'codex',
+    session_id: 'thread-current',
     created_by_app_id: 7,
     agent_settings_json: { model: 'example' },
     effective: { effort: 'high' },

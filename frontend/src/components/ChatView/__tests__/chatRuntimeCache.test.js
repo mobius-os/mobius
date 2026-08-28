@@ -62,6 +62,24 @@ test('unchanged durable waits do not republish the persisted chat cache', () => 
   assert.equal(cache.value().waits, waits)
 })
 
+test('unchanged settled chat metadata does not republish the persisted cache', () => {
+  const chatInfo = {
+    provider: 'claude',
+    session_id: 'claude-session-1',
+    effective: { model: 'claude-opus-4-8' },
+  }
+  const cache = cacheHarness({ messages: [], chatInfo })
+
+  updateChatRuntimeCache(
+    cache.queryClient,
+    ['chat-messages', 'chat-1'],
+    { chatInfo: structuredClone(chatInfo) },
+  )
+
+  assert.equal(cache.updates(), 0)
+  assert.equal(cache.value().chatInfo, chatInfo)
+})
+
 test('a runtime transition patches only runtime fields', () => {
   const transcript = [{ role: 'assistant', content: 'history' }]
   const cache = cacheHarness({
