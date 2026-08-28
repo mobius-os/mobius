@@ -303,6 +303,23 @@ def get_current_owner(
   return resolve_owner_only(token, db)
 
 
+def authorize_current_owner_detached(
+  token: str = Depends(_oauth2),
+) -> str:
+  """Authenticate an owner token without retaining a DB session.
+
+  Long-lived owner-only streams use the returned username to bind their
+  transient in-memory resource while releasing the pooled connection before
+  response iteration begins.
+  """
+  db = SessionLocal()
+  try:
+    owner = resolve_owner_only(token, db)
+    return owner.username
+  finally:
+    db.close()
+
+
 def _enforce_delegation_claims(
   payload: dict, db: Session, app_id: int | None,
 ) -> tuple[str, str]:

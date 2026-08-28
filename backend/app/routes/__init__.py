@@ -68,6 +68,7 @@ proxy_router = _load("proxy")
 public_apps_router = _load("public_apps")
 local_services_router = _load("local_services")
 notify_router = _load("notify")
+screen_control_router = _load("screen_control")
 settings_router = _load("settings")
 storage_router = _load("storage")
 fs_router = _load("fs")
@@ -110,6 +111,7 @@ __all__ = [
   "public_apps_router",
   "local_services_router",
   "notify_router",
+  "screen_control_router",
   "settings_router",
   "uploads_router",
   "media_router",

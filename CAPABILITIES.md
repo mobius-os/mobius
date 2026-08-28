@@ -173,6 +173,7 @@ The host registry maps a capability id to:
   version: 1,
   exclusive: true,
   onDeactivate: 'finish',
+  preserveOnDetach: false,
   async open({ input, declaration, channel }) {
     channel.ready(metadata)
     channel.event('progress', value)
@@ -194,6 +195,13 @@ Provider methods must be idempotent under repeated finish/cancel, release every
 browser resource, and tolerate cancellation after the app frame has gone away.
 They must clamp requests to reviewed declaration limits rather than trusting
 app input.
+
+`preserveOnDetach` is exceptional and platform-reviewed. It is reserved for a
+background grant whose independent, owner-visible stop surface survives frame
+replacement. A preserving provider receives `control('detach')`, must drop the
+old frame channel without ending the grant, and must offer a narrow reattach
+operation bound to the same app-owned identity. Ordinary providers keep the
+default `false` and are cancelled on frame or host teardown.
 
 ## Lifecycle and grants
 
@@ -246,6 +254,15 @@ Add primitives only after a real app needs them. Likely families are:
 - `notifications.request`, `share.open`
 - `device.midi`, `device.serial`, `device.bluetooth`
 - `display.fullscreen`, `display.wake_lock`
+
+The current `workspace.screen-control` provider is intentionally narrower than
+a general DOM or browser-debugging bridge. Only an app-owned support chat can
+be bound to a session. The owner must start current-tab capture from a visible
+app gesture, an active-only shell pill keeps Stop available after navigation,
+and the provider exposes no arbitrary script execution. The session may remain
+active while its app is behind another workspace view so the support agent can
+investigate that view; frame teardown, capture stop, relay disconnect, expiry,
+or the owner/agent Stop path releases it.
 
 Today external HTTP remains an app-token-authenticated server surface rather
 than a host session. Its reviewable permission should describe destinations and
