@@ -20,6 +20,7 @@ import shutil
 import stat
 import subprocess
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -5642,6 +5643,56 @@ def test_for_chat_returns_the_complete_lifecycle_without_a_hidden_five_card_cap(
   assert len(records) == 7
   assert [record["number"] for record in records] == [7, 6, 5, 4, 3, 2, 1]
   assert records[0]["url"].endswith("/7")
+
+
+def test_for_chat_releases_storage_lock_before_parsing_contribution_history(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  _prepared_for_chat(
+    app_id,
+    "lock-friendly",
+    "chat-a",
+    status="open",
+    number=58,
+    url="https://github.com/mobius-os/app-demo/pull/58",
+  )
+  held = False
+  real_lock = github_routes.fs_locks.app_storage_lock
+  real_read = github_routes._read_record_tolerant
+
+  @asynccontextmanager
+  async def observed_lock(requested_app_id):
+    nonlocal held
+    async with real_lock(requested_app_id):
+      held = True
+      try:
+        yield
+      finally:
+        held = False
+
+  def assert_unlocked_history_read(path):
+    if path.parent.name == "contributions":
+      assert held is False, "ledger JSON parsing must not hold the writer lock"
+    return real_read(path)
+
+  monkeypatch.setattr(
+    github_routes.fs_locks, "app_storage_lock", observed_lock,
+  )
+  monkeypatch.setattr(
+    github_routes, "_read_record_tolerant", assert_unlocked_history_read,
+  )
+
+  response = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-a",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+
+  assert response.status_code == 200, response.text
+  assert [record["id"] for record in response.json()["records"]] == [
+    "lock-friendly",
+  ]
 
 
 def test_diff_file_paths_reads_headers_not_source_that_looks_like_one(tmp_path):
