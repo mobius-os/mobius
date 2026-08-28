@@ -136,26 +136,37 @@ test('artifact loading resolves only apps maintained by the current chat', async
 })
 
 test('artifact loading falls back to origin provenance when app lookup fails', async () => {
-  const request = async (path) => {
-    if (path === '/apps/') throw new Error('offline')
-    return {
-      ok: true,
-      json: async () => ({
-        entries: [
-          { content: { id: 'origin-artifact', chat_id: 'app-chat' } },
-          {
-            content: {
-              id: 'related-artifact',
-              chat_id: 'other-chat',
-              related_apps: [{ slug: 'app-store' }],
-            },
-          },
-        ],
-        next_cursor: null,
-      }),
-    }
+  const appLookupFailures = {
+    'thrown error': () => { throw new Error('offline') },
+    'non-ok response': () => ({
+      ok: false,
+      status: 503,
+      json: async () => [{ id: 39, slug: 'app-store', chat_id: 'app-chat' }],
+    }),
   }
 
-  const loaded = await loadChatArtifacts(88, 'app-chat', { request })
-  assert.deepEqual(loaded.map(item => item.id), ['origin-artifact'])
+  for (const [mode, failAppLookup] of Object.entries(appLookupFailures)) {
+    const request = async (path) => {
+      if (path === '/apps/') return failAppLookup()
+      return {
+        ok: true,
+        json: async () => ({
+          entries: [
+            { content: { id: 'origin-artifact', chat_id: 'app-chat' } },
+            {
+              content: {
+                id: 'related-artifact',
+                chat_id: 'other-chat',
+                related_apps: [{ slug: 'app-store' }],
+              },
+            },
+          ],
+          next_cursor: null,
+        }),
+      }
+    }
+
+    const loaded = await loadChatArtifacts(88, 'app-chat', { request })
+    assert.deepEqual(loaded.map(item => item.id), ['origin-artifact'], mode)
+  }
 })
