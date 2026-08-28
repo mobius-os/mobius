@@ -1003,16 +1003,15 @@ export default function Shell({ onInitialVisualReady }) {
     && openTabs.length >= 1
   const shellTabStripVisible = tabStripVisible && !workspaceChromeActive
 
-  // Reconcile other React-owned chrome changes from committed DOM. Desktop
-  // drawer toggles do not depend on this effect for atomicity: their event
-  // handler primes contentRect in the same state batch.
+  // Reconcile React-owned chrome that changes the actual content box. The
+  // one-pane Builder strip is overlaid and therefore deliberately absent here;
+  // desktop drawer toggles prime contentRect in their event batch.
   useLayoutEffect(() => {
     syncContentRect({ settlePending: true })
   }, [
     desktopSidebarReserved,
     desktopSidebarWidth,
     immersiveActive,
-    shellTabStripVisible,
     syncContentRect,
   ])
 
@@ -3924,20 +3923,19 @@ export default function Shell({ onInitialVisualReady }) {
           boolean prop form emits the attribute only while this is true. */}
       {/* Tab strip: pinned chats/apps to swap between with one tap.
           Switching a tab is ordinary navTo, so back works through the
-          existing navStack. The strip shrinks .shell__content by one row;
-          the chat re-measures its spacer at the new height on the next
-          layout event (a ~1-row imprecision on the 0<->1 crossing that
-          self-corrects). Deliberately NOT a ChatView remount — that would
-          reset the send-reservation and freeze stream-follow (the reason the
-          bespoke split view was parked). */}
-      {tabStripVisible && !workspaceChromeActive && (() => {
+          existing navStack. A one-pane Builder strip is positioned over the
+          stable content box while the painted surface reserves its row. That
+          keeps the transcript and composer bottom edge fixed through every
+          mode flip. Deliberately NOT a ChatView remount — that would reset the
+          send-reservation and freeze stream-follow. */}
+      {shellTabStripVisible && (() => {
         const navPaneId = workspace.focusedPaneId
         const navViewStyle = navPaneId
           ? modeViewTransitionStyle('strip', navPaneId, 'single')
           : null
         return (
         <nav
-          className="shell__tabstrip"
+          className="shell__tabstrip shell__tabstrip--single-builder"
           onWheel={scrollStripWheel}
           // INV 9 (inert beat): the single-pane strip clears WITH its pane during
           // a mode scene, so it is pointer/keyboard inert throughout — not just under
@@ -3984,7 +3982,15 @@ export default function Shell({ onInitialVisualReady }) {
         </nav>
         )
       })()}
-      <main className="shell__content" id="main-content" tabIndex={-1} inert={navigationSurfaceOpen} ref={contentElRef}>
+      <main
+        className={`shell__content${shellTabStripVisible
+          ? ' shell__content--single-builder-strip'
+          : ''}`}
+        id="main-content"
+        tabIndex={-1}
+        inert={navigationSurfaceOpen}
+        ref={contentElRef}
+      >
         {/* Content layer (design §2): app-iframe wrappers (id-sorted) and chat
             wrappers (chatId-sorted) as ONE flat sibling set, never reparented.
             A wrapper is positioned (--paned) when its tab is a visible pane's

@@ -431,8 +431,8 @@ export function hitTest(point, scene, prevZone = null) {
 
   // 1. strip caret — checked first so a drop over the tabs always reads as an
   // insert, even in the outer-margin corner where a root edge would also apply.
-  // The single-pane Builder strip is outside the content box, so strip ownership
-  // is deliberately independent of paneAt().
+  // The single-pane Builder strip overlays the top of the content box, so strip
+  // ownership is deliberately independent of paneAt().
   if (stripPane) return caretZone(point, stripPane, prevZone)
 
   const pane = paneAt(point, scene)

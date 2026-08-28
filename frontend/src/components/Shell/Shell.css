@@ -91,6 +91,14 @@
   gap: 8px;
 }
 
+@media (max-width: 620px) {
+  /* Keep the 44px touch targets, but trim the empty row around them so the
+     visible toolbar sits closer to the phone's safe-area boundary. */
+  .shell {
+    --shell-bar-height: 46px;
+  }
+}
+
 /* Desktop-only quick actions. Declare the closed state outside the media query
    so adding this shared markup can never leak controls into the phone header. */
 .shell__rail-actions {
@@ -309,6 +317,18 @@
   pointer-events: none;
 }
 
+/* A one-pane Builder adds only its tab row. Keep the workspace containing box
+   fixed so the native scene never relocates the transcript or composer; the
+   currently painted surface reserves the row from its top while retaining the
+   same bottom edge. Hidden Standard and parked app surfaces keep their own
+   full-height geometry. */
+.shell__content--single-builder-strip > .shell__view--active,
+.shell__content--single-builder-strip > .shell__chat-view--staging,
+.shell__content--single-builder-strip > .shell__chat-view--held,
+.shell__content--single-builder-strip > .shell__app-view--held {
+  top: var(--shell-tabstrip-height);
+}
+
 .shell__view--active {
   visibility: visible;
   pointer-events: auto;
@@ -395,6 +415,16 @@
   touch-action: pan-x pinch-zoom;
   overscroll-behavior-inline: contain;
   z-index: 2;
+}
+
+/* The single-pane Builder strip is shell chrome, not a flex row that is allowed
+   to resize .shell__content. Its top edge matches the stable content box in both
+   phone-header and desktop-rail layouts. */
+.shell__tabstrip--single-builder {
+  position: absolute;
+  top: calc(var(--shell-bar-height) + env(safe-area-inset-top, 0px));
+  left: 0;
+  right: 0;
 }
 .shell__tabstrip::-webkit-scrollbar { height: 0; width: 0; }
 

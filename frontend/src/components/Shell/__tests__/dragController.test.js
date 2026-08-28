@@ -186,19 +186,19 @@ test('strip caret beats every other zone at overlapping coordinates', () => {
   assert.equal(z.type, 'strip')
 })
 
-test('a shell-level Builder strip above content still owns its caret preview', () => {
+test('a shell-level Builder strip aligned to content still owns its caret preview', () => {
   const p = pane('p0', { x: 0, y: 0, w: 426, h: 768 }, {
-    stripRect: { x: 0, y: -34, w: 426, h: 34 },
+    stripRect: { x: 0, y: 0, w: 426, h: 34 },
     tabs: [
       { key: 'chat:a', left: 9, right: 142 },
       { key: 'app:62', left: 173, right: 215 },
     ],
   })
-  const z = hitTest({ x: 200, y: -17 }, scene([p], { mode: 'phone' }))
+  const z = hitTest({ x: 200, y: 17 }, scene([p], { mode: 'phone' }))
   assert.equal(z.type, 'strip')
   assert.equal(z.paneId, 'p0')
   assert.equal(z.index, 2)
-  assert.equal(z.rect.y, -29, 'caret stays aligned to the measured shell strip')
+  assert.equal(z.rect.y, 5, 'caret stays aligned to the measured shell strip')
 })
 
 test('root edge beats a pane edge, and only when fine pointers allow it', () => {
