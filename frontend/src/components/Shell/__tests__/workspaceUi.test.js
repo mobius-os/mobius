@@ -952,11 +952,19 @@ test('the Möbius header keeps its phone divider but flows into desktop navigati
   )
   assert.match(
     shellCss,
+    /@media \(max-width: 620px\)[\s\S]*?\.shell\s*\{[\s\S]*?--shell-bar-height:\s*46px;/,
+  )
+  assert.match(
+    shellCss,
     /@media \(min-width: 1024px\)[\s\S]*?\.shell__bar\s*\{[\s\S]*?border:\s*0;/,
   )
   assert.match(
     shellCss,
     /\.shell--drawer-docked \.shell__bar\s*\{[\s\S]*?border-bottom:\s*0;/,
+  )
+  assert.match(
+    drawerCss,
+    /top:\s*calc\(var\(--shell-bar-height,\s*58px\) \+ env\(safe-area-inset-top\)\);/,
   )
 })
 

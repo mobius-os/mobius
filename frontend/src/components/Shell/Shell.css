@@ -91,6 +91,13 @@
   gap: 8px;
 }
 
+@media (max-width: 620px) {
+  /* Keep 44px touch targets while trimming the unused row around them. */
+  .shell {
+    --shell-bar-height: 46px;
+  }
+}
+
 /* Desktop-only quick actions. Declare the closed state outside the media query
    so adding this shared markup can never leak controls into the phone header. */
 .shell__rail-actions {

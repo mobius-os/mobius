@@ -36,7 +36,7 @@
 .drawer-close-shield,
 .drawer {
   position: fixed;
-  top: calc(58px + env(safe-area-inset-top));
+  top: calc(var(--shell-bar-height, 58px) + env(safe-area-inset-top));
   left: 0;
   bottom: 0;
   width: min(360px, 90vw);
