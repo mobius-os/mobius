@@ -1194,23 +1194,33 @@ async def contributions_for_chat(
   db.close()
   contribution_dir = _contributions_dir(app_id)
   async with fs_locks.app_storage_lock(app_id):
-    records = []
-    if contribution_dir.exists():
-      for path in contribution_dir.glob("*.json"):
-        record = _read_record_tolerant(path)
-        if (
-          record is not None
-          and isinstance(record.get("id"), str)
-          and _CONTRIBUTION_ID.match(record["id"])
-          and str(record.get("chat_id") or "") == chat_id
-          and record.get("type") == "pr"
-          and record.get("status") in _CHAT_CONTRIBUTION_STATUSES
-        ):
-          records.append(record)
+    # Keep the complete chat lifecycle without making every contribution
+    # writer wait for a whole-directory JSON parse. Records are replaced
+    # atomically, so each tolerant read remains coherent outside the lock; a
+    # concurrent update may appear on the next refresh, which is already the
+    # contract of this read-only projection.
+    contribution_paths = (
+      tuple(contribution_dir.glob("*.json"))
+      if contribution_dir.exists()
+      else ()
+    )
     settings_path = (
       Path(get_settings().data_dir) / "apps" / str(app_id) / "settings.json"
     )
     app_settings = _read_record_tolerant(settings_path) or {}
+
+  records = []
+  for path in contribution_paths:
+    record = _read_record_tolerant(path)
+    if (
+      record is not None
+      and isinstance(record.get("id"), str)
+      and _CONTRIBUTION_ID.match(record["id"])
+      and str(record.get("chat_id") or "") == chat_id
+      and record.get("type") == "pr"
+      and record.get("status") in _CHAT_CONTRIBUTION_STATUSES
+    ):
+      records.append(record)
 
   records.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
 
