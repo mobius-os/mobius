@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app import app_git, icon_assets, models, timeutil
@@ -34,7 +35,10 @@ from app.compiler import (
 from app.manifest_contract import (
   ICON_MAX_BYTES,
   MANIFEST_MAX_BYTES,
+  STATIC_ASSET_MAX_BYTES,
+  STATIC_ASSETS_TOTAL_MAX,
   ManifestContractError,
+  static_asset_entries,
   validate_manifest_contract,
 )
 
@@ -56,6 +60,64 @@ class ApplyResult:
   app: models.App
   mode: Literal["created", "updated", "unchanged"]
   warnings: tuple[str, ...] = ()
+
+
+def _snapshot_static_assets(snapshot_dir: Path, manifest: dict) -> dict[str, bytes]:
+  """Read local package assets from the same immutable tree being accepted."""
+  assets: dict[str, bytes] = {}
+  total = 0
+  for destination, source in static_asset_entries(
+    manifest.get("static_assets") or {},
+  ).items():
+    path = snapshot_dir / source
+    try:
+      raw = path.read_bytes()
+    except FileNotFoundError as exc:
+      raise AppApplyError(
+        "static_asset_missing",
+        f"Manifest static asset {source!r} does not exist.",
+      ) from exc
+    except OSError as exc:
+      raise AppApplyError(
+        "static_asset_unreadable",
+        f"Could not read manifest static asset {source!r}: {exc}",
+      ) from exc
+    if len(raw) > STATIC_ASSET_MAX_BYTES:
+      raise AppApplyError(
+        "static_asset_too_large",
+        f"Manifest static asset {source!r} exceeds {STATIC_ASSET_MAX_BYTES} bytes.",
+      )
+    total += len(raw)
+    if total > STATIC_ASSETS_TOTAL_MAX:
+      raise AppApplyError(
+        "static_assets_too_large",
+        f"Manifest static assets exceed {STATIC_ASSETS_TOTAL_MAX} bytes total.",
+      )
+    assets[destination] = raw
+  return assets
+
+
+def _rollback_static_assets(
+  created_paths: list[Path], rollback_actions: list,
+) -> None:
+  for action in reversed(rollback_actions):
+    try:
+      action()
+    except OSError:
+      log.exception("app apply: static asset rollback failed")
+  for path in reversed(created_paths):
+    try:
+      path.unlink(missing_ok=True)
+    except OSError:
+      log.exception("app apply: static asset cleanup failed")
+
+
+def _finish_static_assets(commit_actions: list) -> None:
+  for action in commit_actions:
+    try:
+      action()
+    except OSError:
+      log.exception("app apply: static asset backup cleanup failed")
 
 
 async def _sync_accepted_app_skills(
@@ -313,6 +375,10 @@ async def apply_source_revision(
   previous_bundle = None
   published = None
   staged = None
+  static_created: list[Path] = []
+  static_rollback: list = []
+  static_commit: list = []
+  static_materialized = False
   created = app is None
   try:
     with tempfile.TemporaryDirectory(prefix="mobius-app-source-") as tmp:
@@ -328,6 +394,11 @@ async def apply_source_revision(
       manifest = None if store_managed else _read_manifest(snapshot_dir)
       if manifest is not None:
         _validate_local_identity(source_path, manifest)
+      static_assets = (
+        _snapshot_static_assets(snapshot_dir, manifest)
+        if manifest is not None
+        else {}
+      )
       # Store-installed source trees intentionally exclude reviewed package
       # metadata. Their App row owns that identity; the editable source
       # contract has one fixed entry. Local apps retain the strict manifest
@@ -417,6 +488,25 @@ async def apply_source_revision(
       # the accepted-ahead retry, ``committed`` is None and the candidate
       # parent is the already-accepted tip.
       app.source_commit = committed or candidate.parent_sha
+      if manifest is not None:
+        from app import install
+
+        static_materialized = True
+        try:
+          install._write_static_assets(
+            source_path,
+            static_assets,
+            static_created,
+            static_rollback,
+            static_commit,
+          )
+        except (OSError, HTTPException, ValueError) as exc:
+          detail = getattr(exc, "detail", None) or str(exc)
+          raise AppApplyError(
+            "static_assets_unavailable",
+            f"Could not publish the accepted static assets: {detail}",
+            status_code=409,
+          ) from exc
       if (
         app.manifest_url is None
         and app.source_commit != previous_state[7]
@@ -454,6 +544,8 @@ async def apply_source_revision(
         warnings = await _sync_accepted_app_side_effects(
           db, app, manifest, drop_prior_cron=False,
         )
+        _finish_static_assets(static_commit)
+        static_materialized = False
         return ApplyResult(app=app, mode="unchanged", warnings=warnings)
 
       app.jsx_source = source
@@ -469,6 +561,8 @@ async def apply_source_revision(
       if previous_bundle != published:
         unlink_app_bundle(app.id, previous_bundle)
       db.refresh(app)
+      _finish_static_assets(static_commit)
+      static_materialized = False
       warnings = await _sync_accepted_app_side_effects(
         db, app, manifest, drop_prior_cron=not created,
       )
@@ -479,6 +573,8 @@ async def apply_source_revision(
       )
   except Exception:
     db.rollback()
+    if static_materialized:
+      _rollback_static_assets(static_created, static_rollback)
     if staged is not None:
       staged.unlink(missing_ok=True)
     if published is not None and app is not None and published != previous_bundle:

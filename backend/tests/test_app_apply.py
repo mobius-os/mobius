@@ -127,6 +127,39 @@ def test_apply_updates_multifile_revision_once(client, auth, db):
   ]
 
 
+def test_local_apply_materializes_versioned_static_assets(client, auth):
+  source = _source()
+  listing_source = source / "listing-assets" / "screen.png"
+  listing_source.parent.mkdir()
+  listing_source.write_bytes(b"accepted-screen-v1")
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["static_assets"] = {
+    "listing/screen.png": "listing-assets/screen.png",
+  }
+  (source / "mobius.json").write_text(json.dumps(manifest))
+
+  created = _apply(client, auth, source)
+
+  assert created.status_code == 200, created.text
+  served = source / "static" / "listing" / "screen.png"
+  assert served.read_bytes() == b"accepted-screen-v1"
+  assert app_git._run(source, "status", "--porcelain").stdout == ""
+
+  listing_source.write_bytes(b"accepted-screen-v2")
+  updated = _apply(client, auth, source)
+
+  assert updated.status_code == 200, updated.text
+  assert served.read_bytes() == b"accepted-screen-v2"
+
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest.pop("static_assets")
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  removed = _apply(client, auth, source)
+
+  assert removed.status_code == 200, removed.text
+  assert not served.exists()
+
+
 def test_local_apply_converges_schedule_creation_and_removal(client, auth):
   source = _source()
   _declare_schedule(source)
@@ -456,6 +489,13 @@ def test_database_failure_after_git_commit_is_retryable(
   (source / "index.jsx").write_text(
     "export default function App() { return <div>accepted-ahead</div> }\n"
   )
+  asset = source / "listing-assets" / "screen.png"
+  asset.parent.mkdir()
+  asset.write_bytes(b"accepted-screen")
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["static_assets"] = {"listing/screen.png": "listing-assets/screen.png"}
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  served = source / "static" / "listing" / "screen.png"
 
   original_commit = app_apply.Session.commit
   calls = 0
@@ -475,6 +515,7 @@ def test_database_failure_after_git_commit_is_retryable(
   assert accepted_head != previous_head
   row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
   assert row.compiled_path == previous_bundle
+  assert not served.exists()
 
   retry = _apply(client, auth, source)
 
@@ -484,6 +525,7 @@ def test_database_failure_after_git_commit_is_retryable(
   assert row.compiled_path != previous_bundle
   assert "accepted-ahead" in row.jsx_source
   assert app_git.head_sha(source, app_git.LOCAL_BRANCH) == accepted_head
+  assert served.read_bytes() == b"accepted-screen"
 
 
 def test_edit_without_apply_remains_a_dirty_invisible_draft(client, auth, db):
