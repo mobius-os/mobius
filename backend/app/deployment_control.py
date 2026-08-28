@@ -391,7 +391,12 @@ async def read_rebuild_status() -> RebuildStatus:
               "enabling container updates."
             ),
           )
-        raw = {}
+        return _empty_status(
+          deployment,
+          supported=False,
+          code=exc.code,
+          message=exc.message,
+        )
       if (
         raw.get("mode") == "bootstrap"
         and raw.get("state") not in {None, "", "idle", "awaiting_bootstrap"}

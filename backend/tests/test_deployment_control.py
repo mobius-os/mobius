@@ -209,6 +209,30 @@ async def test_legacy_railway_bootstrap_requires_linked_account(
 
 
 @pytest.mark.asyncio
+async def test_legacy_railway_bootstrap_does_not_mask_controller_failure(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
+  monkeypatch.setattr(
+    dc, "get_settings", lambda: type("S", (), {"data_dir": str(tmp_path)})(),
+  )
+
+  def unavailable(*_args, **_kwargs):
+    raise dc.DeploymentControlError(
+      "controller_unavailable", "The Möbius account service is unavailable.",
+    )
+
+  monkeypatch.setattr(dc, "_managed_request", unavailable)
+
+  status = await dc.read_rebuild_status()
+
+  assert status["supported"] is False
+  assert status["bootstrap_available"] is False
+  assert status["code"] == "controller_unavailable"
+  assert status["message"] == "The Möbius account service is unavailable."
+
+
+@pytest.mark.asyncio
 async def test_legacy_railway_bootstrap_waits_for_idle_chats(tmp_path, monkeypatch):
   from app import chat
   from app.runner_registry import registry
