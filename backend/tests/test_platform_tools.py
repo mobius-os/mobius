@@ -1,5 +1,6 @@
 """Provider-neutral Möbius controls are exposed consistently and safely."""
 
+import asyncio
 import importlib.util
 import sys
 from pathlib import Path
@@ -80,3 +81,58 @@ def test_promote_goal_tool_preserves_helper_rejection(monkeypatch):
   monkeypatch.setattr(control._GOALS, "promote_goal", reject)
   with pytest.raises(RuntimeError, match="wrong physical run"):
     control._promote_goal("Ship and verify")
+
+
+def test_control_server_advertises_goal_and_durable_wait_tools():
+  control = _control_module()
+
+  tools = {
+    tool.name: tool for tool in asyncio.run(control.server.list_tools())
+  }
+
+  assert set(tools) == {
+    platform_tools.GOAL_TOOL_NAME,
+    platform_tools.WAIT_TOOL_NAME,
+  }
+  wait_schema = tools[platform_tools.WAIT_TOOL_NAME].inputSchema
+  assert wait_schema["required"] == ["description"]
+  assert set(wait_schema["properties"]) == {
+    "description",
+    "command",
+    "delay_secs",
+    "interval_secs",
+    "deadline_secs",
+  }
+  assert "server restarts" in tools[platform_tools.WAIT_TOOL_NAME].description
+  assert "silent exit 1" in tools[platform_tools.WAIT_TOOL_NAME].description
+
+
+def test_wait_tool_reuses_the_chat_wait_client(monkeypatch):
+  control = _control_module()
+  calls = []
+
+  def fake_call(method, path, payload=None):
+    calls.append((method, path, payload))
+    return {"id": "wait-1", "status": "armed"}
+
+  monkeypatch.setattr(control._WAITS, "_call", fake_call)
+
+  result = control._declare_wait(
+    "CI becomes green",
+    command="gh pr checks 123 --watch=false >/dev/null",
+    interval_secs=120,
+    deadline_secs=3600,
+  )
+
+  assert result == {"id": "wait-1", "status": "armed"}
+  assert calls == [("POST", "/api/chat-waits", {
+    "description": "CI becomes green",
+    "kind": "command",
+    "command": "gh pr checks 123 --watch=false >/dev/null",
+    "delay_secs": None,
+    "interval_secs": 120,
+    "deadline_secs": 3600,
+  })]
+
+  with pytest.raises(RuntimeError, match="exactly one"):
+    control._declare_wait("ambiguous")

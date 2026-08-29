@@ -436,9 +436,80 @@ def _success_result(
 
 
 @pytest.mark.asyncio
-async def test_native_child_drain_waits_for_clean_parent_synthesis(monkeypatch):
+@pytest.mark.parametrize(
+  "mode", ["agent-running", "agent-settled", "finite-monitor"],
+)
+async def test_native_work_drains_through_clean_parent_synthesis(
+  monkeypatch, mode,
+):
   async def _ignore_session_persistence(*_args):
     return None
+
+  child_frames = [
+    StreamEvent(
+      uuid="child-delta", session_id="child-session",
+      parent_tool_use_id="spawn-1",
+      event={
+        "type": "content_block_delta", "index": 0,
+        "delta": {"type": "text_delta", "text": "Child raw report."},
+      },
+    ),
+    AssistantMessage(
+      content=[TextBlock(text="Child raw report.")],
+      model="claude-sonnet", parent_tool_use_id="spawn-1",
+      session_id="child-session",
+    ),
+    TaskNotificationMessage(
+      subtype="task_notification", data={}, task_id="agent-1",
+      status="completed", output_file="/tmp/agent-1",
+      summary="inspection complete", uuid="task-done-1",
+      session_id="root-session", tool_use_id="spawn-1",
+    ),
+  ]
+  if mode == "finite-monitor":
+    first_messages = [
+      AssistantMessage(
+        content=[ToolUseBlock(
+          id="monitor-1", name="Monitor",
+          input={"command": "sleep 1; echo READY", "persistent": False},
+        )],
+        model="claude-sonnet", session_id="root-session",
+      ),
+      TaskStartedMessage(
+        subtype="task_started", data={}, task_id="monitor-task",
+        description="wait for READY", uuid="monitor-start",
+        session_id="root-session", tool_use_id="monitor-1",
+        task_type="local_bash",
+      ),
+    ]
+    followup_messages = [TaskNotificationMessage(
+      subtype="task_notification", data={}, task_id="monitor-task",
+      status="completed", output_file="/tmp/monitor-task",
+      summary="READY", uuid="monitor-done", session_id="root-session",
+      tool_use_id="monitor-1",
+    )]
+    expected_text = "The monitored command is ready."
+  else:
+    first_messages = [TaskStartedMessage(
+      subtype="task_started", data={}, task_id="agent-1",
+      description="inspect the implementation", uuid="task-start-1",
+      session_id="root-session", tool_use_id="spawn-1",
+      task_type="local_agent",
+    )]
+    followup_messages = child_frames if mode == "agent-running" else []
+    if mode == "agent-settled":
+      # This is the intermittent ordering a plain in-flight set misses: the
+      # task is already absent when its spawning ResultMessage arrives.
+      first_messages.extend(child_frames)
+    expected_text = "Parent synthesized the result."
+  first_messages.append(_success_result("root-session", cost=0.01))
+  followup_messages.extend([
+    AssistantMessage(
+      content=[TextBlock(text=expected_text)],
+      model="claude-sonnet", session_id="root-session",
+    ),
+    _success_result("root-session", cost=0.03),
+  ])
 
   class _FakeClient:
     def __init__(self, _options):
@@ -454,65 +525,24 @@ async def test_native_child_drain_waits_for_clean_parent_synthesis(monkeypatch):
       return None
 
     async def receive_response(self):
-      yield TaskStartedMessage(
-        subtype="task_started",
-        data={},
-        task_id="agent-1",
-        description="inspect the implementation",
-        uuid="task-start-1",
-        session_id="root-session",
-        tool_use_id="spawn-1",
-        task_type="local_agent",
-      )
-      yield _success_result("root-session", cost=0.01)
+      for message in first_messages:
+        yield message
 
     async def receive_messages(self):
-      yield StreamEvent(
-        uuid="child-delta",
-        session_id="child-session",
-        parent_tool_use_id="spawn-1",
-        event={
-          "type": "content_block_delta",
-          "index": 0,
-          "delta": {"type": "text_delta", "text": "Child raw report."},
-        },
-      )
-      yield AssistantMessage(
-        content=[TextBlock(text="Child raw report.")],
-        model="claude-sonnet",
-        parent_tool_use_id="spawn-1",
-        session_id="child-session",
-      )
-      yield TaskNotificationMessage(
-        subtype="task_notification",
-        data={},
-        task_id="agent-1",
-        status="completed",
-        output_file="/tmp/agent-1",
-        summary="inspection complete",
-        uuid="task-done-1",
-        session_id="root-session",
-        tool_use_id="spawn-1",
-      )
-      yield AssistantMessage(
-        content=[TextBlock(text="Parent synthesized the result.")],
-        model="claude-sonnet",
-        session_id="root-session",
-      )
-      yield _success_result("root-session", cost=0.03)
+      for message in followup_messages:
+        yield message
 
   monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
   monkeypatch.setattr(
     claude_sdk_runner, "_persist_session_id", _ignore_session_persistence,
   )
   bus = _Bus()
-
   result = await run_claude_sdk_turn(
-    "delegate this inspection",
+    "wait for native work",
     session_id=None,
     base_env={},
     cwd="/data",
-    chat_id="native-followup",
+    chat_id=f"native-followup-{mode}",
     skill_text="system",
     bc=bus,
     pending_questions={},
@@ -522,8 +552,73 @@ async def test_native_child_drain_waits_for_clean_parent_synthesis(monkeypatch):
   assert result["cost_usd"] == 0.03
   assert next(
     event for event in bus.events if event["type"] == "text_final"
-  )["content"] == "Parent synthesized the result."
+  )["content"] == expected_text
   assert "Child raw report" not in str(bus.events)
+
+
+def test_native_continuation_tracker_defers_only_the_uncovered_result():
+  fast = claude_events.NativeContinuationTracker()
+  fast.task_started("fast", "local_agent", "spawn-fast")
+  fast.task_finished("fast")
+  assert fast.observe_result() is True
+  assert fast.observe_result() is False
+
+  slow = claude_events.NativeContinuationTracker()
+  slow.task_started("slow", "local_agent", "spawn-slow")
+  assert slow.observe_result() is True
+  slow.task_finished("slow")
+  assert slow.observe_result() is False
+
+
+def test_long_running_shells_do_not_own_native_turn_completion():
+  tracker = claude_events.NativeContinuationTracker()
+  bus = _Bus()
+  for block in (
+    ToolUseBlock(
+      id="server-1", name="Bash",
+      input={"command": "npm run dev", "run_in_background": True},
+    ),
+    ToolUseBlock(
+      id="monitor-persistent", name="Monitor",
+      input={"command": "tail -f server.log", "persistent": True},
+    ),
+  ):
+    dispatch_sdk_message(
+      AssistantMessage(content=[block], model="claude-sonnet"),
+      bus,
+      None,
+      native_work=tracker,
+    )
+  assert tracker.pending_count == 0
+  assert tracker.observe_result() is False
+
+
+def test_failed_finite_monitor_does_not_leave_an_unreachable_followup():
+  tracker = claude_events.NativeContinuationTracker()
+  bus = _Bus()
+  dispatch_sdk_message(
+    AssistantMessage(
+      content=[ToolUseBlock(
+        id="monitor-failed", name="Monitor",
+        input={"command": "echo READY", "persistent": False},
+      )],
+      model="claude-sonnet",
+    ),
+    bus,
+    None,
+    native_work=tracker,
+  )
+  dispatch_sdk_message(
+    UserMessage(content=[ToolResultBlock(
+      tool_use_id="monitor-failed", content="Monitor is unavailable",
+      is_error=True,
+    )]),
+    bus,
+    None,
+    native_work=tracker,
+  )
+  assert tracker.pending_count == 0
+  assert tracker.observe_result() is False
 
 
 def _interrupt_result(session_id: str = "sess-1") -> ResultMessage:
@@ -1159,7 +1254,7 @@ def test_dispatch_thinking_delta_emits_thinking(monkeypatch):
   }]
 
 
-def test_control_mcp_readiness_waits_for_promote_goal_tool():
+def test_control_mcp_readiness_waits_for_every_platform_tool():
   from app import claude_sdk_runner
 
   class _Client:
@@ -1173,17 +1268,23 @@ def test_control_mcp_readiness_waits_for_promote_goal_tool():
           "name": "mobius_control",
           "status": "pending",
         }]}
+      if self.calls == 2:
+        return {"mcpServers": [{
+          "name": "mobius_control",
+          "status": "connected",
+          "tools": [{"name": "promote_goal"}],
+        }]}
       return {"mcpServers": [{
         "name": "mobius_control",
         "status": "connected",
-        "tools": [{"name": "promote_goal"}],
+        "tools": [{"name": "promote_goal"}, {"name": "declare_wait"}],
       }]}
 
   client = _Client()
   assert asyncio.run(
     claude_sdk_runner._await_control_mcp_ready(client, enabled=True)
   ) is None
-  assert client.calls == 2
+  assert client.calls == 3
 
 
 def test_control_mcp_readiness_reports_terminal_failure_without_retrying():

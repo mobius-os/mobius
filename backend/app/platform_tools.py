@@ -13,7 +13,9 @@ from typing import Any
 
 
 CONTROL_SERVER_NAME = "mobius_control"
-CONTROL_TOOL_NAME = "promote_goal"
+GOAL_TOOL_NAME = "promote_goal"
+WAIT_TOOL_NAME = "declare_wait"
+CONTROL_TOOL_NAMES = (GOAL_TOOL_NAME, WAIT_TOOL_NAME)
 CONTROL_ENV_VARS = (
   "API_BASE_URL",
   "AGENT_TOKEN",
