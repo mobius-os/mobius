@@ -557,6 +557,23 @@ def authorize_current_owner_or_app_detached(
     db.close()
 
 
+def authorize_current_owner_detached(
+  token: str = Depends(_oauth2),
+) -> str:
+  """Authenticate an owner token without retaining a DB session.
+
+  Long-lived owner-only streams use the returned username to bind their
+  transient in-memory resource while releasing the pooled connection before
+  response iteration begins.
+  """
+  db = SessionLocal()
+  try:
+    owner = resolve_owner_only(token, db)
+    return owner.username
+  finally:
+    db.close()
+
+
 def get_principal(
   token: str = Depends(_oauth2),
   db: Session = Depends(get_db),

@@ -641,6 +641,26 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   },
+  screenControl: {
+    start: async (payload) => jsonOrThrow(
+      await apiFetch('/screen-control/sessions', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+      'Could not start screen control',
+    ),
+    respond: (sessionId, payload) => apiFetch(
+      `/screen-control/sessions/${encodeURIComponent(sessionId)}/responses`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+    ),
+    stop: (sessionId) => apiFetch(
+      `/screen-control/sessions/${encodeURIComponent(sessionId)}`,
+      { method: 'DELETE' },
+    ),
+  },
   notifications: {
     // Cursor pagination: `before` is the last row id of the previous page.
     list: ({ before, limit } = {}) => {
