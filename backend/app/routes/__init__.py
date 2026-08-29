@@ -2,15 +2,16 @@
 
 `main.py` does a single `from app.routes import (...)` for its router names.
 A `SyntaxError` (or any other ImportError) in any one of those unprotected route
-modules would otherwise kill uvicorn at boot instead of leaving the remaining
-owner API available.
+modules would otherwise kill uvicorn at boot.
 
 The defense lives here, in the one place that decides what gets
-exposed. Each router is loaded through `_load(name)`: on success
-we return the module's real `router`; on any import failure we log
-loudly and return a stub `APIRouter` that 503s every path with an actionable
-message. `main.py` keeps importing cleanly because every expected
-name still exists.
+exposed. Each router is loaded through `_load(name)`: on success we return the
+requested router; on failure we record it and return an empty `APIRouter` so
+`main.py` can finish importing. The entrypoint then calls
+`require_all_routers_loaded()` and selects the baked platform floor if anything
+failed. The empty fallback is deliberate: if source changes in the tiny window
+between probe and serve, one broken module must not install a global catch-all
+that shadows `/api/health` and every healthy router.
 
 Keep this registry deliberately small. If the editable copy itself breaks, the
 root-owned entrypoint's import probe selects the baked platform fallback.
@@ -18,36 +19,37 @@ root-owned entrypoint's import probe selects the baked platform fallback.
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 log = logging.getLogger(__name__)
+_ROUTER_IMPORT_FAILURES: set[str] = set()
 
 
-def _load(name: str) -> APIRouter:
-  """Imports `app.routes.<name>` and returns its `router`, or a 503
-  stub on any import failure."""
+def _load(name: str, attr: str = "router") -> APIRouter:
+  """Return one router attribute, recording and isolating import failures."""
+  key = name if attr == "router" else f"{name}.{attr}"
   try:
-    mod = __import__(f"app.routes.{name}", fromlist=["router"])
-    return mod.router
+    mod = __import__(f"app.routes.{name}", fromlist=[attr])
+    return getattr(mod, attr)
   except Exception as exc:
     log.error(
       "Failed to import app.routes.%s: %s",
-      name, exc, exc_info=True,
+      key, exc, exc_info=True,
     )
-    stub = APIRouter()
-    detail = (
-      f"Router '{name}' failed to load at boot. "
-      "Use the deployment's external Recovery action to repair it."
-    )
+    _ROUTER_IMPORT_FAILURES.add(key)
+    return APIRouter()
 
-    @stub.api_route(
-      "/{rest_of_path:path}",
-      methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
-    )
-    async def _broken(rest_of_path: str):
-      raise HTTPException(503, detail=detail)
 
-    return stub
+def router_import_failures() -> tuple[str, ...]:
+  """Stable public boot verdict shared by the entrypoint and diagnostics."""
+  return tuple(sorted(_ROUTER_IMPORT_FAILURES))
+
+
+def require_all_routers_loaded() -> None:
+  """Fail the boot probe when `_load` had to isolate any broken router."""
+  failures = router_import_failures()
+  if failures:
+    raise RuntimeError(f"Router imports failed: {', '.join(failures)}")
 
 
 admin_router = _load("admin")
@@ -56,14 +58,12 @@ auth_router = _load("auth")
 chat_router = _load("chat")
 chat_embed_router = _load("chat_embed")
 chats_router = _load("chats")
+app_chat_router = _load("chats", "app_chat_router")
 chats_stream_router = _load("chats_stream")
 secure_inputs_router = _load("secure_inputs")
 chat_logs_router = _load("chat_logs")
 connectors_router = _load("connectors")
-try:
-  from app.routes.connectors import public_router as connectors_public_router
-except Exception:  # pragma: no cover - mirrors _load's stub behavior
-  connectors_public_router = APIRouter()
+connectors_public_router = _load("connectors", "public_router")
 proxy_router = _load("proxy")
 public_apps_router = _load("public_apps")
 local_services_router = _load("local_services")
@@ -101,6 +101,7 @@ __all__ = [
   "chat_router",
   "chat_embed_router",
   "chats_router",
+  "app_chat_router",
   "chats_stream_router",
   "secure_inputs_router",
   "chat_logs_router",

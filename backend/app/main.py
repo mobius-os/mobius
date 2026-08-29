@@ -66,6 +66,7 @@ from app import activity, models
 # wrapped imports in lifespan() below.
 from app.routes import (
   admin_router, apps_router, auth_router,
+  app_chat_router,
   chat_embed_router, chat_logs_router, chat_router, chats_router, chats_stream_router,
   secure_inputs_router,
   connectors_router, connectors_public_router,
@@ -79,12 +80,29 @@ from app.routes import (
   theme_router, uploads_router, platform_router,
   published_router,
   connect_router,
+  router_import_failures,
 )
 
 _BOOT_ID = os.environ.get("MOBIUS_BOOT_ID") or f"{os.getpid()}-{time.time_ns()}"
 # ORM-vs-database schema gaps found at startup; non-empty means the process
 # answers but cannot serve turns (see health vs health_strict).
 _SCHEMA_GAPS: list[str] = []
+
+
+def _boot_degraded_payload() -> dict | None:
+  """Return one stable serviceability verdict for every health surface."""
+  if _SCHEMA_GAPS:
+    return {
+      "reason": "schema_mismatch",
+      "schema_gaps": list(_SCHEMA_GAPS),
+    }
+  failures = router_import_failures()
+  if failures:
+    return {
+      "reason": "router_import_failure",
+      "failed_routers": list(failures),
+    }
+  return None
 
 
 def _install_pm_commit_launcher(source: Path, target: Path) -> bool:
@@ -731,18 +749,7 @@ app.include_router(goal_plans_router)
 app.include_router(chat_logs_router)
 app.include_router(connectors_router)
 app.include_router(connectors_public_router)
-# App-attributed chat contract (design §1) — a SECOND router defined in
-# routes/chats.py under /api/app-chats, so it's imported directly rather
-# than via routes/__init__'s `_load` (which only returns `.router`).
-# Guarded: a broken chats.py already degraded chats_router to a stub
-# above, and shouldn't take the whole app down here either.
-try:
-  from app.routes.chats import app_chat_router  # noqa: E402
-  app.include_router(app_chat_router)
-except Exception as _exc:  # pragma: no cover - defensive boot guard
-  logging.getLogger(__name__).error(
-    "app_chat_router not mounted: %s", _exc, exc_info=True,
-  )
+app.include_router(app_chat_router)
 app.include_router(notify_router)
 app.include_router(proxy_router)
 app.include_router(public_apps_router)
@@ -786,36 +793,44 @@ def health(response: Response):
   reloading while the old process is still briefly answering before SIGTERM.
   """
   response.headers["Cache-Control"] = "no-store"
+  degraded = _boot_degraded_payload()
   payload = {
-    "status": "schema_mismatch" if _SCHEMA_GAPS else "ok",
+    "status": degraded["reason"] if degraded else "ok",
     "target": "mobius",
-    "mode": "normal",
+    "mode": (
+      "degraded"
+      if degraded and degraded["reason"] == "router_import_failure"
+      else "normal"
+    ),
     "build_sha": settings.build_sha,
     "boot_id": _BOOT_ID,
   }
-  if _SCHEMA_GAPS:
+  if degraded:
     # Still HTTP 200: the shell's reachability probe requires response.ok,
-    # and a schema gap must not masquerade as "device offline". The strict
-    # variant below carries the 5xx for container health.
-    payload["schema_gaps"] = _SCHEMA_GAPS
+    # and boot degradation must not masquerade as "device offline". The
+    # strict variant below carries the 5xx for container health.
+    payload.update({k: v for k, v in degraded.items() if k != "reason"})
   return payload
 
 
 @app.get("/api/health/strict")
 def health_strict(response: Response):
-  """Schema-focused serviceability probe retained for diagnostics.
+  """Boot-focused serviceability probe retained for diagnostics.
 
   Distinct from `/api/health` (reachability — must stay 200 whenever the
   process answers, or the shell would flip devices to offline UI): this
-  variant fails when the database is missing ORM-declared schema. Deployment
-  healthchecks use `/api/ready`, which includes this schema contract plus the
-  chat-persistence writer contract.
+  variant fails when the database schema or any route import is broken.
+  Deployment healthchecks use `/api/ready`, which includes this boot contract
+  plus the chat-persistence writer contract.
   """
   response.headers["Cache-Control"] = "no-store"
-  gaps = list(_SCHEMA_GAPS)
-  if gaps:
+  degraded = _boot_degraded_payload()
+  if degraded:
     response.status_code = 503
-    return {"status": "schema_mismatch", "schema_gaps": gaps}
+    return {
+      "status": degraded["reason"],
+      **{k: v for k, v in degraded.items() if k != "reason"},
+    }
   return {"status": "ok", "boot_id": _BOOT_ID}
 
 
@@ -838,10 +853,10 @@ def ready(response: Response):
   """Readiness probe: 200 only when chats can actually be served.
 
   Distinct from `/api/health` (reachability — the process is answering HTTP),
-  this route also requires an ORM-compatible database and a usable
-  single-writer chat-persistence actor. A deploy must not green while a mapped
-  column is absent or every chat write will fail, even though the process can
-  still answer ordinary HTTP requests.
+  this route also requires an ORM-compatible database, every route module, and
+  a usable single-writer chat-persistence actor. A deploy must not green while
+  a mapped column is absent or a route failed to load, even though the process
+  can still answer ordinary HTTP requests.
 
   After the schema gate, `writer_readiness()` owns the writer predicate: the
   writer singleton exists, its worker thread is alive, and the actor is
@@ -851,13 +866,12 @@ def ready(response: Response):
   window where this false-fails.
   """
   response.headers["Cache-Control"] = "no-store"
-  gaps = list(_SCHEMA_GAPS)
-  if gaps:
+  degraded = _boot_degraded_payload()
+  if degraded:
     response.status_code = 503
     return {
       "ready": False,
-      "reason": "schema_mismatch",
-      "schema_gaps": gaps,
+      **degraded,
     }
   from app.chat_writer import writer_readiness
   is_ready, reason = writer_readiness()
@@ -997,6 +1011,16 @@ def unknown_api(path: str):
   or a bundled server-side script run via `/api/apps/{id}/run-job`) rather
   than a synchronous in-backend completion endpoint.
   """
+  failures = router_import_failures()
+  if failures:
+    names = ", ".join(failures)
+    raise HTTPException(
+      status_code=503,
+      detail=(
+        f"Router import failed at boot: {names}. "
+        "Use the deployment's external Recovery action to repair it."
+      ),
+    )
   raise HTTPException(status_code=404, detail="Not found.")
 
 

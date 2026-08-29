@@ -70,6 +70,7 @@ def test_boot_fallback_never_moves_or_prunes_owner_platform_source():
     encoding="utf-8",
   )
   assert "_platform_import_probe" in entrypoint
+  assert "require_all_routers_loaded" in entrypoint
   assert "_platform_use_baked" in entrypoint
   assert "serving baked floor" in entrypoint
   assert "platform.crashloop-prev" not in entrypoint
