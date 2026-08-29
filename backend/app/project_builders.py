@@ -585,7 +585,8 @@ async def build_website(
   Copying the whole tree — not just the entry file — is what lets relative
   assets (images, fonts, CSS, extra pages) resolve when the built site renders
   in a sandboxed iframe. ``artifacts/`` is excluded so the output never copies
-  itself, and symlinks are skipped so the copy stays inside the project.
+  itself. Symlinks are omitted recursively; ``symlinks=True`` also guarantees
+  a concurrent entry swap can copy only the link, never dereference its target.
   """
   if output_dir.exists():
     shutil.rmtree(output_dir)
@@ -597,9 +598,16 @@ async def build_website(
       continue
     dest = output_dir / child.name
     if child.is_dir():
-      shutil.copytree(child, dest, symlinks=False)
+      shutil.copytree(
+        child,
+        dest,
+        symlinks=True,
+        ignore=lambda directory, names: [
+          name for name in names if (Path(directory) / name).is_symlink()
+        ],
+      )
     else:
-      shutil.copyfile(child, dest)
+      shutil.copyfile(child, dest, follow_symlinks=False)
     copied += 1
   entry = output_dir / source.lstrip("/")
   if not entry.is_file():

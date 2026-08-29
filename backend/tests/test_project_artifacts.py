@@ -180,6 +180,37 @@ def test_website_build_copies_tree_and_serves_entry_with_csp(client, auth):
   assert log["truncated"] is False
 
 
+def test_website_build_never_dereferences_nested_symlinks(
+  client, auth, db, tmp_path,
+):
+  project = _make_project(client, auth)
+  row = db.query(models.Project).filter(models.Project.id == project["id"]).one()
+  root = Path(os.environ["DATA_DIR"]) / row.root_path
+  (root / "index.html").write_text("<h1>safe</h1>", encoding="utf-8")
+  (root / "nested").mkdir()
+  outside_file = tmp_path / "private.txt"
+  outside_file.write_text("must-not-copy", encoding="utf-8")
+  outside_dir = tmp_path / "private-dir"
+  outside_dir.mkdir()
+  (outside_dir / "secret.txt").write_text("also-private", encoding="utf-8")
+  (root / "nested" / "file-link").symlink_to(outside_file)
+  (root / "nested" / "dir-link").symlink_to(
+    outside_dir, target_is_directory=True,
+  )
+  client.post(
+    f"/api/projects/{project['id']}/artifacts", headers=auth,
+    json={"name": "Website", "builder": "website", "source": "index.html"},
+  )
+
+  asyncio.run(project_builders.run_build(project["id"], "website"))
+
+  output = root / "artifacts" / "website" / "output" / "nested"
+  assert not (output / "file-link").exists()
+  assert not (output / "file-link").is_symlink()
+  assert not (output / "dir-link").exists()
+  assert not (output / "dir-link").is_symlink()
+
+
 def test_output_serving_is_confined_and_header_authed(client, auth, owner_token):
   project = _make_project(client, auth)
   _write_file(client, auth, project, "index.html", "<h1>ok</h1>")
