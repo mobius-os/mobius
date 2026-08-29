@@ -363,6 +363,26 @@ def _idempotency_key(app_id: int, record_id: str, revision: int) -> str:
   return "mobius-pr:" + hashlib.sha256(material).hexdigest()
 
 
+_RELAY_GUARD_FIELDS = (
+  "status",
+  "relay_status",
+  "relay_contribution_id",
+  "relay_revision",
+  "relay_request_sha256",
+  "relay_idempotency_key",
+)
+
+
+def _relay_guard(record: dict) -> tuple:
+  """Identity of the exact local relay attempt an outbound call represents."""
+  return tuple(record.get(field) for field in _RELAY_GUARD_FIELDS)
+
+
+def _require_relay_guard(current: dict, expected: tuple, message: str) -> None:
+  if _relay_guard(current) != expected:
+    raise HTTPException(409, message)
+
+
 def _request_revision(record: dict, payload: dict) -> tuple[int, str]:
   """Choose one monotonic revision for the exact body-independent snapshot.
 
@@ -510,6 +530,7 @@ async def submit_through_mobius(
       }
       write_record(record_path, claimed)
   db.close()
+  attempt_guard = None
 
   try:
     async with fs_locks.source_dir_lock(
@@ -554,6 +575,7 @@ async def submit_through_mobius(
         "updated_at": now_iso(),
       }
       write_record(record_path, claimed)
+      attempt_guard = _relay_guard(claimed)
     result, _status, _headers = await contribution_broker.request(
       "POST",
       CONTRIBUTION_PREFIX,
@@ -563,6 +585,11 @@ async def submit_through_mobius(
   except ContributionSubmitError as exc:
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
+      if attempt_guard is not None:
+        _require_relay_guard(
+          read_record(record_path), attempt_guard,
+          "This contribution changed while it was sent.",
+        )
       record = _mark_submit_failure(
         app_id=app_id,
         record_path=record_path,
@@ -581,6 +608,10 @@ async def submit_through_mobius(
   except ContributionBrokerError as exc:
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
+      _require_relay_guard(
+        read_record(record_path), attempt_guard,
+        "This contribution changed while it was sent.",
+      )
       record = _relay_failure(app_id=app_id, record_path=record_path, exc=exc)
     headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
     raise HTTPException(
@@ -599,6 +630,10 @@ async def submit_through_mobius(
   except ContributionBrokerError as invalid:
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
+      _require_relay_guard(
+        read_record(record_path), attempt_guard,
+        "This contribution changed while it was sent.",
+      )
       record = _relay_failure(app_id=app_id, record_path=record_path, exc=invalid)
     raise HTTPException(
       502,
@@ -607,8 +642,10 @@ async def submit_through_mobius(
   async with fs_locks.app_storage_lock(app_id):
     _recheck_submit_app(db, app_id, expected_nonce)
     current = read_record(record_path)
-    if current.get("status") != "submitting":
-      raise HTTPException(409, "This contribution changed while it was sent.")
+    _require_relay_guard(
+      current, attempt_guard,
+      "This contribution changed while it was sent.",
+    )
     submitted = {
       **current,
       **relay_patch,
@@ -637,10 +674,14 @@ async def relay_contribution_status(
 ):
   expected_nonce = _validate_submit_app(app_id, principal, db)
   record_path, _diff_path = record_paths(app_id, record_id)
-  record = read_record(record_path)
-  contribution_id = str(record.get("relay_contribution_id") or "")
-  if not contribution_id:
-    raise HTTPException(404, "This contribution has not reached the relay yet.")
+  async with fs_locks.app_storage_lock(app_id):
+    _recheck_submit_app(db, app_id, expected_nonce)
+    record = read_record(record_path)
+    contribution_id = str(record.get("relay_contribution_id") or "")
+    if not contribution_id:
+      raise HTTPException(404, "This contribution has not reached the relay yet.")
+    attempt_guard = _relay_guard(record)
+  db.close()
   try:
     payload, _status, _headers = await contribution_broker.request(
       "GET", CONTRIBUTION_PREFIX + "/" + contribution_id,
@@ -652,8 +693,10 @@ async def relay_contribution_status(
   async with fs_locks.app_storage_lock(app_id):
     _recheck_submit_app(db, app_id, expected_nonce)
     current = read_record(record_path)
-    if str(current.get("relay_contribution_id") or "") != contribution_id:
-      raise HTTPException(409, "This contribution changed while status was checked.")
+    _require_relay_guard(
+      current, attempt_guard,
+      "This contribution changed while status was checked.",
+    )
     try:
       relay_patch = _relay_result_patch(
         payload,
@@ -728,6 +771,8 @@ async def withdraw_mobius_contribution(
     idempotency_key = "mobius-withdraw:" + hashlib.sha256(
       f"{app_id}\0{record_id}\0{contribution_id}\0{revision}".encode()
     ).hexdigest()
+    attempt_guard = _relay_guard(current)
+  db.close()
 
   try:
     result, _status, _headers = await contribution_broker.request(
@@ -759,8 +804,10 @@ async def withdraw_mobius_contribution(
   async with fs_locks.app_storage_lock(app_id):
     _recheck_submit_app(db, app_id, expected_nonce)
     latest = read_record(record_path)
-    if str(latest.get("relay_contribution_id") or "") != contribution_id:
-      raise HTTPException(409, "This contribution changed while it was withdrawn.")
+    _require_relay_guard(
+      latest, attempt_guard,
+      "This contribution changed while it was withdrawn.",
+    )
     withdrawn = {
       **latest,
       **relay_patch,

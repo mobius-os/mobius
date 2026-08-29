@@ -601,6 +601,44 @@ def test_submit_route_retries_one_lost_response_with_the_same_request(
   assert [record["id"] for record in witnessed] == [record_id]
 
 
+def test_submit_route_never_applies_an_old_response_to_a_newer_revision(
+  client, owner_token, tmp_path, monkeypatch,
+):
+  record_id = "relay-submit-race"
+  app_id, record_path = _prepared_relay_record(
+    client, owner_token, tmp_path, record_id,
+  )
+  _stub_reviewed_snapshot(monkeypatch, tmp_path)
+
+  async def fake_request(method, path, *, body=None, idempotency_key=None):
+    newer = json.loads(record_path.read_text())
+    newer.update({
+      "status": "submitting",
+      "relay_revision": body["revision"] + 1,
+      "relay_request_sha256": "newer-request",
+      "relay_idempotency_key": "mobius-pr:newer",
+    })
+    atomic_write(record_path, json.dumps(newer))
+    return ({
+      "id": _RELAY_ID,
+      "status": "queued",
+      "revision": body["revision"],
+    }, 202, {})
+
+  monkeypatch.setattr(relay_route.contribution_broker, "request", fake_request)
+  response = client.post(
+    f"/api/contribution-relay/{app_id}/{record_id}/submit",
+    headers={"Authorization": f"Bearer {owner_token}"},
+    json={"confirm_publication": True},
+  )
+
+  assert response.status_code == 409, response.text
+  stored = json.loads(record_path.read_text())
+  assert stored["relay_revision"] == 2
+  assert stored["relay_request_sha256"] == "newer-request"
+  assert "relay_contribution_id" not in stored
+
+
 def test_terminal_relay_equivalence_uses_the_verified_merge_commit(
   tmp_path, monkeypatch,
 ):
@@ -704,6 +742,43 @@ def test_status_route_never_overwrites_a_newer_local_relay_identity(
   assert stored["relay_revision"] == 2
 
 
+def test_status_route_never_overwrites_a_newer_revision_of_the_same_identity(
+  client, owner_token, tmp_path, monkeypatch,
+):
+  record_id = "relay-status-revision-race"
+  app_id, record_path = _prepared_relay_record(
+    client, owner_token, tmp_path, record_id,
+  )
+  original = json.loads(record_path.read_text())
+  original.update({
+    "status": "submitting",
+    "submission_mode": "mobius-bot",
+    "relay_contribution_id": _RELAY_ID,
+    "relay_revision": 1,
+    "relay_request_sha256": "revision-one",
+  })
+  atomic_write(record_path, json.dumps(original))
+
+  async def fake_request(method, path, *, body=None, idempotency_key=None):
+    newer = json.loads(record_path.read_text())
+    newer["relay_revision"] = 2
+    newer["relay_request_sha256"] = "revision-two"
+    atomic_write(record_path, json.dumps(newer))
+    return ({"id": _RELAY_ID, "status": "draft", "revision": 1}, 200, {})
+
+  monkeypatch.setattr(relay_route.contribution_broker, "request", fake_request)
+  response = client.get(
+    f"/api/contribution-relay/{app_id}/{record_id}/status",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+
+  assert response.status_code == 409, response.text
+  stored = json.loads(record_path.read_text())
+  assert stored["relay_contribution_id"] == _RELAY_ID
+  assert stored["relay_revision"] == 2
+  assert stored["relay_request_sha256"] == "revision-two"
+
+
 def test_withdraw_route_requires_confirmation_and_is_locally_idempotent(
   client, owner_token, tmp_path, monkeypatch,
 ):
@@ -802,4 +877,48 @@ def test_withdraw_route_never_reports_closed_before_relay_confirmation(
   assert response.json()["detail"]["code"] == "invalid_relay_response"
   stored = json.loads(record_path.read_text())
   assert stored["status"] == "draft"
+  assert "withdrawn_at" not in stored
+
+
+def test_withdraw_route_never_applies_an_old_response_to_a_newer_revision(
+  client, owner_token, tmp_path, monkeypatch,
+):
+  record_id = "relay-withdraw-race"
+  app_id, record_path = _prepared_relay_record(
+    client, owner_token, tmp_path, record_id,
+  )
+  original = json.loads(record_path.read_text())
+  original.update({
+    "status": "draft",
+    "submission_mode": "mobius-bot",
+    "relay_contribution_id": _RELAY_ID,
+    "relay_revision": 3,
+    "relay_request_sha256": "revision-three",
+    "relay_status": "draft",
+  })
+  atomic_write(record_path, json.dumps(original))
+
+  async def fake_request(method, path, *, body=None, idempotency_key=None):
+    newer = json.loads(record_path.read_text())
+    newer["relay_revision"] = 4
+    newer["relay_request_sha256"] = "revision-four"
+    atomic_write(record_path, json.dumps(newer))
+    return ({
+      "id": _RELAY_ID,
+      "status": "withdrawn",
+      "revision": 3,
+    }, 200, {})
+
+  monkeypatch.setattr(relay_route.contribution_broker, "request", fake_request)
+  response = client.post(
+    f"/api/contribution-relay/{app_id}/{record_id}/withdraw",
+    headers={"Authorization": f"Bearer {owner_token}"},
+    json={"confirm_withdrawal": True},
+  )
+
+  assert response.status_code == 409, response.text
+  stored = json.loads(record_path.read_text())
+  assert stored["status"] == "draft"
+  assert stored["relay_revision"] == 4
+  assert stored["relay_request_sha256"] == "revision-four"
   assert "withdrawn_at" not in stored
