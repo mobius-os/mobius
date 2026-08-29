@@ -51,6 +51,11 @@ function entryPaths(entry) {
     .filter(Boolean)
 }
 
+export function chatEditPaths(entries) {
+  return [...new Set((Array.isArray(entries) ? entries : []).flatMap(entryPaths))]
+    .sort()
+}
+
 function instant(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value
   const parsed = Date.parse(String(value || ''))
@@ -61,6 +66,26 @@ function recordCoversEntry(record, entry) {
   const coveredAt = instant(record?.coverage_at)
   const editedAt = instant(entry?.ts)
   return coveredAt !== null && (editedAt === null || editedAt <= coveredAt)
+}
+
+function exactCoverageByPath(payload) {
+  if (!Array.isArray(payload?.coverage)) return null
+  const coverage = new Map()
+  for (const item of payload.coverage) {
+    const path = cleanPath(item?.path)
+    const coveredAt = instant(item?.coverage_at)
+    if (!path || coveredAt === null) continue
+    const previous = coverage.get(path)
+    if (previous === undefined || coveredAt > previous) coverage.set(path, coveredAt)
+  }
+  return coverage
+}
+
+function exactCoverageCoversEntry(coverage, path, entry) {
+  const coveredAt = coverage.get(path)
+  if (coveredAt === undefined) return false
+  const editedAt = instant(entry?.ts)
+  return editedAt === null || editedAt <= coveredAt
 }
 
 function combinedFileStatus(previous, next) {
@@ -102,14 +127,23 @@ export function chatChangesOverview(entries, payload) {
   const safeEntries = Array.isArray(entries) ? entries : []
   const records = Array.isArray(payload?.records) ? payload.records : []
   const paths = new Set(safeEntries.flatMap(entryPaths))
+  const exactCoverage = exactCoverageByPath(payload)
   const coveredForEntry = new Map()
   for (const entry of safeEntries) {
     const covered = new Set()
-    for (const record of records) {
-      if (!recordCoversEntry(record, entry)) continue
-      for (const file of record?.files || []) {
-        const path = contributionSourceFile(record, file)
-        if (path) covered.add(path)
+    if (exactCoverage !== null) {
+      for (const path of entryPaths(entry)) {
+        if (exactCoverageCoversEntry(exactCoverage, path, entry)) {
+          covered.add(path)
+        }
+      }
+    } else {
+      for (const record of records) {
+        if (!recordCoversEntry(record, entry)) continue
+        for (const file of record?.files || []) {
+          const path = contributionSourceFile(record, file)
+          if (path) covered.add(path)
+        }
       }
     }
     coveredForEntry.set(entry, covered)

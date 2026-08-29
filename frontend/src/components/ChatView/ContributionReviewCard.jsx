@@ -47,6 +47,7 @@ export default function ContributionReviewCard({
     contributions: data,
     contributionsQuery,
     diffsQueryKey,
+    coverageQueryKey,
   } = overview
   const queryKey = contributionsQuery.queryKey
   const { data: appToken } = appQueries.token.useQuery(appId)
@@ -59,9 +60,10 @@ export default function ContributionReviewCard({
     if (wasActive.current && !turnActive) {
       queryClient.invalidateQueries({ queryKey, exact: true })
       queryClient.invalidateQueries({ queryKey: diffsQueryKey, exact: true })
+      queryClient.invalidateQueries({ queryKey: coverageQueryKey, exact: true })
     }
     wasActive.current = turnActive
-  }, [turnActive, queryClient, queryKey, diffsQueryKey])
+  }, [turnActive, queryClient, queryKey, diffsQueryKey, coverageQueryKey])
 
   // Dismissals are persisted, so this only forces the re-render; the stored
   // decision is what actually filters the list.

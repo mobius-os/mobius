@@ -5509,6 +5509,77 @@ def test_for_chat_returns_the_complete_lifecycle_without_a_hidden_five_card_cap(
   assert records[0]["url"].endswith("/7")
 
 
+def test_for_chat_coverage_keeps_display_bounded_without_losing_file_41(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  _, record = _prepared_for_chat(
+    app_id,
+    "wide-review",
+    "chat-wide",
+    status="open",
+    number=41,
+    url="https://github.com/mobius-os/mobius/pull/41",
+  )
+  record["plan"]["source_repo_path"] = "/data/platform"
+  record["quality_review"] = {"reviewed_at": "2026-08-27T12:00:00Z"}
+  diff_text = "".join(
+    "\n".join([
+      f"diff --git a/file-{index:02}.js b/file-{index:02}.js",
+      f"--- a/file-{index:02}.js",
+      f"+++ b/file-{index:02}.js",
+      "@@ -1 +1 @@",
+      "-old",
+      "+new",
+      "",
+    ])
+    for index in range(1, 42)
+  )
+  _write_contribution(app_id, "wide-review", record, diff_text)
+  owner_headers = {"Authorization": f"Bearer {owner_token}"}
+
+  lifecycle = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-wide",
+    headers=owner_headers,
+  )
+  assert lifecycle.status_code == 200, lifecycle.text
+  projected = lifecycle.json()["records"][0]
+  assert len(projected["files"]) == 40
+  assert "file-41.js" not in projected["files"]
+
+  coverage = client.post(
+    f"/api/github/contributions/{app_id}/for-chat/chat-wide/coverage",
+    headers=owner_headers,
+    json={"paths": ["/data/platform/file-41.js", "/private/not-requested.js"]},
+  )
+  assert coverage.status_code == 200, coverage.text
+  assert coverage.json() == {"coverage": [{
+    "path": "/data/platform/file-41.js",
+    "coverage_at": "2026-08-27T12:00:00Z",
+  }]}
+  assert "wide-review" not in coverage.text
+  assert "file-01.js" not in coverage.text
+
+  app_request = client.post(
+    f"/api/github/contributions/{app_id}/for-chat/chat-wide/coverage",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={"paths": ["/data/platform/file-41.js"]},
+  )
+  assert app_request.status_code == 403
+
+
+def test_for_chat_coverage_rejects_an_unbounded_path_request(client, owner_token):
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/for-chat/chat-wide/coverage",
+    headers={"Authorization": f"Bearer {owner_token}"},
+    json={"paths": [f"/data/platform/file-{index}.js" for index in range(101)]},
+  )
+  assert response.status_code == 400
+  assert response.json()["detail"] == "At most 100 paths are allowed."
+
+
 def test_for_chat_releases_storage_lock_before_parsing_contribution_history(
   client, owner_token, monkeypatch,
 ):

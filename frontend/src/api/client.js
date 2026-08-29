@@ -677,6 +677,13 @@ export const api = {
     forChat: (appId, chatId) => apiFetch(
       `/github/contributions/${appId}/for-chat/${encodeURIComponent(chatId)}`,
     ),
+    coverageForChat: (appId, chatId, paths) => apiFetch(
+      `/github/contributions/${appId}/for-chat/${encodeURIComponent(chatId)}/coverage`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ paths }),
+      },
+    ),
     publish: (appId, record, { autopilot = false } = {}) => {
       const update = record?.action === 'pr_update'
       const action = update ? 'update-existing' : 'submit'
