@@ -224,3 +224,44 @@ async def test_malformed_scratch_release_event_is_ignored(
   await asyncio.sleep(0)
   assert release_calls == []
   await supervisors.stop()
+
+
+@pytest.mark.asyncio
+async def test_gauntlet_reconciliation_has_periodic_backstop(monkeypatch):
+  import app.broadcast as broadcast_module
+  import app.chat as chat_module
+  import app.gauntlets as gauntlets_module
+  import app.runtime_supervisors as supervisors_module
+
+  broadcast = SystemBroadcast()
+  reconciled = asyncio.Event()
+  calls = 0
+
+  async def no_chats(*_args, **_kwargs):
+    return chat_module.ContinuationSweepResult()
+
+  async def reconcile():
+    nonlocal calls
+    calls += 1
+    reconciled.set()
+    # Prevent a zero-interval test loop from spinning after proving one tick.
+    await asyncio.Event().wait()
+
+  monkeypatch.setattr(broadcast_module, "get_system_broadcast", lambda: broadcast)
+  monkeypatch.setattr(supervisors_module, "SessionLocal", _EmptySession)
+  monkeypatch.setattr(chat_module, "sweep_reset_parks", no_chats)
+  monkeypatch.setattr(
+    supervisors_module, "GAUNTLET_RECONCILE_INTERVAL_SECS", 0,
+  )
+  monkeypatch.setattr(
+    gauntlets_module, "reconcile_running_gauntlets", reconcile,
+  )
+
+  supervisors = _supervisors()
+  await supervisors._start_chat_supervisors()
+  await asyncio.wait_for(reconciled.wait(), timeout=1)
+
+  assert calls == 1
+  assert "gauntlet-reconcile" in supervisors._tasks
+  await supervisors.stop()
+  assert supervisors._tasks == {}

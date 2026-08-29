@@ -35,6 +35,16 @@ async def chat_stop(
     raise HTTPException(status_code=403, detail="Embedded chat id is required.")
   if body.chat_id:
     require_active_chat_access(db, body.chat_id, principal)
+  from app.gauntlets import active_gauntlet_ids_for_chat, stop_gauntlet
+  gauntlet_ids = (
+    active_gauntlet_ids_for_chat(db, body.chat_id)
+    if body.chat_id
+    else [row[0] for row in db.query(models.GauntletRun.id).filter(
+      models.GauntletRun.status.in_(("running", "stopping")),
+    ).all()]
+  )
+  for gauntlet_id in gauntlet_ids:
+    await stop_gauntlet(gauntlet_id)
   stopped, cleared_pending_cids = await stop_chat(body.chat_id or None, db=db)
   cancelled_delegations = []
   if body.chat_id and stopped:
@@ -55,4 +65,5 @@ async def chat_stop(
     "stopped": stopped,
     "cleared_pending_cids": cleared_pending_cids,
     "cancelled_delegations": cancelled_delegations,
+    "cancelled_gauntlets": gauntlet_ids,
   }

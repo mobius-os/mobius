@@ -447,10 +447,41 @@ class StartTurn(_Command):
 
 
 @dataclass(frozen=True)
+class StartContinuationAttached:
+  """The exact physical continuation run was already persisted."""
+
+
+@dataclass(frozen=True)
+class StartContinuationBlocked:
+  """Expected non-start because the controller chat is not idle."""
+
+  reason: str
+
+
+@dataclass(frozen=True)
 class GoalPromotionRejected:
   """Expected refusal when a run cannot accept the requested Goal."""
 
   reason: str
+
+
+@dataclass
+class StartContinuation(_Command):
+  """Atomically append and open one owner-authority continuation.
+
+  Durable coordinators reserve ``run_token`` and ``cid`` before asking the
+  writer to resume an already-settled logical root.  The transcript append,
+  pending-queue recovery, and ChatRun insert are one transaction so a crash
+  can never leave only the synthetic pending row behind.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+  root_run_id: str = ""
+  content: str = ""
+  cid: str = ""
+  reason: str = ""
+  initiated_by_app_id: int | None = None
 
 
 @dataclass
@@ -825,6 +856,7 @@ _FENCE_COMMANDS = (
   QuestionCommit,
   AnswerQuestion,
   StartTurn,
+  StartContinuation,
   AppendPending,
   AppendSteeredUserMessage,
   PromotePending,
@@ -1321,7 +1353,7 @@ class ChatWriterActor:
         # post-abandon commit strands a turn. The `finally` still GCs the
         # key's fence epoch for the skipped command.
         if (
-          isinstance(cmd, (StartTurn, PromotePending))
+          isinstance(cmd, (StartTurn, StartContinuation, PromotePending))
           and cmd.ack is not None
           and cmd.ack.done()
         ):
@@ -1559,6 +1591,8 @@ class ChatWriterActor:
       return self._reconcile_startup_chat(db, cmd)
     if isinstance(cmd, StartTurn):
       return self._start_turn(db, cmd)
+    if isinstance(cmd, StartContinuation):
+      return self._start_continuation(db, cmd)
     if isinstance(cmd, PromoteRunToGoal):
       return self._promote_run_to_goal(db, cmd)
     if isinstance(cmd, AppendPending):
@@ -2349,6 +2383,164 @@ class ChatWriterActor:
       "provider": chat.provider,
     }
 
+  def _start_continuation(
+    self, db, cmd: StartContinuation,
+  ) -> dict | StartContinuationAttached | StartContinuationBlocked:
+    """Append and open an idle, same-root continuation in one commit.
+
+    A deterministic ``run_token`` makes a retry attach to an already-created
+    physical run.  A deterministic ``cid`` also lets this command repair the
+    one legacy crash shape produced by the former two-command implementation:
+    exactly the expected synthetic row was appended to ``pending_messages``
+    but never promoted.  Foreign pending work is never combined or reordered.
+    """
+    from datetime import UTC, datetime
+
+    from app.models import ChatRun
+
+    chat = _active_chat(db, cmd.chat_id)
+    if chat is None:
+      raise _PersistFailed("StartContinuation: chat not found or deleted")
+
+    existing_run = db.query(ChatRun).filter(
+      ChatRun.id == cmd.run_token,
+      ChatRun.chat_id == cmd.chat_id,
+    ).first()
+    if existing_run is not None:
+      if (existing_run.root_run_id or existing_run.id) != cmd.root_run_id:
+        raise _PersistFailed(
+          "StartContinuation: run token belongs to a different logical root"
+        )
+      if existing_run.initiated_by_app_id != cmd.initiated_by_app_id:
+        raise _PersistFailed(
+          "StartContinuation: run token has different app attribution"
+        )
+      db.rollback()
+      return StartContinuationAttached()
+
+    root = db.query(ChatRun.id).filter(
+      ChatRun.id == cmd.root_run_id,
+      ChatRun.chat_id == cmd.chat_id,
+    ).first()
+    if root is None:
+      raise _PersistFailed(
+        "StartContinuation: logical root does not belong to chat"
+      )
+    if chat.pending_question_id is not None:
+      db.rollback()
+      return StartContinuationBlocked("pending_question")
+    other_run = db.query(ChatRun.id).filter(
+      ChatRun.chat_id == cmd.chat_id,
+      ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+    ).first()
+    if other_run is not None:
+      db.rollback()
+      return StartContinuationBlocked("active_run")
+
+    existing = list(chat.messages or [])
+    pending = list(chat.pending_messages or [])
+    for row in existing:
+      if row.get("role") == "user" and cid_of(row) == cmd.cid:
+        raise _PersistFailed(
+          "StartContinuation: continuation cid exists without its ChatRun"
+        )
+
+    if pending:
+      # Recover only the exact row the retired AppendPending -> PromotePending
+      # sequence could have stranded.  Never consume a real owner queue or an
+      # app-attributed row in order to make coordinator progress.
+      if len(pending) != 1:
+        db.rollback()
+        return StartContinuationBlocked("foreign_pending")
+      queued = pending[0]
+      expected = (
+        queued.get("role") == "user"
+        and cid_of(queued) == cmd.cid
+        and queued.get("content") == cmd.content
+        and queued.get("kind") == "continuation"
+        and queued.get("continuation_reason") == cmd.reason
+        and queued.get("_initiated_by_app_id") == cmd.initiated_by_app_id
+      )
+      if not expected:
+        db.rollback()
+        return StartContinuationBlocked("foreign_pending")
+      source = dict(queued)
+    else:
+      source = {
+        "role": "user",
+        "content": cmd.content,
+        "ts": next_message_ts(existing),
+        "cid": cmd.cid,
+        "kind": "continuation",
+        "continuation_reason": cmd.reason,
+      }
+      if cmd.initiated_by_app_id is not None:
+        source["_initiated_by_app_id"] = cmd.initiated_by_app_id
+
+    # Programmatic continuations have no browser request of their own. Carry
+    # the latest owner viewport/timezone forward so visual testing exercises
+    # the partner's real dimensions rather than provider defaults.
+    for key in ("viewport", "timezone"):
+      if source.get(key) is not None:
+        continue
+      for prior in reversed(existing):
+        if prior.get("role") == "user" and prior.get(key) is not None:
+          source[key] = copy.deepcopy(prior[key])
+          break
+
+    ensure_user_cid(source)
+    stored = _pending_messages_for_transcript([source], existing)[0]
+    try:
+      history = [
+        schemas.ChatMessage(
+          role=row.get("role", "user"),
+          content=row.get("content", "") or "",
+        )
+        for row in existing
+      ]
+      history.append(schemas.ChatMessage(role="user", content=cmd.content))
+    except Exception as exc:
+      raise _PersistFailed(
+        "StartContinuation: malformed controller transcript"
+      ) from exc
+
+    chat.messages = existing + [stored]
+    chat.pending_messages = []
+    chat.live_assistant = {
+      "id": cmd.run_token,
+      "role": "assistant",
+      "blocks": [],
+      "ts": next_message_ts(chat.messages),
+    }
+    chat.active_assistant_message_id = cmd.run_token
+    started_at = datetime.now(UTC)
+    chat.updated_at = started_at
+    provider = chat.provider or "claude"
+    from app.run_state import goal_identity_for_run_start
+    goal_objective, goal_id = goal_identity_for_run_start(
+      db, cmd.chat_id, source,
+    )
+    db.add(ChatRun(
+      id=cmd.run_token,
+      chat_id=cmd.chat_id,
+      status="running",
+      root_run_id=cmd.root_run_id,
+      provider=provider,
+      started_at=started_at,
+      initiated_by_app_id=cmd.initiated_by_app_id,
+      goal_objective=goal_objective,
+      goal_id=goal_id,
+    ))
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("StartContinuation did not persist")
+    self._run_token_owner[cmd.chat_id] = cmd.run_token
+    return {
+      "history": history,
+      "promoted": stored,
+      "session_id": chat.session_id,
+      "provider": provider,
+    }
+
   def _promote_run_to_goal(
     self, db, cmd: PromoteRunToGoal,
   ) -> dict | GoalPromotionRejected:
@@ -3025,7 +3217,7 @@ class ChatWriterActor:
         ChatRun.id == cmd.run_token,
         ChatRun.chat_id == cmd.chat_id,
       ).first()
-      if run is not None and run.status == "running":
+      if run is not None and run.status in models.NONTERMINAL_RUN_STATUSES:
         run.status = cmd.terminal_status
         run.ended_at = datetime.now(UTC)
         run.restart_nonce = None

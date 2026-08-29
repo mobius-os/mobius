@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session, defer
 
 from app import (
   activity, app_activity, app_apply, app_capability_acceptance, app_git,
-  app_jobs, app_preview, app_recency, fs_locks, icon_cache,
+  app_jobs, app_preview, app_recency, chat_queue, fs_locks, icon_cache,
   models, providers, schemas,
   source_dirs,
 )
@@ -199,6 +199,19 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   deleted_app_id = app.id
   settings = get_settings()
 
+  if db.query(models.GauntletRun.id).filter(
+    models.GauntletRun.app_id == deleted_app_id,
+    models.GauntletRun.status.in_(("running", "stopping")),
+  ).first() is not None:
+    raise RuntimeError(
+      "active Gauntlet must quiesce before permanent app deletion"
+    )
+  from app.delegations import active_delegation_ids_for_app
+  if active_delegation_ids_for_app(db, deleted_app_id):
+    raise RuntimeError(
+      "active delegated work must quiesce before permanent app deletion"
+    )
+
   # Registry state is the revocation boundary; physical cleanup may fail.
   await _revoke_app_publish_tokens(
     settings, deleted_app_id, app.token_nonce,
@@ -227,6 +240,65 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   # missing files (a 404) is the acceptable failure, not data exposure.
   # The activity marker is id-keyed too; remove it before the reusable app id
   # is freed so a future unrelated app never inherits the old app's dot.
+  delegation_ids = [row[0] for row in db.query(models.Delegation.id).filter(
+    models.Delegation.app_id == deleted_app_id,
+  ).all()]
+  critic_chat_ids = [row[0] for row in db.query(
+    models.Delegation.child_chat_id,
+  ).filter(models.Delegation.app_id == deleted_app_id).all()]
+  gauntlet_ids = {row[0] for row in db.query(models.GauntletRun.id).filter(
+    models.GauntletRun.app_id == deleted_app_id,
+  ).all()}
+  if delegation_ids:
+    gauntlet_ids.update(row[0] for row in db.query(
+      models.GauntletTask.gauntlet_run_id,
+    ).filter(
+      models.GauntletTask.delegation_id.in_(delegation_ids),
+    ).all())
+  task_query = db.query(models.GauntletTask)
+  task_filters = []
+  if gauntlet_ids:
+    task_filters.append(models.GauntletTask.gauntlet_run_id.in_(gauntlet_ids))
+  if delegation_ids:
+    task_filters.append(models.GauntletTask.delegation_id.in_(delegation_ids))
+  if task_filters:
+    from sqlalchemy import or_
+    task_query.filter(or_(*task_filters)).delete(synchronize_session=False)
+  if gauntlet_ids:
+    db.query(models.GauntletRun).filter(
+      models.GauntletRun.id.in_(gauntlet_ids),
+    ).delete(synchronize_session=False)
+  if delegation_ids:
+    db.query(models.Delegation).filter(
+      models.Delegation.id.in_(delegation_ids),
+    ).delete(synchronize_session=False)
+
+  # Critic chats are implementation-owned and have no value after their app's
+  # seven-day recovery window closes. Hand them to the ordinary hard-purge
+  # lifecycle; preserve other app-created chats as owner history by removing
+  # only their now-invalid app attribution.
+  purged_critic_chat_ids: list[str] = []
+  if critic_chat_ids:
+    db.query(models.Chat).filter(
+      models.Chat.id.in_(critic_chat_ids),
+    ).update({models.Chat.deleted_at: app.deleted_at}, synchronize_session=False)
+    from app.chat_retention import stage_chat_graph_purge
+    purged_critic_chat_ids = stage_chat_graph_purge(db, critic_chat_ids)
+  db.query(models.Chat).filter(
+    models.Chat.created_by_app_id == deleted_app_id,
+  ).update({models.Chat.created_by_app_id: None}, synchronize_session=False)
+  db.query(models.ChatRun).filter(
+    models.ChatRun.initiated_by_app_id == deleted_app_id,
+  ).update({models.ChatRun.initiated_by_app_id: None}, synchronize_session=False)
+  db.query(models.ChatEmbedGrant).filter(
+    models.ChatEmbedGrant.app_id == deleted_app_id,
+  ).delete(synchronize_session=False)
+  db.query(models.InstallPassGrant).filter(
+    models.InstallPassGrant.app_id == deleted_app_id,
+  ).delete(synchronize_session=False)
+  db.query(models.ContributionAutopilot).filter(
+    models.ContributionAutopilot.app_id == deleted_app_id,
+  ).delete(synchronize_session=False)
   db.query(models.AppActivityState).filter(
     models.AppActivityState.app_id == deleted_app_id,
   ).delete(synchronize_session=False)
@@ -238,6 +310,9 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   ).delete(synchronize_session=False)
   db.delete(app)
   db.commit()
+  if purged_critic_chat_ids:
+    from app.chat_retention import finalize_purged_chats
+    finalize_purged_chats(purged_critic_chat_ids)
   get_system_broadcast().publish(
     {"type": "app_deleted", "appId": str(deleted_app_id)}
   )
@@ -2550,26 +2625,67 @@ async def delete_app(
     if not app:
       raise HTTPException(status_code=404, detail="App not found.")
 
+    # A Gauntlet may own both an owner-authority writer and hidden critics.
+    # Stop that whole graph before ordinary delegated children so app removal
+    # cannot strand work after the app token and runtime disappear.
+    from app.gauntlets import stop_gauntlet
+    active_gauntlet_ids = [row[0] for row in db.query(
+      models.GauntletRun.id,
+    ).filter(
+      models.GauntletRun.app_id == app_id,
+      models.GauntletRun.status.in_(("running", "stopping")),
+    ).all()]
+    for gauntlet_id in active_gauntlet_ids:
+      stopped_gauntlet = await stop_gauntlet(gauntlet_id)
+      if (
+        stopped_gauntlet is not None
+        and stopped_gauntlet.get("status") == "stopping"
+      ):
+        raise HTTPException(
+          status_code=409,
+          detail=(
+            "Could not stop all Gauntlet work yet; retry app deletion after "
+            "the active provider process exits."
+          ),
+        )
+
     # An app-owned delegated process can keep spending or writing after its
-    # frame disappears. Settle every child (and its descendants) before the
-    # app authority is tombstoned; a provider that will not stop makes the
-    # uninstall retryable rather than orphaning live work.
+    # frame disappears. Settle every remaining child (and its descendants)
+    # before the app authority is tombstoned; a provider that will not stop
+    # makes the uninstall retryable rather than orphaning live work.
     from app.delegations import (
       active_delegation_ids_for_app,
       cancel_delegation_execution,
     )
+    db.rollback()
     for delegation_id in active_delegation_ids_for_app(db, app_id):
       if not await cancel_delegation_execution(delegation_id):
         raise HTTPException(
           status_code=409,
-          detail="Could not stop active delegated work; retry",
+          detail=(
+            "Could not stop all delegated work yet; retry app deletion after "
+            "the active provider process exits."
+          ),
         )
+
     db.rollback()
-    app = (
-      db.query(models.App)
-      .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
-      .first()
-    )
+    if db.query(models.GauntletRun.id).filter(
+      models.GauntletRun.app_id == app_id,
+      models.GauntletRun.status.in_(("running", "stopping")),
+    ).first() is not None:
+      raise HTTPException(
+        status_code=409,
+        detail="A Gauntlet started while deletion was waiting; retry deletion.",
+      )
+    if active_delegation_ids_for_app(db, app_id):
+      raise HTTPException(
+        status_code=409,
+        detail="Delegated work started while deletion was waiting; retry deletion.",
+      )
+    app = db.query(models.App).filter(
+      models.App.id == app_id,
+      models.App.deleted_at.is_(None),
+    ).first()
     if app is None:
       raise HTTPException(status_code=404, detail="App not found.")
 

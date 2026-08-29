@@ -441,6 +441,152 @@ class ChatWait(Base):
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
 
 
+class GauntletRun(Base):
+  """Durable coordinator state for one evidence-driven improvement loop.
+
+  ChatRun remains the execution authority for the owner-writer and Delegation
+  remains the authority for read-only critics.  This row persists only the
+  contract and the barrier position needed to deterministically decide which
+  execution belongs next.  ``create_all`` installs this new table on existing
+  copies; no ALTER migration is required.
+  """
+
+  __tablename__ = "gauntlet_runs"
+  __table_args__ = (
+    CheckConstraint(
+      "status IN "
+      "('running','stopping','completed','budget_exhausted','failed','stopped')",
+      name="ck_gauntlet_runs_status",
+    ),
+    CheckConstraint(
+      "phase IN ('baseline','integrate','evaluate','terminal')",
+      name="ck_gauntlet_runs_phase",
+    ),
+    CheckConstraint("current_round >= 0", name="ck_gauntlet_runs_round"),
+    CheckConstraint("max_rounds >= 1", name="ck_gauntlet_runs_max_rounds"),
+    CheckConstraint(
+      "(status IN ('running','stopping') AND active_target_key IS NOT NULL) OR "
+      "(status NOT IN ('running','stopping') AND active_target_key IS NULL)",
+      name="ck_gauntlet_runs_active_target",
+    ),
+    CheckConstraint(
+      "(status = 'stopping' AND requested_terminal_status IN "
+      "('stopped','budget_exhausted','failed')) OR "
+      "(status != 'stopping' AND requested_terminal_status IS NULL)",
+      name="ck_gauntlet_runs_requested_terminal",
+    ),
+  )
+
+  # Caller-provided stable identity is also POST idempotency.
+  id = Column(String(64), primary_key=True)
+  app_id = Column(Integer, ForeignKey("apps.id"), nullable=False, index=True)
+  parent_chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=False, index=True
+  )
+  # The controller's original logical run.  Like Delegation's parent root,
+  # this intentionally has no FK so audit state survives unusual run repair.
+  parent_root_run_id = Column(String(64), nullable=False, index=True)
+  target_path = Column(String(1024), nullable=False)
+  # A nullable unique lease: exactly one running coordinator may own a target,
+  # while terminal historical rows all release it to NULL. The value is the
+  # normalized path's SHA-256 digest, keeping the unique index bounded even on
+  # databases with tight index-key byte limits.
+  active_target_key = Column(
+    String(64), nullable=True, unique=True, index=True
+  )
+  contract_json = Column(JSON, nullable=False)
+  contract_sha256 = Column(String(64), nullable=False)
+  provider = Column(String(32), nullable=False)
+  model = Column(String(256), nullable=True)
+  effort = Column(String(32), nullable=True)
+  status = Column(String(24), nullable=False, default="running", index=True)
+  phase = Column(String(16), nullable=False, default="baseline")
+  current_round = Column(Integer, nullable=False, default=0)
+  max_rounds = Column(Integer, nullable=False)
+  max_budget_usd = Column(Float, nullable=True)
+  deadline_at = Column(DateTime, nullable=True)
+  stop_requested_at = Column(DateTime, nullable=True, default=None)
+  requested_terminal_status = Column(String(24), nullable=True, default=None)
+  terminal_reason = Column(Text, nullable=True, default=None)
+  revision = Column(Integer, nullable=False, default=0)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  updated_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  ended_at = Column(DateTime, nullable=True, default=None)
+
+
+class GauntletTargetMutex(Base):
+  """Singleton row serializing hierarchical target-lease acquisition.
+
+  A unique exact-path key cannot prevent concurrent ``parent`` / ``child``
+  targets. Every creator updates row 1 before scanning active normalized paths;
+  that row lock serializes the overlap decision across processes on SQLite and
+  PostgreSQL without reducing unrelated, non-overlapping runs to one global
+  lease for their full lifetimes.
+  """
+
+  __tablename__ = "gauntlet_target_mutex"
+
+  id = Column(Integer, primary_key=True)
+  revision = Column(Integer, nullable=False, default=0)
+
+
+class GauntletTask(Base):
+  """One durable execution slot in a Gauntlet all-of barrier.
+
+  Read slots point at scope-enforced Delegations.  The sole write slot points
+  at a physical ChatRun in the owner controller chat, preserving owner-only
+  apply/play-test authority without inventing another runner.  The ChatRun id
+  is reserved before scheduling and deliberately is not an FK: the slot must
+  survive the crash window between reserving work and StartContinuation
+  creating the run in its own chat-writer transaction.
+  """
+
+  __tablename__ = "gauntlet_tasks"
+  __table_args__ = (
+    UniqueConstraint(
+      "gauntlet_run_id", "phase", "round", "ordinal",
+      name="uq_gauntlet_tasks_phase_slot",
+    ),
+    CheckConstraint(
+      "(scope = 'read' AND phase IN ('baseline','evaluate') "
+      "AND delegation_id IS NOT NULL AND chat_run_id IS NULL) OR "
+      "(scope = 'write' AND phase = 'integrate' AND ordinal = 0 "
+      "AND delegation_id IS NULL AND chat_run_id IS NOT NULL)",
+      name="ck_gauntlet_tasks_execution_shape",
+    ),
+    CheckConstraint("round >= 0", name="ck_gauntlet_tasks_round"),
+    CheckConstraint("ordinal >= 0", name="ck_gauntlet_tasks_ordinal"),
+    CheckConstraint(
+      "retry_count >= 0 AND retry_count <= 1",
+      name="ck_gauntlet_tasks_retry_count",
+    ),
+    CheckConstraint(
+      "max_budget_usd IS NULL OR max_budget_usd > 0",
+      name="ck_gauntlet_tasks_budget",
+    ),
+  )
+
+  id = Column(String(64), primary_key=True)
+  gauntlet_run_id = Column(
+    String(64), ForeignKey("gauntlet_runs.id"), nullable=False, index=True
+  )
+  phase = Column(String(16), nullable=False)
+  round = Column(Integer, nullable=False)
+  ordinal = Column(Integer, nullable=False)
+  role = Column(String(128), nullable=False)
+  scope = Column(String(16), nullable=False)
+  delegation_id = Column(
+    String(64), ForeignKey("delegations.id"), nullable=True, unique=True
+  )
+  chat_run_id = Column(String(64), nullable=True, unique=True)
+  # One deterministic execution reservation. Claude enforces this on the
+  # provider turn; Codex reports only observed spend, surfaced by the API.
+  max_budget_usd = Column(Float, nullable=True)
+  retry_count = Column(Integer, nullable=False, default=0)
+  prompt_sha256 = Column(String(64), nullable=False)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
 class ChatSessionLink(Base):
   """Append-only provider-session -> chat identity map (subagent observability).
 

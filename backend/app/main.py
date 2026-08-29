@@ -70,7 +70,8 @@ from app.routes import (
   secure_inputs_router,
   connectors_router, connectors_public_router,
   chat_waits_router,
-  debug_router, delegations_router, fs_router, goal_plans_router, github_router, media_router,
+  debug_router, delegations_router, fs_router, gauntlets_router, goal_plans_router,
+  github_router, media_router,
   identity_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
   public_apps_router,
@@ -727,6 +728,7 @@ app.include_router(chats_stream_router)
 app.include_router(secure_inputs_router)
 app.include_router(delegations_router)
 app.include_router(chat_waits_router)
+app.include_router(gauntlets_router)
 app.include_router(goal_plans_router)
 app.include_router(chat_logs_router)
 app.include_router(connectors_router)
