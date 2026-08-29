@@ -1079,14 +1079,17 @@ def _resolve_asset_file(asset_path: str) -> Path | None:
 # site below.
 _SERVICE_WORKER_SCRIPTS = frozenset({"sw.js", "sw-push.js"})
 
-# Small, same-origin worker scripts that are deliberately NOT precached (mirrors
-# the frontend precache-policy.mjs UNPRECACHED_WORKERS list). A worker runs under
-# the Content-Security-Policy of its OWN response, so — exactly like sw.js — it
-# must revalidate on every load. Without this the browser caches the worker by
-# HTTP heuristic freshness, and a device that fetched it under an earlier policy
-# keeps executing under that stale CSP: this is how on-device Pocket TTS stayed
-# WebAssembly-blocked even after shell_csp restored the 'wasm-unsafe-eval' source.
-_UNPRECACHED_WORKER_SCRIPTS = frozenset({"speech/pocket-tts-worker.js"})
+# Small, same-origin worker-class scripts that are deliberately NOT precached
+# (mirrors the frontend precache-policy.mjs UNPRECACHED_WORKERS list). They use
+# stable URLs, so each load must revalidate instead of retaining old executable
+# bytes under HTTP heuristic freshness. Dedicated workers also run under the
+# Content-Security-Policy of their OWN response: a stale response is how
+# on-device Pocket TTS stayed WebAssembly-blocked after shell_csp restored the
+# 'wasm-unsafe-eval' source.
+_UNPRECACHED_WORKER_SCRIPTS = frozenset({
+  "speech/pocket-tts-worker.js",
+  "speech/soundtouch-processor.js",
+})
 
 # The push worker's scope. It exists only to name a URL prefix inside the
 # shell's PWA scope, and must never resolve to a document — a page here would

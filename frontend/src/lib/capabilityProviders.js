@@ -20,6 +20,7 @@ export function createSpeechProvider({
       const operation = input?.operation || 'synthesize'
       const activeOperation = activeInput?.operation || 'synthesize'
       if (operation === 'catalog' || activeOperation === 'catalog') return 'share'
+      if (operation !== 'synthesize' && operation !== 'model-stream') return 'share'
       return 'replace'
     },
     async open(context) {

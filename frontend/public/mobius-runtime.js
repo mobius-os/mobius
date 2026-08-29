@@ -3650,7 +3650,6 @@ function makeCapabilities({ declarations = {}, hostWindow, selfWindow } = {}) {
 					stream.on("chunk", onChunk);
 					stream.on("progress", onProgress);
 					stream.result.then(onComplete).catch((error) => {
-						if (error?.name === "AbortError") return;
 						if (error?.code === "invalid_request") fallbackToShell();
 						else onError(error);
 					});

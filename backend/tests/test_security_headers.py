@@ -94,6 +94,27 @@ def test_speech_worker_revalidates_so_its_csp_cannot_go_stale():
   assert "'wasm-unsafe-eval'" in (r.headers.get("content-security-policy") or "")
 
 
+def test_speech_pitch_worklet_revalidates_its_stable_url():
+  import os
+
+  static = Path(os.environ["MOBIUS_BAKED_STATIC_DIR"])
+  worklet = static / "speech" / "soundtouch-processor.js"
+  worklet.parent.mkdir(parents=True, exist_ok=True)
+  body = b"// test stub speech worklet\n"
+  if not worklet.exists():
+    worklet.write_bytes(body)
+  else:
+    body = worklet.read_bytes()
+
+  r = TestClient(app).get(
+    "/speech/soundtouch-processor.js",
+    headers={"Range": "bytes=0-0"},
+  )
+  assert r.status_code == 200
+  assert r.content == body
+  assert r.headers.get("cache-control") == "no-cache, must-revalidate"
+
+
 def test_standard_security_headers_present():
   h = _headers()
   assert h.get("x-content-type-options") == "nosniff"
