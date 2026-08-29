@@ -1060,6 +1060,11 @@ test('launcher cards and drawer rows share the stationary menu threshold', () =>
   assert.doesNotMatch(drawer, /520/)
 })
 
+test('drawer artwork is loaded only by rows that are actually mounted', () => {
+  assert.match(drawer, /<AppIcon/)
+  assert.doesNotMatch(drawer, /preloadAppIcons|APP_ICON_(?:PRIORITY_COUNT|WARM_LIMIT)/)
+})
+
 test('double-click edits a drawer row name instead of duplicating its context menu', () => {
   assert.match(drawer, /onDoubleClick=\{event => \{[\s\S]*?actions\.startRename\(kind, id, surface\)/)
 })

@@ -12,7 +12,6 @@ import {
   SettingsNavIcon,
 } from '../navigationIcons.js'
 import AppIcon from '../AppIcon.jsx'
-import { preloadAppIcons } from '../appIcon.js'
 import {
   computePinnedDrag,
   observePinnedOrderHandoff,
@@ -66,8 +65,6 @@ import './Drawer.css'
 // downstream.
 const EMPTY_SET = new Set()
 const TOUCH_CONTEXT_MENU_PROVENANCE_MS = 1500
-const APP_ICON_PRIORITY_COUNT = 24
-const APP_ICON_WARM_LIMIT = 96
 
 export default function Drawer({
   open,
@@ -148,22 +145,6 @@ export default function Drawer({
     apps: sortedApps,
   } = useMemo(() => buildDrawerSections(chats, apps), [chats, apps])
 
-  // Decode the first launcher viewport immediately, then warm a bounded
-  // remainder without competing with initial shell work.
-  useEffect(() => {
-    if (sortedApps.length === 0) return
-    const priority = sortedApps.slice(0, APP_ICON_PRIORITY_COUNT)
-    const remainder = sortedApps.slice(APP_ICON_PRIORITY_COUNT, APP_ICON_WARM_LIMIT)
-    void preloadAppIcons(priority)
-    if (remainder.length === 0 || navigator.connection?.saveData) return
-
-    const warmRemainder = () => { void preloadAppIcons(remainder) }
-    if (typeof requestIdleCallback === 'function') {
-      requestIdleCallback(warmRemainder, { timeout: 3000 })
-    } else {
-      setTimeout(warmRemainder, 500)
-    }
-  }, [sortedApps])
   const pinnedItems = useMemo(() => (
     pinnedOrderHandoff
       ? projectPinnedEntries(basePinnedItems, pinnedOrderHandoff.visibleKeys)
