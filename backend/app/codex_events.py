@@ -668,7 +668,8 @@ def _tool_completed_events(item: Any, sdk: dict[str, Any]) -> list[dict[str, Any
 
   if isinstance(item, sdk["FileChangeThreadItem"]):
     events: list[dict[str, Any]] = []
-    summary = _file_change_patch_summary(item.changes)
+    status = _enum_wire_value(getattr(item, "status", None))
+    summary = _file_change_patch_summary(item.changes, status=status)
     if summary:
       events.append({"type": "tool_output", "content": summary})
     events.append({"type": "tool_end"})
@@ -964,26 +965,40 @@ def _observe_skill_reads(
     log.debug("codex skill_loaded observability failed", exc_info=True)
 
 
-def _file_change_patch_summary(changes: list[Any]) -> str:
-  """Summarize file changes without exposing provider model reprs."""
+def _file_change_patch_summary(
+  changes: list[Any], *, status: str | None,
+) -> str:
+  """Summarize proposed or settled file changes in outcome-honest language."""
   lines: list[str] = []
   for change in changes:
     change_dict = _model_dump(change) or {}
     raw_kind = change_dict.get("kind")
     kind = raw_kind if isinstance(raw_kind, dict) else {}
     kind_type = str(kind.get("type") or "update")
-    path = change_dict.get("path", "")
+    path = change_dict.get("path")
+    if not isinstance(path, str) or not path:
+      continue
     move_path = kind.get("move_path")
     if kind_type == "add":
-      line = f"Added {path}".strip()
+      action = f"add {path}"
+      completed = f"Added {path}"
     elif kind_type == "delete":
-      line = f"Deleted {path}".strip()
+      action = f"delete {path}"
+      completed = f"Deleted {path}"
     elif isinstance(move_path, str) and move_path:
-      line = f"Moved {path} → {move_path}".strip()
+      action = f"move {path} → {move_path}"
+      completed = f"Moved {path} → {move_path}"
     else:
-      line = f"Updated {path}".strip()
-    if line:
-      lines.append(line)
+      action = f"update {path}"
+      completed = f"Updated {path}"
+    if status == "completed":
+      lines.append(completed)
+    elif status == "failed":
+      lines.append(f"Failed to {action}")
+    elif status == "declined":
+      lines.append(f"Declined: {action}")
+    else:
+      lines.append(f"Proposed: {action}")
   return "\n".join(lines)
 
 

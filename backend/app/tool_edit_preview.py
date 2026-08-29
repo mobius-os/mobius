@@ -111,12 +111,20 @@ def codex_edit_preview(changes: Any) -> dict | None:
     patch = change.get("diff")
     if not isinstance(path, str) or not path or not isinstance(patch, str):
       continue
-    if patch.startswith("diff --git "):
-      sections.append(patch)
-      continue
     raw_kind = change.get("kind")
     kind = raw_kind if isinstance(raw_kind, dict) else {}
     kind_type = str(kind.get("type") or "update")
+    # The pinned Codex app-server contract carries complete file content for
+    # add/delete changes and unified diff text for updates. Dispatch on that
+    # typed distinction before inspecting content: a valid new file may itself
+    # begin with diff metadata such as `diff --git`, `@@`, or `GIT binary patch`.
+    if kind_type in {"add", "delete"}:
+      patch_lines = _content_hunk(patch, kind_type)
+    elif patch.startswith("diff --git "):
+      sections.append(patch)
+      continue
+    else:
+      patch_lines = patch.splitlines()
     move_path = kind.get("move_path")
     new_path = move_path if isinstance(move_path, str) and move_path else path
     header = [
@@ -145,26 +153,5 @@ def codex_edit_preview(changes: Any) -> dict | None:
         f"--- {_git_path('a', path)}",
         f"+++ {_git_path('b', new_path)}",
       ])
-    # FileUpdateChange.diff is not one stable shape: updates and some
-    # add/delete events carry hunk text, while other add/delete events carry
-    # the complete file body with no @@ header or +/- prefixes. Normalize that
-    # provider variation here so every durable preview is an honest unified
-    # diff rather than a file header followed by unparseable source text.
-    patch_lines = patch.splitlines()
-    first_patch_line = patch_lines[0] if patch_lines else ""
-    patch_is_diff = (
-      first_patch_line.startswith("@@ ")
-      or (
-        first_patch_line.startswith("Binary files ")
-        and first_patch_line.endswith(" differ")
-      )
-      or first_patch_line == "GIT binary patch"
-    )
-    if (
-      kind_type in {"add", "delete"}
-      and patch
-      and not patch_is_diff
-    ):
-      patch_lines = _content_hunk(patch, kind_type)
     sections.append("\n".join([*header, *patch_lines]))
   return _bounded_preview("\n".join(sections))

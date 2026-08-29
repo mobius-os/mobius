@@ -1,5 +1,10 @@
 """Provider edit tools preserve bounded, renderable diff previews."""
 
+from openai_codex.generated.v2_all import (
+  FileChangeThreadItem as CodexFileChangeThreadItem,
+  PatchApplyStatus,
+)
+
 from app.codex_events import (
   _file_change_patch_summary,
   _tool_completed_events,
@@ -53,7 +58,7 @@ def test_codex_patch_preview_keeps_multiple_file_kinds_and_bounds_payload():
     {
       "path": "new.py",
       "kind": {"type": "add"},
-      "diff": "@@ -0,0 +1 @@\n+hello",
+      "diff": "hello\n",
     },
   ])
 
@@ -64,7 +69,7 @@ def test_codex_patch_preview_keeps_multiple_file_kinds_and_bounds_payload():
   large = codex_edit_preview([{
     "path": "large.txt",
     "kind": {"type": "add"},
-    "diff": "@@ -0,0 +1 @@\n+" + ("x" * (MAX_EDIT_PREVIEW_CHARS + 100)),
+    "diff": "x" * (MAX_EDIT_PREVIEW_CHARS + 100),
   }])
   assert large["truncated"] is True
   assert len(large["diff"]) == MAX_EDIT_PREVIEW_CHARS
@@ -89,18 +94,51 @@ def test_codex_raw_add_and_delete_bodies_become_countable_hunks():
   assert "@@ -1,2 +0,0 @@\n-first\n-second" in preview["diff"]
 
 
-def test_codex_empty_file_and_existing_hunks_are_not_invented_or_rewritten():
+def test_codex_empty_file_and_update_hunks_are_not_invented_or_rewritten():
   preview = codex_edit_preview([
     {"path": "empty.txt", "kind": {"type": "add"}, "diff": ""},
     {
       "path": "new.txt",
-      "kind": {"type": "add"},
-      "diff": "@@ -0,0 +1 @@\n+already unified",
+      "kind": {"type": "update"},
+      "diff": "@@ -1 +1 @@\n-old\n+already unified",
     },
   ])
 
   assert preview["diff"].count("@@ ") == 1
   assert preview["diff"].count("+already unified") == 1
+
+
+def test_codex_raw_file_bodies_treat_diff_metadata_prefixes_as_content():
+  changes = [
+    {
+      "path": "patch-fixture.txt",
+      "kind": {"type": "add"},
+      "diff": "diff --git a/old b/new\n@@ -1 +1 @@\n-old\n+new\n",
+    },
+    {
+      "path": "release-marker.txt",
+      "kind": {"type": "add"},
+      "diff": "@@ release marker\nactual body\n",
+    },
+    {
+      "path": "binary-sentence.txt",
+      "kind": {"type": "delete"},
+      "diff": "Binary files cats and dogs differ\nsecond line\n",
+    },
+    {
+      "path": "binary-patch.txt",
+      "kind": {"type": "delete"},
+      "diff": "GIT binary patch\nliteral text\n",
+    },
+  ]
+
+  diff = codex_edit_preview(changes)["diff"]
+
+  assert "diff --git a/patch-fixture.txt b/patch-fixture.txt" in diff
+  assert "+diff --git a/old b/new" in diff
+  assert "+@@ release marker\n+actual body" in diff
+  assert "-Binary files cats and dogs differ\n-second line" in diff
+  assert "-GIT binary patch\n-literal text" in diff
 
 
 def test_preview_quoting_preserves_unicode_paths():
@@ -136,7 +174,7 @@ def test_codex_file_change_start_carries_shared_edit_preview():
   assert "-old\n+new" in event["edit_preview"]["diff"]
 
 
-def test_codex_file_change_fallback_summary_uses_owner_language():
+def test_codex_completed_file_change_summary_uses_owner_language():
   summary = _file_change_patch_summary([
     {"path": "new.py", "kind": {"type": "add"}},
     {"path": "old.py", "kind": {"type": "delete"}},
@@ -145,7 +183,7 @@ def test_codex_file_change_fallback_summary_uses_owner_language():
       "kind": {"type": "update", "move_path": "after.py"},
     },
     {"path": "same.py", "kind": {"type": "update"}},
-  ])
+  ], status="completed")
 
   assert summary.splitlines() == [
     "Added new.py",
@@ -156,21 +194,57 @@ def test_codex_file_change_fallback_summary_uses_owner_language():
   assert "{'type':" not in summary
 
 
-def test_codex_completed_file_change_emits_the_owner_language_fallback():
-  class FileChangeThreadItem:
-    changes = [{"path": "new.py", "kind": {"type": "add"}}]
+def _codex_file_change_item(status: PatchApplyStatus):
+  return CodexFileChangeThreadItem.model_validate({
+    "id": "edit-1",
+    "type": "fileChange",
+    "status": status.value,
+    "changes": [{
+      "path": "new.py",
+      "kind": {"type": "add"},
+      "diff": "hello\n",
+    }],
+  })
 
+
+def test_codex_completed_file_change_emits_applied_owner_language():
   sdk = {
     "CommandExecutionThreadItem": type("CommandExecutionThreadItem", (), {}),
-    "FileChangeThreadItem": FileChangeThreadItem,
-    "McpToolCallThreadItem": type("McpToolCallThreadItem", (), {}),
-    "DynamicToolCallThreadItem": type("DynamicToolCallThreadItem", (), {}),
-    "WebSearchThreadItem": type("WebSearchThreadItem", (), {}),
+    "FileChangeThreadItem": CodexFileChangeThreadItem,
   }
 
-  assert _tool_completed_events(FileChangeThreadItem(), sdk) == [
+  assert _tool_completed_events(
+    _codex_file_change_item(PatchApplyStatus.completed), sdk,
+  ) == [
     {"type": "tool_output", "content": "Added new.py"},
     {"type": "tool_end"},
+  ]
+
+
+def test_codex_failed_and_declined_file_changes_never_claim_application():
+  sdk = {
+    "CommandExecutionThreadItem": type("CommandExecutionThreadItem", (), {}),
+    "FileChangeThreadItem": CodexFileChangeThreadItem,
+  }
+
+  expected = {
+    PatchApplyStatus.failed: "Failed to add new.py",
+    PatchApplyStatus.declined: "Declined: add new.py",
+  }
+  for status, summary in expected.items():
+    assert _tool_completed_events(_codex_file_change_item(status), sdk) == [
+      {"type": "tool_output", "content": summary},
+      {"type": "tool_end"},
+    ]
+
+
+def test_codex_in_progress_file_change_summary_is_explicitly_proposed():
+  assert _file_change_patch_summary([
+    {"path": "new.py", "kind": {"type": "add"}},
+    {"path": "old.py", "kind": {"type": "delete"}},
+  ], status="inProgress").splitlines() == [
+    "Proposed: add new.py",
+    "Proposed: delete old.py",
   ]
 
 
