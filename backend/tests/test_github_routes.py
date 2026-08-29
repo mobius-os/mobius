@@ -5708,6 +5708,48 @@ def test_submit_persists_precise_upstream_fetch_failure(
   assert detail["record"]["last_submit_upstream_branch"] == "main"
 
 
+def test_submit_failure_keeps_a_compatible_patch_error_code(tmp_path):
+  from app.github_contributions import _mark_submit_failure
+
+  record_path = tmp_path / "compatible-failure.json"
+  record_path.write_text(json.dumps({
+    "id": "compatible-failure",
+    "status": "submitting",
+  }))
+
+  failed = _mark_submit_failure(
+    app_id=0,
+    record_path=record_path,
+    message="Rejected payload.",
+    record_patch={"last_submit_error_code": "invalid_payload"},
+  )
+
+  assert failed["status"] == "prepared"
+  assert failed["last_submit_error_code"] == "invalid_payload"
+  assert json.loads(record_path.read_text())["last_submit_error_code"] == "invalid_payload"
+
+
+def test_submit_failure_does_not_reuse_a_previous_attempt_error_code(tmp_path):
+  from app.github_contributions import _mark_submit_failure
+
+  record_path = tmp_path / "new-failure.json"
+  record_path.write_text(json.dumps({
+    "id": "new-failure",
+    "status": "submitting",
+    "last_submit_error_code": "upstream_fetch_unavailable",
+  }))
+
+  failed = _mark_submit_failure(
+    app_id=0,
+    record_path=record_path,
+    message="Rejected payload.",
+  )
+
+  assert failed["status"] == "prepared"
+  assert "last_submit_error_code" not in failed
+  assert "last_submit_error_code" not in json.loads(record_path.read_text())
+
+
 # ── Pre-publication branch truth check ──────────────────────────────────────
 # The reviewed-diff preflights prove WHAT would be sent; _existing_branch_pr
 # proves WHETHER it was already sent, from GitHub itself, because the

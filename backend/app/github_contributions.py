@@ -982,8 +982,11 @@ def _mark_submit_failure(
     next_record["last_submit_error_detail"] = detail
   else:
     next_record.pop("last_submit_error_detail", None)
-  if code:
-    next_record["last_submit_error_code"] = code
+  effective_code = code or str(
+    (record_patch or {}).get("last_submit_error_code") or ""
+  )
+  if effective_code:
+    next_record["last_submit_error_code"] = effective_code
   else:
     next_record.pop("last_submit_error_code", None)
   _write_record(record_path, next_record)
