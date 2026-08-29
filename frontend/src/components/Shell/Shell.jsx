@@ -170,6 +170,9 @@ const APP_SETTINGS_SECTIONS = new Set([
   'models',
 ])
 const EMPTY_LIST = Object.freeze([])
+// Reconnect list reads order durable state ahead of buffered system events, so
+// they need a short deadline rather than holding notifications behind a stalled request.
+const SYSTEM_RECONNECT_LIST_TIMEOUT_MS = 5_000
 // Mode timing lives with the pure snapshot geometry in workspaceView.js; browser
 // transition completion owns its lifetime, so Shell has no animation timers.
 const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
@@ -1935,7 +1938,7 @@ export default function Shell({ onInitialVisualReady }) {
   // effect/caller that consumes them vulnerable to duplicate fetches.
   // Driving the refetch via the query client's stable
   // `refetchQueries` keeps the callback identity steady.
-  const refreshApps = useCallback(() => {
+  const refreshApps = useCallback(({ timeoutMs } = {}) => {
     // Force a genuinely fresh fetch and return THAT fetch's result.
     // refetchQueries alone can coalesce with an initial mount fetch that's
     // still in flight (React Query dedups), then resolve against the stale
@@ -1948,13 +1951,13 @@ export default function Shell({ onInitialVisualReady }) {
     return queryClient.cancelQueries({ queryKey: appQueries.keys.all })
       .then(() => queryClient.fetchQuery({
         queryKey: appQueries.keys.all,
-        queryFn: async () => reconcileApps(await appQueries.list.fetch()),
+        queryFn: async () => reconcileApps(await appQueries.list.fetch({ timeoutMs })),
         staleTime: 0,
       }))
       .then(data => data || [])
       .catch(() => queryClient.getQueryData(appQueries.keys.all) || [])
   }, [queryClient, reconcileApps])
-  const fetchFreshChats = useCallback(() => {
+  const fetchFreshChats = useCallback(({ timeoutMs } = {}) => {
     // Shell-level chat state (running, waiting for owner input, activity) is
     // durable and must win over a transient event that may have been missed
     // while the page was suspended or the server restarted. Cancel first so
@@ -1963,7 +1966,9 @@ export default function Shell({ onInitialVisualReady }) {
     return queryClient.cancelQueries({ queryKey: chatQueries.keys.all })
       .then(() => queryClient.fetchQuery({
         queryKey: chatQueries.keys.all,
-        queryFn: async () => reconcileCreatedChats(await chatQueries.list.fetch()),
+        queryFn: async () => reconcileCreatedChats(
+          await chatQueries.list.fetch({ timeoutMs }),
+        ),
         staleTime: 0,
       }))
       .then(data => data || [])
@@ -2712,10 +2717,10 @@ export default function Shell({ onInitialVisualReady }) {
         reconcileDeletedChatIdentities(),
       ])
       const [, refreshedChats] = await Promise.all([
-        refreshApps(),
+        refreshApps({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS }),
         // Unlike ordinary best-effort refreshes, reconnect must not use a stale
         // cached fallback to retire an optimistic active-work marker.
-        fetchFreshChats(),
+        fetchFreshChats({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS }),
       ])
       setLocalStreamingChatIds(prev => (
         withoutSettledLocalChatRuns(prev, refreshedChats)

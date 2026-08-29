@@ -526,7 +526,7 @@ export const api = {
     ),
   },
   apps: {
-    list: () => apiFetch('/apps/'),
+    list: (options = {}) => apiFetch('/apps/', options),
     markOpened: (appId) => apiFetch(`/apps/${appId}/opened`, {
       method: 'POST',
     }),

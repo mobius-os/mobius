@@ -778,8 +778,9 @@ test('builder mode + FOREGROUND: unchanged tree placement (no slot write)', () =
 test('shell reconciles both durable drawer lists whenever the system stream reconnects', () => {
   const shellSource = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
   assert.match(shellSource, /const reconcileSystemStateOnOpen = useCallback/)
-  assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*refreshApps\(\)/)
-  assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*fetchFreshChats\(\)/)
+  assert.match(shellSource, /const SYSTEM_RECONNECT_LIST_TIMEOUT_MS = 5_000/)
+  assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*refreshApps\(\{ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS \}\)/)
+  assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*fetchFreshChats\(\{ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS \}\)/)
   assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*withoutSettledLocalChatRuns/,
     'fresh reconnect truth retires a local active-work marker whose finish event was missed')
   assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*chat\.running[\s\S]*visibleChatIdsRef\.current[\s\S]*markChatRunReconcile\(chat\.id\)/,

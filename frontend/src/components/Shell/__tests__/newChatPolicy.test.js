@@ -509,8 +509,11 @@ test('new-chat creation cancels stale list reads through a real AbortSignal', ()
   const createAt = shellSource.indexOf("api.chats.create({ title: 'New chat' })")
   assert.ok(cancelAt >= 0 && cancelAt < createAt,
     'the stale drawer read must be cancelled before the create request')
-  assert.match(queriesSource, /async function fetchChats\(\{ signal \} = \{\}\)/)
-  assert.match(queriesSource, /api\.chats\.list\(\{ signal \}\)/)
+  assert.match(
+    queriesSource,
+    /async function fetchChats\(\{ signal, timeoutMs \} = \{\}\)/,
+  )
+  assert.match(queriesSource, /api\.chats\.list\(\{ signal, timeoutMs \}\)/)
   assert.match(clientSource, /list: \(options = \{\}\) => apiFetch\('\/chats', options\)/)
 })
 
@@ -540,6 +543,32 @@ test('the drawer transport aborts before creation can continue', async () => {
     assert.deepEqual(sequence, [
       'list-started', 'list-aborted', 'create-allowed',
     ])
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('a stalled drawer list releases its reconnect barrier at the supplied deadline', async () => {
+  const originalFetch = globalThis.fetch
+  let deadlineAborted = false
+  globalThis.fetch = (_url, options = {}) => new Promise(resolve => {
+    options.signal?.addEventListener('abort', () => {
+      deadlineAborted = true
+      // Resolve instead of rejecting so the connectivity owner is not part of
+      // this transport-deadline test.
+      resolve(new Response('[]', {
+        status: 499,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+    }, { once: true })
+  })
+
+  try {
+    await assert.rejects(
+      chatQueries.list.fetch({ timeoutMs: 5 }),
+      /chats fetch failed: 499/,
+    )
+    assert.equal(deadlineAborted, true)
   } finally {
     globalThis.fetch = originalFetch
   }
