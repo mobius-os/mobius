@@ -55,6 +55,17 @@ export function normalizeChatDiffEntries(values) {
     .filter(Boolean)
 }
 
+export async function loadChatDiffEntries(chatId, { request, signal } = {}) {
+  if (typeof request !== 'function') throw new TypeError('request is required')
+  const response = await request(
+    `/chats/${encodeURIComponent(chatId)}/edit-diffs`,
+    { signal },
+  )
+  if (!response.ok) throw new Error(`Request failed (${response.status})`)
+  const data = await response.json()
+  return normalizeChatDiffEntries(data?.entries)
+}
+
 export function mergeChatDiffEntries(authoritative, live) {
   const merged = [...(Array.isArray(authoritative) ? authoritative : [])]
   const positions = new Map(merged.map((entry, index) => [entry.id, index]))

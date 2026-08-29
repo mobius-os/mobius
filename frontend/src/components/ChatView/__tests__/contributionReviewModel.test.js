@@ -67,6 +67,16 @@ test('the ledger owner is resolved by slug, and a missing app hides the card', (
   assert.equal(contributeApp(APPS, 99), null)
 })
 
+test('the composer card gets unsorted work from the complete chat owner', () => {
+  assert.match(
+    cardSrc,
+    /const overview = useChatChangesOverview\(chatId, initialChangeEntries\)/,
+  )
+  assert.match(cardSrc, /diffsQueryKey/)
+  assert.match(cardSrc, /&& overview\.lifecycleAvailable/)
+  assert.doesNotMatch(cardSrc, /chatChangesOverview\(initialChangeEntries/)
+})
+
 test('publication decisions stay distinct from the lifecycle kept in chat', () => {
   const payload = { records: [
     { id: 'a', status: 'prepared' },

@@ -5443,6 +5443,44 @@ def test_for_chat_returns_only_this_chat_s_prepared_reviews(client, owner_token)
   assert body["autopilot_default"] is True
 
 
+def test_for_chat_keeps_one_review_attached_to_every_chat_that_refined_it(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  _, record = _prepared_for_chat(app_id, "shared-review", "chat-original")
+  record["chat_ids"] = [
+    "chat-original",
+    *(f"chat-intermediate-{index}" for index in range(40)),
+    " chat-refinement ", "chat-refinement", "", 42,
+  ]
+  _write_contribution(app_id, "shared-review", record, "")
+  headers = {"Authorization": f"Bearer {owner_token}"}
+
+  original = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-original",
+    headers=headers,
+  )
+  refinement = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-refinement",
+    headers=headers,
+  )
+  unrelated = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-unrelated",
+    headers=headers,
+  )
+
+  assert original.status_code == 200, original.text
+  assert refinement.status_code == 200, refinement.text
+  assert unrelated.status_code == 200, unrelated.text
+  assert [item["id"] for item in original.json()["records"]] == ["shared-review"]
+  assert [item["id"] for item in refinement.json()["records"]] == ["shared-review"]
+  assert unrelated.json()["records"] == []
+  # Other chat identities stay private; the projection exposes only the same
+  # publication review and its source-file coverage.
+  assert "chat_ids" not in refinement.json()["records"][0]
+
+
 def test_for_chat_returns_the_complete_lifecycle_without_a_hidden_five_card_cap(
   client, owner_token,
 ):

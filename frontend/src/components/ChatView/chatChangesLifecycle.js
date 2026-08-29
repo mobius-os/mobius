@@ -167,6 +167,12 @@ export function chatChangesOverview(entries, payload) {
 
 export function compactChangesSummary(overview) {
   const counts = overview?.counts || {}
+  if (overview?.lifecycleAvailable === false) {
+    if (counts.files > 0) {
+      return `${counts.files} recorded ${counts.files === 1 ? 'file' : 'files'} · status unavailable`
+    }
+    return 'Contribution status unavailable'
+  }
   const parts = []
   if (counts.unsorted > 0) parts.push(`${counts.unsorted} unsorted`)
   if (counts.prepared > 0) parts.push(`${counts.prepared} prepared`)

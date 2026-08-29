@@ -1207,6 +1207,31 @@ _CHAT_CONTRIBUTION_STATUSES = frozenset({
 })
 
 
+def _contribution_chat_ids(record: dict) -> tuple[str, ...]:
+  """Return every chat whose edits this one contribution has reconciled.
+
+  ``chat_id`` remains the creation/provenance owner. ``chat_ids`` is additive:
+  an agent appends to it when a later chat refines the same review instead of
+  creating a duplicate contribution. Keeping the primary id in the projection
+  preserves old records and expresses the real many-to-one relationship
+  without moving ownership away from the original conversation.
+  """
+  values: list[object] = [record.get("chat_id")]
+  linked = record.get("chat_ids")
+  if isinstance(linked, list):
+    values.extend(linked)
+  chat_ids: list[str] = []
+  seen: set[str] = set()
+  for value in values:
+    if not isinstance(value, str):
+      continue
+    normalized = value.strip()
+    if normalized and normalized not in seen:
+      seen.add(normalized)
+      chat_ids.append(normalized)
+  return tuple(chat_ids)
+
+
 @router.get("/contributions/{app_id}/for-chat/{chat_id}")
 @_limiter.limit("60/minute")
 async def contributions_for_chat(
@@ -1252,7 +1277,7 @@ async def contributions_for_chat(
       record is not None
       and isinstance(record.get("id"), str)
       and _CONTRIBUTION_ID.match(record["id"])
-      and str(record.get("chat_id") or "") == chat_id
+      and chat_id in _contribution_chat_ids(record)
       and record.get("type") == "pr"
       and record.get("status") in _CHAT_CONTRIBUTION_STATUSES
     ):
