@@ -1,5 +1,6 @@
 """Activation classification is one ordered contract across deployments."""
 
+import re
 from pathlib import Path
 
 from app import platform_activation as activation
@@ -40,6 +41,9 @@ def test_dependency_and_baked_runtime_never_degrade_to_restart_only():
     "backend/requirements.lock": "dependency_sync",
     "frontend/package-lock.json": "image_rebuild",
     "backend/scripts/entrypoint.sh": "image_rebuild",
+    "backend/scripts/init_skills.py": "image_rebuild",
+    "backend/scripts/seed-skills/platform-maintenance.md": "image_rebuild",
+    "backend/runtime": "image_rebuild",
     "backend/runtime/restart_ledger.py": "image_rebuild",
     "protected-files.txt": "image_rebuild",
   }
@@ -87,3 +91,45 @@ def test_python_dependencies_apply_in_place_not_via_rebuild():
 
 def test_dependency_sync_requires_an_import_probe():
   assert activation.backend_import_probe_required(["backend/requirements.lock"])
+
+
+def test_only_image_owned_bootstrap_scripts_require_a_rebuild():
+  assert activation.classify_activation([
+    "backend/scripts/goal_plan.py",
+  ])["level"] == "live"
+  assert activation.classify_activation([
+    "backend/scripts/rebuild_shell.sh",
+  ])["level"] == "live"
+  assert activation.classify_activation([
+    "backend/scripts/mapi",
+  ])["level"] == "live"
+  assert activation.classify_activation([
+    "backend/scripts/pm-commit",
+  ])["level"] == "server_restart"
+  assert activation.classify_activation([
+    "scripts/mobius-rebuild-host.py",
+  ])["level"] == "host_maintenance"
+
+
+def test_bootstrap_allowlist_covers_entrypoint_app_script_references():
+  root = Path(__file__).resolve().parents[2]
+  entrypoint = (root / "backend/scripts/entrypoint.sh").read_text(
+    encoding="utf-8",
+  )
+  referenced = set(re.findall(
+    r"/app/scripts/([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)",
+    entrypoint,
+  ))
+  # pm-commit is seeded from the image, then deliberately refreshed from the
+  # live checkout by FastAPI startup; it needs one server restart, not an image.
+  # mapi is an image fallback only: the installed symlink already targets the
+  # live checkout, so changing that target takes effect immediately.
+  image_names = {Path(path).name for path in activation.IMAGE_BOOTSTRAP_SCRIPTS}
+  assert referenced == (image_names - {"entrypoint.sh"}) | {"pm-commit", "mapi"}
+  assert activation.classify_activation([
+    "backend/scripts/entrypoint.sh",
+  ])["level"] == "image_rebuild"
+  for name in referenced - {"pm-commit", "mapi"}:
+    assert activation.classify_activation([
+      f"backend/scripts/{name}",
+    ])["level"] == "image_rebuild", name
