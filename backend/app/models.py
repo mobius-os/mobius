@@ -987,13 +987,16 @@ class ProjectAgentMessage(Base):
 
   id = Column(String(64), primary_key=True)
   project_id = Column(
-    String(64), ForeignKey("projects.id"), nullable=False, index=True,
+    String(64), ForeignKey("projects.id", ondelete="CASCADE"),
+    nullable=False, index=True,
   )
   from_chat_id = Column(
-    String(64), ForeignKey("chats.id"), nullable=False, index=True,
+    String(64), ForeignKey("chats.id", ondelete="CASCADE"),
+    nullable=False, index=True,
   )
   to_chat_id = Column(
-    String(64), ForeignKey("chats.id"), nullable=True, index=True,
+    String(64), ForeignKey("chats.id", ondelete="CASCADE"),
+    nullable=True, index=True,
   )
   body = Column(Text, nullable=False)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
@@ -1080,7 +1083,10 @@ class ProjectWorkClaim(Base):
   actor_key = Column(String(72), nullable=False)
   actor_kind = Column(String(16), nullable=False)
   display_name = Column(String(256), nullable=False)
-  chat_id = Column(String(64), ForeignKey("chats.id"), nullable=True, index=True)
+  chat_id = Column(
+    String(64), ForeignKey("chats.id", ondelete="CASCADE"),
+    nullable=True, index=True,
+  )
   path = Column(String(2048), nullable=True)
   summary = Column(String(300), nullable=False)
   updated_at = Column(DateTime, nullable=False, default=now_naive_utc)

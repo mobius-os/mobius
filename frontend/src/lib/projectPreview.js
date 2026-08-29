@@ -17,18 +17,30 @@ const PROJECT_PREVIEW_RUNTIME = `<script data-mobius-project-preview-runtime>
 (() => {
   const pending = new Map();
   const listeners = new Map();
+  let connected = false;
   let sequence = 0;
   const call = (method, path, value) => new Promise((resolve, reject) => {
     const requestId = 'preview-' + (++sequence);
-    pending.set(requestId, { resolve, reject });
-    parent.postMessage({ type: 'mobius:project-preview-storage', requestId, method, path, value }, '*');
+    const message = { type: 'mobius:project-preview-storage', requestId, method, path, value };
+    const timeout = setTimeout(() => {
+      pending.delete(requestId);
+      reject(new Error('Personal preview data did not connect. Reload the preview and try again.'));
+    }, 5000);
+    pending.set(requestId, { resolve, reject, timeout, message });
+    if (connected) parent.postMessage(message, '*');
   });
   addEventListener('message', event => {
     if (event.source !== parent || !event.data) return;
     const message = event.data;
+    if (message.type === 'mobius:project-preview-storage-connected') {
+      connected = true;
+      for (const request of pending.values()) parent.postMessage(request.message, '*');
+      return;
+    }
     if (message.type === 'mobius:project-preview-storage-result') {
       const request = pending.get(message.requestId);
       if (!request) return;
+      clearTimeout(request.timeout);
       pending.delete(message.requestId);
       if (message.error) request.reject(new Error(message.error));
       else request.resolve(message.value);

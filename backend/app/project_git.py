@@ -549,7 +549,8 @@ def project_status(
 
 def _untracked_diff(target: Path, status: str) -> dict:
   try:
-    content = target.read_bytes()
+    with target.open("rb") as handle:
+      content = handle.read(_DIFF_OUTPUT_MAX + 1)
   except OSError:
     content = b""
   truncated = len(content) > _DIFF_OUTPUT_MAX

@@ -11,6 +11,10 @@ from pathlib import Path
 
 READ_MAX = 10 * 1024 * 1024
 LIST_LIMIT = 1000
+# Directory contents are owner data and can be adversarially large.  Bound the
+# number of filesystem entries one request will inspect as well as the number
+# it returns; `truncated` tells the caller when either ceiling was reached.
+LIST_SCAN_LIMIT = 10_000
 TEXT_MEDIA_TYPES = frozenset({
   "application/json",
   "application/javascript",
@@ -98,15 +102,25 @@ def list_entries(
   if not directory.is_dir():
     raise NotADirectoryError("Path is not a directory.")
 
-  def children(folder: Path) -> list[Path]:
+  scanned = 0
+
+  def children(folder: Path) -> tuple[list[Path], bool]:
+    nonlocal scanned
+    values: list[Path] = []
+    hit_scan_limit = False
     try:
-      values = folder.iterdir()
+      for value in folder.iterdir():
+        if scanned >= LIST_SCAN_LIMIT:
+          hit_scan_limit = True
+          break
+        scanned += 1
+        values.append(value)
       return sorted(
         values,
         key=lambda value: (not value.is_dir(), value.name.lower()),
-      )
+      ), hit_scan_limit
     except OSError:
-      return []
+      return [], hit_scan_limit
 
   def excluded(child: Path) -> bool:
     if child.is_symlink():
@@ -125,7 +139,8 @@ def list_entries(
     queue = deque([directory])
     while queue and not truncated:
       folder = queue.popleft()
-      for child in children(folder):
+      folder_children, hit_scan_limit = children(folder)
+      for child in folder_children:
         if excluded(child):
           continue
         if child.is_dir():
@@ -137,8 +152,11 @@ def list_entries(
         row = _entry(root, child)
         if row is not None:
           entries.append(row)
+      if hit_scan_limit:
+        truncated = True
   else:
-    for child in children(directory):
+    folder_children, hit_scan_limit = children(directory)
+    for child in folder_children:
       if excluded(child):
         continue
       if len(entries) >= LIST_LIMIT:
@@ -147,6 +165,7 @@ def list_entries(
       row = _entry(root, child)
       if row is not None:
         entries.append(row)
+    truncated = truncated or hit_scan_limit
   return {"path": path, "entries": entries, "truncated": truncated}
 
 
@@ -163,7 +182,10 @@ def read_file(target: Path, path: str) -> tuple[dict | None, str]:
     or target.suffix.lower() in TEXT_SUFFIXES
   ):
     try:
-      raw = target.read_bytes()
+      with target.open("rb") as handle:
+        raw = handle.read(READ_MAX + 1)
+      if len(raw) > READ_MAX:
+        raise OverflowError("File is too large to open in this workspace.")
       return {
         "path": path,
         "content": raw.decode("utf-8"),

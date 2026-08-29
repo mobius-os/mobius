@@ -404,6 +404,52 @@ def test_each_project_chat_gets_context_and_can_be_deleted_independently(
   ).json() == []
 
 
+def test_individually_deleted_project_chat_and_coordination_rows_expire(
+  client, auth, db,
+):
+  project = client.post(
+    "/api/projects", headers=auth,
+    json={"name": "Long-lived project", "template_id": "blank"},
+  ).json()
+  expired = _create_project_chat(client, auth, project, "Finished agent")
+  survivor = _create_project_chat(client, auth, project, "Remaining agent")
+  message = models.ProjectAgentMessage(
+    id="message-from-expired-project-chat",
+    project_id=project["id"],
+    from_chat_id=expired["id"],
+    to_chat_id=survivor["id"],
+    body="handoff",
+  )
+  claim = models.ProjectWorkClaim(
+    id="claim-from-expired-project-chat",
+    project_id=project["id"],
+    actor_key=f"agent:{expired['id']}",
+    actor_kind="agent",
+    display_name="Finished agent",
+    chat_id=expired["id"],
+    path="index.html",
+    summary="done",
+    expires_at=now_naive_utc() + timedelta(days=30),
+  )
+  db.add_all([message, claim])
+  db.commit()
+  message_id = message.id
+  claim_id = claim.id
+
+  assert client.delete(f"/api/chats/{expired['id']}", headers=auth).status_code == 204
+  db.get(models.Chat, expired["id"]).deleted_at = (
+    now_naive_utc() - SOFT_DELETE_TTL - timedelta(seconds=1)
+  )
+  db.commit()
+
+  assert expired["id"] in purge_expired_chat_tombstones(db)
+  assert db.get(models.Chat, expired["id"]) is None
+  assert db.get(models.Chat, survivor["id"]) is not None
+  assert db.get(models.Project, project["id"]) is not None
+  assert db.get(models.ProjectAgentMessage, message_id) is None
+  assert db.get(models.ProjectWorkClaim, claim_id) is None
+
+
 def test_manifest_template_scaffolds_files_and_snapshots_metadata(
   client, auth, db,
 ):

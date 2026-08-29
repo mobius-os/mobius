@@ -47,7 +47,12 @@ export default function ProjectPreviewFrame({ projectId, sourcePath, title, clas
     }
     const onStorage = event => {
       if (event.key !== storageKey) return
-      const previous = event.oldValue ? JSON.parse(event.oldValue) : {}
+      let previous = {}
+      try {
+        previous = event.oldValue ? JSON.parse(event.oldValue) : {}
+      } catch {
+        // A malformed old browser value should not break the live bridge.
+      }
       const next = readProjectPreviewStore(localStorage, storageKey)
       for (const path of new Set([...Object.keys(previous), ...Object.keys(next)])) {
         if (JSON.stringify(previous[path]) !== JSON.stringify(next[path])) {
@@ -71,5 +76,8 @@ export default function ProjectPreviewFrame({ projectId, sourcePath, title, clas
     className={className}
     sandbox={projectPreviewSandbox()}
     srcDoc={srcDoc}
+    onLoad={() => frameRef.current?.contentWindow?.postMessage({
+      type: 'mobius:project-preview-storage-connected',
+    }, '*')}
   />
 }

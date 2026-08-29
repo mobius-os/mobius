@@ -47,10 +47,6 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
   expired_chat_ids = select(models.Chat.id).where(
     models.Chat.deleted_at.isnot(None),
     models.Chat.deleted_at < cutoff,
-    or_(
-      models.Chat.project_id.is_(None),
-      ~models.Chat.project_id.in_(select(models.Project.id)),
-    ),
   )
   chat_ids = [
     chat_id for chat_id in db.scalars(expired_chat_ids).all()
@@ -71,6 +67,23 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
     db.query(model).filter(
       model.chat_id.in_(expired_chat_ids),
     ).delete(synchronize_session=False)
+  # Project coordination rows are intentionally small, but their foreign keys
+  # still make them part of the chat's durable lifecycle.  A project can stay
+  # live after one of its chats is deleted, so waiting for project retention
+  # would leak that chat forever and can make the final Chat DELETE fail.
+  db.query(models.ProjectAgentMessage).filter(
+    or_(
+      models.ProjectAgentMessage.from_chat_id.in_(expired_chat_ids),
+      models.ProjectAgentMessage.to_chat_id.in_(expired_chat_ids),
+    ),
+  ).delete(synchronize_session=False)
+  db.query(models.ProjectWorkClaim).filter(
+    models.ProjectWorkClaim.chat_id.in_(expired_chat_ids),
+  ).delete(synchronize_session=False)
+  # Rolling-upgrade rows may still carry the retired primary-chat pointer.
+  db.query(models.Project).filter(
+    models.Project.chat_id.in_(expired_chat_ids),
+  ).update({models.Project.chat_id: None}, synchronize_session=False)
   # Search rows are derived transcript data without a foreign key because the
   # SQLite FTS trigger owns their lifecycle. Remove them in the same durable
   # transaction as the source row rather than retaining a hard-deleted chat's

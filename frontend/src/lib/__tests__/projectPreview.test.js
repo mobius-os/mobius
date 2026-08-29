@@ -26,6 +26,14 @@ test('project preview policy precedes resources placed before a malformed head',
   assert.match(result, /^<meta http-equiv="Content-Security-Policy"/)
 })
 
+test('preview storage waits for the parent handshake and has a bounded failure', () => {
+  const document = safeProjectHtmlDocument('<main>Preview</main>')
+  assert.match(document, /mobius:project-preview-storage-connected/)
+  assert.match(document, /if \(connected\) parent\.postMessage/)
+  assert.match(document, /did not connect/)
+  assert.match(document, /clearTimeout\(request\.timeout\)/)
+})
+
 test('project HTML preview runs scripts without granting origin or navigation access', () => {
   assert.equal(projectPreviewSandbox(), 'allow-scripts')
 })

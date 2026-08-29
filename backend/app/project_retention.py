@@ -97,6 +97,12 @@ def purge_expired_project_tombstones(db: Session) -> list[str]:
       )) is not None
     ]
     if project_ids:
+      # ProjectAgentMessage predates cascade ownership on some local builds.
+      # Clear it explicitly so an upgraded database and a fresh database have
+      # the same final-delete behavior.
+      db.query(models.ProjectAgentMessage).filter(
+        models.ProjectAgentMessage.project_id.in_(project_ids),
+      ).delete(synchronize_session=False)
       db.query(models.Project).filter(
         models.Project.id.in_(project_ids),
         models.Project.deleted_at.isnot(None),
