@@ -238,7 +238,7 @@ def test_runtime_merge_applies_an_exact_target_bound_reviewed_resolution(
   digest = host._runtime_snapshot(reviewed)[0]
   resolution = host.RuntimeResolution(
     "a" * 40, "b" * 64, "c" * 40, ("identity_broker.py",),
-    digest, reviewed,
+    (), digest, reviewed,
   )
 
   merged_digest, carried = host._merge_runtime_trees(
@@ -267,7 +267,7 @@ def test_runtime_merge_applies_a_reviewed_followup_after_a_clean_merge(
   _write_runtime_tree(reviewed, "route=local-v2\n")
   resolution = host.RuntimeResolution(
     "a" * 40, "b" * 64, "c" * 40, ("identity_broker.py",),
-    host._runtime_snapshot(reviewed)[0], reviewed,
+    (), host._runtime_snapshot(reviewed)[0], reviewed,
   )
 
   merged_digest, carried = host._merge_runtime_trees(
@@ -295,7 +295,7 @@ def test_runtime_merge_rejects_a_resolution_for_different_conflict_paths(
   (reviewed / "other.py").write_text("reviewed\n", encoding="utf-8")
   resolution = host.RuntimeResolution(
     "a" * 40, "b" * 64, "c" * 40, ("other.py",),
-    host._runtime_snapshot(reviewed)[0], reviewed,
+    (), host._runtime_snapshot(reviewed)[0], reviewed,
   )
 
   with pytest.raises(host.RuntimeOverlayConflict) as exc:
@@ -304,6 +304,34 @@ def test_runtime_merge_rejects_a_resolution_for_different_conflict_paths(
     )
 
   assert exc.value.paths == ("identity_broker.py",)
+
+
+def test_runtime_merge_applies_a_reviewed_conflict_deletion(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(host.os, "chown", lambda *_args: None)
+  base = tmp_path / "base"
+  active = tmp_path / "active"
+  incoming = tmp_path / "incoming"
+  reviewed = tmp_path / "reviewed"
+  result = tmp_path / "result"
+  _write_runtime_tree(base, "base\n")
+  _write_runtime_tree(active, "local edit\n")
+  incoming.mkdir()
+  reviewed.mkdir()
+  deleted = ("identity_broker.py",)
+  digest = host._runtime_resolution_digest(reviewed, deleted)[0]
+  resolution = host.RuntimeResolution(
+    "a" * 40, "b" * 64, "c" * 40, deleted, deleted, digest, reviewed,
+  )
+
+  merged_digest, carried = host._merge_runtime_trees(
+    base, active, incoming, result, resolution,
+  )
+
+  assert not (result / "identity_broker.py").exists()
+  assert carried == deleted
+  assert merged_digest == host._runtime_snapshot(result)[0]
 
 
 def test_prepare_runtime_uses_commit_merge_base_for_a_local_image(
@@ -440,6 +468,72 @@ def test_stage_runtime_resolution_binds_reviewed_file_to_active_tree_and_target(
   ) == "combined\n"
   assert resolution.active_digest == host._runtime_snapshot(active_tree)[0]
   assert statuses[-1]["code"] == "runtime_overlay_resolved"
+
+
+def test_staged_runtime_resolution_can_delete_a_conflicted_file(
+  tmp_path, monkeypatch,
+):
+  config, _inbox = _worker_paths(tmp_path, monkeypatch)
+  monkeypatch.setattr(host.os, "chown", lambda *_args: None)
+  repo = config["data_dir"] / "platform"
+  repo.mkdir()
+
+  def git(*args):
+    return subprocess.run(
+      ["git", "-C", str(repo), *args], text=True, capture_output=True, check=True,
+    )
+
+  git("init", "-q")
+  git("config", "user.name", "Test")
+  git("config", "user.email", "test@example.com")
+  runtime = repo / "backend" / "runtime"
+  _write_runtime_tree(runtime, "base\n")
+  (runtime / "keep.py").write_text("keep\n", encoding="utf-8")
+  git("add", "-A")
+  git("commit", "-q", "-m", "base")
+  base = git("rev-parse", "HEAD").stdout.strip()
+
+  git("checkout", "-q", "-b", "local")
+  (runtime / "identity_broker.py").write_text("local edit\n", encoding="utf-8")
+  git("commit", "-qam", "local runtime")
+  current = git("rev-parse", "HEAD").stdout.strip()
+  active_tree = tmp_path / "active-tree-delete"
+  shutil.copytree(runtime, active_tree)
+
+  git("checkout", "-q", "-b", "official", base)
+  (runtime / "identity_broker.py").unlink()
+  git("commit", "-qam", "official deletion")
+  expected = git("rev-parse", "HEAD").stdout.strip()
+  official_tree = tmp_path / "official-tree-delete"
+  shutil.copytree(runtime, official_tree)
+
+  def copy_active(_cid, destination):
+    shutil.copytree(active_tree, destination, dirs_exist_ok=True)
+    return host._normalize_runtime_tree(destination)
+
+  def copy_image(image, destination):
+    source = active_tree if image == "current-image" else official_tree
+    shutil.copytree(source, destination, dirs_exist_ok=True)
+    digest = host._normalize_runtime_tree(destination)
+    return digest, {"sha": current if image == "current-image" else expected}
+
+  monkeypatch.setattr(host, "app_container", lambda _config: ("a" * 12, "current-image"))
+  monkeypatch.setattr(host, "_copy_container_runtime", copy_active)
+  monkeypatch.setattr(host, "_copy_image_runtime", copy_image)
+  monkeypatch.setattr(host, "write_status", lambda _config, **fields: fields)
+
+  resolution = host.stage_runtime_resolution(
+    config, "a" * 12, expected, expected,
+  )
+  prepared = host.prepare_runtime_overlay(
+    "a" * 12, "current-image", "incoming-image", repo, expected,
+  )
+
+  assert resolution.paths == ("identity_broker.py",)
+  assert resolution.deleted_paths == ("identity_broker.py",)
+  assert not (resolution.directory / "identity_broker.py").exists()
+  assert not (prepared.candidate.path / "identity_broker.py").exists()
+  assert (prepared.candidate.path / "keep.py").read_text(encoding="utf-8") == "keep\n"
 
 
 def test_stage_runtime_resolution_accepts_a_reviewed_clean_followup(

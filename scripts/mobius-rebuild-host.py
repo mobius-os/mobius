@@ -69,6 +69,7 @@ class RuntimeResolution(NamedTuple):
     active_digest: str
     source_commit: str
     paths: tuple[str, ...]
+    deleted_paths: tuple[str, ...]
     digest: str
     directory: Path
 
@@ -174,6 +175,21 @@ def _runtime_snapshot(root: Path) -> tuple[str, dict[str, str]]:
         tree.update(digest.encode("ascii"))
         tree.update(b"\n")
     return tree.hexdigest(), files
+
+
+def _runtime_resolution_digest(
+    root: Path, deleted_paths: tuple[str, ...],
+) -> tuple[str, dict[str, str]]:
+    """Bind replacement bytes and reviewed deletions into one receipt digest."""
+    tree_digest, files = _runtime_snapshot(root)
+    digest = hashlib.sha256()
+    digest.update(tree_digest.encode("ascii"))
+    digest.update(b"\n")
+    for name in deleted_paths:
+        digest.update(b"delete\0")
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest(), files
 
 
 def _normalize_runtime_tree(root: Path) -> str:
@@ -329,6 +345,21 @@ def _replace_checkout(repo: Path, source: Path) -> None:
             os.chmod(path, path.stat().st_mode | 0o200)
 
 
+def _apply_runtime_resolution(repo: Path, resolution: RuntimeResolution) -> None:
+    """Materialize one verified replacement/deletion outcome into the merge."""
+    deleted = set(resolution.deleted_paths)
+    for name in resolution.paths:
+        target = repo / name
+        if target.is_dir() and not target.is_symlink():
+            shutil.rmtree(target)
+        elif target.exists() or target.is_symlink():
+            target.unlink()
+        if name not in deleted:
+            source = resolution.directory / name
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+
+
 def _merge_runtime_trees(
     base: Path, local: Path, incoming: Path, result: Path,
     resolution: RuntimeResolution | None = None,
@@ -372,15 +403,7 @@ def _merge_runtime_trees(
         if conflicts:
             if resolution is None or tuple(conflicts) != resolution.paths:
                 raise RuntimeOverlayConflict(conflicts)
-            for name in resolution.paths:
-                source = resolution.directory / name
-                target = repo / name
-                if target.is_dir() and not target.is_symlink():
-                    shutil.rmtree(target)
-                elif target.exists() or target.is_symlink():
-                    target.unlink()
-                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                shutil.copy2(source, target)
+            _apply_runtime_resolution(repo, resolution)
             _git(repo, "add", "-A", "-f")
             resolution_applied = True
             unresolved = [
@@ -396,15 +419,7 @@ def _merge_runtime_trees(
                 (merged.stderr or merged.stdout or "runtime merge failed").strip()[:300]
             )
     if resolution is not None and not resolution_applied:
-        for name in resolution.paths:
-            source = resolution.directory / name
-            target = repo / name
-            if target.is_dir() and not target.is_symlink():
-                shutil.rmtree(target)
-            elif target.exists() or target.is_symlink():
-                target.unlink()
-            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            shutil.copy2(source, target)
+        _apply_runtime_resolution(repo, resolution)
         _git(repo, "add", "-A", "-f")
         carried = tuple(sorted({*carried, *resolution.paths}))
     result.mkdir(mode=0o700)
@@ -477,11 +492,16 @@ def _read_runtime_resolution(
         return None
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise RuntimeOverlayError("the staged runtime resolution is invalid") from exc
-    required = {
+    required_v1 = {
         "version", "expected_sha", "active_digest", "source_commit",
         "paths", "digest", "directory",
     }
-    if value.get("version") != 1 or set(value) != required:
+    required_v2 = {*required_v1, "deleted_paths"}
+    version = value.get("version")
+    if (
+        version not in {1, 2}
+        or set(value) != (required_v1 if version == 1 else required_v2)
+    ):
         raise RuntimeOverlayError("the staged runtime resolution is invalid")
     target = str(value["expected_sha"])
     active = str(value["active_digest"])
@@ -489,6 +509,7 @@ def _read_runtime_resolution(
     resolution_digest = str(value["digest"])
     directory_name = str(value["directory"])
     raw_paths = value["paths"]
+    raw_deleted_paths = value.get("deleted_paths", [])
     if (
         not SHA_RE.fullmatch(target)
         or not re.fullmatch(r"[0-9a-f]{64}", active)
@@ -497,10 +518,24 @@ def _read_runtime_resolution(
         or not RESOLUTION_RE.fullmatch(directory_name)
         or not isinstance(raw_paths, list)
         or not raw_paths
+        or not isinstance(raw_deleted_paths, list)
     ):
         raise RuntimeOverlayError("the staged runtime resolution is invalid")
     paths = tuple(sorted({_safe_runtime_path(item) for item in raw_paths}))
-    if len(paths) != len(raw_paths):
+    deleted_paths = tuple(sorted({
+        _safe_runtime_path(item) for item in raw_deleted_paths
+    }))
+    path_set = set(paths)
+    if (
+        len(paths) != len(raw_paths)
+        or len(deleted_paths) != len(raw_deleted_paths)
+        or not set(deleted_paths).issubset(path_set)
+        or any(
+            parent.as_posix() in path_set
+            for name in paths for parent in Path(name).parents
+            if parent.as_posix() != "."
+        )
+    ):
         raise RuntimeOverlayError("the staged runtime resolution is invalid")
     directory = RUNTIME_RESOLUTIONS / directory_name
     trusted_uid = os.geteuid()
@@ -510,13 +545,22 @@ def _read_runtime_resolution(
         stat = path.stat()
         if stat.st_uid != trusted_uid or stat.st_mode & 0o022:
             raise RuntimeOverlayError("the staged runtime resolution is unsafe")
-    actual_digest, files = _runtime_snapshot(directory)
-    if actual_digest != resolution_digest or set(files) != set(paths):
+    if version == 1:
+        actual_digest, files = _runtime_snapshot(directory)
+    else:
+        actual_digest, files = _runtime_resolution_digest(
+            directory, deleted_paths,
+        )
+    if (
+        actual_digest != resolution_digest
+        or set(files) != set(paths) - set(deleted_paths)
+    ):
         raise RuntimeOverlayError("the staged runtime resolution is invalid")
     if target != expected_sha or active != active_digest:
         return None
     return RuntimeResolution(
-        target, active, source_commit, paths, resolution_digest, directory,
+        target, active, source_commit, paths, deleted_paths,
+        resolution_digest, directory,
     )
 
 
@@ -798,16 +842,25 @@ def stage_runtime_resolution(
                     "the reviewed runtime matches the active official merge"
                 )
 
+        selected.mkdir(mode=0o700)
+        deleted_paths: list[str] = []
         for name in selected_paths:
             source = reviewed / name
-            if source.is_symlink() or not source.is_file():
+            if source.is_symlink() or (source.exists() and not source.is_file()):
                 raise RuntimeOverlayError(
-                    f"the reviewed resolution does not contain {name}"
+                    f"the reviewed resolution has an invalid path: {name}"
                 )
+            if not source.exists():
+                deleted_paths.append(name)
+                continue
             target = selected / name
             target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             shutil.copy2(source, target)
-        resolution_digest = _normalize_runtime_tree(selected)
+        _normalize_runtime_tree(selected)
+        deleted = tuple(sorted(deleted_paths))
+        resolution_digest, _selected_files = _runtime_resolution_digest(
+            selected, deleted,
+        )
 
         RUNTIME_RESOLUTIONS.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(RUNTIME_RESOLUTIONS, 0o700)
@@ -826,11 +879,12 @@ def stage_runtime_resolution(
         pass
     paths = tuple(sorted(selected_paths))
     _atomic_json(RUNTIME_RESOLUTION, {
-        "version": 1,
+        "version": 2,
         "expected_sha": expected_sha,
         "active_digest": active_digest,
         "source_commit": source_commit,
         "paths": list(paths),
+        "deleted_paths": list(deleted),
         "digest": resolution_digest,
         "directory": directory_name,
     })
