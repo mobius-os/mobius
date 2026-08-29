@@ -2154,6 +2154,7 @@ def _select_install_target(
   manifest_url: str | None,
   source: str,
   expected_app_id: int | None,
+  publication_handoff_app_id: int | None = None,
 ) -> InstallTarget:
   """Resolve install/update/adoption identity without mutating the target row."""
   manifest = candidate.manifest
@@ -2189,8 +2190,13 @@ def _select_install_target(
       if existing:
         adopting_previous_id = True
 
-  if expected_app_id is not None and (
-    existing is None or existing.id != expected_app_id
+  required_app_id = (
+    expected_app_id
+    if expected_app_id is not None
+    else publication_handoff_app_id
+  )
+  if required_app_id is not None and (
+    existing is None or existing.id != required_app_id
   ):
     raise HTTPException(409, "Pending update no longer matches this app.")
   return InstallTarget(
@@ -2474,6 +2480,58 @@ class ActivationPlan:
   capability_contract: dict
 
 
+def _apply_manifest_metadata(
+  app: models.App,
+  *,
+  manifest: dict,
+  canonical_manifest_url: str,
+  capability_contract: dict,
+  entry_source: str,
+) -> None:
+  """Attach one reviewed package identity and its runtime declarations.
+
+  A normal install/update calls this only while activating the reviewed source
+  tree. A conflicted publication handoff attaches catalog identity separately;
+  it must not grant new capabilities to the still-running local bundle before
+  the ordinary resolver accepts those source bytes.
+  """
+  app.version = str(manifest.get("version", "")).strip() or None
+  app.theme_color = _manifest_color(manifest.get("theme_color"))
+  app.background_color = (
+    _manifest_color(manifest.get("background_color")) or app.theme_color
+  )
+  app.display = _manifest_display(manifest.get("display"))
+  app.jsx_source = entry_source
+  app.manifest_url = canonical_manifest_url
+  app.published_manifest_url = None
+  permissions = manifest.get("permissions") or {}
+  app.cross_app_access = permissions.get(
+    "cross_app_access", app.cross_app_access,
+  )
+  app.share_with_apps = permissions.get(
+    "share_with_apps", app.share_with_apps,
+  )
+  app.chat_log_access = permissions.get(
+    "chat_log_access", app.chat_log_access,
+  )
+  # Privileged grants are opt-in on every version; omission revokes them.
+  app.manage_apps = bool(permissions.get("manage_apps", False))
+  app.manage_skills = bool(permissions.get("manage_skills", False))
+  app.github_access = bool(permissions.get("github_access", False))
+  app.github_connect = bool(permissions.get("github_connect", False))
+  app.filesystem_access = bool(permissions.get("filesystem_access", False))
+  app.connections_manage = bool(permissions.get("connections_manage", False))
+  app.connect_manage = bool(permissions.get("connect_manage", False))
+  if "offline_capable" in manifest:
+    app.offline_capable = bool(manifest["offline_capable"])
+  if "embeds_agent" in manifest:
+    app.embeds_agent = bool(manifest["embeds_agent"])
+  app.offline_contract = manifest.get("offline") or None
+  app.system_prompt_file = manifest.get("system_prompt") or None
+  app.system_app = bool(manifest.get("system_app", False))
+  app.capability_contract = capability_contract
+
+
 async def _activate_install_source(
   db: Session,
   *,
@@ -2490,43 +2548,14 @@ async def _activate_install_source(
   journal before this function returns, so the outer transaction retains one
   rollback boundary.
   """
-  app.version = str(manifest.get("version", "")).strip() or None
-  app.theme_color = _manifest_color(manifest.get("theme_color"))
-  app.background_color = (
-    _manifest_color(manifest.get("background_color")) or app.theme_color
-  )
-  app.display = _manifest_display(manifest.get("display"))
-
   entry_source = plan.source_tree[plan.entry_key].decode("utf-8")
-  if plan.updating:
-    permissions = manifest.get("permissions") or {}
-    app.jsx_source = entry_source
-    app.manifest_url = plan.canonical_manifest_url
-    app.cross_app_access = permissions.get(
-      "cross_app_access", app.cross_app_access,
-    )
-    app.share_with_apps = permissions.get(
-      "share_with_apps", app.share_with_apps,
-    )
-    app.chat_log_access = permissions.get(
-      "chat_log_access", app.chat_log_access,
-    )
-    # Privileged grants are opt-in on every version; omission revokes them.
-    app.manage_apps = bool(permissions.get("manage_apps", False))
-    app.manage_skills = bool(permissions.get("manage_skills", False))
-    app.github_access = bool(permissions.get("github_access", False))
-    app.github_connect = bool(permissions.get("github_connect", False))
-    app.filesystem_access = bool(permissions.get("filesystem_access", False))
-    app.connections_manage = bool(permissions.get("connections_manage", False))
-    app.connect_manage = bool(permissions.get("connect_manage", False))
-    if "offline_capable" in manifest:
-      app.offline_capable = bool(manifest["offline_capable"])
-    if "embeds_agent" in manifest:
-      app.embeds_agent = bool(manifest["embeds_agent"])
-    app.offline_contract = manifest.get("offline") or None
-    app.system_prompt_file = manifest.get("system_prompt") or None
-    app.system_app = bool(manifest.get("system_app", False))
-    app.capability_contract = plan.capability_contract
+  _apply_manifest_metadata(
+    app,
+    manifest=manifest,
+    canonical_manifest_url=plan.canonical_manifest_url,
+    capability_contract=plan.capability_contract,
+    entry_source=entry_source,
+  )
 
   staged_bundle = data_dir / "compiled" / f"app-{app.id}.js.staging"
   source_dir = Path(app.source_dir)
@@ -2626,6 +2655,7 @@ async def install_from_manifest(
   expected_candidate_digest: str | None = None,
   resolution_policy: str | None = None,
   reviewed_resolution_tree_oid: str | None = None,
+  publication_handoff_app_id: int | None = None,
 ) -> InstallResult:
   """Return a structured durable install/update/conflict outcome.
 
@@ -2674,6 +2704,11 @@ async def install_from_manifest(
     and resolution_policy != "preserve_local"
   ):
     raise ValueError("reviewed resolution tree requires preserve-local policy")
+  if publication_handoff_app_id is not None:
+    if source != "publication_handoff":
+      raise ValueError("publication handoff requires its dedicated source")
+    if expected_app_id is not None:
+      raise ValueError("publication handoff cannot be a pending replay")
   # Phase 1: immutable, review-bound candidate. All network I/O ends here.
   candidate = await _fetch_install_candidate(
     manifest_url=manifest_url,
@@ -2706,6 +2741,7 @@ async def install_from_manifest(
     manifest_url=manifest_url,
     source=source,
     expected_app_id=expected_app_id,
+    publication_handoff_app_id=publication_handoff_app_id,
   )
   existing = target.existing
   mode = target.mode
@@ -3237,6 +3273,15 @@ async def install_from_manifest(
       source_lock.release()
 
     if mode == "conflict":
+      if publication_handoff_app_id is not None:
+        # The owner explicitly approved this separately verified publication
+        # handoff. Connect the original row even when later local edits need the
+        # ordinary source resolver, but preserve the running bundle's version
+        # and capability contract. Granting the incoming permissions before its
+        # source is accepted would let unreviewed local-conflict bytes inherit
+        # privileges reviewed for a different package.
+        app.manifest_url = canonical_manifest_url
+        app.published_manifest_url = None
       # Commit the recorded upstream provenance + return so the App Store can
       # surface a click-gated resolver. The served source/bundle stay the prior
       # good ones until the owner chooses Resolve in chat.

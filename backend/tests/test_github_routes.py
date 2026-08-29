@@ -913,6 +913,169 @@ def test_source_status_projects_local_distribution_manifest_identity(
   assert response.json()["apps"][0]["key"] == f"app:{app_id}"
 
 
+def test_connect_published_app_reuses_reviewed_local_row_idempotently(
+  client, owner_token, monkeypatch,
+):
+  """The after-merge action links identity without replacing app data."""
+  from app import app_git, install, models
+  from app.app_capabilities import contract_and_digest
+  from app.database import SessionLocal
+
+  contribute_id, contribute_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  target = create_local_app(
+    client,
+    auth,
+    name="Connect",
+    source_dir=Path(get_settings().data_dir) / "apps" / "connect",
+    manifest_extra={
+      "id": "connect",
+      "permissions": {"connect_manage": True},
+    },
+  )
+  source = Path(target["source_dir"])
+  subprocess.run(
+    [
+      "git", "-C", str(source), "remote", "add", "origin",
+      "https://github.com/mobius-os/app-connect.git",
+    ],
+    check=True,
+  )
+  base = app_git.head_sha(source, app_git.LOCAL_BRANCH)
+  (source / "index.jsx").write_text(
+    "export default function App(){return <div>reviewed</div>}\n",
+    encoding="utf-8",
+  )
+  reviewed = app_git.commit_local(source, "reviewed publication")
+  assert reviewed
+  reviewed_diff = app_git._canonical_diff(source, base, reviewed)
+  assert reviewed_diff is not None
+  diff_digest = hashlib.sha256(reviewed_diff).hexdigest()
+  assert app_git.record_pending_equivalent_change(
+    source,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    diff_sha256=diff_digest,
+    contribution_id="publish-connect",
+  )
+  assert app_git.mark_equivalent_change_landed(
+    source, diff_digest, upstream_sha=reviewed,
+  )
+
+  record = {
+    "id": "publish-connect",
+    "type": "pr",
+    "status": "merged",
+    "repo": "mobius-os/app-connect",
+    "number": 1,
+    "plan": {
+      "action": "pr",
+      "repo": "mobius-os/app-connect",
+      "source_repo_path": str(source),
+      "source_sha": reviewed,
+      "base_sha": base,
+      "head_sha": reviewed,
+      "diff_sha256": diff_digest,
+      "after_merge": {
+        "action": "connect_app",
+        "app_id": target["id"],
+        "manifest_url": (
+          "https://raw.githubusercontent.com/mobius-os/"
+          "app-connect/main/mobius.json"
+        ),
+      },
+    },
+  }
+  record_path = (
+    Path(get_settings().data_dir) / "apps" / str(contribute_id)
+    / "contributions" / "publish-connect.json"
+  )
+  record_path.parent.mkdir(parents=True, exist_ok=True)
+  atomic_write(record_path, json.dumps(record))
+
+  tree = app_git.read_ref_tree(source, reviewed)
+  manifest = json.loads(tree["mobius.json"])
+  contract, capability_digest = contract_and_digest(manifest)
+  candidate = install.InstallCandidate(
+    manifest=manifest,
+    raw_base=(
+      "https://raw.githubusercontent.com/mobius-os/app-connect/"
+      f"{reviewed}/"
+    ),
+    entry_bytes=tree["index.jsx"],
+    icon_processed=None,
+    icon_warning=None,
+    bundled_job=None,
+    static_assets={},
+    source_files={},
+    seeds={},
+    capability_contract=contract,
+    capability_digest=capability_digest,
+    candidate_digest="a" * 64,
+    source_review_digest="b" * 64,
+  )
+  monkeypatch.setattr(
+    github_routes, "_merged_upstream_sha", lambda *_args: reviewed,
+  )
+  monkeypatch.setattr(app_git, "fetch_origin_commit", lambda *_args: reviewed)
+  async def fetched(_url):
+    return candidate
+  monkeypatch.setattr(install, "fetch_install_candidate", fetched)
+
+  installs = 0
+  async def connected(db, **kwargs):
+    nonlocal installs
+    installs += 1
+    row = db.query(models.App).filter(models.App.id == target["id"]).one()
+    row.manifest_url = (
+      "https://raw.githubusercontent.com/mobius-os/app-connect/"
+      f"{reviewed}#manifest-id=connect"
+    )
+    row.version = "0.1.0"
+    row.capability_contract = contract
+    db.commit()
+    db.refresh(row)
+    return install.InstallResult(
+      app=row,
+      mode="update",
+      warnings=[],
+      manifest=manifest,
+      conflict_paths=[],
+      divergence="clean_merge",
+      reconciliation=app_git.ReconciliationReceipt(),
+    )
+  monkeypatch.setattr(install, "install_from_manifest", connected)
+
+  app_auth = {"Authorization": f"Bearer {contribute_token}"}
+  first = client.post(
+    f"/api/github/contributions/{contribute_id}/publish-connect/connect-app",
+    headers=app_auth,
+  )
+  assert first.status_code == 200, first.text
+  assert first.json()["connection"]["status"] == "connected"
+  assert first.json()["connection"]["app_id"] == target["id"]
+  assert installs == 1
+
+  second = client.post(
+    f"/api/github/contributions/{contribute_id}/publish-connect/connect-app",
+    headers=app_auth,
+  )
+  assert second.status_code == 200, second.text
+  assert second.json()["connection"]["app_id"] == target["id"]
+  assert installs == 1
+
+  session = SessionLocal()
+  try:
+    row = session.query(models.App).filter(models.App.id == target["id"]).one()
+    assert row.slug == "connect"
+    assert row.manifest_url.endswith(f"{reviewed}#manifest-id=connect")
+  finally:
+    session.close()
+
+
 def test_source_status_keeps_healthy_apps_when_one_checkout_fails(
   client, owner_token, auth, monkeypatch,
 ):

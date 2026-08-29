@@ -3598,6 +3598,74 @@ def test_flag_on_conflict_does_not_apply_upstream_capabilities(
     db.close()
 
 
+def test_verified_publication_handoff_connects_identity_across_source_conflict(
+  client, auth, db, bypass_url_validation,
+):
+  """A published identity connects in place while local bytes stay untouched."""
+  from app import install
+
+  base = "https://publication-conflict.test/repo/"
+  manifest = {
+    **MANIFEST_NEWS,
+    "id": "publication-conflict",
+    "permissions": {
+      "cross_app_access": "none",
+      "share_with_apps": "none",
+      "manage_apps": False,
+    },
+  }
+  first = _install_v1(client, auth, base, manifest, JSX_MULTI)
+  assert first.status_code == 201, first.text
+  app_id = first.json()["id"]
+  source = Path(get_settings().data_dir) / "apps" / "publication-conflict"
+  entry = source / "index.jsx"
+  local = JSX_MULTI.replace("ORIGINAL TITLE", "LOCAL TITLE")
+  entry.write_text(local)
+
+  incoming = JSX_MULTI.replace("ORIGINAL TITLE", "PUBLISHED TITLE")
+  next_manifest = {
+    **manifest,
+    "version": "2.0.0",
+    "permissions": {
+      "cross_app_access": "read",
+      "share_with_apps": "read",
+      "manage_apps": True,
+      "connect_manage": True,
+    },
+  }
+  responses = {
+    base + "mobius.json": (200, json.dumps(next_manifest).encode()),
+    base + "index.jsx": (200, incoming.encode()),
+    base + "icon.png": (200, _png_bytes()),
+    base + "prompt.md": (200, PROMPT.encode()),
+    base + "fetch.sh": (200, b""),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ):
+    result = asyncio.run(install.install_from_manifest(
+      db,
+      manifest_url=base + "mobius.json",
+      manifest=None,
+      raw_base=None,
+      source="publication_handoff",
+      publication_handoff_app_id=app_id,
+    ))
+
+  assert result.mode == "conflict"
+  assert result.app.id == app_id
+  assert entry.read_text() == local
+  assert result.app.version == "1.0.0"
+  assert result.app.manifest_url == (
+    base.rstrip("/") + "#manifest-id=publication-conflict"
+  )
+  assert result.app.manage_apps is False
+  assert result.app.connect_manage is False
+  assert result.app.cross_app_access == "none"
+  assert result.app.share_with_apps == "none"
+
+
 def test_core_app_store_self_update_overwrites_local_conflict(
   client, auth, bypass_url_validation,
 ):
