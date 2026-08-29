@@ -18,7 +18,10 @@ from __future__ import annotations
 
 import os
 import re
+import selectors
+import stat
 import subprocess
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -28,6 +31,8 @@ from app.config import get_settings
 
 _GIT_TIMEOUT = 8
 _DIFF_PREVIEW_BYTES = 800_000
+_UNTRACKED_PATH_BYTES = 512_000
+_UNTRACKED_PATHS = 5_000
 _EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # Filenames and numstat counts are safe metadata (never source contents). Keep
 # a generous ceiling so Contribute can offer a truthful "Show all files" for
@@ -445,49 +450,115 @@ def _working_summary(repo: Path) -> dict[str, Any]:
   }
 
 
-def _bounded_diff(
-  repo: Path, *args: str, limit: int = _DIFF_PREVIEW_BYTES,
-) -> tuple[bytes, bool]:
-  """Return bounded Git diff bytes without buffering an unbounded patch."""
-  command = [
-    "git", "-C", str(repo), "diff", "--no-ext-diff", "--no-color",
-    "--binary", "--full-index", "--no-renames",
-    "--src-prefix=a/", "--dst-prefix=b/", *args,
-  ]
+def _bounded_stdout(
+  command: list[str], *, env: dict[str, str], limit: int,
+) -> tuple[bytes, bool, int | None]:
+  """Read at most ``limit`` bytes while imposing the Git wall-clock bound."""
   try:
     process = subprocess.Popen(
       command,
       stdout=subprocess.PIPE,
       stderr=subprocess.DEVNULL,
-      env=_git_env(repo),
+      env=env,
     )
   except OSError:
-    return b"", False
+    return b"", False, None
   assert process.stdout is not None
+  selector = selectors.DefaultSelector()
+  output = bytearray()
+  truncated = False
+  deadline = time.monotonic() + _GIT_TIMEOUT
   try:
-    output = process.stdout.read(limit + 1)
-    truncated = len(output) > limit
-    if truncated:
-      output = output[:limit]
+    os.set_blocking(process.stdout.fileno(), False)
+    selector.register(process.stdout, selectors.EVENT_READ)
+    reached_eof = False
+    while not reached_eof:
+      remaining_time = deadline - time.monotonic()
+      if remaining_time <= 0:
+        truncated = True
+        break
+      events = selector.select(remaining_time)
+      if not events:
+        truncated = True
+        break
+      for key, _mask in events:
+        try:
+          chunk = os.read(
+            key.fileobj.fileno(),
+            min(65_536, max(1, limit + 1 - len(output))),
+          )
+        except BlockingIOError:
+          continue
+        if not chunk:
+          reached_eof = True
+          break
+        output.extend(chunk)
+        if len(output) > limit:
+          del output[limit:]
+          truncated = True
+          reached_eof = True
+          break
+
+    if truncated and process.poll() is None:
       process.terminate()
     try:
-      process.wait(timeout=_GIT_TIMEOUT)
+      process.wait(timeout=max(0.05, deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
       process.kill()
-      process.wait()
+      process.wait(timeout=1)
       truncated = True
-    return output, truncated
+    return bytes(output), truncated, process.returncode
   finally:
+    if process.poll() is None:
+      process.kill()
+      try:
+        process.wait(timeout=1)
+      except subprocess.TimeoutExpired:
+        pass
+    selector.close()
     process.stdout.close()
 
 
-def _untracked_paths(repo: Path) -> list[str]:
-  proc = _git(
-    repo, "ls-files", "--others", "--exclude-standard", "-z", "--",
+def _bounded_diff(
+  repo: Path, *args: str, limit: int = _DIFF_PREVIEW_BYTES,
+) -> tuple[bytes, bool]:
+  """Return bounded Git diff bytes without an unbounded read or wait."""
+  output, truncated, _returncode = _bounded_stdout(
+    [
+      "git", "-C", str(repo), "diff", "--no-ext-diff", "--no-color",
+      "--binary", "--full-index", "--no-renames",
+      "--src-prefix=a/", "--dst-prefix=b/", *args,
+    ],
+    env=_git_env(repo),
+    limit=limit,
   )
-  if proc.returncode != 0:
-    return []
-  return [path for path in proc.stdout.split("\0") if path]
+  return output, truncated or _returncode not in (0, 1)
+
+
+def _untracked_paths(repo: Path) -> tuple[list[str], bool]:
+  """Return a bounded set of complete, NUL-delimited untracked paths."""
+  output, truncated, returncode = _bounded_stdout(
+    [
+      "git", "-C", str(repo), "ls-files", "--others",
+      "--exclude-standard", "-z", "--",
+    ],
+    env=_git_env(repo),
+    limit=_UNTRACKED_PATH_BYTES,
+  )
+  if returncode != 0:
+    return [], True
+  records = output.split(b"\0")
+  if output and not output.endswith(b"\0"):
+    records.pop()
+    truncated = True
+  paths = [
+    record.decode("utf-8", errors="surrogateescape")
+    for record in records if record
+  ]
+  if len(paths) > _UNTRACKED_PATHS:
+    paths = paths[:_UNTRACKED_PATHS]
+    truncated = True
+  return paths, truncated
 
 
 def build_project_diff(
@@ -508,11 +579,16 @@ def build_project_diff(
   head = project.get("head_sha")
   if not isinstance(head, str) or not head:
     raise ValueError("Source is not available for diff review.")
-  comparison_ref = project.get("comparison_ref") or project.get("base_ref")
   comparison_sha = project.get("comparison_sha") or project.get("base_sha")
   if head != expected_head or comparison_sha != expected_comparison:
     raise RuntimeError("source_snapshot_changed")
-  left = comparison_ref if isinstance(comparison_ref, str) and comparison_ref else _EMPTY_TREE_SHA
+  if _rev(repo, "HEAD") != head:
+    raise RuntimeError("source_snapshot_changed")
+  left = (
+    comparison_sha
+    if isinstance(comparison_sha, str) and comparison_sha
+    else _EMPTY_TREE_SHA
+  )
 
   managed_paths: set[str] = set()
   if project.get("kind") == "app":
@@ -521,7 +597,7 @@ def build_project_diff(
     # managed set here rather than trusting the status response's capped path
     # preview; one explicit diff open can afford the bounded extra inventory.
     _summary, managed_paths = _diff_inventory(
-      repo, left, "HEAD", classify_install=True,
+      repo, left, head, classify_install=True,
     )
     managed_paths.add(".gitignore")
   pathspec = ["."] + [
@@ -532,8 +608,20 @@ def build_project_diff(
     repo, left, "--", *pathspec, limit=_DIFF_PREVIEW_BYTES,
   )
   remaining = max(0, _DIFF_PREVIEW_BYTES - len(patch))
-  for path in _untracked_paths(repo):
+  untracked_paths, untracked_truncated = _untracked_paths(repo)
+  truncated = truncated or untracked_truncated
+  for path in untracked_paths:
     if path in managed_paths:
+      continue
+    try:
+      mode = (repo / path).lstat().st_mode
+    except OSError:
+      truncated = True
+      continue
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+      # Git's no-index diff opens its operands. Refuse untracked symlinks and
+      # special files so a review cannot escape the project or wait on a FIFO.
+      truncated = True
       continue
     if remaining <= 0:
       truncated = True

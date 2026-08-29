@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -177,6 +180,32 @@ def test_project_diff_refuses_a_stale_source_map_head():
       expected_comparison="0" * 40,
     )
 
+  (repo / "later.js").write_text("later\n", encoding="utf-8")
+  _git(repo, "add", "later.js")
+  _commit(repo, "later source edit")
+  with pytest.raises(RuntimeError, match="source_snapshot_changed"):
+    source_status.build_project_diff(
+      repo, project, expected_head=project["head_sha"],
+      expected_comparison=project["comparison_sha"],
+    )
+
+
+def test_project_diff_uses_captured_sha_after_comparison_ref_moves():
+  repo = _repo("immutable-diff-endpoints")
+  (repo / "index.jsx").write_text("export default 2\n", encoding="utf-8")
+  _git(repo, "add", "index.jsx")
+  head = _commit(repo, "accepted local edit")
+  project = source_status.build_app_status(_app(repo))
+  assert project is not None
+
+  _git(repo, "update-ref", "refs/heads/upstream", head)
+  preview = source_status.build_project_diff(
+    repo, project, expected_head=project["head_sha"],
+    expected_comparison=project["comparison_sha"],
+  )
+
+  assert "+export default 2" in preview["diff"]
+
 
 def test_project_diff_caps_large_source_without_buffering_it(monkeypatch):
   repo = _repo("bounded-diff-preview")
@@ -192,6 +221,49 @@ def test_project_diff_caps_large_source_without_buffering_it(monkeypatch):
 
   assert preview["diff_truncated"] is True
   assert len(preview["diff"].encode()) <= 256
+
+
+def test_bounded_reader_enforces_time_without_waiting_for_output(monkeypatch):
+  monkeypatch.setattr(source_status, "_GIT_TIMEOUT", 0.05)
+  started = time.monotonic()
+
+  output, truncated, returncode = source_status._bounded_stdout(
+    [sys.executable, "-c", "import time; time.sleep(10)"],
+    env=dict(os.environ),
+    limit=256,
+  )
+
+  assert time.monotonic() - started < 1
+  assert output == b""
+  assert truncated is True
+  assert returncode is not None
+
+
+def test_untracked_inventory_is_bounded_by_path_count(monkeypatch):
+  repo = _repo("bounded-untracked-paths")
+  for index in range(3):
+    (repo / f"new-{index}.js").write_text("new\n", encoding="utf-8")
+  monkeypatch.setattr(source_status, "_UNTRACKED_PATHS", 2)
+
+  paths, truncated = source_status._untracked_paths(repo)
+
+  assert len(paths) == 2
+  assert truncated is True
+
+
+def test_project_diff_skips_untracked_symlinks():
+  repo = _repo("untracked-symlink")
+  os.symlink("index.jsx", repo / "outside-review")
+  project = source_status.build_app_status(_app(repo))
+  assert project is not None
+
+  preview = source_status.build_project_diff(
+    repo, project, expected_head=project["head_sha"],
+    expected_comparison=project["comparison_sha"],
+  )
+
+  assert preview["diff_truncated"] is True
+  assert "outside-review" not in preview["diff"]
 
 
 def test_typical_project_returns_its_complete_changed_filename_list():
