@@ -10,6 +10,10 @@ function samePendingMessages(current, next) {
 }
 
 function runtimeFieldMatches(current, field, value) {
+  if (field === 'chatInfo') {
+    if (current?.chatInfo === value) return true
+    return JSON.stringify(current?.chatInfo || null) === JSON.stringify(value || null)
+  }
   if (field === 'pending_messages') {
     return samePendingMessages(current?.pending_messages || [], value || [])
   }

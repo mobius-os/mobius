@@ -340,8 +340,8 @@ def test_web_search_results_survive_generated_sdk_schema_lag():
   }]
 
 
-def test_cache_write_usage_survives_generated_sdk_schema_lag():
-  """The 5.6 cache-write counter must reach cost normalization."""
+def test_cache_write_usage_survives_generated_sdk_schema_evolution():
+  """The cache-write counter reaches normalization on old and new SDKs."""
   pytest.importorskip("openai_codex")
   from openai_codex.generated import v2_all
   from app import codex_sdk_runner
@@ -364,9 +364,11 @@ def test_cache_write_usage_survives_generated_sdk_schema_lag():
       "modelContextWindow": 1_050_000,
     },
   })
-  assert payload.token_usage.last.model_extra == {
-    "cacheWriteInputTokens": 60,
-  }
+  last = payload.token_usage.last
+  assert (
+    getattr(last, "cache_write_input_tokens", None) == 60
+    or (last.model_extra or {}).get("cacheWriteInputTokens") == 60
+  )
   assert codex_sdk_runner.normalize_codex_usage(
     payload.token_usage,
     payload.token_usage,

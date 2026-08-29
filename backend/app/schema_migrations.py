@@ -1348,8 +1348,8 @@ def _add_connector_capability_identity(eng) -> None:
       ))
 
 
-def orm_schema_gaps(eng) -> list[str]:
-  """ORM-mapped columns/tables the live database lacks (``table.column``).
+def mapped_schema_gaps(eng) -> list[str]:
+  """Mapped columns/tables the live database lacks (``table.column``).
 
   Runs after ``create_all`` + migrations, so any gap is a written-code bug
   (a declared column with no migration), not a pending upgrade. Such a gap

@@ -63,7 +63,7 @@ def test_previous_release_database_upgrades_to_current_orm(tmp_path):
   first_history = schema_migration_history(eng)
   run_migrations(eng)
 
-  assert migrations.orm_schema_gaps(eng) == []
+  assert migrations.mapped_schema_gaps(eng) == []
   assert schema_migration_history(eng) == first_history
   assert [row["version"] for row in first_history] == [
     version for version, _migration in migrations._SCHEMA_MIGRATIONS
@@ -265,7 +265,7 @@ def test_app_identity_migration_materializes_legacy_source_without_overwriting_d
 
   from app import compiler
 
-  async def fake_compile(_app_id, source, *, out_path, source_path):
+  async def fake_compile(source, *, out_path, source_path):
     assert source == stored
     assert Path(source_path) == source_dir / "index.jsx"
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -1790,16 +1790,16 @@ def test_connector_oauth_gcloud_migration_upgrades_legacy_rows_idempotently(
   }
 
 
-def test_orm_schema_gaps_reports_missing_columns(tmp_path):
+def test_mapped_schema_gaps_reports_missing_columns(tmp_path):
   from app.database import Base
-  from app.schema_migrations import orm_schema_gaps
+  from app.schema_migrations import mapped_schema_gaps
 
   eng = create_engine(f"sqlite:///{tmp_path / 'parity.db'}")
   Base.metadata.create_all(bind=eng)
-  assert orm_schema_gaps(eng) == []
+  assert mapped_schema_gaps(eng) == []
   with eng.begin() as conn:
     conn.execute(text("ALTER TABLE apps DROP COLUMN connections_manage"))
-  assert "apps.connections_manage" in orm_schema_gaps(eng)
+  assert "apps.connections_manage" in mapped_schema_gaps(eng)
 
 
 def test_connectors_migration_preserves_preview_era_rows(tmp_path):

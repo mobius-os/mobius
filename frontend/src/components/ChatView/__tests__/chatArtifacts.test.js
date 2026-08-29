@@ -2,9 +2,41 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  appArtifactsFromBuiltApps,
   artifactTouchForChat,
   artifactsTouchedByChat,
+  chatArtifactPickerItems,
 } from '../chatArtifacts.js'
+
+test('built apps become durable chat artifacts without duplicate rows', () => {
+  const apps = appArtifactsFromBuiltApps([
+    { id: 7, name: 'Atlas', updated_at: '2026-08-20T10:00:00Z' },
+    { id: 9, name: 'Canvas', updated_at: '2026-08-21T10:00:00Z' },
+    { id: 7, name: 'Atlas refined', updated_at: '2026-08-22T10:00:00Z' },
+  ])
+  assert.deepEqual(apps.map(app => app.name), ['Atlas refined', 'Canvas'])
+})
+
+test('artifact picker orders apps and documents together by their chat touch', () => {
+  const items = chatArtifactPickerItems([
+    { id: 7, name: 'Atlas', updated_at: '2026-08-22T10:00:00Z' },
+    { id: 9, name: 'Canvas', updated_at: '2026-08-20T10:00:00Z' },
+  ], [
+    {
+      id: 'launch-brief',
+      title: 'Launch brief',
+      touchedAt: '2026-08-21T10:00:00Z',
+      version: 2,
+    },
+  ])
+
+  assert.deepEqual(items.map(item => item.key), [
+    'app:7',
+    'artifact:launch-brief',
+    'app:9',
+  ])
+  assert.equal(items[0].title, 'Atlas')
+})
 
 test('chat artifacts are attributed by version touch, not global record recency', () => {
   const records = [
