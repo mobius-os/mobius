@@ -1036,6 +1036,7 @@ def test_connect_published_app_reuses_reviewed_local_row_idempotently(
     )
     row.version = "0.1.0"
     row.capability_contract = contract
+    row.upstream_commit = reviewed
     db.commit()
     db.refresh(row)
     return install.InstallResult(
@@ -1065,6 +1066,31 @@ def test_connect_published_app_reuses_reviewed_local_row_idempotently(
   )
   assert second.status_code == 200, second.text
   assert second.json()["connection"]["app_id"] == target["id"]
+  assert installs == 1
+
+  # Simulate the narrow crash window after a conflicting handoff committed
+  # the app identity and pending receipt but before its ledger mirror landed.
+  install.stage_pending_conflict_update(
+    source,
+    app_id=target["id"],
+    upstream_commit=reviewed,
+    manifest=manifest,
+    raw_base=candidate.raw_base,
+    capability_digest=capability_digest,
+    candidate_digest="c" * 64,
+    conflict_paths=["index.jsx"],
+  )
+  interrupted = json.loads(record_path.read_text(encoding="utf-8"))
+  interrupted.pop("publication_connection", None)
+  atomic_write(record_path, json.dumps(interrupted))
+
+  recovered = client.post(
+    f"/api/github/contributions/{contribute_id}/publish-connect/connect-app",
+    headers=app_auth,
+  )
+  assert recovered.status_code == 200, recovered.text
+  assert recovered.json()["connection"]["status"] == "connected_conflict"
+  assert recovered.json()["connection"]["conflict_paths"] == ["index.jsx"]
   assert installs == 1
 
   session = SessionLocal()

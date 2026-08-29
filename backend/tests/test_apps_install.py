@@ -3664,6 +3664,13 @@ def test_verified_publication_handoff_connects_identity_across_source_conflict(
   assert result.app.connect_manage is False
   assert result.app.cross_app_access == "none"
   assert result.app.share_with_apps == "none"
+  receipt = install.read_pending_conflict_update_receipt(
+    source,
+    app_id=app_id,
+    upstream_commit=result.app.upstream_commit,
+  )
+  assert receipt is not None
+  assert receipt["conflict_paths"] == ["index.jsx"]
 
 
 def test_core_app_store_self_update_overwrites_local_conflict(

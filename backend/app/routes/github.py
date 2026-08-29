@@ -2014,13 +2014,24 @@ async def connect_published_app(
         if isinstance(record.get("publication_connection"), dict)
         else {}
       )
+      pending_conflict = install.read_pending_conflict_update_receipt(
+        target.source_dir,
+        app_id=target.id,
+        upstream_commit=target.upstream_commit,
+      )
       connection = {
         **prior,
-        "status": prior.get("status") or "connected",
+        "status": (
+          "connected_conflict" if pending_conflict is not None else "connected"
+        ),
         "app_id": spec.target_app_id,
         "manifest_url": target.manifest_url,
         "version": target.version,
         "connected_at": prior.get("connected_at") or _now_iso(),
+        "conflict_paths": (
+          pending_conflict.get("conflict_paths", [])
+          if pending_conflict is not None else []
+        ),
       }
       record = {
         **record,

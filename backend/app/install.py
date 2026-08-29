@@ -860,6 +860,7 @@ def stage_pending_conflict_update(
   raw_base: str,
   capability_digest: str,
   candidate_digest: str,
+  conflict_paths: list[str] | None = None,
 ) -> None:
   """Persist everything explicit resolution needs to finish an update.
 
@@ -884,6 +885,7 @@ def stage_pending_conflict_update(
     "raw_base": raw_base,
     "capability_digest": capability_digest,
     "candidate_digest": candidate_digest,
+    "conflict_paths": sorted(set(conflict_paths or [])),
     "resolution_policy": None,
     "reviewed_tree_oid": None,
   }, ensure_ascii=False, sort_keys=True) + "\n")
@@ -908,6 +910,10 @@ def read_pending_conflict_update_receipt(
   reviewed_tree_oid = (
     receipt.get("reviewed_tree_oid") if schema == 2 else None
   ) if isinstance(receipt, dict) else None
+  conflict_paths = (
+    receipt.get("conflict_paths", [])
+    if isinstance(receipt, dict) else None
+  )
   if (
     not isinstance(receipt, dict)
     or schema not in (1, 2)
@@ -918,6 +924,11 @@ def read_pending_conflict_update_receipt(
     or not isinstance(receipt.get("raw_base"), str)
     or not isinstance(receipt.get("capability_digest"), str)
     or not re.fullmatch(r"[0-9a-f]{64}", receipt.get("candidate_digest", ""))
+    or not isinstance(conflict_paths, list)
+    or any(
+      not isinstance(path, str) or not path or len(path) > 1000
+      for path in conflict_paths
+    )
     or policy not in ({None} | UPDATE_RESOLUTION_POLICIES)
     or (
       reviewed_tree_oid is not None
@@ -930,6 +941,7 @@ def read_pending_conflict_update_receipt(
     )
   ):
     return None
+  receipt["conflict_paths"] = sorted(set(conflict_paths))
   # Schema 1 receipts can survive a rolling restart. Normalize them in memory;
   # the first explicit policy choice upgrades the durable receipt atomically.
   receipt["resolution_policy"] = policy
@@ -3236,6 +3248,7 @@ async def install_from_manifest(
           raw_base=raw_base,
           capability_digest=fetched_capability_digest,
           candidate_digest=candidate_digest,
+          conflict_paths=conflict_paths,
         )
 
       # The disk-write phase runs INSIDE the same held lock for the Git path so
