@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import math
 from typing import Any, Literal
@@ -191,12 +190,12 @@ async def browser_events(
       return
     try:
       yield f"data: {json.dumps({'type': 'screen-control-open'})}\n\n"
-      while session.active:
+      while True:
         if await request.is_disconnected():
           break
         try:
-          command = await asyncio.wait_for(
-            session.commands.get(), timeout=_KEEPALIVE_SECONDS,
+          command = await registry.next_browser_command(
+            session, keepalive_seconds=_KEEPALIVE_SECONDS,
           )
         except TimeoutError:
           yield ": keepalive\n\n"

@@ -1,11 +1,13 @@
 """Owner-consented, exact-chat live screen relay contracts."""
 
 import asyncio
+import time
 
 import pytest
 from pydantic import ValidationError
 
 from app import auth as auth_module, models
+from app import screen_control as screen_control_module
 from app.routes.screen_control import AgentCommandBody
 from app.screen_control import ScreenControlRegistry
 from test_app_fixtures import create_local_app
@@ -111,6 +113,7 @@ async def test_relay_returns_only_the_browser_answer_to_the_waiting_command():
   command = await asyncio.wait_for(session.commands.get(), timeout=1)
   assert command["action"] == "click"
   assert command["ref"] == "e3"
+  assert command["deadlineAt"] > int(time.time() * 1000)
 
   accepted = await registry.answer(session, command["commandId"], {
     "ok": True, "result": {"clicked": "e3"}, "error": None,
@@ -163,6 +166,70 @@ async def test_relay_bounds_commands_waiting_on_one_browser():
 
   await registry.stop(session)
   assert all(not outcome["ok"] for outcome in await asyncio.gather(*waiting))
+
+
+@pytest.mark.asyncio
+async def test_timed_out_command_never_crosses_the_browser_boundary(monkeypatch):
+  monkeypatch.setattr(screen_control_module, "COMMAND_TIMEOUT_SECONDS", 0.01)
+  registry = ScreenControlRegistry()
+  session = await registry.start(
+    owner_username="owner",
+    app_id=7,
+    chat_id="chat-a",
+    route="/chat/chat-a",
+    viewport={"width": 1280, "height": 720, "pixelRatio": 1},
+  )
+  await registry.connect_browser(session.id, "owner")
+
+  outcome = await registry.issue_command(session, {"action": "click", "ref": "e3"})
+  assert outcome == {
+    "ok": False,
+    "error": "The shared browser did not answer in time.",
+  }
+  with pytest.raises(TimeoutError):
+    await registry.next_browser_command(session, keepalive_seconds=0.02)
+  assert session.commands.empty()
+  await registry.stop(session)
+
+
+@pytest.mark.asyncio
+async def test_transport_queue_stays_bounded_after_repeated_timeouts(monkeypatch):
+  monkeypatch.setattr(screen_control_module, "COMMAND_TIMEOUT_SECONDS", 0.01)
+  registry = ScreenControlRegistry()
+  session = await registry.start(
+    owner_username="owner",
+    app_id=7,
+    chat_id="chat-a",
+    route="/chat/chat-a",
+    viewport={"width": 1280, "height": 720, "pixelRatio": 1},
+  )
+  await registry.connect_browser(session.id, "owner")
+
+  outcomes = [
+    await registry.issue_command(session, {"action": "snapshot"})
+    for _ in range(8)
+  ]
+
+  assert session.commands.qsize() == screen_control_module.MAX_PENDING_COMMANDS
+  assert all(not outcome["ok"] for outcome in outcomes)
+  await registry.stop(session)
+
+
+@pytest.mark.asyncio
+async def test_browser_wait_ends_at_session_expiry_without_keepalive_delay():
+  registry = ScreenControlRegistry()
+  session = await registry.start(
+    owner_username="owner",
+    app_id=7,
+    chat_id="chat-a",
+    route="/chat/chat-a",
+    viewport={"width": 1280, "height": 720, "pixelRatio": 1},
+  )
+  await registry.connect_browser(session.id, "owner")
+  session.expires_at = time.time() + 0.01
+
+  assert await registry.next_browser_command(session, keepalive_seconds=5) is None
+  assert session.active is False
 
 
 @pytest.mark.parametrize("payload", [
