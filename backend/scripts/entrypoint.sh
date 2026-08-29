@@ -681,18 +681,34 @@ done
 # Stored outside /data/shared/ so it's not accessible via the storage API.
 # Token lifetime is 90 days; auto-regenerated when within 30 days of expiry.
 # Only runs after first-time setup (requires an owner to exist).
-_token=$(python3 -c "
+_token=$(
+  cd "$_serve_workdir" || exit 1
+  $_env_scrub timeout 15 python3 -c "
 from app.auth import create_access_token, decode_access_token
 from app.database import SessionLocal
 from app import models
 from datetime import datetime, UTC, timedelta
-import os
+import os, sys, time
 
-try:
-    db = SessionLocal()
-    owner = db.query(models.Owner).first()
-    db.close()
-except Exception:
+owner = None
+queried = False
+last_error = None
+for attempt in range(3):
+    try:
+        with SessionLocal() as db:
+            owner = db.query(models.Owner).first()
+        queried = True
+        break
+    except Exception as exc:
+        last_error = exc
+        if attempt < 2:
+            time.sleep(1)
+if not queried:
+    detail = str(last_error)[:240] if last_error else 'unknown error'
+    print(
+        f'WARNING: service token refresh skipped after database errors: {detail}',
+        file=sys.stderr,
+    )
     exit(0)
 if not owner:
     exit(0)
@@ -724,6 +740,10 @@ token = create_access_token(
 )
 print(token, end='')
 ")
+_token_status=$?
+if [ "$_token_status" -ne 0 ]; then
+  echo "WARNING: service token refresh command failed (exit $_token_status)." >&2
+fi
 if [ -n "$_token" ]; then
   # Atomic write: tmp + rename. A crash mid-write would otherwise leave
   # an empty service-token.txt that cron jobs read as an empty token.
