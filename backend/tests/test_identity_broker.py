@@ -319,6 +319,113 @@ def test_handler_only_supports_identity_and_inference_http_methods():
   assert not hasattr(handler, "do_DELETE")
 
 
+def test_contribution_proxy_is_uds_only_and_binds_exact_requests(
+  broker, monkeypatch,
+):
+  seen = {}
+
+  class FakeClient:
+    def build_request(self, method, url, **kwargs):
+      seen["url"] = url
+      seen["headers"] = kwargs["headers"]
+      return httpx.Request(
+        method, url, content=kwargs.get("content"), headers=kwargs["headers"],
+      )
+
+    def send(self, request, *, stream):
+      return httpx.Response(
+        200, request=request, stream=httpx.ByteStream(b"{}"),
+      )
+
+    def close(self):
+      return None
+
+  capabilities = []
+  broker.client.close()
+  broker.client = FakeClient()
+  monkeypatch.setattr(
+    broker, "_capability",
+    lambda **kwargs: capabilities.append(kwargs) or "one-use",
+  )
+  create_path = "/v1/contributions"
+  create_body = b'{"repo":"mobius-os/mobius"}'
+  key = "contribution:0123456789abcdef"
+
+  with pytest.raises(FileNotFoundError):
+    broker.proxy(
+      method="POST", path=create_path, body=create_body,
+      headers={"idempotency-key": key},
+    )
+
+  response = broker.proxy(
+    method="POST", path=create_path, body=create_body,
+    headers={"idempotency-key": key}, allow_contributions=True,
+  )
+  response.close()
+  assert seen["url"] == broker_module.CONTRIBUTION_BASE_URL + create_path
+  assert seen["headers"]["Idempotency-Key"] == key
+  assert capabilities[-1]["audience"] == "mobius-contribution-relay"
+  assert capabilities[-1]["scope"] == "contribution:submit"
+  assert capabilities[-1]["idempotency_key"] == key
+
+  contribution = "ctr_1234567890abcdef1234567890abcdef"
+  response = broker.proxy(
+    method="GET", path=f"/v1/contributions/{contribution}", body=b"",
+    headers={}, allow_contributions=True,
+  )
+  response.close()
+  assert capabilities[-1]["scope"] == "contribution:read"
+
+  withdraw_path = f"/v1/contributions/{contribution}/withdraw"
+  response = broker.proxy(
+    method="POST", path=withdraw_path, body=b'{"revision":1}',
+    headers={"idempotency-key": "withdraw:0123456789abcdef"},
+    allow_contributions=True,
+  )
+  response.close()
+  assert capabilities[-1]["scope"] == "contribution:withdraw"
+
+  for method, forbidden in (
+    ("GET", "/v1/contributions/github/status"),
+    ("GET", f"/v1/contributions/{contribution}?subject=other"),
+    ("DELETE", f"/v1/contributions/{contribution}"),
+    ("POST", "https://evil.test/v1/contributions"),
+  ):
+    with pytest.raises(FileNotFoundError):
+      broker.proxy(
+        method=method, path=forbidden, body=b"", headers={},
+        allow_contributions=True,
+      )
+
+
+def test_contribution_mutations_require_idempotency(broker):
+  with pytest.raises(ValueError, match="idempotency key is required"):
+    broker.proxy(
+      method="POST", path="/v1/contributions", body=b"{}", headers={},
+      allow_contributions=True,
+    )
+
+
+def test_large_body_exception_is_only_for_exact_contribution_mutations():
+  contribution = "ctr_1234567890abcdef1234567890abcdef"
+  assert broker_module._request_body_limit(
+    is_unix=True, method="POST", path="/v1/contributions",
+  ) == broker_module.MAX_CONTRIBUTION_BODY
+  assert broker_module._request_body_limit(
+    is_unix=True, method="POST",
+    path=f"/v1/contributions/{contribution}/withdraw",
+  ) == broker_module.MAX_CONTRIBUTION_BODY
+  for is_unix, method, path in (
+    (False, "POST", "/v1/contributions"),
+    (True, "POST", "/v1/contributions?x=1"),
+    (True, "GET", f"/v1/contributions/{contribution}"),
+    (True, "POST", "/v1/community/apps"),
+  ):
+    assert broker_module._request_body_limit(
+      is_unix=is_unix, method=method, path=path,
+    ) == broker_module.MAX_BODY
+
+
 def test_unix_handler_rejects_identity_queries_and_forwards_inference():
   # AF_UNIX paths are capped at roughly 108 bytes on Linux; long worktree
   # paths can make pytest's ordinary tmp_path exceed that.
@@ -330,7 +437,9 @@ def test_unix_handler_rejects_identity_queries_and_forwards_inference():
     def identity(self):
       return {"linked": True}
 
-    def proxy(self, *, method, path, body, headers):
+    def proxy(
+      self, *, method, path, body, headers, allow_contributions=False,
+    ):
       seen.append((method, path, body))
       request = httpx.Request(method, "https://central.test" + path)
       payload = json.dumps({"method": method}).encode()
