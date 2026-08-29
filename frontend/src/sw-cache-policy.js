@@ -54,7 +54,12 @@ export const SHELL_DATA_CACHE = 'mobius-shell-data'
 // a `?v=<app.updated_at>` key that has not changed, only a cache-name bump forces
 // eviction: activation evicts v7 and the next app open refetches the current
 // WebAssembly-enabled frame.
-export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v8'
+// Bumped -v8 → -v9 (2026-08-29): the runtime gained the `window.mobius.projects`
+// primitive (a light named-project-workspaces registry). A cache-first app
+// frame/module cached before this keeps serving the OLD runtime with no
+// `projects` capability, so an app using it (Web Studio 1.1.0) can't manage
+// projects until the cache is evicted. Same reason as prior runtime bumps.
+export const OFFLINE_APPS_CACHE = 'mobius-offline-apps-v9'
 // Bumped -v2 → -v3 (2026-07-30): v2 standalone documents executed app-authored
 // modules directly at owner origin. The secure host now mounts the shared
 // opaque AppCanvas frame; activation must evict every cached v2 document so an

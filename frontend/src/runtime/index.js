@@ -55,6 +55,9 @@
 //   window.mobius.capabilities.open(name, input)  -> capability session
 //     session.ready, session.result, session.on(event, cb), finish(), cancel()
 //   window.mobius.capabilities.invoke(name, input, {signal?}) -> one-shot result
+//   window.mobius.projects.list() / .create(name, id?) / .rename(id, name)
+//     / .remove(id) -> a light "named project workspaces" registry for this app
+//     (list only; the app keeps each project's files in its own storage).
 //
 // "No walls": this runtime is the easy DEFAULT, not a cage. In the default
 // shell mount the app has an opaque origin, so IndexedDB/OPFS/SQLite-wasm are
@@ -82,6 +85,7 @@ import { makeNav, makeSplit } from './navigation.js'
 import { makeCapabilities } from './capabilities.js'
 import { makeImmersive } from './immersive.js'
 import { makeClipboard } from './clipboard.js'
+import { makeProjects } from './projects.js'
 import { tokenMatchesRuntime } from './token.js'
 
 export * from './storage.js'
@@ -90,6 +94,7 @@ export * from './chat.js'
 export * from './navigation.js'
 export * from './capabilities.js'
 export * from './immersive.js'
+export * from './projects.js'
 
 
 // ── P1-A: probed-online reactive backing ─────────────────────────────────────
@@ -212,6 +217,7 @@ export function init({ appId, appInstanceId = null, getToken, capabilityContract
     split: makeSplit(),
     immersive: makeImmersive({ appId }),
     clipboard: makeClipboard(),
+    projects: makeProjects({ getToken: scopedToken }),
   }
   window.mobius = api
   _runtimeContext = { identityKey, tokenRef, storage, signal, capabilities, chat, api }

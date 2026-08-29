@@ -3907,6 +3907,45 @@ function makeClipboard() {
 }
 
 //#endregion
+//#region src/runtime/projects.js
+async function jsonOrThrow(res, action) {
+	if (!res.ok) {
+		let detail = "";
+		try {
+			detail = (await res.json())?.detail || "";
+		} catch (e) {}
+		throw new Error(detail || `mobius.projects: ${action} failed (${res.status})`);
+	}
+	if (res.status === 204) return null;
+	return res.json();
+}
+function makeProjects({ getToken }) {
+	const call = (path, init) => fetchWithAppToken(getToken, `/api/projects${path}`, init);
+	const jsonBody = (method, body) => ({
+		method,
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(body)
+	});
+	return {
+		async list() {
+			return jsonOrThrow(await call(""), "list");
+		},
+		async create(name, id) {
+			return jsonOrThrow(await call("", jsonBody("POST", {
+				name,
+				id
+			})), "create");
+		},
+		async rename(id, name) {
+			return jsonOrThrow(await call(`/${encodeURIComponent(id)}`, jsonBody("PATCH", { name })), "rename");
+		},
+		async remove(id) {
+			return jsonOrThrow(await call(`/${encodeURIComponent(id)}`, { method: "DELETE" }), "remove");
+		}
+	};
+}
+
+//#endregion
 //#region src/runtime/index.js
 let _online = typeof navigator !== "undefined" ? navigator.onLine : true;
 const _onlineListeners = /* @__PURE__ */ new Set();
@@ -3987,7 +4026,8 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 		nav: makeNav(),
 		split: makeSplit(),
 		immersive: makeImmersive({ appId }),
-		clipboard: makeClipboard()
+		clipboard: makeClipboard(),
+		projects: makeProjects({ getToken: scopedToken })
 	};
 	window.mobius = api;
 	_runtimeContext = {
@@ -4008,4 +4048,4 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 }
 
 //#endregion
-export { CapabilityError, DurableWriteError, appChatMetadataBody, createUseDocument, init, makeCapabilities, makeChat, makeEmbedAuthorizationHandoff, makeEmbedFrameReveal, makeImmersive, makeNav, makeSignal, makeSplit, makeStorage, overlayPending, purgeAppRuntimeData, runtimeFeatures, sanitizeEmbedGuidance };
+export { CapabilityError, DurableWriteError, appChatMetadataBody, createUseDocument, init, makeCapabilities, makeChat, makeEmbedAuthorizationHandoff, makeEmbedFrameReveal, makeImmersive, makeNav, makeProjects, makeSignal, makeSplit, makeStorage, overlayPending, purgeAppRuntimeData, runtimeFeatures, sanitizeEmbedGuidance };
