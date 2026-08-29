@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -15,6 +16,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "backend" / "app" / "schema_migrations.py"
 SOURCE_REPO_PATH = SOURCE.relative_to(ROOT)
+HISTORY = ROOT / "backend" / "tests" / "fixtures" / "migration_history.json"
+HISTORY_FORMAT = 3
+HISTORY_HASH_KIND = "migration-owned-ast-v1"
 
 # These migrations shipped before the repository required migration code to
 # be self-contained. Their source remains immutable, but their historical
@@ -195,6 +199,52 @@ def append_only_error(
   return "published migration history changed"
 
 
+def frozen_history_error(
+  frozen: dict[str, str], candidate: dict[str, tuple[str, str]],
+) -> str | None:
+  """Explain how candidate differs from the checked-in immutable ledger."""
+  candidate_versions = list(candidate)
+  frozen_versions = list(frozen)
+  if candidate_versions != frozen_versions:
+    return (
+      "registry and migration_history.json differ; append the new version and "
+      "its hash without editing or renumbering prior entries"
+    )
+  changed = [
+    version for version, (_function, digest) in candidate.items()
+    if frozen.get(version) != digest
+  ]
+  if changed:
+    return (
+      "published migration code changed for " + ", ".join(changed)
+      + "; restore it and append a new migration"
+    )
+  return None
+
+
+def _frozen_history() -> dict[str, str]:
+  try:
+    frozen = json.loads(HISTORY.read_text(encoding="utf-8"))
+  except (OSError, json.JSONDecodeError) as exc:
+    fail(f"cannot read {HISTORY.relative_to(ROOT)}: {exc}")
+  if (
+    frozen.get("format") != HISTORY_FORMAT
+    or frozen.get("hash_kind") != HISTORY_HASH_KIND
+    or not isinstance(frozen.get("migrations"), dict)
+  ):
+    fail("migration_history.json has an unsupported shape or hash kind")
+  migrations = frozen["migrations"]
+  if not all(
+    isinstance(version, str)
+    and isinstance(digest, str)
+    and len(digest) == 64
+    and all(character in "0123456789abcdef" for character in digest)
+    for version, digest in migrations.items()
+  ):
+    fail("migration_history.json contains an invalid migration entry")
+  return migrations
+
+
 def _published_source(ref: str) -> str:
   try:
     completed = subprocess.run(
@@ -224,6 +274,9 @@ def main() -> None:
   candidate = inspect_history(
     SOURCE.read_text(encoding="utf-8"), source=str(SOURCE_REPO_PATH),
   )
+  frozen_regression = frozen_history_error(_frozen_history(), candidate)
+  if frozen_regression:
+    fail(frozen_regression)
   if args.against:
     published = inspect_history(
       _published_source(args.against),
@@ -232,12 +285,12 @@ def main() -> None:
     regression = append_only_error(published, candidate)
     if regression:
       fail(regression + "; restore it and append a new migration")
-    suffix = f" against {args.against}"
+    suffix = f" and {args.against}"
   else:
-    suffix = " (no published baseline supplied)"
+    suffix = ""
   print(
-    f"schema-migrations: {len(candidate)} append-only migrations verified"
-    f"{suffix}"
+    f"schema-migrations: {len(candidate)} immutable migrations verified "
+    f"against migration_history.json{suffix}"
   )
 
 
