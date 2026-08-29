@@ -247,6 +247,10 @@ class ContributionSubmitBody(BaseModel):
   )
 
 
+class ContributionCoverageBody(BaseModel):
+  paths: list[str]
+
+
 class AutopilotRespondBody(BaseModel):
   # The attention payload job.sh detected. `key`
   # dedupes rounds; `event_at` is the cursor guard against re-triggering on the
@@ -1119,7 +1123,7 @@ async def refresh_pre_pr_checks(
 # Use the canonical per-file header rather than `+++`: added source is allowed
 # to begin with those characters, so scanning hunk contents can invent a path
 # that is not part of the reviewed change.
-def _diff_file_paths(diff_path: Path, limit: int = 40) -> list[str]:
+def _diff_file_paths(diff_path: Path, limit: int | None = 40) -> list[str]:
   def header_path(line: str) -> str:
     raw = line[4:].rstrip("\r\n").split("\t", 1)[0]
     if raw.startswith('"'):
@@ -1133,6 +1137,7 @@ def _diff_file_paths(diff_path: Path, limit: int = 40) -> list[str]:
     return raw
 
   paths: list[str] = []
+  seen_paths: set[str] = set()
   in_file_header = False
   old_path = ""
   try:
@@ -1155,9 +1160,10 @@ def _diff_file_paths(diff_path: Path, limit: int = 40) -> list[str]:
         if target == "/dev/null":
           target = old_path
         in_file_header = False
-        if target and target != "/dev/null" and target not in paths:
+        if target and target != "/dev/null" and target not in seen_paths:
+          seen_paths.add(target)
           paths.append(target)
-        if len(paths) >= limit:
+        if limit is not None and len(paths) >= limit:
           break
   except OSError:
     return paths
@@ -1309,34 +1315,14 @@ def _contribution_chat_ids(record: dict) -> tuple[str, ...]:
   return tuple(chat_ids)
 
 
-@router.get("/contributions/{app_id}/for-chat/{chat_id}")
-@_limiter.limit("60/minute")
-async def contributions_for_chat(
-  request: Request,
+async def _chat_contribution_records(
   app_id: int,
   chat_id: str,
-  db: Session = Depends(get_db),
-  principal: Principal = Depends(get_principal),
-):
-  """Complete contribution lifecycle records from ONE chat.
-
-  Chat uses the actionable subset while Changes keeps the complete lifecycle.
-  Both are read-only projections over the same ledger the Contribute app reads;
-  Send still goes through the guarded submit endpoint below.
-
-  Only prepared records receive the local preflight. Later lifecycle states are
-  display-only and cheap. Do not silently truncate this chat-scoped set: the
-  old five-row window made healthy work disappear without telling the owner.
-  """
-  _validate_submit_app(app_id, principal, db)
-  db.close()
+) -> tuple[list[dict], dict]:
   contribution_dir = _contributions_dir(app_id)
   async with fs_locks.app_storage_lock(app_id):
-    # Keep the complete chat lifecycle without making every contribution
-    # writer wait for a whole-directory JSON parse. Records are replaced
-    # atomically, so each tolerant read remains coherent outside the lock; a
-    # concurrent update may appear on the next refresh, which is already the
-    # contract of this read-only projection.
+    # Record files are atomically replaced. Snapshot names under the lock, then
+    # parse outside it so a long history cannot block contribution writers.
     contribution_paths = (
       tuple(contribution_dir.glob("*.json"))
       if contribution_dir.exists()
@@ -1359,8 +1345,68 @@ async def contributions_for_chat(
       and record.get("status") in _CHAT_CONTRIBUTION_STATUSES
     ):
       records.append(record)
-
   records.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+  return records, app_settings
+
+
+def _normalized_coverage_path(value: object) -> str:
+  if not isinstance(value, str):
+    return ""
+  normalized = re.sub(r"/{2,}", "/", value.strip().replace("\\", "/"))
+  if normalized.startswith(("a/", "b/")):
+    normalized = normalized[2:]
+  return normalized
+
+
+def _record_coverage_paths(record: dict, diff_path: Path) -> set[str]:
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  source_root = _normalized_coverage_path(plan.get("source_repo_path"))
+  paths: set[str] = set()
+  for file_path in _diff_file_paths(diff_path, limit=None):
+    relative = _normalized_coverage_path(file_path)
+    if not relative:
+      continue
+    if source_root and not relative.startswith("/"):
+      paths.add(_normalized_coverage_path(f"{source_root}/{relative}"))
+    else:
+      paths.add(relative)
+  return paths
+
+
+def _coverage_instant(value: str) -> datetime | None:
+  if not value:
+    return None
+  try:
+    instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+  except ValueError:
+    return None
+  if instant.tzinfo is None:
+    instant = instant.replace(tzinfo=UTC)
+  return instant.astimezone(UTC)
+
+
+@router.get("/contributions/{app_id}/for-chat/{chat_id}")
+@_limiter.limit("60/minute")
+async def contributions_for_chat(
+  request: Request,
+  app_id: int,
+  chat_id: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Complete contribution lifecycle records from ONE chat.
+
+  Chat uses the actionable subset while Changes keeps the complete lifecycle.
+  Both are read-only projections over the same ledger the Contribute app reads;
+  Send still goes through the guarded submit endpoint below.
+
+  Only prepared records receive the local preflight. Later lifecycle states are
+  display-only and cheap. Do not silently truncate this chat-scoped set: the
+  old five-row window made healthy work disappear without telling the owner.
+  """
+  _validate_submit_app(app_id, principal, db)
+  db.close()
+  records, app_settings = await _chat_contribution_records(app_id, chat_id)
 
   github_state = github_auth.read_state() or {}
   projections = []
@@ -1395,6 +1441,66 @@ async def contributions_for_chat(
       True if autopilot_default is None else bool(autopilot_default)
     ),
     "records": projections,
+  }
+
+
+@router.post(
+  "/contributions/{app_id}/for-chat/{chat_id}/coverage",
+  dependencies=[Depends(reject_cross_site)],
+)
+@_limiter.limit("60/minute")
+async def contribution_coverage_for_chat(
+  request: Request,
+  app_id: int,
+  chat_id: str,
+  body: ContributionCoverageBody,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Return exact coverage only for the owner-supplied chat edit paths.
+
+  The lifecycle card keeps its 40-file display preview. This separate bounded
+  membership query reads every canonical diff path server-side, but echoes no
+  record identity or source path the owner did not already request.
+  """
+  _validate_submit_app(app_id, principal, db)
+  if principal.scope != "owner":
+    raise HTTPException(status_code=403, detail="Owner access required.")
+  if len(body.paths) > 100:
+    raise HTTPException(status_code=400, detail="At most 100 paths are allowed.")
+  requested = []
+  seen: set[str] = set()
+  for raw_path in body.paths:
+    path = _normalized_coverage_path(raw_path)
+    if not path or len(path) > 2048 or "\x00" in path:
+      raise HTTPException(status_code=400, detail="Invalid source path.")
+    if path not in seen:
+      seen.add(path)
+      requested.append(path)
+
+  db.close()
+  records, _app_settings = await _chat_contribution_records(app_id, chat_id)
+  latest: dict[str, tuple[datetime, str]] = {}
+  requested_set = set(requested)
+  for record in records:
+    coverage_at = _chat_record_coverage_at(record)
+    coverage_instant = _coverage_instant(coverage_at)
+    if coverage_instant is None:
+      continue
+    canonical_coverage_at = coverage_instant.isoformat().replace("+00:00", "Z")
+    _, diff_path = _record_paths(app_id, str(record.get("id") or ""))
+    matched = requested_set & _record_coverage_paths(record, diff_path)
+    for path in matched:
+      current = latest.get(path)
+      if current is None or coverage_instant > current[0]:
+        latest[path] = (coverage_instant, canonical_coverage_at)
+
+  return {
+    "coverage": [
+      {"path": path, "coverage_at": latest[path][1]}
+      for path in requested
+      if path in latest
+    ],
   }
 
 

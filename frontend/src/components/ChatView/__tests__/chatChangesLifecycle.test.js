@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  chatEditPaths,
   chatChangesOverview,
   compactChangesSummary,
   contributionNeedsAttention,
@@ -154,6 +155,32 @@ test('a contribution without a coverage instant cannot hide an edit', () => {
   }] })
 
   assert.deepEqual(overview.unsortedPaths, ['/data/platform/same.js'])
+})
+
+test('exact bounded coverage supersedes the 40-file display preview', () => {
+  const covered = entry('covered', '/data/platform/file-41.js')
+  covered.ts = Date.parse('2026-08-27T11:00:00Z')
+  const uncovered = entry('uncovered', '/data/platform/file-42.js')
+  uncovered.ts = Date.parse('2026-08-27T11:00:00Z')
+  const entries = [covered, uncovered]
+
+  assert.deepEqual(chatEditPaths(entries), [
+    '/data/platform/file-41.js',
+    '/data/platform/file-42.js',
+  ])
+  const overview = chatChangesOverview(entries, {
+    records: [{
+      id: 'wide-pr', status: 'open', source_root: '/data/platform',
+      files: Array.from({ length: 40 }, (_, index) => `file-${index + 1}.js`),
+      coverage_at: '2026-08-27T12:00:00Z',
+    }],
+    coverage: [{
+      path: '/data/platform/file-41.js',
+      coverage_at: '2026-08-27T12:00:00Z',
+    }],
+  })
+
+  assert.deepEqual(overview.unsortedPaths, ['/data/platform/file-42.js'])
 })
 
 test('dismissing the preparation suggestion hides one revision, not future edits', () => {
