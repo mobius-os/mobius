@@ -125,6 +125,10 @@ test('Brain copy stays quiet when settled and names only useful outstanding work
     compactChangesSummary({ counts: { unsorted: 2, prepared: 1, open: 4, attention: 1 } }),
     '2 unsorted · 1 prepared · 4 open · 1 need attention',
   )
+  assert.equal(
+    compactChangesSummary({ lifecycleAvailable: false, counts: { files: 2, unsorted: 2 } }),
+    '2 recorded files · status unavailable',
+  )
 })
 
 test('an edit made after an old contribution returns to unsorted', () => {

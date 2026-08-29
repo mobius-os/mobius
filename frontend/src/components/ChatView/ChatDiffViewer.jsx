@@ -195,7 +195,11 @@ export default function ChatDiffViewer({
               aria-pressed={activeStage === stage}
               onClick={() => setActiveStage(stage)}
             >
-              <span>{STAGE_LABELS[stage]}</span>
+              <span>
+                {stage === 'unsorted' && !overview.lifecycleAvailable
+                  ? 'Recorded'
+                  : STAGE_LABELS[stage]}
+              </span>
               <b>{overview.counts[stage] || 0}</b>
             </button>
           ))}
@@ -220,7 +224,11 @@ export default function ChatDiffViewer({
           ) : activeStage === 'unsorted' ? (
             overview.unsortedEntries.length > 0 ? (
               <div className="chat-work__updates">
-                {overview.error ? (
+                {!overview.lifecycleAvailable ? (
+                  <p className="chat-work__notice">
+                    Contribution status is unavailable. These are recorded edits, not a confirmed list of unorganized work.
+                  </p>
+                ) : overview.error ? (
                   <p className="chat-work__notice">Showing the changes already loaded in this chat.</p>
                 ) : null}
                 {shortenedCount > 0 ? (
@@ -272,7 +280,10 @@ export default function ChatDiffViewer({
           ) : <EmptyStage stage={activeStage} hasRecordedEdits={overview.counts.files > 0} />}
         </div>
 
-        {activeStage === 'unsorted' && overview.counts.unsorted > 0 && onPrepareChanges ? (
+        {activeStage === 'unsorted'
+          && overview.lifecycleAvailable
+          && overview.counts.unsorted > 0
+          && onPrepareChanges ? (
           <footer className="chat-work__prepare">
             <div>
               <strong>Organize this work</strong>

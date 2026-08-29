@@ -12,8 +12,8 @@ import {
   chatChangesOverview,
 } from './chatChangesLifecycle.js'
 import {
+  loadChatDiffEntries,
   mergeChatDiffEntries,
-  normalizeChatDiffEntries,
 } from './chatDiffs.js'
 
 export function useChatContributions(chatId, { enabled = true } = {}) {
@@ -32,22 +32,30 @@ export function useChatContributions(chatId, { enabled = true } = {}) {
     staleTime: 15000,
     retry: false,
   })
-  return { appId, app, queryKey, ...query }
+  return {
+    appId,
+    app,
+    queryKey,
+    ...query,
+    isLoading: appsQuery.isLoading || query.isLoading,
+    isError: appsQuery.isError || query.isError,
+  }
 }
 
 export function useChatChangesOverview(chatId, initialEntries = [], { enabled = true } = {}) {
   const contributions = useChatContributions(chatId, { enabled })
+  const diffsQueryKey = useMemo(
+    () => ['chat-edit-diffs', String(chatId || '')],
+    [chatId],
+  )
   const diffs = useQuery({
-    queryKey: ['chat-edit-diffs', String(chatId || '')],
-    queryFn: async ({ signal }) => {
-      const response = await apiFetch(
-        `/chats/${encodeURIComponent(chatId)}/edit-diffs`,
-        { signal },
-      )
-      if (!response.ok) throw new Error(`Request failed (${response.status})`)
-      const data = await response.json()
-      return normalizeChatDiffEntries(data?.entries)
-    },
+    queryKey: diffsQueryKey,
+    // This owner route scans the complete persisted transcript. The message
+    // window mounted in a cold or long chat is only a live supplement below.
+    queryFn: ({ signal }) => loadChatDiffEntries(
+      chatId,
+      { request: apiFetch, signal },
+    ),
     enabled: Boolean(enabled && chatId),
     staleTime: 15000,
     retry: false,
@@ -60,13 +68,21 @@ export function useChatChangesOverview(chatId, initialEntries = [], { enabled = 
     () => chatChangesOverview(entries, contributions.data),
     [entries, contributions.data],
   )
+  const lifecycleAvailable = !contributions.isLoading
+    && !contributions.isError
+    && (
+      !contributions.appId
+      || Array.isArray(contributions.data?.records)
+    )
   return {
     ...overview,
+    lifecycleAvailable,
     contributeApp: contributions.app,
     contributeAppId: contributions.appId,
     contributions: contributions.data,
     contributionsQuery: contributions,
     diffsQuery: diffs,
+    diffsQueryKey,
     loading: diffs.isLoading || contributions.isLoading,
     error: diffs.isError || contributions.isError,
   }

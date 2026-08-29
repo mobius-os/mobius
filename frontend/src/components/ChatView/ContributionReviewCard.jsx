@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from '@openai/apps-sdk-ui/components/Icon'
 import { api } from '../../api/client.js'
@@ -25,12 +25,8 @@ import {
   trackingStatusLabel,
   visibleReviewItems,
 } from './contributionReviewModel.js'
-import {
-  chatChangesOverview,
-  isUnsortedDismissed,
-  rememberUnsortedDismissed,
-} from './chatChangesLifecycle.js'
-import { useChatContributions } from './useChatChangesOverview.js'
+import { isUnsortedDismissed, rememberUnsortedDismissed } from './chatChangesLifecycle.js'
+import { useChatChangesOverview } from './useChatChangesOverview.js'
 import './ContributionReviewCard.css'
 
 export default function ContributionReviewCard({
@@ -44,13 +40,15 @@ export default function ContributionReviewCard({
   onPrepareChanges,
 }) {
   const queryClient = useQueryClient()
-  const contributionQuery = useChatContributions(chatId)
+  const overview = useChatChangesOverview(chatId, initialChangeEntries)
   const {
-    appId,
-    app: contributeApp,
-    data,
-    queryKey,
-  } = contributionQuery
+    contributeAppId: appId,
+    contributeApp,
+    contributions: data,
+    contributionsQuery,
+    diffsQueryKey,
+  } = overview
+  const queryKey = contributionsQuery.queryKey
   const { data: appToken } = appQueries.token.useQuery(appId)
 
   // The agent stages a review during a turn, so refetch exactly once when a turn
@@ -60,20 +58,18 @@ export default function ContributionReviewCard({
   useEffect(() => {
     if (wasActive.current && !turnActive) {
       queryClient.invalidateQueries({ queryKey, exact: true })
+      queryClient.invalidateQueries({ queryKey: diffsQueryKey, exact: true })
     }
     wasActive.current = turnActive
-  }, [turnActive, queryClient, queryKey])
+  }, [turnActive, queryClient, queryKey, diffsQueryKey])
 
   // Dismissals are persisted, so this only forces the re-render; the stored
   // decision is what actually filters the list.
   const [dismissRevision, setDismissRevision] = useState(0)
 
   const storage = typeof localStorage !== 'undefined' ? localStorage : null
-  const overview = useMemo(
-    () => chatChangesOverview(initialChangeEntries, data),
-    [initialChangeEntries, data],
-  )
   const unsortedVisible = !turnActive
+    && overview.lifecycleAvailable
     && overview.counts.unsorted > 0
     && !isUnsortedDismissed(chatId, overview.unsortedRevision, storage)
   const pendingItems = [
