@@ -94,6 +94,7 @@ export default function useSystemEventStream(
         // Without this ordering, a slower list response can overwrite a run
         // start/finish that arrived immediately after the connection opened.
         await onOpenRef.current?.()
+        if (cancelled) return
 
         const reader = res.body.getReader()
         const decoder = new TextDecoder()

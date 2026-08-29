@@ -1969,9 +1969,10 @@ export default function Shell({ onInitialVisualReady }) {
       .then(data => data || [])
   }, [queryClient, reconcileCreatedChats])
   const refreshChats = useCallback(() => {
-    return fetchFreshChats()
-      .catch(() => queryClient.getQueryData(chatQueries.keys.all) || [])
-  }, [fetchFreshChats, queryClient])
+    return queryClient.refetchQueries({ queryKey: chatQueries.keys.all })
+      .then(() => queryClient.getQueryData(chatQueries.keys.all) || [])
+      .catch(() => [])
+  }, [queryClient])
   const projectChatList = useCallback((project) => {
     queryClient.setQueryData(chatQueries.keys.all, current => {
       const next = project(Array.isArray(current) ? current : [])
@@ -2697,19 +2698,21 @@ export default function Shell({ onInitialVisualReady }) {
   // the durable app list after every initial connection/reconnect; after the
   // first list establishes the session baseline, fresh chat-owned rows flow
   // through the same idempotent placement resolver as live app_preview_ready events.
-  const reconcileSystemStateOnOpen = useCallback(() => {
+  const reconcileSystemStateOnOpen = useCallback(async () => {
     reconcileNotifications()
-    return Promise.all([
-      invalidateShellListCache('apps'),
-      invalidateShellListCache('chats'),
-      reconcileDeletedAppIdentities(),
-      reconcileDeletedChatIdentities(),
-    ]).then(() => Promise.all([
-      refreshApps(),
-      // Unlike ordinary best-effort refreshes, reconnect must not use a stale
-      // cached fallback to retire an optimistic active-work marker.
-      fetchFreshChats(),
-    ])).then(([, refreshedChats]) => {
+    try {
+      await Promise.all([
+        invalidateShellListCache('apps'),
+        invalidateShellListCache('chats'),
+        reconcileDeletedAppIdentities(),
+        reconcileDeletedChatIdentities(),
+      ])
+      const [, refreshedChats] = await Promise.all([
+        refreshApps(),
+        // Unlike ordinary best-effort refreshes, reconnect must not use a stale
+        // cached fallback to retire an optimistic active-work marker.
+        fetchFreshChats(),
+      ])
       setLocalStreamingChatIds(prev => (
         withoutSettledLocalChatRuns(prev, refreshedChats)
       ))
@@ -2721,7 +2724,10 @@ export default function Shell({ onInitialVisualReady }) {
           markChatRunReconcile(chat.id)
         }
       }
-    }).catch(() => {})
+    } catch {
+      // Reconciliation is best-effort. The open stream remains useful, and a
+      // later reconnect gets another authoritative pass.
+    }
   }, [
     fetchFreshChats,
     markChatRunReconcile,
