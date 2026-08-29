@@ -2182,7 +2182,9 @@ def test_published_schema_migration_history_is_unique_ordered_and_immutable():
     check=False,
   )
   assert completed.returncode == 0, completed.stderr
-  assert "append-only migrations verified" in completed.stdout
+  assert "immutable migrations verified against migration_history.json" in (
+    completed.stdout
+  )
 
 
 def test_failed_migration_is_not_recorded_and_can_retry(tmp_path, monkeypatch):
