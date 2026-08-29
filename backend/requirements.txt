@@ -1,12 +1,12 @@
-fastapi>=0.115.0,<1.0.0
-uvicorn[standard]>=0.30.0
-sqlalchemy>=2.0.30
+fastapi>=0.141.1,<1.0.0
+uvicorn[standard]>=0.52.4
+sqlalchemy>=2.0.52
 PyJWT[crypto]>=2.13.0,<3.0.0
 bcrypt>=4.1.0,<6.0.0
 cryptography>=50.0.0
 python-multipart>=0.0.18
-pydantic[email]>=2.7.0
-pydantic-settings>=2.5.0
+pydantic[email]>=2.13.5
+pydantic-settings>=2.15.0
 slowapi>=0.1.10
 # Runtime integrations use httpx; the self-testing runtime's Starlette
 # TestClient imports httpx2 instead of its deprecated httpx fallback.
@@ -17,7 +17,7 @@ pywebpush>=2.0.0
 pytest>=8.0
 pytest-asyncio>=0.23
 watchdog>=4.0.0
-claude-agent-sdk==0.2.139
+claude-agent-sdk==0.2.148
 # openai-codex is installed --no-deps from a pinned Git SHA in Dockerfile.
 # Its declared cli-bin package is retained for SDK compatibility, but its
 # duplicate payload is replaced in-layer with a link to the pinned npm CLI.
