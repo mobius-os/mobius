@@ -312,10 +312,11 @@ async def _wake_completed_delegation_parents(context: StartupContext) -> None:
   from app.delegations import wake_parents_for_completed_delegations
 
   try:
-    woken = await wake_parents_for_completed_delegations()
-    if woken:
+    result = await wake_parents_for_completed_delegations()
+    if result.woken_parents:
       context.logger.info(
-        "woke %d parent chat(s) for completed-while-away delegations", woken,
+        "woke %d parent chat(s) for completed-while-away delegations",
+        result.woken_parents,
       )
   except Exception:
     context.logger.warning(

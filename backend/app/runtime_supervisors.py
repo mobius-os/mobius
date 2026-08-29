@@ -21,7 +21,8 @@ from app.database import SessionLocal
 
 RESTART_BACKLOG_DRAIN_INTERVAL_SECS = 2.0
 CHAT_WAIT_SWEEP_INTERVAL_SECS = 30.0
-WAKE_RECOVERY_INTERVAL_SECS = 60.0
+DELEGATION_WAKE_RECOVERY_INTERVAL_SECS = 60.0
+AUTOPILOT_LEASE_RECOVERY_INTERVAL_SECS = 60.0
 
 
 class RuntimeSettings(Protocol):
@@ -201,25 +202,36 @@ class RuntimeSupervisors:
         except Exception as exc:
           self.log.error("chat-wait sweep failed: %s", exc, exc_info=True)
 
-    async def wake_recovery_loop():
-      # Live completion hooks own the prompt path. This periodic backstop closes
-      # the two restart/crash gaps whose durable rows can otherwise remain stuck
-      # until another external event happens.
-      from app.contribution_autopilot import sweep_expired_leases
+    async def delegation_wake_recovery_loop():
+      # Live completion hooks own the prompt path. This bounded cursor pass
+      # repairs missed hooks without letting one parent monopolize recovery.
       from app.delegations import wake_parents_for_completed_delegations
+      cursor = None
       while True:
-        await asyncio.sleep(WAKE_RECOVERY_INTERVAL_SECS)
+        await asyncio.sleep(DELEGATION_WAKE_RECOVERY_INTERVAL_SECS)
         try:
-          await wake_parents_for_completed_delegations()
+          result = await wake_parents_for_completed_delegations(after=cursor)
+          cursor = result.next_cursor
         except asyncio.CancelledError:
           raise
         except Exception as exc:
           self.log.error(
             "delegation wake recovery failed: %s", exc, exc_info=True,
           )
+
+    async def autopilot_lease_recovery_loop():
+      from app.contribution_autopilot import sweep_expired_leases
+
+      def sweep_once() -> int:
+        # Session creation belongs in the worker with every operation that uses
+        # it; no synchronous SQLite wait may stall the server event loop.
+        with SessionLocal() as db:
+          return sweep_expired_leases(db)
+
+      while True:
+        await asyncio.sleep(AUTOPILOT_LEASE_RECOVERY_INTERVAL_SECS)
         try:
-          with SessionLocal() as db:
-            sweep_expired_leases(db)
+          await asyncio.to_thread(sweep_once)
         except asyncio.CancelledError:
           raise
         except Exception as exc:
@@ -313,7 +325,12 @@ class RuntimeSupervisors:
     self._spawn("wedged-marker-sweep", wedged_marker_loop())
     self._spawn("reset-park-sweep", reset_park_loop())
     self._spawn("chat-wait-sweep", chat_wait_loop())
-    self._spawn("wake-recovery-sweep", wake_recovery_loop())
+    self._spawn(
+      "delegation-wake-recovery", delegation_wake_recovery_loop(),
+    )
+    self._spawn(
+      "autopilot-lease-recovery", autopilot_lease_recovery_loop(),
+    )
     self._spawn("writer-supervisor", writer_supervisor_loop())
     self._spawn("browser-profile-quota", browser_profile_loop())
     self._spawn("agent-scratch-retention", agent_scratch_loop())

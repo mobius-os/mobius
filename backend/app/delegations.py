@@ -9,16 +9,18 @@ projection. It never writes Chat.messages or Chat.pending_messages directly.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 import hashlib
 import json
 import logging
 from pathlib import Path
 import uuid
 
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app import auth, models
 from app.timeutil import now_naive_utc
@@ -712,38 +714,124 @@ async def _cancel_delegation_execution_locked(
 # `interrupted`/`resuming` auto-resume, so waking on them would be wrong.
 
 WAKE_ELIGIBLE_STATUSES = frozenset({"completed", "failed", "needs_review"})
+WAKE_ELIGIBLE_RUN_STATUSES = frozenset({"completed", "failed"})
 _WAKE_RESULT_MAX = 3000
+WAKE_RECOVERY_BATCH_SIZE = 16
+WAKE_NOTICE_DELEGATION_LIMIT = 16
+WAKE_PARENT_DELIVERY_TIMEOUT_SECS = 40.0
 _LOG = logging.getLogger("moebius.delegations")
 
 
-def _wake_eligible_rows_for_parent(
-  db: Session, parent_chat_id: str, source_work_id: str | None = None,
-) -> list[models.Delegation]:
-  """Opt-in, non-cancelled, un-woken delegations for this parent whose child
-  reached a real terminal — the set a single wake coalesces."""
-  candidates = (
-    db.query(models.Delegation)
+@dataclass(frozen=True)
+class DelegationWakeCursor:
+  """Stable position in the ordered recovery-group scan."""
+
+  created_at: datetime
+  parent_chat_id: str
+  source_work_id: str
+
+
+@dataclass(frozen=True)
+class DelegationWakeSweepResult:
+  """One bounded recovery pass and the position for its next pass."""
+
+  attempted_groups: int
+  woken_parents: int
+  next_cursor: DelegationWakeCursor | None
+
+
+def _latest_child_run_id():
+  """Correlated scalar selecting one delegation child's authoritative run."""
+  candidate = aliased(models.ChatRun)
+  return (
+    select(candidate.id)
+    .where(candidate.chat_id == models.Delegation.child_chat_id)
+    .order_by(candidate.started_at.desc(), candidate.id.desc())
+    .limit(1)
+    .correlate(models.Delegation)
+    .scalar_subquery()
+  )
+
+
+def _wake_recovery_groups(
+  db: Session,
+  *,
+  after: DelegationWakeCursor | None,
+  batch_size: int,
+) -> list[DelegationWakeCursor]:
+  """Select one bounded page of terminal child groups without transcripts."""
+  if batch_size < 1:
+    raise ValueError("wake recovery batch size must be positive")
+
+  first_created = func.min(models.Delegation.created_at)
+  query = (
+    db.query(
+      first_created.label("first_created_at"),
+      models.Delegation.parent_chat_id,
+      models.Delegation.parent_root_run_id,
+    )
+    .join(models.ChatRun, models.ChatRun.id == _latest_child_run_id())
     .filter(
-      models.Delegation.parent_chat_id == parent_chat_id,
       models.Delegation.notify_parent_on_complete.is_(True),
       models.Delegation.cancelled_at.is_(None),
       models.Delegation.parent_woken_at.is_(None),
+      models.ChatRun.status.in_(WAKE_ELIGIBLE_RUN_STATUSES),
     )
-    .order_by(models.Delegation.created_at.asc())
+    .group_by(
+      models.Delegation.parent_chat_id,
+      models.Delegation.parent_root_run_id,
+    )
+  )
+  if after is not None:
+    query = query.having(or_(
+      first_created > after.created_at,
+      and_(
+        first_created == after.created_at,
+        models.Delegation.parent_chat_id > after.parent_chat_id,
+      ),
+      and_(
+        first_created == after.created_at,
+        models.Delegation.parent_chat_id == after.parent_chat_id,
+        models.Delegation.parent_root_run_id > after.source_work_id,
+      ),
+    ))
+  rows = query.order_by(
+    first_created.asc(),
+    models.Delegation.parent_chat_id.asc(),
+    models.Delegation.parent_root_run_id.asc(),
+  ).limit(batch_size).all()
+  return [
+    DelegationWakeCursor(
+      created_at=row.first_created_at,
+      parent_chat_id=row.parent_chat_id,
+      source_work_id=row.parent_root_run_id,
+    )
+    for row in rows
+  ]
+
+
+def _wake_eligible_rows_for_parent(
+  db: Session, parent_chat_id: str, source_work_id: str,
+) -> list[models.Delegation]:
+  """Opt-in, non-cancelled, un-woken delegations for this parent whose child
+  reached a real terminal — the set a single wake coalesces."""
+  return (
+    db.query(models.Delegation)
+    .join(models.ChatRun, models.ChatRun.id == _latest_child_run_id())
+    .filter(
+      models.Delegation.parent_chat_id == parent_chat_id,
+      models.Delegation.parent_root_run_id == source_work_id,
+      models.Delegation.notify_parent_on_complete.is_(True),
+      models.Delegation.cancelled_at.is_(None),
+      models.Delegation.parent_woken_at.is_(None),
+      models.ChatRun.status.in_(WAKE_ELIGIBLE_RUN_STATUSES),
+    )
+    .order_by(
+      models.Delegation.created_at.asc(), models.Delegation.id.asc(),
+    )
+    .limit(WAKE_NOTICE_DELEGATION_LIMIT)
     .all()
   )
-  eligible: list[models.Delegation] = []
-  for row in candidates:
-    status, _, _ = derived_status(db, row)
-    if status in WAKE_ELIGIBLE_STATUSES:
-      eligible.append(row)
-  if not eligible:
-    return []
-  owner_id = source_work_id or eligible[0].parent_root_run_id
-  # Never attribute results from separate logical work to whichever Goal
-  # happened to create the newest row. Each hidden wake carries one exact
-  # owner identity so Goal recovery cannot fold old work into a newer Goal.
-  return [row for row in eligible if row.parent_root_run_id == owner_id]
 
 
 def _compose_wake_notice(db: Session, rows: list[models.Delegation]) -> str:
@@ -816,7 +904,15 @@ async def _append_wake_pending(
 
 
 async def _deliver_parent_wake(
-  parent_chat_id: str, source_work_id: str | None = None,
+  parent_chat_id: str, source_work_id: str,
+) -> bool:
+  """Deliver one bounded parent notice; timeout leaves its latch retryable."""
+  async with asyncio.timeout(WAKE_PARENT_DELIVERY_TIMEOUT_SECS):
+    return await _deliver_parent_wake_once(parent_chat_id, source_work_id)
+
+
+async def _deliver_parent_wake_once(
+  parent_chat_id: str, source_work_id: str,
 ) -> bool:
   """Coalesce every wake-eligible child for one parent into a single notice and
   deliver it under the parent's queue lock.
@@ -843,7 +939,6 @@ async def _deliver_parent_wake(
         return False
       ids = [row.id for row in rows]
       content = _compose_wake_notice(db, rows)
-      source_work_id = rows[0].parent_root_run_id
       parent_chat = (
         db.query(models.Chat)
         .filter(models.Chat.id == parent_chat_id)
@@ -928,41 +1023,44 @@ async def wake_parent_after_child_settled(child_chat_id: str) -> None:
     )
 
 
-async def wake_parents_for_completed_delegations() -> int:
-  """Boot reconcile: wake parents whose child settled while the process was down
-  (latch still NULL). One coalesced wake per parent. Returns parents woken."""
+async def wake_parents_for_completed_delegations(
+  *,
+  after: DelegationWakeCursor | None = None,
+  batch_size: int = WAKE_RECOVERY_BATCH_SIZE,
+) -> DelegationWakeSweepResult:
+  """Recover one fair, bounded page of missed terminal-child notifications.
+
+  The cursor advances past attempted groups even when delivery fails, so one
+  broken parent cannot starve later work. Reaching the end returns ``None``;
+  the next periodic pass starts again at the oldest still-unwoken group.
+  """
   from app.database import SessionLocal
 
-  wake_groups: list[tuple[str, str]] = []
   with SessionLocal() as db:
-    rows = (
-      db.query(models.Delegation)
-      .filter(
-        models.Delegation.notify_parent_on_complete.is_(True),
-        models.Delegation.cancelled_at.is_(None),
-        models.Delegation.parent_woken_at.is_(None),
-      )
-      .order_by(models.Delegation.created_at.asc())
-      .all()
+    wake_groups = _wake_recovery_groups(
+      db, after=after, batch_size=batch_size,
     )
-    seen: set[tuple[str, str]] = set()
-    for row in rows:
-      key = (row.parent_chat_id, row.parent_root_run_id)
-      if key in seen:
-        continue
-      status, _, _ = derived_status(db, row)
-      if status in WAKE_ELIGIBLE_STATUSES:
-        seen.add(key)
-        wake_groups.append(key)
 
-  woken_parents: set[str] = set()
-  for parent_chat_id, source_work_id in wake_groups:
+  async def recover(group: DelegationWakeCursor) -> str | None:
     try:
-      if await _deliver_parent_wake(parent_chat_id, source_work_id):
-        woken_parents.add(parent_chat_id)
+      if await _deliver_parent_wake(
+        group.parent_chat_id, group.source_work_id,
+      ):
+        return group.parent_chat_id
     except Exception:
       _LOG.warning(
-        "boot delegation parent-wake failed parent=%s",
-        parent_chat_id, exc_info=True,
+        "delegation parent-wake recovery failed parent=%s",
+        group.parent_chat_id, exc_info=True,
       )
-  return len(woken_parents)
+    return None
+
+  recovered = await asyncio.gather(*(recover(group) for group in wake_groups))
+  woken_parents = {parent for parent in recovered if parent is not None}
+  next_cursor = (
+    wake_groups[-1] if len(wake_groups) == batch_size else None
+  )
+  return DelegationWakeSweepResult(
+    attempted_groups=len(wake_groups),
+    woken_parents=len(woken_parents),
+    next_cursor=next_cursor,
+  )
