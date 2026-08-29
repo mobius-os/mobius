@@ -2583,7 +2583,6 @@ async def _activate_install_source(
     journal.commit_actions,
   )
   await compile_jsx(
-    app.id,
     entry_source,
     out_path=staged_bundle,
     source_path=source_dir / plan.entry_key,
