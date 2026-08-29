@@ -293,7 +293,7 @@ def _delegation_tree(
   db: Session, physical: models.ChatRun, root: models.ChatRun,
 ) -> list[dict[str, Any]]:
   """Project durable immediate-child ownership without copying transcripts."""
-  from app.delegations import MAX_DELEGATION_DEPTH, derived_status
+  from app.delegations import derived_status
 
   run_ids = {root.id}
   if physical.goal_id:
@@ -317,9 +317,7 @@ def _delegation_tree(
   children_by_parent: dict[str, list[models.Delegation]] = {}
   frontier = [row.child_chat_id for row in roots]
   seen_rows = {row.id for row in roots}
-  for _depth in range(1, MAX_DELEGATION_DEPTH):
-    if not frontier:
-      break
+  while frontier:
     child_rows = db.query(models.Delegation).filter(
       models.Delegation.parent_chat_id.in_(frontier),
     ).order_by(models.Delegation.created_at.asc()).all()
