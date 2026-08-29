@@ -308,10 +308,10 @@ def _remove_unsupported_output(out: Path) -> None:
 
 
 # Rolldown's native compiler has a larger transient RSS than the old compiler.
-# Installs are normally serialized already, but explicit applies to different
-# apps are not. The shared build lease bounds a small instance's peak more
-# strongly than an in-process semaphore could: shell Vite and the validator
-# compile from other processes entirely.
+# Installs and explicit applies already serialize their lifecycle mutations.
+# The shared build lease also bounds recompiles plus shell Vite and validator
+# builds, including compilers running in other processes where an in-process
+# semaphore would have no effect.
 
 
 async def _run_rolldown(
@@ -352,7 +352,6 @@ async def _run_rolldown(
 
 
 async def compile_jsx(
-  app_id: int,
   jsx_source: str,
   *,
   out_path: str | Path,
@@ -361,12 +360,12 @@ async def compile_jsx(
   """Compiles JSX source to an ES module and returns the output path.
 
   Args:
-    app_id: The numeric ID of the mini-app being compiled.
     jsx_source: The JSX source code string.
-    out_path: Where Rolldown writes the bundle. Production callers pass the
-      app's staging path, then publish the output by content hash (see
-      ``recompile_app_bundle``). It is required so a new caller cannot silently
-      bypass immutable publication through the retired fixed live filename.
+    out_path: Caller-owned staging path where Rolldown writes the bundle.
+      Callers either select the app-owned staging contract directly or rename
+      into it before publishing by content hash (see ``recompile_app_bundle``).
+      It is required so a new caller cannot silently bypass immutable
+      publication through the retired fixed live filename.
     source_path: Optional real filesystem entrypoint. When present,
       Rolldown compiles that path directly, allowing relative imports from
       sibling files in the app source tree. When omitted, the legacy
@@ -534,7 +533,6 @@ async def recompile_app_bundle(db, app, jsx_source: str) -> None:
   published = None
   try:
     await compile_jsx(
-      app.id,
       jsx_source,
       out_path=staged,
       source_path=compile_source_path,
