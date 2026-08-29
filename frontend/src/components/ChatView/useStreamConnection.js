@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { getAuthHeaders, BASE } from '../../api/client.js'
+import { getAuthHeaders, getToken, BASE } from '../../api/client.js'
 import {
   isChatStreamSystemEvent,
   shouldForwardChatStreamSystemEvent,
@@ -33,6 +33,12 @@ import {
 import { BEFORE_SHELL_RELOAD_EVENT } from '../../lib/shellReloadEvents.js'
 import { agentViewport } from '../../lib/agentViewport.js'
 import { ChatTransportError, chatHttpError } from './sendErrors.js'
+import {
+  classifyReplayOutcome,
+  enqueueIntent,
+  outboxPrincipalKey,
+  retireIntent,
+} from './chatOutbox.js'
 import {
   reportNetworkReachable,
   verifyConnectivity,
@@ -1584,6 +1590,8 @@ export default function useStreamConnection(chatId, {
     }
 
     let responseData = null
+    let outboxCid = null
+    let outboxRetained = false
     try {
       const body = { content: text }
       if (hidden) body.hidden = true
@@ -1623,6 +1631,20 @@ export default function useStreamConnection(chatId, {
       const maxH = maxInnerHeightRef.current || 0
       const keyboardLikely = maxH > 0 && cur < maxH - 100
       body.viewport = agentViewport(window, keyboardLikely ? maxH : cur)
+      // Persist ordinary sends and answers before transport begins. Replays use
+      // this same cid, so an acknowledgement lost to sleep/restart is harmless:
+      // the backend returns its idempotent duplicate result instead of starting
+      // another turn. Steers target one live turn and are never replayable.
+      outboxCid = (cid && !forceSteer && !directSteer) ? cid : null
+      if (outboxCid) {
+        outboxRetained = await enqueueIntent({
+          chatId: chatIdRef.current,
+          cid: outboxCid,
+          type: answers ? 'answer' : 'message',
+          body,
+          principalKey: outboxPrincipalKey(getToken()),
+        })
+      }
       // Time-box the send POST. It normally returns 202 immediately (the turn
       // runs as a background task), so a hang means a dead socket (mobile
       // sleep, lost network) or a wedged backend — without this the await
@@ -1638,7 +1660,7 @@ export default function useStreamConnection(chatId, {
         const sendTimer = setTimeout(() => sendCtrl.abort(), SEND_POST_TIMEOUT_MS)
         try {
           return await fetch(
-            `${BASE}/api/chats/${chatIdRef.current}/messages`,
+            `${BASE}/api/chats/${encodeURIComponent(String(chatIdRef.current))}/messages`,
             {
               method: 'POST',
               headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
@@ -1663,10 +1685,23 @@ export default function useStreamConnection(chatId, {
         ),
       })
       if (!res.ok) {
+        const replayOutcome = classifyReplayOutcome({ ok: false, status: res.status })
+        // An authoritative client rejection means the interactive path will
+        // restore the draft; silently sending it later would be wrong. Keep
+        // only transport/server/rate and auth outcomes for a later replay.
+        if (outboxCid && replayOutcome !== 'retry' && replayOutcome !== 'auth') {
+          outboxRetained = false
+          void retireIntent(outboxCid)
+        }
         throw await chatHttpError(res)
       }
       const data = await res.json()
       responseData = data
+      // Any parsed 2xx response is authoritative acceptance (including
+      // duplicate/queued/answer-delivered). A lost response instead leaves the
+      // record in place for the shell-wide reconnect drain.
+      if (outboxCid) void retireIntent(outboxCid)
+      outboxRetained = false
       // Trust the backend's actual status, not the frontend's queueOnly
       // hint. The frontend's `sending` flag can be stale (turn finished
       // between the doSend check and the POST landing), so a request
@@ -1747,6 +1782,11 @@ export default function useStreamConnection(chatId, {
         setConnectionError(null)
       }
     } catch (err) {
+      if (outboxRetained && err && typeof err === 'object') {
+        // ChatView owns the copy and draft rollback; this transport fact keeps
+        // that copy honest when IndexedDB was unavailable or quota-blocked.
+        err.outboxRetained = true
+      }
       // Reset streaming state on POST failure. The earlier
       // `if (!queueOnly)` guard left the UI stuck on "thinking" dots
       // when a queueOnly send raced the server's `status: 'started'`

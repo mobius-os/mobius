@@ -31,6 +31,7 @@ import {
   useReachabilityPhase,
   useRecoveryGeneration,
 } from '../../hooks/useOnlineStatus.js'
+import useOutboxDrain from '../../hooks/useOutboxDrain.js'
 import { ReachabilityPhase } from '../../lib/connectivityStore.js'
 import {
   appQueries,
@@ -802,6 +803,9 @@ export default function Shell({ onInitialVisualReady }) {
   const reachabilityLabel = reachabilityPhase === ReachabilityPhase.CHECKING
     ? 'Reconnecting…'
     : (reachabilityPhase === ReachabilityPhase.OFFLINE ? 'Offline' : null)
+  // One shell owner drains every chat's durable intent after a relaunch or
+  // reconnect, even when the chat that created it is not the visible pane.
+  useOutboxDrain()
   const chatsLoadedRef = useRef(false)
   const knownExistingOffListChatIdsRef = useRef(new Set())
   // Always-current chats, for reading inside callbacks that may hold a stale

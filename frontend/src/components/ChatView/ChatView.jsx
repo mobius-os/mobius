@@ -29,12 +29,12 @@ import {
   savedReadingAnchorKey,
 } from './scroll/readingPositions.js'
 import useVoiceInput from './useVoiceInput.js'
-import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import {
   getOnlineSnapshot,
   getRecoverySnapshot,
   subscribeRecovery,
 } from '../../lib/connectivityStore.js'
+import { retireIntent, subscribeOutboxDelivered } from './chatOutbox.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
@@ -389,10 +389,6 @@ export default function ChatView({
     onInternalNav?.(url)
   }, [onInternalNav])
   const internalNav = onInternalNav ? handleInternalNav : undefined
-  // Chat is online-only (it spawns a server-side agent). When offline
-  // the composer disables send and says so, rather than failing into a
-  // dead stream.
-  const online = useOnlineStatus()
   // Read the query cache synchronously on mount. If we've viewed this chat
   // before, its complete transcript window builds the hidden restoration DOM
   // immediately. A complete cache that covers the saved reading coordinate may
@@ -3203,7 +3199,6 @@ export default function ChatView({
     clearFiles,
     restoreFiles,
     releaseFiles,
-    online,
     setActiveGoalState,
     acknowledgeFirstMessageAccepted,
   ])
@@ -3454,6 +3449,10 @@ export default function ChatView({
     const cancelledRow = cancelledIndex >= 0 ? currentQueue[cancelledIndex] : null
     pendingQueue.cancelByCid(cid)
     forgetSendIntent({ cid })
+    // Cancellation owns the local intent too. If the DELETE is ambiguous, the
+    // server's durable queue row remains authoritative and reconciliation below
+    // restores it without needing a second client replay.
+    void retireIntent(cid)
     try {
       const res = await apiFetch(`/chats/${chatId}/pending/${encodeURIComponent(cid)}`, {
         method: 'DELETE',
@@ -4189,6 +4188,16 @@ export default function ChatView({
       document.removeEventListener('visibilitychange', onVisible)
     }
   }, [ensureRuntimeStreamConnected, hidden, reconcileRuntimeState])
+
+  // The shell can deliver this chat's intent while another pane is visible.
+  // Reconcile immediately when this mounted chat becomes that delivery target
+  // instead of waiting for its next polling/focus interval.
+  useEffect(() => subscribeOutboxDelivered((deliveredChatId) => {
+    if (hidden || String(deliveredChatId) !== String(chatId)) return
+    reconcileRuntimeState().then(runtime => {
+      if (runtime) ensureRuntimeStreamConnected(runtime)
+    })
+  }), [chatId, hidden, reconcileRuntimeState, ensureRuntimeStreamConnected])
 
   // Empty-state is the "I have nothing to show because nothing happened
   // yet" view. If the initial chat fetch errored, we have no idea
@@ -5060,7 +5069,6 @@ export default function ChatView({
           steerReady={!steerBusy}
           canRequestSteer={canRequestSteer}
           canSubmitSteer={canSubmitSteer}
-          offline={!online}
           sendFailure={sendFailure}
           submissionBlocked={providerSwitching}
           questionBlocked={hasPendingQuestion}
