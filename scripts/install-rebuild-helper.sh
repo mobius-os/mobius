@@ -37,18 +37,45 @@ mapfile -t CANDIDATES < <(docker ps -q \
 [[ ${#CANDIDATES[@]} -eq 1 ]] \
   || { echo "Expected exactly one running app for Compose project '$PROJECT'." >&2; exit 1; }
 CID=${CANDIDATES[0]}
+CURRENT_IMAGE=$(docker inspect "$CID" --format '{{.Config.Image}}')
+[[ -n $CURRENT_IMAGE && $CURRENT_IMAGE != *$'\n'* ]] \
+  || { echo "Could not resolve the running app image." >&2; exit 1; }
 readarray -t LABELS < <(docker inspect "$CID" --format \
-  '{{index .Config.Labels "com.docker.compose.project"}}{{println}}{{index .Config.Labels "com.docker.compose.project.working_dir"}}{{println}}{{index .Config.Labels "com.docker.compose.project.config_files"}}')
+  '{{index .Config.Labels "com.docker.compose.project"}}{{println}}{{index .Config.Labels "com.docker.compose.project.working_dir"}}{{println}}{{index .Config.Labels "com.docker.compose.project.config_files"}}{{println}}{{index .Config.Labels "com.docker.compose.project.environment_file"}}')
 [[ ${LABELS[0]:-} == "$PROJECT" ]] || { echo "Compose project label mismatch." >&2; exit 1; }
 WORKING_DIR=${LABELS[1]:-}
-FILES_OUTPUT=$(python3 "$ROOT/scripts/rebuild-topology.py" compose-files \
-  "$ROOT" "$WORKING_DIR" "${LABELS[2]:-}")
-mapfile -t FILES <<<"$FILES_OUTPUT"
-for file in "${FILES[@]}"; do
-  relative=${file#"$ROOT/"}
-  git -C "$ROOT" ls-files --error-unmatch "$relative" >/dev/null \
-    || { echo "Compose input is not tracked: $relative" >&2; exit 1; }
-done
+FROZEN_SOURCE=
+FILES=()
+ENV_FILES=()
+if [[ $WORKING_DIR == /etc/mobius-rebuild \
+      && ${LABELS[2]:-} == "/etc/mobius-rebuild/compose.yml,/etc/mobius-rebuild/image.override.yml" ]]; then
+  # A container already recreated by this helper records the frozen root-owned
+  # files in its Compose labels rather than the original checkout. Preserve the
+  # proven resolved topology while upgrading only the reviewed controller and
+  # its narrow image/runtime override.
+  for frozen in /etc/mobius-rebuild/config.json \
+                /etc/mobius-rebuild/compose.yml \
+                /etc/mobius-rebuild/image.override.yml; do
+    [[ -f $frozen && ! -L $frozen && $(stat -c '%u' "$frozen") == 0 \
+       && $((8#$(stat -c '%a' "$frozen") & 8#022)) == 0 ]] \
+      || { echo "Existing replacement topology is not root-controlled." >&2; exit 1; }
+  done
+  FROZEN_SOURCE=/etc/mobius-rebuild/compose.yml
+else
+  FILES_OUTPUT=$(python3 "$ROOT/scripts/rebuild-topology.py" compose-files \
+    "$ROOT" "$WORKING_DIR" "${LABELS[2]:-}")
+  mapfile -t FILES <<<"$FILES_OUTPUT"
+  ENV_FILES_OUTPUT=$(python3 "$ROOT/scripts/rebuild-topology.py" \
+    environment-files "${LABELS[3]:-}")
+  if [[ -n $ENV_FILES_OUTPUT ]]; then
+    mapfile -t ENV_FILES <<<"$ENV_FILES_OUTPUT"
+  fi
+  for file in "${FILES[@]}"; do
+    relative=${file#"$ROOT/"}
+    git -C "$ROOT" ls-files --error-unmatch "$relative" >/dev/null \
+      || { echo "Compose input is not tracked: $relative" >&2; exit 1; }
+  done
+fi
 git -C "$ROOT" diff --quiet HEAD -- \
   scripts/install-rebuild-helper.sh scripts/mobius-rebuild-host.py \
   scripts/rebuild-topology.py backend/scripts/prepare-container-replacement.py \
@@ -62,7 +89,9 @@ git -C "$ROOT" diff --quiet HEAD -- \
   "${FILES[@]#"$ROOT/"}") ]] \
   || { echo "The selected helper and Compose inputs must be clean." >&2; exit 1; }
 
-ARGS=(-p "$PROJECT")
+ARGS=()
+for file in "${ENV_FILES[@]}"; do ARGS+=(--env-file "$file"); done
+ARGS+=(-p "$PROJECT")
 for file in "${FILES[@]}"; do ARGS+=(-f "$file"); done
 DATA_SOURCE=$(docker inspect "$CID" --format \
   '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}')
@@ -79,7 +108,13 @@ RUNNING_NETWORKS=$(docker inspect "$CID" --format \
   | sed '/^$/d' | sort)
 RESOLVED=$(mktemp)
 trap 'rm -f "$RESOLVED"' EXIT
-docker compose "${ARGS[@]}" config --format json >"$RESOLVED"
+if [[ -n $FROZEN_SOURCE ]]; then
+  MOBIUS_IMAGE="$CURRENT_IMAGE" docker compose \
+    -p "$PROJECT" -f "$FROZEN_SOURCE" config --format json >"$RESOLVED"
+else
+  MOBIUS_IMAGE="$CURRENT_IMAGE" docker compose \
+    "${ARGS[@]}" config --format json >"$RESOLVED"
+fi
 EXPECTED_NETWORKS=$(python3 "$ROOT/scripts/rebuild-topology.py" \
   expected-networks "$RESOLVED")
 [[ $RUNNING_NETWORKS == "$EXPECTED_NETWORKS" ]] \
@@ -90,14 +125,25 @@ umask 077
 install -d -m 0700 /etc/mobius-rebuild /var/lib/mobius-rebuild
 install -D -m 0755 "$ROOT/scripts/mobius-rebuild-host.py" \
   /usr/local/libexec/mobius-rebuild-host
+/usr/local/libexec/mobius-rebuild-host bootstrap-runtime "$CID"
 SNAPSHOT=$(mktemp /etc/mobius-rebuild/compose.XXXXXX)
-docker compose "${ARGS[@]}" config >"$SNAPSHOT"
+if [[ -n $FROZEN_SOURCE ]]; then
+  cp "$FROZEN_SOURCE" "$SNAPSHOT"
+else
+  MOBIUS_IMAGE="$CURRENT_IMAGE" docker compose \
+    "${ARGS[@]}" config >"$SNAPSHOT"
+fi
 chmod 0600 "$SNAPSHOT"
 mv -f "$SNAPSHOT" /etc/mobius-rebuild/compose.yml
 cat >/etc/mobius-rebuild/image.override.yml <<'EOF'
 services:
   app:
     image: ${MOBIUS_IMAGE:?MOBIUS_IMAGE is required}
+    volumes:
+      - type: bind
+        source: ${MOBIUS_RUNTIME_OVERLAY:?MOBIUS_RUNTIME_OVERLAY is required}
+        target: /app/runtime
+        read_only: true
 EOF
 chmod 0600 /etc/mobius-rebuild/image.override.yml
 python3 - "$PROJECT" "$DATA_SOURCE" <<'PY'
@@ -159,5 +205,5 @@ systemctl enable mobius-rebuild-reconcile.service
 systemctl enable --now mobius-rebuild.path
 
 echo "Container replacement installed for Compose project '$PROJECT'."
-echo "Topology: ${FILES[*]}"
+echo "Topology: ${FILES[*]:-$FROZEN_SOURCE}"
 echo "Rerun this installer after an intentional Compose topology change."
