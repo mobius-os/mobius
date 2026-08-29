@@ -41,21 +41,42 @@ export function withChatRunState(rows, chatId, running) {
 }
 
 /**
- * Retire optimistic run markers only when a fresh drawer row explicitly says
- * the matching chat is settled. Unknown rows stay optimistic: a newly-created
- * chat can start before it first appears in the compact list.
+ * Retire optimistic run markers only after the run was acknowledged and a
+ * fresh drawer row explicitly says it is settled. A locally-started request
+ * can briefly race ahead of its durable row, while a visible or owner-input
+ * turn remains authoritative until its mounted stream reaches a boundary.
  */
-export function withoutSettledLocalChatRuns(localIds, rows) {
+export function withoutSettledLocalChatRuns(
+  localIds,
+  rows,
+  { acknowledgedIds = localIds, protectedIds = new Set() } = {},
+) {
   if (!(localIds instanceof Set) || !Array.isArray(rows)) return localIds
-  const serverRunning = new Map()
+  const acknowledged = acknowledgedIds instanceof Set
+    ? acknowledgedIds
+    : new Set()
+  const protectedLocal = protectedIds instanceof Set
+    ? protectedIds
+    : new Set()
+  const serverSettled = new Set()
   for (const row of rows) {
-    if (row?.id == null || typeof row.running !== 'boolean') continue
-    serverRunning.set(String(row.id), row.running)
+    if (
+      row?.id == null
+      || row.running !== false
+      || row.owner_input_kind != null
+      || row.pending_question_id != null
+    ) continue
+    serverSettled.add(String(row.id))
   }
 
   let next = localIds
   for (const id of localIds) {
-    if (serverRunning.get(String(id)) !== false) continue
+    const key = String(id)
+    if (
+      !acknowledged.has(key)
+      || protectedLocal.has(key)
+      || !serverSettled.has(key)
+    ) continue
     if (next === localIds) next = new Set(localIds)
     next.delete(id)
   }

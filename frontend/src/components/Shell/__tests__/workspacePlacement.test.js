@@ -783,7 +783,11 @@ test('shell reconciles both durable drawer lists whenever the system stream reco
   assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*fetchFreshChats\(\{ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS \}\)/)
   assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*withoutSettledLocalChatRuns/,
     'fresh reconnect truth retires a local active-work marker whose finish event was missed')
-  assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*chat\.running[\s\S]*visibleChatIdsRef\.current[\s\S]*markChatRunReconcile\(chat\.id\)/,
+  assert.match(shellSource, /acknowledgedIds: acknowledgedLocalChatRunIdsRef\.current[\s\S]*protectedIds: visibleChatIdsRef\.current/,
+    'only acknowledged, non-visible local activity can retire from compact truth')
+  assert.match(shellSource, /if \(reconciledLocalIds\.has\(chatId\)\) continue/,
+    'a mounted local start remains authoritative over a temporarily idle row')
+  assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*chat\.running[\s\S]*visibleChatIdsRef\.current[\s\S]*markChatRunReconcile\(chatId\)/,
     'open chats and durable running chats reconcile even when run events were missed')
   assert.match(shellSource, /useSystemEventStream\(handleSystemEvent, \{ onOpen: reconcileSystemStateOnOpen \}\)/)
 })

@@ -46,13 +46,40 @@ test('run and rename events project only the committed fields they carry', () =>
   assert.equal(renamed[0].updated_at, '2026-08-01T12:30:00Z')
 })
 
-test('fresh reconnect truth retires only settled optimistic run markers', () => {
+test('visible and owner-input turns survive temporarily false compact rows', () => {
+  const local = new Set(['visible', 'question-held', 'secure-input-held'])
+  const reconciled = withoutSettledLocalChatRuns(local, [
+    { id: 'visible', running: false },
+    { id: 'question-held', running: false, owner_input_kind: 'question' },
+    { id: 'secure-input-held', running: false, pending_question_id: 'secure-1' },
+  ], {
+    acknowledgedIds: new Set(local),
+    protectedIds: new Set(['visible']),
+  })
+
+  assert.equal(reconciled, local, 'protected local activity is a referential no-op')
+})
+
+test('an unacknowledged fresh start survives a temporarily false compact row', () => {
+  const local = new Set(['fresh-send'])
+  const reconciled = withoutSettledLocalChatRuns(local, [
+    { id: 'fresh-send', running: false },
+  ], {
+    acknowledgedIds: new Set(),
+  })
+
+  assert.equal(reconciled, local)
+})
+
+test('fresh reconnect truth retires an acknowledged settled background marker', () => {
   const local = new Set(['settled', 'running', 'not-listed', 'uncertain'])
   const reconciled = withoutSettledLocalChatRuns(local, [
     { id: 'settled', running: false },
     { id: 'running', running: true },
     { id: 'uncertain' },
-  ])
+  ], {
+    acknowledgedIds: new Set(['settled', 'running']),
+  })
 
   assert.deepEqual([...reconciled], ['running', 'not-listed', 'uncertain'])
   assert.deepEqual([...local], ['settled', 'running', 'not-listed', 'uncertain'],
@@ -60,7 +87,9 @@ test('fresh reconnect truth retires only settled optimistic run markers', () => 
   assert.equal(
     withoutSettledLocalChatRuns(reconciled, [
       { id: 'running', running: true },
-    ]),
+    ], {
+      acknowledgedIds: new Set(['running']),
+    }),
     reconciled,
     'a no-op reconciliation preserves Set identity',
   )

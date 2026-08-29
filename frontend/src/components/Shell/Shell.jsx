@@ -1710,6 +1710,12 @@ export default function Shell({ onInitialVisualReady }) {
   // attentionChatIds is separate: it marks a background-finished chat until
   // the user opens it, without pretending the turn is still streaming.
   const [localStreamingChatIds, setLocalStreamingChatIds] = useState(() => new Set())
+  // Keep the send-time owner synchronous across the reconnect await. A compact
+  // row can still say `running: false` before the accepted send emits its
+  // durable start, so state committed on the next React frame is too late to
+  // decide whether that row may retire the optimistic marker.
+  const localStreamingChatIdsRef = useRef(localStreamingChatIds)
+  const acknowledgedLocalChatRunIdsRef = useRef(new Set())
   // Monotonic per-chat activity survives a start+finish pair delivered in one
   // system-stream chunk. A running boolean can end the React batch exactly as
   // it began (false) and lose the fact that the transcript changed.
@@ -1770,30 +1776,41 @@ export default function Shell({ onInitialVisualReady }) {
 
   // Stable callbacks for ChatView — identity must not change across
   // renders or ChatView's onStreamEnd-handler memoization breaks. The
-  // setter form lets us avoid depending on the previous state.
+  // synchronous ref lets reconnect reconciliation observe a send in the same
+  // frame, while React state remains the rendering owner.
   const markStreamingStart = useCallback((chatId) => {
     if (!chatId) return
-    setLocalStreamingChatIds(prev => {
-      if (prev.has(chatId)) return prev
-      const next = new Set(prev)
-      next.add(chatId)
-      return next
-    })
+    const key = String(chatId)
+    const previous = localStreamingChatIdsRef.current
+    if (!previous.has(key)) {
+      const next = new Set(previous)
+      next.add(key)
+      localStreamingChatIdsRef.current = next
+      setLocalStreamingChatIds(next)
+    }
     setAttentionChatIds(prev => {
-      if (!prev.has(chatId)) return prev
+      if (!prev.has(key)) return prev
       const next = new Set(prev)
-      next.delete(chatId)
+      next.delete(key)
       return next
     })
   }, [])
+  const markStreamingAcknowledged = useCallback((chatId) => {
+    if (!chatId) return
+    const key = String(chatId)
+    acknowledgedLocalChatRunIdsRef.current.add(key)
+    markStreamingStart(key)
+  }, [markStreamingStart])
   const markStreamingEnd = useCallback((chatId) => {
     if (!chatId) return
-    setLocalStreamingChatIds(prev => {
-      if (!prev.has(chatId)) return prev
-      const next = new Set(prev)
-      next.delete(chatId)
-      return next
-    })
+    const key = String(chatId)
+    acknowledgedLocalChatRunIdsRef.current.delete(key)
+    const previous = localStreamingChatIdsRef.current
+    if (!previous.has(key)) return
+    const next = new Set(previous)
+    next.delete(key)
+    localStreamingChatIdsRef.current = next
+    setLocalStreamingChatIds(next)
   }, [])
 
   const markChatRunActivity = useCallback((chatId) => {
@@ -2603,7 +2620,7 @@ export default function Shell({ onInitialVisualReady }) {
           c => String(c.id) === String(ev.chatId),
         )
         markChatRunActivity(ev.chatId)
-        markStreamingStart(ev.chatId)
+        markStreamingAcknowledged(ev.chatId)
         markChatRunState(ev.chatId, true)
         markChatOwnerInput(ev.chatId, { kind: null, questionId: null })
         // A run can be the drawer's FIRST evidence of a chat created entirely
@@ -2689,7 +2706,8 @@ export default function Shell({ onInitialVisualReady }) {
     confirmAppDeleted, confirmAppIdentityIsLive, confirmAppRecovered,
     confirmChatDeleted, confirmChatIdentityIsLive, confirmChatRecovered,
     loadTheme, markChatRunActivity, markChatRunFinished, markChatRunReconcile,
-    markChatOwnerInput, markChatRunState, markStreamingEnd, markStreamingStart,
+    markChatOwnerInput, markChatRunState, markStreamingAcknowledged,
+    markStreamingEnd,
     onNotificationCreated, placeInWorkspace, queryClient,
     refreshApps, refreshChats, warmAppCode,
   ])
@@ -2723,15 +2741,41 @@ export default function Shell({ onInitialVisualReady }) {
         // cached fallback to retire an optimistic active-work marker.
         fetchFreshChats({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS }),
       ])
-      setLocalStreamingChatIds(prev => (
-        withoutSettledLocalChatRuns(prev, refreshedChats)
-      ))
+      const localIds = localStreamingChatIdsRef.current
       for (const chat of refreshedChats) {
+        const chatId = String(chat.id)
+        if (chat.running && localIds.has(chatId)) {
+          acknowledgedLocalChatRunIdsRef.current.add(chatId)
+        }
+      }
+      const reconciledLocalIds = withoutSettledLocalChatRuns(
+        localIds,
+        refreshedChats,
+        {
+          acknowledgedIds: acknowledgedLocalChatRunIdsRef.current,
+          protectedIds: visibleChatIdsRef.current,
+        },
+      )
+      if (reconciledLocalIds !== localIds) {
+        for (const chatId of localIds) {
+          if (!reconciledLocalIds.has(chatId)) {
+            acknowledgedLocalChatRunIdsRef.current.delete(String(chatId))
+          }
+        }
+        localStreamingChatIdsRef.current = reconciledLocalIds
+        setLocalStreamingChatIds(reconciledLocalIds)
+      }
+      for (const chat of refreshedChats) {
+        const chatId = String(chat.id)
+        // The mounted stream owns a local start until it reaches a boundary.
+        // Re-reading its detail here would let the same temporarily-idle row
+        // retire an unacknowledged send through a second reconciliation path.
+        if (reconciledLocalIds.has(chatId)) continue
         if (
           chat.running
-          || visibleChatIdsRef.current.has(String(chat.id))
+          || visibleChatIdsRef.current.has(chatId)
         ) {
-          markChatRunReconcile(chat.id)
+          markChatRunReconcile(chatId)
         }
       }
     } catch {
