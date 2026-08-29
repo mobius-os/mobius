@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -82,6 +83,62 @@ def test_private_directory_and_key_reject_precreated_symlinks(tmp_path, monkeypa
 
   with pytest.raises(RuntimeError, match="file is unsafe"):
     broker_module._load_or_create_key()
+
+
+def _legacy_state_paths(tmp_path, monkeypatch):
+  private = tmp_path / "identity-broker"
+  private.mkdir(mode=0o700)
+  key = private / "instance-ed25519.pem"
+  key.write_text("legacy-key", encoding="utf-8")
+  key.chmod(0o600)
+  owner = (os.getuid(), os.getgid())
+  monkeypatch.setattr(broker_module, "PRIVATE_DIR", private)
+  monkeypatch.setattr(broker_module, "KEY_PATH", key)
+  monkeypatch.setattr(broker_module, "STATE_PATH", private / "identity.json")
+  monkeypatch.setattr(broker_module, "INSTANCE_PATH", private / "instance-id")
+  monkeypatch.setattr(
+    broker_module, "PENDING_BOOTSTRAP_PATH", private / "pending-enrollment.jwt"
+  )
+  monkeypatch.setattr(broker_module.os, "geteuid", lambda: 0)
+  monkeypatch.setattr(
+    broker_module.pwd, "getpwnam",
+    lambda _name: SimpleNamespace(pw_uid=owner[0], pw_gid=owner[1]),
+  )
+  return private, key
+
+
+def test_root_broker_reclaims_only_locked_down_legacy_state(tmp_path, monkeypatch):
+  private, key = _legacy_state_paths(tmp_path, monkeypatch)
+  adopted = []
+  monkeypatch.setattr(
+    broker_module.os, "chown",
+    lambda path, uid, gid: adopted.append((Path(path), uid, gid)),
+  )
+
+  broker_module._reclaim_private_state_after_compat_chown()
+
+  assert adopted == [(private, 0, 0), (key, 0, 0)]
+  assert stat.S_IMODE(private.stat().st_mode) == 0o700
+  assert stat.S_IMODE(key.stat().st_mode) == 0o600
+
+
+def test_root_broker_refuses_linked_legacy_state(tmp_path, monkeypatch):
+  private, key = _legacy_state_paths(tmp_path, monkeypatch)
+  key.unlink()
+  outside = tmp_path / "outside"
+  outside.write_text("do not adopt", encoding="utf-8")
+  os.link(outside, key)
+
+  with pytest.raises(RuntimeError, match="file is unsafe"):
+    broker_module._reclaim_private_state_after_compat_chown()
+
+
+def test_root_broker_refuses_permissive_legacy_state(tmp_path, monkeypatch):
+  _private, key = _legacy_state_paths(tmp_path, monkeypatch)
+  key.chmod(0o640)
+
+  with pytest.raises(RuntimeError, match="file is unsafe"):
+    broker_module._reclaim_private_state_after_compat_chown()
 
 
 def test_socket_parent_must_not_be_app_writable(tmp_path, monkeypatch):

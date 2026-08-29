@@ -13,6 +13,7 @@ import base64
 import hashlib
 import json
 import os
+import pwd
 import re
 import secrets
 import socketserver
@@ -88,6 +89,55 @@ def _atomic_root_write(path: Path, value: bytes) -> None:
     os.replace(temp, path)
   finally:
     temp.unlink(missing_ok=True)
+
+
+def _reclaim_private_state_after_compat_chown() -> None:
+  """Restore root ownership after the broad /data compatibility pass.
+
+  Older official entrypoints make a persisted /data tree app-writable before
+  this root broker starts. Adopt only the broker's fixed, already-private state
+  files; reject links, unexpected owners, and permissive modes rather than
+  blessing an attacker-controlled path.
+  """
+  if os.geteuid() != 0:
+    return
+
+  mobius = pwd.getpwnam("mobius")
+  allowed_owners = {(0, 0), (mobius.pw_uid, mobius.pw_gid)}
+  try:
+    current = os.lstat(PRIVATE_DIR)
+  except FileNotFoundError:
+    PRIVATE_DIR.mkdir(mode=0o700)
+    current = os.lstat(PRIVATE_DIR)
+  if (
+    stat.S_ISLNK(current.st_mode)
+    or not stat.S_ISDIR(current.st_mode)
+    or (current.st_uid, current.st_gid) not in allowed_owners
+    or stat.S_IMODE(current.st_mode) & 0o077
+  ):
+    raise RuntimeError("identity broker private directory is unsafe")
+
+  existing: list[Path] = []
+  for path in (KEY_PATH, STATE_PATH, INSTANCE_PATH, PENDING_BOOTSTRAP_PATH):
+    try:
+      item = os.lstat(path)
+    except FileNotFoundError:
+      continue
+    if (
+      stat.S_ISLNK(item.st_mode)
+      or not stat.S_ISREG(item.st_mode)
+      or item.st_nlink != 1
+      or (item.st_uid, item.st_gid) not in allowed_owners
+      or stat.S_IMODE(item.st_mode) & 0o077
+    ):
+      raise RuntimeError(f"identity broker file is unsafe: {path.name}")
+    existing.append(path)
+
+  os.chown(PRIVATE_DIR, 0, 0)
+  os.chmod(PRIVATE_DIR, 0o700)
+  for path in existing:
+    os.chown(path, 0, 0)
+    os.chmod(path, 0o600)
 
 
 def _prepare_private_dir() -> None:
@@ -557,6 +607,7 @@ class _TcpServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 def main() -> None:
   if os.geteuid() != 0:
     raise SystemExit("identity broker must run as root")
+  _reclaim_private_state_after_compat_chown()
   broker = Broker()
   _prepare_socket_dir()
   SOCKET_PATH.unlink(missing_ok=True)
