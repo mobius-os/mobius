@@ -1164,6 +1164,38 @@ def _diff_file_paths(diff_path: Path, limit: int = 40) -> list[str]:
   return paths
 
 
+def _chat_record_coverage_at(record: dict) -> str:
+  """Return the latest source-bearing instant for chat edit reconciliation."""
+  quality = (
+    record.get("quality_review")
+    if isinstance(record.get("quality_review"), dict)
+    else {}
+  )
+  # These are ordered by authority rather than chronology. An exact review
+  # witnesses the source that was inspected; a later push only publishes that
+  # same source and must not cover intervening chat edits. Publication times
+  # remain a conservative compatibility witness for older records that do not
+  # carry review metadata.
+  candidates = [
+    record.get("coverage_at"),
+    quality.get("reviewed_at"),
+    record.get("last_updated_pr_at"),
+    record.get("submitted_at"),
+  ]
+  for value in candidates:
+    if not isinstance(value, str) or not value.strip():
+      continue
+    normalized = value.strip()
+    try:
+      instant = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+    except ValueError:
+      continue
+    if instant.tzinfo is None:
+      instant = instant.replace(tzinfo=UTC)
+    return normalized
+  return ""
+
+
 def _chat_review_projection(record: dict, app_id: int) -> dict:
   """The small, display-only view shared by chat actions and Changes."""
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
@@ -1227,6 +1259,10 @@ def _chat_review_projection(record: dict, app_id: int) -> dict:
     "last_submit_error": text(record.get("last_submit_error")),
     "last_submit_error_detail": text(record.get("last_submit_error_detail")),
     "updated_at": text(record.get("updated_at")),
+    # A path is reusable across revisions. Expose the latest instant this
+    # record could have incorporated source edits so later edits return to
+    # Unsorted instead of being hidden by historical path coverage.
+    "coverage_at": _chat_record_coverage_at(record),
     "quality_review_ready": bool(
       isinstance(record.get("quality_review"), dict)
       and record["quality_review"].get("state") == "all_clear"
