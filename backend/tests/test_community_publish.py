@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app import community_publish
 from app.community_publish import CommunityPublicationError, build_public_snapshot
 
 
@@ -97,3 +98,46 @@ def test_snapshot_rejects_symlink_instead_of_following_it(tmp_path):
     build_public_snapshot(app)
 
   assert raised.value.code == "invalid_file_type"
+
+
+def test_partial_success_journal_contains_only_bounded_public_state(
+  tmp_path, monkeypatch,
+):
+  root = tmp_path / "community-publications"
+  monkeypatch.setattr(community_publish, "_journal_root", lambda: root)
+  journal = community_publish.new_publication_journal(
+    local_app_id="app:42:pocket-list",
+    accepted_commit="a" * 40,
+    repository_name="pocket-list",
+    repository="octo-owner/pocket-list",
+    source_commit_sha="c" * 40,
+  )
+
+  community_publish.write_publication_journal(journal)
+
+  raw = next(root.glob("*.json")).read_text()
+  assert set(json.loads(raw)) == {
+    "accepted_commit",
+    "admission_code",
+    "admission_commit_sha",
+    "admission_message",
+    "admission_retryable",
+    "admission_status_code",
+    "created_at",
+    "id",
+    "local_app_id",
+    "repository",
+    "repository_name",
+    "source_commit_sha",
+    "state",
+    "updated_at",
+  }
+  assert "token" not in raw.casefold()
+  assert community_publish.read_publication_journal(
+    "app:42:pocket-list",
+  ) == journal
+
+  journal.admission_message = "x" * 401
+  with pytest.raises(CommunityPublicationError) as raised:
+    community_publish.write_publication_journal(journal)
+  assert raised.value.code == "publication_journal_invalid"

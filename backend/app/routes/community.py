@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from datetime import UTC, datetime
 import hashlib
 import re
 from typing import Any, Literal
 from urllib.parse import quote
+from weakref import WeakValueDictionary
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -22,8 +24,14 @@ from app.community_broker import (
   community_broker,
 )
 from app.community_publish import (
+  CommunityPublicationJournal,
   CommunityPublicationError,
   build_public_snapshot,
+  delete_publication_journal,
+  list_publication_journals,
+  new_publication_journal,
+  read_publication_journal,
+  write_publication_journal,
 )
 from app.database import get_db
 from app.deps import (
@@ -36,6 +44,21 @@ from app.deps import (
 router = APIRouter(prefix="/api/community", tags=["community"])
 _PUBLIC_IDENTITY = Literal["anonymous", "github"]
 _PUBLIC_ID = re.compile(r"^[A-Za-z0-9_:-]{8,200}$")
+_RETRYABLE_ADMISSION_CODES = {
+  "community_unavailable",
+  "request_in_progress",
+  "rate_limited",
+  "temporarily_unavailable",
+}
+_publication_locks: "WeakValueDictionary[str, asyncio.Lock]" = WeakValueDictionary()
+
+
+def _publication_lock(local_app_id: str) -> asyncio.Lock:
+  lock = _publication_locks.get(local_app_id)
+  if lock is None:
+    lock = asyncio.Lock()
+    _publication_locks[local_app_id] = lock
+  return lock
 
 
 def _store_github_owner(
@@ -98,17 +121,208 @@ def _broker_error(exc: CommunityBrokerError) -> HTTPException:
   )
 
 
-async def _request(*args, **kwargs) -> JSONResponse:
+async def _broker_result(*args, **kwargs) -> tuple[Any, int, dict[str, str]]:
   try:
-    payload, status, headers = await community_broker.request(*args, **kwargs)
+    return await community_broker.request(*args, **kwargs)
   except CommunityBrokerError as exc:
     raise _broker_error(exc) from exc
+
+
+def _response(
+  payload: Any, status: int, headers: dict[str, str],
+) -> JSONResponse:
+  normalized_headers = {
+    str(key).lower(): value for key, value in headers.items()
+  }
   outgoing = {
-    key.title(): value for key, value in headers.items()
+    key.title(): value for key, value in normalized_headers.items()
     if key in {"etag", "last-modified", "retry-after"}
   }
   outgoing["Cache-Control"] = "no-store"
   return JSONResponse(payload, status_code=status, headers=outgoing)
+
+
+async def _request(*args, **kwargs) -> JSONResponse:
+  return _response(*(await _broker_result(*args, **kwargs)))
+
+
+def _error_detail(
+  exc: HTTPException, *, default_code: str,
+) -> tuple[str, str]:
+  detail = exc.detail
+  if isinstance(detail, dict):
+    code = str(detail.get("code") or default_code)[:128]
+    message = str(detail.get("message") or "The Store listing request failed.")
+  else:
+    code = default_code
+    message = str(detail or "The Store listing request failed.")
+  return code, message[:400]
+
+
+def _retryable_admission(status_code: int, code: str) -> bool:
+  return (
+    code in _RETRYABLE_ADMISSION_CODES
+    or status_code in {408, 425, 429}
+    or status_code >= 500
+  )
+
+
+def _journal_projection(
+  journal: CommunityPublicationJournal,
+) -> dict[str, Any]:
+  return {
+    "id": f"local-publication:{journal.id}",
+    "local_app_id": journal.local_app_id,
+    "status": journal.state,
+    "repository": journal.repository,
+    "repository_url": f"https://github.com/{quote(journal.repository, safe='/')}",
+    "accepted_commit": journal.accepted_commit,
+    "commit_sha": journal.source_commit_sha,
+    "admission_commit_sha": journal.admission_commit_sha,
+    "admission": {
+      "code": journal.admission_code,
+      "message": journal.admission_message,
+      "status_code": journal.admission_status_code,
+      "retryable": bool(journal.admission_retryable),
+    },
+    "created_at": journal.created_at,
+    "updated_at": journal.updated_at,
+  }
+
+
+def _latest_local_publications() -> list[dict[str, Any]]:
+  rows = sorted(
+    list_publication_journals(), key=lambda row: row.updated_at, reverse=True,
+  )
+  return [_journal_projection(row) for row in rows]
+
+
+def _merge_publication_state(
+  payload: Any, local_items: list[dict[str, Any]],
+) -> Any:
+  if not local_items:
+    return payload
+  if isinstance(payload, list):
+    remote_items = payload
+    container: dict[str, Any] | None = None
+  elif isinstance(payload, dict):
+    remote_items = payload.get("items")
+    if not isinstance(remote_items, list):
+      remote_items = []
+    container = dict(payload)
+  else:
+    remote_items = []
+    container = {}
+
+  local_by_app = {item["local_app_id"]: item for item in local_items}
+  merged = []
+  for item in remote_items:
+    if not isinstance(item, dict):
+      merged.append(item)
+      continue
+    local = local_by_app.pop(str(item.get("local_app_id") or ""), None)
+    if local and _remote_publication_is_current(item, local):
+      delete_publication_journal(local["local_app_id"])
+      merged.append(item)
+    else:
+      merged.append({**item, **local} if local else item)
+  local_only_count = len(local_by_app)
+  merged.extend(local_by_app.values())
+  if container is None:
+    return merged
+  container["items"] = merged
+  if isinstance(container.get("total"), int):
+    container["total"] += local_only_count
+  return container
+
+
+def _publication_timestamp(value: Any) -> float | None:
+  try:
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+      parsed = parsed.replace(tzinfo=UTC)
+    return parsed.timestamp()
+  except (OSError, OverflowError, ValueError):
+    return None
+
+
+def _remote_publication_is_current(
+  remote: dict[str, Any], local: dict[str, Any],
+) -> bool:
+  if str(remote.get("status") or "").casefold() != "live":
+    return False
+  same_repository = (
+    str(remote.get("repository") or "").casefold()
+    == str(local.get("repository") or "").casefold()
+  )
+  remote_commit = str(remote.get("commit_sha") or "").casefold()
+  if same_repository and remote_commit in {
+    str(local.get("commit_sha") or "").casefold(),
+    str(local.get("admission_commit_sha") or "").casefold(),
+  }:
+    return bool(remote_commit)
+  remote_updated = _publication_timestamp(remote.get("updated_at"))
+  local_updated = _publication_timestamp(local.get("updated_at"))
+  return (
+    remote_updated is not None
+    and local_updated is not None
+    and remote_updated >= local_updated
+  )
+
+
+def _publication_journal(
+  *,
+  local_app_id: str,
+  accepted_commit: str,
+  repository_name: str,
+) -> CommunityPublicationJournal | None:
+  journal = read_publication_journal(local_app_id)
+  if journal is None or (
+    journal.accepted_commit != accepted_commit
+    or journal.repository_name != repository_name
+  ):
+    return None
+  return journal
+
+
+def _record_source_public(
+  journal: CommunityPublicationJournal,
+) -> None:
+  journal.state = "listing_pending"
+  journal.admission_code = "admission_pending"
+  journal.admission_message = "The public source is waiting for Store admission."
+  journal.admission_status_code = None
+  journal.admission_retryable = True
+  journal.updated_at = datetime.now(UTC).isoformat()
+  write_publication_journal(journal)
+
+
+def _record_admission_failure(
+  journal: CommunityPublicationJournal,
+  exc: HTTPException,
+) -> tuple[str, str, bool]:
+  code, message = _error_detail(exc, default_code="host_admission_failed")
+  retryable = _retryable_admission(exc.status_code, code)
+  journal.state = "listing_pending" if retryable else "failed"
+  journal.admission_code = code
+  journal.admission_message = message
+  journal.admission_status_code = exc.status_code
+  journal.admission_retryable = retryable
+  journal.updated_at = datetime.now(UTC).isoformat()
+  write_publication_journal(journal)
+  return code, message, retryable
+
+
+def _record_admission_success(
+  journal: CommunityPublicationJournal,
+) -> None:
+  journal.state = "live"
+  journal.admission_code = ""
+  journal.admission_message = ""
+  journal.admission_status_code = None
+  journal.admission_retryable = False
+  journal.updated_at = datetime.now(UTC).isoformat()
+  write_publication_journal(journal)
 
 
 def _release_proof_marker(
@@ -140,6 +354,33 @@ def _local_release_marker(
   return "[mobius-store-source:" + hashlib.sha256(
     f"{repository_marker}\n{accepted_commit}".encode("utf-8"),
   ).hexdigest()[:32] + "]"
+
+
+def _local_admission_key(
+  *,
+  issuer: str,
+  subject: str,
+  local_app_id: str,
+  accepted_commit: str,
+  repository: str,
+  source_commit_sha: str,
+  manifest_path: str,
+  public_identity: str,
+) -> str:
+  """Bind Host idempotency to the exact public-source admission intent."""
+  material = "\n".join((
+    issuer,
+    subject,
+    local_app_id,
+    accepted_commit,
+    repository.casefold(),
+    source_commit_sha.casefold(),
+    manifest_path,
+    public_identity,
+  ))
+  return "store:publish-local:" + hashlib.sha256(
+    material.encode("utf-8"),
+  ).hexdigest()
 
 
 async def _github_json(
@@ -209,9 +450,35 @@ async def list_community_publications(
   _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
 ) -> JSONResponse:
   """Return the current identity's durable publication lifecycle records."""
-  return await _request(
-    "GET", f"{COMMUNITY_PREFIX}/publications",
-    params={"limit": limit, "offset": offset},
+  try:
+    local_items = _latest_local_publications()
+  except CommunityPublicationError as exc:
+    raise HTTPException(
+      exc.status_code, {"code": exc.code, "message": exc.detail},
+    ) from exc
+  try:
+    payload, status, headers = await _broker_result(
+      "GET", f"{COMMUNITY_PREFIX}/publications",
+      params={"limit": limit, "offset": offset},
+    )
+  except HTTPException as exc:
+    if not local_items:
+      raise
+    code, message = _error_detail(exc, default_code="community_unavailable")
+    return _response(
+      {
+        "items": local_items,
+        "registry_unavailable": {
+          "code": code,
+          "message": message,
+          "retryable": True,
+        },
+      },
+      200,
+      exc.headers or {},
+    )
+  return _response(
+    _merge_publication_state(payload, local_items), status, headers,
   )
 
 
@@ -250,9 +517,9 @@ async def publish_local_app_to_github(
 ) -> JSONResponse:
   """Publish one accepted local app revision through the inherited GitHub account.
 
-  GitHub remains the public source of truth. The Host receives only the same
-  exact-revision proof used for an existing public repository; the local token
-  and unpublished worktree never cross either boundary.
+  GitHub remains the public source of truth. The partial-success journal is
+  committed after that exact source becomes public and before Host admission,
+  so a reload or retry can finish the listing without repeating publication.
   """
   _idempotency(idempotency_key)
   app = (
@@ -282,6 +549,123 @@ async def publish_local_app_to_github(
       exc.status_code, {"code": exc.code, "message": exc.detail},
     ) from exc
 
+  local_app_id = f"app:{app.id}:{app.slug}"
+  async with _publication_lock(local_app_id):
+    repository_name = body.repository_name.casefold()
+    journal = _publication_journal(
+      local_app_id=local_app_id,
+      accepted_commit=accepted_commit,
+      repository_name=repository_name,
+    )
+    if journal is not None:
+      repository = journal.repository
+      source_commit_sha = journal.source_commit_sha
+      if (
+        not re.fullmatch(r"[0-9a-f]{40}", source_commit_sha)
+        or not re.fullmatch(
+          r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}", repository,
+        )
+      ):
+        raise HTTPException(
+          409,
+          {
+            "code": "publication_journal_invalid",
+            "message": "The saved publication state is incomplete. Repair it before retrying.",
+          },
+        )
+      if journal.state == "live":
+        return _response(_journal_projection(journal), 200, {})
+      if journal.state == "failed" and not journal.admission_retryable:
+        raise HTTPException(
+          journal.admission_status_code or 409,
+          {
+            "code": journal.admission_code or "host_admission_failed",
+            "message": journal.admission_message,
+            "retryable": False,
+            "publication": _journal_projection(journal),
+          },
+        )
+    else:
+      repository, source_commit_sha = await _publish_local_source(
+        app=app,
+        token=token,
+        issuer=issuer,
+        subject=subject,
+        local_app_id=local_app_id,
+        repository_name=body.repository_name,
+        accepted_commit=accepted_commit,
+        files=files,
+      )
+      journal = new_publication_journal(
+        local_app_id=local_app_id,
+        accepted_commit=accepted_commit,
+        repository_name=repository_name,
+        repository=repository,
+        source_commit_sha=source_commit_sha,
+      )
+
+    host_key = _local_admission_key(
+      issuer=issuer,
+      subject=subject,
+      local_app_id=local_app_id,
+      accepted_commit=accepted_commit,
+      repository=repository,
+      source_commit_sha=source_commit_sha,
+      manifest_path="mobius.json",
+      public_identity="github",
+    )
+    _record_source_public(journal)
+    try:
+      admission_payload, admission_key = await _prepare_existing_github_revision(
+        ExistingGitHubRevisionIn(
+          repository=repository,
+          commit_sha=source_commit_sha,
+          manifest_path="mobius.json",
+          public_identity="github",
+        ),
+        host_key,
+        local_app_id=local_app_id,
+      )
+      journal.admission_commit_sha = str(
+        (admission_payload.get("github") or {}).get("commit_sha") or "",
+      ).casefold()
+      _record_source_public(journal)
+      response = await _request(
+        "POST", f"{COMMUNITY_PREFIX}/apps",
+        body=admission_payload,
+        idempotency_key=admission_key,
+      )
+    except HTTPException as exc:
+      code, message, retryable = _record_admission_failure(journal, exc)
+      raise HTTPException(
+        exc.status_code,
+        {
+          "code": code,
+          "message": message,
+          "retryable": retryable,
+          "publication": _journal_projection(journal),
+        },
+        headers=exc.headers,
+      ) from exc
+    _record_admission_success(journal)
+
+  response.headers["X-Mobius-Accepted-Source-Commit"] = accepted_commit
+  response.headers["X-Mobius-GitHub-Repository"] = repository
+  return response
+
+
+async def _publish_local_source(
+  *,
+  app: models.App,
+  token: str,
+  issuer: str,
+  subject: str,
+  local_app_id: str,
+  repository_name: str,
+  accepted_commit: str,
+  files: list[dict[str, str]],
+) -> tuple[str, str]:
+  """Publish one accepted source tree, or reuse its managed GitHub commit."""
   headers = {
     "Authorization": f"Bearer {token}",
     "Accept": "application/vnd.github+json",
@@ -295,7 +679,7 @@ async def publish_local_app_to_github(
     login = str(user.get("login") or "")
     if not login or not isinstance(user.get("id"), int):
       raise HTTPException(502, "GitHub did not return the connected account.")
-    repository = f"{login}/{body.repository_name}"
+    repository = f"{login}/{repository_name}"
     encoded_repo = quote(repository, safe="/")
     repo, repo_status = await _github_json(
       github, "GET", f"/repos/{encoded_repo}", allow_not_found=True,
@@ -304,7 +688,7 @@ async def publish_local_app_to_github(
       repo, _ = await _github_json(
         github, "POST", "/user/repos",
         body={
-          "name": body.repository_name,
+          "name": repository_name,
           "description": str(app.description or f"{app.name} for Möbius")[:350],
           "private": False,
           "auto_init": False,
@@ -317,7 +701,6 @@ async def publish_local_app_to_github(
     ):
       raise HTTPException(409, "That GitHub repository is not reusable for this app.")
 
-    local_app_id = f"app:{app.id}:{app.slug}"
     repository_marker = _local_repository_marker(
       issuer=issuer, subject=subject, repository=repository,
       local_app_id=local_app_id,
@@ -346,101 +729,70 @@ async def publish_local_app_to_github(
         )
 
     if release_marker in parent_message:
-      source_commit_sha = parent_sha
-    else:
-      tree_items = []
-      for item in files:
-        blob, _ = await _github_json(
-          github, "POST", f"/repos/{encoded_repo}/git/blobs",
-          body={
-            "content": item["content_base64"],
-            "encoding": "base64",
-          },
-        )
-        blob_sha = str(blob.get("sha") or "").lower()
-        if not re.fullmatch(r"[0-9a-f]{40}", blob_sha):
-          raise HTTPException(502, "GitHub did not return a source blob.")
-        tree_items.append({
-          "path": item["path"],
-          "mode": item["mode"],
-          "type": "blob",
-          "sha": blob_sha,
-        })
-      tree, _ = await _github_json(
-        github, "POST", f"/repos/{encoded_repo}/git/trees",
-        body={"tree": tree_items},
-      )
-      tree_sha = str(tree.get("sha") or "").lower()
-      if not re.fullmatch(r"[0-9a-f]{40}", tree_sha):
-        raise HTTPException(502, "GitHub did not return the source tree.")
-      commit, _ = await _github_json(
-        github, "POST", f"/repos/{encoded_repo}/git/commits",
+      return repository, parent_sha
+
+    tree_items = []
+    for item in files:
+      blob, _ = await _github_json(
+        github, "POST", f"/repos/{encoded_repo}/git/blobs",
         body={
-          "message": (
-            f"Publish {app.name} from Möbius\n\n"
-            f"{repository_marker}\n{release_marker}"
-          ),
-          "tree": tree_sha,
-          "parents": [parent_sha] if parent_sha else [],
+          "content": item["content_base64"],
+          "encoding": "base64",
         },
       )
-      source_commit_sha = str(commit.get("sha") or "").lower()
-      if not re.fullmatch(r"[0-9a-f]{40}", source_commit_sha):
-        raise HTTPException(502, "GitHub did not return the source commit.")
-      if ref_status == 404:
-        await _github_json(
-          github, "POST", f"/repos/{encoded_repo}/git/refs",
-          body={"ref": "refs/heads/main", "sha": source_commit_sha},
-        )
-      else:
-        await _github_json(
-          github, "PATCH", f"/repos/{encoded_repo}/git/refs/heads/main",
-          body={"sha": source_commit_sha, "force": False},
-        )
-
-  host_key = "store:publish-local:" + hashlib.sha256(
-    f"{issuer}\n{subject}\n{local_app_id}\n{accepted_commit}".encode("utf-8"),
-  ).hexdigest()
-  try:
-    response = await _publish_existing_github_revision(
-      ExistingGitHubRevisionIn(
-        repository=repository,
-        commit_sha=source_commit_sha,
-        manifest_path="mobius.json",
-        public_identity="github",
-      ),
-      host_key,
-      local_app_id=local_app_id,
+      blob_sha = str(blob.get("sha") or "").lower()
+      if not re.fullmatch(r"[0-9a-f]{40}", blob_sha):
+        raise HTTPException(502, "GitHub did not return a source blob.")
+      tree_items.append({
+        "path": item["path"],
+        "mode": item["mode"],
+        "type": "blob",
+        "sha": blob_sha,
+      })
+    tree, _ = await _github_json(
+      github, "POST", f"/repos/{encoded_repo}/git/trees",
+      body={"tree": tree_items},
     )
-  except HTTPException as exc:
-    raise HTTPException(
-      502,
-      {
-        "code": "listing_pending",
+    tree_sha = str(tree.get("sha") or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", tree_sha):
+      raise HTTPException(502, "GitHub did not return the source tree.")
+    commit, _ = await _github_json(
+      github, "POST", f"/repos/{encoded_repo}/git/commits",
+      body={
         "message": (
-          "The source is public on GitHub, but the Store listing is not live yet. "
-          "Publish again to finish it."
+          f"Publish {app.name} from Möbius\n\n"
+          f"{repository_marker}\n{release_marker}"
         ),
-        "repository": repository,
-        "commit_sha": source_commit_sha,
+        "tree": tree_sha,
+        "parents": [parent_sha] if parent_sha else [],
       },
-    ) from exc
-  response.headers["X-Mobius-Accepted-Source-Commit"] = accepted_commit
-  response.headers["X-Mobius-GitHub-Repository"] = repository
-  return response
+    )
+    source_commit_sha = str(commit.get("sha") or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", source_commit_sha):
+      raise HTTPException(502, "GitHub did not return the source commit.")
+    if ref_status == 404:
+      await _github_json(
+        github, "POST", f"/repos/{encoded_repo}/git/refs",
+        body={"ref": "refs/heads/main", "sha": source_commit_sha},
+      )
+    else:
+      await _github_json(
+        github, "PATCH", f"/repos/{encoded_repo}/git/refs/heads/main",
+        body={"sha": source_commit_sha, "force": False},
+      )
+    return repository, source_commit_sha
 
 
-async def _publish_existing_github_revision(
+async def _prepare_existing_github_revision(
   body: ExistingGitHubRevisionIn,
   idempotency_key: str,
   *,
   local_app_id: str = "",
-) -> JSONResponse:
+) -> tuple[dict[str, Any], str]:
   key = _idempotency(idempotency_key)
   if body.contribution_id:
-    return await _request(
-      "POST", f"{COMMUNITY_PREFIX}/apps",
-      body={
+    return (
+      {
         "github": {
           "repository": body.repository,
           "commit_sha": body.commit_sha.lower(),
@@ -449,7 +801,7 @@ async def _publish_existing_github_revision(
         "public_identity": body.public_identity,
         "contribution_id": body.contribution_id,
       },
-      idempotency_key=key,
+      key,
     )
   if body.public_identity != "github":
     raise HTTPException(
@@ -552,6 +904,18 @@ async def _publish_existing_github_revision(
   }
   if local_app_id:
     payload["local_app_id"] = local_app_id
+  return payload, key
+
+
+async def _publish_existing_github_revision(
+  body: ExistingGitHubRevisionIn,
+  idempotency_key: str,
+  *,
+  local_app_id: str = "",
+) -> JSONResponse:
+  payload, key = await _prepare_existing_github_revision(
+    body, idempotency_key, local_app_id=local_app_id,
+  )
   return await _request(
     "POST", f"{COMMUNITY_PREFIX}/apps",
     body=payload,

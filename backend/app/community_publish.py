@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+from datetime import UTC, datetime
+import hashlib
 import json
 import re
 import subprocess
@@ -10,11 +12,14 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from app import app_git, models
+from app.config import get_settings
+from app.storage_io import atomic_write
 
 
 MAX_SOURCE_FILES = 250
 MAX_SOURCE_BYTES = 64 * 1024 * 1024
 MAX_PATH_BYTES = 512
+MAX_JOURNAL_BYTES = 16 * 1024
 _OID = re.compile(r"^[0-9a-f]{40,64}$")
 _SOURCE_SEGMENT = re.compile(r"^[A-Za-z0-9._@+ -]+$")
 _SENSITIVE_DIRS = {
@@ -29,6 +34,13 @@ _SECRET_PATTERNS = (
   re.compile(r"\bgithub_pat_[A-Za-z0-9_]{40,}\b"),
   re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
 )
+_JOURNAL_STATES = {"listing_pending", "failed", "live"}
+_LOCAL_APP_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
+_REPOSITORY = re.compile(
+  r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$",
+)
+_REPOSITORY_NAME = re.compile(r"^[a-z0-9_.-]{1,100}$")
+_ADMISSION_CODE = re.compile(r"^[A-Za-z0-9_.:-]{0,128}$")
 
 
 @dataclass(frozen=True)
@@ -36,6 +48,187 @@ class CommunityPublicationError(Exception):
   detail: str
   code: str = "invalid_publication"
   status_code: int = 400
+
+
+@dataclass
+class CommunityPublicationJournal:
+  """Public-source coordinates and the resumable Host admission outcome."""
+
+  id: str
+  local_app_id: str
+  accepted_commit: str
+  repository_name: str
+  repository: str
+  source_commit_sha: str
+  admission_commit_sha: str
+  state: str
+  admission_code: str
+  admission_message: str
+  admission_status_code: int | None
+  admission_retryable: bool
+  created_at: str
+  updated_at: str
+
+
+def _journal_root() -> Path:
+  return Path(get_settings().data_dir) / "community-publications"
+
+
+def _journal_id(local_app_id: str) -> str:
+  return hashlib.sha256(local_app_id.encode("utf-8")).hexdigest()
+
+
+def _journal_path(local_app_id: str) -> Path:
+  return _journal_root() / f"{_journal_id(local_app_id)}.json"
+
+
+def _validate_journal(journal: CommunityPublicationJournal) -> None:
+  valid_status = (
+    journal.admission_status_code is None
+    or isinstance(journal.admission_status_code, int)
+    and 100 <= journal.admission_status_code <= 599
+  )
+  valid_time = True
+  for value in (journal.created_at, journal.updated_at):
+    try:
+      parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+      valid_time = False
+      break
+    if parsed.tzinfo is None or not 1 <= len(value) <= 64:
+      valid_time = False
+      break
+  if (
+    journal.id != _journal_id(journal.local_app_id)
+    or not _LOCAL_APP_ID.fullmatch(journal.local_app_id)
+    or not _OID.fullmatch(journal.accepted_commit)
+    or not _REPOSITORY_NAME.fullmatch(journal.repository_name)
+    or not _REPOSITORY.fullmatch(journal.repository)
+    or not re.fullmatch(r"[0-9a-f]{40}", journal.source_commit_sha)
+    or journal.admission_commit_sha != ""
+    and not re.fullmatch(r"[0-9a-f]{40}", journal.admission_commit_sha)
+    or journal.state not in _JOURNAL_STATES
+    or not _ADMISSION_CODE.fullmatch(journal.admission_code)
+    or len(journal.admission_message) > 400
+    or not valid_status
+    or not isinstance(journal.admission_retryable, bool)
+    or not valid_time
+  ):
+    raise CommunityPublicationError(
+      "The saved publication state is invalid.",
+      "publication_journal_invalid",
+      409,
+    )
+
+
+def _decode_journal(path: Path) -> CommunityPublicationJournal:
+  try:
+    if path.is_symlink() or path.stat().st_size > MAX_JOURNAL_BYTES:
+      raise ValueError("unsafe journal path")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    journal = CommunityPublicationJournal(
+      id=str(payload["id"]),
+      local_app_id=str(payload["local_app_id"]),
+      accepted_commit=str(payload["accepted_commit"]),
+      repository_name=str(payload["repository_name"]),
+      repository=str(payload["repository"]),
+      source_commit_sha=str(payload["source_commit_sha"]),
+      admission_commit_sha=str(payload.get("admission_commit_sha") or ""),
+      state=str(payload["state"]),
+      admission_code=str(payload.get("admission_code") or ""),
+      admission_message=str(payload.get("admission_message") or ""),
+      admission_status_code=payload.get("admission_status_code"),
+      admission_retryable=payload.get("admission_retryable"),
+      created_at=str(payload["created_at"]),
+      updated_at=str(payload["updated_at"]),
+    )
+    _validate_journal(journal)
+    if path.name != f"{journal.id}.json":
+      raise ValueError("journal identity mismatch")
+    return journal
+  except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+    raise CommunityPublicationError(
+      "The saved publication state is invalid.",
+      "publication_journal_invalid",
+      409,
+    ) from exc
+
+
+def read_publication_journal(
+  local_app_id: str,
+) -> CommunityPublicationJournal | None:
+  path = _journal_path(local_app_id)
+  if not path.exists():
+    return None
+  return _decode_journal(path)
+
+
+def list_publication_journals() -> list[CommunityPublicationJournal]:
+  root = _journal_root()
+  if root.is_symlink():
+    raise CommunityPublicationError(
+      "The saved publication state is invalid.",
+      "publication_journal_invalid",
+      409,
+    )
+  if not root.is_dir():
+    return []
+  paths = sorted(root.glob("*.json"))
+  if len(paths) > 1000:
+    raise CommunityPublicationError(
+      "There are too many saved publication states.",
+      "publication_journal_too_large",
+      409,
+    )
+  return [_decode_journal(path) for path in paths]
+
+
+def new_publication_journal(
+  *,
+  local_app_id: str,
+  accepted_commit: str,
+  repository_name: str,
+  repository: str,
+  source_commit_sha: str,
+) -> CommunityPublicationJournal:
+  now = datetime.now(UTC).isoformat()
+  return CommunityPublicationJournal(
+    id=_journal_id(local_app_id),
+    local_app_id=local_app_id,
+    accepted_commit=accepted_commit,
+    repository_name=repository_name,
+    repository=repository,
+    source_commit_sha=source_commit_sha,
+    admission_commit_sha="",
+    state="listing_pending",
+    admission_code="admission_pending",
+    admission_message="The public source is waiting for Store admission.",
+    admission_status_code=None,
+    admission_retryable=True,
+    created_at=now,
+    updated_at=now,
+  )
+
+
+def write_publication_journal(journal: CommunityPublicationJournal) -> None:
+  _validate_journal(journal)
+  if _journal_root().is_symlink():
+    raise CommunityPublicationError(
+      "The saved publication state is invalid.",
+      "publication_journal_invalid",
+      409,
+    )
+  atomic_write(
+    _journal_path(journal.local_app_id),
+    json.dumps(journal.__dict__, ensure_ascii=False, sort_keys=True) + "\n",
+  )
+
+
+def delete_publication_journal(local_app_id: str) -> None:
+  try:
+    _journal_path(local_app_id).unlink()
+  except FileNotFoundError:
+    pass
 
 
 def _git(repo: Path, *args: str, binary: bool = False) -> bytes | str:
