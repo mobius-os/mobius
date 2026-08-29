@@ -151,7 +151,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `config.py` | `Settings` via pydantic-settings; reads `.env` |
 | `database.py` | SQLAlchemy engine, pool instrumentation, `SessionLocal`, `Base`, and `get_db`; contains no schema history |
 | `schema_migrations.py` | Append-only schema/data migrations, durable ledger primitives, and ORM/live-schema parity inspection; published functions are semantic-hash frozen |
-| `startup.py` | Two-phase boot: process/schema preflight first, then writer/reconciliation/database supervisors only after schema parity succeeds |
+| `startup.py` | Two-phase boot: process/database preflight first, then writer/reconciliation/database supervisors only after migrations and mapped-shape checks succeed |
 | `models.py` | ORM tables: `Owner`, `Chat`, `ChatRun`, `App`, `PushSubscription`, `Notification` |
 | `schemas.py` | Pydantic request/response models |
 | `auth.py` | bcrypt hashing, JWT creation/decoding, Fernet encryption |
@@ -213,23 +213,25 @@ Self-hosters use the authority they already own:
 `docker compose exec -u 0 app bash`. This attaches to the live container and
 does not replace its normal process.
 
-### Health, readiness, and schema-degraded boot
+### Health, readiness, and database-degraded boot
 
 `GET /api/health` is reachability and remains HTTP 200 whenever the process can
 answer; the shell uses that distinction so a server fault never masquerades as
 the device being offline. `GET /api/ready` is serviceability: it requires both
-an ORM-compatible database and the single-writer persistence actor. Deployment
-and container probes use readiness. `GET /api/health/strict` retains the
-schema-only diagnostic contract.
+a successfully initialized database with every mapped table and column, and
+the single-writer persistence actor. Deployment and container probes use
+readiness. `GET /api/health/strict` retains the database-only diagnostic
+contract.
 
-Boot runs `create_all`, append-only migrations, and `orm_schema_gaps()` before
-starting any database owner. A remaining gap enters a bounded degraded mode:
-ordinary APIs return one deterministic 503, database startup tasks and
-supervisors do not run, cron remains disabled, and static shell plus health,
-version, browser-bootstrap, and authenticated restart surfaces remain. External
-Recovery may alter the database, but the process intentionally keeps its boot
-verdict until restart; promoting only part of the skipped startup plan inside a
-health probe would create a second, race-prone boot mechanism.
+Boot runs `create_all`, append-only migrations, and `mapped_schema_gaps()` before
+starting any database owner. A migration/initialization failure or remaining
+mapped-shape gap enters one bounded degraded mode: ordinary APIs return a
+deterministic 503, database startup tasks and supervisors do not run, cron
+remains disabled, and static shell plus health, version, browser-bootstrap, and
+the normally authenticated restart surface remain. External Recovery may alter
+the database, but the process intentionally keeps its boot verdict until
+restart; promoting only part of the skipped startup plan inside a health probe
+would create a second, race-prone boot mechanism.
 
 ### Misc shared helpers
 
@@ -486,6 +488,13 @@ The in-product agent is a first-class reader of this code, and its behavior has 
 ├── published/<token>/      published site snapshots (shareable /sites/<token>/ URLs)
 └── service-token.txt       owner JWT used only by the platform job wrapper (chmod 600)
 ```
+
+SQLite is the shipped and tested persistence runtime. Some frozen historical
+migrations retain PostgreSQL branches because already-published migration code
+is immutable; those branches are compatibility history, not a second supported
+deployment contract. Adding another database therefore requires an explicit
+driver, end-to-end migration/readiness coverage, and deployment documentation
+rather than relying on those old conditional statements.
 
 `/data` is itself a git repo owned by the `mobius` user, tracking `shared/memory/` and `shared/skills/` with a nightly safety-net commit, so a bad memory consolidation or skill overwrite is recoverable. Inspect it as that user (`docker exec -u mobius ... git -C /data ...`) — as root it dies with "dubious ownership," which reads misleadingly as an empty/non-repo tree.
 
