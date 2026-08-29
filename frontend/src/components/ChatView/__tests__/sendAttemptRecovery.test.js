@@ -2,11 +2,13 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  SEND_ATTEMPT_MISSING_MESSAGE,
   clearFailedSendAttempt,
   failedSendReconciliation,
   loadFailedSendAttempt,
   saveFailedSendAttempt,
   sendAttemptIsDurable,
+  settleFailedSendConfirmation,
 } from '../sendAttemptRecovery.js'
 
 function storageStub() {
@@ -89,6 +91,56 @@ test('a confirmed missing send keeps the draft and offers a safe retry', () => {
       sendFailure: 'That message didn’t reach the chat. It’s safe here—send it again when ready.',
     },
   )
+})
+
+test('a failed confirmation settles the provisional state through missing-send reconciliation', async () => {
+  const reconciliations = []
+  const result = await settleFailedSendConfirmation(
+    async () => null,
+    options => {
+      reconciliations.push(options)
+      return failedSendReconciliation(
+        { cid: 'cid-1' },
+        [],
+        [],
+        options,
+      )
+    },
+  )
+
+  assert.deepEqual(reconciliations, [{ reportMissing: true }])
+  assert.deepEqual(result, {
+    status: 'missing',
+    sendFailure: 'That message didn’t reach the chat. It’s safe here—send it again when ready.',
+  })
+})
+
+test('a rejected confirmation reaches the same bounded settlement', async () => {
+  const result = await settleFailedSendConfirmation(
+    async () => { throw new Error('confirmation unavailable') },
+    options => failedSendReconciliation(
+      { cid: 'cid-1' },
+      [],
+      [],
+      options,
+    ),
+  )
+
+  assert.equal(result.status, 'missing')
+  assert.equal(result.sendFailure, SEND_ATTEMPT_MISSING_MESSAGE)
+})
+
+test('a successful confirmation leaves the authoritative refresh in control', async () => {
+  const confirmation = { running: true }
+  let missingReconciliations = 0
+
+  const result = await settleFailedSendConfirmation(
+    async () => confirmation,
+    () => { missingReconciliations += 1 },
+  )
+
+  assert.equal(result, confirmation)
+  assert.equal(missingReconciliations, 0)
 })
 
 test('clearing a failed attempt prevents stale cid reuse', () => {

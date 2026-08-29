@@ -88,3 +88,21 @@ export function failedSendReconciliation(
     ...(reportMissing ? { sendFailure: SEND_ATTEMPT_MISSING_MESSAGE } : {}),
   }
 }
+
+/**
+ * Keep the provisional "Checking…" state until the bounded confirmation read
+ * settles. A failed read cannot prove where the send landed, but it is the end
+ * of this automatic check: hand the exact cid back to the existing
+ * reconciliation owner, which either observes it locally or exposes the safe
+ * idempotent retry guidance with the restored draft still intact.
+ */
+export async function settleFailedSendConfirmation(confirm, reconcileMissing) {
+  try {
+    const confirmation = await confirm()
+    if (confirmation !== null) return confirmation
+  } catch {
+    // Confirmation is a best-effort network read. Its user-facing fallback is
+    // the same for an explicit null result and an unexpected rejection.
+  }
+  return reconcileMissing({ reportMissing: true })
+}

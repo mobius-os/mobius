@@ -169,7 +169,10 @@ import {
   cidForSendAttempt,
   sendDraftIdentity,
 } from './sendAttemptIdentity.js'
-import { clearFailedSendAttempt } from './sendAttemptRecovery.js'
+import {
+  clearFailedSendAttempt,
+  settleFailedSendConfirmation,
+} from './sendAttemptRecovery.js'
 import {
   clearComposerDraft,
   consumeComposerHandoff,
@@ -1205,6 +1208,22 @@ export default function ChatView({
     queryClient,
     reconcileFailedSendAttempt,
     setActiveAssistantMessageId,
+  ])
+
+  const settleAmbiguousSendConfirmation = useCallback(() => (
+    settleFailedSendConfirmation(
+      () => fetchMessages({ force: true }),
+      options => reconcileFailedSendAttempt(
+        messagesRef.current,
+        pendingQueue.pendingMessagesRef.current,
+        options,
+      ),
+    )
+  ), [
+    fetchMessages,
+    messagesRef,
+    pendingQueue.pendingMessagesRef,
+    reconcileFailedSendAttempt,
   ])
 
   // Active-turn runtime reconciliation. The SSE stream is authoritative for
@@ -2969,7 +2988,7 @@ export default function ChatView({
           ? null
           : sendFailureMessage(err, { online: getOnlineSnapshot() }))
         if (isAmbiguousSendFailure(err)) {
-          void fetchMessages({ force: true })
+          void settleAmbiguousSendConfirmation()
         }
         if (modelSelectionBlocked) {
           setModelSelectionRequest(request => request + 1)
@@ -3175,7 +3194,7 @@ export default function ChatView({
         ? null
         : sendFailureMessage(err, { online: getOnlineSnapshot() }))
       if (isAmbiguousSendFailure(err)) {
-        void fetchMessages({ force: true })
+        void settleAmbiguousSendConfirmation()
       }
       if (modelSelectionBlocked) {
         setModelSelectionRequest(request => request + 1)
@@ -3207,6 +3226,7 @@ export default function ChatView({
     pendingFiles,
     commitMessages,
     fetchMessages,
+    settleAmbiguousSendConfirmation,
     clearFiles,
     restoreFiles,
     releaseFiles,
