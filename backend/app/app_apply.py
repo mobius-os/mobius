@@ -351,10 +351,12 @@ async def apply_source_revision(
           slug=manifest["id"],
           cross_app_access="none",
           share_with_apps="none",
+          # SQLAlchemy's Python column defaults materialize on INSERT. This
+          # value participates in the pre-INSERT capability projection, so it
+          # must already match the durable default before compilation.
+          chat_log_access="none",
           offline_capable=False,
         )
-        db.add(app)
-        db.flush()
       assert app is not None
       previous_state = (
         app.name,
@@ -370,9 +372,12 @@ async def apply_source_revision(
         app.icon_override_png,
       )
 
-      staged = _compiled_dir() / f"app-{app.id}.js.staging"
+      # Explicit apply is serialized by the lifecycle lock, so it can compile
+      # under one shared, non-servable name before a new row has a numeric id.
+      # Publication still begins only after the bytes move into the app-owned
+      # staging contract below.
+      staged = _compiled_dir() / "app-apply.js.staging"
       await compile_jsx(
-        app.id,
         source,
         out_path=staged,
         source_path=snapshot_dir / entry_relative,
@@ -405,7 +410,6 @@ async def apply_source_revision(
       if chat_id is not None:
         app.chat_id = chat_id
 
-      previous_bundle = owned_bundle_path(app.id, app.compiled_path)
       committed = await _git_operation(
         "commit",
         app_git.commit_worktree_tree,
@@ -425,6 +429,19 @@ async def apply_source_revision(
         # local source advances, require publication verification again rather
         # than silently offering a stale repository to other people.
         app.published_manifest_url = None
+      if created:
+        # A new App has no numeric id until SQLite inserts it. Compiling after
+        # that insert used to hold the database write lock for the entire
+        # build, so an unrelated chat creation could exhaust SQLite's busy
+        # timeout. Everything slow or failure-prone above this point is
+        # independent of the durable identity; begin the write transaction
+        # only when the accepted Git tree and compiled bytes are ready.
+        db.add(app)
+        db.flush()
+      app_staged = _compiled_dir() / f"app-{app.id}.js.staging"
+      staged.replace(app_staged)
+      staged = app_staged
+      previous_bundle = owned_bundle_path(app.id, app.compiled_path)
       published = publish_staged_bundle(app.id, staged)
       staged = None
 

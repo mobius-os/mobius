@@ -12,7 +12,7 @@ async def test_compile_accepts_default_reexport(tmp_path):
   output = tmp_path / "compiled" / "app.js"
   source = "const App = () => null;\nexport { App as default };"
 
-  await compile_jsx(1, source, out_path=output)
+  await compile_jsx(source, out_path=output)
 
   assert output.is_file()
 
@@ -29,7 +29,7 @@ async def test_compile_inlines_dynamic_imports(tmp_path):
   entry.write_text(source)
   dependency.write_text("export const value = 'inlined-detail'")
 
-  await compile_jsx(1, source, out_path=output, source_path=entry)
+  await compile_jsx(source, out_path=output, source_path=entry)
 
   compiled = output.read_text()
   assert "inlined-detail" in compiled
@@ -47,7 +47,7 @@ async def test_compile_rejects_unresolved_import_matching_output_name(tmp_path):
   entry.write_text(source)
 
   with pytest.raises(CompileError, match="Compilation failed") as exc:
-    await compile_jsx(1, source, out_path=output, source_path=entry)
+    await compile_jsx(source, out_path=output, source_path=entry)
 
   assert "Could not resolve 'index.js'" in exc.value.stderr
   assert not output.exists()
@@ -61,7 +61,7 @@ async def test_compile_preserves_explicit_online_dynamic_import(tmp_path):
     "export default function App(){ return null }"
   )
 
-  await compile_jsx(1, source, out_path=output)
+  await compile_jsx(source, out_path=output)
 
   assert "https://esm.sh/example-package" in output.read_text()
 
@@ -81,7 +81,7 @@ async def test_compile_is_deterministic_across_snapshot_directories(tmp_path):
     (root / "detail.js").write_text("export const value = 'stable'")
     output = tmp_path / f"{name}.js"
 
-    await compile_jsx(1, source, out_path=output, source_path=entry)
+    await compile_jsx(source, out_path=output, source_path=entry)
     outputs.append(output.read_bytes())
 
   assert outputs[0] == outputs[1]
@@ -93,7 +93,7 @@ async def test_compile_rejects_comment_that_only_mentions_default_export(tmp_pat
   source = "// export default function Fake() {}\nexport const value = 1;"
 
   with pytest.raises(CompileError, match="Compilation failed") as exc:
-    await compile_jsx(1, source, out_path=output)
+    await compile_jsx(source, out_path=output)
 
   assert "no default export" in exc.value.stderr
   assert not output.exists()
@@ -109,7 +109,7 @@ async def test_compile_rejects_css_and_removes_side_output(tmp_path):
   css.write_text("body { color: red; }")
 
   with pytest.raises(CompileError, match="Compilation failed") as exc:
-    await compile_jsx(1, source, out_path=output, source_path=entry)
+    await compile_jsx(source, out_path=output, source_path=entry)
 
   assert "CSS imports are not supported" in exc.value.stderr
   assert not output.exists()

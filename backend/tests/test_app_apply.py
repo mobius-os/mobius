@@ -9,6 +9,7 @@ import pytest
 
 from app import app_apply, app_git, icon_assets, models
 from app.config import get_settings
+from app.database import SessionLocal
 
 
 def _source(slug: str = "demo") -> Path:
@@ -88,6 +89,47 @@ def test_apply_creates_from_manifest_and_commits_exact_source(
     source / "index.jsx"
   ).read_bytes()
   assert app_git._run(source, "status", "--porcelain").stdout == ""
+
+
+def test_new_app_compile_does_not_hold_sqlite_write_lock(
+  client, auth, monkeypatch,
+):
+  """A slow first build must not block unrelated durable owner work."""
+  source = _source()
+  concurrent_chat_id = "chat-created-during-app-compile"
+
+  async def compile_while_chat_is_created(
+    _source, *, out_path, source_path=None,
+  ):
+    del source_path
+    concurrent = SessionLocal()
+    try:
+      # A regression should fail promptly instead of waiting out the live
+      # five-second busy timeout. WAL permits this write while the apply owns
+      # only its preflight read transaction; an early App INSERT does not.
+      concurrent.connection().exec_driver_sql("PRAGMA busy_timeout=50")
+      concurrent.add(models.Chat(
+        id=concurrent_chat_id,
+        title="Concurrent chat",
+        messages=[],
+        pending_messages=[],
+      ))
+      concurrent.commit()
+    finally:
+      concurrent.close()
+    Path(out_path).write_text("export default function App(){}\n")
+    return str(out_path)
+
+  monkeypatch.setattr(app_apply, "compile_jsx", compile_while_chat_is_created)
+
+  response = _apply(client, auth, source)
+
+  assert response.status_code == 200, response.text
+  verify = SessionLocal()
+  try:
+    assert verify.get(models.Chat, concurrent_chat_id) is not None
+  finally:
+    verify.close()
 
 
 def test_apply_updates_multifile_revision_once(client, auth, db):
@@ -483,6 +525,42 @@ def test_database_failure_after_git_commit_is_retryable(
   row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
   assert row.compiled_path != previous_bundle
   assert "accepted-ahead" in row.jsx_source
+  assert app_git.head_sha(source, app_git.LOCAL_BRANCH) == accepted_head
+
+
+def test_database_failure_during_create_is_retryable_without_orphan_row(
+  client, auth, db, monkeypatch,
+):
+  source = _source()
+  original_commit = app_apply.Session.commit
+  calls = 0
+
+  def fail_once(session):
+    nonlocal calls
+    calls += 1
+    if calls == 1:
+      raise RuntimeError("simulated database failure")
+    return original_commit(session)
+
+  monkeypatch.setattr(app_apply.Session, "commit", fail_once)
+  with pytest.raises(RuntimeError, match="simulated database failure"):
+    _apply(client, auth, source)
+
+  accepted_head = app_git.head_sha(source, app_git.LOCAL_BRANCH)
+  assert db.query(models.App).filter_by(source_dir=str(source)).first() is None
+  assert not list(app_apply._compiled_dir().glob("app-*-*.js"))
+  assert not list(app_apply._compiled_dir().glob("*.js.staging"))
+
+  retry = _apply(client, auth, source)
+
+  assert retry.status_code == 200, retry.text
+  assert retry.json()["mode"] == "created"
+  row = db.query(models.App).populate_existing().filter_by(
+    source_dir=str(source),
+  ).one()
+  assert row.source_commit == accepted_head
+  assert Path(row.compiled_path).is_file()
+  assert not list(app_apply._compiled_dir().glob("*.js.staging"))
   assert app_git.head_sha(source, app_git.LOCAL_BRANCH) == accepted_head
 
 
