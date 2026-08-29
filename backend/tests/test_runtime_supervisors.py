@@ -224,3 +224,54 @@ async def test_malformed_scratch_release_event_is_ignored(
   await asyncio.sleep(0)
   assert release_calls == []
   await supervisors.stop()
+
+
+@pytest.mark.asyncio
+async def test_periodic_recovery_retries_missed_wakes_and_expired_leases(
+  monkeypatch,
+):
+  import app.broadcast as broadcast_module
+  import app.chat as chat_module
+  import app.contribution_autopilot as autopilot_module
+  import app.delegations as delegations_module
+  import app.runtime_supervisors as supervisors_module
+
+  broadcast = SystemBroadcast()
+  recovered = asyncio.Event()
+  block_second_wake = asyncio.Event()
+  wake_calls = 0
+  sweep_sessions = []
+
+  async def no_chats(*_args, **_kwargs):
+    return chat_module.ContinuationSweepResult()
+
+  async def wake_parents():
+    nonlocal wake_calls
+    wake_calls += 1
+    if wake_calls > 1:
+      await block_second_wake.wait()
+    return 0
+
+  def sweep(db):
+    sweep_sessions.append(db)
+    recovered.set()
+    return 0
+
+  monkeypatch.setattr(broadcast_module, "get_system_broadcast", lambda: broadcast)
+  monkeypatch.setattr(supervisors_module, "SessionLocal", _EmptySession)
+  monkeypatch.setattr(supervisors_module, "WAKE_RECOVERY_INTERVAL_SECS", 0)
+  monkeypatch.setattr(chat_module, "sweep_reset_parks", no_chats)
+  monkeypatch.setattr(
+    delegations_module, "wake_parents_for_completed_delegations", wake_parents,
+  )
+  monkeypatch.setattr(autopilot_module, "sweep_expired_leases", sweep)
+
+  supervisors = _supervisors()
+  await supervisors._start_chat_supervisors()
+  await asyncio.wait_for(recovered.wait(), timeout=1)
+
+  assert wake_calls == 1
+  assert len(sweep_sessions) == 1
+  assert "wake-recovery-sweep" in supervisors._tasks
+  await supervisors.stop()
+  assert supervisors._tasks == {}

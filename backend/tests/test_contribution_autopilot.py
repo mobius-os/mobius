@@ -326,6 +326,42 @@ def test_stale_lease_reclaim_and_double_stale_escalate(db):
   assert v["reason"] == "stale_rounds"
 
 
+def test_expired_lease_is_reclaimed_without_a_new_event(db):
+  autopilot.stamp_grant(db, 1, "wedged", head_sha="abc")
+  autopilot.claim_for_round(
+    db, 1, "wedged", attention_key="checks_failed:abc",
+    event_at="2026-07-01T00:00:00Z",
+  )
+  row = autopilot.get_row(db, 1, "wedged")
+  row.lease_expires_at = now_naive_utc() - timedelta(minutes=1)
+  db.commit()
+
+  assert autopilot.sweep_expired_leases(db) == 1
+  db.expire_all()
+  reclaimed = autopilot.get_row(db, 1, "wedged")
+  assert reclaimed.state == "idle"
+  assert reclaimed.run_id is None
+  assert reclaimed.consecutive_failures == 1
+  assert reclaimed.rounds_json[-1]["outcome"] == "stale"
+  assert autopilot.sweep_expired_leases(db) == 0
+
+  second = autopilot.claim_for_round(
+    db, 1, "wedged", attention_key="checks_failed:def",
+    event_at="2026-07-02T00:00:00Z",
+  )
+  assert second["status"] == "granted"
+  row = autopilot.get_row(db, 1, "wedged")
+  row.lease_expires_at = now_naive_utc() - timedelta(minutes=1)
+  db.commit()
+  assert autopilot.sweep_expired_leases(db) == 1
+
+  escalated = autopilot.claim_for_round(
+    db, 1, "wedged", attention_key="checks_failed:ghi",
+    event_at="2026-07-03T00:00:00Z",
+  )
+  assert escalated == {"status": "escalate", "reason": "stale_rounds"}
+
+
 def test_round_limit_escalates(db):
   autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
   row = autopilot.get_row(db, 1, "rec")
