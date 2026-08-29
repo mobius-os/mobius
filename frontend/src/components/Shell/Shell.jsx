@@ -2698,6 +2698,10 @@ export default function Shell({ onInitialVisualReady }) {
   // the durable app list after every initial connection/reconnect; after the
   // first list establishes the session baseline, fresh chat-owned rows flow
   // through the same idempotent placement resolver as live app_preview_ready events.
+  // This runs as a causal barrier in front of the system stream's reader, so
+  // however long it takes is how long every buffered system event waits. Keep
+  // the reads here few and short; anything unbounded added below stalls live
+  // events until it settles.
   const reconcileSystemStateOnOpen = useCallback(async () => {
     reconcileNotifications()
     try {

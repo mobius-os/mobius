@@ -93,6 +93,11 @@ export default function useSystemEventStream(
         // settle before applying newer events already buffered on this stream.
         // Without this ordering, a slower list response can overwrite a run
         // start/finish that arrived immediately after the connection opened.
+        // The cost is paid by every event type on this stream, not just the
+        // chat indicators the ordering protects: nothing is read until onOpen
+        // settles, and the barrier is only as bounded as onOpen itself. Events
+        // are delayed, never dropped — the reader drains the buffered bytes in
+        // order once the barrier lifts. Keep the bound in the reconciler.
         await onOpenRef.current?.()
         if (cancelled) return
 
