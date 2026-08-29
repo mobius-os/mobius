@@ -480,10 +480,16 @@ export const api = {
         { signal, timeoutMs },
       )
     },
-    currentUsage: (chatId, { signal } = {}) => apiFetch(
-      `/chats/${encodeURIComponent(chatId)}/usage/current`,
-      { signal },
-    ),
+    currentUsage: (chatId, { provider, providerSessionId, signal } = {}) => {
+      const params = new URLSearchParams({
+        provider,
+        provider_session_id: providerSessionId,
+      })
+      return apiFetch(
+        `/chats/${encodeURIComponent(chatId)}/usage/current?${params}`,
+        { signal },
+      )
+    },
     update: (chatId, payload) => listAffectingMutation('chats', `/chats/${chatId}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
