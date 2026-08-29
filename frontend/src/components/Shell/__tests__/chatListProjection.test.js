@@ -7,6 +7,7 @@ import {
   withChatOwnerInput,
   withChatRename,
   withChatRunState,
+  withoutSettledLocalChatRuns,
 } from '../chatListProjection.js'
 
 const rows = [
@@ -43,6 +44,26 @@ test('run and rename events project only the committed fields they carry', () =>
   })
   assert.equal(renamed[0].title, 'Current topic')
   assert.equal(renamed[0].updated_at, '2026-08-01T12:30:00Z')
+})
+
+test('fresh reconnect truth retires only settled optimistic run markers', () => {
+  const local = new Set(['settled', 'running', 'not-listed', 'uncertain'])
+  const reconciled = withoutSettledLocalChatRuns(local, [
+    { id: 'settled', running: false },
+    { id: 'running', running: true },
+    { id: 'uncertain' },
+  ])
+
+  assert.deepEqual([...reconciled], ['running', 'not-listed', 'uncertain'])
+  assert.deepEqual([...local], ['settled', 'running', 'not-listed', 'uncertain'],
+    'reconciliation must not mutate the previous React state')
+  assert.equal(
+    withoutSettledLocalChatRuns(reconciled, [
+      { id: 'running', running: true },
+    ]),
+    reconciled,
+    'a no-op reconciliation preserves Set identity',
+  )
 })
 
 test('owner-input events project kind while only questions update their durable id', () => {

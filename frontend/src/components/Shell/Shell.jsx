@@ -95,6 +95,7 @@ import {
   withChatOwnerInput,
   withChatRename,
   withChatRunState,
+  withoutSettledLocalChatRuns,
 } from './chatListProjection.js'
 import {
   clearComposerDraft,
@@ -1700,6 +1701,8 @@ export default function Shell({ onInitialVisualReady }) {
   // time. The computed streamingChatIds below merges those with durable
   // `running` flags from /api/chats, so drawer dots survive navigation,
   // reloads, and PWA reopen even when the streaming ChatView is unmounted.
+  // A fresh reconnect also retires local starts whose finish event was missed;
+  // otherwise the optimistic half of this union can outlive server truth.
   // attentionChatIds is separate: it marks a background-finished chat until
   // the user opens it, without pretending the turn is still streaming.
   const [localStreamingChatIds, setLocalStreamingChatIds] = useState(() => new Set())
@@ -1951,11 +1954,24 @@ export default function Shell({ onInitialVisualReady }) {
       .then(data => data || [])
       .catch(() => queryClient.getQueryData(appQueries.keys.all) || [])
   }, [queryClient, reconcileApps])
+  const fetchFreshChats = useCallback(() => {
+    // Shell-level chat state (running, waiting for owner input, activity) is
+    // durable and must win over a transient event that may have been missed
+    // while the page was suspended or the server restarted. Cancel first so
+    // this reconciliation cannot coalesce with an older in-flight list read
+    // and then overwrite a newer event projection with its stale response.
+    return queryClient.cancelQueries({ queryKey: chatQueries.keys.all })
+      .then(() => queryClient.fetchQuery({
+        queryKey: chatQueries.keys.all,
+        queryFn: async () => reconcileCreatedChats(await chatQueries.list.fetch()),
+        staleTime: 0,
+      }))
+      .then(data => data || [])
+  }, [queryClient, reconcileCreatedChats])
   const refreshChats = useCallback(() => {
-    return queryClient.refetchQueries({ queryKey: chatQueries.keys.all })
-      .then(() => queryClient.getQueryData(chatQueries.keys.all) || [])
-      .catch(() => [])
-  }, [queryClient])
+    return fetchFreshChats()
+      .catch(() => queryClient.getQueryData(chatQueries.keys.all) || [])
+  }, [fetchFreshChats, queryClient])
   const projectChatList = useCallback((project) => {
     queryClient.setQueryData(chatQueries.keys.all, current => {
       const next = project(Array.isArray(current) ? current : [])
@@ -2683,21 +2699,36 @@ export default function Shell({ onInitialVisualReady }) {
   // through the same idempotent placement resolver as live app_preview_ready events.
   const reconcileSystemStateOnOpen = useCallback(() => {
     reconcileNotifications()
-    void Promise.all([
+    return Promise.all([
       invalidateShellListCache('apps'),
       invalidateShellListCache('chats'),
       reconcileDeletedAppIdentities(),
       reconcileDeletedChatIdentities(),
-    ]).then(() => {
-      refreshApps()
-      refreshChats()
-    })
+    ]).then(() => Promise.all([
+      refreshApps(),
+      // Unlike ordinary best-effort refreshes, reconnect must not use a stale
+      // cached fallback to retire an optimistic active-work marker.
+      fetchFreshChats(),
+    ])).then(([, refreshedChats]) => {
+      setLocalStreamingChatIds(prev => (
+        withoutSettledLocalChatRuns(prev, refreshedChats)
+      ))
+      for (const chat of refreshedChats) {
+        if (
+          chat.running
+          || visibleChatIdsRef.current.has(String(chat.id))
+        ) {
+          markChatRunReconcile(chat.id)
+        }
+      }
+    }).catch(() => {})
   }, [
+    fetchFreshChats,
+    markChatRunReconcile,
     reconcileNotifications,
     reconcileDeletedAppIdentities,
     reconcileDeletedChatIdentities,
     refreshApps,
-    refreshChats,
   ])
   useSystemEventStream(handleSystemEvent, { onOpen: reconcileSystemStateOnOpen })
 

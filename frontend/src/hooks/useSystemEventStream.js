@@ -89,7 +89,11 @@ export default function useSystemEventStream(
           throw new Error(`system stream status ${res.status}`)
         }
         backoffMs = 1000  // Reset on a successful connect.
-        onOpenRef.current?.()
+        // Reconnect reconciliation is a causal barrier: let durable list state
+        // settle before applying newer events already buffered on this stream.
+        // Without this ordering, a slower list response can overwrite a run
+        // start/finish that arrived immediately after the connection opened.
+        await onOpenRef.current?.()
 
         const reader = res.body.getReader()
         const decoder = new TextDecoder()

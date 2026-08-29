@@ -779,7 +779,11 @@ test('shell reconciles both durable drawer lists whenever the system stream reco
   const shellSource = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
   assert.match(shellSource, /const reconcileSystemStateOnOpen = useCallback/)
   assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*refreshApps\(\)/)
-  assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*refreshChats\(\)/)
+  assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*fetchFreshChats\(\)/)
+  assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*withoutSettledLocalChatRuns/,
+    'fresh reconnect truth retires a local active-work marker whose finish event was missed')
+  assert.match(shellSource, /reconcileSystemStateOnOpen[\s\S]*chat\.running[\s\S]*visibleChatIdsRef\.current[\s\S]*markChatRunReconcile\(chat\.id\)/,
+    'open chats and durable running chats reconcile even when run events were missed')
   assert.match(shellSource, /useSystemEventStream\(handleSystemEvent, \{ onOpen: reconcileSystemStateOnOpen \}\)/)
 })
 

@@ -40,6 +40,28 @@ export function withChatRunState(rows, chatId, running) {
   })
 }
 
+/**
+ * Retire optimistic run markers only when a fresh drawer row explicitly says
+ * the matching chat is settled. Unknown rows stay optimistic: a newly-created
+ * chat can start before it first appears in the compact list.
+ */
+export function withoutSettledLocalChatRuns(localIds, rows) {
+  if (!(localIds instanceof Set) || !Array.isArray(rows)) return localIds
+  const serverRunning = new Map()
+  for (const row of rows) {
+    if (row?.id == null || typeof row.running !== 'boolean') continue
+    serverRunning.set(String(row.id), row.running)
+  }
+
+  let next = localIds
+  for (const id of localIds) {
+    if (serverRunning.get(String(id)) !== false) continue
+    if (next === localIds) next = new Set(localIds)
+    next.delete(id)
+  }
+  return next
+}
+
 export function ownerInputChangeFromEvent(event) {
   const safeEvent = event && typeof event === 'object' ? event : {}
   const hasQuestionId = Object.hasOwn(safeEvent, 'questionId')
