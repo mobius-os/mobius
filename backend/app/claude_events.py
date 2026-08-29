@@ -73,7 +73,9 @@ class NativeContinuationTracker:
   plain in-flight set is empty at that boundary and makes the runner reap the
   CLI one result too early. Remember that ordering and defer exactly that next
   result; tasks already observed across a result need no extra deferral because
-  their eventual result is the parent continuation itself.
+  their eventual result is the parent continuation itself. A root assistant
+  message after completion proves the parent already reacted and closes the
+  provisional deferral.
 
   Monitor is admitted only when its tool call is finite. Ordinary background
   shells and persistent monitors can run forever, so they never own turn
@@ -132,6 +134,16 @@ class NativeContinuationTracker:
   def monitor_failed(self, tool_use_id: str) -> None:
     self._pending_monitors.discard(tool_use_id)
     self._monitors_seen_at_result.discard(tool_use_id)
+
+  def root_continuation_observed(self) -> None:
+    """Mark a pre-result completion as already consumed by its parent.
+
+    Task bookkeeping alone cannot distinguish a completion that will wake a
+    parent after the next result from one the parent has already synthesized.
+    A later root AssistantMessage is that missing boundary signal: its result
+    closes the continuation instead of opening another one.
+    """
+    self._settled_before_result = False
 
   def observe_result(self) -> bool:
     """Record one result; return whether it is not yet the run boundary."""
@@ -519,6 +531,8 @@ def dispatch_sdk_message(
   if isinstance(sdk_msg, AssistantMessage):
     if sdk_msg.session_id:
       current_session_id = sdk_msg.session_id
+    if native_work is not None:
+      native_work.root_continuation_observed()
     if usage_state is not None and sdk_msg.usage:
       usage_state["latest_model_usage"] = dict(sdk_msg.usage)
     server_tools: dict[str, str] = {}
