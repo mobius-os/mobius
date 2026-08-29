@@ -12,10 +12,8 @@ const diffView = read('../../components/DiffView/DiffView.jsx')
 const diffStyles = read('../../components/DiffView/styles.js')
 
 test('platform update delegates file disclosures to the canonical list', () => {
-  assert.match(modal, /import FileDiffList from '\.\.\/DiffView\/FileDiffList\.jsx'/)
-  assert.match(modal, /import \{ parseUnifiedDiff \} from '\.\.\/DiffView\/parseUnifiedDiff\.js'/)
-  assert.match(modal, /parseUnifiedDiff\(preview\?\.diff\)/)
-  assert.match(modal, /<FileDiffList[\s\S]*files=\{parsedFiles\}/)
+  assert.match(modal, /import UnifiedDiff from '\.\.\/DiffView\/UnifiedDiff\.jsx'/)
+  assert.match(modal, /<UnifiedDiff[\s\S]*diff=\{preview\?\.diff\}/)
   assert.match(modal, /summaryOverrides=\{files\}/)
   assert.match(modal, /diffTruncated=\{!!preview\?\.diff_truncated\}/)
   assert.doesNotMatch(modal, /urm__file|toggleFile|diffByPath|<DiffView/)

@@ -22,10 +22,12 @@ never bypassed. An app-scoped github_access token may act only on records from
 its own storage; it cannot use either path as a general GitHub write proxy.
 
 The fetch-free /source-status read is the local companion for Contribute's
-Sources view. It exposes only sanitized repository identity, refs, diff
-magnitudes, and capped relative path names — never source contents, absolute
-paths, raw remotes, or credentials — so Contribute does not need the broader
-filesystem capability merely to explain where local work sits.
+Projects view. It exposes only sanitized repository identity, refs, diff
+magnitudes, and capped relative path names. The separate /source-diff read
+returns one bounded unified patch for an exact inspected project/head; callers
+cannot provide a repository path or Git ref. Neither route exposes absolute
+paths, raw remotes, or credentials, so Contribute does not need general
+filesystem access to review local work.
 
 The token itself never appears in any response or log line (INV1).
 """
@@ -580,6 +582,81 @@ async def github_source_status(
     "platform": platform,
     "apps": projects,
   }
+
+
+@router.get("/source-diff")
+async def github_source_diff(
+  project: str,
+  head: str,
+  comparison: str | None = None,
+  _: models.Owner = Depends(get_owner_or_app_with_github_access),
+  db: Session = Depends(get_db),
+):
+  """Return a bounded unified diff for one source-map project snapshot."""
+  if not re.fullmatch(r"[0-9a-f]{40}", head):
+    raise HTTPException(status_code=422, detail="Invalid source revision.")
+  if comparison is not None and not re.fullmatch(r"[0-9a-f]{40}", comparison):
+    raise HTTPException(status_code=422, detail="Invalid comparison revision.")
+
+  async def build_diff(repo: Path, inspected: dict) -> dict:
+    """Map the narrow source-preview outcomes consistently for every owner."""
+    try:
+      return await asyncio.to_thread(
+        source_status.build_project_diff,
+        repo,
+        inspected,
+        expected_head=head,
+        expected_comparison=comparison,
+      )
+    except RuntimeError as exc:
+      if str(exc) != "source_snapshot_changed":
+        raise
+      raise HTTPException(
+        status_code=409,
+        detail={
+          "code": "source_snapshot_changed",
+          "message": "The project changed; refresh before opening its diff.",
+        },
+      ) from exc
+    except ValueError as exc:
+      raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+  if project == "platform":
+    db.close()
+    repo = Path(get_settings().data_dir).resolve() / "platform"
+    async with fs_locks.source_dir_lock(repo):
+      inspected = await asyncio.to_thread(source_status.build_platform_status)
+      return await build_diff(repo, inspected)
+
+  match = re.fullmatch(r"app:([1-9][0-9]*)", project)
+  if match is None:
+    raise HTTPException(status_code=404, detail="Project not found.")
+  row = (
+    db.query(models.App)
+    .filter(
+      models.App.id == int(match.group(1)),
+      models.App.deleted_at.is_(None),
+      models.App.source_dir.isnot(None),
+    )
+    .first()
+  )
+  if row is None:
+    raise HTTPException(status_code=404, detail="Project not found.")
+  app = {
+    "id": row.id,
+    "name": row.name,
+    "slug": row.slug,
+    "version": row.version,
+    "manifest_url": row.manifest_url,
+    "published_manifest_url": row.published_manifest_url,
+    "source_dir": row.source_dir,
+  }
+  db.close()
+  async with fs_locks.source_dir_lock(app["source_dir"]):
+    inspected = await asyncio.to_thread(source_status.build_app_status, app)
+    if inspected is None:
+      raise HTTPException(status_code=404, detail="Project not found.")
+    return await build_diff(Path(app["source_dir"]), inspected)
 
 
 @router.delete("/connect", dependencies=[Depends(reject_cross_site)])
