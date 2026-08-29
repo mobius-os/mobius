@@ -1,6 +1,10 @@
 """Provider edit tools preserve bounded, renderable diff previews."""
 
-from app.codex_events import _tool_start_event
+from app.codex_events import (
+  _file_change_patch_summary,
+  _tool_completed_events,
+  _tool_start_event,
+)
 from app.events import process_event
 from app.tool_edit_preview import (
   MAX_EDIT_PREVIEW_CHARS,
@@ -67,6 +71,38 @@ def test_codex_patch_preview_keeps_multiple_file_kinds_and_bounds_payload():
   assert len(large["_full_diff"]) > len(large["diff"])
 
 
+def test_codex_raw_add_and_delete_bodies_become_countable_hunks():
+  preview = codex_edit_preview([
+    {
+      "path": "new.py",
+      "kind": {"type": "add"},
+      "diff": "import os\n\nprint(os.getcwd())\n",
+    },
+    {
+      "path": "gone.txt",
+      "kind": {"type": "delete"},
+      "diff": "first\nsecond\n",
+    },
+  ])
+
+  assert "@@ -0,0 +1,3 @@\n+import os\n+\n+print(os.getcwd())" in preview["diff"]
+  assert "@@ -1,2 +0,0 @@\n-first\n-second" in preview["diff"]
+
+
+def test_codex_empty_file_and_existing_hunks_are_not_invented_or_rewritten():
+  preview = codex_edit_preview([
+    {"path": "empty.txt", "kind": {"type": "add"}, "diff": ""},
+    {
+      "path": "new.txt",
+      "kind": {"type": "add"},
+      "diff": "@@ -0,0 +1 @@\n+already unified",
+    },
+  ])
+
+  assert preview["diff"].count("@@ ") == 1
+  assert preview["diff"].count("+already unified") == 1
+
+
 def test_preview_quoting_preserves_unicode_paths():
   preview = codex_edit_preview([{
     "path": "/data/café file.py",
@@ -98,6 +134,44 @@ def test_codex_file_change_start_carries_shared_edit_preview():
   assert event["tool"] == "Edit"
   assert event["input"] == "src/app.js"
   assert "-old\n+new" in event["edit_preview"]["diff"]
+
+
+def test_codex_file_change_fallback_summary_uses_owner_language():
+  summary = _file_change_patch_summary([
+    {"path": "new.py", "kind": {"type": "add"}},
+    {"path": "old.py", "kind": {"type": "delete"}},
+    {
+      "path": "before.py",
+      "kind": {"type": "update", "move_path": "after.py"},
+    },
+    {"path": "same.py", "kind": {"type": "update"}},
+  ])
+
+  assert summary.splitlines() == [
+    "Added new.py",
+    "Deleted old.py",
+    "Moved before.py → after.py",
+    "Updated same.py",
+  ]
+  assert "{'type':" not in summary
+
+
+def test_codex_completed_file_change_emits_the_owner_language_fallback():
+  class FileChangeThreadItem:
+    changes = [{"path": "new.py", "kind": {"type": "add"}}]
+
+  sdk = {
+    "CommandExecutionThreadItem": type("CommandExecutionThreadItem", (), {}),
+    "FileChangeThreadItem": FileChangeThreadItem,
+    "McpToolCallThreadItem": type("McpToolCallThreadItem", (), {}),
+    "DynamicToolCallThreadItem": type("DynamicToolCallThreadItem", (), {}),
+    "WebSearchThreadItem": type("WebSearchThreadItem", (), {}),
+  }
+
+  assert _tool_completed_events(FileChangeThreadItem(), sdk) == [
+    {"type": "tool_output", "content": "Added new.py"},
+    {"type": "tool_end"},
+  ]
 
 
 def test_tool_lifecycle_persists_preview_from_start_and_input_updates():

@@ -65,6 +65,15 @@ def _selection_hunk(edit: dict[str, Any]) -> list[str]:
   ))[2:]
 
 
+def _content_hunk(content: str, kind_type: str) -> list[str]:
+  """Turn Codex's raw add/delete file body into a real unified hunk."""
+  if kind_type not in {"add", "delete"} or not content:
+    return []
+  before = content.splitlines() if kind_type == "delete" else []
+  after = content.splitlines() if kind_type == "add" else []
+  return list(difflib.unified_diff(before, after, lineterm=""))[2:]
+
+
 def claude_edit_preview(tool: str, inp: Any) -> dict | None:
   """Build an honest selection-relative preview from Claude edit arguments."""
   if not isinstance(inp, dict) or tool not in {"Edit", "MultiEdit"}:
@@ -136,5 +145,26 @@ def codex_edit_preview(changes: Any) -> dict | None:
         f"--- {_git_path('a', path)}",
         f"+++ {_git_path('b', new_path)}",
       ])
-    sections.append("\n".join([*header, patch]))
+    # FileUpdateChange.diff is not one stable shape: updates and some
+    # add/delete events carry hunk text, while other add/delete events carry
+    # the complete file body with no @@ header or +/- prefixes. Normalize that
+    # provider variation here so every durable preview is an honest unified
+    # diff rather than a file header followed by unparseable source text.
+    patch_lines = patch.splitlines()
+    first_patch_line = patch_lines[0] if patch_lines else ""
+    patch_is_diff = (
+      first_patch_line.startswith("@@ ")
+      or (
+        first_patch_line.startswith("Binary files ")
+        and first_patch_line.endswith(" differ")
+      )
+      or first_patch_line == "GIT binary patch"
+    )
+    if (
+      kind_type in {"add", "delete"}
+      and patch
+      and not patch_is_diff
+    ):
+      patch_lines = _content_hunk(patch, kind_type)
+    sections.append("\n".join([*header, *patch_lines]))
   return _bounded_preview("\n".join(sections))
