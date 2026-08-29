@@ -1976,7 +1976,7 @@ export default function Shell({ onInitialVisualReady }) {
   const refreshChats = useCallback(() => {
     return queryClient.refetchQueries({ queryKey: chatQueries.keys.all })
       .then(() => queryClient.getQueryData(chatQueries.keys.all) || [])
-      .catch(() => [])
+      .catch(() => queryClient.getQueryData(chatQueries.keys.all) || [])
   }, [queryClient])
   const projectChatList = useCallback((project) => {
     queryClient.setQueryData(chatQueries.keys.all, current => {

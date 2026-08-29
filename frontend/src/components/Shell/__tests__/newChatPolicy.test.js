@@ -504,6 +504,13 @@ test('ordinary chat selection does not launch a competing drawer refresh', () =>
   assert.doesNotMatch(selectChat, /refreshChats/)
 })
 
+test('ordinary drawer refresh preserves cached rows after a transient failure', () => {
+  assert.match(
+    shellSource,
+    /const refreshChats = useCallback\([\s\S]*?\.catch\(\(\) => queryClient\.getQueryData\(chatQueries\.keys\.all\) \|\| \[\]\)/,
+  )
+})
+
 test('new-chat creation cancels stale list reads through a real AbortSignal', () => {
   const cancelAt = shellSource.indexOf('await queryClient.cancelQueries({')
   const createAt = shellSource.indexOf("api.chats.create({ title: 'New chat' })")
