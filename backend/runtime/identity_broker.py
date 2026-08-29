@@ -98,6 +98,11 @@ def _reclaim_private_state_after_compat_chown() -> None:
   this root broker starts. Adopt only the broker's fixed, already-private state
   files; reject links, unexpected owners, and permissive modes rather than
   blessing an attacker-controlled path.
+
+  Each entry is validated and fixed up through a single descriptor. A
+  concurrent app-user process can still swap a directory entry, but it can no
+  longer redirect the root chown/chmod onto a target this function never
+  checked.
   """
   if os.geteuid() != 0:
     return
@@ -105,39 +110,58 @@ def _reclaim_private_state_after_compat_chown() -> None:
   mobius = pwd.getpwnam("mobius")
   allowed_owners = {(0, 0), (mobius.pw_uid, mobius.pw_gid)}
   try:
-    current = os.lstat(PRIVATE_DIR)
-  except FileNotFoundError:
     PRIVATE_DIR.mkdir(mode=0o700)
-    current = os.lstat(PRIVATE_DIR)
-  if (
-    stat.S_ISLNK(current.st_mode)
-    or not stat.S_ISDIR(current.st_mode)
-    or (current.st_uid, current.st_gid) not in allowed_owners
-    or stat.S_IMODE(current.st_mode) & 0o077
-  ):
-    raise RuntimeError("identity broker private directory is unsafe")
+  except FileExistsError:
+    pass
 
-  existing: list[Path] = []
-  for path in (KEY_PATH, STATE_PATH, INSTANCE_PATH, PENDING_BOOTSTRAP_PATH):
+  # O_NOFOLLOW rejects a symlink planted at the entry itself, and O_NONBLOCK
+  # keeps a planted FIFO or device node from stalling the open before fstat
+  # can reject it. Both make the open, not a prior lstat, the decisive check.
+  open_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+  opened: list[tuple[int, int]] = []
+  try:
     try:
-      item = os.lstat(path)
-    except FileNotFoundError:
-      continue
+      dir_fd = os.open(PRIVATE_DIR, open_flags | os.O_DIRECTORY)
+    except OSError as exc:
+      raise RuntimeError("identity broker private directory is unsafe") from exc
+    opened.append((dir_fd, 0o700))
+    current = os.fstat(dir_fd)
     if (
-      stat.S_ISLNK(item.st_mode)
-      or not stat.S_ISREG(item.st_mode)
-      or item.st_nlink != 1
-      or (item.st_uid, item.st_gid) not in allowed_owners
-      or stat.S_IMODE(item.st_mode) & 0o077
+      not stat.S_ISDIR(current.st_mode)
+      or (current.st_uid, current.st_gid) not in allowed_owners
+      or stat.S_IMODE(current.st_mode) & 0o077
     ):
-      raise RuntimeError(f"identity broker file is unsafe: {path.name}")
-    existing.append(path)
+      raise RuntimeError("identity broker private directory is unsafe")
 
-  os.chown(PRIVATE_DIR, 0, 0)
-  os.chmod(PRIVATE_DIR, 0o700)
-  for path in existing:
-    os.chown(path, 0, 0)
-    os.chmod(path, 0o600)
+    # These are fixed children of PRIVATE_DIR, so opening them by name relative
+    # to the pinned directory keeps a rename of PRIVATE_DIR itself irrelevant.
+    for path in (KEY_PATH, STATE_PATH, INSTANCE_PATH, PENDING_BOOTSTRAP_PATH):
+      try:
+        file_fd = os.open(path.name, open_flags, dir_fd=dir_fd)
+      except FileNotFoundError:
+        continue
+      except OSError as exc:
+        raise RuntimeError(
+          f"identity broker file is unsafe: {path.name}"
+        ) from exc
+      opened.append((file_fd, 0o600))
+      item = os.fstat(file_fd)
+      if (
+        not stat.S_ISREG(item.st_mode)
+        or item.st_nlink != 1
+        or (item.st_uid, item.st_gid) not in allowed_owners
+        or stat.S_IMODE(item.st_mode) & 0o077
+      ):
+        raise RuntimeError(f"identity broker file is unsafe: {path.name}")
+
+    # Nothing is mutated until every entry has passed, so a rejected tree is
+    # left exactly as found.
+    for fd, mode in opened:
+      os.fchown(fd, 0, 0)
+      os.fchmod(fd, mode)
+  finally:
+    for fd, _mode in opened:
+      os.close(fd)
 
 
 def _prepare_private_dir() -> None:

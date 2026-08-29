@@ -107,23 +107,87 @@ def _legacy_state_paths(tmp_path, monkeypatch):
   return private, key
 
 
+def _record_adopted_inodes(monkeypatch, on_first_call=None):
+  """Capture which inodes the root fixup targets, without needing real root."""
+  adopted = []
+
+  def fake_fchown(fd, uid, gid):
+    if on_first_call is not None and not adopted:
+      on_first_call()
+    adopted.append((os.fstat(fd).st_ino, uid, gid))
+
+  monkeypatch.setattr(broker_module.os, "fchown", fake_fchown)
+  return adopted
+
+
 def test_root_broker_reclaims_only_locked_down_legacy_state(tmp_path, monkeypatch):
   private, key = _legacy_state_paths(tmp_path, monkeypatch)
-  adopted = []
-  monkeypatch.setattr(
-    broker_module.os, "chown",
-    lambda path, uid, gid: adopted.append((Path(path), uid, gid)),
-  )
+  adopted = _record_adopted_inodes(monkeypatch)
 
   broker_module._reclaim_private_state_after_compat_chown()
 
-  assert adopted == [(private, 0, 0), (key, 0, 0)]
+  assert adopted == [(private.stat().st_ino, 0, 0), (key.stat().st_ino, 0, 0)]
   assert stat.S_IMODE(private.stat().st_mode) == 0o700
   assert stat.S_IMODE(key.stat().st_mode) == 0o600
 
 
-def test_root_broker_refuses_linked_legacy_state(tmp_path, monkeypatch):
+def test_root_broker_refuses_symlinked_legacy_state(tmp_path, monkeypatch):
+  _private, key = _legacy_state_paths(tmp_path, monkeypatch)
+  key.unlink()
+  outside = tmp_path / "outside.pem"
+  outside.write_text("do not adopt", encoding="utf-8")
+  # Locked down like genuine state, so being a symlink is the only reason
+  # this can be refused.
+  outside.chmod(0o600)
+  key.symlink_to(outside)
+  adopted = _record_adopted_inodes(monkeypatch)
+
+  with pytest.raises(RuntimeError, match="file is unsafe"):
+    broker_module._reclaim_private_state_after_compat_chown()
+
+  assert adopted == []
+
+
+def test_root_broker_refuses_symlinked_private_directory(tmp_path, monkeypatch):
+  private, _key = _legacy_state_paths(tmp_path, monkeypatch)
+  outside = tmp_path / "outside-dir"
+  outside.mkdir(mode=0o700)
+  link = tmp_path / "identity-broker-link"
+  link.symlink_to(outside, target_is_directory=True)
+  monkeypatch.setattr(broker_module, "PRIVATE_DIR", link)
+  adopted = _record_adopted_inodes(monkeypatch)
+
+  with pytest.raises(RuntimeError, match="private directory is unsafe"):
+    broker_module._reclaim_private_state_after_compat_chown()
+
+  assert adopted == []
+  assert stat.S_IMODE(private.stat().st_mode) == 0o700
+
+
+def test_root_broker_fixup_survives_entry_swapped_after_validation(
+  tmp_path, monkeypatch
+):
+  """A validated entry replaced mid-run must not redirect the root fixup."""
   private, key = _legacy_state_paths(tmp_path, monkeypatch)
+  key_inode = key.stat().st_ino
+  outside = tmp_path / "outside.pem"
+  outside.write_text("do not adopt", encoding="utf-8")
+  outside.chmod(0o644)
+
+  def swap_key_for_symlink():
+    key.unlink()
+    key.symlink_to(outside)
+
+  adopted = _record_adopted_inodes(monkeypatch, on_first_call=swap_key_for_symlink)
+
+  broker_module._reclaim_private_state_after_compat_chown()
+
+  assert adopted == [(private.stat().st_ino, 0, 0), (key_inode, 0, 0)]
+  assert stat.S_IMODE(outside.stat().st_mode) == 0o644
+
+
+def test_root_broker_refuses_linked_legacy_state(tmp_path, monkeypatch):
+  _private, key = _legacy_state_paths(tmp_path, monkeypatch)
   key.unlink()
   outside = tmp_path / "outside"
   outside.write_text("do not adopt", encoding="utf-8")
