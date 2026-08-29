@@ -37,15 +37,18 @@ test('one lifecycle separates recorded edits from prepared, open, and landed wor
   ], { records: [
     {
       id: 'prepared', status: 'prepared', source_root: '/data/platform',
-      files: ['a.js'], updated_at: '2026-08-27T10:00:00Z',
+      files: ['a.js'], coverage_at: '2026-08-27T10:00:00Z',
+      updated_at: '2026-08-27T10:00:00Z',
     },
     {
       id: 'open', status: 'open', source_root: '/data/apps/demo',
-      files: ['index.jsx'], updated_at: '2026-08-27T11:00:00Z',
+      files: ['index.jsx'], coverage_at: '2026-08-27T11:00:00Z',
+      updated_at: '2026-08-27T11:00:00Z',
     },
     {
       id: 'landed', status: 'merged', source_root: '/data/platform',
-      files: ['old.js'], updated_at: '2026-08-27T09:00:00Z',
+      files: ['old.js'], coverage_at: '2026-08-27T09:00:00Z',
+      updated_at: '2026-08-27T09:00:00Z',
     },
   ] })
 
@@ -122,6 +125,31 @@ test('Brain copy stays quiet when settled and names only useful outstanding work
     compactChangesSummary({ counts: { unsorted: 2, prepared: 1, open: 4, attention: 1 } }),
     '2 unsorted · 1 prepared · 4 open · 1 need attention',
   )
+})
+
+test('an edit made after an old contribution returns to unsorted', () => {
+  const older = entry('older', '/data/platform/same.js')
+  older.ts = Date.parse('2026-08-27T10:00:00Z')
+  const newer = entry('newer', '/data/platform/same.js')
+  newer.ts = Date.parse('2026-08-27T12:00:00Z')
+
+  const overview = chatChangesOverview([older, newer], { records: [{
+    id: 'old-pr', status: 'open', source_root: '/data/platform', files: ['same.js'],
+    coverage_at: '2026-08-27T11:00:00Z',
+  }] })
+
+  assert.deepEqual(overview.unsortedEntries.map(item => item.id), ['newer'])
+  assert.deepEqual(overview.unsortedPaths, ['/data/platform/same.js'])
+})
+
+test('a contribution without a coverage instant cannot hide an edit', () => {
+  const overview = chatChangesOverview([
+    entry('current', '/data/platform/same.js'),
+  ], { records: [{
+    id: 'incomplete', status: 'open', source_root: '/data/platform', files: ['same.js'],
+  }] })
+
+  assert.deepEqual(overview.unsortedPaths, ['/data/platform/same.js'])
 })
 
 test('dismissing the preparation suggestion hides one revision, not future edits', () => {

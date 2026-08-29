@@ -51,6 +51,18 @@ function entryPaths(entry) {
     .filter(Boolean)
 }
 
+function instant(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  const parsed = Date.parse(String(value || ''))
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function recordCoversEntry(record, entry) {
+  const coveredAt = instant(record?.coverage_at)
+  const editedAt = instant(entry?.ts)
+  return coveredAt !== null && (editedAt === null || editedAt <= coveredAt)
+}
+
 function combinedFileStatus(previous, next) {
   if (next === 'D') return 'D'
   if (previous === 'A') return 'A'
@@ -90,25 +102,31 @@ export function chatChangesOverview(entries, payload) {
   const safeEntries = Array.isArray(entries) ? entries : []
   const records = Array.isArray(payload?.records) ? payload.records : []
   const paths = new Set(safeEntries.flatMap(entryPaths))
-  const covered = new Set()
-  for (const record of records) {
-    for (const file of record?.files || []) {
-      const path = contributionSourceFile(record, file)
-      if (path) covered.add(path)
+  const coveredForEntry = new Map()
+  for (const entry of safeEntries) {
+    const covered = new Set()
+    for (const record of records) {
+      if (!recordCoversEntry(record, entry)) continue
+      for (const file of record?.files || []) {
+        const path = contributionSourceFile(record, file)
+        if (path) covered.add(path)
+      }
     }
+    coveredForEntry.set(entry, covered)
   }
 
-  const unsortedPaths = [...paths].filter(path => !covered.has(path)).sort()
-  const unsortedSet = new Set(unsortedPaths)
   const unsortedEntries = safeEntries.flatMap(entry => {
+    const covered = coveredForEntry.get(entry) || new Set()
     const files = (entry?.preview?.files || []).filter(
-      file => unsortedSet.has(cleanPath(file?.path)),
+      file => !covered.has(cleanPath(file?.path)),
     )
     return files.length ? [{
       ...entry,
       preview: { ...entry.preview, files },
     }] : []
   })
+  const unsortedPaths = [...new Set(unsortedEntries.flatMap(entryPaths))].sort()
+  const unsortedSet = new Set(unsortedPaths)
   const unsortedFiles = combineFiles(unsortedEntries, unsortedSet)
 
   const stages = { prepared: [], open: [], landed: [] }

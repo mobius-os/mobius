@@ -4947,6 +4947,7 @@ def test_chat_projection_marks_exact_reviewed_pr_updates_sendable(
   record_id = "existing-pr-chat-card"
   record = _prepared_existing_pr_update(app_id, record_id)
   record["chat_id"] = "chat-existing-update"
+  record["quality_review"]["reviewed_at"] = "2026-08-27T12:34:56Z"
   _write_contribution(app_id, record_id, record, "reviewed diff")
   monkeypatch.setattr(
     github_routes,
@@ -4969,6 +4970,81 @@ def test_chat_projection_marks_exact_reviewed_pr_updates_sendable(
   assert projected["action"] == "pr_update"
   assert projected["quality_review_ready"] is True
   assert projected["review"]["state"] == "ready"
+  assert projected["coverage_at"] == "2026-08-27T12:34:56Z"
+
+
+def test_chat_projection_uses_private_review_time_after_the_public_submission(
+  client, owner_token, monkeypatch,
+):
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  record_id = "existing-pr-newer-private-review"
+  record = _prepared_existing_pr_update(app_id, record_id)
+  record["chat_id"] = "chat-private-update"
+  record["submitted_at"] = "2026-08-27T10:00:00Z"
+  record["quality_review"]["reviewed_at"] = "2026-08-27T12:00:00Z"
+  record["updated_at"] = "2026-08-27T13:00:00Z"
+  _write_contribution(app_id, record_id, record, "reviewed diff")
+  monkeypatch.setattr(
+    github_routes,
+    "_inspect_prepared_review",
+    lambda record, _diff_path, _github_state: {
+      "id": record["id"], "state": "ready", "code": "ready",
+      "message": "Still matches the exact source you reviewed.",
+    },
+  )
+
+  response = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-private-update",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+
+  assert response.status_code == 200, response.text
+  # A scheduled metadata write at 13:00 cannot hide edits. The exact-head
+  # review at 12:00 is the latest moment that actually incorporated source.
+  assert response.json()["records"][0]["coverage_at"] == "2026-08-27T12:00:00Z"
+
+
+def test_chat_projection_does_not_let_push_time_cover_post_review_edits(
+  client, owner_token, monkeypatch,
+):
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  record_id = "existing-pr-reviewed-before-push"
+  record = _prepared_existing_pr_update(app_id, record_id)
+  record["chat_id"] = "chat-review-before-push"
+  record["quality_review"]["reviewed_at"] = "2026-08-27T10:00:00Z"
+  record["submitted_at"] = "2026-08-27T12:00:00Z"
+  record["updated_at"] = "2026-08-27T13:00:00Z"
+  _write_contribution(app_id, record_id, record, "reviewed diff")
+  monkeypatch.setattr(
+    github_routes,
+    "_inspect_prepared_review",
+    lambda record, _diff_path, _github_state: {
+      "id": record["id"], "state": "ready", "code": "ready",
+      "message": "Still matches the exact source you reviewed.",
+    },
+  )
+
+  response = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-review-before-push",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["records"][0]["coverage_at"] == "2026-08-27T10:00:00Z"
+
+
+def test_chat_projection_uses_publication_time_only_for_legacy_records():
+  assert github_routes._chat_record_coverage_at({
+    "submitted_at": "2026-08-27T12:00:00Z",
+    "updated_at": "2026-08-27T13:00:00Z",
+  }) == "2026-08-27T12:00:00Z"
+  assert github_routes._chat_record_coverage_at({
+    "updated_at": "2026-08-27T13:00:00Z",
+  }) == ""
 
 
 # --- contribution CI feedback loop (checks refresh + classification) ---
