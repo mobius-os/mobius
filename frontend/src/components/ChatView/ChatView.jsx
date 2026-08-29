@@ -5124,6 +5124,8 @@ export default function ChatView({
                 artifactsAppId={artifactsAppId}
                 onOpenArtifact={onOpenArtifact}
                 onOpenUsage={() => setShowUsage(true)}
+                appArtifacts={builtApps}
+                onOpenAppArtifact={onOpenApp}
                 embedded={embedded}
               />
               )}
