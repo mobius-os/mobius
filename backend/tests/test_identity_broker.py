@@ -4,6 +4,7 @@ import importlib.util
 import hashlib
 import json
 import os
+import signal
 import stat
 import subprocess
 import tempfile
@@ -203,6 +204,35 @@ def test_root_broker_refuses_permissive_legacy_state(tmp_path, monkeypatch):
 
   with pytest.raises(RuntimeError, match="file is unsafe"):
     broker_module._reclaim_private_state_after_compat_chown()
+
+
+def test_root_broker_refuses_planted_fifo_without_stalling(tmp_path, monkeypatch):
+  """The FIFO is refused, and opening it must not wait for a writer.
+
+  A FIFO is the shape that isolates the S_ISREG guard: it has one link, the
+  expected owner, and a private mode, so every other rejection clause passes
+  it. A planted directory is already refused by the link check.
+  """
+  _private, key = _legacy_state_paths(tmp_path, monkeypatch)
+  key.unlink()
+  os.mkfifo(key, 0o600)
+  adopted = _record_adopted_inodes(monkeypatch)
+
+  def _stalled(_signum, _frame):
+    raise AssertionError("opening the planted FIFO blocked on a writer")
+
+  # Without O_NONBLOCK this open waits forever for a writer that never comes,
+  # so fail the assertion instead of hanging the suite.
+  previous = signal.signal(signal.SIGALRM, _stalled)
+  signal.alarm(5)
+  try:
+    with pytest.raises(RuntimeError, match="file is unsafe"):
+      broker_module._reclaim_private_state_after_compat_chown()
+  finally:
+    signal.alarm(0)
+    signal.signal(signal.SIGALRM, previous)
+
+  assert adopted == []
 
 
 def test_socket_parent_must_not_be_app_writable(tmp_path, monkeypatch):
