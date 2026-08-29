@@ -1155,8 +1155,8 @@ async def _ensure_read_task(
       effort=run.effort,
       scope="read",
       cwd=run.target_path,
-      max_budget_usd=task_budget,
       notify_parent_on_complete=False,
+      explicit_provider_budget_usd=task_budget,
     )
     delegation, _attached = create_or_attach_delegation(db, intent)
     task = models.GauntletTask(

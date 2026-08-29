@@ -30,7 +30,6 @@ TERMINAL_DELEGATION_STATUSES = frozenset({
   "interrupted",
 })
 REVIEW_REQUIRED_MARKER = "DELEGATION_WRITE_REVIEW_REQUIRED"
-MAX_DELEGATION_DEPTH = 4
 
 
 @dataclass(frozen=True)
@@ -44,8 +43,10 @@ class RunPolicy:
   effort: str | None
   scope: str
   cwd: str
-  max_budget_usd: float | None
   depth: int = 1
+  # Ordinary Subagents never set a local spending ceiling. This field exists
+  # only for an explicitly budgeted owner workflow such as a Gauntlet.
+  explicit_provider_budget_usd: float | None = None
 
   @property
   def delegated(self) -> bool:
@@ -114,8 +115,10 @@ class DelegationIntent:
   effort: str | None
   scope: str
   cwd: str
-  max_budget_usd: float | None
   notify_parent_on_complete: bool = True
+  # Kept out of the ordinary submit API. Gauntlet is the sole caller that may
+  # reserve an owner-chosen provider budget on its delegated read slots.
+  explicit_provider_budget_usd: float | None = None
 
 
 def same_delegation_intent(
@@ -132,7 +135,10 @@ def same_delegation_intent(
     row.effort == intent.effort,
     row.scope == intent.scope,
     row.cwd == intent.cwd,
-    row.max_budget_usd == intent.max_budget_usd,
+    (
+      intent.explicit_provider_budget_usd is None
+      or row.max_budget_usd == intent.explicit_provider_budget_usd
+    ),
     row.notify_parent_on_complete == intent.notify_parent_on_complete,
     row.prompt_sha256 == hashlib.sha256(
       intent.prompt.encode("utf-8")
@@ -175,7 +181,7 @@ def create_or_attach_delegation(
     scope=intent.scope,
     cwd=intent.cwd,
     prompt_sha256=hashlib.sha256(intent.prompt.encode("utf-8")).hexdigest(),
-    max_budget_usd=intent.max_budget_usd,
+    max_budget_usd=intent.explicit_provider_budget_usd,
     notify_parent_on_complete=intent.notify_parent_on_complete,
   )
   child = models.Chat(
@@ -250,15 +256,17 @@ def policy_for_chat(db: Session, chat_id: str) -> RunPolicy | None:
     digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     if digest != row.prompt_sha256:
       raise RuntimeError("delegation prompt no longer matches immutable intent")
-  remaining_budget = row.max_budget_usd
-  if remaining_budget is not None:
+  depth = delegation_depth(db, row)
+  gauntlet_budget = None
+  if row.max_budget_usd is not None and db.query(
+    models.GauntletTask.id,
+  ).filter(models.GauntletTask.delegation_id == row.id).first() is not None:
     known_prior_cost = float(sum(
       float(value or 0.0) for (value,) in db.query(
         models.ChatRun.cost_usd,
       ).filter(models.ChatRun.chat_id == chat_id).all()
     ))
-    remaining_budget = max(0.001, remaining_budget - known_prior_cost)
-  depth = delegation_depth(db, row)
+    gauntlet_budget = max(0.001, row.max_budget_usd - known_prior_cost)
   return RunPolicy(
     delegation_id=row.id,
     app_id=row.app_id,
@@ -267,8 +275,8 @@ def policy_for_chat(db: Session, chat_id: str) -> RunPolicy | None:
     effort=row.effort,
     scope=row.scope,
     cwd=row.cwd,
-    max_budget_usd=remaining_budget,
     depth=depth,
+    explicit_provider_budget_usd=gauntlet_budget,
   )
 
 
@@ -450,7 +458,6 @@ def serialize_delegation(
     "effort": row.effort,
     "scope": row.scope,
     "cwd": row.cwd,
-    "max_budget_usd": row.max_budget_usd,
     "status": status,
     "physical_run_id": run.id if run is not None else None,
     "provider_session_id": run.provider_session_id if run is not None else None,

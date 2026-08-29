@@ -1233,8 +1233,11 @@ async def run_claude_sdk_turn(
           "permission_mode": (
             "plan" if run_policy.scope == "read" else "acceptEdits"
           ),
-          "max_budget_usd": run_policy.max_budget_usd,
         })
+        if run_policy.explicit_provider_budget_usd is not None:
+          restricted_options["max_budget_usd"] = (
+            run_policy.explicit_provider_budget_usd
+          )
       elif gauntlet_max_budget_usd is not None:
         restricted_options["max_budget_usd"] = gauntlet_max_budget_usd
       options_kwargs.update(restricted_options)

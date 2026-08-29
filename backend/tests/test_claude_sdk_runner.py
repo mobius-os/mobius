@@ -2198,6 +2198,74 @@ async def test_can_use_tool_read_of_skill_file_emits_skill_loaded(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("explicit_budget", [None, 0.75])
+async def test_delegated_claude_only_uses_explicit_budget_and_keeps_guards(
+  monkeypatch, explicit_budget,
+):
+  captured: dict = {}
+  real_options = claude_sdk_runner.ClaudeAgentOptions
+
+  def capture_options(**kwargs):
+    captured["kwargs"] = dict(kwargs)
+    return real_options(**kwargs)
+
+  class _FakeClient:
+    def __init__(self, options):
+      del options
+
+    async def connect(self):
+      return None
+
+    async def query(self, message):
+      del message
+
+    async def disconnect(self):
+      return None
+
+    async def receive_response(self):
+      yield ResultMessage(
+        subtype="success",
+        duration_ms=10,
+        duration_api_ms=5,
+        is_error=False,
+        num_turns=1,
+        session_id="sess-delegated-budget",
+        stop_reason="end_turn",
+        total_cost_usd=0.01,
+        usage={"input_tokens": 1, "output_tokens": 1},
+      )
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeAgentOptions", capture_options)
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+
+  policy = SimpleNamespace(
+    scope="read", explicit_provider_budget_usd=explicit_budget,
+  )
+  await run_claude_sdk_turn(
+    "review",
+    session_id=None,
+    base_env={},
+    cwd="/data",
+    chat_id="delegated-budget",
+    skill_text="system",
+    bc=_Bus(),
+    pending_questions={},
+    db=None,
+    run_policy=policy,
+  )
+
+  kwargs = captured["kwargs"]
+  if explicit_budget is None:
+    assert "max_budget_usd" not in kwargs
+  else:
+    assert kwargs["max_budget_usd"] == explicit_budget
+  assert kwargs["agents"] == {}
+  assert {
+    "AskUserQuestion", "Task", "Workflow", "Agent", "create_goal",
+  }.issubset(set(kwargs["disallowed_tools"]))
+
+
+@pytest.mark.asyncio
 async def test_rate_limit_resets_at_rides_the_terminal_result(monkeypatch):
   """A RateLimitEvent's structured resets_at lands on the terminal dict so
   the limit park (design §2.4) can use the exact reset time; a turn with NO

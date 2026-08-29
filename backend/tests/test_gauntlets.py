@@ -1353,7 +1353,7 @@ def test_critic_limit_resume_uses_latched_total_reservation(
   from app.delegations import policy_for_chat
   assert policy_for_chat(
     db, delegation.child_chat_id,
-  ).max_budget_usd == pytest.approx(0.3)
+  ).explicit_provider_budget_usd == pytest.approx(0.3)
 
   physical.cost_usd = task.max_budget_usd - 0.0005
   db.commit()
