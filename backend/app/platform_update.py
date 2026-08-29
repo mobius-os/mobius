@@ -64,7 +64,7 @@ from typing import Callable, Literal, TypedDict
 
 from sqlalchemy.orm import Session
 
-from app import app_git, platform_activation
+from app import app_git, platform_activation, runtime_provenance
 from app.platform_activation import PlatformActivationImpact
 
 
@@ -952,20 +952,61 @@ def _read_activation_marker() -> _ActivationMarker | None:
   }
 
 
-def container_replacement_blockers() -> list[str]:
+def _protected_runtime_status(
+  repo: Path = PLATFORM_REPO,
+) -> runtime_provenance.RuntimeParity:
+  return runtime_provenance.protected_runtime_status(
+    repo / "backend" / "runtime",
+  )
+
+
+def container_replacement_blockers(
+  expected_sha: str | None = None,
+  repo: Path = PLATFORM_REPO,
+  *,
+  preserve_active_runtime: bool = False,
+) -> list[str]:
   """Return local image/runtime changes absent from the official target.
 
   An official image can retire only activation paths whose desired content is
   exactly the applied upstream revision. Replacing a working container while a
   local-only Dockerfile or baked-runtime change remains would silently remove
   that runtime addition, so the owner action must fail closed before cutover.
+
+  A replacement controller with the active-runtime overlay contract owns the
+  narrower protected-runtime case at the root boundary: it carries forward
+  only bytes already executing from ``/app/runtime`` and never promotes newer
+  editable source. Other image inputs remain blockers because no equivalent
+  active-generation receipt exists for them.
   """
   marker = _read_activation_marker()
-  if not marker:
-    return []
-  covered = set(marker["image_paths"])
+  covered = set(marker["image_paths"]) if marker else set()
+  pending = list(marker["paths"]) if marker else []
+
+  # Activation markers record intended work, not the bytes actually mounted at
+  # /app/runtime. When the caller supplies the official replacement target,
+  # verify deployed parity directly and prove that target contains every stale
+  # path. This catches lost markers without blocking a replacement whose exact
+  # official image will repair the drift.
+  if expected_sha:
+    runtime = _protected_runtime_status(repo)
+    if runtime["state"] == "unavailable":
+      pending.append("backend/runtime")
+    else:
+      runtime_paths = runtime_provenance.activation_paths(runtime)
+      pending.extend(runtime_paths)
+      head = _rev(repo, _local_branch(repo))
+      if head:
+        covered.update(_paths_matching_upstream(
+          repo, head, expected_sha, runtime_paths,
+        ))
+
   blockers: list[str] = []
-  for path in marker["paths"]:
+  for path in sorted(set(pending)):
+    if preserve_active_runtime and (
+      path == "backend/runtime" or path.startswith("backend/runtime/")
+    ):
+      continue
     impact = platform_activation.classify_activation(
       [path], deployment="self_hosted",
     )
@@ -1084,6 +1125,9 @@ def _tree_change_needs_import_probe(
 def _pending_activation_paths(repo: Path = PLATFORM_REPO) -> list[str]:
   marker = _read_activation_marker()
   paths = list(marker["paths"]) if marker else []
+  paths.extend(runtime_provenance.activation_paths(
+    _protected_runtime_status(repo),
+  ))
   served = _served_platform_sha()
   if served:
     try:
