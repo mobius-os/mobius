@@ -15,16 +15,16 @@ from datetime import datetime, UTC
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, defer
 
 from app import (
   activity, app_activity, app_apply, app_capability_acceptance, app_git,
   app_jobs, app_preview, app_recency, fs_locks, icon_cache,
-  models, providers, schemas,
-  source_dirs,
+  models, project_git, providers, schemas,
+  source_dirs, workspace_files,
 )
 from app.app_identity import (
   reject_if_source_dir_taken as _reject_if_source_dir_taken,
@@ -75,6 +75,105 @@ router.include_router(schedules_router)
 APP_SOFT_DELETE_TTL = SOFT_DELETE_TTL
 
 log = logging.getLogger("mobius.apps")
+
+_APP_SOURCE_HIDDEN_DIRS = frozenset({
+  ".git", ".build", "__pycache__", "dist", "node_modules",
+})
+
+
+def _app_source_root(db: Session, app_id: int) -> tuple[models.App, Path]:
+  app = live_app_or_404(db, app_id)
+  if source_dirs.source_dir_kind(app.source_dir, get_settings().data_dir) != "app":
+    raise HTTPException(404, "App source is unavailable.")
+  root = _resolve_app_source_dir(app.source_dir)
+  if not root.is_dir():
+    raise HTTPException(404, "App source is unavailable.")
+  return app, root
+
+
+def _resolve_app_source_path(root: Path, path: str) -> Path:
+  try:
+    return workspace_files.resolve_path(
+      root, path, hidden_dirs=_APP_SOURCE_HIDDEN_DIRS,
+    )
+  except workspace_files.InvalidWorkspacePath as exc:
+    raise HTTPException(400, "Invalid app source path.") from exc
+  except workspace_files.UnavailableWorkspacePath as exc:
+    raise HTTPException(403, str(exc)) from exc
+
+
+@router.get("/{app_id}/source/files")
+def list_app_source_files(
+  app_id: int,
+  path: str = Query(default="", max_length=2048),
+  recursive: bool = False,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Read one installed app's source tree without registering a Project."""
+  _app, root = _app_source_root(db, app_id)
+  directory = _resolve_app_source_path(root, path)
+  try:
+    return workspace_files.list_entries(
+      root, directory,
+      path=path,
+      recursive=recursive,
+      hidden_dirs=_APP_SOURCE_HIDDEN_DIRS,
+    )
+  except NotADirectoryError as exc:
+    raise HTTPException(400, "Path is not a directory.") from exc
+
+
+@router.get("/{app_id}/source/file")
+def read_app_source_file(
+  app_id: int,
+  path: str = Query(min_length=1, max_length=2048),
+  download: bool = False,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Preview or download one confined app-source file; never mutate it."""
+  _app, root = _app_source_root(db, app_id)
+  target = _resolve_app_source_path(root, path)
+  try:
+    payload, media_type = workspace_files.read_file(target, path)
+  except FileNotFoundError as exc:
+    raise HTTPException(404, "File not found.") from exc
+  except OverflowError as exc:
+    raise HTTPException(413, "File is too large to open here.") from exc
+  if not download and payload is not None:
+    return payload
+  return FileResponse(
+    target,
+    media_type=media_type,
+    filename=target.name if download else None,
+  )
+
+
+@router.get("/{app_id}/source/git/status")
+def get_app_source_git_status(
+  app_id: int,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  _app, root = _app_source_root(db, app_id)
+  return project_git.project_status(root, hidden_dirs=_APP_SOURCE_HIDDEN_DIRS)
+
+
+@router.get("/{app_id}/source/git/diff")
+def get_app_source_git_diff(
+  app_id: int,
+  path: str = Query(min_length=1, max_length=2048),
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  _app, root = _app_source_root(db, app_id)
+  target = _resolve_app_source_path(root, path)
+  if not target.is_file():
+    raise HTTPException(404, "File not found.")
+  return project_git.project_file_diff(
+    root, target, hidden_dirs=_APP_SOURCE_HIDDEN_DIRS,
+  )
 
 
 def _safe_to_rmtree_source(
@@ -199,6 +298,15 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   deleted_app_id = app.id
   settings = get_settings()
 
+  legacy_project = db.query(models.Project.id).filter(
+    models.Project.source_app_id == deleted_app_id,
+    models.Project.legacy_source_json.isnot(None),
+  ).first()
+  if legacy_project is not None:
+    raise RuntimeError(
+      f"app {deleted_app_id} still owns imported project {legacy_project.id}"
+    )
+
   # Registry state is the revocation boundary; physical cleanup may fail.
   await _revoke_app_publish_tokens(
     settings, deleted_app_id, app.token_nonce,
@@ -236,6 +344,9 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   db.query(models.AppPreviewState).filter(
     models.AppPreviewState.app_id == deleted_app_id,
   ).delete(synchronize_session=False)
+  db.query(models.Project).filter(
+    models.Project.source_app_id == deleted_app_id,
+  ).update({models.Project.source_app_id: None}, synchronize_session=False)
   db.delete(app)
   db.commit()
   get_system_broadcast().publish(
@@ -2549,6 +2660,24 @@ async def delete_app(
     )
     if not app:
       raise HTTPException(status_code=404, detail="App not found.")
+
+    imported_project = db.query(models.Project.id, models.Project.name).filter(
+      models.Project.source_app_id == app_id,
+      models.Project.legacy_source_json.isnot(None),
+      models.Project.deleted_at.is_(None),
+    ).first()
+    if imported_project is not None:
+      raise HTTPException(
+        status_code=409,
+        detail={
+          "code": "app_has_imported_project",
+          "message": (
+            f"Project “{imported_project.name}” still uses this app's legacy "
+            "files. Delete that project before uninstalling the app."
+          ),
+          "project_id": imported_project.id,
+        },
+      )
 
     # An app-owned delegated process can keep spending or writing after its
     # frame disappears. Settle every child (and its descendants) before the

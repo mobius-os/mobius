@@ -19,6 +19,9 @@ const settingsKey = ['settings']
 const providerUsageRootKey = ['settings', 'provider-usage']
 const providerUsageKey = (provider) => [...providerUsageRootKey, provider]
 const appsKey = ['apps']
+const projectsKey = ['projects']
+const projectTemplatesKey = ['projects', 'templates']
+const legacyProjectsKey = ['projects', 'legacy']
 const chatsKey = ['chats']
 const chatCurrentUsageRootKey = ['chat-current-usage']
 const chatCurrentUsageKey = (chatId, provider) => [
@@ -123,6 +126,36 @@ function useAppsQuery({ reconcile } = {}) {
       return reconcile ? reconcile(rows) : rows
     },
   })
+}
+
+async function fetchProjects() {
+  const res = await api.projects.list()
+  const data = await jsonOrThrow(res, 'projects fetch failed:')
+  return Array.isArray(data) ? data : []
+}
+
+function useProjectsQuery() {
+  return useQuery({ queryKey: projectsKey, queryFn: fetchProjects })
+}
+
+async function fetchProjectTemplates() {
+  const res = await api.projects.templates()
+  const data = await jsonOrThrow(res, 'project templates fetch failed:')
+  return Array.isArray(data) ? data : []
+}
+
+function useProjectTemplatesQuery() {
+  return useQuery({ queryKey: projectTemplatesKey, queryFn: fetchProjectTemplates })
+}
+
+async function fetchLegacyProjects() {
+  const res = await api.projects.legacy()
+  const data = await jsonOrThrow(res, 'legacy projects fetch failed:')
+  return Array.isArray(data) ? data : []
+}
+
+function useLegacyProjectsQuery({ enabled = true } = {}) {
+  return useQuery({ queryKey: legacyProjectsKey, queryFn: fetchLegacyProjects, enabled })
 }
 
 async function fetchChats({ signal } = {}) {
@@ -436,6 +469,65 @@ function useChatUsageSummaryQuery(chatId, { enabled = true } = {}) {
     staleTime: 30_000,
     retry: 1,
   })
+}
+
+export const appSourceQueries = {
+  keys: {
+    root: (appId) => ['app-source', String(appId)],
+    files: (appId, path = '') => ['app-source', String(appId), 'files', path],
+    gitStatus: (appId) => ['app-source', String(appId), 'git', 'status'],
+    gitDiff: (appId, path) => ['app-source', String(appId), 'git', 'diff', path],
+  },
+  invalidate: (queryClient, appId) => queryClient.invalidateQueries({
+    queryKey: appId == null ? ['app-source'] : ['app-source', String(appId)],
+  }),
+}
+
+export const projectQueries = {
+  keys: {
+    all: projectsKey,
+    templates: projectTemplatesKey,
+    legacy: legacyProjectsKey,
+    detail: (projectId) => ['projects', 'detail', projectId],
+    chats: (projectId) => ['projects', 'chats', projectId],
+    files: (projectId, path = '') => ['projects', 'files', projectId, path],
+    gitStatus: (projectId) => ['projects', 'git', projectId, 'status'],
+    gitDiff: (projectId, path) => ['projects', 'git', projectId, 'diff', path],
+    fileIndex: (projectId) => ['projects', 'file-index', projectId],
+    artifacts: (projectId) => ['projects', 'artifacts', projectId],
+    artwork: (projectId) => ['projects', 'artwork', String(projectId)],
+    workClaims: (projectId) => ['projects', 'work-claims', String(projectId)],
+  },
+  list: {
+    key: projectsKey,
+    fetch: fetchProjects,
+    useQuery: useProjectsQuery,
+    invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: projectsKey }),
+  },
+  templates: {
+    key: projectTemplatesKey,
+    fetch: fetchProjectTemplates,
+    useQuery: useProjectTemplatesQuery,
+    invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: projectTemplatesKey }),
+  },
+  legacy: {
+    key: legacyProjectsKey,
+    fetch: fetchLegacyProjects,
+    useQuery: useLegacyProjectsQuery,
+    invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: legacyProjectsKey }),
+  },
+  files: {
+    key: (projectId, path = '') => ['projects', 'files', projectId, path],
+    invalidate: (queryClient, projectId) => queryClient.invalidateQueries({
+      queryKey: ['projects', 'files', projectId],
+    }),
+  },
+  artifacts: {
+    key: (projectId) => ['projects', 'artifacts', projectId],
+    invalidate: (queryClient, projectId) => queryClient.invalidateQueries({
+      queryKey: ['projects', 'artifacts', projectId],
+    }),
+  },
 }
 
 export const chatQueries = {

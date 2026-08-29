@@ -145,7 +145,11 @@ export default function DrawerItemActionMenu({
     items[next].focus()
   }
 
-  const recoveryLabel = itemKind === 'chat' ? 'chats' : 'apps'
+  const recoveryLabel = itemKind === 'chat'
+    ? 'chats'
+    : itemKind === 'project'
+      ? 'projects'
+      : 'apps'
 
   function actionFor(target) {
     return target?.closest?.('.drawer__item-action-item') || null

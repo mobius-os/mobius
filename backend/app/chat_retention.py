@@ -9,7 +9,7 @@ listing.
 import shutil
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app import models, questions
@@ -40,10 +40,17 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
   best-effort process/filesystem cleanup; a failed transaction therefore
   cannot erase recoverable data outside the database.
   """
+  from app.project_retention import purge_expired_project_tombstones
+  purge_expired_project_tombstones(db)
+
   cutoff = now_naive_utc() - SOFT_DELETE_TTL
   expired_chat_ids = select(models.Chat.id).where(
     models.Chat.deleted_at.isnot(None),
     models.Chat.deleted_at < cutoff,
+    or_(
+      models.Chat.project_id.is_(None),
+      ~models.Chat.project_id.in_(select(models.Project.id)),
+    ),
   )
   chat_ids = [
     chat_id for chat_id in db.scalars(expired_chat_ids).all()

@@ -67,9 +67,10 @@ export function withChatOwnerInput(
   })
 }
 
-export function withChatRename(rows, chatId, { title, updatedAt } = {}) {
+export function withChatRename(rows, chatId, { title, updatedAt, activityAt } = {}) {
   return withChatListRowPatch(rows, chatId, {
     ...(typeof title === 'string' ? { title } : {}),
     ...(typeof updatedAt === 'string' ? { updated_at: updatedAt } : {}),
+    ...(typeof activityAt === 'string' ? { activity_at: activityAt } : {}),
   })
 }

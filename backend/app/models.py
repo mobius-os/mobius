@@ -221,6 +221,12 @@ class Chat(Base):
   created_by_app_id = Column(
     Integer, ForeignKey("apps.id"), nullable=True, default=None
   )
+  # Optional first-class Project membership. A project may contain any number
+  # of chats (including none); each chat remains an ordinary Chat row so the
+  # runtime, transcript, recovery, and provider paths stay shared.
+  project_id = Column(
+    String(64), nullable=True, default=None, index=True,
+  )
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
@@ -891,10 +897,218 @@ class App(Base):
   # Server-derived, versioned capability contract reviewed at install time.
   # Null is a legitimate legacy state for apps installed before contracts.
   capability_contract = Column(JSON, nullable=True, default=None)
+  # First-class project types contributed by this installed app. The installer
+  # stores the validated manifest declaration verbatim enough for project
+  # creation to snapshot it; existing projects never read this live value.
+  project_templates_json = Column(JSON, nullable=True, default=None)
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
   updated_at = Column(
     DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
   )
+
+
+class Project(Base):
+  """A first-class owner workspace containing files, chats, and artifacts.
+
+  Project files live outside the database. ``root_path`` is nevertheless
+  explicit so a non-destructive legacy import can point at an existing
+  app-storage ``files/`` tree without moving it. All access goes through the
+  project router's resolved-path confinement.
+  """
+
+  __tablename__ = "projects"
+  __table_args__ = (UniqueConstraint("chat_id", name="uq_projects_chat_id"),)
+
+  id = Column(String(64), primary_key=True)
+  name = Column(String(256), nullable=False)
+  # Optional owner-chosen accent for compact project identity controls. Stored
+  # as a CSS hex color; NULL follows the instance accent without freezing a
+  # theme-specific value into project data.
+  color = Column(String(7), nullable=True, default=None)
+  project_type = Column(String(128), nullable=False, default="blank")
+  root_path = Column(String(1024), nullable=False, unique=True)
+  # Rolling-upgrade compatibility for projects created by the original
+  # one-primary-chat implementation. Migration 0014 moves that relationship
+  # to Chat.project_id and clears this pointer. New projects leave it NULL.
+  chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=True, unique=True, index=True,
+  )
+  source_app_id = Column(
+    Integer, ForeignKey("apps.id", ondelete="SET NULL"),
+    nullable=True, default=None, index=True,
+  )
+  template_snapshot_json = Column(JSON, nullable=False, default=dict)
+  legacy_source_json = Column(JSON, nullable=True, default=None)
+  # Artifact registry plus per-artifact build status for this project. The ORM
+  # row is the atomic source of truth (mirrors ``template_snapshot_json``), not
+  # a lock-free on-disk manifest: build status transitions read-update-commit
+  # this column serialized by the per-project build lock. Each entry is
+  # {id, name, builder, source, output_rel, status, updated_at, duration_ms,
+  # log_rel}. Nullable so an existing row reads as "no artifacts yet." The agent
+  # owns the project tree and may hand-edit this value, so every read tolerates
+  # malformed entries rather than trusting the shape (see project_builders and
+  # routes/projects.py artifact listing).
+  artifacts_json = Column(JSON, nullable=True, default=None)
+  deleted_at = Column(DateTime, nullable=True, default=None)
+  created_at = Column(DateTime, default=lambda: datetime.now(UTC))
+  updated_at = Column(
+    DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+  )
+
+
+
+class ProjectDrawerState(Base):
+  """Shell navigation state for one project.
+
+  Opening or pinning a project is not a project-content edit, so these fields
+  stay outside ``projects`` just as app open recency stays outside ``apps``.
+  A row is created lazily on first open or pin; unopened projects therefore do
+  not appear in Recents merely because their files changed.
+  """
+
+  __tablename__ = "project_drawer_state"
+
+  project_id = Column(
+    String(64), ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True,
+  )
+  last_opened_at = Column(DateTime, nullable=True, default=None)
+  pinned_at = Column(DateTime, nullable=True, default=None)
+
+
+class ProjectAgentMessage(Base):
+  """A bounded project-local mailbox between project chat agents.
+
+  ``to_chat_id`` is NULL for a project broadcast. Directed multi-recipient
+  sends create one row per recipient, which keeps reads and confinement simple.
+  This is a new table, so ``create_all`` installs it on the next boot.
+  """
+
+  __tablename__ = "project_agent_messages"
+
+  id = Column(String(64), primary_key=True)
+  project_id = Column(
+    String(64), ForeignKey("projects.id"), nullable=False, index=True,
+  )
+  from_chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=False, index=True,
+  )
+  to_chat_id = Column(
+    String(64), ForeignKey("chats.id"), nullable=True, index=True,
+  )
+  body = Column(Text, nullable=False)
+  created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
+
+
+class ProjectMember(Base):
+  """One revocable human collaborator confined to one Project."""
+
+  __tablename__ = "project_members"
+
+  id = Column(String(64), primary_key=True)
+  project_id = Column(
+    String(64), ForeignKey("projects.id", ondelete="CASCADE"),
+    nullable=False, index=True,
+  )
+  display_name = Column(String(128), nullable=False)
+  role = Column(String(16), nullable=False)
+  token_epoch = Column(Integer, nullable=False, default=0, server_default="0")
+  joined_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  revoked_at = Column(DateTime, nullable=True, default=None, index=True)
+
+
+class ProjectInvite(Base):
+  """A one-use invitation; only its secret digest is stored."""
+
+  __tablename__ = "project_invites"
+
+  id = Column(String(64), primary_key=True)
+  project_id = Column(
+    String(64), ForeignKey("projects.id", ondelete="CASCADE"),
+    nullable=False, index=True,
+  )
+  token_hash = Column(String(64), nullable=False, unique=True, index=True)
+  invitee_name = Column(String(128), nullable=True)
+  role = Column(String(16), nullable=False)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  expires_at = Column(DateTime, nullable=False, index=True)
+  consumed_at = Column(DateTime, nullable=True, default=None)
+  revoked_at = Column(DateTime, nullable=True, default=None)
+  accepted_member_id = Column(
+    String(64), ForeignKey("project_members.id", ondelete="SET NULL"),
+    nullable=True,
+  )
+
+
+class ProjectPresence(Base):
+  """Latest heartbeat for one owner or collaborator in one Project."""
+
+  __tablename__ = "project_presence"
+  __table_args__ = (
+    UniqueConstraint("project_id", "actor_key", name="uq_project_presence_actor"),
+  )
+
+  id = Column(String(64), primary_key=True)
+  project_id = Column(
+    String(64), ForeignKey("projects.id", ondelete="CASCADE"),
+    nullable=False, index=True,
+  )
+  actor_key = Column(String(72), nullable=False)
+  display_name = Column(String(128), nullable=False)
+  role = Column(String(16), nullable=False)
+  last_seen_at = Column(DateTime, nullable=False, default=now_naive_utc, index=True)
+
+
+class ProjectWorkClaim(Base):
+  """Short-lived human or agent ownership of one project work surface.
+
+  Claims are coordination hints, never locks: two people can deliberately work
+  in the same file, while revision-checked writes remain the correctness
+  boundary. A separate table lets existing installations gain the feature via
+  ``create_all`` without widening the established presence table.
+  """
+
+  __tablename__ = "project_work_claims"
+  __table_args__ = (
+    UniqueConstraint("project_id", "actor_key", name="uq_project_work_claim_actor"),
+  )
+
+  id = Column(String(64), primary_key=True)
+  project_id = Column(
+    String(64), ForeignKey("projects.id", ondelete="CASCADE"),
+    nullable=False, index=True,
+  )
+  actor_key = Column(String(72), nullable=False)
+  actor_kind = Column(String(16), nullable=False)
+  display_name = Column(String(256), nullable=False)
+  chat_id = Column(String(64), ForeignKey("chats.id"), nullable=True, index=True)
+  path = Column(String(2048), nullable=True)
+  summary = Column(String(300), nullable=False)
+  updated_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  expires_at = Column(DateTime, nullable=False, index=True)
+
+
+class ProjectChange(Base):
+  """Bounded durable project-change cursor for reconnect-safe live refresh.
+
+  System events make owner tabs react immediately; this log is the source of
+  truth for collaborators and reconnects that missed an event. It records
+  paths and revisions, never file contents.
+  """
+
+  __tablename__ = "project_changes"
+
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  project_id = Column(
+    String(64), ForeignKey("projects.id", ondelete="CASCADE"),
+    nullable=False, index=True,
+  )
+  kind = Column(String(32), nullable=False)
+  path = Column(String(2048), nullable=True)
+  prior_path = Column(String(2048), nullable=True)
+  revision = Column(String(64), nullable=True)
+  actor_key = Column(String(72), nullable=False)
+  display_name = Column(String(256), nullable=False)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc, index=True)
 
 
 class AppActivityState(Base):

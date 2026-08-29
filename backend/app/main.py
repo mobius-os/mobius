@@ -79,6 +79,7 @@ from app.routes import (
   theme_router, uploads_router, platform_router,
   published_router,
   connect_router,
+  projects_router,
 )
 
 _BOOT_ID = os.environ.get("MOBIUS_BOOT_ID") or f"{os.getpid()}-{time.time_ns()}"
@@ -316,6 +317,9 @@ _CONTENT_SECURITY_POLICY = b"content-security-policy"
 _OPAQUE_STATIC_EMBED_PREFIX = "/app-embeds/by-id/"
 _PUBLISHED_SITE_PREFIX = "/sites/"
 _APP_FRAME_PATH = re.compile(r"^/api/apps/[^/]+/frame$")
+_ARTIFACT_OUTPUT_PATH = re.compile(
+  r"^/api/projects/[^/]+/artifacts/[^/]+/output/"
+)
 
 # This isolation boundary must always be enforced, never Report-Only: browsers
 # ignore the CSP sandbox directive in a Report-Only policy. The sandbox omits
@@ -397,6 +401,17 @@ def _app_frame_csp_for_scope(scope) -> str:
 _PUBLISHED_SITE_CSP = PUBLISHED_SITE_CSP
 
 
+# Built website artifacts render in sandboxed iframes without
+# ``allow-same-origin``, so their documents cannot reach the shell's owner
+# credentials. Keep the build-output namespace on the Projects isolation
+# policy instead of inheriting the broader shell policy.
+_ARTIFACT_OUTPUT_CSP = (
+  "default-src 'self'; img-src 'self' data:; font-src 'self' data:; "
+  "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+  "frame-ancestors 'self'"
+)
+
+
 def _is_public_service_surface(scope) -> bool:
   """Whether the gateway host may frame this registered service route."""
   path = scope.get("path") or ""
@@ -431,6 +446,7 @@ class _SecurityHeadersMiddleware:
     published_site = path.startswith(_PUBLISHED_SITE_PREFIX)
     chat_embed = path == "/shell/embed/chat"
     app_frame = bool(_APP_FRAME_PATH.fullmatch(path))
+    artifact_output = bool(_ARTIFACT_OUTPUT_PATH.match(path))
     service_surface = _is_public_service_surface(scope)
     response_headers = list(_SECURITY_HEADERS)
     replaced_header_names = _SECURITY_HEADER_NAMES
@@ -448,6 +464,8 @@ class _SecurityHeadersMiddleware:
         csp = CHAT_EMBED_CSP
       elif app_frame:
         csp = _app_frame_csp_for_scope(scope)
+      elif artifact_output:
+        csp = _ARTIFACT_OUTPUT_CSP
       else:
         csp = _SHELL_CSP
       response_headers.append((
@@ -720,6 +738,7 @@ app.include_router(auth_router)
 app.include_router(apps_router)
 app.include_router(storage_router)
 app.include_router(fs_router)
+app.include_router(projects_router)
 app.include_router(chat_router)
 app.include_router(chat_embed_router)
 app.include_router(chats_router)

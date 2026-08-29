@@ -5,6 +5,7 @@ export {
   Chat as ChatNavIcon,
   ComposeEditSquare as NewChatNavIcon,
   Grid as AppsNavIcon,
+  Folder as ProjectsNavIcon,
   MagnifyingGlassSearch as SearchNavIcon,
   SettingsSlider as SettingsNavIcon,
 } from '@openai/apps-sdk-ui/components/Icon'
