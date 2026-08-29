@@ -27,7 +27,13 @@ _FETCH_ATTEMPTS = 2
 
 
 def _is_transient_transport_error(message: str) -> bool:
-  """Classify failures worth one safe retry before any public mutation."""
+  """Classify failures worth one safe retry before any public mutation.
+
+  Rate limiting (429) is deliberately absent. The preflight retry below is
+  sleepless, and GitHub answers a throttled caller with Retry-After, so an
+  immediate second attempt would spend the only retry on a near-certain
+  second rejection and add one more request to the throttle.
+  """
   detail = str(message or "").lower()
   transient_markers = (
     "could not resolve host",
@@ -40,18 +46,17 @@ def _is_transient_transport_error(message: str) -> bool:
     "temporarily unavailable",
     "empty reply from server",
     "early eof",
-    "http 429",
     "http 500",
     "http 502",
     "http 503",
     "http 504",
-    "the requested url returned error: 429",
     "the requested url returned error: 500",
     "the requested url returned error: 502",
     "the requested url returned error: 503",
     "the requested url returned error: 504",
   )
   return any(marker in detail for marker in transient_markers)
+
 
 def _validate_repo_slug(value: object) -> str:
   repo = str(value or "")

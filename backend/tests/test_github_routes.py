@@ -1928,6 +1928,30 @@ def test_push_topic_branch_briefly_retries_transient_transport_errors(
   assert sleeps == [0.5, 1.0]
 
 
+def test_rate_limited_transport_is_surfaced_instead_of_retried(
+  tmp_path, monkeypatch,
+):
+  """A 429 carries Retry-After, so an instant second attempt is wasted."""
+  from app.routes.github import _push_topic_branch
+
+  calls = []
+  sleeps = []
+  monkeypatch.setattr(
+    "app.github_contribution_git._git",
+    lambda _repo, *args, **kwargs: calls.append(args) or _cp(
+      stderr="fatal: unable to access: The requested URL returned error: 429",
+      returncode=1,
+    ),
+  )
+  monkeypatch.setattr("app.github_contributions.time.sleep", sleeps.append)
+
+  error = _push_topic_branch(tmp_path, "fix/demo")
+
+  assert "429" in error
+  assert len(calls) == 1
+  assert sleeps == []
+
+
 def test_inspect_owner_fork_reports_strictly_behind_without_mutation(
   tmp_path, monkeypatch,
 ):
