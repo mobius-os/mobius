@@ -100,7 +100,6 @@ def test_delegated_prompt_states_connections_unavailable():
     effort=None,
     scope="read",
     cwd="/data",
-    max_budget_usd=None,
   )
   assert (
     "Owner-managed MCP connections are not available" in policy.system_prompt
