@@ -3,6 +3,10 @@ import {
   createDeviceAssetCacheProvider,
   DEVICE_ASSET_CACHE,
 } from './deviceAssetCache.js'
+import {
+  createScreenControlProvider,
+  SCREEN_CONTROL,
+} from './screenControlHost.js'
 
 export const MICROPHONE_CAPTURE = 'media.microphone.capture'
 export const SPEECH = 'media.speech'
@@ -87,5 +91,6 @@ export function builtInCapabilityProviders(options = {}) {
       appId: options.deviceAssets?.appId,
       ...options.speechModels,
     }),
+    [SCREEN_CONTROL]: createScreenControlProvider(options.screenControl),
   }
 }

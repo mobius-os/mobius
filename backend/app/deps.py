@@ -557,6 +557,23 @@ def authorize_current_owner_or_app_detached(
     db.close()
 
 
+def authorize_current_owner_detached(
+  token: str = Depends(_oauth2),
+) -> str:
+  """Authenticate an owner token without retaining a DB session.
+
+  Long-lived owner-only streams use the returned username to bind their
+  transient in-memory resource while releasing the pooled connection before
+  response iteration begins.
+  """
+  db = SessionLocal()
+  try:
+    owner = resolve_owner_only(token, db)
+    return owner.username
+  finally:
+    db.close()
+
+
 def get_principal(
   token: str = Depends(_oauth2),
   db: Session = Depends(get_db),
@@ -864,8 +881,9 @@ def get_owner_or_app_with_github_access(
   """Owner JWT, OR an app-scoped JWT whose App row has github_access=true.
 
   This is the GitHub data grant: the GET-only REST proxy, mutation-rejecting
-  GraphQL proxy, sanitized local source status, and Contribute's narrow reviewed
-  submit endpoints. Credential management is a separate github_connect grant.
+  GraphQL proxy, sanitized local source status, project-bound bounded source
+  previews, and Contribute's narrow reviewed submit endpoints. Credential
+  management is a separate github_connect grant.
   Neither capability can exfiltrate the stored token (INV1).
 
   Permission is read from the App row at request time (not baked into

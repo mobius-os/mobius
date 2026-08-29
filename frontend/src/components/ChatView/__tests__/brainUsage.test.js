@@ -9,6 +9,7 @@ import {
   resolvedContextTokenCounts,
   visibleBrainFillBounds,
 } from '../brainUsage.js'
+import { chatQueries } from '../../../hooks/queries.js'
 
 test('context gauge measures the latest model call against its context window', () => {
   assert.equal(contextUsedPercent({
@@ -74,6 +75,15 @@ test('missing usage in an established session remains unknown', () => {
     input_tokens: null,
     context_window: null,
   }, registry, 'codex', 'gpt-5.6-sol'), null)
+})
+
+test('context usage cache identity follows the exact provider session', () => {
+  const first = chatQueries.keys.currentUsage('chat-1', 'codex', 'session-1')
+  const second = chatQueries.keys.currentUsage('chat-1', 'codex', 'session-2')
+  assert.deepEqual(first, [
+    'chat-current-usage', 'chat-1', 'codex', 'session-1',
+  ])
+  assert.notDeepEqual(first, second)
 })
 
 test('the final ten percent remains visibly linear inside the inset mask', () => {

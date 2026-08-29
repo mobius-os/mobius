@@ -240,8 +240,6 @@ def test_current_chat_usage_is_bounded_to_selected_provider_session(
   client, auth, chat, db,
 ):
   now = datetime.now(UTC)
-  chat.provider = "codex"
-  chat.session_id = "thread-current"
   db.add_all([
     models.ChatRun(
       id="older-thread",
@@ -277,6 +275,10 @@ def test_current_chat_usage_is_bounded_to_selected_provider_session(
 
   response = client.get(
     f"/api/chats/{chat.id}/usage/current",
+    params={
+      "provider": "codex",
+      "provider_session_id": "thread-current",
+    },
     headers=auth,
   )
 
@@ -292,8 +294,6 @@ def test_current_chat_usage_is_bounded_to_selected_provider_session(
 def test_current_chat_usage_reads_normalized_claude_call_occupancy(
   client, auth, chat, db,
 ):
-  chat.provider = "claude"
-  chat.session_id = "claude-session-current"
   db.add(models.ChatRun(
     id="selected-claude-session",
     chat_id=chat.id,
@@ -311,6 +311,10 @@ def test_current_chat_usage_reads_normalized_claude_call_occupancy(
 
   response = client.get(
     f"/api/chats/{chat.id}/usage/current",
+    params={
+      "provider": "claude",
+      "provider_session_id": "claude-session-current",
+    },
     headers=auth,
   )
 
@@ -326,8 +330,6 @@ def test_current_chat_usage_reads_normalized_claude_call_occupancy(
 def test_current_chat_usage_reads_codex_shaped_app_provider_metrics(
   client, auth, chat, db,
 ):
-  chat.provider = "mobius"
-  chat.session_id = "mobius-session"
   db.add(models.ChatRun(
     id="mobius-evolve-run",
     chat_id=chat.id,
@@ -348,6 +350,10 @@ def test_current_chat_usage_reads_codex_shaped_app_provider_metrics(
 
   response = client.get(
     f"/api/chats/{chat.id}/usage/current",
+    params={
+      "provider": "mobius",
+      "provider_session_id": "mobius-session",
+    },
     headers=auth,
   )
 
@@ -365,13 +371,17 @@ def test_current_chat_usage_returns_unknown_for_a_fresh_session(
 ):
   response = client.get(
     f"/api/chats/{chat.id}/usage/current",
+    params={
+      "provider": "claude",
+      "provider_session_id": "session-without-a-turn",
+    },
     headers=auth,
   )
 
   assert response.status_code == 200
   assert response.json() == {
     "provider": "claude",
-    "provider_session_id": None,
+    "provider_session_id": "session-without-a-turn",
     "input_tokens": None,
     "context_window": None,
   }

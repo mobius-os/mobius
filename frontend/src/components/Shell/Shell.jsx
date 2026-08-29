@@ -161,6 +161,7 @@ import useAppFrameCache from './useAppFrameCache.js'
 import useShellVisualViewport from './useShellVisualViewport.js'
 import useShellShortcuts from '../../hooks/useShellShortcuts.js'
 import ShellBrand from './ShellBrand.jsx'
+import ScreenControlButton from './ScreenControlButton.jsx'
 import { createMediaSessionOwner } from './mediaSessionOwner.js'
 import { HistoryDismissProvider } from '../../hooks/useHistoryDismiss.jsx'
 
@@ -3892,6 +3893,7 @@ export default function Shell({ onInitialVisualReady }) {
               <span className="shell__sr-only">{reachabilityLabel}</span>
             </span>
           )}
+          <ScreenControlButton chatId={activeChatId} onNotice={showToast} />
           <NotificationCenter
             ref={notificationCenterActionsRef}
             commands={shellCommands}

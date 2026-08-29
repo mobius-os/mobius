@@ -1,9 +1,9 @@
 """Two-phase startup for the owner-facing service.
 
-Process setup and schema verification run first. Database-backed ownership,
-reconciliation, and background work run only after the live database matches
-the ORM. A schema-incompatible process can therefore serve bounded diagnostics
-without executing partial maintenance against a database it cannot understand.
+Process setup and database verification run first. Database-backed ownership,
+reconciliation, and background work run only after migrations complete and the
+live database has every mapped table and column. An incompatible database can
+therefore serve bounded diagnostics without executing partial maintenance.
 """
 
 from __future__ import annotations
@@ -31,12 +31,32 @@ class StartupSettings(Protocol):
   data_dir: str
 
 
+@dataclass(frozen=True)
+class DatabaseBootResult:
+  """One explicit verdict for every database-backed startup owner."""
+
+  schema_gaps: tuple[str, ...] = ()
+  failure_reason: str | None = None
+
+  @property
+  def reason(self) -> str | None:
+    if self.failure_reason:
+      return self.failure_reason
+    if self.schema_gaps:
+      return "schema_mismatch"
+    return None
+
+  @property
+  def serviceable(self) -> bool:
+    return self.reason is None
+
+
 @dataclass
 class StartupContext:
   app: StartupApp
   settings: StartupSettings
   boot_id: str
-  init_db: Callable[[], list[str]]
+  init_db: Callable[[], DatabaseBootResult]
   install_pm_commit_launcher: Callable[[Path, Path], bool]
   assert_provider_defaults: Callable[[object], None]
   logger: logging.Logger = field(
@@ -45,7 +65,7 @@ class StartupContext:
   restart_authorization: str | None = None
   manual_reconciled_chats: list[str] = field(default_factory=list)
   restart_fallback_chats: list[str] = field(default_factory=list)
-  schema_gaps: list[str] = field(default_factory=list)
+  database_boot: DatabaseBootResult = field(default_factory=DatabaseBootResult)
 
 
 TaskAction = Callable[[StartupContext], object | Awaitable[object]]
@@ -55,7 +75,6 @@ TaskAction = Callable[[StartupContext], object | Awaitable[object]]
 class StartupTask:
   name: str
   action: TaskAction
-  critical: bool = False
   checkpoint: str | None = None
 
 
@@ -70,14 +89,6 @@ async def run_startup_tasks(
       if inspect.isawaitable(result):
         await result
     except Exception as exc:
-      if task.critical:
-        context.logger.critical(
-          "critical startup task %s failed: %s",
-          task.name,
-          exc,
-          exc_info=True,
-        )
-        raise
       context.logger.error(
         "startup task %s failed: %s",
         task.name,
@@ -89,24 +100,28 @@ async def run_startup_tasks(
         record_memory_checkpoint(task.checkpoint)
 
 
-async def run_startup_plan(context: StartupContext) -> bool:
+async def run_startup_plan(context: StartupContext) -> DatabaseBootResult:
   """Run process setup, then database services only when schema-safe.
 
-  Returns whether the database-backed application was started. The caller uses
-  that same outcome to decide which long-lived supervisors may start, keeping
-  one schema-serviceability decision for the entire boot.
+  Returns the database verdict used by HTTP diagnostics and long-lived
+  supervisors, keeping one serviceability decision for the entire boot.
   """
   await run_startup_tasks(context, PROCESS_STARTUP_TASKS)
-  if context.schema_gaps:
-    context.logger.critical(
-      "database schema mismatch; skipped %d database startup task(s): %s",
-      len(DATABASE_STARTUP_TASKS),
-      ", ".join(context.schema_gaps),
+  if not context.database_boot.serviceable:
+    detail = (
+      ", ".join(context.database_boot.schema_gaps)
+      or str(context.database_boot.failure_reason)
     )
-    record_memory_checkpoint("startup_schema_degraded")
-    return False
+    context.logger.critical(
+      "database startup degraded (%s); skipped %d database task(s): %s",
+      context.database_boot.reason,
+      len(DATABASE_STARTUP_TASKS),
+      detail,
+    )
+    record_memory_checkpoint("startup_database_degraded")
+    return context.database_boot
   await run_startup_tasks(context, DATABASE_STARTUP_TASKS)
-  return True
+  return context.database_boot
 
 
 def _refresh_commit_launcher(context: StartupContext) -> None:
@@ -130,7 +145,16 @@ def _remove_legacy_auto_resume_setting(context: StartupContext) -> None:
 
 
 def _initialize_database(context: StartupContext) -> None:
-  context.schema_gaps = context.init_db()
+  try:
+    context.database_boot = context.init_db()
+  except Exception as exc:
+    context.logger.critical(
+      "database initialization failed: %s", exc, exc_info=True,
+    )
+    context.database_boot = DatabaseBootResult(
+      failure_reason="database_initialization_failed",
+    )
+  record_memory_checkpoint("startup_database_checked")
 
 
 def _purge_expired_chats(context: StartupContext) -> None:
@@ -372,8 +396,6 @@ PROCESS_STARTUP_TASKS = (
   StartupTask(
     "initialize database",
     _initialize_database,
-    critical=True,
-    checkpoint="startup_database_initialized",
   ),
 )
 

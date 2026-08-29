@@ -46,6 +46,9 @@ services:
       # only when the browser-facing origin differs from DOMAIN.
       - MOBIUS_ACCOUNT_ORIGIN=${MOBIUS_ACCOUNT_ORIGIN:-https://www.mobius.you}
       - MOBIUS_ACCOUNT_CLIENT_ORIGIN=${MOBIUS_ACCOUNT_CLIENT_ORIGIN:-}
+      - MOBIUS_CONTRIBUTION_RELAY_URL=${MOBIUS_CONTRIBUTION_RELAY_URL:-https://www.mobius.you}
+      - MOBIUS_CONTRIBUTION_TARGET_REPO=${MOBIUS_CONTRIBUTION_TARGET_REPO:-}
+      - MOBIUS_CONTRIBUTION_RELAY_TEST_REPOSITORIES=${MOBIUS_CONTRIBUTION_RELAY_TEST_REPOSITORIES:-}
       # No application default: every public_surface fails closed unless the
       # operator explicitly configures the same shared origin consumed by
       # Caddy above. One gateway serves all owner-trusted service slugs.
