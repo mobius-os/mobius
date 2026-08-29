@@ -1492,6 +1492,14 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
       )
 
     file = static_dir / path
+    if not file.is_file() and static_dir != _baked_dir and path != "index.html":
+      # A complete live build can still omit an image-installed vendor asset,
+      # or a new public file until that build refreshes. Pick the baked copy
+      # before response policy so executable fallbacks cannot bypass the cache
+      # and Range invariants enforced below.
+      baked = _baked_dir / path
+      if baked.is_file():
+        file = baked
     if file.is_file() and path != "index.html":
       # The service worker MUST be served with `Cache-Control:
       # no-cache` so the browser revalidates it on every page load.
@@ -1515,19 +1523,6 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
         # (same class as the /app-assets + /module fix; see http_caching).
         strip_range(request)
       return FileResponse(str(file), headers=headers or None)
-    # When the live build is being served, a file that lives ONLY in the baked
-    # build (/app/static) would otherwise fall through to the HTML response.
-    # /vendor/pdfjs/* is the canonical example: the npm-install asset copy
-    # lands in /app/static at image build time, but Vite doesn't emit it
-    # into /data/platform/frontend/dist. Falling back to the baked dir for
-    # files-not-in-live keeps app-authored asset URLs working without forcing the
-    # rebuild to mirror the entire vendor tree.
-    if static_dir != _baked_dir and path != "index.html":
-      baked = _baked_dir / path
-      if baked.is_file():
-        return FileResponse(
-          str(baked), headers=_public_static_headers(path) or None
-        )
     # Static asset namespaces 404 on a miss — they must never receive the
     # SPA HTML below (a module URL served as text/html is MIME-rejected by
     # the browser and poisons the cache-first service worker). Only app
