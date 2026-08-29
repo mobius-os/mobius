@@ -16,6 +16,7 @@ import {
   outboxPrincipalKey,
   outboxRequestPath,
   retireIntent,
+  storedIntentOwnership,
   subscribeOutboxDelivered,
 } from '../chatOutbox.js'
 
@@ -115,6 +116,10 @@ test('a queued intent survives to disk and is listable only by its principal', a
   assert.equal((await list()).length, 0)
   installToken()
   assert.equal((await list()).length, 0, 'mismatched owner data is pruned')
+})
+
+test('unscoped legacy intent is discarded instead of adopted by this owner', () => {
+  assert.equal(storedIntentOwnership(null, currentPrincipalKey()), 'discard')
 })
 
 test('same-owner embedded capabilities do not delete each other\'s queued text', async () => {

@@ -62,6 +62,14 @@ function sameOwnerPartition(first, second) {
   }
 }
 
+export function storedIntentOwnership(recordPrincipalKey, currentPrincipalKey) {
+  if (!recordPrincipalKey) return 'discard'
+  if (recordPrincipalKey === currentPrincipalKey) return 'owned'
+  return sameOwnerPartition(recordPrincipalKey, currentPrincipalKey)
+    ? 'preserve'
+    : 'discard'
+}
+
 // A replay's terminal disposition, decided from an HTTP result:
 //   delivered — accepted, duplicate, or an answer whose question is gone;
 //   retry     — transport/rate/server trouble; preserve order and retry later;
@@ -140,20 +148,18 @@ export async function listIntents(principalKey) {
         cleanup.push(del(key, store))
         continue
       }
-      if (value.principalKey && value.principalKey !== principalKey) {
-        // Capabilities for the same owner share this origin but not replay
-        // authority. Keep their records for their own mounted chat; only data
-        // from a genuinely different owner/epoch is stale and pruned.
-        if (!sameOwnerPartition(value.principalKey, principalKey)) {
-          cleanup.push(del(key, store))
-        }
+      const ownership = storedIntentOwnership(value.principalKey, principalKey)
+      if (ownership === 'discard') {
+        // Ownership of an unscoped row cannot be proven, and a different
+        // owner/epoch is known stale. Delete both rather than guessing across
+        // this security boundary.
+        cleanup.push(del(key, store))
         continue
       }
-      if (!value.principalKey) {
-        // Upgrade the unscoped v1 records created by earlier local builds for
-        // the currently authenticated owner before any replay.
-        value.principalKey = principalKey
-        cleanup.push(set(key, value, store))
+      if (ownership === 'preserve') {
+        // Capabilities for the same owner share this origin but not replay
+        // authority. Keep the row for its own mounted chat.
+        continue
       }
       owned.push(value)
     }
