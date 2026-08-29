@@ -18,6 +18,7 @@ import {
   removeClonedSpeechProfile,
   saveClonedSpeechProfile,
 } from './speechModels.js'
+import { SPEECH_PITCH_WORKLET_URL } from './speechPitchAsset.js'
 
 const ACTIVE_MODEL_KEY = 'mobius:speech:active-model:v1'
 const CLONE_SECONDS = 8
@@ -216,7 +217,13 @@ export async function speechPlaybackCatalog(options = {}) {
   const active = catalog.models.find((model) => (
     model.id === catalog.activeModelId && model.state === 'ready'
   )) || null
-  return { activeModel: playbackModel(active) }
+  return {
+    activeModel: playbackModel(active),
+    playback: {
+      pitchPreserving: true,
+      workletUrl: SPEECH_PITCH_WORKLET_URL,
+    },
+  }
 }
 
 export function resetSpeechClones({ storage = globalThis.localStorage } = {}) {

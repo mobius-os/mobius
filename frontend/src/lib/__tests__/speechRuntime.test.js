@@ -9,6 +9,11 @@ import {
 } from '../speech/pocketTtsEngine.js'
 import { SPEECH_WORKER_URL } from '../speech/speechWorkerAsset.js'
 import {
+  SPEECH_PITCH_WORKLET_PATH,
+  SPEECH_PITCH_WORKLET_URL,
+  SPEECH_PITCH_WORKLET_VERSION,
+} from '../speech/speechPitchAsset.js'
+import {
   DEFAULT_SPEECH_ENGINE_ID,
   DEFAULT_SPEECH_MODEL_ID,
   publicSpeechEngine,
@@ -482,11 +487,39 @@ test('speech playback catalog projects only the active ready voice', async () =>
       language: 'English',
       sampleRate: 24_000,
     },
+    playback: {
+      pitchPreserving: true,
+      workletUrl: SPEECH_PITCH_WORKLET_URL,
+    },
   })
-  assert.deepEqual(Object.keys(active), ['activeModel'])
+  assert.deepEqual(Object.keys(active), ['activeModel', 'playback'])
   assert.equal('engines' in active, false)
   assert.equal('models' in active, false)
-  assert.deepEqual(missing, { activeModel: null })
+  assert.deepEqual(missing, {
+    activeModel: null,
+    playback: {
+      pitchPreserving: true,
+      workletUrl: SPEECH_PITCH_WORKLET_URL,
+    },
+  })
+})
+
+test('pitch-preserving speech worklet registers its processor', async (t) => {
+  const OriginalProcessor = globalThis.AudioWorkletProcessor
+  const originalRegister = globalThis.registerProcessor
+  let registration
+  globalThis.AudioWorkletProcessor = class {}
+  globalThis.registerProcessor = (name, Processor) => { registration = { name, Processor } }
+  t.after(() => {
+    globalThis.AudioWorkletProcessor = OriginalProcessor
+    globalThis.registerProcessor = originalRegister
+  })
+
+  await import(new URL(`../../../public/${SPEECH_PITCH_WORKLET_PATH}`, import.meta.url))
+
+  assert.equal(SPEECH_PITCH_WORKLET_VERSION, '2.1.1')
+  assert.equal(registration.name, 'soundtouch-processor')
+  assert.equal(typeof registration.Processor, 'function')
 })
 
 test('clone removal uses the same injected storage that supplied the model', async () => {

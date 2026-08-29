@@ -125,6 +125,12 @@ test('speech providers lazy-load the runtime and preserve the invoking app ident
 
   assert.equal(typeof speechControl.control, 'function')
   assert.equal(typeof modelControl.control, 'function')
+  assert.equal(speech.contention({
+    input: { operation: 'catalog' }, activeInput: { operation: 'model-stream' },
+  }), 'share')
+  assert.equal(speech.contention({
+    input: { operation: 'model-stream' }, activeInput: { operation: 'synthesize' },
+  }), 'replace')
   assert.deepEqual(calls, [
     ['speech', { text: 'Hello' }],
     ['models', 61, { operation: 'catalog' }],
