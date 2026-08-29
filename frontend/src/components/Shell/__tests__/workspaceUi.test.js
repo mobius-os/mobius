@@ -972,6 +972,10 @@ test('the Möbius header keeps its phone divider but flows into desktop navigati
     drawerCss,
     /top:\s*calc\(var\(--shell-bar-height,\s*58px\) \+ env\(safe-area-inset-top\)\);/,
   )
+  assert.match(
+    shellCss,
+    /\.shell__tabstrip--single-builder\s*\{[\s\S]*?top:\s*calc\(var\(--shell-bar-height,\s*58px\) \+ env\(safe-area-inset-top,\s*0px\)\);/,
+  )
 })
 
 test('drawer rows keep action and reorder chrome out of the list', () => {

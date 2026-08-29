@@ -421,7 +421,7 @@
    phone-header and desktop-rail layouts. */
 .shell__tabstrip--single-builder {
   position: absolute;
-  top: calc(var(--shell-bar-height) + env(safe-area-inset-top, 0px));
+  top: calc(var(--shell-bar-height, 58px) + env(safe-area-inset-top, 0px));
   left: 0;
   right: 0;
 }
