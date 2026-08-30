@@ -353,6 +353,10 @@ Report Memory health on separate axes: publication, input coverage, semantic
 edit capability, graph integrity, queue progress, and recall opportunities. A
 clean publication must not flatten missing semantic-edit input or silent recall
 into a single HEALTHY label.
+Keep recall execution, knowledge freshness, and recall-quality feedback
+separate too: successful navigator attempts prove that the read path ran, not
+that the graph is current or that recent selections were useful. Never call the
+whole subsystem healthy when one of those axes is stale or unassessed.
 
 Read, in this order:
 
@@ -441,6 +445,14 @@ Then act on the **system** signal:
 - If Memory did not run, timed out, or repeatedly failed its graph rebuild,
   diagnose the wrapper/runner/app-install issue if it is small and reversible;
   otherwise put a clear proposal in the brief.
+- Clearing a suspected exception path is not recovery. Until a later
+  authoritative scheduled run publishes successfully, describe it as “the
+  immediate crash path is cleared” and keep recovery **unverified**. A compile,
+  import, or focused unit test proves only the layer it exercised.
+- When a backlog exists, compare pending-before, acknowledged, remaining, and
+  the run's actual intake/acceptance capacity before promising catch-up. Say
+  “began draining” until the authoritative queue reaches zero; one green run is
+  not evidence that several runs of queued work disappeared.
 - If Memory's update log says it created/merged/pruned useful notes, mention the
   outcome in the brief only when it matters to the partner. Do not recap routine
   maintenance.
