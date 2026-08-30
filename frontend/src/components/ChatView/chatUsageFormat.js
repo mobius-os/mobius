@@ -1,7 +1,6 @@
 /**
- * Shared formatting for the chat token-usage/cost surfaces (the composer
- * badge and the full ChatUsageInspector breakdown). One place so the badge's
- * compact numbers and the inspector's precise ones never drift apart.
+ * Shared formatting for the Brain's chat-usage summary and detailed inspector.
+ * One place keeps the progressive-disclosure layers numerically consistent.
  */
 
 export function formatTokenCount(value) {
@@ -22,32 +21,44 @@ export function formatCostUsd(value) {
   return `$${value.toFixed(2)}`
 }
 
-export function formatUsageStripText(totals) {
-  if (!totals) return null
-  const cost = formatCostUsd(totals.cost_usd)
-  const input = formatTokenCount(totals.input_tokens)
-  const output = formatTokenCount(totals.output_tokens)
-  const total = formatTokenCount(totals.total_tokens)
-  if (cost === null && !input && !output && !total) return null
-  const parts = ['Usage']
-  if (cost !== null) parts.push(cost)
-  if (input || output) {
-    parts.push([
-      input && `${input} in`,
-      output && `${output} out`,
-    ].filter(Boolean).join(' / '))
-  } else if (total) parts.push(`${total} tokens`)
-  return parts.join(' · ')
+export function nonCachedInputTokens(totals) {
+  if (typeof totals?.input_tokens !== 'number'
+      || !Number.isFinite(totals.input_tokens)) return null
+  const cached = typeof totals.cache_read_input_tokens === 'number'
+    && Number.isFinite(totals.cache_read_input_tokens)
+    ? totals.cache_read_input_tokens
+    : 0
+  return Math.max(0, totals.input_tokens - cached)
 }
 
-export function formatUsageAriaSummary(totals) {
-  if (!totals) return 'Usage not yet available for this chat'
+export function cacheHitRate(totals) {
+  const input = totals?.input_tokens
+  const cached = totals?.cache_read_input_tokens
+  if (typeof input !== 'number' || !Number.isFinite(input) || input <= 0) return null
+  if (typeof cached !== 'number' || !Number.isFinite(cached)) return null
+  return Math.min(100, Math.max(0, (cached / input) * 100))
+}
+
+export function formatCacheHitRate(totals, fractionDigits = 0) {
+  const rate = cacheHitRate(totals)
+  if (rate === null) return null
+  const digits = Math.max(0, Math.min(1, fractionDigits))
+  return `${rate.toFixed(digits).replace(/\.0$/, '')}%`
+}
+
+export function formatUsageMenuText(totals) {
+  if (!totals) return null
+  const input = formatTokenCount(nonCachedInputTokens(totals))
+  const output = formatTokenCount(totals.output_tokens)
+  const cache = formatCacheHitRate(totals)
   const cost = formatCostUsd(totals.cost_usd)
-  const tokens = formatTokenCount(totals.total_tokens)
   const parts = []
-  if (cost !== null) parts.push(`reported cost ${cost}`)
-  if (tokens) parts.push(`${tokens} tokens`)
-  return parts.length ? `Chat usage so far: ${parts.join(', ')}` : 'Usage not yet available for this chat'
+  if (input) parts.push(`${input} in`)
+  if (output) parts.push(`${output} out`)
+  if (cache) parts.push(`${cache} cache`)
+  if (cost !== null) parts.push(cost)
+  if (!parts.length) return null
+  return parts.join(' · ')
 }
 
 export function usageModelName(usage) {

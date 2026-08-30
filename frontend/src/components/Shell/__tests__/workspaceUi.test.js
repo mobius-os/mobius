@@ -1370,7 +1370,7 @@ test('round4-3: the New Chat landing renders for a null slot and reuses ChatView
     'a model-only New Chat Brain must not expose a dead attachment action')
   assert.match(composerPopover, /\{!embedded && onOpenChanges && \(/,
     'a model-only New Chat Brain must not expose a dead Changes action')
-  assert.match(composerPopover, /\{!embedded && \(onOpenSummary \|\| onOpenInspector \|\| onOpenUsage\) && \(/,
+  assert.match(composerPopover, /\{!embedded && \(onOpenUsage \|\| onOpenSummary \|\| onOpenInspector\) && \(/,
     'a model-only New Chat Brain must not expose dead continuity actions')
   assert.doesNotMatch(newChatLanding, /attachTriggerRef/,
     'the pre-allocation surface must not expose server-bound attachment behavior')
