@@ -26,6 +26,7 @@
     "0022_project_artifacts": "ba42d74e4b2795b08f37c2c75116c879dea1686ededb16b0eca0b5c4c79ab29e",
     "0023_project_color": "aecbaff852f8640f86a9f0695bc26ff8b00e857b31d36a1d345440c301eca5ed",
     "0024_chat_goal_dismissal": "eb39716740f6dd2414db70b7d3d64443cc94583b778aca344398202adb591b96",
-    "0025_attached_delegation_work": "45504079269294dcd1e52d55e581dd7322ed49f8c0b6304b6f1a5e161d057468"
+    "0025_attached_delegation_work": "45504079269294dcd1e52d55e581dd7322ed49f8c0b6304b6f1a5e161d057468",
+    "0026_chat_app_artifacts": "0bffb4b1d8082ec51d8b1e77f1d4fa5bf6e9890c71737332ebb9f4a24ae8037d"
   }
 }

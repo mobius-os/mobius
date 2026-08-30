@@ -5,9 +5,6 @@
 
 import { groupActivityRuns } from './activityGrouping.js'
 import { hasPendingQuestionMessage } from '../../lib/chatDetailCache.js'
-import { shouldShowOpenAppCta } from './openAppCtaState.js'
-
-export { shouldShowOpenAppCta }
 
 export function isContinuationMessage(message) {
   return message?.kind === 'continuation'
@@ -323,78 +320,6 @@ export function coldTranscriptRenderFrames(
   if (frames.length === 0) return [messages]
   frames[frames.length - 1] = messages
   return frames
-}
-
-export function openAppCtaViewModel(builtApp, turnActive) {
-  if (!shouldShowOpenAppCta(builtApp, turnActive)) return null
-  const name = builtApp.name || 'app'
-  if (turnActive) {
-    return {
-      label: `Open ${name} preview`,
-      ariaLabel: `Open live preview of ${name}`,
-    }
-  }
-  return {
-    label: `Open ${name}`,
-    ariaLabel: `Open ${name}`,
-  }
-}
-
-export function previewReadyAnnouncement(builtApp) {
-  if (!shouldShowOpenAppCta(builtApp)) return ''
-  return `Live preview ready for ${builtApp.name || 'app'}.`
-}
-
-export function previewUpdatedAnnouncement(builtApp) {
-  return `Preview updated for ${builtApp?.name || 'app'}.`
-}
-
-// Pure decision for the built-app CTA pulse + announce, given the current CTA
-// list (derived from server truth, newest last) and a Map of the last-seen
-// updated_at per app id. Both cases — first build vs source recompile — are
-// derived here from updated_at deltas alone:
-//
-//   - a NEW id (absent from `lastSeen`) is a FIRST BUILD: record its updated_at
-//     WITHOUT pulsing, and the newest such app drives the first-build announce
-//     ("Live preview ready …").
-//   - an ALREADY-SEEN id whose updated_at ADVANCED is a source RECOMPILE: flash
-//     "Preview updated ✓" and announce it. A recompile announce wins over a
-//     first-build one in the same batch.
-//
-// Because the derived list is `app.chat_id === activeChatId`, an app appears in
-// exactly one chat's list (its single chat_id), so this per-ChatView decision
-// can only ever pulse in the chat that owns the app — no cross-chat flash.
-// SANCTIONED trade: updated_at also bumps on a rename/metadata write, so such
-// an update flashes "Preview updated ✓" and can reorder the CTA list (it sorts
-// by updated_at) — accepted as-is, since the app row DID update and tracking a
-// parallel source-only timestamp would recreate the duplicated state this
-// derivation removed.
-export function builtAppPulseDecision(builtApps, lastSeen) {
-  const list = Array.isArray(builtApps) ? builtApps : []
-  const seen = lastSeen instanceof Map ? lastSeen : new Map()
-  const nextSeen = new Map()
-  let pulseApp = null
-  let newApp = null
-  for (const app of list) {
-    if (!app || app.id == null) continue
-    const id = Number(app.id)
-    const updatedAt = app.updated_at ?? null
-    nextSeen.set(id, updatedAt)
-    if (!seen.has(id)) {
-      newApp = app
-    } else if (updatedAt != null && seen.get(id) != null
-        && updatedAt !== seen.get(id)) {
-      pulseApp = app
-    }
-  }
-  const announce = pulseApp
-    ? previewUpdatedAnnouncement(pulseApp)
-    : (newApp ? previewReadyAnnouncement(newApp) : '')
-  return {
-    pulseId: pulseApp ? Number(pulseApp.id) : null,
-    announce,
-    nextSeen,
-  }
 }
 
 export function systemEventForChat(event, chatId) {

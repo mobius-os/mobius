@@ -2140,6 +2140,66 @@ def _add_attached_delegation_work(eng) -> None:
       "ON delegations (source_work_active_chat_id)"
     ))
 
+
+def _backfill_chat_app_artifacts(eng) -> None:
+  """Lift the last known chat/app build and its acknowledgement cursor."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  tables = set(sa_inspect(eng).get_table_names())
+  if not {"apps", "chats", "chat_app_artifacts"}.issubset(tables):
+    return
+  preview_join = (
+    "LEFT JOIN app_preview_state p ON p.app_id = a.id"
+    if "app_preview_state" in tables else ""
+  )
+  preview_projection = "p.seen_updated_at" if preview_join else "NULL"
+
+  def same_instant(left, right) -> bool:
+    if left is None or right is None:
+      return False
+
+    def parsed(value):
+      if isinstance(value, datetime):
+        current = value
+      else:
+        current = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+      if current.tzinfo is not None:
+        current = current.astimezone(UTC).replace(tzinfo=None)
+      return current
+
+    return parsed(left) == parsed(right)
+
+  with eng.begin() as conn:
+    rows = conn.execute(text(
+      f"SELECT a.chat_id, a.id AS app_id, a.updated_at, {preview_projection} "
+      "AS preview_seen_at "
+      "FROM apps a JOIN chats c ON c.id = a.chat_id "
+      f"{preview_join} "
+      "WHERE a.chat_id IS NOT NULL"
+    )).mappings().all()
+    for row in rows:
+      seen_at = (
+        row["updated_at"]
+        if same_instant(row["preview_seen_at"], row["updated_at"])
+        else None
+      )
+      conn.execute(text(
+        "INSERT INTO chat_app_artifacts "
+        "(chat_id, app_id, touched_at, seen_at) "
+        "SELECT :chat_id, :app_id, :touched_at, :seen_at "
+        "WHERE NOT EXISTS ("
+        "SELECT 1 FROM chat_app_artifacts "
+        "WHERE chat_id = :chat_id AND app_id = :app_id"
+        ")"
+      ), {
+        "chat_id": row["chat_id"],
+        "app_id": row["app_id"],
+        "touched_at": row["updated_at"],
+        "seen_at": seen_at,
+      })
+    if preview_join:
+      conn.execute(text("DROP TABLE app_preview_state"))
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -2168,6 +2228,7 @@ _SCHEMA_MIGRATIONS = (
   ("0023_project_color", _add_project_color),
   ("0024_chat_goal_dismissal", _add_chat_goal_dismissal),
   ("0025_attached_delegation_work", _add_attached_delegation_work),
+  ("0026_chat_app_artifacts", _backfill_chat_app_artifacts),
 )
 
 

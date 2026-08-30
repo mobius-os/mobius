@@ -1181,23 +1181,27 @@ class AppRecencyState(Base):
   )
 
 
-class AppPreviewState(Base):
-  """Durable acknowledgement of the exact app build opened from its chat CTA.
+class ChatAppArtifact(Base):
+  """One app this chat created or updated, plus its acknowledgement cursor.
 
-  This is separate from ``apps`` so acknowledging a preview never advances
-  ``App.updated_at`` — the executable-bundle version the acknowledgement is
-  meant to record. ``seen_as_final`` distinguishes opening a live preview from
-  opening the settled result: finishing the turn may surface the same build one
-  last time even when no final source write was needed.
+  The composite key is the durable many-to-many relationship: an app may be
+  refined by several chats without disappearing from the earlier chats'
+  artifact pickers. ``touched_at`` advances only with a successful app apply;
+  opening that chat's Brain advances ``seen_at`` without rotating the
+  executable bundle version on ``apps.updated_at``.
   """
 
-  __tablename__ = "app_preview_state"
+  __tablename__ = "chat_app_artifacts"
 
-  app_id = Column(Integer, ForeignKey("apps.id"), primary_key=True)
-  seen_updated_at = Column(DateTime, nullable=False)
-  seen_as_final = Column(
-    Boolean, nullable=False, default=False, server_default=false()
+  chat_id = Column(
+    String(64), ForeignKey("chats.id", ondelete="CASCADE"), primary_key=True,
   )
+  app_id = Column(
+    Integer, ForeignKey("apps.id", ondelete="CASCADE"), primary_key=True,
+    index=True,
+  )
+  touched_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  seen_at = Column(DateTime, nullable=True, default=None)
 
 
 class PushSubscription(Base):

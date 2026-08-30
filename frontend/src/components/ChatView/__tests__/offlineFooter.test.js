@@ -33,11 +33,9 @@ test('only transient nudges float above the measured rail → connection → que
     'transient post-turn actions must render in the separate floating layer')
   const transientLane = foot.indexOf('className="chat__floating-transients"')
   const offscreenNudges = foot.indexOf('className="chat__offscreen-nudges"')
-  const openApp = foot.indexOf('className="chat__open-app"')
   assert.ok(
     transientLane > floatingActions
-      && offscreenNudges > transientLane
-      && openApp > transientLane,
+      && offscreenNudges > transientLane,
     'every transient footer action must stay in the one short-lived lane',
   )
   assert.doesNotMatch(

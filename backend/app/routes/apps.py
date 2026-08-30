@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session, defer
 
 from app import (
   activity, app_activity, app_apply, app_capability_acceptance, app_git,
-  app_jobs, app_preview, app_recency, fs_locks, icon_cache,
+  app_jobs, app_recency, chat_app_artifacts, fs_locks, icon_cache,
   models, project_git, providers, schemas,
   source_dirs, workspace_files,
 )
@@ -341,8 +341,8 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   db.query(models.AppRecencyState).filter(
     models.AppRecencyState.app_id == deleted_app_id,
   ).delete(synchronize_session=False)
-  db.query(models.AppPreviewState).filter(
-    models.AppPreviewState.app_id == deleted_app_id,
+  db.query(models.ChatAppArtifact).filter(
+    models.ChatAppArtifact.app_id == deleted_app_id,
   ).delete(synchronize_session=False)
   db.query(models.Project).filter(
     models.Project.source_app_id == deleted_app_id,
@@ -448,10 +448,61 @@ async def list_apps(
     .all()
   )
   return app_recency.annotate_apps(
-    db, app_preview.annotate_apps(
-      db, app_activity.annotate_apps(db, apps)
-    )
+    db, app_activity.annotate_apps(db, apps)
   )
+
+
+@router.get(
+  "/chat-artifacts/{chat_id}",
+  response_model=list[schemas.ChatAppArtifactOut],
+)
+def list_chat_app_artifacts(
+  chat_id: str,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Return the live apps this chat successfully created or updated."""
+  chat_exists = db.query(models.Chat.id).filter(
+    models.Chat.id == chat_id,
+    models.Chat.deleted_at.is_(None),
+  ).first()
+  if chat_exists is None:
+    raise HTTPException(status_code=404, detail="Chat not found")
+  return [
+    schemas.ChatAppArtifactOut(
+      app=app,
+      touched_at=artifact.touched_at,
+      seen_at=artifact.seen_at,
+    )
+    for artifact, app in chat_app_artifacts.list_for_chat(db, chat_id)
+  ]
+
+
+@router.post(
+  "/chat-artifacts/{chat_id}/seen",
+  status_code=204,
+  dependencies=[Depends(reject_cross_site)],
+)
+def mark_chat_app_artifacts_seen(
+  chat_id: str,
+  body: schemas.ChatAppArtifactsSeenRequest,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Acknowledge the exact app updates visible when this Brain opened."""
+  chat_exists = db.query(models.Chat.id).filter(
+    models.Chat.id == chat_id,
+    models.Chat.deleted_at.is_(None),
+  ).first()
+  if chat_exists is None:
+    raise HTTPException(status_code=404, detail="Chat not found")
+  chat_app_artifacts.mark_chat_touches_seen(
+    db,
+    chat_id=chat_id,
+    touches=[(touch.app_id, touch.touched_at) for touch in body.touches],
+  )
+  db.commit()
+  return Response(status_code=204)
 
 
 @router.post(
@@ -2128,9 +2179,7 @@ def get_app(
   """Returns a single mini-app by ID (404 for a tombstoned one)."""
   app = live_app_or_404(db, app_id)
   return app_recency.annotate_apps(
-    db, app_preview.annotate_apps(
-      db, app_activity.annotate_apps(db, [app])
-    )
+    db, app_activity.annotate_apps(db, [app])
   )[0]
 
 
@@ -2144,7 +2193,7 @@ def mark_app_opened(
   db: Session = Depends(get_db),
   _: models.Owner = Depends(get_current_owner),
 ):
-  """Record owner navigation recency without changing the app bundle version."""
+  """Record navigation recency without changing app-update attention."""
   live_app_or_404(db, app_id)
   app_recency.mark_opened(db, app_id)
   db.commit()
@@ -2169,43 +2218,6 @@ def mark_app_activity_seen(
   """Clear an app's durable activity dot when the owner opens the app."""
   live_app_or_404(db, app_id)
   app_activity.mark_seen(db, app_id, body.activity_version)
-  db.commit()
-  return Response(status_code=204)
-
-
-class AppPreviewSeenRequest(BaseModel):
-  updated_at: datetime
-  final: bool = False
-
-
-@router.post(
-  "/{app_id}/preview/seen",
-  status_code=204,
-  dependencies=[Depends(reject_cross_site)],
-)
-def mark_app_preview_seen(
-  app_id: int,
-  body: AppPreviewSeenRequest,
-  db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner),
-):
-  """Acknowledge the exact app build opened from its owning chat.
-
-  The client sends the version it rendered, not merely the app id. If a newer
-  compile races this request, the older acknowledgement remains older and the
-  new build's CTA stays visible.
-  """
-  app = live_app_or_404(db, app_id)
-  observed = app_preview.naive_utc(body.updated_at)
-  current = app_preview.naive_utc(app.updated_at)
-  if observed > current:
-    raise HTTPException(
-      status_code=409,
-      detail="Cannot acknowledge a preview newer than the installed app.",
-    )
-  app_preview.mark_seen(
-    db, app_id, observed, seen_as_final=body.final,
-  )
   db.commit()
   return Response(status_code=204)
 
@@ -2357,10 +2369,8 @@ async def update_app(
       get_system_broadcast().publish(
         {"type": "app_updated", "appId": str(app.id)}
       )
-    # The in-chat "Open <App>" CTA is DERIVED on the frontend from the apps
-    # query's chat_id + updated_at, so app_updated alone surfaces it in the
-    # owning chat. A metadata-only PATCH still bumps updated_at; the wire carries
-    # no source-only version key to gate on.
+    # Metadata-only PATCHes do not advance chat artifacts. That relationship is
+    # owned by a successful source apply carrying an explicit requesting chat.
   return app
 
 

@@ -22,6 +22,11 @@ const appsKey = ['apps']
 const projectsKey = ['projects']
 const projectTemplatesKey = ['projects', 'templates']
 const legacyProjectsKey = ['projects', 'legacy']
+const chatAppArtifactsRootKey = ['chat-app-artifacts']
+const chatAppArtifactsKey = chatId => [
+  ...chatAppArtifactsRootKey,
+  String(chatId || ''),
+]
 const chatsKey = ['chats']
 const chatUsageRootKey = ['chat-usage']
 const chatUsageKey = chatId => [...chatUsageRootKey, chatId]
@@ -119,6 +124,21 @@ async function fetchApps({ signal, timeoutMs } = {}) {
   const res = await api.apps.list({ signal, timeoutMs })
   const data = await jsonOrThrow(res, 'apps fetch failed:')
   return Array.isArray(data) ? data : []
+}
+
+async function fetchChatAppArtifacts(chatId, { signal } = {}) {
+  const res = await api.apps.chatArtifacts(chatId, { signal })
+  const data = await jsonOrThrow(res, 'chat app artifacts fetch failed:')
+  return Array.isArray(data) ? data : []
+}
+
+function useChatAppArtifactsQuery(chatId, { enabled = true } = {}) {
+  return useQuery({
+    queryKey: chatAppArtifactsKey(chatId),
+    queryFn: ({ signal }) => fetchChatAppArtifacts(chatId, { signal }),
+    enabled: Boolean(enabled && chatId),
+    staleTime: 0,
+  })
 }
 
 function useAppsQuery({ reconcile, enabled = true } = {}) {
@@ -452,6 +472,23 @@ export const appQueries = {
     useQuery: useAppTokenQuery,
     invalidate: (queryClient, appId) => queryClient.invalidateQueries({ queryKey: ['app-token', appId] }),
   },
+}
+
+export const chatAppArtifactQueries = {
+  keys: {
+    all: chatAppArtifactsRootKey,
+    detail: chatAppArtifactsKey,
+  },
+  detail: {
+    fetch: fetchChatAppArtifacts,
+    useQuery: useChatAppArtifactsQuery,
+    invalidate: (queryClient, chatId) => queryClient.invalidateQueries({
+      queryKey: chatAppArtifactsKey(chatId),
+    }),
+  },
+  invalidateAll: queryClient => queryClient.invalidateQueries({
+    queryKey: chatAppArtifactsRootKey,
+  }),
 }
 
 async function fetchChatUsage(chatId, { signal } = {}) {

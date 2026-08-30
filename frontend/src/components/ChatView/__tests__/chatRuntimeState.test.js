@@ -4,7 +4,6 @@ import assert from 'node:assert/strict'
 import {
   answerKeepsCurrentTurn,
   answerTurnDisposition,
-  builtAppPulseDecision,
   canFastForwardQueue,
   shouldFreezeStreamingReturn,
   coldTranscriptRenderFrames,
@@ -13,9 +12,6 @@ import {
   isOwnerUserMessage,
   startsFollowingTurn,
   jumpToLatestShown,
-  openAppCtaViewModel,
-  previewReadyAnnouncement,
-  previewUpdatedAnnouncement,
   runtimeStreamAttachAction,
   serverSnapshotBehindLocal,
   shouldAttachRunningStream,
@@ -23,7 +19,6 @@ import {
   shouldRetireRestoredQuestionSnapshot,
   shouldRecoverSettledRuntime,
   shouldRetryStopAfterConfirm,
-  shouldShowOpenAppCta,
   startedMessagesFromResponse,
   stopConfirmedIdle,
   stopRequestSucceeded,
@@ -477,63 +472,6 @@ test('canFastForwardQueue requires active turn and server-confirmed queued rows'
   assert.equal(canFastForwardQueue([{ ts: 1, serverTs: true }, { ts: 2, serverTs: true }], true), true)
 })
 
-test('shouldShowOpenAppCta is tied to the built app, not turn completion', () => {
-  assert.equal(shouldShowOpenAppCta(null), false)
-  assert.equal(shouldShowOpenAppCta({}), false)
-  assert.equal(shouldShowOpenAppCta({ id: 42, name: 'Habits' }), true)
-})
-
-test('opening a preview hides it until the turn settles, then final open hides it', () => {
-  const previewSeen = {
-    id: 42,
-    name: 'Habits',
-    updated_at: 't1',
-    preview_seen_updated_at: 't1',
-    preview_seen_final: false,
-  }
-  assert.equal(shouldShowOpenAppCta(previewSeen, true), false)
-  assert.equal(shouldShowOpenAppCta(previewSeen, false), true)
-  assert.equal(openAppCtaViewModel(previewSeen, true), null)
-  assert.equal(openAppCtaViewModel(previewSeen, false)?.label, 'Open Habits')
-
-  const finalSeen = { ...previewSeen, preview_seen_final: true }
-  assert.equal(shouldShowOpenAppCta(finalSeen, false), false)
-  assert.equal(openAppCtaViewModel(finalSeen, false), null)
-})
-
-test('a newer app build resurfaces after the prior build was opened', () => {
-  const updated = {
-    id: 42,
-    name: 'Habits',
-    updated_at: 't2',
-    preview_seen_updated_at: 't1',
-    preview_seen_final: true,
-  }
-  assert.equal(shouldShowOpenAppCta(updated, true), true)
-  assert.equal(openAppCtaViewModel(updated, true)?.label, 'Open Habits preview')
-})
-
-test('openAppCtaViewModel names the active preview and idle app action', () => {
-  assert.equal(openAppCtaViewModel(null, true), null)
-  assert.deepEqual(openAppCtaViewModel({ id: 42, name: 'Habits' }, true), {
-    label: 'Open Habits preview',
-    ariaLabel: 'Open live preview of Habits',
-  })
-  assert.deepEqual(openAppCtaViewModel({ id: 42, name: 'Habits' }, false), {
-    label: 'Open Habits',
-    ariaLabel: 'Open Habits',
-  })
-  assert.deepEqual(openAppCtaViewModel({ id: 42 }, true), {
-    label: 'Open app preview',
-    ariaLabel: 'Open live preview of app',
-  })
-})
-
-test('previewReadyAnnouncement announces when a preview becomes available', () => {
-  assert.equal(previewReadyAnnouncement(null), '')
-  assert.equal(previewReadyAnnouncement({ id: 42, name: 'Habits' }), 'Live preview ready for Habits.')
-})
-
 test('systemEventForChat annotates forwarded stream events with their chat id', () => {
   assert.deepEqual(systemEventForChat({ type: 'app_updated', appId: '7' }, 'chat-a'), {
     type: 'app_updated',
@@ -546,45 +484,6 @@ test('systemEventForChat annotates forwarded stream events with their chat id', 
   })
   assert.equal(systemEventForChat(null, 'chat-a'), null)
   assert.deepEqual(systemEventForChat({ type: 'app_updated' }, null), { type: 'app_updated' })
-})
-
-test('previewUpdatedAnnouncement names the recompiled app', () => {
-  assert.equal(previewUpdatedAnnouncement({ id: 7, name: 'Habits' }), 'Preview updated for Habits.')
-  assert.equal(previewUpdatedAnnouncement({ id: 7 }), 'Preview updated for app.')
-})
-
-test('builtAppPulseDecision: a first-seen app announces but does not pulse', () => {
-  const list = [{ id: 7, name: 'Habits', updated_at: 't1' }]
-  const d = builtAppPulseDecision(list, new Map())
-  assert.equal(d.pulseId, null)
-  assert.equal(d.announce, 'Live preview ready for Habits.')
-  assert.equal(d.nextSeen.get(7), 't1')
-})
-
-test('builtAppPulseDecision: an already-seen app whose updated_at advanced pulses', () => {
-  const list = [{ id: 7, name: 'Habits', updated_at: 't2' }]
-  const seen = new Map([[7, 't1']])
-  const d = builtAppPulseDecision(list, seen)
-  assert.equal(d.pulseId, 7)
-  assert.equal(d.announce, 'Preview updated for Habits.')
-  assert.equal(d.nextSeen.get(7), 't2')
-})
-
-test('builtAppPulseDecision: an already-seen app at the same updated_at neither pulses nor announces', () => {
-  const list = [{ id: 7, name: 'Habits', updated_at: 't1' }]
-  const d = builtAppPulseDecision(list, new Map([[7, 't1']]))
-  assert.equal(d.pulseId, null)
-  assert.equal(d.announce, '')
-})
-
-test('builtAppPulseDecision: a recompile wins the announce over a co-arriving new app', () => {
-  const list = [
-    { id: 7, name: 'Habits', updated_at: 't2' }, // seen at t1 → recompile
-    { id: 8, name: 'Notes', updated_at: 't1' },  // brand new
-  ]
-  const d = builtAppPulseDecision(list, new Map([[7, 't1']]))
-  assert.equal(d.pulseId, 7)
-  assert.equal(d.announce, 'Preview updated for Habits.')
 })
 
 test('serverSnapshotBehindLocal only preserves explicit unsaved local rows', () => {

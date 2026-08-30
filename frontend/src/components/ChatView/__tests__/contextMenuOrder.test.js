@@ -46,9 +46,12 @@ test('Changes owns contribution attention without adding a composer card', () =>
     /useChatChangesOverview\(chatId, initialChangeEntries,[\s\S]*?enabled: Boolean\(!embedded && chatId\)/,
   )
   assert.match(composerSource, /changesOverview\.needsAction \|\| changesOverview\.workState === 'attention'/)
+  assert.match(composerSource, /appArtifactAttentionDecision/)
   assert.match(composerSource, /composer-plus__attention-dot/)
+  assert.match(composerSource, /composer-popover__row-attention/)
   assert.match(composerSource, /Changes need attention\./)
   assert.match(chatViewSource, /initialChangeEntries=\{chatDiffEntries\}/)
+  assert.match(chatViewSource, /appArtifactsReady=\{builtAppsReady && !hidden\}/)
   assert.doesNotMatch(chatViewSource, /ContributionReviewCard|contrib-card-stack/)
 })
 
