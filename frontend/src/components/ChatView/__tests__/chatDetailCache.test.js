@@ -106,6 +106,7 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
     effective_agent_settings: { effort: 'high' },
     has_assistant_turns: true,
     auto_resume_on_limit: true,
+    project: { id: 'p1', name: 'Site', root_path: 'projects/p1' },
   }
 
   const cached = chatDetailCacheValue(source)
@@ -126,6 +127,7 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
     effective: { effort: 'high' },
     has_assistant_turns: true,
     auto_resume_on_limit: true,
+    project: { id: 'p1', name: 'Site', root_path: 'projects/p1' },
   })
 })
 
