@@ -2575,6 +2575,10 @@ async def delete_project_artifact(
   project.artifacts_json = remaining or None
   flag_modified(project, "artifacts_json")
   project.updated_at = now_naive_utc()
+  db.query(models.ProjectArtifactDrawerState).filter(
+    models.ProjectArtifactDrawerState.project_id == project.id,
+    models.ProjectArtifactDrawerState.artifact_id == artifact_id,
+  ).delete(synchronize_session=False)
   db.commit()
   return Response(status_code=204)
 

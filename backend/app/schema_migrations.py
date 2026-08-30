@@ -2132,7 +2132,6 @@ def _migrate_shared_app_state_files(eng) -> None:
   importing mutable runtime helpers.
   """
   import re
-  import tempfile
   import uuid
 
   from sqlalchemy import (
@@ -2243,29 +2242,66 @@ def _migrate_shared_app_state_files(eng) -> None:
     finally:
       os.close(descriptor)
 
-  def atomic_write(target: Path, content: bytes) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    current = target.parent
-    while current != instances_root:
-      if current.is_symlink():
-        raise RuntimeError("shared app state has an unsafe path")
-      current = current.parent
-    fd, temporary = tempfile.mkstemp(
-      dir=target.parent,
-      prefix=f".{target.name}.",
-      suffix=".tmp",
-    )
+  def open_parent(target: Path) -> int:
+    """Open/create ``target.parent`` without following path symlinks."""
+    relative = target.relative_to(instances_root)
+    instance_root = instances_root / relative.parts[0]
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+      flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+      flags |= os.O_NOFOLLOW
     try:
+      descriptor = os.open(instance_root, flags)
+      for part in relative.parent.parts[1:]:
+        try:
+          child = os.open(part, flags, dir_fd=descriptor)
+        except FileNotFoundError:
+          # Create exactly one component below the already-open owning
+          # directory. Never ``parents=True``: a later symlink in the chain
+          # must be rejected before it can redirect any descendant creation.
+          os.mkdir(part, 0o755, dir_fd=descriptor)
+          os.fsync(descriptor)
+          child = os.open(part, flags, dir_fd=descriptor)
+        os.close(descriptor)
+        descriptor = child
+      return descriptor
+    except OSError as exc:
+      try:
+        os.close(descriptor)
+      except (OSError, UnboundLocalError):
+        pass
+      raise RuntimeError("shared app state has an unsafe path") from exc
+
+  def atomic_write(target: Path, content: bytes) -> None:
+    parent_descriptor = open_parent(target)
+    temporary = f".{target.name}.{uuid.uuid4().hex}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+      flags |= os.O_NOFOLLOW
+    try:
+      fd = os.open(
+        temporary,
+        flags,
+        0o644,
+        dir_fd=parent_descriptor,
+      )
       with os.fdopen(fd, "wb") as handle:
         os.fchmod(handle.fileno(), 0o644)
         handle.write(content)
         handle.flush()
         os.fsync(handle.fileno())
-      os.replace(temporary, target)
+      os.replace(
+        temporary,
+        target.name,
+        src_dir_fd=parent_descriptor,
+        dst_dir_fd=parent_descriptor,
+      )
       # The file fsync above preserves its bytes. Directory fsyncs, from the
       # new leaf back to the already-owned instance root, preserve the rename
       # and every newly-created directory entry before the DB blob is cleared.
-      current = target.parent
+      os.fsync(parent_descriptor)
+      current = target.parent.parent
       while True:
         sync_directory(current)
         if current == instances_root / target.relative_to(instances_root).parts[0]:
@@ -2273,10 +2309,12 @@ def _migrate_shared_app_state_files(eng) -> None:
         current = current.parent
     except BaseException:
       try:
-        os.unlink(temporary)
+        os.unlink(temporary, dir_fd=parent_descriptor)
       except OSError:
         pass
       raise
+    finally:
+      os.close(parent_descriptor)
 
   clear = text(
     "UPDATE shared_app_instances "

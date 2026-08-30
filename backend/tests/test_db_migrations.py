@@ -1551,6 +1551,52 @@ def test_shared_app_path_state_rejects_a_symlinked_instance_root(
   assert retained["revision"] == 7
 
 
+def test_shared_app_path_state_rejects_a_symlink_before_creating_descendants(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  instance_id = "11111111-1111-4111-8111-111111111111"
+  snapshot_path = f"shared/app-instances/{instance_id}/build"
+  root = data_dir / "shared" / "app-instances" / instance_id
+  (root / "build").mkdir(parents=True)
+  (root / "data").mkdir()
+  outside = data_dir / "owner-private"
+  outside.mkdir()
+  (root / "data" / "linked").symlink_to(outside, target_is_directory=True)
+  eng = create_engine(f"sqlite:///{tmp_path / 'shared-state-child-link.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE shared_app_instances ("
+      "id VARCHAR(64) PRIMARY KEY, snapshot_path VARCHAR(2048) NOT NULL, "
+      "state_json JSON NOT NULL, revision INTEGER NOT NULL)"
+    ))
+    conn.execute(text(
+      "INSERT INTO shared_app_instances (id, snapshot_path, state_json, revision) "
+      "VALUES (:id, :snapshot_path, :state_json, 7)"
+    ), {
+      "id": instance_id,
+      "snapshot_path": snapshot_path,
+      "state_json": json.dumps({
+        "linked/newdir/board.json": {"secret": "must stay in DB"},
+      }),
+    })
+
+  with pytest.raises(RuntimeError, match="unsafe path"):
+    migrations._migrate_shared_app_state_files(eng)
+
+  assert not (outside / "newdir").exists()
+  assert not (outside / "newdir" / "board.json").exists()
+  with eng.connect() as conn:
+    retained = conn.execute(text(
+      "SELECT state_json, revision FROM shared_app_instances WHERE id = :id"
+    ), {"id": instance_id}).mappings().one()
+  assert json.loads(retained["state_json"]) == {
+    "linked/newdir/board.json": {"secret": "must stay in DB"},
+  }
+  assert retained["revision"] == 7
+
+
 def test_shared_app_path_state_fsyncs_renamed_file_and_directory_chain(
   tmp_path, monkeypatch,
 ):
@@ -1579,9 +1625,14 @@ def test_shared_app_path_state_fsyncs_renamed_file_and_directory_chain(
   original_replace = os.replace
   original_fsync = os.fsync
 
-  def tracked_replace(source, target):
-    original_replace(source, target)
-    events.append(("replace", Path(target)))
+  def tracked_replace(source, target, *args, **kwargs):
+    original_replace(source, target, *args, **kwargs)
+    target_dir_fd = kwargs.get("dst_dir_fd")
+    if target_dir_fd is None:
+      replaced = Path(target)
+    else:
+      replaced = Path(os.readlink(f"/proc/self/fd/{target_dir_fd}")) / target
+    events.append(("replace", replaced))
 
   def tracked_fsync(descriptor):
     link = Path(f"/proc/self/fd/{descriptor}")
@@ -2472,6 +2523,78 @@ def test_published_schema_migration_history_is_unique_ordered_and_immutable():
   assert "migration hashes match migration_history.json" in (
     completed.stdout
   )
+
+
+def test_goal_dismissal_migration_adds_nullable_chat_pointer(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'goal-dismissal.db'}")
+  models.Base.metadata.create_all(eng)
+  with eng.begin() as conn:
+    conn.execute(text("ALTER TABLE chats DROP COLUMN dismissed_goal_id"))
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version in _migration_versions_before("0024_chat_goal_dismissal"):
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
+      ), {"v": version, "at": datetime(2026, 8, 22)})
+
+  run_migrations(eng)
+
+  columns = {column["name"] for column in inspect(eng).get_columns("chats")}
+  assert "dismissed_goal_id" in columns
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT COUNT(*) FROM schema_migrations "
+      "WHERE version = '0024_chat_goal_dismissal'"
+    )).scalar_one() == 1
+
+
+def test_current_history_survives_unmerged_local_migration_names(tmp_path):
+  """A local review may have run before upstream claimed the same number.
+
+  The durable ledger keys the complete semantic name, not only its numeric
+  prefix. Keep the landed Goal migration and the renumbered sharing migrations
+  runnable when an installation already recorded the five names from the
+  earlier unmerged sharing review.
+  """
+  eng = create_engine(f"sqlite:///{tmp_path / 'local-review-history.db'}")
+  models.Base.metadata.create_all(eng)
+  old_local_names = [
+    "0024_shared_app_retention",
+    "0025_shared_app_path_state",
+    "0026_project_artifact_drawer_state",
+    "0027_shared_app_change_operation_id",
+    "0028_shared_app_previous_snapshot_path",
+  ]
+  with eng.begin() as conn:
+    conn.execute(text("ALTER TABLE chats DROP COLUMN dismissed_goal_id"))
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version in [
+      *_migration_versions_before("0024_chat_goal_dismissal"),
+      *old_local_names,
+    ]:
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
+      ), {"v": version, "at": datetime(2026, 8, 22)})
+
+  run_migrations(eng)
+
+  history = {row["version"] for row in schema_migration_history(eng)}
+  assert set(old_local_names) <= history
+  assert {
+    "0024_chat_goal_dismissal",
+    "0025_shared_app_retention",
+    "0026_shared_app_path_state",
+    "0027_project_artifact_drawer_state",
+    "0028_shared_app_change_operation_id",
+    "0029_shared_app_previous_snapshot_path",
+  } <= history
+  columns = {column["name"] for column in inspect(eng).get_columns("chats")}
+  assert "dismissed_goal_id" in columns
 
 
 def test_failed_migration_is_not_recorded_and_can_retry(tmp_path, monkeypatch):
