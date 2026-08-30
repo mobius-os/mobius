@@ -5,6 +5,7 @@ import sqlite3
 import subprocess
 import sys
 import importlib.util
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -1427,6 +1428,205 @@ def test_shared_app_path_state_migrates_prototype_data_without_runtime_columns(
   assert migrated["revision"] == 0
   assert "state_json" not in models.SharedAppInstance.__table__.columns
   assert "revision" not in models.SharedAppInstance.__table__.columns
+
+
+def test_shared_app_path_state_rejects_a_traversing_legacy_instance_id(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  instance_id = "../escape"
+  snapshot_path = "shared/escape/build"
+  (data_dir / snapshot_path).mkdir(parents=True)
+  eng = create_engine(f"sqlite:///{tmp_path / 'shared-state-traversal.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE shared_app_instances ("
+      "id VARCHAR(64) PRIMARY KEY, snapshot_path VARCHAR(2048) NOT NULL, "
+      "state_json JSON NOT NULL, revision INTEGER NOT NULL)"
+    ))
+    conn.execute(text(
+      "INSERT INTO shared_app_instances (id, snapshot_path, state_json, revision) "
+      "VALUES (:id, :snapshot_path, :state_json, 7)"
+    ), {
+      "id": instance_id,
+      "snapshot_path": snapshot_path,
+      "state_json": json.dumps({"board.json": {"secret": "must stay in DB"}}),
+    })
+
+  with pytest.raises(RuntimeError, match="invalid instance id"):
+    migrations._migrate_shared_app_state_files(eng)
+
+  assert not (data_dir / "shared" / "escape" / "data" / "board.json").exists()
+  with eng.connect() as conn:
+    retained = conn.execute(text(
+      "SELECT state_json, revision FROM shared_app_instances WHERE id = :id"
+    ), {"id": instance_id}).mappings().one()
+  assert json.loads(retained["state_json"]) == {
+    "board.json": {"secret": "must stay in DB"},
+  }
+  assert retained["revision"] == 7
+
+
+def test_shared_app_path_state_rejects_a_noncanonical_legacy_instance_id(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  canonical_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+  instance_id = canonical_id.upper()
+  snapshot_path = f"shared/app-instances/{instance_id}/build"
+  (data_dir / snapshot_path).mkdir(parents=True)
+  eng = create_engine(f"sqlite:///{tmp_path / 'shared-state-noncanonical.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE shared_app_instances ("
+      "id VARCHAR(64) PRIMARY KEY, snapshot_path VARCHAR(2048) NOT NULL, "
+      "state_json JSON NOT NULL, revision INTEGER NOT NULL)"
+    ))
+    conn.execute(text(
+      "INSERT INTO shared_app_instances (id, snapshot_path, state_json, revision) "
+      "VALUES (:id, :snapshot_path, :state_json, 7)"
+    ), {
+      "id": instance_id,
+      "snapshot_path": snapshot_path,
+      "state_json": json.dumps({"board.json": {"secret": "must stay in DB"}}),
+    })
+
+  with pytest.raises(RuntimeError, match="invalid instance id"):
+    migrations._migrate_shared_app_state_files(eng)
+
+  assert not (
+    data_dir / "shared" / "app-instances" / canonical_id / "data" / "board.json"
+  ).exists()
+  with eng.connect() as conn:
+    retained = conn.execute(text(
+      "SELECT state_json, revision FROM shared_app_instances WHERE id = :id"
+    ), {"id": instance_id}).mappings().one()
+  assert json.loads(retained["state_json"]) == {
+    "board.json": {"secret": "must stay in DB"},
+  }
+  assert retained["revision"] == 7
+
+
+def test_shared_app_path_state_rejects_a_symlinked_instance_root(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  instance_id = "11111111-1111-4111-8111-111111111111"
+  snapshot_path = f"shared/app-instances/{instance_id}/build"
+  instances_root = data_dir / "shared" / "app-instances"
+  instances_root.mkdir(parents=True)
+  outside = data_dir / "owner-private" / instance_id
+  (outside / "build").mkdir(parents=True)
+  (instances_root / instance_id).symlink_to(outside, target_is_directory=True)
+  eng = create_engine(f"sqlite:///{tmp_path / 'shared-state-symlink.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE shared_app_instances ("
+      "id VARCHAR(64) PRIMARY KEY, snapshot_path VARCHAR(2048) NOT NULL, "
+      "state_json JSON NOT NULL, revision INTEGER NOT NULL)"
+    ))
+    conn.execute(text(
+      "INSERT INTO shared_app_instances (id, snapshot_path, state_json, revision) "
+      "VALUES (:id, :snapshot_path, :state_json, 7)"
+    ), {
+      "id": instance_id,
+      "snapshot_path": snapshot_path,
+      "state_json": json.dumps({"board.json": {"secret": "must stay in DB"}}),
+    })
+
+  with pytest.raises(RuntimeError, match="invalid snapshot path"):
+    migrations._migrate_shared_app_state_files(eng)
+
+  assert not (outside / "data" / "board.json").exists()
+  with eng.connect() as conn:
+    retained = conn.execute(text(
+      "SELECT state_json, revision FROM shared_app_instances WHERE id = :id"
+    ), {"id": instance_id}).mappings().one()
+  assert json.loads(retained["state_json"]) == {
+    "board.json": {"secret": "must stay in DB"},
+  }
+  assert retained["revision"] == 7
+
+
+def test_shared_app_path_state_fsyncs_renamed_file_and_directory_chain(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  instance_id = "11111111-1111-4111-8111-111111111111"
+  snapshot_path = f"shared/app-instances/{instance_id}/build"
+  (data_dir / snapshot_path).mkdir(parents=True)
+  eng = create_engine(f"sqlite:///{tmp_path / 'shared-state-fsync.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE shared_app_instances ("
+      "id VARCHAR(64) PRIMARY KEY, snapshot_path VARCHAR(2048) NOT NULL, "
+      "state_json JSON NOT NULL, revision INTEGER NOT NULL)"
+    ))
+    conn.execute(text(
+      "INSERT INTO shared_app_instances (id, snapshot_path, state_json, revision) "
+      "VALUES (:id, :snapshot_path, :state_json, 1)"
+    ), {
+      "id": instance_id,
+      "snapshot_path": snapshot_path,
+      "state_json": json.dumps({"nested/board.json": {"cards": ["durable"]}}),
+    })
+
+  events = []
+  original_replace = os.replace
+  original_fsync = os.fsync
+
+  def tracked_replace(source, target):
+    original_replace(source, target)
+    events.append(("replace", Path(target)))
+
+  def tracked_fsync(descriptor):
+    link = Path(f"/proc/self/fd/{descriptor}")
+    try:
+      target = Path(os.readlink(link))
+    except OSError:
+      target = None
+    original_fsync(descriptor)
+    events.append(("fsync", target))
+
+  def tracked_sql(_conn, _cursor, statement, _parameters, _context, _many):
+    if statement.startswith("UPDATE shared_app_instances SET state_json"):
+      events.append(("clear", None))
+
+  monkeypatch.setattr(os, "replace", tracked_replace)
+  monkeypatch.setattr(os, "fsync", tracked_fsync)
+  event.listen(eng, "before_cursor_execute", tracked_sql)
+  try:
+    migrations._migrate_shared_app_state_files(eng)
+  finally:
+    event.remove(eng, "before_cursor_execute", tracked_sql)
+
+  target = (
+    data_dir / "shared" / "app-instances" / instance_id
+    / "data" / "nested" / "board.json"
+  )
+  replace_index = events.index(("replace", target))
+  synced_after_replace = {
+    path for kind, path in events[replace_index + 1:] if kind == "fsync"
+  }
+  required_directories = {
+    target.parent,
+    target.parent.parent,
+    target.parent.parent.parent,
+  }
+  assert required_directories <= synced_after_replace
+  clear_index = events.index(("clear", None))
+  for directory in required_directories:
+    assert events.index(("fsync", directory), replace_index + 1) < clear_index
+  with eng.connect() as conn:
+    cleared = conn.execute(text(
+      "SELECT state_json, revision FROM shared_app_instances WHERE id = :id"
+    ), {"id": instance_id}).mappings().one()
+  assert json.loads(cleared["state_json"]) == {}
+  assert cleared["revision"] == 0
 
 
 def test_shared_app_change_operation_identity_is_added_idempotently(tmp_path):

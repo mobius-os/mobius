@@ -2133,6 +2133,7 @@ def _migrate_shared_app_state_files(eng) -> None:
   """
   import re
   import tempfile
+  import uuid
 
   from sqlalchemy import (
     JSON as SAJSON,
@@ -2204,18 +2205,43 @@ def _migrate_shared_app_state_files(eng) -> None:
   instances_root = data_root / "shared" / "app-instances"
 
   def owned_root(instance_id: str, snapshot_path: str) -> Path:
-    root = instances_root / str(instance_id)
+    try:
+      canonical_id = str(uuid.UUID(str(instance_id)))
+    except (ValueError, AttributeError) as exc:
+      raise RuntimeError("shared app state has an invalid instance id") from exc
+    if canonical_id != str(instance_id):
+      raise RuntimeError("shared app state has an invalid instance id")
+    root = instances_root / canonical_id
     stored = Path(snapshot_path)
     lexical = stored if stored.is_absolute() else data_root / stored
     try:
       if lexical.absolute() != (root / "build").absolute():
         raise RuntimeError("shared app state has an invalid snapshot path")
-      instances_root.resolve().relative_to(data_root)
+      resolved_instances = instances_root.resolve()
+      resolved_instances.relative_to(data_root)
+      resolved_root = root.resolve()
+      if resolved_root.relative_to(resolved_instances).parts != (canonical_id,):
+        raise RuntimeError("shared app state has an invalid snapshot path")
     except (OSError, ValueError) as exc:
       raise RuntimeError("shared app state has an invalid snapshot path") from exc
-    if root.is_symlink() or (root / "data").is_symlink():
-      raise RuntimeError("shared app state has an unsafe snapshot path")
+    current = data_root
+    for part in (root / "data").relative_to(data_root).parts:
+      current = current / part
+      if current.is_symlink():
+        raise RuntimeError("shared app state has an unsafe snapshot path")
     return root
+
+  def sync_directory(path: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+      flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+      flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+      os.fsync(descriptor)
+    finally:
+      os.close(descriptor)
 
   def atomic_write(target: Path, content: bytes) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -2231,11 +2257,20 @@ def _migrate_shared_app_state_files(eng) -> None:
     )
     try:
       with os.fdopen(fd, "wb") as handle:
+        os.fchmod(handle.fileno(), 0o644)
         handle.write(content)
         handle.flush()
         os.fsync(handle.fileno())
-      os.chmod(temporary, 0o644)
       os.replace(temporary, target)
+      # The file fsync above preserves its bytes. Directory fsyncs, from the
+      # new leaf back to the already-owned instance root, preserve the rename
+      # and every newly-created directory entry before the DB blob is cleared.
+      current = target.parent
+      while True:
+        sync_directory(current)
+        if current == instances_root / target.relative_to(instances_root).parts[0]:
+          break
+        current = current.parent
     except BaseException:
       try:
         os.unlink(temporary)

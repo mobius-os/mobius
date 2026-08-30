@@ -14,9 +14,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
+from starlette.concurrency import run_in_threadpool
 
 from app import (
   auth,
+  fs_locks,
   models,
   project_builders,
   shared_app_releases,
@@ -104,6 +106,8 @@ def _instance_for(
 
 
 def _built_artifact(project: models.Project, artifact_id: str) -> tuple[dict, Path, str]:
+  if project_builders.ARTIFACT_ID_RE.fullmatch(artifact_id) is None:
+    raise HTTPException(422, "Artifact output is invalid.")
   artifact = next(
     (item for item in project_builders.read_artifacts(project) if item.get("id") == artifact_id),
     None,
@@ -116,13 +120,32 @@ def _built_artifact(project: models.Project, artifact_id: str) -> tuple[dict, Pa
     output_rel = project_builders.default_output_rel(
       artifact_id, str(artifact.get("builder")), str(artifact.get("source") or ""), artifact_type,
     )
-  project_root = (Path(get_settings().data_dir) / project.root_path).resolve()
-  output_root = (project_root / "artifacts" / artifact_id / "output").resolve()
+  data_root = Path(get_settings().data_dir).resolve()
+  stored_root = Path(project.root_path)
+  project_root = (
+    stored_root if stored_root.is_absolute() else data_root / stored_root
+  ).absolute()
+  output_root = project_root / "artifacts" / artifact_id / "output"
   try:
+    output_root.relative_to(data_root)
+    relative_output = output_root.relative_to(data_root)
+    current = data_root
+    for part in relative_output.parts:
+      current = current / part
+      # Check the lexical path before resolving it. Resolving first would hide
+      # an output root (or ancestor) redirected into owner-private storage.
+      if current.is_symlink():
+        raise ValueError("artifact output traverses a symbolic link")
+    project_root = project_root.resolve()
+    project_root.relative_to(data_root)
+    output_root = output_root.resolve()
+    output_root.relative_to(project_root)
     entry = (project_root / output_rel.lstrip("/")).resolve()
     entry_rel = entry.relative_to(output_root).as_posix()
   except (ValueError, OSError) as exc:
     raise HTTPException(422, "Artifact output is invalid.") from exc
+  if not output_root.is_dir():
+    raise HTTPException(409, "Build the artifact before sharing it.")
   if not entry.is_file():
     raise HTTPException(409, "Build the artifact before sharing it.")
   total = 0
@@ -157,11 +180,26 @@ def _view(
 
 
 @router.post("", status_code=201, dependencies=[Depends(reject_cross_site)])
-def create_shared_app(
+async def create_shared_app(
   body: SharedAppCreate,
   response: Response,
   owner: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
+):
+  # A release is one immutable observation of a build. The builder owns this
+  # same per-project lock for its entire output rewrite, so validation and copy
+  # can never capture files from two build revisions.
+  async with fs_locks.project_build_lock(body.project_id):
+    return await run_in_threadpool(
+      _create_shared_app_with_lifecycle, body, response, owner, db,
+    )
+
+
+def _create_shared_app_with_lifecycle(
+  body: SharedAppCreate,
+  response: Response,
+  owner: models.Owner,
+  db: Session,
 ):
   with PROJECT_LIFECYCLE_LOCK:
     return _create_shared_app(body, response, owner, db)
@@ -322,10 +360,31 @@ def get_shared_app(
 
 
 @router.put("/{instance_id}/release", dependencies=[Depends(reject_cross_site)])
-def publish_shared_app_release(
+async def publish_shared_app_release(
   instance_id: str,
   principal: SharedAppPrincipal = Depends(get_shared_app_principal),
   db: Session = Depends(get_db),
+):
+  project_id = await run_in_threadpool(
+    _shared_app_project_id, instance_id, principal, db,
+  )
+  async with fs_locks.project_build_lock(project_id):
+    return await run_in_threadpool(
+      _publish_shared_app_release_with_lifecycle,
+      instance_id,
+      principal,
+      db,
+    )
+
+
+def _shared_app_project_id(
+  instance_id: str, principal: SharedAppPrincipal, db: Session,
+) -> str:
+  return str(_instance_for(db, instance_id, principal, "owner").project_id)
+
+
+def _publish_shared_app_release_with_lifecycle(
+  instance_id: str, principal: SharedAppPrincipal, db: Session,
 ):
   with PROJECT_LIFECYCLE_LOCK:
     return _publish_shared_app_release(instance_id, principal, db)

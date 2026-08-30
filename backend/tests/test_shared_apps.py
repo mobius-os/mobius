@@ -1,5 +1,6 @@
 """Shared app instances pin builds and keep membership separate from source."""
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event
 from pathlib import Path
@@ -9,7 +10,7 @@ import pytest
 from fastapi import HTTPException, Response
 from sqlalchemy.orm.attributes import flag_modified
 
-from app import models, shared_app_releases, shared_app_state
+from app import models, project_builders, shared_app_releases, shared_app_state
 from app.config import get_settings
 from app.deps import SharedAppPrincipal
 from app.routes import shared_apps as shared_app_routes
@@ -81,6 +82,136 @@ def test_shared_app_pins_build_and_confines_member_to_runtime(client, auth, db):
     "/api/shared-apps/invites/redeem",
     json={"invite": secret, "display_name": "Replay"},
   ).status_code == 410
+
+
+def test_shared_app_rejects_an_output_root_symlink_to_owner_private_data(
+  client, auth, db, tmp_path,
+):
+  project, output = _built_project(client, auth, db)
+  private = tmp_path / "owner-private"
+  private.mkdir()
+  (private / "index.html").write_text("PRIVATE SENTINEL", encoding="utf-8")
+  (output / "index.html").unlink()
+  output.rmdir()
+  output.symlink_to(private, target_is_directory=True)
+
+  response = client.post(
+    "/api/shared-apps",
+    headers=auth,
+    json={"project_id": project.id, "artifact_id": "website"},
+  )
+
+  assert response.status_code == 422, response.text
+  assert db.query(models.SharedAppInstance).filter(
+    models.SharedAppInstance.project_id == project.id,
+  ).count() == 0
+  instances_root = Path(get_settings().data_dir) / "shared" / "app-instances"
+  assert not instances_root.exists() or not any(instances_root.iterdir())
+
+
+def test_shared_app_rejects_an_output_ancestor_symlink_to_owner_private_data(
+  client, auth, db, tmp_path,
+):
+  project, output = _built_project(client, auth, db)
+  project_root = output.parents[2]
+  private = tmp_path / "owner-private"
+  private_output = private / "website" / "output"
+  private_output.mkdir(parents=True)
+  (private_output / "index.html").write_text(
+    "PRIVATE SENTINEL", encoding="utf-8",
+  )
+  (output / "index.html").unlink()
+  output.rmdir()
+  output.parent.rmdir()
+  output.parent.parent.rmdir()
+  (project_root / "artifacts").symlink_to(private, target_is_directory=True)
+
+  response = client.post(
+    "/api/shared-apps",
+    headers=auth,
+    json={"project_id": project.id, "artifact_id": "website"},
+  )
+
+  assert response.status_code == 422, response.text
+  assert db.query(models.SharedAppInstance).filter(
+    models.SharedAppInstance.project_id == project.id,
+  ).count() == 0
+  instances_root = Path(get_settings().data_dir) / "shared" / "app-instances"
+  assert not instances_root.exists() or not any(instances_root.iterdir())
+
+
+def test_shared_app_keeps_an_unbuilt_artifact_as_a_retryable_conflict(
+  client, auth, db,
+):
+  project, output = _built_project(client, auth, db)
+  (output / "index.html").unlink()
+  output.rmdir()
+
+  response = client.post(
+    "/api/shared-apps",
+    headers=auth,
+    json={"project_id": project.id, "artifact_id": "website"},
+  )
+
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"] == "Build the artifact before sharing it."
+
+
+def test_shared_app_publish_waits_for_one_coherent_project_build(
+  client, auth, db, monkeypatch,
+):
+  project, output = _built_project(client, auth, db)
+  (output.parents[2] / "index.html").write_text(
+    "<h1>source</h1>", encoding="utf-8",
+  )
+  (output / "app.js").write_text("window.release = 'old'", encoding="utf-8")
+  instance = _create_instance(client, auth, project.id)
+  half_written = Event()
+  finish_build = Event()
+
+  async def staged_builder(*, root, source, output_dir, log_path):
+    del root, source, log_path
+    (output_dir / "index.html").write_text(
+      "<script src='app.js'></script><p>new</p>", encoding="utf-8",
+    )
+    half_written.set()
+    assert await asyncio.to_thread(finish_build.wait, 5)
+    (output_dir / "app.js").write_text(
+      "window.release = 'new'", encoding="utf-8",
+    )
+
+  monkeypatch.setitem(project_builders.BUILDERS, "website", staged_builder)
+  owner = db.query(models.Owner).one()
+  principal = SharedAppPrincipal(
+    owner=owner, role="owner", display_name=owner.username,
+  )
+
+  async def build_and_publish():
+    building = asyncio.create_task(
+      project_builders.run_build(str(project.id), "website"),
+    )
+    assert await asyncio.to_thread(half_written.wait, 5)
+    publishing = asyncio.create_task(
+      shared_app_routes.publish_shared_app_release(
+        instance["id"], principal, db,
+      ),
+    )
+    await asyncio.sleep(0.05)
+    assert not publishing.done()
+    finish_build.set()
+    await building
+    return await publishing
+
+  published = asyncio.run(build_and_publish())
+  release_id = published["release_id"]
+  assert client.get(
+    f"/api/shared-apps/{instance['id']}/output/{release_id}/index.html",
+    headers=auth,
+  ).text == "<script src='app.js'></script><p>new</p>"
+  assert client.get(
+    f"/api/shared-apps/{instance['id']}/output/{release_id}/app.js",
+    headers=auth,
+  ).text == "window.release = 'new'"
 
 
 def test_shared_state_is_path_version_checked_and_visible_to_members(client, auth, db):
