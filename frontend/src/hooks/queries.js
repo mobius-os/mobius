@@ -110,8 +110,8 @@ function useSettingsQuery() {
   })
 }
 
-async function fetchApps() {
-  const res = await api.apps.list()
+async function fetchApps({ signal, timeoutMs } = {}) {
+  const res = await api.apps.list({ signal, timeoutMs })
   const data = await jsonOrThrow(res, 'apps fetch failed:')
   return Array.isArray(data) ? data : []
 }
@@ -126,8 +126,8 @@ function useAppsQuery({ reconcile } = {}) {
   })
 }
 
-async function fetchChats({ signal } = {}) {
-  const res = await api.chats.list({ signal })
+async function fetchChats({ signal, timeoutMs } = {}) {
+  const res = await api.chats.list({ signal, timeoutMs })
   const data = await jsonOrThrow(res, 'chats fetch failed:')
   return Array.isArray(data) ? data : []
 }
