@@ -504,15 +504,24 @@ test('speech playback catalog projects only the active ready voice', async () =>
   })
 })
 
-test('pitch-preserving speech worklet registers its processor', async (t) => {
+test('pitch-preserving speech worklet registers and compensates a faster source', async (t) => {
   const OriginalProcessor = globalThis.AudioWorkletProcessor
   const originalRegister = globalThis.registerProcessor
+  const originalSampleRate = globalThis.sampleRate
+  const messages = []
   let registration
-  globalThis.AudioWorkletProcessor = class {}
+  globalThis.sampleRate = 48_000
+  globalThis.AudioWorkletProcessor = class {
+    constructor() {
+      this.port = { postMessage: message => messages.push(message) }
+    }
+  }
   globalThis.registerProcessor = (name, Processor) => { registration = { name, Processor } }
   t.after(() => {
     globalThis.AudioWorkletProcessor = OriginalProcessor
     globalThis.registerProcessor = originalRegister
+    if (originalSampleRate === undefined) delete globalThis.sampleRate
+    else globalThis.sampleRate = originalSampleRate
   })
 
   await import(new URL(`../../../public/${SPEECH_PITCH_WORKLET_PATH}`, import.meta.url))
@@ -520,6 +529,46 @@ test('pitch-preserving speech worklet registers its processor', async (t) => {
   assert.equal(SPEECH_PITCH_WORKLET_VERSION, '2.1.1')
   assert.equal(registration.name, 'soundtouch-processor')
   assert.equal(typeof registration.Processor, 'function')
+
+  const processor = new registration.Processor({
+    processorOptions: { sampleBufferType: 'circular' },
+  })
+  const rendered = []
+  let phase = 0
+  const sourceStep = 2 * Math.PI * 660 / globalThis.sampleRate
+  for (let block = 0; block < 750; block += 1) {
+    const input = new Float32Array(128)
+    for (let frame = 0; frame < input.length; frame += 1) {
+      input[frame] = Math.sin(phase) * 0.25
+      phase += sourceStep
+    }
+    const output = new Float32Array(128)
+    processor.process([[input]], [[output]], {
+      pitch: Float32Array.of(1),
+      pitchSemitones: Float32Array.of(0),
+      playbackRate: Float32Array.of(1.5),
+    })
+    rendered.push(...output)
+  }
+
+  const firstAudible = rendered.findIndex(sample => Math.abs(sample) > 0.02)
+  assert.ok(firstAudible >= 0)
+  let positiveCrossings = 0
+  let previous = rendered[firstAudible]
+  for (let index = firstAudible + 1; index < rendered.length; index += 1) {
+    const sample = rendered[index]
+    if (previous <= 0 && sample > 0) positiveCrossings += 1
+    previous = sample
+  }
+  const audibleSeconds = (rendered.length - firstAudible) / globalThis.sampleRate
+  const restoredFrequency = positiveCrossings / audibleSeconds
+  assert.ok(Math.abs(restoredFrequency - 440) < 2,
+    `expected 440 Hz after pitch compensation, received ${restoredFrequency.toFixed(2)} Hz`)
+
+  const metrics = messages.filter(message => message.type === 'metrics')
+  assert.ok(metrics.length >= 2)
+  assert.equal(metrics.at(-1).underrunCount, metrics.at(-2).underrunCount,
+    'the real processor must stop underrunning after its bounded warm-up')
 })
 
 test('clone removal uses the same injected storage that supplied the model', async () => {
