@@ -1018,6 +1018,14 @@ test('drawer rows keep action and reorder chrome out of the list', () => {
   )
   assert.match(drawer, /if \(openMenu\) return[\s\S]*?onClose\?\.\(\)/,
     'Escape must close a row menu before dismissing the mobile drawer beneath it')
+  assert.match(drawer, /focusFirstAction: event\.type === 'keydown'/,
+    'only keyboard invocation should focus the first drawer action')
+  assert.match(drawer, /focusFirstAction=\{menu\?\.focusFirstAction === true\}/)
+  assert.match(
+    drawerItemActionMenu,
+    /if \(!focusFirstAction && confirmation === null\) return/,
+    'pointer-opened menus must not paint the first keyboard focus ring',
+  )
 })
 
 test('chat deletion is immediate while app deletion still requires confirmation', () => {
@@ -1041,7 +1049,7 @@ test('drawer row actions have one opening path without a custom touch hold', () 
   assert.match(drawer, /open: openItemMenuHistory,[\s\S]*?close: closeItemMenu,[\s\S]*?useHistoryDismiss\(\(\) => setOpenMenu\(null\)\)/)
   assert.match(drawer, /function showItemMenu\(\{ restoreFocusTarget, \.\.\.menu \}\) \{[\s\S]*?openItemMenuHistory\(\)[\s\S]*?setOpenMenu\(menu\)/,
     'Back ownership must be registered before the portaled menu paints')
-  assert.match(drawer, /function openItemMenuAt\(point,[\s\S]*?actions\.openMenu\(\{[\s\S]*?restoreFocusTarget: trigger,/)
+  assert.match(drawer, /function openItemMenuAt\(\s*point,[\s\S]*?actions\.openMenu\(\{[\s\S]*?restoreFocusTarget: trigger,/)
   assert.equal((drawer.match(/onContextMenu=\{openItemMenu\}/g) || []).length, 2,
     'app cards and drawer rows must share one semantic opening function')
   assert.match(drawer, /if \(suppressTouchContextMenu\(event\)\) return/,

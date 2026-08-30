@@ -1682,12 +1682,17 @@ const DrawerRow = memo(function DrawerRow({
     }
   }
 
-  function openItemMenuAt(point, trigger = itemButtonRef.current) {
+  function openItemMenuAt(
+    point,
+    trigger = itemButtonRef.current,
+    { focusFirstAction = false } = {},
+  ) {
     actions.openMenu({
       kind,
       id,
       surface,
       placement: itemMenuPlacement(point),
+      focusFirstAction,
       restoreFocusTarget: trigger,
     })
   }
@@ -1723,7 +1728,9 @@ const DrawerRow = memo(function DrawerRow({
     openItemMenuAt({
       x: event.clientX,
       y: event.clientY,
-    }, event.currentTarget)
+    }, event.currentTarget, {
+      focusFirstAction: event.type === 'keydown',
+    })
   }
 
   function recordItemMenuPointer(event) {
@@ -2207,6 +2214,7 @@ const DrawerItemMenu = memo(function DrawerItemMenu({
       canShare={kind === 'app' && isDrawerAppShareEligible(item)}
       canInspectSource={kind === 'app'}
       placement={menu?.placement}
+      focusFirstAction={menu?.focusFirstAction === true}
       restoreFocusRef={restoreFocusRef}
       onClose={actions.closeMenu}
       onPin={() => actions.pin(kind, id, !pinned)}
