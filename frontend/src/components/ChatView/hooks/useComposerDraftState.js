@@ -150,13 +150,17 @@ export default function useComposerDraftState({ chatId, hidden, inputRef }) {
   const reconcileFailedAttempt = useCallback((
     visibleMessages,
     pendingMessages,
-    { reportMissing = false } = {},
+    {
+      reportMissing = false,
+      reportUnavailable = false,
+      expectedAttempt,
+    } = {},
   ) => {
     const reconciliation = failedSendReconciliation(
       failedSendAttemptRef.current,
       visibleMessages,
       pendingMessages,
-      { reportMissing },
+      { reportMissing, reportUnavailable, expectedAttempt },
     )
     if (reconciliation.status !== 'durable') {
       if (reconciliation.sendFailure) setSendFailure(reconciliation.sendFailure)

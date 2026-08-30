@@ -869,6 +869,10 @@ export default function ChatView({
   // snapshot while app context, settings, or the POST is still in flight;
   // that snapshot cannot retire this locally-owned start.
   const localStartRequestRef = useRef(null)
+  // A manual Resume has no composer draft owner. Keep its provisional
+  // confirmation notice under an exact token so an older check cannot clear a
+  // newer send failure or leave the internal `continue` action in the composer.
+  const continuationConfirmationRef = useRef(null)
   // Re-entrancy guard for doSendSilent (answer submissions). sendingRef
   // alone cannot guard doSendSilent because answer sends are deliberately
   // allowed while sendingRef is true (the runner is parked waiting for
@@ -1086,6 +1090,7 @@ export default function ChatView({
     force = false,
     terminal204 = false,
     authoritative = false,
+    expectedFailedAttempt,
   } = {}) => {
     if (sendingRef.current && !force) return
     const gen = fetchGenRef.current
@@ -1112,7 +1117,7 @@ export default function ChatView({
       reconcileFailedSendAttempt(
         msgs,
         data.pending_messages || [],
-        { reportMissing: true },
+        { reportMissing: true, expectedAttempt: expectedFailedAttempt },
       )
       const preserveLocalTurn =
         !authoritative
@@ -1210,20 +1215,32 @@ export default function ChatView({
     setActiveAssistantMessageId,
   ])
 
-  const settleAmbiguousSendConfirmation = useCallback(() => (
+  const settleAmbiguousSendConfirmation = useCallback((
+    failedAttempt,
+    continuationConfirmation = null,
+  ) => (
     settleFailedSendConfirmation(
-      () => fetchMessages({ force: true }),
+      () => fetchMessages({ force: true, expectedFailedAttempt: failedAttempt }),
       options => reconcileFailedSendAttempt(
         messagesRef.current,
         pendingQueue.pendingMessagesRef.current,
-        options,
+        { ...options, expectedAttempt: failedAttempt },
       ),
+      () => {
+        if (
+          !continuationConfirmation
+          || continuationConfirmationRef.current !== continuationConfirmation
+        ) return
+        continuationConfirmationRef.current = null
+        setSendFailure(null)
+      },
     )
   ), [
     fetchMessages,
     messagesRef,
     pendingQueue.pendingMessagesRef,
     reconcileFailedSendAttempt,
+    setSendFailure,
   ])
 
   // Active-turn runtime reconciliation. The SSE stream is authoritative for
@@ -2622,6 +2639,7 @@ export default function ChatView({
     const pin = opts.pin !== false  // default true
     const continuation = opts.continuation === 'manual' ? 'manual' : undefined
     const preserveComposer = opts.preserveComposer === true
+    continuationConfirmationRef.current = null
     setSendFailure(null)
 
     // Stop voice recognition so a late onresult doesn't refill input
@@ -2975,20 +2993,18 @@ export default function ChatView({
         // Roll back optimistic + restore input.
         if (!directSteer) pendingQueue.cancelByCid(queuedMsg.cid)
         forgetSendIntent({ cid: queuedMsg.cid })
-        if (!continuation) {
-          rememberFailedAttempt({
-            cid,
-            draftIdentity,
-            text,
-            attachments: composerFileSnapshot,
-          })
+        const failedAttempt = continuation ? null : {
+          cid, draftIdentity, text, attachments: composerFileSnapshot,
         }
+        if (failedAttempt) rememberFailedAttempt(failedAttempt)
         restoreComposerAfterFailedSend()
         setSendFailure(modelSelectionBlocked
           ? null
           : sendFailureMessage(err, { online: getOnlineSnapshot() }))
         if (isAmbiguousSendFailure(err)) {
-          void settleAmbiguousSendConfirmation()
+          const confirmation = continuation ? {} : null
+          if (confirmation) continuationConfirmationRef.current = confirmation
+          void settleAmbiguousSendConfirmation(failedAttempt, confirmation)
         }
         if (modelSelectionBlocked) {
           setModelSelectionRequest(request => request + 1)
@@ -3171,14 +3187,10 @@ export default function ChatView({
         sendingRef.current = false
         setServerRunningState(false)
       }
-      if (!continuation) {
-        rememberFailedAttempt({
-          cid,
-          draftIdentity,
-          text,
-          attachments: composerFileSnapshot,
-        })
+      const failedAttempt = continuation ? null : {
+        cid, draftIdentity, text, attachments: composerFileSnapshot,
       }
+      if (failedAttempt) rememberFailedAttempt(failedAttempt)
       restoreComposerAfterFailedSend()
       // Ambiguity recovery already verified reachability and safely replayed
       // this exact cid once. If even that acknowledgement was lost, keep the
@@ -3194,7 +3206,9 @@ export default function ChatView({
         ? null
         : sendFailureMessage(err, { online: getOnlineSnapshot() }))
       if (isAmbiguousSendFailure(err)) {
-        void settleAmbiguousSendConfirmation()
+        const confirmation = continuation ? {} : null
+        if (confirmation) continuationConfirmationRef.current = confirmation
+        void settleAmbiguousSendConfirmation(failedAttempt, confirmation)
       }
       if (modelSelectionBlocked) {
         setModelSelectionRequest(request => request + 1)

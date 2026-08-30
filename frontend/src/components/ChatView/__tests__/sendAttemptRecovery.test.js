@@ -3,10 +3,12 @@ import assert from 'node:assert/strict'
 
 import {
   SEND_ATTEMPT_MISSING_MESSAGE,
+  SEND_ATTEMPT_UNCONFIRMED_MESSAGE,
   clearFailedSendAttempt,
   failedSendReconciliation,
   loadFailedSendAttempt,
   saveFailedSendAttempt,
+  sameSendAttempt,
   sendAttemptIsDurable,
   settleFailedSendConfirmation,
 } from '../sendAttemptRecovery.js'
@@ -63,6 +65,38 @@ test('authoritative transcript or pending queue settles an ambiguous send', () =
   ]), true)
 })
 
+test('confirmation ownership requires the same cid and draft identity', () => {
+  const first = { cid: 'cid-1', draftIdentity: 'draft-1' }
+  assert.equal(sameSendAttempt(first, { ...first }), true)
+  assert.equal(sameSendAttempt(first, { ...first, cid: 'cid-2' }), false)
+  assert.equal(sameSendAttempt(first, { ...first, draftIdentity: 'draft-2' }), false)
+})
+
+test('a stale confirmation cannot settle a newer failed send', () => {
+  assert.deepEqual(
+    failedSendReconciliation(
+      { cid: 'cid-new', draftIdentity: 'draft-new' },
+      [],
+      [],
+      {
+        reportUnavailable: true,
+        expectedAttempt: { cid: 'cid-old', draftIdentity: 'draft-old' },
+      },
+    ),
+    { status: 'superseded' },
+  )
+  assert.deepEqual(
+    failedSendReconciliation(
+      { cid: 'cid-new', draftIdentity: 'draft-new' },
+      [],
+      [],
+      { reportMissing: true, expectedAttempt: null },
+    ),
+    { status: 'superseded' },
+    'a continuation confirmation launched with no draft cannot touch a later send',
+  )
+})
+
 test('a later visible transcript update retires the restored ambiguous draft', () => {
   const attempt = { cid: 'cid-1' }
 
@@ -93,7 +127,7 @@ test('a confirmed missing send keeps the draft and offers a safe retry', () => {
   )
 })
 
-test('a failed confirmation settles the provisional state through missing-send reconciliation', async () => {
+test('an unavailable confirmation settles without claiming the send is missing', async () => {
   const reconciliations = []
   const result = await settleFailedSendConfirmation(
     async () => null,
@@ -108,10 +142,10 @@ test('a failed confirmation settles the provisional state through missing-send r
     },
   )
 
-  assert.deepEqual(reconciliations, [{ reportMissing: true }])
+  assert.deepEqual(reconciliations, [{ reportUnavailable: true }])
   assert.deepEqual(result, {
-    status: 'missing',
-    sendFailure: 'That message didn’t reach the chat. It’s safe here—send it again when ready.',
+    status: 'unconfirmed',
+    sendFailure: SEND_ATTEMPT_UNCONFIRMED_MESSAGE,
   })
 })
 
@@ -126,8 +160,8 @@ test('a rejected confirmation reaches the same bounded settlement', async () => 
     ),
   )
 
-  assert.equal(result.status, 'missing')
-  assert.equal(result.sendFailure, SEND_ATTEMPT_MISSING_MESSAGE)
+  assert.equal(result.status, 'unconfirmed')
+  assert.equal(result.sendFailure, SEND_ATTEMPT_UNCONFIRMED_MESSAGE)
 })
 
 test('a successful confirmation leaves the authoritative refresh in control', async () => {
@@ -141,6 +175,36 @@ test('a successful confirmation leaves the authoritative refresh in control', as
 
   assert.equal(result, confirmation)
   assert.equal(missingReconciliations, 0)
+})
+
+test('a continuation confirmation retires its provisional state when unavailable', async () => {
+  let settled = 0
+  const result = await settleFailedSendConfirmation(
+    async () => null,
+    options => failedSendReconciliation(
+      null,
+      [],
+      [],
+      { ...options, expectedAttempt: null },
+    ),
+    () => { settled += 1 },
+  )
+
+  assert.deepEqual(result, { status: 'none' })
+  assert.equal(settled, 1)
+})
+
+test('a continuation confirmation retires its provisional state after success', async () => {
+  let settled = 0
+  const confirmation = { running: true }
+  const result = await settleFailedSendConfirmation(
+    async () => confirmation,
+    () => assert.fail('successful confirmation must not use the fallback'),
+    () => { settled += 1 },
+  )
+
+  assert.equal(result, confirmation)
+  assert.equal(settled, 1)
 })
 
 test('clearing a failed attempt prevents stale cid reuse', () => {
