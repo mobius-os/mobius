@@ -23,6 +23,7 @@ const LoginForm = lazy(() => import('./components/LoginForm/LoginForm.jsx'))
 const Shell = lazy(() => import('./components/Shell/Shell.jsx'))
 const ChatEmbed = lazy(() => import('./components/ChatEmbed/ChatEmbed.jsx'))
 const StandaloneApp = lazy(() => import('./components/StandaloneApp/StandaloneApp.jsx'))
+const ProjectShare = lazy(() => import('./components/Projects/ProjectShare.jsx'))
 
 // True when this SPA load is the stripped-chrome chat embed
 // (capability A). The SPA catch-all serves index.html for any non-API
@@ -42,10 +43,21 @@ function isEmbedRoute() {
 }
 
 const EMBED_ROUTE = isEmbedRoute()
+const PROJECT_SHARE_ROUTE = (() => {
+  try {
+    const path = window.location.pathname
+    return path === `${BASE}/project-invite`
+      || path.startsWith(`${BASE}/shared/project/`)
+  } catch {
+    return false
+  }
+})()
 const STANDALONE_APP = readStandaloneBoot()
 if (EMBED_ROUTE) {
   beginEphemeralAuth()
   beginEmbedBootstrap()
+} else if (PROJECT_SHARE_ROUTE) {
+  beginEphemeralAuth()
 } else {
   // Capture Chromium's one-shot install event before setup or sign-in can keep
   // the first-use shell card from mounting.
@@ -70,6 +82,15 @@ export default function App() {
           <Suspense fallback={null}>
             <ChatEmbed />
           </Suspense>
+        </ErrorBoundary>
+      </QueryClientProvider>
+    )
+  }
+  if (PROJECT_SHARE_ROUTE) {
+    return (
+      <QueryClientProvider client={queryClient}>
+        <ErrorBoundary label="project-share" recoveryKey="project-share:root" canAskAgent={false}>
+          <Suspense fallback={<RouteLoading />}><ProjectShare /></Suspense>
         </ErrorBoundary>
       </QueryClientProvider>
     )

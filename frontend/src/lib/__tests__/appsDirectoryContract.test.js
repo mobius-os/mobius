@@ -60,11 +60,12 @@ test('phone and web share one searchable launcher tab', () => {
   assert.match(shell, /const navigationSurfaceOpen = modalDrawerOpen/)
 })
 
-test('chat and app rows share one placed action menu contract', () => {
+test('chat, app, and project rows share one placed action menu contract', () => {
   assert.match(drawer, /<DrawerItemActionMenu[\s\S]*?itemKind=\{kind\}[\s\S]*?itemName=\{label\}/)
   assert.doesNotMatch(drawer, /@openai\/apps-sdk-ui\/components\/Menu/)
   assert.doesNotMatch(drawer, /triggerHidden|drawer__menu-anchor/)
-  assert.match(itemActionMenu, /itemKind === 'chat' \? 'chats' : 'apps'/)
+  assert.match(itemActionMenu, /itemKind === 'project'[\s\S]*?'projects'/)
+  assert.match(itemActionMenu, /:\s*'apps'/)
   assert.doesNotMatch(itemActionMenu, /drawer__item-action-header|drawer__item-action-handle/)
   assert.match(itemActionMenu, /itemKind === 'app' && \(/,
     'Delete data must stay app-only')

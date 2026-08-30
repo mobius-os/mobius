@@ -882,8 +882,8 @@ test('chat drawer indicators distinguish owner input, active work, waiting, and 
   )
   assert.match(
     shell,
-    /ev\.type === 'chat_run_started'[\s\S]*?markStreamingStart\(ev\.chatId\)/,
-    'a started run must raise the active-work dot',
+    /ev\.type === 'chat_run_started'[\s\S]*?markStreamingAcknowledged\(ev\.chatId\)/,
+    'a started run must raise and acknowledge the active-work dot',
   )
   assert.match(
     shell,
@@ -918,7 +918,7 @@ test('live preview reveal keeps the workspace controller distinct from device mo
 })
 
 test('large drawer lists memoize ordering and row actions without changing row ownership', () => {
-  assert.match(drawer, /useMemo\(\(\) => buildDrawerSections\(chats, apps\), \[chats, apps\]\)/)
+  assert.match(drawer, /useMemo\(\(\) => buildDrawerSections\(chats, apps, projects\), \[chats, apps, projects\]\)/)
   assert.match(drawer, /const filteredApps = useMemo\(/)
   assert.match(drawer, /const rowActions = useMemo\(/)
   assert.match(drawer, /const DrawerRow = memo\(function DrawerRow/)
@@ -927,6 +927,50 @@ test('large drawer lists memoize ordering and row actions without changing row o
   assert.doesNotMatch(drawer, /onSelect=\{\(\) => on(?:Chat|App)/)
   assert.equal((drawer.match(/<DrawerItemMenu/g) || []).length, 1,
     'the drawer must render one item-menu controller')
+})
+
+test('successful project artifacts render as direct Recents destinations', () => {
+  assert.match(drawer, /kind === 'artifact' \? \(/)
+  assert.match(drawer, /<DrawerArtifactRow/)
+  assert.match(drawer, /<ProjectArtifactIcon artifact=\{item\}/)
+  assert.doesNotMatch(drawer, /<ArtifactIdentityIcon artifact=\{item\}/,
+    'Recents uses one semantic glyph rather than nesting a tile inside a row icon')
+  assert.match(drawer, /actions\.select\('artifact', item\.id\)/)
+  assert.match(shell, /activeArtifactRef=\{activeArtifactRef\}/)
+  assert.match(shell, /parseArtifactTabId\(artifactRef\)[\s\S]*?openArtifact\(project, parsed\.artifactId\)/)
+  assert.match(shell, /activeView === 'artifact' \|\| activeProjectChatProjectId/)
+})
+
+test('artifact previews keep recovery actions visible without a build-log drawer', () => {
+  const artifactWorkspace = readFileSync(
+    new URL('../../Projects/ArtifactWorkspace.jsx', import.meta.url),
+    'utf8',
+  )
+  const projectsCss = readFileSync(
+    new URL('../../Projects/Projects.css', import.meta.url),
+    'utf8',
+  )
+  assert.match(artifactWorkspace, /The last build failed\. Fix the source and build again\./)
+  assert.doesNotMatch(artifactWorkspace, /BuildLog|Build log|artifactLog/)
+  assert.doesNotMatch(projectsCss, /artifact-log/)
+})
+
+test('a selected project-owned Recent includes its project chip in one row surface', () => {
+  assert.match(drawer, /drawer__row--artifact drawer__row--project-owned/)
+  assert.match(drawer, /projectChip \? ' drawer__row--project-owned'/)
+  assert.match(
+    drawerCss,
+    /\.drawer__row--project-owned\.drawer__row--active\s*\{[\s\S]*?background:\s*var\(--accent-dim\)/,
+  )
+  assert.match(
+    drawerCss,
+    /\.drawer__row--project-owned\.drawer__row--active \.drawer__item\s*\{[\s\S]*?background:\s*transparent/,
+  )
+  assert.doesNotMatch(
+    drawerCss.match(/\.drawer__item--apps\s*\{[\s\S]*?\}/)?.[0] || '',
+    /margin-(?:top|bottom)/,
+    'Apps must not insert drift before the Projects glyph shared with the closed rail',
+  )
 })
 
 test('mixed recents reserve artwork for apps without redundant chat icons', () => {

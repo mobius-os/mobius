@@ -1,4 +1,4 @@
-"""Build-time contracts for immutable, self-contained migration history."""
+"""Build-time contracts for self-contained, append-only migration history."""
 
 import importlib.util
 import subprocess
@@ -18,8 +18,8 @@ def _migration_guard():
   return guard
 
 
-def test_current_schema_migration_history_is_unique_ordered_and_self_contained():
-  """The checkout is internally valid even when no target ref is available."""
+def test_checkout_schema_migration_history_matches_committed_ledger():
+  """No-target checks catch one-sided checkout drift, not ledger co-edits."""
   script = Path(__file__).parents[1] / "scripts" / "check-schema-migrations.py"
   completed = subprocess.run(
     [sys.executable, str(script)],
@@ -28,7 +28,9 @@ def test_current_schema_migration_history_is_unique_ordered_and_self_contained()
     check=False,
   )
   assert completed.returncode == 0, completed.stderr
-  assert "append-only migrations verified" in completed.stdout
+  assert "migration hashes match migration_history.json" in (
+    completed.stdout
+  )
 
 
 def test_published_history_cannot_be_rehashed_in_place():
@@ -71,6 +73,35 @@ def test_published_history_cannot_be_removed_or_reordered():
   assert reordered == (
     "published migration 0001_initial was reordered, removed, or renamed "
     "to 0002_next"
+  )
+
+
+def test_committed_history_rejects_one_sided_registry_or_code_drift():
+  guard = _migration_guard()
+  candidate = {
+    "0001_initial": ("initial", "a" * 64),
+    "0002_next": ("next_step", "b" * 64),
+  }
+
+  assert guard.committed_history_error({
+    "0001_initial": "a" * 64,
+  }, candidate) == (
+    "registry and migration_history.json differ; append the new version and "
+    "its hash without editing or renumbering prior entries"
+  )
+  assert guard.committed_history_error({
+    "0002_next": "b" * 64,
+    "0001_initial": "a" * 64,
+  }, candidate) == (
+    "registry and migration_history.json differ; append the new version and "
+    "its hash without editing or renumbering prior entries"
+  )
+  assert guard.committed_history_error({
+    "0001_initial": "c" * 64,
+    "0002_next": "b" * 64,
+  }, candidate) == (
+    "migration code differs from migration_history.json for 0001_initial; "
+    "restore the matching entry and append a new migration"
   )
 
 

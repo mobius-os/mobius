@@ -7,6 +7,7 @@ import {
   Chat,
   ComposeEditSquare,
   Grid,
+  Folder,
   MagnifyingGlassSearch,
   SettingsSlider,
 } from '@openai/apps-sdk-ui/components/Icon'
@@ -24,5 +25,6 @@ function navigationIcon(Icon) {
 export const ChatNavIcon = navigationIcon(Chat)
 export const NewChatNavIcon = navigationIcon(ComposeEditSquare)
 export const AppsNavIcon = navigationIcon(Grid)
+export const ProjectsNavIcon = navigationIcon(Folder)
 export const SearchNavIcon = navigationIcon(MagnifyingGlassSearch)
 export const SettingsNavIcon = navigationIcon(SettingsSlider)

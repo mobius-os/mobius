@@ -245,19 +245,52 @@ class ChatCreate(ChatUpdate):
   id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
+def _project_ref_for_chat(db: Session, chat) -> dict | None:
+  """Live project membership for one chat, or None.
+
+  Folds both membership shapes the drawer query joins on: the current
+  ``Chat.project_id`` link and the legacy ``Project.chat_id`` primary-chat link
+  a not-yet-backfilled row may still carry. A soft-deleted project is excluded,
+  so its chip never appears.
+  """
+  project_id = getattr(chat, "project_id", None)
+  row = (
+    db.query(
+      models.Project.id,
+      models.Project.name,
+      models.Project.root_path,
+      models.Project.color,
+    )
+    .filter(
+      models.Project.deleted_at.is_(None),
+      (models.Project.id == project_id)
+      | (models.Project.chat_id == chat.id),
+    )
+    .first()
+  )
+  if row is None:
+    return None
+  return {
+    "id": row[0],
+    "name": row[1],
+    "root_path": row[2],
+    "color": row[3],
+  }
+
+
 def _chat_create_response(chat: models.Chat, db: Session) -> dict:
   detail = _chat_detail_response(chat, db=db)
   return {
-    **_owner_chat_summary(chat),
+    **_owner_chat_summary(chat, project_ref=_project_ref_for_chat(db, chat)),
     "messages": detail["messages"],
     "detail": detail,
   }
 
 
 class PinnedOrderItem(BaseModel):
-  """One identity in the drawer's combined chat/app pinned list."""
+  """One identity in the drawer's combined pinned list."""
 
-  kind: Literal["chat", "app"]
+  kind: Literal["chat", "app", "project"]
   id: str = Field(min_length=1, max_length=128)
 
 
@@ -367,6 +400,7 @@ def _owner_chat_summary(
   durable_running: bool = False,
   durable_waiting: bool = False,
   transient_owner_input_kind: OwnerInputKind | None = None,
+  project_ref: dict | None = None,
 ) -> dict:
   """Canonical owner-list shape for a Chat or its lightweight projection."""
   return {
@@ -377,6 +411,7 @@ def _owner_chat_summary(
     "pinned_at": chat.pinned_at.isoformat() if chat.pinned_at else None,
     "has_messages": bool(chat.has_messages),
     "created_by_app_id": chat.created_by_app_id,
+    "project": project_ref,
     "running": durable_running or is_chat_running(chat.id),
     # Waiting is durable idle work, distinct from an agent actively streaming.
     # The drawer renders it explicitly rather than making an armed chat look
@@ -597,6 +632,7 @@ def _chat_detail_response(
       provider=provider,
     ),
     "has_assistant_turns": _has_assistant_turns,
+    "project": _project_ref_for_chat(db, chat),
     # Armed durable waits: the visible "Waiting for …" state. Refreshed by the
     # detail refetches the run lifecycle already triggers, so declare (during a
     # run) and resume (a new run) both reach the UI without extra plumbing.
@@ -647,6 +683,17 @@ def list_chats(
     # shell tell a parked turn from a live stream without decoding the messages
     # JSON. Consumed by _owner_chat_summary below.
     models.Chat.pending_question_id,
+    models.Project.id.label("project_ref_id"),
+    models.Project.name.label("project_name"),
+    models.Project.root_path.label("project_root_path"),
+    models.Project.color.label("project_color"),
+  ).outerjoin(
+    models.Project,
+    (
+      (models.Chat.project_id == models.Project.id)
+      | (models.Project.chat_id == models.Chat.id)
+    )
+    & models.Project.deleted_at.is_(None),
   ).filter(models.Chat.deleted_at.is_(None))
   chats = (
     q.order_by(
@@ -675,6 +722,16 @@ def list_chats(
       durable_waiting=chat.id in durable_waiting,
       transient_owner_input_kind=(
         "secure_input" if chat.id in secure_input_chats else None
+      ),
+      project_ref=(
+        {
+          "id": chat.project_ref_id,
+          "name": chat.project_name,
+          "root_path": chat.project_root_path,
+          "color": chat.project_color,
+        }
+        if chat.project_ref_id is not None
+        else None
       ),
     )
     for chat in chats
@@ -954,11 +1011,11 @@ def update_pinned_order(
 ):
   """Atomically persist the drawer's one combined pinned order.
 
-  Chats and apps live in separate tables, but the drawer presents them as one
-  list. Re-pinning each row through its ordinary resource endpoint exposed
-  partially-restamped server state to unrelated list refreshes. Validate the
-  complete identity set, assign one coherent timestamp sequence, and commit
-  both tables once so readers see either the old or the new order.
+  Chats, apps, and project drawer state live in separate tables, but the drawer
+  presents them as one list. Re-pinning each row through its ordinary resource
+  endpoint exposed partially-restamped server state to unrelated list
+  refreshes. Validate the complete identity set, assign one coherent timestamp
+  sequence, and commit every table once so readers see either order atomically.
   """
   normalized: list[tuple[str, str]] = []
   for item in body.items:
@@ -986,9 +1043,17 @@ def update_pinned_order(
     models.App.deleted_at.is_(None),
     models.App.pinned_at.isnot(None),
   ).all()
+  pinned_projects = db.query(models.ProjectDrawerState).join(
+    models.Project,
+    models.Project.id == models.ProjectDrawerState.project_id,
+  ).filter(
+    models.Project.deleted_at.is_(None),
+    models.ProjectDrawerState.pinned_at.isnot(None),
+  ).all()
   rows = {
     **{("chat", str(chat.id)): chat for chat in pinned_chats},
     **{("app", str(app.id)): app for app in pinned_apps},
+    **{("project", str(state.project_id)): state for state in pinned_projects},
   }
   if set(normalized) != set(rows):
     raise HTTPException(
@@ -1252,6 +1317,11 @@ async def patch_chat(
         chat.session_id = None
       chat.provider = target_provider
 
+    if chat.title != previous_title and chat.project_id is not None:
+      # Project chat names are part of the active workspace. Unlike ordinary
+      # auto-retitles, an explicit owner rename should reliably reorder that
+      # one chat in Recents.
+      chat.activity_at = now_naive_utc()
     db.commit()
     db.refresh(chat)
     if chat.title != previous_title:
@@ -2091,6 +2161,21 @@ def recover_chat(
   db: Session = Depends(get_db),
 ):
   """Restores a soft-deleted chat if the TTL window has not expired."""
+  linked_project = db.query(models.Project.id).join(
+    models.Chat, models.Chat.project_id == models.Project.id,
+  ).filter(
+    models.Chat.id == chat_id,
+    models.Project.deleted_at.isnot(None),
+  ).first()
+  if linked_project is not None:
+    raise HTTPException(
+      status_code=409,
+      detail={
+        "code": "project_deleted",
+        "message": "Recover this chat through its project.",
+        "project_id": linked_project.id,
+      },
+    )
   chat = db.query(models.Chat).filter(
     models.Chat.id == chat_id,
     models.Chat.deleted_at.isnot(None),

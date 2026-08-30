@@ -5,6 +5,7 @@ import { CollapseSm } from '@openai/apps-sdk-ui/components/Icon'
 import {
   AppsNavIcon,
   NewChatNavIcon,
+  ProjectsNavIcon,
   SettingsNavIcon,
 } from '../navigationIcons.js'
 import Drawer from '../Drawer/Drawer.jsx'
@@ -34,11 +35,20 @@ import {
 import { ReachabilityPhase } from '../../lib/connectivityStore.js'
 import {
   appQueries,
+  appSourceQueries,
   chatMessagesQueryKey,
   chatQueries,
   modelQueries,
   ownerQueries,
+  projectQueries,
 } from '../../hooks/queries.js'
+import ProjectsDirectory from '../Projects/ProjectsDirectory.jsx'
+import ProjectWorkspace from '../Projects/ProjectWorkspace.jsx'
+import AppSourceWorkspace from '../Projects/AppSourceWorkspace.jsx'
+import ArtifactWorkspace from '../Projects/ArtifactWorkspace.jsx'
+import { defaultProjectName } from '../Projects/ProjectTypeIcon.jsx'
+import { buildEventProjectId, isArtifactBuildEvent } from '../../lib/projectArtifacts.js'
+import { appSourceProject, appSourceProjectId } from '../../lib/appSourceProject.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
 import { bumpChatRunSignal, chatRunSignal } from '../../lib/chatRunSignal.js'
 import { clearAppFrameStorage, clearCachedAppToken } from '../../lib/appFrameStorage.js'
@@ -95,6 +105,7 @@ import {
   withChatOwnerInput,
   withChatRename,
   withChatRunState,
+  withoutSettledLocalChatRuns,
 } from './chatListProjection.js'
 import {
   clearComposerDraft,
@@ -170,6 +181,9 @@ const APP_SETTINGS_SECTIONS = new Set([
   'models',
 ])
 const EMPTY_LIST = Object.freeze([])
+// Reconnect list reads order durable state ahead of buffered system events, so
+// they need a short deadline rather than holding notifications behind a stalled request.
+const SYSTEM_RECONNECT_LIST_TIMEOUT_MS = 5_000
 // Mode timing lives with the pure snapshot geometry in workspaceView.js; browser
 // transition completion owns its lifetime, so Shell has no animation timers.
 const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
@@ -222,6 +236,8 @@ export default function Shell({ onInitialVisualReady }) {
     activeView,
     activeAppId,
     activeChatId,
+    activeProjectId,
+    activeArtifactRef,
     drawerOpen, settingsOverlayOpen, settingsOpenRaw, openDrawer, closeDrawer,
     drawerNavigationCover, finishDrawerNavigationPresentation,
     navTo, navigateBackward, navigateForward,
@@ -510,6 +526,39 @@ export default function Shell({ onInitialVisualReady }) {
       // this session; the next live list fetch restores server truth.
       .catch(() => {})
   }, [activeAppId, activeView, queryClient])
+  const recencyMarkedProjectRef = useRef(null)
+  useEffect(() => {
+    if (activeView !== 'project' || activeProjectId == null) {
+      recencyMarkedProjectRef.current = null
+      return
+    }
+    const projectId = String(activeProjectId)
+    if (!projectId || recencyMarkedProjectRef.current === projectId) return
+    recencyMarkedProjectRef.current = projectId
+
+    // Projects join the exact same Recents contract as apps: focused opening
+    // promotes locally first, then a tiny navigation-state write makes it
+    // durable without changing the project's content updated_at timestamp.
+    const lastOpenedAt = new Date().toISOString()
+    const promoteCachedProject = () => {
+      queryClient.setQueryData(projectQueries.keys.all, rows => (
+        Array.isArray(rows)
+          ? rows.map(project => (
+            String(project.id) === projectId
+              ? { ...project, last_opened_at: lastOpenedAt }
+              : project
+          ))
+          : rows
+      ))
+    }
+    promoteCachedProject()
+    void api.projects.markOpened(projectId)
+      .then(response => {
+        if (response.ok) promoteCachedProject()
+        else projectQueries.list.invalidate(queryClient)
+      })
+      .catch(() => {})
+  }, [activeProjectId, activeView, queryClient])
   const notificationCenterActionsRef = useRef(null)
   const reconcileNotifications = useCallback(() => {
     notificationCenterActionsRef.current?.reconcile()
@@ -527,6 +576,8 @@ export default function Shell({ onInitialVisualReady }) {
     [],
   )
   const appsQuery = appQueries.list.useQuery({ reconcile: reconcileApps })
+  const projectsQuery = projectQueries.list.useQuery()
+  const projectTemplatesQuery = projectQueries.templates.useQuery()
   // Create responses are authoritative even when the next NetworkFirst list
   // request has to fall back to a just-stale service-worker copy. Reconcile at
   // the query function boundary so the protected row never disappears from
@@ -545,6 +596,8 @@ export default function Shell({ onInitialVisualReady }) {
     reconcile: reconcileCreatedChats,
   })
   const apps = appsQuery.data ?? EMPTY_LIST
+  const projects = projectsQuery.data ?? EMPTY_LIST
+  const projectTemplates = projectTemplatesQuery.data ?? EMPTY_LIST
   const artifactsAppId = apps.find(app => app.slug === 'artifacts')?.id ?? null
   const chats = chatsQuery.data ?? EMPTY_LIST
   const appsStatus = apps.length > 0 || appsQuery.isSuccess
@@ -553,6 +606,13 @@ export default function Shell({ onInitialVisualReady }) {
   const chatsStatus = chats.length > 0 || chatsQuery.isSuccess
     ? 'success'
     : (chatsQuery.isError ? 'error' : 'loading')
+  const projectsStatus = projects.length > 0 || projectsQuery.isSuccess
+    ? 'success'
+    : (projectsQuery.isError ? 'error' : 'loading')
+  const projectsRef = useRef(projects)
+  const projectTemplatesRef = useRef(projectTemplates)
+  useEffect(() => { projectsRef.current = projects }, [projects])
+  useEffect(() => { projectTemplatesRef.current = projectTemplates }, [projectTemplates])
   const appPreviewAckRef = useRef(new Set())
   const handleAppPreviewSeen = useCallback((app, final) => {
     acknowledgeAppPreview({
@@ -1094,6 +1154,11 @@ export default function Shell({ onInitialVisualReady }) {
     || projection.visibleLeaves.some(id => workspace.panes[id]?.activeTabKey === APPS_KEY)
   const appsPaned = workspaceChromeActive ? visibleTabRects.get(APPS_KEY) : null
   const appsFullBleed = !appsPaned && fullBleedKey === APPS_KEY
+  const PROJECTS_KEY = tabModel.PROJECTS_TAB_KEY
+  const projectsVisibleAsTab = fullBleedKey === PROJECTS_KEY
+    || projection.visibleLeaves.some(id => workspace.panes[id]?.activeTabKey === PROJECTS_KEY)
+  const projectsPaned = workspaceChromeActive ? visibleTabRects.get(PROJECTS_KEY) : null
+  const projectsFullBleed = !projectsPaned && fullBleedKey === PROJECTS_KEY
   // focusedActiveKey / fullBleedKey / visibleAppIds are derived once by
   // deriveContentVisibility above: focusedActiveKey drives the AppCanvas
   // focused-pane-only `active` prop (insets + immersive holder); fullBleedKey is
@@ -1327,12 +1392,313 @@ export default function Shell({ onInitialVisualReady }) {
     for (const a of apps) m.set(String(a.id), a)
     return m
   }, [apps])
+  const projectById = useMemo(() => {
+    const m = new Map()
+    for (const project of projects) m.set(String(project.id), project)
+    for (const app of apps) {
+      const source = appSourceProject(app)
+      if (source) m.set(source.id, source)
+    }
+    return m
+  }, [apps, projects])
+  const projectArtifactByRef = useMemo(() => {
+    const map = new Map()
+    for (const project of projects) {
+      for (const artifact of project.artifacts || []) {
+        map.set(tabModel.artifactTabId(project.id, artifact.id), artifact)
+      }
+    }
+    return map
+  }, [projects])
+  const [projectRenameId, setProjectRenameId] = useState(null)
+  const [projectChatMeta, setProjectChatMeta] = useState({})
+  const projectChatLookup = useMemo(() => {
+    const next = { ...projectChatMeta }
+    for (const project of projects) {
+      for (const chat of project.chats || []) {
+        next[String(chat.id)] = {
+          projectId: String(project.id),
+          projectName: project.name,
+          title: chat.title,
+        }
+      }
+    }
+    return next
+  }, [projectChatMeta, projects])
+  const activeProjectChatProjectId = activeView === 'chat'
+    ? projectChatLookup[String(activeChatId)]?.projectId
+    : null
   const labelForTab = useCallback((tab) => {
     if (tab.kind === 'apps') return 'Apps'
+    if (tab.kind === 'projects') return 'Projects'
     if (tab.kind === 'settings') return 'Settings'
-    if (tab.kind === 'chat') return chatById.get(tab.id)?.title || 'Chat'
+    if (tab.kind === 'chat') {
+      const projectChat = projectChatLookup[tab.id]
+      return projectChat
+        ? `${projectChat.projectName} · ${projectChat.title || 'Chat'}`
+        : chatById.get(tab.id)?.title || 'Chat'
+    }
+    if (tab.kind === 'project') {
+      return projectById.get(tab.id)?.name || 'Project'
+    }
+    if (tab.kind === 'artifact') {
+      const parsed = tabModel.parseArtifactTabId(tab.id)
+      const name = parsed ? (projectById.get(parsed.projectId)?.name || 'Project') : 'Project'
+      const artifactName = projectArtifactByRef.get(tab.id)?.name || parsed?.artifactId
+      return parsed ? `${name} · ${artifactName}` : name
+    }
     return appById.get(tab.id)?.name || 'App'
-  }, [chatById, appById])
+  }, [chatById, appById, projectById, projectArtifactByRef, projectChatLookup])
+
+  const renderedProjectIds = useMemo(() => {
+    const ids = new Set(
+      openTabs.filter(tab => tab.kind === 'project').map(tab => String(tab.id)),
+    )
+    const slot = workspace.singleScreen
+    if (slot?.kind === 'project') ids.add(String(slot.id))
+    return [...ids].sort()
+  }, [openTabs, workspace.singleScreen])
+
+  // Each open artifact tab renders its own ArtifactWorkspace, keyed by its
+  // composite `<projectId>:<artifactId>` id (the same shape the tab carries).
+  const renderedArtifactIds = useMemo(() => {
+    const ids = new Set(
+      openTabs.filter(tab => tab.kind === 'artifact').map(tab => String(tab.id)),
+    )
+    const slot = workspace.singleScreen
+    if (slot?.kind === 'artifact') ids.add(String(slot.id))
+    if (activeArtifactRef) ids.add(String(activeArtifactRef))
+    return [...ids].sort()
+  }, [openTabs, workspace.singleScreen, activeArtifactRef])
+
+  function openProject(project) {
+    if (!project?.id) return
+    navTo('project', { projectId: project.id })
+    dispatchWorkspace({
+      type: 'APPLY_PLACEMENT',
+      toast: null,
+      resolve: (current) => {
+        let next = paneModel.setViewMode(current, 'panes')
+        const projectKey = tabModel.tabKey(tabModel.projectTab(project.id))
+        if (!paneModel.paneOf(next, projectKey)) {
+          next = paneModel.openTab(next, tabModel.projectTab(project.id))
+        }
+        const projectPane = paneModel.paneOf(next, projectKey)
+        if (!projectPane) return next
+        next = paneModel.setActiveTab(next, projectPane.id, projectKey)
+        return paneModel.focusPane(next, projectPane.id)
+      },
+    })
+  }
+
+  function openAppSource(app) {
+    const source = appSourceProject(app)
+    if (source) openProject(source)
+  }
+
+  // Open a project artifact in its OWN workspace tab (website iframe / latex
+  // pdf preview). Mirrors openProject: reveal builder, open/activate the
+  // artifact tab, focus its pane.
+  function openArtifact(project, artifactId) {
+    const projectId = typeof project === 'object' ? project?.id : project
+    if (projectId == null || artifactId == null) return
+    navTo('artifact', { projectId, artifactId })
+    const artifactRef = tabModel.artifactTabId(projectId, artifactId)
+    dispatchWorkspace({
+      type: 'APPLY_PLACEMENT',
+      toast: null,
+      resolve: (current) => {
+        let next = paneModel.setViewMode(current, 'panes')
+        const artifactKey = tabModel.tabKey(tabModel.makeTab('artifact', artifactRef))
+        if (!paneModel.paneOf(next, artifactKey)) {
+          next = paneModel.openTab(next, tabModel.makeTab('artifact', artifactRef))
+        }
+        const pane = paneModel.paneOf(next, artifactKey)
+        if (!pane) return next
+        next = paneModel.setActiveTab(next, pane.id, artifactKey)
+        return paneModel.focusPane(next, pane.id)
+      },
+    })
+  }
+
+  function openProjectChat(project, rawChat) {
+    const rawChatId = typeof rawChat === 'object' ? rawChat?.id : rawChat
+    if (!project?.id || !rawChatId) return
+    const chatId = String(rawChatId)
+    setProjectChatMeta(current => ({
+      ...current,
+      [chatId]: {
+        projectId: String(project.id),
+        projectName: project.name,
+        title: typeof rawChat === 'object' ? rawChat.title : current[chatId]?.title,
+      },
+    }))
+    knownExistingOffListChatIdsRef.current.add(chatId)
+    navTo('chat', { chatId })
+    dispatchWorkspace({
+      type: 'APPLY_PLACEMENT',
+      toast: null,
+      resolve: (current) => {
+        let next = paneModel.setViewMode(current, 'panes')
+        const chatTab = tabModel.makeTab('chat', chatId)
+        const chatKey = tabModel.tabKey(chatTab)
+        const projectKey = tabModel.tabKey(tabModel.projectTab(project.id))
+        const projectPane = paneModel.paneOf(next, projectKey)
+        if (!projectPane) return paneModel.openTab(next, chatTab)
+        const phone = paneModel.modeForRect(contentRectRef.current) === 'phone'
+        const companionPane = Object.entries(projectChatLookup)
+          .filter(([existingChatId, meta]) => (
+            existingChatId !== chatId
+            && meta.projectId === String(project.id)
+          ))
+          .map(([existingChatId]) => paneModel.paneOf(
+            next,
+            tabModel.tabKey(tabModel.makeTab('chat', existingChatId)),
+          ))
+          .find(pane => pane && pane.id !== projectPane.id)
+        const chatPane = paneModel.paneOf(next, chatKey)
+        if (chatPane) {
+          if (!phone && chatPane.id === projectPane.id) {
+            next = companionPane
+              ? paneModel.moveTab(next, chatKey, { paneId: companionPane.id })
+              : paneModel.moveTab(next, chatKey, {
+                paneId: projectPane.id,
+                edge: 'right',
+              })
+          }
+          const owner = paneModel.paneOf(next, chatKey)
+          if (!owner) return next
+          next = paneModel.setActiveTab(next, owner.id, chatKey)
+          return paneModel.focusPane(next, owner.id)
+        }
+        if (phone) {
+          next = paneModel.openTab(next, chatTab, { paneId: projectPane.id })
+        } else {
+          if (companionPane) {
+            next = paneModel.openTab(next, chatTab, { paneId: companionPane.id })
+          } else {
+            const split = paneModel.splitPaneWithTab(next, chatTab, {
+              paneId: projectPane.id,
+              edge: 'right',
+              focus: true,
+            })
+            next = split === next
+              ? paneModel.openTab(next, chatTab, { paneId: projectPane.id })
+              : split
+          }
+        }
+        const owner = paneModel.paneOf(next, chatKey)
+        return owner ? paneModel.focusPane(next, owner.id) : next
+      },
+    })
+  }
+
+  async function createProjectChat(project, { title = 'New chat', prompt = null } = {}) {
+    if (!project?.id) return null
+    const response = await api.projects.createChat(project.id, {
+      title,
+      recovery_request_id: crypto.randomUUID(),
+    })
+    const chat = await jsonOrThrow(response, 'Project chat creation failed:')
+    knownExistingOffListChatIdsRef.current.add(String(chat.id))
+    queryClient.setQueryData(projectQueries.keys.chats(project.id), current => [
+      chat,
+      ...(Array.isArray(current)
+        ? current.filter(row => String(row.id) !== String(chat.id))
+        : []),
+    ])
+    queryClient.setQueryData(projectQueries.keys.all, current => (
+      Array.isArray(current)
+        ? current.map(row => String(row.id) === String(project.id)
+          ? {
+            ...row,
+            chats: [
+              chat,
+              ...(row.chats || []).filter(item => String(item.id) !== String(chat.id)),
+            ],
+          }
+          : row)
+        : current
+    ))
+    openProjectChat(project, chat)
+    if (prompt) {
+      stageComposerHandoff(chat.id, prompt, { autoSend: true })
+      requestComposer(chat.id, { draft: prompt, submit: true })
+    }
+    return chat
+  }
+
+  async function createProjectFromTemplate(template) {
+    const templateId = template?.key || 'blank'
+    const response = await api.projects.create({
+      name: defaultProjectName(template),
+      template_id: templateId,
+      recovery_request_id: crypto.randomUUID(),
+    })
+    const project = await jsonOrThrow(response, 'Project creation failed:')
+    projectsRef.current = [
+      project,
+      ...projectsRef.current.filter(row => String(row.id) !== String(project.id)),
+    ]
+    queryClient.setQueryData(projectQueries.keys.all, projectsRef.current)
+    setProjectRenameId(String(project.id))
+    openProject(project)
+    return project
+  }
+
+  async function importProjectFromGithub({ repository, name }) {
+    const response = await api.projects.importGithub({
+      repository,
+      name,
+      recovery_request_id: crypto.randomUUID(),
+    })
+    const project = await jsonOrThrow(response, 'GitHub import failed:')
+    projectsRef.current = [
+      project,
+      ...projectsRef.current.filter(row => String(row.id) !== String(project.id)),
+    ]
+    queryClient.setQueryData(projectQueries.keys.all, projectsRef.current)
+    openProject(project)
+    return project
+  }
+
+  async function patchProject(project, patch) {
+    const response = await api.projects.update(project.id, patch)
+    const updated = await jsonOrThrow(response, 'Project update failed:')
+    projectsRef.current = projectsRef.current.map(row => (
+      String(row.id) === String(updated.id) ? updated : row
+    ))
+    queryClient.setQueryData(projectQueries.keys.all, projectsRef.current)
+    queryClient.setQueryData(chatQueries.keys.all, current => {
+      const next = (Array.isArray(current) ? current : []).map(chat => (
+        String(chat.project?.id) === String(updated.id)
+          ? {
+            ...chat,
+            project: {
+              ...chat.project,
+              name: updated.name,
+              color: updated.color,
+            },
+          }
+          : chat
+      ))
+      chatsRef.current = next
+      return next
+    })
+    return updated
+  }
+
+  async function renameProject(project, name) {
+    const updated = await patchProject(project, { name })
+    setProjectRenameId(null)
+    return updated
+  }
+
+  async function setProjectColor(project, color) {
+    return patchProject(project, { color })
+  }
+  const openProjectRef = useRef(openProject)
+  openProjectRef.current = openProject
 
   // Per-chat repair callback for a mounted chat pane (design §2 M13). A pane
   // whose chat reports a real 404 drops its tab; the derived triple follows the
@@ -1701,9 +2067,17 @@ export default function Shell({ onInitialVisualReady }) {
   // time. The computed streamingChatIds below merges those with durable
   // `running` flags from /api/chats, so drawer dots survive navigation,
   // reloads, and PWA reopen even when the streaming ChatView is unmounted.
+  // A fresh reconnect also retires local starts whose finish event was missed;
+  // otherwise the optimistic half of this union can outlive server truth.
   // attentionChatIds is separate: it marks a background-finished chat until
   // the user opens it, without pretending the turn is still streaming.
   const [localStreamingChatIds, setLocalStreamingChatIds] = useState(() => new Set())
+  // Keep the send-time owner synchronous across the reconnect await. A compact
+  // row can still say `running: false` before the accepted send emits its
+  // durable start, so state committed on the next React frame is too late to
+  // decide whether that row may retire the optimistic marker.
+  const localStreamingChatIdsRef = useRef(localStreamingChatIds)
+  const acknowledgedLocalChatRunIdsRef = useRef(new Set())
   // Monotonic per-chat activity survives a start+finish pair delivered in one
   // system-stream chunk. A running boolean can end the React batch exactly as
   // it began (false) and lose the fact that the transcript changed.
@@ -1764,30 +2138,41 @@ export default function Shell({ onInitialVisualReady }) {
 
   // Stable callbacks for ChatView — identity must not change across
   // renders or ChatView's onStreamEnd-handler memoization breaks. The
-  // setter form lets us avoid depending on the previous state.
+  // synchronous ref lets reconnect reconciliation observe a send in the same
+  // frame, while React state remains the rendering owner.
   const markStreamingStart = useCallback((chatId) => {
     if (!chatId) return
-    setLocalStreamingChatIds(prev => {
-      if (prev.has(chatId)) return prev
-      const next = new Set(prev)
-      next.add(chatId)
-      return next
-    })
+    const key = String(chatId)
+    const previous = localStreamingChatIdsRef.current
+    if (!previous.has(key)) {
+      const next = new Set(previous)
+      next.add(key)
+      localStreamingChatIdsRef.current = next
+      setLocalStreamingChatIds(next)
+    }
     setAttentionChatIds(prev => {
-      if (!prev.has(chatId)) return prev
+      if (!prev.has(key)) return prev
       const next = new Set(prev)
-      next.delete(chatId)
+      next.delete(key)
       return next
     })
   }, [])
+  const markStreamingAcknowledged = useCallback((chatId) => {
+    if (!chatId) return
+    const key = String(chatId)
+    acknowledgedLocalChatRunIdsRef.current.add(key)
+    markStreamingStart(key)
+  }, [markStreamingStart])
   const markStreamingEnd = useCallback((chatId) => {
     if (!chatId) return
-    setLocalStreamingChatIds(prev => {
-      if (!prev.has(chatId)) return prev
-      const next = new Set(prev)
-      next.delete(chatId)
-      return next
-    })
+    const key = String(chatId)
+    acknowledgedLocalChatRunIdsRef.current.delete(key)
+    const previous = localStreamingChatIdsRef.current
+    if (!previous.has(key)) return
+    const next = new Set(previous)
+    next.delete(key)
+    localStreamingChatIdsRef.current = next
+    setLocalStreamingChatIds(next)
   }, [])
 
   const markChatRunActivity = useCallback((chatId) => {
@@ -1933,7 +2318,7 @@ export default function Shell({ onInitialVisualReady }) {
   // effect/caller that consumes them vulnerable to duplicate fetches.
   // Driving the refetch via the query client's stable
   // `refetchQueries` keeps the callback identity steady.
-  const refreshApps = useCallback(() => {
+  const refreshApps = useCallback(({ timeoutMs } = {}) => {
     // Force a genuinely fresh fetch and return THAT fetch's result.
     // refetchQueries alone can coalesce with an initial mount fetch that's
     // still in flight (React Query dedups), then resolve against the stale
@@ -1946,16 +2331,32 @@ export default function Shell({ onInitialVisualReady }) {
     return queryClient.cancelQueries({ queryKey: appQueries.keys.all })
       .then(() => queryClient.fetchQuery({
         queryKey: appQueries.keys.all,
-        queryFn: async () => reconcileApps(await appQueries.list.fetch()),
+        queryFn: async () => reconcileApps(await appQueries.list.fetch({ timeoutMs })),
         staleTime: 0,
       }))
       .then(data => data || [])
       .catch(() => queryClient.getQueryData(appQueries.keys.all) || [])
   }, [queryClient, reconcileApps])
+  const fetchFreshChats = useCallback(({ timeoutMs } = {}) => {
+    // Shell-level chat state (running, waiting for owner input, activity) is
+    // durable and must win over a transient event that may have been missed
+    // while the page was suspended or the server restarted. Cancel first so
+    // this reconciliation cannot coalesce with an older in-flight list read
+    // and then overwrite a newer event projection with its stale response.
+    return queryClient.cancelQueries({ queryKey: chatQueries.keys.all })
+      .then(() => queryClient.fetchQuery({
+        queryKey: chatQueries.keys.all,
+        queryFn: async () => reconcileCreatedChats(
+          await chatQueries.list.fetch({ timeoutMs }),
+        ),
+        staleTime: 0,
+      }))
+      .then(data => data || [])
+  }, [queryClient, reconcileCreatedChats])
   const refreshChats = useCallback(() => {
     return queryClient.refetchQueries({ queryKey: chatQueries.keys.all })
       .then(() => queryClient.getQueryData(chatQueries.keys.all) || [])
-      .catch(() => [])
+      .catch(() => queryClient.getQueryData(chatQueries.keys.all) || [])
   }, [queryClient])
   const projectChatList = useCallback((project) => {
     queryClient.setQueryData(chatQueries.keys.all, current => {
@@ -1983,8 +2384,38 @@ export default function Shell({ onInitialVisualReady }) {
     projectChatList(rows => withChatRename(rows, event.chatId, {
       title: event.title,
       updatedAt: event.updatedAt,
+      activityAt: event.activityAt,
     }))
-  }, [projectChatList])
+    const projectChat = projectChatLookup[String(event.chatId)]
+    if (projectChat) {
+      queryClient.setQueryData(
+        projectQueries.keys.chats(projectChat.projectId),
+        rows => withChatRename(Array.isArray(rows) ? rows : [], event.chatId, {
+          title: event.title,
+          updatedAt: event.updatedAt,
+          activityAt: event.activityAt,
+        }),
+      )
+      queryClient.setQueryData(projectQueries.keys.all, rows => (
+        Array.isArray(rows)
+          ? rows.map(project => String(project.id) === projectChat.projectId
+            ? {
+              ...project,
+              chats: withChatRename(
+                Array.isArray(project.chats) ? project.chats : [],
+                event.chatId,
+                {
+                  title: event.title,
+                  updatedAt: event.updatedAt,
+                  activityAt: event.activityAt,
+                },
+              ),
+            }
+            : project)
+          : rows
+      ))
+    }
+  }, [projectChatList, projectChatLookup, queryClient])
 
   const confirmChatDeleted = useCallback((id) => {
     const sid = String(id)
@@ -2440,6 +2871,59 @@ export default function Shell({ onInitialVisualReady }) {
       // Recovery is the sole operation allowed to clear the session tombstone.
       if (ev.chatId) confirmChatRecovered(ev.chatId)
       void invalidateShellListCache('chats').then(refreshChats)
+    } else if (ev.type === 'project_deleted') {
+      if (ev.projectId) {
+        const projectId = String(ev.projectId)
+        queryClient.setQueryData(projectQueries.keys.all, current => (
+          Array.isArray(current)
+            ? current.filter(project => String(project.id) !== projectId)
+            : current
+        ))
+        navStackRef.current = navStackRef.current.filter(
+          entry => String(entry.projectId ?? '') !== projectId,
+        )
+        tombstoneRoute('project', projectId)
+        dispatchWorkspace({
+          type: 'CLOSE_PROJECT_TABS',
+          projectId,
+          reason: 'deleted',
+        })
+      }
+      void projectQueries.list.invalidate(queryClient)
+    } else if (ev.type === 'project_recovered') {
+      void projectQueries.list.invalidate(queryClient)
+    } else if (ev.type === 'project_file_changed') {
+      const projectId = ev.projectId == null ? null : String(ev.projectId)
+      if (projectId) {
+        void projectQueries.files.invalidate(queryClient, projectId)
+        void queryClient.invalidateQueries({
+          queryKey: ['projects', 'artwork', projectId],
+        })
+        void queryClient.invalidateQueries({
+          queryKey: ['projects', 'git', projectId],
+        })
+        window.dispatchEvent(new CustomEvent('mobius:project-change', {
+          detail: ev,
+        }))
+      }
+      void projectQueries.list.invalidate(queryClient)
+    } else if (ev.type === 'project_work_claim_changed') {
+      const projectId = ev.projectId == null ? null : String(ev.projectId)
+      if (projectId) {
+        void queryClient.invalidateQueries({
+          queryKey: ['projects', 'work-claims', projectId],
+        })
+        void queryClient.invalidateQueries({
+          queryKey: ['projects', 'collaboration', projectId],
+        })
+      }
+    } else if (isArtifactBuildEvent(ev)) {
+      // A build changed status (idle→building→ok/error). Refresh the project's
+      // artifacts cache so the open ArtifactWorkspace live-updates its status
+      // pill and hot-swaps the preview when a build finishes — no polling.
+      const projectId = buildEventProjectId(ev)
+      if (projectId != null) projectQueries.artifacts.invalidate(queryClient, projectId)
+      void projectQueries.list.invalidate(queryClient)
     } else if (ev.type === 'chat_renamed') {
       // The committed event carries the exact changed row fields. Apply those
       // in place so renaming one chat cannot parse and reconcile all hundreds
@@ -2581,7 +3065,7 @@ export default function Shell({ onInitialVisualReady }) {
           c => String(c.id) === String(ev.chatId),
         )
         markChatRunActivity(ev.chatId)
-        markStreamingStart(ev.chatId)
+        markStreamingAcknowledged(ev.chatId)
         markChatRunState(ev.chatId, true)
         markChatOwnerInput(ev.chatId, { kind: null, questionId: null })
         // A run can be the drawer's FIRST evidence of a chat created entirely
@@ -2603,6 +3087,22 @@ export default function Shell({ onInitialVisualReady }) {
         markChatRunFinished(chatId)
         markStreamingEnd(chatId)
         markChatRunState(chatId, false)
+        // Project agents write directly into the project directory. Refresh
+        // every mounted folder query for that project so generated artifacts
+        // appear as soon as the run finishes, without polling the filesystem.
+        const projectId = projectChatLookup[String(chatId)]?.projectId
+        if (projectId) {
+          // Project agents may be started by another project surface without a
+          // fresh owner message. Completion is still meaningful chat activity.
+          markChatOwnerActivity(chatId)
+          void projectQueries.files.invalidate(queryClient, projectId)
+          void queryClient.invalidateQueries({
+            queryKey: ['projects', 'work-claims', String(projectId)],
+          })
+          void queryClient.invalidateQueries({
+            queryKey: ['projects', 'git', String(projectId)],
+          })
+        }
         markChatOwnerInput(chatId, { kind: null, questionId: null })
         // Attention iff the finished chat is NOT visible in ANY pane — membership
         // in the visible set, not equality with one global id, so a chat visible
@@ -2666,10 +3166,11 @@ export default function Shell({ onInitialVisualReady }) {
     applyChatRenameEvent,
     confirmAppDeleted, confirmAppIdentityIsLive, confirmAppRecovered,
     confirmChatDeleted, confirmChatIdentityIsLive, confirmChatRecovered,
-    loadTheme, markChatRunActivity, markChatRunFinished, markChatRunReconcile,
-    markChatOwnerInput, markChatRunState, markStreamingEnd, markStreamingStart,
-    onNotificationCreated, placeInWorkspace, queryClient,
-    refreshApps, refreshChats, warmAppCode,
+    loadTheme, markChatOwnerActivity, markChatRunActivity, markChatRunFinished, markChatRunReconcile,
+    markChatOwnerInput, markChatRunState, markStreamingAcknowledged,
+    markStreamingEnd, markStreamingStart,
+    onNotificationCreated, placeInWorkspace, projectChatLookup, queryClient,
+    refreshApps, refreshChats, tombstoneRoute, warmAppCode,
   ])
 
   // Shell-level SSE subscription for system events. Stays open for
@@ -2682,23 +3183,73 @@ export default function Shell({ onInitialVisualReady }) {
   // the durable app list after every initial connection/reconnect; after the
   // first list establishes the session baseline, fresh chat-owned rows flow
   // through the same idempotent placement resolver as live app_preview_ready events.
-  const reconcileSystemStateOnOpen = useCallback(() => {
+  // This runs as a causal barrier in front of the system stream's reader, so
+  // however long it takes is how long every buffered system event waits. Keep
+  // the reads here few and short; anything unbounded added below stalls live
+  // events until it settles.
+  const reconcileSystemStateOnOpen = useCallback(async () => {
     reconcileNotifications()
-    void Promise.all([
-      invalidateShellListCache('apps'),
-      invalidateShellListCache('chats'),
-      reconcileDeletedAppIdentities(),
-      reconcileDeletedChatIdentities(),
-    ]).then(() => {
-      refreshApps()
-      refreshChats()
-    })
+    try {
+      await Promise.all([
+        invalidateShellListCache('apps'),
+        invalidateShellListCache('chats'),
+        reconcileDeletedAppIdentities(),
+        reconcileDeletedChatIdentities(),
+      ])
+      const [, refreshedChats] = await Promise.all([
+        refreshApps({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS }),
+        // Unlike ordinary best-effort refreshes, reconnect must not use a stale
+        // cached fallback to retire an optimistic active-work marker.
+        fetchFreshChats({ timeoutMs: SYSTEM_RECONNECT_LIST_TIMEOUT_MS }),
+      ])
+      const localIds = localStreamingChatIdsRef.current
+      for (const chat of refreshedChats) {
+        const chatId = String(chat.id)
+        if (chat.running && localIds.has(chatId)) {
+          acknowledgedLocalChatRunIdsRef.current.add(chatId)
+        }
+      }
+      const reconciledLocalIds = withoutSettledLocalChatRuns(
+        localIds,
+        refreshedChats,
+        {
+          acknowledgedIds: acknowledgedLocalChatRunIdsRef.current,
+          protectedIds: visibleChatIdsRef.current,
+        },
+      )
+      if (reconciledLocalIds !== localIds) {
+        for (const chatId of localIds) {
+          if (!reconciledLocalIds.has(chatId)) {
+            acknowledgedLocalChatRunIdsRef.current.delete(String(chatId))
+          }
+        }
+        localStreamingChatIdsRef.current = reconciledLocalIds
+        setLocalStreamingChatIds(reconciledLocalIds)
+      }
+      for (const chat of refreshedChats) {
+        const chatId = String(chat.id)
+        // The mounted stream owns a local start until it reaches a boundary.
+        // Re-reading its detail here would let the same temporarily-idle row
+        // retire an unacknowledged send through a second reconciliation path.
+        if (reconciledLocalIds.has(chatId)) continue
+        if (
+          chat.running
+          || visibleChatIdsRef.current.has(chatId)
+        ) {
+          markChatRunReconcile(chatId)
+        }
+      }
+    } catch {
+      // Reconciliation is best-effort. The open stream remains useful, and a
+      // later reconnect gets another authoritative pass.
+    }
   }, [
+    fetchFreshChats,
+    markChatRunReconcile,
     reconcileNotifications,
     reconcileDeletedAppIdentities,
     reconcileDeletedChatIdentities,
     refreshApps,
-    refreshChats,
   ])
   useSystemEventStream(handleSystemEvent, { onOpen: reconcileSystemStateOnOpen })
 
@@ -3567,6 +4118,94 @@ export default function Shell({ onInitialVisualReady }) {
     })
   }
 
+  async function deleteProject(project) {
+    const projectId = String(project.id)
+    let projectChats = queryClient.getQueryData(projectQueries.keys.chats(projectId))
+    if (!Array.isArray(projectChats)) {
+      try {
+        const chatsResponse = await api.projects.chats(projectId)
+        projectChats = await jsonOrThrow(chatsResponse, 'Project chats failed:')
+      } catch {
+        projectChats = []
+      }
+    }
+    const chatIds = projectChats.map(chat => String(chat.id))
+    let res
+    try {
+      res = await api.projects.remove(projectId)
+    } catch {
+      showToast("Couldn't delete — check your connection.", { variant: 'error' })
+      return false
+    }
+    if (!res.ok && res.status !== 404) {
+      if (res.status === 409) {
+        showToast('The project agent is still working — stop it and retry.', { duration: 6000 })
+      } else {
+        showToast("Couldn't delete this project — please try again.", { variant: 'error' })
+      }
+      return false
+    }
+
+    for (const chatId of chatIds) {
+      confirmChatDeleted(chatId)
+      clearComposerDraft(chatId)
+      chatQueries.messages.remove(queryClient, chatId)
+    }
+    queryClient.removeQueries({ queryKey: projectQueries.keys.chats(projectId), exact: true })
+    queryClient.setQueryData(projectQueries.keys.all, current => (
+      Array.isArray(current)
+        ? current.filter(candidate => String(candidate.id) !== projectId)
+        : current
+    ))
+    navStackRef.current = navStackRef.current.filter(entry => (
+      String(entry.projectId ?? '') !== projectId
+      && !chatIds.includes(String(entry.chatId ?? ''))
+    ))
+    tombstoneRoute('project', projectId)
+    for (const chatId of chatIds) tombstoneRoute('chat', chatId)
+    navTo('projects')
+    dispatchWorkspace({
+      type: 'CLOSE_PROJECT_TABS',
+      projectId,
+      reason: 'deleted',
+    })
+    for (const chatId of chatIds) {
+      dispatchWorkspace({
+        type: 'CLOSE_TAB',
+        tabKey: tabModel.tabKey(tabModel.makeTab('chat', chatId)),
+        reason: 'deleted',
+      })
+    }
+    await Promise.all([
+      projectsQuery.refetch(),
+      refreshChats(),
+    ])
+    showToast('Project deleted', {
+      duration: 5000,
+      action: {
+        label: 'Undo',
+        onAction: async () => {
+          try {
+            const recoverRes = await api.projects.recover(projectId)
+            const recovered = await jsonOrThrow(recoverRes, 'Project recovery failed')
+            for (const chatId of chatIds) confirmChatRecovered(chatId)
+            void queryClient.invalidateQueries({
+              queryKey: projectQueries.keys.chats(projectId), exact: true,
+            })
+            queryClient.setQueryData(projectQueries.keys.all, current => {
+              const rows = Array.isArray(current) ? current : []
+              return [recovered, ...rows.filter(row => String(row.id) !== projectId)]
+            })
+            await refreshChats()
+          } catch {
+            showToast("Couldn't undo — project may be gone.", { variant: 'error' })
+          }
+        },
+      },
+    })
+    return true
+  }
+
   // App delete lives here (not in Drawer) so we have access to showToast.
   // The Drawer's local deleteApp swallowed all errors silently — 409 means
   // the agent is still working and the app cannot be safely removed yet;
@@ -3825,6 +4464,16 @@ export default function Shell({ onInitialVisualReady }) {
           </button>
           <button
             type="button"
+            className={`shell__rail-action${activeView === 'projects' || activeView === 'project' || activeView === 'artifact' || activeProjectChatProjectId ? ' shell__rail-action--active' : ''}`}
+            aria-label="Projects shortcut"
+            title="Projects"
+            aria-current={activeView === 'projects' ? 'page' : undefined}
+            onClick={() => navTo('projects')}
+          >
+            <ProjectsNavIcon aria-hidden="true" />
+          </button>
+          <button
+            type="button"
             className={`shell__rail-action shell__rail-action--bottom${activeView === 'settings' ? ' shell__rail-action--active' : ''}`}
             aria-label="Settings shortcut"
             title="Settings"
@@ -3871,12 +4520,37 @@ export default function Shell({ onInitialVisualReady }) {
         onRetryApps={() => appsQuery.refetch()}
         activeView={activeView}
         activeAppId={activeAppId}
+        projects={projects}
+        projectsStatus={projectsStatus}
+        onRetryProjects={() => projectsQuery.refetch()}
+        activeProjectId={activeProjectId}
+        activeProjectChatProjectId={activeProjectChatProjectId}
+        activeArtifactRef={activeArtifactRef}
+        projectTemplates={projectTemplates}
+        onProject={openProject}
+        onProjectRename={(project, name) => {
+          if (typeof name === 'string') return renameProject(project, name)
+          setProjectRenameId(String(project.id))
+          openProject(project)
+          return undefined
+        }}
+        onProjectColor={setProjectColor}
+        onProjectDelete={deleteProject}
+        onArtifact={(artifactRef) => {
+          const parsed = tabModel.parseArtifactTabId(artifactRef)
+          if (!parsed) return
+          const project = projectById.get(parsed.projectId)
+          if (project) openArtifact(project, parsed.artifactId)
+        }}
+        onProjectsOpen={() => navTo('projects')}
+        onProjectCreate={createProjectFromTemplate}
         chats={chats}
         chatsStatus={chatsStatus}
         onRetryChats={() => chatsQuery.refetch()}
         activeChatId={activeChatId}
         onChat={selectChat}
         onApp={(id) => navTo('canvas', { appId: id })}
+        onAppSource={openAppSource}
         onNewChat={startUserChat}
         onDeleteChat={deleteChat}
         onDeleteApp={deleteApp}
@@ -4283,6 +4957,157 @@ export default function Shell({ onInitialVisualReady }) {
             </div>
           )
         })()}
+        {/* Projects launcher — a canonical workspace destination below Apps. */}
+        {(() => {
+          const projectListPos = projectsPaned
+            ? {
+              top: projectsPaned.y,
+              left: projectsPaned.x,
+              width: projectsPaned.w,
+              height: projectsPaned.h,
+              ...modeViewTransitionStyle('pane', projectsPaned.paneId, PROJECTS_KEY),
+            }
+            : null
+          const surfaceVisible = projectsVisibleAsTab
+            && !!(projectsPaned || projectsFullBleed)
+          return (
+            <div
+              key="projects"
+              id={projectsPaned ? panePanelDomId(projectsPaned.paneId, PROJECTS_KEY) : undefined}
+              role={projectsPaned ? 'tabpanel' : undefined}
+              aria-labelledby={projectsPaned ? paneTabDomId(projectsPaned.paneId, PROJECTS_KEY) : undefined}
+              data-tab-key={projectsPaned ? PROJECTS_KEY : undefined}
+              data-mode-pane-vt={projectsPaned ? projectsPaned.paneId : undefined}
+              className={projectsPaned
+                ? 'shell__view shell__view--paned shell__projects-view'
+                : `shell__view shell__projects-view ${projectsFullBleed ? 'shell__view--active' : ''}`}
+              style={projectListPos || undefined}
+              inert={!surfaceVisible || undefined}
+              aria-hidden={!surfaceVisible ? 'true' : undefined}
+              onPointerDownCapture={projectsPaned && !modeBeatActive
+                ? () => dispatchWorkspace({ type: 'FOCUS', paneId: projectsPaned.paneId })
+                : undefined}
+            >
+              <ProjectsDirectory
+                projects={projects}
+                templates={projectTemplates}
+                status={projectsStatus}
+                onRetry={() => Promise.all([
+                  projectsQuery.refetch(),
+                  projectTemplatesQuery.refetch(),
+                ])}
+                onOpen={openProject}
+                onCreate={createProjectFromTemplate}
+                onImportGithub={importProjectFromGithub}
+                onRename={renameProject}
+                onColor={setProjectColor}
+                onDelete={deleteProject}
+              />
+            </div>
+          )
+        })()}
+        {/* One stable file/editor surface per open project. The companion chat is
+            always its ordinary chat tab and therefore reuses the shell's sole
+            PaneChatView mount for that chat id. */}
+        {renderedProjectIds.map((projectId) => {
+          const project = projectById.get(projectId)
+          if (!project) return null
+          const key = tabModel.tabKey(tabModel.projectTab(projectId))
+          const paned = workspaceChromeActive ? visibleTabRects.get(key) : null
+          const fullBleed = !paned && fullBleedKey === key
+          const pos = paned
+            ? {
+              top: paned.y,
+              left: paned.x,
+              width: paned.w,
+              height: paned.h,
+              ...modeViewTransitionStyle('pane', paned.paneId, key),
+            }
+            : null
+          const visible = !!(paned || fullBleed)
+          return (
+            <div
+              key={key}
+              id={paned ? panePanelDomId(paned.paneId, key) : undefined}
+              role={paned ? 'tabpanel' : undefined}
+              aria-labelledby={paned ? paneTabDomId(paned.paneId, key) : undefined}
+              data-tab-key={paned ? key : undefined}
+              data-mode-pane-vt={paned ? paned.paneId : undefined}
+              className={paned
+                ? 'shell__view shell__view--paned shell__project-view'
+                : `shell__view shell__project-view ${fullBleed ? 'shell__view--active' : ''}`}
+              style={pos || undefined}
+              inert={!visible || undefined}
+              aria-hidden={!visible ? 'true' : undefined}
+              onPointerDownCapture={paned && !modeBeatActive
+                ? () => dispatchWorkspace({ type: 'FOCUS', paneId: paned.paneId })
+                : undefined}
+            >
+              {project.source_kind === 'app' ? (
+                <AppSourceWorkspace
+                  app={project.app}
+                  onOpenApp={() => navTo('canvas', { appId: project.source_app_id })}
+                />
+              ) : (
+                <ProjectWorkspace
+                  project={project}
+                  onOpenChat={chat => openProjectChat(project, chat)}
+                  onCreateChat={() => createProjectChat(project)}
+                  onOpenArtifact={artifactId => openArtifact(project, artifactId)}
+                  startRenaming={String(projectRenameId) === String(project.id)}
+                  onRename={name => renameProject(project, name)}
+                  onRenameEnd={() => setProjectRenameId(null)}
+                />
+              )}
+            </div>
+          )
+        })}
+        {/* One ArtifactWorkspace per open artifact tab (website iframe / latex
+            pdf preview), positioned exactly like the project surfaces above. */}
+        {renderedArtifactIds.map((artifactRef) => {
+          const parsed = tabModel.parseArtifactTabId(artifactRef)
+          if (!parsed) return null
+          const project = projectById.get(parsed.projectId)
+          const key = tabModel.tabKey(tabModel.makeTab('artifact', artifactRef))
+          const paned = workspaceChromeActive ? visibleTabRects.get(key) : null
+          const fullBleed = !paned && fullBleedKey === key
+          const pos = paned
+            ? {
+              top: paned.y,
+              left: paned.x,
+              width: paned.w,
+              height: paned.h,
+              ...modeViewTransitionStyle('pane', paned.paneId, key),
+            }
+            : null
+          const visible = !!(paned || fullBleed)
+          return (
+            <div
+              key={key}
+              id={paned ? panePanelDomId(paned.paneId, key) : undefined}
+              role={paned ? 'tabpanel' : undefined}
+              aria-labelledby={paned ? paneTabDomId(paned.paneId, key) : undefined}
+              data-tab-key={paned ? key : undefined}
+              data-mode-pane-vt={paned ? paned.paneId : undefined}
+              className={paned
+                ? 'shell__view shell__view--paned shell__project-view'
+                : `shell__view shell__project-view ${fullBleed ? 'shell__view--active' : ''}`}
+              style={pos || undefined}
+              inert={!visible || undefined}
+              aria-hidden={!visible ? 'true' : undefined}
+              onPointerDownCapture={paned && !modeBeatActive
+                ? () => dispatchWorkspace({ type: 'FOCUS', paneId: paned.paneId })
+                : undefined}
+            >
+              <ArtifactWorkspace
+                projectId={parsed.projectId}
+                artifactId={parsed.artifactId}
+                projectName={project?.name}
+                onOpenProject={project ? () => openProject(project) : undefined}
+              />
+            </div>
+          )
+        })}
         {/* Settings surface — ONE wrapper, positioned like a chat/app content
             wrapper (paned) when it is a visible builder tab, full-bleed when the
             takeover overlay is up. Keyed 'settings' so React reconciles it by key
