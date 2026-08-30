@@ -29,6 +29,10 @@ const newChatLandingSource = readFileSync(
   new URL('../NewChatLanding.jsx', import.meta.url),
   'utf8',
 )
+const chatViewSource = readFileSync(
+  new URL('../../ChatView/ChatView.jsx', import.meta.url),
+  'utf8',
+)
 const queriesSource = readFileSync(new URL('../../../hooks/queries.js', import.meta.url), 'utf8')
 const clientSource = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
 
@@ -158,7 +162,7 @@ test('an accepted allocation hydrates durable draft ownership before handoff', (
 
 test('a provisional Send becomes one durable handoff and retries on proven recovery', () => {
   const queue = shellSource.match(
-    /const queueDraftFirstNewChat = useCallback\(\(input\) => \{([\s\S]*?)\n  \}, \[retryDraftFirstNewChat\]\)/,
+    /const queueDraftFirstNewChat = useCallback\(\(input\) => \{([\s\S]*?)\n  \}, \[requestComposer, retryDraftFirstNewChat\]\)/,
   )?.[1] || ''
   const stage = queue.indexOf('stageVerifiedNewChatHandoff(')
   const verify = queue.indexOf('if (!staged)')
@@ -188,6 +192,30 @@ test('a provisional Send becomes one durable handoff and retries on proven recov
     shellSource,
     /stageComposerHandoff\(decision\.chatId, autoSendDraft, \{ autoSend: true \}\)/,
     'an authoritative id rotation must move the queued handoff to its new owner',
+  )
+})
+
+test('Send remains owned by the landing after allocation materializes', () => {
+  const queue = shellSource.match(
+    /const queueDraftFirstNewChat = useCallback\(\(input\) => \{([\s\S]*?)\n  \}, \[requestComposer, retryDraftFirstNewChat\]\)/,
+  )?.[1] || ''
+
+  assert.doesNotMatch(queue, /!presentation \|\| presentation\.materialized/,
+    'a materialized row must not turn the still-visible Send button into a no-op')
+  assert.match(
+    queue,
+    /if \(presentation\.materialized\) \{[\s\S]*?requestComposer\(presentation\.chatId, \{[\s\S]*?draft: text,[\s\S]*?submit: true,[\s\S]*?releaseNewChatPresentationToken: presentation\.token/,
+    'the landing must submit through the mounted destination and release itself',
+  )
+  assert.match(
+    queue,
+    /submitted: true,[\s\S]*?handoffRequested: presentation\.materialized[\s\S]*?\|\| presentation\.handoffRequested/,
+    'the submit handoff must claim the request slot before display-ready focus can replace it',
+  )
+  assert.match(
+    chatViewSource,
+    /if \(request\.storedHandoff\) \{[\s\S]*?consumeComposerHandoff[\s\S]*?doSend\(text\)[\s\S]*?onComposerRequestHandled\?\.\(request\.token\)/,
+    'the destination must acknowledge the explicit handoff after starting its send',
   )
 })
 

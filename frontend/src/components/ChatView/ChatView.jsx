@@ -3233,7 +3233,11 @@ export default function ChatView({
       consumeComposerHandoff(chatId, request.text, { autoSend: true })
     }
     doSend(text)
-    if (!request.storedHandoff) onComposerRequestHandled?.(request.token)
+    // A stored handoff can also be an explicit Shell request from the still-
+    // visible New Chat landing. Acknowledge every request token after the send
+    // starts: storage-only tokens simply do not match Shell's current request,
+    // while a matching token releases the landing and clears its ownership.
+    onComposerRequestHandled?.(request.token)
   }, [
     pendingComposerSubmit,
     loading,

@@ -342,7 +342,7 @@ test('direct chat actions hand focus to the destination composer', () => {
   )
 })
 
-test('the held chat is an opaque layer above staging until the atomic swap', () => {
+test('every outgoing chat-entry surface becomes neutral until the atomic swap', () => {
   assert.match(ruleBody('.shell__chat-view'), /background:\s*var\(--bg\)/,
     'the cover must be opaque so hidden incoming content cannot leak through')
   assert.match(ruleBody('.shell__chat-view'), /isolation:\s*isolate/,
@@ -351,7 +351,23 @@ test('the held chat is an opaque layer above staging until the atomic swap', () 
   assert.match(ruleBody('.shell__chat-view--staging'), /z-index:\s*1/)
   assert.match(ruleBody('.shell__chat-view--held'), /visibility:\s*visible/)
   assert.match(ruleBody('.shell__chat-view--held'), /z-index:\s*2/,
-    'the last painted frame must stay above the staging mount')
+    'the neutral cover must stay above the staging mount')
+  assert.match(ruleBody('.shell__chat-view--held > .chat'), /visibility:\s*hidden/,
+    'the outgoing transcript must disappear as soon as selection begins')
+  assert.match(
+    shellCss,
+    /\.shell__app-view--held > \*,\s*\.shell__chat-view--held > \.chat\s*\{[\s\S]*?visibility:\s*hidden/,
+    'an outgoing app must follow the same immediate hidden-pixels policy',
+  )
+  const openingCover = ruleBody('.shell__chat-view--held::after')
+  assert.match(openingCover, /content:\s*"Opening chat\\2026"/)
+  assert.match(openingCover, /background:\s*var\(--bg\)/,
+    'the selected chat waits behind one opaque neutral surface')
+  assert.match(
+    shellCss,
+    /\.shell__app-view--held::after,\s*\.shell__chat-view--held::after\s*\{/,
+    'chat and app handoffs must render the same neutral cover',
+  )
 })
 
 test('chat selection swaps atomically without flashing or animating text layers', () => {
@@ -368,8 +384,10 @@ test('chat selection swaps atomically without flashing or animating text layers'
   assert.doesNotMatch(drawerPress, /transform:/,
     'drawer press feedback must keep the row geometry fixed')
 
-  assert.doesNotMatch(shellCss, /\.shell__chat-view(?:--staging)? > \.chat/,
-    'the ready transcript must replace the opaque cover in one fully painted frame')
+  assert.doesNotMatch(shellCss, /\.shell__chat-view--staging > \.chat/,
+    'the incoming transcript must remain free to prepare beneath the cover')
+  assert.match(ruleBody('.shell__chat-view--held > .chat'), /visibility:\s*hidden/,
+    'the old transcript must not remain visible while the selected chat prepares')
   assert.doesNotMatch(ruleBody('.shell__chat-view--held'), /opacity:/,
     'the outgoing transcript must remain opaque until the atomic swap')
   assert.match(drawerCss,

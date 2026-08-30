@@ -426,10 +426,10 @@ export default function Shell({ onInitialVisualReady }) {
   )
   const { multiPane, single, focusedActiveKey, fullBleedKey, visibleAppIds } = contentVisibility
   // ChatView keeps its transcript hidden during the first scroll/stream
-  // settlement frame. Chat-to-chat transitions retain the old ChatView as an
-  // opaque cover, but an app has no ChatView to retain. Hold the outgoing app
-  // until the destination reports display-ready instead of exposing that
-  // intentional partial frame (particularly visible for long, running chats).
+  // settlement frame. Chat-to-chat transitions retain the old ChatView's
+  // geometry; an app has no ChatView to retain, so keep its wrapper until the
+  // destination reports display-ready. CSS replaces either outgoing surface's
+  // pixels with one neutral Opening-chat frame immediately.
   const standardSurface = useMemo(
     () => standardContentSurface({ single, fullBleedKey }),
     [fullBleedKey, single],
@@ -3637,7 +3637,7 @@ export default function Shell({ onInitialVisualReady }) {
 
   const queueDraftFirstNewChat = useCallback((input) => {
     const presentation = newChatPresentationRef.current
-    if (!presentation || presentation.materialized || presentation.releasing) return
+    if (!presentation || presentation.releasing) return
     const text = typeof input === 'string' ? input : ''
     if (!text.trim()) return
 
@@ -3658,11 +3658,31 @@ export default function Shell({ onInitialVisualReady }) {
     }
 
     const shouldRetryAllocation = !!presentation.failure
-    const queued = { ...presentation, submitted: true }
+    const queued = {
+      ...presentation,
+      submitted: true,
+      // A materialized landing now owns the one destination handoff. Mark it
+      // before publishing state so a concurrent display-ready focus request
+      // cannot replace the submit request in Shell's single request slot.
+      handoffRequested: presentation.materialized
+        || presentation.handoffRequested,
+    }
     newChatPresentationRef.current = queued
     setNewChatPresentation(queued)
+    if (presentation.materialized) {
+      // Allocation may finish before the owner presses Send while the landing
+      // still covers the newly mounted ChatView. That visible composer remains
+      // the action owner: explicitly hand its verified draft to the real
+      // composer instead of treating materialization as a reason to ignore it.
+      requestComposer(presentation.chatId, {
+        draft: text,
+        submit: true,
+        releaseNewChatPresentationToken: presentation.token,
+      })
+      return
+    }
     if (shouldRetryAllocation) retryDraftFirstNewChat()
-  }, [retryDraftFirstNewChat])
+  }, [requestComposer, retryDraftFirstNewChat])
 
   // Retry only on the shared store's proven recovery edge. A render, a browser
   // `online` event, or a phase-label change is not enough evidence and cannot
@@ -4664,12 +4684,10 @@ export default function Shell({ onInitialVisualReady }) {
           const coveredByNewChat = newChatCoversSurface(surfacePaneId)
           const appSurfaceInert = !surfaceVisible || heldForChat || coveredByNewChat
           const appRuntimeVisible = visibleAppIds.has(String(id)) && !heldForChat
-          // The held app is the visual handoff cover. Keep its frame visibly
-          // foreground until the chat has painted: apps may legitimately clear
-          // their own UI after `frame-visibility:false`, which would otherwise
-          // reveal the chat's still-settling frame beneath this wrapper. Its
-          // logical runtime remains inactive, so it cannot navigate or claim a
-          // capability during the handoff.
+          // Keep the held frame alive until the chat has painted: apps may
+          // legitimately clear their own UI after `frame-visibility:false`, but
+          // CSS hides those pixels behind the shared neutral handoff. Its logical
+          // runtime remains inactive, so it cannot navigate or claim a capability.
           const appFrameVisible = appRuntimeVisible || heldForChat
           const posStyle = paned ? {
             top: paned.y,
