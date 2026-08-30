@@ -20,6 +20,10 @@
     "0016_app_connect_manage": "c8f341f1801d60325e792029365bd19dbd35ee5ebc46d6efcf01075111ec57b1",
     "0017_retire_restart_resume_toggle": "e1f45203e12c83aad605c1c06160ec3059be7337f82f644958f534888c36f86d",
     "0018_explicit_legacy_chat_models": "5b2138a39976829b61212efdbf3741b320b38967cf8d64f5a645b75e58a4c4c9",
-    "0019_chat_active_assistant_identity": "6791081271e6be6a46801b3cc91cfdd0d179861a9f87b8717231a7ec55687f4a"
+    "0019_chat_active_assistant_identity": "6791081271e6be6a46801b3cc91cfdd0d179861a9f87b8717231a7ec55687f4a",
+    "0020_app_project_templates": "bdb43c8236d85fce265b6ad92ff5fb590c1a122030c496c888affa22b2f2c1d9",
+    "0021_project_chat_collection": "03a5584764da2420f5cdda5256dd1e553fcedf51d488728f57f39278f49966ac",
+    "0022_project_artifacts": "ba42d74e4b2795b08f37c2c75116c879dea1686ededb16b0eca0b5c4c79ab29e",
+    "0023_project_color": "aecbaff852f8640f86a9f0695bc26ff8b00e857b31d36a1d345440c301eca5ed"
   }
 }

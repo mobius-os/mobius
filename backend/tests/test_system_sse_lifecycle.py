@@ -1,6 +1,9 @@
 """Lifecycle contracts for the process-wide system SSE subscription."""
 
 import asyncio
+from datetime import datetime, timezone
+import json
+from types import SimpleNamespace
 
 import pytest
 from starlette.requests import ClientDisconnect
@@ -9,6 +12,7 @@ from app import models
 from app.broadcast import SystemBroadcast
 from app.deps import Principal
 from app.routes import notify as notify_routes
+from app.routes import projects as project_routes
 
 
 class _ConnectedRequest:
@@ -70,6 +74,37 @@ async def test_system_stream_first_yield_subscribes_and_close_unsubscribes(
     await iterator.aclose()
 
   assert broadcast.subscribers == []
+
+
+@pytest.mark.asyncio
+async def test_project_change_event_is_serializable_on_system_stream(monkeypatch):
+  """Project mutation events must survive the raw json.dumps SSE boundary."""
+  broadcast, _db, response = await _build_system_stream(monkeypatch)
+  iterator = response.body_iterator
+  await iterator.__anext__()
+
+  change = project_routes._change_view(SimpleNamespace(
+    id=7,
+    kind="file_written",
+    path="index.html",
+    prior_path=None,
+    revision="abc123",
+    actor_key="owner",
+    display_name="Owner",
+    created_at=datetime(2026, 8, 26, tzinfo=timezone.utc),
+  ))
+  broadcast.publish({
+    "type": "project_file_changed",
+    "projectId": "project-1",
+    "change": change,
+  })
+
+  try:
+    event = await iterator.__anext__()
+    payload = json.loads(event.removeprefix("data: ").strip())
+    assert payload["change"]["created_at"] == "2026-08-26T00:00:00+00:00"
+  finally:
+    await iterator.aclose()
 
 
 @pytest.mark.asyncio

@@ -258,6 +258,7 @@ export async function apiFetch(path, options = {}) {
   if (res.status === 401 && sentCredential && !setupSession.isInProgress()) {
     if (ephemeralAuthEnabled) {
       clearEphemeralAuthSession()
+      window.dispatchEvent(new CustomEvent('mobius:ephemeral-auth-expired'))
       window.dispatchEvent(new CustomEvent('mobius:chat-embed-auth-expired'))
       throw new Error('EMBED_AUTH_EXPIRED')
     }
@@ -349,7 +350,17 @@ export async function jsonOrThrow(response, label = 'Request failed') {
     if (response.ok) throw new Error(`${label}: invalid JSON response`)
   }
   if (!response.ok) {
-    throw new Error(body?.detail || `${label} (${response.status})`)
+    const detail = body?.detail
+    const message = typeof detail === 'string'
+      ? detail
+      : (detail?.message || `${label} (${response.status})`)
+    const error = new Error(message)
+    error.status = response.status
+    error.detail = detail
+    if (detail && typeof detail === 'object' && typeof detail.code === 'string') {
+      error.code = detail.code
+    }
+    throw error
   }
   return body
 }
@@ -533,6 +544,22 @@ export const api = {
   },
   apps: {
     list: (options = {}) => apiFetch('/apps/', options),
+    sourceFiles: (appId, path = '', { signal, recursive = false } = {}) => apiFetch(
+      `/apps/${encodeURIComponent(appId)}/source/files?path=${encodeURIComponent(path)}${recursive ? '&recursive=true' : ''}`,
+      { signal },
+    ),
+    sourceGitStatus: (appId, { signal } = {}) => apiFetch(
+      `/apps/${encodeURIComponent(appId)}/source/git/status`,
+      { signal },
+    ),
+    sourceGitDiff: (appId, path, { signal } = {}) => apiFetch(
+      `/apps/${encodeURIComponent(appId)}/source/git/diff?path=${encodeURIComponent(path)}`,
+      { signal },
+    ),
+    readSourceFile: (appId, path, { download = false, signal } = {}) => apiFetch(
+      `/apps/${encodeURIComponent(appId)}/source/file?path=${encodeURIComponent(path)}${download ? '&download=true' : ''}`,
+      { signal },
+    ),
     markOpened: (appId) => apiFetch(`/apps/${appId}/opened`, {
       method: 'POST',
     }),
@@ -572,6 +599,214 @@ export const api = {
     // transfers it to the opaque frame. Keep the stable base URL here; the
     // broker appends the scoped token + versioned service-worker cache key.
     moduleUrl: (appId) => `${BASE}/api/apps/${appId}/module`,
+  },
+  projects: {
+    list: () => apiFetch('/projects'),
+    templates: () => apiFetch('/projects/templates'),
+    legacy: () => apiFetch('/projects/legacy'),
+    detail: (projectId) => apiFetch(`/projects/${encodeURIComponent(projectId)}`),
+    markOpened: (projectId) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/opened`, { method: 'POST' },
+    ),
+    create: (payload) => apiFetch('/projects', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+    importLegacy: (payload) => apiFetch('/projects/import-legacy', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+    importGithub: (payload) => apiFetch('/projects/import-github', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+    redeemInvite: (payload) => apiFetch('/projects/invites/redeem', {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+    collaboration: (projectId) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/collaboration`,
+    ),
+    heartbeat: (projectId) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/presence`, { method: 'POST' },
+    ),
+    createInvite: (projectId, payload) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/invites`, {
+        method: 'POST', body: JSON.stringify(payload),
+      },
+    ),
+    revokeInvite: (projectId, inviteId) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/invites/${encodeURIComponent(inviteId)}`,
+      { method: 'DELETE' },
+    ),
+    updateMember: (projectId, memberId, payload) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(memberId)}`,
+      { method: 'PATCH', body: JSON.stringify(payload) },
+    ),
+    revokeMember: (projectId, memberId) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(memberId)}`,
+      { method: 'DELETE' },
+    ),
+    update: (projectId, payload) => apiFetch(`/projects/${encodeURIComponent(projectId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
+    remove: (projectId) => apiFetch(`/projects/${encodeURIComponent(projectId)}`, {
+      method: 'DELETE',
+    }),
+    recover: (projectId) => apiFetch(`/projects/${encodeURIComponent(projectId)}/recover`, {
+      method: 'POST',
+    }),
+    chats: (projectId) => apiFetch(`/projects/${encodeURIComponent(projectId)}/chats`),
+    agents: (projectId) => apiFetch(`/projects/${encodeURIComponent(projectId)}/agents`),
+    agentMessages: (projectId, chatId) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/agent-messages?chat_id=${encodeURIComponent(chatId)}`,
+    ),
+    sendAgentMessage: (projectId, payload) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/agent-messages`, {
+        method: 'POST', body: JSON.stringify(payload),
+      },
+    ),
+    createChat: (projectId, payload) => apiFetch(`/projects/${encodeURIComponent(projectId)}/chats`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+    files: (projectId, path = '', { signal, recursive = false } = {}) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/files?path=${encodeURIComponent(path)}${recursive ? '&recursive=true' : ''}`,
+      { signal },
+    ),
+    gitStatus: (projectId, { signal } = {}) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/git/status`,
+      { signal },
+    ),
+    gitDiff: (projectId, path, { signal } = {}) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/git/diff?path=${encodeURIComponent(path)}`,
+      { signal },
+    ),
+    initGit: (projectId) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/git/init`, { method: 'POST' },
+    ),
+    commitGit: (projectId, payload) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/git/commit`, {
+        method: 'POST', body: JSON.stringify(payload),
+      },
+    ),
+    remoteStatus: (projectId, { signal } = {}) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/git/remote`, { signal },
+    ),
+    connectRemote: (projectId, repository) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/git/remote`, {
+        method: 'POST', body: JSON.stringify({ repository }),
+      },
+    ),
+    fetchRemote: (projectId) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/git/fetch`, { method: 'POST' },
+    ),
+    pullRemote: (projectId, expectedHead) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/git/pull`, {
+        method: 'POST', body: JSON.stringify({ expected_head: expectedHead || null }),
+      },
+    ),
+    pushRemote: (projectId, expectedHead) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/git/push`, {
+        method: 'POST',
+        body: JSON.stringify({ expected_head: expectedHead || null, confirmed: true }),
+      },
+    ),
+    readFile: (projectId, path, { download = false, signal } = {}) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/file?path=${encodeURIComponent(path)}${download ? '&download=true' : ''}`,
+      { signal },
+    ),
+    changes: (projectId, after, { signal } = {}) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/changes${after == null ? '' : `?after=${encodeURIComponent(after)}`}`,
+      { signal },
+    ),
+    workClaims: (projectId, { signal } = {}) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/work-claims`, { signal },
+    ),
+    claimWork: (projectId, payload) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/work-claim`, {
+        method: 'PUT', body: JSON.stringify(payload),
+      },
+    ),
+    releaseWork: (projectId, chatId = null) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/work-claim${chatId ? `?chat_id=${encodeURIComponent(chatId)}` : ''}`,
+      { method: 'DELETE' },
+    ),
+    writeFile: (projectId, path, content, expectedRevision) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/file?path=${encodeURIComponent(path)}`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({
+          content,
+          ...(expectedRevision !== undefined
+            ? { expected_revision: expectedRevision }
+            : {}),
+        }),
+      },
+    ),
+    writeBytes: (projectId, path, bytes, expectedRevision = undefined) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/file-bytes?path=${encodeURIComponent(path)}`,
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          ...(expectedRevision === null
+            ? { 'If-None-Match': '*' }
+            : typeof expectedRevision === 'string'
+              ? { 'If-Match': expectedRevision }
+              : {}),
+        },
+        body: bytes,
+      },
+    ),
+    createFolder: (projectId, path) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/folder`,
+      { method: 'POST', body: JSON.stringify({ path }) },
+    ),
+    deleteFile: (projectId, path) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/file?path=${encodeURIComponent(path)}`,
+      { method: 'DELETE' },
+    ),
+    downloadUrl: (projectId, path) => (
+      `${BASE}/api/projects/${encodeURIComponent(projectId)}/file?path=${encodeURIComponent(path)}&download=true`
+    ),
+    // Rename or move a file/dir within the project tree. The backend confines
+    // both paths, rejects symlink escape / dst-exists / into-descendant, and
+    // maps an os.replace failure to a 4xx rather than a 500 (see the build spec).
+    move: (projectId, { from_path, to_path }) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/move`,
+      { method: 'POST', body: JSON.stringify({ from_path, to_path }) },
+    ),
+    // ── Artifacts (buildable outputs: website / latex) ───────────────────────
+    artifacts: (projectId, { signal } = {}) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/artifacts`,
+      { signal },
+    ),
+    createArtifact: (projectId, payload) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/artifacts`,
+      { method: 'POST', body: JSON.stringify(payload) },
+    ),
+    deleteArtifact: (projectId, artifactId) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}`,
+      { method: 'DELETE' },
+    ),
+    buildArtifact: (projectId, artifactId) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}/build`,
+      { method: 'POST' },
+    ),
+    artifactLog: (projectId, artifactId) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}/log`,
+    ),
+    // Bytes of one confined output file (pdfjs fetches the latex pdf through
+    // this via apiFetch so the owner Bearer authenticates the read).
+    // Artifact output bytes always go through apiFetch with the Bearer header
+    // (pdfjs for latex, and the shell fetching + inlining a website into a
+    // sandboxed srcDoc). The owner token is NEVER placed in a URL a sandboxed
+    // artifact could read from window.location.
+    artifactOutput: (projectId, artifactId, path, { signal } = {}) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}/output/${path.split('/').map(encodeURIComponent).join('/')}`,
+      { signal },
+    ),
   },
   services: {
     surface: async (slug) => jsonOrThrow(
