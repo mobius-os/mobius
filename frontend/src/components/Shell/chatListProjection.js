@@ -117,3 +117,36 @@ export function withChatRename(rows, chatId, { title, updatedAt, activityAt } = 
     ...(typeof activityAt === 'string' ? { activity_at: activityAt } : {}),
   })
 }
+
+/**
+ * Keep a committed rename ahead of drawer-list reads that began before it.
+ * The guard retires only when a row carries the same committed revision (or a
+ * newer one), so an older in-flight response cannot briefly resurrect the
+ * first-message title after the live rename event already reached the shell.
+ */
+export function reconcileChatRenameGuards(rows, guards) {
+  if (!Array.isArray(rows) || !(guards instanceof Map) || guards.size === 0) {
+    return rows
+  }
+
+  let next = rows
+  for (const [chatId, rename] of guards) {
+    const row = next.find(item => String(item?.id) === String(chatId))
+    if (!row) continue
+
+    const rowUpdatedAt = typeof row.updated_at === 'string' ? row.updated_at : ''
+    const renameUpdatedAt = typeof rename?.updatedAt === 'string'
+      ? rename.updatedAt
+      : ''
+    const sameCommittedRename = row.title === rename?.title
+      && (!renameUpdatedAt || rowUpdatedAt === renameUpdatedAt)
+    const rowIsNewer = Boolean(renameUpdatedAt && rowUpdatedAt > renameUpdatedAt)
+    if (sameCommittedRename || rowIsNewer) {
+      guards.delete(chatId)
+      continue
+    }
+
+    next = withChatRename(next, chatId, rename)
+  }
+  return next
+}

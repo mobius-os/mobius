@@ -28,7 +28,7 @@ test('Apps is a single drawer destination and the old full app list is gone', ()
 test('directory cards preserve app management through shared row actions', () => {
   assert.match(drawer, /variant="card"[\s\S]*?actions=\{rowActions\}/,
     'app cards must keep the shared row action surface')
-  for (const action of ['Install to home screen', 'Share app', 'Delete data', 'Rename']) {
+  for (const action of ['Install to home screen', 'Share app', 'Delete data', 'Copy name', 'Rename']) {
     assert.match(itemActionMenu, new RegExp(action))
   }
 })
@@ -69,6 +69,12 @@ test('chat, app, and project rows share one placed action menu contract', () => 
   assert.doesNotMatch(itemActionMenu, /drawer__item-action-header|drawer__item-action-handle/)
   assert.match(itemActionMenu, /itemKind === 'app' && \(/,
     'Delete data must stay app-only')
+  assert.match(drawer, /onCopy=\{\(\) => actions\.copyName\(label\)\}/)
+  assert.match(drawer, /writeClipboardText\(value\)/)
+  assert.doesNotMatch(drawer, /Name copied/,
+    'successful name copies should not create a routine confirmation notice')
+  assert.match(drawer, /if \(!copied\)[\s\S]*?Couldn't copy the name\./,
+    'clipboard failures must remain visible')
 })
 
 test('the app directory distinguishes loading, errors, and confirmed emptiness', () => {
