@@ -20,6 +20,7 @@ const workspaceSession = readFileSync(
 const shellBrand = readFileSync(new URL('../ShellBrand.jsx', import.meta.url), 'utf8')
 const newChatLanding = readFileSync(new URL('../NewChatLanding.jsx', import.meta.url), 'utf8')
 const chatInputBar = readFileSync(new URL('../../ChatView/ChatInputBar.jsx', import.meta.url), 'utf8')
+const composerPopover = readFileSync(new URL('../../ChatView/ComposerPopover.jsx', import.meta.url), 'utf8')
 const workspaceViewSrc = readFileSync(new URL('../workspaceView.js', import.meta.url), 'utf8')
 const modeViewTransitionSrc = readFileSync(new URL('../useModeViewTransition.js', import.meta.url), 'utf8')
 const modeControllerSrc = readFileSync(new URL('../useModeController.js', import.meta.url), 'utf8')
@@ -1337,14 +1338,27 @@ test('round4-3: the New Chat landing renders for a null slot and reuses ChatView
   assert.match(shell, /const newChatSurface = fullBleedKey === EMPTY_SINGLE_SURFACE_KEY/)
   assert.match(shell, /<NewChatLanding/)
   assert.match(shell, /chatId=\{presentingNewChat \? newChatPresentation\.chatId : null\}/)
+  assert.match(shell, /chatInfo=\{newChatPresentation\?\.chatInfo \?\? null\}/)
+  assert.match(shell,
+    /materialized: true,[\s\S]*chatInfo: createdChatDetailCache\(result\.chat\)\?\.chatInfo \?\? null/,
+    'the accepted create response must unlock the model picker without another read')
   assert.match(shell, /retryDraftFirstNewChat/)
   assert.match(newChatLanding, /submissionBlocked[\s\S]*attachmentsDisabled/)
   assert.match(newChatLanding,
     /focusComposerElement\(inputRef\.current\)[\s\S]*placeCaretAtTextEnd\(inputRef\.current\)/,
     'the provisional draft resumes at its text end without changing generic focus policy')
   assert.match(newChatLanding,
-    /leftButtons=\{<ComposerPopover pending \/>\}/,
-    'the provisional composer must reuse the real options control in its inert state')
+    /leftButtons=\{liveChatInfo \? \([\s\S]*<BrainUsageButton[\s\S]*<ComposerPopover[\s\S]*chatInfo=\{liveChatInfo\}[\s\S]*embedded[\s\S]*\) : <ComposerPopover pending \/>\}/,
+    'the provisional composer must unlock the canonical model picker once its chat row exists')
+  assert.match(newChatLanding,
+    /async function submitDraft[\s\S]*await settingsSaveTailRef\.current[\s\S]*onSubmit\?\.\(draft\)/,
+    'a first send must follow any model choice the owner just made')
+  assert.match(composerPopover, /\{onAttachClick && \(/,
+    'a model-only New Chat Brain must not expose a dead attachment action')
+  assert.match(composerPopover, /\{!embedded && onOpenChanges && \(/,
+    'a model-only New Chat Brain must not expose a dead Changes action')
+  assert.match(composerPopover, /\{!embedded && \(onOpenSummary \|\| onOpenInspector \|\| onOpenUsage\) && \(/,
+    'a model-only New Chat Brain must not expose dead continuity actions')
   assert.doesNotMatch(newChatLanding, /attachTriggerRef/,
     'the pre-allocation surface must not expose server-bound attachment behavior')
   assert.match(chatInputBar,

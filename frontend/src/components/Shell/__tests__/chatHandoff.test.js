@@ -301,7 +301,7 @@ test('direct chat actions hand focus to the destination composer', () => {
     /function selectChat\(id, \{ focusComposer = true \} = \{\}\) \{([\s\S]*?)\n  \}/,
   )?.[1] || ''
   assert.match(selectChat,
-    /navTo\('chat', \{ chatId: id, preserveDrawerPresentation \}\)[\s\S]*if \(focusComposer\) focusSelectedChatComposer\(id\)/,
+    /navTo\('chat', \{ chatId: id \}\)[\s\S]*if \(focusComposer\) focusSelectedChatComposer\(id\)/,
     'drawer and settings chat selection must focus after requesting navigation')
   assert.match(shell,
     /target\.focusComposer === true[\s\S]*requestComposer\(target\.chatId, \{ focus: true \}\)/,

@@ -693,12 +693,6 @@ export default function useNavigation({
     }
   }
 
-  // Finish a drawer deliberately retained after its navigation sentinel was
-  // consumed. A newly reopened logical drawer wins over late readiness.
-  const finishDrawerNavigationPresentation = useCallback(() => {
-    if (!drawerOpenRef.current) setDrawerVisible(false)
-  }, [])
-
   /**
    * Mini-app nav-bridge: install a back-sentinel on behalf of a VISIBLE
    * mini-app. Pushing a real top-level history entry makes Android's swipe-back
@@ -1095,9 +1089,6 @@ export default function useNavigation({
     if (beforeNavigateRef?.current?.(nextRoute) === true) return
 
     navigationEpochRef.current += 1
-    const keepDrawerPresented = opts.preserveDrawerPresentation === true
-      && drawerOpenRef.current
-
     // Ensure exactly one history entry sits above the current one to serve as
     // this navigation's back-target: retag a consumed drawer sentinel, else push
     // a fresh nav entry. Exactly one pushState/retag per navTo (§5.3.12).
@@ -1115,7 +1106,7 @@ export default function useNavigation({
     // open try to re-adopt a sentinel this navigation has already retagged.
     drawerClosePendingRef.current = false
     drawerOpenRef.current = false
-    setDrawerVisible(keepDrawerPresented)
+    setDrawerVisible(false)
 
     // One reducer action makes payload+view atomic (§1.3.2). The ONE decision
     // point applies the destination to the correct world: a chat/app nav in single
@@ -2035,7 +2026,6 @@ export default function useNavigation({
     activeProjectId,
     activeArtifactRef,
     drawerOpen: drawerVisible,
-    drawerNavigationCover: drawerVisible && !drawerOpenRef.current,
     // Strictly "the full-workspace takeover overlay is up" — NOT "focused content
     // is Settings" (a builder tab is the latter without the overlay). The render
     // gates pane suppression on THIS, never on activeView, so builder Settings
@@ -2050,7 +2040,6 @@ export default function useNavigation({
     settingsOpenRaw: settingsOpen,
     openDrawer,
     closeDrawer,
-    finishDrawerNavigationPresentation,
     navTo,
     navigateBackward,
     navigateForward,

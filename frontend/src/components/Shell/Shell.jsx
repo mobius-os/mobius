@@ -239,7 +239,6 @@ export default function Shell({ onInitialVisualReady }) {
     activeProjectId,
     activeArtifactRef,
     drawerOpen, settingsOverlayOpen, settingsOpenRaw, openDrawer, closeDrawer,
-    drawerNavigationCover, finishDrawerNavigationPresentation,
     navTo, navigateBackward, navigateForward,
     tabRevealRevision, applyModeDestination, dismissSettings,
     backFiredRef, drawerPushedRef, navStackRef, navigationEpochRef,
@@ -1277,7 +1276,6 @@ export default function Shell({ onInitialVisualReady }) {
         releaseNewChatPresentationToken: presentation.token,
       })
     }
-    finishDrawerNavigationPresentation()
     const appCover = appToChatCoverRef.current
     if (
       appCover
@@ -1288,7 +1286,6 @@ export default function Shell({ onInitialVisualReady }) {
       setAppToChatCover(null)
     }
   }, [
-    finishDrawerNavigationPresentation,
     focusedPaneViewIdRef,
     markInitialVisualReady,
     requestComposer,
@@ -3529,6 +3526,7 @@ export default function Shell({ onInitialVisualReady }) {
             failure: 'queue',
             failedAtRecoveryGeneration: recoveryGenerationRef.current,
             materialized: false,
+            chatInfo: null,
             handoffRequested: false,
           }
           newChatPresentationRef.current = failed
@@ -3545,6 +3543,7 @@ export default function Shell({ onInitialVisualReady }) {
         failure: null,
         failedAtRecoveryGeneration: null,
         materialized: false,
+        chatInfo: null,
         handoffRequested: false,
       }
       newChatPresentationRef.current = replacement
@@ -3589,6 +3588,7 @@ export default function Shell({ onInitialVisualReady }) {
     const resolved = {
       ...current,
       materialized: true,
+      chatInfo: createdChatDetailCache(result.chat)?.chatInfo ?? null,
       handoffRequested: !changesRoute,
       failure: null,
       failedAtRecoveryGeneration: null,
@@ -3761,6 +3761,7 @@ export default function Shell({ onInitialVisualReady }) {
       token,
       chatId,
       materialized: false,
+      chatInfo: null,
       handoffRequested: false,
       focusToken: token,
       failure: null,
@@ -4004,27 +4005,8 @@ export default function Shell({ onInitialVisualReady }) {
       workspace.viewMode, workspace.singleScreen, workspaceStateRef])
 
   function selectChat(id, { focusComposer = true } = {}) {
-    const chatId = String(id)
-    const paintedWorld = effectiveViewMode === 'single'
-      ? STANDARD_CHAT_WORLD
-      : BUILDER_CHAT_WORLD
-    const destinationAlreadyPainted = visibleChatPanes.some(owner => (
-      owner.world === paintedWorld
-      && String(owner.chatId) === chatId
-      && (paintedWorld !== BUILDER_CHAT_WORLD
-        || focusedPaneViewId == null
-        || String(owner.paneId) === String(focusedPaneViewId))
-      && String(presentedChatBySurface.get(
-        paintedWorld === BUILDER_CHAT_WORLD && focusedPaneViewId != null
-          ? FOCUSED_BUILDER_CHAT_SURFACE
-          : String(owner.paneId),
-      ) ?? '') === chatId
-    ))
-    const preserveDrawerPresentation = modalDrawerOpen
-      && !(activeView === 'chat' && String(activeChatId) === chatId)
-      && !destinationAlreadyPainted
     clearChatAttention(id)
-    navTo('chat', { chatId: id, preserveDrawerPresentation })
+    navTo('chat', { chatId: id })
     if (focusComposer) focusSelectedChatComposer(id)
   }
 
@@ -4511,10 +4493,8 @@ export default function Shell({ onInitialVisualReady }) {
         persistent={persistentDrawer}
         width={desktopSidebarWidth}
         onWidthChange={setDesktopSidebarWidth}
-        interactionLocked={drawerModeTransitioning || drawerNavigationCover}
-        onClose={drawerModeTransitioning || drawerNavigationCover
-          ? undefined
-          : closeDrawer}
+        interactionLocked={drawerModeTransitioning}
+        onClose={drawerModeTransitioning ? undefined : closeDrawer}
         apps={apps}
         appsStatus={appsStatus}
         onRetryApps={() => appsQuery.refetch()}
@@ -5224,6 +5204,7 @@ export default function Shell({ onInitialVisualReady }) {
                   : newChatLandingFailure}
                 onComposerReady={handleNewChatLandingComposerReady}
                 submitted={!!newChatPresentation?.submitted}
+                chatInfo={newChatPresentation?.chatInfo ?? null}
                 onSubmit={presentingNewChat
                   ? queueDraftFirstNewChat
                   : undefined}
