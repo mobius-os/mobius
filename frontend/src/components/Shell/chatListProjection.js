@@ -40,6 +40,49 @@ export function withChatRunState(rows, chatId, running) {
   })
 }
 
+/**
+ * Retire optimistic run markers only after the run was acknowledged and a
+ * fresh drawer row explicitly says it is settled. A locally-started request
+ * can briefly race ahead of its durable row, while a visible or owner-input
+ * turn remains authoritative until its mounted stream reaches a boundary.
+ */
+export function withoutSettledLocalChatRuns(
+  localIds,
+  rows,
+  { acknowledgedIds = localIds, protectedIds = new Set() } = {},
+) {
+  if (!(localIds instanceof Set) || !Array.isArray(rows)) return localIds
+  const acknowledged = acknowledgedIds instanceof Set
+    ? acknowledgedIds
+    : new Set()
+  const protectedLocal = protectedIds instanceof Set
+    ? protectedIds
+    : new Set()
+  const serverSettled = new Set()
+  for (const row of rows) {
+    if (
+      row?.id == null
+      || row.running !== false
+      || row.owner_input_kind != null
+      || row.pending_question_id != null
+    ) continue
+    serverSettled.add(String(row.id))
+  }
+
+  let next = localIds
+  for (const id of localIds) {
+    const key = String(id)
+    if (
+      !acknowledged.has(key)
+      || protectedLocal.has(key)
+      || !serverSettled.has(key)
+    ) continue
+    if (next === localIds) next = new Set(localIds)
+    next.delete(id)
+  }
+  return next
+}
+
 export function ownerInputChangeFromEvent(event) {
   const safeEvent = event && typeof event === 'object' ? event : {}
   const hasQuestionId = Object.hasOwn(safeEvent, 'questionId')

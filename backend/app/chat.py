@@ -14,6 +14,7 @@ import os
 import re
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -3882,6 +3883,30 @@ DEFAULT_VIEWPORT_PIXEL_RATIO = 1.0
 MIN_VIEWPORT_PIXEL_RATIO = 0.5
 MAX_VIEWPORT_PIXEL_RATIO = 4.0
 AVAILABLE_SKILLS_CONTEXT_LIMIT = 64
+DEFAULT_AGENT_BROWSER_CONFIG = "/app/agent-browser-config.json"
+DEFAULT_AGENT_BROWSER_IDLE_TIMEOUT_MS = "600000"
+
+
+def agent_browser_runtime_env(
+  source: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+  """Return shared browser safeguards for Claude and Codex turns.
+
+  Agent-browser already remains reusable between commands and terminal turn
+  cleanup stays authoritative.  The shorter idle lifetime is a fallback for a
+  parked or orphaned session, while the explicit config path prevents a
+  workspace's agent-browser.json from starting owner-unapproved executables.
+  """
+  source = os.environ if source is None else source
+  config = str(source.get("AGENT_BROWSER_CONFIG") or "").strip()
+  idle_timeout = str(source.get("AGENT_BROWSER_IDLE_TIMEOUT_MS") or "").strip()
+  return {
+    "AGENT_BROWSER_CONFIG": config or DEFAULT_AGENT_BROWSER_CONFIG,
+    "AGENT_BROWSER_IDLE_TIMEOUT_MS": (
+      idle_timeout or DEFAULT_AGENT_BROWSER_IDLE_TIMEOUT_MS
+    ),
+  }
+
 
 def bounded_agent_browser_args(existing: str | None) -> str:
   """Preserve operator Chromium flags while supplying safe cache defaults."""
@@ -4422,6 +4447,7 @@ async def _run_chat_impl_with_db(
   base_env["AGENT_BROWSER_ARGS"] = bounded_agent_browser_args(
     os.environ.get("AGENT_BROWSER_ARGS"),
   )
+  base_env.update(agent_browser_runtime_env())
 
   # Resolve effective agent settings (model, effort, ...) for this turn.
   # Per-chat overrides from `Chat.agent_settings_json` win over the

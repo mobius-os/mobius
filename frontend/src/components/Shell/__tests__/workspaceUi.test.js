@@ -882,8 +882,8 @@ test('chat drawer indicators distinguish owner input, active work, waiting, and 
   )
   assert.match(
     shell,
-    /ev\.type === 'chat_run_started'[\s\S]*?markStreamingStart\(ev\.chatId\)/,
-    'a started run must raise the active-work dot',
+    /ev\.type === 'chat_run_started'[\s\S]*?markStreamingAcknowledged\(ev\.chatId\)/,
+    'a started run must raise and acknowledge the active-work dot',
   )
   assert.match(
     shell,

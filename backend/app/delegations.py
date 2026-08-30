@@ -30,7 +30,6 @@ TERMINAL_DELEGATION_STATUSES = frozenset({
   "interrupted",
 })
 REVIEW_REQUIRED_MARKER = "DELEGATION_WRITE_REVIEW_REQUIRED"
-MAX_DELEGATION_DEPTH = 4
 
 
 @dataclass(frozen=True)
@@ -44,7 +43,6 @@ class RunPolicy:
   effort: str | None
   scope: str
   cwd: str
-  max_budget_usd: float | None
   depth: int = 1
 
   @property
@@ -114,7 +112,6 @@ class DelegationIntent:
   effort: str | None
   scope: str
   cwd: str
-  max_budget_usd: float | None
   notify_parent_on_complete: bool = True
 
 
@@ -132,7 +129,6 @@ def same_delegation_intent(
     row.effort == intent.effort,
     row.scope == intent.scope,
     row.cwd == intent.cwd,
-    row.max_budget_usd == intent.max_budget_usd,
     row.notify_parent_on_complete == intent.notify_parent_on_complete,
     row.prompt_sha256 == hashlib.sha256(
       intent.prompt.encode("utf-8")
@@ -175,7 +171,10 @@ def create_or_attach_delegation(
     scope=intent.scope,
     cwd=intent.cwd,
     prompt_sha256=hashlib.sha256(intent.prompt.encode("utf-8")).hexdigest(),
-    max_budget_usd=intent.max_budget_usd,
+    # Older rows may retain the retired ordinary delegated-run budget. New
+    # work deliberately leaves it unset; provider/account limits remain the
+    # observable boundary instead of a hidden local spending ceiling.
+    max_budget_usd=None,
     notify_parent_on_complete=intent.notify_parent_on_complete,
   )
   child = models.Chat(
@@ -250,14 +249,6 @@ def policy_for_chat(db: Session, chat_id: str) -> RunPolicy | None:
     digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     if digest != row.prompt_sha256:
       raise RuntimeError("delegation prompt no longer matches immutable intent")
-  remaining_budget = row.max_budget_usd
-  if remaining_budget is not None:
-    known_prior_cost = float(sum(
-      float(value or 0.0) for (value,) in db.query(
-        models.ChatRun.cost_usd,
-      ).filter(models.ChatRun.chat_id == chat_id).all()
-    ))
-    remaining_budget = max(0.001, remaining_budget - known_prior_cost)
   depth = delegation_depth(db, row)
   return RunPolicy(
     delegation_id=row.id,
@@ -267,7 +258,6 @@ def policy_for_chat(db: Session, chat_id: str) -> RunPolicy | None:
     effort=row.effort,
     scope=row.scope,
     cwd=row.cwd,
-    max_budget_usd=remaining_budget,
     depth=depth,
   )
 
@@ -450,7 +440,6 @@ def serialize_delegation(
     "effort": row.effort,
     "scope": row.scope,
     "cwd": row.cwd,
-    "max_budget_usd": row.max_budget_usd,
     "status": status,
     "physical_run_id": run.id if run is not None else None,
     "provider_session_id": run.provider_session_id if run is not None else None,

@@ -2005,6 +2005,8 @@ def _latest_model_input_tokens(run: models.ChatRun) -> int | None:
 @router.get("/{chat_id}/usage/current")
 def get_current_chat_usage(
   chat_id: str,
+  provider: str,
+  provider_session_id: str,
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
@@ -2014,24 +2016,17 @@ def get_current_chat_usage(
   composer gauge needs only one bounded projection and is mounted for every
   open chat pane, so it must not download an ever-growing usage history.
   """
-  chat = get_active_chat_or_404(
+  get_active_chat_or_404(
     db,
     chat_id,
-    load_fields=(models.Chat.id, models.Chat.provider, models.Chat.session_id),
+    load_fields=(models.Chat.id,),
   )
-  if not chat.session_id:
-    return {
-      "provider": chat.provider,
-      "provider_session_id": None,
-      "input_tokens": None,
-      "context_window": None,
-    }
   run = (
     db.query(models.ChatRun)
     .filter(
       models.ChatRun.chat_id == chat_id,
-      models.ChatRun.provider == chat.provider,
-      models.ChatRun.provider_session_id == chat.session_id,
+      models.ChatRun.provider == provider,
+      models.ChatRun.provider_session_id == provider_session_id,
       models.ChatRun.usage_json.isnot(None),
       models.ChatRun.model_context_window.isnot(None),
     )
@@ -2040,8 +2035,8 @@ def get_current_chat_usage(
   )
   if run is None:
     return {
-      "provider": chat.provider,
-      "provider_session_id": chat.session_id,
+      "provider": provider,
+      "provider_session_id": provider_session_id,
       "input_tokens": None,
       "context_window": None,
     }

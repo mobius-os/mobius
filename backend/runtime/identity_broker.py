@@ -13,12 +13,14 @@ import base64
 import hashlib
 import json
 import os
+import pwd
 import re
 import secrets
 import socketserver
 import stat
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
@@ -54,7 +56,11 @@ GATEWAY_BASE_URL = os.environ.get(
   # authenticate every exact gateway route.
   "MOBIUS_AGENT_GATEWAY_URL", "https://www.mobius.you"
 ).rstrip("/")
+CONTRIBUTION_BASE_URL = os.environ.get(
+  "MOBIUS_CONTRIBUTION_RELAY_URL", IDENTITY_BASE_URL
+).rstrip("/")
 MAX_BODY = 2_000_000
+MAX_CONTRIBUTION_BODY = 3_000_000
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$")
 INSTANCE_RE = re.compile(r"^mob_[A-Za-z0-9_-]{3,160}$")
 
@@ -67,6 +73,42 @@ INFERENCE_ROUTES = {
     "inference:responses", "mobius-agent-gateway"
   ),
 }
+
+
+def _contribution_route(
+  method: str, route_path: str, query: str,
+) -> tuple[str, str, str] | None:
+  if query:
+    return None
+  if method == "POST" and route_path == "/v1/contributions":
+    return (
+      "contribution:submit", "mobius-contribution-relay",
+      CONTRIBUTION_BASE_URL,
+    )
+  if method == "POST" and re.fullmatch(
+    r"/v1/contributions/ctr_[0-9a-f]{32}/withdraw", route_path
+  ):
+    return (
+      "contribution:withdraw", "mobius-contribution-relay",
+      CONTRIBUTION_BASE_URL,
+    )
+  if method == "GET" and re.fullmatch(
+    r"/v1/contributions/ctr_[0-9a-f]{32}", route_path
+  ):
+    return (
+      "contribution:read", "mobius-contribution-relay",
+      CONTRIBUTION_BASE_URL,
+    )
+  return None
+
+
+def _request_body_limit(*, is_unix: bool, method: str, path: str) -> int:
+  if is_unix and method == "POST" and (
+    path == "/v1/contributions"
+    or re.fullmatch(r"/v1/contributions/ctr_[0-9a-f]{32}/withdraw", path)
+  ):
+    return MAX_CONTRIBUTION_BODY
+  return MAX_BODY
 
 
 def _b64(value: bytes) -> str:
@@ -88,6 +130,79 @@ def _atomic_root_write(path: Path, value: bytes) -> None:
     os.replace(temp, path)
   finally:
     temp.unlink(missing_ok=True)
+
+
+def _reclaim_private_state_after_compat_chown() -> None:
+  """Restore root ownership after the broad /data compatibility pass.
+
+  Older official entrypoints make a persisted /data tree app-writable before
+  this root broker starts. Adopt only the broker's fixed, already-private state
+  files; reject links, unexpected owners, and permissive modes rather than
+  blessing an attacker-controlled path.
+
+  Each entry is validated and fixed up through a single descriptor. A
+  concurrent app-user process can still swap a directory entry, but it can no
+  longer redirect the root chown/chmod onto a target this function never
+  checked.
+  """
+  if os.geteuid() != 0:
+    return
+
+  mobius = pwd.getpwnam("mobius")
+  allowed_owners = {(0, 0), (mobius.pw_uid, mobius.pw_gid)}
+  try:
+    PRIVATE_DIR.mkdir(mode=0o700)
+  except FileExistsError:
+    pass
+
+  # O_NOFOLLOW rejects a symlink planted at the entry itself, and O_NONBLOCK
+  # keeps a planted FIFO or device node from stalling the open before fstat
+  # can reject it. Both make the open, not a prior lstat, the decisive check.
+  open_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+  opened: list[tuple[int, int]] = []
+  try:
+    try:
+      dir_fd = os.open(PRIVATE_DIR, open_flags | os.O_DIRECTORY)
+    except OSError as exc:
+      raise RuntimeError("identity broker private directory is unsafe") from exc
+    opened.append((dir_fd, 0o700))
+    current = os.fstat(dir_fd)
+    if (
+      not stat.S_ISDIR(current.st_mode)
+      or (current.st_uid, current.st_gid) not in allowed_owners
+      or stat.S_IMODE(current.st_mode) & 0o077
+    ):
+      raise RuntimeError("identity broker private directory is unsafe")
+
+    # These are fixed children of PRIVATE_DIR, so opening them by name relative
+    # to the pinned directory keeps a rename of PRIVATE_DIR itself irrelevant.
+    for path in (KEY_PATH, STATE_PATH, INSTANCE_PATH, PENDING_BOOTSTRAP_PATH):
+      try:
+        file_fd = os.open(path.name, open_flags, dir_fd=dir_fd)
+      except FileNotFoundError:
+        continue
+      except OSError as exc:
+        raise RuntimeError(
+          f"identity broker file is unsafe: {path.name}"
+        ) from exc
+      opened.append((file_fd, 0o600))
+      item = os.fstat(file_fd)
+      if (
+        not stat.S_ISREG(item.st_mode)
+        or item.st_nlink != 1
+        or (item.st_uid, item.st_gid) not in allowed_owners
+        or stat.S_IMODE(item.st_mode) & 0o077
+      ):
+        raise RuntimeError(f"identity broker file is unsafe: {path.name}")
+
+    # Nothing is mutated until every entry has passed, so a rejected tree is
+    # left exactly as found.
+    for fd, mode in opened:
+      os.fchown(fd, 0, 0)
+      os.fchmod(fd, mode)
+  finally:
+    for fd, _mode in opened:
+      os.close(fd)
 
 
 def _prepare_private_dir() -> None:
@@ -375,6 +490,7 @@ class Broker:
     path: str,
     body: bytes,
     request_id: str,
+    idempotency_key: str = "",
   ) -> str:
     with self.lock:
       state = dict(self.state or {})
@@ -398,6 +514,10 @@ class Broker:
       "exp": now + 60,
       "audit_context": {"source": "runtime-broker"},
     }
+    if idempotency_key:
+      claims["idempotency_key_sha256"] = hashlib.sha256(
+        idempotency_key.encode("utf-8")
+      ).hexdigest()
     response = self.client.post(
       f"{IDENTITY_BASE_URL}/identity/capabilities",
       json={"assertion": self._sign(claims)},
@@ -417,12 +537,44 @@ class Broker:
     path: str,
     body: bytes,
     headers: dict[str, str],
+    allow_contributions: bool = False,
   ) -> httpx.Response:
-    route = INFERENCE_ROUTES.get((method, path))
+    split = urllib.parse.urlsplit(path)
+    route_path = split.path
+    if (
+      not route_path.startswith("/")
+      or split.scheme
+      or split.netloc
+      or split.fragment
+    ):
+      raise FileNotFoundError("broker route not found")
+    declared = INFERENCE_ROUTES.get(
+      (method, route_path)
+    ) if not split.query else None
+    if declared is not None:
+      scope, audience = declared
+      route = (scope, audience, GATEWAY_BASE_URL)
+    else:
+      route = (
+        _contribution_route(method, route_path, split.query)
+        if allow_contributions
+        else None
+      )
     if route is None:
       raise FileNotFoundError("broker route not found")
-    scope, audience = route
+    scope, audience, target = route
     request_id = self._request_id(method, path, body, headers)
+    idempotency_key = headers.get("idempotency-key", "")
+    if idempotency_key and not re.fullmatch(
+      r"[A-Za-z0-9][A-Za-z0-9._:-]{15,127}", idempotency_key
+    ):
+      raise ValueError("invalid idempotency key")
+    if (
+      audience == "mobius-contribution-relay"
+      and method != "GET"
+      and not idempotency_key
+    ):
+      raise ValueError("an idempotency key is required")
     capability = self._capability(
       audience=audience,
       scope=scope,
@@ -430,6 +582,7 @@ class Broker:
       path=path,
       body=body,
       request_id=request_id,
+      idempotency_key=idempotency_key,
     )
     forwarded = {
       "Authorization": f"Bearer {capability}",
@@ -441,12 +594,14 @@ class Broker:
     metadata = headers.get("x-codex-turn-metadata")
     if metadata:
       forwarded["x-codex-turn-metadata"] = metadata
+    if idempotency_key:
+      forwarded["Idempotency-Key"] = idempotency_key
     request = self.client.build_request(
       method,
-      GATEWAY_BASE_URL + path,
+      target + path,
       content=body if body else None,
       headers=forwarded,
-      timeout=None if path == "/v1/responses" else 30.0,
+      timeout=None if route_path == "/v1/responses" else 30.0,
     )
     # Do not buffer Responses API streams in the privileged broker. Besides
     # preserving token-by-token UX, this bounds the broker's memory footprint
@@ -472,12 +627,12 @@ class _Handler(BaseHTTPRequestHandler):
     self.end_headers()
     self.wfile.write(body)
 
-  def _body(self) -> bytes:
+  def _body(self, *, maximum: int = MAX_BODY) -> bytes:
     try:
       length = int(self.headers.get("content-length", "0"))
     except ValueError as exc:
       raise ValueError("invalid content length") from exc
-    if length < 0 or length > MAX_BODY:
+    if length < 0 or length > maximum:
       raise ValueError("request body is too large")
     return self.rfile.read(length)
 
@@ -487,6 +642,9 @@ class _Handler(BaseHTTPRequestHandler):
     path = self.path
     route_path = path.split("?", 1)[0]
     is_unix = bool(getattr(self.server, "is_unix", False))
+    body_limit = _request_body_limit(
+      is_unix=is_unix, method=method, path=path,
+    )
     try:
       if is_unix and route_path.startswith("/identity") and path != route_path:
         raise FileNotFoundError("broker route not found")
@@ -504,13 +662,14 @@ class _Handler(BaseHTTPRequestHandler):
         subject = value.get("expected_subject") if isinstance(value, dict) else None
         self._json(200, broker.unlink(str(subject or "")))
         return
-      body = self._body()
+      body = self._body(maximum=body_limit)
       incoming = {key.lower(): value for key, value in self.headers.items()}
       upstream = broker.proxy(
         method=method,
         path=path,
         body=body,
         headers=incoming,
+        allow_contributions=is_unix,
       )
       try:
         self.send_response(upstream.status_code)
@@ -557,6 +716,7 @@ class _TcpServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 def main() -> None:
   if os.geteuid() != 0:
     raise SystemExit("identity broker must run as root")
+  _reclaim_private_state_after_compat_chown()
   broker = Broker()
   _prepare_socket_dir()
   SOCKET_PATH.unlink(missing_ok=True)

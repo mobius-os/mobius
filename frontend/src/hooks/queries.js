@@ -24,10 +24,11 @@ const projectTemplatesKey = ['projects', 'templates']
 const legacyProjectsKey = ['projects', 'legacy']
 const chatsKey = ['chats']
 const chatCurrentUsageRootKey = ['chat-current-usage']
-const chatCurrentUsageKey = (chatId, provider) => [
+const chatCurrentUsageKey = (chatId, provider, providerSessionId) => [
   ...chatCurrentUsageRootKey,
   chatId,
   provider,
+  providerSessionId,
 ]
 const providersStatusKey = ['auth', 'providers', 'status']
 const modelRegistryKey = ['models', 'registry']
@@ -112,8 +113,8 @@ function useSettingsQuery() {
   })
 }
 
-async function fetchApps() {
-  const res = await api.apps.list()
+async function fetchApps({ signal, timeoutMs } = {}) {
+  const res = await api.apps.list({ signal, timeoutMs })
   const data = await jsonOrThrow(res, 'apps fetch failed:')
   return Array.isArray(data) ? data : []
 }
@@ -158,8 +159,8 @@ function useLegacyProjectsQuery({ enabled = true } = {}) {
   return useQuery({ queryKey: legacyProjectsKey, queryFn: fetchLegacyProjects, enabled })
 }
 
-async function fetchChats({ signal } = {}) {
-  const res = await api.chats.list({ signal })
+async function fetchChats({ signal, timeoutMs } = {}) {
+  const res = await api.chats.list({ signal, timeoutMs })
   const data = await jsonOrThrow(res, 'chats fetch failed:')
   return Array.isArray(data) ? data : []
 }
@@ -177,24 +178,33 @@ async function fetchChatMessages(chatId, { signal } = {}) {
 
 async function fetchChatCurrentUsage(
   chatId,
+  provider,
+  providerSessionId,
   { signal } = {},
 ) {
-  const res = await api.chats.currentUsage(chatId, { signal })
+  const res = await api.chats.currentUsage(chatId, {
+    provider,
+    providerSessionId,
+    signal,
+  })
   return jsonOrThrow(res, 'current chat usage fetch failed:')
 }
 
 function useChatCurrentUsageQuery(
   chatId,
   provider,
+  providerSessionId,
   { enabled = true } = {},
 ) {
   return useQuery({
-    queryKey: chatCurrentUsageKey(chatId, provider),
+    queryKey: chatCurrentUsageKey(chatId, provider, providerSessionId),
     queryFn: context => fetchChatCurrentUsage(
       chatId,
+      provider,
+      providerSessionId,
       context,
     ),
-    enabled: enabled && Boolean(chatId && provider),
+    enabled: enabled && Boolean(chatId && provider && providerSessionId),
     staleTime: 60_000,
     retry: 0,
   })

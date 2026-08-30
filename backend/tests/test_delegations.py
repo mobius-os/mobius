@@ -77,7 +77,6 @@ def test_read_delegation_receives_only_a_delegation_scoped_bearer(
     model=None,
     effort=None,
     cwd="/data/platform",
-    max_budget_usd=None,
   )
 
   read_token = delegation_execution_token(
@@ -138,6 +137,7 @@ def test_submit_is_idempotent_per_parent_root_and_task_key(
   first = client.post("/api/delegations", json=body, headers=auth)
   assert first.status_code == 201, first.text
   assert first.json()["attached"] is False
+  assert "max_budget_usd" not in first.json()
   assert first.json()["parent_root_run_id"] == "parent-root"
   assert first.json()["status"] == "starting"
 
@@ -289,9 +289,9 @@ def test_app_token_can_only_submit_bounded_work_under_its_own_child(
   assert escalated.status_code == 403
   assert "read-only" in escalated.json()["detail"]
 
-  # The backend is the single recursion-policy owner. Descendants may use the
-  # same guarded helper until the fourth level, where another child is refused
-  # regardless of what an installed helper or its documentation claims.
+  # Ownership may continue through as many useful local levels as the work
+  # needs. Every bearer still owns only its direct children, and a read-only
+  # owner still cannot create a write-capable descendant.
   nested_parent = nested.json()["child_chat_id"]
   for depth in (3, 4):
     nested_run_id = f"depth-{depth}-parent-run"
@@ -320,29 +320,30 @@ def test_app_token_can_only_submit_bounded_work_under_its_own_child(
     nested_parent = deeper.json()["child_chat_id"]
 
   db.add(models.ChatRun(
-    id="depth-limit-parent-run",
-    root_run_id="depth-limit-parent-run",
+    id="depth-5-parent-run",
+    root_run_id="depth-5-parent-run",
     chat_id=nested_parent,
     status="running",
     provider="claude",
   ))
   db.commit()
-  depth_limit_policy = policy_for_chat(db, nested_parent)
-  assert depth_limit_policy is not None and depth_limit_policy.depth == 4
-  depth_limit_auth = {
+  fifth_parent_policy = policy_for_chat(db, nested_parent)
+  assert fifth_parent_policy is not None and fifth_parent_policy.depth == 4
+  fifth_parent_auth = {
     "Authorization": (
       "Bearer "
-      f"{delegation_execution_token(db, depth_limit_policy, 'depth-limit-parent-run')}"
+      f"{delegation_execution_token(db, fifth_parent_policy, 'depth-5-parent-run')}"
     )
   }
-  rejected_depth = client.post("/api/delegations", json={
+  fifth = client.post("/api/delegations", json={
     **body,
     "parent_chat_id": nested_parent,
     "task_key": "depth-5",
-    "prompt": "Exceed the recursion limit.",
-  }, headers=depth_limit_auth)
-  assert rejected_depth.status_code == 409
-  assert "maximum (4)" in rejected_depth.json()["detail"]
+    "prompt": "Continue one more bounded level.",
+  }, headers=fifth_parent_auth)
+  assert fifth.status_code == 201, fifth.text
+  fifth_policy = policy_for_chat(db, fifth.json()["child_chat_id"])
+  assert fifth_policy is not None and fifth_policy.depth == 5
 
 
 def test_delegation_listing_exposes_run_usage_without_loading_result(
@@ -426,7 +427,6 @@ def test_child_policy_is_integrity_checked_and_write_loss_needs_review(db):
     prompt_sha256=hashlib.sha256(
       b"Make the bounded edit."
     ).hexdigest(),
-    max_budget_usd=5.0,
   )
   db.add(row)
   db.commit()
@@ -434,14 +434,12 @@ def test_child_policy_is_integrity_checked_and_write_loss_needs_review(db):
   policy = policy_for_chat(db, child.id)
   assert policy is not None
   assert policy.allow_session_reseed is False
-  assert policy.max_budget_usd == 5.0
   assert "$MOBIUS_SUBAGENT_HELPER" in policy.system_prompt
   assert "Do not use any other agent CLI" in policy.system_prompt
 
   codex_policy = RunPolicy(
     delegation_id="codex-child", app_id=app.id, provider="codex",
     model=None, effort=None, scope="read", cwd="/data/platform",
-    max_budget_usd=None,
   )
   assert (
     "Nested delegated work is not available" in codex_policy.system_prompt
@@ -643,7 +641,6 @@ def _seed_delegation(
     scope="read",
     cwd="/data/platform",
     prompt_sha256=hashlib.sha256(b"Do the bounded task.").hexdigest(),
-    max_budget_usd=5.0,
     notify_parent_on_complete=notify,
     parent_woken_at=None,
     cancelled_at=now_naive_utc() if cancelled else None,

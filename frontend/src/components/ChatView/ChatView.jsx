@@ -1145,6 +1145,11 @@ export default function ChatView({
       const runtimeGoalObjective = goalObjectiveFromRuntime(
         data, latestGoalObjective(msgs),
       )
+      // A provider creates its session during the first turn, after ChatView
+      // has already mounted. Publish the refreshed detail metadata with the
+      // settled transcript so the context gauge follows that exact session
+      // without waiting for a page reload.
+      const refreshedChatInfo = chatDetailCacheValue(data).chatInfo
       setActiveGoalObjective(runtimeGoalObjective)
       const adoptAssistantOwner = shouldAdoptRuntimeAssistantOwner({
         runtimeRunning: !!data.running,
@@ -1165,6 +1170,7 @@ export default function ChatView({
           activeAssistantMessageId: data.active_assistant_message_id || null,
         } : {}),
         waits: data.waits || [],
+        chatInfo: refreshedChatInfo,
       })
       // Reconcile pending queue against authoritative server state.
       // hydrate() already preserves truly optimistic/in-flight local rows
@@ -5075,6 +5081,7 @@ export default function ChatView({
               usageEnabled={!embedded}
               chatId={chatId}
               provider={chatInfo?.provider}
+              providerSessionId={chatInfo?.session_id}
               model={selectedChatModel(chatInfo)}
             >
               {({ icon, ariaLabel, providerUsage }) => (
@@ -5117,6 +5124,8 @@ export default function ChatView({
                 artifactsAppId={artifactsAppId}
                 onOpenArtifact={onOpenArtifact}
                 onOpenUsage={() => setShowUsage(true)}
+                appArtifacts={builtApps}
+                onOpenAppArtifact={onOpenApp}
                 embedded={embedded}
               />
               )}
