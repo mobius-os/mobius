@@ -15,6 +15,11 @@ LIST_LIMIT = 1000
 # number of filesystem entries one request will inspect as well as the number
 # it returns; `truncated` tells the caller when either ceiling was reached.
 LIST_SCAN_LIMIT = 10_000
+# Git repositories may store their control data as either a directory or a
+# gitfile (for example in linked worktrees and submodules). Workspaces expose
+# source files, never repository metadata, so reserve the name independent of
+# the on-disk entry type.
+GIT_METADATA_NAMES = frozenset({".git"})
 TEXT_MEDIA_TYPES = frozenset({
   "application/json",
   "application/javascript",
@@ -125,7 +130,7 @@ def list_entries(
   def excluded(child: Path) -> bool:
     if child.is_symlink():
       return True
-    if child.is_dir() and child.name in hidden_dirs:
+    if child.name in hidden_dirs:
       return True
     return (
       child.is_dir()

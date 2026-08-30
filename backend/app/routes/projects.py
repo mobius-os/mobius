@@ -593,11 +593,13 @@ def _project_root(project: models.Project) -> Path:
 def _resolve_project_path(project: models.Project, path: str) -> tuple[Path, Path]:
   root = _project_root(project)
   try:
-    target = workspace_files.resolve_path(root, path)
+    target = workspace_files.resolve_path(
+      root, path, hidden_dirs=workspace_files.GIT_METADATA_NAMES,
+    )
   except workspace_files.InvalidWorkspacePath as exc:
     raise HTTPException(400, "Invalid project path.") from exc
   except workspace_files.UnavailableWorkspacePath as exc:
-    raise HTTPException(403, "Symbolic links are not available in Projects.")
+    raise HTTPException(403, "Path is not available in Projects.")
   return root, target
 
 
@@ -1998,6 +2000,7 @@ def list_project_files(
     root, directory,
     path=path,
     recursive=recursive,
+    hidden_dirs=workspace_files.GIT_METADATA_NAMES,
     hidden_root_dirs=frozenset({"artifacts"}),
   )
 

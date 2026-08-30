@@ -6,6 +6,7 @@ import Github from 'lucide-react/dist/esm/icons/folder-git-2.mjs'
 import Users from 'lucide-react/dist/esm/icons/users.mjs'
 import { api, jsonOrThrow } from '../../api/client.js'
 import { projectQueries } from '../../hooks/queries.js'
+import { queueArtifactBuildsAfterSourceSave } from '../../lib/projectArtifacts.js'
 import ProjectArtifacts from './ProjectArtifacts.jsx'
 import ProjectFinder from './ProjectFinder.jsx'
 import ProjectIdentityIcon from './ProjectIdentityIcon.jsx'
@@ -141,12 +142,12 @@ export default function ProjectWorkspace({
       await api.projects.artifacts(project.id),
       'Artifact refresh failed:',
     )
-    const ready = (Array.isArray(artifacts) ? artifacts : []).filter(
-      artifact => artifact?.status !== 'building' && !artifact?.source_missing,
+    const outcomes = await queueArtifactBuildsAfterSourceSave(
+      artifacts,
+      async artifactId => jsonOrThrow(
+        await api.projects.buildArtifact(project.id, artifactId), 'Build failed:',
+      ),
     )
-    const outcomes = await Promise.allSettled(ready.map(async artifact => (
-      jsonOrThrow(await api.projects.buildArtifact(project.id, artifact.id), 'Build failed:')
-    )))
     await queryClient.invalidateQueries({ queryKey: projectQueries.keys.artifacts(project.id) })
     const failed = outcomes.find(outcome => outcome.status === 'rejected')
     if (failed) throw failed.reason

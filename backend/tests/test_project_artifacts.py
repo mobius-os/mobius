@@ -211,6 +211,40 @@ def test_website_build_never_dereferences_nested_symlinks(
   assert not (output / "dir-link").is_symlink()
 
 
+def test_website_build_excludes_git_directories_and_gitfiles(client, auth, db):
+  project = _make_project(client, auth)
+  row = db.query(models.Project).filter(models.Project.id == project["id"]).one()
+  root = Path(os.environ["DATA_DIR"]) / row.root_path
+  (root / "index.html").write_text("<h1>safe</h1>", encoding="utf-8")
+  (root / ".git" / "hooks").mkdir(parents=True)
+  (root / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+  (root / "packages" / "child").mkdir(parents=True)
+  (root / "packages" / "child" / ".git").write_text(
+    "gitdir: ../../../.git/modules/child\n", encoding="utf-8",
+  )
+  (root / "packages" / "child" / "page.html").write_text(
+    "<p>copied</p>", encoding="utf-8",
+  )
+  (root / "packages" / "vendor" / ".git").mkdir(parents=True)
+  (root / "packages" / "vendor" / ".git" / "config").write_text(
+    "[core]\n", encoding="utf-8",
+  )
+  client.post(
+    f"/api/projects/{project['id']}/artifacts", headers=auth,
+    json={"name": "Website", "builder": "website", "source": "index.html"},
+  )
+
+  asyncio.run(project_builders.run_build(project["id"], "website"))
+
+  output = root / "artifacts" / "website" / "output"
+  assert not (output / ".git").exists()
+  assert not (output / "packages" / "child" / ".git").exists()
+  assert not (output / "packages" / "vendor" / ".git").exists()
+  assert (output / "packages" / "child" / "page.html").read_text(
+    encoding="utf-8",
+  ) == "<p>copied</p>"
+
+
 def test_output_serving_is_confined_and_header_authed(client, auth, owner_token):
   project = _make_project(client, auth)
   _write_file(client, auth, project, "index.html", "<h1>ok</h1>")

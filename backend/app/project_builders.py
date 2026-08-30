@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from app import workspace_files
 from app.timeutil import now_naive_utc
 
 log = logging.getLogger(__name__)
@@ -580,12 +581,13 @@ async def build_latex(
 async def build_website(
   *, root: Path, source: str, output_dir: Path, log_path: Path,
 ) -> None:
-  """Copy the project source tree (minus ``artifacts/``) into ``output/``.
+  """Copy project sources, excluding build output and repository metadata.
 
   Copying the whole tree — not just the entry file — is what lets relative
   assets (images, fonts, CSS, extra pages) resolve when the built site renders
   in a sandboxed iframe. ``artifacts/`` is excluded so the output never copies
-  itself. Symlinks are omitted recursively; ``symlinks=True`` also guarantees
+  itself. Git control data is reserved whether represented by a directory or a
+  gitfile. Symlinks are omitted recursively; ``symlinks=True`` also guarantees
   a concurrent entry swap can copy only the link, never dereference its target.
   """
   if output_dir.exists():
@@ -594,7 +596,11 @@ async def build_website(
   lines = ["Building website: copying project sources into output.\n"]
   copied = 0
   for child in sorted(root.iterdir(), key=lambda p: p.name):
-    if child.name == "artifacts" or child.is_symlink():
+    if (
+      child.name == "artifacts"
+      or child.name in workspace_files.GIT_METADATA_NAMES
+      or child.is_symlink()
+    ):
       continue
     dest = output_dir / child.name
     if child.is_dir():
@@ -603,7 +609,11 @@ async def build_website(
         dest,
         symlinks=True,
         ignore=lambda directory, names: [
-          name for name in names if (Path(directory) / name).is_symlink()
+          name for name in names
+          if (
+            name in workspace_files.GIT_METADATA_NAMES
+            or (Path(directory) / name).is_symlink()
+          )
         ],
       )
     else:

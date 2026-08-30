@@ -168,6 +168,69 @@ def test_project_file_mutations_reject_the_reserved_artifacts_area(client, auth)
     assert response.json()["detail"] == "The artifacts area is managed by builds."
 
 
+def test_project_files_reserve_git_metadata_from_browse_and_mutation(
+  client, auth, db,
+):
+  project = client.post(
+    "/api/projects", headers=auth,
+    json={"name": "Repository workspace", "template_id": "blank"},
+  ).json()
+  row = db.get(models.Project, project["id"])
+  root = Path(os.environ["DATA_DIR"]) / row.root_path
+  (root / ".git").mkdir()
+  (root / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+  (root / "packages" / "child").mkdir(parents=True)
+  (root / "packages" / "child" / ".git").write_text(
+    "gitdir: ../../../.git/modules/child\n", encoding="utf-8",
+  )
+  (root / "notes.md").write_text("safe", encoding="utf-8")
+  base = f"/api/projects/{project['id']}"
+
+  root_listing = client.get(f"{base}/files", headers=auth)
+  assert root_listing.status_code == 200
+  assert ".git" not in {entry["name"] for entry in root_listing.json()["entries"]}
+  recursive = client.get(f"{base}/files?recursive=true", headers=auth)
+  assert recursive.status_code == 200
+  assert all(
+    ".git" not in Path(entry["path"]).parts
+    for entry in recursive.json()["entries"]
+  )
+
+  blocked = (
+    client.get(f"{base}/files?path=.git", headers=auth),
+    client.get(f"{base}/file?path=.git/config", headers=auth),
+    client.get(f"{base}/file?path=packages/child/.git", headers=auth),
+    client.post(
+      f"{base}/folder", headers=auth, json={"path": ".git/hooks"},
+    ),
+    client.put(
+      f"{base}/file?path=.git/config", headers=auth,
+      json={"content": "unsafe", "expected_revision": None},
+    ),
+    client.put(
+      f"{base}/file-bytes?path=packages/child/.git",
+      headers={**auth, "If-Match": "0" * 64}, content=b"unsafe",
+    ),
+    client.delete(f"{base}/file?path=.git/config", headers=auth),
+    client.delete(f"{base}/file?path=packages/child/.git", headers=auth),
+    client.post(
+      f"{base}/move", headers=auth,
+      json={"from_path": ".git/config", "to_path": "config-copy"},
+    ),
+    client.post(
+      f"{base}/move", headers=auth,
+      json={"from_path": "notes.md", "to_path": ".git/notes.md"},
+    ),
+  )
+  for response in blocked:
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"] == "Path is not available in Projects."
+
+  assert (root / ".git" / "config").read_text(encoding="utf-8") == "[core]\n"
+  assert (root / "packages" / "child" / ".git").is_file()
+  assert (root / "notes.md").read_text(encoding="utf-8") == "safe"
+
+
 def test_project_file_revisions_reject_stale_edits_and_changes_reconnect(
   client, auth,
 ):

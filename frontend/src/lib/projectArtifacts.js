@@ -17,6 +17,13 @@ export function normalizeArtifacts(data) {
   ))
 }
 
+export function queueArtifactBuildsAfterSourceSave(data, queueBuild) {
+  const ready = normalizeArtifacts(data).filter(
+    artifact => artifact.status !== 'building' && !artifact.source_missing,
+  )
+  return Promise.allSettled(ready.map(artifact => queueBuild(artifact.id)))
+}
+
 // The four build states map to a small status vocabulary the pill renders.
 // An unknown/absent status reads as idle rather than erroring.
 export function artifactStatus(artifact) {

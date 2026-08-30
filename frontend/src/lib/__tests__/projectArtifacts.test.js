@@ -13,6 +13,7 @@ import {
   isArtifactBuildEvent,
   isBuilding,
   normalizeArtifacts,
+  queueArtifactBuildsAfterSourceSave,
   shouldHotSwapPreview,
 } from '../projectArtifacts.js'
 
@@ -22,6 +23,24 @@ test('normalizeArtifacts reads a bare array or an envelope, and drops malformed 
   // Lenient read: a hand-edited manifest with junk entries never throws.
   assert.deepEqual(normalizeArtifacts([{ id: 'a' }, null, {}, { id: '' }, 'x']).map(r => r.id), ['a'])
   assert.deepEqual(normalizeArtifacts(undefined), [])
+})
+
+test('source Save queues one idle envelope artifact and preserves build filters', async () => {
+  const queued = []
+  const outcomes = await queueArtifactBuildsAfterSourceSave({
+    artifacts: [
+      { id: 'site', status: 'idle' },
+      { id: 'busy', status: 'building' },
+      { id: 'missing', status: 'idle', source_missing: true },
+      { id: '' },
+    ],
+  }, async artifactId => {
+    queued.push(artifactId)
+  })
+
+  assert.deepEqual(queued, ['site'])
+  assert.equal(outcomes.length, 1)
+  assert.equal(outcomes[0].status, 'fulfilled')
 })
 
 test('artifactStatus and pill map the four states, unknown reads as idle', () => {

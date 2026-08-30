@@ -6,6 +6,7 @@ import Users from 'lucide-react/dist/esm/icons/users.mjs'
 import {
   api, BASE, clearEphemeralAuthSession, jsonOrThrow, setEphemeralAuthSession,
 } from '../../api/client.js'
+import { queueArtifactBuildsAfterSourceSave } from '../../lib/projectArtifacts.js'
 import ArtifactWorkspace from './ArtifactWorkspace.jsx'
 import ProjectArtifacts from './ProjectArtifacts.jsx'
 import ProjectFinder from './ProjectFinder.jsx'
@@ -238,12 +239,12 @@ export default function ProjectShare() {
       await api.projects.artifacts(projectId),
       'Artifact refresh failed:',
     )
-    const ready = (Array.isArray(artifacts) ? artifacts : []).filter(
-      artifact => artifact?.status !== 'building' && !artifact?.source_missing,
+    const outcomes = await queueArtifactBuildsAfterSourceSave(
+      artifacts,
+      async artifactId => jsonOrThrow(
+        await api.projects.buildArtifact(projectId, artifactId), 'Build failed:',
+      ),
     )
-    const outcomes = await Promise.allSettled(ready.map(async artifact => (
-      jsonOrThrow(await api.projects.buildArtifact(projectId, artifact.id), 'Build failed:')
-    )))
     await queryClient.invalidateQueries({ queryKey: ['projects', 'artifacts', projectId] })
     const failed = outcomes.find(outcome => outcome.status === 'rejected')
     if (failed) throw failed.reason
