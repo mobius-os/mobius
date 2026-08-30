@@ -59,6 +59,7 @@ import {
   DESKTOP_SIDEBAR_MIN_WIDTH,
 } from '../Shell/useDesktopSidebar.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
+import { writeClipboardText } from '../../runtime/clipboard.js'
 import './Drawer.css'
 
 // Module-level constant so default Set props are stable across renders.
@@ -91,6 +92,7 @@ export default function Drawer({
   onDeleteChat,
   onDeleteApp,
   onDeleteAppData,
+  onNotice,
   onSettings,
   appsActive = false,
   onAppsOpen,
@@ -434,6 +436,15 @@ export default function Drawer({
       if (!next || next === previous) return
       if (kind === 'chat') current.renameChat(id, next)
       else current.renameApp(id, next)
+    },
+    copyName(name) {
+      const current = rowActionInputsRef.current
+      const value = typeof name === 'string' ? name : ''
+      void writeClipboardText(value).then(copied => {
+        if (!copied) {
+          current.onNotice?.("Couldn't copy the name.", { variant: 'error' })
+        }
+      })
     },
     pin(kind, id, next) {
       const current = rowActionInputsRef.current
@@ -993,6 +1004,7 @@ export default function Drawer({
     onDeleteChat,
     onDeleteApp,
     onDeleteAppData,
+    onNotice,
     showItemMenu,
     closeItemMenu,
     menuRestoreFocusRef,
@@ -2007,6 +2019,7 @@ const DrawerItemMenu = memo(function DrawerItemMenu({
       restoreFocusRef={restoreFocusRef}
       onClose={actions.closeMenu}
       onPin={() => actions.pin(kind, id, !pinned)}
+      onCopy={() => actions.copyName(label)}
       onRename={() => actions.startRename(kind, id, surface)}
       onInstall={() => actions.install(item)}
       onShare={() => actions.share(item)}

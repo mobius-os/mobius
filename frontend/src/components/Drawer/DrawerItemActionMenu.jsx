@@ -29,6 +29,7 @@ export default function DrawerItemActionMenu({
   restoreFocusRef,
   onClose,
   onPin,
+  onCopy,
   onRename,
   onInstall,
   onShare,
@@ -283,6 +284,14 @@ export default function DrawerItemActionMenu({
                   ? <Pin width={15} height={15} aria-hidden="true" />
                   : <PinFilled width={15} height={15} aria-hidden="true" />}
                 <span>{pinned ? 'Unpin' : 'Pin'}</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className="drawer__item-action-item"
+                onClick={() => run(onCopy, { restoreFocus: false })}
+              >
+                Copy name
               </button>
               <button
                 type="button"

@@ -91,6 +91,7 @@ import {
 } from './confirmedDeletion.js'
 import {
   ownerInputChangeFromEvent,
+  reconcileChatRenameGuards,
   withChatOwnerActivity,
   withChatOwnerInput,
   withChatRename,
@@ -536,10 +537,17 @@ export default function Shell({ onInitialVisualReady }) {
   // the query function boundary so the protected row never disappears from
   // cache/render between fetch settlement and an after-the-fact patch.
   const recentlyCreatedChatsRef = useRef(new Map())
+  // A committed rename event can overtake a list request that began before the
+  // commit. Keep that exact row revision until a list read confirms it, just as
+  // newly-created rows stay protected from an older in-flight snapshot.
+  const chatRenameGuardsRef = useRef(new Map())
   const reconcileCreatedChats = useCallback(
     rows => withoutConfirmedDeletions(
-      mergeChatListWithCreatedGuards(
-        rows, recentlyCreatedChatsRef.current,
+      reconcileChatRenameGuards(
+        mergeChatListWithCreatedGuards(
+          rows, recentlyCreatedChatsRef.current,
+        ),
+        chatRenameGuardsRef.current,
       ),
       deletedChatIdsRef.current,
     ),
@@ -2019,6 +2027,10 @@ export default function Shell({ onInitialVisualReady }) {
     projectChatList(rows => withChatOwnerInput(rows, chatId, change))
   }, [projectChatList])
   const applyChatRenameEvent = useCallback((event) => {
+    chatRenameGuardsRef.current.set(String(event.chatId), {
+      title: event.title,
+      updatedAt: event.updatedAt,
+    })
     projectChatList(rows => withChatRename(rows, event.chatId, {
       title: event.title,
       updatedAt: event.updatedAt,
@@ -2027,6 +2039,7 @@ export default function Shell({ onInitialVisualReady }) {
 
   const confirmChatDeleted = useCallback((id) => {
     const sid = String(id)
+    chatRenameGuardsRef.current.delete(sid)
     rememberConfirmedDeletion(deletedChatIdsRef.current, sid)
     recentlyCreatedChatsRef.current.delete(sid)
     queryClient.setQueryData(chatQueries.keys.all, current => {
@@ -3971,6 +3984,7 @@ export default function Shell({ onInitialVisualReady }) {
         onDeleteChat={deleteChat}
         onDeleteApp={deleteApp}
         onDeleteAppData={deleteAppData}
+        onNotice={showToast}
         onSettings={() => {
           setSettingsFocusTarget(null)
           navTo('settings')

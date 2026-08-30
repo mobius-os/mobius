@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   ownerInputChangeFromEvent,
+  reconcileChatRenameGuards,
   withChatListRowPatch,
   withChatOwnerActivity,
   withChatOwnerInput,
@@ -44,6 +45,44 @@ test('run and rename events project only the committed fields they carry', () =>
   })
   assert.equal(renamed[0].title, 'Current topic')
   assert.equal(renamed[0].updated_at, '2026-08-01T12:30:00Z')
+})
+
+test('a committed rename survives an older in-flight drawer snapshot', () => {
+  const guards = new Map([['a', {
+    title: 'Current topic',
+    updatedAt: '2026-08-01T12:30:00Z',
+  }]])
+  const stale = reconcileChatRenameGuards([{
+    id: 'a',
+    title: 'First message preview',
+    updated_at: '2026-08-01T12:00:00Z',
+  }], guards)
+
+  assert.equal(stale[0].title, 'Current topic')
+  assert.equal(stale[0].updated_at, '2026-08-01T12:30:00Z')
+  assert.equal(guards.has('a'), true, 'an older list read must not retire the guard')
+
+  const confirmedRow = {
+    id: 'a',
+    title: 'Current topic',
+    updated_at: '2026-08-01T12:30:00Z',
+  }
+  const confirmed = reconcileChatRenameGuards([confirmedRow], guards)
+  assert.equal(confirmed[0], confirmedRow)
+  assert.equal(guards.has('a'), false, 'matching server truth retires the guard')
+
+  const supersededGuards = new Map([['a', {
+    title: 'Current topic',
+    updatedAt: '2026-08-01T12:30:00Z',
+  }]])
+  const newerRow = {
+    id: 'a',
+    title: 'Owner-chosen name',
+    updated_at: '2026-08-01T12:31:00Z',
+  }
+  const newer = reconcileChatRenameGuards([newerRow], supersededGuards)
+  assert.equal(newer[0], newerRow, 'a later rename must win over the old guard')
+  assert.equal(supersededGuards.has('a'), false)
 })
 
 test('visible and owner-input turns survive temporarily false compact rows', () => {
