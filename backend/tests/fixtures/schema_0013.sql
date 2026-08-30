@@ -28,11 +28,6 @@ CREATE TABLE system_prompt_snapshots (
 	created_at DATETIME,
 	PRIMARY KEY (id)
 );
-CREATE TABLE gauntlet_target_mutex (
-	id INTEGER NOT NULL,
-	revision INTEGER NOT NULL,
-	PRIMARY KEY (id)
-);
 CREATE TABLE apps (
 	id INTEGER NOT NULL,
 	name VARCHAR(128) NOT NULL,
@@ -268,41 +263,6 @@ CREATE TABLE delegations (
 	FOREIGN KEY(parent_chat_id) REFERENCES chats (id),
 	FOREIGN KEY(child_chat_id) REFERENCES chats (id)
 );
-CREATE TABLE gauntlet_runs (
-	id VARCHAR(64) NOT NULL,
-	app_id INTEGER NOT NULL,
-	parent_chat_id VARCHAR(64) NOT NULL,
-	parent_root_run_id VARCHAR(64) NOT NULL,
-	target_path VARCHAR(1024) NOT NULL,
-	active_target_key VARCHAR(64),
-	contract_json JSON NOT NULL,
-	contract_sha256 VARCHAR(64) NOT NULL,
-	provider VARCHAR(32) NOT NULL,
-	model VARCHAR(256),
-	effort VARCHAR(32),
-	status VARCHAR(24) NOT NULL,
-	phase VARCHAR(16) NOT NULL,
-	current_round INTEGER NOT NULL,
-	max_rounds INTEGER NOT NULL,
-	max_budget_usd FLOAT,
-	deadline_at DATETIME,
-	stop_requested_at DATETIME,
-	requested_terminal_status VARCHAR(24),
-	terminal_reason TEXT,
-	revision INTEGER NOT NULL,
-	created_at DATETIME NOT NULL,
-	updated_at DATETIME NOT NULL,
-	ended_at DATETIME,
-	PRIMARY KEY (id),
-	CONSTRAINT ck_gauntlet_runs_status CHECK (status IN ('running','stopping','completed','budget_exhausted','failed','stopped')),
-	CONSTRAINT ck_gauntlet_runs_phase CHECK (phase IN ('baseline','integrate','evaluate','terminal')),
-	CONSTRAINT ck_gauntlet_runs_round CHECK (current_round >= 0),
-	CONSTRAINT ck_gauntlet_runs_max_rounds CHECK (max_rounds >= 1),
-	CONSTRAINT ck_gauntlet_runs_active_target CHECK ((status IN ('running','stopping') AND active_target_key IS NOT NULL) OR (status NOT IN ('running','stopping') AND active_target_key IS NULL)),
-	CONSTRAINT ck_gauntlet_runs_requested_terminal CHECK ((status = 'stopping' AND requested_terminal_status IN ('stopped','budget_exhausted','failed')) OR (status != 'stopping' AND requested_terminal_status IS NULL)),
-	FOREIGN KEY(app_id) REFERENCES apps (id),
-	FOREIGN KEY(parent_chat_id) REFERENCES chats (id)
-);
 CREATE TABLE chat_session_links (
 	provider VARCHAR(32) NOT NULL,
 	session_id VARCHAR(128) NOT NULL,
@@ -394,32 +354,6 @@ CREATE TABLE contribution_autopilot (
 	FOREIGN KEY(app_id) REFERENCES apps (id),
 	FOREIGN KEY(followup_chat_id) REFERENCES chats (id)
 );
-CREATE TABLE gauntlet_tasks (
-	id VARCHAR(64) NOT NULL,
-	gauntlet_run_id VARCHAR(64) NOT NULL,
-	phase VARCHAR(16) NOT NULL,
-	round INTEGER NOT NULL,
-	ordinal INTEGER NOT NULL,
-	role VARCHAR(128) NOT NULL,
-	scope VARCHAR(16) NOT NULL,
-	delegation_id VARCHAR(64),
-	chat_run_id VARCHAR(64),
-	max_budget_usd FLOAT,
-	retry_count INTEGER NOT NULL,
-	prompt_sha256 VARCHAR(64) NOT NULL,
-	created_at DATETIME NOT NULL,
-	PRIMARY KEY (id),
-	CONSTRAINT uq_gauntlet_tasks_phase_slot UNIQUE (gauntlet_run_id, phase, round, ordinal),
-	CONSTRAINT ck_gauntlet_tasks_execution_shape CHECK ((scope = 'read' AND phase IN ('baseline','evaluate') AND delegation_id IS NOT NULL AND chat_run_id IS NULL) OR (scope = 'write' AND phase = 'integrate' AND ordinal = 0 AND delegation_id IS NULL AND chat_run_id IS NOT NULL)),
-	CONSTRAINT ck_gauntlet_tasks_round CHECK (round >= 0),
-	CONSTRAINT ck_gauntlet_tasks_ordinal CHECK (ordinal >= 0),
-	CONSTRAINT ck_gauntlet_tasks_retry_count CHECK (retry_count >= 0 AND retry_count <= 1),
-	CONSTRAINT ck_gauntlet_tasks_budget CHECK (max_budget_usd IS NULL OR max_budget_usd > 0),
-	FOREIGN KEY(gauntlet_run_id) REFERENCES gauntlet_runs (id),
-	UNIQUE (delegation_id),
-	FOREIGN KEY(delegation_id) REFERENCES delegations (id),
-	UNIQUE (chat_run_id)
-);
 CREATE TABLE agent_lifecycle_events (
 	id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
 	event_key VARCHAR(64) NOT NULL,
@@ -496,11 +430,6 @@ CREATE INDEX ix_delegations_parent_root_run_id ON delegations (parent_root_run_i
 CREATE INDEX ix_delegations_parent_chat_id ON delegations (parent_chat_id);
 CREATE UNIQUE INDEX ix_delegations_child_chat_id ON delegations (child_chat_id);
 CREATE INDEX ix_delegations_app_id ON delegations (app_id);
-CREATE INDEX ix_gauntlet_runs_parent_root_run_id ON gauntlet_runs (parent_root_run_id);
-CREATE INDEX ix_gauntlet_runs_parent_chat_id ON gauntlet_runs (parent_chat_id);
-CREATE INDEX ix_gauntlet_runs_app_id ON gauntlet_runs (app_id);
-CREATE INDEX ix_gauntlet_runs_status ON gauntlet_runs (status);
-CREATE UNIQUE INDEX ix_gauntlet_runs_active_target_key ON gauntlet_runs (active_target_key);
 CREATE INDEX ix_chat_session_links_chat_id ON chat_session_links (chat_id);
 CREATE INDEX ix_agent_lifecycle_run_updates_chat_id ON agent_lifecycle_run_updates (chat_id);
 CREATE INDEX ix_agent_lifecycle_run_updates_chat_run_id ON agent_lifecycle_run_updates (chat_run_id);
@@ -514,7 +443,6 @@ CREATE INDEX ix_chat_embed_grants_session_expires_at ON chat_embed_grants (sessi
 CREATE INDEX ix_chat_embed_grants_chat_id ON chat_embed_grants (chat_id);
 CREATE INDEX ix_tool_outputs_chat_id ON tool_outputs (chat_id);
 CREATE INDEX ix_thinking_traces_chat_id ON thinking_traces (chat_id);
-CREATE INDEX ix_gauntlet_tasks_gauntlet_run_id ON gauntlet_tasks (gauntlet_run_id);
 CREATE INDEX ix_agent_lifecycle_events_activation_id ON agent_lifecycle_events (activation_id);
 CREATE UNIQUE INDEX ix_agent_lifecycle_events_event_key ON agent_lifecycle_events (event_key);
 CREATE INDEX ix_agent_lifecycle_events_parent_agent_id ON agent_lifecycle_events (parent_agent_id);
