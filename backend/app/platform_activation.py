@@ -72,6 +72,25 @@ def _normalize_path(path: str) -> str:
   return normalized[2:] if normalized.startswith("./") else normalized
 
 
+# These scripts run from the protected ``/app/scripts`` image tree before the
+# served ``/data/platform`` checkout can own execution.  Keep this allowlist in
+# sync with absolute ``/app/scripts/<name>`` references in entrypoint.sh.  The
+# rest of backend/scripts is linked from the live checkout and takes effect on
+# its next invocation, so classifying the whole directory as image-bound turns
+# ordinary maintenance work into unnecessary container replacements.
+IMAGE_BOOTSTRAP_SCRIPTS = (
+  "backend/scripts/agent-browser-profile-cleanup.py",
+  "backend/scripts/agent_sudo.sh",
+  "backend/scripts/entrypoint.sh",
+  "backend/scripts/init-cron-scaffold.sh",
+  "backend/scripts/init_agent_context.py",
+  "backend/scripts/init_chat_summaries.py",
+  "backend/scripts/init_skills.py",
+  "backend/scripts/migrate-app-rename.sh",
+  "backend/scripts/self-reminders-dispatch.sh",
+)
+
+
 # Ordered first-match rules.  Narrow baked/deployment inputs precede the broad
 # backend runtime rule.  A path may require only one owning activation boundary;
 # mixed updates still report every distinct rule they touch.
@@ -80,7 +99,11 @@ _RULES = (
     "host_operator_tooling",
     ActivationLevel.HOST_MAINTENANCE,
     "Host-operated deployment tooling changed.",
-    exact=("scripts/deploy-prod.sh",),
+    exact=(
+      "scripts/deploy-prod.sh",
+      "scripts/install-rebuild-helper.sh",
+      "scripts/mobius-rebuild-host.py",
+    ),
     deployment="self_hosted",
   ),
   _Rule(
@@ -121,9 +144,9 @@ _RULES = (
     "baked_runtime",
     ActivationLevel.IMAGE_REBUILD,
     "Baked scripts, supervisors, or protected-file rules changed.",
-    exact=("protected-files.txt",),
+    exact=("protected-files.txt", "backend/runtime", *IMAGE_BOOTSTRAP_SCRIPTS),
     prefixes=(
-      "backend/scripts/",
+      "backend/scripts/seed-skills/",
       "backend/runtime/",
       "backend/static/",
     ),
@@ -148,6 +171,18 @@ _RULES = (
     "The self-hosted Caddy routing or TLS policy changed.",
     exact=("Caddyfile",),
     deployment="self_hosted",
+  ),
+  _Rule(
+    "commit_launcher",
+    ActivationLevel.SERVER_RESTART,
+    "The commit launcher changed and is refreshed during server startup.",
+    exact=("backend/scripts/pm-commit",),
+  ),
+  _Rule(
+    "live_maintenance_tooling",
+    ActivationLevel.LIVE,
+    "Maintenance tooling is executed from the live platform checkout.",
+    prefixes=("backend/scripts/",),
   ),
   _Rule(
     "backend_development_source",
@@ -238,9 +273,21 @@ def _guidance(level: ActivationLevel, deployment: DeploymentKind) -> str:
         "does not reload the proxy."
       )
     if level is ActivationLevel.CONTAINER_RECREATE:
-      return "Refresh the host checkout, then recreate the affected Docker Compose services."
+      return (
+        "Apply this with scripts/deploy-prod.sh on the host — it recreates from "
+        "the current Compose files with the canonical env-file. Never hand-run "
+        "docker compose against the live instance: it recreates the container "
+        "this agent runs in (stranding the turn mid-recreate) and, without the "
+        "canonical env-file, drifts SECRET_KEY and logs every session out. The "
+        "in-product Settings replacement swaps the image on a frozen Compose "
+        "topology and will not apply Compose changes."
+      )
     if level is ActivationLevel.IMAGE_REBUILD:
-      return "Refresh the host checkout, rebuild the image, then recreate the app container."
+      return (
+        "Rebuild and replace through the in-product Settings container "
+        "replacement or scripts/deploy-prod.sh on the host; do not hand-run "
+        "docker build/compose against the live instance."
+      )
     if level is ActivationLevel.HOST_MAINTENANCE:
       return "Update the host-operated tooling and complete its maintenance outside the container."
   return "Complete this deployment action outside Möbius; an in-product restart is insufficient."
