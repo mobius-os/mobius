@@ -1988,9 +1988,12 @@ async def test_frontend_build_failure_rolls_back_source_and_is_not_success(
   assert "frontend_build_failed" in progress["error"]
 
 
-def test_entrypoint_ignores_durable_update_progress_from_outer_data_repo():
-  entrypoint = (
-    Path(__file__).resolve().parents[1] / "scripts" / "entrypoint.sh"
-  ).read_text(encoding="utf-8")
+def test_boot_policy_ignores_durable_update_progress_from_outer_data_repo():
+  scripts = Path(__file__).resolve().parents[1] / "scripts"
+  entrypoint = (scripts / "entrypoint.sh").read_text(encoding="utf-8")
+  data_repo_helper = (scripts / "init_data_repo.py").read_text(
+    encoding="utf-8",
+  )
 
-  assert ".platform-update-progress.json" in entrypoint
+  assert "init_data_repo.py write-ignore /data" in entrypoint
+  assert ".platform-update-progress.json" in data_repo_helper
