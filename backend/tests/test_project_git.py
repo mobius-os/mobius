@@ -1,8 +1,11 @@
 """Project Git projections stay confined, bounded, and useful for diffs."""
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from app import models
 from app import project_git
@@ -28,6 +31,16 @@ def _git(cwd: Path, *args: str) -> str:
 def _project_root(db, project: dict) -> Path:
   row = db.get(models.Project, project["id"])
   return Path(os.environ["DATA_DIR"]) / row.root_path
+
+
+@pytest.fixture
+def shared_data_repo():
+  """Own the suite-level test repository for exactly one Project Git test."""
+  data_root = Path(os.environ["DATA_DIR"])
+  git_dir = data_root / ".git"
+  shutil.rmtree(git_dir, ignore_errors=True)
+  yield data_root
+  shutil.rmtree(git_dir, ignore_errors=True)
 
 
 def _write_file(
@@ -63,14 +76,14 @@ def test_project_without_git_reports_ordinary_unavailability(client, auth):
 
 
 def test_shared_repository_is_scoped_to_project_and_exposes_changed_lines(
-  client, auth, db,
+  client, auth, db, shared_data_repo,
 ):
   project = client.post(
     "/api/projects", headers=auth,
     json={"name": "Git project", "template_id": "blank"},
   ).json()
   root = _project_root(db, project)
-  data_root = Path(os.environ["DATA_DIR"])
+  data_root = shared_data_repo
   main_revision = _write_file(
     client, auth, project["id"], "main.py", "one\ntwo\nthree\n",
   )
@@ -180,13 +193,15 @@ def test_owner_can_initialize_and_commit_only_a_project_owned_repository(
   assert _git(root, "log", "-1", "--pretty=%s") == "Update the greeting"
 
 
-def test_commit_route_refuses_to_stage_the_shared_data_repository(client, auth, db):
+def test_commit_route_refuses_to_stage_the_shared_data_repository(
+  client, auth, db, shared_data_repo,
+):
   project = client.post(
     "/api/projects", headers=auth,
     json={"name": "Nested project", "template_id": "blank"},
   ).json()
   root = _project_root(db, project)
-  data_root = Path(os.environ["DATA_DIR"])
+  data_root = shared_data_repo
   main_revision = _write_file(
     client, auth, project["id"], "main.py", "first\n",
   )
