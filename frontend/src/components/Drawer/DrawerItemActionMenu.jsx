@@ -26,6 +26,7 @@ export default function DrawerItemActionMenu({
   canInstall,
   canShare,
   placement,
+  focusFirstAction = false,
   restoreFocusRef,
   onClose,
   onPin,
@@ -110,11 +111,16 @@ export default function DrawerItemActionMenu({
 
   useLayoutEffect(() => {
     if (!open || !position || !menuRef.current) return
+    // Pointer-opened menus stay visually neutral: moving focus into the first
+    // action paints a keyboard ring even though the owner only held/right-
+    // clicked the row. Keyboard invocation still lands on the first action,
+    // and confirmation views always reclaim focus after replacing their trigger.
+    if (!focusFirstAction && confirmation === null) return
     const frame = requestAnimationFrame(() => {
       focusableMenuItems(menuRef.current)[0]?.focus()
     })
     return () => cancelAnimationFrame(frame)
-  }, [open, position, confirmation])
+  }, [open, position, confirmation, focusFirstAction])
 
   function run(action, { restoreFocus = true } = {}) {
     close({ restoreFocus })
