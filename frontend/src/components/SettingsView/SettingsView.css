@@ -324,12 +324,6 @@
   color: var(--muted);
 }
 
-.settings__update-check {
-  margin: 0;
-  font-size: 12px;
-  color: var(--muted);
-}
-
 .settings__btn--nowrap { white-space: nowrap; }
 
 .settings-bg-list {
