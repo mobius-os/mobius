@@ -21,6 +21,7 @@ from pathlib import Path
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app import (
   activity,
@@ -4630,7 +4631,11 @@ async def _run_chat_impl_with_db(
   # the SDK runner. Without this, the SDK fails with a cryptic error.
   auth_error = provider_requirement_errors.get(provider_id)
   if auth_error is None:
-    auth_error = provider.check_auth(settings.data_dir)
+    # check_auth may perform blocking I/O (e.g. MobiusProvider probes the
+    # local broker over a Unix socket). Run it off the event loop so a slow
+    # or hung broker cannot stall this single-worker ASGI loop and the other
+    # turns and SSE streams sharing it.
+    auth_error = await run_in_threadpool(provider.check_auth, settings.data_dir)
   if auth_error:
     # A fresh install may intentionally finish setup without connecting an
     # agent; a returning owner's sole credential can also expire. When no
@@ -4642,11 +4647,16 @@ async def _run_chat_impl_with_db(
     # disconnected. If another provider is connected, this chat's selected
     # provider genuinely failed and the existing error path below remains the
     # honest response.
-    runnable_provider = any(
-      provider_requirement_errors.get(candidate_id) is None
-      and candidate.check_auth(settings.data_dir) is None
-      for candidate_id, candidate in PROVIDERS.items()
-    )
+    def _has_runnable_provider() -> bool:
+      return any(
+        provider_requirement_errors.get(candidate_id) is None
+        and candidate.check_auth(settings.data_dir) is None
+        for candidate_id, candidate in PROVIDERS.items()
+      )
+
+    # The scan calls check_auth for each provider, so offload the whole loop
+    # off the event loop for the same broker-stall reason as the probe above.
+    runnable_provider = await run_in_threadpool(_has_runnable_provider)
     if not runnable_provider:
       await _record_run_metrics(
         chat_id=chat_id,
