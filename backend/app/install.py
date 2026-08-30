@@ -2449,6 +2449,7 @@ async def _prepare_app_row(
     system_prompt_file=manifest.get("system_prompt") or None,
     system_app=bool(manifest.get("system_app", False)),
     capability_contract=candidate.capability_contract,
+    project_templates_json=manifest.get("project_templates") or None,
   )
   db.add(app)
   db.flush()
@@ -2527,6 +2528,7 @@ async def _activate_install_source(
     app.system_prompt_file = manifest.get("system_prompt") or None
     app.system_app = bool(manifest.get("system_app", False))
     app.capability_contract = plan.capability_contract
+    app.project_templates_json = manifest.get("project_templates") or None
 
   staged_bundle = data_dir / "compiled" / f"app-{app.id}.js.staging"
   source_dir = Path(app.source_dir)
@@ -2583,7 +2585,6 @@ async def _activate_install_source(
     journal.commit_actions,
   )
   await compile_jsx(
-    app.id,
     entry_source,
     out_path=staged_bundle,
     source_path=source_dir / plan.entry_key,

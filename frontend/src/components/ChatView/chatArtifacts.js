@@ -57,6 +57,43 @@ export function artifactsTouchedByChat(records, chatId) {
     .sort((left, right) => timestamp(right.touchedAt) - timestamp(left.touchedAt))
 }
 
+// Apps keep their own durable chat attribution on the app row. Project that
+// same server truth into the chat's artifact picker so opening a preview leaves
+// a reusable way back to the app after the short-lived preview CTA retires.
+// Newest wins if a stale/refetched array briefly carries the same id twice.
+export function appArtifactsFromBuiltApps(builtApps) {
+  const seen = new Set()
+  const items = []
+  for (let index = (Array.isArray(builtApps) ? builtApps.length : 0) - 1;
+    index >= 0; index -= 1) {
+    const app = builtApps[index]
+    const id = Number(app?.id)
+    if (!Number.isInteger(id) || id <= 0 || seen.has(id)) continue
+    seen.add(id)
+    items.push(app)
+  }
+  return items
+}
+
+export function chatArtifactPickerItems(builtApps, artifacts) {
+  const appItems = appArtifactsFromBuiltApps(builtApps).map(app => ({
+    key: `app:${app.id}`,
+    kind: 'app',
+    id: Number(app.id),
+    title: String(app.name || 'Untitled app'),
+    touchedAt: app.updated_at || app.created_at || '',
+    app,
+  }))
+  const documentItems = (Array.isArray(artifacts) ? artifacts : []).map(artifact => ({
+    ...artifact,
+    key: `artifact:${artifact.id}`,
+    kind: 'artifact',
+    title: String(artifact.title || 'Untitled artifact'),
+  }))
+  return [...appItems, ...documentItems]
+    .sort((left, right) => timestamp(right.touchedAt) - timestamp(left.touchedAt))
+}
+
 export async function loadChatArtifacts(appId, chatId, { signal, request } = {}) {
   if (typeof request !== 'function') {
     throw new Error('Artifact loading requires a request function.')

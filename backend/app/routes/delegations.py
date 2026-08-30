@@ -21,7 +21,6 @@ from app.delegations import (
   cancel_delegation_execution,
   create_or_attach_delegation,
   derived_status,
-  MAX_DELEGATION_DEPTH,
   normalize_cwd,
   parent_root_run_id,
   serialize_delegation,
@@ -153,9 +152,6 @@ def _require_submitter(
       status_code=403,
       detail="Delegation token may only create direct children.",
     )
-  from app.delegations import delegation_depth
-  if delegation_depth(db, parent) >= MAX_DELEGATION_DEPTH:
-    raise HTTPException(status_code=409, detail=f"Delegation depth reached the maximum ({MAX_DELEGATION_DEPTH}).")
   return parent
 
 
@@ -276,7 +272,6 @@ async def submit_or_attach(
       effort=body.effort,
       scope=body.scope,
       cwd=cwd,
-      max_budget_usd=5.0 if body.provider == "claude" else None,
       notify_parent_on_complete=body.notify_parent_on_complete,
     )
     try:

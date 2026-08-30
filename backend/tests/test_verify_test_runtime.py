@@ -167,6 +167,7 @@ def test_node_runtime_satisfies_the_pinned_agent_browser_engine():
   assert "--engine-strict --strict-allow-scripts" in apt_layer
   for package in ("jq", "ripgrep", "sqlite3", "unzip"):
     assert re.search(rf"\b{package}\b", apt_layer)
+  assert "printf '{}\\n' > /app/agent-browser-config.json" in dockerfile
   assert "node:24-trixie-slim sh -c" in preship
   assert "node:22" not in dockerfile
   assert "node:22" not in preship
@@ -207,8 +208,8 @@ def test_image_deduplicates_agent_cli_payloads_without_breaking_sdk_contracts():
     "pip install --no-cache-dir --require-hashes -r requirements.lock"
     in requirements_layer
   )
-  assert "claude-agent-sdk==0.2.139" in requirements
-  assert "claude-agent-sdk==0.2.139" in requirements_lock
+  assert "claude-agent-sdk==0.2.148" in requirements
+  assert "claude-agent-sdk==0.2.148" in requirements_lock
   assert (
     'Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"'
     in requirements_layer
@@ -221,7 +222,7 @@ def test_image_deduplicates_agent_cli_payloads_without_breaking_sdk_contracts():
     dockerfile.index("# Capture each installed agent CLI")
   ]
   assert "pip install --no-cache-dir --no-deps" in codex_layer
-  assert "pip install --no-cache-dir 'openai-codex-cli-bin==0.144.4'" in codex_layer
+  assert "pip install --no-cache-dir 'openai-codex-cli-bin==0.147.0'" in codex_layer
   assert 'rm -rf "${_codex_cli_bin}/bin"' in codex_layer
   assert 'ln -s /usr/local/bin/codex "${_codex_cli_bin}/bin/codex"' in codex_layer
   assert "bundled_codex_path().samefile" in codex_layer

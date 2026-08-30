@@ -271,8 +271,42 @@
 }
 
 .drawer__item--apps {
-  margin-bottom: 2px;
   font-weight: 500;
+}
+
+.drawer__projects-nav {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 42px;
+  align-items: center;
+  gap: 0;
+}
+
+.drawer__item--projects {
+  min-width: 0;
+  font-weight: 500;
+}
+
+.drawer__projects-add {
+  width: 42px;
+}
+
+.drawer__projects-add .project-create-menu__trigger {
+  width: 40px;
+  height: 40px;
+  color: var(--muted);
+  background: transparent;
+}
+
+.drawer__projects-add .project-create-menu__trigger:hover,
+.drawer__projects-add .project-create-menu__trigger:focus-visible,
+.drawer__projects-add .project-create-menu__trigger[aria-expanded="true"] {
+  color: var(--text);
+  background: var(--surface);
+}
+
+.drawer__projects-add .project-create-menu__popover {
+  right: 0;
+  width: min(260px, calc(100vw - 24px));
 }
 
 .drawer__now-playing {
@@ -492,6 +526,20 @@
   font-size: 8px;
 }
 
+.drawer__project-icon {
+  filter: saturate(.92);
+}
+
+.drawer__item--active .drawer__project-icon {
+  filter: saturate(1.08);
+}
+
+.drawer__artifact-icon {
+  width: 20px;
+  height: 20px;
+  opacity: 1;
+}
+
 /* ── Context-menu row ──────────────────────────────── */
 
 .drawer__row {
@@ -505,6 +553,87 @@
 .drawer__row .drawer__item {
   flex: 1;
   min-width: 0;
+}
+
+/* Project-owned Recents rows select as one surface even though the destination
+   and project chip remain separate, valid buttons. The wrapper owns the wash;
+   both controls sit above it and therefore read as one full-width selection. */
+.drawer__row--project-owned {
+  width: 100%;
+  border-radius: 10px;
+}
+
+.drawer__row--project-owned.drawer__row--active {
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.drawer__row--project-owned.drawer__row--active .drawer__item {
+  color: inherit;
+  background: transparent;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .drawer__row--project-owned:hover {
+    background: var(--surface);
+  }
+
+  .drawer__row--project-owned:hover .drawer__item {
+    background: transparent;
+  }
+
+  .drawer__row--project-owned.drawer__row--active:hover {
+    background: var(--accent-dim);
+  }
+}
+
+/* Quiet project context: artwork carries identity while the name stays
+   secondary to the chat or artifact that owns the row. */
+.drawer__project-chip {
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 1;
+  max-width: 34%;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: 6px;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.drawer__project-chip .project-identity-icon { flex: 0 0 16px; }
+.drawer__project-chip span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.drawer__project-chip:hover {
+  color: var(--text);
+  background: var(--surface);
+}
+.drawer__project-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* The default accent wash is deliberately quiet in dark mode, but that same
+   mix loses the selected row and project identity against a light canvas. */
+[data-theme="light"] .drawer__row--project-owned.drawer__row--active {
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+[data-theme="light"] .drawer__row--project-owned.drawer__row--active:hover {
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg));
+}
+[data-theme="light"] .drawer__project-chip {
+  color: color-mix(in srgb, var(--project-color) 72%, var(--text));
+  border-color: color-mix(in srgb, var(--project-color) 42%, var(--border-light));
+  background: color-mix(in srgb, var(--project-color) 20%, var(--bg));
 }
 
 /* Ordinary rows retain native momentum scrolling. A pinned row must reserve its

@@ -184,7 +184,7 @@ export function createCapabilityHost({
       channel,
     })).then((control) => {
       if (!current(shellSession)) {
-        try { control?.control?.('cancel') } catch {}
+        try { control?.control?.(shellSession.detached ? 'detach' : 'cancel') } catch {}
         return
       }
       shellSession.control = control || {}
@@ -218,6 +218,14 @@ export function createCapabilityHost({
     })
   }
 
+  function detachSession(session) {
+    if (!current(session)) return
+    session.detached = true
+    try { session.control?.control?.('detach') } catch {}
+    session.settled = true
+    sessions.delete(session.requestId)
+  }
+
   return {
     handle(source, msg) {
       if (!msg || typeof msg !== 'object') return false
@@ -237,7 +245,9 @@ export function createCapabilityHost({
     detachSource(source) {
       for (const session of [...sessions.values()]) {
         if (session.source === source) {
-          abortSession(session, 'The app frame that opened this capability was detached.')
+          const provider = providers[session.capability]
+          if (provider?.preserveOnDetach) detachSession(session)
+          else abortSession(session, 'The app frame that opened this capability was detached.')
         }
       }
     },
@@ -252,7 +262,9 @@ export function createCapabilityHost({
     },
     destroy() {
       for (const session of [...sessions.values()]) {
-        abortSession(session, 'Capability host was detached.')
+        const provider = providers[session.capability]
+        if (provider?.preserveOnDetach) detachSession(session)
+        else abortSession(session, 'Capability host was detached.')
       }
     },
     activeCount: () => sessions.size,

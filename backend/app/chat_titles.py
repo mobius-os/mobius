@@ -22,6 +22,7 @@ def renamed_event(chat) -> dict[str, object]:
     "chatId": str(chat.id),
     "title": chat.title,
     "updatedAt": chat.updated_at.isoformat() if chat.updated_at else None,
+    "activityAt": chat.activity_at.isoformat() if chat.activity_at else None,
   }
 
 

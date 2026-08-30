@@ -232,3 +232,29 @@ test('contract revocation cancels an already-open session', async () => {
   assert.equal(harness.host.activeCount(), 0)
   assert.equal(harness.sent.at(-1).message.code, 'aborted')
 })
+
+test('a reviewed background provider can preserve its grant across frame replacement', async () => {
+  const controls = []
+  const source = {}
+  const host = createCapabilityHost({
+    providers: {
+      [CAPABILITY]: {
+        version: 1,
+        preserveOnDetach: true,
+        async open() {
+          return { control(action) { controls.push(action) } }
+        },
+      },
+    },
+    getDeclaration: () => ({ version: 1, lifecycle: 'background' }),
+    isActive: () => true,
+    send() {},
+  })
+  host.handle(source, openMessage())
+  await new Promise((resolve) => setImmediate(resolve))
+
+  host.detachSource(source)
+
+  assert.deepEqual(controls, ['detach'])
+  assert.equal(host.activeCount(), 0)
+})
