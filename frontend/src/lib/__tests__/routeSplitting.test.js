@@ -3,6 +3,11 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 const SOURCE = readFileSync(new URL('../../App.jsx', import.meta.url), 'utf8')
+const API_CLIENT = readFileSync(new URL('../../api/client.js', import.meta.url), 'utf8')
+const LOGIN_CSS = readFileSync(
+  new URL('../../components/LoginForm/LoginForm.css', import.meta.url),
+  'utf8',
+)
 const INDEX_HTML = readFileSync(new URL('../../../index.html', import.meta.url), 'utf8')
 const RECOVERY_CSS = [
   readFileSync(new URL('../../components/ErrorBoundary/ErrorBoundary.css', import.meta.url), 'utf8'),
@@ -61,4 +66,18 @@ test('route loading and the theme-matched launch cover contain no artwork', () =
     /Möbius|moebius\.(?:png|svg)|<img|<svg|<span/,
     'the startup handoff must remain an artwork-free theme cover',
   )
+})
+
+test('managed sign-in stays on the viewed origin and owns a centered action', () => {
+  assert.match(
+    API_CLIENT,
+    /startUrl:\s*\(returnPath = '\/'\)\s*=>\s*\(\s*`\/api\/auth\/sso\/start\?return_path=/,
+  )
+  assert.doesNotMatch(
+    API_CLIENT,
+    /startUrl:\s*\(returnPath = '\/'\)\s*=>\s*\(\s*`\$\{BASE\}\/api\/auth\/sso\/start/,
+  )
+  const buttonRule = LOGIN_CSS.match(/\.login__btn\s*\{[\s\S]*?\}/)?.[0] || ''
+  assert.match(buttonRule, /width:\s*100%/)
+  assert.match(buttonRule, /justify-content:\s*center/)
 })

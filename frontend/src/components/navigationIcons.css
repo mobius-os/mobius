@@ -1,0 +1,6 @@
+/* Shared rendering contract for navigation glyphs in the rail and drawer. */
+.navigation-action-icon {
+  width: 1em;
+  height: 1em;
+  opacity: 0.85;
+}

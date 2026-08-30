@@ -793,6 +793,10 @@
 
   .shell {
     --desktop-rail-width: 58px;
+    /* The desktop workspace starts at y=0, but the expanded drawer begins
+       below its own 58px header. This is intentionally independent of the
+       mobile shell bar height. */
+    --drawer-top-offset: 58px;
     --shell-bar-height: 0px;
   }
 
@@ -899,12 +903,7 @@
     color: var(--muted);
     background: transparent;
     cursor: pointer;
-  }
-
-  .shell__rail-action svg {
-    width: 20px;
-    height: 20px;
-    stroke-width: 1.8;
+    font-size: 20px;
   }
 
   .shell__rail-action:hover,

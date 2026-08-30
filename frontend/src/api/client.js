@@ -394,8 +394,11 @@ export const api = {
       body: new URLSearchParams({ username, password }),
     }),
     sso: {
+      // This is a top-level browser navigation, not an API fetch. The fetch
+      // base may be a container-local address in production builds; the login
+      // handoff must begin on the origin the owner is actually viewing.
       startUrl: (returnPath = '/') => (
-        `${BASE}/api/auth/sso/start?return_path=${encodeURIComponent(returnPath)}`
+        `/api/auth/sso/start?return_path=${encodeURIComponent(returnPath)}`
       ),
       consume: () => apiFetch('/auth/sso/session', { method: 'POST' }),
     },
