@@ -49,6 +49,31 @@ def mark_opened(db: Session, project_id: str) -> datetime:
   return opened_at
 
 
+def mark_artifact_opened(db: Session, project_id: str, artifact_id: str) -> datetime:
+  """Advance one built result's open marker inside the caller's transaction."""
+  opened_at = now_naive_utc()
+  key = (project_id, artifact_id)
+  state = db.get(models.ProjectArtifactDrawerState, key)
+  if state is None:
+    try:
+      with db.begin_nested():
+        state = models.ProjectArtifactDrawerState(
+          project_id=project_id,
+          artifact_id=artifact_id,
+          last_opened_at=opened_at,
+        )
+        db.add(state)
+        db.flush()
+        return opened_at
+    except IntegrityError:
+      state = db.get(models.ProjectArtifactDrawerState, key)
+      if state is None:
+        raise
+  if state.last_opened_at < opened_at:
+    state.last_opened_at = opened_at
+  return opened_at
+
+
 def set_pinned(db: Session, project_id: str, pinned: bool) -> datetime | None:
   """Set project pin state without advancing project ``updated_at``."""
   pinned_at = now_naive_utc() if pinned else None
@@ -74,4 +99,12 @@ def annotate_projects(
     state = states.get(project.id)
     project.last_opened_at = state.last_opened_at if state else None
     project.pinned_at = state.pinned_at if state else None
+  artifact_states = db.query(models.ProjectArtifactDrawerState).filter(
+    models.ProjectArtifactDrawerState.project_id.in_(ids),
+  ).all() if ids else []
+  opened_by_project: dict[str, dict[str, datetime]] = {}
+  for state in artifact_states:
+    opened_by_project.setdefault(state.project_id, {})[state.artifact_id] = state.last_opened_at
+  for project in projects:
+    project.artifact_last_opened_at = opened_by_project.get(project.id, {})
   return projects

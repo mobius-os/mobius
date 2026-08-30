@@ -704,6 +704,7 @@ def _artifact_view(
     "log_rel": log_rel,
     "status": project_builders.effective_status(project.id, entry),
     "updated_at": entry.get("updated_at"),
+    "last_opened_at": getattr(project, "artifact_last_opened_at", {}).get(str(artifact_id)),
     "duration_ms": entry.get("duration_ms"),
     "has_output": has_output,
     "source_missing": not source_exists,
@@ -1907,6 +1908,8 @@ async def delete_project(
   with PROJECT_LIFECYCLE_LOCK:
     deleted_at = now_naive_utc()
     project.deleted_at = deleted_at
+    from app.shared_app_retention import stage_project_shared_app_delete
+    stage_project_shared_app_delete(db, str(project.id), deleted_at)
     from app.chat_waits import stage_cancel_waits_for_chat
     for chat in chats:
       stage_cancel_waits_for_chat(db, chat.id)
@@ -1951,6 +1954,8 @@ def recover_project(
     if not _project_root(project).is_dir():
       raise HTTPException(409, "Project files are unavailable.")
     deleted_at = project.deleted_at
+    from app.shared_app_retention import stage_project_shared_app_recovery
+    stage_project_shared_app_recovery(db, str(project.id), deleted_at)
     chats = db.query(models.Chat).filter(
       models.Chat.project_id == project.id,
       models.Chat.deleted_at == deleted_at,
@@ -2467,6 +2472,8 @@ def list_project_artifacts(
 ):
   """List a project's artifacts, reconciling live/stale build status."""
   project = _project_for(db, project_id, principal, "viewer")
+  if principal.is_owner:
+    project_drawer.annotate_projects(db, [project])
   root = _project_root(project)
   return {
     "artifacts": [
@@ -2474,6 +2481,27 @@ def list_project_artifacts(
       for entry in project_builders.read_artifacts(project)
     ],
   }
+
+
+@router.post(
+  "/{project_id}/artifacts/{artifact_id}/opened", status_code=204,
+  dependencies=[Depends(reject_cross_site)],
+)
+def mark_project_artifact_opened(
+  project_id: str,
+  artifact_id: str,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  project = _live_project(db, project_id)
+  if not any(
+    str(entry.get("id")) == artifact_id
+    for entry in project_builders.read_artifacts(project)
+  ):
+    raise HTTPException(404, "Creation not found.")
+  project_drawer.mark_artifact_opened(db, project.id, artifact_id)
+  db.commit()
+  return Response(status_code=204)
 
 
 @router.post(

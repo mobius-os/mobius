@@ -8,6 +8,7 @@ could observe it torn.
 
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -31,6 +32,17 @@ MAX_STORAGE_BYTES = 50 * 1024 * 1024
 # a backstop, not a wall: the owner's agent can raise it in code if a real app
 # needs more headroom.
 MAX_APP_STORAGE_BYTES = 1024 * 1024 * 1024
+
+# ``tempfile.mkstemp`` uses eight characters from this alphabet for the random
+# portion of names created by ``atomic_write``. Keep recognition beside the
+# writer so readers can reserve only its exact crash-artifact namespace rather
+# than broadly hiding dotfiles or every ``*.tmp`` owner path.
+_ATOMIC_WRITE_TEMP_RE = re.compile(r"^\..+\.[a-z0-9_]{8}\.tmp$")
+
+
+def is_atomic_write_temp_name(name: str) -> bool:
+  """Whether ``name`` is an internal same-directory atomic-write artifact."""
+  return _ATOMIC_WRITE_TEMP_RE.fullmatch(name) is not None
 
 
 def rmtree_strict(path: Path) -> None:

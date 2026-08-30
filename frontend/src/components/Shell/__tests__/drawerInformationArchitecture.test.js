@@ -22,6 +22,25 @@ test('projects join Recents only after they have been opened', () => {
   ])
 })
 
+test('Creations join Recents only after they have been opened', () => {
+  const project = {
+    id: 'project-1', name: 'Album', updated_at: '2026-08-26T08:00:00',
+    artifacts: [
+      { id: 'unopened', name: 'Unopened', status: 'ok', has_output: true },
+      {
+        id: 'opened', name: 'Opened', status: 'ok', has_output: true,
+        last_opened_at: '2026-08-26T10:00:00',
+      },
+    ],
+  }
+
+  const result = buildDrawerSections([], [], [project])
+
+  assert.deepEqual(result.recents.map(row => `${row.kind}:${row.item.id}`), [
+    'artifact:project-1:opened',
+  ])
+})
+
 test('a pinned project shares the combined pinned order and leaves Recents', () => {
   const project = {
     id: 'pinned-project',

@@ -1169,6 +1169,9 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0021_project_chat_collection",
     "0022_project_artifacts",
     "0023_project_color",
+    "0024_shared_app_retention",
+    "0025_shared_app_path_state",
+    "0026_project_artifact_drawer_state",
   ]
   assert second == first
 
@@ -1382,6 +1385,45 @@ def test_legacy_chat_models_preserve_malformed_settings(tmp_path, monkeypatch):
     assert conn.execute(text(
       "SELECT agent_settings_json FROM chats WHERE id = 'malformed-settings'"
     )).scalar_one() == "{malformed"
+
+
+def test_shared_app_path_state_migrates_prototype_data_without_runtime_columns(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  instance_id = "11111111-1111-4111-8111-111111111111"
+  snapshot_path = f"shared/app-instances/{instance_id}/build"
+  (data_dir / snapshot_path).mkdir(parents=True)
+  eng = create_engine(f"sqlite:///{tmp_path / 'shared-state.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE shared_app_instances ("
+      "id VARCHAR(64) PRIMARY KEY, snapshot_path VARCHAR(2048) NOT NULL, "
+      "state_json JSON NOT NULL, revision INTEGER NOT NULL)"
+    ))
+    conn.execute(text(
+      "INSERT INTO shared_app_instances (id, snapshot_path, state_json, revision) "
+      "VALUES (:id, :snapshot_path, :state_json, 7)"
+    ), {
+      "id": instance_id,
+      "snapshot_path": snapshot_path,
+      "state_json": json.dumps({"board.json": {"cards": ["kept"]}}),
+    })
+
+  migrations._migrate_shared_app_state_files(eng)
+
+  assert json.loads((
+    data_dir / "shared" / "app-instances" / instance_id / "data" / "board.json"
+  ).read_text(encoding="utf-8")) == {"cards": ["kept"]}
+  with eng.connect() as conn:
+    migrated = conn.execute(text(
+      "SELECT state_json, revision FROM shared_app_instances WHERE id = :id"
+    ), {"id": instance_id}).mappings().one()
+  assert json.loads(migrated["state_json"]) == {}
+  assert migrated["revision"] == 0
+  assert "state_json" not in models.SharedAppInstance.__table__.columns
+  assert "revision" not in models.SharedAppInstance.__table__.columns
 
 
 def test_pending_question_migration_backfills_only_active_latest_question(

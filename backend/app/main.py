@@ -81,6 +81,7 @@ from app.routes import (
   published_router,
   connect_router,
   projects_router,
+  shared_apps_router,
 )
 
 _BOOT_ID = os.environ.get("MOBIUS_BOOT_ID") or f"{os.getpid()}-{time.time_ns()}"
@@ -780,6 +781,7 @@ app.include_router(apps_router)
 app.include_router(storage_router)
 app.include_router(fs_router)
 app.include_router(projects_router)
+app.include_router(shared_apps_router)
 app.include_router(chat_router)
 app.include_router(chat_embed_router)
 app.include_router(chats_router)

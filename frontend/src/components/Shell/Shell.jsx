@@ -559,6 +559,38 @@ export default function Shell({ onInitialVisualReady }) {
       })
       .catch(() => {})
   }, [activeProjectId, activeView, queryClient])
+  const recencyMarkedArtifactRef = useRef(null)
+  useEffect(() => {
+    if (activeView !== 'artifact' || !activeArtifactRef) {
+      recencyMarkedArtifactRef.current = null
+      return
+    }
+    const parsed = tabModel.parseArtifactTabId(activeArtifactRef)
+    if (!parsed || recencyMarkedArtifactRef.current === activeArtifactRef) return
+    recencyMarkedArtifactRef.current = activeArtifactRef
+    const lastOpenedAt = new Date().toISOString()
+    const promoteCachedArtifact = () => {
+      queryClient.setQueryData(projectQueries.keys.all, rows => (
+        Array.isArray(rows) ? rows.map(project => (
+          String(project.id) !== parsed.projectId ? project : {
+            ...project,
+            artifacts: (project.artifacts || []).map(artifact => (
+              String(artifact.id) === parsed.artifactId
+                ? { ...artifact, last_opened_at: lastOpenedAt }
+                : artifact
+            )),
+          }
+        )) : rows
+      ))
+    }
+    promoteCachedArtifact()
+    void api.projects.markArtifactOpened(parsed.projectId, parsed.artifactId)
+      .then(response => {
+        if (response.ok) promoteCachedArtifact()
+        else projectQueries.list.invalidate(queryClient)
+      })
+      .catch(() => {})
+  }, [activeArtifactRef, activeView, queryClient])
   const notificationCenterActionsRef = useRef(null)
   const reconcileNotifications = useCallback(() => {
     notificationCenterActionsRef.current?.reconcile()
