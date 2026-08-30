@@ -42,8 +42,8 @@ RUN useradd -m -s /bin/bash mobius
 # agent-browser looks by default).
 # Discard npm's download cache in each layer: installed packages are the
 # runtime artifact; registry tarballs only make the production image larger.
-ARG CLAUDE_CODE_VERSION=2.1.234
-ARG AGENT_BROWSER_VERSION=0.33.2
+ARG CLAUDE_CODE_VERSION=2.1.251
+ARG AGENT_BROWSER_VERSION=0.35.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     age ca-certificates cron curl git jq procps ripgrep sqlite3 sudo unzip util-linux \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
@@ -53,7 +53,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && npm install -g --engine-strict --strict-allow-scripts \
       --allow-scripts="@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION},agent-browser@${AGENT_BROWSER_VERSION}" \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-      @openai/codex@0.147.0 \
+      @openai/codex@0.150.1 \
       "agent-browser@${AGENT_BROWSER_VERSION}" \
     && agent-browser install \
     && mv /root/.agent-browser /opt/agent-browser \
@@ -111,6 +111,13 @@ RUN set -eux; \
 RUN ln -s /opt/agent-browser /root/.agent-browser \
     && ln -s /opt/agent-browser /home/mobius/.agent-browser
 
+# Agent turns point AGENT_BROWSER_CONFIG here so untrusted workspace config
+# cannot register executable plugins. Runtime settings still travel through
+# explicit AGENT_BROWSER_* environment variables owned by chat.py.
+RUN install -d -m 0755 /app \
+    && printf '{}\n' > /app/agent-browser-config.json \
+    && chmod 0644 /app/agent-browser-config.json
+
 # openai/codex-plugin-cc — Claude Code plugin that exposes Codex as a
 # delegation/review subagent inside the agent's session. Cloned at
 # image-build time so the source is reproducible and pinned to a
@@ -136,8 +143,8 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.lock \
 # lockstep npm CLI. This preserves the external SDK contract without storing a
 # second ~350 MB runtime or running a second protocol version.
 # Pinned to commit SHA (not tag) for full reproducibility — tags are
-# mutable on GitHub. SHA corresponds to refs/tags/rust-v0.147.0
-# as of 2026-08-18, and is kept in lockstep with the npm @openai/codex
+# mutable on GitHub. SHA corresponds to refs/tags/rust-v0.150.1
+# as of 2026-08-27, and is kept in lockstep with the npm @openai/codex
 # binary above (the SDK spawns it via codex_bin=shutil.which("codex")).
 # We moved from rust-v0.144.5 to this tag because the 0.144.x generated
 # ReasoningEffort enum was strict (none/minimal/low/medium/high/xhigh)
@@ -145,15 +152,15 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.lock \
 # codex.models() and ThreadResumeResponse validation failed and broke a
 # real chat resume. alpha.13 turned ReasoningEffort into a forgiving
 # `str, Enum` with a `_missing_` hook that accepts any effort string;
-# 0.147.0 is the latest stable tag published to BOTH the git repo and npm, so
+# 0.150.1 is the latest stable tag published to BOTH the git repo and npm, so
 # binary and schema stay matched. The SDK exposes the request bridge as a
 # public `approval_handler` constructor argument on
 # `openai_codex.client.CodexClient`; `AsyncCodex` still does not forward
 # it, so codex_sdk_runner.py installs the handler on the wrapped sync
 # client's `_approval_handler`.
 RUN pip install --no-cache-dir --no-deps \
-      'openai-codex @ git+https://github.com/openai/codex.git@be6e8eac029b183056b7e4402879f15d2c85f61b#subdirectory=sdk/python' \
-    && pip install --no-cache-dir 'openai-codex-cli-bin==0.144.4' \
+      'openai-codex @ git+https://github.com/openai/codex.git@90854393966b21e9ebfd21b122334eb09a20c93d#subdirectory=sdk/python' \
+    && pip install --no-cache-dir 'openai-codex-cli-bin==0.147.0' \
     && _codex_cli_bin="$(python -c \
       'from pathlib import Path; import codex_cli_bin; print(Path(codex_cli_bin.__file__).parent)')" \
     && rm -rf "${_codex_cli_bin}/bin" \

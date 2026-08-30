@@ -1818,16 +1818,16 @@ function agentViewport(windowLike, height) {
 //#endregion
 //#region src/runtime/chat.js
 const EMBED_NS = "moebius:chat-embed:";
-const EMBED_INIT = "moebius:chat-embed:init";
-const EMBED_GUIDANCE = "moebius:chat-embed:guidance";
-const EMBED_READY = "moebius:chat-embed:ready";
-const EMBED_MESSAGE_SENT = "moebius:chat-embed:message-sent";
-const EMBED_TURN_DONE = "moebius:chat-embed:turn-done";
-const EMBED_ERROR = "moebius:chat-embed:error";
-const EMBED_AUTH_EXPIRING = "moebius:chat-embed:auth-expiring";
-const EMBED_BOOTSTRAP_READY = "moebius:chat-embed:bootstrap-ready";
-const EMBED_CONTEXT_REQUEST = "moebius:chat-embed:context-request";
-const EMBED_CONTEXT_RESPONSE = "moebius:chat-embed:context-response";
+const EMBED_INIT = EMBED_NS + "init";
+const EMBED_GUIDANCE = EMBED_NS + "guidance";
+const EMBED_READY = EMBED_NS + "ready";
+const EMBED_MESSAGE_SENT = EMBED_NS + "message-sent";
+const EMBED_TURN_DONE = EMBED_NS + "turn-done";
+const EMBED_ERROR = EMBED_NS + "error";
+const EMBED_AUTH_EXPIRING = EMBED_NS + "auth-expiring";
+const EMBED_BOOTSTRAP_READY = EMBED_NS + "bootstrap-ready";
+const EMBED_CONTEXT_REQUEST = EMBED_NS + "context-request";
+const EMBED_CONTEXT_RESPONSE = EMBED_NS + "context-response";
 const EMBED_GUIDANCE_MAX_LENGTH = 300;
 function sanitizeEmbedGuidance(value) {
 	if (typeof value !== "string") return null;

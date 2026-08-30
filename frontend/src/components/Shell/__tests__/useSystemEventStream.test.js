@@ -11,11 +11,7 @@ function target(extra = {}) {
   }
 }
 
-async function flushMicrotasks() {
-  for (let index = 0; index < 10; index += 1) await Promise.resolve()
-}
-
-test('a clean system-stream EOF enters the shared reachability owner', async () => {
+function installBrowser() {
   globalThis.window = target({ location: { reload() {} } })
   globalThis.document = target({ visibilityState: 'visible' })
   Object.defineProperty(globalThis, 'navigator', {
@@ -27,6 +23,14 @@ test('a clean system-stream EOF enters the shared reachability owner', async () 
     removeItem() {},
   }
   globalThis.sessionStorage = { setItem() {} }
+}
+
+async function flushMicrotasks() {
+  for (let index = 0; index < 10; index += 1) await Promise.resolve()
+}
+
+test('a clean system-stream EOF enters the shared reachability owner', async () => {
+  installBrowser()
 
   const requests = []
   let holdHealthProbe
@@ -58,4 +62,102 @@ test('a clean system-stream EOF enters the shared reachability owner', async () 
 
   holdHealthProbe?.({ ok: true })
   hook.unmount()
+})
+
+test('reconnect reconciliation settles before buffered system events are applied', async () => {
+  installBrowser()
+
+  let releaseReconciliation
+  const reconciliation = new Promise(resolve => { releaseReconciliation = resolve })
+  const order = []
+  let firstRead = true
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    body: {
+      getReader() {
+        order.push('reader-opened')
+        return {
+          read() {
+            if (firstRead) {
+              firstRead = false
+              return Promise.resolve({
+                done: false,
+                value: new TextEncoder().encode(
+                  'data: {"type":"chat_run_started","chat_id":"new-run"}\n\n',
+                ),
+              })
+            }
+            return new Promise(() => {})
+          },
+        }
+      },
+    },
+  })
+
+  const { default: useSystemEventStream } = await import(
+    '../../../hooks/useSystemEventStream.js'
+  )
+  const hook = renderHook(
+    useSystemEventStream,
+    event => order.push(`event:${event.chat_id}`),
+    {
+      onOpen: () => {
+        order.push('reconciliation-started')
+        return reconciliation
+      },
+    },
+  )
+  await flushMicrotasks()
+
+  assert.deepEqual(order, ['reconciliation-started'])
+
+  releaseReconciliation()
+  await flushMicrotasks()
+
+  assert.deepEqual(order, [
+    'reconciliation-started',
+    'reader-opened',
+    'event:new-run',
+  ])
+
+  hook.unmount()
+})
+
+test('unmount during reconnect reconciliation never acquires the stream reader', async () => {
+  installBrowser()
+  let releaseCancelledReconciliation
+  const cancelledReconciliation = new Promise(resolve => {
+    releaseCancelledReconciliation = resolve
+  })
+  const cancelledOrder = []
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    body: {
+      getReader() {
+        cancelledOrder.push('reader-opened')
+        return { read: () => new Promise(() => {}) }
+      },
+    },
+  })
+  const { default: useSystemEventStream } = await import(
+    '../../../hooks/useSystemEventStream.js'
+  )
+  const cancelledHook = renderHook(
+    useSystemEventStream,
+    () => {},
+    {
+      onOpen: () => {
+        cancelledOrder.push('reconciliation-started')
+        return cancelledReconciliation
+      },
+    },
+  )
+  await flushMicrotasks()
+  cancelledHook.unmount()
+  releaseCancelledReconciliation()
+  await flushMicrotasks()
+
+  assert.deepEqual(cancelledOrder, ['reconciliation-started'])
 })

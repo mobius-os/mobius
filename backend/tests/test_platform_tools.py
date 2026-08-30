@@ -1,6 +1,9 @@
 """Provider-neutral Möbius controls are exposed consistently and safely."""
 
 import importlib.util
+import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -80,3 +83,94 @@ def test_promote_goal_tool_preserves_helper_rejection(monkeypatch):
   monkeypatch.setattr(control._GOALS, "promote_goal", reject)
   with pytest.raises(RuntimeError, match="wrong physical run"):
     control._promote_goal("Ship and verify")
+
+
+def test_control_protocol_advertises_only_the_run_bound_tool():
+  control = _control_module()
+
+  initialized = control._dispatch_message({
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {"protocolVersion": "2025-06-18"},
+  })
+  assert initialized["result"]["protocolVersion"] == "2025-06-18"
+  assert initialized["result"]["capabilities"] == {
+    "tools": {"listChanged": False},
+  }
+
+  listed = control._dispatch_message({
+    "jsonrpc": "2.0", "id": 2, "method": "tools/list",
+  })
+  assert [tool["name"] for tool in listed["result"]["tools"]] == [
+    platform_tools.CONTROL_TOOL_NAME,
+  ]
+  schema = listed["result"]["tools"][0]["inputSchema"]
+  assert schema["required"] == ["objective"]
+  assert schema["additionalProperties"] is False
+
+
+def test_control_protocol_returns_tool_success_without_framework_wrapping(
+  monkeypatch,
+):
+  control = _control_module()
+  monkeypatch.setattr(control, "_promote_goal", lambda objective: {
+    "state": "promoted",
+    "objective": objective,
+    "goal_id": "goal-1",
+    "run_id": "run-1",
+  })
+
+  response = control._dispatch_message({
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "tools/call",
+    "params": {
+      "name": platform_tools.CONTROL_TOOL_NAME,
+      "arguments": {"objective": "  Ship and verify  "},
+    },
+  })
+
+  result = response["result"]
+  assert result["isError"] is False
+  assert json.loads(result["content"][0]["text"]) == {
+    "state": "promoted",
+    "objective": "Ship and verify",
+    "goal_id": "goal-1",
+    "run_id": "run-1",
+  }
+
+
+def test_control_stdio_process_survives_tool_errors_and_keeps_serving():
+  script = Path(platform_tools._control_script())
+  env = dict(os.environ)
+  for key in platform_tools.CONTROL_ENV_VARS:
+    env.pop(key, None)
+  messages = [
+    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+      "protocolVersion": "2025-11-25",
+    }},
+    {"jsonrpc": "2.0", "method": "notifications/initialized"},
+    {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+      "name": platform_tools.CONTROL_TOOL_NAME,
+      "arguments": {"objective": "Ship and verify"},
+    }},
+    {"jsonrpc": "2.0", "id": 3, "method": "ping"},
+  ]
+
+  completed = subprocess.run(
+    [sys.executable, str(script)],
+    input="".join(json.dumps(message) + "\n" for message in messages),
+    text=True,
+    capture_output=True,
+    check=True,
+    timeout=10,
+    env=env,
+  )
+
+  responses = [json.loads(line) for line in completed.stdout.splitlines()]
+  assert [response["id"] for response in responses] == [1, 2, 3]
+  assert responses[1]["result"]["isError"] is True
+  assert "missing environment" in responses[1]["result"]["content"][0]["text"]
+  assert responses[2]["result"] == {}
+  assert completed.stderr == ""
