@@ -8,6 +8,7 @@ could observe it torn.
 
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -31,6 +32,17 @@ MAX_STORAGE_BYTES = 50 * 1024 * 1024
 # a backstop, not a wall: the owner's agent can raise it in code if a real app
 # needs more headroom.
 MAX_APP_STORAGE_BYTES = 1024 * 1024 * 1024
+
+# ``tempfile.mkstemp`` uses eight characters from this alphabet for the random
+# portion of names created by ``atomic_write``. Keep recognition beside the
+# writer so readers can reserve only its exact crash-artifact namespace rather
+# than broadly hiding dotfiles or every ``*.tmp`` owner path.
+_ATOMIC_WRITE_TEMP_RE = re.compile(r"^\..+\.[a-z0-9_]{8}\.tmp$")
+
+
+def is_atomic_write_temp_name(name: str) -> bool:
+  """Whether ``name`` is an internal same-directory atomic-write artifact."""
+  return _ATOMIC_WRITE_TEMP_RE.fullmatch(name) is not None
 
 
 def rmtree_strict(path: Path) -> None:
@@ -125,6 +137,39 @@ def atomic_write(file_path: Path, content: str | bytes) -> None:
     except OSError:
       pass
     raise
+
+
+def sync_directory(path: Path) -> None:
+  """Flush directory entries that make an atomic filesystem change durable."""
+  fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+  try:
+    os.fsync(fd)
+  finally:
+    os.close(fd)
+
+
+def sync_file_tree(root: Path) -> None:
+  """Flush every regular file and directory in one newly published tree."""
+  directories = []
+  for current, child_dirs, files in os.walk(root):
+    current_path = Path(current)
+    if current_path.is_symlink():
+      raise OSError(f"cannot sync symbolic-link directory {current_path}")
+    directories.append(current_path)
+    for name in child_dirs:
+      if (current_path / name).is_symlink():
+        raise OSError(f"cannot sync symbolic-link directory {current_path / name}")
+    for name in files:
+      target = current_path / name
+      if target.is_symlink():
+        raise OSError(f"cannot sync symbolic-link file {target}")
+      fd = os.open(target, os.O_RDONLY)
+      try:
+        os.fsync(fd)
+      finally:
+        os.close(fd)
+  for directory in reversed(directories):
+    sync_directory(directory)
 
 
 async def read_capped_body(request: Request, cap: int = MAX_STORAGE_BYTES) -> bytes:

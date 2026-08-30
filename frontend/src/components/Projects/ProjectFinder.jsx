@@ -632,7 +632,7 @@ export default function ProjectFinder({
         try {
           await onSourceSaved(selected)
         } catch (cause) {
-          setError(cause?.message || 'The file was saved, but its live artifact could not rebuild.')
+          setError(cause?.message || 'The file was saved, but its Creation could not rebuild.')
         }
       }
     } catch (cause) {

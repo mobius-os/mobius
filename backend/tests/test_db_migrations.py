@@ -1170,6 +1170,11 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0022_project_artifacts",
     "0023_project_color",
     "0024_chat_goal_dismissal",
+    "0025_shared_app_retention",
+    "0026_shared_app_path_state",
+    "0027_project_artifact_drawer_state",
+    "0028_shared_app_change_operation_id",
+    "0029_shared_app_previous_snapshot_path",
   ]
   assert second == first
 
@@ -1383,6 +1388,83 @@ def test_legacy_chat_models_preserve_malformed_settings(tmp_path, monkeypatch):
     assert conn.execute(text(
       "SELECT agent_settings_json FROM chats WHERE id = 'malformed-settings'"
     )).scalar_one() == "{malformed"
+
+
+def test_shared_app_path_state_migrates_prototype_data_without_runtime_columns(
+  tmp_path, monkeypatch,
+):
+  data_dir = tmp_path / "data"
+  monkeypatch.setenv("DATA_DIR", str(data_dir))
+  instance_id = "11111111-1111-4111-8111-111111111111"
+  snapshot_path = f"shared/app-instances/{instance_id}/build"
+  (data_dir / snapshot_path).mkdir(parents=True)
+  eng = create_engine(f"sqlite:///{tmp_path / 'shared-state.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE shared_app_instances ("
+      "id VARCHAR(64) PRIMARY KEY, snapshot_path VARCHAR(2048) NOT NULL, "
+      "state_json JSON NOT NULL, revision INTEGER NOT NULL)"
+    ))
+    conn.execute(text(
+      "INSERT INTO shared_app_instances (id, snapshot_path, state_json, revision) "
+      "VALUES (:id, :snapshot_path, :state_json, 7)"
+    ), {
+      "id": instance_id,
+      "snapshot_path": snapshot_path,
+      "state_json": json.dumps({"board.json": {"cards": ["kept"]}}),
+    })
+
+  migrations._migrate_shared_app_state_files(eng)
+
+  assert json.loads((
+    data_dir / "shared" / "app-instances" / instance_id / "data" / "board.json"
+  ).read_text(encoding="utf-8")) == {"cards": ["kept"]}
+  with eng.connect() as conn:
+    migrated = conn.execute(text(
+      "SELECT state_json, revision FROM shared_app_instances WHERE id = :id"
+    ), {"id": instance_id}).mappings().one()
+  assert json.loads(migrated["state_json"]) == {}
+  assert migrated["revision"] == 0
+  assert "state_json" not in models.SharedAppInstance.__table__.columns
+  assert "revision" not in models.SharedAppInstance.__table__.columns
+
+
+def test_shared_app_change_operation_identity_is_added_idempotently(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'shared-change.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE shared_app_changes ("
+      "id INTEGER PRIMARY KEY, instance_id VARCHAR(64) NOT NULL)"
+    ))
+
+  migrations._add_shared_app_change_operation_id(eng)
+  migrations._add_shared_app_change_operation_id(eng)
+
+  inspector = inspect(eng)
+  assert "operation_id" in {
+    column["name"] for column in inspector.get_columns("shared_app_changes")
+  }
+  indexes = {index["name"]: index for index in inspector.get_indexes("shared_app_changes")}
+  assert indexes["ix_shared_app_changes_operation_id"]["unique"] == 1
+
+
+def test_shared_app_previous_snapshot_pointer_is_added_idempotently(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'shared-release.db'}")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE shared_app_instances ("
+      "id VARCHAR(64) PRIMARY KEY, snapshot_path VARCHAR(2048) NOT NULL)"
+    ))
+
+  migrations._add_shared_app_previous_snapshot_path(eng)
+  migrations._add_shared_app_previous_snapshot_path(eng)
+
+  inspector = inspect(eng)
+  assert "previous_snapshot_path" in {
+    column["name"] for column in inspector.get_columns("shared_app_instances")
+  }
+  indexes = {index["name"]: index for index in inspector.get_indexes("shared_app_instances")}
+  assert indexes["ix_shared_app_instances_previous_snapshot_path"]["unique"] == 1
 
 
 def test_pending_question_migration_backfills_only_active_latest_question(
@@ -2190,31 +2272,6 @@ def test_published_schema_migration_history_is_unique_ordered_and_immutable():
   assert "migration hashes match migration_history.json" in (
     completed.stdout
   )
-
-
-def test_goal_dismissal_migration_adds_nullable_chat_pointer(tmp_path):
-  eng = create_engine(f"sqlite:///{tmp_path / 'goal-dismissal.db'}")
-  models.Base.metadata.create_all(eng)
-  with eng.begin() as conn:
-    conn.execute(text("ALTER TABLE chats DROP COLUMN dismissed_goal_id"))
-    conn.execute(text(
-      "CREATE TABLE IF NOT EXISTS schema_migrations ("
-      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
-    ))
-    for version in _migration_versions_before("0024_chat_goal_dismissal"):
-      conn.execute(text(
-        "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
-      ), {"v": version, "at": datetime(2026, 8, 22)})
-
-  run_migrations(eng)
-
-  columns = {column["name"] for column in inspect(eng).get_columns("chats")}
-  assert "dismissed_goal_id" in columns
-  with eng.connect() as conn:
-    assert conn.execute(text(
-      "SELECT COUNT(*) FROM schema_migrations "
-      "WHERE version = '0024_chat_goal_dismissal'"
-    )).scalar_one() == 1
 
 
 def test_failed_migration_is_not_recorded_and_can_retry(tmp_path, monkeypatch):

@@ -679,7 +679,7 @@ PY
     # publishes one stable visual-readiness contract; automation must not learn
     # its private handoff classes or compositor attributes. Once the owner says
     # settled, give style/layout two frames to commit.
-    SHELL_SETTLED_EXPR="document.querySelector('.shell[data-workspace-visual-state=\"settled\"]') !== null && performance.getEntriesByName('first-contentful-paint').length > 0"
+    SHELL_SETTLED_EXPR="(document.querySelector('.shell[data-workspace-visual-state=\"settled\"]') !== null || document.querySelector('[data-mobius-visual-state=\"settled\"]') !== null) && performance.getEntriesByName('first-contentful-paint').length > 0"
     BROWSER_PHASE="shell visual readiness"
     if ! browser_wait --fn "$SHELL_SETTLED_EXPR" >/dev/null; then
       die "shell did not reach a settled visual state before capture"

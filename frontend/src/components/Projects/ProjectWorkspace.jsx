@@ -140,7 +140,7 @@ export default function ProjectWorkspace({
   async function rebuildRegisteredArtifacts() {
     const artifacts = await jsonOrThrow(
       await api.projects.artifacts(project.id),
-      'Artifact refresh failed:',
+      'Creation refresh failed:',
     )
     const outcomes = await queueArtifactBuildsAfterSourceSave(
       artifacts,
@@ -210,7 +210,7 @@ export default function ProjectWorkspace({
             <div className="project-overview" aria-label="Project overview">
               <section className="project-overview__section" aria-labelledby={`project-artifacts-heading-${project.id}`}>
                 <header className="project-overview__heading">
-                  <h2 id={`project-artifacts-heading-${project.id}`}>Artifacts</h2>
+                  <h2 id={`project-artifacts-heading-${project.id}`}>Creations</h2>
                 </header>
                 <ProjectArtifacts projectId={project.id} onOpen={onOpenArtifact} />
               </section>

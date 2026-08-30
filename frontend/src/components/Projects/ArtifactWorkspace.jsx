@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import ArrowLeft from 'lucide-react/dist/esm/icons/arrow-left.mjs'
 import Hammer from 'lucide-react/dist/esm/icons/hammer.mjs'
-import { api, jsonOrThrow } from '../../api/client.js'
+import { api, BASE, jsonOrThrow } from '../../api/client.js'
 import { projectQueries } from '../../hooks/queries.js'
 import {
   artifactEntryPath,
@@ -24,12 +24,12 @@ import './Projects.css'
 // HTML renders in a sandboxed iframe with NO
 // allow-same-origin (its JS can never read the parent token); PDFs render
 // through pdfjs; images use a private object URL. The preview hot-swaps.
-export default function ArtifactWorkspace({ projectId, artifactId, projectName, onOpenProject, readOnly = false }) {
+export default function ArtifactWorkspace({ projectId, artifactId, projectName, onOpenProject, readOnly = false, canShareApp = !readOnly }) {
   const artifactsQuery = useQuery({
     queryKey: projectQueries.keys.artifacts(projectId),
     queryFn: async ({ signal }) => normalizeArtifacts(await jsonOrThrow(
       await api.projects.artifacts(projectId, { signal }),
-      'Project artifacts failed:',
+      'Project Creations failed:',
     )),
     // The owner shell also forwards build-status events, but an invited
     // collaborator runs in an isolated route without that stream. Poll only
@@ -53,6 +53,7 @@ export default function ArtifactWorkspace({ projectId, artifactId, projectName, 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [previewVersion, setPreviewVersion] = useState(0)
+  const [sharing, setSharing] = useState(false)
 
   // Hot-swap the preview when a build finishes (building -> ok, or a fresh ok
   // first seen). The status is owned by the query, refreshed by the build-status
@@ -77,16 +78,42 @@ export default function ArtifactWorkspace({ projectId, artifactId, projectName, 
     } finally { setBusy(false) }
   }
 
+  async function useTogether() {
+    if (sharing || !artifact) return
+    const sharedWindow = window.open('', '_blank')
+    if (sharedWindow) {
+      sharedWindow.opener = null
+      sharedWindow.document.title = 'Opening shared app…'
+      sharedWindow.document.body.textContent = 'Opening shared app…'
+    }
+    setSharing(true); setError('')
+    try {
+      const instance = await jsonOrThrow(await api.sharedApps.create({
+        project_id: projectId,
+        artifact_id: artifactId,
+        name: artifact.name || projectName || 'Shared app',
+      }), 'Could not share app:')
+      const url = `${BASE}/shared/app/${encodeURIComponent(instance.id)}`
+      if (sharedWindow) sharedWindow.location.assign(url)
+      else window.location.assign(url)
+      setSharing(false)
+    } catch (cause) {
+      sharedWindow?.close()
+      setError(cause?.message || 'Could not create a shared app.')
+      setSharing(false)
+    }
+  }
+
   const entryPath = artifact ? artifactEntryPath(artifact) : null
 
   if (artifactsQuery.isLoading) {
-    return <section className="artifact-workspace" aria-busy="true"><p className="projects-empty" role="status">Loading artifact…</p></section>
+    return <section className="artifact-workspace" aria-busy="true"><p className="projects-empty" role="status">Loading Creation…</p></section>
   }
   if (!artifact) {
     return (
       <section className="artifact-workspace">
         <div className="projects-empty" role="alert">
-          <p>This artifact is no longer available.</p>
+          <p>This Creation is no longer available.</p>
           {onOpenProject && <button type="button" onClick={onOpenProject}>Back to project</button>}
         </div>
       </section>
@@ -94,7 +121,7 @@ export default function ArtifactWorkspace({ projectId, artifactId, projectName, 
   }
 
   return (
-    <section className="artifact-workspace" aria-label={`${artifact.name || artifactId} artifact`}>
+    <section className="artifact-workspace" aria-label={`${artifact.name || artifactId} Creation`}>
       <header className="artifact-workspace__header">
         {onOpenProject && (
           <button type="button" className="project-icon-button" aria-label="Back to project" title={projectName ? `Back to ${projectName}` : 'Back to project'} onClick={onOpenProject}><ArrowLeft size={18} /></button>
@@ -114,6 +141,12 @@ export default function ArtifactWorkspace({ projectId, artifactId, projectName, 
           <Hammer size={16} aria-hidden="true" />
           <span>{isBuilding(artifact) ? 'Building…' : hasOutput ? 'Rebuild' : 'Build'}</span>
         </button>}
+        {canShareApp && hasOutput && preview === 'html' && <button
+          type="button"
+          className="project-use-together-button"
+          disabled={sharing}
+          onClick={useTogether}
+        >{sharing ? 'Opening…' : 'Open shared version'}</button>}
       </header>
 
       {error && <p className="projects-error" role="alert">{error}</p>}
@@ -123,7 +156,7 @@ export default function ArtifactWorkspace({ projectId, artifactId, projectName, 
           <div className="project-document__empty" role="status">
             <Hammer size={42} strokeWidth={1.3} aria-hidden="true" />
             <h2>Nothing built yet</h2>
-            <p>{status === 'error' ? 'The last build failed. Fix the source and build again.' : 'Build this artifact to preview it here.'}</p>
+            <p>{status === 'error' ? 'The last build failed. Fix the source and build again.' : 'Build this Creation to preview it here.'}</p>
             {!readOnly && <button type="button" className="project-build-button" disabled={busy} onClick={build}><Hammer size={16} aria-hidden="true" /><span>Build</span></button>}
           </div>
         ) : preview === 'pdf' ? (
@@ -235,7 +268,7 @@ function PdfPreview({ projectId, artifactId, entryPath, version }) {
 
   if (error) return <div className="project-document__empty" role="alert"><h2>Couldn’t load the document</h2><p>{error}</p></div>
   if (loading && !data) return <div className="project-document__empty" role="status"><p>Rendering document…</p></div>
-  return <ProjectPdfPreview data={data} title="Artifact document" />
+  return <ProjectPdfPreview data={data} title="Creation document" />
 }
 
 function ImagePreview({ projectId, artifactId, entryPath, version, name }) {

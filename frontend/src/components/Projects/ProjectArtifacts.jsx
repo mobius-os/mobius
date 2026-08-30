@@ -10,8 +10,8 @@ import {
 import ArtifactIdentityIcon from './ArtifactIdentityIcon.jsx'
 import './Projects.css'
 
-// The Artifacts zone: a simple list of a project's buildable outputs, each
-// opening in its own tab. Artifacts are created for you — a
+// The Creations zone: a simple list of a project's buildable outputs, each
+// opening in its own tab. Creations are created for you — a
 // templated project comes with one predefined, and any file can be built into
 // one from its ⋯ menu in the finder — so this panel deliberately has no manual
 // "new artifact" form. Kept as plain as possible.
@@ -20,7 +20,7 @@ export default function ProjectArtifacts({ projectId, onOpen }) {
     queryKey: projectQueries.keys.artifacts(projectId),
     queryFn: async ({ signal }) => normalizeArtifacts(await jsonOrThrow(
       await api.projects.artifacts(projectId, { signal }),
-      'Project artifacts failed:',
+      'Project Creations failed:',
     )),
   })
   const artifacts = artifactsQuery.data || []
@@ -28,11 +28,11 @@ export default function ProjectArtifacts({ projectId, onOpen }) {
   return (
     <div className="project-artifacts">
       {artifactsQuery.isLoading ? (
-        <p className="projects-empty" role="status">Loading artifacts…</p>
+        <p className="projects-empty" role="status">Loading Creations…</p>
       ) : artifactsQuery.isError ? (
-        <div className="projects-empty" role="alert"><p>Artifacts are unavailable.</p><button type="button" onClick={() => artifactsQuery.refetch()}>Try again</button></div>
+        <div className="projects-empty" role="alert"><p>Creations are unavailable.</p><button type="button" onClick={() => artifactsQuery.refetch()}>Try again</button></div>
       ) : artifacts.length === 0 ? (
-        <p className="projects-empty project-artifacts__empty">No artifacts yet.</p>
+        <p className="projects-empty project-artifacts__empty">No Creations yet.</p>
       ) : (
         <div className="project-artifacts__list">
           {artifacts.map(artifact => {

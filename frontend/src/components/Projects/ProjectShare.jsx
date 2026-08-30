@@ -237,7 +237,7 @@ export default function ProjectShare() {
     if (!canEdit) return
     const artifacts = await jsonOrThrow(
       await api.projects.artifacts(projectId),
-      'Artifact refresh failed:',
+      'Creation refresh failed:',
     )
     const outcomes = await queueArtifactBuildsAfterSourceSave(
       artifacts,
@@ -261,7 +261,7 @@ export default function ProjectShare() {
         <button type="button" onClick={leave}><LogOut size={16} /><span>Leave</span></button>
       </header>
       <div className="project-share__workspace">
-        {artifactId ? <ArtifactWorkspace projectId={projectId} artifactId={artifactId} projectName={project.name} readOnly={!canEdit} onOpenProject={() => setArtifactId('')} /> : <ProjectFinder
+        {artifactId ? <ArtifactWorkspace projectId={projectId} artifactId={artifactId} projectName={project.name} readOnly={!canEdit} canShareApp={false} onOpenProject={() => setArtifactId('')} /> : <ProjectFinder
           projectId={projectId}
           projectName={project.name}
           artifactTypes={project.template?.artifact_types}
@@ -269,7 +269,7 @@ export default function ProjectShare() {
           onBuildFile={canEdit ? buildFileAsArtifact : undefined}
           onSourceSaved={canEdit ? rebuildRegisteredArtifacts : undefined}
           overview={<div className="project-share__overview">
-            <section><div className="project-share__section-head"><h2>Artifacts</h2></div><ProjectArtifacts projectId={projectId} onOpen={setArtifactId} /></section>
+            <section><div className="project-share__section-head"><h2>Creations</h2></div><ProjectArtifacts projectId={projectId} onOpen={setArtifactId} /></section>
             <section><div className="project-share__section-head"><h2>People</h2><span>{online} online</span></div><div className="project-share__people">{members.map(member => { const claim = claimsByActor.get(member.id === 'owner' ? 'owner' : `member:${member.id}`); return <div key={member.id}><span>{initials(member.display_name)}</span><strong>{member.you ? `${member.display_name} · You` : member.display_name}</strong><small>{claim?.summary || `${member.role}${member.online ? ' · online' : ''}`}</small></div> })}{claims.filter(claim => claim.actor_kind === 'agent').map(claim => <div key={claim.id}><span>AI</span><strong>{claim.display_name}</strong><small>{claim.summary}</small></div>)}</div></section>
           </div>}
         />}

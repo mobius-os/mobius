@@ -134,7 +134,7 @@ export default function ProjectGitPanel({ project, onClose }) {
                   <button type="button" className="is-primary" disabled={!!busy || !actions.push} aria-expanded={pushReview} onClick={() => setPushReview(true)}><ArrowUp size={14} />{busy === 'push' ? 'Pushing…' : 'Review & push'}</button>
                 </div>
                 {pushReview && <div className="project-git__push-review" role="group" aria-label="Confirm GitHub push">
-                  <div><strong>Publish {status.ahead} {status.ahead === 1 ? 'commit' : 'commits'}?</strong><p>Destination: <code>{status.repository}:{status.branch}</code>. Uncommitted files and generated artifacts stay local.</p></div>
+                  <div><strong>Publish {status.ahead} {status.ahead === 1 ? 'commit' : 'commits'}?</strong><p>Destination: <code>{status.repository}:{status.branch}</code>. Uncommitted files and generated build output stay local.</p></div>
                   <div><button type="button" disabled={!!busy} onClick={() => setPushReview(false)}>Cancel</button><button type="button" className="is-primary" disabled={!!busy} onClick={() => void run('push')}>{busy === 'push' ? 'Pushing…' : `Push ${status.ahead}`}</button></div>
                 </div>}
               </section>
@@ -142,7 +142,7 @@ export default function ProjectGitPanel({ project, onClose }) {
               {status.commits?.length > 0 && <section>
                 <div className="project-git__section-head"><h3>Outgoing commits</h3><span>{status.commits.length}{status.ahead > status.commits.length ? ` of ${status.ahead}` : ''}</span></div>
                 <div className="project-git__commits">{status.commits.map(commit => <div key={commit.id}><code>{commit.id}</code><span>{commit.subject}</span></div>)}</div>
-                <p className="project-git__review-note">Only these committed snapshots are published. Uncommitted files and generated artifacts are never included.</p>
+                <p className="project-git__review-note">Only these committed snapshots are published. Uncommitted files and generated build output are never included.</p>
               </section>}
             </>}
           </>}

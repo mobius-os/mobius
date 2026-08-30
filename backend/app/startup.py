@@ -207,6 +207,15 @@ def _fix_forward_chat_media(context: StartupContext) -> None:
     raise
 
 
+def _reconcile_shared_app_storage(_context: StartupContext) -> None:
+  from app.shared_app_releases import reconcile_release_storage
+  from app.shared_app_state import reconcile_all_journals
+
+  with SessionLocal() as db:
+    reconcile_all_journals(db)
+    reconcile_release_storage(db)
+
+
 def _read_restart_authorization(context: StartupContext) -> None:
   from app.restart_ledger import authorized_restart_nonce
 
@@ -414,6 +423,7 @@ DATABASE_STARTUP_TASKS = (
   StartupTask("backfill session links", _backfill_session_links),
   StartupTask("backfill prompt snapshots", _backfill_prompt_snapshots),
   StartupTask("fix forward chat media", _fix_forward_chat_media),
+  StartupTask("reconcile shared app storage", _reconcile_shared_app_storage),
   StartupTask("read restart authorization", _read_restart_authorization),
   StartupTask(
     "reconcile startup chats",

@@ -923,6 +923,7 @@ def test_shell_capture_waits_for_visual_ownership_and_rendered_fonts(tmp_path: P
     and "first-contentful-paint" in command
   )
   settle_command = commands[settle_index]
+  assert "data-mobius-visual-state" in settle_command
   assert "shell__chat-view--staging" not in settle_command
   assert "shell__chat-view--held" not in settle_command
   assert "data-mode-motion" not in settle_command

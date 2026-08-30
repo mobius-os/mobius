@@ -980,6 +980,18 @@ class ProjectDrawerState(Base):
   pinned_at = Column(DateTime, nullable=True, default=None)
 
 
+class ProjectArtifactDrawerState(Base):
+  """Open recency for one built Project result, separate from content dates."""
+
+  __tablename__ = "project_artifact_drawer_state"
+
+  project_id = Column(
+    String(64), ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True,
+  )
+  artifact_id = Column(String(64), primary_key=True)
+  last_opened_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
 class ProjectAgentMessage(Base):
   """A bounded project-local mailbox between project chat agents.
 
@@ -1045,6 +1057,83 @@ class ProjectInvite(Base):
     String(64), ForeignKey("project_members.id", ondelete="SET NULL"),
     nullable=True,
   )
+
+
+class SharedAppInstance(Base):
+  """A pinned project build with its own members and shared runtime data."""
+
+  __tablename__ = "shared_app_instances"
+
+  id = Column(String(64), primary_key=True)
+  project_id = Column(String(64), ForeignKey("projects.id"), nullable=False, index=True)
+  artifact_id = Column(String(64), nullable=False)
+  name = Column(String(256), nullable=False)
+  entry_path = Column(String(2048), nullable=False)
+  snapshot_path = Column(String(2048), nullable=False, unique=True)
+  previous_snapshot_path = Column(
+    String(2048), nullable=True, unique=True, index=True,
+  )
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  updated_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  deleted_at = Column(DateTime, nullable=True, default=None, index=True)
+
+
+class SharedAppMember(Base):
+  """One revocable person confined to one shared app instance."""
+
+  __tablename__ = "shared_app_members"
+
+  id = Column(String(64), primary_key=True)
+  instance_id = Column(
+    String(64), ForeignKey("shared_app_instances.id", ondelete="CASCADE"),
+    nullable=False, index=True,
+  )
+  display_name = Column(String(128), nullable=False)
+  role = Column(String(16), nullable=False, default="editor")
+  token_epoch = Column(Integer, nullable=False, default=0, server_default="0")
+  joined_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  revoked_at = Column(DateTime, nullable=True, default=None, index=True)
+
+
+class SharedAppInvite(Base):
+  """A one-use invitation to an app instance, never to its source Project."""
+
+  __tablename__ = "shared_app_invites"
+
+  id = Column(String(64), primary_key=True)
+  instance_id = Column(
+    String(64), ForeignKey("shared_app_instances.id", ondelete="CASCADE"),
+    nullable=False, index=True,
+  )
+  token_hash = Column(String(64), nullable=False, unique=True, index=True)
+  invitee_name = Column(String(128), nullable=True)
+  role = Column(String(16), nullable=False, default="editor")
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  expires_at = Column(DateTime, nullable=False, index=True)
+  consumed_at = Column(DateTime, nullable=True, default=None)
+  revoked_at = Column(DateTime, nullable=True, default=None)
+  accepted_member_id = Column(
+    String(64), ForeignKey("shared_app_members.id", ondelete="SET NULL"), nullable=True,
+  )
+
+
+class SharedAppChange(Base):
+  """Bounded path-change cursor for one shared app's data namespace."""
+
+  __tablename__ = "shared_app_changes"
+
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  operation_id = Column(String(64), nullable=True, unique=True, index=True)
+  instance_id = Column(
+    String(64), ForeignKey("shared_app_instances.id", ondelete="CASCADE"),
+    nullable=False, index=True,
+  )
+  kind = Column(String(16), nullable=False)
+  path = Column(String(200), nullable=False)
+  version = Column(String(128), nullable=True)
+  actor_key = Column(String(72), nullable=False)
+  display_name = Column(String(256), nullable=False)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc, index=True)
 
 
 class ProjectPresence(Base):

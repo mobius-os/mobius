@@ -116,6 +116,21 @@ class ProjectPrincipal:
 
 
 @dataclass(frozen=True)
+class SharedAppPrincipal:
+  """Owner or a revocable identity confined to one shared app instance."""
+
+  owner: models.Owner
+  role: str
+  instance_id: str | None = None
+  member_id: str | None = None
+  display_name: str | None = None
+
+  @property
+  def is_owner(self) -> bool:
+    return self.member_id is None
+
+
+@dataclass(frozen=True)
 class PublicAppAccess:
   """One live, anonymous, exact-app capability."""
 
@@ -358,6 +373,45 @@ def get_project_principal(
   db: Session = Depends(get_db),
 ) -> ProjectPrincipal:
   return resolve_project_principal(token, db)
+
+
+def resolve_shared_app_principal(token: str, db: Session) -> SharedAppPrincipal:
+  """Resolve owner authority or one exact live shared-app membership."""
+  owner, payload = _resolve_owner(token, db)
+  scope = payload.get("scope")
+  if scope is None:
+    return SharedAppPrincipal(owner=owner, role="owner", display_name=owner.username)
+  if scope != "shared_app_collaborator":
+    raise HTTPException(403, "Token scope is not valid for shared apps.")
+  member_id = payload.get("shared_app_member")
+  instance_id = payload.get("shared_app_instance")
+  member_epoch = payload.get("member_epoch")
+  if (
+    not isinstance(member_id, str)
+    or not isinstance(instance_id, str)
+    or type(member_epoch) is not int
+  ):
+    raise HTTPException(401, "Invalid shared app session.")
+  member = db.query(models.SharedAppMember).filter(
+    models.SharedAppMember.id == member_id,
+    models.SharedAppMember.instance_id == instance_id,
+    models.SharedAppMember.revoked_at.is_(None),
+  ).first()
+  if member is None or member.token_epoch != member_epoch:
+    raise HTTPException(401, "Shared app access has been revoked.")
+  return SharedAppPrincipal(
+    owner=owner,
+    role=str(member.role),
+    instance_id=str(member.instance_id),
+    member_id=str(member.id),
+    display_name=str(member.display_name),
+  )
+
+
+def get_shared_app_principal(
+  token: str = Depends(_oauth2), db: Session = Depends(get_db),
+) -> SharedAppPrincipal:
+  return resolve_shared_app_principal(token, db)
 
 
 def _enforce_delegation_claims(
