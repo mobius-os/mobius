@@ -47,6 +47,15 @@ test('phone drawer increases row type without changing the section-title scale',
   assert.equal(px(drawerLabel, 'font-size'), 14)
 })
 
+test('now-playing actions keep full touch targets', () => {
+  const control = ruleBody(drawerCss, '.drawer__now-playing-control', 1)
+  const speed = ruleBody(drawerCss, '.drawer__now-playing-speed')
+
+  assert.equal(px(control, 'width'), 44)
+  assert.equal(px(control, 'height'), 44)
+  assert.equal(px(speed, 'min-width'), 44)
+})
+
 test('the docked notifications panel covers the drawer content column', () => {
   const panel = ruleBody(shellCss, '.shell--drawer-docked .notifications')
   const desktopDrawerBody = ruleBody(drawerCss, '.drawer__body', 1)

@@ -901,7 +901,7 @@ const AppCanvas = forwardRef(function AppCanvas({
         frameMediaSessionRef.current.set(srcVersion, mediaEvent.sessionId)
         const source = e.source
         onMediaSessionRef.current?.(appId, mediaEvent, (action) => {
-          if (!['play', 'pause', 'stop'].includes(action)) return false
+          if (!['play', 'pause', 'stop', 'cycle-speed'].includes(action)) return false
           try {
             source?.postMessage({
               type: 'moebius:media-control',
