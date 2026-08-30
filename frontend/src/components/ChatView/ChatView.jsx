@@ -5471,6 +5471,7 @@ export default function ChatView({
           attachTriggerRef={attachTriggerRef}
           messageHistory={messageHistory}
           provider={chatInfo?.provider}
+          projectRef={chatInfo?.project || null}
           leftButtons={
             <BrainUsageButton
               usageEnabled={!embedded}
