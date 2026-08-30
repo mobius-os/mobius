@@ -583,6 +583,7 @@ def test_delegated_capability_read_refuses_symlinked_storage(tmp_path):
 # --- Parent auto-wake on child completion ------------------------------------
 
 import asyncio
+import threading
 
 import app.chat as chat_mod
 import app.chat_start as chat_start_mod
@@ -1103,6 +1104,40 @@ def test_reconcile_wakes_parent_for_completed_while_away(db, monkeypatch):
   assert woken_again.woken_parents == 0
   assert woken_again.attempted_groups == 0
   assert len(starts) == 1
+
+
+def test_recovery_selection_runs_off_the_event_loop(db, monkeypatch):
+  # The correlated GROUP BY selection scan must execute in a worker thread, not
+  # on the server event loop, exactly as autopilot_lease_recovery_loop offloads
+  # its sibling sweep. Reverting the asyncio.to_thread offload makes this the
+  # only failing test in the file.
+  _seed_delegation(db, suffix="offloaded", child_status="completed")
+
+  real_select = delegations_mod._wake_recovery_groups
+  select_thread: dict[str, int] = {}
+
+  def probe(*args, **kwargs):
+    select_thread["ident"] = threading.get_ident()
+    return real_select(*args, **kwargs)
+
+  monkeypatch.setattr(delegations_mod, "_wake_recovery_groups", probe)
+
+  async def capture_delivery(parent_chat_id, source_work_id):
+    return False
+
+  monkeypatch.setattr(
+    delegations_mod, "_deliver_parent_wake", capture_delivery,
+  )
+
+  async def drive():
+    loop_thread = threading.get_ident()
+    result = await delegations_mod.wake_parents_for_completed_delegations()
+    return loop_thread, result
+
+  loop_thread, result = asyncio.run(drive())
+  assert result.attempted_groups == 1
+  assert "ident" in select_thread
+  assert select_thread["ident"] != loop_thread
 
 
 def test_recovery_scan_is_bounded_fair_and_status_only(db, monkeypatch):

@@ -1036,10 +1036,16 @@ async def wake_parents_for_completed_delegations(
   """
   from app.database import SessionLocal
 
-  with SessionLocal() as db:
-    wake_groups = _wake_recovery_groups(
-      db, after=after, batch_size=batch_size,
-    )
+  def _select_groups() -> list[DelegationWakeCursor]:
+    # Session creation and the correlated GROUP BY scan both run in the worker
+    # thread; no synchronous SQLite wait may stall the server event loop as the
+    # Delegation table grows. Mirrors autopilot_lease_recovery_loop's sweep.
+    with SessionLocal() as db:
+      return _wake_recovery_groups(
+        db, after=after, batch_size=batch_size,
+      )
+
+  wake_groups = await asyncio.to_thread(_select_groups)
 
   async def recover(group: DelegationWakeCursor) -> str | None:
     try:
