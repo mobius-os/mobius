@@ -94,6 +94,51 @@ def test_speech_worker_revalidates_so_its_csp_cannot_go_stale():
   assert "'wasm-unsafe-eval'" in (r.headers.get("content-security-policy") or "")
 
 
+def test_speech_pitch_worklet_revalidates_its_stable_url():
+  import os
+
+  static = Path(os.environ["MOBIUS_BAKED_STATIC_DIR"])
+  worklet = static / "speech" / "soundtouch-processor.js"
+  worklet.parent.mkdir(parents=True, exist_ok=True)
+  body = b"// test stub speech worklet\n"
+  if not worklet.exists():
+    worklet.write_bytes(body)
+  else:
+    body = worklet.read_bytes()
+
+  r = TestClient(app).get(
+    "/speech/soundtouch-processor.js",
+    headers={"Range": "bytes=0-0"},
+  )
+  assert r.status_code == 200
+  assert r.content == body
+  assert r.headers.get("cache-control") == "no-cache, must-revalidate"
+
+
+def test_speech_pitch_worklet_baked_fallback_keeps_worker_response_policy(
+  monkeypatch, tmp_path,
+):
+  live = tmp_path / "live"
+  baked = tmp_path / "baked"
+  live.mkdir()
+  worklet = baked / "speech" / "soundtouch-processor.js"
+  worklet.parent.mkdir(parents=True)
+  body = b"// baked speech worklet\n"
+  worklet.write_bytes(body)
+  monkeypatch.setattr(main, "_resolve_static_dir", lambda: live)
+  monkeypatch.setattr(main, "_baked_dir", baked)
+
+  r = TestClient(app).get(
+    "/speech/soundtouch-processor.js",
+    headers={"Range": "bytes=0-0"},
+  )
+
+  assert r.status_code == 200
+  assert r.content == body
+  assert r.headers.get("cache-control") == "no-cache, must-revalidate"
+  assert r.headers.get("content-range") is None
+
+
 def test_standard_security_headers_present():
   h = _headers()
   assert h.get("x-content-type-options") == "nosniff"

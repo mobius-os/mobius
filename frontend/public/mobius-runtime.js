@@ -3258,6 +3258,8 @@ function synthesizeInFrame({ input, channel, openModelStream, maxTextChars }) {
 	let blobUrl = "";
 	let stream = null;
 	let finished = false;
+	let startupComplete = false;
+	let startupTimer = null;
 	let settleResult;
 	let failResult;
 	const result = new Promise((resolve, reject) => {
@@ -3265,6 +3267,16 @@ function synthesizeInFrame({ input, channel, openModelStream, maxTextChars }) {
 		failResult = reject;
 	});
 	result.catch(() => {});
+	const clearStartupTimeout = () => {
+		if (startupTimer === null) return;
+		clearTimeout(startupTimer);
+		startupTimer = null;
+	};
+	const armStartupTimeout = () => {
+		if (finished || startupComplete) return;
+		clearStartupTimeout();
+		startupTimer = setTimeout(() => fail(speechError("timeout", "The speech engine stopped making progress while starting.", "TimeoutError")), LOAD_TIMEOUT_MS);
+	};
 	const cleanup = () => {
 		try {
 			stream?.cancel?.();
@@ -3280,18 +3292,18 @@ function synthesizeInFrame({ input, channel, openModelStream, maxTextChars }) {
 	const fail = (error) => {
 		if (finished) return;
 		finished = true;
-		clearTimeout(timer);
+		clearStartupTimeout();
 		cleanup();
 		failResult(error);
 	};
 	const succeed = (value) => {
 		if (finished) return;
 		finished = true;
-		clearTimeout(timer);
+		clearStartupTimeout();
 		cleanup();
 		settleResult(value);
 	};
-	const timer = setTimeout(() => fail(speechError("timeout", "The speech engine took too long to start.", "TimeoutError")), LOAD_TIMEOUT_MS);
+	armStartupTimeout();
 	let queue = Promise.resolve();
 	const send = (message, transfer = []) => {
 		queue = queue.then(() => ready).then(() => {
@@ -3321,14 +3333,18 @@ function synthesizeInFrame({ input, channel, openModelStream, maxTextChars }) {
 	const onWorkerMessage = (data) => {
 		if (!data || finished) return;
 		if (data.type === "load-ready") {
+			armStartupTimeout();
 			stream?.control?.("start");
 			return;
 		}
 		if (data.type === "chunk-accepted") {
+			armStartupTimeout();
 			stream?.control?.("chunk-accepted");
 			return;
 		}
 		if (data.type === "load-complete") {
+			startupComplete = true;
+			clearStartupTimeout();
 			channel.event("loading", {
 				stage: "preparing",
 				percent: 100
@@ -3360,6 +3376,7 @@ function synthesizeInFrame({ input, channel, openModelStream, maxTextChars }) {
 		if (finished) return;
 		blobUrl = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
 		worker = new Worker(blobUrl);
+		armStartupTimeout();
 		worker.onerror = (event) => fail(speechError("engine_blocked", event?.message || `The speech engine could not start: ${SPEECH_WORKER_URL} did not load.`));
 		worker.onmessage = ({ data }) => onWorkerMessage(data);
 	})();
@@ -3371,26 +3388,38 @@ function synthesizeInFrame({ input, channel, openModelStream, maxTextChars }) {
 	stream = openModelStream({
 		modelId: input?.modelId,
 		engineId: input?.engineId,
-		onManifest: (value) => send({
-			type: "load-start",
-			wasmUrl: new URL(SPEECH_WASM_URL, globalThis.location.href).href,
-			assetBytes: value.assetBytes,
-			temperature: value.temperature,
-			clonedVoiceSamples: input?.clonedVoiceSamples || value.clonedVoiceSamples || void 0
-		}),
-		onChunk: (value) => send({
-			type: "asset-chunk",
-			chunkId: value.index,
-			assetId: value.assetId,
-			index: value.index,
-			offset: value.offset,
-			bytes: value.bytes
-		}, [value.bytes]),
-		onProgress: (value) => channel.event("loading", {
-			stage: "reading",
-			...value
-		}),
-		onComplete: () => send({ type: "load-finish" }),
+		onManifest: (value) => {
+			armStartupTimeout();
+			send({
+				type: "load-start",
+				wasmUrl: new URL(SPEECH_WASM_URL, globalThis.location.href).href,
+				assetBytes: value.assetBytes,
+				temperature: value.temperature,
+				clonedVoiceSamples: input?.clonedVoiceSamples || value.clonedVoiceSamples || void 0
+			});
+		},
+		onChunk: (value) => {
+			armStartupTimeout();
+			send({
+				type: "asset-chunk",
+				chunkId: value.index,
+				assetId: value.assetId,
+				index: value.index,
+				offset: value.offset,
+				bytes: value.bytes
+			}, [value.bytes]);
+		},
+		onProgress: (value) => {
+			armStartupTimeout();
+			channel.event("loading", {
+				stage: "reading",
+				...value
+			});
+		},
+		onComplete: () => {
+			armStartupTimeout();
+			send({ type: "load-finish" });
+		},
 		onError: fail
 	});
 	return {
@@ -3398,7 +3427,7 @@ function synthesizeInFrame({ input, channel, openModelStream, maxTextChars }) {
 		cancel() {
 			if (finished) return;
 			finished = true;
-			clearTimeout(timer);
+			clearStartupTimeout();
 			cleanup();
 			failResult(speechError("aborted", "Speech stopped.", "AbortError"));
 		}
@@ -3621,7 +3650,6 @@ function makeCapabilities({ declarations = {}, hostWindow, selfWindow } = {}) {
 					stream.on("chunk", onChunk);
 					stream.on("progress", onProgress);
 					stream.result.then(onComplete).catch((error) => {
-						if (error?.name === "AbortError") return;
 						if (error?.code === "invalid_request") fallbackToShell();
 						else onError(error);
 					});

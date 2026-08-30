@@ -14,6 +14,10 @@ const frame = readFileSync(
   resolve(here, '../../../public/app-frame.html'),
   'utf8',
 )
+const frameSpeech = readFileSync(
+  resolve(here, '../../runtime/speech.js'),
+  'utf8',
+)
 
 function extractFunction(source, name) {
   const start = source.indexOf(`function ${name}(`)
@@ -48,6 +52,30 @@ function frameMountSignal(version, queue) {
   )
   return { source, mount: factory(frameWindow, createElement, '42') }
 }
+
+test('speech startup watchdog tracks progress and ends when model loading completes', () => {
+  const readyStart = frameSpeech.indexOf("if (data.type === 'load-ready')")
+  const readyEnd = frameSpeech.indexOf("if (data.type === 'chunk-accepted')", readyStart)
+  assert.match(frameSpeech.slice(readyStart, readyEnd), /armStartupTimeout\(\)/)
+
+  const chunkStart = readyEnd
+  const chunkEnd = frameSpeech.indexOf("if (data.type === 'load-complete')", chunkStart)
+  assert.match(frameSpeech.slice(chunkStart, chunkEnd), /armStartupTimeout\(\)/)
+
+  const start = frameSpeech.indexOf("if (data.type === 'load-complete')")
+  const end = frameSpeech.indexOf("if (data.type === 'audio')", start)
+  assert.ok(start >= 0 && end > start)
+  const branch = frameSpeech.slice(start, end)
+  assert.match(branch, /clearStartupTimeout\(\)/)
+  assert.ok(branch.indexOf('clearStartupTimeout()') < branch.indexOf('generateNext()'))
+
+  for (const callback of ['onManifest', 'onChunk', 'onProgress', 'onComplete']) {
+    const callbackStart = frameSpeech.indexOf(`${callback}:`)
+    const callbackEnd = frameSpeech.indexOf('\n    },', callbackStart)
+    assert.ok(callbackStart >= 0 && callbackEnd > callbackStart, `${callback} exists`)
+    assert.match(frameSpeech.slice(callbackStart, callbackEnd), /armStartupTimeout\(\)/)
+  }
+})
 
 test('commit ordering keeps capability sessions on the exact live document', () => {
   const queue = []

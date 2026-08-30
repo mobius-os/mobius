@@ -127,10 +127,64 @@ test('speech providers lazy-load the runtime and preserve the invoking app ident
 
   assert.equal(typeof speechControl.control, 'function')
   assert.equal(typeof modelControl.control, 'function')
+  assert.equal(speech.contention({
+    input: { operation: 'catalog' }, activeInput: { operation: 'model-stream' },
+  }), 'share')
+  assert.equal(speech.contention({
+    input: { operation: 'model-stream' }, activeInput: { operation: 'synthesize' },
+  }), 'replace')
   assert.deepEqual(calls, [
     ['speech', { text: 'Hello' }],
     ['models', 61, { operation: 'catalog' }],
   ])
+})
+
+test('an invalid speech operation cannot replace healthy work', async () => {
+  const controls = []
+  const sent = []
+  const source = { id: 'speech-frame' }
+  const provider = createSpeechProvider({
+    loadRuntime: async () => ({
+      openSpeechCapability({ input }) {
+        if (input.operation === 'unknown') {
+          throw new TypeError('Unknown speech operation.')
+        }
+        return { control(action) { controls.push(action) } }
+      },
+    }),
+  })
+  const host = createCapabilityHost({
+    providers: { 'media.speech': provider },
+    getDeclaration: () => ({ version: 1, lifecycle: 'background' }),
+    isActive: () => true,
+    send(_target, message) { sent.push(message) },
+  })
+
+  host.handle(source, {
+    type: 'moebius:capability-open',
+    requestId: 'healthy-stream',
+    capability: 'media.speech',
+    version: 1,
+    input: { operation: 'model-stream' },
+  })
+  await new Promise((resolve) => setImmediate(resolve))
+
+  host.handle(source, {
+    type: 'moebius:capability-open',
+    requestId: 'invalid-stream',
+    capability: 'media.speech',
+    version: 1,
+    input: { operation: 'unknown' },
+  })
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.deepEqual(controls, [])
+  assert.equal(host.activeCount(), 1)
+  assert.equal(sent.some((message) => (
+    message.requestId === 'invalid-stream'
+      && message.type === 'moebius:capability-error'
+      && message.code === 'invalid_request'
+  )), true)
 })
 
 test('screen control provider binds the app chat, survives detach, and reattaches', async () => {

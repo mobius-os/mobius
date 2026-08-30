@@ -172,6 +172,10 @@ The host registry maps a capability id to:
 {
   version: 1,
   exclusive: true,
+  // Optional per-request policy for a capability with both read-only and
+  // resource-owning operations. Receives {input, activeInput} and returns
+  // 'share', 'replace', or 'reject'. It takes precedence over `exclusive`.
+  contention({ input, activeInput }) { return 'reject' },
   onDeactivate: 'finish',
   preserveOnDetach: false,
   async open({ input, declaration, channel }) {
@@ -189,7 +193,12 @@ The host registry maps a capability id to:
 The generic host owns correlation, declaration/version checks, exact-source
 binding, active-frame checks, queued controls before readiness, terminal
 settlement, and teardown. Providers own input validation, browser APIs, result
-shape, event names, exclusivity, and feature-specific cleanup.
+shape, event names, contention/exclusivity, and feature-specific cleanup. A
+`replace` decision cancels and settles the matching older session before the
+new request opens; use it only when the new user intent honestly supersedes the
+old work. The replaced consumer receives an `AbortError` with code
+`superseded`, so it can preserve a resumable checkpoint and explain the handoff
+instead of presenting a generic failure.
 
 Provider methods must be idempotent under repeated finish/cancel, release every
 browser resource, and tolerate cancellation after the app frame has gone away.
