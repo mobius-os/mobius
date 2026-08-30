@@ -2182,7 +2182,7 @@ def test_published_schema_migration_history_is_unique_ordered_and_immutable():
     check=False,
   )
   assert completed.returncode == 0, completed.stderr
-  assert "immutable migrations verified against migration_history.json" in (
+  assert "migration hashes match migration_history.json" in (
     completed.stdout
   )
 

@@ -199,41 +199,42 @@ def append_only_error(
   return "published migration history changed"
 
 
-def frozen_history_error(
-  frozen: dict[str, str], candidate: dict[str, tuple[str, str]],
+def committed_history_error(
+  committed: dict[str, str], candidate: dict[str, tuple[str, str]],
 ) -> str | None:
-  """Explain how candidate differs from the checked-in immutable ledger."""
+  """Explain how candidate differs from the checkout's committed ledger."""
   candidate_versions = list(candidate)
-  frozen_versions = list(frozen)
-  if candidate_versions != frozen_versions:
+  committed_versions = list(committed)
+  if candidate_versions != committed_versions:
     return (
       "registry and migration_history.json differ; append the new version and "
       "its hash without editing or renumbering prior entries"
     )
   changed = [
     version for version, (_function, digest) in candidate.items()
-    if frozen.get(version) != digest
+    if committed.get(version) != digest
   ]
   if changed:
     return (
-      "published migration code changed for " + ", ".join(changed)
-      + "; restore it and append a new migration"
+      "migration code differs from migration_history.json for "
+      + ", ".join(changed)
+      + "; restore the matching entry and append a new migration"
     )
   return None
 
 
-def _frozen_history() -> dict[str, str]:
+def _committed_history() -> dict[str, str]:
   try:
-    frozen = json.loads(HISTORY.read_text(encoding="utf-8"))
+    committed = json.loads(HISTORY.read_text(encoding="utf-8"))
   except (OSError, json.JSONDecodeError) as exc:
     fail(f"cannot read {HISTORY.relative_to(ROOT)}: {exc}")
   if (
-    frozen.get("format") != HISTORY_FORMAT
-    or frozen.get("hash_kind") != HISTORY_HASH_KIND
-    or not isinstance(frozen.get("migrations"), dict)
+    committed.get("format") != HISTORY_FORMAT
+    or committed.get("hash_kind") != HISTORY_HASH_KIND
+    or not isinstance(committed.get("migrations"), dict)
   ):
     fail("migration_history.json has an unsupported shape or hash kind")
-  migrations = frozen["migrations"]
+  migrations = committed["migrations"]
   if not all(
     isinstance(version, str)
     and isinstance(digest, str)
@@ -274,9 +275,9 @@ def main() -> None:
   candidate = inspect_history(
     SOURCE.read_text(encoding="utf-8"), source=str(SOURCE_REPO_PATH),
   )
-  frozen_regression = frozen_history_error(_frozen_history(), candidate)
-  if frozen_regression:
-    fail(frozen_regression)
+  checkout_drift = committed_history_error(_committed_history(), candidate)
+  if checkout_drift:
+    fail(checkout_drift)
   if args.against:
     published = inspect_history(
       _published_source(args.against),
@@ -289,8 +290,8 @@ def main() -> None:
   else:
     suffix = ""
   print(
-    f"schema-migrations: {len(candidate)} immutable migrations verified "
-    f"against migration_history.json{suffix}"
+    f"schema-migrations: {len(candidate)} migration hashes match "
+    f"migration_history.json{suffix}"
   )
 
 
