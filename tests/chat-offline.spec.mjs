@@ -30,7 +30,7 @@ function readChatOutbox(page) {
   }))
 }
 
-test('offline Send is retained once and drains into the chat after reconnect', async ({ page, context }) => {
+test('offline Send survives reload and drains into the chat once after reconnect', async ({ page, context }) => {
   await page.goto(`${BASE}/shell/`, { waitUntil: 'domcontentloaded' })
   const chat = await createTaggedChat(page, 'offline-outbox')
   const chatPath = `/api/chats/${chat.id}`
@@ -108,8 +108,23 @@ test('offline Send is retained once and drains into the chat after reconnect', a
   expect(retained[0].cid).toBeTruthy()
   expect(retained[0].body.cid).toBe(retained[0].cid)
 
-  networkUp = true
+  // Restore document reachability while the message transport remains down,
+  // then reload the complete shell. Session-owned draft/files and the durable
+  // outbox row must compose back into automatic retry ownership; an
+  // authoritative empty transcript is not proof that the retained send failed.
   await context.setOffline(false)
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await expect(deliveryNote).toHaveText(
+    'Möbius couldn’t confirm the send. Your message is queued and will retry automatically.',
+  )
+  await expect(input).toHaveValue(message)
+  await expect.poll(() => readChatOutbox(page), { timeout: 5000 }).toHaveLength(1)
+
+  networkUp = true
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event('online'))
+    window.dispatchEvent(new Event('focus'))
+  })
   await expect(page.locator('.shell__connection-status')).toHaveCount(0)
   await expect.poll(() => acceptedBodies, { timeout: 5000 }).toHaveLength(1)
   expect(acceptedBodies[0]).toEqual(retained[0].body)

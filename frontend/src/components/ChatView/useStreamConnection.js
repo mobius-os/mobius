@@ -63,6 +63,17 @@ export function streamCatchUpOwnerMatches(owner, current) {
     && String(owner?.chatId ?? '') === String(current?.chatId ?? '')
 }
 
+export async function retireInteractiveIntent({
+  cid,
+  chatId,
+  outcome,
+  outboxRetained,
+  retire = retireIntent,
+}) {
+  const retired = await retire(cid, { chatId, outcome })
+  return retired ? false : outboxRetained
+}
+
 // Delay before the wake/online reattach surfaces as a visible
 // "Reconnecting…" note. Real mobile reattach can spend time waking the
 // radio, negotiating TLS, and replaying a long event log; quick
@@ -1665,8 +1676,12 @@ export default function useStreamConnection(chatId, {
         // restore the draft; silently sending it later would be wrong. Keep
         // only transport/server/rate and auth outcomes for a later replay.
         if (outboxCid && replayOutcome !== 'retry' && replayOutcome !== 'auth') {
-          outboxRetained = false
-          void retireIntent(outboxCid)
+          outboxRetained = await retireInteractiveIntent({
+            cid: outboxCid,
+            chatId: chatIdRef.current,
+            outcome: replayOutcome,
+            outboxRetained,
+          })
         }
         throw await chatHttpError(res)
       }
@@ -1675,8 +1690,14 @@ export default function useStreamConnection(chatId, {
       // Any parsed 2xx response is authoritative acceptance (including
       // duplicate/queued/answer-delivered). A lost response instead leaves the
       // record in place for the shell-wide reconnect drain.
-      if (outboxCid) void retireIntent(outboxCid)
-      outboxRetained = false
+      if (outboxCid) {
+        outboxRetained = await retireInteractiveIntent({
+          cid: outboxCid,
+          chatId: chatIdRef.current,
+          outcome: 'delivered',
+          outboxRetained,
+        })
+      }
       // Trust the backend's actual status, not the frontend's queueOnly
       // hint. The frontend's `sending` flag can be stale (turn finished
       // between the doSend check and the POST landing), so a request

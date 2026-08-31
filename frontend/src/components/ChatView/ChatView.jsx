@@ -12,7 +12,7 @@ import { flushSync } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
-import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
+import { apiFetch, getAuthHeaders, getToken, jsonOrThrow, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey, chatQueries, settingsQueries } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode from './useScrollMode.js'
@@ -34,7 +34,12 @@ import {
   getRecoverySnapshot,
   subscribeRecovery,
 } from '../../lib/connectivityStore.js'
-import { retireIntent, subscribeOutboxDelivered } from './chatOutbox.js'
+import {
+  inspectOutboxIntent,
+  outboxPrincipalKey,
+  retireIntent,
+  subscribeOutboxSettlement,
+} from './chatOutbox.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
@@ -171,6 +176,7 @@ import {
 } from './sendAttemptIdentity.js'
 import {
   clearFailedSendAttempt,
+  coordinateFailedSendRecovery,
   settleFailedSendConfirmation,
 } from './sendAttemptRecovery.js'
 import {
@@ -869,6 +875,21 @@ export default function ChatView({
   // confirmation notice under an exact token so an older check cannot clear a
   // newer send failure or leave the internal `continue` action in the composer.
   const continuationConfirmationRef = useRef(null)
+  // Terminal drain events are a wake-up hint for one exact attempt, never a
+  // replacement for inspecting the durable outbox. Retain the hint only while
+  // its cid + draft identity still name the mounted composer owner.
+  const failedSendTerminalRef = useRef(null)
+  const failedSendOutboxReconcileSeqRef = useRef(0)
+  const failedSendChatIdRef = useRef(String(chatId))
+  useLayoutEffect(() => {
+    failedSendChatIdRef.current = String(chatId)
+    failedSendTerminalRef.current = null
+    failedSendOutboxReconcileSeqRef.current += 1
+    return () => {
+      failedSendOutboxReconcileSeqRef.current += 1
+      failedSendTerminalRef.current = null
+    }
+  }, [chatId])
   // Re-entrancy guard for doSendSilent (answer submissions). sendingRef
   // alone cannot guard doSendSilent because answer sends are deliberately
   // allowed while sendingRef is true (the runner is parked waiting for
@@ -1078,6 +1099,65 @@ export default function ChatView({
     commitSendIntent({ cid, intent, fallbackWillPin })
   }
 
+  const reconcileFailedSendOutbox = useCallback(async ({
+    visibleMessages = messagesRef.current,
+    pendingMessages = pendingQueue.pendingMessagesRef.current,
+    authoritative = false,
+    terminalOutcome = null,
+    expectedAttempt = failedSendAttemptRef.current,
+    expectedFetchGeneration = fetchGenRef.current,
+  } = {}) => {
+    if (!expectedAttempt) return 'none'
+    const sequence = failedSendOutboxReconcileSeqRef.current + 1
+    failedSendOutboxReconcileSeqRef.current = sequence
+    const expectedChatId = String(chatId)
+    const reconciliation = await coordinateFailedSendRecovery({
+      expectedAttempt,
+      expectedChatId,
+      expectedGeneration: expectedFetchGeneration,
+      expectedInspection: sequence,
+      visibleMessages,
+      pendingMessages,
+      authoritative,
+      terminalOutcome,
+      inspectIntent: () => inspectOutboxIntent({
+        chatId: expectedChatId,
+        cid: expectedAttempt.cid,
+        principalKey: outboxPrincipalKey(getToken()),
+        attempt: expectedAttempt,
+      }),
+      readCurrent: () => ({
+        chatId: failedSendChatIdRef.current,
+        chatStale: chatIdStaleRef.current,
+        generation: fetchGenRef.current,
+        inspection: failedSendOutboxReconcileSeqRef.current,
+        attempt: failedSendAttemptRef.current,
+        visibleMessages: messagesRef.current,
+        pendingMessages: pendingQueue.pendingMessagesRef.current,
+        terminal: failedSendTerminalRef.current,
+      }),
+    })
+    if (reconciliation.status === 'none' || reconciliation.status === 'superseded') {
+      return reconciliation.status
+    }
+    return reconcileFailedSendAttempt(
+      messagesRef.current,
+      pendingQueue.pendingMessagesRef.current,
+      {
+        expectedAttempt,
+        reportQueued: reconciliation.status === 'queued',
+        reportMissing: reconciliation.status === 'missing',
+        reportUnavailable: reconciliation.status === 'unconfirmed',
+      },
+    )
+  }, [
+    chatId,
+    failedSendAttemptRef,
+    messagesRef,
+    pendingQueue.pendingMessagesRef,
+    reconcileFailedSendAttempt,
+  ])
+
   // Re-fetch messages from the API. Called when the SSE stream reconnects
   // and gets a 204 (no active broadcast — the chat finished while the
   // user was offline or on poor connectivity). Replaces stale messages
@@ -1087,6 +1167,7 @@ export default function ChatView({
     terminal204 = false,
     authoritative = false,
     expectedFailedAttempt,
+    failedAttemptTerminalOutcome = null,
   } = {}) => {
     if (sendingRef.current && !force) return
     const gen = fetchGenRef.current
@@ -1110,11 +1191,16 @@ export default function ChatView({
           }
         }
       }
-      reconcileFailedSendAttempt(
-        msgs,
-        data.pending_messages || [],
-        { reportMissing: true, expectedAttempt: expectedFailedAttempt },
-      )
+      await reconcileFailedSendOutbox({
+        visibleMessages: msgs,
+        pendingMessages: data.pending_messages || [],
+        authoritative: true,
+        terminalOutcome: failedAttemptTerminalOutcome,
+        expectedAttempt: expectedFailedAttempt === undefined
+          ? failedSendAttemptRef.current
+          : expectedFailedAttempt,
+        expectedFetchGeneration: gen,
+      })
       const preserveLocalTurn =
         !authoritative
         && force
@@ -1203,6 +1289,14 @@ export default function ChatView({
         pendingLimitResume: !!tailResumableBlock(msgs)?.pause?.resets_at,
       }
     } catch {
+      void reconcileFailedSendOutbox({
+        authoritative: false,
+        terminalOutcome: failedAttemptTerminalOutcome,
+        expectedAttempt: expectedFailedAttempt === undefined
+          ? failedSendAttemptRef.current
+          : expectedFailedAttempt,
+        expectedFetchGeneration: gen,
+      })
       // Network error — silent, user can retry. Callers that need to attach
       // to a newly announced run must distinguish this ambiguous result from
       // an authoritative idle verdict.
@@ -1213,7 +1307,7 @@ export default function ChatView({
     commitMessages,
     pendingQueue.hydrate,
     queryClient,
-    reconcileFailedSendAttempt,
+    reconcileFailedSendOutbox,
     setActiveAssistantMessageId,
   ])
 
@@ -2162,6 +2256,7 @@ export default function ChatView({
     ))
 
     const gen = fetchGenRef.current
+    const activationFailedAttempt = failedSendAttemptRef.current
     const requestJson = async (path, label) => {
       const response = await apiFetch(path, {
         timeoutMs: CHAT_FETCH_TIMEOUT_MS,
@@ -2289,11 +2384,14 @@ export default function ChatView({
         return
       }
       const msgs = detailCache.messages
-      reconcileFailedSendAttempt(
-        msgs,
-        runtime.pending_messages,
-        { reportMissing: true },
-      )
+      await reconcileFailedSendOutbox({
+        visibleMessages: msgs,
+        pendingMessages: runtime.pending_messages || [],
+        authoritative: true,
+        expectedAttempt: activationFailedAttempt,
+        expectedFetchGeneration: gen,
+      })
+      if (cancelled || fetchGenRef.current !== gen) return
 
       if (reused) {
         // One narrow cache publication updates queue/liveness only. Reconcile
@@ -2443,6 +2541,15 @@ export default function ChatView({
         setLoadError(!cacheIsSafeFallback)
         setLoading(false)
         setActivationSettled(true)
+        void reconcileFailedSendOutbox({
+          visibleMessages: cacheIsSafeFallback
+            ? activationCache.messages
+            : [],
+          pendingMessages: pendingQueue.pendingMessagesRef.current,
+          authoritative: false,
+          expectedAttempt: activationFailedAttempt,
+          expectedFetchGeneration: gen,
+        })
         // A confirmed 404 means this chat is gone (deleted out-of-band, or an
         // off-list chat the restore probe had memoized as existing). Tell the
         // shell so it demotes to a live chat instead of stranding the user on a
@@ -2468,7 +2575,7 @@ export default function ChatView({
     loadNonce,
     searchReveal?.anchorKey,
     searchReveal?.id,
-    reconcileFailedSendAttempt,
+    reconcileFailedSendOutbox,
     setActiveAssistantMessageId,
   ])
 
@@ -2996,7 +3103,11 @@ export default function ChatView({
         if (!directSteer) pendingQueue.cancelByCid(queuedMsg.cid)
         forgetSendIntent({ cid: queuedMsg.cid })
         const failedAttempt = continuation ? null : {
-          cid, draftIdentity, text, attachments: composerFileSnapshot,
+          cid,
+          draftIdentity,
+          text,
+          transportContent: text,
+          attachments: composerFileSnapshot,
         }
         if (failedAttempt) rememberFailedAttempt(failedAttempt)
         restoreComposerAfterFailedSend()
@@ -3190,7 +3301,11 @@ export default function ChatView({
         setServerRunningState(false)
       }
       const failedAttempt = continuation ? null : {
-        cid, draftIdentity, text, attachments: composerFileSnapshot,
+        cid,
+        draftIdentity,
+        text,
+        transportContent: sendText,
+        attachments: composerFileSnapshot,
       }
       if (failedAttempt) rememberFailedAttempt(failedAttempt)
       restoreComposerAfterFailedSend()
@@ -3499,11 +3614,16 @@ export default function ChatView({
     const cancelledIndex = currentQueue.findIndex(row => cidOf(row) === cid)
     const cancelledRow = cancelledIndex >= 0 ? currentQueue[cancelledIndex] : null
     pendingQueue.cancelByCid(cid)
+    // Make replay retirement authoritative before asking the server to cancel
+    // the queue row. A failed state transition restores the UI and stops here;
+    // otherwise a later automatic replay could resurrect work the owner just
+    // cancelled. Physical IndexedDB deletion is only best-effort compaction.
+    const retired = await retireIntent(cid, { chatId, outcome: 'cancelled' })
+    if (!retired) {
+      pendingQueue.restoreByCid(cancelledRow, cancelledIndex)
+      return
+    }
     forgetSendIntent({ cid })
-    // Cancellation owns the local intent too. If the DELETE is ambiguous, the
-    // server's durable queue row remains authoritative and reconciliation below
-    // restores it without needing a second client replay.
-    void retireIntent(cid)
     try {
       const res = await apiFetch(`/chats/${chatId}/pending/${encodeURIComponent(cid)}`, {
         method: 'DELETE',
@@ -4213,6 +4333,7 @@ export default function ChatView({
     let observedRecoveryGeneration = getRecoverySnapshot()
     const run = () => {
       if (cancelled) return
+      void reconcileFailedSendOutbox({ authoritative: false })
       reconcileRuntimeState().then(runtime => {
         if (!cancelled && runtime) ensureRuntimeStreamConnected(runtime)
       })
@@ -4238,17 +4359,48 @@ export default function ChatView({
       window.removeEventListener('online', run)
       document.removeEventListener('visibilitychange', onVisible)
     }
-  }, [ensureRuntimeStreamConnected, hidden, reconcileRuntimeState])
+  }, [
+    ensureRuntimeStreamConnected,
+    hidden,
+    reconcileFailedSendOutbox,
+    reconcileRuntimeState,
+  ])
 
   // The shell can deliver this chat's intent while another pane is visible.
-  // Reconcile immediately when this mounted chat becomes that delivery target
-  // instead of waiting for its next polling/focus interval.
-  useEffect(() => subscribeOutboxDelivered((deliveredChatId) => {
-    if (hidden || String(deliveredChatId) !== String(chatId)) return
-    reconcileRuntimeState().then(runtime => {
+  // Reconcile the authoritative transcript immediately when this mounted chat
+  // becomes that delivery target. The runtime-only projection carries no
+  // message cids and therefore cannot settle the restored composer.
+  useEffect(() => subscribeOutboxSettlement((settlement) => {
+    if (hidden || String(settlement?.chatId) !== String(chatId)) return
+    const attempt = failedSendAttemptRef.current
+    if (!attempt || String(settlement?.cid) !== String(attempt.cid)) return
+    failedSendTerminalRef.current = {
+      attempt,
+      outcome: settlement.outcome,
+    }
+    if (settlement.outcome === 'failed') {
+      void reconcileFailedSendOutbox({
+        terminalOutcome: 'failed',
+        expectedAttempt: attempt,
+      })
+      return
+    }
+    fetchMessages({
+      force: true,
+      authoritative: true,
+      expectedFailedAttempt: attempt,
+      failedAttemptTerminalOutcome: 'delivered',
+    }).then(runtime => {
       if (runtime) ensureRuntimeStreamConnected(runtime)
     })
-  }), [chatId, hidden, reconcileRuntimeState, ensureRuntimeStreamConnected])
+  }), [
+    chatId,
+    ensureRuntimeStreamConnected,
+    failedSendAttemptRef,
+    fetchMessages,
+    hidden,
+    reconcileFailedSendOutbox,
+  ])
 
   // Empty-state is the "I have nothing to show because nothing happened
   // yet" view. If the initial chat fetch errored, we have no idea

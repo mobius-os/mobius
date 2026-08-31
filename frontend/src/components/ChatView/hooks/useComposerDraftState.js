@@ -153,6 +153,7 @@ export default function useComposerDraftState({ chatId, hidden, inputRef }) {
     {
       reportMissing = false,
       reportUnavailable = false,
+      reportQueued = false,
       expectedAttempt,
     } = {},
   ) => {
@@ -160,7 +161,7 @@ export default function useComposerDraftState({ chatId, hidden, inputRef }) {
       failedSendAttemptRef.current,
       visibleMessages,
       pendingMessages,
-      { reportMissing, reportUnavailable, expectedAttempt },
+      { reportMissing, reportUnavailable, reportQueued, expectedAttempt },
     )
     if (reconciliation.status !== 'durable') {
       if (reconciliation.sendFailure) setSendFailure(reconciliation.sendFailure)

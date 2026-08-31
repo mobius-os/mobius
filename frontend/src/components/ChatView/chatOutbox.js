@@ -1,4 +1,5 @@
-import { clear, createStore, del, entries, set, update } from 'idb-keyval'
+import { clear, createStore, del, entries, get, set, update } from 'idb-keyval'
+import { sendDraftIdentity } from './sendAttemptIdentity.js'
 
 // Durable owner intent for the two ordinary chat writes: sending a message and
 // answering a question. useStreamConnection records the complete POST body here
@@ -16,7 +17,13 @@ const store = createStore(OUTBOX_DB, OUTBOX_STORE)
 // a permanent 403 from being POSTed on every focus/visibility event. A new login
 // reloads the document and gets one fresh attempt with the new credential.
 const authBlockedAttempted = new Set()
+// A failed IndexedDB transition cannot be allowed to race a later drain in the
+// same document. The durable retired marker below is the cross-reload owner;
+// this fence only closes the smaller in-process gap while that transition is
+// unavailable or still committing.
+const retirementFences = new Set()
 let clearGeneration = 0
+let retirementSequence = 0
 
 /**
  * A non-secret partition key for the principal represented by a JWT.
@@ -85,16 +92,21 @@ export function classifyReplayOutcome({ ok, status }) {
   return 'failed'
 }
 
-const deliveredSubscribers = new Set()
+const settlementSubscribers = new Set()
 
-export function subscribeOutboxDelivered(callback) {
-  deliveredSubscribers.add(callback)
-  return () => { deliveredSubscribers.delete(callback) }
+export function subscribeOutboxSettlement(callback) {
+  settlementSubscribers.add(callback)
+  return () => { settlementSubscribers.delete(callback) }
 }
 
-function announceDelivered(chatId) {
-  for (const callback of deliveredSubscribers) {
-    try { callback(chatId) } catch { /* a listener cannot stall the drain */ }
+function announceSettlement(record, outcome) {
+  const settlement = {
+    chatId: String(record.chatId),
+    cid: String(record.cid),
+    outcome,
+  }
+  for (const callback of settlementSubscribers) {
+    try { callback(settlement) } catch { /* a listener cannot stall the drain */ }
   }
 }
 
@@ -125,16 +137,180 @@ export async function enqueueIntent({ chatId, cid, type, body, principalKey }) {
       ),
       authBlocked: false,
     }), store)
+    retirementFences.delete(key)
     return true
   } catch {
     return false
   }
 }
 
-export async function retireIntent(cid) {
-  if (!cid) return
-  authBlockedAttempted.delete(String(cid))
-  try { await del(String(cid), store) } catch { /* best-effort persistence */ }
+function retirementId() {
+  retirementSequence += 1
+  return `${Date.now()}:${retirementSequence}`
+}
+
+function transitionIntentToRetired(key, { chatId, outcome }) {
+  return store('readwrite', objectStore => new Promise((resolve, reject) => {
+    const transaction = objectStore.transaction
+    let result = { state: 'absent' }
+    transaction.oncomplete = () => resolve(result)
+    transaction.onerror = () => reject(transaction.error || new Error('outbox retirement failed'))
+    transaction.onabort = () => reject(transaction.error || new Error('outbox retirement aborted'))
+
+    const request = objectStore.get(key)
+    request.onsuccess = () => {
+      const record = request.result
+      if (!record || (chatId && String(record.chatId) !== String(chatId))) return
+      if (record.replayState === 'retired' && record.retirement?.id) {
+        result = {
+          state: 'already-retired',
+          record,
+          retirement: record.retirement,
+        }
+        return
+      }
+      const retirement = {
+        id: retirementId(),
+        outcome: outcome || 'discarded',
+      }
+      result = { state: 'retired', record, retirement }
+      objectStore.put({
+        ...record,
+        replayState: 'retired',
+        retirement,
+      }, key)
+    }
+  }))
+}
+
+// Delete is only compaction. It re-checks the retirement token in the same
+// transaction so a manual resend that re-activates this cid cannot be deleted
+// by an older retirement cleanup.
+function cleanupRetiredIntent(key, expectedRetirementId) {
+  return store('readwrite', objectStore => new Promise((resolve, reject) => {
+    const transaction = objectStore.transaction
+    let deleted = false
+    transaction.oncomplete = () => resolve(deleted)
+    transaction.onerror = () => reject(transaction.error || new Error('outbox cleanup failed'))
+    transaction.onabort = () => reject(transaction.error || new Error('outbox cleanup aborted'))
+
+    const request = objectStore.get(key)
+    request.onsuccess = () => {
+      const record = request.result
+      if (
+        record?.replayState !== 'retired'
+        || record.retirement?.id !== expectedRetirementId
+      ) return
+      deleted = true
+      objectStore.delete(key)
+    }
+  }))
+}
+
+/**
+ * Authoritatively retire replay eligibility before best-effort compaction.
+ *
+ * A successful return means either no matching row exists or the row is
+ * durably marked non-replayable. `cleanup` is injectable so callers can prove
+ * that a failed physical delete cannot undo that state transition.
+ */
+export async function retireIntent(
+  cid,
+  { chatId = null, outcome = null } = {},
+  { cleanup = cleanupRetiredIntent } = {},
+) {
+  if (!cid) return false
+  const key = String(cid)
+  retirementFences.add(key)
+  let transition
+  try {
+    transition = await transitionIntentToRetired(key, { chatId, outcome })
+  } catch {
+    return false
+  }
+  if (transition.state === 'absent') {
+    retirementFences.delete(key)
+    authBlockedAttempted.delete(key)
+    return true
+  }
+
+  authBlockedAttempted.delete(key)
+  if (
+    transition.state === 'retired'
+    && (outcome === 'delivered' || outcome === 'failed')
+  ) {
+    // The record owns its chat identity; never let a caller-supplied label move
+    // a private cid settlement onto another mounted chat.
+    announceSettlement(transition.record, outcome)
+  }
+  // Compaction is deliberately outside the awaited state boundary. A blocked
+  // physical delete must not hold an accepted response or cancellation after
+  // replay eligibility is already durably retired.
+  void Promise.resolve()
+    .then(() => cleanup(key, transition.retirement.id))
+    .then(
+      () => { retirementFences.delete(key) },
+      () => {
+        // The durable marker is authoritative. Keeping the fence also protects
+        // a drain that captured the old row before the marker committed.
+      },
+    )
+  return true
+}
+
+function replayBodyMatchesAttempt(record, attempt, chatId, key) {
+  const body = record?.body
+  if (
+    record?.type !== 'message'
+    || record.replayState === 'retired'
+    || !body
+    || typeof body !== 'object'
+    || String(body.cid) !== key
+    || typeof body.content !== 'string'
+    || body.hidden === true
+    || body.answers != null
+    || body.question_id != null
+    || body.continuation != null
+    || body.force_steer === true
+    || body.direct_steer === true
+    || !attempt
+    || String(attempt.cid) !== key
+    || typeof attempt.text !== 'string'
+    || typeof attempt.transportContent !== 'string'
+    || typeof attempt.draftIdentity !== 'string'
+    || body.content !== attempt.transportContent
+  ) return false
+
+  const expectedIdentity = sendDraftIdentity(
+    chatId,
+    attempt.text,
+    attempt.attachments || [],
+  )
+  return attempt.draftIdentity === expectedIdentity
+    && sendDraftIdentity(chatId, attempt.text, body.attachments || []) === expectedIdentity
+}
+
+/**
+ * Inspect one exact durable intent without scanning, pruning, or adopting data.
+ * An unreadable store or invalid principal is unknown; a row is retained only
+ * when its key, owner, chat, cid, and replay body all name the same intent.
+ */
+export async function inspectOutboxIntent({ chatId, cid, principalKey, attempt }) {
+  if (!principalKey) return 'unknown'
+  if (!chatId || !cid) return 'absent'
+  const key = String(cid)
+  try {
+    const record = await get(key, store)
+    if (!record) return 'absent'
+    return (
+      record.principalKey === principalKey
+      && String(record.chatId) === String(chatId)
+      && String(record.cid) === key
+      && replayBodyMatchesAttempt(record, attempt, chatId, key)
+    ) ? 'retained' : 'absent'
+  } catch {
+    return 'unknown'
+  }
 }
 
 export async function listIntents(principalKey) {
@@ -144,6 +320,16 @@ export async function listIntents(principalKey) {
     const owned = []
     const cleanup = []
     for (const [key, value] of rows) {
+      if (value?.replayState === 'retired') {
+        if (value.retirement?.id) {
+          cleanup.push(
+            cleanupRetiredIntent(String(key), value.retirement.id)
+              .then(() => { retirementFences.delete(String(key)) }),
+          )
+        }
+        continue
+      }
+      if (retirementFences.has(String(key))) continue
       if (!value?.cid || !value?.chatId || !value?.body) {
         cleanup.push(del(key, store))
         continue
@@ -201,6 +387,7 @@ async function drainInner({ deliver, principalKey, generation }) {
   const records = await listIntents(principalKey)
   if (generation !== clearGeneration) return
   for (const record of records) {
+    if (retirementFences.has(String(record.cid))) continue
     if (record.authBlocked && authBlockedAttempted.has(record.cid)) break
     if (record.authBlocked) authBlockedAttempted.add(record.cid)
 
@@ -226,8 +413,11 @@ async function drainInner({ deliver, principalKey, generation }) {
       break
     }
 
-    await retireIntent(record.cid)
-    if (outcome === 'delivered') announceDelivered(record.chatId)
+    const retired = await retireIntent(record.cid, {
+      chatId: record.chatId,
+      outcome,
+    })
+    if (!retired) break
   }
 }
 
@@ -257,6 +447,7 @@ export async function clearChatOutbox() {
   clearGeneration += 1
   inFlight = null
   authBlockedAttempted.clear()
+  retirementFences.clear()
   try {
     await clear(store)
     return true
@@ -267,4 +458,10 @@ export async function clearChatOutbox() {
 
 export async function clearOutboxForTests() {
   await clearChatOutbox()
+}
+
+export function resetOutboxReplaySessionForTests() {
+  authBlockedAttempted.clear()
+  retirementFences.clear()
+  inFlight = null
 }
