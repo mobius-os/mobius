@@ -588,18 +588,34 @@ def test_community_mutations_require_and_forward_idempotency(broker, monkeypatch
     headers={"idempotency-key": "comment:1234567890abcdef"},
     allow_privileged_routes=True,
   ).close()
+  editorial_asset_path = "/v1/community/editorial/assets"
+  broker.proxy(
+    method="POST", path=editorial_asset_path, body=b'{"data_base64":"abcd"}',
+    headers={"idempotency-key": "editorial:1234567890abcdef"},
+    allow_privileged_routes=True,
+  ).close()
+  editorial_feed_path = "/v1/community/editorial/spotlight"
+  broker.proxy(
+    method="PUT", path=editorial_feed_path, body=b'{"items":[]}',
+    headers={"idempotency-key": "editorial:feed:12345678"},
+    allow_privileged_routes=True,
+  ).close()
 
   assert [item["scope"] for item in capabilities] == [
     "community:publish",
     "community:install",
     "community:rate",
     "community:comment",
+    "community:editorial",
+    "community:editorial",
   ]
   assert [item["path"] for item in capabilities] == [
     publish_path,
     install_path,
     rating_path,
     comment_path,
+    editorial_asset_path,
+    editorial_feed_path,
   ]
 
 

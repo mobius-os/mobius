@@ -81,6 +81,11 @@ INFERENCE_ROUTES = {
 _COMMUNITY_ROUTES = (
   ("GET", re.compile(r"/v1/community/apps"), "community:read"),
   ("GET", re.compile(r"/v1/community/publications"), "community:read"),
+  (
+    "GET",
+    re.compile(r"/v1/community/editorial/spotlight"),
+    "community:read",
+  ),
   ("GET", re.compile(r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}"), "community:read"),
   (
     "GET",
@@ -111,6 +116,16 @@ _COMMUNITY_ROUTES = (
       r"[A-Za-z0-9_:-]{8,200}/comments"
     ),
     "community:comment",
+  ),
+  (
+    "POST",
+    re.compile(r"/v1/community/editorial/assets"),
+    "community:editorial",
+  ),
+  (
+    "PUT",
+    re.compile(r"/v1/community/editorial/spotlight"),
+    "community:editorial",
   ),
 )
 
