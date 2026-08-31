@@ -25,6 +25,15 @@ def _install_control(tmp_path, monkeypatch):
   return control, inbox
 
 
+def _install_managed_cutover_marker(tmp_path, monkeypatch, boot_id="boot-test"):
+  run_dir = tmp_path / "run"
+  run_dir.mkdir(exist_ok=True)
+  (run_dir / "managed-cutover-ready").write_text(
+    f"{boot_id}\n", encoding="utf-8",
+  )
+  monkeypatch.setenv("MOBIUS_BOOT_ID", boot_id)
+
+
 @pytest.mark.parametrize("status", [400, 409])
 def test_managed_request_recognizes_only_structured_client_rejections(
   monkeypatch, status,
@@ -98,25 +107,194 @@ def test_normalize_rejects_unknown_controller_state():
 
 
 @pytest.mark.asyncio
-async def test_railway_requires_baked_managed_cutover_support(tmp_path, monkeypatch):
+async def test_legacy_railway_image_offers_managed_bootstrap(tmp_path, monkeypatch):
+  from app import chat
+  from app.runner_registry import registry
+
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
   monkeypatch.setattr(dc, "get_settings", lambda: type("S", (), {"data_dir": str(tmp_path)})())
   monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "a" * 40)
   monkeypatch.setattr(dc.platform_update, "container_replacement_blockers", lambda: [])
+  calls = []
+
+  def managed_request(method, suffix, payload=None):
+    calls.append((method, suffix, payload))
+    if method == "GET":
+      return {"mode": "handoff", "state": "idle"}
+    if suffix == "bootstrap/prepare":
+      return {
+        "mode": "bootstrap", "state": "awaiting_bootstrap",
+        "operation_id": "bootstrap_123", "handoff_nonce": "nonce",
+      }
+    return {
+      "mode": "bootstrap", "state": "queued",
+      "operation_id": "bootstrap_123", "expected_sha": "a" * 40,
+    }
+
+  monkeypatch.setattr(dc, "_managed_request", managed_request)
+  monkeypatch.setattr(registry, "all_alive_chat_ids", lambda: set())
+  began = []
+  monkeypatch.setattr(chat, "begin_drain", lambda: began.append(True))
 
   status = await dc.read_rebuild_status()
   assert status["supported"] is False
+  assert status["bootstrap_available"] is True
   assert status["code"] == "controller_upgrade_required"
+
+  started = await dc.request_rebuild()
+  assert started["state"] == "queued"
+  assert started["bootstrap_available"] is True
+  assert began == [True]
+  assert calls == [
+    ("GET", "status", None),
+    ("POST", "bootstrap/prepare", {"expected_sha": "a" * 40}),
+    ("POST", "bootstrap/start", {
+      "operation_id": "bootstrap_123", "handoff_nonce": "nonce",
+    }),
+  ]
+
+
+@pytest.mark.asyncio
+async def test_stale_managed_marker_cannot_impersonate_current_boot(
+  tmp_path, monkeypatch,
+):
+  _install_managed_cutover_marker(tmp_path, monkeypatch, boot_id="previous-boot")
+  monkeypatch.setenv("MOBIUS_BOOT_ID", "current-boot")
+  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
+  monkeypatch.setattr(
+    dc, "get_settings", lambda: type("S", (), {"data_dir": str(tmp_path)})(),
+  )
+  monkeypatch.setattr(
+    dc, "_managed_request", lambda method, suffix: {
+      "mode": "handoff", "state": "idle",
+    },
+  )
+
+  status = await dc.read_rebuild_status()
+
+  assert dc.managed_cutover_ready() is False
+  assert status["supported"] is False
+  assert status["bootstrap_available"] is True
+  assert status["code"] == "controller_upgrade_required"
+
+
+def test_managed_marker_belongs_only_to_matching_boot(tmp_path, monkeypatch):
+  _install_managed_cutover_marker(tmp_path, monkeypatch, boot_id="current-boot")
+  monkeypatch.setattr(
+    dc, "get_settings", lambda: type("S", (), {"data_dir": str(tmp_path)})(),
+  )
+
+  assert dc.managed_cutover_ready() is True
+
+
+@pytest.mark.asyncio
+async def test_legacy_railway_bootstrap_requires_linked_account(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
+  monkeypatch.setattr(
+    dc, "get_settings", lambda: type("S", (), {"data_dir": str(tmp_path)})(),
+  )
+
+  def unlinked(*_args, **_kwargs):
+    raise dc.DeploymentControlError("not_configured", "not linked", status_code=409)
+
+  monkeypatch.setattr(dc, "_managed_request", unlinked)
+
+  status = await dc.read_rebuild_status()
+
+  assert status["supported"] is False
+  assert status["bootstrap_available"] is False
+  assert status["code"] == "not_configured"
+
+
+@pytest.mark.asyncio
+async def test_legacy_railway_bootstrap_does_not_mask_controller_failure(
+  tmp_path, monkeypatch,
+):
+  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
+  monkeypatch.setattr(
+    dc, "get_settings", lambda: type("S", (), {"data_dir": str(tmp_path)})(),
+  )
+
+  def unavailable(*_args, **_kwargs):
+    raise dc.DeploymentControlError(
+      "controller_unavailable", "The Möbius account service is unavailable.",
+    )
+
+  monkeypatch.setattr(dc, "_managed_request", unavailable)
+
+  status = await dc.read_rebuild_status()
+
+  assert status["supported"] is False
+  assert status["bootstrap_available"] is False
+  assert status["code"] == "controller_unavailable"
+  assert status["message"] == "The Möbius account service is unavailable."
+
+
+@pytest.mark.asyncio
+async def test_legacy_railway_bootstrap_waits_for_idle_chats(tmp_path, monkeypatch):
+  from app import chat
+  from app.runner_registry import registry
+
+  monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
+  monkeypatch.setattr(dc, "get_settings", lambda: type("S", (), {"data_dir": str(tmp_path)})())
+  monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "a" * 40)
+  monkeypatch.setattr(dc.platform_update, "container_replacement_blockers", lambda: [])
+  calls = []
+
+  def managed_request(method, suffix, payload=None):
+    calls.append((method, suffix, payload))
+    return {
+      "mode": "bootstrap", "state": "awaiting_bootstrap",
+      "operation_id": "bootstrap_123", "handoff_nonce": "nonce",
+    }
+
+  monkeypatch.setattr(dc, "_managed_request", managed_request)
+  monkeypatch.setattr(registry, "all_alive_chat_ids", lambda: {"active-chat"})
+  began = []
+  monkeypatch.setattr(chat, "begin_drain", lambda: began.append(True))
 
   with pytest.raises(dc.DeploymentControlError) as exc:
     await dc.request_rebuild()
-  assert exc.value.code == "controller_upgrade_required"
+
+  assert exc.value.code == "active_chats"
+  assert began == []
+  assert [suffix for _method, suffix, _payload in calls] == ["bootstrap/prepare"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_bootstrap_reopens_admission_only_after_definitive_rejection(
+  monkeypatch,
+):
+  from app import chat
+  from app.runner_registry import registry
+
+  monkeypatch.setattr(registry, "all_alive_chat_ids", lambda: set())
+  began = []
+  cancelled = []
+  monkeypatch.setattr(chat, "begin_drain", lambda: began.append(True))
+  monkeypatch.setattr(chat, "cancel_idle_drain", lambda: cancelled.append(True))
+
+  def managed_request(method, suffix, _payload=None):
+    if suffix == "bootstrap/prepare":
+      return {"operation_id": "bootstrap_123", "handoff_nonce": "nonce"}
+    raise dc.DeploymentControlError(
+      "controller_rejected", "The managed upgrade was rejected.", status_code=409,
+    )
+
+  monkeypatch.setattr(dc, "_managed_request", managed_request)
+
+  with pytest.raises(dc.DeploymentControlError):
+    await dc._request_managed_bootstrap("a" * 40)
+
+  assert began == [True]
+  assert cancelled == [True]
 
 
 @pytest.mark.asyncio
 async def test_railway_status_uses_account_service(tmp_path, monkeypatch):
-  (tmp_path / "run").mkdir()
-  (tmp_path / "run" / "managed-cutover-ready").touch()
+  _install_managed_cutover_marker(tmp_path, monkeypatch)
   settings = type("S", (), {"data_dir": str(tmp_path)})()
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
   monkeypatch.setattr(dc, "get_settings", lambda: settings)
@@ -137,8 +315,7 @@ async def test_railway_status_uses_account_service(tmp_path, monkeypatch):
 async def test_request_rebuild_selects_managed_railway_handoff(tmp_path, monkeypatch):
   from app import restart_ledger, restart_util
 
-  (tmp_path / "run").mkdir()
-  (tmp_path / "run" / "managed-cutover-ready").touch()
+  _install_managed_cutover_marker(tmp_path, monkeypatch)
   settings = type("S", (), {"data_dir": str(tmp_path)})()
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
   monkeypatch.setattr(dc, "get_settings", lambda: settings)
@@ -193,8 +370,7 @@ async def test_managed_start_failure_restarts_only_after_definitive_rejection(
   from app import restart_ledger, restart_util
 
   _install_control(tmp_path, monkeypatch)
-  (tmp_path / "run").mkdir()
-  (tmp_path / "run" / "managed-cutover-ready").touch()
+  _install_managed_cutover_marker(tmp_path, monkeypatch)
   settings = type("S", (), {"data_dir": str(tmp_path)})()
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
   monkeypatch.setattr(dc, "get_settings", lambda: settings)
@@ -238,8 +414,7 @@ async def test_pre_start_receipt_timeout_recovers_the_drained_worker(
   from app import restart_ledger, restart_util
 
   _install_control(tmp_path, monkeypatch)
-  (tmp_path / "run").mkdir()
-  (tmp_path / "run" / "managed-cutover-ready").touch()
+  _install_managed_cutover_marker(tmp_path, monkeypatch)
   settings = type("S", (), {"data_dir": str(tmp_path)})()
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
   monkeypatch.setattr(dc, "get_settings", lambda: settings)
@@ -293,8 +468,7 @@ async def test_definitive_rejection_owns_recovery_until_restart_settles(
   from app import restart_ledger, restart_util
 
   _install_control(tmp_path, monkeypatch)
-  (tmp_path / "run").mkdir()
-  (tmp_path / "run" / "managed-cutover-ready").touch()
+  _install_managed_cutover_marker(tmp_path, monkeypatch)
   settings = type("S", (), {"data_dir": str(tmp_path)})()
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
   monkeypatch.setattr(dc, "get_settings", lambda: settings)

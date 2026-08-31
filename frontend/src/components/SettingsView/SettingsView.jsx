@@ -9,6 +9,7 @@ import { platformVersionIdentity } from '../../lib/platformVersionIdentity.js'
 import { formatUpstreamCommitDate } from '../../lib/platformProvenance.js'
 import {
   rebuildIsActive,
+  rebuildNeedsBootstrap,
   rebuildPollShouldContinue,
   rebuildProgressMessage,
 } from '../../lib/containerRebuild.js'
@@ -1114,6 +1115,8 @@ export default function SettingsView({
     }
   }
 
+  const rebuildBootstrap = rebuildNeedsBootstrap(rebuildStatus)
+
   async function signOut() {
     if (signingOut) return
     setSigningOut(true)
@@ -2073,7 +2076,9 @@ export default function SettingsView({
             />
           )}
           <div className="settings__row">
-            <span className="settings__label">Replace container</span>
+            <span className="settings__label">
+              {rebuildBootstrap ? 'Container updates' : 'Replace container'}
+            </span>
             {rebuildConfirm ? (
               <div className="settings__confirm">
                 <button
@@ -2090,7 +2095,9 @@ export default function SettingsView({
                   onClick={rebuildContainer}
                   disabled={rebuildRequesting || rebuildIsActive(rebuildStatus)}
                 >
-                  {rebuildRequesting || rebuildIsActive(rebuildStatus) ? 'Replacing…' : 'Replace now'}
+                  {rebuildRequesting || rebuildIsActive(rebuildStatus)
+                    ? (rebuildBootstrap ? 'Enabling…' : 'Replacing…')
+                    : (rebuildBootstrap ? 'Enable now' : 'Replace now')}
                 </button>
               </div>
             ) : (
@@ -2102,18 +2109,26 @@ export default function SettingsView({
                   restartPhase === 'restarting'
                   || rebuildRequesting
                   || rebuildIsActive(rebuildStatus)
-                  || rebuildStatus?.supported === false
+                  || (rebuildStatus?.supported === false && !rebuildBootstrap)
                 }
               >
-                {rebuildStatus?.supported === false ? 'Not set up' : 'Replace'}
+                {rebuildBootstrap
+                  ? 'Enable'
+                  : (rebuildStatus?.supported === false ? 'Not set up' : 'Replace')}
               </button>
             )}
           </div>
           {rebuildConfirm && !rebuildIsActive(rebuildStatus) && (
             <p className="settings__subtext settings__subtext--tight">
-              Deploys the official image for your applied update. Local-only
-              runtime changes recorded by Möbius block replacement; undeclared
-              container changes are lost. Active chats continue afterward.
+              {rebuildBootstrap ? (
+                <>Performs one managed Railway redeploy, then verifies the safe
+                update controller. Finish active responses first; Railway restores
+                the previous container if the upgrade is unhealthy.</>
+              ) : (
+                <>Deploys the official image for your applied update. Local-only
+                runtime changes recorded by Möbius block replacement; undeclared
+                container changes are lost. Active chats continue afterward.</>
+              )}
             </p>
           )}
           {rebuildStatus?.supported === false && (
