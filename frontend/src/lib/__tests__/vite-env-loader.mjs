@@ -26,7 +26,7 @@ const REACT_SHIM = new URL(
 const REACT_SHIMMED_MODULES = [
   '/components/AppIcon.jsx',
   '/components/Shell/useAppIntentNavigation.js',
-  '/components/Shell/useShellReloadController.js',
+  '/components/Shell/useShellUpdateController.js',
   '/hooks/useSystemEventStream.js',
   '/components/ChatView/useFileUpload.js',
   '/components/ChatView/hooks/useComposerDraftState.js',

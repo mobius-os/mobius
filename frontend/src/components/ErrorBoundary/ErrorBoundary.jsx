@@ -121,7 +121,7 @@ export default class ErrorBoundary extends Component {
 
   // Single reload executor for both auto-heal and the manual refresh button:
   // record the attempt (loop guard for a repeat crash), notify the owning
-  // surface, mark the reload so App.jsx skips the splash, then reload.
+  // surface, then reload through the ordinary launch cover.
   applyRecoveryReload = (context) => {
     if (context) {
       writeRefreshedRecoveryAttempt({
@@ -130,11 +130,6 @@ export default class ErrorBoundary extends Component {
       })
     }
     this.props.onReset?.()
-    try {
-      sessionStorage.setItem('shell-reload', '1')
-    } catch {
-      /* ignore */
-    }
     window.location.reload()
   }
 

@@ -123,10 +123,6 @@ import {
   composerDraftWantsKeyboard,
   releaseComposerFocusLease,
 } from './composerFocusLease.js'
-import {
-  inspectShellUpdate,
-  watchForShellUpdateOnResume,
-} from '../../lib/shellUpdate.js'
 import './Shell.css'
 import './workspace.css'
 import WorkspaceChrome from './WorkspaceChrome.jsx'
@@ -168,7 +164,7 @@ import useDesktopSidebar, {
   desktopContentWidthAfterSidebarToggle,
 } from './useDesktopSidebar.js'
 import useWorkspaceSession from './useWorkspaceSession.js'
-import useShellReloadController from './useShellReloadController.js'
+import useShellUpdateController from './useShellUpdateController.js'
 import useAppFrameCache from './useAppFrameCache.js'
 import useShellVisualViewport from './useShellVisualViewport.js'
 import useShellShortcuts from '../../hooks/useShellShortcuts.js'
@@ -226,9 +222,6 @@ export default function Shell({ onInitialVisualReady }) {
     storage: localStorage,
     legacyStorage: sessionStorage,
   })
-  // Navigation reads the current claimant synchronously without closing over
-  // reload-controller state declared later in this component.
-  const beforeNavigateRef = useRef(null)
   // Back/Forward can reserve a draft's mobile writing session before the
   // outgoing surface becomes inert. The callback is filled after the shared
   // composer handoff exists below.
@@ -257,7 +250,6 @@ export default function Shell({ onInitialVisualReady }) {
     blobValid,
     replaceImplicitBootTab,
     dragActiveRef,
-    beforeNavigateRef,
     beforeRestoreRouteRef,
   })
 
@@ -343,10 +335,6 @@ export default function Shell({ onInitialVisualReady }) {
   const builderModeActive = modeMachine.builderModeActive(modeState)
   // Drag-preview alone may project the tiled world before it is committed.
   const effectiveViewMode = modeMachine.effectiveViewMode(modeState)
-  const multiPaneBuilderVisible = effectiveViewMode === 'panes'
-    && paneModel.paneIdsInOrder(workspace).length > 1
-  const multiPaneBuilderVisibleRef = useRef(multiPaneBuilderVisible)
-  multiPaneBuilderVisibleRef.current = multiPaneBuilderVisible
   // The final React world is already committed during this window; only browser
   // snapshots move. Shield that settled DOM until the scene transaction ends.
   const modeBeatActive = !!modeView.active
@@ -680,9 +668,10 @@ export default function Shell({ onInitialVisualReady }) {
       return next
     })
   }, [])
-  // Guards the once-per-mount deferred shell-update pickup effect below.
-  const shellUpdatePickupRef = useRef(false)
-  const shellUpdatePickupCheckStartedRef = useRef(false)
+  // A ready update is coalesced separately from transient toasts. If another
+  // action owns the toast slot when the build lands, the update notice waits
+  // for that action to settle rather than replacing it.
+  const shellUpdateNoticeShownRef = useRef(false)
   const [composerRequest, setComposerRequest] = useState(null)
   const composerRequestRef = useRef(null)
   const composerRequestTokenRef = useRef(0)
@@ -2090,11 +2079,6 @@ export default function Shell({ onInitialVisualReady }) {
   // system-stream chunk. A running boolean can end the React batch exactly as
   // it began (false) and lose the fact that the transcript changed.
   const [chatRunSignals, setChatRunSignals] = useState(() => new Map())
-  // Voice dictation is a single boolean — is the (single-mount) ChatView's mic
-  // active right now — not a per-chat Set: nothing ever read which chat was
-  // dictating, only whether any dictation is live, so the shell-reload policy
-  // just needs "hold the reload while the mic is on."
-  const [voiceDictationActive, setVoiceDictationActive] = useState(false)
   const [attentionChatIds, setAttentionChatIds] = useState(() => new Set())
   const streamingChatIds = useMemo(() => {
     const next = new Set(localStreamingChatIds)
@@ -2116,15 +2100,12 @@ export default function Shell({ onInitialVisualReady }) {
   }, [chats])
   const streamingChatIdsRef = useRef(streamingChatIds)
   useEffect(() => { streamingChatIdsRef.current = streamingChatIds }, [streamingChatIds])
-  const voiceDictationActiveRef = useRef(voiceDictationActive)
-  useEffect(() => {
-    voiceDictationActiveRef.current = voiceDictationActive
-  }, [voiceDictationActive])
 
   const {
-    requestShellReload,
-    claimPendingShellReloadNavigation,
-  } = useShellReloadController({
+    updateAvailable: shellUpdateAvailable,
+    markShellUpdateAvailable,
+    applyShellUpdate,
+  } = useShellUpdateController({
     win: window,
     doc: document,
     nav: navigator,
@@ -2133,16 +2114,17 @@ export default function Shell({ onInitialVisualReady }) {
     persistWorkspaceSnapshot,
     workspaceStateRef,
     activeViewRef,
-    activeChatIdRef,
     drawerOpenRef,
-    multiPaneBuilderVisibleRef,
-    streamingChatIdsRef,
-    voiceDictationActiveRef,
-    activeView,
-    activeChatId,
-    multiPaneBuilderVisible,
   })
-  beforeNavigateRef.current = claimPendingShellReloadNavigation
+
+  useEffect(() => {
+    if (!shellUpdateAvailable || toast || shellUpdateNoticeShownRef.current) return
+    shellUpdateNoticeShownRef.current = true
+    showToast('A Möbius update is ready.', {
+      duration: 0,
+      action: { label: 'Update now', onAction: applyShellUpdate },
+    })
+  }, [applyShellUpdate, shellUpdateAvailable, showToast, toast])
 
   // Stable callbacks for ChatView — identity must not change across
   // renders or ChatView's onStreamEnd-handler memoization breaks. The
@@ -2193,10 +2175,6 @@ export default function Shell({ onInitialVisualReady }) {
 
   const markChatRunFinished = useCallback((chatId) => {
     setChatRunSignals(prev => bumpChatRunSignal(prev, chatId, 'chat_run_finished'))
-  }, [])
-
-  const markVoiceListening = useCallback((listening) => {
-    setVoiceDictationActive(!!listening)
   }, [])
 
   const clearChatAttention = useCallback((chatId) => {
@@ -2778,87 +2756,6 @@ export default function Shell({ onInitialVisualReady }) {
       refreshChats, dispatchWorkspace, applyModeDestination,
       requestEmptySingleNewChat, workspaceStateRef, activeChatIdRef])
 
-  // Deferred shell-update pickup: a service worker that finished installing and
-  // is now WAITING (leashed — it never took over on its own). Route it through
-  // the SAME hold-until-idle
-  // path as a live shell_rebuilt (requestShellReload → apply if idle, else hold
-  // the reload until the running turn ends). This recovers a lost apply race:
-  // the SW generation that installed just after an earlier apply signal, a
-  // stale precache the boot check spotted, or an ACTIVE worker newer than the
-  // page's controller (feature 207 — reg.waiting is null in that settled
-  // state, so a waiting-only check misses it). Gate on a live-confirmed chats
-  // list, so streamingChatIds reflects any running background turn — a cold mount's
-  // empty pre-fetch list would otherwise read as idle and reload straight
-  // through a reconnecting turn. Runs at most once per mount. Do not key this
-  // recovery on TanStack's observer-relative `isFetchedAfterMount`: a fetch can
-  // complete in the same mount turn (especially through the SW cache) without
-  // that observer flag producing another usable effect pass. Instead, force one
-  // staleTime:0 query completion here, then yield a task so the query observer
-  // has committed the fresh durable run set before requestShellReload reads its
-  // refs. This is both a live-confirmation gate and deterministic mount pickup.
-  useEffect(() => {
-    if (shellUpdatePickupRef.current || shellUpdatePickupCheckStartedRef.current) return
-    if (!chatsQuery.isSuccess) return
-    shellUpdatePickupCheckStartedRef.current = true
-    let cancelled = false
-    ;(async () => {
-      const { updateAvailable } = await inspectShellUpdate({
-        serviceWorker: navigator.serviceWorker,
-      })
-      if (cancelled || !updateAvailable) return
-      try {
-        await queryClient.fetchQuery({
-          queryKey: chatQueries.keys.all,
-          queryFn: chatQueries.list.fetch,
-          staleTime: 0,
-        })
-      } catch {
-        // A failed live confirmation is not permission to reload through a
-        // possibly-running turn. A later mount/online recovery can try again.
-        return
-      }
-      await new Promise(resolve => setTimeout(resolve, 0))
-      if (cancelled) return
-      shellUpdatePickupRef.current = true
-      // requestShellReload reads streaming/view state from refs at call time, so
-      // the captured closure is fresh even though it isn't in this effect's deps.
-      // This is recovery, not watcher noise: the page has just mounted and a
-      // waiting/mismatched worker must not remain stranded behind a restored
-      // chat (especially when another tab keeps the outgoing worker alive).
-      requestShellReload()
-    })()
-    return () => {
-      cancelled = true
-      // React StrictMode immediately runs mount effects through one synthetic
-      // setup/cleanup cycle. Let the real setup own the check when that first
-      // async pass was cancelled before it could claim the pickup.
-      if (!shellUpdatePickupRef.current) shellUpdatePickupCheckStartedRef.current = false
-    }
-  }, [chatsQuery.isSuccess, queryClient])
-
-  // Resume-time shell-update pickup. The boot re-arm net above runs once per
-  // MOUNT, and a live `shell_rebuilt` reaches only a page with a live EventSource.
-  // An installed PWA BACKGROUNDED across a deploy hits neither: it misses the
-  // transient broadcast (its stream was suspended and the event is not replayed on
-  // reconnect) and never re-mounts, so it keeps running the OLD bundle until a cold
-  // start — the "still broken after the deploy" report from a warm install. This
-  // watch is the missing apply trigger: on every return to visible (and on
-  // regaining connectivity) it forces a fresh sw.js fetch and, once a newer
-  // generation is waiting/mismatched, routes it through the SAME apply-on-idle
-  // reload as a deliberate apply — silent, and deferred while a turn streams or
-  // the owner is typing (requestShellReload reads streaming/view state from refs,
-  // so this closure staying out of the deps is correct). Unlike a passive source
-  // rebuild, returning to the shell is itself the safe boundary the owner chose;
-  // classifying it as passive would hold the update forever behind any visible
-  // idle chat. The shared inspector makes a return with no new generation a
-  // no-op — no toast, no spurious reload.
-  useEffect(() => watchForShellUpdateOnResume({
-    doc: typeof document !== 'undefined' ? document : null,
-    win: typeof window !== 'undefined' ? window : null,
-    serviceWorker: typeof navigator !== 'undefined' ? navigator.serviceWorker : null,
-    rearm: () => requestShellReload(),
-  }), [])
-
   // Handle non-content SSE events: theme changes, app updates, shell rebuilds.
   const handleSystemEvent = useCallback((ev) => {
     if (ev.type === 'theme_updated') {
@@ -3135,30 +3032,13 @@ export default function Shell({ onInitialVisualReady }) {
         }
       }
     } else if (ev.type === 'shell_rebuilt' || ev.type === 'shell_apply_now') {
-      // A new shell generation is available. `shell_rebuilt` fires automatically
-      // when the frontend rebuilds; `shell_apply_now` is the agent's EXPLICIT
-      // "look now" signal (design §1.5). A watcher rebuild is passive and
-      // coalesces while an idle chat is visible; apply-now is deliberate and
-      // uses the ordinary apply-on-idle policy. This prevents source-save
-      // bursts from repeatedly refreshing a transcript someone is reading.
-      //
-      // These are system-bus-only (frontend_watcher / notify skip the per-chat
-      // fan-out) and SystemBroadcast has no replay, so each reaches the Shell
-      // exactly once — no dedup stamp needed to avoid reload loops.
-      //
-      // Apply-on-idle: the streaming view is sacred. requestShellReload reads
-      // view + streaming state from refs (not closure-captured scalars, which
-      // can lag concurrent updates by a render) and applies immediately when
-      // idle, or holds the refresh quietly until the page is idle when the
-      // owner is typing, steering, or reading a running chat
-      // (shellReloadPolicy.shouldDeferShellReload) — no focus stealing. The SW
-      // leash rides the same moment: performShellReload posts SKIP_WAITING to
-      // the waiting worker so the SW generation flips exactly when the page
-      // reloads.
+      // Rebuild and agent-finished signals are availability, never permission
+      // to navigate. Repeated generations collapse into one ready state; the
+      // owner can keep switching chats/apps and explicitly refresh once.
       if (ev.type === 'shell_apply_now') {
         setSettingsRefreshToken(token => token + 1)
       }
-      requestShellReload({ passive: ev.type === 'shell_rebuilt' })
+      markShellUpdateAvailable()
     } else if (ev.type === 'shell_rebuild_failed') {
       // Deliberately silent in the owner UI. The atomic publisher keeps the
       // previous shell running, and watcher failures commonly describe a
@@ -3172,15 +3052,11 @@ export default function Shell({ onInitialVisualReady }) {
       onNotificationCreated()
     }
   }, [
-    // Scalar state removed: shell_rebuilt now reads from refs (activeViewRef,
-    // activeAppIdRef, activeChatIdRef, drawerOpenRef) so stale closure values
-    // can't be serialized. Refs themselves don't need to be in deps (they're
-    // stable objects whose .current is read at call time, not at capture time).
     applyChatRenameEvent,
     confirmAppDeleted, confirmAppIdentityIsLive, confirmAppRecovered,
     confirmChatDeleted, confirmChatIdentityIsLive, confirmChatRecovered,
     loadTheme, markChatOwnerActivity, markChatRunActivity, markChatRunFinished, markChatRunReconcile,
-    markChatOwnerInput, markChatRunState, markStreamingAcknowledged,
+    markChatOwnerInput, markChatRunState, markShellUpdateAvailable, markStreamingAcknowledged,
     markStreamingEnd, markStreamingStart,
     onNotificationCreated, placeInWorkspace, projectChatLookup, queryClient,
     refreshApps, refreshChats, tombstoneRoute, warmAppCode,
@@ -4919,7 +4795,6 @@ export default function Shell({ onInitialVisualReady }) {
                 onSystemEvent={handleSystemEvent}
                 markStreamingStart={markStreamingStart}
                 markStreamingEnd={markStreamingEnd}
-                markVoiceListening={markVoiceListening}
                 refreshApps={refreshApps}
                 acknowledgeAppPreview={handleAppPreviewSeen}
                 refreshChats={refreshChats}
