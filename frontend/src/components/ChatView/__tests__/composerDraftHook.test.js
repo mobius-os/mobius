@@ -6,6 +6,7 @@ import {
   stageComposerHandoff,
 } from '../composerDraft.js'
 import {
+  SEND_ATTEMPT_QUEUED_MESSAGE,
   SEND_ATTEMPT_UNCONFIRMED_MESSAGE,
   saveFailedSendAttempt,
   settleFailedSendConfirmation,
@@ -127,6 +128,59 @@ test('an unavailable confirmation reaches the mounted ambiguous-send owner', () 
       hook.result.current.sendFailure,
       SEND_ATTEMPT_UNCONFIRMED_MESSAGE,
     )
+    hook.unmount()
+  } finally {
+    if (previousStorage === undefined) delete globalThis.sessionStorage
+    else globalThis.sessionStorage = previousStorage
+  }
+})
+
+test('a hard-reloaded retained intent keeps text and files under automatic retry ownership', () => {
+  const previousStorage = globalThis.sessionStorage
+  globalThis.sessionStorage = storageStub()
+  try {
+    saveFailedSendAttempt('retained-reload', {
+      cid: 'cid-retained',
+      draftIdentity: 'draft-retained',
+      text: 'retry automatically',
+      attachments: [{
+        id: 'file-retained', name: 'note.txt', size: 12, mime_type: 'text/plain',
+      }],
+    })
+    const hook = renderHook(() => useComposerDraftState({
+      chatId: 'retained-reload',
+      hidden: false,
+      inputRef: { current: null },
+    }))
+    const attempt = hook.result.current.failedSendAttemptRef.current
+
+    assert.equal(hook.result.current.reconcileFailedAttempt(
+      [],
+      [],
+      { reportQueued: true, expectedAttempt: attempt },
+    ), 'queued')
+    assert.equal(hook.result.current.input, 'retry automatically')
+    assert.equal(hook.result.current.pendingFiles.length, 1)
+    assert.equal(hook.result.current.sendFailure, SEND_ATTEMPT_QUEUED_MESSAGE)
+
+    hook.result.current.handleComposerRemoveFile('file-retained')
+    hook.result.current.handleComposerInputChange('new owner draft')
+    const newerAttempt = {
+      cid: 'cid-new',
+      draftIdentity: 'draft-new',
+      text: 'new owner draft',
+      attachments: [],
+    }
+    hook.result.current.rememberFailedAttempt(newerAttempt)
+    hook.result.current.setSendFailure('New attempt owns this status.')
+    assert.equal(hook.result.current.reconcileFailedAttempt(
+      [],
+      [],
+      { reportQueued: true, expectedAttempt: attempt },
+    ), 'superseded')
+    assert.equal(hook.result.current.input, 'new owner draft')
+    assert.equal(hook.result.current.sendFailure, 'New attempt owns this status.')
+    assert.deepEqual(hook.result.current.failedSendAttemptRef.current, newerAttempt)
     hook.unmount()
   } finally {
     if (previousStorage === undefined) delete globalThis.sessionStorage

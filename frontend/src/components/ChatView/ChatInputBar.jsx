@@ -151,7 +151,7 @@ function PrimaryActionGlyphs({ action }) {
 }
 
 function PrimaryAction({
-  sending, listening, hasInput, hasUploading, offline, showSteer, steerReady,
+  sending, listening, hasInput, hasUploading, showSteer, steerReady,
   submissionBlocked, questionBlocked,
   onSubmit, onStop, onSteer, onToggleVoice,
 }) {
@@ -212,7 +212,9 @@ function PrimaryAction({
         onTouchEnd={(e) => { e.preventDefault(); onSubmit(e) }}
         onClick={onSubmit}
         aria-label="Send"
-        disabled={hasUploading || offline || submissionBlocked}
+        // Offline is an accepted intent now: doSend records it durably before
+        // the POST and the shell replays it when connectivity returns.
+        disabled={hasUploading || submissionBlocked}
       >
         <PrimaryActionGlyphs action="send" />
       </button>
@@ -504,7 +506,6 @@ export default function ChatInputBar({
   steerReady = true,
   canRequestSteer = canSteer,
   canSubmitSteer = canRequestSteer,
-  offline,
   sendFailure = null,
   submissionBlocked = false,
   questionBlocked = false,
@@ -920,7 +921,6 @@ export default function ChatInputBar({
               listening={listening}
               hasInput={hasInput}
               hasUploading={hasUploading}
-              offline={offline}
               showSteer={showSteer}
               steerReady={steerReady}
               submissionBlocked={submissionBlocked}

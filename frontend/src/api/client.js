@@ -9,6 +9,7 @@ import { clearLatchedTokens } from '../lib/appToken.js'
 import { clearOwnerDraftStorage } from '../lib/ownerDraftStorage.js'
 import { clearReadingPositions } from '../components/ChatView/scroll/readingPositions.js'
 import { clearDurableComposerDrafts } from '../components/ChatView/composerDraft.js'
+import { clearChatOutbox } from '../components/ChatView/chatOutbox.js'
 import {
   reportNetworkReachable,
   verifyConnectivity,
@@ -125,10 +126,13 @@ export function clearToken() {
 //     not owner-scoped data but worth purging so the next owner
 //     on a shared device gets a clean install on next visit.
 // The TanStack Query cache (IDB) holds owner-scoped chat/app
-// lists; that's the primary privacy reason for the wipe. Returns
+// lists; that's the primary privacy reason for the wipe. An expired-token path
+// may preserve only the separately principal-partitioned chat outbox so the
+// same owner can resume accepted intent after signing back in; explicit logout
+// uses the default and removes it too. Returns
 // a promise so callers can `await` it before reloading the page
 // (otherwise the browser would abort the in-flight delete).
-export function clearQueryCache() {
+export function clearQueryCache({ preserveChatOutbox = false } = {}) {
   // Owner-scoped in-memory state: the AppCanvas token latch holds resolved
   // app/owner tokens across iframe remounts; drop it on logout so a remount
   // after the session ends can't reuse the previous owner's token.
@@ -146,6 +150,9 @@ export function clearQueryCache() {
     clearDurableComposerDrafts().catch(() => {}),
     idbDel('mobius-query-cache').catch(() => {}),
     delOutboxDb().catch(() => {}),
+    ...(preserveChatOutbox
+      ? []
+      : [clearChatOutbox()]),
     delDatabase('mobius-signals', 'signal queue').catch(() => {}),
     wipeSwCaches().catch(() => {}),
   ])
@@ -267,7 +274,10 @@ export async function apiFetch(path, options = {}) {
     // Await the cache wipe before reloading. Without this, the page
     // reload aborts the IndexedDB delete and the next owner could see
     // stale chats/messages from the cached query data.
-    await clearQueryCache()
+    // Keep accepted chat intent through an expired credential. Each record is
+    // partitioned by owner+epoch and can only replay after a matching login;
+    // explicit Settings logout still uses the default full wipe.
+    await clearQueryCache({ preserveChatOutbox: true })
     // Defer reload one tick and throw a typed error so callers'
     // try/catch/finally blocks run (stopping spinners) before the
     // page goes away. Previously we returned a never-resolving

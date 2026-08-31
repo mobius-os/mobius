@@ -77,7 +77,9 @@ export default function useSystemEventStream(
           if (!setupSession.isInProgress()) {
             clearToken()
             try { sessionStorage.setItem('auth_expired', '1') } catch {}
-            await clearQueryCache()
+            // Match apiFetch: preserve only principal-partitioned accepted chat
+            // intent across credential renewal. Explicit logout still wipes it.
+            await clearQueryCache({ preserveChatOutbox: true })
             setTimeout(() => window.location.reload(), 100)
           }
           // Stop the reconnect loop regardless — either the page is
