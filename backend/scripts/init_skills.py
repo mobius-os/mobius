@@ -81,6 +81,9 @@ _UNMODIFIED_MIGRATIONS = {
     "0c2b88ff8a79ff05f75ebaa60af2899f0b9ed27d0a23bfff83b54f4e2a1de97a",
     # Phase-transition seed before the mandatory turn-local routing decision.
     "7a80e90870f75be7c8802f421e76ac21790f1ef812d4a4d0d923d474e5dadd2d",
+    # Mandatory turn-local routing seed before every unfinished Goal wait had
+    # to declare a durable monitor or present an explicit owner action.
+    "07ac534c61899fc1154dc4ba99a4eda0f648b2f33c839dc65879d12952e09533",
   },
   "reflection.md": {
     "c0f57c227f61cd8539a56b70eadfbbe2212125c23b7137472dd173a578baacd8",
