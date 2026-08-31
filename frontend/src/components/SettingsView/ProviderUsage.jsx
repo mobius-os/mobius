@@ -58,6 +58,9 @@ export default function ProviderUsage({
           {snapshot?.credit_balance && (
             <span className="provider-usage__credit">{snapshot.credit_balance}</span>
           )}
+          {snapshot?.stale && (
+            <span className="provider-usage__credit">Last available reading</span>
+          )}
         </span>
       ) : (
         <span className="provider-usage__unavailable">Usage unavailable</span>

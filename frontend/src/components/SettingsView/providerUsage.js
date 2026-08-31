@@ -65,6 +65,7 @@ export function providerAllowance(provider, snapshot) {
     label,
     usedPercent: Number.isFinite(used) ? clampUsagePercent(used) : null,
     expiresAt: typeof window?.expires_at === 'string' ? window.expires_at : null,
+    ...(snapshot.stale === true ? { stale: true } : {}),
   }
 }
 
@@ -76,7 +77,10 @@ export function providerAllowanceSummary(provider, allowance, now = new Date()) 
     ].filter(Boolean).join(' · ')
   }
   if (typeof allowance?.usedPercent === 'number') {
-    return `${Math.round(allowance.usedPercent)}% ${allowance.label.toLowerCase()}`
+    return [
+      `${Math.round(allowance.usedPercent)}% ${allowance.label.toLowerCase()}`,
+      allowance.stale ? 'last available' : '',
+    ].filter(Boolean).join(' · ')
   }
   return allowance?.label || 'Usage'
 }
