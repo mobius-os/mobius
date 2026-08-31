@@ -12,7 +12,7 @@ import { flushSync } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
-import { Play } from '@openai/apps-sdk-ui/components/Icon'
+import { Chat, Play } from '@openai/apps-sdk-ui/components/Icon'
 import {
   api,
   apiFetch,
@@ -1050,6 +1050,7 @@ export default function ChatView({
     freezeQuestionSubmission,
     freezeQueuedSubmission,
     resumeQuestionSubmissionOnResponse,
+    revealPendingQuestion,
     revealConversationTail,
     revealAnchor,
     reapplyActiveMode,
@@ -4994,6 +4995,13 @@ export default function ChatView({
   const pendingCardOffscreen = useOffscreenNudge(
     scrollRef, hasPendingQuestion, pendingQuestionEl,
   )
+  const handleGoalRailAction = useCallback((item) => {
+    if (item?.actionKind === 'owner-question') {
+      revealPendingQuestion(pendingQuestionEl)
+      return
+    }
+    handleResumeGoal()
+  }, [handleResumeGoal, pendingQuestionEl, revealPendingQuestion])
 
   // The resume card publishes the same way, from the TAIL resumable note only
   // — the same block tailResumableBlock arms the cue on. MsgContent applies
@@ -5088,18 +5096,31 @@ export default function ChatView({
     }
     return 'Turn paused — Resume available.'
   })()
-  const goalAriaStatus = goalPresentation
-    ? {
-        active: `Following goal: ${activeGoalObjective}.`,
-        paused: `Goal paused: ${activeGoalObjective}. Resume available.`,
-        completed: `Goal completed: ${activeGoalObjective}.`,
-        failed: `Goal needs attention: ${activeGoalObjective}.`,
-      }[goalPresentation.status]
+  const actionableGoalPresentation = ['active', 'paused'].includes(goalPresentation?.status)
+    ? goalPresentation
     : null
-  const ariaStatus = turnActive
-    ? (goalPresentation?.status === 'active'
-        ? goalAriaStatus
-        : 'Assistant is responding…')
+  const goalWaitState = {
+    ownerActionRequired: goalPresentation?.waitKind === 'owner_question',
+    monitoring: goalPresentation?.waitKind === 'monitor',
+  }
+  const goalAriaStatus = goalPresentation
+    ? goalWaitState.ownerActionRequired
+      ? `Goal waiting for you: ${activeGoalObjective}. Question available.`
+      : goalWaitState.monitoring
+        ? `Monitoring for goal: ${activeGoalObjective}. This chat will resume automatically.`
+        : {
+            active: `Following goal: ${activeGoalObjective}.`,
+            paused: `Goal paused: ${activeGoalObjective}. Resume available.`,
+            completed: `Goal completed: ${activeGoalObjective}.`,
+            failed: `Goal needs attention: ${activeGoalObjective}.`,
+          }[goalPresentation.status]
+    : null
+  const ariaStatus = goalWaitState.ownerActionRequired && goalAriaStatus
+    ? goalAriaStatus
+    : turnActive
+      ? (goalPresentation?.status === 'active'
+          ? goalAriaStatus
+          : 'Assistant is responding…')
     : (goalAriaStatus
         ?? resumeStatus
         ?? (messages.length > 0
@@ -5119,6 +5140,7 @@ export default function ChatView({
     goalPresentation,
     buildPhaseRail,
     activeGoalPlan,
+    goalWaitState,
   ).map(item => {
     if (item.key !== 'goal') return item
     // The Goal step owns a two-tap clear affordance and the plan details.
@@ -5134,8 +5156,17 @@ export default function ChatView({
         ? `Confirm clear goal: ${visibleGoalObjective}`
         : 'Confirm clear goal',
       ...(goalClearError ? { clearError: goalClearError } : {}),
-      ...(goalPresentation?.status === 'paused'
+      ...(actionableGoalPresentation && goalWaitState.ownerActionRequired
         ? {
+            actionKind: 'owner-question',
+            actionLabel: 'View question',
+            actionAriaLabel: `Answer question for goal: ${visibleGoalObjective}`,
+            actionIcon: <Chat width={13} height={13} aria-hidden="true" />,
+          }
+        : actionableGoalPresentation?.status === 'paused'
+            && !goalWaitState.monitoring
+        ? {
+            actionKind: 'resume',
             actionLabel: 'Resume',
             actionAriaLabel: `Resume goal: ${visibleGoalObjective}`,
             actionIcon: <Play width={13} height={13} aria-hidden="true" />,
@@ -5585,7 +5616,7 @@ export default function ChatView({
           resetKey={activeGoalPlan?.root_run_id || goalPresentation?.id || visibleGoalObjective || 'build-progress'}
           ariaLabel={visibleGoalObjective ? 'Goal progress' : 'Build progress'}
           onClearItem={handleClearGoal}
-          onActionItem={handleResumeGoal}
+          onActionItem={handleGoalRailAction}
         />
         {draftGoal !== null && <GoalDraftChip objective={draftGoal} />}
         {!turnActive && armedWaits.length > 0 && (

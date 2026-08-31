@@ -423,6 +423,53 @@ def test_paused_goal_clear_does_not_interrupt_a_later_ordinary_turn(
   assert ordinary_run.ended_at is None
 
 
+def test_goal_wait_ownership_excludes_a_later_ordinary_turn(db, chat):
+  from app.chat_waits import declare_wait
+  from app.goal_plans import presented_goal
+
+  started_at = datetime.now(UTC)
+  goal_run = models.ChatRun(
+    id="waiting-goal-run", root_run_id="waiting-goal-run", chat_id=chat.id,
+    status="parked", provider="codex", goal_objective="Wait precisely",
+    goal_id="waiting-goal-id", started_at=started_at,
+  )
+  ordinary_run = models.ChatRun(
+    id="later-ordinary-run", root_run_id="later-ordinary-run",
+    chat_id=chat.id, status="running", provider="codex",
+    started_at=started_at + timedelta(seconds=1),
+  )
+  db.add_all([goal_run, ordinary_run])
+  chat.pending_question_id = "ordinary-question"
+  db.commit()
+  ordinary_wait = declare_wait(
+    db,
+    chat_id=chat.id,
+    description="ordinary wait",
+    kind="timer",
+    delay_secs=60,
+    created_by_run_id=ordinary_run.id,
+  )
+
+  assert "wait_kind" not in presented_goal(db, chat.id)
+
+  ordinary_run.status = "completed"
+  ordinary_wait.status = "cancelled"
+  chat.pending_question_id = "goal-question"
+  db.commit()
+  assert presented_goal(db, chat.id)["wait_kind"] == "owner_question"
+
+  chat.pending_question_id = None
+  declare_wait(
+    db,
+    chat_id=chat.id,
+    description="goal wait",
+    kind="timer",
+    delay_secs=60,
+    created_by_run_id=goal_run.id,
+  )
+  assert presented_goal(db, chat.id)["wait_kind"] == "monitor"
+
+
 def test_legacy_queued_goal_clear_is_retired_without_opening_a_turn(db, chat):
   from app.chat_writer import PromotePending, get_writer
 
