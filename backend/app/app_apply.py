@@ -40,6 +40,7 @@ from app.manifest_contract import (
   ManifestContractError,
   static_asset_entries,
   validate_manifest_contract,
+  validate_repo_relative_path,
 )
 
 
@@ -54,6 +55,11 @@ class AppApplyError(RuntimeError):
 
 log = logging.getLogger("mobius.app_apply")
 
+_STATIC_ASSETS_MANIFEST = ".mobius-static-assets.json"
+_STATIC_ASSETS_BACKUP_SUFFIX = ".mobius-static-bak"
+_STATIC_ASSETS_BACKUP_ASSET_PREFIX = "assets"
+_STATIC_ASSETS_BACKUP_METADATA_PREFIX = "metadata"
+
 
 @dataclass(frozen=True)
 class ApplyResult:
@@ -62,13 +68,117 @@ class ApplyResult:
   warnings: tuple[str, ...] = ()
 
 
-def _snapshot_static_assets(snapshot_dir: Path, manifest: dict) -> dict[str, bytes]:
+def _require_confined_non_symlink_path(
+  root: Path,
+  relative: str,
+  *,
+  code: str,
+  message: str,
+) -> None:
+  """Reject a relative path if any existing component is a symlink."""
+  if root.is_symlink():
+    raise AppApplyError(code, message)
+  resolved_root = root.resolve()
+  candidate = root
+  for part in relative.split("/"):
+    candidate /= part
+    if candidate.is_symlink():
+      raise AppApplyError(code, message)
+  try:
+    candidate.resolve().relative_to(resolved_root)
+  except (OSError, ValueError) as exc:
+    raise AppApplyError(code, message) from exc
+
+
+def _validate_static_asset_publish_paths(
+  source_dir: Path, assets: dict[str, bytes],
+) -> None:
+  """Confine local asset outputs before Git or accepted state can advance."""
+  metadata_message = "Managed static asset metadata must stay inside the app."
+  _require_confined_non_symlink_path(
+    source_dir,
+    _STATIC_ASSETS_MANIFEST,
+    code="static_asset_symlink",
+    message=metadata_message,
+  )
+  metadata_path = source_dir / _STATIC_ASSETS_MANIFEST
+  previous_assets: set[str] = set()
+  if metadata_path.exists():
+    try:
+      previous_raw = json.loads(metadata_path.read_text())
+      if isinstance(previous_raw, list):
+        previous_assets = {
+          path for path in previous_raw if isinstance(path, str)
+        }
+    except (OSError, json.JSONDecodeError):
+      previous_assets = set()
+
+  destinations = set(assets).union(previous_assets)
+  _require_confined_non_symlink_path(
+    source_dir,
+    "static",
+    code="static_asset_symlink",
+    message="Managed static asset root must stay inside the app without symlinks.",
+  )
+  backup_name = f".{source_dir.name}{_STATIC_ASSETS_BACKUP_SUFFIX}"
+  _require_confined_non_symlink_path(
+    source_dir.parent,
+    backup_name,
+    code="static_asset_symlink",
+    message="Managed static asset backup must stay beside the app without symlinks.",
+  )
+  _require_confined_non_symlink_path(
+    source_dir.parent,
+    (
+      f"{backup_name}/{_STATIC_ASSETS_BACKUP_METADATA_PREFIX}/"
+      f"{_STATIC_ASSETS_MANIFEST}"
+    ),
+    code="static_asset_symlink",
+    message=metadata_message,
+  )
+  for destination in destinations:
+    try:
+      validate_repo_relative_path(
+        destination, f"static_assets.{destination}",
+      )
+    except ManifestContractError as exc:
+      raise AppApplyError("static_assets_unavailable", str(exc)) from exc
+    message = (
+      f"Manifest static asset destination {destination!r} must stay inside "
+      "the app without symlinks."
+    )
+    _require_confined_non_symlink_path(
+      source_dir,
+      f"static/{destination}",
+      code="static_asset_symlink",
+      message=message,
+    )
+    _require_confined_non_symlink_path(
+      source_dir.parent,
+      f"{backup_name}/{_STATIC_ASSETS_BACKUP_ASSET_PREFIX}/{destination}",
+      code="static_asset_symlink",
+      message=message,
+    )
+
+
+def _snapshot_static_assets(
+  snapshot_dir: Path, source_dir: Path, manifest: dict,
+) -> dict[str, bytes]:
   """Read local package assets from the same immutable tree being accepted."""
   assets: dict[str, bytes] = {}
   total = 0
   for destination, source in static_asset_entries(
     manifest.get("static_assets") or {},
   ).items():
+    _require_confined_non_symlink_path(
+      source_dir,
+      source,
+      code="static_asset_symlink",
+      message=(
+        f"Manifest static asset source {source!r} must stay inside the app "
+        "without symlinks."
+      ),
+    )
     path = snapshot_dir / source
     try:
       raw = path.read_bytes()
@@ -379,6 +489,7 @@ async def apply_source_revision(
   static_rollback: list = []
   static_commit: list = []
   static_materialized = False
+  durable_commit = False
   created = app is None
   try:
     with tempfile.TemporaryDirectory(prefix="mobius-app-source-") as tmp:
@@ -395,7 +506,7 @@ async def apply_source_revision(
       if manifest is not None:
         _validate_local_identity(source_path, manifest)
       static_assets = (
-        _snapshot_static_assets(snapshot_dir, manifest)
+        _snapshot_static_assets(snapshot_dir, source_path, manifest)
         if manifest is not None
         else {}
       )
@@ -464,6 +575,9 @@ async def apply_source_revision(
           "current edit is complete.",
           status_code=409,
         )
+
+      if manifest is not None:
+        _validate_static_asset_publish_paths(source_path, static_assets)
 
       if app.manifest_url is None:
         runtime_fields = local_manifest_runtime_fields(manifest)
@@ -575,11 +689,12 @@ async def apply_source_revision(
         if published != previous_bundle:
           unlink_app_bundle(app.id, published)
         raise
+      durable_commit = True
+      _finish_static_assets(static_commit)
+      static_materialized = False
       if previous_bundle != published:
         unlink_app_bundle(app.id, previous_bundle)
       db.refresh(app)
-      _finish_static_assets(static_commit)
-      static_materialized = False
       warnings = await _sync_accepted_app_side_effects(
         db, app, manifest, drop_prior_cron=not created,
       )
@@ -590,10 +705,15 @@ async def apply_source_revision(
       )
   except Exception:
     db.rollback()
-    if static_materialized:
+    if not durable_commit and static_materialized:
       _rollback_static_assets(static_created, static_rollback)
     if staged is not None:
       staged.unlink(missing_ok=True)
-    if published is not None and app is not None and published != previous_bundle:
+    if (
+      not durable_commit
+      and published is not None
+      and app is not None
+      and published != previous_bundle
+    ):
       unlink_app_bundle(app.id, published)
     raise
