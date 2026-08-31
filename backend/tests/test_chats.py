@@ -732,6 +732,22 @@ def test_send_requires_explicit_model_before_any_durable_side_effect(
   ).count() == 0
 
 
+def test_goal_clear_text_command_is_retired_before_queueing(
+  client, auth, chat, db,
+):
+  response = client.post(
+    f"/api/chats/{chat.id}/messages",
+    json={"content": "/goal clear"},
+    headers=auth,
+  )
+
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"]["code"] == "goal_clear_retired"
+  db.refresh(chat)
+  assert chat.messages == []
+  assert chat.pending_messages == []
+
+
 def test_fresh_send_response_includes_stored_user_message(
   client, auth, chat, db, monkeypatch,
 ):

@@ -1937,7 +1937,6 @@ def _pin_established_legacy_chat_models(eng) -> None:
       })
 
 
-
 def _add_app_project_templates(eng) -> None:
   """Persist validated manifest project-template declarations on App rows."""
   from sqlalchemy import inspect as sa_inspect, text
@@ -2083,6 +2082,24 @@ def _add_project_color(eng) -> None:
       conn.execute(text(
         "ALTER TABLE projects ADD COLUMN color VARCHAR(7) NULL"
       ))
+
+
+def _add_chat_goal_dismissal(eng) -> None:
+  """Give Goal presentation a first-class chat-owned dismissal pointer."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chats" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chats")}
+  if "dismissed_goal_id" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE chats ADD COLUMN dismissed_goal_id VARCHAR(64) NULL"
+    ))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -2109,6 +2126,7 @@ _SCHEMA_MIGRATIONS = (
   ("0021_project_chat_collection", _add_project_chat_collection),
   ("0022_project_artifacts", _add_project_artifacts),
   ("0023_project_color", _add_project_color),
+  ("0024_chat_goal_dismissal", _add_chat_goal_dismissal),
 )
 
 

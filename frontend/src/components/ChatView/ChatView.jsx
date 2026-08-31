@@ -617,6 +617,8 @@ export default function ChatView({
   ))
   const goalPresentationRef = useRef(goalPresentation)
   goalPresentationRef.current = goalPresentation
+  const goalClearInFlightRef = useRef(false)
+  const [goalClearError, setGoalClearError] = useState('')
   const activeGoalObjective = goalPresentation?.objective || ''
   // Armed durable waits — the visible "agent is waiting for X" state. Server
   // truth arrives with every chat detail read; run start/finish already
@@ -673,6 +675,8 @@ export default function ChatView({
       goalPresentationRef.current,
     ))
   }, [setGoalState])
+
+  useEffect(() => setGoalClearError(''), [goalPresentation?.id])
 
   useEffect(() => () => {
     if (messageMetaTimerRef.current) clearTimeout(messageMetaTimerRef.current)
@@ -1687,6 +1691,14 @@ export default function ChatView({
       }
       if (event?.type === 'goal_plan_updated') {
         setActiveGoalPlan(current => newestGoalPlan(current, event.plan || null))
+        return
+      }
+      if (event?.type === 'goal_cleared') {
+        const current = goalPresentationRef.current
+        if (!event.goal_id || current?.id === String(event.goal_id)) {
+          setGoalState(null)
+          setActiveGoalPlan(null)
+        }
         return
       }
       // A build_phase is chat-local: it only feeds this chat's milestone rail,
@@ -3679,12 +3691,38 @@ export default function ChatView({
       .finally(() => { submitSteerInFlightRef.current = false })
   }
 
-  // The goal rail's X clears the active goal by sending the same `/goal clear`
-  // command typing it would — so the mid-run/idle behaviour stays identical to
-  // the documented command instead of a parallel clearing path.
-  const handleClearGoal = useCallback(() => {
-    void doSend('/goal clear', { pin: false })
-  }, [doSend])
+  // Goal clearing is lifecycle control, never chat content. The rail confirms
+  // first, then this exact-id request stops active Goal execution and dismisses
+  // its presentation without entering the pending-message transport.
+  const handleClearGoal = useCallback(async (item) => {
+    const goalId = item?.goalId
+    if (!goalId || goalClearInFlightRef.current) return
+    goalClearInFlightRef.current = true
+    setGoalClearError('')
+    try {
+      const res = await apiFetch(`/chats/${chatId}/goal`, {
+        method: 'DELETE',
+        body: JSON.stringify({ goal_id: goalId }),
+        timeoutMs: CHAT_FETCH_TIMEOUT_MS,
+      })
+      let data = null
+      try { data = await res.json() } catch { /* status remains authoritative */ }
+      if (!res.ok) {
+        const detail = typeof data?.detail === 'string'
+          ? data.detail
+          : data?.detail?.message
+        throw new Error(detail || 'Could not clear this Goal.')
+      }
+      if (goalPresentationRef.current?.id === String(goalId)) {
+        setGoalState(null)
+        setActiveGoalPlan(null)
+      }
+    } catch (err) {
+      setGoalClearError(err?.message || 'Could not clear this Goal.')
+    } finally {
+      goalClearInFlightRef.current = false
+    }
+  }, [chatId, setGoalState])
 
   const handleResumeGoal = useCallback(() => {
     if (goalPresentation?.status !== 'paused') return
@@ -4912,14 +4950,19 @@ export default function ChatView({
     activeGoalPlan,
   ).map(item => {
     if (item.key !== 'goal') return item
-    // The goal step carries a clear affordance (the X) in place of typing
-    // `/goal clear`, and the plan details when a plan exists.
+    // The Goal step owns a two-tap clear affordance and the plan details.
     return {
       ...item,
-      clearable: true,
+      clearable: !!goalPresentation?.id,
+      goalId: goalPresentation?.id,
+      clearConfirmationKey: goalPresentation?.id,
       clearLabel: visibleGoalObjective
         ? `Clear goal: ${visibleGoalObjective}`
         : 'Clear goal',
+      clearConfirmLabel: visibleGoalObjective
+        ? `Confirm clear goal: ${visibleGoalObjective}`
+        : 'Confirm clear goal',
+      ...(goalClearError ? { clearError: goalClearError } : {}),
       ...(goalPresentation?.status === 'paused'
         ? {
             actionLabel: 'Resume',

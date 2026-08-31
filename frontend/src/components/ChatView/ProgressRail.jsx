@@ -1,11 +1,13 @@
 /* ProgressRail renders the shared compact status sequence above the composer. */
 
 import { useEffect, useState } from 'react'
-import { X } from '@openai/apps-sdk-ui/components/Icon'
+import { Check, X } from '@openai/apps-sdk-ui/components/Icon'
 
 function ProgressStep({ item, detailsExpanded, onDetailsToggle, onClear, onAction }) {
   const [labelExpanded, setLabelExpanded] = useState(false)
+  const [clearConfirmed, setClearConfirmed] = useState(false)
   useEffect(() => setLabelExpanded(false), [item.label])
+  useEffect(() => setClearConfirmed(false), [item.clearConfirmationKey])
 
   const hasDetails = !!item.details
   const expanded = hasDetails ? detailsExpanded : labelExpanded
@@ -79,15 +81,26 @@ function ProgressStep({ item, detailsExpanded, onDetailsToggle, onClear, onActio
       {clearable && (
         <button
           type="button"
-          className="chat__progress-clear"
+          className={`chat__progress-clear${clearConfirmed
+            ? ' chat__progress-clear--confirm'
+            : ''}`}
           // Keep composer focus (and the soft keyboard) put when clearing.
           onPointerDown={(event) => event.preventDefault()}
-          onClick={() => onClear()}
+          onClick={() => {
+            if (clearConfirmed) onClear(item)
+            else setClearConfirmed(true)
+          }}
           // Label text is item-supplied so the shared rail stays domain-neutral.
-          aria-label={item.clearLabel || 'Clear'}
-          title={item.clearLabel || 'Clear'}
+          aria-label={clearConfirmed
+            ? (item.clearConfirmLabel || 'Confirm clear')
+            : (item.clearLabel || 'Clear')}
+          title={clearConfirmed
+            ? (item.clearConfirmLabel || 'Confirm clear')
+            : (item.clearLabel || 'Clear')}
         >
-          <X width={14} height={14} aria-hidden="true" />
+          {clearConfirmed
+            ? <Check width={14} height={14} aria-hidden="true" />
+            : <X width={14} height={14} aria-hidden="true" />}
         </button>
       )}
     </span>
@@ -101,6 +114,7 @@ export default function ProgressRail({
   useEffect(() => setDetailsKey(null), [resetKey])
   if (!items.length) return null
   const detailItem = items.find(item => item.key === detailsKey && item.details)
+  const errorItem = items.find(item => item.clearError)
   return (
     <div className="chat__progress-rail" role="group" aria-label={ariaLabel}>
       {items.map(item => (
@@ -116,6 +130,11 @@ export default function ProgressRail({
         />
       ))}
       {detailItem && detailItem.details}
+      {errorItem && (
+        <div className="chat__progress-error" role="alert">
+          {errorItem.clearError}
+        </div>
+      )}
     </div>
   )
 }
