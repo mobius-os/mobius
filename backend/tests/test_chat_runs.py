@@ -112,7 +112,7 @@ def test_start_turn_opens_a_running_run_record():
   assert _active_status("r1") == "running"
 
 
-def test_only_semantic_continuation_inherits_goal_identity():
+def test_semantic_and_plain_continue_resume_a_paused_goal():
   _seed_chat("r-goal")
   get_writer().submit(StartTurn(
     chat_id="r-goal", run_token="rt-goal",
@@ -148,7 +148,7 @@ def test_only_semantic_continuation_inherits_goal_identity():
     user_msg={"role": "user", "content": "continue", "ts": 3},
     title_source="continue", default_provider="codex",
   )).result(timeout=5)
-  assert _goal_objective("r-goal") is None
+  assert _goal_objective("r-goal") == "finish the migration"
 
 
 def test_completed_goal_does_not_leak_into_an_ordinary_later_run():

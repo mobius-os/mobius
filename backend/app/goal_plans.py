@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import re
 from typing import Any
 
-from sqlalchemy import update
+from sqlalchemy import or_, update
 from sqlalchemy.orm import Session
 
 from app import models
@@ -214,6 +214,33 @@ def normalize_tasks(raw_tasks: Any) -> list[dict[str, Any]]:
   return tasks
 
 
+def _goal_rows_for_physical(
+  db: Session, physical: models.ChatRun,
+) -> tuple[models.ChatRun, models.ChatRun]:
+  """Resolve one physical Goal row to the row that owns its visible plan."""
+  if physical.goal_id:
+    plan_owner = (
+      db.query(models.ChatRun)
+      .filter(
+        models.ChatRun.chat_id == physical.chat_id,
+        models.ChatRun.goal_id == physical.goal_id,
+        models.ChatRun.goal_plan_json.isnot(None),
+      )
+      .order_by(models.ChatRun.started_at.asc(), models.ChatRun.id.asc())
+      .first()
+    )
+    if plan_owner is not None:
+      return physical, plan_owner
+  root_id = physical.root_run_id or physical.id
+  root = db.query(models.ChatRun).filter(
+    models.ChatRun.id == root_id,
+    models.ChatRun.chat_id == physical.chat_id,
+  ).first()
+  if root is None:
+    raise RuntimeError("Goal refers to a missing logical root run")
+  return physical, root
+
+
 def active_goal_rows(
   db: Session, chat_id: str,
 ) -> tuple[models.ChatRun, models.ChatRun] | None:
@@ -230,8 +257,9 @@ def active_goal_rows(
   )
   if physical is None:
     # A parent provider turn may finish after launching durable background
-    # children. Keep that latest Goal visible while its plan or delegation tree
-    # still owns unsettled work, but never reach past a newer ordinary turn.
+    # children. Keep only the latest Goal actionable while its plan or
+    # delegation tree still owns unsettled work; never reach past a newer
+    # ordinary turn.
     physical = (
       db.query(models.ChatRun)
       .filter(models.ChatRun.chat_id == chat_id)
@@ -240,53 +268,49 @@ def active_goal_rows(
     )
     if physical is None or physical.goal_objective is None:
       return None
-  if physical.goal_id:
-    plan_owner = (
-      db.query(models.ChatRun)
-      .filter(
-        models.ChatRun.chat_id == chat_id,
-        models.ChatRun.goal_id == physical.goal_id,
-        models.ChatRun.goal_plan_json.isnot(None),
-      )
-      .order_by(models.ChatRun.started_at.asc(), models.ChatRun.id.asc())
-      .first()
+  rows = _goal_rows_for_physical(db, physical)
+  if physical.status in models.NONTERMINAL_RUN_STATUSES:
+    return rows
+  document = rows[1].goal_plan_json
+  tasks = document.get("tasks") if isinstance(document, dict) else None
+  unfinished_plan = bool(tasks) and any(
+    isinstance(task, dict)
+    and task.get("status") not in {"completed", "cancelled"}
+    for task in tasks
+  )
+  if unfinished_plan or _delegation_tree_has_active_work(
+    _delegation_tree(db, *rows),
+  ):
+    return rows
+  return None
+
+
+def presented_goal_rows(
+  db: Session, chat_id: str,
+) -> tuple[models.ChatRun, models.ChatRun] | None:
+  """Return the latest Goal that remains visible until an explicit clear.
+
+  A ``/goal clear`` run carries the cleared Goal's identity with a null
+  objective. That row is a durable presentation tombstone: later ordinary
+  turns do not revive the Goal, while a genuinely new Goal has a newer identity
+  and naturally becomes visible. Execution liveness is deliberately absent
+  from this query so completed and paused Goals survive reloads.
+  """
+  physical = (
+    db.query(models.ChatRun)
+    .filter(
+      models.ChatRun.chat_id == chat_id,
+      or_(
+        models.ChatRun.goal_id.isnot(None),
+        models.ChatRun.goal_objective.isnot(None),
+      ),
     )
-    if plan_owner is not None:
-      rows = (physical, plan_owner)
-      if physical.status in models.NONTERMINAL_RUN_STATUSES:
-        return rows
-      document = plan_owner.goal_plan_json
-      tasks = document.get("tasks") if isinstance(document, dict) else None
-      unfinished_plan = bool(tasks) and any(
-        isinstance(task, dict)
-        and task.get("status") not in {"completed", "cancelled"}
-        for task in tasks
-      )
-      if unfinished_plan or _delegation_tree_has_active_work(
-        _delegation_tree(db, *rows),
-      ):
-        return rows
-      return None
-  root_id = physical.root_run_id or physical.id
-  root = db.query(models.ChatRun).filter(
-    models.ChatRun.id == root_id,
-    models.ChatRun.chat_id == chat_id,
-  ).first()
-  if root is None:
-    raise RuntimeError("active Goal refers to a missing logical root run")
-  if physical.status not in models.NONTERMINAL_RUN_STATUSES:
-    document = root.goal_plan_json
-    tasks = document.get("tasks") if isinstance(document, dict) else None
-    unfinished_plan = bool(tasks) and any(
-      isinstance(task, dict)
-      and task.get("status") not in {"completed", "cancelled"}
-      for task in tasks
-    )
-    if not unfinished_plan and not _delegation_tree_has_active_work(
-      _delegation_tree(db, physical, root),
-    ):
-      return None
-  return physical, root
+    .order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc())
+    .first()
+  )
+  if physical is None or physical.goal_objective is None:
+    return None
+  return _goal_rows_for_physical(db, physical)
 
 
 def _delegation_tree(
@@ -557,6 +581,45 @@ def terminal_goal_summaries_by_message_index(
       "plan": plan,
     })
   return projected
+
+
+def serialize_goal(
+  db: Session,
+  physical: models.ChatRun,
+  root: models.ChatRun,
+) -> dict[str, Any]:
+  """Project durable Goal presentation independently of turn liveness."""
+  plan = serialize_plan(db, physical, root)
+  if physical.status == "running":
+    status = "active"
+  elif physical.status in {
+    "parked", "resume_pending", "parked_notified", "stopped", "interrupted",
+  }:
+    status = "paused"
+  elif physical.status == "failed":
+    status = "failed"
+  elif (
+    physical.status == "completed"
+    and plan is not None
+    and not plan["summary"]["can_complete"]
+  ):
+    # A clean physical turn can end before a multi-turn plan is complete. The
+    # Goal remains resumable; physical completion is not Goal completion.
+    status = "paused"
+  else:
+    status = "completed"
+  return {
+    "id": physical.goal_id or root.id,
+    "objective": physical.goal_objective,
+    "status": status,
+    "resumable": status == "paused",
+  }
+
+
+def presented_goal(db: Session, chat_id: str) -> dict[str, Any] | None:
+  """Serialize the Goal presentation retained by this chat, if any."""
+  rows = presented_goal_rows(db, chat_id)
+  return serialize_goal(db, *rows) if rows is not None else None
 
 
 def replace_plan(
