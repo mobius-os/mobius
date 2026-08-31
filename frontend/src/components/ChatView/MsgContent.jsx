@@ -1,5 +1,4 @@
 import { memo } from 'react'
-import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ActivityStretch from './ActivityStretch.jsx'
 import { groupActivityRuns, coalesceThinkingEntries } from './groupBlocks.js'
@@ -17,6 +16,7 @@ import {
 } from './streamReducers.js'
 import { stripAugmentation } from './msgText.js'
 import ErrorCard from './ErrorCard.jsx'
+import { ownsRecoveryAction } from './recoveryCard.js'
 import ContextCompactionMarker from './ContextCompactionMarker.jsx'
 import { assistantBlockKey } from './streamPromotion.js'
 import { copyAssistantSelection } from './markdownClipboard.js'
@@ -104,6 +104,7 @@ function MsgContentInner({
   autoResumeSaving,
   autoResumeError,
   onAutoResumeChange,
+  limitResetElapsed = false,
   submissionBlocked = false,
   // isLastMsg + liveQuestionId are primitive props so memo can do a stable
   // shallow comparison; an inline isQuestionAnswerable arrow would hand memo a
@@ -132,7 +133,6 @@ function MsgContentInner({
   // the persisted message and streamItems.
   suppressedQuestionKeys,
 }) {
-  const autoResumeSwitchId = chatId ? `auto-resume-${chatId}` : undefined
   // Build a stable per-render answerable predicate that closes over the
   // scalar props (no function prop needed from ChatView).
   const isQuestionAnswerable = (block) =>
@@ -195,6 +195,13 @@ function MsgContentInner({
     const lastEntryIdx = finalEntries.length
       ? finalEntries[finalEntries.length - 1].idx
       : -1
+    // A durable unanswered question remains the only action that can advance
+    // this turn, even when pause normalization places a resumable restart note
+    // at the visible tail. Recovery copy and controls must use that same owner
+    // rather than promising a second, impossible continuation path.
+    const questionOwnsTurn = finalEntries.some(({ item }) => (
+      isQuestionAnswerable(item)
+    ))
     const assistantMarkdownByIndex = new Map(
       msg.role !== 'assistant' ? [] : finalEntries.flatMap(({ item, idx }) => {
         if (item.type !== 'text' || !item.content) return []
@@ -320,65 +327,66 @@ function MsgContentInner({
         // branch the block rendered to null and the error
         // vanished on chat return; that was the bug.
         //
-        // The card body (label, park/pause classification, reset line) is
-        // ErrorCard — this SAME block renderer consumes the live payload too,
-        // so the two sources cannot diverge. Only the Resume button
-        // lives here: a turn paused by a drain-gated restart (or interrupted
+        // The card body and its one recovery path are shared here for live and
+        // persisted payloads. A turn paused by a drain-gated restart (or interrupted
         // by a crash) persists a `resumable` note (backend reconcile marks
         // it), and only the TAIL note on the last message is resumable —
         // mirrors how a question card is only answerable at the tail — so
         // scrolled-back history and live provider errors never show a Resume
         // button. One tap opens a provider continuation turn and persists a
         // product marker rather than attributing the internal prompt to the
-        // owner; on a park the button reads "Resume now" (design §2.4).
-        const resumable = !!(block.resumable && isLastMsg && onResume)
+        // owner. A provider-limit park never offers a retry before its reset:
+        // it enables automatic continuation instead, then exposes Continue
+        // only when the deadline has actually elapsed (design §2.4).
+        const recoveryOwner = ownsRecoveryAction({
+          block,
+          entryIndex: i,
+          lastEntryIndex: lastEntryIdx,
+          isLastMessage: isLastMsg,
+          canResume: !!onResume,
+          questionOwnsTurn,
+        })
         const parked = !!block.pause?.resets_at
+        const automaticContinuation = recoveryOwner && parked && !!autoResumeEnabled
+        const manualResumeAvailable = recoveryOwner && (
+          !parked || (!!limitResetElapsed && !autoResumeEnabled)
+        )
         return (
           <ErrorCard
             key={assistantBlockKey(block, i)}
             block={block}
-            autoResume={resumable && parked && !!autoResumeEnabled}
+            autoResume={automaticContinuation}
+            restartAutoContinue={recoveryOwner && block.pause?.kind === 'restart'}
+            resetElapsed={!!limitResetElapsed}
+            cardRef={recoveryOwner ? resumeCardRef : undefined}
           >
-            {resumable && parked && autoResumeAvailable && onAutoResumeChange && (
-              <div className="chat__limit-option">
-                <div className="chat__limit-option-copy">
-                  <label
-                    className="chat__limit-option-label"
-                    htmlFor={autoResumeSwitchId}
-                  >
-                    Automatically continue after usage limits
-                  </label>
-                </div>
-                <Switch
-                  className="chat-policy-switch"
-                  id={autoResumeSwitchId}
-                  checked={!!autoResumeEnabled}
-                  onCheckedChange={onAutoResumeChange}
+            {recoveryOwner && parked && autoResumeAvailable && onAutoResumeChange && (
+              <div className="chat__recovery-actions">
+                <button
+                  type="button"
+                  className={`chat__recovery-action${autoResumeEnabled
+                    ? ' chat__recovery-action--quiet'
+                    : ''}`}
+                  onClick={() => onAutoResumeChange(!autoResumeEnabled)}
                   disabled={!!autoResumeSaving || submissionBlocked}
-                />
+                >
+                  {autoResumeSaving
+                    ? 'Saving…'
+                    : autoResumeEnabled
+                      ? 'Turn off auto-continue'
+                      : 'Auto-continue this chat'}
+                </button>
                 {autoResumeError && (
-                  <span className="chat__limit-option-error" role="alert">
+                  <span className="chat__recovery-action-error" role="alert">
                     {autoResumeError}
                   </span>
                 )}
               </div>
             )}
-            {resumable && (
+            {manualResumeAvailable && (
               <button
                 type="button"
                 className="chat__resume"
-                // Publish ONLY the tail note's button. `resumable` gates on
-                // isLastMsg, not on tail position, so a last message holding
-                // two resumable error blocks renders two buttons — and one
-                // shared callback ref has ONE slot: the later mount wins, then
-                // an unmount of the OTHER button calls the ref with null and
-                // the cue goes dark while the real target is still on screen
-                // and offscreen. The tail is also exactly what arms the cue
-                // (ChatView's tailResumableBlock), so gating here keeps the
-                // observed node and the `active` flag talking about the same
-                // block. The old querySelectorAll lookup took `.pop()`, which
-                // is what this reproduces.
-                ref={i === lastEntryIdx ? resumeCardRef : undefined}
                 onClick={() => onResume('continue', {
                   continuation: 'manual',
                   pin: false,
@@ -388,7 +396,7 @@ function MsgContentInner({
                   ? 'Wait for the provider switch to finish.'
                   : undefined}
               >
-                {parked ? 'Resume now' : 'Resume'}
+                {parked ? 'Continue now' : 'Resume'}
               </button>
             )}
           </ErrorCard>
@@ -508,6 +516,7 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.autoResumeSaving === next.autoResumeSaving
     && prev.autoResumeError === next.autoResumeError
     && prev.onAutoResumeChange === next.onAutoResumeChange
+    && prev.limitResetElapsed === next.limitResetElapsed
     && prev.submissionBlocked === next.submissionBlocked
     && prev.isLastMsg === next.isLastMsg
     && prev.liveQuestionId === next.liveQuestionId

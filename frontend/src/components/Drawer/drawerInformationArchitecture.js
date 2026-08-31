@@ -28,14 +28,16 @@ function newestRecentFirst(a, b) {
 /**
  * Build the drawer's navigation projection without mutating query-cache arrays.
  *
- * Pinned chats and apps share one stable section ordered oldest-pin-first, so a
+ * Pinned chats, apps, and projects share one stable section ordered
+ * oldest-pin-first, so a
  * new pin appends at the bottom and manual drag-to-reorder owns the rest.
- * Unpinned chats and apps share one newest-first Recents section. Chat activity
- * follows owner conversation activity; app activity follows explicit opens,
- * falling back to the bundle update/creation time until the first open. The
- * searchable apps grid keeps its pinned-first then stable creation ordering.
+ * Unpinned chats and apps share one newest-first Recents section. Projects join
+ * only after an explicit open; file changes alone never manufacture recency.
+ * Chat activity follows owner conversation activity; app activity follows
+ * explicit opens, falling back to bundle update/creation time until the first
+ * open. The searchable apps grid keeps its own stable ordering.
  */
-export function buildDrawerSections(chats = [], apps = []) {
+export function buildDrawerSections(chats = [], apps = [], projects = []) {
   const chatRows = chats
     .filter(chat => chat.has_messages)
     .slice()
@@ -62,6 +64,9 @@ export function buildDrawerSections(chats = [], apps = []) {
     ...appRows
       .filter(app => app.pinned_at)
       .map(item => ({ kind: 'app', item })),
+    ...projects
+      .filter(project => project.pinned_at)
+      .map(item => ({ kind: 'project', item })),
   ].sort(oldestPinnedFirst)
 
   const recents = [
@@ -71,6 +76,23 @@ export function buildDrawerSections(chats = [], apps = []) {
     ...appRows
       .filter(app => !app.pinned_at)
       .map(item => ({ kind: 'app', item })),
+    ...projects
+      .filter(project => !project.pinned_at && project.last_opened_at)
+      .map(item => ({ kind: 'project', item })),
+    ...projects.flatMap(project => (
+      Array.isArray(project?.artifacts) ? project.artifacts : []
+    )
+      .filter(artifact => artifact?.status === 'ok' && artifact?.has_output)
+      .map(artifact => ({
+        kind: 'artifact',
+        item: {
+          ...artifact,
+          id: `${project.id}:${artifact.id}`,
+          artifact_id: artifact.id,
+          activity_at: artifact.updated_at || project.updated_at || '',
+          project: { id: project.id, name: project.name, color: project.color },
+        },
+      }))),
   ].sort(newestRecentFirst)
 
   return {
@@ -93,8 +115,12 @@ export function filterInstalledApps(apps = [], query = '') {
 // The shared menu names a row by identity, so it must survive that row
 // disappearing mid-render (deleted, filtered, or refreshed away) as ordinary
 // absence rather than a crash.
-export function findDrawerMenuItem(menu, chats = [], apps = []) {
+export function findDrawerMenuItem(menu, chats = [], apps = [], projects = []) {
   if (!menu) return null
-  const items = menu.kind === 'chat' ? (chats || []) : (apps || [])
+  const items = menu.kind === 'chat'
+    ? (chats || [])
+    : menu.kind === 'project'
+      ? (projects || [])
+      : (apps || [])
   return items.find(item => item?.id === menu.id) || null
 }

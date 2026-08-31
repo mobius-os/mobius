@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { modeAfterQuestionResponseStart } from '../useScrollMode.js'
+import { modeAfterQuestionResponseStart } from '../scroll/policy.js'
 
 test('first post-answer activity resumes only the follow mode that submitted it', () => {
   const follow = { kind: 'FOLLOW_BOTTOM' }

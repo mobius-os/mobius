@@ -68,6 +68,7 @@ proxy_router = _load("proxy")
 public_apps_router = _load("public_apps")
 local_services_router = _load("local_services")
 notify_router = _load("notify")
+screen_control_router = _load("screen_control")
 settings_router = _load("settings")
 storage_router = _load("storage")
 fs_router = _load("fs")
@@ -89,9 +90,11 @@ standalone_router = _load("standalone")
 client_error_router = _load("client_error")
 client_signal_router = _load("client_signal")
 community_router = _load("community")
+contribution_relay_router = _load("contribution_relay")
 platform_router = _load("platform")
 published_router = _load("published")
 connect_router = _load("connect")
+projects_router = _load("projects")
 
 __all__ = [
   "admin_router",
@@ -111,6 +114,7 @@ __all__ = [
   "public_apps_router",
   "local_services_router",
   "notify_router",
+  "screen_control_router",
   "settings_router",
   "uploads_router",
   "media_router",
@@ -130,7 +134,9 @@ __all__ = [
   "client_error_router",
   "client_signal_router",
   "community_router",
+  "contribution_relay_router",
   "platform_router",
   "published_router",
   "connect_router",
+  "projects_router",
 ]

@@ -485,6 +485,71 @@ test('microphone capability can cancel while permission is still pending', async
   })
 })
 
+test('a superseded speech stream rejects its outer synthesis promptly', async (t) => {
+  const OriginalWorker = globalThis.Worker
+  const originalFetch = globalThis.fetch
+  globalThis.Worker = class FakeWorker {
+    postMessage() {}
+    terminate() {}
+  }
+  globalThis.fetch = async () => ({
+    ok: true,
+    async text() { return '// test speech worker' },
+  })
+  t.after(() => {
+    globalThis.Worker = OriginalWorker
+    globalThis.fetch = originalFetch
+  })
+
+  await withFakeWindow(async ({ window, parent }) => {
+    const capabilities = makeCapabilities({
+      declarations: {
+        'media.speech': {
+          version: 1, limits: { max_text_chars: 1000 },
+        },
+      },
+    })
+    const session = capabilities.open('media.speech', {
+      operation: 'synthesize', text: 'Hello.',
+    })
+    try {
+      let streamOpen
+      for (let attempt = 0; attempt < 10 && !streamOpen; attempt += 1) {
+        await new Promise((resolve) => setImmediate(resolve))
+        streamOpen = parent.messages.find(({ data }) => (
+          data.input?.operation === 'model-stream'
+        ))?.data
+      }
+      assert.ok(streamOpen, 'the in-frame synthesis opens its host model stream')
+
+      window.emit({
+        type: 'moebius:capability-error',
+        requestId: streamOpen.requestId,
+        capability: streamOpen.capability,
+        name: 'AbortError',
+        code: 'superseded',
+        message: 'Another request took over this capability.',
+      })
+
+      let deadline
+      const didNotSettle = new Promise((_, reject) => {
+        deadline = setTimeout(() => reject(new Error('outer synthesis stayed pending')), 100)
+      })
+      try {
+        await assert.rejects(
+          Promise.race([session.result, didNotSettle]),
+          { name: 'AbortError', code: 'superseded' },
+        )
+      } finally {
+        clearTimeout(deadline)
+      }
+    } finally {
+      session.cancel()
+      capabilities._destroy()
+    }
+  })
+})
+
 test('capabilities reject direct top-level use instead of bypassing the host', async () => {
   const previousWindow = globalThis.window
   const topLevel = {

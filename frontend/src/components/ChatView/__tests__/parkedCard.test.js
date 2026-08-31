@@ -1,10 +1,12 @@
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { ownsRecoveryAction } from '../recoveryCard.js'
+import { upsertTerminalErrorItem } from '../streamReducers.js'
 
 // Provider-limit parking (design §2.4): a limit-killed turn persists an error
 // block carrying a single `pause` descriptor ({kind, resets_at?}), which
-// renders as a live "Rate limit — resets at … · Resume now" card. That one
+// renders as one calm queued/paused recovery card. That one
 // field must survive all three client seams: the live stream reducer,
 // promote-to-block, and the shared ErrorCard renderer. MsgContent owns the
 // block tree for BOTH persisted and live data, so those sources cannot diverge.
@@ -13,7 +15,6 @@ const streamingMessage = readFileSync(new URL('../StreamingMessage.jsx', import.
 const errorCard = readFileSync(new URL('../ErrorCard.jsx', import.meta.url), 'utf8')
 const resetTime = readFileSync(new URL('../resetTime.js', import.meta.url), 'utf8')
 const promotion = readFileSync(new URL('../streamPromotion.js', import.meta.url), 'utf8')
-const stream = readFileSync(new URL('../useStreamConnection.js', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const shell = readFileSync(new URL('../../Shell/Shell.jsx', import.meta.url), 'utf8')
@@ -30,12 +31,12 @@ const settingsView = readFileSync(
 test('ErrorCard renders a parked card for a block whose pause has a reset time', () => {
   assert.match(errorCard, /block\.pause\?\.resets_at/,
     'the card must key the parked classification on block.pause.resets_at')
-  assert.match(errorCard, /Rate limit/,
-    'a parked block must be labeled as a rate limit, not a generic error')
-  assert.match(errorCard, /Resets \{vm\.resetLabel\}/,
-    'the card must show the reset time (label carries its own preposition)')
-  assert.match(msgContent, /\{parked \? 'Resume now' : 'Resume'\}/,
-    'the tail resume button reads "Resume now" on a parked card')
+  assert.match(errorCard, /Usage resets/,
+    'a parked block must lead with a plain-language reset outcome')
+  assert.match(errorCard, /Queued to continue/,
+    'enabled automatic continuation is the authoritative state')
+  assert.match(msgContent, /\{parked \? 'Continue now' : 'Resume'\}/,
+    'an elapsed park offers Continue now rather than a premature retry')
 })
 
 test('the one block renderer owns ErrorCard for both active sources', () => {
@@ -84,38 +85,39 @@ test('streamItemToBlock carries the pause descriptor through promote', () => {
 })
 
 test('the live stream reducer carries the pause descriptor', () => {
-  assert.match(
-    stream,
-    /event\.pause \? \{ pause: event\.pause \}/,
-    'a live limit/restart note must render as the pause card before promote too',
-  )
-  assert.match(
-    stream,
-    /event\.resumable \? \{ resumable: true \}/,
-    'a live paused note must carry resumable',
-  )
+  const block = upsertTerminalErrorItem([], {
+    message: 'Usage limit reached.',
+    resumable: true,
+    pause: { kind: 'limit', resets_at: '2026-08-24T09:00:00Z' },
+  })[0]
+  assert.deepEqual(block, {
+    type: 'error',
+    message: 'Usage limit reached.',
+    resumable: true,
+    pause: { kind: 'limit', resets_at: '2026-08-24T09:00:00Z' },
+  }, 'a live limit note must render as the pause card before promote too')
 })
 
 test('the parked card has styling distinct from a plain error', () => {
   assert.match(css, /\.chat__text--parked\s*\{/,
     'a .chat__text--parked style must exist (wait state, not failure)')
-  assert.match(css, /\.chat__parked-reset\s*\{/,
-    'the reset line has its own style')
+  assert.match(css, /\.chat__recovery-title\s*\{/,
+    'the authoritative recovery outcome has its own hierarchy')
 })
 
-test('auto-resume is a chat-local switch shown only on the active rate-limit card', () => {
-  assert.match(msgContent, /resumable && parked && autoResumeAvailable && onAutoResumeChange/,
-    'the switch must require the tail resumable rate-limit state')
-  assert.match(msgContent, /Automatically continue after usage limits/,
-    'the switch label describes the automatic behavior directly')
-  assert.match(msgContent, /htmlFor=\{autoResumeSwitchId\}/,
-    'the visible switch label must also be its accessible name')
-  assert.doesNotMatch(msgContent, /This chat only/,
-    'the card keeps the control copy concise')
-  assert.match(msgContent, /onCheckedChange=\{onAutoResumeChange\}/,
-    'toggling changes the chat preference rather than sending continue')
-  assert.match(css, /\.chat__limit-option\s*\{/,
-    'the in-card control has a dedicated layout')
+test('the rate-limit card presents one recovery action at a time', () => {
+  assert.match(msgContent, /recoveryOwner && parked && autoResumeAvailable && onAutoResumeChange/,
+    'the action must require the tail resumable rate-limit state')
+  assert.match(msgContent, /Auto-continue this chat/,
+    'a future reset names the persistent chat policy')
+  assert.match(msgContent, /Turn off auto-continue/,
+    'an enabled policy stays reversible without a competing retry')
+  assert.match(msgContent, /manualResumeAvailable = recoveryOwner && \([\s\S]*!parked \|\| \(!!limitResetElapsed && !autoResumeEnabled\)/,
+    'manual continuation appears only after reset and only when auto continuation is off')
+  assert.doesNotMatch(msgContent, /<Switch/,
+    'the card must not present a switch beside a competing action')
+  assert.match(css, /\.chat__recovery-actions\s*\{/,
+    'the in-card action has a dedicated layout')
   assert.doesNotMatch(settingsView, /auto_resume_on_limit|Auto.?resume/i,
     'the removed global automatic option must not reappear in Settings')
   assert.match(chatSettingsPanel, /Automatically continue after usage limits/,
@@ -128,6 +130,25 @@ test('auto-resume is a chat-local switch shown only on the active rate-limit car
     'the settings surface uses the same full-size black/purple switch treatment')
   assert.match(css, /\.chat-policy-switch button\[role="switch"\]\[data-state="checked"\]/,
     'the chat switch restores the SDK checked track after the button reset')
+})
+
+test('only the visible tail block owns recovery controls', () => {
+  const block = { type: 'error', resumable: true, pause: { resets_at: 'later' } }
+  const context = {
+    block,
+    lastEntryIndex: 3,
+    isLastMessage: true,
+    canResume: true,
+  }
+  assert.equal(ownsRecoveryAction({ ...context, entryIndex: 2 }), false)
+  assert.equal(ownsRecoveryAction({ ...context, entryIndex: 3 }), true)
+  assert.equal(
+    ownsRecoveryAction({ ...context, entryIndex: 3, questionOwnsTurn: true }),
+    false,
+    'an unanswered question owns the turn ahead of a resumable tail pause',
+  )
+  assert.equal(ownsRecoveryAction({ ...context, entryIndex: 3, isLastMessage: false }), false)
+  assert.equal(ownsRecoveryAction({ ...context, entryIndex: 3, canResume: false }), false)
 })
 
 test('continuations render as product markers, not user bubbles', () => {
@@ -192,19 +213,38 @@ test('a benign pause (no reset time) renders the calm "Paused" family, not red E
     'ANY pause gets the soft treatment')
   assert.match(errorCard, /block\.pause \? 'Paused' : 'Error'/,
     'a benign pause reads "Paused"; only genuine failures read "Error"')
+  assert.match(errorCard, /\) : vm\.benign \? \([\s\S]*chat__recovery-title--paused/,
+    'a benign pause uses the neutral recovery hierarchy rather than the red error label')
+  assert.match(css, /\.chat__recovery-title--paused\s*\{[\s\S]*?color: var\(--accent\)/,
+    'the Paused heading uses the exact same accent token as Resume')
+  assert.match(errorCard, /Möbius will continue automatically when the restart is complete\./,
+    'the restart pause briefly states its expected automatic outcome')
+  assert.match(errorCard, /restartAutoContinue[\s\S]*?This response is paused\./,
+    'only an owned restart continuation may promise an automatic outcome')
+  assert.match(msgContent,
+    /restartAutoContinue=\{recoveryOwner && block\.pause\?\.kind === 'restart'\}/,
+    'a question-held restart cannot promise continuation before the owner answers')
+  assert.match(chatView, /Response paused for restart\. Möbius will continue automatically\./,
+    'the screen-reader status matches the visible automatic continuation promise')
+  assert.match(chatView, /Paused for restart — continuing automatically/,
+    'the offscreen-card nudge keeps the same concise informational language')
   assert.match(errorCard, /role=\{vm\.benign \? undefined : 'alert'\}/,
     'the global live region announces waits; only genuine failures alert here')
   assert.match(errorCard, /className="chat__error-status"[\s\S]*<\/div>\s*\{children\}/,
     'interactive recovery controls must remain separate from the error body')
 })
 
-test('the park card reassures that a reset push is coming', () => {
-  assert.match(errorCard, /chat__parked-note/,
-    'a muted reassurance line renders inside the parked branch')
-  assert.match(errorCard, /notification when it resets/,
-    'the note names the incoming reset push')
-  assert.match(errorCard, /keep trying to continue this chat after the limit resets/,
-    'the note reflects the enabled per-chat behavior')
-  assert.match(css, /\.chat__parked-note\s*\{/,
-    'the reassurance line has its own muted style')
+test('the park card keeps provider mechanics behind progressive disclosure', () => {
+  assert.match(errorCard, /chat__recovery-copy/,
+    'the plain-language outcome is the visible supporting copy')
+  assert.match(errorCard, /Technical details/,
+    'the raw provider payload stays available on demand')
+  assert.match(errorCard, /Möbius will continue automatically/,
+    'the enabled state promises only the behavior the policy owns')
+  assert.match(css, /\.chat__recovery-details\s*\{/,
+    'technical detail has a quiet disclosure style')
+  assert.match(errorCard, /chat__recovery-details-chevron/,
+    'technical detail has an explicit visible disclosure indicator')
+  assert.match(css, /\[open\] \.chat__recovery-details-chevron[\s\S]*rotate\(90deg\)/,
+    'the disclosure indicator reflects its open state')
 })

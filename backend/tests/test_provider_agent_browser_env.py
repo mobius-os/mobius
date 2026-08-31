@@ -1,7 +1,10 @@
 from app.chat import (
+  DEFAULT_AGENT_BROWSER_CONFIG,
+  DEFAULT_AGENT_BROWSER_IDLE_TIMEOUT_MS,
   DEFAULT_VIEWPORT_HEIGHT,
   DEFAULT_VIEWPORT_PIXEL_RATIO,
   DEFAULT_VIEWPORT_WIDTH,
+  agent_browser_runtime_env,
   bounded_agent_browser_args,
   viewport_env,
 )
@@ -85,6 +88,20 @@ def test_browser_cache_defaults_preserve_operator_flags_and_overrides():
   assert bounded_agent_browser_args("--no-sandbox,--disk-cache-size=123") == (
     "--no-sandbox,--disk-cache-size=123,--media-cache-size=16777216"
   )
+
+
+def test_shared_browser_runtime_uses_bounded_idle_and_trusted_config_defaults():
+  assert agent_browser_runtime_env({}) == {
+    "AGENT_BROWSER_CONFIG": DEFAULT_AGENT_BROWSER_CONFIG,
+    "AGENT_BROWSER_IDLE_TIMEOUT_MS": DEFAULT_AGENT_BROWSER_IDLE_TIMEOUT_MS,
+  }
+  assert agent_browser_runtime_env({
+    "AGENT_BROWSER_CONFIG": "/operator/browser.json",
+    "AGENT_BROWSER_IDLE_TIMEOUT_MS": "0",
+  }) == {
+    "AGENT_BROWSER_CONFIG": "/operator/browser.json",
+    "AGENT_BROWSER_IDLE_TIMEOUT_MS": "0",
+  }
 
 
 # CSS geometry and physical density form one agent-browser capture contract:

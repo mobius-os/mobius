@@ -535,7 +535,7 @@ test.describe('Navigation basics', () => {
 test.describe('Touch navigation', () => {
   test.use({ hasTouch: true, isMobile: true })
 
-  test('chat selection keeps the drawer over the outgoing chat until the destination paints', async ({ page }) => {
+  test('chat selection closes the drawer before the destination paints', async ({ page }) => {
     let releaseChatDetail
     const wait = new Promise(resolve => { releaseChatDetail = resolve })
     await setup(page, { width: 412, height: 915 }, {
@@ -549,8 +549,9 @@ test.describe('Touch navigation', () => {
     const drawer = page.locator('#navigation-drawer')
     await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
       .toBe(NAV_CHATS[1].id)
-    await expect(drawer).toHaveClass(/drawer--open/)
-    await expect(drawer).toHaveClass(/drawer--locked/)
+    await expect(drawer).not.toHaveClass(/drawer--open/)
+    await expect(drawer).not.toHaveClass(/drawer--locked/)
+    await expect(page.locator('.shell__content')).not.toHaveAttribute('inert', '')
     await expect.poll(() => page.evaluate(() => ({
       held: document.querySelector('.shell__chat-view--held')?.dataset.chatId,
       staging: document.querySelector('.shell__chat-view--staging')?.dataset.chatId,
@@ -1441,6 +1442,75 @@ test.describe('Drawer touch lifecycle', () => {
     await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
       .toBe(NAV_CHATS[2].id)
     await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  test('a drawer selection survives its recovered close arriving late', async ({ page }) => {
+    await page.route('**/api/client-error', route => route.fulfill({
+      status: 204,
+      body: '',
+    }))
+    await setup(page, { width: 426, height: 860 })
+    await openDrawer(page)
+
+    // Hold the explicit scrim-close traversal past the stale-close recovery
+    // boundary. The shell must let the next real tap reopen the drawer without
+    // forgetting that this exact programmatic Back can still arrive later.
+    await page.evaluate(() => {
+      const originalBack = history.back.bind(history)
+      history.back = () => {
+        window.__releaseLateDrawerClose = () => {
+          history.back = originalBack
+          originalBack()
+        }
+      }
+    })
+    await closeDrawerButton(page)
+    await page.evaluate(() => {
+      const originalNow = Date.now.bind(Date)
+      Date.now = () => originalNow() + 5000
+      window.__restoreDateNow = () => { Date.now = originalNow }
+    })
+
+    const toggle = page.getByRole('button', { name: 'Toggle navigation' })
+    let box = await toggle.boundingBox()
+    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2)
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    await page.evaluate(() => window.__restoreDateNow())
+
+    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    const beta = navigation.getByRole('button', { name: NAV_CHATS[1].title, exact: true })
+    await expect(page.locator('#navigation-drawer'))
+      .toHaveCSS('transform', 'matrix(1, 0, 0, 1, 0, 0)')
+    box = await beta.boundingBox()
+    await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2)
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
+      .toBe(NAV_CHATS[1].id)
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+
+    await page.evaluate(() => window.__releaseLateDrawerClose())
+    await expect.poll(() => page.evaluate(() => history.state?.route?.chatId))
+      .toBe(NAV_CHATS[1].id)
+    await expect.poll(() => page.evaluate(() => localStorage.getItem('moebius_active_chat')))
+      .toBe(NAV_CHATS[1].id)
+
+    const trace = await page.evaluate(() => {
+      const ring = JSON.parse(sessionStorage.getItem('mobius:error-log') || '[]')
+      return ring.find(entry => entry.where === 'useNavigation.recoveredDrawerClose')
+    })
+    expect(trace).toBeTruthy()
+    expect(JSON.parse(trace.stack)).toEqual({
+      sourceKind: 'nav',
+      destinationKind: 'base',
+      sourceIndex: 1,
+      destinationIndex: 0,
+      expectedReturn: true,
+      selectionChanged: true,
+    })
+    const serializedTrace = JSON.stringify(trace)
+    for (const { id, title } of NAV_CHATS) {
+      expect(serializedTrace).not.toContain(id)
+      expect(serializedTrace).not.toContain(title)
+    }
   })
 })
 

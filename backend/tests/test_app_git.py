@@ -2322,10 +2322,15 @@ def test_commit_local_upgrades_managed_gitignore_and_untracks_runtime_files(tmp_
   (repo / "last-run.json").write_text("{}\n", encoding="utf-8")
   (repo / "init-cron.sh").write_text("#!/bin/sh\n", encoding="utf-8")
   (repo / "README.md.mobius-drop-bak").write_text("old\n", encoding="utf-8")
+  (repo / "debug.log").write_text("runtime\n", encoding="utf-8")
+  (repo / ".env.local").write_text("SECRET=not-source\n", encoding="utf-8")
+  (repo / ".pytest_cache").mkdir()
+  (repo / ".pytest_cache" / "state").write_text("runtime\n", encoding="utf-8")
   app_git._run(
     repo, "add",
     "inputs/activity.jsonl", "last-run.json", "init-cron.sh",
-    "README.md.mobius-drop-bak",
+    "README.md.mobius-drop-bak", "debug.log", ".env.local",
+    ".pytest_cache/state",
   )
 
   app_git.commit_local(repo, "agent edit")
@@ -2336,14 +2341,23 @@ def test_commit_local_upgrades_managed_gitignore_and_untracks_runtime_files(tmp_
   assert "last-run.json" not in tracked
   assert "init-cron.sh" not in tracked
   assert "README.md.mobius-drop-bak" not in tracked
+  assert "debug.log" not in tracked
+  assert ".env.local" not in tracked
+  assert ".pytest_cache/state" not in tracked
   assert (repo / "inputs" / "activity.jsonl").exists()
   assert (repo / "last-run.json").exists()
   assert (repo / "init-cron.sh").exists()
   assert (repo / "README.md.mobius-drop-bak").exists()
+  assert (repo / "debug.log").exists()
+  assert (repo / ".env.local").exists()
+  assert (repo / ".pytest_cache" / "state").exists()
   gitignore = (repo / ".gitignore").read_text(encoding="utf-8")
   assert "*.js" not in gitignore
   assert "inputs/" in gitignore
   assert "last-run.json" in gitignore
+  assert "*.log" in gitignore
+  assert ".env.local" in gitignore
+  assert ".pytest_cache/" in gitignore
 
 
 def test_record_upstream_upgrades_stale_managed_gitignore(tmp_path):

@@ -1219,7 +1219,6 @@ async def run_claude_sdk_turn(
         "permission_mode": (
           "plan" if run_policy.scope == "read" else "acceptEdits"
         ),
-        "max_budget_usd": run_policy.max_budget_usd,
         "disallowed_tools": [
           "AskUserQuestion", "Task", "TaskOutput", "TaskStop",
           "Workflow", "Workflows", "Agent",

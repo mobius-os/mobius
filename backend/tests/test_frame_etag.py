@@ -30,7 +30,7 @@ def test_recompile_bumps_updated_at_so_etag_changes(monkeypatch, tmp_path):
   jsx_source = "export default function A(){}"
   source_path.write_text(jsx_source, encoding="utf-8")
 
-  async def fake_compile(app_id, jsx, *, out_path=None, source_path=None):
+  async def fake_compile(jsx, *, out_path=None, source_path=None):
     Path(out_path).write_text("// compiled")
 
   monkeypatch.setattr(compiler, "compile_jsx", fake_compile)

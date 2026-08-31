@@ -224,3 +224,69 @@ async def test_malformed_scratch_release_event_is_ignored(
   await asyncio.sleep(0)
   assert release_calls == []
   await supervisors.stop()
+
+
+@pytest.mark.asyncio
+async def test_stalled_delegation_wake_cannot_block_off_loop_lease_recovery(
+  monkeypatch,
+):
+  import app.broadcast as broadcast_module
+  import app.chat as chat_module
+  import app.contribution_autopilot as autopilot_module
+  import app.delegations as delegations_module
+  import app.runtime_supervisors as supervisors_module
+
+  broadcast = SystemBroadcast()
+  recovered = asyncio.Event()
+  wake_started = asyncio.Event()
+  block_wake = asyncio.Event()
+  main_thread = threading.get_ident()
+  loop = asyncio.get_running_loop()
+
+  class TrackingSession(_EmptySession):
+    def __init__(self):
+      self.created_on = threading.get_ident()
+
+    def __enter__(self):
+      return self
+
+  def session_factory():
+    return TrackingSession()
+
+  async def no_chats(*_args, **_kwargs):
+    return chat_module.ContinuationSweepResult()
+
+  async def wake_parents(**_kwargs):
+    wake_started.set()
+    await block_wake.wait()
+
+  def sweep(db):
+    assert db.created_on == threading.get_ident()
+    assert db.created_on != main_thread
+    loop.call_soon_threadsafe(recovered.set)
+    return 0
+
+  monkeypatch.setattr(broadcast_module, "get_system_broadcast", lambda: broadcast)
+  monkeypatch.setattr(supervisors_module, "SessionLocal", session_factory)
+  monkeypatch.setattr(
+    supervisors_module, "DELEGATION_WAKE_RECOVERY_INTERVAL_SECS", 0,
+  )
+  monkeypatch.setattr(
+    supervisors_module, "AUTOPILOT_LEASE_RECOVERY_INTERVAL_SECS", 0,
+  )
+  monkeypatch.setattr(chat_module, "sweep_reset_parks", no_chats)
+  monkeypatch.setattr(
+    delegations_module, "wake_parents_for_completed_delegations", wake_parents,
+  )
+  monkeypatch.setattr(autopilot_module, "sweep_expired_leases", sweep)
+
+  supervisors = _supervisors()
+  await supervisors._start_chat_supervisors()
+  await asyncio.wait_for(wake_started.wait(), timeout=1)
+  await asyncio.wait_for(recovered.wait(), timeout=1)
+
+  assert not block_wake.is_set()
+  assert "delegation-wake-recovery" in supervisors._tasks
+  assert "autopilot-lease-recovery" in supervisors._tasks
+  await supervisors.stop()
+  assert supervisors._tasks == {}

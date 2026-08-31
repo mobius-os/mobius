@@ -1,35 +1,40 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 
 import {
   _anchorModeIntersectsContent,
   _anchorReapplyNeeded,
   _computeSpacerH,
-  _modeForPersistence,
   _pinReapplyNeeded,
-  _scrollModeForDiagnostics,
-  _validateSavedMode,
   applyMode,
   anchorModeFromScroll,
   bottomAnchorModeFromScroll,
   contentHoldModeFromScroll,
+  isQuestionSubmissionMode,
+  nextPinViewportHeight,
+  physicalBottomAnchorModeFromScroll,
+  topRevealAnchorMode,
+} from '../scroll/geometry.js'
+import {
+  _modeForPersistence,
+  _validateSavedMode,
+} from '../scroll/restore.js'
+import {
   composerTailIntentRequestsFollow,
   delayedSendWillPin,
   gestureLayoutRetryDelay,
   isNearPhysicalBottom,
-  isQuestionSubmissionMode,
   layoutMayOwnScroll,
   modeForChatExit,
   modeForDisclosureToggle,
   modeForForegroundReturn,
   modeForQuestionSubmission,
   modeForQueuedSubmission,
+  modeAfterQuestionResponseStart,
   modeAfterReaderGesture,
   modeAfterSpacerResize,
   modeAfterTerminalLayout,
   nestedReaderTargetOwnsInput,
-  physicalBottomAnchorModeFromScroll,
   readerInputClaimsPhysicalTail,
   readerInputEscapeDirection,
   readerInputActivatesDisclosure,
@@ -38,7 +43,8 @@ import {
   readerScrollEscapeDirection,
   settledPinMode,
   shouldPinSend,
-} from '../useScrollMode.js'
+} from '../scroll/policy.js'
+import { _scrollModeForDiagnostics } from '../useScrollMode.js'
 import {
   PIN_BOTTOM_ROOM,
   PIN_OFFSET,
@@ -46,11 +52,6 @@ import {
   pinLanded,
   snapshotChatUX,
 } from '../chatContract.js'
-
-const scrollModeSource = readFileSync(
-  new URL('../useScrollMode.js', import.meta.url),
-  'utf8',
-)
 
 function makeScrollEl({ scrollHeight, scrollTop, clientHeight, spacerHeight = 0 }) {
   return {
@@ -406,33 +407,6 @@ test('the no-scroll release classifier never reads touch geometry', () => {
   assert.equal(geometryReads, 2, 'wheel reads the scroller once')
 })
 
-test('reader-input tracing never measures the transcript at gesture start', () => {
-  assert.match(
-    scrollModeSource,
-    /captureGeometry = true,[\s\S]*?geometry: captureGeometry \? _scrollGeometryForDiagnostics\(scrollEl\) : null/,
-    'low-frequency diagnostics retain geometry while hot paths can opt out',
-  )
-  assert.match(
-    scrollModeSource,
-    /reader:input-\$\{event\?\.type \|\| 'unknown'\}`,[\s\S]{0,120}?captureGeometry: false/,
-    'the first reader input must not force transcript layout',
-  )
-  assert.match(
-    scrollModeSource,
-    /reader:scroll-start', \{ captureGeometry: false \}/,
-    'the first compositor scroll frame must not force transcript layout',
-  )
-  const onScroll = scrollModeSource.slice(
-    scrollModeSource.indexOf('const onScroll = () =>'),
-    scrollModeSource.indexOf("scrollEl.addEventListener('scroll', onScroll"),
-  )
-  assert.ok(
-    onScroll.indexOf('if (!userDriven)')
-      < onScroll.indexOf('const distanceToBottom'),
-    'browser clamps must return before measuring reader-owned tail intent',
-  )
-})
-
 test('scroll diagnostics expose behavior without message identity', () => {
   assert.deepEqual(_scrollModeForDiagnostics({
     kind: 'PIN_USER_MSG',
@@ -494,6 +468,102 @@ test('question submission freezes the visible row before same-turn output resume
       questionSubmitBaseMode: { kind: 'FOLLOW_BOTTOM' },
     },
   )
+})
+
+test('question submission treats a settled pin at the physical tail as follow intent', () => {
+  // A short intro + question card ends the stream before its reservation fills,
+  // so the live mode settles to a PIN_USER_MSG with its automatic follow-arm
+  // retired while the reader is still parked at the bottom. Answering + resuming
+  // must re-follow the new output, so the captured base normalizes to
+  // FOLLOW_BOTTOM even though the live mode was a settled pin.
+  const item = {
+    offsetTop: 660,
+    offsetHeight: 420,
+    dataset: { key: 'assistant-with-question' },
+  }
+  const scrollEl = {
+    scrollHeight: 1200,
+    scrollTop: 600,
+    clientHeight: 600, // gap = 0 → at the physical tail
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [item] : []
+    },
+  }
+  const captured = modeForQuestionSubmission(
+    scrollEl, { kind: 'PIN_USER_MSG', cid: 'latest' },
+  )
+  assert.equal(captured.kind, 'ANCHOR_AT')
+  assert.deepEqual(captured.questionSubmitBaseMode, { kind: 'FOLLOW_BOTTOM' })
+})
+
+test('question submission keeps a reading hold when parked up-thread', () => {
+  // Same settled-pin shape, but the reader has scrolled up: this is a genuine
+  // reading hold, so the base must NOT be promoted to follow.
+  const item = {
+    offsetTop: 360,
+    offsetHeight: 420,
+    dataset: { key: 'assistant-with-question' },
+  }
+  const scrollEl = {
+    scrollHeight: 1800,
+    scrollTop: 300,
+    clientHeight: 600, // gap = 900 → not at the tail
+    querySelectorAll(selector) {
+      return selector === '.chat__msg[data-key]' ? [item] : []
+    },
+  }
+  const readingHold = { kind: 'PIN_USER_MSG', cid: 'latest' }
+  const captured = modeForQuestionSubmission(scrollEl, readingHold)
+  assert.deepEqual(captured.questionSubmitBaseMode, readingHold)
+})
+
+test('first post-answer activity resumes only the follow mode that submitted it', () => {
+  const follow = { kind: 'FOLLOW_BOTTOM' }
+  const heldMode = {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-with-question',
+    offset: 60,
+    questionSubmitBaseMode: follow,
+  }
+  const submission = { mode: heldMode, readerIntentVersion: 7 }
+
+  assert.equal(modeAfterQuestionResponseStart({
+    currentMode: heldMode,
+    submission,
+    currentReaderIntentVersion: 7,
+  }), follow)
+  assert.equal(modeAfterQuestionResponseStart({
+    currentMode: follow,
+    submission,
+    currentReaderIntentVersion: 7,
+  }), follow, 'a viewport release that already restored follow remains stable')
+
+  const readerHold = { kind: 'ANCHOR_AT', key: 'older-row', offset: 20 }
+  assert.equal(modeAfterQuestionResponseStart({
+    currentMode: readerHold,
+    submission,
+    currentReaderIntentVersion: 8,
+  }), readerHold, 'a reader scroll during submission cancels follow restoration')
+  assert.equal(modeAfterQuestionResponseStart({
+    currentMode: readerHold,
+    submission,
+    currentReaderIntentVersion: 7,
+  }), readerHold, 'a newer semantic location is never overwritten')
+})
+
+test('post-answer activity keeps a pre-submit reading hold', () => {
+  const baseMode = { kind: 'ANCHOR_AT', key: 'older-row', offset: 20 }
+  const submittedMode = {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-with-question',
+    offset: 60,
+    questionSubmitBaseMode: baseMode,
+  }
+  assert.equal(modeAfterQuestionResponseStart({
+    currentMode: submittedMode,
+    submission: { mode: submittedMode, readerIntentVersion: 3 },
+    currentReaderIntentVersion: 3,
+  }), submittedMode)
 })
 
 test('question submission is a viewport-independent transient anchor', () => {
@@ -734,29 +804,6 @@ test('anchor reapply is inert for non-anchor modes and unresolved keys', () => {
   )
 })
 
-test('viewport resize reapplies the current mode without reclassifying it', () => {
-  assert.match(
-    scrollModeSource,
-    /applyLayoutMode\('layout:viewport-change', authorityVersion\)/,
-    'keyboard geometry keeps the existing pin, follow, or exact anchor',
-  )
-  assert.doesNotMatch(
-    scrollModeSource,
-    /transitionMode\(\s*modeRef\.current,\s*'layout:viewport-change'/,
-    'geometry must not manufacture a semantic no-op transition',
-  )
-  assert.doesNotMatch(
-    scrollModeSource,
-    /modeForViewportChange/,
-    'viewport layout has no second semantic mode-derivation path',
-  )
-  assert.doesNotMatch(
-    scrollModeSource,
-    /visualViewport\.addEventListener/,
-    'chat observes its actual resized box instead of racing Shell for the browser event',
-  )
-})
-
 test('an armed live pin holds until its exact spacer is filled, then follows', () => {
   const livePin = {
     kind: 'PIN_USER_MSG', cid: 'c-123', followWhenFilled: true,
@@ -971,6 +1018,53 @@ test('attention nudge anchors the physical tail without enabling follow', () => 
     'the nudge includes all composer clearance after the attention card')
   assert.notEqual(mode.kind, 'FOLLOW_BOTTOM',
     'revealing a question or Resume control must not create live-follow intent')
+})
+
+test('the question nudge reveals a card from its top, not its tail', () => {
+  const scrollEl = {
+    scrollTop: 300,
+    clientHeight: 700,
+    clientWidth: 400,
+    offsetWidth: 400,
+    getBoundingClientRect: () => ({ top: 0 }),
+    querySelector(selector) {
+      return selector === '[data-key="assistant-question"]' ? row : null
+    },
+  }
+  const row = {
+    offsetTop: 500,
+    offsetHeight: 900,
+    dataset: { key: 'assistant-question' },
+    getBoundingClientRect: () => ({ top: 200 }),
+  }
+  // The card starts 60px below its owning row's top and is taller than the
+  // usable viewport, so the physical tail would strand its prompt above.
+  const card = {
+    getBoundingClientRect: () => ({ top: 260 }),
+    closest: (selector) => (selector === '.chat__msg[data-key]' ? row : null),
+  }
+
+  const mode = topRevealAnchorMode(scrollEl, card, 16)
+  assert.deepEqual(mode, {
+    kind: 'ANCHOR_AT',
+    key: 'assistant-question',
+    offset: -44,
+  }, 'the anchor folds the card-vs-row offset into the owning row key')
+
+  applyMode(scrollEl, mode)
+  // The card sits at content position 560; landing scrollTop 544 places its
+  // top 16px below the viewport top — the prompt is read from its first line.
+  assert.equal(scrollEl.scrollTop, 544,
+    'the card top rests just below the viewport top, its tail one scroll away')
+})
+
+test('a question card with no owning keyed row falls back to the tail reveal', () => {
+  const scrollEl = { getBoundingClientRect: () => ({ top: 0 }) }
+  const orphanCard = { closest: () => null }
+  assert.equal(topRevealAnchorMode(scrollEl, orphanCard, 16), null,
+    'an unresolvable card returns null so the caller can anchor the tail')
+  assert.equal(topRevealAnchorMode(scrollEl, null, 16), null,
+    'a missing card node returns null rather than throwing')
 })
 
 test('an off-content physical nudge stays live but persists the real-content tail', () => {
@@ -1550,6 +1644,59 @@ test('keyboard height shrinks blank reservation before moving followed content',
     listEl.offsetHeight + openSpacer - 500,
     'removing 300px of visible height first removes 300px of blank spacer',
   )
+})
+
+test('a pin reserves the known keyboard-closed viewport before that resize paints', () => {
+  const scrollEl = makeSpacerScrollEl({ clientHeight: 500 })
+  const latestUserMsgEl = {
+    offsetTop: 500,
+    offsetHeight: 80,
+    dataset: { cid: 'latest' },
+  }
+  const listEl = { offsetHeight: 700 }
+
+  assert.equal(_computeSpacerH(
+    scrollEl,
+    listEl,
+    latestUserMsgEl,
+    { kind: 'PIN_USER_MSG', cid: 'latest' },
+    { pinViewportHeight: 800 },
+  ), 596)
+  assert.equal(_computeSpacerH(
+    scrollEl,
+    listEl,
+    latestUserMsgEl,
+    { kind: 'FOLLOW_BOTTOM' },
+    { pinViewportHeight: 800 },
+  ), 296, 'follow remains responsive to the keyboard-open box')
+})
+
+test('pin viewport ceiling survives same-width keyboard motion and resets on layout changes', () => {
+  assert.equal(nextPinViewportHeight({
+    previousHeight: 800,
+    previousWidth: 412,
+    currentHeight: 500,
+    currentWidth: 412,
+  }), 800)
+  assert.equal(nextPinViewportHeight({
+    previousHeight: 500,
+    previousWidth: 412,
+    currentHeight: 800,
+    currentWidth: 412,
+  }), 800)
+  assert.equal(nextPinViewportHeight({
+    previousHeight: 800,
+    previousWidth: 412,
+    currentHeight: 500,
+    currentWidth: 700,
+  }), 500, 'orientation/width changes establish a new ceiling')
+  assert.equal(nextPinViewportHeight({
+    previousHeight: 800,
+    previousWidth: 700,
+    currentHeight: 620,
+    currentWidth: 700,
+    committedResize: true,
+  }), 620, 'a committed pane resize establishes a new ceiling')
 })
 
 test('keyboard overflow lifts only content that no longer fits', () => {

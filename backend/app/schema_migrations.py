@@ -1348,8 +1348,8 @@ def _add_connector_capability_identity(eng) -> None:
       ))
 
 
-def orm_schema_gaps(eng) -> list[str]:
-  """ORM-mapped columns/tables the live database lacks (``table.column``).
+def mapped_schema_gaps(eng) -> list[str]:
+  """Mapped columns/tables the live database lacks (``table.column``).
 
   Runs after ``create_all`` + migrations, so any gap is a written-code bug
   (a declared column with no migration), not a pending upgrade. Such a gap
@@ -1937,6 +1937,152 @@ def _pin_established_legacy_chat_models(eng) -> None:
       })
 
 
+
+def _add_app_project_templates(eng) -> None:
+  """Persist validated manifest project-template declarations on App rows."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "apps" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("apps")}
+  if "project_templates_json" not in columns:
+    with eng.begin() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN project_templates_json JSON NULL"
+      ))
+
+def _add_project_chat_collection(eng) -> None:
+  """Move Projects from one required primary chat to zero-or-more chats.
+
+  Existing primary chats are preserved and associated through
+  ``chats.project_id``. SQLite cannot drop a NOT NULL constraint in place, so
+  its small metadata-only Projects table is rebuilt transactionally. Project
+  files remain outside the database and are untouched.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  tables = set(inspector.get_table_names())
+  if not {"projects", "chats"}.issubset(tables):
+    return
+  project_columns = {
+    column["name"]: column for column in inspector.get_columns("projects")
+  }
+  if not project_columns["chat_id"].get("nullable", True):
+    if eng.dialect.name == "sqlite":
+      # No table points at Projects before this migration. Rebuild it before
+      # adding chats.project_id so SQLite cannot retarget an incoming FK to the
+      # temporary table name during ALTER TABLE RENAME.
+      raw = eng.raw_connection()
+      try:
+        cursor = raw.cursor()
+        cursor.execute("PRAGMA foreign_keys=OFF")
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute("ALTER TABLE projects RENAME TO projects__pre_0021")
+        cursor.execute(
+          "CREATE TABLE projects ("
+          "id VARCHAR(64) NOT NULL PRIMARY KEY, "
+          "name VARCHAR(256) NOT NULL, "
+          "project_type VARCHAR(128) NOT NULL, "
+          "root_path VARCHAR(1024) NOT NULL UNIQUE, "
+          "chat_id VARCHAR(64) NULL UNIQUE REFERENCES chats(id), "
+          "source_app_id INTEGER NULL REFERENCES apps(id) ON DELETE SET NULL, "
+          "template_snapshot_json JSON NOT NULL, "
+          "legacy_source_json JSON NULL, "
+          "deleted_at DATETIME NULL, "
+          "created_at DATETIME NULL, "
+          "updated_at DATETIME NULL"
+          ")"
+        )
+        cursor.execute(
+          "INSERT INTO projects "
+          "(id, name, project_type, root_path, chat_id, source_app_id, "
+          "template_snapshot_json, legacy_source_json, deleted_at, created_at, updated_at) "
+          "SELECT id, name, project_type, root_path, chat_id, source_app_id, "
+          "template_snapshot_json, legacy_source_json, deleted_at, created_at, updated_at "
+          "FROM projects__pre_0021"
+        )
+        cursor.execute("DROP TABLE projects__pre_0021")
+        cursor.execute("CREATE INDEX ix_projects_chat_id ON projects (chat_id)")
+        cursor.execute("CREATE INDEX ix_projects_source_app_id ON projects (source_app_id)")
+        raw.commit()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+      except Exception:
+        raw.rollback()
+        raise
+      finally:
+        raw.close()
+    else:
+      with eng.begin() as conn:
+        conn.execute(text(
+          "ALTER TABLE projects ALTER COLUMN chat_id DROP NOT NULL"
+        ))
+
+  inspector = sa_inspect(eng)
+  chat_columns = {column["name"] for column in inspector.get_columns("chats")}
+  with eng.begin() as conn:
+    if "project_id" not in chat_columns:
+      if eng.dialect.name == "sqlite":
+        conn.execute(text(
+          "ALTER TABLE chats ADD COLUMN project_id VARCHAR(64) NULL"
+        ))
+      else:
+        conn.execute(text(
+          "ALTER TABLE chats ADD COLUMN project_id VARCHAR(64) NULL"
+        ))
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_chats_project_id ON chats (project_id)"
+    ))
+    conn.execute(text(
+      "UPDATE chats SET project_id = ("
+      "SELECT projects.id FROM projects WHERE projects.chat_id = chats.id"
+      ") WHERE project_id IS NULL AND EXISTS ("
+      "SELECT 1 FROM projects WHERE projects.chat_id = chats.id"
+      ")"
+    ))
+    conn.execute(text("UPDATE projects SET chat_id = NULL WHERE chat_id IS NOT NULL"))
+
+def _add_project_artifacts(eng) -> None:
+  """Persist the per-project artifact registry and build status.
+
+  Additive and idempotent: the column is inspector-gated so a re-run no-ops.
+  ``create_all`` builds a fresh projects table with the column already present,
+  so this ALTER only covers an already-deployed projects table. Nullable with no
+  backfill — every existing row reads NULL as "no artifacts yet." Project files
+  (including the ``artifacts/`` output trees) live outside the database and are
+  untouched.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "projects" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("projects")}
+  if "artifacts_json" not in columns:
+    with eng.begin() as conn:
+      conn.execute(text(
+        "ALTER TABLE projects ADD COLUMN artifacts_json JSON NULL"
+      ))
+
+def _add_project_color(eng) -> None:
+  """Add an optional owner-chosen color to project identity controls.
+
+  Existing projects remain NULL and continue following the instance accent.
+  The inspector gate makes a retry and a fresh ORM-created database no-ops.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "projects" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("projects")}
+  if "color" not in columns:
+    with eng.begin() as conn:
+      conn.execute(text(
+        "ALTER TABLE projects ADD COLUMN color VARCHAR(7) NULL"
+      ))
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -1957,6 +2103,12 @@ _SCHEMA_MIGRATIONS = (
   ("0017_retire_restart_resume_toggle", _retire_restart_resume_toggle),
   ("0018_explicit_legacy_chat_models", _pin_established_legacy_chat_models),
   ("0019_chat_active_assistant_identity", _add_chat_active_assistant_identity),
+  # Projects append after current upstream history. Collection migration must
+  # precede artifacts because it may rebuild the legacy Projects table.
+  ("0020_app_project_templates", _add_app_project_templates),
+  ("0021_project_chat_collection", _add_project_chat_collection),
+  ("0022_project_artifacts", _add_project_artifacts),
+  ("0023_project_color", _add_project_color),
 )
 
 

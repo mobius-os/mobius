@@ -3041,7 +3041,8 @@ class ChatWriterActor:
     # cleanup intentionally retires all work, including on a soft-deleted row.
     should_retire_surface = not cmd.run_token or run_changed
     if should_retire_surface:
-      from app.models import Chat
+      from app.models import Chat, ProjectWorkClaim
+      from app.project_activity import append_project_change
 
       chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
       preserve_parked_question = bool(
@@ -3056,6 +3057,32 @@ class ChatWriterActor:
         if chat.active_assistant_message_id is not None:
           chat.active_assistant_message_id = None
           changed = True
+      if (
+        chat is not None
+        and chat.project_id is not None
+        and chat.deleted_at is None
+        and run_changed
+      ):
+        # A project chat is itself a visible work surface. Agent completion is
+        # durable Recents activity even when no owner message preceded the run,
+        # and a project-wide change cursor wakes collaborator workspaces after
+        # direct agent filesystem edits that bypass the HTTP file routes.
+        chat.activity_at = datetime.now(UTC)
+        db.query(ProjectWorkClaim).filter(
+          ProjectWorkClaim.project_id == chat.project_id,
+          ProjectWorkClaim.actor_key == f"agent:{chat.id}",
+        ).delete(synchronize_session=False)
+        append_project_change(
+          db,
+          project_id=chat.project_id,
+          kind="agent_run_completed",
+          path=None,
+          prior_path=None,
+          revision=None,
+          actor_key=f"agent:{chat.id}",
+          display_name=chat.title or "Project agent",
+        )
+        changed = True
     if changed and not _commit_or_rollback(db):
       raise _PersistFailed("FinishRun did not persist")
     if not cmd.run_token or owner == cmd.run_token:

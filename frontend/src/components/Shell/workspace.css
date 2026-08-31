@@ -206,11 +206,14 @@ html[data-mode-view-transition="exit"]::view-transition-old(mode-navigation-draw
 }
 
 .workspace__divider--v:hover .workspace__divider-bar,
-.workspace__divider--v:focus-visible .workspace__divider-bar { transform: scaleX(3); }
+.workspace__divider--v:focus-visible .workspace__divider-bar,
+.workspace__divider--v[data-center-snapped] .workspace__divider-bar { transform: scaleX(3); }
 .workspace__divider--h:hover .workspace__divider-bar,
-.workspace__divider--h:focus-visible .workspace__divider-bar { transform: scaleY(3); }
+.workspace__divider--h:focus-visible .workspace__divider-bar,
+.workspace__divider--h[data-center-snapped] .workspace__divider-bar { transform: scaleY(3); }
 .workspace__divider:hover .workspace__divider-bar,
-.workspace__divider:focus-visible .workspace__divider-bar {
+.workspace__divider:focus-visible .workspace__divider-bar,
+.workspace__divider[data-center-snapped] .workspace__divider-bar {
   background: var(--accent);
 }
 

@@ -9,7 +9,7 @@ listing.
 import shutil
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app import models, questions
@@ -40,6 +40,9 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
   best-effort process/filesystem cleanup; a failed transaction therefore
   cannot erase recoverable data outside the database.
   """
+  from app.project_retention import purge_expired_project_tombstones
+  purge_expired_project_tombstones(db)
+
   cutoff = now_naive_utc() - SOFT_DELETE_TTL
   expired_chat_ids = select(models.Chat.id).where(
     models.Chat.deleted_at.isnot(None),
@@ -64,6 +67,23 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
     db.query(model).filter(
       model.chat_id.in_(expired_chat_ids),
     ).delete(synchronize_session=False)
+  # Project coordination rows are intentionally small, but their foreign keys
+  # still make them part of the chat's durable lifecycle.  A project can stay
+  # live after one of its chats is deleted, so waiting for project retention
+  # would leak that chat forever and can make the final Chat DELETE fail.
+  db.query(models.ProjectAgentMessage).filter(
+    or_(
+      models.ProjectAgentMessage.from_chat_id.in_(expired_chat_ids),
+      models.ProjectAgentMessage.to_chat_id.in_(expired_chat_ids),
+    ),
+  ).delete(synchronize_session=False)
+  db.query(models.ProjectWorkClaim).filter(
+    models.ProjectWorkClaim.chat_id.in_(expired_chat_ids),
+  ).delete(synchronize_session=False)
+  # Rolling-upgrade rows may still carry the retired primary-chat pointer.
+  db.query(models.Project).filter(
+    models.Project.chat_id.in_(expired_chat_ids),
+  ).update({models.Project.chat_id: None}, synchronize_session=False)
   # Search rows are derived transcript data without a foreign key because the
   # SQLite FTS trigger owns their lifecycle. Remove them in the same durable
   # transaction as the source row rather than retaining a hard-deleted chat's

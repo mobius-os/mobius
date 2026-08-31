@@ -4,7 +4,7 @@
  *
  *   1. Attach files + chat changes — calls `onAttachClick` (parent owns the hidden
  *      <input type="file"> so it can clear .value after each pick).
- *   2. Artifacts touched by this chat, with the latest always exposed.
+ *   2. Apps built here and artifacts touched by this chat.
  *   3. Model / effort / summary / automation — renders
  *      <ChatSettingsPanel> when a chatInfo is available; omitted on a fresh
  *      empty chat where chatInfo hasn't loaded yet.
@@ -19,11 +19,11 @@
  * anchor — the form is only relative so other absolutely-positioned
  * children (none today) could anchor to it.
  *
- * A draft-first New Chat uses this same component with `pending`. That
- * renders the canonical trigger in its final geometry, but keeps it disabled
- * and omits dialog semantics until the server-backed chat is ready. Keeping
- * the pending state here prevents the provisional composer from maintaining a
- * second lookalike button that can drift from the real control.
+ * A draft-first New Chat uses this same component with `pending` only until
+ * its server row exists, then reuses the model picker with unrelated chat
+ * actions omitted. Keeping both states here prevents the provisional composer
+ * from maintaining a second lookalike button that can drift from the real
+ * control.
  *
  * Soft-keyboard contract: opening or using this popover preserves whether the
  * owning textarea was focused. The brain trigger suppresses native button focus
@@ -48,9 +48,12 @@ import {
 } from '@openai/apps-sdk-ui/components/Icon'
 import BrainUsageIcon from './BrainUsageIcon.jsx'
 import ChatSettingsPanel from './ChatSettingsPanel.jsx'
-import { loadChatArtifacts } from './chatArtifacts.js'
+import ArtifactPickerSection from './ArtifactPickerSection.jsx'
+import {
+  chatArtifactPickerItems,
+  loadChatArtifacts,
+} from './chatArtifacts.js'
 import { apiFetch } from '../../api/client.js'
-import { formatRelativeTime } from '../../lib/relativeTime.js'
 import { popoverMaxHeight, nearestClipTop } from './composerPopoverHeight.js'
 import { focusComposerElement } from './composerFocusPolicy.js'
 import {
@@ -90,6 +93,8 @@ export default function ComposerPopover({
   artifactsAppId = null,
   onOpenArtifact,
   onOpenUsage,
+  appArtifacts = [],
+  onOpenAppArtifact,
   embedded = false,
   pending = false,
   triggerIcon = null,
@@ -125,16 +130,18 @@ export default function ComposerPopover({
     staleTime: 0,
   })
   const chatArtifacts = artifactsQuery.data || []
-  const latestArtifact = chatArtifacts[0] || null
-  const latestArtifactRelativeTime = latestArtifact
-    ? formatRelativeTime(latestArtifact.touchedAt)
-    : ''
-  const otherArtifacts = chatArtifacts.slice(1)
+  const artifactItems = chatArtifactPickerItems(appArtifacts, chatArtifacts)
+  const latestArtifact = artifactItems[0] || null
+  const otherArtifacts = artifactItems.slice(1)
+  const [artifactsExpanded, setArtifactsExpanded] = useState(false)
   useDiscardUnconfirmedSwitchOnPickerClose(
     open,
     providerSwitchState?.status,
     chatId,
   )
+  useEffect(() => {
+    if (!open) setArtifactsExpanded(false)
+  }, [open])
   // Measured cap on the panel's height: the space above the trigger inside both
   // the chat pane (which clips with `overflow: hidden`) and the keyboard-shrunk
   // visible viewport. See composerPopoverHeight.js for why CSS viewport units
@@ -234,6 +241,7 @@ export default function ComposerPopover({
   }, [open, composerInputRef, setOpen, wasInputFocusedRef])
 
   function handleAttach() {
+    if (!onAttachClick) return
     setOpen(false)
     // Refocus the chat textarea ONLY if the keyboard was already
     // up when the popover opened. Otherwise leave focus alone —
@@ -267,6 +275,19 @@ export default function ComposerPopover({
   function handleOpenUsage() {
     setOpen(false)
     onOpenUsage?.()
+  }
+
+  function handleOpenAppArtifact(app) {
+    setOpen(false)
+    onOpenAppArtifact?.(app)
+  }
+
+  function handleOpenArtifactItem(item) {
+    if (item.kind === 'app') {
+      handleOpenAppArtifact(item.app)
+      return
+    }
+    handleOpenArtifact(item.id)
   }
 
   function togglePopover() {
@@ -313,20 +334,22 @@ export default function ComposerPopover({
           style={maxHeight !== null ? { maxHeight: `${maxHeight}px` } : undefined}
         >
           <div className="composer-popover__section">
-            <button
-              type="button"
-              className="composer-popover__row"
-              onClick={handleAttach}
-            >
-              <span className="composer-popover__row-icon"><Paperclip width={20} height={20} /></span>
-              <span className="composer-popover__row-main">
-                <span className="composer-popover__row-title">Attach files</span>
-                <span className="composer-popover__row-sub">
-                  Images, PDFs, code
+            {onAttachClick && (
+              <button
+                type="button"
+                className="composer-popover__row"
+                onClick={handleAttach}
+              >
+                <span className="composer-popover__row-icon"><Paperclip width={20} height={20} /></span>
+                <span className="composer-popover__row-main">
+                  <span className="composer-popover__row-title">Attach files</span>
+                  <span className="composer-popover__row-sub">
+                    Images, PDFs, code
+                  </span>
                 </span>
-              </span>
-            </button>
-            {!embedded && (
+              </button>
+            )}
+            {!embedded && onOpenChanges && (
               <button
                 type="button"
                 className="composer-popover__row"
@@ -342,7 +365,7 @@ export default function ComposerPopover({
               </button>
             )}
           </div>
-          {!embedded && artifactsAppId && artifactsQuery.isLoading && (
+          {!embedded && artifactsAppId && artifactsQuery.isLoading && !latestArtifact && (
             <div className="composer-popover__section composer-popover__section--artifacts">
               <span className="composer-popover__eyebrow">Latest artifact</span>
               <div className="composer-popover__row" role="status">
@@ -355,7 +378,7 @@ export default function ComposerPopover({
               </div>
             </div>
           )}
-          {!embedded && artifactsAppId && artifactsQuery.isError && (
+          {!embedded && artifactsAppId && artifactsQuery.isError && !latestArtifact && (
             <div className="composer-popover__section composer-popover__section--artifacts">
               <button
                 type="button"
@@ -373,52 +396,15 @@ export default function ComposerPopover({
             </div>
           )}
           {!embedded && latestArtifact && (
-            <div className="composer-popover__section composer-popover__section--artifacts">
-              <span className="composer-popover__eyebrow">Latest artifact</span>
-              <button
-                type="button"
-                className="composer-popover__row composer-popover__artifact-latest"
-                onClick={() => handleOpenArtifact(latestArtifact.id)}
-              >
-                <span className="composer-popover__row-icon" aria-hidden="true">
-                  <FileDocument width={18} height={18} />
-                </span>
-                <span className="composer-popover__row-main">
-                  <span className="composer-popover__row-title">{latestArtifact.title}</span>
-                  <span className="composer-popover__row-sub">
-                    {latestArtifactRelativeTime
-                      ? `Edited here ${latestArtifactRelativeTime} · v${latestArtifact.version}`
-                      : `Edited in this chat · v${latestArtifact.version}`}
-                  </span>
-                </span>
-              </button>
-              {otherArtifacts.length > 0 && (
-                <details className="composer-popover__artifact-more">
-                  <summary className="composer-popover__artifact-summary">
-                    <span>Other artifacts</span>
-                    <span>{otherArtifacts.length}</span>
-                    <ChevronDown width={15} height={15} aria-hidden="true" />
-                  </summary>
-                  <div className="composer-popover__artifact-list">
-                    {otherArtifacts.map(artifact => (
-                      <button
-                        key={artifact.id}
-                        type="button"
-                        className="composer-popover__row"
-                        onClick={() => handleOpenArtifact(artifact.id)}
-                      >
-                        <span className="composer-popover__row-main">
-                          <span className="composer-popover__row-title">{artifact.title}</span>
-                          <span className="composer-popover__row-sub">
-                            {formatRelativeTime(artifact.touchedAt) || `Version ${artifact.version}`}
-                          </span>
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                </details>
-              )}
-            </div>
+            <ArtifactPickerSection
+              latestArtifact={latestArtifact}
+              otherArtifacts={otherArtifacts}
+              expanded={artifactsExpanded}
+              onToggle={() => setArtifactsExpanded(value => !value)}
+              onOpenArtifact={handleOpenArtifactItem}
+              documentIcon={<FileDocument width={18} height={18} />}
+              disclosureIcon={<ChevronDown width={15} height={15} aria-hidden="true" />}
+            />
           )}
           {chatInfo && chatId && (
             <div className="composer-popover__section composer-popover__section--picker">
@@ -439,53 +425,59 @@ export default function ComposerPopover({
               />
             </div>
           )}
-          {!embedded && (
+          {!embedded && (onOpenSummary || onOpenInspector || onOpenUsage) && (
           <div className="composer-popover__section composer-popover__section--context">
-            <button
-              type="button"
-              className="composer-popover__row"
-              onClick={handleOpenSummary}
-            >
-              <span className="composer-popover__row-icon" aria-hidden="true">
-                <FileDocument width={18} height={18} />
-              </span>
-              <span className="composer-popover__row-main">
-                <span className="composer-popover__row-title">Chat summary</span>
-                <span className="composer-popover__row-sub">
-                  Name, digest, full handoff
+            {onOpenSummary && (
+              <button
+                type="button"
+                className="composer-popover__row"
+                onClick={handleOpenSummary}
+              >
+                <span className="composer-popover__row-icon" aria-hidden="true">
+                  <FileDocument width={18} height={18} />
                 </span>
-              </span>
-            </button>
-            <button
-              type="button"
-              className="composer-popover__row"
-              onClick={handleOpenInspector}
-            >
-              <span className="composer-popover__row-icon" aria-hidden="true">
-                <InfoCircle width={18} height={18} />
-              </span>
-              <span className="composer-popover__row-main">
-                <span className="composer-popover__row-title">What the agent knows</span>
-                <span className="composer-popover__row-sub">
-                  System prompt and recent chats
+                <span className="composer-popover__row-main">
+                  <span className="composer-popover__row-title">Chat summary</span>
+                  <span className="composer-popover__row-sub">
+                    Name, digest, full handoff
+                  </span>
                 </span>
-              </span>
-            </button>
-            <button
-              type="button"
-              className="composer-popover__row"
-              onClick={handleOpenUsage}
-            >
-              <span className="composer-popover__row-icon" aria-hidden="true">
-                <DollarCircle width={18} height={18} />
-              </span>
-              <span className="composer-popover__row-main">
-                <span className="composer-popover__row-title">Usage &amp; reported cost</span>
-                <span className="composer-popover__row-sub">
-                  Per-turn tokens and provider-reported cost
+              </button>
+            )}
+            {onOpenInspector && (
+              <button
+                type="button"
+                className="composer-popover__row"
+                onClick={handleOpenInspector}
+              >
+                <span className="composer-popover__row-icon" aria-hidden="true">
+                  <InfoCircle width={18} height={18} />
                 </span>
-              </span>
-            </button>
+                <span className="composer-popover__row-main">
+                  <span className="composer-popover__row-title">What the agent knows</span>
+                  <span className="composer-popover__row-sub">
+                    System prompt and recent chats
+                  </span>
+                </span>
+              </button>
+            )}
+            {onOpenUsage && (
+              <button
+                type="button"
+                className="composer-popover__row"
+                onClick={handleOpenUsage}
+              >
+                <span className="composer-popover__row-icon" aria-hidden="true">
+                  <DollarCircle width={18} height={18} />
+                </span>
+                <span className="composer-popover__row-main">
+                  <span className="composer-popover__row-title">Usage &amp; reported cost</span>
+                  <span className="composer-popover__row-sub">
+                    Per-turn tokens and provider-reported cost
+                  </span>
+                </span>
+              </button>
+            )}
           </div>
           )}
         </div>

@@ -151,7 +151,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `config.py` | `Settings` via pydantic-settings; reads `.env` |
 | `database.py` | SQLAlchemy engine, pool instrumentation, `SessionLocal`, `Base`, and `get_db`; contains no schema history |
 | `schema_migrations.py` | Append-only schema/data migrations, durable ledger primitives, and ORM/live-schema parity inspection; published functions are semantic-hash frozen |
-| `startup.py` | Two-phase boot: process/schema preflight first, then writer/reconciliation/database supervisors only after schema parity succeeds |
+| `startup.py` | Two-phase boot: process/database preflight first, then writer/reconciliation/database supervisors only after migrations and mapped-shape checks succeed |
 | `models.py` | ORM tables: `Owner`, `Chat`, `ChatRun`, `App`, `PushSubscription`, `Notification` |
 | `schemas.py` | Pydantic request/response models |
 | `auth.py` | bcrypt hashing, JWT creation/decoding, Fernet encryption |
@@ -213,23 +213,25 @@ Self-hosters use the authority they already own:
 `docker compose exec -u 0 app bash`. This attaches to the live container and
 does not replace its normal process.
 
-### Health, readiness, and schema-degraded boot
+### Health, readiness, and database-degraded boot
 
 `GET /api/health` is reachability and remains HTTP 200 whenever the process can
 answer; the shell uses that distinction so a server fault never masquerades as
 the device being offline. `GET /api/ready` is serviceability: it requires both
-an ORM-compatible database and the single-writer persistence actor. Deployment
-and container probes use readiness. `GET /api/health/strict` retains the
-schema-only diagnostic contract.
+a successfully initialized database with every mapped table and column, and
+the single-writer persistence actor. Deployment and container probes use
+readiness. `GET /api/health/strict` retains the database-only diagnostic
+contract.
 
-Boot runs `create_all`, append-only migrations, and `orm_schema_gaps()` before
-starting any database owner. A remaining gap enters a bounded degraded mode:
-ordinary APIs return one deterministic 503, database startup tasks and
-supervisors do not run, cron remains disabled, and static shell plus health,
-version, browser-bootstrap, and authenticated restart surfaces remain. External
-Recovery may alter the database, but the process intentionally keeps its boot
-verdict until restart; promoting only part of the skipped startup plan inside a
-health probe would create a second, race-prone boot mechanism.
+Boot runs `create_all`, append-only migrations, and `mapped_schema_gaps()` before
+starting any database owner. A migration/initialization failure or remaining
+mapped-shape gap enters one bounded degraded mode: ordinary APIs return a
+deterministic 503, database startup tasks and supervisors do not run, cron
+remains disabled, and static shell plus health, version, browser-bootstrap, and
+the normally authenticated restart surface remain. External Recovery may alter
+the database, but the process intentionally keeps its boot verdict until
+restart; promoting only part of the skipped startup plan inside a health probe
+would create a second, race-prone boot mechanism.
 
 ### Misc shared helpers
 
@@ -487,6 +489,13 @@ The in-product agent is a first-class reader of this code, and its behavior has 
 └── service-token.txt       owner JWT used only by the platform job wrapper (chmod 600)
 ```
 
+SQLite is the shipped and tested persistence runtime. Some frozen historical
+migrations retain PostgreSQL branches because already-published migration code
+is immutable; those branches are compatibility history, not a second supported
+deployment contract. Adding another database therefore requires an explicit
+driver, end-to-end migration/readiness coverage, and deployment documentation
+rather than relying on those old conditional statements.
+
 `/data` is itself a git repo owned by the `mobius` user, tracking `shared/memory/` and `shared/skills/` with a nightly safety-net commit, so a bad memory consolidation or skill overwrite is recoverable. Inspect it as that user (`docker exec -u mobius ... git -C /data ...`) — as root it dies with "dubious ownership," which reads misleadingly as an empty/non-repo tree.
 
 ## Boot, self-heal, and how each layer updates
@@ -544,7 +553,7 @@ installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.23 (2026-08-24).** This section is the
+**Owner-authoritative contract — v1.24 (2026-08-24).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -583,7 +592,12 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   scroll box, now-hidden blank room is removed from the spacer first. In
   `FOLLOW_BOTTOM` this keeps the visible content fixed while room remains; after
   the spacer reaches zero, only the overflow that no longer fits moves upward.
-  Closing the keyboard restores the exact larger-screen deficit. The full range
+  A `PIN_USER_MSG` has one reachability exception: while the box is narrowed by
+  a same-width software keyboard, it reserves against the largest same-width
+  scroll box already observed. Closing the keyboard therefore cannot clamp the
+  sent row for one painted frame before ResizeObserver restores the larger
+  deficit. A width/orientation change or committed pane resize establishes a new
+  ceiling. FOLLOW and ordinary anchors continue to use the active box. The full range
   for the current visible viewport must exist before a downward gesture approaches
   the final turn: crossing the latest-user viewport boundary must never extend
   `scrollHeight` after momentum settles. The remaining room survives turn
@@ -622,7 +636,7 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   just before final buffered text fills the reservation. Later idle layout changes
   cannot create follow. A non-pinning send preserves the exact reading anchor.
   A settled `PIN_USER_MSG` survives the complete mobile-keyboard open/close
-  cycle. An armed live pin keeps the sent row fixed while the resized active
+  cycle without an intermediate displaced paint. An armed live pin keeps the sent row fixed while the resized active
   reservation remains; if the smaller visible viewport reduces that exact
   reservation to zero, the ordinary filled-reservation handoff enters
   `FOLLOW_BOTTOM` so covered live output moves into view and continues following.
@@ -686,7 +700,22 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   once even when the browser is already clamped at the physical tail and therefore
   emits no scroll event; coordinate comparison is the per-move hot path and physical
   geometry is read at most once for that gesture. After a real scroll lands,
-  reader ownership remains active through a short trailing-edge quiet window. The
+  reader ownership remains active through a short trailing-edge quiet window.
+  Physical touch contact is itself reader ownership (v1.24): from a touch
+  pointer's first contact with the transcript until the last touch pointer
+  lifts or cancels, the gesture cannot settle, the no-scroll dead-man cannot
+  release, and no layout path may commit a direct or indirect scroll write — a
+  finger resting on the glass mid-gesture holds the exact position it is
+  touching, matching native `scrollend` semantics, which never fire during
+  contact. The trailing quiet window is therefore measured from the later of
+  the last owned scroll event and the last lift, so one contact episode (drag,
+  pause, drag, lift, momentum) settles exactly once, with its full gesture
+  history. A controller reinstall while contact is active (a transcript row
+  committing mid-stream) preserves the live gesture rather than settling it.
+  Contact evidence clears only on lift/cancel — including window-level
+  delivery when the original element is replaced mid-gesture — page hide, or
+  chat change; never on a timer, because an indefinitely resting finger is a
+  legitimate reading hold. The
   hot scroll handler records intent and physical-tail arrival only; final anchor
   discovery, spacer sizing, mode transition, and persistence run once when momentum
   settles. Exact physical-tail intent belongs to
@@ -697,7 +726,8 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   attention navigation discard the older decision after snapshotting current
   geometry, while a disclosure first settles any preceding gesture and then owns
   layout caused by its own expansion/collapse. A bounded dead-man remains the final
-  escape hatch for any interrupted no-scroll gesture.
+  escape hatch for any interrupted no-scroll gesture that holds no live touch
+  contact.
   The first actual scroll event owned by each gesture also advances one monotonic
   reader-intent generation. Every direct scroll write and every indirect geometry
   write that can clamp scrolling (dynamic spacer height and composer clearance)
@@ -712,14 +742,19 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   A marked Q&A custom-answer field is the deliberate exception to "ordinary
   typing cannot scroll": changing its value can grow the field and cause the
   browser to move the transcript to keep the native caret visible. Only an
-  ordinary `ANCHOR_AT` reading hold yields from `beforeinput` through one
-  complete rendered frame; if no scroll lands, layout resumes immediately
-  after that frame, and if one does, the ordinary quiet-settle path records the
-  resulting hold. Stronger location contracts keep layout ownership:
+  ordinary `ANCHOR_AT` reading hold may adopt that native caret reveal. While
+  the field is focused it joins the chat's existing `ResizeObserver`, so a
+  keyboard viewport change and field growth resolve in one layout transaction.
+  The usable bottom is the overlaid composer's top, not the scroll box's hidden
+  physical bottom: multiline growth moves the field upward until the complete
+  writing surface is visible there, then records that position as the new hold.
+  Ordinary characters read only `scrollTop`; geometry is consulted only after
+  the browser actually moves or the field resizes. The same reveal operation
+  owns keyboard resize, native first-letter caret movement, and multiline
+  growth, so none can replay a position chosen by another. Stronger location
+  contracts keep layout ownership:
   `FOLLOW_BOTTOM` absorbs the new line in its normal ResizeObserver pass, while
   pins, reserved-tail holds, and the question-submission overlay remain fixed.
-  The controller must not restore a stale anchor between those two outcomes or
-  interrupt live tail-follow with a delayed snap.
 - **R5a — Attention nudges reveal the usable tail.** Tapping an offscreen question
   or paused-turn nudge is an explicit one-shot reading action: it lands at the
   physical tail, including the list's composer-clearance padding, so the card's
@@ -735,8 +770,8 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   Its visibility is a pure physical-tail geometry read outside the controller's
   ownership gates: it renders only while the reader holds a position away from
   the physical tail, including after an upward move through reserved room. A fresh
-  live-send reservation does not summon it because a correctly pinned row rests at
-  that same physical clamp. It yields
+  live-send reservation does not summon it while `PIN_USER_MSG` owns that expected
+  latest-turn location, including during R1's transient keyboard-close ceiling. It yields
   to a visible attention nudge, which navigates to the same tail with strictly
   more context.
 - **R5b — One keyboard geometry signal; reservation-responsive resize.** Shell alone
@@ -745,6 +780,9 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   scroll-box `ResizeObserver` is the sole downstream signal that keyboard layout
   has actually landed. A resize recalculates the latest-turn spacer from the
   active scroll-box height, then reapplies the mode that already owns the chat.
+  PIN alone pre-reserves the largest already-observed same-width height, because
+  native viewport growth can clamp `scrollTop` one paint before ResizeObserver's
+  callback; this is reachability geometry, not a second viewport listener.
   `PIN_USER_MSG` keeps the sent row at its pinned offset while reservation remains,
   `ANCHOR_AT` keeps the same row offset, and `FOLLOW_BOTTOM` follows the resized
   physical tail without moving through blank room. The only ordinary mode change
@@ -834,7 +872,7 @@ path means routing it through the same entries rather than inventing another rul
 | Short reply settles before consuming the reservation | armed pin hold | settled pin hold | Keep prompt fixed; retire automatic handoff |
 | Other layout grows/collapses while latest user is visible | any hold | same hold | Consume/restore exact R1 deficit |
 | Latest user leaves the viewport | any | same reader mode | Collapse spacer to zero |
-| Viewport/keyboard changes | armed `PIN_USER_MSG` | same pin while responsive room remains; `FOLLOW_BOTTOM` if it reaches zero | Shrink blank reservation first; reapply pin or perform R3's ordinary filled-reservation handoff |
+| Viewport/keyboard changes | armed `PIN_USER_MSG` | same pin while responsive room remains; `FOLLOW_BOTTOM` if it reaches zero | Keep the same-width pin ceiling reachable before growth; reapply pin or perform R3's ordinary filled-reservation handoff |
 | Viewport/keyboard changes | settled `PIN_USER_MSG` | same `PIN_USER_MSG` | Reapply the same pin; geometry never reclassifies it |
 | Viewport/keyboard changes | follow or anchor hold | same mode | Resize reservation to the visible scroll box, then reapply the physical tail or exact anchor; never create or retire follow |
 | Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
@@ -865,7 +903,8 @@ Controller structure is part of the contract, not an implementation detail:
 - `useScrollMode` is the sole writer of `.spacer-dynamic` height and the
   composer-clearance CSS geometry. Those indirect writes and every `writeMode`
   call share R5's reader-generation commit gate. Spacer height is
-  derived from the latest user row, active scroll-box height, and exact tail deficit;
+  derived from the latest user row, active scroll-box height (plus R1's transient
+  same-width pin ceiling), and exact tail deficit;
   disclosure helpers and renderers may preserve an on-screen anchor but may never
   prime, enlarge, or unwind spacer themselves.
 - The gesture-gated `scroll` event reads physical-bottom geometry directly.

@@ -404,6 +404,52 @@ def test_mobius_provider_is_available_only_with_identity_app_installed(
   assert installed["mobius"]["available"] is True
 
 
+def test_providers_status_hides_mobius_trial_from_app_principals(
+  client, auth, monkeypatch,
+):
+  """The owner's Möbius trial balance is owner-only. App/embed principals share
+  the endpoint for model-picker availability, so they must see the same
+  provider fields without the owner's credit units and grant expiries."""
+  from app import models
+  from app.database import SessionLocal
+  from app.providers import MobiusProvider
+
+  # Install the identity app so mobius reports as available.
+  app = create_local_app(
+    client, auth, name="Möbius · You", description="Account",
+  )
+  with SessionLocal() as session:
+    row = session.query(models.App).filter(models.App.id == app["id"]).one()
+    row.slug = "identity"
+    session.commit()
+
+  # Fake a linked subscription carrying a real trial balance.
+  balance = {
+    "spendable_units": 500,
+    "grants": [{"amount": 500, "expires_at": "2026-12-31"}],
+  }
+  monkeypatch.setattr(MobiusProvider, "check_auth", lambda self, data_dir: None)
+  monkeypatch.setattr(MobiusProvider, "trial_status", lambda self: balance)
+
+  # The owner sees the trial balance.
+  owner_body = client.get("/api/auth/providers/status", headers=auth).json()
+  assert owner_body["mobius"]["available"] is True
+  assert owner_body["mobius"]["trial"] == balance
+
+  # An app-scoped principal gets availability but never the balance.
+  from app.auth import create_access_token
+  app_token = create_access_token(
+    {"sub": "test", "scope": "app", "app_id": app["id"]},
+  )
+  app_body = client.get(
+    "/api/auth/providers/status",
+    headers={"Authorization": f"Bearer {app_token}"},
+  ).json()
+  assert app_body["mobius"]["available"] is True
+  assert app_body["mobius"]["configured"] is True
+  assert "trial" not in app_body["mobius"]
+
+
 def test_provider_status_exposes_configured_with_legacy_alias(client, auth):
   r = client.get("/api/auth/provider/status", headers=auth)
 

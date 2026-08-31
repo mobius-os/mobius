@@ -1888,6 +1888,218 @@ def test_trusted_origin_adoption_is_always_reconciled_as_local_source(
   assert target.adopting_trusted_origin is True
 
 
+def test_trusted_origin_first_adoption_conflict_reviews_and_finalizes(
+  client, auth, db, bypass_url_validation,
+):
+  """A proven local app stays unprivileged until its conflict is accepted."""
+  from app import install
+
+  original = (
+    'const title = "ORIGINAL";\n'
+    'export default function App() { return <div>{title}</div> }\n'
+  )
+  local = original.replace("ORIGINAL", "LOCAL")
+  incoming = original.replace("ORIGINAL", "STORE")
+  resolved = original.replace("ORIGINAL", "RESOLVED")
+  manifest_id = "trusted-adoption"
+  manifest_url = (
+    "https://raw.githubusercontent.com/mobius-os/"
+    "app-trusted-adoption/main/mobius.json"
+  )
+  raw_base = manifest_url.rsplit("/", 1)[0] + "/"
+  manifest = {
+    "id": manifest_id,
+    "name": "Trusted Adoption",
+    "version": "1.0.0",
+    "description": "Published package",
+    "entry": "index.jsx",
+    "permissions": {"manage_apps": True, "connect_manage": True},
+  }
+  legacy = create_local_app(
+    client,
+    auth,
+    name="Trusted Adoption",
+    description="Local source",
+    jsx_source=original,
+  )
+  app_id = legacy["id"]
+  repo = Path(legacy["source_dir"])
+  (repo / "index.jsx").write_text(local, encoding="utf-8")
+  subprocess.run(
+    [
+      "git", "-C", str(repo), "remote", "add", "origin",
+      "https://github.com/mobius-os/app-trusted-adoption.git",
+    ],
+    check=True,
+  )
+  responses = {
+    manifest_url: (200, json.dumps(manifest).encode()),
+    raw_base + "index.jsx": (200, incoming.encode()),
+  }
+
+  # The origin is an identity witness, not a live dependency of this test.
+  # Falling back to the fetched package mirrors an unavailable private/offline
+  # origin while preserving the same installer path.
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ), patch(
+    "app.install.app_git.fetch_upstream",
+    side_effect=RuntimeError("offline origin"),
+  ):
+    conflicted = client.post(
+      "/api/apps/install",
+      headers=auth,
+      json={"manifest_url": manifest_url},
+    )
+
+  assert conflicted.status_code == 201, conflicted.text
+  assert conflicted.json()["mode"] == "conflict"
+  assert conflicted.json()["id"] == app_id
+  assert (repo / "index.jsx").read_text(encoding="utf-8") == local
+  db.expire_all()
+  row = db.query(models.App).filter(models.App.id == app_id).one()
+  assert row.manifest_url is None
+  assert row.manage_apps is False
+  assert row.connect_manage is False
+
+  selected = client.post(
+    "/api/apps/resolve-update/policy",
+    headers=auth,
+    json={"source_dir": str(repo), "policy": "preserve_local"},
+  )
+  assert selected.status_code == 200, selected.text
+  assert (repo / ".git" / "MERGE_HEAD").is_file()
+  (repo / "index.jsx").write_text(resolved, encoding="utf-8")
+
+  reviewed = client.post(
+    "/api/apps/resolve-update/review",
+    headers=auth,
+    json={"source_dir": str(repo)},
+  )
+  assert reviewed.status_code == 200, reviewed.text
+  assert "RESOLVED" in reviewed.json()["diff"]
+
+  db.expire_all()
+  row = db.query(models.App).filter(models.App.id == app_id).one()
+  assert row.manifest_url is None
+  assert row.manage_apps is False
+  assert row.connect_manage is False
+
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client({raw_base + "index.jsx": (200, incoming.encode())}),
+  ):
+    finalized = client.post(
+      "/api/apps/resolve-update",
+      headers=auth,
+      json={
+        "source_dir": str(repo),
+        "reviewed_tree_oid": reviewed.json()["tree_oid"],
+      },
+    )
+
+  assert finalized.status_code == 200, finalized.text
+  assert finalized.json()["mode"] == "updated"
+  assert finalized.json()["app"]["id"] == app_id
+  assert (repo / "index.jsx").read_text(encoding="utf-8") == resolved
+  db.expire_all()
+  row = db.query(models.App).filter(models.App.id == app_id).one()
+  assert row.manifest_url == (
+    raw_base.rstrip("/") + f"#manifest-id={manifest_id}"
+  )
+  assert row.manage_apps is True
+  assert row.connect_manage is True
+  assert install.read_pending_conflict_update_receipt(
+    repo,
+    app_id=app_id,
+    upstream_commit=row.upstream_commit,
+  ) is None
+
+
+def test_trusted_origin_pending_adoption_rejects_mismatched_and_stale_receipts(
+  client, auth, db,
+):
+  """A receipt cannot attach another package or outlive its upstream proof."""
+  from app import install
+
+  legacy = create_local_app(
+    client,
+    auth,
+    name="Receipt Guard",
+    description="Local source",
+    jsx_source="export default function App(){return <div>local</div>}\n",
+  )
+  app_id = legacy["id"]
+  repo = Path(legacy["source_dir"])
+  subprocess.run(
+    [
+      "git", "-C", str(repo), "remote", "add", "origin",
+      "https://github.com/mobius-os/app-receipt-guard.git",
+    ],
+    check=True,
+  )
+  row = db.query(models.App).filter(models.App.id == app_id).one()
+  assert row.manifest_url is None
+  row.upstream_commit = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  db.commit()
+  assert row.upstream_commit
+  upstream_commit = row.upstream_commit
+  manifest = {
+    "id": "receipt-guard",
+    "name": "Receipt Guard",
+    "version": "1.0.0",
+    "description": "Published package",
+    "entry": "index.jsx",
+    "permissions": {"manage_apps": True},
+  }
+
+  install.stage_pending_conflict_update(
+    repo,
+    app_id=app_id,
+    upstream_commit=upstream_commit,
+    manifest=manifest,
+    raw_base=(
+      "https://raw.githubusercontent.com/mobius-os/"
+      "app-another-package/main/"
+    ),
+    capability_digest="a" * 64,
+    candidate_digest="b" * 64,
+  )
+  mismatched = client.post(
+    "/api/apps/resolve-update/policy",
+    headers=auth,
+    json={"source_dir": str(repo), "policy": "preserve_local"},
+  )
+  assert mismatched.status_code == 409, mismatched.text
+  assert mismatched.json()["detail"]["code"] == "pending_update_identity_changed"
+  assert not (repo / ".git" / "MERGE_HEAD").exists()
+
+  install.stage_pending_conflict_update(
+    repo,
+    app_id=app_id,
+    upstream_commit="0" * 40,
+    manifest=manifest,
+    raw_base=(
+      "https://raw.githubusercontent.com/mobius-os/"
+      "app-receipt-guard/main/"
+    ),
+    capability_digest="a" * 64,
+    candidate_digest="b" * 64,
+  )
+  stale = client.post(
+    "/api/apps/resolve-update/policy",
+    headers=auth,
+    json={"source_dir": str(repo), "policy": "preserve_local"},
+  )
+  assert stale.status_code == 409, stale.text
+  assert not (repo / ".git" / "MERGE_HEAD").exists()
+  db.expire_all()
+  row = db.query(models.App).filter(models.App.id == app_id).one()
+  assert row.manifest_url is None
+  assert row.manage_apps is False
+
+
 def test_trusted_origin_adoption_accepts_equal_tree_with_unrelated_history(
   client, auth, db, bypass_url_validation, tmp_path,
 ):

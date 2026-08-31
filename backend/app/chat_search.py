@@ -296,7 +296,14 @@ def _iso_timestamp(stored: str) -> str | None:
 
 
 def _rank_results(rows, tokens: list[str], limit: int) -> list[dict]:
-  """Rank a complete chat-grouped row stream with memory bounded by ``limit``."""
+  """Return matching chats recent-first with memory bounded by ``limit``.
+
+  Candidate selection already requires every query token to occur in one
+  visible title/message document. Counting the same words across a long chat
+  therefore measures transcript length, not match quality, and used to let old
+  verbose conversations crowd recent exact reports out of the result window.
+  Recency owns ordering once that full-query relevance boundary is crossed.
+  """
   patterns = _token_patterns(tokens)
   top_results = []
   current = None
@@ -304,12 +311,7 @@ def _rank_results(rows, tokens: list[str], limit: int) -> list[dict]:
   def finish(result) -> None:
     if result is None or result["match_count"] == 0:
       return
-    rank = (
-      result["occurrences"],
-      result["match_count"],
-      result["last_active"],
-      result["id"],
-    )
+    rank = (result["last_active"], result["id"])
     heapq.heappush(top_results, (rank, result))
     if len(top_results) > limit:
       heapq.heappop(top_results)
@@ -322,14 +324,12 @@ def _rank_results(rows, tokens: list[str], limit: int) -> list[dict]:
         "title": title,
         "last_active": active_text or "",
         "match_count": 0,
-        "occurrences": 0,
         "best_prose": None,
       }
     spans = _match_spans(doc_text, patterns)
     if not spans:
       continue
     current["match_count"] += 1
-    current["occurrences"] += len(spans)
     if msg_idx < 0:
       continue
     candidate = (len(spans), -msg_idx, timestamp, role, doc_text, spans)

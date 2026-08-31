@@ -111,7 +111,11 @@ test('gesture scroll frames defer anchor, spacer, and persistence work until set
   assert.doesNotMatch(settlePath, /spacerH|hasReservedTail/,
     'physical-bottom intent must not branch on invisible reservation')
   assert.match(settlePath, /persistMode\(\)/)
-  assert.match(settlePath, /sizeSpacer\(currentAuthority\(\)\)/)
+  assert.match(
+    settlePath,
+    /syncLayout\(\{ forceApply: true, authorityVersion: currentAuthority\(\) \}\)/,
+    'settlement must resize and re-apply the captured semantic coordinate atomically',
+  )
   assert.doesNotMatch(settlePath, /PIN_USER_MSG|contentHoldModeFromScroll/,
     'a reader gesture may hold or follow but must never recreate pin authority')
   assert.doesNotMatch(
@@ -216,11 +220,11 @@ test('automatic geometry owners and newer semantic actions share reader authorit
     hotStart,
   )
   const hotPath = ownerSource.slice(hotStart, hotEnd)
-  assert.match(hotPath, /if \(disclosureInputOwnsGesture\) return/,
+  assert.match(hotPath, /if \(gesture\.disclosureOwns\) return/,
     'layout scrolls caused by a disclosure must not create a stale reader settle')
   assert.match(
     ownerSource,
-    /const onPointerCancelInput = \(\) => \{[\s\S]*?disclosureInputOwnsGesture = false[\s\S]*?addEventListener\('pointercancel', onPointerCancelInput/,
+    /const onPointerCancelInput = \(\) => \{[\s\S]*?gesture\.disclosureOwns = false[\s\S]*?addEventListener\('pointercancel', onPointerCancelInput/,
     'a disclosure press promoted to a native pan must become reader-owned scroll',
   )
 

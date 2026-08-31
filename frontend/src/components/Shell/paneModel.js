@@ -139,12 +139,18 @@ function sanitizeTab(raw) {
   if (raw.kind === 'apps') {
     return String(raw.id) === tabModel.APPS_ID ? tabModel.appsTab() : null
   }
+  if (raw.kind === 'projects') {
+    return String(raw.id) === tabModel.PROJECTS_ID ? tabModel.projectsTab() : null
+  }
   if (raw.kind === 'settings') {
     return String(raw.id) === tabModel.SETTINGS_ID
       ? tabModel.settingsTab()
       : null
   }
-  if (raw.kind !== 'chat' && raw.kind !== 'app') return null
+  if (raw.kind === 'artifact') {
+    return tabModel.parseArtifactTabId(raw.id) ? tabModel.makeTab('artifact', raw.id) : null
+  }
+  if (raw.kind !== 'chat' && raw.kind !== 'app' && raw.kind !== 'project') return null
   if (raw.kind === 'app' && !Number.isFinite(Number(raw.id))) return null
   return tabModel.makeTab(raw.kind, raw.id)
 }
@@ -174,11 +180,20 @@ function sanitizeSingleScreen(raw) {
   if (raw.kind === 'apps' && String(raw.id) === tabModel.APPS_ID) {
     return tabModel.appsTab()
   }
+  if (raw.kind === 'projects' && String(raw.id) === tabModel.PROJECTS_ID) {
+    return tabModel.projectsTab()
+  }
   if (raw.kind === 'chat' && raw.id != null && String(raw.id).trim() !== '') {
     return { kind: 'chat', id: String(raw.id) }
   }
   if (raw.kind === 'app' && Number.isFinite(Number(raw.id))) {
     return { kind: 'app', id: String(raw.id) }
+  }
+  if (raw.kind === 'project' && raw.id != null && String(raw.id).trim() !== '') {
+    return { kind: 'project', id: String(raw.id) }
+  }
+  if (raw.kind === 'artifact' && tabModel.parseArtifactTabId(raw.id)) {
+    return { kind: 'artifact', id: String(raw.id) }
   }
   return null
 }
@@ -489,6 +504,7 @@ function singleScreenTab(ws) {
   const item = sanitizeSingleScreen(ws.singleScreen)
   if (!item) return null
   if (item.kind === 'apps') return tabModel.appsTab()
+  if (item.kind === 'projects') return tabModel.projectsTab()
   return tabModel.makeTab(item.kind, item.id)
 }
 
@@ -520,10 +536,11 @@ export function toggleViewMode(ws) {
 
 // ── Single-screen slot ops (two-worlds design) ──────────────────────────────
 //
-// The slot is the single world's ENTIRE memory: exactly one screen, the last
-// concrete item opened while in single mode. These ops NEVER touch the pane tree
-// (design: opens in single mode must not mutate the tree), so builder and single
-// keep independent navigation contexts.
+// The slot is the single world's ENTIRE memory: exactly one selected screen.
+// These ops NEVER touch the pane tree
+// (design: opens in single mode must not mutate the tree). Exiting Builder is
+// the deliberate handoff between those worlds: it replaces the slot with the
+// focused pane's selected tab so Standard opens what the owner just chose.
 
 // The `chat:<id>` / `app:<id>` key of the slot item, or null for an empty/home
 // slot. Shell unions this with the builder tab keys to keep the slot's iframe /
@@ -535,6 +552,9 @@ export function singleScreenKey(ws) {
   if (slot.kind === 'app') return `app:${slot.id}`
   if (slot.kind === 'chat') return `chat:${slot.id}`
   if (slot.kind === 'apps') return tabModel.APPS_TAB_KEY
+  if (slot.kind === 'projects') return tabModel.PROJECTS_TAB_KEY
+  if (slot.kind === 'project') return `project:${slot.id}`
+  if (slot.kind === 'artifact') return `artifact:${slot.id}`
   return null
 }
 
@@ -581,17 +601,18 @@ function focusedSlotSeed(ws) {
   if (tab.kind === 'app') return { kind: 'app', id: String(tab.id) }
   if (tab.kind === 'chat') return { kind: 'chat', id: String(tab.id) }
   if (tab.kind === 'apps') return tabModel.appsTab()
+  if (tab.kind === 'projects') return tabModel.projectsTab()
+  if (tab.kind === 'project') return { kind: 'project', id: String(tab.id) }
+  if (tab.kind === 'artifact') return { kind: 'artifact', id: String(tab.id) }
   return null
 }
 
-// Seed the slot ONCE, on the first builder→single switch, using property ABSENCE
-// as the migration marker (design §Recommended state). A blob that already carries
-// an explicit slot (including explicit `null` = initialized empty) is left
-// untouched — an initialized empty screen is never reseeded from builder focus.
-// Same reference when the slot is already present.
-export function seedSingleScreenIfAbsent(ws) {
-  if ('singleScreen' in ws) return ws
-  return { ...ws, singleScreen: focusedSlotSeed(ws) }
+// Hand the focused Builder selection to Standard on every explicit exit. This is
+// intentionally not a seed-once migration: the visible selection is the user's
+// current navigation intent and must beat the older Standard slot. Same reference
+// when the selected item already occupies the slot.
+export function selectFocusedBuilderTabForStandard(ws) {
+  return setSingleScreen(ws, focusedSlotSeed(ws))
 }
 
 // True when the whole workspace holds no tabs.
@@ -649,6 +670,16 @@ export function focusedContentRoute(ws) {
       // (design: the overlay must not be conflated with focused-content-is-Settings).
       if (tab.kind === 'settings') return { view: 'settings', chatId: null, appId: null, paneId }
       if (tab.kind === 'apps') return { view: 'apps', chatId: null, appId: null, paneId }
+      if (tab.kind === 'projects') return { view: 'projects', chatId: null, appId: null, projectId: null, paneId }
+      if (tab.kind === 'project') return { view: 'project', chatId: null, appId: null, projectId: String(tab.id), paneId }
+      if (tab.kind === 'artifact') {
+        const parsed = tabModel.parseArtifactTabId(tab.id)
+        return {
+          view: 'artifact', chatId: null, appId: null,
+          projectId: parsed ? parsed.projectId : null,
+          artifactRef: String(tab.id), paneId,
+        }
+      }
       const { view, opts } = tabModel.tabNavTarget(tab)
       if (view === 'canvas') return { view: 'canvas', chatId: null, appId: opts.appId, paneId }
       return { view: 'chat', chatId: opts.chatId, appId: null, paneId }
@@ -668,6 +699,20 @@ export function singleScreenRoute(ws) {
   const paneId = ws.focusedPaneId
   if (slot && slot.kind === 'apps') {
     return { view: 'apps', chatId: null, appId: null, paneId }
+  }
+  if (slot && slot.kind === 'projects') {
+    return { view: 'projects', chatId: null, appId: null, projectId: null, paneId }
+  }
+  if (slot && slot.kind === 'project') {
+    return { view: 'project', chatId: null, appId: null, projectId: String(slot.id), paneId }
+  }
+  if (slot && slot.kind === 'artifact') {
+    const parsed = tabModel.parseArtifactTabId(slot.id)
+    return {
+      view: 'artifact', chatId: null, appId: null,
+      projectId: parsed ? parsed.projectId : null,
+      artifactRef: String(slot.id), paneId,
+    }
   }
   if (slot && slot.kind === 'app') {
     const appId = Number(slot.id)
@@ -714,6 +759,9 @@ export function visibleAppIds(ws, visibleLeaves) {
 function routeItemKey(route) {
   if (!route || typeof route !== 'object') return null
   if (route.view === 'apps') return tabModel.APPS_TAB_KEY
+  if (route.view === 'projects') return tabModel.PROJECTS_TAB_KEY
+  if (route.view === 'project' && route.projectId != null) return `project:${route.projectId}`
+  if (route.view === 'artifact' && route.artifactRef != null) return `artifact:${route.artifactRef}`
   if (route.view === 'canvas' && route.appId != null) return `app:${route.appId}`
   if (route.view === 'chat' && !route.homeSeed && route.chatId != null) return `chat:${route.chatId}`
   return null
@@ -898,6 +946,25 @@ export function closeTab(ws, tabKey) {
     ...ws,
     panes: { ...ws.panes, [pane.id]: { ...pane, tabs, activeTabKey: active } },
   })
+}
+
+// Project deletion retires the project browser and every independently-opened
+// artifact preview backed by that project.  Keep this as one workspace
+// transition so tabs in different panes and the phone's single-screen slot
+// cannot disagree about whether the deleted resource still exists.
+export function closeProjectTabs(ws, projectId) {
+  const target = String(projectId)
+  const belongsToProject = (tab) => {
+    if (tab?.kind === 'project') return String(tab.id) === target
+    if (tab?.kind !== 'artifact') return false
+    return tabModel.parseArtifactTabId(tab.id)?.projectId === target
+  }
+  let next = ws
+  for (const tab of flatten(ws)) {
+    if (belongsToProject(tab)) next = closeTab(next, tabModel.tabKey(tab))
+  }
+  if (belongsToProject(ws.singleScreen)) next = setSingleScreen(next, null)
+  return next
 }
 
 // Close a whole pane: drop every tab it holds, then normalize (the emptied pane
@@ -1168,11 +1235,13 @@ function toIdSet(ids) {
 
 // Whether the single-screen slot's backing chat/app is still live. A null/home
 // slot is always "live" (nothing to prune). A null live set means "unknown, keep".
-function slotIsLive(slot, chats, apps) {
+function slotIsLive(slot, chats, apps, projects) {
   if (!slot || typeof slot !== 'object') return true
   if (slot.kind === 'chat') return chats == null || chats.has(String(slot.id))
   if (slot.kind === 'app') return apps == null || apps.has(String(slot.id))
+  if (slot.kind === 'project') return projects == null || projects.has(String(slot.id))
   if (slot.kind === 'apps') return true
+  if (slot.kind === 'projects') return true
   return true
 }
 
@@ -1183,12 +1252,14 @@ function slotIsLive(slot, chats, apps) {
 // same op, so a phantom slot can never point at a dead item. A deleted slot
 // degrades to the explicit-empty screen (null), NEVER to builder focus (design:
 // no auto-fallback from a deleted slot).
-export function prune(ws, { liveChatIds, liveAppIds } = {}) {
+export function prune(ws, { liveChatIds, liveAppIds, liveProjectIds } = {}) {
   const chats = toIdSet(liveChatIds)
   const apps = toIdSet(liveAppIds)
+  const projects = toIdSet(liveProjectIds)
   const keep = (tab) => {
     if (tab.kind === 'chat') return chats == null || chats.has(tab.id)
     if (tab.kind === 'app') return apps == null || apps.has(tab.id)
+    if (tab.kind === 'project') return projects == null || projects.has(tab.id)
     return true
   }
   const panes = {}
@@ -1205,7 +1276,7 @@ export function prune(ws, { liveChatIds, liveAppIds } = {}) {
   // via CLOSE_TAB reason:'deleted'. This slot check exists so PRUNE remains
   // CORRECT if a bulk-reconcile caller is ever wired; it is not the delete path.
   const slotDead = ('singleScreen' in ws) && !!ws.singleScreen
-    && !slotIsLive(ws.singleScreen, chats, apps)
+    && !slotIsLive(ws.singleScreen, chats, apps, projects)
   if (!changed && !slotDead) return ws
   const candidate = { ...ws, panes }
   if (slotDead) candidate.singleScreen = null
@@ -1748,6 +1819,13 @@ export function workspaceReducer(state, action) {
         },
       }
     }
+    case 'CLOSE_PROJECT_TABS': {
+      const next = closeProjectTabs(ws, action.projectId)
+      // A deleted resource must never be recoverable from an older undo
+      // snapshot, even if this live workspace did not currently show it.
+      if (next === ws && undo == null) return state
+      return { ws: next, undo: null }
+    }
     case 'CLOSE_PANE': {
       // Closing a pane closes all its tabs at once (a keyboard/menu affordance —
       // no per-tab clicks). Reversible: the snapshot restores the whole pane. An
@@ -1836,6 +1914,7 @@ export function workspaceReducer(state, action) {
       const next = prune(ws, {
         liveChatIds: action.liveChatIds,
         liveAppIds: action.liveAppIds,
+        liveProjectIds: action.liveProjectIds,
       })
       if (next === ws && undo == null) return state
       return { ws: next, undo: null }
@@ -1852,7 +1931,11 @@ export function workspaceReducer(state, action) {
       // overwriting a live drag's toast slot.
       return {
         ws: next,
-        undo: { ws, label: 'Workspace placement', toast: action.toast || 'Agent arranged your workspace' },
+        undo: {
+          ws,
+          label: 'Workspace placement',
+          toast: action.toast === undefined ? 'Agent arranged your workspace' : action.toast,
+        },
       }
     }
     case 'SET_VIEW_MODE': {
@@ -1860,11 +1943,11 @@ export function workspaceReducer(state, action) {
       // seed its empty hidden tree from Standard, but that seed is part of the
       // destination representation rather than a separate editable gesture.
       const flipped = action.mode === 'toggle' ? toggleViewMode(ws) : setViewMode(ws, action.mode)
-      // On the FIRST-ever builder→single switch the slot is seeded from the focused
-      // concrete item (two-worlds design: seed once, using property absence as the
-      // migration marker). Every later switch leaves the slot exactly as the single
-      // world last left it — builder work never rewrites the single screen.
-      const next = flipped.viewMode === 'single' ? seedSingleScreenIfAbsent(flipped) : flipped
+      // Exiting Builder opens the tab the owner currently selected in the focused
+      // pane, not whichever Standard item happened to be visited before Builder.
+      // Repeating SET_VIEW_MODE while already single remains a true no-op.
+      const leavingBuilder = ws.viewMode !== 'single' && flipped.viewMode === 'single'
+      const next = leavingBuilder ? selectFocusedBuilderTabForStandard(flipped) : flipped
       if (next === ws) return state
       // INV 8 (review §3, P1): an explicit later mode intent REBASES a mode-COUPLED
       // undo to tree-only. A coupled undo (restoreViewMode: a single-leaf drop flip
@@ -1920,9 +2003,10 @@ export function workspaceReducer(state, action) {
         // First boot of a legacy/flat active chat into Standard: the derivations no
         // longer borrow Builder focus, so seed the slot from the reset's focused item
         // or the surface renders the empty New-Chat home instead of that chat. Only
-        // the genuine uninitialized case (no slot on the current ws) seeds here; a
-        // later toggle/close still owns the slot via seedSingleScreenIfAbsent /
-        // completeCloseTransition, and an explicit null slot stays New Chat.
+        // the genuine uninitialized case (no slot on the current ws) seeds here;
+        // a later explicit Builder exit / close owns the slot via
+        // selectFocusedBuilderTabForStandard / completeCloseTransition, and an
+        // explicit null slot stays New Chat until one of those visible handoffs.
         const seed = focusedSlotSeed(seeded)
         if (seed) candidate.singleScreen = seed
       }

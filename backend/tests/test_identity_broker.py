@@ -4,12 +4,14 @@ import importlib.util
 import hashlib
 import json
 import os
+import signal
 import stat
 import subprocess
 import tempfile
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -82,6 +84,155 @@ def test_private_directory_and_key_reject_precreated_symlinks(tmp_path, monkeypa
 
   with pytest.raises(RuntimeError, match="file is unsafe"):
     broker_module._load_or_create_key()
+
+
+def _legacy_state_paths(tmp_path, monkeypatch):
+  private = tmp_path / "identity-broker"
+  private.mkdir(mode=0o700)
+  key = private / "instance-ed25519.pem"
+  key.write_text("legacy-key", encoding="utf-8")
+  key.chmod(0o600)
+  owner = (os.getuid(), os.getgid())
+  monkeypatch.setattr(broker_module, "PRIVATE_DIR", private)
+  monkeypatch.setattr(broker_module, "KEY_PATH", key)
+  monkeypatch.setattr(broker_module, "STATE_PATH", private / "identity.json")
+  monkeypatch.setattr(broker_module, "INSTANCE_PATH", private / "instance-id")
+  monkeypatch.setattr(
+    broker_module, "PENDING_BOOTSTRAP_PATH", private / "pending-enrollment.jwt"
+  )
+  monkeypatch.setattr(broker_module.os, "geteuid", lambda: 0)
+  monkeypatch.setattr(
+    broker_module.pwd, "getpwnam",
+    lambda _name: SimpleNamespace(pw_uid=owner[0], pw_gid=owner[1]),
+  )
+  return private, key
+
+
+def _record_adopted_inodes(monkeypatch, on_first_call=None):
+  """Capture which inodes the root fixup targets, without needing real root."""
+  adopted = []
+
+  def fake_fchown(fd, uid, gid):
+    if on_first_call is not None and not adopted:
+      on_first_call()
+    adopted.append((os.fstat(fd).st_ino, uid, gid))
+
+  monkeypatch.setattr(broker_module.os, "fchown", fake_fchown)
+  return adopted
+
+
+def test_root_broker_reclaims_only_locked_down_legacy_state(tmp_path, monkeypatch):
+  private, key = _legacy_state_paths(tmp_path, monkeypatch)
+  adopted = _record_adopted_inodes(monkeypatch)
+
+  broker_module._reclaim_private_state_after_compat_chown()
+
+  assert adopted == [(private.stat().st_ino, 0, 0), (key.stat().st_ino, 0, 0)]
+  assert stat.S_IMODE(private.stat().st_mode) == 0o700
+  assert stat.S_IMODE(key.stat().st_mode) == 0o600
+
+
+def test_root_broker_refuses_symlinked_legacy_state(tmp_path, monkeypatch):
+  _private, key = _legacy_state_paths(tmp_path, monkeypatch)
+  key.unlink()
+  outside = tmp_path / "outside.pem"
+  outside.write_text("do not adopt", encoding="utf-8")
+  # Locked down like genuine state, so being a symlink is the only reason
+  # this can be refused.
+  outside.chmod(0o600)
+  key.symlink_to(outside)
+  adopted = _record_adopted_inodes(monkeypatch)
+
+  with pytest.raises(RuntimeError, match="file is unsafe"):
+    broker_module._reclaim_private_state_after_compat_chown()
+
+  assert adopted == []
+
+
+def test_root_broker_refuses_symlinked_private_directory(tmp_path, monkeypatch):
+  private, _key = _legacy_state_paths(tmp_path, monkeypatch)
+  outside = tmp_path / "outside-dir"
+  outside.mkdir(mode=0o700)
+  link = tmp_path / "identity-broker-link"
+  link.symlink_to(outside, target_is_directory=True)
+  monkeypatch.setattr(broker_module, "PRIVATE_DIR", link)
+  adopted = _record_adopted_inodes(monkeypatch)
+
+  with pytest.raises(RuntimeError, match="private directory is unsafe"):
+    broker_module._reclaim_private_state_after_compat_chown()
+
+  assert adopted == []
+  assert stat.S_IMODE(private.stat().st_mode) == 0o700
+
+
+def test_root_broker_fixup_survives_entry_swapped_after_validation(
+  tmp_path, monkeypatch
+):
+  """A validated entry replaced mid-run must not redirect the root fixup."""
+  private, key = _legacy_state_paths(tmp_path, monkeypatch)
+  key_inode = key.stat().st_ino
+  outside = tmp_path / "outside.pem"
+  outside.write_text("do not adopt", encoding="utf-8")
+  outside.chmod(0o644)
+
+  def swap_key_for_symlink():
+    key.unlink()
+    key.symlink_to(outside)
+
+  adopted = _record_adopted_inodes(monkeypatch, on_first_call=swap_key_for_symlink)
+
+  broker_module._reclaim_private_state_after_compat_chown()
+
+  assert adopted == [(private.stat().st_ino, 0, 0), (key_inode, 0, 0)]
+  assert stat.S_IMODE(outside.stat().st_mode) == 0o644
+
+
+def test_root_broker_refuses_linked_legacy_state(tmp_path, monkeypatch):
+  _private, key = _legacy_state_paths(tmp_path, monkeypatch)
+  key.unlink()
+  outside = tmp_path / "outside"
+  outside.write_text("do not adopt", encoding="utf-8")
+  os.link(outside, key)
+
+  with pytest.raises(RuntimeError, match="file is unsafe"):
+    broker_module._reclaim_private_state_after_compat_chown()
+
+
+def test_root_broker_refuses_permissive_legacy_state(tmp_path, monkeypatch):
+  _private, key = _legacy_state_paths(tmp_path, monkeypatch)
+  key.chmod(0o640)
+
+  with pytest.raises(RuntimeError, match="file is unsafe"):
+    broker_module._reclaim_private_state_after_compat_chown()
+
+
+def test_root_broker_refuses_planted_fifo_without_stalling(tmp_path, monkeypatch):
+  """The FIFO is refused, and opening it must not wait for a writer.
+
+  A FIFO is the shape that isolates the S_ISREG guard: it has one link, the
+  expected owner, and a private mode, so every other rejection clause passes
+  it. A planted directory is already refused by the link check.
+  """
+  _private, key = _legacy_state_paths(tmp_path, monkeypatch)
+  key.unlink()
+  os.mkfifo(key, 0o600)
+  adopted = _record_adopted_inodes(monkeypatch)
+
+  def _stalled(_signum, _frame):
+    raise AssertionError("opening the planted FIFO blocked on a writer")
+
+  # Without O_NONBLOCK this open waits forever for a writer that never comes,
+  # so fail the assertion instead of hanging the suite.
+  previous = signal.signal(signal.SIGALRM, _stalled)
+  signal.alarm(5)
+  try:
+    with pytest.raises(RuntimeError, match="file is unsafe"):
+      broker_module._reclaim_private_state_after_compat_chown()
+  finally:
+    signal.alarm(0)
+    signal.signal(signal.SIGALRM, previous)
+
+  assert adopted == []
 
 
 def test_socket_parent_must_not_be_app_writable(tmp_path, monkeypatch):
@@ -311,7 +462,7 @@ def test_gateway_capability_wraps_the_exact_signed_request_binding(broker):
   )
 
 
-def test_handler_supports_allowlisted_community_http_methods():
+def test_handler_supports_allowlisted_local_service_http_methods():
   handler = broker_module._Handler
   assert handler.do_GET is handler._handle
   assert handler.do_POST is handler._handle
@@ -328,10 +479,14 @@ def test_community_proxy_is_uds_only_and_binds_the_exact_request(
     def build_request(self, method, url, **kwargs):
       seen["url"] = url
       seen["headers"] = kwargs["headers"]
-      return httpx.Request(method, url, content=kwargs.get("content"), headers=kwargs["headers"])
+      return httpx.Request(
+        method, url, content=kwargs.get("content"), headers=kwargs["headers"],
+      )
 
     def send(self, request, *, stream):
-      return httpx.Response(200, request=request, stream=httpx.ByteStream(b"{}"))
+      return httpx.Response(
+        200, request=request, stream=httpx.ByteStream(b"{}"),
+      )
 
     def close(self):
       return None
@@ -349,7 +504,7 @@ def test_community_proxy_is_uds_only_and_binds_the_exact_request(
     broker.proxy(method="GET", path=target, body=b"", headers={})
 
   response = broker.proxy(
-    method="GET", path=target, body=b"", headers={}, allow_community=True,
+    method="GET", path=target, body=b"", headers={}, allow_privileged_routes=True,
   )
   response.close()
 
@@ -367,7 +522,7 @@ def test_community_proxy_is_uds_only_and_binds_the_exact_request(
     with pytest.raises(FileNotFoundError):
       broker.proxy(
         method="GET", path=forbidden, body=b"", headers={},
-        allow_community=True,
+        allow_privileged_routes=True,
       )
 
 
@@ -377,10 +532,14 @@ def test_community_mutations_require_and_forward_idempotency(broker, monkeypatch
   class FakeClient:
     def build_request(self, method, url, **kwargs):
       seen["headers"] = kwargs["headers"]
-      return httpx.Request(method, url, content=kwargs.get("content"), headers=kwargs["headers"])
+      return httpx.Request(
+        method, url, content=kwargs.get("content"), headers=kwargs["headers"],
+      )
 
     def send(self, request, *, stream):
-      return httpx.Response(200, request=request, stream=httpx.ByteStream(b"{}"))
+      return httpx.Response(
+        200, request=request, stream=httpx.ByteStream(b"{}"),
+      )
 
     def close(self):
       return None
@@ -392,15 +551,122 @@ def test_community_mutations_require_and_forward_idempotency(broker, monkeypatch
   with pytest.raises(ValueError, match="idempotency key is required"):
     broker.proxy(
       method="POST", path=path, body=b'{"github":{}}', headers={},
-      allow_community=True,
+      allow_privileged_routes=True,
     )
   response = broker.proxy(
     method="POST", path=path, body=b'{"github":{}}',
     headers={"idempotency-key": "publish:1234567890abcdef"},
-    allow_community=True,
+    allow_privileged_routes=True,
   )
   response.close()
   assert seen["headers"]["Idempotency-Key"] == "publish:1234567890abcdef"
+
+
+def test_contribution_proxy_is_uds_only_and_binds_exact_requests(
+  broker, monkeypatch,
+):
+  seen = {}
+
+  class FakeClient:
+    def build_request(self, method, url, **kwargs):
+      seen["url"] = url
+      seen["headers"] = kwargs["headers"]
+      return httpx.Request(
+        method, url, content=kwargs.get("content"), headers=kwargs["headers"],
+      )
+
+    def send(self, request, *, stream):
+      return httpx.Response(
+        200, request=request, stream=httpx.ByteStream(b"{}"),
+      )
+
+    def close(self):
+      return None
+
+  capabilities = []
+  broker.client.close()
+  broker.client = FakeClient()
+  monkeypatch.setattr(
+    broker, "_capability",
+    lambda **kwargs: capabilities.append(kwargs) or "one-use",
+  )
+  create_path = "/v1/contributions"
+  create_body = b'{"repo":"mobius-os/mobius"}'
+  key = "contribution:0123456789abcdef"
+
+  with pytest.raises(FileNotFoundError):
+    broker.proxy(
+      method="POST", path=create_path, body=create_body,
+      headers={"idempotency-key": key},
+    )
+
+  response = broker.proxy(
+    method="POST", path=create_path, body=create_body,
+    headers={"idempotency-key": key}, allow_privileged_routes=True,
+  )
+  response.close()
+  assert seen["url"] == broker_module.CONTRIBUTION_BASE_URL + create_path
+  assert seen["headers"]["Idempotency-Key"] == key
+  assert capabilities[-1]["audience"] == "mobius-contribution-relay"
+  assert capabilities[-1]["scope"] == "contribution:submit"
+  assert capabilities[-1]["idempotency_key"] == key
+
+  contribution = "ctr_1234567890abcdef1234567890abcdef"
+  response = broker.proxy(
+    method="GET", path=f"/v1/contributions/{contribution}", body=b"",
+    headers={}, allow_privileged_routes=True,
+  )
+  response.close()
+  assert capabilities[-1]["scope"] == "contribution:read"
+
+  withdraw_path = f"/v1/contributions/{contribution}/withdraw"
+  response = broker.proxy(
+    method="POST", path=withdraw_path, body=b'{"revision":1}',
+    headers={"idempotency-key": "withdraw:0123456789abcdef"},
+    allow_privileged_routes=True,
+  )
+  response.close()
+  assert capabilities[-1]["scope"] == "contribution:withdraw"
+
+  for method, forbidden in (
+    ("GET", "/v1/contributions/github/status"),
+    ("GET", f"/v1/contributions/{contribution}?subject=other"),
+    ("DELETE", f"/v1/contributions/{contribution}"),
+    ("POST", "https://evil.test/v1/contributions"),
+  ):
+    with pytest.raises(FileNotFoundError):
+      broker.proxy(
+        method=method, path=forbidden, body=b"", headers={},
+        allow_privileged_routes=True,
+      )
+
+
+def test_contribution_mutations_require_idempotency(broker):
+  with pytest.raises(ValueError, match="idempotency key is required"):
+    broker.proxy(
+      method="POST", path="/v1/contributions", body=b"{}", headers={},
+      allow_privileged_routes=True,
+    )
+
+
+def test_large_body_exception_is_only_for_exact_contribution_mutations():
+  contribution = "ctr_1234567890abcdef1234567890abcdef"
+  assert broker_module._request_body_limit(
+    is_unix=True, method="POST", path="/v1/contributions",
+  ) == broker_module.MAX_CONTRIBUTION_BODY
+  assert broker_module._request_body_limit(
+    is_unix=True, method="POST",
+    path=f"/v1/contributions/{contribution}/withdraw",
+  ) == broker_module.MAX_CONTRIBUTION_BODY
+  for is_unix, method, path in (
+    (False, "POST", "/v1/contributions"),
+    (True, "POST", "/v1/contributions?x=1"),
+    (True, "GET", f"/v1/contributions/{contribution}"),
+    (True, "POST", "/v1/community/apps"),
+  ):
+    assert broker_module._request_body_limit(
+      is_unix=is_unix, method=method, path=path,
+    ) == broker_module.MAX_BODY
 
 
 def test_unix_handler_rejects_identity_queries_and_forwards_inference():
@@ -414,7 +680,9 @@ def test_unix_handler_rejects_identity_queries_and_forwards_inference():
     def identity(self):
       return {"linked": True}
 
-    def proxy(self, *, method, path, body, headers, allow_community=False):
+    def proxy(
+      self, *, method, path, body, headers, allow_privileged_routes=False,
+    ):
       seen.append((method, path, body))
       request = httpx.Request(method, "https://central.test" + path)
       payload = json.dumps({"method": method}).encode()

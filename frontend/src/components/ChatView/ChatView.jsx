@@ -15,16 +15,19 @@ import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
 import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey, chatQueries, settingsQueries } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
-import useScrollMode, {
+import useScrollMode from './useScrollMode.js'
+import {
   FOLLOW_STICK_BAND_PX,
   isNearPhysicalBottom,
   olderHistoryRetryShown,
   olderHistoryShouldLoad,
+} from './scroll/policy.js'
+import {
   remapSavedReadingAnchor,
   retireSavedReadingPosition,
   savedReadingAnchorHasNestedPart,
   savedReadingAnchorKey,
-} from './useScrollMode.js'
+} from './scroll/readingPositions.js'
 import useVoiceInput from './useVoiceInput.js'
 import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import {
@@ -117,6 +120,7 @@ import { composerHistoryFromMessages } from './composerHistory.js'
 import { createFileDragHandlers } from './dragUpload.js'
 import useOpenAppCtaAutoDismiss from './hooks/useOpenAppCtaAutoDismiss.js'
 import {
+  isAmbiguousSendFailure,
   isModelSelectionRequiredFailure,
   isPendingQuestionSendFailure,
   sendFailureMessage,
@@ -167,7 +171,7 @@ import {
 } from './sendAttemptIdentity.js'
 import {
   clearFailedSendAttempt,
-  sendAttemptIsDurable,
+  settleFailedSendConfirmation,
 } from './sendAttemptRecovery.js'
 import {
   clearComposerDraft,
@@ -465,6 +469,11 @@ export default function ChatView({
   // back-stack — and contradicts the project's no-hard-reload principle).
   const [loadNonce, setLoadNonce] = useState(0)
   const [sending, setSending] = useState(() => !!cached?.running)
+  // Authoritative transcript reads can replace a locally promoted live answer
+  // with its compact settled projection without changing the row count. Bump
+  // this alongside that commit so the scroll owner can re-apply the semantic
+  // reading mode against the new geometry before paint.
+  const [transcriptReconcileSeq, setTranscriptReconcileSeq] = useState(0)
   // Terminal live-to-settled commits bump this sequence. The corresponding
   // layout effect settles an armed prompt pin against the committed DOM.
   const [pinnedSettleSeq, setPinnedSettleSeq] = useState(0)
@@ -522,6 +531,7 @@ export default function ChatView({
     failedSendAttemptRef,
     clearFailedAttempt,
     rememberFailedAttempt,
+    reconcileFailedAttempt: reconcileFailedSendAttempt,
     pendingFiles,
     clearFiles,
     restoreFiles,
@@ -681,6 +691,13 @@ export default function ChatView({
   // synchronous access (handleStop's pre-await clear, fetchMessages'
   // cid preservation).
   const pendingQueue = usePendingQueue(cached?.pending_messages || [])
+  useEffect(() => {
+    // The POST error and the server's durable transcript can settle in either
+    // order. If a later SSE/reconcile render proves this exact cid is already
+    // visible, retire the restored draft immediately instead of waiting for a
+    // remount or another network read.
+    reconcileFailedSendAttempt(messages, pendingQueue.pendingMessages)
+  }, [messages, pendingQueue.pendingMessages, reconcileFailedSendAttempt])
   // Every delayed visible user row carries one opaque scroll intent under the
   // same stable cid that owns its queue/transcript identity. A queued
   // continuation temporarily moves its rows + intent into one envelope while
@@ -852,6 +869,10 @@ export default function ChatView({
   // snapshot while app context, settings, or the POST is still in flight;
   // that snapshot cannot retire this locally-owned start.
   const localStartRequestRef = useRef(null)
+  // A manual Resume has no composer draft owner. Keep its provisional
+  // confirmation notice under an exact token so an older check cannot clear a
+  // newer send failure or leave the internal `continue` action in the composer.
+  const continuationConfirmationRef = useRef(null)
   // Re-entrancy guard for doSendSilent (answer submissions). sendingRef
   // alone cannot guard doSendSilent because answer sends are deliberately
   // allowed while sendingRef is true (the runner is parked waiting for
@@ -953,6 +974,7 @@ export default function ChatView({
     settleStreamingPin,
     composerEdited,
     paneResized,
+    pinning,
     following,
     followLatest,
   } = useScrollMode({
@@ -1068,6 +1090,7 @@ export default function ChatView({
     force = false,
     terminal204 = false,
     authoritative = false,
+    expectedFailedAttempt,
   } = {}) => {
     if (sendingRef.current && !force) return
     const gen = fetchGenRef.current
@@ -1091,6 +1114,11 @@ export default function ChatView({
           }
         }
       }
+      reconcileFailedSendAttempt(
+        msgs,
+        data.pending_messages || [],
+        { reportMissing: true, expectedAttempt: expectedFailedAttempt },
+      )
       const preserveLocalTurn =
         !authoritative
         && force
@@ -1113,6 +1141,7 @@ export default function ChatView({
           preserveLocalSuffix: true,
         })
         commitMessages(refreshed.messages, refreshed.offset)
+        setTranscriptReconcileSeq(seq => seq + 1)
       } else if (!staleSnapshot) {
         const refreshed = mergeRecentMessagesIntoLoadedWindow({
           loadedMessages: messagesRef.current,
@@ -1121,6 +1150,7 @@ export default function ChatView({
           recentOffset: data.offset || 0,
         })
         commitMessages(refreshed.messages, refreshed.offset)
+        setTranscriptReconcileSeq(seq => seq + 1)
       }
       if (data.running) {
         setSending(true)
@@ -1134,6 +1164,11 @@ export default function ChatView({
       const runtimeGoalObjective = goalObjectiveFromRuntime(
         data, latestGoalObjective(msgs),
       )
+      // A provider creates its session during the first turn, after ChatView
+      // has already mounted. Publish the refreshed detail metadata with the
+      // settled transcript so the context gauge follows that exact session
+      // without waiting for a page reload.
+      const refreshedChatInfo = chatDetailCacheValue(data).chatInfo
       setActiveGoalObjective(runtimeGoalObjective)
       const adoptAssistantOwner = shouldAdoptRuntimeAssistantOwner({
         runtimeRunning: !!data.running,
@@ -1154,6 +1189,7 @@ export default function ChatView({
           activeAssistantMessageId: data.active_assistant_message_id || null,
         } : {}),
         waits: data.waits || [],
+        chatInfo: refreshedChatInfo,
       })
       // Reconcile pending queue against authoritative server state.
       // hydrate() already preserves truly optimistic/in-flight local rows
@@ -1181,7 +1217,36 @@ export default function ChatView({
     commitMessages,
     pendingQueue.hydrate,
     queryClient,
+    reconcileFailedSendAttempt,
     setActiveAssistantMessageId,
+  ])
+
+  const settleAmbiguousSendConfirmation = useCallback((
+    failedAttempt,
+    continuationConfirmation = null,
+  ) => (
+    settleFailedSendConfirmation(
+      () => fetchMessages({ force: true, expectedFailedAttempt: failedAttempt }),
+      options => reconcileFailedSendAttempt(
+        messagesRef.current,
+        pendingQueue.pendingMessagesRef.current,
+        { ...options, expectedAttempt: failedAttempt },
+      ),
+      () => {
+        if (
+          !continuationConfirmation
+          || continuationConfirmationRef.current !== continuationConfirmation
+        ) return
+        continuationConfirmationRef.current = null
+        setSendFailure(null)
+      },
+    )
+  ), [
+    fetchMessages,
+    messagesRef,
+    pendingQueue.pendingMessagesRef,
+    reconcileFailedSendAttempt,
+    setSendFailure,
   ])
 
   // Active-turn runtime reconciliation. The SSE stream is authoritative for
@@ -2228,23 +2293,11 @@ export default function ChatView({
         return
       }
       const msgs = detailCache.messages
-      const failedAttempt = failedSendAttemptRef.current
-      if (failedAttempt) {
-        if (sendAttemptIsDurable(
-          failedAttempt,
-          msgs,
-          runtime.pending_messages,
-        )) {
-          clearFailedAttempt()
-          setComposerInput('')
-          clearFiles()
-          setSendFailure(null)
-        } else {
-          setSendFailure(
-            'That message didn’t reach the chat. It’s ready in the composer—try again.',
-          )
-        }
-      }
+      reconcileFailedSendAttempt(
+        msgs,
+        runtime.pending_messages,
+        { reportMissing: true },
+      )
 
       if (reused) {
         // One narrow cache publication updates queue/liveness only. Reconcile
@@ -2419,6 +2472,7 @@ export default function ChatView({
     loadNonce,
     searchReveal?.anchorKey,
     searchReveal?.id,
+    reconcileFailedSendAttempt,
     setActiveAssistantMessageId,
   ])
 
@@ -2591,6 +2645,7 @@ export default function ChatView({
     const pin = opts.pin !== false  // default true
     const continuation = opts.continuation === 'manual' ? 'manual' : undefined
     const preserveComposer = opts.preserveComposer === true
+    continuationConfirmationRef.current = null
     setSendFailure(null)
 
     // Stop voice recognition so a late onresult doesn't refill input
@@ -2944,18 +2999,19 @@ export default function ChatView({
         // Roll back optimistic + restore input.
         if (!directSteer) pendingQueue.cancelByCid(queuedMsg.cid)
         forgetSendIntent({ cid: queuedMsg.cid })
-        if (!continuation) {
-          rememberFailedAttempt({
-            cid,
-            draftIdentity,
-            text,
-            attachments: composerFileSnapshot,
-          })
+        const failedAttempt = continuation ? null : {
+          cid, draftIdentity, text, attachments: composerFileSnapshot,
         }
+        if (failedAttempt) rememberFailedAttempt(failedAttempt)
         restoreComposerAfterFailedSend()
         setSendFailure(modelSelectionBlocked
           ? null
           : sendFailureMessage(err, { online: getOnlineSnapshot() }))
+        if (isAmbiguousSendFailure(err)) {
+          const confirmation = continuation ? {} : null
+          if (confirmation) continuationConfirmationRef.current = confirmation
+          void settleAmbiguousSendConfirmation(failedAttempt, confirmation)
+        }
         if (modelSelectionBlocked) {
           setModelSelectionRequest(request => request + 1)
         } else if (pendingQuestionBlocked) {
@@ -3137,14 +3193,10 @@ export default function ChatView({
         sendingRef.current = false
         setServerRunningState(false)
       }
-      if (!continuation) {
-        rememberFailedAttempt({
-          cid,
-          draftIdentity,
-          text,
-          attachments: composerFileSnapshot,
-        })
+      const failedAttempt = continuation ? null : {
+        cid, draftIdentity, text, attachments: composerFileSnapshot,
       }
+      if (failedAttempt) rememberFailedAttempt(failedAttempt)
       restoreComposerAfterFailedSend()
       // Ambiguity recovery already verified reachability and safely replayed
       // this exact cid once. If even that acknowledgement was lost, keep the
@@ -3159,6 +3211,11 @@ export default function ChatView({
       setSendFailure(modelSelectionBlocked
         ? null
         : sendFailureMessage(err, { online: getOnlineSnapshot() }))
+      if (isAmbiguousSendFailure(err)) {
+        const confirmation = continuation ? {} : null
+        if (confirmation) continuationConfirmationRef.current = confirmation
+        void settleAmbiguousSendConfirmation(failedAttempt, confirmation)
+      }
       if (modelSelectionBlocked) {
         setModelSelectionRequest(request => request + 1)
         onStreamEndRef.current?.({ continues: false })
@@ -3189,6 +3246,7 @@ export default function ChatView({
     pendingFiles,
     commitMessages,
     fetchMessages,
+    settleAmbiguousSendConfirmation,
     clearFiles,
     restoreFiles,
     releaseFiles,
@@ -3216,7 +3274,11 @@ export default function ChatView({
       consumeComposerHandoff(chatId, request.text, { autoSend: true })
     }
     doSend(text)
-    if (!request.storedHandoff) onComposerRequestHandled?.(request.token)
+    // A stored handoff can also be an explicit Shell request from the still-
+    // visible New Chat landing. Acknowledge every request token after the send
+    // starts: storage-only tokens simply do not match Shell's current request,
+    // while a matching token releases the landing and clears its ownership.
+    onComposerRequestHandled?.(request.token)
   }, [
     pendingComposerSubmit,
     loading,
@@ -3290,11 +3352,10 @@ export default function ChatView({
     const wasServerRunning = serverRunningRef.current
     sendingRef.current = true
     promotedRef.current = false
-    // Hidden answer is a continuation, NOT a new visible send. The
-    // user may be reading somewhere else; don't yank them with a PIN.
-    // freezeQuestionSubmission above already converted the exact visible
-    // position into ANCHOR_AT, so resumed output grows inside the existing
-    // assistant row without creating tail-follow intent.
+    // Hidden answer is a continuation, NOT a new visible send. The user may be
+    // reading somewhere else, so it never creates a PIN. The transient
+    // question hold preserves that exact position; an accepted in-process
+    // answer may release it back to a FOLLOW_BOTTOM that already existed.
     try {
       // Mint a cid for symmetry so the persisted hidden row carries a stable
       // identity for reload dedup. It is inert here — a hidden answer send
@@ -4075,20 +4136,15 @@ export default function ChatView({
     }
   }, [freezeForegroundReturn, turnActive])
 
-  // Cloak the first post-reconnect catch-up commit (contract v2 item 2, lever
-  // 3). freezeStreamingReturn above already anchors the mode at the moment the
-  // tab returns; the atomic catch-up commit lands async AFTER that, and even the
-  // in-place reconcile (lever 2c) can re-settle heights. Re-hold the anchor the
-  // instant the commit's DOM mutation lands — in a layout effect, before paint,
-  // so a real reconnect (Path B) or a Path-A commit after the reveal cap never
-  // blinks the reader's position. reapplyActiveMode no-ops before reveal, and a
-  // quick-wake kept socket never reconnects (no commit → seq stays put), so a
-  // glance at the notification shade cannot trigger it. The seq starts at 0 and
-  // only a commit bumps it, so this skips the initial mount.
+  // Reconnect catch-up and authoritative compact reads are the two atomic
+  // transcript-source handoffs. Either can re-settle row geometry without
+  // changing the message count. Re-apply the mode already owned by the scroll
+  // controller in the same pre-paint commit; before reveal, hide-then-reveal
+  // already owns the position and reapplyActiveMode deliberately no-ops.
   useLayoutEffect(() => {
-    if (catchUpCommitSeq === 0) return
+    if (catchUpCommitSeq === 0 && transcriptReconcileSeq === 0) return
     reapplyActiveMode()
-  }, [catchUpCommitSeq, reapplyActiveMode])
+  }, [catchUpCommitSeq, transcriptReconcileSeq, reapplyActiveMode])
 
   // Promotion and this sequence update share one React batch, so the terminal
   // pin decision runs after the settled assistant DOM is committed and before
@@ -4476,10 +4532,10 @@ export default function ChatView({
   )
 
   // The resume card publishes the same way, from the TAIL resumable note only
-  // — the same block tailResumableBlock arms the cue on. (MsgContent renders a
-  // Resume button on every resumable block of the last message, so the tail
-  // gate lives at the publication site; one shared ref can only hold one
-  // node.) A tap on the nudge scrolls that node in.
+  // — the same block tailResumableBlock arms the cue on. MsgContent applies
+  // that tail ownership to the card and its actions together, so this shared
+  // ref always names the single actionable recovery surface. A tap on the
+  // nudge scrolls that node in.
   const [resumeCardEl, resumeCardRef] = useNudgeTargetRef()
   const resumeCardOffscreen = useOffscreenNudge(
     scrollRef, hasPendingResume, resumeCardEl,
@@ -4487,7 +4543,12 @@ export default function ChatView({
   const questionNudgeShown = hasPendingQuestion && pendingCardOffscreen
   const resumeNudgeShown = hasPendingResume && resumeCardOffscreen
   const jumpToLatestVisible = jumpToLatestShown({
-    awayFromTail: awayFromLatest && !following,
+    // A send-owned PIN_USER_MSG is the expected latest-turn location, not a
+    // reader escape. Its keyboard-close reachability floor can temporarily
+    // extend the physical tail before the viewport grows, so suppress the
+    // navigation affordance until either the pin hands off or the reader
+    // scrolls into an ordinary anchor.
+    awayFromTail: awayFromLatest && !following && !pinning,
     questionNudgeShown,
     resumeNudgeShown,
   })
@@ -4548,9 +4609,18 @@ export default function ChatView({
     if (!pendingResumeBlock) return null
     if (pendingResumeBlock.pause?.resets_at) {
       const label = formatResetTime(pendingResumeBlock.pause.resets_at)
+      if (autoResumeEnabled) {
+        return label
+          ? `Usage limit reached. Queued to continue ${label}.`
+          : 'Usage limit reached. Queued to continue automatically.'
+      }
+      if (limitResetElapsed) return 'Usage is available again. Continue available.'
       return label
-        ? `Rate limit reached, resets ${label} — Resume available.`
-        : 'Rate limit reached — Resume available.'
+        ? `Usage limit reached. Usage resets ${label}. Automatic continuation available.`
+        : 'Usage limit reached. Automatic continuation available.'
+    }
+    if (pendingResumeBlock.pause?.kind === 'restart') {
+      return 'Response paused for restart. Möbius will continue automatically.'
     }
     return 'Turn paused — Resume available.'
   })()
@@ -4828,6 +4898,7 @@ export default function ChatView({
                 onAutoResumeChange={
                   isLastMsg ? handleAutoResumeChange : undefined
                 }
+                limitResetElapsed={isLastMsg && limitResetElapsed}
                 submissionBlocked={providerSwitching}
                 isLastMsg={isLastMsg}
                 liveQuestionId={answerableQuestionId}
@@ -4862,6 +4933,7 @@ export default function ChatView({
                 autoResumeErrorSource === 'card' ? autoResumeError : ''
               }
               onAutoResumeChange={handleAutoResumeChange}
+              limitResetElapsed={limitResetElapsed}
               submissionBlocked={providerSwitching}
               liveQuestionId={answerableQuestionId}
               // Same publication channel as the durable rows above: while the
@@ -4945,8 +5017,21 @@ export default function ChatView({
                       onClick={revealConversationTail}
                     >
                       {pendingResumeBlock?.pause?.resets_at
-                        ? 'Rate limit reached — tap to resume'
-                        : 'Turn paused — tap to resume'}
+                        ? autoResumeEnabled
+                          ? (() => {
+                              const label = formatResetTime(
+                                pendingResumeBlock.pause.resets_at,
+                              )
+                              return label
+                                ? `Queued to continue ${label}`
+                                : 'Queued to continue automatically'
+                            })()
+                          : limitResetElapsed
+                            ? 'Usage available — tap to continue'
+                            : 'Usage limit reached — continuation available'
+                        : pendingResumeBlock?.pause?.kind === 'restart'
+                          ? 'Paused for restart — continuing automatically'
+                          : 'Turn paused — tap to resume'}
                     </button>
                   )}
                   {jumpToLatestVisible && (
@@ -5065,6 +5150,7 @@ export default function ChatView({
               usageEnabled={!embedded}
               chatId={chatId}
               provider={chatInfo?.provider}
+              providerSessionId={chatInfo?.session_id}
               model={selectedChatModel(chatInfo)}
             >
               {({ icon, ariaLabel, providerUsage }) => (
@@ -5107,6 +5193,8 @@ export default function ChatView({
                 artifactsAppId={artifactsAppId}
                 onOpenArtifact={onOpenArtifact}
                 onOpenUsage={() => setShowUsage(true)}
+                appArtifacts={builtApps}
+                onOpenAppArtifact={onOpenApp}
                 embedded={embedded}
               />
               )}

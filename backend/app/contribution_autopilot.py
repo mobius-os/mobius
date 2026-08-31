@@ -56,9 +56,11 @@ FAILURE_ESCALATION_THRESHOLD = 2
 MAX_ROUND_LOG = 30
 MAX_IGNORED_EVENT_URLS = 20
 
-# Outcomes that mean the round did useful work (resets the failure counter and
-# advances the round count/cursor). Anything else is a non-productive round.
+# Outcomes that settle the claimed attention (reset the failure counter and
+# advance the round count/cursor). Public actions prove ``pushed``/``replied``;
+# the agent may explicitly settle an exact no-change review as ``handled``.
 PRODUCTIVE_OUTCOMES = frozenset({"pushed", "replied"})
+SETTLED_OUTCOMES = PRODUCTIVE_OUTCOMES | {"handled"}
 
 
 # ─────────────────────────── row access ────────────────────────────
@@ -264,6 +266,34 @@ def _reclaim_expired(
   return result.rowcount == 1, failures
 
 
+def sweep_expired_leases(db: Session) -> int:
+  """Reclaim expired round leases even when no newer event arrives.
+
+  ``claim_for_round`` reclaims lazily when another GitHub event reaches the
+  same record. A round that crashes after the final event would otherwise stay
+  in ``responding`` forever. The runtime supervisor calls this idempotent sweep
+  so the poller's durable attention can be retried. Returns rows reclaimed.
+  """
+  rows = (
+    db.query(models.ContributionAutopilot)
+    .filter(
+      models.ContributionAutopilot.enabled.is_(True),
+      models.ContributionAutopilot.state == "responding",
+      models.ContributionAutopilot.lease_expires_at.isnot(None),
+      models.ContributionAutopilot.lease_expires_at <= now_naive_utc(),
+    )
+    .order_by(models.ContributionAutopilot.lease_expires_at.asc())
+    .limit(100)
+    .all()
+  )
+  reclaimed = 0
+  for row in rows:
+    ok, _failures = _reclaim_expired(db, row)
+    if ok:
+      reclaimed += 1
+  return reclaimed
+
+
 def claim_for_round(
   db: Session,
   app_id: int,
@@ -310,6 +340,11 @@ def claim_for_round(
       if failures >= FAILURE_ESCALATION_THRESHOLD:
         return {"status": "escalate", "reason": "stale_rounds"}
       continue
+    if int(row.consecutive_failures or 0) >= FAILURE_ESCALATION_THRESHOLD:
+      # A periodic lease sweep may have reclaimed the expired row before this
+      # request arrived. Preserve the same escalation verdict as inline reclaim
+      # instead of granting an unbounded sequence of crash/retry rounds.
+      return {"status": "escalate", "reason": "stale_rounds"}
     if row.rounds_used >= row.max_rounds:
       return {"status": "escalate", "reason": "round_limit"}
 
@@ -455,20 +490,27 @@ def complete_round(
 
   ``event_at`` is accepted for compatibility but deliberately ignored: the
   cursor advances only to the canonical timestamp stored by the claim.
-  Requires the live claim's run_id. Productive outcomes reset the failure
-  counter, bump ``rounds_used``, and advance the handled-event cursor; a
-  non-productive ``failed`` counts toward escalation. Returns
+  Requires the live claim's run_id. Settled outcomes reset the failure counter,
+  bump ``rounds_used``, and advance the handled-event cursor; a failed round
+  counts toward escalation. Public action endpoints prove ``pushed`` and
+  ``replied``; ``handled`` is reserved for an exact no-change review. Returns
   ``{"status": "ok"|"stale", "escalate": bool}``.
   """
   row = get_row(db, app_id, record_id)
   if not verify_claim(row, run_id):
     return {"status": "stale", "escalate": False, "productive": False}
 
-  # Public action endpoints, not the caller, decide whether the round did work.
-  recorded_outcome = (
-    row.round_action if row.round_action in PRODUCTIVE_OUTCOMES else "failed"
-  )
-  productive = recorded_outcome in PRODUCTIVE_OUTCOMES
+  # Public action endpoints, not the caller, decide whether a push or reply
+  # happened. A no-change review is different: the claimed agent may settle
+  # the exact attention item as ``handled`` without manufacturing public noise.
+  # Any successful public action still wins over that caller-declared outcome.
+  if row.round_action in PRODUCTIVE_OUTCOMES:
+    recorded_outcome = row.round_action
+  elif outcome == "handled":
+    recorded_outcome = "handled"
+  else:
+    recorded_outcome = "failed"
+  productive = recorded_outcome in SETTLED_OUTCOMES
   entry = {
     "attention_key": row.attention_key,
     "run_id": run_id,

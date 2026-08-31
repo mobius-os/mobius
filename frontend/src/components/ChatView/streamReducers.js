@@ -701,6 +701,56 @@ export function closeAllToolLifecycles(prev) {
   })
 }
 
+/**
+ * Apply a terminal error using the same ordering contract as the durable
+ * transcript reducer. A planned restart can arrive after an unanswered
+ * question was already rendered; the question remains the tail interaction,
+ * so its pause marker belongs immediately before it. Other errors keep the
+ * existing latest-error-wins behavior.
+ */
+export function upsertTerminalErrorItem(prev, event = {}) {
+  const updated = closeAllToolLifecycles(prev)
+  const incoming = {
+    type: 'error',
+    message: event.message || '',
+    ...(event.resumable ? { resumable: true } : {}),
+    ...(event.pause ? { pause: event.pause } : {}),
+  }
+  const restartPause = incoming.pause?.kind === 'restart'
+  let trailingOpenStart = updated.length
+  if (restartPause) {
+    while (trailingOpenStart > 0) {
+      const block = updated[trailingOpenStart - 1]
+      if (block?.type !== 'question' || block.answers) break
+      trailingOpenStart -= 1
+    }
+  }
+
+  if (restartPause && trailingOpenStart < updated.length) {
+    // The answer is the continuation. A competing Resume control on the
+    // adjacent pause marker would offer the wrong action.
+    delete incoming.resumable
+    const previousIndex = trailingOpenStart - 1
+    if (
+      previousIndex >= 0
+      && updated[previousIndex]?.type === 'error'
+      && updated[previousIndex]?.pause?.kind === 'restart'
+    ) {
+      updated[previousIndex] = incoming
+    } else {
+      updated.splice(trailingOpenStart, 0, incoming)
+    }
+    return updated
+  }
+
+  if (updated.at(-1)?.type === 'error') {
+    updated[updated.length - 1] = incoming
+  } else {
+    updated.push(incoming)
+  }
+  return updated
+}
+
 // ---------------------------------------------------------------------------
 // Live subagent helpers — task_start / task_progress / task_done ENRICH the
 // existing Task/Agent tool block; they are metadata about a tool call that
