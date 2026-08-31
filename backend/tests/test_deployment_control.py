@@ -18,7 +18,8 @@ def _install_control(tmp_path, monkeypatch):
   inbox = control / "inbox"
   inbox.mkdir(parents=True)
   (control / "status.json").write_text(
-    '{"state":"idle","handoff":"external-cutover-v1"}',
+    '{"state":"idle","handoff":"external-cutover-v1",'
+    '"runtime_overlay":"active-runtime-v1"}',
     encoding="utf-8",
   )
   monkeypatch.setattr(dc, "_control_dir", lambda: control)
@@ -114,7 +115,11 @@ async def test_legacy_railway_image_offers_managed_bootstrap(tmp_path, monkeypat
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
   monkeypatch.setattr(dc, "get_settings", lambda: type("S", (), {"data_dir": str(tmp_path)})())
   monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "a" * 40)
-  monkeypatch.setattr(dc.platform_update, "container_replacement_blockers", lambda: [])
+  monkeypatch.setattr(
+    dc.platform_update,
+    "container_replacement_blockers",
+    lambda *_args, **_kwargs: [],
+  )
   calls = []
 
   def managed_request(method, suffix, payload=None):
@@ -240,7 +245,11 @@ async def test_legacy_railway_bootstrap_waits_for_idle_chats(tmp_path, monkeypat
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
   monkeypatch.setattr(dc, "get_settings", lambda: type("S", (), {"data_dir": str(tmp_path)})())
   monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "a" * 40)
-  monkeypatch.setattr(dc.platform_update, "container_replacement_blockers", lambda: [])
+  monkeypatch.setattr(
+    dc.platform_update,
+    "container_replacement_blockers",
+    lambda *_args, **_kwargs: [],
+  )
   calls = []
 
   def managed_request(method, suffix, payload=None):
@@ -320,7 +329,17 @@ async def test_request_rebuild_selects_managed_railway_handoff(tmp_path, monkeyp
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
   monkeypatch.setattr(dc, "get_settings", lambda: settings)
   monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "a" * 40)
-  monkeypatch.setattr(dc.platform_update, "container_replacement_blockers", lambda: [])
+  blocker_calls = []
+
+  def blockers(expected, *, preserve_active_runtime):
+    blocker_calls.append((expected, preserve_active_runtime))
+    return []
+
+  monkeypatch.setattr(
+    dc.platform_update,
+    "container_replacement_blockers",
+    blockers,
+  )
   calls = []
 
   def managed_request(method, suffix, payload=None):
@@ -350,6 +369,7 @@ async def test_request_rebuild_selects_managed_railway_handoff(tmp_path, monkeyp
 
   assert status["deployment"] == "railway"
   assert status["state"] == "queued"
+  assert blocker_calls == [("a" * 40, False)]
   assert calls == [
     ("POST", "prepare", {"expected_sha": "a" * 40}),
     ("POST", "start", {
@@ -375,7 +395,11 @@ async def test_managed_start_failure_restarts_only_after_definitive_rejection(
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
   monkeypatch.setattr(dc, "get_settings", lambda: settings)
   monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "a" * 40)
-  monkeypatch.setattr(dc.platform_update, "container_replacement_blockers", lambda: [])
+  monkeypatch.setattr(
+    dc.platform_update,
+    "container_replacement_blockers",
+    lambda *_args, **_kwargs: [],
+  )
 
   def managed_request(method, suffix, payload=None):
     if suffix == "prepare":
@@ -419,7 +443,11 @@ async def test_pre_start_receipt_timeout_recovers_the_drained_worker(
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
   monkeypatch.setattr(dc, "get_settings", lambda: settings)
   monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "a" * 40)
-  monkeypatch.setattr(dc.platform_update, "container_replacement_blockers", lambda: [])
+  monkeypatch.setattr(
+    dc.platform_update,
+    "container_replacement_blockers",
+    lambda *_args, **_kwargs: [],
+  )
 
   requests = []
 
@@ -473,7 +501,11 @@ async def test_definitive_rejection_owns_recovery_until_restart_settles(
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
   monkeypatch.setattr(dc, "get_settings", lambda: settings)
   monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "a" * 40)
-  monkeypatch.setattr(dc.platform_update, "container_replacement_blockers", lambda: [])
+  monkeypatch.setattr(
+    dc.platform_update,
+    "container_replacement_blockers",
+    lambda *_args, **_kwargs: [],
+  )
 
   def managed_request(method, suffix, _payload=None):
     if suffix == "prepare":
@@ -522,13 +554,26 @@ async def test_request_writes_only_the_derived_sha(tmp_path, monkeypatch):
   _control, inbox = _install_control(tmp_path, monkeypatch)
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "self_hosted")
   monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "c" * 40)
-  monkeypatch.setattr(dc.platform_update, "container_replacement_blockers", lambda: [])
+  seen = {}
+
+  def blockers(expected, *, preserve_active_runtime):
+    seen["expected"] = expected
+    seen["preserve_active_runtime"] = preserve_active_runtime
+    return []
+
+  monkeypatch.setattr(
+    dc.platform_update, "container_replacement_blockers", blockers,
+  )
 
   status = await dc.request_rebuild()
 
   assert status["state"] == "queued"
   assert json.loads((inbox / "request.json").read_text()) == {
     "version": 1, "expected_sha": "c" * 40,
+  }
+  assert seen == {
+    "expected": "c" * 40,
+    "preserve_active_runtime": True,
   }
 
 
@@ -537,7 +582,8 @@ async def test_queued_request_masks_the_previous_terminal_status(tmp_path, monke
   control, inbox = _install_control(tmp_path, monkeypatch)
   (control / "status.json").write_text(
     '{"state":"succeeded","operation_id":"old",'
-    '"handoff":"external-cutover-v1"}', encoding="utf-8",
+    '"handoff":"external-cutover-v1",'
+    '"runtime_overlay":"active-runtime-v1"}', encoding="utf-8",
   )
   (inbox / "request.json").write_text(json.dumps({
     "version": 1, "expected_sha": "e" * 40,
@@ -556,7 +602,9 @@ async def test_request_refuses_local_runtime_changes(tmp_path, monkeypatch):
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "self_hosted")
   monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "d" * 40)
   monkeypatch.setattr(
-    dc.platform_update, "container_replacement_blockers", lambda: ["Dockerfile"],
+    dc.platform_update,
+    "container_replacement_blockers",
+    lambda _expected, *, preserve_active_runtime: ["Dockerfile"],
   )
 
   with pytest.raises(dc.DeploymentControlError) as exc:
