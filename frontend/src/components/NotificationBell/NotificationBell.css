@@ -1,6 +1,6 @@
 /* Header bell — sized to sit beside the offline pill in shell__bar-actions.
    The BUTTON is the touch target: 44×44 (mobile comfort floor) inside the
-   58px header row; the glyph stays compact and the hit area does the work. */
+   responsive header row; the glyph stays compact and the hit area does the work. */
 
 .notification-bell {
   position: relative;

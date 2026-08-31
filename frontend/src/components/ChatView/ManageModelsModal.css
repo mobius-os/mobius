@@ -6,13 +6,13 @@
 
 .mmm__overlay {
   position: fixed;
-  /* Settings lives under the persistent 58px shell bar. This modal is inside the
+  /* Settings lives under the responsive shell bar. This modal is inside the
      shell content stacking context, so it cannot paint over that bar anyway;
      start below it so a tall/narrow dialog never hides its title underneath.
      The card's height cap subtracts this same offset (below) so the full modal —
      header included — always fits between the bar and the viewport bottom. One
      var keeps the two in lockstep; they must never drift. */
-  --modal-top-offset: calc(58px + env(safe-area-inset-top, 0px));
+  --modal-top-offset: calc(var(--shell-bar-height, 58px) + env(safe-area-inset-top, 0px));
   top: var(--modal-top-offset);
   right: 0;
   bottom: 0;
@@ -53,8 +53,9 @@
      minmax(0, 1fr) scroll area. dvh tracks mobile browser chrome. Subtract the
      shell-bar offset (the overlay starts below it) plus the 18px overlay padding
      on each side (36px) so the whole card — header included — fits the space the
-     overlay actually offers. Without the offset term the cap overshoots by 58px
-     and the title/× get pushed under the bar on any viewport below ~815px. */
+     overlay actually offers. Without the offset term the cap overshoots by the
+     shell bar's height and the title/× get pushed under the bar on any viewport
+     below ~815px. */
   height: min(720px, calc(100vh - var(--modal-top-offset) - 36px));
   height: min(720px, calc(100dvh - var(--modal-top-offset) - 36px));
   max-height: 100%;

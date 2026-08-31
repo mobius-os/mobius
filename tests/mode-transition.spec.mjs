@@ -102,6 +102,12 @@ function standardChatWithEmptyBuilder() {
   )
 }
 
+function onePaneStandardChat() {
+  let ws = paneModel.seedFromFlatTabs([{ kind: 'chat', id: 'aaa' }])
+  ws = paneModel.setSingleScreen(ws, { kind: 'chat', id: 'aaa' })
+  return paneModel.setViewMode(ws, 'single')
+}
+
 // An intentionally asymmetric three-pane tree. Its natural edge vectors differ
 // enough to expose same-duration entry as visibly different pane velocities.
 function unevenThreePaneBuilder(slot) {
@@ -348,6 +354,79 @@ for (const [name, viewport] of [
     await expect(page.locator('.shell__content')).toBeAttached()
   })
 }
+
+test('phone one-pane Builder keeps the workspace and composer anchored across repeated toggles', async ({ page }) => {
+  await bootSeededWorkspace(page, { width: 412, height: 915 }, onePaneStandardChat())
+  const paintedComposer = page.locator(
+    '[data-chat-surface="painted"] textarea.chat__input',
+  )
+  await expect(paintedComposer).toBeVisible()
+
+  const baseline = await page.evaluate(() => {
+    const content = document.querySelector('.shell__content').getBoundingClientRect()
+    const composer = document.querySelector(
+      '[data-chat-surface="painted"] textarea.chat__input',
+    ).getBoundingClientRect()
+    return {
+      contentTop: content.top,
+      contentHeight: content.height,
+      composerBottom: composer.bottom,
+    }
+  })
+
+  const sampleToggle = async () => {
+    const frames = page.evaluate(async () => {
+      const samples = []
+      for (let frame = 0; frame < 42; frame += 1) {
+        await new Promise(resolve => requestAnimationFrame(resolve))
+        const content = document.querySelector('.shell__content')?.getBoundingClientRect()
+        const composer = document.querySelector(
+          '[data-chat-surface="painted"] textarea.chat__input',
+        )?.getBoundingClientRect()
+        const strip = document.querySelector('.shell__tabstrip')?.getBoundingClientRect()
+        samples.push({
+          contentTop: content?.top ?? null,
+          contentHeight: content?.height ?? null,
+          composerBottom: composer?.bottom ?? null,
+          stripTop: strip?.top ?? null,
+        })
+      }
+      return samples
+    })
+    await page.waitForTimeout(32)
+    await toggleMode(page)
+    return frames
+  }
+
+  for (let toggle = 0; toggle < 2; toggle += 1) {
+    const frames = await sampleToggle()
+    for (const frame of frames) {
+      expect(frame.contentTop).toBeCloseTo(baseline.contentTop, 0)
+      expect(frame.contentHeight).toBeCloseTo(baseline.contentHeight, 0)
+      if (frame.composerBottom != null) {
+        expect(frame.composerBottom).toBeCloseTo(baseline.composerBottom, 0)
+      }
+      if (frame.stripTop != null) {
+        expect(frame.stripTop).toBeCloseTo(baseline.contentTop, 0)
+      }
+    }
+    await expect.poll(() => transientClassCount(page), { timeout: 2000 }).toBe(0)
+  }
+
+  await expect.poll(() => builderActive(page)).toBe(false)
+  const returned = await page.evaluate(() => {
+    const content = document.querySelector('.shell__content').getBoundingClientRect()
+    const composer = document.querySelector(
+      '[data-chat-surface="painted"] textarea.chat__input',
+    ).getBoundingClientRect()
+    return {
+      contentTop: content.top,
+      contentHeight: content.height,
+      composerBottom: composer.bottom,
+    }
+  })
+  expect(returned).toEqual(baseline)
+})
 
 // ── Assemble/scatter v3 browser coverage ─────────────────────────────────────
 // Frame-sampled proof of the compositor-only contract in a real browser. Wide only

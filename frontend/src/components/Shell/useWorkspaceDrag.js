@@ -221,9 +221,8 @@ export default function useWorkspaceDrag({
     }
 
     // Render (or clear) the drop preview for a zone. The geometry engine speaks
-    // content-local pixels, including a negative y for the shell-level one-pane
-    // strip. Translate once to viewport coordinates so the fixed preview can
-    // paint both inside content and over that sibling strip without clipping.
+    // content-local pixels. Translate once to viewport coordinates so the fixed
+    // preview can paint over both pane and strip chrome without clipping.
     function renderPreview(zone, box) {
       if (!previewEl) return
       if (!zone) { previewEl.classList.remove('is-visible'); return }
@@ -275,10 +274,10 @@ export default function useWorkspaceDrag({
       return shell?.querySelector?.(selector) || null
     }
 
-    // Measure one pane's whole strip contract. Most strips are content children;
-    // the one-pane Builder strip is a shell sibling above content, so its local y
-    // is negative. Keeping rect + tabs together prevents hit-testing, previews,
-    // and auto-scroll from inventing different ideas of where the strip lives.
+    // Measure one pane's whole strip contract. The one-pane Builder strip is a
+    // shell sibling aligned with the content top; tiled strips are content
+    // children. Keeping rect + tabs together prevents hit-testing, previews, and
+    // auto-scroll from inventing different ideas of where the strip lives.
     function measureStrip(paneId, box = contentBox()) {
       const strip = findStrip(paneId)
       if (!strip) return null
