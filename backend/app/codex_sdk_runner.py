@@ -2193,7 +2193,9 @@ async def run_codex_sdk_turn(
             }
             _stamp_notification_item_id(event, payload)
             bc.publish(event)
-          summary = _file_change_patch_summary(payload.changes)
+          summary = _file_change_patch_summary(
+            payload.changes, status="inProgress",
+          )
           if summary:
             event = {"type": "tool_output", "content": summary}
             _stamp_notification_item_id(event, payload)
