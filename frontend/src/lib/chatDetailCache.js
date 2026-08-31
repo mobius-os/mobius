@@ -198,6 +198,9 @@ export function chatDetailCacheValue(data = {}) {
       effective: data.effective_agent_settings || {},
       has_assistant_turns: !!data.has_assistant_turns,
       auto_resume_on_limit: !!data.auto_resume_on_limit,
+      // The composer uses this bounded project locator to turn an @-selected
+      // file into the ordinary /data path the agent can read.
+      project: data.project || null,
     },
   }
 }
