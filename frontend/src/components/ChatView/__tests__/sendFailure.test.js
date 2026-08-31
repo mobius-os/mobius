@@ -55,6 +55,48 @@ test('known offline state wins over the transport error shape', () => {
     sendFailureMessage(new Error('anything'), { online: false }),
     /You’re offline/,
   )
+  assert.match(
+    sendFailureMessage({ outboxRetained: true }, { online: false }),
+    /queued and will send when you reconnect/,
+  )
+  assert.match(
+    sendFailureMessage(new Error('anything'), { online: false }),
+    /back in the composer/,
+  )
+})
+
+test('the send attempt verdict outranks a connection snapshot that changed later', () => {
+  const offline = new ChatTransportError(new TypeError('Failed to fetch'))
+  offline.outboxRetained = true
+  offline.sendReachability = 'offline'
+  assert.equal(
+    sendFailureMessage(offline, { online: true }),
+    'You’re offline. Your message is queued and will send when you reconnect.',
+  )
+
+  const online = new ChatTransportError(new TypeError('Failed to fetch'))
+  online.outboxRetained = true
+  online.sendReachability = 'online'
+  assert.equal(
+    sendFailureMessage(online, { online: false }),
+    'Möbius couldn’t confirm the send. Your message is queued and will retry automatically.',
+  )
+})
+
+test('automatic replay is promised only when the durable write succeeded', () => {
+  const transport = new ChatTransportError(new TypeError('Failed to fetch'))
+  transport.outboxRetained = true
+  assert.match(sendFailureMessage(transport), /queued and will retry automatically/)
+
+  const unavailable = new Error('HTTP 503')
+  unavailable.status = 503
+  unavailable.outboxRetained = true
+  assert.match(sendFailureMessage(unavailable), /queued and will retry automatically/)
+
+  assert.match(
+    sendFailureMessage({ status: 401, outboxRetained: true }),
+    /queued for this owner and will resume afterward/,
+  )
 })
 
 test('HTTP failures retain a safe server detail for diagnostics', async () => {

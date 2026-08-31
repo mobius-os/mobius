@@ -53,3 +53,19 @@ test('sendability is decided before submit-time UI and scroll side effects', () 
     )
   }
 })
+
+test('failed recovery records the exact content passed by both send paths', () => {
+  const source = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+  const start = source.indexOf('const doSend = useCallback')
+  const end = source.indexOf('\n  }, [', start)
+  const doSend = source.slice(start, end)
+  const queueSend = doSend.indexOf('queueRequest = sendAfterSettingsSaved(\n          text,')
+  const queueRecovery = doSend.indexOf('transportContent: text,', queueSend)
+  const contextSend = doSend.indexOf('const result = await sendAfterSettingsSaved(\n        sendText,')
+  const contextRecovery = doSend.indexOf('transportContent: sendText,', contextSend)
+
+  assert.ok(queueSend >= 0 && queueRecovery > queueSend && queueRecovery < contextSend,
+    'queued/raw recovery must record the raw content passed to transport')
+  assert.ok(contextSend >= 0 && contextRecovery > contextSend,
+    'fresh/context recovery must record the augmented content passed to transport')
+})

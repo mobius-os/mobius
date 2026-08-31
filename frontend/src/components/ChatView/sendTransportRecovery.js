@@ -5,6 +5,21 @@
  * turns that replay into either the original acknowledgement or a duplicate
  * acknowledgement, never a second user turn.
  */
+function rememberSendReachability(error, reachability) {
+  if (!error || typeof error !== 'object' || !reachability) return error
+  try {
+    // The composer reports this attempt's verified transport state. Reading the
+    // process-wide monitor later is racy: another request may have moved it
+    // between this verdict and ChatView's catch boundary.
+    error.sendReachability = reachability
+  } catch {
+    // A browser-supplied DOMException can be non-extensible. Preserve the
+    // original transport error; the presentation layer still has its shared
+    // connectivity snapshot as a conservative fallback.
+  }
+  return error
+}
+
 export async function sendWithAmbiguityRecovery({
   send,
   verifyReachability,
@@ -12,6 +27,7 @@ export async function sendWithAmbiguityRecovery({
   isAmbiguousError,
 }) {
   let attempt = 0
+  let verifiedReachability = null
   while (attempt < 2) {
     attempt += 1
     try {
@@ -19,14 +35,20 @@ export async function sendWithAmbiguityRecovery({
       reportReachable?.()
       return response
     } catch (error) {
-      if (attempt >= 2 || !isAmbiguousError(error)) throw error
+      if (!isAmbiguousError(error)) throw error
+      if (attempt >= 2) {
+        throw rememberSendReachability(error, verifiedReachability)
+      }
       let reachable = false
       try {
         reachable = await verifyReachability()
       } catch {
         reachable = false
       }
-      if (!reachable) throw error
+      verifiedReachability = reachable ? 'online' : 'offline'
+      if (!reachable) {
+        throw rememberSendReachability(error, verifiedReachability)
+      }
     }
   }
   throw new Error('unreachable')
