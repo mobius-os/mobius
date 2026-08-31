@@ -695,11 +695,6 @@ def _claim_record(
   record_path, diff_path = _record_paths(app_id, record_id)
   _recheck_submit_app(db, app_id, expected_nonce)
   record = _read_record(record_path)
-  if record.get("status") != "prepared":
-    raise HTTPException(
-      status_code=409,
-      detail="This contribution is no longer waiting for approval.",
-    )
   plan = record.get("plan")
   if not isinstance(plan, dict):
     raise HTTPException(
@@ -715,6 +710,17 @@ def _claim_record(
         else "This approval action no longer matches the prepared PR update."
       ),
     )
+  resumable_successor = (
+    record.get("status") == "submitting"
+    and expected_action == "pr_update"
+    and isinstance(plan.get("successor"), dict)
+    and record.get("submitter") == submitter
+  )
+  if record.get("status") != "prepared" and not resumable_successor:
+    raise HTTPException(
+      status_code=409,
+      detail="This contribution is no longer waiting for approval.",
+    )
   if isinstance(plan.get("stack"), dict):
     raise HTTPException(
       status_code=409,
@@ -723,6 +729,9 @@ def _claim_record(
         "chain together."
       ),
     )
+  _require_all_clear_review(record)
+  if resumable_successor:
+    return record, record_path, diff_path
   now = _now_iso()
   claimed = {
     **record,
@@ -1246,6 +1255,30 @@ def _mark_submit_failure(
   return next_record
 
 
+def _note_submit_unconfirmed(
+  *, record_path: Path, message: str, record_patch: dict,
+  code: str, detail: str,
+) -> dict:
+  """Keep one already-authorized public action resumable after ambiguity."""
+  record = _read_record(record_path)
+  if record.get("status") != "submitting":
+    return record
+  next_record = {
+    **record,
+    **record_patch,
+    "status": "submitting",
+    "last_submit_error": message,
+    "last_submit_error_code": code or "update_unconfirmed",
+    "updated_at": _now_iso(),
+  }
+  if detail:
+    next_record["last_submit_error_detail"] = detail
+  else:
+    next_record.pop("last_submit_error_detail", None)
+  _write_record(record_path, next_record)
+  return next_record
+
+
 def _mark_submit_success(
   *,
   record_path: Path,
@@ -1575,6 +1608,7 @@ def _confirm_existing_pr_update(
   expected_head_sha: str,
   branch: str,
   base_branch: str,
+  expected_base_sha: str | None = None,
 ) -> tuple[str, str] | None:
   """Confirm one known PR after its reviewed branch was pushed.
 
@@ -1583,7 +1617,14 @@ def _confirm_existing_pr_update(
   the new head. Read the known PR directly and retry only this exact,
   side-effect-free confirmation. The push itself is never repeated here.
   """
-  if number < 1 or not _GIT_SHA.match(str(expected_head_sha or "")):
+  if (
+    number < 1
+    or not _GIT_SHA.match(str(expected_head_sha or ""))
+    or (
+      expected_base_sha is not None
+      and not _GIT_SHA.match(str(expected_base_sha or ""))
+    )
+  ):
     return None
   args = ("api", f"repos/{upstream_repo}/pulls/{number}")
   for attempt in range(_PR_VISIBILITY_RETRIES):
@@ -1610,6 +1651,10 @@ def _confirm_existing_pr_update(
         and head.get("ref") == branch
         and head.get("sha") == expected_head_sha
         and base.get("ref") == base_branch
+        and (
+          expected_base_sha is None
+          or base.get("sha") == expected_base_sha
+        )
         and isinstance(live.get("draft"), bool)
         and isinstance(url, str)
         and url == f"https://github.com/{upstream_repo}/pull/{number}"
@@ -2683,31 +2728,43 @@ def _push_stack_tip_with_lease(
   remote = f"https://github.com/{upstream_repo}.git"
   last_error = ""
   last_actual = expected_base
+  saw_ambiguous_attempt = False
   for attempt in range(_PUSH_RETRIES):
-    proc = _git_ops._git(
-      repo,
-      "push",
-      f"--force-with-lease=refs/heads/{target_branch}:{expected_base}",
-      remote,
-      f"{landed_sha}:refs/heads/{target_branch}",
-      check=False,
-    )
-    if proc.returncode == 0:
-      return
-    last_error = (proc.stderr or proc.stdout or "").strip()
+    try:
+      proc = _git_ops._git(
+        repo,
+        "push",
+        f"--force-with-lease=refs/heads/{target_branch}:{expected_base}",
+        remote,
+        f"{landed_sha}:refs/heads/{target_branch}",
+        check=False,
+      )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+      proc = None
+      last_error = str(exc)
+      saw_ambiguous_attempt = True
+    else:
+      if proc.returncode == 0:
+        return
+      last_error = (proc.stderr or proc.stdout or "").strip()
     # A transport can fail after GitHub has accepted the ref update. Re-read the
     # target before reporting failure or retrying: the exact landed tip is proof
     # that this compare-and-swap succeeded, while every other value remains a
     # safe failure. This mirrors submission's lost-response reconciliation and
     # prevents the ledger from reopening a stack that is already live.
-    last_actual = _git_ops._upstream_branch_sha(repo, upstream_repo, target_branch)
+    try:
+      last_actual = _git_ops._upstream_branch_sha(
+        repo, upstream_repo, target_branch,
+      )
+    except (subprocess.TimeoutExpired, OSError):
+      last_actual = None
     if last_actual == landed_sha:
       return
-    if not _is_transient_push_error(last_error):
+    if proc is not None and not _is_transient_push_error(last_error):
       break
     if attempt + 1 < _PUSH_RETRIES:
       time.sleep(_PUSH_RETRY_BASE_SECONDS * (2 ** attempt))
-  if last_actual is None:
+  if last_actual is None or saw_ambiguous_attempt:
     raise ContributionSubmitError(
       "GitHub did not confirm whether the atomic landing completed. The "
       "recovery journal is still intact; check again shortly.",
@@ -2725,6 +2782,596 @@ def _push_stack_tip_with_lease(
     )
   raise ContributionSubmitError(
     (last_error[:600] if last_error else "GitHub rejected the atomic landing.")
+  )
+
+
+def _merged_parent_successor_plan(record: dict) -> dict:
+  """Validate the durable merged-parent successor claim carried by one card.
+
+  A squash/queue-merged parent leaves its reviewed child pointed at a base
+  branch that no longer carries that commit. The agent re-reviews the child
+  rebased onto the surviving target base; this claim records BOTH public
+  mutations that reviewed successor authorizes — the exact branch rewrite and
+  the base retarget — so neither can be inferred from an agent-writable ledger.
+  """
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  if plan.get("action") != "pr_update":
+    raise ContributionSubmitError(
+      "This reviewed update is not a merged-parent successor. Nothing was pushed."
+    )
+  if isinstance(plan.get("stack"), dict):
+    raise ContributionSubmitError(
+      "A merged-parent successor must be detached from its settled stack "
+      "before review. Nothing was pushed."
+    )
+  successor = (
+    plan.get("successor") if isinstance(plan.get("successor"), dict) else {}
+  )
+  branch = _git_ops._validate_branch(plan.get("branch") or record.get("branch"))
+  old_head_sha = str(successor.get("old_head_sha") or "").strip()
+  old_base_sha = str(successor.get("old_base_sha") or "").strip()
+  merged_base_sha = str(successor.get("merged_base_sha") or "").strip()
+  successor_head_sha = str(plan.get("head_sha") or "").strip()
+  target_base_sha = str(plan.get("base_sha") or "").strip()
+  if not all(
+    _GIT_SHA.fullmatch(value)
+    for value in (old_head_sha, old_base_sha, successor_head_sha, target_base_sha)
+  ):
+    raise ContributionSubmitError(
+      "This merged-parent successor is missing its exact reviewed commits. "
+      "Nothing was pushed."
+    )
+  if merged_base_sha and not _GIT_SHA.fullmatch(merged_base_sha):
+    raise ContributionSubmitError(
+      "This merged-parent successor has an invalid merged-parent commit. "
+      "Nothing was pushed."
+    )
+  old_base_branch = _git_ops._validate_branch(successor.get("old_base_branch"))
+  target_base_branch = _git_ops._validate_branch(
+    successor.get("base_branch") or plan.get("base_branch")
+  )
+  if old_base_branch == target_base_branch:
+    raise ContributionSubmitError(
+      "A merged-parent successor must retarget its base to a new branch. "
+      "Nothing was pushed."
+    )
+  if old_head_sha == successor_head_sha:
+    raise ContributionSubmitError(
+      "A merged-parent successor must rewrite its branch to a new commit. "
+      "Nothing was pushed."
+    )
+  return {
+    "branch": branch,
+    "old_head_sha": old_head_sha,
+    "old_base_branch": old_base_branch,
+    "old_base_sha": old_base_sha,
+    "merged_base_sha": merged_base_sha or None,
+    "successor_head_sha": successor_head_sha,
+    "target_base_branch": target_base_branch,
+    "target_base_sha": target_base_sha,
+  }
+
+
+def _classify_merged_parent_successor(
+  journal: dict, *, live_head_sha: str, live_base_branch: str,
+) -> str:
+  """Decide the one safe next step purely from the live public PR facts.
+
+  Never authorize from the ledger: the branch rewrite and base retarget are
+  keyed only on what GitHub currently exposes, so a crashed run resumes exactly
+  where it stopped and any drifted pull request fails closed with no mutation.
+
+  * old head + old base -> ``push`` (rewrite the branch, then retarget)
+  * new head + old base -> ``retarget`` (branch already rewritten; retarget only)
+  * new head + new base -> ``settle`` (both mutations landed; ledger only)
+  * anything else -> fail closed without touching anything public
+  """
+  live_head = str(live_head_sha or "").strip()
+  live_base = str(live_base_branch or "").strip()
+  old_head = journal["old_head_sha"]
+  new_head = journal["successor_head_sha"]
+  old_base = journal["old_base_branch"]
+  new_base = journal["target_base_branch"]
+  if live_head == old_head and live_base == old_base:
+    return "push"
+  if live_head == new_head and live_base == old_base:
+    return "retarget"
+  if live_head == new_head and live_base == new_base:
+    return "settle"
+  raise ContributionSubmitError(
+    "This pull request changed after the merged-parent successor was reviewed. "
+    "Nothing was pushed. Ask the agent to refresh and review it against the "
+    "current pull request.",
+    code="review_refresh_needed",
+    detail=(
+      "The live pull request head or base no longer matches the reviewed "
+      "successor."
+    ),
+  )
+
+
+def _assert_merged_parent_tree_equivalence(
+  repo: Path, *, old_base_sha: str, target_base_sha: str,
+  merged_base_sha: str | None = None,
+) -> None:
+  """Prove the merged parent reached the reviewed target base unchanged.
+
+  Immediately after the parent lands, the target tip itself has the parent's
+  exact tree. Later contributions may advance that target before the reviewed
+  child is ready. In that case the durable claim identifies the exact merged
+  parent commit: its tree must equal the old public parent branch, and it must
+  be an ancestor of the exact target tip the successor was reviewed on. The
+  successor's canonical diff is still owned by that target tip. A read that
+  cannot complete fails closed rather than guessing.
+  """
+  merged_sha = str(merged_base_sha or target_base_sha)
+  trees = []
+  for sha in (old_base_sha, merged_sha):
+    proc = _git_ops._git(
+      repo, "rev-parse", "--verify", "--quiet", f"{sha}^{{tree}}", check=False,
+    )
+    tree = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not _GIT_SHA.fullmatch(tree):
+      raise ContributionSubmitError(
+        "Could not verify that the merged parent reached the target base. "
+        "Nothing was pushed.",
+        status_code=503,
+        code="update_unconfirmed",
+        detail="The merged-parent or target-base tree could not be resolved.",
+      )
+    trees.append(tree)
+  if trees[0] != trees[1]:
+    raise ContributionSubmitError(
+      "The merged parent no longer matches the parent branch that was reviewed. "
+      "Nothing was pushed. Ask the agent to refresh the successor.",
+      code="review_refresh_needed",
+      detail="The merged commit's tree differs from the reviewed parent branch.",
+    )
+  if merged_base_sha:
+    ancestry = _git_ops._git(
+      repo,
+      "merge-base",
+      "--is-ancestor",
+      merged_sha,
+      target_base_sha,
+      check=False,
+    )
+    if ancestry.returncode == 1:
+      raise ContributionSubmitError(
+        "The reviewed target base does not contain the merged parent. Nothing "
+        "was pushed. Ask the agent to refresh the successor.",
+        code="review_refresh_needed",
+        detail="The merged parent is not an ancestor of the reviewed target base.",
+      )
+    if ancestry.returncode != 0:
+      raise ContributionSubmitError(
+        "Could not verify that the merged parent reached the target base. "
+        "Nothing was pushed.",
+        status_code=503,
+        code="update_unconfirmed",
+        detail="The merged-parent ancestry check could not complete.",
+      )
+
+
+def _retarget_pr_base(
+  repo: Path, upstream_repo: str, number: int, *, base_branch: str,
+) -> tuple[str, str]:
+  """Retarget one known PR base and classify the single public attempt.
+
+  The caller re-reads the pull request to confirm the new base, so a lost or
+  ambiguous edit response never issues a second mutation: the read is the
+  authority. This function deliberately attempts the mutation once.
+  """
+  base_branch = _git_ops._validate_branch(base_branch)
+  try:
+    proc = _git_ops._gh(
+      repo, "pr", "edit", str(number), "-R", upstream_repo,
+      "--base", base_branch, check=False,
+    )
+  except (subprocess.TimeoutExpired, OSError) as exc:
+    return "ambiguous", str(exc)
+  if proc.returncode == 0:
+    return "accepted", ""
+  error = (proc.stderr or proc.stdout or "").strip()
+  if _is_transient_push_error(error):
+    return "ambiguous", error
+  return "rejected", error
+
+
+def _successor_record_patch(
+  journal: dict, witness: dict, *, target_base_sha: str, stage: str,
+) -> dict:
+  """Assemble the settled ledger patch for one detached successor."""
+  return {
+    **witness,
+    "last_successor_base_sha": target_base_sha,
+    "last_submit_base_branch": journal["target_base_branch"],
+    "publication_stage": stage,
+  }
+
+
+def _advance_merged_parent_successor(
+  record: dict,
+  diff_path: Path,
+  *,
+  expected_number: int,
+  expected_head_repository: str,
+  live_head_sha: str,
+  live_base_branch: str,
+) -> tuple[str, int, dict]:
+  """Apply one reviewed merged-parent successor to an already-open PR.
+
+  This is the single owning primitive for a squash/queue-merged parent's child.
+  It rewrites the child branch to the reviewed successor with an exact
+  force-with-lease from the old public head, confirms that rewrite while the
+  merged-parent base still stands, then retargets the pull request base to the
+  surviving target branch and confirms the exact new head and base. Both
+  mutations are recorded on the durable claim and keyed only on the live pull
+  request, so every crash resumes state-by-state and any drift fails closed
+  with nothing pushed. Never authorize from the ledger alone.
+  """
+  if not shutil.which("git") or not shutil.which("gh"):
+    raise ContributionSubmitError(
+      "This platform needs git and gh installed before it can update PRs.",
+      status_code=409,
+    )
+  token = github_auth.get_token()
+  state = github_auth.read_state() or {}
+  login = str(state.get("login") or "")
+  if not token or not login:
+    raise ContributionSubmitError("Connect GitHub before approving this update.", 401)
+  if not has_full_pr_access(state.get("scopes")):
+    raise ContributionSubmitError(
+      "Reconnect GitHub with full PR access before approving this update.",
+      status_code=409,
+    )
+  author_name, author_email = _git_ops._connected_git_identity(state, login)
+
+  journal = _merged_parent_successor_plan(record)
+  plan = record.get("plan") or {}
+  upstream_repo = _git_ops._validate_repo_slug(plan.get("repo") or record.get("repo"))
+  branch = journal["branch"]
+  head_repository = _git_ops._validate_repo_slug(expected_head_repository)
+  if (
+    head_repository.casefold() != upstream_repo.casefold()
+    and head_repository.split("/", 1)[0].casefold() != login.casefold()
+  ):
+    raise ContributionSubmitError(
+      "This pull request branch is not owned by the connected GitHub account. "
+      "Nothing was pushed."
+    )
+  repo = _safe_repo_path(plan.get("repo_path"))
+  if not (repo / ".git").exists():
+    raise ContributionSubmitError("The staged repo is not a git checkout.")
+
+  old_head = journal["old_head_sha"]
+  new_head = journal["successor_head_sha"]
+  old_base_branch = journal["old_base_branch"]
+  target_base_branch = journal["target_base_branch"]
+
+  step = _classify_merged_parent_successor(
+    journal, live_head_sha=live_head_sha, live_base_branch=live_base_branch,
+  )
+
+  same_repo = head_repository.casefold() == upstream_repo.casefold()
+  witness = {
+    "last_successor_old_head": old_head,
+    "last_successor_base_branch": target_base_branch,
+    "last_submit_push_sha": new_head,
+    "last_submit_stage": "pushed",
+    "head_repository": head_repository,
+    "last_pushed_branch": branch if same_repo else f"{login}:{branch}",
+    "last_pushed_branch_url": (
+      f"https://github.com/{head_repository}/tree/{quote(branch, safe='/')}"
+    ),
+  }
+
+  def confirm_state(
+    expected_head_sha: str, base_branch: str, expected_base_sha: str | None,
+  ):
+    return _confirm_existing_pr_update(
+      repo,
+      upstream_repo,
+      expected_number,
+      expected_head_repository=head_repository,
+      expected_head_sha=expected_head_sha,
+      branch=branch,
+      base_branch=base_branch,
+      expected_base_sha=expected_base_sha,
+    )
+
+  def confirm(base_branch: str, expected_base_sha: str | None):
+    return confirm_state(new_head, base_branch, expected_base_sha)
+
+  def require_target_base(*, record_patch: dict | None = None) -> str:
+    try:
+      current = _git_ops._upstream_branch_sha(
+        repo, upstream_repo, target_base_branch,
+      )
+    except (subprocess.TimeoutExpired, OSError):
+      current = None
+    if current is None:
+      raise ContributionSubmitError(
+        "GitHub could not verify the merged-parent successor's target base. "
+        "Nothing further was changed.",
+        status_code=503,
+        code="update_unconfirmed",
+        detail="The current target base branch tip could not be verified.",
+        record_patch=record_patch,
+      )
+    if current != journal["target_base_sha"]:
+      raise ContributionSubmitError(
+        "The successor's target base branch moved after review. Nothing "
+        "further was changed. Ask the agent to refresh the successor.",
+        code="review_refresh_needed",
+        detail="The target base branch tip changed from the reviewed commit.",
+        record_patch=record_patch,
+      )
+    return current
+
+  # Every entry and recovery state must still prove the exact reviewed local
+  # branch, stored diff, base, attribution, and merge result. Public state alone
+  # never substitutes for the private all-clear snapshot.
+  checkout_back = None
+  try:
+    current_branch = _git_ops._git(
+      repo, "rev-parse", "--abbrev-ref", "HEAD",
+    ).stdout.strip()
+    checkout_back = (
+      _git_ops._git(repo, "rev-parse", "HEAD").stdout.strip()
+      if current_branch == "HEAD"
+      else current_branch
+    )
+    _git_ops._git(repo, "check-ref-format", "--branch", branch)
+    _git_ops._assert_clean_worktree(repo)
+    _git_ops._git(repo, "checkout", "-q", branch)
+    _git_ops._assert_clean_worktree(repo)
+    expected_base, expected_head, _diff = _git_ops._assert_fresh(
+      record, diff_path, repo, branch,
+    )
+    if (
+      expected_base != journal["target_base_sha"]
+      or expected_head != new_head
+    ):
+      raise ContributionSubmitError(
+        "The reviewed successor branch changed after review. Nothing was "
+        "changed.",
+        code="review_refresh_needed",
+      )
+    _git_ops._assert_coauthor_trailer(repo, branch)
+    _git_ops._assert_head_attribution(
+      repo, branch, author_name=author_name, author_email=author_email,
+    )
+    _git_ops._assert_clean_worktree(repo)
+    _git_ops._assert_merges_with_upstream(repo, upstream_repo, branch)
+    landed_sha = _git_ops._git(repo, "rev-parse", "HEAD").stdout.strip()
+    if landed_sha != new_head:
+      raise ContributionSubmitError(
+        "Could not verify the exact reviewed successor commit."
+      )
+  finally:
+    if checkout_back:
+      _git_ops._git(repo, "checkout", "-q", checkout_back, check=False)
+
+  # Settle-only recovery: both public mutations already landed. Never re-push or
+  # re-edit; only prove the exact new head and base, then settle the ledger.
+  if step == "settle":
+    target_base_sha = require_target_base(record_patch=witness)
+    try:
+      confirmed = confirm(target_base_branch, target_base_sha)
+    except ContributionSubmitError as exc:
+      raise ContributionSubmitError(
+        exc.message,
+        status_code=exc.status_code,
+        code=exc.code or "update_unconfirmed",
+        detail=exc.detail,
+        record_patch=_git_ops._record_patch_with(witness, exc.record_patch),
+      ) from exc
+    if not confirmed:
+      raise ContributionSubmitError(
+        "The merged-parent successor could not be confirmed on GitHub.",
+        status_code=503,
+        code="update_unconfirmed",
+        detail=(
+          "The live pull request did not expose the reviewed successor head "
+          "and base."
+        ),
+        record_patch=witness,
+      )
+    url, stage = confirmed
+    return url, expected_number, _successor_record_patch(
+      journal, witness, target_base_sha=target_base_sha, stage=stage,
+    )
+
+  # GitHub's pull-request ``base.sha`` is a comparison snapshot, not a lease on
+  # the current base ref. Resolve the named old base directly before either
+  # mutation; this also supports a parent branch that advanced after the child
+  # PR was opened but whose reviewed final tree is what reached main.
+  try:
+    current_old_base_sha = _git_ops._upstream_branch_sha(
+      repo, upstream_repo, old_base_branch,
+    )
+  except (subprocess.TimeoutExpired, OSError):
+    current_old_base_sha = None
+  if current_old_base_sha is None:
+    raise ContributionSubmitError(
+      "GitHub could not verify the merged-parent successor's current base. "
+      "Nothing further was changed.",
+      status_code=503,
+      code="update_unconfirmed",
+      detail="The current merged-parent branch tip could not be verified.",
+      record_patch=(witness if step == "retarget" else None),
+    )
+  if current_old_base_sha != journal["old_base_sha"]:
+    raise ContributionSubmitError(
+      "The successor's current base branch moved after review. Nothing was "
+      "pushed. Ask the agent to refresh the successor.",
+      code="review_refresh_needed",
+      detail="The pull request base no longer points at the reviewed parent commit.",
+      record_patch=(witness if step == "retarget" else None),
+    )
+
+  # Both push and retarget need a verified, tree-equivalent target base.
+  target_base_sha = require_target_base(
+    record_patch=(witness if step == "retarget" else None),
+  )
+  try:
+    _assert_merged_parent_tree_equivalence(
+      repo,
+      old_base_sha=journal["old_base_sha"],
+      merged_base_sha=journal["merged_base_sha"],
+      target_base_sha=target_base_sha,
+    )
+  except ContributionSubmitError as exc:
+    if step == "retarget" and exc.code == "update_unconfirmed":
+      raise ContributionSubmitError(
+        exc.message,
+        status_code=exc.status_code,
+        code=exc.code,
+        detail=exc.detail,
+        record_patch=_git_ops._record_patch_with(witness, exc.record_patch),
+      ) from exc
+    raise
+
+  if step == "push":
+    # Re-read both public bases and the exact old PR state immediately before
+    # mutation. The earlier route snapshot and local checks are not leases.
+    target_base_sha = require_target_base()
+    confirmed_old = confirm_state(
+      old_head, old_base_branch, journal["old_base_sha"],
+    )
+    if not confirmed_old:
+      raise ContributionSubmitError(
+        "The pull request changed while its reviewed successor was being "
+        "checked. Nothing was pushed.",
+        status_code=503,
+        code="update_unconfirmed",
+        detail="The exact old head and base could not be confirmed before push.",
+      )
+    # Public mutation #1: exact force-with-lease from the old public head to
+    # the reviewed successor. A moved lease fails closed inside this call.
+    try:
+      _push_stack_tip_with_lease(
+        repo,
+        upstream_repo=head_repository,
+        target_branch=branch,
+        expected_base=old_head,
+        landed_sha=new_head,
+      )
+    except ContributionSubmitError as exc:
+      if exc.code == "landing_unconfirmed":
+        raise ContributionSubmitError(
+          exc.message,
+          status_code=exc.status_code,
+          code=exc.code,
+          detail=exc.detail,
+          record_patch=witness,
+        ) from exc
+      raise
+    # Confirm the rewrite while the merged-parent base still stands, before
+    # any retarget. A base that already moved here is drift, not this action.
+    try:
+      confirmed_pre = confirm(old_base_branch, journal["old_base_sha"])
+    except ContributionSubmitError as exc:
+      raise ContributionSubmitError(
+        exc.message,
+        status_code=exc.status_code,
+        code=exc.code or "update_unconfirmed",
+        detail=exc.detail,
+        record_patch=_git_ops._record_patch_with(witness, exc.record_patch),
+      ) from exc
+    if not confirmed_pre:
+      raise ContributionSubmitError(
+        "The reviewed successor branch was pushed, but GitHub did not confirm "
+        "the rewrite before the base retarget.",
+        status_code=503,
+        code="update_unconfirmed",
+        detail=(
+          "The live pull request did not expose the successor head on the "
+          "merged-parent base."
+        ),
+        record_patch=witness,
+      )
+  # Re-read the target and both possible exact PR states immediately before the
+  # second mutation. If an earlier ambiguous edit actually landed, settle it;
+  # if the PR is still conclusively on the reviewed old base, one new attempt is
+  # safe. Any other state fails closed without another edit.
+  target_base_sha = require_target_base(record_patch=witness)
+  try:
+    confirmed = confirm(target_base_branch, target_base_sha)
+  except ContributionSubmitError as exc:
+    raise ContributionSubmitError(
+      exc.message,
+      status_code=exc.status_code,
+      code=exc.code or "update_unconfirmed",
+      detail=exc.detail,
+      record_patch=_git_ops._record_patch_with(witness, exc.record_patch),
+    ) from exc
+  if confirmed:
+    url, stage = confirmed
+    return url, expected_number, _successor_record_patch(
+      journal, witness, target_base_sha=target_base_sha, stage=stage,
+    )
+  try:
+    confirmed_old = confirm(old_base_branch, journal["old_base_sha"])
+  except ContributionSubmitError as exc:
+    raise ContributionSubmitError(
+      exc.message,
+      status_code=exc.status_code,
+      code=exc.code or "update_unconfirmed",
+      detail=exc.detail,
+      record_patch=_git_ops._record_patch_with(witness, exc.record_patch),
+    ) from exc
+  if not confirmed_old:
+    raise ContributionSubmitError(
+      "The reviewed successor branch is live, but its current base could not "
+      "be confirmed. Nothing further was changed.",
+      status_code=503,
+      code="update_unconfirmed",
+      detail="Neither the reviewed old nor target base state was authoritative.",
+      record_patch=witness,
+    )
+
+  # Public mutation #2: retarget the base to the surviving branch, then confirm
+  # the exact new head and base. Each request attempts the edit once, and only
+  # after the authoritative read above proves it still has not landed.
+  edit_result, edit_error = _retarget_pr_base(
+    repo, upstream_repo, expected_number, base_branch=target_base_branch,
+  )
+  try:
+    confirmed = confirm(target_base_branch, target_base_sha)
+  except ContributionSubmitError as exc:
+    raise ContributionSubmitError(
+      exc.message,
+      status_code=exc.status_code,
+      code=exc.code or "update_unconfirmed",
+      detail=exc.detail,
+      record_patch=_git_ops._record_patch_with(witness, exc.record_patch),
+    ) from exc
+  if not confirmed:
+    if edit_result in {"accepted", "ambiguous"}:
+      raise ContributionSubmitError(
+        "The reviewed successor branch is live, but GitHub did not confirm the "
+        "base retarget.",
+        status_code=503,
+        code="update_unconfirmed",
+        detail=(
+          "The pull request did not expose the retargeted base after the edit."
+          if edit_result == "accepted"
+          else "GitHub's response to the base retarget was ambiguous."
+        ),
+        record_patch=witness,
+      )
+    raise ContributionSubmitError(
+      "The reviewed successor branch is live, but its base could not be "
+      "retargeted. Nothing else was changed.",
+      code="review_refresh_needed",
+      detail=(edit_error[:300] if edit_error else "The base retarget was rejected."),
+      record_patch=witness,
+    )
+  url, stage = confirmed
+  return url, expected_number, _successor_record_patch(
+    journal, witness, target_base_sha=target_base_sha, stage=stage,
   )
 
 

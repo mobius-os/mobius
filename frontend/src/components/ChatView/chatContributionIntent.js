@@ -1,6 +1,7 @@
 /* Typed chat-owned requests for one compact attached contribution worker. */
 
 import {
+  isUpdateAction,
   publicationAction,
   publicationStackAction,
   sendBlocker,
@@ -151,7 +152,9 @@ export function preparedChangesPrimaryAction(values, { connected } = {}) {
   if (items.length === 0) return null
   if (items.some(item => item.kind === 'stack'
     ? item.records?.some(record => record?.status === 'submitting')
-    : item.record?.status === 'submitting')) return null
+    : item.record?.status === 'submitting' && item.record?.successor !== true)) {
+    return null
+  }
   const ready = items.every(item => item.kind === 'stack'
     ? !stackSendBlocker(item, { connected })
     : !sendBlocker(item.record, { connected }))
@@ -172,7 +175,7 @@ export function preparedChangesPrimaryAction(values, { connected } = {}) {
     }
     const allUpdates = items.every(item => item.kind === 'stack'
       ? publicationStackAction(item).updating
-      : item.record?.action === 'pr_update')
+      : isUpdateAction(item.record?.action))
     const allStacks = items.every(item => item.kind === 'stack')
     return {
       kind: 'publish-items',
