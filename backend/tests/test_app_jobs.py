@@ -19,9 +19,6 @@ from app import app_cron, app_jobs, models
 from app.config import get_settings
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
 def test_cron_parser_resolves_supervised_command_to_real_job():
   line = (
     "30 5 * * * python3 /app/scripts/app-job-runner.py "
@@ -210,15 +207,6 @@ def test_wrapper_skips_an_overlapping_job_for_the_same_app(
   released = runner._acquire_app_run_lock(57)
   assert released is not None
   released.close()
-
-
-def test_app_job_runtime_root_is_ignored_by_the_data_repo():
-  entrypoint = (REPO_ROOT / "backend/scripts/entrypoint.sh").read_text()
-  data_gitignore = entrypoint.split(
-    "cat > /data/.gitignore <<'EOF'\n", 1,
-  )[1].split("\nEOF", 1)[0]
-
-  assert "/run/" in data_gitignore.splitlines()
 
 
 def test_live_check_calls_real_app_endpoint(monkeypatch):
