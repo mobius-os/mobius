@@ -25,6 +25,24 @@ def test_version_endpoint_exposes_build_sha(client):
   assert isinstance(body.get("sha"), str) and body["sha"]
 
 
+def test_version_exposes_protected_runtime_parity(client, monkeypatch):
+  parity = {
+    "state": "stale",
+    "source_sha256": "a" * 64,
+    "deployed_sha256": "b" * 64,
+    "mismatched_paths": ["identity_broker.py"],
+  }
+  monkeypatch.setattr(
+    "app.main.protected_runtime_status",
+    lambda _source: parity,
+  )
+
+  body = client.get("/api/version").json()
+
+  assert body["protected_runtime_state"] == "stale"
+  assert body["protected_runtime"] == parity
+
+
 def test_health_exposes_stable_normal_target_identity(client):
   body = client.get("/api/health").json()
   assert body["status"] == "ok"

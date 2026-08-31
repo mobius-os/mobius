@@ -50,6 +50,7 @@ from app.frontend_assets import (
   resolve_frontend_dir,
 )
 from app.memory_observability import record_memory_checkpoint
+from app.runtime_provenance import protected_runtime_status
 from app.response_policy import (
   CHAT_EMBED_CSP,
   PUBLISHED_SITE_CSP,
@@ -1042,17 +1043,28 @@ def version():
     Changes whenever the watcher swaps a fresh ``vite build`` into the served
     ``dist`` — the frontend analogue of ``served_sha``. Poll it to confirm a
     frontend edit went live.
+  - ``protected_runtime``: content parity between the served platform's desired
+    ``backend/runtime`` tree and the root-started ``/app/runtime`` image copy.
+    This closes the gap where Git and image identities were individually valid
+    while the protected broker still ran older bytes.
 
   A full GitHub-release check + one-click update is a follow-up; this exposes
   the local build identity cleanly so the image-pull path is self-verifying.
   """
   settings = get_settings()
+  protected_runtime = protected_runtime_status(
+    Path(settings.data_dir) / "platform" / "backend" / "runtime",
+  )
   return {"sha": settings.build_sha,
           "build_date": settings.build_date,
           # Browser setup verifies this dedicated test-container marker before
           # any write. Localhost is not sufficient evidence because a preview
           # proxy can still forward to the live app.
           "test_runtime": os.environ.get("MOBIUS_TEST_RUNTIME") == "1",
+          # Keep the state flat as well as detailed: Host shell verification
+          # can parse one stable scalar without reimplementing JSON traversal.
+          "protected_runtime_state": protected_runtime["state"],
+          "protected_runtime": protected_runtime,
           **_served_platform_identity(settings.data_dir),
           **_served_frontend_identity()}
 
