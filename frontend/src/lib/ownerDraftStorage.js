@@ -3,6 +3,9 @@ const OWNER_DRAFT_PREFIXES = [
   'draft:',
   // Retire handoffs left by a tab that was open during the storage migration.
   'draft-autosend:',
+  // Failed attempts retain both the visible draft and its exact hidden replay
+  // context. Match the stable namespace so future record versions leave too.
+  'mobius:send-attempt:',
 ]
 const OWNER_DRAFT_KEYS = new Set([
   'composer-handoff',

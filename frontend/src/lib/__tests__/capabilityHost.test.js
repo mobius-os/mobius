@@ -112,6 +112,56 @@ test('host never truncates an invalid correlation id', () => {
   assert.deepEqual(harness.sent, [])
 })
 
+test('provider contention can share catalog reads and replace stale work', async () => {
+  const sent = []
+  const controls = new Map()
+  const source = { id: 'speech-frame' }
+  const host = createCapabilityHost({
+    providers: {
+      [CAPABILITY]: {
+        version: 1,
+        contention({ input, activeInput }) {
+          if (input.operation === 'catalog' || activeInput.operation === 'catalog') return 'share'
+          return 'replace'
+        },
+        async open({ input }) {
+          controls.set(input.label, [])
+          return { control: (action) => controls.get(input.label).push(action) }
+        },
+      },
+    },
+    getDeclaration: () => ({ version: 1, lifecycle: 'background' }),
+    isActive: () => true,
+    send(target, message) { sent.push({ target, message }) },
+  })
+
+  host.handle(source, openMessage({
+    requestId: 'stream-1', input: { operation: 'model-stream', label: 'first' },
+  }))
+  host.handle(source, openMessage({
+    requestId: 'catalog-1', input: { operation: 'catalog', label: 'catalog' },
+  }))
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(host.activeCount(), 2)
+
+  host.handle(source, openMessage({
+    requestId: 'stream-2', input: { operation: 'model-stream', label: 'second' },
+  }))
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.deepEqual(controls.get('first'), ['cancel'])
+  assert.deepEqual(controls.get('catalog'), [])
+  assert.equal(host.activeCount(), 2)
+  assert.equal(sent.some(({ message }) => (
+    message.requestId === 'stream-1'
+      && message.type === 'moebius:capability-error'
+      && message.code === 'superseded'
+      && message.name === 'AbortError'
+      && message.message.includes('resume')
+  )), true)
+  assert.equal(sent.some(({ message }) => message.code === 'busy'), false)
+})
+
 test('control messages cannot cross session source boundaries', async () => {
   const harness = setup()
   harness.host.handle(harness.source, openMessage())
@@ -181,4 +231,30 @@ test('contract revocation cancels an already-open session', async () => {
 
   assert.equal(harness.host.activeCount(), 0)
   assert.equal(harness.sent.at(-1).message.code, 'aborted')
+})
+
+test('a reviewed background provider can preserve its grant across frame replacement', async () => {
+  const controls = []
+  const source = {}
+  const host = createCapabilityHost({
+    providers: {
+      [CAPABILITY]: {
+        version: 1,
+        preserveOnDetach: true,
+        async open() {
+          return { control(action) { controls.push(action) } }
+        },
+      },
+    },
+    getDeclaration: () => ({ version: 1, lifecycle: 'background' }),
+    isActive: () => true,
+    send() {},
+  })
+  host.handle(source, openMessage())
+  await new Promise((resolve) => setImmediate(resolve))
+
+  host.detachSource(source)
+
+  assert.deepEqual(controls, ['detach'])
+  assert.equal(host.activeCount(), 0)
 })

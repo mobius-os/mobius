@@ -18,5 +18,7 @@ test('a committed summary rename projects exact fields without a list refetch', 
     shell.indexOf("ev.type === 'app_deleted'"),
   )
   assert.doesNotMatch(renamePath, /refreshChats/)
+  assert.match(shell, /chatRenameGuardsRef\.current\.set\(String\(event\.chatId\)/)
+  assert.match(shell, /reconcileChatRenameGuards\([\s\S]*?chatRenameGuardsRef\.current/)
   assert.match(shell, /title: event\.title[\s\S]*?updatedAt: event\.updatedAt/)
 })

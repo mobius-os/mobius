@@ -3,6 +3,10 @@ import {
   createDeviceAssetCacheProvider,
   DEVICE_ASSET_CACHE,
 } from './deviceAssetCache.js'
+import {
+  createScreenControlProvider,
+  SCREEN_CONTROL,
+} from './screenControlHost.js'
 
 export const MICROPHONE_CAPTURE = 'media.microphone.capture'
 export const SPEECH = 'media.speech'
@@ -13,7 +17,16 @@ export function createSpeechProvider({
 } = {}) {
   return {
     version: 1,
-    exclusive: true,
+    // Catalog reads do not contend with playback. A new synthesis/model stream
+    // is an explicit user intent and replaces stale speech work instead of
+    // exposing a generic "already in use" dead end.
+    contention({ input, activeInput }) {
+      const operation = input?.operation || 'synthesize'
+      const activeOperation = activeInput?.operation || 'synthesize'
+      if (operation === 'catalog' || activeOperation === 'catalog') return 'share'
+      if (operation !== 'synthesize' && operation !== 'model-stream') return 'share'
+      return 'replace'
+    },
     async open(context) {
       const runtime = await loadRuntime()
       return runtime.openSpeechCapability(context)
@@ -87,5 +100,6 @@ export function builtInCapabilityProviders(options = {}) {
       appId: options.deviceAssets?.appId,
       ...options.speechModels,
     }),
+    [SCREEN_CONTROL]: createScreenControlProvider(options.screenControl),
   }
 }

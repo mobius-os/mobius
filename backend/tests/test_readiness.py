@@ -16,9 +16,13 @@ singleton.
 
 from pathlib import Path
 
+import pytest
+from sqlalchemy.exc import OperationalError
+
 from app import chat_writer, main as main_module
 from app.chat_writer import get_writer
 from app.database import SessionLocal
+from app.startup import DatabaseBootResult
 
 
 def _wait_for_healthy_writer():
@@ -44,7 +48,7 @@ def test_ready_returns_200_when_writer_running(client):
 def test_schema_gap_fails_serviceability_but_not_reachability(client):
   """A mapped-column gap must keep every deployment probe fail-closed."""
   gap = "apps.paused_capabilities"
-  main_module._SCHEMA_GAPS[:] = [gap]
+  main_module._set_database_boot_state(DatabaseBootResult(schema_gaps=(gap,)))
   try:
     ready = client.get("/api/ready")
     assert ready.status_code == 503
@@ -57,32 +61,72 @@ def test_schema_gap_fails_serviceability_but_not_reachability(client):
     assert strict.status_code == 503
     assert strict.json() == {
       "status": "schema_mismatch",
+      "reason": "schema_mismatch",
       "schema_gaps": [gap],
     }
     reachable = client.get("/api/health")
     assert reachable.status_code == 200
     assert reachable.json()["status"] == "schema_mismatch"
+    assert reachable.json()["reason"] == "schema_mismatch"
+    assert reachable.json()["mode"] == "degraded"
     gated = client.get("/api/apps")
     assert gated.status_code == 503
     assert gated.json() == {
-      "detail": "database schema mismatch; restart after Recovery",
+      "detail": "database is not serviceable; use Recovery, then restart",
+      "reason": "schema_mismatch",
       "schema_gaps": [gap],
     }
     assert client.get("/api/version").status_code == 200
   finally:
-    main_module._SCHEMA_GAPS.clear()
+    main_module._set_database_boot_state(DatabaseBootResult())
+
+
+def test_database_initialization_failure_uses_the_same_degraded_boundary(client):
+  result = DatabaseBootResult(
+    failure_reason="database_initialization_failed",
+  )
+  main_module._set_database_boot_state(result)
+  try:
+    ready = client.get("/api/ready")
+    assert ready.status_code == 503
+    assert ready.json() == {
+      "ready": False,
+      "reason": "database_initialization_failed",
+    }
+    strict = client.get("/api/health/strict")
+    assert strict.status_code == 503
+    assert strict.json() == {
+      "status": "database_initialization_failed",
+      "reason": "database_initialization_failed",
+    }
+    reachable = client.get("/api/health")
+    assert reachable.status_code == 200
+    assert reachable.json()["status"] == "database_initialization_failed"
+    assert reachable.json()["mode"] == "degraded"
+    gated = client.get("/api/apps")
+    assert gated.status_code == 503
+    assert gated.json() == {
+      "detail": "database is not serviceable; use Recovery, then restart",
+      "reason": "database_initialization_failed",
+    }
+  finally:
+    main_module._set_database_boot_state(DatabaseBootResult())
 
 
 def test_external_schema_repair_requires_a_clean_startup(client):
   """A degraded boot never starts skipped DB owners partway through life."""
-  main_module._SCHEMA_GAPS[:] = ["apps.paused_capabilities"]
+  main_module._set_database_boot_state(DatabaseBootResult(
+    schema_gaps=("apps.paused_capabilities",),
+  ))
   try:
     ready = client.get("/api/ready")
     assert ready.status_code == 503
     assert ready.json()["reason"] == "schema_mismatch"
-    assert main_module._SCHEMA_GAPS == ["apps.paused_capabilities"]
+    assert main_module._DATABASE_BOOT_RESULT.schema_gaps == (
+      "apps.paused_capabilities",
+    )
   finally:
-    main_module._SCHEMA_GAPS.clear()
+    main_module._set_database_boot_state(DatabaseBootResult())
 
 
 def test_deployment_healthchecks_use_the_serviceability_probe():
@@ -100,6 +144,54 @@ def test_deployment_healthchecks_use_the_serviceability_probe():
   assert 'http://127.0.0.1:8000/api/ready' in (
     root / "backend/scripts/verify_test_runtime.py"
   ).read_text(encoding="utf-8")
+
+
+def test_database_boot_retries_lock_contention(monkeypatch):
+  locked = OperationalError(
+    "ALTER TABLE apps", {}, RuntimeError("database is locked"),
+  )
+  assert main_module._database_init_error_is_transient(locked) is True
+
+  calls = 0
+  sleeps = []
+
+  def locked_once(*_args, **_kwargs):
+    nonlocal calls
+    calls += 1
+    if calls == 1:
+      raise locked
+
+  monkeypatch.setattr(main_module.Base.metadata, "create_all", locked_once)
+  monkeypatch.setattr(main_module, "run_migrations", lambda _engine: None)
+  monkeypatch.setattr(main_module, "mapped_schema_gaps", lambda _engine: [])
+  monkeypatch.setattr(main_module.time, "sleep", sleeps.append)
+
+  assert main_module._init_db() == DatabaseBootResult()
+  assert calls == 2
+  assert sleeps == [1]
+
+
+def test_database_boot_does_not_retry_broken_migration_sql(monkeypatch):
+  broken = OperationalError(
+    "ALTER TABLE apps", {}, RuntimeError("no such column: broken"),
+  )
+  assert main_module._database_init_error_is_transient(broken) is False
+
+  calls = 0
+  sleeps = []
+
+  def fail_create_all(*_args, **_kwargs):
+    nonlocal calls
+    calls += 1
+    raise broken
+
+  monkeypatch.setattr(main_module.Base.metadata, "create_all", fail_create_all)
+  monkeypatch.setattr(main_module.time, "sleep", sleeps.append)
+  with pytest.raises(OperationalError):
+    main_module._init_db()
+
+  assert calls == 1
+  assert sleeps == []
 
 
 def test_writer_probe_transactions_end_before_readiness():

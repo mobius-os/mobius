@@ -171,7 +171,14 @@ function appFrameRequestUrl(appId, version, frameRev) {
 //      interactive frame. Exact source + focus gating prevents arbitrary
 //      keylogging or a hidden frame dispatching workspace behavior.
 //
-//  10. moebius:account-link-*                              three-party broker
+//  10. moebius:screen-control-command/result               bidirectional
+//      The owner-granted shell session may inspect or operate the visible app
+//      through the same closed semantic command set as shell controls. The
+//      frame never evaluates agent-authored script, never exposes credentials,
+//      masks sensitive fields, and rejects commands while shell interactivity
+//      is suspended by a modal surface.
+//
+//  11. moebius:account-link-*                              three-party broker
 //      The CSP-sandboxed app frame has an opaque origin, so an external OAuth
 //      completion page cannot safely target it by the shell's concrete origin.
 //      A live, visible frame with the reviewed identity_manage grant registers
@@ -531,7 +538,10 @@ const AppCanvas = forwardRef(function AppCanvas({
   const capabilityHostRef = useRef(null)
   if (!capabilityHostRef.current) {
     capabilityHostRef.current = createCapabilityHost({
-      providers: builtInCapabilityProviders({ deviceAssets: { appId } }),
+      providers: builtInCapabilityProviders({
+        deviceAssets: { appId },
+        screenControl: { appId },
+      }),
       getDeclaration(capability) {
         return capabilityContractRef.current?.runtime?.[capability] || null
       },

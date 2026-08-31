@@ -145,6 +145,14 @@ def test_core_prompt_has_no_static_skill_catalog():
   assert "<available_skills>" in core
 
 
+def test_core_prompt_requires_truncated_skill_reads_to_continue():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
+
+  assert "A truncated tool result is not a completed read" in core
+  assert "until every part has been received" in core
+
+
 def test_core_prompt_owns_freshness_and_source_policy():
   repo = Path(__file__).resolve().parents[2]
   core = (repo / "skill" / "core.md").read_text(encoding="utf-8")

@@ -1,5 +1,3 @@
-import { formatRelativeTime } from './relativeTime.js'
-
 export function formatUpstreamCommitDate(value, locale) {
   const match = typeof value === 'string'
     ? value.match(/^(\d{4})-(\d{2})-(\d{2})/)
@@ -17,9 +15,4 @@ export function formatUpstreamCommitDate(value, locale) {
   } catch {
     return `${year}-${month}-${day}`
   }
-}
-
-export function formatUpstreamCheckTime(value, now = Date.now()) {
-  const relative = formatRelativeTime(value, now)
-  return relative ? `Last checked ${relative}` : ''
 }

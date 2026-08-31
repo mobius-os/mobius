@@ -30,6 +30,16 @@ function errorFields(error, fallbackCode = 'provider_error') {
   }
 }
 
+function providerContention(provider, input, activeInput) {
+  if (typeof provider?.contention === 'function') {
+    const decision = provider.contention({ input, activeInput })
+    if (decision === 'share' || decision === 'replace' || decision === 'reject') {
+      return decision
+    }
+  }
+  return provider?.exclusive ? 'reject' : 'share'
+}
+
 export function createCapabilityHost({
   providers,
   getDeclaration,
@@ -94,6 +104,7 @@ export function createCapabilityHost({
     const shellSession = {
       requestId,
       capability,
+      input: msg.input,
       source,
       settled: false,
       control: null,
@@ -126,17 +137,29 @@ export function createCapabilityHost({
       rejectOpen('version_mismatch', `Capability \`${capability}\` version is not supported.`)
       return true
     }
-    if (provider.exclusive && [...sessions.values()].some(
-      (candidate) => candidate.capability === capability,
-    )) {
-      rejectOpen('busy', `Capability \`${capability}\` is already in use.`, 'InvalidStateError')
-      return true
-    }
     if (!msg.input || typeof msg.input !== 'object' || Array.isArray(msg.input)) {
       rejectOpen('invalid_request', 'Capability input must be an object.', 'TypeError')
       return true
     }
-
+    const contentions = [...sessions.values()]
+      .filter((candidate) => candidate.capability === capability)
+      .map((candidate) => ({
+        candidate,
+        decision: providerContention(provider, msg.input, candidate.input),
+      }))
+    if (contentions.some(({ decision }) => decision === 'reject')) {
+      rejectOpen('busy', `Capability \`${capability}\` is already in use.`, 'InvalidStateError')
+      return true
+    }
+    for (const { candidate, decision } of contentions) {
+      if (decision === 'replace') {
+        abortSession(
+          candidate,
+          'Another request took over this capability. You can resume the earlier action when ready.',
+          'superseded',
+        )
+      }
+    }
     sessions.set(requestId, shellSession)
     const channel = {
       ready(value) {
@@ -161,7 +184,7 @@ export function createCapabilityHost({
       channel,
     })).then((control) => {
       if (!current(shellSession)) {
-        try { control?.control?.('cancel') } catch {}
+        try { control?.control?.(shellSession.detached ? 'detach' : 'cancel') } catch {}
         return
       }
       shellSession.control = control || {}
@@ -185,14 +208,22 @@ export function createCapabilityHost({
     return true
   }
 
-  function abortSession(session, message) {
+  function abortSession(session, message, code = 'aborted') {
     if (!current(session)) return
     runControl(session, 'cancel')
     fail(session, {
-      code: 'aborted',
+      code,
       name: 'AbortError',
       message,
     })
+  }
+
+  function detachSession(session) {
+    if (!current(session)) return
+    session.detached = true
+    try { session.control?.control?.('detach') } catch {}
+    session.settled = true
+    sessions.delete(session.requestId)
   }
 
   return {
@@ -214,7 +245,9 @@ export function createCapabilityHost({
     detachSource(source) {
       for (const session of [...sessions.values()]) {
         if (session.source === source) {
-          abortSession(session, 'The app frame that opened this capability was detached.')
+          const provider = providers[session.capability]
+          if (provider?.preserveOnDetach) detachSession(session)
+          else abortSession(session, 'The app frame that opened this capability was detached.')
         }
       }
     },
@@ -229,7 +262,9 @@ export function createCapabilityHost({
     },
     destroy() {
       for (const session of [...sessions.values()]) {
-        abortSession(session, 'Capability host was detached.')
+        const provider = providers[session.capability]
+        if (provider?.preserveOnDetach) detachSession(session)
+        else abortSession(session, 'Capability host was detached.')
       }
     },
     activeCount: () => sessions.size,

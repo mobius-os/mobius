@@ -14,12 +14,14 @@ import os
 import re
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app import (
   activity,
@@ -3882,6 +3884,30 @@ DEFAULT_VIEWPORT_PIXEL_RATIO = 1.0
 MIN_VIEWPORT_PIXEL_RATIO = 0.5
 MAX_VIEWPORT_PIXEL_RATIO = 4.0
 AVAILABLE_SKILLS_CONTEXT_LIMIT = 64
+DEFAULT_AGENT_BROWSER_CONFIG = "/app/agent-browser-config.json"
+DEFAULT_AGENT_BROWSER_IDLE_TIMEOUT_MS = "600000"
+
+
+def agent_browser_runtime_env(
+  source: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+  """Return shared browser safeguards for Claude and Codex turns.
+
+  Agent-browser already remains reusable between commands and terminal turn
+  cleanup stays authoritative.  The shorter idle lifetime is a fallback for a
+  parked or orphaned session, while the explicit config path prevents a
+  workspace's agent-browser.json from starting owner-unapproved executables.
+  """
+  source = os.environ if source is None else source
+  config = str(source.get("AGENT_BROWSER_CONFIG") or "").strip()
+  idle_timeout = str(source.get("AGENT_BROWSER_IDLE_TIMEOUT_MS") or "").strip()
+  return {
+    "AGENT_BROWSER_CONFIG": config or DEFAULT_AGENT_BROWSER_CONFIG,
+    "AGENT_BROWSER_IDLE_TIMEOUT_MS": (
+      idle_timeout or DEFAULT_AGENT_BROWSER_IDLE_TIMEOUT_MS
+    ),
+  }
+
 
 def bounded_agent_browser_args(existing: str | None) -> str:
   """Preserve operator Chromium flags while supplying safe cache defaults."""
@@ -4422,6 +4448,7 @@ async def _run_chat_impl_with_db(
   base_env["AGENT_BROWSER_ARGS"] = bounded_agent_browser_args(
     os.environ.get("AGENT_BROWSER_ARGS"),
   )
+  base_env.update(agent_browser_runtime_env())
 
   # Resolve effective agent settings (model, effort, ...) for this turn.
   # Per-chat overrides from `Chat.agent_settings_json` win over the
@@ -4604,7 +4631,11 @@ async def _run_chat_impl_with_db(
   # the SDK runner. Without this, the SDK fails with a cryptic error.
   auth_error = provider_requirement_errors.get(provider_id)
   if auth_error is None:
-    auth_error = provider.check_auth(settings.data_dir)
+    # check_auth may perform blocking I/O (e.g. MobiusProvider probes the
+    # local broker over a Unix socket). Run it off the event loop so a slow
+    # or hung broker cannot stall this single-worker ASGI loop and the other
+    # turns and SSE streams sharing it.
+    auth_error = await run_in_threadpool(provider.check_auth, settings.data_dir)
   if auth_error:
     # A fresh install may intentionally finish setup without connecting an
     # agent; a returning owner's sole credential can also expire. When no
@@ -4616,11 +4647,16 @@ async def _run_chat_impl_with_db(
     # disconnected. If another provider is connected, this chat's selected
     # provider genuinely failed and the existing error path below remains the
     # honest response.
-    runnable_provider = any(
-      provider_requirement_errors.get(candidate_id) is None
-      and candidate.check_auth(settings.data_dir) is None
-      for candidate_id, candidate in PROVIDERS.items()
-    )
+    def _has_runnable_provider() -> bool:
+      return any(
+        provider_requirement_errors.get(candidate_id) is None
+        and candidate.check_auth(settings.data_dir) is None
+        for candidate_id, candidate in PROVIDERS.items()
+      )
+
+    # The scan calls check_auth for each provider, so offload the whole loop
+    # off the event loop for the same broker-stall reason as the probe above.
+    runnable_provider = await run_in_threadpool(_has_runnable_provider)
     if not runnable_provider:
       await _record_run_metrics(
         chat_id=chat_id,

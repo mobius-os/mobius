@@ -9,6 +9,7 @@ import {
 } from '../composerDraft.js'
 import {
   clearFailedSendAttempt,
+  failedSendReconciliation,
   loadFailedSendAttempt,
   saveFailedSendAttempt,
 } from '../sendAttemptRecovery.js'
@@ -143,6 +144,36 @@ export default function useComposerDraftState({ chatId, hidden, inputRef }) {
     saveFailedSendAttempt(chatId, attempt)
   }, [chatId])
 
+  // An ambiguous POST restores the exact cid-tagged draft until server truth
+  // proves where it landed. Keep the state transition beside the composer and
+  // file owners so transcript reconciliation cannot clear only half the draft.
+  const reconcileFailedAttempt = useCallback((
+    visibleMessages,
+    pendingMessages,
+    {
+      reportMissing = false,
+      reportUnavailable = false,
+      reportQueued = false,
+      expectedAttempt,
+    } = {},
+  ) => {
+    const reconciliation = failedSendReconciliation(
+      failedSendAttemptRef.current,
+      visibleMessages,
+      pendingMessages,
+      { reportMissing, reportUnavailable, reportQueued, expectedAttempt },
+    )
+    if (reconciliation.status !== 'durable') {
+      if (reconciliation.sendFailure) setSendFailure(reconciliation.sendFailure)
+      return reconciliation.status
+    }
+    clearFailedAttempt()
+    setComposerInput('')
+    clearFiles()
+    setSendFailure(null)
+    return 'durable'
+  }, [clearFailedAttempt, clearFiles, setComposerInput])
+
   const handleComposerInputChange = useCallback((nextInput) => {
     clearFailedAttempt()
     setSendFailure(null)
@@ -202,6 +233,7 @@ export default function useComposerDraftState({ chatId, hidden, inputRef }) {
     failedSendAttemptRef,
     clearFailedAttempt,
     rememberFailedAttempt,
+    reconcileFailedAttempt,
     pendingFiles,
     clearFiles,
     restoreFiles,

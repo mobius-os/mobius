@@ -874,6 +874,77 @@ def test_source_status_requires_github_access_for_app_tokens(
   assert allowed.status_code == 200, allowed.text
 
 
+def test_source_diff_is_project_bound_bounded_and_stale_safe(
+  client, owner_token,
+):
+  from app import models
+  from app.database import SessionLocal
+
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  session = SessionLocal()
+  try:
+    row = session.query(models.App).filter(models.App.id == app_id).one()
+    source = Path(row.source_dir)
+  finally:
+    session.close()
+  head = subprocess.run(
+    ["git", "-C", str(source), "rev-parse", "HEAD"],
+    check=True, capture_output=True, text=True,
+  ).stdout.strip()
+  comparison = subprocess.run(
+    ["git", "-C", str(source), "rev-parse", "upstream"],
+    check=True, capture_output=True, text=True,
+  ).stdout.strip()
+  (source / "new-source.js").write_text(
+    "export const reviewed = true\n", encoding="utf-8",
+  )
+  headers = {"Authorization": f"Bearer {app_token}"}
+
+  response = client.get(
+    "/api/github/source-diff",
+    params={
+      "project": f"app:{app_id}",
+      "head": head,
+      "comparison": comparison,
+    },
+    headers=headers,
+  )
+
+  assert response.status_code == 200, response.text
+  body = response.json()
+  assert body["project"] == f"app:{app_id}"
+  assert body["head_sha"] == head
+  assert "diff --git a/new-source.js b/new-source.js" in body["diff"]
+  assert "+export const reviewed = true" in body["diff"]
+  assert str(source) not in response.text
+
+  stale = client.get(
+    "/api/github/source-diff",
+    params={
+      "project": f"app:{app_id}",
+      "head": "0" * 40,
+      "comparison": comparison,
+    },
+    headers=headers,
+  )
+  assert stale.status_code == 409
+  assert stale.json()["detail"]["code"] == "source_snapshot_changed"
+
+
+def test_source_diff_requires_github_access_for_app_tokens(
+  client, owner_token,
+):
+  _, denied_token = _app_token(client, owner_token, github_access=False)
+  denied = client.get(
+    "/api/github/source-diff",
+    params={"project": "platform", "head": "0" * 40},
+    headers={"Authorization": f"Bearer {denied_token}"},
+  )
+  assert denied.status_code == 403
+
+
 def test_source_status_projects_local_distribution_manifest_identity(
   client, owner_token, auth, monkeypatch,
 ):
@@ -1729,6 +1800,161 @@ def _submit_preflight_response(args, *, merge_conflict: bool = False):
   return None
 
 
+def test_upstream_merge_preflight_retries_one_transient_fetch(tmp_path, monkeypatch):
+  from app.github_contribution_git import _assert_merges_with_upstream
+
+  repo = tmp_path / "repo"
+  repo.mkdir()
+  calls = []
+  fetches = iter((
+    _cp(stderr="fatal: unable to access: HTTP 503", returncode=1),
+    _cp(),
+  ))
+  monkeypatch.setattr(
+    "app.github_contribution_git._upstream_default_branch",
+    lambda *_args: "main",
+  )
+
+  def fake_git(_repo, *args, check=True):
+    calls.append(args)
+    if args[:1] == ("fetch",):
+      return next(fetches)
+    if args[:2] == ("rev-parse", "--verify"):
+      return _cp(_UPSTREAM_SHA + "\n")
+    return _cp()
+
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+
+  patch = _assert_merges_with_upstream(
+    repo, "mobius-os/app-demo", "fix/demo",
+  )
+
+  assert patch == {
+    "last_submit_upstream_branch": "main",
+    "last_submit_upstream_sha": _UPSTREAM_SHA,
+  }
+  assert sum(call[:1] == ("fetch",) for call in calls) == 2
+  assert sum(call[:1] == ("merge-tree",) for call in calls) == 1
+
+
+def test_upstream_merge_preflight_recovers_one_fetch_timeout(tmp_path, monkeypatch):
+  from app.github_contribution_git import _assert_merges_with_upstream
+
+  repo = tmp_path / "repo"
+  repo.mkdir()
+  fetch_attempts = 0
+  monkeypatch.setattr(
+    "app.github_contribution_git._upstream_default_branch",
+    lambda *_args: "main",
+  )
+
+  def fake_git(_repo, *args, check=True):
+    nonlocal fetch_attempts
+    if args[:1] == ("fetch",):
+      fetch_attempts += 1
+      if fetch_attempts == 1:
+        raise subprocess.TimeoutExpired(["git", "fetch"], timeout=30)
+      return _cp()
+    if args[:2] == ("rev-parse", "--verify"):
+      return _cp(_UPSTREAM_SHA + "\n")
+    return _cp()
+
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+
+  patch = _assert_merges_with_upstream(
+    repo, "mobius-os/app-demo", "fix/demo",
+  )
+
+  assert patch["last_submit_upstream_sha"] == _UPSTREAM_SHA
+  assert fetch_attempts == 2
+
+
+def test_upstream_merge_preflight_preserves_persistent_fetch_diagnosis(
+  tmp_path, monkeypatch,
+):
+  from app.github_contribution_git import _assert_merges_with_upstream
+
+  repo = tmp_path / "repo"
+  repo.mkdir()
+  calls = []
+  monkeypatch.setattr(
+    "app.github_contribution_git._upstream_default_branch",
+    lambda *_args: "main",
+  )
+
+  def fake_git(_repo, *args, check=True):
+    calls.append(args)
+    if args[:1] == ("fetch",):
+      return _cp(
+        stderr="\x1b[31mfatal: Could not resolve host: github.com\x1b[0m",
+        returncode=1,
+      )
+    return _cp()
+
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+
+  with pytest.raises(ContributionSubmitError) as raised:
+    _assert_merges_with_upstream(repo, "mobius-os/app-demo", "fix/demo")
+
+  error = raised.value
+  assert error.code == "upstream_fetch_unavailable"
+  assert error.record_patch == {"last_submit_upstream_branch": "main"}
+  assert error.detail == "fatal: Could not resolve host: github.com"
+  assert "Try Send again" in error.message
+  assert "Nothing was published" in error.message
+  assert sum(call[:1] == ("fetch",) for call in calls) == 2
+  assert not any(call[:1] == ("merge-tree",) for call in calls)
+
+
+def test_upstream_merge_preflight_does_not_retry_deterministic_fetch_rejection(
+  tmp_path, monkeypatch,
+):
+  from app.github_contribution_git import _assert_merges_with_upstream
+
+  repo = tmp_path / "repo"
+  repo.mkdir()
+  calls = []
+  monkeypatch.setattr(
+    "app.github_contribution_git._upstream_default_branch",
+    lambda *_args: "main",
+  )
+
+  def fake_git(_repo, *args, check=True):
+    calls.append(args)
+    if args[:1] == ("fetch",):
+      return _cp(stderr="fatal: repository not found", returncode=128)
+    return _cp()
+
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+
+  with pytest.raises(ContributionSubmitError) as raised:
+    _assert_merges_with_upstream(repo, "mobius-os/app-demo", "fix/demo")
+
+  assert raised.value.code == "upstream_fetch_failed"
+  assert raised.value.detail == "fatal: repository not found"
+  assert sum(call[:1] == ("fetch",) for call in calls) == 1
+
+
+def test_merge_error_patch_keeps_transport_diagnosis():
+  from app.github_contribution_git import _merge_error_patch
+
+  original = ContributionSubmitError(
+    "GitHub was temporarily unreachable.",
+    record_patch={"last_submit_upstream_branch": "main"},
+    code="upstream_fetch_unavailable",
+    detail="fatal: Could not resolve host: github.com",
+  )
+
+  merged = _merge_error_patch(original, {"head_sha": "a" * 40})
+
+  assert merged.code == original.code
+  assert merged.detail == original.detail
+  assert merged.record_patch == {
+    "head_sha": "a" * 40,
+    "last_submit_upstream_branch": "main",
+  }
+
+
 def test_push_topic_branch_does_not_retry_deterministic_rejections(
   tmp_path, monkeypatch,
 ):
@@ -1771,6 +1997,30 @@ def test_push_topic_branch_briefly_retries_transient_transport_errors(
 
   assert _push_topic_branch(tmp_path, "fix/demo") is None
   assert sleeps == [0.5, 1.0]
+
+
+def test_rate_limited_transport_is_surfaced_instead_of_retried(
+  tmp_path, monkeypatch,
+):
+  """A 429 carries Retry-After, so an instant second attempt is wasted."""
+  from app.routes.github import _push_topic_branch
+
+  calls = []
+  sleeps = []
+  monkeypatch.setattr(
+    "app.github_contribution_git._git",
+    lambda _repo, *args, **kwargs: calls.append(args) or _cp(
+      stderr="fatal: unable to access: The requested URL returned error: 429",
+      returncode=1,
+    ),
+  )
+  monkeypatch.setattr("app.github_contributions.time.sleep", sleeps.append)
+
+  error = _push_topic_branch(tmp_path, "fix/demo")
+
+  assert "429" in error
+  assert len(calls) == 1
+  assert sleeps == []
 
 
 def test_inspect_owner_fork_reports_strictly_behind_without_mutation(
@@ -5517,6 +5767,82 @@ def test_submit_records_where_the_owner_pressed_send(
   assert submitted.status_code == 200, submitted.text
   record_path, _ = github_routes._record_paths(app_id, "provenance")
   assert json.loads(record_path.read_text())["submitter"] == "chat-review-card"
+
+
+def test_submit_persists_precise_upstream_fetch_failure(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  _prepared_for_chat(app_id, "fetch-diagnosis", "chat-a")
+
+  def fail_submit(*_args, **_kwargs):
+    raise ContributionSubmitError(
+      "GitHub was temporarily unreachable while Contribute checked upstream "
+      "main. Nothing was published. Try Send again; leave feedback only if "
+      "it keeps failing.",
+      record_patch={"last_submit_upstream_branch": "main"},
+      code="upstream_fetch_unavailable",
+      detail="fatal: Could not resolve host: github.com",
+    )
+
+  monkeypatch.setattr(github_routes, "_submit_prepared_pr", fail_submit)
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/fetch-diagnosis/submit",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+
+  assert response.status_code == 409, response.text
+  detail = response.json()["detail"]
+  assert detail["code"] == "upstream_fetch_unavailable"
+  assert detail["detail"] == "fatal: Could not resolve host: github.com"
+  assert detail["record"]["status"] == "prepared"
+  assert detail["record"]["last_submit_error_code"] == detail["code"]
+  assert detail["record"]["last_submit_error_detail"] == detail["detail"]
+  assert detail["record"]["last_submit_upstream_branch"] == "main"
+
+
+def test_submit_failure_keeps_a_compatible_patch_error_code(tmp_path):
+  from app.github_contributions import _mark_submit_failure
+
+  record_path = tmp_path / "compatible-failure.json"
+  record_path.write_text(json.dumps({
+    "id": "compatible-failure",
+    "status": "submitting",
+  }))
+
+  failed = _mark_submit_failure(
+    app_id=0,
+    record_path=record_path,
+    message="Rejected payload.",
+    record_patch={"last_submit_error_code": "invalid_payload"},
+  )
+
+  assert failed["status"] == "prepared"
+  assert failed["last_submit_error_code"] == "invalid_payload"
+  assert json.loads(record_path.read_text())["last_submit_error_code"] == "invalid_payload"
+
+
+def test_submit_failure_does_not_reuse_a_previous_attempt_error_code(tmp_path):
+  from app.github_contributions import _mark_submit_failure
+
+  record_path = tmp_path / "new-failure.json"
+  record_path.write_text(json.dumps({
+    "id": "new-failure",
+    "status": "submitting",
+    "last_submit_error_code": "upstream_fetch_unavailable",
+  }))
+
+  failed = _mark_submit_failure(
+    app_id=0,
+    record_path=record_path,
+    message="Rejected payload.",
+  )
+
+  assert failed["status"] == "prepared"
+  assert "last_submit_error_code" not in failed
+  assert "last_submit_error_code" not in json.loads(record_path.read_text())
 
 
 # ── Pre-publication branch truth check ──────────────────────────────────────

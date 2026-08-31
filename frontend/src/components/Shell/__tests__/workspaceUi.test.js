@@ -20,6 +20,7 @@ const workspaceSession = readFileSync(
 const shellBrand = readFileSync(new URL('../ShellBrand.jsx', import.meta.url), 'utf8')
 const newChatLanding = readFileSync(new URL('../NewChatLanding.jsx', import.meta.url), 'utf8')
 const chatInputBar = readFileSync(new URL('../../ChatView/ChatInputBar.jsx', import.meta.url), 'utf8')
+const composerPopover = readFileSync(new URL('../../ChatView/ComposerPopover.jsx', import.meta.url), 'utf8')
 const workspaceViewSrc = readFileSync(new URL('../workspaceView.js', import.meta.url), 'utf8')
 const modeViewTransitionSrc = readFileSync(new URL('../useModeViewTransition.js', import.meta.url), 'utf8')
 const modeControllerSrc = readFileSync(new URL('../useModeController.js', import.meta.url), 'utf8')
@@ -882,8 +883,8 @@ test('chat drawer indicators distinguish owner input, active work, waiting, and 
   )
   assert.match(
     shell,
-    /ev\.type === 'chat_run_started'[\s\S]*?markStreamingStart\(ev\.chatId\)/,
-    'a started run must raise the active-work dot',
+    /ev\.type === 'chat_run_started'[\s\S]*?markStreamingAcknowledged\(ev\.chatId\)/,
+    'a started run must raise and acknowledge the active-work dot',
   )
   assert.match(
     shell,
@@ -918,7 +919,7 @@ test('live preview reveal keeps the workspace controller distinct from device mo
 })
 
 test('large drawer lists memoize ordering and row actions without changing row ownership', () => {
-  assert.match(drawer, /useMemo\(\(\) => buildDrawerSections\(chats, apps\), \[chats, apps\]\)/)
+  assert.match(drawer, /useMemo\(\(\) => buildDrawerSections\(chats, apps, projects\), \[chats, apps, projects\]\)/)
   assert.match(drawer, /const filteredApps = useMemo\(/)
   assert.match(drawer, /const rowActions = useMemo\(/)
   assert.match(drawer, /const DrawerRow = memo\(function DrawerRow/)
@@ -927,6 +928,50 @@ test('large drawer lists memoize ordering and row actions without changing row o
   assert.doesNotMatch(drawer, /onSelect=\{\(\) => on(?:Chat|App)/)
   assert.equal((drawer.match(/<DrawerItemMenu/g) || []).length, 1,
     'the drawer must render one item-menu controller')
+})
+
+test('successful project artifacts render as direct Recents destinations', () => {
+  assert.match(drawer, /kind === 'artifact' \? \(/)
+  assert.match(drawer, /<DrawerArtifactRow/)
+  assert.match(drawer, /<ProjectArtifactIcon artifact=\{item\}/)
+  assert.doesNotMatch(drawer, /<ArtifactIdentityIcon artifact=\{item\}/,
+    'Recents uses one semantic glyph rather than nesting a tile inside a row icon')
+  assert.match(drawer, /actions\.select\('artifact', item\.id\)/)
+  assert.match(shell, /activeArtifactRef=\{activeArtifactRef\}/)
+  assert.match(shell, /parseArtifactTabId\(artifactRef\)[\s\S]*?openArtifact\(project, parsed\.artifactId\)/)
+  assert.match(shell, /activeView === 'artifact' \|\| activeProjectChatProjectId/)
+})
+
+test('artifact previews keep recovery actions visible without a build-log drawer', () => {
+  const artifactWorkspace = readFileSync(
+    new URL('../../Projects/ArtifactWorkspace.jsx', import.meta.url),
+    'utf8',
+  )
+  const projectsCss = readFileSync(
+    new URL('../../Projects/Projects.css', import.meta.url),
+    'utf8',
+  )
+  assert.match(artifactWorkspace, /The last build failed\. Fix the source and build again\./)
+  assert.doesNotMatch(artifactWorkspace, /BuildLog|Build log|artifactLog/)
+  assert.doesNotMatch(projectsCss, /artifact-log/)
+})
+
+test('a selected project-owned Recent includes its project chip in one row surface', () => {
+  assert.match(drawer, /drawer__row--artifact drawer__row--project-owned/)
+  assert.match(drawer, /projectChip \? ' drawer__row--project-owned'/)
+  assert.match(
+    drawerCss,
+    /\.drawer__row--project-owned\.drawer__row--active\s*\{[\s\S]*?background:\s*var\(--accent-dim\)/,
+  )
+  assert.match(
+    drawerCss,
+    /\.drawer__row--project-owned\.drawer__row--active \.drawer__item\s*\{[\s\S]*?background:\s*transparent/,
+  )
+  assert.doesNotMatch(
+    drawerCss.match(/\.drawer__item--apps\s*\{[\s\S]*?\}/)?.[0] || '',
+    /margin-(?:top|bottom)/,
+    'Apps must not insert drift before the Projects glyph shared with the closed rail',
+  )
 })
 
 test('mixed recents reserve artwork for apps without redundant chat icons', () => {
@@ -958,6 +1003,14 @@ test('the Möbius header keeps its phone divider but flows into desktop navigati
     shellCss,
     /\.shell--drawer-docked \.shell__bar\s*\{[\s\S]*?border-bottom:\s*0;/,
   )
+  assert.match(
+    drawerCss,
+    /var\(--drawer-top-offset,\s*var\(--shell-bar-height,\s*58px\)\)/,
+  )
+  assert.match(
+    shellCss,
+    /@media \(min-width: 1024px\)[\s\S]*?\.shell\s*\{[\s\S]*?--drawer-top-offset:\s*58px;[\s\S]*?--shell-bar-height:\s*0px;/,
+  )
 })
 
 test('drawer rows keep action and reorder chrome out of the list', () => {
@@ -974,6 +1027,14 @@ test('drawer rows keep action and reorder chrome out of the list', () => {
   )
   assert.match(drawer, /if \(openMenu\) return[\s\S]*?onClose\?\.\(\)/,
     'Escape must close a row menu before dismissing the mobile drawer beneath it')
+  assert.match(drawer, /focusFirstAction: event\.type === 'keydown'/,
+    'only keyboard invocation should focus the first drawer action')
+  assert.match(drawer, /focusFirstAction=\{menu\?\.focusFirstAction === true\}/)
+  assert.match(
+    drawerItemActionMenu,
+    /if \(!focusFirstAction && confirmation === null\) return/,
+    'pointer-opened menus must not paint the first keyboard focus ring',
+  )
 })
 
 test('chat deletion is immediate while app deletion still requires confirmation', () => {
@@ -997,7 +1058,7 @@ test('drawer row actions have one opening path without a custom touch hold', () 
   assert.match(drawer, /open: openItemMenuHistory,[\s\S]*?close: closeItemMenu,[\s\S]*?useHistoryDismiss\(\(\) => setOpenMenu\(null\)\)/)
   assert.match(drawer, /function showItemMenu\(\{ restoreFocusTarget, \.\.\.menu \}\) \{[\s\S]*?openItemMenuHistory\(\)[\s\S]*?setOpenMenu\(menu\)/,
     'Back ownership must be registered before the portaled menu paints')
-  assert.match(drawer, /function openItemMenuAt\(point,[\s\S]*?actions\.openMenu\(\{[\s\S]*?restoreFocusTarget: trigger,/)
+  assert.match(drawer, /function openItemMenuAt\(\s*point,[\s\S]*?actions\.openMenu\(\{[\s\S]*?restoreFocusTarget: trigger,/)
   assert.equal((drawer.match(/onContextMenu=\{openItemMenu\}/g) || []).length, 2,
     'app cards and drawer rows must share one semantic opening function')
   assert.match(drawer, /if \(suppressTouchContextMenu\(event\)\) return/,
@@ -1058,6 +1119,11 @@ test('launcher cards and drawer rows share the stationary menu threshold', () =>
     'the shared controller, not the reorder implementation, owns hold timing',
   )
   assert.doesNotMatch(drawer, /520/)
+})
+
+test('drawer artwork is loaded only by rows that are actually mounted', () => {
+  assert.match(drawer, /<AppIcon/)
+  assert.doesNotMatch(drawer, /preloadAppIcons|APP_ICON_(?:PRIORITY_COUNT|WARM_LIMIT)/)
 })
 
 test('double-click edits a drawer row name instead of duplicating its context menu', () => {
@@ -1285,14 +1351,27 @@ test('round4-3: the New Chat landing renders for a null slot and reuses ChatView
   assert.match(shell, /const newChatSurface = fullBleedKey === EMPTY_SINGLE_SURFACE_KEY/)
   assert.match(shell, /<NewChatLanding/)
   assert.match(shell, /chatId=\{presentingNewChat \? newChatPresentation\.chatId : null\}/)
+  assert.match(shell, /chatInfo=\{newChatPresentation\?\.chatInfo \?\? null\}/)
+  assert.match(shell,
+    /materialized: true,[\s\S]*chatInfo: createdChatDetailCache\(result\.chat\)\?\.chatInfo \?\? null/,
+    'the accepted create response must unlock the model picker without another read')
   assert.match(shell, /retryDraftFirstNewChat/)
   assert.match(newChatLanding, /submissionBlocked[\s\S]*attachmentsDisabled/)
   assert.match(newChatLanding,
     /focusComposerElement\(inputRef\.current\)[\s\S]*placeCaretAtTextEnd\(inputRef\.current\)/,
     'the provisional draft resumes at its text end without changing generic focus policy')
   assert.match(newChatLanding,
-    /leftButtons=\{<ComposerPopover pending \/>\}/,
-    'the provisional composer must reuse the real options control in its inert state')
+    /leftButtons=\{liveChatInfo \? \([\s\S]*<BrainUsageButton[\s\S]*<ComposerPopover[\s\S]*chatInfo=\{liveChatInfo\}[\s\S]*embedded[\s\S]*\) : <ComposerPopover pending \/>\}/,
+    'the provisional composer must unlock the canonical model picker once its chat row exists')
+  assert.match(newChatLanding,
+    /async function submitDraft[\s\S]*await settingsSaveTailRef\.current[\s\S]*onSubmit\?\.\(draft\)/,
+    'a first send must follow any model choice the owner just made')
+  assert.match(composerPopover, /\{onAttachClick && \(/,
+    'a model-only New Chat Brain must not expose a dead attachment action')
+  assert.match(composerPopover, /\{!embedded && onOpenChanges && \(/,
+    'a model-only New Chat Brain must not expose a dead Changes action')
+  assert.match(composerPopover, /\{!embedded && \(onOpenSummary \|\| onOpenInspector \|\| onOpenUsage\) && \(/,
+    'a model-only New Chat Brain must not expose dead continuity actions')
   assert.doesNotMatch(newChatLanding, /attachTriggerRef/,
     'the pre-allocation surface must not expose server-bound attachment behavior')
   assert.match(chatInputBar,

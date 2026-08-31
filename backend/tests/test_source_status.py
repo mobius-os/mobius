@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -133,6 +136,136 @@ def test_committed_and_working_deltas_are_reported_separately():
   assert result["working"]["untracked"] == 1
 
 
+def test_project_diff_combines_committed_working_and_untracked_source():
+  repo = _repo("diff-preview")
+  (repo / "index.jsx").write_text("export default 2\n", encoding="utf-8")
+  _git(repo, "add", "index.jsx")
+  _commit(repo, "accepted local edit")
+  (repo / "index.jsx").write_text("export default 3\n", encoding="utf-8")
+  (repo / "new-file.js").write_text("export const newFile = true\n", encoding="utf-8")
+  (repo / ".gitignore").write_text("ignored.log\n", encoding="utf-8")
+  (repo / "ignored.log").write_text("runtime noise\n", encoding="utf-8")
+
+  project = source_status.build_app_status(_app(repo))
+  assert project is not None
+  preview = source_status.build_project_diff(
+    repo, project, expected_head=project["head_sha"],
+    expected_comparison=project["comparison_sha"],
+  )
+
+  assert preview["project"] == project["key"]
+  assert preview["head_sha"] == project["head_sha"]
+  assert preview["diff_truncated"] is False
+  assert "diff --git a/index.jsx b/index.jsx" in preview["diff"]
+  assert "+export default 3" in preview["diff"]
+  assert "diff --git a/new-file.js b/new-file.js" in preview["diff"]
+  assert "+export const newFile = true" in preview["diff"]
+  assert "diff --git a/.gitignore b/.gitignore" not in preview["diff"]
+  assert "diff --git a/ignored.log b/ignored.log" not in preview["diff"]
+
+
+def test_project_diff_refuses_a_stale_source_map_head():
+  repo = _repo("stale-diff-preview")
+  project = source_status.build_app_status(_app(repo))
+  assert project is not None
+
+  with pytest.raises(RuntimeError, match="source_snapshot_changed"):
+    source_status.build_project_diff(
+      repo, project, expected_head="0" * 40,
+      expected_comparison=project["comparison_sha"],
+    )
+  with pytest.raises(RuntimeError, match="source_snapshot_changed"):
+    source_status.build_project_diff(
+      repo, project, expected_head=project["head_sha"],
+      expected_comparison="0" * 40,
+    )
+
+  (repo / "later.js").write_text("later\n", encoding="utf-8")
+  _git(repo, "add", "later.js")
+  _commit(repo, "later source edit")
+  with pytest.raises(RuntimeError, match="source_snapshot_changed"):
+    source_status.build_project_diff(
+      repo, project, expected_head=project["head_sha"],
+      expected_comparison=project["comparison_sha"],
+    )
+
+
+def test_project_diff_uses_captured_sha_after_comparison_ref_moves():
+  repo = _repo("immutable-diff-endpoints")
+  (repo / "index.jsx").write_text("export default 2\n", encoding="utf-8")
+  _git(repo, "add", "index.jsx")
+  head = _commit(repo, "accepted local edit")
+  project = source_status.build_app_status(_app(repo))
+  assert project is not None
+
+  _git(repo, "update-ref", "refs/heads/upstream", head)
+  preview = source_status.build_project_diff(
+    repo, project, expected_head=project["head_sha"],
+    expected_comparison=project["comparison_sha"],
+  )
+
+  assert "+export default 2" in preview["diff"]
+
+
+def test_project_diff_caps_large_source_without_buffering_it(monkeypatch):
+  repo = _repo("bounded-diff-preview")
+  (repo / "large.js").write_text("x" * 4096, encoding="utf-8")
+  project = source_status.build_app_status(_app(repo))
+  assert project is not None
+  monkeypatch.setattr(source_status, "_DIFF_PREVIEW_BYTES", 256)
+
+  preview = source_status.build_project_diff(
+    repo, project, expected_head=project["head_sha"],
+    expected_comparison=project["comparison_sha"],
+  )
+
+  assert preview["diff_truncated"] is True
+  assert len(preview["diff"].encode()) <= 256
+
+
+def test_bounded_reader_enforces_time_without_waiting_for_output(monkeypatch):
+  monkeypatch.setattr(source_status, "_GIT_TIMEOUT", 0.05)
+  started = time.monotonic()
+
+  output, truncated, returncode = source_status._bounded_stdout(
+    [sys.executable, "-c", "import time; time.sleep(10)"],
+    env=dict(os.environ),
+    limit=256,
+  )
+
+  assert time.monotonic() - started < 1
+  assert output == b""
+  assert truncated is True
+  assert returncode is not None
+
+
+def test_untracked_inventory_is_bounded_by_path_count(monkeypatch):
+  repo = _repo("bounded-untracked-paths")
+  for index in range(3):
+    (repo / f"new-{index}.js").write_text("new\n", encoding="utf-8")
+  monkeypatch.setattr(source_status, "_UNTRACKED_PATHS", 2)
+
+  paths, truncated = source_status._untracked_paths(repo)
+
+  assert len(paths) == 2
+  assert truncated is True
+
+
+def test_project_diff_skips_untracked_symlinks():
+  repo = _repo("untracked-symlink")
+  os.symlink("index.jsx", repo / "outside-review")
+  project = source_status.build_app_status(_app(repo))
+  assert project is not None
+
+  preview = source_status.build_project_diff(
+    repo, project, expected_head=project["head_sha"],
+    expected_comparison=project["comparison_sha"],
+  )
+
+  assert preview["diff_truncated"] is True
+  assert "outside-review" not in preview["diff"]
+
+
 def test_typical_project_returns_its_complete_changed_filename_list():
   repo = _repo("many-files")
   for index in range(25):
@@ -187,6 +320,14 @@ def test_install_managed_app_deltas_do_not_look_like_customization(monkeypatch):
   assert customized["tree"]["paths"][0]["path"] == "index.jsx"
   assert customized["tree"]["paths"][0]["group"] == "authored"
   assert len(log_calls) == 2, "each status build should need one history scan"
+
+  preview = source_status.build_project_diff(
+    repo, customized, expected_head=customized["head_sha"],
+    expected_comparison=customized["comparison_sha"],
+  )
+  assert "diff --git a/index.jsx b/index.jsx" in preview["diff"]
+  assert "diff --git a/runner.sh b/runner.sh" not in preview["diff"]
+  assert "diff --git a/.gitignore b/.gitignore" not in preview["diff"]
 
 
 def test_history_subject_boundary_cannot_be_forged_by_a_filename():

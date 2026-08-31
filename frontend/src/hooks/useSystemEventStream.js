@@ -77,7 +77,9 @@ export default function useSystemEventStream(
           if (!setupSession.isInProgress()) {
             clearToken()
             try { sessionStorage.setItem('auth_expired', '1') } catch {}
-            await clearQueryCache()
+            // Match apiFetch: preserve only principal-partitioned accepted chat
+            // intent across credential renewal. Explicit logout still wipes it.
+            await clearQueryCache({ preserveChatOutbox: true })
             setTimeout(() => window.location.reload(), 100)
           }
           // Stop the reconnect loop regardless — either the page is
@@ -89,7 +91,17 @@ export default function useSystemEventStream(
           throw new Error(`system stream status ${res.status}`)
         }
         backoffMs = 1000  // Reset on a successful connect.
-        onOpenRef.current?.()
+        // Reconnect reconciliation is a causal barrier: let durable list state
+        // settle before applying newer events already buffered on this stream.
+        // Without this ordering, a slower list response can overwrite a run
+        // start/finish that arrived immediately after the connection opened.
+        // The cost is paid by every event type on this stream, not just the
+        // chat indicators the ordering protects: nothing is read until onOpen
+        // settles, and the barrier is only as bounded as onOpen itself. Events
+        // are delayed, never dropped — the reader drains the buffered bytes in
+        // order once the barrier lifts. Keep the bound in the reconciler.
+        await onOpenRef.current?.()
+        if (cancelled) return
 
         const reader = res.body.getReader()
         const decoder = new TextDecoder()

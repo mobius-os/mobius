@@ -42,7 +42,7 @@ from app.database import (
   reset_database_request_label,
   set_database_request_label,
 )
-from app.schema_migrations import orm_schema_gaps, run_migrations
+from app.schema_migrations import mapped_schema_gaps, run_migrations
 from app.http_caching import strip_range
 from app.frontend_assets import (
   baked_frontend_dir,
@@ -73,18 +73,57 @@ from app.routes import (
   debug_router, delegations_router, fs_router, goal_plans_router, github_router, media_router,
   identity_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
+  screen_control_router,
   public_apps_router,
   secrets_router, self_reminders_router, settings_router, skills_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
-  theme_router, uploads_router, platform_router,
+  theme_router, uploads_router, platform_router, contribution_relay_router,
   published_router,
   connect_router,
+  projects_router,
 )
 
 _BOOT_ID = os.environ.get("MOBIUS_BOOT_ID") or f"{os.getpid()}-{time.time_ns()}"
-# ORM-vs-database schema gaps found at startup; non-empty means the process
-# answers but cannot serve turns (see health vs health_strict).
-_SCHEMA_GAPS: list[str] = []
+# One boot verdict feeds startup ownership, middleware, and every health probe.
+# These stay fixed until restart: Recovery may repair the database externally,
+# but only a clean boot can coherently start the skipped database owners.
+_DATABASE_BOOT_RESULT = None
+
+
+def _set_database_boot_state(result) -> None:
+  global _DATABASE_BOOT_RESULT
+  _DATABASE_BOOT_RESULT = result
+
+
+def _database_degraded_payload() -> dict | None:
+  result = _DATABASE_BOOT_RESULT
+  if result is None or result.serviceable:
+    return None
+  if result.failure_reason:
+    return {"reason": result.failure_reason}
+  if result.schema_gaps:
+    return {
+      "reason": "schema_mismatch",
+      "schema_gaps": list(result.schema_gaps),
+    }
+  return None
+
+
+def _database_init_error_is_transient(exc: OperationalError) -> bool:
+  """Retry only connection loss or SQLite lock contention at boot.
+
+  Deterministic migration/DDL errors are also ``OperationalError`` instances.
+  Retrying those ten times only delays the same degraded verdict and obscures
+  the first useful traceback. SQLite lock errors and invalidated connections
+  can genuinely clear without changing the release, so retain the bounded
+  retry for those cases.
+  """
+  if exc.connection_invalidated:
+    return True
+  if engine.dialect.name != "sqlite":
+    return False
+  detail = str(exc.orig or exc).lower()
+  return "locked" in detail or "busy" in detail
 
 
 def _install_pm_commit_launcher(source: Path, target: Path) -> bool:
@@ -104,7 +143,7 @@ def _install_pm_commit_launcher(source: Path, target: Path) -> bool:
   return True
 
 
-def _init_db() -> list[str]:
+def _init_db():
   """Create missing tables, then migrate existing ones, with retries.
 
   Creating tables first lets a migration move legacy data into a newly
@@ -112,12 +151,13 @@ def _init_db() -> list[str]:
   mutates existing tables, so column upgrades remain owned by
   ``run_migrations``.
   """
+  from app.startup import DatabaseBootResult
+
   for attempt in range(10):
     try:
       Base.metadata.create_all(bind=engine)
       run_migrations(engine)
-      gaps = orm_schema_gaps(engine)
-      _SCHEMA_GAPS[:] = gaps
+      gaps = mapped_schema_gaps(engine)
       if gaps:
         # A mapped column with no migration fails at first query, not at
         # boot. Surface it loudly here and through /api/health(+/strict)
@@ -126,9 +166,9 @@ def _init_db() -> list[str]:
           "CRITICAL: database is missing ORM-declared schema: "
           + ", ".join(gaps)
         )
-      return list(gaps)
+      return DatabaseBootResult(schema_gaps=tuple(gaps))
     except OperationalError as e:
-      if attempt < 9:
+      if attempt < 9 and _database_init_error_is_transient(e):
         delay = min(2 ** attempt, 10)
         print(f"DB init retry {attempt + 1}/10 in {delay}s: {e}")
         time.sleep(delay)
@@ -169,7 +209,8 @@ async def lifespan(app):
     assert_provider_defaults=_assert_provider_defaults,
     logger=_log,
   )
-  database_serviceable = await run_startup_plan(startup_context)
+  database_boot = await run_startup_plan(startup_context)
+  _set_database_boot_state(database_boot)
   from app.runtime_supervisors import RuntimeSupervisors
   supervisors = RuntimeSupervisors(
     settings=settings,
@@ -179,7 +220,7 @@ async def lifespan(app):
   )
   await supervisors.start_process_services()
   record_memory_checkpoint("startup_frontend_watcher_started")
-  if database_serviceable:
+  if database_boot.serviceable:
     await supervisors.start_database_services()
     record_memory_checkpoint("startup_ready")
   try:
@@ -316,6 +357,9 @@ _CONTENT_SECURITY_POLICY = b"content-security-policy"
 _OPAQUE_STATIC_EMBED_PREFIX = "/app-embeds/by-id/"
 _PUBLISHED_SITE_PREFIX = "/sites/"
 _APP_FRAME_PATH = re.compile(r"^/api/apps/[^/]+/frame$")
+_ARTIFACT_OUTPUT_PATH = re.compile(
+  r"^/api/projects/[^/]+/artifacts/[^/]+/output/"
+)
 
 # This isolation boundary must always be enforced, never Report-Only: browsers
 # ignore the CSP sandbox directive in a Report-Only policy. The sandbox omits
@@ -397,6 +441,17 @@ def _app_frame_csp_for_scope(scope) -> str:
 _PUBLISHED_SITE_CSP = PUBLISHED_SITE_CSP
 
 
+# Built website artifacts render in sandboxed iframes without
+# ``allow-same-origin``, so their documents cannot reach the shell's owner
+# credentials. Keep the build-output namespace on the Projects isolation
+# policy instead of inheriting the broader shell policy.
+_ARTIFACT_OUTPUT_CSP = (
+  "default-src 'self'; img-src 'self' data:; font-src 'self' data:; "
+  "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+  "frame-ancestors 'self'"
+)
+
+
 def _is_public_service_surface(scope) -> bool:
   """Whether the gateway host may frame this registered service route."""
   path = scope.get("path") or ""
@@ -431,6 +486,7 @@ class _SecurityHeadersMiddleware:
     published_site = path.startswith(_PUBLISHED_SITE_PREFIX)
     chat_embed = path == "/shell/embed/chat"
     app_frame = bool(_APP_FRAME_PATH.fullmatch(path))
+    artifact_output = bool(_ARTIFACT_OUTPUT_PATH.match(path))
     service_surface = _is_public_service_surface(scope)
     response_headers = list(_SECURITY_HEADERS)
     replaced_header_names = _SECURITY_HEADER_NAMES
@@ -448,6 +504,8 @@ class _SecurityHeadersMiddleware:
         csp = CHAT_EMBED_CSP
       elif app_frame:
         csp = _app_frame_csp_for_scope(scope)
+      elif artifact_output:
+        csp = _ARTIFACT_OUTPUT_CSP
       else:
         csp = _SHELL_CSP
       response_headers.append((
@@ -568,7 +626,7 @@ class _ServiceSurfaceHostMiddleware:
     return await self.app(scope, receive, send)
 
 
-_SCHEMA_DEGRADED_API_PATHS = frozenset({
+_DATABASE_DEGRADED_API_PATHS = frozenset({
   "/api/health",
   "/api/health/strict",
   "/api/ready",
@@ -578,8 +636,8 @@ _SCHEMA_DEGRADED_API_PATHS = frozenset({
 })
 
 
-class _SchemaServiceabilityMiddleware:
-  """Reject ordinary API work after a schema-incompatible boot.
+class _DatabaseServiceabilityMiddleware:
+  """Reject ordinary API work after an incompatible database boot.
 
   Readiness keeps a new deployment out of rotation, but an already-running
   reverse proxy can still reach an unhealthy replacement directly. Centralize
@@ -595,15 +653,16 @@ class _SchemaServiceabilityMiddleware:
 
   async def __call__(self, scope, receive, send):
     path = scope.get("path", "")
+    degraded = _database_degraded_payload()
     if (
       scope["type"] == "http"
-      and _SCHEMA_GAPS
+      and degraded
       and path.startswith("/api/")
-      and path not in _SCHEMA_DEGRADED_API_PATHS
+      and path not in _DATABASE_DEGRADED_API_PATHS
     ):
       body = json.dumps({
-        "detail": "database schema mismatch; restart after Recovery",
-        "schema_gaps": list(_SCHEMA_GAPS),
+        "detail": "database is not serviceable; use Recovery, then restart",
+        **degraded,
       }, separators=(",", ":")).encode()
       await send({
         "type": "http.response.start",
@@ -710,7 +769,7 @@ app.add_middleware(_OpaqueOriginCorsMiddleware)
 # before routing so it can never serve the shell, APIs, or another
 # service prefix.
 app.add_middleware(_ServiceSurfaceHostMiddleware)
-app.add_middleware(_SchemaServiceabilityMiddleware)
+app.add_middleware(_DatabaseServiceabilityMiddleware)
 app.add_middleware(_SecurityHeadersMiddleware)
 app.add_middleware(_DatabaseRequestContextMiddleware)
 app.add_middleware(_RequestErrorTelemetryMiddleware)
@@ -720,6 +779,7 @@ app.include_router(auth_router)
 app.include_router(apps_router)
 app.include_router(storage_router)
 app.include_router(fs_router)
+app.include_router(projects_router)
 app.include_router(chat_router)
 app.include_router(chat_embed_router)
 app.include_router(chats_router)
@@ -744,12 +804,14 @@ except Exception as _exc:  # pragma: no cover - defensive boot guard
     "app_chat_router not mounted: %s", _exc, exc_info=True,
   )
 app.include_router(notify_router)
+app.include_router(screen_control_router)
 app.include_router(proxy_router)
 app.include_router(public_apps_router)
 app.include_router(local_services_router)
 app.include_router(connect_router)
 app.include_router(client_error_router)
 app.include_router(client_signal_router)
+app.include_router(contribution_relay_router)
 app.include_router(settings_router)
 app.include_router(platform_router)
 app.include_router(uploads_router)
@@ -786,36 +848,36 @@ def health(response: Response):
   reloading while the old process is still briefly answering before SIGTERM.
   """
   response.headers["Cache-Control"] = "no-store"
+  degraded = _database_degraded_payload()
   payload = {
-    "status": "schema_mismatch" if _SCHEMA_GAPS else "ok",
+    "status": degraded["reason"] if degraded else "ok",
     "target": "mobius",
-    "mode": "normal",
+    "mode": "degraded" if degraded else "normal",
     "build_sha": settings.build_sha,
     "boot_id": _BOOT_ID,
   }
-  if _SCHEMA_GAPS:
-    # Still HTTP 200: the shell's reachability probe requires response.ok,
-    # and a schema gap must not masquerade as "device offline". The strict
-    # variant below carries the 5xx for container health.
-    payload["schema_gaps"] = _SCHEMA_GAPS
+  if degraded:
+    # Still HTTP 200: database failure must never masquerade as device offline.
+    # The strict and readiness variants below carry the 5xx service verdict.
+    payload.update(degraded)
   return payload
 
 
 @app.get("/api/health/strict")
 def health_strict(response: Response):
-  """Schema-focused serviceability probe retained for diagnostics.
+  """Database-focused serviceability probe retained for diagnostics.
 
   Distinct from `/api/health` (reachability — must stay 200 whenever the
   process answers, or the shell would flip devices to offline UI): this
-  variant fails when the database is missing ORM-declared schema. Deployment
-  healthchecks use `/api/ready`, which includes this schema contract plus the
-  chat-persistence writer contract.
+  variant fails when database initialization fails or mapped schema is absent.
+  Deployment healthchecks use `/api/ready`, which includes this database
+  contract plus the chat-persistence writer contract.
   """
   response.headers["Cache-Control"] = "no-store"
-  gaps = list(_SCHEMA_GAPS)
-  if gaps:
+  degraded = _database_degraded_payload()
+  if degraded:
     response.status_code = 503
-    return {"status": "schema_mismatch", "schema_gaps": gaps}
+    return {"status": degraded["reason"], **degraded}
   return {"status": "ok", "boot_id": _BOOT_ID}
 
 
@@ -838,7 +900,8 @@ def ready(response: Response):
   """Readiness probe: 200 only when chats can actually be served.
 
   Distinct from `/api/health` (reachability — the process is answering HTTP),
-  this route also requires an ORM-compatible database and a usable
+  this route also requires a successfully initialized database with every
+  mapped table and column, plus a usable
   single-writer chat-persistence actor. A deploy must not green while a mapped
   column is absent or every chat write will fail, even though the process can
   still answer ordinary HTTP requests.
@@ -851,13 +914,12 @@ def ready(response: Response):
   window where this false-fails.
   """
   response.headers["Cache-Control"] = "no-store"
-  gaps = list(_SCHEMA_GAPS)
-  if gaps:
+  degraded = _database_degraded_payload()
+  if degraded:
     response.status_code = 503
     return {
       "ready": False,
-      "reason": "schema_mismatch",
-      "schema_gaps": gaps,
+      **degraded,
     }
   from app.chat_writer import writer_readiness
   is_ready, reason = writer_readiness()
@@ -1079,14 +1141,17 @@ def _resolve_asset_file(asset_path: str) -> Path | None:
 # site below.
 _SERVICE_WORKER_SCRIPTS = frozenset({"sw.js", "sw-push.js"})
 
-# Small, same-origin worker scripts that are deliberately NOT precached (mirrors
-# the frontend precache-policy.mjs UNPRECACHED_WORKERS list). A worker runs under
-# the Content-Security-Policy of its OWN response, so — exactly like sw.js — it
-# must revalidate on every load. Without this the browser caches the worker by
-# HTTP heuristic freshness, and a device that fetched it under an earlier policy
-# keeps executing under that stale CSP: this is how on-device Pocket TTS stayed
-# WebAssembly-blocked even after shell_csp restored the 'wasm-unsafe-eval' source.
-_UNPRECACHED_WORKER_SCRIPTS = frozenset({"speech/pocket-tts-worker.js"})
+# Small, same-origin worker-class scripts that are deliberately NOT precached
+# (mirrors the frontend precache-policy.mjs UNPRECACHED_WORKERS list). They use
+# stable URLs, so each load must revalidate instead of retaining old executable
+# bytes under HTTP heuristic freshness. Dedicated workers also run under the
+# Content-Security-Policy of their OWN response: a stale response is how
+# on-device Pocket TTS stayed WebAssembly-blocked after shell_csp restored the
+# 'wasm-unsafe-eval' source.
+_UNPRECACHED_WORKER_SCRIPTS = frozenset({
+  "speech/pocket-tts-worker.js",
+  "speech/soundtouch-processor.js",
+})
 
 # The push worker's scope. It exists only to name a URL prefix inside the
 # shell's PWA scope, and must never resolve to a document — a page here would
@@ -1489,6 +1554,14 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
       )
 
     file = static_dir / path
+    if not file.is_file() and static_dir != _baked_dir and path != "index.html":
+      # A complete live build can still omit an image-installed vendor asset,
+      # or a new public file until that build refreshes. Pick the baked copy
+      # before response policy so executable fallbacks cannot bypass the cache
+      # and Range invariants enforced below.
+      baked = _baked_dir / path
+      if baked.is_file():
+        file = baked
     if file.is_file() and path != "index.html":
       # The service worker MUST be served with `Cache-Control:
       # no-cache` so the browser revalidates it on every page load.
@@ -1512,19 +1585,6 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
         # (same class as the /app-assets + /module fix; see http_caching).
         strip_range(request)
       return FileResponse(str(file), headers=headers or None)
-    # When the live build is being served, a file that lives ONLY in the baked
-    # build (/app/static) would otherwise fall through to the HTML response.
-    # /vendor/pdfjs/* is the canonical example: the npm-install asset copy
-    # lands in /app/static at image build time, but Vite doesn't emit it
-    # into /data/platform/frontend/dist. Falling back to the baked dir for
-    # files-not-in-live keeps app-authored asset URLs working without forcing the
-    # rebuild to mirror the entire vendor tree.
-    if static_dir != _baked_dir and path != "index.html":
-      baked = _baked_dir / path
-      if baked.is_file():
-        return FileResponse(
-          str(baked), headers=_public_static_headers(path) or None
-        )
     # Static asset namespaces 404 on a miss — they must never receive the
     # SPA HTML below (a module URL served as text/html is MIME-rejected by
     # the browser and poisons the cache-first service worker). Only app

@@ -21,6 +21,7 @@ export default function BrainUsageButton({
   usageEnabled = true,
   chatId = null,
   provider = null,
+  providerSessionId = null,
   model = null,
 }) {
   const providerUsageQuery = settingsQueries.providerUsage.useQuery(provider, {
@@ -29,10 +30,11 @@ export default function BrainUsageButton({
   const contextUsageQuery = chatQueries.currentUsage.useQuery(
     chatId,
     provider,
+    providerSessionId,
     { enabled: usageEnabled },
   )
   const modelRegistryQuery = modelQueries.registry.useQuery({
-    enabled: usageEnabled && Boolean(provider && model),
+    enabled: usageEnabled && !providerSessionId && Boolean(provider && model),
   })
   const allowance = providerUsageQuery.isLoading
     ? providerAllowance(provider, null)
@@ -42,6 +44,7 @@ export default function BrainUsageButton({
   const contextSnapshot = (
     contextUsageQuery.isLoading
     || contextUsageQuery.data?.provider !== provider
+    || contextUsageQuery.data?.provider_session_id !== providerSessionId
   )
     ? null
     : contextUsageQuery.data

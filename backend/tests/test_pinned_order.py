@@ -1,4 +1,4 @@
-"""Atomic ordering contract for the drawer's combined pinned chat/app list."""
+"""Atomic ordering contract for the drawer's combined pinned list."""
 
 from datetime import datetime, timedelta
 
@@ -27,22 +27,41 @@ def _seed_pinned_rows(db):
     )
     for index in (1, 2)
   ]
-  db.add_all([*chats, *apps])
+  projects = [
+    models.Project(
+      id=f"project-{index}",
+      name=f"Project {index}",
+      project_type="blank",
+      root_path=f"projects/project-{index}",
+      template_snapshot_json={},
+    )
+    for index in (1, 2)
+  ]
+  states = [
+    models.ProjectDrawerState(
+      project_id=project.id,
+      pinned_at=base + timedelta(seconds=index + 4),
+    )
+    for index, project in enumerate(projects, start=1)
+  ]
+  db.add_all([*chats, *apps, *projects, *states])
   db.commit()
-  for row in [*chats, *apps]:
+  for row in [*chats, *apps, *states]:
     db.refresh(row)
-  return chats, apps
+  return chats, apps, states
 
 
 def test_combined_pinned_order_commits_one_coherent_rank_sequence(
   client, auth, db,
 ):
-  chats, apps = _seed_pinned_rows(db)
+  chats, apps, projects = _seed_pinned_rows(db)
   requested = [
     {"kind": "app", "id": str(apps[1].id)},
+    {"kind": "project", "id": projects[0].project_id},
     {"kind": "chat", "id": chats[0].id},
     {"kind": "app", "id": str(apps[0].id)},
     {"kind": "chat", "id": chats[1].id},
+    {"kind": "project", "id": projects[1].project_id},
   ]
 
   response = client.put(
@@ -64,6 +83,7 @@ def test_combined_pinned_order_commits_one_coherent_rank_sequence(
   rows = {
     **{("chat", row.id): row for row in db.query(models.Chat).all()},
     **{("app", str(row.id)): row for row in db.query(models.App).all()},
+    **{("project", row.project_id): row for row in db.query(models.ProjectDrawerState).all()},
   }
   assert [rows[(item["kind"], item["id"])].pinned_at for item in requested] == stamps
 
@@ -71,11 +91,13 @@ def test_combined_pinned_order_commits_one_coherent_rank_sequence(
 def test_combined_pinned_order_rejects_a_partial_identity_set_without_writes(
   client, auth, db,
 ):
-  chats, apps = _seed_pinned_rows(db)
+  chats, apps, projects = _seed_pinned_rows(db)
   before = {
     ("chat", row.id): row.pinned_at for row in chats
   } | {
     ("app", str(row.id)): row.pinned_at for row in apps
+  } | {
+    ("project", row.project_id): row.pinned_at for row in projects
   }
 
   response = client.put(
@@ -89,5 +111,6 @@ def test_combined_pinned_order_rejects_a_partial_identity_set_without_writes(
   after = {
     **{("chat", row.id): row.pinned_at for row in db.query(models.Chat).all()},
     **{("app", str(row.id)): row.pinned_at for row in db.query(models.App).all()},
+    **{("project", row.project_id): row.pinned_at for row in db.query(models.ProjectDrawerState).all()},
   }
   assert after == before

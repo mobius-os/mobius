@@ -5,6 +5,12 @@ import {
   readComposerHandoff,
   stageComposerHandoff,
 } from '../composerDraft.js'
+import {
+  SEND_ATTEMPT_QUEUED_MESSAGE,
+  SEND_ATTEMPT_UNCONFIRMED_MESSAGE,
+  saveFailedSendAttempt,
+  settleFailedSendConfirmation,
+} from '../sendAttemptRecovery.js'
 import useComposerDraftState from '../hooks/useComposerDraftState.js'
 
 function storageStub() {
@@ -52,6 +58,200 @@ test('restoration consumes ordinary handoffs but keeps autosend intent', () => {
       draft: 'Send this once',
       autoSendDraft: 'Send this once',
     })
+    hook.unmount()
+  } finally {
+    if (previousStorage === undefined) delete globalThis.sessionStorage
+    else globalThis.sessionStorage = previousStorage
+  }
+})
+
+test('late transcript durability settles the mounted ambiguous-send owner', () => {
+  const previousStorage = globalThis.sessionStorage
+  globalThis.sessionStorage = storageStub()
+  try {
+    saveFailedSendAttempt('late-durable', {
+      cid: 'cid-late',
+      draftIdentity: 'draft-late',
+      text: 'already sent',
+      attachments: [{
+        id: 'file-1', name: 'note.txt', size: 12, mime_type: 'text/plain',
+      }],
+    })
+    const hook = renderHook(() => useComposerDraftState({
+      chatId: 'late-durable',
+      hidden: false,
+      inputRef: { current: null },
+    }))
+
+    assert.equal(hook.result.current.input, 'already sent')
+    assert.equal(hook.result.current.pendingFiles.length, 1)
+    assert.equal(hook.result.current.reconcileFailedAttempt([], []), 'missing')
+    assert.equal(hook.result.current.input, 'already sent')
+
+    assert.equal(hook.result.current.reconcileFailedAttempt([
+      { role: 'user', cid: 'cid-late' },
+    ], []), 'durable')
+    assert.equal(hook.result.current.input, '')
+    assert.deepEqual(hook.result.current.pendingFiles, [])
+    assert.equal(hook.result.current.sendFailure, null)
+    assert.equal(hook.result.current.failedSendAttemptRef.current, null)
+    hook.unmount()
+  } finally {
+    if (previousStorage === undefined) delete globalThis.sessionStorage
+    else globalThis.sessionStorage = previousStorage
+  }
+})
+
+test('an unavailable confirmation reaches the mounted ambiguous-send owner', () => {
+  const previousStorage = globalThis.sessionStorage
+  globalThis.sessionStorage = storageStub()
+  try {
+    saveFailedSendAttempt('confirmation-unavailable', {
+      cid: 'cid-unconfirmed',
+      draftIdentity: 'draft-unconfirmed',
+      text: 'keep this draft',
+      attachments: [],
+    })
+    const hook = renderHook(() => useComposerDraftState({
+      chatId: 'confirmation-unavailable',
+      hidden: false,
+      inputRef: { current: null },
+    }))
+
+    assert.equal(hook.result.current.reconcileFailedAttempt(
+      [],
+      [],
+      { reportUnavailable: true },
+    ), 'unconfirmed')
+    assert.equal(hook.result.current.input, 'keep this draft')
+    assert.equal(
+      hook.result.current.sendFailure,
+      SEND_ATTEMPT_UNCONFIRMED_MESSAGE,
+    )
+    hook.unmount()
+  } finally {
+    if (previousStorage === undefined) delete globalThis.sessionStorage
+    else globalThis.sessionStorage = previousStorage
+  }
+})
+
+test('a hard-reloaded retained intent keeps text and files under automatic retry ownership', () => {
+  const previousStorage = globalThis.sessionStorage
+  globalThis.sessionStorage = storageStub()
+  try {
+    saveFailedSendAttempt('retained-reload', {
+      cid: 'cid-retained',
+      draftIdentity: 'draft-retained',
+      text: 'retry automatically',
+      attachments: [{
+        id: 'file-retained', name: 'note.txt', size: 12, mime_type: 'text/plain',
+      }],
+    })
+    const hook = renderHook(() => useComposerDraftState({
+      chatId: 'retained-reload',
+      hidden: false,
+      inputRef: { current: null },
+    }))
+    const attempt = hook.result.current.failedSendAttemptRef.current
+
+    assert.equal(hook.result.current.reconcileFailedAttempt(
+      [],
+      [],
+      { reportQueued: true, expectedAttempt: attempt },
+    ), 'queued')
+    assert.equal(hook.result.current.input, 'retry automatically')
+    assert.equal(hook.result.current.pendingFiles.length, 1)
+    assert.equal(hook.result.current.sendFailure, SEND_ATTEMPT_QUEUED_MESSAGE)
+
+    hook.result.current.handleComposerRemoveFile('file-retained')
+    hook.result.current.handleComposerInputChange('new owner draft')
+    const newerAttempt = {
+      cid: 'cid-new',
+      draftIdentity: 'draft-new',
+      text: 'new owner draft',
+      attachments: [],
+    }
+    hook.result.current.rememberFailedAttempt(newerAttempt)
+    hook.result.current.setSendFailure('New attempt owns this status.')
+    assert.equal(hook.result.current.reconcileFailedAttempt(
+      [],
+      [],
+      { reportQueued: true, expectedAttempt: attempt },
+    ), 'superseded')
+    assert.equal(hook.result.current.input, 'new owner draft')
+    assert.equal(hook.result.current.sendFailure, 'New attempt owns this status.')
+    assert.deepEqual(hook.result.current.failedSendAttemptRef.current, newerAttempt)
+    hook.unmount()
+  } finally {
+    if (previousStorage === undefined) delete globalThis.sessionStorage
+    else globalThis.sessionStorage = previousStorage
+  }
+})
+
+test('an older confirmation cannot relabel a newer failed attempt', async () => {
+  const previousStorage = globalThis.sessionStorage
+  globalThis.sessionStorage = storageStub()
+  try {
+    const hook = renderHook(() => useComposerDraftState({
+      chatId: 'stale-confirmation',
+      hidden: false,
+      inputRef: { current: null },
+    }))
+    const first = {
+      cid: 'cid-first', draftIdentity: 'draft-first', text: 'first', attachments: [],
+    }
+    hook.result.current.rememberFailedAttempt(first)
+
+    let finishConfirmation
+    const confirmation = settleFailedSendConfirmation(
+      () => new Promise(resolve => { finishConfirmation = resolve }),
+      options => hook.result.current.reconcileFailedAttempt(
+        [],
+        [],
+        { ...options, expectedAttempt: first },
+      ),
+    )
+
+    hook.result.current.handleComposerInputChange('second')
+    const second = {
+      cid: 'cid-second', draftIdentity: 'draft-second', text: 'second', attachments: [],
+    }
+    hook.result.current.rememberFailedAttempt(second)
+    hook.result.current.setSendFailure('Second attempt is still queued.')
+    finishConfirmation(null)
+
+    assert.equal(await confirmation, 'superseded')
+    assert.equal(hook.result.current.input, 'second')
+    assert.equal(hook.result.current.sendFailure, 'Second attempt is still queued.')
+    assert.deepEqual(hook.result.current.failedSendAttemptRef.current, second)
+    hook.unmount()
+  } finally {
+    if (previousStorage === undefined) delete globalThis.sessionStorage
+    else globalThis.sessionStorage = previousStorage
+  }
+})
+
+test('a newer mounted draft supersedes late ambiguous-send confirmation', () => {
+  const previousStorage = globalThis.sessionStorage
+  globalThis.sessionStorage = storageStub()
+  try {
+    saveFailedSendAttempt('newer-draft', {
+      cid: 'cid-old',
+      draftIdentity: 'draft-old',
+      text: 'old draft',
+      attachments: [],
+    })
+    const hook = renderHook(() => useComposerDraftState({
+      chatId: 'newer-draft',
+      hidden: false,
+      inputRef: { current: null },
+    }))
+
+    hook.result.current.handleComposerInputChange('newer draft')
+    assert.equal(hook.result.current.reconcileFailedAttempt([
+      { role: 'user', cid: 'cid-old' },
+    ], []), 'none')
+    assert.equal(hook.result.current.input, 'newer draft')
     hook.unmount()
   } finally {
     if (previousStorage === undefined) delete globalThis.sessionStorage

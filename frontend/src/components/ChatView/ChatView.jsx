@@ -12,7 +12,7 @@ import { flushSync } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
-import { apiFetch, getAuthHeaders, jsonOrThrow, BASE } from '../../api/client.js'
+import { apiFetch, getAuthHeaders, getToken, jsonOrThrow, BASE } from '../../api/client.js'
 import { chatMessagesQueryKey, chatQueries, settingsQueries } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
 import useScrollMode from './useScrollMode.js'
@@ -29,12 +29,17 @@ import {
   savedReadingAnchorKey,
 } from './scroll/readingPositions.js'
 import useVoiceInput from './useVoiceInput.js'
-import useOnlineStatus from '../../hooks/useOnlineStatus.js'
 import {
   getOnlineSnapshot,
   getRecoverySnapshot,
   subscribeRecovery,
 } from '../../lib/connectivityStore.js'
+import {
+  inspectOutboxIntent,
+  outboxPrincipalKey,
+  retireIntent,
+  subscribeOutboxSettlement,
+} from './chatOutbox.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
@@ -120,6 +125,7 @@ import { composerHistoryFromMessages } from './composerHistory.js'
 import { createFileDragHandlers } from './dragUpload.js'
 import useOpenAppCtaAutoDismiss from './hooks/useOpenAppCtaAutoDismiss.js'
 import {
+  isAmbiguousSendFailure,
   isModelSelectionRequiredFailure,
   isPendingQuestionSendFailure,
   sendFailureMessage,
@@ -170,7 +176,8 @@ import {
 } from './sendAttemptIdentity.js'
 import {
   clearFailedSendAttempt,
-  sendAttemptIsDurable,
+  coordinateFailedSendRecovery,
+  settleFailedSendConfirmation,
 } from './sendAttemptRecovery.js'
 import {
   clearComposerDraft,
@@ -389,10 +396,6 @@ export default function ChatView({
     onInternalNav?.(url)
   }, [onInternalNav])
   const internalNav = onInternalNav ? handleInternalNav : undefined
-  // Chat is online-only (it spawns a server-side agent). When offline
-  // the composer disables send and says so, rather than failing into a
-  // dead stream.
-  const online = useOnlineStatus()
   // Read the query cache synchronously on mount. If we've viewed this chat
   // before, its complete transcript window builds the hidden restoration DOM
   // immediately. A complete cache that covers the saved reading coordinate may
@@ -530,6 +533,7 @@ export default function ChatView({
     failedSendAttemptRef,
     clearFailedAttempt,
     rememberFailedAttempt,
+    reconcileFailedAttempt: reconcileFailedSendAttempt,
     pendingFiles,
     clearFiles,
     restoreFiles,
@@ -689,6 +693,13 @@ export default function ChatView({
   // synchronous access (handleStop's pre-await clear, fetchMessages'
   // cid preservation).
   const pendingQueue = usePendingQueue(cached?.pending_messages || [])
+  useEffect(() => {
+    // The POST error and the server's durable transcript can settle in either
+    // order. If a later SSE/reconcile render proves this exact cid is already
+    // visible, retire the restored draft immediately instead of waiting for a
+    // remount or another network read.
+    reconcileFailedSendAttempt(messages, pendingQueue.pendingMessages)
+  }, [messages, pendingQueue.pendingMessages, reconcileFailedSendAttempt])
   // Every delayed visible user row carries one opaque scroll intent under the
   // same stable cid that owns its queue/transcript identity. A queued
   // continuation temporarily moves its rows + intent into one envelope while
@@ -860,6 +871,25 @@ export default function ChatView({
   // snapshot while app context, settings, or the POST is still in flight;
   // that snapshot cannot retire this locally-owned start.
   const localStartRequestRef = useRef(null)
+  // A manual Resume has no composer draft owner. Keep its provisional
+  // confirmation notice under an exact token so an older check cannot clear a
+  // newer send failure or leave the internal `continue` action in the composer.
+  const continuationConfirmationRef = useRef(null)
+  // Terminal drain events are a wake-up hint for one exact attempt, never a
+  // replacement for inspecting the durable outbox. Retain the hint only while
+  // its cid + draft identity still name the mounted composer owner.
+  const failedSendTerminalRef = useRef(null)
+  const failedSendOutboxReconcileSeqRef = useRef(0)
+  const failedSendChatIdRef = useRef(String(chatId))
+  useLayoutEffect(() => {
+    failedSendChatIdRef.current = String(chatId)
+    failedSendTerminalRef.current = null
+    failedSendOutboxReconcileSeqRef.current += 1
+    return () => {
+      failedSendOutboxReconcileSeqRef.current += 1
+      failedSendTerminalRef.current = null
+    }
+  }, [chatId])
   // Re-entrancy guard for doSendSilent (answer submissions). sendingRef
   // alone cannot guard doSendSilent because answer sends are deliberately
   // allowed while sendingRef is true (the runner is parked waiting for
@@ -1069,6 +1099,65 @@ export default function ChatView({
     commitSendIntent({ cid, intent, fallbackWillPin })
   }
 
+  const reconcileFailedSendOutbox = useCallback(async ({
+    visibleMessages = messagesRef.current,
+    pendingMessages = pendingQueue.pendingMessagesRef.current,
+    authoritative = false,
+    terminalOutcome = null,
+    expectedAttempt = failedSendAttemptRef.current,
+    expectedFetchGeneration = fetchGenRef.current,
+  } = {}) => {
+    if (!expectedAttempt) return 'none'
+    const sequence = failedSendOutboxReconcileSeqRef.current + 1
+    failedSendOutboxReconcileSeqRef.current = sequence
+    const expectedChatId = String(chatId)
+    const reconciliation = await coordinateFailedSendRecovery({
+      expectedAttempt,
+      expectedChatId,
+      expectedGeneration: expectedFetchGeneration,
+      expectedInspection: sequence,
+      visibleMessages,
+      pendingMessages,
+      authoritative,
+      terminalOutcome,
+      inspectIntent: () => inspectOutboxIntent({
+        chatId: expectedChatId,
+        cid: expectedAttempt.cid,
+        principalKey: outboxPrincipalKey(getToken()),
+        attempt: expectedAttempt,
+      }),
+      readCurrent: () => ({
+        chatId: failedSendChatIdRef.current,
+        chatStale: chatIdStaleRef.current,
+        generation: fetchGenRef.current,
+        inspection: failedSendOutboxReconcileSeqRef.current,
+        attempt: failedSendAttemptRef.current,
+        visibleMessages: messagesRef.current,
+        pendingMessages: pendingQueue.pendingMessagesRef.current,
+        terminal: failedSendTerminalRef.current,
+      }),
+    })
+    if (reconciliation.status === 'none' || reconciliation.status === 'superseded') {
+      return reconciliation.status
+    }
+    return reconcileFailedSendAttempt(
+      messagesRef.current,
+      pendingQueue.pendingMessagesRef.current,
+      {
+        expectedAttempt,
+        reportQueued: reconciliation.status === 'queued',
+        reportMissing: reconciliation.status === 'missing',
+        reportUnavailable: reconciliation.status === 'unconfirmed',
+      },
+    )
+  }, [
+    chatId,
+    failedSendAttemptRef,
+    messagesRef,
+    pendingQueue.pendingMessagesRef,
+    reconcileFailedSendAttempt,
+  ])
+
   // Re-fetch messages from the API. Called when the SSE stream reconnects
   // and gets a 204 (no active broadcast — the chat finished while the
   // user was offline or on poor connectivity). Replaces stale messages
@@ -1077,6 +1166,8 @@ export default function ChatView({
     force = false,
     terminal204 = false,
     authoritative = false,
+    expectedFailedAttempt,
+    failedAttemptTerminalOutcome = null,
   } = {}) => {
     if (sendingRef.current && !force) return
     const gen = fetchGenRef.current
@@ -1100,6 +1191,16 @@ export default function ChatView({
           }
         }
       }
+      await reconcileFailedSendOutbox({
+        visibleMessages: msgs,
+        pendingMessages: data.pending_messages || [],
+        authoritative: true,
+        terminalOutcome: failedAttemptTerminalOutcome,
+        expectedAttempt: expectedFailedAttempt === undefined
+          ? failedSendAttemptRef.current
+          : expectedFailedAttempt,
+        expectedFetchGeneration: gen,
+      })
       const preserveLocalTurn =
         !authoritative
         && force
@@ -1145,6 +1246,11 @@ export default function ChatView({
       const runtimeGoalObjective = goalObjectiveFromRuntime(
         data, latestGoalObjective(msgs),
       )
+      // A provider creates its session during the first turn, after ChatView
+      // has already mounted. Publish the refreshed detail metadata with the
+      // settled transcript so the context gauge follows that exact session
+      // without waiting for a page reload.
+      const refreshedChatInfo = chatDetailCacheValue(data).chatInfo
       setActiveGoalObjective(runtimeGoalObjective)
       const adoptAssistantOwner = shouldAdoptRuntimeAssistantOwner({
         runtimeRunning: !!data.running,
@@ -1165,6 +1271,7 @@ export default function ChatView({
           activeAssistantMessageId: data.active_assistant_message_id || null,
         } : {}),
         waits: data.waits || [],
+        chatInfo: refreshedChatInfo,
       })
       // Reconcile pending queue against authoritative server state.
       // hydrate() already preserves truly optimistic/in-flight local rows
@@ -1182,6 +1289,14 @@ export default function ChatView({
         pendingLimitResume: !!tailResumableBlock(msgs)?.pause?.resets_at,
       }
     } catch {
+      void reconcileFailedSendOutbox({
+        authoritative: false,
+        terminalOutcome: failedAttemptTerminalOutcome,
+        expectedAttempt: expectedFailedAttempt === undefined
+          ? failedSendAttemptRef.current
+          : expectedFailedAttempt,
+        expectedFetchGeneration: gen,
+      })
       // Network error — silent, user can retry. Callers that need to attach
       // to a newly announced run must distinguish this ambiguous result from
       // an authoritative idle verdict.
@@ -1192,7 +1307,36 @@ export default function ChatView({
     commitMessages,
     pendingQueue.hydrate,
     queryClient,
+    reconcileFailedSendOutbox,
     setActiveAssistantMessageId,
+  ])
+
+  const settleAmbiguousSendConfirmation = useCallback((
+    failedAttempt,
+    continuationConfirmation = null,
+  ) => (
+    settleFailedSendConfirmation(
+      () => fetchMessages({ force: true, expectedFailedAttempt: failedAttempt }),
+      options => reconcileFailedSendAttempt(
+        messagesRef.current,
+        pendingQueue.pendingMessagesRef.current,
+        { ...options, expectedAttempt: failedAttempt },
+      ),
+      () => {
+        if (
+          !continuationConfirmation
+          || continuationConfirmationRef.current !== continuationConfirmation
+        ) return
+        continuationConfirmationRef.current = null
+        setSendFailure(null)
+      },
+    )
+  ), [
+    fetchMessages,
+    messagesRef,
+    pendingQueue.pendingMessagesRef,
+    reconcileFailedSendAttempt,
+    setSendFailure,
   ])
 
   // Active-turn runtime reconciliation. The SSE stream is authoritative for
@@ -2112,6 +2256,7 @@ export default function ChatView({
     ))
 
     const gen = fetchGenRef.current
+    const activationFailedAttempt = failedSendAttemptRef.current
     const requestJson = async (path, label) => {
       const response = await apiFetch(path, {
         timeoutMs: CHAT_FETCH_TIMEOUT_MS,
@@ -2239,23 +2384,14 @@ export default function ChatView({
         return
       }
       const msgs = detailCache.messages
-      const failedAttempt = failedSendAttemptRef.current
-      if (failedAttempt) {
-        if (sendAttemptIsDurable(
-          failedAttempt,
-          msgs,
-          runtime.pending_messages,
-        )) {
-          clearFailedAttempt()
-          setComposerInput('')
-          clearFiles()
-          setSendFailure(null)
-        } else {
-          setSendFailure(
-            'That message didn’t reach the chat. It’s ready in the composer—try again.',
-          )
-        }
-      }
+      await reconcileFailedSendOutbox({
+        visibleMessages: msgs,
+        pendingMessages: runtime.pending_messages || [],
+        authoritative: true,
+        expectedAttempt: activationFailedAttempt,
+        expectedFetchGeneration: gen,
+      })
+      if (cancelled || fetchGenRef.current !== gen) return
 
       if (reused) {
         // One narrow cache publication updates queue/liveness only. Reconcile
@@ -2405,6 +2541,15 @@ export default function ChatView({
         setLoadError(!cacheIsSafeFallback)
         setLoading(false)
         setActivationSettled(true)
+        void reconcileFailedSendOutbox({
+          visibleMessages: cacheIsSafeFallback
+            ? activationCache.messages
+            : [],
+          pendingMessages: pendingQueue.pendingMessagesRef.current,
+          authoritative: false,
+          expectedAttempt: activationFailedAttempt,
+          expectedFetchGeneration: gen,
+        })
         // A confirmed 404 means this chat is gone (deleted out-of-band, or an
         // off-list chat the restore probe had memoized as existing). Tell the
         // shell so it demotes to a live chat instead of stranding the user on a
@@ -2430,6 +2575,7 @@ export default function ChatView({
     loadNonce,
     searchReveal?.anchorKey,
     searchReveal?.id,
+    reconcileFailedSendOutbox,
     setActiveAssistantMessageId,
   ])
 
@@ -2602,6 +2748,7 @@ export default function ChatView({
     const pin = opts.pin !== false  // default true
     const continuation = opts.continuation === 'manual' ? 'manual' : undefined
     const preserveComposer = opts.preserveComposer === true
+    continuationConfirmationRef.current = null
     setSendFailure(null)
 
     // Stop voice recognition so a late onresult doesn't refill input
@@ -2955,18 +3102,23 @@ export default function ChatView({
         // Roll back optimistic + restore input.
         if (!directSteer) pendingQueue.cancelByCid(queuedMsg.cid)
         forgetSendIntent({ cid: queuedMsg.cid })
-        if (!continuation) {
-          rememberFailedAttempt({
-            cid,
-            draftIdentity,
-            text,
-            attachments: composerFileSnapshot,
-          })
+        const failedAttempt = continuation ? null : {
+          cid,
+          draftIdentity,
+          text,
+          transportContent: text,
+          attachments: composerFileSnapshot,
         }
+        if (failedAttempt) rememberFailedAttempt(failedAttempt)
         restoreComposerAfterFailedSend()
         setSendFailure(modelSelectionBlocked
           ? null
           : sendFailureMessage(err, { online: getOnlineSnapshot() }))
+        if (isAmbiguousSendFailure(err)) {
+          const confirmation = continuation ? {} : null
+          if (confirmation) continuationConfirmationRef.current = confirmation
+          void settleAmbiguousSendConfirmation(failedAttempt, confirmation)
+        }
         if (modelSelectionBlocked) {
           setModelSelectionRequest(request => request + 1)
         } else if (pendingQuestionBlocked) {
@@ -3148,14 +3300,14 @@ export default function ChatView({
         sendingRef.current = false
         setServerRunningState(false)
       }
-      if (!continuation) {
-        rememberFailedAttempt({
-          cid,
-          draftIdentity,
-          text,
-          attachments: composerFileSnapshot,
-        })
+      const failedAttempt = continuation ? null : {
+        cid,
+        draftIdentity,
+        text,
+        transportContent: sendText,
+        attachments: composerFileSnapshot,
       }
+      if (failedAttempt) rememberFailedAttempt(failedAttempt)
       restoreComposerAfterFailedSend()
       // Ambiguity recovery already verified reachability and safely replayed
       // this exact cid once. If even that acknowledgement was lost, keep the
@@ -3170,6 +3322,11 @@ export default function ChatView({
       setSendFailure(modelSelectionBlocked
         ? null
         : sendFailureMessage(err, { online: getOnlineSnapshot() }))
+      if (isAmbiguousSendFailure(err)) {
+        const confirmation = continuation ? {} : null
+        if (confirmation) continuationConfirmationRef.current = confirmation
+        void settleAmbiguousSendConfirmation(failedAttempt, confirmation)
+      }
       if (modelSelectionBlocked) {
         setModelSelectionRequest(request => request + 1)
         onStreamEndRef.current?.({ continues: false })
@@ -3200,10 +3357,10 @@ export default function ChatView({
     pendingFiles,
     commitMessages,
     fetchMessages,
+    settleAmbiguousSendConfirmation,
     clearFiles,
     restoreFiles,
     releaseFiles,
-    online,
     setActiveGoalState,
     acknowledgeFirstMessageAccepted,
   ])
@@ -3227,7 +3384,11 @@ export default function ChatView({
       consumeComposerHandoff(chatId, request.text, { autoSend: true })
     }
     doSend(text)
-    if (!request.storedHandoff) onComposerRequestHandled?.(request.token)
+    // A stored handoff can also be an explicit Shell request from the still-
+    // visible New Chat landing. Acknowledge every request token after the send
+    // starts: storage-only tokens simply do not match Shell's current request,
+    // while a matching token releases the landing and clears its ownership.
+    onComposerRequestHandled?.(request.token)
   }, [
     pendingComposerSubmit,
     loading,
@@ -3453,6 +3614,15 @@ export default function ChatView({
     const cancelledIndex = currentQueue.findIndex(row => cidOf(row) === cid)
     const cancelledRow = cancelledIndex >= 0 ? currentQueue[cancelledIndex] : null
     pendingQueue.cancelByCid(cid)
+    // Make replay retirement authoritative before asking the server to cancel
+    // the queue row. A failed state transition restores the UI and stops here;
+    // otherwise a later automatic replay could resurrect work the owner just
+    // cancelled. Physical IndexedDB deletion is only best-effort compaction.
+    const retired = await retireIntent(cid, { chatId, outcome: 'cancelled' })
+    if (!retired) {
+      pendingQueue.restoreByCid(cancelledRow, cancelledIndex)
+      return
+    }
     forgetSendIntent({ cid })
     try {
       const res = await apiFetch(`/chats/${chatId}/pending/${encodeURIComponent(cid)}`, {
@@ -4163,6 +4333,7 @@ export default function ChatView({
     let observedRecoveryGeneration = getRecoverySnapshot()
     const run = () => {
       if (cancelled) return
+      void reconcileFailedSendOutbox({ authoritative: false })
       reconcileRuntimeState().then(runtime => {
         if (!cancelled && runtime) ensureRuntimeStreamConnected(runtime)
       })
@@ -4188,7 +4359,48 @@ export default function ChatView({
       window.removeEventListener('online', run)
       document.removeEventListener('visibilitychange', onVisible)
     }
-  }, [ensureRuntimeStreamConnected, hidden, reconcileRuntimeState])
+  }, [
+    ensureRuntimeStreamConnected,
+    hidden,
+    reconcileFailedSendOutbox,
+    reconcileRuntimeState,
+  ])
+
+  // The shell can deliver this chat's intent while another pane is visible.
+  // Reconcile the authoritative transcript immediately when this mounted chat
+  // becomes that delivery target. The runtime-only projection carries no
+  // message cids and therefore cannot settle the restored composer.
+  useEffect(() => subscribeOutboxSettlement((settlement) => {
+    if (hidden || String(settlement?.chatId) !== String(chatId)) return
+    const attempt = failedSendAttemptRef.current
+    if (!attempt || String(settlement?.cid) !== String(attempt.cid)) return
+    failedSendTerminalRef.current = {
+      attempt,
+      outcome: settlement.outcome,
+    }
+    if (settlement.outcome === 'failed') {
+      void reconcileFailedSendOutbox({
+        terminalOutcome: 'failed',
+        expectedAttempt: attempt,
+      })
+      return
+    }
+    fetchMessages({
+      force: true,
+      authoritative: true,
+      expectedFailedAttempt: attempt,
+      failedAttemptTerminalOutcome: 'delivered',
+    }).then(runtime => {
+      if (runtime) ensureRuntimeStreamConnected(runtime)
+    })
+  }), [
+    chatId,
+    ensureRuntimeStreamConnected,
+    failedSendAttemptRef,
+    fetchMessages,
+    hidden,
+    reconcileFailedSendOutbox,
+  ])
 
   // Empty-state is the "I have nothing to show because nothing happened
   // yet" view. If the initial chat fetch errored, we have no idea
@@ -4481,10 +4693,10 @@ export default function ChatView({
   )
 
   // The resume card publishes the same way, from the TAIL resumable note only
-  // — the same block tailResumableBlock arms the cue on. (MsgContent renders a
-  // Resume button on every resumable block of the last message, so the tail
-  // gate lives at the publication site; one shared ref can only hold one
-  // node.) A tap on the nudge scrolls that node in.
+  // — the same block tailResumableBlock arms the cue on. MsgContent applies
+  // that tail ownership to the card and its actions together, so this shared
+  // ref always names the single actionable recovery surface. A tap on the
+  // nudge scrolls that node in.
   const [resumeCardEl, resumeCardRef] = useNudgeTargetRef()
   const resumeCardOffscreen = useOffscreenNudge(
     scrollRef, hasPendingResume, resumeCardEl,
@@ -4558,9 +4770,18 @@ export default function ChatView({
     if (!pendingResumeBlock) return null
     if (pendingResumeBlock.pause?.resets_at) {
       const label = formatResetTime(pendingResumeBlock.pause.resets_at)
+      if (autoResumeEnabled) {
+        return label
+          ? `Usage limit reached. Queued to continue ${label}.`
+          : 'Usage limit reached. Queued to continue automatically.'
+      }
+      if (limitResetElapsed) return 'Usage is available again. Continue available.'
       return label
-        ? `Rate limit reached, resets ${label} — Resume available.`
-        : 'Rate limit reached — Resume available.'
+        ? `Usage limit reached. Usage resets ${label}. Automatic continuation available.`
+        : 'Usage limit reached. Automatic continuation available.'
+    }
+    if (pendingResumeBlock.pause?.kind === 'restart') {
+      return 'Response paused for restart. Möbius will continue automatically.'
     }
     return 'Turn paused — Resume available.'
   })()
@@ -4838,6 +5059,7 @@ export default function ChatView({
                 onAutoResumeChange={
                   isLastMsg ? handleAutoResumeChange : undefined
                 }
+                limitResetElapsed={isLastMsg && limitResetElapsed}
                 submissionBlocked={providerSwitching}
                 isLastMsg={isLastMsg}
                 liveQuestionId={answerableQuestionId}
@@ -4872,6 +5094,7 @@ export default function ChatView({
                 autoResumeErrorSource === 'card' ? autoResumeError : ''
               }
               onAutoResumeChange={handleAutoResumeChange}
+              limitResetElapsed={limitResetElapsed}
               submissionBlocked={providerSwitching}
               liveQuestionId={answerableQuestionId}
               // Same publication channel as the durable rows above: while the
@@ -4955,8 +5178,21 @@ export default function ChatView({
                       onClick={revealConversationTail}
                     >
                       {pendingResumeBlock?.pause?.resets_at
-                        ? 'Rate limit reached — tap to resume'
-                        : 'Turn paused — tap to resume'}
+                        ? autoResumeEnabled
+                          ? (() => {
+                              const label = formatResetTime(
+                                pendingResumeBlock.pause.resets_at,
+                              )
+                              return label
+                                ? `Queued to continue ${label}`
+                                : 'Queued to continue automatically'
+                            })()
+                          : limitResetElapsed
+                            ? 'Usage available — tap to continue'
+                            : 'Usage limit reached — continuation available'
+                        : pendingResumeBlock?.pause?.kind === 'restart'
+                          ? 'Paused for restart — continuing automatically'
+                          : 'Turn paused — tap to resume'}
                     </button>
                   )}
                   {jumpToLatestVisible && (
@@ -5060,7 +5296,6 @@ export default function ChatView({
           steerReady={!steerBusy}
           canRequestSteer={canRequestSteer}
           canSubmitSteer={canSubmitSteer}
-          offline={!online}
           sendFailure={sendFailure}
           submissionBlocked={providerSwitching}
           questionBlocked={hasPendingQuestion}
@@ -5075,6 +5310,7 @@ export default function ChatView({
               usageEnabled={!embedded}
               chatId={chatId}
               provider={chatInfo?.provider}
+              providerSessionId={chatInfo?.session_id}
               model={selectedChatModel(chatInfo)}
             >
               {({ icon, ariaLabel, providerUsage }) => (
@@ -5117,6 +5353,8 @@ export default function ChatView({
                 artifactsAppId={artifactsAppId}
                 onOpenArtifact={onOpenArtifact}
                 onOpenUsage={() => setShowUsage(true)}
+                appArtifacts={builtApps}
+                onOpenAppArtifact={onOpenApp}
                 embedded={embedded}
               />
               )}

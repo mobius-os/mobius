@@ -34,6 +34,10 @@ SOURCE_FILES_TOTAL_MAX = 8 * 1024 * 1024
 ICON_MAX_BYTES = 12 * 1024 * 1024
 SKILL_MAX_BYTES = 256 * 1024
 SYSTEM_PROMPT_MAX_BYTES = 256 * 1024
+PROJECT_TEMPLATES_COUNT_MAX = 12
+PROJECT_TEMPLATE_FILES_COUNT_MAX = 64
+PROJECT_ARTIFACT_TYPES_COUNT_MAX = 12
+PROJECT_ARTIFACT_EXTENSIONS_COUNT_MAX = 16
 
 _SLUG_OK = "abcdefghijklmnopqrstuvwxyz0123456789-_"
 _SOURCE_FILES_MANAGED_PREFIXES = (
@@ -232,6 +236,151 @@ def validate_manifest_contract(manifest) -> None:
   for field in RECOGNIZED_CAPABILITIES:
     if field in permissions and not isinstance(permissions[field], bool):
       _fail(f"Manifest `permissions.{field}` must be a boolean.")
+
+  project_templates = manifest.get("project_templates")
+  if project_templates is not None:
+    if not isinstance(project_templates, list):
+      _fail("Manifest `project_templates` must be an array.")
+    if len(project_templates) > PROJECT_TEMPLATES_COUNT_MAX:
+      _fail(
+        "Manifest has too many project_templates "
+        f"(max {PROJECT_TEMPLATES_COUNT_MAX})."
+      )
+    seen_template_ids = set()
+    for index, template in enumerate(project_templates):
+      field = f"project_templates[{index}]"
+      if not isinstance(template, Mapping):
+        _fail(f"Manifest `{field}` must be an object.")
+      template_id = template.get("id")
+      validate_slug_field(template_id, f"{field}.id")
+      if template_id in seen_template_ids:
+        _fail(f"Manifest `{field}.id` duplicates {template_id!r}.")
+      seen_template_ids.add(template_id)
+      if not isinstance(template.get("name"), str) or not template["name"].strip():
+        _fail(f"Manifest `{field}.name` must be a non-empty string.")
+      for text_field in ("description", "guidance"):
+        value = template.get(text_field)
+        if value is not None and not isinstance(value, str):
+          _fail(f"Manifest `{field}.{text_field}` must be a string.")
+      for list_field in ("skills", "dependencies"):
+        values = template.get(list_field, [])
+        if not isinstance(values, list) or any(
+          not isinstance(value, str) or not value.strip() for value in values
+        ):
+          _fail(f"Manifest `{field}.{list_field}` must be an array of strings.")
+      previews = template.get("previews", [])
+      if not isinstance(previews, list) or len(previews) > 8:
+        _fail(f"Manifest `{field}.previews` must be an array with at most 8 entries.")
+      seen_preview_ids = set()
+      for preview_index, preview in enumerate(previews):
+        preview_field = f"{field}.previews[{preview_index}]"
+        if not isinstance(preview, Mapping):
+          _fail(f"Manifest `{preview_field}` must be an object.")
+        preview_id = preview.get("id")
+        validate_slug_field(preview_id, f"{preview_field}.id")
+        if preview_id in seen_preview_ids:
+          _fail(f"Manifest `{preview_field}.id` duplicates {preview_id!r}.")
+        seen_preview_ids.add(preview_id)
+        if preview.get("kind") not in {"html", "pdf", "image"}:
+          _fail(f"Manifest `{preview_field}.kind` must be html, pdf, or image.")
+        if not isinstance(preview.get("name"), str) or not preview["name"].strip():
+          _fail(f"Manifest `{preview_field}.name` must be a non-empty string.")
+        validate_repo_relative_path(preview.get("path"), f"{preview_field}.path")
+      actions = template.get("actions", [])
+      if not isinstance(actions, list) or len(actions) > 8:
+        _fail(f"Manifest `{field}.actions` must be an array with at most 8 entries.")
+      seen_action_ids = set()
+      for action_index, action in enumerate(actions):
+        action_field = f"{field}.actions[{action_index}]"
+        if not isinstance(action, Mapping):
+          _fail(f"Manifest `{action_field}` must be an object.")
+        action_id = action.get("id")
+        validate_slug_field(action_id, f"{action_field}.id")
+        if action_id in seen_action_ids:
+          _fail(f"Manifest `{action_field}.id` duplicates {action_id!r}.")
+        seen_action_ids.add(action_id)
+        if not isinstance(action.get("name"), str) or not action["name"].strip():
+          _fail(f"Manifest `{action_field}.name` must be a non-empty string.")
+        prompt = action.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 4000:
+          _fail(f"Manifest `{action_field}.prompt` must be 1-4000 characters.")
+      files = template.get("files", {})
+      if not isinstance(files, Mapping):
+        _fail(f"Manifest `{field}.files` must be an object.")
+      if len(files) > PROJECT_TEMPLATE_FILES_COUNT_MAX:
+        _fail(
+          f"Manifest `{field}.files` has too many entries "
+          f"(max {PROJECT_TEMPLATE_FILES_COUNT_MAX})."
+        )
+      for destination, source in files.items():
+        validate_repo_relative_path(destination, f"{field}.files.{destination}")
+        validate_repo_relative_path(source, f"{field}.files.{destination}")
+
+      artifact_types = template.get("artifact_types", [])
+      if (
+        not isinstance(artifact_types, list)
+        or len(artifact_types) > PROJECT_ARTIFACT_TYPES_COUNT_MAX
+      ):
+        _fail(
+          f"Manifest `{field}.artifact_types` must be an array with at most "
+          f"{PROJECT_ARTIFACT_TYPES_COUNT_MAX} entries."
+        )
+      seen_artifact_type_ids = set()
+      for artifact_index, artifact_type in enumerate(artifact_types):
+        artifact_field = f"{field}.artifact_types[{artifact_index}]"
+        if not isinstance(artifact_type, Mapping):
+          _fail(f"Manifest `{artifact_field}` must be an object.")
+        artifact_type_id = artifact_type.get("id")
+        validate_slug_field(artifact_type_id, f"{artifact_field}.id")
+        if artifact_type_id in seen_artifact_type_ids:
+          _fail(f"Manifest `{artifact_field}.id` duplicates {artifact_type_id!r}.")
+        seen_artifact_type_ids.add(artifact_type_id)
+        if (
+          not isinstance(artifact_type.get("name"), str)
+          or not artifact_type["name"].strip()
+        ):
+          _fail(f"Manifest `{artifact_field}.name` must be a non-empty string.")
+        extensions = artifact_type.get("extensions")
+        if (
+          not isinstance(extensions, list)
+          or not extensions
+          or len(extensions) > PROJECT_ARTIFACT_EXTENSIONS_COUNT_MAX
+          or any(
+            not isinstance(extension, str)
+            or re.fullmatch(r"[a-z0-9]{1,16}", extension) is None
+            for extension in extensions
+          )
+        ):
+          _fail(
+            f"Manifest `{artifact_field}.extensions` must be 1-"
+            f"{PROJECT_ARTIFACT_EXTENSIONS_COUNT_MAX} lowercase file extensions."
+          )
+        if artifact_type.get("preview") not in {"html", "pdf", "image"}:
+          _fail(f"Manifest `{artifact_field}.preview` must be html, pdf, or image.")
+        script = artifact_type.get("script")
+        validate_repo_relative_path(script, f"{artifact_field}.script")
+        if not script.endswith(".sh"):
+          _fail(
+            f"Manifest `{artifact_field}.script` must be a .sh source file."
+          )
+        declared_sources = manifest.get("source_files")
+        if not isinstance(declared_sources, list) or script not in declared_sources:
+          _fail(
+            f"Manifest `{artifact_field}.script` must also be listed in "
+            "`source_files` so every install contains the reviewed builder."
+          )
+        output = artifact_type.get("output")
+        if not isinstance(output, str) or not output or len(output) > 256:
+          _fail(f"Manifest `{artifact_field}.output` must be a non-empty string.")
+        placeholders = set(re.findall(r"\{([^{}]+)\}", output))
+        if placeholders - {"source", "stem"}:
+          _fail(
+            f"Manifest `{artifact_field}.output` uses unsupported placeholders."
+          )
+        rendered_output = output.replace("{source}", "source/index.html").replace(
+          "{stem}", "index",
+        )
+        validate_repo_relative_path(rendered_output, f"{artifact_field}.output")
 
   # An app declares the platform capabilities it cannot function without. A name
   # this build does not recognize means the running Möbius predates the feature

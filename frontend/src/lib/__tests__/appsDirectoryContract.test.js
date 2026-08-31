@@ -28,7 +28,7 @@ test('Apps is a single drawer destination and the old full app list is gone', ()
 test('directory cards preserve app management through shared row actions', () => {
   assert.match(drawer, /variant="card"[\s\S]*?actions=\{rowActions\}/,
     'app cards must keep the shared row action surface')
-  for (const action of ['Install to home screen', 'Share app', 'Delete data', 'Rename']) {
+  for (const action of ['Install to home screen', 'Share app', 'Delete data', 'Copy name', 'Rename']) {
     assert.match(itemActionMenu, new RegExp(action))
   }
 })
@@ -60,14 +60,21 @@ test('phone and web share one searchable launcher tab', () => {
   assert.match(shell, /const navigationSurfaceOpen = modalDrawerOpen/)
 })
 
-test('chat and app rows share one placed action menu contract', () => {
+test('chat, app, and project rows share one placed action menu contract', () => {
   assert.match(drawer, /<DrawerItemActionMenu[\s\S]*?itemKind=\{kind\}[\s\S]*?itemName=\{label\}/)
   assert.doesNotMatch(drawer, /@openai\/apps-sdk-ui\/components\/Menu/)
   assert.doesNotMatch(drawer, /triggerHidden|drawer__menu-anchor/)
-  assert.match(itemActionMenu, /itemKind === 'chat' \? 'chats' : 'apps'/)
+  assert.match(itemActionMenu, /itemKind === 'project'[\s\S]*?'projects'/)
+  assert.match(itemActionMenu, /:\s*'apps'/)
   assert.doesNotMatch(itemActionMenu, /drawer__item-action-header|drawer__item-action-handle/)
   assert.match(itemActionMenu, /itemKind === 'app' && \(/,
     'Delete data must stay app-only')
+  assert.match(drawer, /onCopy=\{\(\) => actions\.copyName\(label\)\}/)
+  assert.match(drawer, /writeClipboardText\(value\)/)
+  assert.doesNotMatch(drawer, /Name copied/,
+    'successful name copies should not create a routine confirmation notice')
+  assert.match(drawer, /if \(!copied\)[\s\S]*?Couldn't copy the name\./,
+    'clipboard failures must remain visible')
 })
 
 test('the app directory distinguishes loading, errors, and confirmed emptiness', () => {
@@ -85,6 +92,8 @@ test('expanded and collapsed navigation share one ChatGPT SDK icon vocabulary', 
   for (const icon of ['ComposeEditSquare', 'Grid', 'SettingsSlider']) {
     assert.match(navigationIcons, new RegExp(icon))
   }
+  assert.match(navigationIcons, /navigationIcon\(/)
+  assert.match(navigationIcons, /navigation-action-icon/)
   assert.match(drawer, /from '\.\.\/navigationIcons\.js'/)
   assert.match(shell, /from '\.\.\/navigationIcons\.js'/)
 })

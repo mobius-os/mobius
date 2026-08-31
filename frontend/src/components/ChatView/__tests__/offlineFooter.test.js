@@ -4,10 +4,14 @@ import assert from 'node:assert/strict'
 
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const chatInputBar = readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8')
+const streamConnection = readFileSync(new URL('../useStreamConnection.js', import.meta.url), 'utf8')
 const connectionStatus = readFileSync(new URL('../ConnectionStatus.jsx', import.meta.url), 'utf8')
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 const scrollMode = readFileSync(new URL('../useScrollMode.js', import.meta.url), 'utf8')
 const shell = readFileSync(new URL('../../Shell/Shell.jsx', import.meta.url), 'utf8')
+const apiClient = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
+const systemStream = readFileSync(new URL('../../../hooks/useSystemEventStream.js', import.meta.url), 'utf8')
+const settingsView = readFileSync(new URL('../../SettingsView/SettingsView.jsx', import.meta.url), 'utf8')
 
 test('floating actions precede the measured rail → connection → queued → composer stack', () => {
   const footStart = chatView.indexOf('<div ref={footRef} className="chat__foot">')
@@ -82,6 +86,50 @@ test('the shell is the one persistent connection owner while send failures stay 
     chatInputBar,
     /\{sendFailure && \([\s\S]*?chat__offline-note--error[\s\S]*?\{sendFailure\}/,
     'moving the persistent offline state must not remove a failed-send explanation',
+  )
+})
+
+test('the composer accepts an offline send for the durable chat outbox', () => {
+  assert.match(
+    chatInputBar,
+    /aria-label="Send"[\s\S]{0,700}?disabled=\{hasUploading \|\| submissionBlocked\}/,
+  )
+  assert.doesNotMatch(
+    chatInputBar,
+    /disabled=\{hasUploading \|\| offline \|\| submissionBlocked\}/,
+  )
+  const sendFailure = readFileSync(new URL('../sendFailure.js', import.meta.url), 'utf8')
+  assert.match(sendFailure, /queued and will send when you reconnect/)
+  assert.match(shell, /useOutboxDrain\(\)/)
+  assert.match(
+    streamConnection,
+    /outboxRetained = await enqueueIntent\([\s\S]*?err\.outboxRetained = true/,
+    'automatic-replay copy must be gated by the successful durable write',
+  )
+})
+
+test('credential expiry preserves principal-bound intent while explicit logout wipes it', () => {
+  assert.match(
+    apiClient,
+    /clearQueryCache\(\{ preserveChatOutbox = false \} = \{\}\)/,
+  )
+  assert.match(
+    apiClient,
+    /preserveChatOutbox[\s\S]*?\? \[\][\s\S]*?: \[clearChatOutbox\(\)\]/,
+    'explicit cleanup must clear through the live outbox store, not a blocked deleteDatabase',
+  )
+  assert.match(
+    apiClient,
+    /status === 401[\s\S]*?clearQueryCache\(\{ preserveChatOutbox: true \}\)/,
+  )
+  assert.match(
+    systemStream,
+    /res\.status === 401[\s\S]*?clearQueryCache\(\{ preserveChatOutbox: true \}\)/,
+  )
+  assert.match(
+    settingsView,
+    /clearToken\(\)[\s\S]{0,300}?await clearQueryCache\(\)/,
+    'owner-invoked logout must use the default full outbox wipe',
   )
 })
 

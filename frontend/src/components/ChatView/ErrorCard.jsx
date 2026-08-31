@@ -1,5 +1,6 @@
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import { formatResetTime } from './resetTime.js'
+import { ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 
 // The single renderer for the error/pause/park card family. MsgContent consumes
 // both persisted blocks and the converted live stream, so source selection
@@ -30,10 +31,31 @@ export function errorCardViewModel(block) {
 // appends its tail-gated Resume button there; the live surface renders none
 // (a terminal error promotes within the same breath, and the button's
 // tail-only gate is a persisted-transcript concept).
-export default function ErrorCard({ block, autoResume = false, children }) {
+export default function ErrorCard({
+  block,
+  autoResume = false,
+  restartAutoContinue = false,
+  resetElapsed = false,
+  cardRef,
+  children,
+}) {
   const vm = errorCardViewModel(block)
+  const recoveryTitle = vm.parked
+    ? autoResume
+      ? (vm.resetLabel ? `Queued to continue ${vm.resetLabel}` : 'Queued to continue')
+      : resetElapsed
+        ? 'Usage is available again'
+        : (vm.resetLabel ? `Usage resets ${vm.resetLabel}` : 'Usage limit reached')
+    : null
+  const recoveryCopy = vm.parked
+    ? autoResume
+      ? 'Your work is safe. Möbius will continue automatically here and at future usage limits in this chat.'
+      : resetElapsed
+        ? 'Your work is safe. Continue when you’re ready.'
+        : 'Your work is safe. Turn on auto-continue for this and future usage limits in this chat.'
+    : null
   return (
-    <div className={vm.className}>
+    <div className={vm.className} ref={cardRef}>
       {/* Keep the announced status body separate from interactive children.
           Otherwise a switch update or nested save alert makes the atomic
           status region re-announce the whole rate-limit card. */}
@@ -41,28 +63,47 @@ export default function ErrorCard({ block, autoResume = false, children }) {
         className="chat__error-status"
         role={vm.benign ? undefined : 'alert'}
       >
-        <span className="chat__error-label">{vm.label}</span>
-        {/* StandardMarkdown so URLs in provider error payloads (quota links,
-            billing pages) become clickable straight from the chat. */}
-        <StandardMarkdown
-          text={block.message || 'The agent ran into an issue.'}
-        />
-        {vm.parked && vm.resetLabel && (
-          <div className="chat__parked-reset">Resets {vm.resetLabel}</div>
-        )}
-        {vm.parked && vm.resetLabel && (
-          // Reassure that the wait resolves on its own: a reset push is coming.
-          // Tapping Resume now before the reset just re-parks (the provider
-          // limit is still in force), so name that honestly rather than letting
-          // the button look broken.
-          <div className="chat__parked-note">
-            {autoResume
-              ? 'Möbius will keep trying to continue this chat after the limit resets.'
-              : (
-                  <>You'll get a notification when it resets — or tap Resume
-                    now to try sooner (it may pause again).</>
-                )}
-          </div>
+        {vm.parked ? (
+          <>
+            <div className="chat__recovery-title">{recoveryTitle}</div>
+            <div className="chat__recovery-copy">{recoveryCopy}</div>
+            {block.message && (
+              <details className="chat__recovery-details">
+                <summary>
+                  <ChevronRight
+                    className="chat__recovery-details-chevron"
+                    width={14}
+                    height={14}
+                    aria-hidden="true"
+                  />
+                  Technical details
+                </summary>
+                {/* Provider payloads sometimes carry useful quota links. Keep
+                    them available without making internal codes the headline. */}
+                <StandardMarkdown text={block.message} />
+              </details>
+            )}
+          </>
+        ) : vm.benign ? (
+          <>
+            <div className="chat__recovery-title chat__recovery-title--paused">
+              {vm.label}
+            </div>
+            <div className="chat__recovery-copy">
+              {block.pause?.kind === 'restart'
+                ? restartAutoContinue
+                  ? 'Möbius will continue automatically when the restart is complete.'
+                  : (block.message || 'This response is paused.')
+                : (block.message || 'Möbius will continue automatically.')}
+            </div>
+          </>
+        ) : (
+          <>
+            <span className="chat__error-label">{vm.label}</span>
+            <StandardMarkdown
+              text={block.message || 'The agent ran into an issue.'}
+            />
+          </>
         )}
       </div>
       {children}

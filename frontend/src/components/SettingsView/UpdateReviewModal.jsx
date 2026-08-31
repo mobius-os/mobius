@@ -20,18 +20,17 @@
  * 1px borders, sentence-case titles, the shared .settings tokens.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { api } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
-import { parseUnifiedDiff } from '../DiffView/parseUnifiedDiff.js'
 import {
   shortSha,
   summarizePreview,
   isTrivialUpdate,
 } from '../../lib/platformUpdatePreview.js'
 import { deploymentKindLabel, platformActivationLabel } from '../../lib/platformUpdateState.js'
-import FileDiffList from '../DiffView/FileDiffList.jsx'
+import UnifiedDiff from '../DiffView/UnifiedDiff.jsx'
 import './UpdateReviewModal.css'
 
 function fileCountLabel(count) {
@@ -139,10 +138,6 @@ export default function UpdateReviewModal({
   const activationReasons = Array.isArray(activation?.reasons)
     ? activation.reasons
     : []
-  const parsedFiles = useMemo(
-    () => parseUnifiedDiff(preview?.diff),
-    [preview?.diff],
-  )
   // A preview that resolved to "not available" (e.g. the update landed from
   // another surface between status and open) has nothing to apply.
   const notAvailable = preview && preview.available === false && !loadError
@@ -297,8 +292,8 @@ export default function UpdateReviewModal({
 
               <section className="urm__section">
                 <h3 className="urm__section-title">{fileCountLabel(files.length)}</h3>
-                <FileDiffList
-                  files={parsedFiles}
+                <UnifiedDiff
+                  diff={preview?.diff}
                   summaryOverrides={files}
                   diffTruncated={!!preview?.diff_truncated}
                 />
