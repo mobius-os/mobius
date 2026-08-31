@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from claude_agent_sdk.types import (
@@ -37,15 +38,10 @@ except ImportError:
   TERMINAL_TASK_STATUSES = frozenset()
   TaskUpdatedMessage = None
 
-# Only *delegated agent* tasks reliably reach a terminal status, so only these
-# are safe to wait on before the turn-end reap. The SDK gates its own
-# task-lifecycle tracker on this exact set (claude_agent_sdk/_internal/query.py)
-# and warns that tracking anything else "will hang the query": a background shell
-# or Monitor is a long-running watch that by design never emits a terminal frame,
-# so adding it to the in-flight set would make the drain block to its full
-# timeout instead of returning. The constant lives in the SDK's private
-# internals (not exported from types), so mirror it with a best-effort import and
-# a hardcoded fallback that matches the current SDK value.
+# The SDK's generic task ledger admits only finite delegated-agent work. Mirror
+# that exact private constant here. A finite Monitor is tracked separately from
+# its explicit tool call; arbitrary background shells and persistent monitors
+# remain excluded because they may never emit a terminal frame.
 try:
   from claude_agent_sdk._internal.query import DEFERRING_TASK_TYPES
 except ImportError:
@@ -67,6 +63,101 @@ log = logging.getLogger(__name__)
 # last_tool_name is a tool name — both are generous.
 _TASK_TEXT_CAP = 2000
 _TASK_LABEL_CAP = 200
+
+
+@dataclass
+class NativeContinuationTracker:
+  """Track Claude-native work through the result that wakes its parent.
+
+  A task may settle immediately before its spawning turn's ResultMessage. A
+  plain in-flight set is empty at that boundary and makes the runner reap the
+  CLI one result too early. Remember that ordering and defer exactly that next
+  result; tasks already observed across a result need no extra deferral because
+  their eventual result is the parent continuation itself. A root assistant
+  message after completion proves the parent already reacted and closes the
+  provisional deferral.
+
+  Monitor is admitted only when its tool call is finite. Ordinary background
+  shells and persistent monitors can run forever, so they never own turn
+  completion here.
+  """
+
+  _active_tasks: set[str] = field(default_factory=set)
+  _tasks_seen_at_result: set[str] = field(default_factory=set)
+  _pending_monitors: set[str] = field(default_factory=set)
+  _monitors_seen_at_result: set[str] = field(default_factory=set)
+  _settled_before_result: bool = False
+
+  @property
+  def pending_count(self) -> int:
+    return (
+      len(self._active_tasks)
+      + len(self._pending_monitors)
+      + int(self._settled_before_result)
+    )
+
+  def task_started(
+    self,
+    task_id: str | None,
+    task_type: str | None,
+    tool_use_id: str | None,
+  ) -> None:
+    if not task_id:
+      return
+    if task_type in DEFERRING_TASK_TYPES:
+      self._active_tasks.add(task_id)
+      return
+    if task_type != "local_bash" or tool_use_id not in self._pending_monitors:
+      return
+    self._pending_monitors.discard(tool_use_id)
+    self._active_tasks.add(task_id)
+    if tool_use_id in self._monitors_seen_at_result:
+      self._tasks_seen_at_result.add(task_id)
+    self._monitors_seen_at_result.discard(tool_use_id)
+
+  def task_finished(self, task_id: str | None) -> None:
+    if not task_id or task_id not in self._active_tasks:
+      return
+    self._active_tasks.discard(task_id)
+    if task_id not in self._tasks_seen_at_result:
+      self._settled_before_result = True
+    self._tasks_seen_at_result.discard(task_id)
+
+  def monitor_started(self, tool_use_id: str, tool_input: Any) -> None:
+    if (
+      tool_use_id
+      and isinstance(tool_input, dict)
+      and tool_input.get("persistent") is not True
+    ):
+      self._pending_monitors.add(tool_use_id)
+
+  def monitor_failed(self, tool_use_id: str) -> None:
+    self._pending_monitors.discard(tool_use_id)
+    self._monitors_seen_at_result.discard(tool_use_id)
+
+  def root_continuation_observed(self) -> None:
+    """Mark a pre-result completion as already consumed by its parent.
+
+    Task bookkeeping alone cannot distinguish a completion that will wake a
+    parent after the next result from one the parent has already synthesized.
+    A later root AssistantMessage is that missing boundary signal: its result
+    closes the continuation instead of opening another one.
+    """
+    self._settled_before_result = False
+
+  def observe_result(self) -> bool:
+    """Record one result; return whether it is not yet the run boundary."""
+    if self._active_tasks or self._pending_monitors:
+      self._tasks_seen_at_result.update(self._active_tasks)
+      self._monitors_seen_at_result.update(self._pending_monitors)
+      # This result also covers any task that settled just before it. Other
+      # active work already keeps the connection open for the same follow-up.
+      self._settled_before_result = False
+      return True
+    if self._settled_before_result:
+      self._settled_before_result = False
+      return True
+    return False
 
 
 def is_root_conversation_message(message: Any) -> bool:
@@ -245,7 +336,7 @@ def dispatch_sdk_message(
   sdk_msg: Any,
   bc,
   current_session_id: str | None,
-  inflight: set | None = None,
+  native_work: NativeContinuationTracker | None = None,
   usage_state: dict[str, Any] | None = None,
 ) -> tuple[str | None, dict | None]:
   """Translates one SDK message into broadcast events.
@@ -256,12 +347,10 @@ def dispatch_sdk_message(
   type the caller updates ``current_session_id`` from the first
   return value and keeps reading.
 
-  When ``inflight`` is passed, this also maintains it as the set of
-  *drainable* background task_ids still running — added when a
-  DEFERRING_TASK_TYPES agent starts, discarded on its terminal frame —
-  from the very branches that already classify those task messages. The
-  runner keeps a live client draining until that set empties so
-  parallel subagents finish instead of being reaped at turn end.
+  When ``native_work`` is passed, the same branches that classify task and
+  Monitor messages also maintain the provider-native continuation boundary.
+  The runner can then keep the live client through Claude's parent follow-up
+  without treating an unrelated long-running shell as turn-owned work.
 
   ``usage_state`` carries the latest root AssistantMessage usage to the
   terminal ResultMessage. Claude's result usage aggregates the whole agent
@@ -307,12 +396,12 @@ def dispatch_sdk_message(
           "source_event_id": getattr(sdk_msg, "uuid", None),
         })
       bc.publish(public_event)
-      if (
-        inflight is not None
-        and getattr(sdk_msg, "task_type", None) in DEFERRING_TASK_TYPES
-        and sdk_msg.task_id is not None
-      ):
-        inflight.add(sdk_msg.task_id)
+      if native_work is not None:
+        native_work.task_started(
+          sdk_msg.task_id,
+          getattr(sdk_msg, "task_type", None),
+          getattr(sdk_msg, "tool_use_id", None),
+        )
       return current_session_id, None
     if isinstance(sdk_msg, TaskProgressMessage):
       bc.publish({
@@ -340,8 +429,8 @@ def dispatch_sdk_message(
           "source_event_id": getattr(sdk_msg, "uuid", None),
         })
       bc.publish(public_event)
-      if inflight is not None:
-        inflight.discard(sdk_msg.task_id)
+      if native_work is not None:
+        native_work.task_finished(sdk_msg.task_id)
       return current_session_id, None
     if TaskUpdatedMessage is not None and isinstance(sdk_msg, TaskUpdatedMessage):
       # A background task's terminal state can arrive ONLY as a task_updated
@@ -374,8 +463,8 @@ def dispatch_sdk_message(
           recorder(private_event)
         bc.publish({key: private_event.get(key) for key in (
           "type", "task_id", "status", "summary", "tool_use_id")})
-        if inflight is not None:
-          inflight.discard(sdk_msg.task_id)
+        if native_work is not None:
+          native_work.task_finished(sdk_msg.task_id)
       return current_session_id, None
     if sdk_msg.subtype == "init":
       # Setup metadata only — no Möbius-side render.
@@ -442,6 +531,8 @@ def dispatch_sdk_message(
   if isinstance(sdk_msg, AssistantMessage):
     if sdk_msg.session_id:
       current_session_id = sdk_msg.session_id
+    if native_work is not None:
+      native_work.root_continuation_observed()
     if usage_state is not None and sdk_msg.usage:
       usage_state["latest_model_usage"] = dict(sdk_msg.usage)
     server_tools: dict[str, str] = {}
@@ -456,6 +547,8 @@ def dispatch_sdk_message(
           "input": "",
           "tool_use_id": block.id,
         })
+        if native_work is not None and block.name == "Monitor":
+          native_work.monitor_started(block.id, block.input)
         summary = summarize_tool_input(block.name, block.input)
         edit_preview = claude_edit_preview(block.name, block.input)
         if summary or edit_preview:
@@ -561,6 +654,8 @@ def dispatch_sdk_message(
     for block in content:
       if isinstance(block, ToolResultBlock):
         output = _format_tool_output(block.content)
+        if native_work is not None and block.is_error:
+          native_work.monitor_failed(block.tool_use_id)
         # Carry the tool_use_id (matches the ToolUseBlock's .id) so the sink can
         # key a stash of the full output and the block can fetch it by id.
         bc.publish({

@@ -63,6 +63,27 @@ def _call(method: str, path: str, payload: dict | None = None) -> dict:
     raise SystemExit(f"request failed: {exc.reason}")
 
 
+def declare_wait(
+  description: str,
+  *,
+  command: str | None = None,
+  delay_secs: int | None = None,
+  interval_secs: int | None = None,
+  deadline_secs: int | None = None,
+) -> dict:
+  """Arm one command or timer wait through the chat-bound platform API."""
+  if bool(command) == bool(delay_secs):
+    raise SystemExit("declare needs exactly one of command or delay_secs")
+  return _call("POST", "/api/chat-waits", {
+    "description": description,
+    "kind": "command" if command else "timer",
+    "command": command,
+    "delay_secs": delay_secs,
+    "interval_secs": interval_secs,
+    "deadline_secs": deadline_secs,
+  })
+
+
 def main() -> None:
   parser = argparse.ArgumentParser(description=__doc__)
   sub = parser.add_subparsers(dest="action", required=True)
@@ -99,17 +120,13 @@ def main() -> None:
   _, _, chat_id = _settings()
 
   if args.action == "declare":
-    if bool(args.command) == bool(args.delay_secs):
-      raise SystemExit("declare needs exactly one of --command or --in")
-    payload = {
-      "description": args.description,
-      "kind": "command" if args.command else "timer",
-      "command": args.command,
-      "delay_secs": args.delay_secs,
-      "interval_secs": args.interval_secs,
-      "deadline_secs": args.deadline_secs,
-    }
-    result = _call("POST", "/api/chat-waits", payload)
+    result = declare_wait(
+      args.description,
+      command=args.command,
+      delay_secs=args.delay_secs,
+      interval_secs=args.interval_secs,
+      deadline_secs=args.deadline_secs,
+    )
     print(json.dumps(result, indent=2))
     print(
       f"\nWait armed. This chat will resume on its own when the condition "
