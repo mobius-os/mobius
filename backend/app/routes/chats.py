@@ -46,6 +46,7 @@ from app.chat_titles import (
   renamed_event,
 )
 from app.database import get_db
+from app.goal_plans import presented_goal
 from app.memory_observability import record_memory_checkpoint_once
 from app.owner_input import OwnerInputKind
 from app.deps import (
@@ -607,6 +608,7 @@ def _chat_detail_response(
     draining=is_draining(),
   )
   active_goal_objective = running_goal_objective(db, chat.id)
+  goal = presented_goal(db, chat.id)
   response = {
     "id": chat.id,
     "title": chat.title,
@@ -621,6 +623,7 @@ def _chat_detail_response(
     "running": running,
     "active_assistant_message_id": _active_assistant_message_id(chat),
     "active_goal_objective": active_goal_objective,
+    "goal": goal,
     "pending_question_id": _open_question_id_for(chat),
     "session_id": chat.session_id if expose_session else None,
     "provider": provider,
@@ -1480,6 +1483,7 @@ def get_chat_runtime(
     "running": is_chat_running(chat.id),
     "active_assistant_message_id": _active_assistant_message_id(chat),
     "active_goal_objective": running_goal_objective(db, chat.id),
+    "goal": presented_goal(db, chat.id),
     "pending_messages": list(chat.pending_messages or []),
     "pending_question_id": _open_question_id_for(chat),
     "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
