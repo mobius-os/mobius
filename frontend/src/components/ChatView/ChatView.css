@@ -2177,8 +2177,7 @@
 .chat__foot .chat__wait-cancel,
 .chat__foot .slash-menu,
 .chat__foot .chat__pill,
-.chat__foot .composer-plus,
-.chat__foot .chat__usage-strip { pointer-events: auto; }
+.chat__foot .composer-plus { pointer-events: auto; }
 
 /* One geometry-neutral stack for every control that floats above the measured
    footer. The safe default keeps transient-only controls clear of the composer.
@@ -2715,61 +2714,6 @@
   background-color: color-mix(in srgb, var(--surface2) 82%, transparent) !important;
   border-color: var(--accent);
   color: var(--text);
-}
-
-/* Always-visible cost/token readout directly above the composer — moved
-   here (from an overlay badge on the brain icon) so it has room for more
-   than one number and sits where the eye already lands after a turn
-   finishes. Deliberately understated: no border/background/pill, just
-   muted small text, consistent with "subtle" — this is ambient status, not
-   a call to action. */
-.chat__usage-strip-wrap {
-  max-width: 720px;
-  margin: 0 auto;
-  padding: 0 4px;
-  display: flex;
-  min-height: 44px;
-  align-items: center;
-}
-
-.chat__usage-strip {
-  border: 0;
-  background: none;
-  min-width: 0;
-  min-height: 44px;
-  padding: 0 6px;
-  margin: 0;
-  color: var(--muted);
-  font-size: 11.5px;
-  line-height: 1.4;
-  font-variant-numeric: tabular-nums;
-  cursor: pointer;
-  border-radius: 6px;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  text-align: left;
-  transition: color 0.12s, background 0.12s;
-}
-
-.chat__usage-strip span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.chat__usage-strip svg { flex: 0 0 auto; }
-
-.chat__usage-strip:hover {
-  color: var(--text);
-  background: color-mix(in srgb, var(--surface2) 60%, transparent);
-}
-
-.chat__usage-strip:focus { outline: none; }
-.chat__usage-strip:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
 }
 
 /* ── Composer popover (Attach + Model picker) ────────── */

@@ -171,7 +171,13 @@ export async function coordinateFailedSendRecovery({
     { expectedAttempt },
   )
   if (initial.status !== 'missing') {
-    return ownerMatches(readCurrent()) ? initial : { status: 'superseded' }
+    if (!ownerMatches(readCurrent())) return { status: 'superseded' }
+    return initial.status === 'durable'
+      ? {
+          ...initial,
+          evidence: { visibleMessages, pendingMessages },
+        }
+      : initial
   }
 
   let intentStatus = 'unknown'
@@ -191,7 +197,17 @@ export async function coordinateFailedSendRecovery({
     current.pendingMessages,
     { expectedAttempt },
   )
-  if (currentEvidence.status !== 'missing') return currentEvidence
+  if (currentEvidence.status !== 'missing') {
+    return currentEvidence.status === 'durable'
+      ? {
+          ...currentEvidence,
+          evidence: {
+            visibleMessages: current.visibleMessages,
+            pendingMessages: current.pendingMessages,
+          },
+        }
+      : currentEvidence
+  }
 
   const rememberedTerminal = sameSendAttempt(
     current.terminal?.attempt,

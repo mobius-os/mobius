@@ -88,6 +88,7 @@
 }
 
 .cui__state {
+  flex: 0 0 auto;
   margin: 0;
   padding: 18px;
   border: 1px solid var(--border);
@@ -126,6 +127,7 @@
 .cui__retry:disabled { opacity: 0.6; cursor: default; }
 
 .cui-totals {
+  flex: 0 0 auto;
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 1px;
@@ -158,7 +160,39 @@
   font-variant-numeric: tabular-nums;
 }
 
+.cui-cumulative {
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 12px;
+  align-items: baseline;
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.cui-cumulative__label,
+.cui-cumulative__hint {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.cui-cumulative__value {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.cui-cumulative__hint {
+  grid-column: 1 / -1;
+}
+
 .cui__note {
+  flex: 0 0 auto;
   margin: 0;
   display: flex;
   align-items: flex-start;
@@ -170,7 +204,12 @@
 
 .cui__note svg { flex: 0 0 auto; margin-top: 2px; }
 
-.cui-runs { display: flex; flex-direction: column; gap: 8px; }
+.cui-runs {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
 
 .cui-run {
   overflow: hidden;

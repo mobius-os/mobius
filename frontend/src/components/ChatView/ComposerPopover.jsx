@@ -8,8 +8,8 @@
  *   3. Model / effort / summary / automation — renders
  *      <ChatSettingsPanel> when a chatInfo is available; omitted on a fresh
  *      empty chat where chatInfo hasn't loaded yet.
- *   4. Chat summary / agent context — opens the two owner-facing continuity
- *      viewers after the picker.
+ *   4. Chat usage / summary / agent context — shows a compact usage total and
+ *      opens the detailed owner-facing viewers after the picker.
  *
  * Open/close state, outside-click, and Escape live here. The trigger
  * is positioned as a sibling of the pill in `.chat__form`. The popover
@@ -41,7 +41,6 @@ import { useQuery } from '@tanstack/react-query'
 import {
   ChevronDown,
   Code,
-  DollarCircle,
   FileDocument,
   InfoCircle,
   Paperclip,
@@ -54,6 +53,7 @@ import {
   loadChatArtifacts,
 } from './chatArtifacts.js'
 import { apiFetch } from '../../api/client.js'
+import { chatQueries } from '../../hooks/queries.js'
 import { popoverMaxHeight, nearestClipTop } from './composerPopoverHeight.js'
 import { focusComposerElement } from './composerFocusPolicy.js'
 import {
@@ -66,6 +66,7 @@ import useDiscardUnconfirmedSwitchOnPickerClose from './hooks/useDiscardUnconfir
 import { resolvedChatSettings } from './modelSelectionPolicy.js'
 import { compactChangesSummary } from './chatChangesLifecycle.js'
 import { useChatChangesOverview } from './useChatChangesOverview.js'
+import { formatUsageMenuText } from './chatUsageFormat.js'
 import './ChatWork.css'
 
 export default function ComposerPopover({
@@ -121,6 +122,10 @@ export default function ComposerPopover({
     modelSelectionRequest,
     composerInputRef,
   )
+  const usageQuery = chatQueries.usage.useQuery(chatId, {
+    enabled: Boolean(open && !embedded && chatId && onOpenUsage),
+  })
+  const usageSummary = formatUsageMenuText(usageQuery.data?.totals)
   const artifactsQuery = useQuery({
     queryKey: ['chat-work-artifacts', String(artifactsAppId || ''), String(chatId || '')],
     queryFn: ({ signal }) => loadChatArtifacts(
@@ -434,60 +439,62 @@ export default function ComposerPopover({
               />
             </div>
           )}
-          {!embedded && (onOpenSummary || onOpenInspector || onOpenUsage) && (
-          <div className="composer-popover__section composer-popover__section--context">
-            {onOpenSummary && (
-              <button
-                type="button"
-                className="composer-popover__row"
-                onClick={handleOpenSummary}
-              >
-                <span className="composer-popover__row-icon" aria-hidden="true">
-                  <FileDocument width={18} height={18} />
-                </span>
-                <span className="composer-popover__row-main">
-                  <span className="composer-popover__row-title">Chat summary</span>
-                  <span className="composer-popover__row-sub">
-                    Name, digest, full handoff
+          {!embedded && (onOpenUsage || onOpenSummary || onOpenInspector) && (
+            <div className="composer-popover__section composer-popover__section--context">
+              {onOpenUsage && (
+                <button
+                  type="button"
+                  className="composer-popover__row"
+                  onClick={handleOpenUsage}
+                >
+                  <span className="composer-popover__row-icon" aria-hidden="true">
+                    <BrainUsageIcon width={18} height={18} />
                   </span>
-                </span>
-              </button>
-            )}
-            {onOpenInspector && (
-              <button
-                type="button"
-                className="composer-popover__row"
-                onClick={handleOpenInspector}
-              >
-                <span className="composer-popover__row-icon" aria-hidden="true">
-                  <InfoCircle width={18} height={18} />
-                </span>
-                <span className="composer-popover__row-main">
-                  <span className="composer-popover__row-title">What the agent knows</span>
-                  <span className="composer-popover__row-sub">
-                    System prompt and recent chats
+                  <span className="composer-popover__row-main">
+                    <span className="composer-popover__row-title">Chat usage</span>
+                    <span className="composer-popover__row-sub">
+                      {usageQuery.isLoading
+                        ? 'Checking this chat’s usage…'
+                        : (usageSummary || 'Appears after the first completed response')}
+                    </span>
                   </span>
-                </span>
-              </button>
-            )}
-            {onOpenUsage && (
-              <button
-                type="button"
-                className="composer-popover__row"
-                onClick={handleOpenUsage}
-              >
-                <span className="composer-popover__row-icon" aria-hidden="true">
-                  <DollarCircle width={18} height={18} />
-                </span>
-                <span className="composer-popover__row-main">
-                  <span className="composer-popover__row-title">Usage &amp; reported cost</span>
-                  <span className="composer-popover__row-sub">
-                    Per-turn tokens and provider-reported cost
+                </button>
+              )}
+              {onOpenSummary && (
+                <button
+                  type="button"
+                  className="composer-popover__row"
+                  onClick={handleOpenSummary}
+                >
+                  <span className="composer-popover__row-icon" aria-hidden="true">
+                    <FileDocument width={18} height={18} />
                   </span>
-                </span>
-              </button>
-            )}
-          </div>
+                  <span className="composer-popover__row-main">
+                    <span className="composer-popover__row-title">Chat summary</span>
+                    <span className="composer-popover__row-sub">
+                      Name, digest, full handoff
+                    </span>
+                  </span>
+                </button>
+              )}
+              {onOpenInspector && (
+                <button
+                  type="button"
+                  className="composer-popover__row"
+                  onClick={handleOpenInspector}
+                >
+                  <span className="composer-popover__row-icon" aria-hidden="true">
+                    <InfoCircle width={18} height={18} />
+                  </span>
+                  <span className="composer-popover__row-main">
+                    <span className="composer-popover__row-title">What the agent knows</span>
+                    <span className="composer-popover__row-sub">
+                      System prompt and recent chats
+                    </span>
+                  </span>
+                </button>
+              )}
+            </div>
           )}
         </div>
       )}

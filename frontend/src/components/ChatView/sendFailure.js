@@ -18,11 +18,11 @@ export function shouldConfirmAmbiguousSend(error) {
 }
 
 export function sendFailureMessage(error, { online = true } = {}) {
-  const sendOnline = error?.sendReachability === 'offline'
-    ? false
-    : error?.sendReachability === 'online'
-      ? true
-      : online
+  // Either verdict can prove that the queued intent now needs offline copy.
+  // The attempt-local probe stays authoritative when a later shared snapshot
+  // has recovered, but a newer shared offline verdict must not be overwritten
+  // by an older in-flight probe that happened to finish successfully.
+  const sendOnline = online !== false && error?.sendReachability !== 'offline'
   if (!sendOnline) {
     return error?.outboxRetained
       ? 'You’re offline. Your message is queued and will send when you reconnect.'
