@@ -1663,14 +1663,6 @@ def _pending_store_update_app(
         "message": "The app source identity changed; retry resolution.",
       },
     )
-  if app.manifest_url is None:
-    raise HTTPException(
-      status_code=409,
-      detail={
-        "code": "not_store_app",
-        "message": "Only a Store app can have a pending update resolution.",
-      },
-    )
   return app
 
 
@@ -1683,12 +1675,30 @@ def _pending_store_update_receipt(app: models.App, source_dir: str) -> dict:
     upstream_commit=app.upstream_commit,
   )
   if receipt is None:
+    if app.manifest_url is None:
+      raise HTTPException(
+        status_code=409,
+        detail={
+          "code": "not_store_app",
+          "message": "Only a Store app can have a pending update resolution.",
+        },
+      )
     raise HTTPException(
       status_code=409,
       detail={
         "code": "pending_update_missing",
         "message": (
           "The pending update receipt is missing or no longer matches this app."
+        ),
+      },
+    )
+  if not install.pending_conflict_update_matches_app(app, receipt):
+    raise HTTPException(
+      status_code=409,
+      detail={
+        "code": "pending_update_identity_changed",
+        "message": (
+          "The pending update no longer matches this app's Store identity."
         ),
       },
     )
