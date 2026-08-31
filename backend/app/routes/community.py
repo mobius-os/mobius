@@ -6,6 +6,7 @@ import asyncio
 import base64
 from datetime import UTC, datetime
 import hashlib
+import mimetypes
 import re
 from typing import Any, Literal
 from urllib.parse import quote
@@ -13,7 +14,7 @@ from weakref import WeakValueDictionary
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -30,6 +31,8 @@ from app.community_publish import (
   delete_publication_journal,
   list_publication_journals,
   new_publication_journal,
+  public_store_listing,
+  read_public_store_asset,
   read_publication_journal,
   write_publication_journal,
 )
@@ -544,6 +547,7 @@ async def publish_local_app_to_github(
   try:
     async with fs_locks.source_dir_lock(str(app.source_dir)):
       accepted_commit, files = await asyncio.to_thread(build_public_snapshot, app)
+    await asyncio.to_thread(public_store_listing, files)
   except CommunityPublicationError as exc:
     raise HTTPException(
       exc.status_code, {"code": exc.code, "message": exc.detail},
@@ -781,6 +785,86 @@ async def _publish_local_source(
         body={"sha": source_commit_sha, "force": False},
       )
     return repository, source_commit_sha
+
+
+@router.get("/publications/github/preview")
+async def preview_local_app_publication(
+  app_id: int = Query(gt=0),
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+) -> dict[str, Any]:
+  """Return the exact accepted listing that the next publish would use."""
+  app = (
+    db.query(models.App)
+    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+    .first()
+  )
+  if app is None:
+    raise HTTPException(404, "App not found.")
+  try:
+    async with fs_locks.source_dir_lock(str(app.source_dir)):
+      accepted_commit, files = await asyncio.to_thread(build_public_snapshot, app)
+    listing = await asyncio.to_thread(public_store_listing, files)
+  except CommunityPublicationError as exc:
+    raise HTTPException(
+      exc.status_code, {"code": exc.code, "message": exc.detail},
+    ) from exc
+  preview_base = (
+    f"/api/community/publications/github/preview/assets/{app.id}/"
+    f"{accepted_commit}/"
+  )
+  return {
+    "app_id": app.id,
+    "name": app.name,
+    "slug": app.slug,
+    "accepted_commit": accepted_commit,
+    "repository_name": app.slug,
+    "icon_url": preview_base + quote(str(listing["icon"]), safe="/"),
+    "asset_base": preview_base + "static/",
+    "listing": listing,
+  }
+
+
+@router.get(
+  "/publications/github/preview/assets/{app_id}/{accepted_commit}/{asset_path:path}",
+)
+async def preview_local_app_publication_asset(
+  app_id: int,
+  accepted_commit: str,
+  asset_path: str,
+  db: Session = Depends(get_db),
+) -> Response:
+  """Serve immutable preview artwork from the accepted Git revision.
+
+  Listing media is already public through the installed app asset/icon routes.
+  This commit-keyed form prevents an editable worktree or icon override from
+  changing the listing after the owner reviewed it.
+  """
+  app = (
+    db.query(models.App)
+    .filter(models.App.id == app_id, models.App.deleted_at.is_(None))
+    .first()
+  )
+  if app is None or not re.fullmatch(r"[0-9a-f]{40,64}", accepted_commit):
+    raise HTTPException(404, "Listing asset not found.")
+  try:
+    async with fs_locks.source_dir_lock(str(app.source_dir)):
+      content = await asyncio.to_thread(
+        read_public_store_asset, app, accepted_commit, asset_path,
+      )
+  except CommunityPublicationError as exc:
+    raise HTTPException(
+      exc.status_code, {"code": exc.code, "message": exc.detail},
+    ) from exc
+  media_type = mimetypes.guess_type(asset_path)[0] or "application/octet-stream"
+  return Response(
+    content,
+    media_type=media_type,
+    headers={
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "X-Content-Type-Options": "nosniff",
+    },
+  )
 
 
 async def _prepare_existing_github_revision(

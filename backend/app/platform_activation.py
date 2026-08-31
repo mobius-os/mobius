@@ -85,6 +85,7 @@ IMAGE_BOOTSTRAP_SCRIPTS = (
   "backend/scripts/init-cron-scaffold.sh",
   "backend/scripts/init_agent_context.py",
   "backend/scripts/init_chat_summaries.py",
+  "backend/scripts/init_data_repo.py",
   "backend/scripts/init_skills.py",
   "backend/scripts/migrate-app-rename.sh",
   "backend/scripts/self-reminders-dispatch.sh",
