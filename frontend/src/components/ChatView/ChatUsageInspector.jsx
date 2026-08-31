@@ -10,9 +10,11 @@ import {
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { chatQueries } from '../../hooks/queries.js'
 import {
+  formatCacheHitRate,
   formatCostUsd,
   formatTimestamp,
   formatTokenCount,
+  nonCachedInputTokens,
   usageModelName,
 } from './chatUsageFormat.js'
 import './ChatUsageInspector.css'
@@ -25,16 +27,6 @@ const RUN_COUNT_FIELDS = [
   'reasoning_output_tokens',
   'total_tokens',
 ]
-
-function freshInputTokens(totals) {
-  if (typeof totals?.input_tokens !== 'number') return null
-  return Math.max(
-    0,
-    totals.input_tokens
-      - (totals.cache_read_input_tokens || 0)
-      - (totals.cache_creation_input_tokens || 0),
-  )
-}
 
 function statusLabel(status) {
   if (!status) return 'Unknown status'
@@ -107,8 +99,10 @@ function RunRow({ run }) {
     <details className="cui-run">
       <RunSummary run={run} expandable />
       <div className="cui-run__detail">
-        <RunField label="Fresh input" value={formatTokenCount(run.usage?.uncached_input_tokens)} />
+        <RunField label="Input" value={formatTokenCount(nonCachedInputTokens(run))} />
+        <RunField label="Cumulative input" value={formatTokenCount(run.input_tokens)} />
         <RunField label="Cached input" value={formatTokenCount(run.cache_read_input_tokens)} />
+        <RunField label="Cache hit" value={formatCacheHitRate(run, 1)} />
         <RunField label="Cache write" value={formatTokenCount(run.cache_creation_input_tokens)} />
         <RunField label="Output" value={formatTokenCount(run.output_tokens)} />
         <RunField label="Reasoning within output" value={formatTokenCount(run.reasoning_output_tokens)} />
@@ -134,21 +128,30 @@ function UsageData({ data }) {
   return (
     <>
       <div className="cui-totals">
-        <TotalsCell label="Reported cost" value={formatCostUsd(totals.cost_usd)} />
-        <TotalsCell label="Fresh input" value={formatTokenCount(freshInputTokens(totals))} />
-        <TotalsCell label="Cached input" value={formatTokenCount(totals.cache_read_input_tokens)} />
+        <TotalsCell label="Input" value={formatTokenCount(nonCachedInputTokens(totals))} />
         <TotalsCell label="Output" value={formatTokenCount(totals.output_tokens)} />
+        <TotalsCell label="Cache hit" value={formatCacheHitRate(totals, 1)} />
+        <TotalsCell label="Cost" value={formatCostUsd(totals.cost_usd)} />
+      </div>
+      <div className="cui-cumulative">
+        <span className="cui-cumulative__label">Cumulative input</span>
+        <span className="cui-cumulative__value">
+          {formatTokenCount(totals.input_tokens) ?? '—'}
+        </span>
+        <span className="cui-cumulative__hint">
+          Across every model call, including cached context
+        </span>
       </div>
       <p className="cui__note">
         <InfoCircle width={14} height={14} aria-hidden="true" />
-        Cost appears only when the provider reports it; token counts remain
-        available without a price. Reasoning is included in output.
+        Input excludes cached tokens. Cost is estimated when the provider does
+        not report it. Reasoning is included in output.
       </p>
       {missingUsage && (
         <p className="cui__note">
           <InfoCircle width={14} height={14} aria-hidden="true" />
-          {coverage.runs_with_usage} of {coverage.runs} turns include usage;
-          older turns predate tracking.
+          {coverage.runs_with_usage} of {coverage.runs} turns include usage.
+          Active turns update when they finish; older turns may predate tracking.
         </p>
       )}
       <div className="cui-runs">
@@ -184,7 +187,7 @@ export default function ChatUsageInspector({ chatId, onClose }) {
         <header className="cui__head">
           <div>
             <h2 id="cui-title" className="cui__title">Usage</h2>
-            <p className="cui__subtitle">Tokens and provider-reported cost for this chat.</p>
+            <p className="cui__subtitle">Input, output, cache efficiency, and cost for this chat.</p>
           </div>
           {onClose && (
             <button

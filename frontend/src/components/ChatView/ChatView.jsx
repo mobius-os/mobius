@@ -53,8 +53,6 @@ import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
 import ChatDiffViewer from './ChatDiffViewer.jsx'
 import ChatUsageInspector from './ChatUsageInspector.jsx'
-import ChatUsageStrip from './ChatUsageStrip.jsx'
-import { formatUsageAriaSummary } from './chatUsageFormat.js'
 import { chatContributionPrepareSubmission } from './chatContributionIntent.js'
 import ComposerPopover from './ComposerPopover.jsx'
 import BrainUsageButton from './BrainUsageButton.jsx'
@@ -357,14 +355,6 @@ export default function ChatView({
   onOpenArtifact = null,
 }) {
   const queryClient = useQueryClient()
-  // Cheap per-chat token/cost summary for the always-visible composer badge
-  // and the full breakdown panel. Not fetched for embedded app-owned chats
-  // (matches BrainUsageButton's own usageEnabled gate) since the owner never
-  // sees the composer chrome there.
-  const chatUsageQuery = chatQueries.usageSummary.useQuery(chatId, {
-    enabled: !embedded && !!chatId,
-  })
-  const chatUsageAriaSummary = formatUsageAriaSummary(chatUsageQuery.data?.totals)
   const hiddenRef = useRef(hidden)
   hiddenRef.current = hidden
   // A drawer search may target a ChatView that is already mounted. Subscribe
@@ -1628,7 +1618,6 @@ export default function ChatView({
       // refetching the cheap per-chat summary here rather than threading a
       // second usage-carrying event through the whole reducer pipeline.
       chatQueries.usage.invalidate(queryClient, chatId)
-      chatQueries.usageSummary.invalidate(queryClient, chatId)
       onStreamEnd?.({ continues })
     },
     onSystemEvent: event => {
@@ -5275,12 +5264,6 @@ export default function ChatView({
             focusComposer={() => focusComposerElement(inputRef.current)}
           />
         )}
-        {!embedded && (
-          <ChatUsageStrip
-            totals={chatUsageQuery.data?.totals}
-            onOpen={() => setShowUsage(true)}
-          />
-        )}
         <ChatInputBar
           chatId={chatId}
           input={input}
@@ -5322,9 +5305,7 @@ export default function ChatView({
               <ComposerPopover
                 triggerIcon={icon}
                 providerUsage={providerUsage}
-                triggerAriaLabel={embedded
-                  ? 'Attach files'
-                  : `${ariaLabel}. ${chatUsageAriaSummary}`}
+                triggerAriaLabel={embedded ? 'Attach files' : ariaLabel}
                 chatInfo={showPicker ? chatInfo : null}
                 chatId={chatId}
                 onAttachClick={() => attachTriggerRef.current?.()}

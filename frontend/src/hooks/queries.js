@@ -23,6 +23,8 @@ const projectsKey = ['projects']
 const projectTemplatesKey = ['projects', 'templates']
 const legacyProjectsKey = ['projects', 'legacy']
 const chatsKey = ['chats']
+const chatUsageRootKey = ['chat-usage']
+const chatUsageKey = chatId => [...chatUsageRootKey, chatId]
 const chatCurrentUsageRootKey = ['chat-current-usage']
 const chatCurrentUsageKey = (chatId, provider, providerSessionId) => [
   ...chatCurrentUsageRootKey,
@@ -451,33 +453,18 @@ export const appQueries = {
   },
 }
 
-async function fetchChatUsage(chatId) {
-  const res = await api.chats.usage(chatId)
+async function fetchChatUsage(chatId, { signal } = {}) {
+  const res = await api.chats.usage(chatId, { signal })
   return jsonOrThrow(res, 'chat usage fetch failed:')
-}
-
-async function fetchChatUsageSummary(chatId) {
-  const res = await api.chats.usageSummary(chatId)
-  return jsonOrThrow(res, 'chat usage summary fetch failed:')
 }
 
 function useChatUsageQuery(chatId, { enabled = true } = {}) {
   return useQuery({
-    queryKey: ['chat-usage', chatId],
-    queryFn: () => fetchChatUsage(chatId),
+    queryKey: chatUsageKey(chatId),
+    queryFn: context => fetchChatUsage(chatId, context),
     enabled: enabled && Boolean(chatId),
-    staleTime: 30_000,
-    retry: 1,
-  })
-}
-
-function useChatUsageSummaryQuery(chatId, { enabled = true } = {}) {
-  return useQuery({
-    queryKey: ['chat-usage-summary', chatId],
-    queryFn: () => fetchChatUsageSummary(chatId),
-    enabled: enabled && Boolean(chatId),
-    staleTime: 30_000,
-    retry: 1,
+    staleTime: 60_000,
+    retry: 0,
   })
 }
 
@@ -544,9 +531,8 @@ export const chatQueries = {
   keys: {
     all: chatsKey,
     messages: (chatId) => ['chat-messages', chatId],
+    usage: chatUsageKey,
     currentUsage: chatCurrentUsageKey,
-    usage: (chatId) => ['chat-usage', chatId],
-    usageSummary: (chatId) => ['chat-usage-summary', chatId],
   },
   list: {
     key: chatsKey,
@@ -570,16 +556,12 @@ export const chatQueries = {
     }),
   },
   usage: {
-    key: (chatId) => ['chat-usage', chatId],
+    key: chatUsageKey,
     fetch: fetchChatUsage,
     useQuery: useChatUsageQuery,
-    invalidate: (queryClient, chatId) => queryClient.invalidateQueries({ queryKey: ['chat-usage', chatId] }),
-  },
-  usageSummary: {
-    key: (chatId) => ['chat-usage-summary', chatId],
-    fetch: fetchChatUsageSummary,
-    useQuery: useChatUsageSummaryQuery,
-    invalidate: (queryClient, chatId) => queryClient.invalidateQueries({ queryKey: ['chat-usage-summary', chatId] }),
+    invalidate: (queryClient, chatId) => queryClient.invalidateQueries({
+      queryKey: chatId ? chatUsageKey(chatId) : chatUsageRootKey,
+    }),
   },
 }
 
