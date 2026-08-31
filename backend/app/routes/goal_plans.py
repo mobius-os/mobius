@@ -21,6 +21,7 @@ from app.goal_plans import (
   GoalPlanConflict,
   GoalPlanError,
   active_goal_rows,
+  presented_goal_rows,
   replace_plan,
   serialize_plan,
   update_task,
@@ -102,7 +103,7 @@ def get_goal_plan(
 ):
   require_chat_embed_operation(principal, "chat:read")
   get_active_chat_for_principal(db, chat_id, principal)
-  rows = active_goal_rows(db, chat_id)
+  rows = presented_goal_rows(db, chat_id)
   return {"plan": serialize_plan(db, *rows) if rows is not None else None}
 
 

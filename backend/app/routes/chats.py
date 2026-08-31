@@ -46,6 +46,7 @@ from app.chat_titles import (
   renamed_event,
 )
 from app.database import get_db
+from app.goal_plans import presented_goal
 from app.memory_observability import record_memory_checkpoint_once
 from app.owner_input import OwnerInputKind
 from app.deps import (
@@ -482,10 +483,16 @@ def _chat_detail_window(
       if _chat_message_matches_key(message, index, anchor_key)
     ), None)
     if anchor_index is not None:
-      # Exact restoration is one atomic snapshot: the saved row through the
-      # current tail. A page ceiling here silently discards the very address
-      # the caller asked us to preserve.
-      return messages[anchor_index:], anchor_index, True
+      # Exact restoration is one atomic snapshot: keep one predecessor above
+      # the saved row, then carry the current tail. Without that small amount
+      # of real scroll range, a row that becomes first in the cold window can
+      # only sit at the list's 8px top padding; a saved positive viewport
+      # offset is clamped even though the requested row was found. The reader
+      # then returns to the right message at the wrong vertical position.
+      # A page ceiling here would still silently discard the exact address the
+      # caller asked us to preserve.
+      start = max(0, anchor_index - 1)
+      return messages[start:], start, True
     start = max(0, total - limit)
     return messages[start:], start, False
   if before is not None:
@@ -607,6 +614,7 @@ def _chat_detail_response(
     draining=is_draining(),
   )
   active_goal_objective = running_goal_objective(db, chat.id)
+  goal = presented_goal(db, chat.id)
   response = {
     "id": chat.id,
     "title": chat.title,
@@ -621,6 +629,7 @@ def _chat_detail_response(
     "running": running,
     "active_assistant_message_id": _active_assistant_message_id(chat),
     "active_goal_objective": active_goal_objective,
+    "goal": goal,
     "pending_question_id": _open_question_id_for(chat),
     "session_id": chat.session_id if expose_session else None,
     "provider": provider,
@@ -1480,6 +1489,7 @@ def get_chat_runtime(
     "running": is_chat_running(chat.id),
     "active_assistant_message_id": _active_assistant_message_id(chat),
     "active_goal_objective": running_goal_objective(db, chat.id),
+    "goal": presented_goal(db, chat.id),
     "pending_messages": list(chat.pending_messages or []),
     "pending_question_id": _open_question_id_for(chat),
     "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,

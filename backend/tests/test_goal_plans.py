@@ -789,9 +789,14 @@ def test_plan_projects_recursive_delegation_ownership_without_transcripts(
     "status": "completed",
   })
   db.commit()
-  assert client.get(
+  settled_plan = client.get(
     f"/api/chats/{chat_id}/goal-plan", headers=auth,
-  ).json()["plan"] is None
+  ).json()["plan"]
+  assert settled_plan["delegations"][0]["status"] == "completed"
+  assert settled_plan["delegations"][0]["children"][0]["status"] == "completed"
+  assert settled_plan["summary"]["completed"] == 1
+  assert settled_plan["summary"]["can_complete"] is True
+  assert settled_plan["summary"]["completion_blockers"] == []
   assert client.get(
     f"/api/chats/{chat_id}/runtime", headers=auth,
   ).json()["active_goal_objective"] is None
@@ -910,13 +915,20 @@ def test_plan_rejects_cycles_missing_dependencies_and_non_goal_runs(
   assert missing.status_code == 422
   assert "missing task" in missing.json()["detail"]
 
+  created = client.put(
+    f"/api/chats/{chat_id}/goal-plan",
+    json={"expected_revision": 0, "tasks": [{"id": "a", "title": "A"}]},
+    headers=auth,
+  )
+  assert created.status_code == 200
+
   db.query(models.ChatRun).filter(models.ChatRun.id == "goal-root").update({
     models.ChatRun.status: "completed",
   })
   db.commit()
   inactive = client.get(f"/api/chats/{chat_id}/goal-plan", headers=auth)
   assert inactive.status_code == 200
-  assert inactive.json() == {"plan": None}
+  assert inactive.json()["plan"]["summary"]["can_complete"] is False
   rejected = client.put(
     f"/api/chats/{chat_id}/goal-plan",
     json={"expected_revision": 0, "tasks": [{"id": "a", "title": "A"}]},

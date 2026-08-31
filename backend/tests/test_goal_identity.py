@@ -2,6 +2,7 @@
 
 from app import models
 from app.chat_writer import AppendPending, Barrier, PromotePending, get_writer
+from app.goal_plans import presented_goal
 from app.run_state import goal_identity_for_run_start
 
 
@@ -122,6 +123,54 @@ def test_continue_does_not_revive_a_settled_plan(db, chat):
   ))
   db.commit()
 
+  assert goal_identity_for_run_start(
+    db, chat.id, {"content": "continue"},
+  ) == (None, None)
+
+
+def test_stopped_unplanned_goal_stays_resumable_after_ordinary_turns(db, chat):
+  db.add_all([
+    models.ChatRun(
+      id="paused-goal", root_run_id="paused-goal", chat_id=chat.id,
+      status="stopped", provider="codex", goal_objective="Pause safely",
+      goal_id="paused-id",
+    ),
+    models.ChatRun(
+      id="later-question", root_run_id="later-question", chat_id=chat.id,
+      status="completed", provider="codex",
+    ),
+  ])
+  db.commit()
+
+  assert presented_goal(db, chat.id) == {
+    "id": "paused-id",
+    "objective": "Pause safely",
+    "status": "paused",
+    "resumable": True,
+  }
+  assert goal_identity_for_run_start(
+    db, chat.id, {"content": "continue"},
+  ) == ("Pause safely", "paused-id")
+
+
+def test_goal_clear_writes_an_identity_tombstone_that_prevents_resume(db, chat):
+  db.add(models.ChatRun(
+    id="paused-goal", root_run_id="paused-goal", chat_id=chat.id,
+    status="stopped", provider="codex", goal_objective="Pause safely",
+    goal_id="paused-id",
+  ))
+  db.commit()
+
+  assert goal_identity_for_run_start(
+    db, chat.id, {"content": "/goal clear"},
+  ) == (None, "paused-id")
+  db.add(models.ChatRun(
+    id="clear-run", root_run_id="clear-run", chat_id=chat.id,
+    status="completed", provider="codex", goal_id="paused-id",
+  ))
+  db.commit()
+
+  assert presented_goal(db, chat.id) is None
   assert goal_identity_for_run_start(
     db, chat.id, {"content": "continue"},
   ) == (None, None)

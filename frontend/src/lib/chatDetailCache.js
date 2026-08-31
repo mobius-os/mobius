@@ -185,6 +185,7 @@ export function chatDetailCacheValue(data = {}) {
     activeGoalObjective: typeof data.active_goal_objective === 'string'
       ? data.active_goal_objective
       : '',
+    goal: data.goal && typeof data.goal === 'object' ? { ...data.goal } : null,
     pending_messages: Array.isArray(data.pending_messages)
       ? data.pending_messages
       : [],

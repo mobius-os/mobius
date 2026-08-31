@@ -27,6 +27,9 @@ test('unchanged runtime polls do not publish a persisted-cache update', () => {
     messages: transcript,
     running: true,
     activeGoalObjective: 'Fix first-scroll jitter',
+    goal: {
+      id: 'goal-1', objective: 'Fix first-scroll jitter', status: 'active',
+    },
     pending_messages: [{ id: 'queued-1', content: 'next' }],
     pending_question_id: null,
   })
@@ -37,6 +40,9 @@ test('unchanged runtime polls do not publish a persisted-cache update', () => {
     {
       running: true,
       activeGoalObjective: 'Fix first-scroll jitter',
+      goal: {
+        id: 'goal-1', objective: 'Fix first-scroll jitter', status: 'active',
+      },
       // A network response creates new objects even when their JSON-domain
       // value is unchanged. That must still count as an unchanged poll.
       pending_messages: [{ id: 'queued-1', content: 'next' }],

@@ -10,7 +10,7 @@ from sqlalchemy import event
 from app.memory_recall import EMPTY_RECALL_BINDING
 
 
-def test_anchor_window_returns_saved_row_through_authoritative_tail():
+def test_anchor_window_keeps_predecessor_and_authoritative_tail():
   messages = [
     {"role": "user" if index % 2 == 0 else "assistant", "ts": 1000 + index}
     for index in range(45)
@@ -24,8 +24,9 @@ def test_anchor_window_returns_saved_row_through_authoritative_tail():
   )
 
   assert found is True
-  assert offset == 11
-  assert page == messages[11:]
+  assert offset == 10
+  assert page == messages[10:]
+  assert page[1] is messages[11]
   assert page[-1] is messages[-1]
 
 
@@ -50,8 +51,8 @@ def test_anchor_window_accepts_every_durable_row_alias():
     )
 
     assert found is True, alias
-    assert offset == 1, alias
-    assert page == messages[1:], alias
+    assert offset == 0, alias
+    assert page == messages, alias
 
 
 def test_missing_anchor_fails_closed_to_the_ordinary_recent_page():
@@ -612,6 +613,7 @@ def test_runtime_route_does_not_select_transcript_json(
     "running": True,
     "active_assistant_message_id": None,
     "active_goal_objective": None,
+    "goal": None,
     "pending_messages": [],
     "pending_question_id": None,
     "updated_at": created.json()["updated_at"],
