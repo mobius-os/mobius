@@ -63,9 +63,11 @@ _KNOWN_STATES = {
 }
 _ACTIVE_STATES = {"queued", "preparing", "replacing", "verifying"}
 _HANDOFF_VERSION = "external-cutover-v1"
+_RUNTIME_OVERLAY_VERSION = "active-runtime-v1"
 _managed_recovery_tasks: set[asyncio.Task[None]] = set()
 _UPGRADE_MESSAGE = (
-  "The Host replacement helper predates safe chat continuation. Re-run "
+  "The Host replacement helper predates safe active-runtime carry-forward. "
+  "Re-run "
   "scripts/install-rebuild-helper.sh from the current trusted checkout."
 )
 
@@ -307,12 +309,16 @@ def _read_host_status() -> dict[str, Any]:
         "expected_sha": expected,
         "message": "Container replacement queued.",
         "handoff": value.get("handoff"),
+        "runtime_overlay": value.get("runtime_overlay"),
       }
   return value
 
 
 def _current_handoff(raw: dict[str, Any]) -> bool:
-  return raw.get("handoff") == _HANDOFF_VERSION
+  return (
+    raw.get("handoff") == _HANDOFF_VERSION
+    and raw.get("runtime_overlay") == _RUNTIME_OVERLAY_VERSION
+  )
 
 
 def _write_request(expected_sha: str) -> None:
@@ -466,12 +472,19 @@ async def request_rebuild() -> RebuildStatus:
       "Möbius cannot identify the official version to deploy.",
       status_code=409,
     )
-  blockers = platform_update.container_replacement_blockers()
+  blockers = platform_update.container_replacement_blockers(
+    expected_sha,
+    preserve_active_runtime=deployment == "self_hosted",
+  )
   if blockers:
+    visible = ", ".join(blockers[:5])
+    if len(blockers) > 5:
+      visible += f", and {len(blockers) - 5} more"
     raise DeploymentControlError(
       "local_runtime_changes",
-      "The official image does not contain local runtime changes. "
-      "Commit them upstream or remove them before replacing this container.",
+      "The official image cannot preserve these local image inputs: "
+      f"{visible}. Commit them upstream, rebuild locally, or remove them "
+      "before replacing this container.",
       status_code=409,
     )
   if deployment == "railway":
