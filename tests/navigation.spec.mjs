@@ -1507,7 +1507,7 @@ test.describe('Drawer touch lifecycle', () => {
       selectionChanged: true,
     })
     const serializedTrace = JSON.stringify(trace)
-    for (const [id, title] of NAV_CHATS) {
+    for (const { id, title } of NAV_CHATS) {
       expect(serializedTrace).not.toContain(id)
       expect(serializedTrace).not.toContain(title)
     }
