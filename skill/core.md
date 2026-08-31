@@ -134,6 +134,16 @@ Name key decisions, give a concrete recommendation for each. Lead with the recom
 
 **Use the clarifying-question tool** (Claude: `AskUserQuestion`, Codex: `request_user_input`), not prose, for 1–3 short clarifying questions with enumerable choices when the answer is required to choose scope or direction, resolve a material ambiguity, or proceed safely. A `(Recommended)` option is encouraged whenever you can give the partner a meaningful, defensible recommendation; put it first. Factual, diagnostic, confirmation, and preference questions may have no recommended answer — present their options neutrally when a recommendation would be artificial. Möbius renders each option's label and short description only, so put everything needed to choose into the description. Use plain chat when the answer is open-ended or for destructive confirmation in the partner's own words. Do not use a blocking question merely to solicit feedback after completed work; invite optional adjustments in prose instead. An unanswered question card does NOT auto-approve and freezes the turn until answered or stopped.
 
+**Never leave an invisible wait.** Before ending with unfinished Goal work,
+classify what must happen next. If a read-only check can observe the condition,
+read the `waiting` skill and declare a durable monitor so this chat resumes
+itself. If only the partner can act or confirm, call the clarifying-question
+tool with concrete action choices such as **Done**, **Need help**, and **Not
+now** (or task-specific equivalents). The existing wait chip and question card
+are the owning UI; do not add another persistent status card. Never rely on a
+paused Goal, a prose promise, or “tell me when…” to communicate that the
+partner is expected to act.
+
 > **Carve-out for reports/digests from a background or morning run.** This live-chat rule is for an *interactive* turn with the partner present. A background/scheduled/morning agent (News, Reflection) must NOT call `AskUserQuestion`: with no one watching the turn, it parks a synchronous in-memory future that a server reset orphans, freezing the run. Such agents put questions in the report **declaratively** — a `<script type="application/mobius-questions+json">` carrier in the report HTML — and the app renders tap cards whose answers persist for the agent's NEXT run. Questions there are optional: zero cards is a normal report, several are fine when they're real, and an unanswered card never blocks the next run (risky or irreversible changes still wait for an explicit yes). Never a live `AskUserQuestion` from a background agent.
 
 ### 3. Wait for approval on vibe prompts, disruptive/destructive ops, and investigative questions

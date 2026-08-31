@@ -592,6 +592,57 @@ def terminal_goal_summaries_by_message_index(
   return projected
 
 
+def _goal_wait_kind(
+  db: Session,
+  physical: models.ChatRun,
+  root: models.ChatRun,
+) -> str | None:
+  """Name the visible gate only when it belongs to this exact Goal."""
+  goal_id = physical.goal_id or root.id
+  pending_question_id = db.query(models.Chat.pending_question_id).filter(
+    models.Chat.id == physical.chat_id,
+  ).scalar()
+  if pending_question_id is not None:
+    question_owner = (
+      db.query(models.ChatRun)
+      .filter(
+        models.ChatRun.chat_id == physical.chat_id,
+        models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+      )
+      .order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc())
+      .first()
+    )
+    if (
+      question_owner is not None
+      and (
+        question_owner.goal_id
+        or question_owner.root_run_id
+        or question_owner.id
+      ) == goal_id
+    ):
+      return "owner_question"
+
+  wait_run_ids = [
+    run_id for (run_id,) in db.query(models.ChatWait.created_by_run_id).filter(
+      models.ChatWait.chat_id == physical.chat_id,
+      models.ChatWait.status == "armed",
+      models.ChatWait.created_by_run_id.isnot(None),
+    ).all()
+  ]
+  if not wait_run_ids:
+    return None
+  wait_owners = db.query(models.ChatRun).filter(
+    models.ChatRun.chat_id == physical.chat_id,
+    models.ChatRun.id.in_(wait_run_ids),
+  ).all()
+  if any(
+    (owner.goal_id or owner.root_run_id or owner.id) == goal_id
+    for owner in wait_owners
+  ):
+    return "monitor"
+  return None
+
+
 def serialize_goal(
   db: Session,
   physical: models.ChatRun,
@@ -617,11 +668,13 @@ def serialize_goal(
     status = "paused"
   else:
     status = "completed"
+  wait_kind = _goal_wait_kind(db, physical, root)
   return {
     "id": physical.goal_id or root.id,
     "objective": physical.goal_objective,
     "status": status,
     "resumable": status == "paused",
+    **({"wait_kind": wait_kind} if wait_kind is not None else {}),
   }
 
 
