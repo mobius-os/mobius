@@ -66,6 +66,7 @@ from app import activity, models
 # wrapped imports in lifespan() below.
 from app.routes import (
   admin_router, apps_router, auth_router,
+  app_chat_router,
   chat_embed_router, chat_logs_router, chat_router, chats_router, chats_stream_router,
   secure_inputs_router,
   connectors_router, connectors_public_router,
@@ -82,6 +83,7 @@ from app.routes import (
   published_router,
   connect_router,
   projects_router,
+  router_import_failures,
 )
 
 _BOOT_ID = os.environ.get("MOBIUS_BOOT_ID") or f"{os.getpid()}-{time.time_ns()}"
@@ -106,6 +108,20 @@ def _database_degraded_payload() -> dict | None:
     return {
       "reason": "schema_mismatch",
       "schema_gaps": list(result.schema_gaps),
+    }
+  return None
+
+
+def _boot_degraded_payload() -> dict | None:
+  """Return the one boot verdict shared by every serviceability surface."""
+  database = _database_degraded_payload()
+  if database:
+    return database
+  failed_routers = router_import_failures()
+  if failed_routers:
+    return {
+      "reason": "router_import_failure",
+      "failed_routers": list(failed_routers),
     }
   return None
 
@@ -792,18 +808,7 @@ app.include_router(goal_plans_router)
 app.include_router(chat_logs_router)
 app.include_router(connectors_router)
 app.include_router(connectors_public_router)
-# App-attributed chat contract (design §1) — a SECOND router defined in
-# routes/chats.py under /api/app-chats, so it's imported directly rather
-# than via routes/__init__'s `_load` (which only returns `.router`).
-# Guarded: a broken chats.py already degraded chats_router to a stub
-# above, and shouldn't take the whole app down here either.
-try:
-  from app.routes.chats import app_chat_router  # noqa: E402
-  app.include_router(app_chat_router)
-except Exception as _exc:  # pragma: no cover - defensive boot guard
-  logging.getLogger(__name__).error(
-    "app_chat_router not mounted: %s", _exc, exc_info=True,
-  )
+app.include_router(app_chat_router)
 app.include_router(notify_router)
 app.include_router(screen_control_router)
 app.include_router(proxy_router)
@@ -850,7 +855,7 @@ def health(response: Response):
   reloading while the old process is still briefly answering before SIGTERM.
   """
   response.headers["Cache-Control"] = "no-store"
-  degraded = _database_degraded_payload()
+  degraded = _boot_degraded_payload()
   payload = {
     "status": degraded["reason"] if degraded else "ok",
     "target": "mobius",
@@ -874,16 +879,16 @@ def health(response: Response):
 
 @app.get("/api/health/strict")
 def health_strict(response: Response):
-  """Database-focused serviceability probe retained for diagnostics.
+  """Boot serviceability probe retained for diagnostics.
 
   Distinct from `/api/health` (reachability — must stay 200 whenever the
   process answers, or the shell would flip devices to offline UI): this
-  variant fails when database initialization fails or mapped schema is absent.
-  Deployment healthchecks use `/api/ready`, which includes this database
-  contract plus the chat-persistence writer contract.
+  variant fails when database initialization fails, mapped schema is absent,
+  or a route import failed. Deployment healthchecks use `/api/ready`, which
+  includes this boot contract plus the chat-persistence writer contract.
   """
   response.headers["Cache-Control"] = "no-store"
-  degraded = _database_degraded_payload()
+  degraded = _boot_degraded_payload()
   if degraded:
     response.status_code = 503
     return {"status": degraded["reason"], **degraded}
@@ -910,7 +915,7 @@ def ready(response: Response):
 
   Distinct from `/api/health` (reachability — the process is answering HTTP),
   this route also requires a successfully initialized database with every
-  mapped table and column, plus a usable
+  mapped table and column, a complete route registry, plus a usable
   single-writer chat-persistence actor. A deploy must not green while a mapped
   column is absent or every chat write will fail, even though the process can
   still answer ordinary HTTP requests.
@@ -923,7 +928,7 @@ def ready(response: Response):
   window where this false-fails.
   """
   response.headers["Cache-Control"] = "no-store"
-  degraded = _database_degraded_payload()
+  degraded = _boot_degraded_payload()
   if degraded:
     response.status_code = 503
     return {
@@ -1068,6 +1073,16 @@ def unknown_api(path: str):
   or a bundled server-side script run via `/api/apps/{id}/run-job`) rather
   than a synchronous in-backend completion endpoint.
   """
+  failed_routers = router_import_failures()
+  if failed_routers:
+    failed = ", ".join(failed_routers)
+    raise HTTPException(
+      status_code=503,
+      detail=(
+        f"Router imports failed ({failed}). "
+        "Repair the platform source, then restart Möbius."
+      ),
+    )
   raise HTTPException(status_code=404, detail="Not found.")
 
 
