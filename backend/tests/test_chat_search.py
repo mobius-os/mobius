@@ -461,7 +461,7 @@ def test_search_anchor_opens_one_authoritative_window_through_the_tail(client, a
     headers=auth,
   ).json()
   assert detail["requested_anchor_found"] is True
-  assert detail["offset"] == 1
+  assert detail["offset"] == 0
   assert [row["content"] for row in detail["messages"]] == [
-    "the searchable narwhal", "after",
+    "before", "the searchable narwhal", "after",
   ]

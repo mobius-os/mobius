@@ -483,10 +483,16 @@ def _chat_detail_window(
       if _chat_message_matches_key(message, index, anchor_key)
     ), None)
     if anchor_index is not None:
-      # Exact restoration is one atomic snapshot: the saved row through the
-      # current tail. A page ceiling here silently discards the very address
-      # the caller asked us to preserve.
-      return messages[anchor_index:], anchor_index, True
+      # Exact restoration is one atomic snapshot: keep one predecessor above
+      # the saved row, then carry the current tail. Without that small amount
+      # of real scroll range, a row that becomes first in the cold window can
+      # only sit at the list's 8px top padding; a saved positive viewport
+      # offset is clamped even though the requested row was found. The reader
+      # then returns to the right message at the wrong vertical position.
+      # A page ceiling here would still silently discard the exact address the
+      # caller asked us to preserve.
+      start = max(0, anchor_index - 1)
+      return messages[start:], start, True
     start = max(0, total - limit)
     return messages[start:], start, False
   if before is not None:
