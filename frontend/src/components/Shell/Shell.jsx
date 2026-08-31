@@ -33,7 +33,12 @@ import {
   useRecoveryGeneration,
 } from '../../hooks/useOnlineStatus.js'
 import useOutboxDrain from '../../hooks/useOutboxDrain.js'
+import useRestartPending from '../../hooks/useRestartPending.js'
 import { ReachabilityPhase } from '../../lib/connectivityStore.js'
+import {
+  clearRestartPending,
+  setRestartPending,
+} from '../../lib/restartStore.js'
 import {
   appQueries,
   appSourceQueries,
@@ -874,6 +879,9 @@ export default function Shell({ onInitialVisualReady }) {
   // One shell owner drains every chat's durable intent after a relaunch or
   // reconnect, even when the chat that created it is not the visible pane.
   useOutboxDrain()
+  const restartPending = useRestartPending()
+  const connectionStatusLabel = reachabilityLabel
+    || (restartPending ? 'Restarting…' : null)
   const chatsLoadedRef = useRef(false)
   const knownExistingOffListChatIdsRef = useRef(new Set())
   // Always-current chats, for reading inside callbacks that may hold a stale
@@ -3165,6 +3173,8 @@ export default function Shell({ onInitialVisualReady }) {
       // transient intermediate state during a multi-file agent edit. The
       // producer logs the diagnostic and retries; an explicit operation such
       // as a platform update reports its own failure where it was initiated.
+    } else if (ev.type === 'server_restarting') {
+      setRestartPending()
     } else if (ev.type === 'notification_created') {
       // The event is only a nudge; the durable list/count remain authoritative.
       // Keeping this behind the notification-center interface prevents the
@@ -3201,6 +3211,10 @@ export default function Shell({ onInitialVisualReady }) {
   // the reads here few and short; anything unbounded added below stalls live
   // events until it settles.
   const reconcileSystemStateOnOpen = useCallback(async () => {
+    // A successful system-stream reconnect is the authoritative "we're back"
+    // signal from the new process. Clear before bounded list reconciliation so
+    // a slow ancillary refresh cannot keep the restart indicator stale.
+    clearRestartPending()
     reconcileNotifications()
     try {
       await Promise.all([
@@ -4505,13 +4519,13 @@ export default function Shell({ onInitialVisualReady }) {
           </button>
         </nav>
         <div className="shell__bar-actions">
-          {reachabilityLabel && (
+          {connectionStatusLabel && (
             <span
               className="shell__connection-status"
               role="status"
               aria-live="polite"
             >
-              <span className="shell__sr-only">{reachabilityLabel}</span>
+              <span className="shell__sr-only">{connectionStatusLabel}</span>
             </span>
           )}
           <ScreenControlButton chatId={activeChatId} onNotice={showToast} />
