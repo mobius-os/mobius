@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from contextlib import asynccontextmanager
 import json
 import shutil
@@ -141,7 +142,6 @@ async def test_local_publication_preview_is_bound_to_the_accepted_listing(
       "src": "static/store/screen.png",
       "alt": "Pocket List's main screen.",
     }],
-    "featured": False,
   }
   files = [{"path": "mobius.json", "content_base64": "e30="}]
   monkeypatch.setattr(community.fs_locks, "source_dir_lock", source_lock)
@@ -357,6 +357,66 @@ async def test_publish_uses_local_github_token_and_sends_only_public_proof(monke
   commit_body = next(body for method, path, body in github_calls if method == "POST" and path.endswith("/git/commits"))
   assert "[mobius-store-proof:" in commit_body["message"]
   assert "local-only-token" not in repr(captured)
+
+
+@pytest.mark.asyncio
+async def test_local_publish_rejects_an_incomplete_listing_before_github_writes(
+  monkeypatch, db,
+):
+  _local_app(db)
+  source_called = False
+
+  @asynccontextmanager
+  async def source_lock(_):
+    yield
+
+  async def fake_broker(method, path, **kwargs):
+    assert (method, path) == ("GET", "/identity")
+    return {"issuer": "https://www.mobius.you", "subject": "user_owner"}, 200, {}
+
+  async def unexpected_source(**_kwargs):
+    nonlocal source_called
+    source_called = True
+    raise AssertionError("GitHub publication must not start")
+
+  manifest = {
+    "id": "pocket-list",
+    "name": "Pocket List",
+    "description": "A small shared list.",
+    "version": "1.0.0",
+    "entry": "index.jsx",
+    "icon": "icon.png",
+  }
+  files = [
+    {
+      "path": "mobius.json",
+      "content_base64": base64.b64encode(json.dumps(manifest).encode()).decode(),
+    },
+    {"path": "icon.png", "content_base64": ""},
+  ]
+  monkeypatch.setattr(community.github_auth, "get_token", lambda: "local-only-token")
+  monkeypatch.setattr(community.community_broker, "request", fake_broker)
+  monkeypatch.setattr(community.fs_locks, "source_dir_lock", source_lock)
+  monkeypatch.setattr(
+    community, "build_public_snapshot", lambda _: ("a" * 40, files),
+  )
+  monkeypatch.setattr(community, "_publish_local_source", unexpected_source)
+
+  with pytest.raises(HTTPException) as raised:
+    await community.publish_local_app_to_github(
+      community.PublishLocalGitHubAppIn(
+        app_id=42,
+        repository_name="pocket-list",
+        confirm_source_public=True,
+      ),
+      db,
+      None,
+      "store:publish-local:incomplete-0001",
+    )
+
+  assert raised.value.status_code == 400
+  assert raised.value.detail["code"] == "listing_incomplete"
+  assert source_called is False
 
 
 @pytest.mark.asyncio

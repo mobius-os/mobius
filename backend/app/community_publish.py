@@ -420,7 +420,6 @@ def public_store_listing(files: list[dict[str, str]]) -> dict:
     "icon": icon,
     **({"hero": {"path": hero}} if hero else {"hero": None}),
     "screenshots": projected,
-    "featured": store.get("featured") is True,
   }
 
 
