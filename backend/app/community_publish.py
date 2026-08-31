@@ -26,7 +26,9 @@ _SENSITIVE_DIRS = {
   ".git", ".github", ".env", "node_modules", "credentials", "secrets",
 }
 _SENSITIVE_FILES = {
-  "id_rsa", "id_ed25519", "credentials.json", "service-account.json",
+  ".netrc", ".npmrc", ".pypirc",
+  "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa",
+  "credentials.json", "service-account.json",
 }
 _SECRET_PATTERNS = (
   re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
@@ -74,12 +76,23 @@ def _journal_root() -> Path:
   return Path(get_settings().data_dir) / "community-publications"
 
 
+def _validated_journal_root() -> Path:
+  root = _journal_root()
+  if root.is_symlink() or root.exists() and not root.is_dir():
+    raise CommunityPublicationError(
+      "The saved publication state is invalid.",
+      "publication_journal_invalid",
+      409,
+    )
+  return root
+
+
 def _journal_id(local_app_id: str) -> str:
   return hashlib.sha256(local_app_id.encode("utf-8")).hexdigest()
 
 
 def _journal_path(local_app_id: str) -> Path:
-  return _journal_root() / f"{_journal_id(local_app_id)}.json"
+  return _validated_journal_root() / f"{_journal_id(local_app_id)}.json"
 
 
 def _validate_journal(journal: CommunityPublicationJournal) -> None:
@@ -164,13 +177,7 @@ def read_publication_journal(
 
 
 def list_publication_journals() -> list[CommunityPublicationJournal]:
-  root = _journal_root()
-  if root.is_symlink():
-    raise CommunityPublicationError(
-      "The saved publication state is invalid.",
-      "publication_journal_invalid",
-      409,
-    )
+  root = _validated_journal_root()
   if not root.is_dir():
     return []
   paths = sorted(root.glob("*.json"))
@@ -212,12 +219,6 @@ def new_publication_journal(
 
 def write_publication_journal(journal: CommunityPublicationJournal) -> None:
   _validate_journal(journal)
-  if _journal_root().is_symlink():
-    raise CommunityPublicationError(
-      "The saved publication state is invalid.",
-      "publication_journal_invalid",
-      409,
-    )
   atomic_write(
     _journal_path(journal.local_app_id),
     json.dumps(journal.__dict__, ensure_ascii=False, sort_keys=True) + "\n",
@@ -279,7 +280,11 @@ def _validate_path(path: str) -> None:
     raise CommunityPublicationError(
       "The accepted app revision contains an unsupported path.", "invalid_path",
     )
-  if any(part in _SENSITIVE_DIRS for part in folded) or folded[-1] in _SENSITIVE_FILES:
+  if (
+    any(part in _SENSITIVE_DIRS for part in folded)
+    or folded[-1] in _SENSITIVE_FILES
+    or folded[-1].startswith(".env.")
+  ):
     raise CommunityPublicationError(
       f"Remove the sensitive path {path} before publishing.", "sensitive_path",
     )

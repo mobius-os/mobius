@@ -77,6 +77,19 @@ def test_snapshot_rejects_tracked_secret_before_broker_upload(tmp_path):
   assert raised.value.code == "secret_detected"
 
 
+def test_snapshot_rejects_tracked_environment_files(tmp_path):
+  repo, app, _ = _app_repo(tmp_path)
+  (repo / ".env.local").write_text("SERVICE_PASSWORD=private", encoding="utf-8")
+  _git(repo, "add", "-f", ".env.local")
+  _git(repo, "commit", "-m", "tracked environment")
+  app.source_commit = _git(repo, "rev-parse", "HEAD")
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    build_public_snapshot(app)
+
+  assert raised.value.code == "sensitive_path"
+
+
 def test_snapshot_enforces_the_host_release_size_limit(tmp_path, monkeypatch):
   repo, app, _ = _app_repo(tmp_path, source="export default 1")
   monkeypatch.setattr("app.community_publish.MAX_SOURCE_BYTES", 1)
@@ -98,6 +111,33 @@ def test_snapshot_rejects_symlink_instead_of_following_it(tmp_path):
     build_public_snapshot(app)
 
   assert raised.value.code == "invalid_file_type"
+
+
+def test_journal_root_symlink_is_rejected_for_every_operation(
+  tmp_path, monkeypatch,
+):
+  outside = tmp_path / "outside"
+  outside.mkdir()
+  root = tmp_path / "community-publications"
+  root.symlink_to(outside, target_is_directory=True)
+  monkeypatch.setattr(community_publish, "_journal_root", lambda: root)
+  journal = community_publish.new_publication_journal(
+    local_app_id="app:42:pocket-list",
+    accepted_commit="a" * 40,
+    repository_name="pocket-list",
+    repository="octo-owner/pocket-list",
+    source_commit_sha="c" * 40,
+  )
+
+  for operation in (
+    lambda: community_publish.read_publication_journal(journal.local_app_id),
+    community_publish.list_publication_journals,
+    lambda: community_publish.write_publication_journal(journal),
+    lambda: community_publish.delete_publication_journal(journal.local_app_id),
+  ):
+    with pytest.raises(CommunityPublicationError) as raised:
+      operation()
+    assert raised.value.code == "publication_journal_invalid"
 
 
 def test_partial_success_journal_contains_only_bounded_public_state(
