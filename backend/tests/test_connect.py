@@ -972,13 +972,17 @@ async def test_unacknowledged_dispatch_expires_and_sends_cancel(
   connect_routes._channels[pairing["id"]] = channel
   request_id = "f" * 16
   monkeypatch.setattr(connect_routes, "_START_ACK_TIMEOUT", 0.01)
+  dispatch_requested_at = time.time()
   request = asyncio.create_task(connect_routes.exec_on_host(
     pairing["id"],
     connect_routes.ExecBody(cmd="must expire", request_id=request_id),
     _owner=object(),
   ))
   dispatched = await asyncio.wait_for(channel.queue.get(), timeout=1)
-  assert dispatched["not_after"] > time.time()
+  # The deliberately tiny deadline may pass while a busy test worker resumes
+  # this coroutine. Verify that dispatch minted a forward deadline instead of
+  # requiring it to still be in the future when the observer is scheduled.
+  assert dispatched["not_after"] > dispatch_requested_at
 
   with pytest.raises(connect_routes.HTTPException) as raised:
     await request
