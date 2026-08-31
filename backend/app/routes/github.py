@@ -1352,10 +1352,7 @@ async def _chat_contribution_records(
 def _normalized_coverage_path(value: object) -> str:
   if not isinstance(value, str):
     return ""
-  normalized = re.sub(r"/{2,}", "/", value.strip().replace("\\", "/"))
-  if normalized.startswith(("a/", "b/")):
-    normalized = normalized[2:]
-  return normalized
+  return re.sub(r"/{2,}", "/", value.strip().replace("\\", "/"))
 
 
 def _record_coverage_paths(record: dict, diff_path: Path) -> set[str]:

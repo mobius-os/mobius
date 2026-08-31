@@ -10,8 +10,6 @@ function cleanPath(value) {
   if (typeof value !== 'string') return ''
   const normalized = value.trim().replaceAll('\\', '/').replace(/\/{2,}/g, '/')
   if (!normalized) return ''
-  if (normalized.startsWith('a/')) return normalized.slice(2)
-  if (normalized.startsWith('b/')) return normalized.slice(2)
   return normalized
 }
 

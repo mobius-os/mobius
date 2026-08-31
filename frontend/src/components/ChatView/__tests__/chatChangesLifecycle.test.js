@@ -183,6 +183,24 @@ test('exact bounded coverage supersedes the 40-file display preview', () => {
   assert.deepEqual(overview.unsortedPaths, ['/data/platform/file-42.js'])
 })
 
+test('exact coverage preserves legitimate repo-relative a and b directories', () => {
+  const entries = [
+    entry('a-directory', 'a/foo.js'),
+    entry('b-directory', 'b/foo.js'),
+  ]
+  entries.forEach(item => { item.ts = Date.parse('2026-08-27T11:00:00Z') })
+
+  const overview = chatChangesOverview(entries, {
+    records: [],
+    coverage: [{
+      path: 'foo.js',
+      coverage_at: '2026-08-27T12:00:00Z',
+    }],
+  })
+
+  assert.deepEqual(overview.unsortedPaths, ['a/foo.js', 'b/foo.js'])
+})
+
 test('dismissing the preparation suggestion hides one revision, not future edits', () => {
   const storage = fakeStorage()
   const revision = 'edit-1:/data/platform/a.js'

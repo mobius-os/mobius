@@ -5830,6 +5830,49 @@ def test_for_chat_coverage_rejects_an_unbounded_path_request(client, owner_token
   assert response.json()["detail"] == "At most 100 paths are allowed."
 
 
+def test_for_chat_coverage_preserves_repo_relative_a_and_b_directories(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  _, record = _prepared_for_chat(
+    app_id,
+    "side-prefix-directories",
+    "chat-side-prefix-directories",
+    status="open",
+  )
+  record["quality_review"] = {"reviewed_at": "2026-08-27T12:00:00Z"}
+  diff_text = "\n".join([
+    "diff --git a/a/foo.js b/a/foo.js",
+    "--- a/a/foo.js",
+    "+++ b/a/foo.js",
+    "@@ -1 +1 @@",
+    "-old a",
+    "+new a",
+    "diff --git a/b/foo.js b/b/foo.js",
+    "--- a/b/foo.js",
+    "+++ b/b/foo.js",
+    "@@ -1 +1 @@",
+    "-old b",
+    "+new b",
+    "",
+  ])
+  _write_contribution(app_id, "side-prefix-directories", record, diff_text)
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/for-chat/"
+    "chat-side-prefix-directories/coverage",
+    headers={"Authorization": f"Bearer {owner_token}"},
+    json={"paths": ["a/foo.js", "foo.js", "b/foo.js"]},
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json() == {"coverage": [
+    {"path": "a/foo.js", "coverage_at": "2026-08-27T12:00:00Z"},
+    {"path": "b/foo.js", "coverage_at": "2026-08-27T12:00:00Z"},
+  ]}
+
+
 def test_for_chat_releases_storage_lock_before_parsing_contribution_history(
   client, owner_token, monkeypatch,
 ):
