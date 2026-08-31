@@ -1886,6 +1886,34 @@ async def stop_contribution_work(
   return {"stopped": work["status"] in {"stopped", "cancelled"}, "work": work}
 
 
+@router.get("/contributions/{app_id}/for-chat/{chat_id}/work/history")
+@_limiter.limit("30/minute")
+def contribution_work_history(
+  request: Request,
+  app_id: int,
+  chat_id: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """All compact source-attached helper outcomes for one chat, newest first."""
+  _validate_submit_app(app_id, principal, db)
+  get_active_chat_or_404(db, chat_id)
+  query = db.query(models.Delegation).filter(
+    models.Delegation.parent_chat_id == chat_id,
+    models.Delegation.source_work_context_app_id == app_id,
+    models.Delegation.source_work_id.is_not(None),
+  )
+  total = query.count()
+  rows = query.order_by(
+    models.Delegation.created_at.desc(), models.Delegation.id.desc(),
+  ).limit(100).all()
+  return {
+    "items": [serialize_source_work(db, row) for row in rows],
+    "total": total,
+    "truncated": total > len(rows),
+  }
+
+
 @router.get("/contributions/{app_id}/for-chat/{chat_id}")
 @_limiter.limit("60/minute")
 async def contributions_for_chat(
@@ -2014,6 +2042,11 @@ async def contributions_for_chat(
   with SessionLocal() as work_db:
     work_row = latest_source_work(work_db, chat_id, app_id)
     work = serialize_source_work(work_db, work_row) if work_row else None
+    work_history_count = work_db.query(models.Delegation).filter(
+      models.Delegation.parent_chat_id == chat_id,
+      models.Delegation.source_work_context_app_id == app_id,
+      models.Delegation.source_work_id.is_not(None),
+    ).count()
   return {
     "generated_at": _now_iso(),
     "connected": bool(github_state.get("token")),
@@ -2029,6 +2062,7 @@ async def contributions_for_chat(
     "stack_units": stack_units,
     "settlements": _settlement_projection(settlement_document),
     "work": work,
+    "work_history_count": work_history_count,
   }
 
 

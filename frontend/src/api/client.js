@@ -965,6 +965,9 @@ export const api = {
         body: JSON.stringify(request),
       },
     ),
+    workHistory: (appId, chatId) => apiFetch(
+      `/github/contributions/${appId}/for-chat/${encodeURIComponent(chatId)}/work/history`,
+    ),
     stopWork: (appId, chatId) => apiFetch(
       `/github/contributions/${appId}/for-chat/${encodeURIComponent(chatId)}/work/stop`,
       { method: 'POST' },

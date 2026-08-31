@@ -227,13 +227,16 @@ export default function FileDiffList({
   summaryOverrides,
   diffTruncated = false,
   expansionCommand = null,
+  initiallyOpenFirst = false,
 }) {
   const parsedFiles = useMemo(() => (Array.isArray(files) ? files : []), [files])
   const rows = useMemo(
     () => buildFileRows(parsedFiles, summaryOverrides),
     [parsedFiles, summaryOverrides],
   )
-  const [openFiles, setOpenFiles] = useState(() => new Set())
+  const [openFiles, setOpenFiles] = useState(() => (
+    initiallyOpenFirst && rows[0] ? new Set([rows[0].key]) : new Set()
+  ))
   const [showAll, setShowAll] = useState(false)
   const listId = useId()
   const lastParsedFile = parsedFiles.at(-1)
@@ -244,6 +247,11 @@ export default function FileDiffList({
     setOpenFiles(expandedFileKeys(rows, expansionCommand.expanded === true))
     if (expansionCommand.expanded === true) setShowAll(true)
   }, [expansionCommand, rows])
+
+  useEffect(() => {
+    if (!initiallyOpenFirst || !rows[0]) return
+    setOpenFiles(current => current.size > 0 ? current : new Set([rows[0].key]))
+  }, [initiallyOpenFirst, rows])
 
   function toggleFile(key) {
     setOpenFiles((current) => {

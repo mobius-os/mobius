@@ -7,13 +7,8 @@ import {
   contributionNeedsAttention,
   contributionSourceFile,
   contributionStage,
-  contributionWorkNeedsSourceAttention,
   contributionWorkState,
   groupUnsortedFiles,
-  initialChangesStage,
-  isUnsortedDismissed,
-  rememberUnsortedDismissed,
-  unsortedDismissKey,
 } from '../chatChangesLifecycle.js'
 
 function entry(id, ...paths) {
@@ -23,14 +18,6 @@ function entry(id, ...paths) {
       files: paths.map(path => ({ path, hunks: [] })),
       truncated: false,
     },
-  }
-}
-
-function fakeStorage() {
-  const values = new Map()
-  return {
-    getItem: key => values.get(key) || null,
-    setItem: (key, value) => values.set(key, String(value)),
   }
 }
 
@@ -66,8 +53,18 @@ test('one lifecycle separates recorded edits from prepared, open, and settled wo
     unsorted: 1, prepared: 1, open: 1, settled: 1,
     attention: 0, submitting: 0, files: 3, updates: 2,
   })
-  assert.equal(compactChangesSummary(overview), '1 unsorted · 1 prepared · 1 open')
-  assert.equal(initialChangesStage(overview), 'unsorted')
+  assert.equal(compactChangesSummary(overview), '2 working · 1 ready · 1 done')
+})
+
+test('settled work cannot remain an owner action because of stale review metadata', () => {
+  for (const status of ['merged', 'superseded', 'closed']) {
+    assert.equal(contributionNeedsAttention({
+      status,
+      needs_attention: true,
+      last_submit_error: 'old failure',
+      review: { state: 'needs_refresh' },
+    }), false)
+  }
 })
 
 test('repeated edits become one file row while retaining every diff hunk', () => {
@@ -127,21 +124,11 @@ test('attached contribution work has one honest source-chat state', () => {
   const overview = chatChangesOverview([], {
     records: [],
     work: { id: 'w', status: 'running' },
+    work_history_count: 4,
   })
   assert.equal(overview.workState, 'active')
-  assert.equal(compactChangesSummary(overview), 'helper working')
-})
-
-test('source chat interrupts only for contribution work that needs judgment', () => {
-  for (const status of ['accepted', 'retrying', 'starting', 'running', 'resuming', 'paused']) {
-    assert.equal(contributionWorkNeedsSourceAttention({ id: 'w', status }), false)
-  }
-  for (const status of ['completed', 'stopped', 'cancelled']) {
-    assert.equal(contributionWorkNeedsSourceAttention({ id: 'w', status }), false)
-  }
-  for (const status of ['failed', 'needs_review', 'interrupted']) {
-    assert.equal(contributionWorkNeedsSourceAttention({ id: 'w', status }), true)
-  }
+  assert.equal(overview.workHistoryCount, 4)
+  assert.equal(compactChangesSummary(overview), 'Preparing in background')
 })
 
 test('a pre-start retry remains active so duplicate contribution controls stay disabled', () => {
@@ -153,15 +140,15 @@ test('a pre-start retry remains active so duplicate contribution controls stay d
   assert.equal(contributionWorkState(work), 'active')
   const overview = chatChangesOverview([], { records: [], work })
   assert.equal(overview.workState, 'active')
-  assert.equal(compactChangesSummary(overview), 'helper working')
+  assert.equal(compactChangesSummary(overview), 'Preparing in background')
 })
 
 test('Brain copy stays quiet when settled and names only useful outstanding work', () => {
-  assert.equal(compactChangesSummary({ counts: { settled: 3 } }), '3 settled · everything organized')
+  assert.equal(compactChangesSummary({ counts: { settled: 3 } }), '3 done')
   assert.equal(compactChangesSummary({ counts: {} }), 'No changes from this chat yet')
   assert.equal(
     compactChangesSummary({ counts: { unsorted: 2, prepared: 1, open: 4, attention: 1 } }),
-    '2 unsorted · 1 prepared · 4 open · 1 need attention',
+    '6 working · 1 ready · 1 needs you',
   )
   assert.equal(
     compactChangesSummary({ lifecycleAvailable: false, counts: { files: 2, unsorted: 2 } }),
@@ -269,16 +256,6 @@ test('unsorted files group by owning project for individual preparation', () => 
     ['/data/platform', 1],
     ['/data/apps/notes', 2],
   ])
-})
-
-test('dismissing the preparation suggestion hides one revision, not future edits', () => {
-  const storage = fakeStorage()
-  const revision = 'edit-1:/data/platform/a.js'
-  assert.match(unsortedDismissKey('chat-a', revision), /^mobius:changes-dismissed:chat-a:/)
-  assert.equal(isUnsortedDismissed('chat-a', revision, storage), false)
-  assert.equal(rememberUnsortedDismissed('chat-a', revision, storage), true)
-  assert.equal(isUnsortedDismissed('chat-a', revision, storage), true)
-  assert.equal(isUnsortedDismissed('chat-a', `${revision}|edit-2`, storage), false)
 })
 
 test('temporary review worktrees and runtime storage never become contribution work', () => {
