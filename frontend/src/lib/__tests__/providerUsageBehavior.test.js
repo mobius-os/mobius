@@ -53,3 +53,19 @@ test('Möbius allowance copy matches the consumed brain gauge at integer precisi
     expiresAt: '2026-09-07T19:40:34.682998+00:00',
   }, now), '3% used · 13d left')
 })
+
+test('plan allowance copy identifies a recent fallback reading', () => {
+  const allowance = providerAllowance('claude', {
+    state: 'ready',
+    stale: true,
+    windows: [
+      { kind: 'weekly', label: 'Weekly', used_percent: 24 },
+    ],
+  })
+
+  assert.equal(allowance.stale, true)
+  assert.equal(
+    providerAllowanceSummary('claude', allowance),
+    '24% weekly usage · last available',
+  )
+})

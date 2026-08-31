@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import concurrent.futures as _cf
 import functools
 import logging
 import os
 import shutil
+import time
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +25,30 @@ log = logging.getLogger(__name__)
 
 _CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 _PROVIDER_TIMEOUT_SECONDS = 12.0
+_PROVIDER_USAGE_FRESH_SECONDS = 2.0
+_PROVIDER_USAGE_STALE_SECONDS = 10 * 60.0
+# Claude's usage-only endpoint can briefly return no windows while ordinary
+# chat authentication and model discovery remain healthy. Retry only this
+# observed cold-read failure; Codex already owns a bounded protocol timeout and
+# Möbius can truthfully have no measurable balance yet.
+_CLAUDE_COLD_RETRY_DELAYS = (0.25, 0.75)
+
+# One browser query is shared across panes, but several browser sessions can
+# still open the same provider at once. Keep the external probe single-flight
+# per installation/provider and retain one recent successful observation for
+# short outages. Production has one configured data_dir and three providers,
+# so these maps are intrinsically bounded by the provider registry.
+
+@dataclass
+class _CachedProviderUsage:
+  observed_at: float
+  checked_at: float
+  snapshot: dict[str, Any]
+  stale: bool = False
+
+
+_provider_usage_cache: dict[tuple[str, str], _CachedProviderUsage] = {}
+_provider_usage_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
 _CLAUDE_WINDOW_LABELS = {
   "five_hour": "5-hour",
@@ -322,12 +349,18 @@ async def _fetch_claude_usage(data_dir: str) -> dict[str, Any]:
     "Content-Type": "application/json",
   }
   async with httpx.AsyncClient(timeout=5.0) as client:
-    response = await client.get(_CLAUDE_USAGE_URL, headers=headers)
-    response.raise_for_status()
-    return normalize_claude_usage(
-      response.json(),
-      subscription_type=subscription_type,
-    )
+    for delay in (0.0, *_CLAUDE_COLD_RETRY_DELAYS):
+      if delay:
+        await asyncio.sleep(delay)
+      response = await client.get(_CLAUDE_USAGE_URL, headers=headers)
+      response.raise_for_status()
+      snapshot = normalize_claude_usage(
+        response.json(),
+        subscription_type=subscription_type,
+      )
+      if snapshot["state"] != "unavailable":
+        return snapshot
+  return snapshot
 
 
 def _codex_plan_type(account_response: Any) -> Any:
@@ -418,6 +451,45 @@ def _unavailable(plan_label: str | None = None) -> dict[str, Any]:
   }
 
 
+def _cache_key(provider_id: str, data_dir: str) -> tuple[str, str]:
+  return (str(Path(data_dir).resolve()), provider_id)
+
+
+def _cached_usage(
+  key: tuple[str, str],
+  *,
+  max_age: float,
+) -> dict[str, Any] | None:
+  cached = _provider_usage_cache.get(key)
+  if cached is None:
+    return None
+  if time.monotonic() - cached.checked_at > max_age:
+    return None
+  snapshot = copy.deepcopy(cached.snapshot)
+  snapshot["stale"] = cached.stale
+  return snapshot
+
+
+def _snapshot_boundaries_are_current(
+  snapshot: dict[str, Any],
+  *,
+  now: datetime | None = None,
+) -> bool:
+  """Never carry an observation across an allowance reset or expiry."""
+  current = now or datetime.now(UTC)
+  for window in snapshot.get("windows", []):
+    if not isinstance(window, dict):
+      continue
+    for field in ("resets_at", "expires_at"):
+      normalized = _reset_iso(window.get(field))
+      if (
+        normalized is not None
+        and datetime.fromisoformat(normalized) <= current
+      ):
+        return False
+  return True
+
+
 async def _provider_snapshot(provider_id: str, data_dir: str) -> dict[str, Any]:
   provider = providers.PROVIDERS[provider_id]
   if provider.check_auth(data_dir) is not None:
@@ -467,5 +539,62 @@ async def read_provider_usage(
   provider_id: str,
   data_dir: str,
 ) -> dict[str, Any]:
-  """Read one provider's plan usage only when its disclosure is opened."""
-  return await _provider_snapshot(provider_id, data_dir)
+  """Return one coalesced provider usage observation with bounded fallback.
+
+  A connected provider's usage service is advisory and can fail independently
+  from chat authentication. A recent successful observation is safer and more
+  useful than erasing the gauge after one failed probe, but it must never live
+  past either the stale bound or a provider reset.
+  """
+  key = _cache_key(provider_id, data_dir)
+  cached = _cached_usage(key, max_age=_PROVIDER_USAGE_FRESH_SECONDS)
+  if cached is not None:
+    return cached
+
+  lock = _provider_usage_locks.setdefault(key, asyncio.Lock())
+  async with lock:
+    # Another request may have refreshed while this one waited.
+    cached = _cached_usage(key, max_age=_PROVIDER_USAGE_FRESH_SECONDS)
+    if cached is not None:
+      return cached
+
+    snapshot = await _provider_snapshot(provider_id, data_dir)
+    if snapshot.get("state") == "ready":
+      ready = copy.deepcopy(snapshot)
+      ready["stale"] = False
+      checked_at = time.monotonic()
+      _provider_usage_cache[key] = _CachedProviderUsage(
+        observed_at=checked_at,
+        checked_at=checked_at,
+        snapshot=ready,
+      )
+      return copy.deepcopy(ready)
+
+    if snapshot.get("state") == "disconnected":
+      _provider_usage_cache.pop(key, None)
+      return snapshot
+
+    prior = _provider_usage_cache.get(key)
+    now = time.monotonic()
+    if (
+      prior is not None
+      and prior.snapshot.get("state") == "ready"
+      and now - prior.observed_at <= _PROVIDER_USAGE_STALE_SECONDS
+      and _snapshot_boundaries_are_current(prior.snapshot)
+    ):
+      # Suppress a second browser waiting on the same failed live probe while
+      # preserving the original observation age for the stale ceiling.
+      prior.checked_at = now
+      prior.stale = True
+      fallback = copy.deepcopy(prior.snapshot)
+      fallback["stale"] = True
+      return fallback
+
+    unavailable = copy.deepcopy(snapshot)
+    unavailable["stale"] = False
+    _provider_usage_cache[key] = _CachedProviderUsage(
+      observed_at=now,
+      checked_at=now,
+      snapshot=unavailable,
+    )
+    return unavailable
