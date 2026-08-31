@@ -90,5 +90,8 @@ test('Shell reconciles both query completion and direct mutation paths', () => {
     shell,
     /confirmChatIdentityIsLive[\s\S]*probeDeletion\(`\/chats\/\$\{encodeURIComponent\(chatId\)\}`\)/,
   )
-  assert.match(queries, /function useAppsQuery\(\{ reconcile \} = \{\}\)/)
+  assert.match(
+    queries,
+    /function useAppsQuery\(\{ reconcile, enabled = true \} = \{\}\)/,
+  )
 })

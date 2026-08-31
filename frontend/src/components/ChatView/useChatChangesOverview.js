@@ -39,7 +39,7 @@ export async function loadChatContributionCoverage(
 }
 
 export function useChatContributions(chatId, { enabled = true } = {}) {
-  const appsQuery = appQueries.list.useQuery()
+  const appsQuery = appQueries.list.useQuery({ enabled })
   const appId = contributeAppId(appsQuery.data)
   const app = contributeApp(appsQuery.data, appId)
   const queryKey = useMemo(

@@ -15,6 +15,18 @@ const bootstrapSource = readFileSync(
   new URL('../chatEmbedBootstrap.js', import.meta.url),
   'utf8',
 )
+const composerSource = readFileSync(
+  new URL('../../components/ChatView/ComposerPopover.jsx', import.meta.url),
+  'utf8',
+)
+const changesSource = readFileSync(
+  new URL('../../components/ChatView/useChatChangesOverview.js', import.meta.url),
+  'utf8',
+)
+const queriesSource = readFileSync(
+  new URL('../../hooks/queries.js', import.meta.url),
+  'utf8',
+)
 const indexSource = readFileSync(
   new URL('../../../index.html', import.meta.url),
   'utf8',
@@ -79,4 +91,16 @@ test('opaque embed boot skips service workers and owner browser storage', () => 
   assert.match(appSource, /beginEphemeralAuth\(\)/)
   assert.match(indexSource, /window\.location\.pathname !== '\/shell\/embed\/chat'/)
   assert.doesNotMatch(embedSource, /localStorage\.(?:getItem|setItem|removeItem)/)
+})
+
+test('embedded chat never starts the owner app inventory query', () => {
+  assert.match(
+    composerSource,
+    /useChatChangesOverview\(chatId, \[\], \{\s*enabled: Boolean\(open && !embedded && chatId\)/,
+  )
+  assert.match(changesSource, /appQueries\.list\.useQuery\(\{ enabled \}\)/)
+  assert.match(
+    queriesSource,
+    /function useAppsQuery\(\{ reconcile, enabled = true \} = \{\}\)[\s\S]*?\n    enabled,\n  \}\)/,
+  )
 })

@@ -119,13 +119,14 @@ async function fetchApps({ signal, timeoutMs } = {}) {
   return Array.isArray(data) ? data : []
 }
 
-function useAppsQuery({ reconcile } = {}) {
+function useAppsQuery({ reconcile, enabled = true } = {}) {
   return useQuery({
     queryKey: appsKey,
     queryFn: async () => {
       const rows = await fetchApps()
       return reconcile ? reconcile(rows) : rows
     },
+    enabled,
   })
 }
 
