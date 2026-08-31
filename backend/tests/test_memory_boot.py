@@ -355,11 +355,15 @@ def test_boot_never_executes_app_owned_cron_declarations():
 
 
 def test_boot_preserves_the_optional_memory_apps_git_repository():
-  text = ENTRYPOINT.read_text(encoding="utf-8")
+  entrypoint = ENTRYPOINT.read_text(encoding="utf-8")
+  data_repo_helper = (SCRIPTS / "init_data_repo.py").read_text(
+    encoding="utf-8",
+  )
 
-  assert "shared/memory/repository/" in text
-  assert "! -regex '/data/shared/memory/repository/\\.git'" in text
-  assert "Memory's optional graph repo" in text
+  assert "init_data_repo.py write-ignore /data" in entrypoint
+  assert "init_data_repo.py reconcile /data" in entrypoint
+  assert "shared/memory/repository/" in data_repo_helper
+  assert "Memory owns this optional repository directly" in data_repo_helper
 
 
 def test_install_rollback_never_executes_app_owned_cron_declarations():

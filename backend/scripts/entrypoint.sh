@@ -932,122 +932,20 @@ python3 /app/scripts/init_skills.py
 # platform default. Deleting /data/shared/theme.css cleanly reverts
 # to that default; writing the file creates an override.
 
-# Always write the gitignore so prior boots (which lacked .secret-key in
-# the ignore list) get the updated rules before the next add/commit cycle.
-cat > /data/.gitignore <<'EOF'
-cli-auth/
-app-secrets/
-push/*.pem
-push/*.json
-push/*.txt
-service-token.txt
-.secret-key
-.pm-commit
-compiled/
-db/
-db.sqlite3
-mobius.db
-chats/
-backups/
-# backup-data.py's second-volume target. A backup carries encrypted
-# secrets + the DB; never let it enter the /data safety-net repo.
-backups-external/
-*.bak-*
-apps/*/data/
-apps/*/.git/
-agent-browser-profiles/
-generated/
-logs/
-cron-logs/
-/run/
-# Memory is an optional system app, but while installed it owns a durable Git
-# repository here. Keep the outer /data safety-net repo from treating that
-# repository as an untracked submodule; Memory owns its history directly.
-shared/memory/repository/
-# platform/ has its OWN git repo; exclude it from the outer /data repo so
-# `git add -A` from /data doesn't treat it as an untracked submodule. Its source
-# is tracked by its own git, not /data's.
-platform/
-# Transient bootstrap scratch + quarantines (siblings of platform/, not
-# matched by platform/). Never user data; never track them in the safety-net.
-platform.seeding.*
-platform.reseeding.*
-platform.reseed-prev.*
-platform.pre-clone.*
-.platform-upgrade-available
-.platform-pre-clone-active
-# Transient platform-update markers — runtime signals, never user data. If the
-# outer /data repo is initialized while one of these exists, `git add -A` must
-# not track it.
-.platform-conflict
-.platform-offline
-.platform-restart-needed
-.platform-apply-in-progress
-.platform-restart-requested
-.platform-rolled-back
-.platform-update-progress.json
-.platform-reconcile-pre
-.platform-reconcile.lock
-EOF
+# The generated root ignore file is the ownership boundary for the /data
+# safety repository. Publish it atomically as root so an older root-owned file
+# cannot strand boot, then reconcile its index as mobius below. The helper is
+# deliberately non-destructive: ignored files and nested Git repositories stay
+# in place for their owning lifecycle.
+python3 /app/scripts/init_data_repo.py write-ignore /data
 chown mobius:mobius /data/.gitignore 2>/dev/null || true
 
-# Drop accidental nested git repos under /data, but preserve the intentional
-# per-app repos at /data/apps/<slug>/.git, Memory's optional graph repo at
-# /data/shared/memory/repository/.git, and the platform git at
-# /data/platform/.git. The outer /data repo ignores those repos so `git add -A`
-# does not try to treat them as submodules, while their owning lifecycle can
-# still keep history across container restarts.
-# Contribution checkouts under /data/contrib and legacy /data/contributions are
-# intentional durable repos too: prepared review cards point at their exact
-# commits and the approved Send path re-verifies that history before pushing.
-#
-# The .pre-clone.<ts> quarantines are also preserved WHOLE (including their
-# .git): they hold the agent's migrated-aside platform tree, and the whole point
-# of the move-aside was to keep those edits and their history recoverable.
-find /data -regextype posix-extended -mindepth 2 -maxdepth 4 \
-  -type d -name '.git' \
-  ! -regex '/data/apps/[^/]+/\.git' \
-  ! -regex '/data/shared/memory/repository/\.git' \
-  ! -regex '/data/platform/\.git' \
-  ! -path '/data/contrib/*' \
-  ! -path '/data/contributions/*' \
-  ! -regex '/data/platform\.pre-clone\..*' \
-  -prune -exec rm -rf {} + 2>/dev/null || true
-
-# Idempotent re-chown of /data/.git BEFORE the if/else below — git
-# refuses cross-owner operations with "dubious ownership", so any git
-# command we run as mobius (the else branch's untrack loop) needs the
-# repo mobius-owned first. A `docker pull` plus a recreated volume can
-# leave a previously-mobius-owned /data/.git root-owned again (e.g. some
-# historical images or install paths bake /data/.git into the image layer);
-# without this the agent's commits also fail. No-op via `|| true` if /data/.git
-# doesn't exist yet — the fresh-init branch below creates it and
-# re-chowns in that case.
+# A recreated managed volume can leave an existing repository root-owned. Git
+# correctly rejects cross-owner index writes, so hand it back before the
+# non-root reconciliation. No-op on a fresh volume; reconcile initializes it.
 chown -R mobius:mobius /data/.git 2>/dev/null || true
-
-if [ ! -d /data/.git ]; then
-  su -s /bin/sh mobius -c '
-    git init /data
-    git -C /data config user.name "Mobius Agent"
-    git -C /data config user.email "agent@mobius"
-    git -C /data add -A
-    git -C /data commit -m "init" --allow-empty
-  '
-  chown -R mobius:mobius /data/.git 2>/dev/null || true
-else
-  # Defensive: prior boots may have committed paths that the current
-  # gitignore now covers (.secret-key landed in the gitignore after
-  # it had already been committed; same story for the loose root-level
-  # .db files). `git rm --cached` is idempotent — silently no-ops if
-  # the path isn't in the index — so this is safe to re-run every boot.
-  # Runs as mobius (the .git owner); the pre-chown above guarantees
-  # ownership is correct.
-  su -s /bin/sh mobius -c '
-    for path in .secret-key db.sqlite3 mobius.db; do
-      git -C /data rm --cached "$path" 2>/dev/null || true
-    done
-  '
-fi
+su -s /bin/sh mobius -c \
+  "python3 /app/scripts/init_data_repo.py reconcile /data"
 
 # Ensure the mobius user has a GLOBAL git identity, a gh config symlink,
 # and a git credential helper — all as mobius, all re-asserted every boot
