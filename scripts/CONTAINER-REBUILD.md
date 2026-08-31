@@ -1,9 +1,9 @@
 # Container replacement controller
 
-Settings can replace a self-hosted app container with the official image for
-the upstream revision already applied inside Möbius. The browser never chooses
-an image, path, Compose project, or Docker argument. Railway deliberately
-reports this action as unsupported until its provider transaction exists.
+Settings can replace an app container with the official image for the upstream
+revision already applied inside Möbius. The browser never chooses an image,
+path, Compose project, or Docker argument. Self-hosted installations use the
+host helper below; linked Railway deployments use the Möbius account service.
 
 ## Install
 
@@ -59,6 +59,24 @@ An installation of the older Host helper is reported as **upgrade required**
 and cannot queue a Settings replacement. Re-run
 `sudo scripts/install-rebuild-helper.sh` from the current trusted checkout;
 the refusal happens before chat admission is closed or an image is touched.
+
+## One-time Railway upgrade
+
+A Railway deployment can serve a current `/data/platform` checkout while its
+baked image still predates the managed cutover supervisor. Settings reports
+that state as **Enable container updates** instead of leaving a dead disabled
+control. The action still derives the exact official image from the applied
+upstream revision; the browser cannot select an image or provider resource.
+
+The account service verifies the current deployment and rollback point, issues
+a one-use upgrade handoff, and owns the Railway deployment. Möbius starts the
+handoff only when no chat runner is alive and closes admission before the
+one-use nonce is consumed. The candidate image must become healthy and publish
+the `external-cutover-v1` capability witness or the account service rolls back
+both the deployment and configured image source. The witness is bound to the
+candidate boot id, so a stale marker on the shared volume cannot make a rolled-
+back legacy image appear capable. Once the upgrade succeeds, all later Railway
+replacements use the normal challenge, drain, and receipt protocol above.
 
 Möbius refuses the request when its activation receipt records local-only image
 or baked-runtime changes that the official target does not contain. Undeclared

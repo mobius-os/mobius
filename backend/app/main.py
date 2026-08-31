@@ -855,7 +855,14 @@ def health(response: Response):
     "mode": "degraded" if degraded else "normal",
     "build_sha": settings.build_sha,
     "boot_id": _BOOT_ID,
+    # The managed account service uses this baked-image witness only for the
+    # one-time Railway bootstrap. Served source can be newer than the running
+    # image, so build_sha alone cannot prove the root cutover supervisor exists.
+    "container_replacement_handoff": None,
   }
+  from app.deployment_control import managed_cutover_ready
+  if managed_cutover_ready():
+    payload["container_replacement_handoff"] = "external-cutover-v1"
   if degraded:
     # Still HTTP 200: database failure must never masquerade as device offline.
     # The strict and readiness variants below carry the 5xx service verdict.

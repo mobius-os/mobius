@@ -199,6 +199,21 @@ def begin_drain() -> None:
   draining = True
 
 
+def cancel_idle_drain() -> bool:
+  """Reopen admission when a pre-cutover request was definitively rejected.
+
+  This is intentionally narrower than a general drain reset. Once any live
+  runner exists or restart draining has claimed a chat, only process exit may
+  clear the gate. The legacy Railway bootstrap calls this solely after its
+  one-use provider start receives a definitive rejection.
+  """
+  global draining
+  if registry.all_alive_chat_ids() or _restart_draining_chats:
+    return False
+  draining = False
+  return True
+
+
 def is_draining() -> bool:
   """Whether the worker is draining for a restart (read live, not imported).
 

@@ -33,6 +33,7 @@ RebuildState = Literal[
 
 class RebuildStatus(TypedDict):
   supported: bool
+  bootstrap_available: bool
   deployment: platform_activation.DeploymentKind
   operation_id: str | None
   state: RebuildState
@@ -73,11 +74,13 @@ def _empty_status(
   deployment: platform_activation.DeploymentKind,
   *,
   supported: bool,
+  bootstrap_available: bool = False,
   message: str | None = None,
   code: str | None = None,
 ) -> RebuildStatus:
   return RebuildStatus(
     supported=supported,
+    bootstrap_available=bootstrap_available,
     deployment=deployment,
     operation_id=None,
     state="idle",
@@ -155,6 +158,7 @@ def _normalize_status(
   updated_at = str(raw.get("updated_at") or "").strip() or None
   return RebuildStatus(
     supported=True,
+    bootstrap_available=False,
     deployment="self_hosted",
     operation_id=operation_id,
     state=state,  # type: ignore[typeddict-item]
@@ -178,6 +182,17 @@ def _managed_headers() -> dict[str, str]:
     "X-Mobius-Instance-Id": settings.mobius_sso_instance_id,
     "Accept": "application/json",
   }
+
+
+def managed_cutover_ready() -> bool:
+  """Whether this exact boot owns the baked managed-cutover supervisor."""
+  marker = Path(get_settings().data_dir) / "run" / "managed-cutover-ready"
+  try:
+    marker_boot_id = marker.read_text(encoding="utf-8").strip()
+  except (FileNotFoundError, OSError, UnicodeError):
+    return False
+  boot_id = str(os.environ.get("MOBIUS_BOOT_ID") or "").strip()
+  return bool(boot_id and secrets.compare_digest(marker_boot_id, boot_id))
 
 
 class _NoManagedRedirect(urllib.request.HTTPRedirectHandler):
@@ -237,7 +252,9 @@ def _managed_request(method: str, suffix: str, payload: dict[str, str] | None = 
   return value
 
 
-def _normalize_managed_status(raw: dict[str, Any]) -> RebuildStatus:
+def _normalize_managed_status(
+  raw: dict[str, Any], *, bootstrap_available: bool = False,
+) -> RebuildStatus:
   remote_state = str(raw.get("state") or "idle").lower()
   states: dict[str, RebuildState] = {
     "idle": "idle", "awaiting_handoff": "preparing", "queued": "queued",
@@ -252,7 +269,8 @@ def _normalize_managed_status(raw: dict[str, Any]) -> RebuildStatus:
     )
   expected = str(raw.get("expected_sha") or "").lower()
   return RebuildStatus(
-    supported=True,
+    supported=not bootstrap_available,
+    bootstrap_available=bootstrap_available,
     deployment="railway",
     operation_id=str(raw.get("operation_id") or "") or None,
     state=states[remote_state],
@@ -355,14 +373,43 @@ def replacement_ready_path(operation_id: str) -> Path:
 async def read_rebuild_status() -> RebuildStatus:
   deployment = platform_activation.deployment_kind()
   if deployment == "railway":
-    if not (Path(get_settings().data_dir) / "run" / "managed-cutover-ready").is_file():
+    if not managed_cutover_ready():
+      # A current served checkout can outlive its baked image. Surface an
+      # account-owned bootstrap operation while it is moving, but never claim
+      # the normal root handoff exists until the new image proves it with the
+      # baked marker.
+      try:
+        raw = await asyncio.to_thread(_managed_request, "GET", "status")
+      except DeploymentControlError as exc:
+        if exc.code == "not_configured":
+          return _empty_status(
+            deployment,
+            supported=False,
+            code="not_configured",
+            message=(
+              "Link this Railway deployment to its Möbius account before "
+              "enabling container updates."
+            ),
+          )
+        return _empty_status(
+          deployment,
+          supported=False,
+          code=exc.code,
+          message=exc.message,
+        )
+      if (
+        raw.get("mode") == "bootstrap"
+        and raw.get("state") not in {None, "", "idle", "awaiting_bootstrap"}
+      ):
+        return _normalize_managed_status(raw, bootstrap_available=True)
       return _empty_status(
         deployment,
         supported=False,
+        bootstrap_available=True,
         code="controller_upgrade_required",
         message=(
-          "Install the current Möbius image once to enable managed container "
-          "replacement on Railway."
+          "This Railway installation needs one managed upgrade before it can "
+          "replace containers safely."
         ),
       )
     raw = await asyncio.to_thread(_managed_request, "GET", "status")
@@ -428,6 +475,8 @@ async def request_rebuild() -> RebuildStatus:
       status_code=409,
     )
   if deployment == "railway":
+    if not managed_cutover_ready():
+      return await _request_managed_bootstrap(expected_sha)
     return await _request_managed_rebuild(expected_sha)
   await asyncio.to_thread(_write_request, expected_sha)
   return _normalize_status({
@@ -440,8 +489,7 @@ async def request_rebuild() -> RebuildStatus:
 async def _request_managed_rebuild(expected_sha: str) -> RebuildStatus:
   from app import restart_ledger, restart_util
 
-  marker = Path(get_settings().data_dir) / "run" / "managed-cutover-ready"
-  if not marker.is_file():
+  if not managed_cutover_ready():
     raise DeploymentControlError(
       "controller_upgrade_required",
       "Install the current Möbius image once to enable managed container replacement.",
@@ -500,3 +548,46 @@ async def _request_managed_rebuild(expected_sha: str) -> RebuildStatus:
       # accepted Railway cutover.
       _schedule_managed_recovery(restart_util.restart_this_worker)
     raise
+
+
+async def _request_managed_bootstrap(expected_sha: str) -> RebuildStatus:
+  """Move one legacy Railway image onto the root-owned handoff protocol.
+
+  The account service validates and owns the Railway mutation. The old image
+  cannot authenticate automatic continuation, so this migration starts only
+  while no agent runtime is alive. Admission closes immediately before the
+  one-use start nonce is consumed; sends arriving during deployment remain in
+  the durable queue for the new worker.
+  """
+  from app import chat
+  from app.runner_registry import registry
+
+  prepared = await asyncio.to_thread(
+    _managed_request, "POST", "bootstrap/prepare", {"expected_sha": expected_sha},
+  )
+  operation_id = str(prepared.get("operation_id") or "")
+  handoff_nonce = str(prepared.get("handoff_nonce") or "")
+  if not operation_id or not handoff_nonce:
+    raise DeploymentControlError(
+      "controller_invalid_response", "The managed upgrade handoff is incomplete."
+    )
+  if registry.all_alive_chat_ids():
+    raise DeploymentControlError(
+      "active_chats",
+      "Finish active chat responses, then enable container updates again.",
+      status_code=409,
+    )
+
+  chat.begin_drain()
+  try:
+    started = await asyncio.to_thread(
+      _managed_request,
+      "POST",
+      "bootstrap/start",
+      {"operation_id": operation_id, "handoff_nonce": handoff_nonce},
+    )
+  except DeploymentControlError as exc:
+    if exc.code == "controller_rejected":
+      chat.cancel_idle_drain()
+    raise
+  return _normalize_managed_status(started, bootstrap_available=True)

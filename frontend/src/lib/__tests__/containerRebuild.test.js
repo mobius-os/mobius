@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   rebuildIsActive,
+  rebuildNeedsBootstrap,
   rebuildPollShouldContinue,
   rebuildProgressMessage,
 } from '../containerRebuild.js'
@@ -18,6 +19,15 @@ test('container replacement active states are exactly the controller phases', ()
   ]) {
     assert.equal(rebuildIsActive({ state }), false, state)
   }
+})
+
+test('legacy Railway status exposes the one-time bootstrap action', () => {
+  assert.equal(rebuildNeedsBootstrap({ bootstrap_available: true }), true)
+  assert.equal(rebuildNeedsBootstrap({ bootstrap_available: false }), false)
+  assert.equal(
+    rebuildProgressMessage({ bootstrap_available: true, state: 'succeeded' }),
+    'Container updates are now enabled.',
+  )
 })
 
 test('container replacement polling survives transient status failures', () => {
