@@ -102,6 +102,12 @@ test('authoritative transcript or pending queue settles an ambiguous send', () =
   assert.equal(sendAttemptIsDurable(attempt, [], [
     { role: 'user', cid: 'cid-1' },
   ]), true)
+  assert.equal(sendAttemptIsDurable(attempt, [
+    { role: 'user', cid: 'cid-1', optimistic: true },
+  ], []), false)
+  assert.equal(sendAttemptIsDurable(attempt, [], [
+    { role: 'user', cid: 'cid-1', optimistic: true },
+  ]), false)
 })
 
 test('confirmation ownership requires the same cid, draft, and transport content', () => {
@@ -181,6 +187,31 @@ test('transcript or pending evidence arriving during inspection outranks retaine
     inspection.resolve('retained')
     assert.deepEqual(await result, { status: 'durable', sendFailure: null })
   }
+})
+
+test('a cached optimistic echo cannot retire a retained send during reload recovery', async () => {
+  const attempt = { cid: 'cid-1', draftIdentity: 'draft-1' }
+  const optimistic = [{ role: 'user', cid: 'cid-1', optimistic: true }]
+  let inspections = 0
+
+  const result = await coordinate(
+    attempt,
+    async () => {
+      inspections += 1
+      return 'retained'
+    },
+    () => recoveryOwner(attempt, { visibleMessages: optimistic }),
+    {
+      authoritative: true,
+      visibleMessages: optimistic,
+    },
+  )
+
+  assert.equal(inspections, 1)
+  assert.deepEqual(result, {
+    status: 'queued',
+    sendFailure: SEND_ATTEMPT_QUEUED_MESSAGE,
+  })
 })
 
 test('async recovery reports terminal, delivered-not-visible, and unavailable states honestly', async () => {

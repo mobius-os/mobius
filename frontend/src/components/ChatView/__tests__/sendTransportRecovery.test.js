@@ -49,6 +49,7 @@ test('a confirmed outage leaves the draft recovery path in control', async () =>
     error,
   )
   assert.equal(sends, 1)
+  assert.equal(error.sendReachability, 'offline')
 })
 
 test('HTTP failures are definitive and are never replayed', async () => {
@@ -86,4 +87,5 @@ test('a second ambiguous failure stops after one safe replay', async () => {
     error,
   )
   assert.equal(sends, 2)
+  assert.equal(error.sendReachability, 'online')
 })

@@ -18,7 +18,12 @@ export function shouldConfirmAmbiguousSend(error) {
 }
 
 export function sendFailureMessage(error, { online = true } = {}) {
-  if (!online) {
+  const sendOnline = error?.sendReachability === 'offline'
+    ? false
+    : error?.sendReachability === 'online'
+      ? true
+      : online
+  if (!sendOnline) {
     return error?.outboxRetained
       ? 'You’re offline. Your message is queued and will send when you reconnect.'
       : 'You’re offline. Your message is back in the composer—send it when you reconnect.'

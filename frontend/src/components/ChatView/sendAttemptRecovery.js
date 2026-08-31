@@ -81,7 +81,15 @@ export function clearFailedSendAttempt(chatId) {
 export function sendAttemptIsDurable(attempt, messages, pendingMessages) {
   if (!attempt?.cid) return false
   return [...(messages || []), ...(pendingMessages || [])]
-    .some(message => message?.role === 'user' && message.cid === attempt.cid)
+    .some(message => (
+      message?.role === 'user'
+      && message.cid === attempt.cid
+      // Query-cache handoff can preserve the local row rendered before the
+      // POST failed. Only a server-confirmed transcript/pending row may retire
+      // the restored draft; treating the optimistic echo as durable silently
+      // erased its retry status on reload.
+      && message.optimistic !== true
+    ))
 }
 
 export function sameSendAttempt(first, second) {
