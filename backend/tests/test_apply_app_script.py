@@ -75,6 +75,36 @@ def test_apply_prints_compact_reusable_identity_receipt(
   }
 
 
+def test_apply_forwards_explicit_local_package_acceptance(
+  monkeypatch, capsys, tmp_path,
+):
+  module = _load()
+  source = tmp_path / "store-app"
+  source.mkdir()
+  monkeypatch.setattr(sys, "argv", [
+    "apply_app.py", "--accept-local-package", str(source),
+  ])
+  monkeypatch.setenv("AGENT_TOKEN", "agent-token")
+  captured = {}
+
+  def urlopen(request, timeout):
+    captured["payload"] = json.loads(request.data)
+    return _Response({
+      "mode": "updated", "warnings": [],
+      "app": {
+        "id": 9, "name": "Store app", "slug": "store-app",
+        "source_dir": str(source.resolve()), "chat_id": None,
+      },
+    })
+
+  monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
+
+  module.main()
+
+  assert captured["payload"]["accept_local_package"] is True
+  assert json.loads(capsys.readouterr().out)["mode"] == "updated"
+
+
 def test_apply_fails_loudly_when_response_loses_numeric_identity(
   monkeypatch, capsys, tmp_path,
 ):

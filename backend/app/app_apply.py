@@ -16,6 +16,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
@@ -23,6 +24,7 @@ from sqlalchemy.orm import Session
 from app import app_git, icon_assets, models, timeutil
 from app.app_capabilities import (
   contract_from_app_state,
+  contract_from_manifest,
   local_manifest_runtime_fields,
 )
 from app.compiler import (
@@ -59,6 +61,10 @@ _STATIC_ASSETS_MANIFEST = ".mobius-static-assets.json"
 _STATIC_ASSETS_BACKUP_SUFFIX = ".mobius-static-bak"
 _STATIC_ASSETS_BACKUP_ASSET_PREFIX = "assets"
 _STATIC_ASSETS_BACKUP_METADATA_PREFIX = "metadata"
+_LOCAL_PACKAGE_WARNING = (
+  "Local package declarations are active, including permissions, schedules, "
+  "and skills; a future reviewed Store update may replace them."
+)
 
 
 @dataclass(frozen=True)
@@ -264,8 +270,9 @@ async def _sync_accepted_app_side_effects(
 ) -> tuple[str, ...]:
   """Converge post-commit declarations for one accepted local revision.
 
-  The caller holds the app source lock. Store-managed worktrees have no local
-  manifest authority, so their reviewed schedule remains installer-owned.
+  The caller holds the app source lock. Store-managed worktrees normally have
+  no local manifest authority; the explicit local-package path supplies the
+  validated manifest when the owner deliberately accepts that package.
   """
   warnings: list[str] = []
   if manifest is not None:
@@ -424,12 +431,21 @@ def retire_integrated_app_provenance(db: Session) -> tuple[int, list[str]]:
   return retired, warnings
 
 
-def _validate_local_identity(source_dir: Path, manifest: dict) -> None:
-  if manifest["id"] != source_dir.name:
+def _validate_local_identity(
+  source_dir: Path, manifest: dict, app: models.App | None = None,
+) -> None:
+  accepted_ids = {source_dir.name}
+  if app is not None and app.manifest_url:
+    accepted_ids.update(
+      value for value in parse_qs(urlsplit(app.manifest_url).fragment).get(
+        "manifest-id", []
+      ) if value
+    )
+  if manifest["id"] not in accepted_ids:
     raise AppApplyError(
       "manifest_id_mismatch",
       "For a local app, mobius.json `id` must match the source-directory "
-      f"name ({source_dir.name!r}).",
+      f"name or its installed package identity ({sorted(accepted_ids)!r}).",
     )
   if len(manifest["id"]) > 128:
     raise AppApplyError(
@@ -442,12 +458,102 @@ def _validate_local_identity(source_dir: Path, manifest: dict) -> None:
     )
 
 
+def _apply_explicit_package_runtime(
+  app: models.App, manifest: dict, *, package_icon: bytes | None,
+) -> None:
+  """Persist every live field owned by an explicitly accepted Store package.
+
+  Store installation and local-source acceptance are two entry points into
+  the same App row. Keep their runtime projection aligned so accepting a local
+  package cannot compile successfully while silently dropping permissions,
+  project templates, offline metadata, or other declarations.
+  """
+  from app import install
+
+  runtime_fields = local_manifest_runtime_fields(manifest)
+  permissions = manifest.get("permissions") or {}
+  app.name = manifest["name"]
+  app.description = manifest["description"]
+  app.version = str(manifest.get("version", "")).strip() or None
+  app.theme_color = install._manifest_color(manifest.get("theme_color"))
+  app.background_color = (
+    install._manifest_color(manifest.get("background_color"))
+    or app.theme_color
+  )
+  app.display = install._manifest_display(manifest.get("display"))
+  app.icon_png = package_icon
+  app.cross_app_access = permissions.get("cross_app_access", "none")
+  app.share_with_apps = permissions.get("share_with_apps", "none")
+  app.chat_log_access = permissions.get("chat_log_access", "none")
+  # Privileged grants are opt-in on every explicitly accepted package;
+  # omission revokes them just as a reviewed Store update does.
+  app.manage_apps = bool(permissions.get("manage_apps", False))
+  app.manage_skills = bool(permissions.get("manage_skills", False))
+  app.github_access = bool(permissions.get("github_access", False))
+  app.github_connect = bool(permissions.get("github_connect", False))
+  app.filesystem_access = bool(permissions.get("filesystem_access", False))
+  app.connections_manage = bool(permissions.get("connections_manage", False))
+  app.connect_manage = bool(permissions.get("connect_manage", False))
+  if "offline_capable" in runtime_fields:
+    app.offline_capable = runtime_fields["offline_capable"]
+  if "embeds_agent" in manifest:
+    app.embeds_agent = bool(manifest["embeds_agent"])
+  app.offline_contract = manifest.get("offline") or None
+  app.system_prompt_file = manifest.get("system_prompt") or None
+  app.system_app = bool(manifest.get("system_app", False))
+  app.project_templates_json = manifest.get("project_templates") or None
+  effective_manifest = dict(manifest)
+  # The reviewed Store updater preserves these two live fields when an older
+  # manifest omits them. Normalize the accepted local package against the same
+  # effective state so its durable contract cannot disagree with its App row.
+  effective_manifest.setdefault("offline_capable", app.offline_capable)
+  effective_manifest.setdefault("embeds_agent", app.embeds_agent)
+  app.capability_contract = contract_from_manifest(effective_manifest)
+
+
+def _live_runtime_state(app: models.App) -> tuple:
+  """Return fields whose manifest-driven changes make an apply non-empty."""
+  return (
+    app.name,
+    app.description,
+    app.version,
+    app.theme_color,
+    app.background_color,
+    app.display,
+    app.cross_app_access,
+    app.share_with_apps,
+    app.chat_log_access,
+    app.manage_apps,
+    app.manage_skills,
+    app.github_access,
+    app.github_connect,
+    app.filesystem_access,
+    app.connections_manage,
+    app.connect_manage,
+    app.offline_capable,
+    app.embeds_agent,
+    app.offline_contract,
+    app.system_prompt_file,
+    app.system_app,
+    app.project_templates_json,
+    app.capability_contract,
+    app.chat_id,
+    app.jsx_source,
+    app.compiled_path,
+    app.source_commit,
+    app.icon_png,
+    app.icon_override_png,
+    app.published_manifest_url,
+  )
+
+
 async def apply_source_revision(
   db: Session,
   *,
   source_dir: str,
   app: models.App | None,
   chat_id: str | None,
+  accept_local_package: bool = False,
 ) -> ApplyResult:
   """Compile, accept, and publish one source revision.
 
@@ -478,6 +584,14 @@ async def apply_source_revision(
         "resolve_app_update.py instead of applying an ordinary edit.",
         status_code=409,
       )
+  if accept_local_package and (
+    app is None or app.manifest_url is None
+  ):
+    raise AppApplyError(
+      "local_package_requires_store_app",
+      "--accept-local-package is only valid for an installed Store app; "
+      "ordinary local apps keep their owner-managed permission settings.",
+    )
 
   candidate = await _git_operation(
     "snapshot", app_git.snapshot_worktree, source_path,
@@ -502,18 +616,21 @@ async def apply_source_revision(
         snapshot_dir,
       )
       store_managed = app is not None and app.manifest_url is not None
-      manifest = None if store_managed else _read_manifest(snapshot_dir)
+      manifest = (
+        _read_manifest(snapshot_dir)
+        if not store_managed or accept_local_package
+        else None
+      )
       if manifest is not None:
-        _validate_local_identity(source_path, manifest)
+        _validate_local_identity(source_path, manifest, app)
       static_assets = (
         _snapshot_static_assets(snapshot_dir, source_path, manifest)
         if manifest is not None
         else {}
       )
-      # Store-installed source trees intentionally exclude reviewed package
-      # metadata. Their App row owns that identity; the editable source
-      # contract has one fixed entry. Local apps retain the strict manifest
-      # reader and its declared entry.
+      # Ordinary Store edits intentionally exclude reviewed package metadata.
+      # Only the explicit local-package mode reads that manifest; local apps
+      # always retain the strict manifest reader and its declared entry.
       entry_relative = "index.jsx" if store_managed else manifest["entry"]
       source = _entry_source(snapshot_dir, entry_relative)
       package_icon = (
@@ -540,19 +657,8 @@ async def apply_source_revision(
           offline_capable=False,
         )
       assert app is not None
-      previous_state = (
-        app.name,
-        app.description,
-        app.offline_capable,
-        app.capability_contract,
-        app.chat_id,
-        app.jsx_source,
-        app.compiled_path,
-        app.source_commit,
-        app.published_manifest_url,
-        app.icon_png,
-        app.icon_override_png,
-      )
+      previous_state = _live_runtime_state(app)
+      previous_source_commit = app.source_commit
 
       # Explicit apply is serialized by the lifecycle lock, so it can compile
       # under one shared, non-servable name before a new row has a numeric id.
@@ -578,20 +684,27 @@ async def apply_source_revision(
 
       if manifest is not None:
         _validate_static_asset_publish_paths(source_path, static_assets)
-
-      if app.manifest_url is None:
-        runtime_fields = local_manifest_runtime_fields(manifest)
-        app.name = manifest["name"]
-        app.description = manifest["description"]
-        app.icon_png = package_icon
-        if "offline_capable" in runtime_fields:
-          app.offline_capable = runtime_fields["offline_capable"]
-        app.capability_contract = contract_from_app_state(
-          app,
-          capabilities=runtime_fields["capabilities"],
-          public_access=runtime_fields["public_access"],
-          contract_permissions=manifest.get("permissions") or {},
-        )
+        if store_managed and accept_local_package:
+          _apply_explicit_package_runtime(
+            app, manifest, package_icon=package_icon,
+          )
+        else:
+          # Ordinary owner-authored app source does not grant server
+          # permissions from source. Those live row fields remain under the
+          # explicit settings/update contract; the manifest owns only the
+          # app's display metadata and host-mediated runtime declarations.
+          runtime_fields = local_manifest_runtime_fields(manifest)
+          app.name = manifest["name"]
+          app.description = manifest["description"]
+          app.icon_png = package_icon
+          if "offline_capable" in runtime_fields:
+            app.offline_capable = runtime_fields["offline_capable"]
+          app.capability_contract = contract_from_app_state(
+            app,
+            capabilities=runtime_fields["capabilities"],
+            public_access=runtime_fields["public_access"],
+            contract_permissions=manifest.get("permissions") or {},
+          )
       if chat_id is not None:
         app.chat_id = chat_id
 
@@ -627,7 +740,7 @@ async def apply_source_revision(
           ) from exc
       if (
         app.manifest_url is None
-        and app.source_commit != previous_state[7]
+        and app.source_commit != previous_source_commit
       ):
         # A distribution manifest is a statement about one exact accepted package. Once
         # local source advances, require publication verification again rather
@@ -652,19 +765,7 @@ async def apply_source_revision(
       changed = (
         created
         or committed is not None
-        or previous_state != (
-          app.name,
-          app.description,
-          app.offline_capable,
-          app.capability_contract,
-          app.chat_id,
-          source,
-          str(published),
-          app.source_commit,
-          app.published_manifest_url,
-          app.icon_png,
-          app.icon_override_png,
-        )
+        or previous_state != _live_runtime_state(app)
       )
       if not changed:
         db.rollback()
@@ -677,6 +778,8 @@ async def apply_source_revision(
         )
         _finish_static_assets(static_commit)
         static_materialized = False
+        if store_managed and accept_local_package:
+          warnings = (*warnings, _LOCAL_PACKAGE_WARNING)
         return ApplyResult(app=app, mode="unchanged", warnings=warnings)
 
       app.jsx_source = source
@@ -698,6 +801,8 @@ async def apply_source_revision(
       warnings = await _sync_accepted_app_side_effects(
         db, app, manifest, drop_prior_cron=not created,
       )
+      if store_managed and accept_local_package:
+        warnings = (*warnings, _LOCAL_PACKAGE_WARNING)
       return ApplyResult(
         app=app,
         mode="created" if created else "updated",

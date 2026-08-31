@@ -32,10 +32,15 @@ def _source(slug: str = "demo") -> Path:
   return root
 
 
-def _apply(client, auth, source: Path, chat_id: str | None = None):
+def _apply(
+  client, auth, source: Path, chat_id: str | None = None,
+  *, accept_local_package: bool = False,
+):
   body = {"source_dir": str(source)}
   if chat_id is not None:
     body["chat_id"] = chat_id
+  if accept_local_package:
+    body["accept_local_package"] = True
   return client.post("/api/apps/apply", json=body, headers=auth)
 
 
@@ -991,6 +996,54 @@ def test_local_apply_updates_runtime_capabilities_with_source(
   assert app_git._run(source, "status", "--porcelain").stdout == ""
 
 
+def test_local_manifest_does_not_grant_live_server_permissions(
+  client, auth, db,
+):
+  source = _source()
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["permissions"] = {
+    "cross_app_access": "read",
+    "share_with_apps": "write",
+    "chat_log_access": "summary_with_deleted",
+    "manage_apps": True,
+    "manage_skills": True,
+    "github_access": True,
+    "github_connect": True,
+    "filesystem_access": True,
+    "connections_manage": True,
+    "connect_manage": True,
+  }
+  (source / "mobius.json").write_text(json.dumps(manifest))
+
+  created = _apply(client, auth, source)
+
+  assert created.status_code == 200, created.text
+  app_id = created.json()["app"]["id"]
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  assert row.cross_app_access == "none"
+  assert row.share_with_apps == "none"
+  assert row.chat_log_access == "none"
+  assert row.manage_apps is False
+  assert row.manage_skills is False
+  assert row.github_access is False
+  assert row.github_connect is False
+  assert row.filesystem_access is False
+  assert row.connections_manage is False
+  assert row.connect_manage is False
+
+
+def test_local_package_flag_requires_an_installed_store_app(client, auth, db):
+  source = _source()
+
+  rejected = _apply(client, auth, source, accept_local_package=True)
+
+  assert rejected.status_code == 422
+  assert rejected.json()["detail"]["code"] == (
+    "local_package_requires_store_app"
+  )
+  assert db.query(models.App).filter_by(source_dir=str(source)).first() is None
+
+
 def test_store_local_apply_preserves_reviewed_manifest_authority(
   client, auth, db,
 ):
@@ -1028,6 +1081,172 @@ def test_store_local_apply_preserves_reviewed_manifest_authority(
   assert row.offline_capable is True
   assert row.capability_contract == reviewed_contract
   assert app_git._run(source, "status", "--porcelain").stdout == ""
+
+
+def test_store_local_package_apply_explicitly_accepts_manifest_authority(
+  client, auth, db,
+):
+  source = _source()
+  created = _apply(client, auth, source)
+  app_id = created.json()["app"]["id"]
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  store_manifest_url = "https://store.example/demo/mobius.json"
+  row.manifest_url = store_manifest_url
+  row.name = "Reviewed name"
+  row.description = "Reviewed description"
+  row.project_templates_json = None
+  db.commit()
+
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["name"] = "Local package name"
+  manifest["description"] = "Local package description"
+  manifest["version"] = "2.3.4"
+  manifest["theme_color"] = "#223344"
+  manifest["background_color"] = "#101820"
+  manifest["display"] = "fullscreen"
+  manifest["embeds_agent"] = True
+  manifest["permissions"] = {
+    "cross_app_access": "read",
+    "share_with_apps": "write",
+    "shared_memory": "write",
+    "chat_log_access": "summary",
+    "manage_apps": True,
+    "manage_skills": True,
+    "github_access": True,
+    "github_connect": True,
+    "filesystem_access": True,
+    "connections_manage": True,
+    "connect_manage": True,
+  }
+  manifest["skills"] = ["guide.md"]
+  manifest["source_files"] = ["guide.md"]
+  manifest["schedule"] = {
+    "default": "*/10 * * * *",
+    "user_configurable": False,
+    "job": "job.sh",
+  }
+  manifest["project_templates"] = [{
+    "id": "document", "name": "Document", "files": {},
+  }]
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  (source / "guide.md").write_text("# Local package guidance\n")
+  job = source / "job.sh"
+  job.write_text("#!/bin/sh\nexit 0\n")
+  job.chmod(0o755)
+  (source / "index.jsx").write_text(
+    "export default function App() { return <div>local package</div> }\n"
+  )
+
+  with patch("app.app_cron.register_cron"):
+    updated = _apply(
+      client, auth, source, accept_local_package=True,
+    )
+
+  assert updated.status_code == 200, updated.text
+  assert updated.json()["app"]["name"] == "Local package name"
+  assert updated.json()["warnings"] == [
+    "Local package declarations are active, including permissions, schedules, "
+    "and skills; a future reviewed Store update may replace them."
+  ]
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  assert row.manifest_url == store_manifest_url
+  assert row.description == "Local package description"
+  assert row.version == "2.3.4"
+  assert row.theme_color == "#223344"
+  assert row.background_color == "#101820"
+  assert row.display == "fullscreen"
+  assert row.embeds_agent is True
+  assert row.cross_app_access == "read"
+  assert row.share_with_apps == "write"
+  assert row.chat_log_access == "summary"
+  assert row.manage_apps is True
+  assert row.manage_skills is True
+  assert row.github_access is True
+  assert row.github_connect is True
+  assert row.filesystem_access is True
+  assert row.connections_manage is True
+  assert row.connect_manage is True
+  assert row.capability_contract["data"]["shared_memory"] == "write"
+  assert row.capability_contract["agent"]["skills"] == ["guide.md"]
+  assert row.capability_contract["background"]["job"] == "job.sh"
+  assert row.capability_contract["background"]["cron"] == "*/10 * * * *"
+  assert row.project_templates_json == [{
+    "id": "document", "name": "Document", "files": {},
+  }]
+  assert "local package" in row.jsx_source
+
+  with patch("app.app_cron.register_cron"):
+    repeated = _apply(client, auth, source, accept_local_package=True)
+
+  assert repeated.status_code == 200, repeated.text
+  assert repeated.json()["mode"] == "unchanged"
+  assert repeated.json()["warnings"] == [
+    "Local package declarations are active, including permissions, schedules, "
+    "and skills; a future reviewed Store update may replace them."
+  ]
+
+
+def test_store_local_package_revokes_omitted_privileged_permissions(
+  client, auth, db,
+):
+  source = _source()
+  created = _apply(client, auth, source)
+  app_id = created.json()["app"]["id"]
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  row.manifest_url = "https://store.example/demo/mobius.json"
+  row.manage_apps = True
+  row.manage_skills = True
+  row.github_access = True
+  row.github_connect = True
+  row.filesystem_access = True
+  row.connections_manage = True
+  row.connect_manage = True
+  row.capability_contract = {
+    "schema": 2,
+    "data": {"shared_memory": "write"},
+  }
+  db.commit()
+
+  updated = _apply(client, auth, source, accept_local_package=True)
+
+  assert updated.status_code == 200, updated.text
+  assert updated.json()["mode"] == "updated"
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  assert row.manage_apps is False
+  assert row.manage_skills is False
+  assert row.github_access is False
+  assert row.github_connect is False
+  assert row.filesystem_access is False
+  assert row.connections_manage is False
+  assert row.connect_manage is False
+  assert row.capability_contract["data"]["shared_memory"] == "none"
+
+
+def test_store_local_package_apply_accepts_its_installed_package_identity(
+  client, auth, db,
+):
+  source = _source("app-store")
+  created = _apply(client, auth, source)
+  app_id = created.json()["app"]["id"]
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  row.manifest_url = (
+    "https://raw.githubusercontent.com/mobius-os/app-store/main"
+    "#manifest-id=store&channel=stable"
+  )
+  db.commit()
+
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["id"] = "store"
+  manifest["permissions"] = {"manage_apps": True, "github_access": True}
+  (source / "mobius.json").write_text(json.dumps(manifest))
+
+  updated = _apply(client, auth, source, accept_local_package=True)
+
+  assert updated.status_code == 200, updated.text
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  assert row.slug == "app-store"
+  assert row.github_access is True
+  assert row.manifest_url.endswith("#manifest-id=store&channel=stable")
 
 
 def test_store_local_apply_accepts_installer_managed_tree_without_manifest(

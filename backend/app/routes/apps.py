@@ -1538,6 +1538,7 @@ async def apply_app_source(
         source_dir=source_dir,
         app=app,
         chat_id=body.chat_id,
+        accept_local_package=body.accept_local_package,
       )
     except app_apply.AppApplyError as exc:
       raise HTTPException(
