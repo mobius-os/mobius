@@ -462,12 +462,104 @@ def test_gateway_capability_wraps_the_exact_signed_request_binding(broker):
   )
 
 
-def test_handler_only_supports_identity_and_inference_http_methods():
+def test_handler_supports_allowlisted_local_service_http_methods():
   handler = broker_module._Handler
   assert handler.do_GET is handler._handle
   assert handler.do_POST is handler._handle
   assert not hasattr(handler, "do_PUT")
   assert not hasattr(handler, "do_DELETE")
+
+
+def test_community_proxy_is_uds_only_and_binds_the_exact_request(
+  broker, monkeypatch,
+):
+  seen = {}
+
+  class FakeClient:
+    def build_request(self, method, url, **kwargs):
+      seen["url"] = url
+      seen["headers"] = kwargs["headers"]
+      return httpx.Request(
+        method, url, content=kwargs.get("content"), headers=kwargs["headers"],
+      )
+
+    def send(self, request, *, stream):
+      return httpx.Response(
+        200, request=request, stream=httpx.ByteStream(b"{}"),
+      )
+
+    def close(self):
+      return None
+
+  capabilities = []
+  broker.client.close()
+  broker.client = FakeClient()
+  monkeypatch.setattr(
+    broker, "_capability",
+    lambda **kwargs: capabilities.append(kwargs) or "one-use",
+  )
+  target = "/v1/community/apps?limit=25&offset=0&q=latex"
+
+  with pytest.raises(FileNotFoundError):
+    broker.proxy(method="GET", path=target, body=b"", headers={})
+
+  response = broker.proxy(
+    method="GET", path=target, body=b"", headers={}, allow_privileged_routes=True,
+  )
+  response.close()
+
+  assert seen["url"] == broker_module.COMMUNITY_BASE_URL + target
+  assert capabilities[0]["audience"] == "mobius-community-registry"
+  assert capabilities[0]["scope"] == "community:read"
+  assert capabilities[0]["path"] == target
+
+  for forbidden in (
+    "/v1/community/apps?offset=0&limit=25",
+    "/v1/community/apps?admin=true",
+    "/v1/community/apps/app_12345678?limit=2",
+    "/v1/community/private-audit",
+  ):
+    with pytest.raises(FileNotFoundError):
+      broker.proxy(
+        method="GET", path=forbidden, body=b"", headers={},
+        allow_privileged_routes=True,
+      )
+
+
+def test_community_mutations_require_and_forward_idempotency(broker, monkeypatch):
+  seen = {}
+
+  class FakeClient:
+    def build_request(self, method, url, **kwargs):
+      seen["headers"] = kwargs["headers"]
+      return httpx.Request(
+        method, url, content=kwargs.get("content"), headers=kwargs["headers"],
+      )
+
+    def send(self, request, *, stream):
+      return httpx.Response(
+        200, request=request, stream=httpx.ByteStream(b"{}"),
+      )
+
+    def close(self):
+      return None
+
+  broker.client.close()
+  broker.client = FakeClient()
+  monkeypatch.setattr(broker, "_capability", lambda **_kwargs: "one-use")
+  path = "/v1/community/apps"
+  with pytest.raises(ValueError, match="idempotency key is required"):
+    broker.proxy(
+      method="POST", path=path, body=b'{"github":{}}', headers={},
+      allow_privileged_routes=True,
+    )
+  response = broker.proxy(
+    method="POST", path=path, body=b'{"github":{}}',
+    headers={"idempotency-key": "publish:1234567890abcdef"},
+    allow_privileged_routes=True,
+  )
+  response.close()
+  assert seen["headers"]["Idempotency-Key"] == "publish:1234567890abcdef"
 
 
 def test_contribution_proxy_is_uds_only_and_binds_exact_requests(
@@ -510,7 +602,7 @@ def test_contribution_proxy_is_uds_only_and_binds_exact_requests(
 
   response = broker.proxy(
     method="POST", path=create_path, body=create_body,
-    headers={"idempotency-key": key}, allow_contributions=True,
+    headers={"idempotency-key": key}, allow_privileged_routes=True,
   )
   response.close()
   assert seen["url"] == broker_module.CONTRIBUTION_BASE_URL + create_path
@@ -522,7 +614,7 @@ def test_contribution_proxy_is_uds_only_and_binds_exact_requests(
   contribution = "ctr_1234567890abcdef1234567890abcdef"
   response = broker.proxy(
     method="GET", path=f"/v1/contributions/{contribution}", body=b"",
-    headers={}, allow_contributions=True,
+    headers={}, allow_privileged_routes=True,
   )
   response.close()
   assert capabilities[-1]["scope"] == "contribution:read"
@@ -531,7 +623,7 @@ def test_contribution_proxy_is_uds_only_and_binds_exact_requests(
   response = broker.proxy(
     method="POST", path=withdraw_path, body=b'{"revision":1}',
     headers={"idempotency-key": "withdraw:0123456789abcdef"},
-    allow_contributions=True,
+    allow_privileged_routes=True,
   )
   response.close()
   assert capabilities[-1]["scope"] == "contribution:withdraw"
@@ -545,7 +637,7 @@ def test_contribution_proxy_is_uds_only_and_binds_exact_requests(
     with pytest.raises(FileNotFoundError):
       broker.proxy(
         method=method, path=forbidden, body=b"", headers={},
-        allow_contributions=True,
+        allow_privileged_routes=True,
       )
 
 
@@ -553,7 +645,7 @@ def test_contribution_mutations_require_idempotency(broker):
   with pytest.raises(ValueError, match="idempotency key is required"):
     broker.proxy(
       method="POST", path="/v1/contributions", body=b"{}", headers={},
-      allow_contributions=True,
+      allow_privileged_routes=True,
     )
 
 
@@ -589,7 +681,7 @@ def test_unix_handler_rejects_identity_queries_and_forwards_inference():
       return {"linked": True}
 
     def proxy(
-      self, *, method, path, body, headers, allow_contributions=False,
+      self, *, method, path, body, headers, allow_privileged_routes=False,
     ):
       seen.append((method, path, body))
       request = httpx.Request(method, "https://central.test" + path)

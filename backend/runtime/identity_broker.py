@@ -56,6 +56,9 @@ GATEWAY_BASE_URL = os.environ.get(
   # authenticate every exact gateway route.
   "MOBIUS_AGENT_GATEWAY_URL", "https://www.mobius.you"
 ).rstrip("/")
+COMMUNITY_BASE_URL = os.environ.get(
+  "MOBIUS_COMMUNITY_REGISTRY_URL", IDENTITY_BASE_URL
+).rstrip("/")
 CONTRIBUTION_BASE_URL = os.environ.get(
   "MOBIUS_CONTRIBUTION_RELAY_URL", IDENTITY_BASE_URL
 ).rstrip("/")
@@ -73,6 +76,58 @@ INFERENCE_ROUTES = {
     "inference:responses", "mobius-agent-gateway"
   ),
 }
+
+
+_COMMUNITY_ROUTES = (
+  ("GET", re.compile(r"/v1/community/apps"), "community:read"),
+  ("GET", re.compile(r"/v1/community/publications"), "community:read"),
+  ("GET", re.compile(r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}"), "community:read"),
+  (
+    "GET",
+    re.compile(
+      r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/revisions/"
+      r"[A-Za-z0-9_:-]{8,200}"
+    ),
+    "community:read",
+  ),
+  ("POST", re.compile(r"/v1/community/apps"), "community:publish"),
+  (
+    "POST",
+    re.compile(
+      r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/revisions/"
+      r"[A-Za-z0-9_:-]{8,200}/installs"
+    ),
+    "community:install",
+  ),
+)
+
+
+def _community_scope(method: str, route_path: str, query: str) -> str | None:
+  scope = next((
+    declared_scope
+    for declared_method, pattern, declared_scope in _COMMUNITY_ROUTES
+    if method == declared_method and pattern.fullmatch(route_path)
+  ), None)
+  if scope is None:
+    return None
+  if not query:
+    return scope
+  if method != "GET" or route_path not in {
+    "/v1/community/apps", "/v1/community/publications",
+  }:
+    return None
+  pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
+  allowed = (
+    {"q", "limit", "offset"}
+    if route_path == "/v1/community/apps"
+    else {"limit", "offset"}
+  )
+  keys = [key for key, _value in pairs]
+  if any(key not in allowed for key in keys) or len(keys) != len(set(keys)):
+    return None
+  if urllib.parse.urlencode(sorted(pairs)) != query:
+    return None
+  return scope
 
 
 def _contribution_route(
@@ -109,6 +164,18 @@ def _request_body_limit(*, is_unix: bool, method: str, path: str) -> int:
   ):
     return MAX_CONTRIBUTION_BODY
   return MAX_BODY
+
+
+def _privileged_route(
+  method: str, route_path: str, query: str,
+) -> tuple[str, str, str] | None:
+  contribution = _contribution_route(method, route_path, query)
+  if contribution is not None:
+    return contribution
+  community_scope = _community_scope(method, route_path, query)
+  if community_scope is None:
+    return None
+  return community_scope, "mobius-community-registry", COMMUNITY_BASE_URL
 
 
 def _b64(value: bytes) -> str:
@@ -537,7 +604,7 @@ class Broker:
     path: str,
     body: bytes,
     headers: dict[str, str],
-    allow_contributions: bool = False,
+    allow_privileged_routes: bool = False,
   ) -> httpx.Response:
     split = urllib.parse.urlsplit(path)
     route_path = split.path
@@ -556,8 +623,8 @@ class Broker:
       route = (scope, audience, GATEWAY_BASE_URL)
     else:
       route = (
-        _contribution_route(method, route_path, split.query)
-        if allow_contributions
+        _privileged_route(method, route_path, split.query)
+        if allow_privileged_routes
         else None
       )
     if route is None:
@@ -570,7 +637,7 @@ class Broker:
     ):
       raise ValueError("invalid idempotency key")
     if (
-      audience == "mobius-contribution-relay"
+      audience in {"mobius-community-registry", "mobius-contribution-relay"}
       and method != "GET"
       and not idempotency_key
     ):
@@ -669,7 +736,7 @@ class _Handler(BaseHTTPRequestHandler):
         path=path,
         body=body,
         headers=incoming,
-        allow_contributions=is_unix,
+        allow_privileged_routes=is_unix,
       )
       try:
         self.send_response(upstream.status_code)

@@ -89,6 +89,7 @@ skills_router = _load("skills")
 standalone_router = _load("standalone")
 client_error_router = _load("client_error")
 client_signal_router = _load("client_signal")
+community_router = _load("community")
 contribution_relay_router = _load("contribution_relay")
 platform_router = _load("platform")
 published_router = _load("published")
@@ -132,6 +133,7 @@ __all__ = [
   "standalone_router",
   "client_error_router",
   "client_signal_router",
+  "community_router",
   "contribution_relay_router",
   "platform_router",
   "published_router",
