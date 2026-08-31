@@ -621,6 +621,10 @@ export const api = {
     markOpened: (projectId) => apiFetch(
       `/projects/${encodeURIComponent(projectId)}/opened`, { method: 'POST' },
     ),
+    markArtifactOpened: (projectId, artifactId) => apiFetch(
+      `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}/opened`,
+      { method: 'POST' },
+    ),
     create: (payload) => apiFetch('/projects', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -819,6 +823,50 @@ export const api = {
     artifactOutput: (projectId, artifactId, path, { signal } = {}) => apiFetch(
       `/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}/output/${path.split('/').map(encodeURIComponent).join('/')}`,
       { signal },
+    ),
+  },
+  sharedApps: {
+    list: () => apiFetch('/shared-apps'),
+    create: payload => apiFetch('/shared-apps', { method: 'POST', body: JSON.stringify(payload) }),
+    detail: instanceId => apiFetch(`/shared-apps/${encodeURIComponent(instanceId)}`),
+    publishRelease: instanceId => apiFetch(
+      `/shared-apps/${encodeURIComponent(instanceId)}/release`, { method: 'PUT' },
+    ),
+    remove: instanceId => apiFetch(`/shared-apps/${encodeURIComponent(instanceId)}`, { method: 'DELETE' }),
+    recover: instanceId => apiFetch(
+      `/shared-apps/${encodeURIComponent(instanceId)}/recover`, { method: 'POST' },
+    ),
+    redeemInvite: payload => apiFetch('/shared-apps/invites/redeem', {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+    collaboration: instanceId => apiFetch(`/shared-apps/${encodeURIComponent(instanceId)}/collaboration`),
+    createInvite: (instanceId, payload) => apiFetch(
+      `/shared-apps/${encodeURIComponent(instanceId)}/invites`,
+      { method: 'POST', body: JSON.stringify(payload) },
+    ),
+    revokeInvite: (instanceId, inviteId) => apiFetch(
+      `/shared-apps/${encodeURIComponent(instanceId)}/invites/${encodeURIComponent(inviteId)}`,
+      { method: 'DELETE' },
+    ),
+    updateMember: (instanceId, memberId, payload) => apiFetch(
+      `/shared-apps/${encodeURIComponent(instanceId)}/members/${encodeURIComponent(memberId)}`,
+      { method: 'PATCH', body: JSON.stringify(payload) },
+    ),
+    removeMember: (instanceId, memberId) => apiFetch(
+      `/shared-apps/${encodeURIComponent(instanceId)}/members/${encodeURIComponent(memberId)}`,
+      { method: 'DELETE' },
+    ),
+    state: instanceId => apiFetch(`/shared-apps/${encodeURIComponent(instanceId)}/state`),
+    changes: (instanceId, after) => apiFetch(
+      `/shared-apps/${encodeURIComponent(instanceId)}/changes?after=${encodeURIComponent(after)}`,
+    ),
+    writeState: (instanceId, path, payload) => apiFetch(
+      `/shared-apps/${encodeURIComponent(instanceId)}/state/${encodeURIComponent(path)}`,
+      { method: 'PUT', body: JSON.stringify(payload) },
+    ),
+    output: (instanceId, releaseId, path, options) => apiFetch(
+      `/shared-apps/${encodeURIComponent(instanceId)}/output/${encodeURIComponent(releaseId)}/${String(path || '').split('/').map(encodeURIComponent).join('/')}`,
+      options,
     ),
   },
   services: {

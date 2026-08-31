@@ -95,6 +95,7 @@ platform_router = _load("platform")
 published_router = _load("published")
 connect_router = _load("connect")
 projects_router = _load("projects")
+shared_apps_router = _load("shared_apps")
 
 __all__ = [
   "admin_router",
@@ -139,4 +140,5 @@ __all__ = [
   "published_router",
   "connect_router",
   "projects_router",
+  "shared_apps_router",
 ]

@@ -13,7 +13,9 @@ const SAFE_PROJECT_PREVIEW_CSP = [
 // truthful place for disposable test data. The opaque frame delegates this
 // tiny storage surface to its parent; ProjectPreviewFrame owns the browser-
 // private namespace and never hands the frame a shell or project credential.
-const PROJECT_PREVIEW_RUNTIME = `<script data-mobius-project-preview-runtime>
+function projectPreviewRuntime(dataScope = 'personal') {
+  const scope = dataScope === 'shared' ? 'shared' : 'personal'
+  return `<script data-mobius-project-preview-runtime>
 (() => {
   const pending = new Map();
   const listeners = new Map();
@@ -24,7 +26,7 @@ const PROJECT_PREVIEW_RUNTIME = `<script data-mobius-project-preview-runtime>
     const message = { type: 'mobius:project-preview-storage', requestId, method, path, value };
     const timeout = setTimeout(() => {
       pending.delete(requestId);
-      reject(new Error('Personal preview data did not connect. Reload the preview and try again.'));
+      reject(new Error('${scope === 'shared' ? 'Shared app data' : 'Personal preview data'} did not connect. Reload the preview and try again.'));
     }, 5000);
     pending.set(requestId, { resolve, reject, timeout, message });
     if (connected) parent.postMessage(message, '*');
@@ -62,18 +64,19 @@ const PROJECT_PREVIEW_RUNTIME = `<script data-mobius-project-preview-runtime>
       return () => { group.delete(listener); if (!group.size) listeners.delete(path); };
     },
   };
-  window.mobius = Object.freeze({ ...(window.mobius || {}), storage, preview: Object.freeze({ dataScope: 'personal' }) });
+  window.mobius = Object.freeze({ ...(window.mobius || {}), storage, preview: Object.freeze({ dataScope: '${scope}' }) });
   dispatchEvent(new CustomEvent('mobius:preview-ready'));
 })();
 </script>`
+}
 
-export function safeProjectHtmlDocument(source) {
+export function safeProjectHtmlDocument(source, dataScope = 'personal') {
   const csp = `<meta http-equiv="Content-Security-Policy" content="${SAFE_PROJECT_PREVIEW_CSP}">`
   // Keep the policy ahead of every untrusted byte. Inserting it after a
   // literal <head> is not sufficient: malformed HTML can place a fetching
   // element before that tag, causing the parser to issue a request (and ignore
   // the now-late head) before it ever encounters the policy.
-  return `${csp}${PROJECT_PREVIEW_RUNTIME}${String(source ?? '')}`
+  return `${csp}${projectPreviewRuntime(dataScope)}${String(source ?? '')}`
 }
 
 export function projectPreviewSandbox() {
@@ -106,7 +109,7 @@ function escapeInlineScript(source) {
  * interactive preview without exposing a project directory as a public URL.
  * Missing or remote dependencies stay in the document and are blocked by CSP.
  */
-export async function assembleProjectHtmlPreview(source, entryPath, loadText, loadDataUri = null) {
+export async function assembleProjectHtmlPreview(source, entryPath, loadText, loadDataUri = null, dataScope = 'personal') {
   let document = String(source ?? '')
   const stylesheet = /<link\b([^>]*\brel=["']?stylesheet["']?[^>]*)>/gi
   const script = /<script\b([^>]*\bsrc=["']([^"']+)["'][^>]*)><\/script\s*>/gi
@@ -173,5 +176,5 @@ export async function assembleProjectHtmlPreview(source, entryPath, loadText, lo
     }
   }
 
-  return safeProjectHtmlDocument(document)
+  return safeProjectHtmlDocument(document, dataScope)
 }

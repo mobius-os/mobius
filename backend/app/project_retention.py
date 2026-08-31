@@ -85,6 +85,12 @@ def purge_expired_project_tombstones(db: Session) -> list[str]:
   """
   cutoff = now_naive_utc() - SOFT_DELETE_TTL
   with PROJECT_LIFECYCLE_LOCK:
+    from app.shared_app_retention import (
+      delete_project_shared_apps,
+      purge_expired_shared_apps,
+      remove_snapshot_root,
+    )
+    purge_expired_shared_apps(db)
     rows = db.query(models.Project).filter(
       models.Project.deleted_at.isnot(None),
       models.Project.deleted_at < cutoff,
@@ -96,6 +102,7 @@ def purge_expired_project_tombstones(db: Session) -> list[str]:
         str(project.id), project.root_path, project.legacy_source_json,
       )) is not None
     ]
+    shared_app_roots = delete_project_shared_apps(db, project_ids)
     if project_ids:
       # ProjectAgentMessage predates cascade ownership on some local builds.
       # Clear it explicitly so an upgraded database and a fresh database have
@@ -117,5 +124,10 @@ def purge_expired_project_tombstones(db: Session) -> list[str]:
         except OSError:
           # The row is already gone, so the UUID orphan sweep can retry safely.
           log.exception("Could not remove expired native project root %s", root)
+      for root in shared_app_roots:
+        try:
+          remove_snapshot_root(root)
+        except OSError:
+          log.exception("Could not remove project-owned shared-app snapshot %s", root)
     _sweep_orphaned_native_roots(db)
     return project_ids

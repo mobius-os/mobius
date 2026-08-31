@@ -130,6 +130,62 @@ def test_artifact_crud_validates_and_confines(client, auth):
   ).status_code == 404
 
 
+def test_creation_open_recency_is_navigation_state(client, auth, db):
+  project = _make_project(client, auth)
+  _write_file(client, auth, project, "index.html", "<h1>Hi</h1>")
+  client.post(
+    f"/api/projects/{project['id']}/artifacts", headers=auth,
+    json={"name": "Website", "builder": "website", "source": "index.html"},
+  )
+  row = db.get(models.Project, project["id"])
+  original_updated_at = row.updated_at
+
+  opened = client.post(
+    f"/api/projects/{project['id']}/artifacts/website/opened", headers=auth,
+  )
+
+  assert opened.status_code == 204, opened.text
+  artifact = _artifact(client, auth, project["id"], "website")
+  assert artifact["last_opened_at"] is not None
+  db.refresh(row)
+  assert row.updated_at == original_updated_at
+  assert client.post(
+    f"/api/projects/{project['id']}/artifacts/missing/opened", headers=auth,
+  ).status_code == 404
+
+
+def test_deleted_creation_does_not_transfer_recency_to_a_reused_id(
+  client, auth, db,
+):
+  project = _make_project(client, auth)
+  _write_file(client, auth, project, "index.html", "<h1>Hi</h1>")
+  artifact_url = f"/api/projects/{project['id']}/artifacts"
+  body = {
+    "name": "Website",
+    "builder": "website",
+    "source": "index.html",
+  }
+  assert client.post(artifact_url, headers=auth, json=body).status_code == 201
+  assert client.post(
+    f"{artifact_url}/website/opened", headers=auth,
+  ).status_code == 204
+  assert _artifact(client, auth, project["id"], "website")[
+    "last_opened_at"
+  ] is not None
+
+  assert client.delete(
+    f"{artifact_url}/website", headers=auth,
+  ).status_code == 204
+  assert db.get(
+    models.ProjectArtifactDrawerState,
+    {"project_id": project["id"], "artifact_id": "website"},
+  ) is None
+
+  assert client.post(artifact_url, headers=auth, json=body).status_code == 201
+  recreated = _artifact(client, auth, project["id"], "website")
+  assert recreated["last_opened_at"] is None
+
+
 def test_website_build_copies_tree_and_serves_entry_with_csp(client, auth):
   project = _make_project(client, auth)
   _write_file(client, auth, project, "index.html", "<h1>Hello site</h1>")

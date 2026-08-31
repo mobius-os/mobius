@@ -5,10 +5,7 @@ import ProjectIdentityIcon from './ProjectIdentityIcon.jsx'
 import ProjectTypeIcon from './ProjectTypeIcon.jsx'
 import './Projects.css'
 
-// The Projects launcher: one clean list of the owner's projects plus the create
-// menu. The icon/list view toggle and the legacy "Existing app projects" import
-// section were removed — a single readable list is the one good default, and
-// legacy app-projects are no longer surfaced here.
+// The Projects launcher: one readable list plus the focused creation menu.
 export default function ProjectsDirectory({
   projects,
   templates,

@@ -24,6 +24,7 @@ const Shell = lazy(() => import('./components/Shell/Shell.jsx'))
 const ChatEmbed = lazy(() => import('./components/ChatEmbed/ChatEmbed.jsx'))
 const StandaloneApp = lazy(() => import('./components/StandaloneApp/StandaloneApp.jsx'))
 const ProjectShare = lazy(() => import('./components/Projects/ProjectShare.jsx'))
+const SharedApp = lazy(() => import('./components/Projects/SharedApp.jsx'))
 
 // True when this SPA load is the stripped-chrome chat embed
 // (capability A). The SPA catch-all serves index.html for any non-API
@@ -52,11 +53,23 @@ const PROJECT_SHARE_ROUTE = (() => {
     return false
   }
 })()
+const SHARED_APP_ROUTE = (() => {
+  try {
+    const path = window.location.pathname
+    return path === `${BASE}/app-invite` || path.startsWith(`${BASE}/shared/app/`)
+  } catch {
+    return false
+  }
+})()
+const SHARED_APP_INVITE_ROUTE = (() => {
+  try { return window.location.pathname === `${BASE}/app-invite` }
+  catch { return false }
+})()
 const STANDALONE_APP = readStandaloneBoot()
 if (EMBED_ROUTE) {
   beginEphemeralAuth()
   beginEmbedBootstrap()
-} else if (PROJECT_SHARE_ROUTE) {
+} else if (PROJECT_SHARE_ROUTE || SHARED_APP_INVITE_ROUTE) {
   beginEphemeralAuth()
 } else {
   // Capture Chromium's one-shot install event before setup or sign-in can keep
@@ -91,6 +104,15 @@ export default function App() {
       <QueryClientProvider client={queryClient}>
         <ErrorBoundary label="project-share" recoveryKey="project-share:root" canAskAgent={false}>
           <Suspense fallback={<RouteLoading />}><ProjectShare /></Suspense>
+        </ErrorBoundary>
+      </QueryClientProvider>
+    )
+  }
+  if (SHARED_APP_ROUTE) {
+    return (
+      <QueryClientProvider client={queryClient}>
+        <ErrorBoundary label="shared-app" recoveryKey="shared-app:root" canAskAgent={false}>
+          <Suspense fallback={<RouteLoading />}><SharedApp /></Suspense>
         </ErrorBoundary>
       </QueryClientProvider>
     )

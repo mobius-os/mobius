@@ -1937,6 +1937,7 @@ def _pin_established_legacy_chat_models(eng) -> None:
       })
 
 
+
 def _add_app_project_templates(eng) -> None:
   """Persist validated manifest project-template declarations on App rows."""
   from sqlalchemy import inspect as sa_inspect, text
@@ -2100,6 +2101,326 @@ def _add_chat_goal_dismissal(eng) -> None:
     ))
 
 
+
+def _add_shared_app_retention(eng) -> None:
+  """Make shared app removal reversible on existing installations."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "shared_app_instances" not in inspector.get_table_names():
+    return
+  columns = {
+    column["name"]
+    for column in inspector.get_columns("shared_app_instances")
+  }
+  with eng.begin() as conn:
+    if "deleted_at" not in columns:
+      conn.execute(text(
+        "ALTER TABLE shared_app_instances ADD COLUMN deleted_at DATETIME NULL"
+      ))
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_shared_app_instances_deleted_at "
+      "ON shared_app_instances (deleted_at)"
+    ))
+
+
+def _migrate_shared_app_state_files(eng) -> None:
+  """Move prototype JSON blobs into path-based shared storage.
+
+  Historical migrations own their behavior permanently, so this conversion
+  carries its validation, path ownership, and atomic-write logic instead of
+  importing mutable runtime helpers.
+  """
+  import re
+  import uuid
+
+  from sqlalchemy import (
+    JSON as SAJSON,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    bindparam,
+    inspect as sa_inspect,
+    text,
+  )
+
+  inspector = sa_inspect(eng)
+  if "shared_app_instances" not in inspector.get_table_names():
+    return
+  # Fresh installations use path storage directly and never create the
+  # prototype blob columns. Existing installations keep this one-way data
+  # migration, but the compatibility shape is not part of normal runtime.
+  columns = {
+    column["name"]
+    for column in inspector.get_columns("shared_app_instances")
+  }
+  if not {"state_json", "revision"}.issubset(columns):
+    return
+
+  metadata = MetaData()
+  Table("shared_app_instances", metadata, autoload_with=eng)
+  changes = Table(
+    "shared_app_changes",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column(
+      "instance_id",
+      String(64),
+      ForeignKey("shared_app_instances.id", ondelete="CASCADE"),
+      nullable=False,
+      index=True,
+    ),
+    Column("kind", String(16), nullable=False),
+    Column("path", String(200), nullable=False),
+    Column("version", String(128), nullable=True),
+    Column("actor_key", String(72), nullable=False),
+    Column("display_name", String(256), nullable=False),
+    Column("created_at", DateTime, nullable=False, index=True),
+    extend_existing=True,
+  )
+  changes.create(bind=eng, checkfirst=True)
+
+  safe_path = re.compile(r"^[\w._/@+ -]+$")
+
+  def validate_path(value: str) -> Path:
+    path = str(value)
+    relative = Path(path)
+    if (
+      not path
+      or len(path) > 200
+      or path.startswith("/")
+      or "\\" in path
+      or ".." in relative.parts
+      or safe_path.fullmatch(path) is None
+    ):
+      raise RuntimeError("shared app state has an invalid path")
+    return relative
+
+  data_root = Path(os.environ.get("DATA_DIR", "/data")).resolve()
+  instances_root = data_root / "shared" / "app-instances"
+
+  def owned_root(instance_id: str, snapshot_path: str) -> Path:
+    try:
+      canonical_id = str(uuid.UUID(str(instance_id)))
+    except (ValueError, AttributeError) as exc:
+      raise RuntimeError("shared app state has an invalid instance id") from exc
+    if canonical_id != str(instance_id):
+      raise RuntimeError("shared app state has an invalid instance id")
+    root = instances_root / canonical_id
+    stored = Path(snapshot_path)
+    lexical = stored if stored.is_absolute() else data_root / stored
+    try:
+      if lexical.absolute() != (root / "build").absolute():
+        raise RuntimeError("shared app state has an invalid snapshot path")
+      resolved_instances = instances_root.resolve()
+      resolved_instances.relative_to(data_root)
+      resolved_root = root.resolve()
+      if resolved_root.relative_to(resolved_instances).parts != (canonical_id,):
+        raise RuntimeError("shared app state has an invalid snapshot path")
+    except (OSError, ValueError) as exc:
+      raise RuntimeError("shared app state has an invalid snapshot path") from exc
+    current = data_root
+    for part in (root / "data").relative_to(data_root).parts:
+      current = current / part
+      if current.is_symlink():
+        raise RuntimeError("shared app state has an unsafe snapshot path")
+    return root
+
+  def sync_directory(path: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+      flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+      flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+      os.fsync(descriptor)
+    finally:
+      os.close(descriptor)
+
+  def open_parent(target: Path) -> int:
+    """Open/create ``target.parent`` without following path symlinks."""
+    relative = target.relative_to(instances_root)
+    instance_root = instances_root / relative.parts[0]
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+      flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+      flags |= os.O_NOFOLLOW
+    try:
+      descriptor = os.open(instance_root, flags)
+      for part in relative.parent.parts[1:]:
+        try:
+          child = os.open(part, flags, dir_fd=descriptor)
+        except FileNotFoundError:
+          # Create exactly one component below the already-open owning
+          # directory. Never ``parents=True``: a later symlink in the chain
+          # must be rejected before it can redirect any descendant creation.
+          os.mkdir(part, 0o755, dir_fd=descriptor)
+          os.fsync(descriptor)
+          child = os.open(part, flags, dir_fd=descriptor)
+        os.close(descriptor)
+        descriptor = child
+      return descriptor
+    except OSError as exc:
+      try:
+        os.close(descriptor)
+      except (OSError, UnboundLocalError):
+        pass
+      raise RuntimeError("shared app state has an unsafe path") from exc
+
+  def atomic_write(target: Path, content: bytes) -> None:
+    parent_descriptor = open_parent(target)
+    temporary = f".{target.name}.{uuid.uuid4().hex}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+      flags |= os.O_NOFOLLOW
+    try:
+      fd = os.open(
+        temporary,
+        flags,
+        0o644,
+        dir_fd=parent_descriptor,
+      )
+      with os.fdopen(fd, "wb") as handle:
+        os.fchmod(handle.fileno(), 0o644)
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+      os.replace(
+        temporary,
+        target.name,
+        src_dir_fd=parent_descriptor,
+        dst_dir_fd=parent_descriptor,
+      )
+      # The file fsync above preserves its bytes. Directory fsyncs, from the
+      # new leaf back to the already-owned instance root, preserve the rename
+      # and every newly-created directory entry before the DB blob is cleared.
+      os.fsync(parent_descriptor)
+      current = target.parent.parent
+      while True:
+        sync_directory(current)
+        if current == instances_root / target.relative_to(instances_root).parts[0]:
+          break
+        current = current.parent
+    except BaseException:
+      try:
+        os.unlink(temporary, dir_fd=parent_descriptor)
+      except OSError:
+        pass
+      raise
+    finally:
+      os.close(parent_descriptor)
+
+  clear = text(
+    "UPDATE shared_app_instances "
+    "SET state_json = :empty, revision = 0 WHERE id = :id"
+  ).bindparams(bindparam("empty", type_=SAJSON))
+  with eng.begin() as conn:
+    rows = conn.execute(text(
+      "SELECT id, snapshot_path, state_json FROM shared_app_instances"
+    )).mappings().all()
+    for row in rows:
+      values = row["state_json"]
+      if isinstance(values, str):
+        values = json.loads(values)
+      if not isinstance(values, dict) or not values:
+        continue
+      root = owned_root(str(row["id"]), str(row["snapshot_path"]))
+      for path, value in values.items():
+        target = root / "data" / validate_path(str(path))
+        atomic_write(
+          target,
+          json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+          ).encode("utf-8"),
+        )
+      conn.execute(clear, {"empty": {}, "id": row["id"]})
+
+
+def _add_project_artifact_drawer_state(eng) -> None:
+  """Track built-result opens without treating navigation as a content edit."""
+  from sqlalchemy import (
+    Column,
+    DateTime,
+    ForeignKey,
+    MetaData,
+    String,
+    Table,
+    inspect as sa_inspect,
+  )
+
+  if "projects" not in sa_inspect(eng).get_table_names():
+    return
+  metadata = MetaData()
+  Table("projects", metadata, autoload_with=eng)
+  drawer_state = Table(
+    "project_artifact_drawer_state",
+    metadata,
+    Column(
+      "project_id",
+      String(64),
+      ForeignKey("projects.id", ondelete="CASCADE"),
+      primary_key=True,
+    ),
+    Column("artifact_id", String(64), primary_key=True),
+    Column("last_opened_at", DateTime, nullable=False),
+    extend_existing=True,
+  )
+  drawer_state.create(bind=eng, checkfirst=True)
+
+
+def _add_shared_app_change_operation_id(eng) -> None:
+  """Give filesystem journals one durable, idempotent change identity."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "shared_app_changes" not in inspector.get_table_names():
+    return
+  columns = {
+    column["name"]
+    for column in inspector.get_columns("shared_app_changes")
+  }
+  with eng.begin() as conn:
+    if "operation_id" not in columns:
+      conn.execute(text(
+        "ALTER TABLE shared_app_changes ADD COLUMN operation_id VARCHAR(64) NULL"
+      ))
+    conn.execute(text(
+      "CREATE UNIQUE INDEX IF NOT EXISTS ix_shared_app_changes_operation_id "
+      "ON shared_app_changes (operation_id)"
+    ))
+
+
+def _add_shared_app_previous_snapshot_path(eng) -> None:
+  """Retain one immutable predecessor while clients finish a pinned load."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "shared_app_instances" not in inspector.get_table_names():
+    return
+  columns = {
+    column["name"]
+    for column in inspector.get_columns("shared_app_instances")
+  }
+  with eng.begin() as conn:
+    if "previous_snapshot_path" not in columns:
+      conn.execute(text(
+        "ALTER TABLE shared_app_instances "
+        "ADD COLUMN previous_snapshot_path VARCHAR(2048) NULL"
+      ))
+    conn.execute(text(
+      "CREATE UNIQUE INDEX IF NOT EXISTS ix_shared_app_instances_previous_snapshot_path "
+      "ON shared_app_instances (previous_snapshot_path)"
+    ))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -2127,6 +2448,11 @@ _SCHEMA_MIGRATIONS = (
   ("0022_project_artifacts", _add_project_artifacts),
   ("0023_project_color", _add_project_color),
   ("0024_chat_goal_dismissal", _add_chat_goal_dismissal),
+  ("0025_shared_app_retention", _add_shared_app_retention),
+  ("0026_shared_app_path_state", _migrate_shared_app_state_files),
+  ("0027_project_artifact_drawer_state", _add_project_artifact_drawer_state),
+  ("0028_shared_app_change_operation_id", _add_shared_app_change_operation_id),
+  ("0029_shared_app_previous_snapshot_path", _add_shared_app_previous_snapshot_path),
 )
 
 

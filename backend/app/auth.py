@@ -172,6 +172,29 @@ def create_project_collaborator_token(
   )
 
 
+def create_shared_app_collaborator_token(
+  *,
+  owner_username: str,
+  owner_epoch: int,
+  instance_id: str,
+  member_id: str,
+  member_epoch: int,
+  expires_delta: timedelta = timedelta(days=30),
+) -> str:
+  """Mint a bearer confined to one revocable shared-app membership."""
+  return create_access_token(
+    {
+      "sub": owner_username,
+      "scope": "shared_app_collaborator",
+      "shared_app_instance": instance_id,
+      "shared_app_member": member_id,
+      "member_epoch": member_epoch,
+    },
+    expires_delta=expires_delta,
+    token_epoch=owner_epoch,
+  )
+
+
 def create_delegation_token(
   delegation_id: str,
   app_id: int,

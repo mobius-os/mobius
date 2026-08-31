@@ -18,6 +18,7 @@ function recentAt({ kind, item }) {
   if (kind === 'chat') {
     return item?.activity_at || item?.updated_at || item?.created_at || ''
   }
+  if (kind === 'artifact') return item?.last_opened_at || ''
   return item?.last_opened_at || item?.updated_at || item?.created_at || ''
 }
 
@@ -82,14 +83,15 @@ export function buildDrawerSections(chats = [], apps = [], projects = []) {
     ...projects.flatMap(project => (
       Array.isArray(project?.artifacts) ? project.artifacts : []
     )
-      .filter(artifact => artifact?.status === 'ok' && artifact?.has_output)
+      .filter(artifact => (
+        artifact?.status === 'ok' && artifact?.has_output && artifact?.last_opened_at
+      ))
       .map(artifact => ({
         kind: 'artifact',
         item: {
           ...artifact,
           id: `${project.id}:${artifact.id}`,
           artifact_id: artifact.id,
-          activity_at: artifact.updated_at || project.updated_at || '',
           project: { id: project.id, name: project.name, color: project.color },
         },
       }))),

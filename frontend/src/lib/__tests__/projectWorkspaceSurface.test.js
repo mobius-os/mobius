@@ -45,11 +45,11 @@ function renderWorkspace() {
   )
 }
 
-test('Artifacts, Chats, and Files form one ordered project workspace without tabs', () => {
+test('Creations, Chats, and Files form one ordered project workspace without tabs', () => {
   const markup = renderWorkspace()
   assert.doesNotMatch(markup, /role="tablist"|role="tab"|role="tabpanel"/)
   assert.match(markup, /aria-label="Project overview"/)
-  const artifacts = markup.indexOf('>Artifacts</h2>')
+  const artifacts = markup.indexOf('>Creations</h2>')
   const chats = markup.indexOf('>Chats</h2>')
   const files = markup.indexOf('aria-label="Folder location"')
   assert.ok(artifacts >= 0 && artifacts < chats)
