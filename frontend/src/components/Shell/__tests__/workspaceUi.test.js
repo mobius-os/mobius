@@ -1188,16 +1188,10 @@ test('a manual platform reconcile refreshes the persistent Settings surface', ()
   )
 })
 
-test('boot delegates the complete shell generation decision to one inspector', () => {
-  assert.match(
-    shell,
-    /const \{ updateAvailable \} = await inspectShellUpdate\(\{[\s\S]*?serviceWorker: navigator\.serviceWorker,[\s\S]*?\}\)/,
-  )
-})
-
-test('shell resume is a deliberate apply, not a passive visible-chat hold', () => {
-  assert.match(shell, /watchForShellUpdateOnResume\(\{[\s\S]*?rearm: \(\) => requestShellReload\(\),/)
-  assert.doesNotMatch(shell, /rearm: \(\) => requestShellReload\(\{ passive: true \}\)/)
+test('shell generations advertise one explicit update without intercepting navigation', () => {
+  assert.match(shell, /markShellUpdateAvailable\(\)/)
+  assert.match(shell, /label: 'Update now', onAction: applyShellUpdate/)
+  assert.doesNotMatch(shell, /requestShellReload|beforeNavigateRef/)
 })
 
 test('the builder no-full-screen invariant scopes to DESTINATIONS, not transient dialogs (§2)', () => {

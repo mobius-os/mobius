@@ -41,6 +41,8 @@ import {
   savedReadingAnchorKey,
 } from './scroll/readingPositions.js'
 import useVoiceInput from './useVoiceInput.js'
+import useOnlineStatus from '../../hooks/useOnlineStatus.js'
+import useRestartPending from '../../hooks/useRestartPending.js'
 import {
   getOnlineSnapshot,
   getRecoverySnapshot,
@@ -414,6 +416,10 @@ export default function ChatView({
     onInternalNav?.(url)
   }, [onInternalNav])
   const internalNav = onInternalNav ? handleInternalNav : undefined
+  // These hooks share the shell's singleton connectivity/restart stores; a
+  // retained chat gains current copy without creating another probe owner.
+  const online = useOnlineStatus()
+  const restartPending = useRestartPending()
   // Read the query cache synchronously on mount. If we've viewed this chat
   // before, its complete transcript window builds the hidden restoration DOM
   // immediately. A complete cache that covers the saved reading coordinate may
@@ -5635,6 +5641,9 @@ export default function ChatView({
             onSteerOne={handleSteerOne}
             steerActive={turnActive && !hasPendingQuestion}
             steerBusy={steerBusy}
+            turnActive={turnActive}
+            online={online}
+            restarting={restartPending}
             focusComposer={() => focusComposerElement(inputRef.current)}
           />
         )}

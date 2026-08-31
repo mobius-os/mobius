@@ -1327,6 +1327,94 @@ def test_container_replacement_accepts_image_input_covered_by_upstream(
   assert pu.container_replacement_blockers() == []
 
 
+def test_active_runtime_overlay_owns_only_protected_runtime_blockers(
+  tmp_path, monkeypatch,
+):
+  marker = tmp_path / "activation.json"
+  monkeypatch.setattr(pu, "RESTART_NEEDED_FLAG", marker)
+  pu._write_activation_marker(
+    "a" * 40,
+    ["Dockerfile", "backend/runtime/identity_broker.py"],
+    upstream_sha="b" * 40,
+    image_paths=[],
+  )
+
+  assert pu.container_replacement_blockers(
+    preserve_active_runtime=True,
+  ) == ["Dockerfile"]
+
+
+def test_stale_protected_runtime_restores_image_activation_without_marker(
+  clone_env, monkeypatch, tmp_path,
+):
+  _, platform = clone_env
+  head = _local_commit(
+    platform,
+    edits={"backend/runtime/identity_broker.py": "wanted\n"},
+  )
+  deployed = tmp_path / "deployed-runtime"
+  deployed.mkdir()
+  (deployed / "identity_broker.py").write_text("old\n", encoding="utf-8")
+  monkeypatch.setenv("MOBIUS_PROTECTED_RUNTIME_DIR", str(deployed))
+  pu.SERVING_SOURCE_FILE.write_text("platform\n")
+  pu.SERVING_SHA_FILE.write_text(head + "\n")
+
+  status = pu.platform_status(platform)
+
+  assert status["state"] == pu.PlatformUpdateState.ACTIVATION_NEEDED.value
+  assert status["activation"]["level"] == "image_rebuild"
+  assert status["activation"]["reasons"] == [{
+    "code": "baked_runtime",
+    "summary": "Baked scripts, supervisors, or protected-file rules changed.",
+    "paths": ["backend/runtime/identity_broker.py"],
+  }]
+
+
+def test_replacement_allows_runtime_drift_covered_by_exact_official_target(
+  clone_env, monkeypatch, tmp_path,
+):
+  _, platform = clone_env
+  official = _local_commit(
+    platform,
+    edits={"backend/runtime/identity_broker.py": "official\n"},
+  )
+  deployed = tmp_path / "deployed-runtime"
+  deployed.mkdir()
+  (deployed / "identity_broker.py").write_text("old\n", encoding="utf-8")
+  monkeypatch.setenv("MOBIUS_PROTECTED_RUNTIME_DIR", str(deployed))
+
+  assert pu.container_replacement_blockers(official, platform) == []
+
+  _local_commit(
+    platform,
+    edits={"backend/runtime/identity_broker.py": "local-only\n"},
+  )
+  assert pu.container_replacement_blockers(official, platform) == [
+    "backend/runtime/identity_broker.py",
+  ]
+
+
+def test_replacement_blocks_when_desired_runtime_cannot_be_verified(
+  clone_env, monkeypatch,
+):
+  _, platform = clone_env
+  official = _git(platform, "rev-parse", "HEAD").stdout.strip()
+  monkeypatch.setattr(
+    pu,
+    "_protected_runtime_status",
+    lambda _repo: {
+      "state": "unavailable",
+      "source_sha256": None,
+      "deployed_sha256": None,
+      "mismatched_paths": [],
+    },
+  )
+
+  assert pu.container_replacement_blockers(official, platform) == [
+    "backend/runtime",
+  ]
+
+
 def test_legacy_activation_marker_cannot_claim_official_image_coverage(
   tmp_path, monkeypatch,
 ):

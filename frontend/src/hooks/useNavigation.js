@@ -134,9 +134,6 @@ export const coldRestoredCanvasAppId =
  *   replaceImplicitBootTab
  *                       true when the only boot tab is the unpinned home
  *                       surface, which an explicit deep link replaces.
- *   beforeNavigateRef   optional synchronous destination claimant, run after
- *                       validation/no-op detection but before history or
- *                       workspace mutation.
  *   beforeRestoreRouteRef optional synchronous Back/Forward destination hook,
  *                       run after validation but before workspace mutation.
  *
@@ -154,7 +151,6 @@ export default function useNavigation({
   blobValid,
   replaceImplicitBootTab,
   dragActiveRef,
-  beforeNavigateRef,
   beforeRestoreRouteRef,
 }) {
   // Monotonic presentation signal for re-revealing an already-active tab. The
@@ -1120,11 +1116,6 @@ export default function useNavigation({
       if (drawerOpenRef.current) closeDrawer()
       return
     }
-
-    // Give the shell-generation controller one synchronous boundary before
-    // this destination mutates history or paints. A pending update can claim
-    // the semantic route and reveal it only in the new document.
-    if (beforeNavigateRef?.current?.(nextRoute) === true) return
 
     navigationEpochRef.current += 1
     // Ensure exactly one history entry sits above the current one to serve as

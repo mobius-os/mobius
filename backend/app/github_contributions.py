@@ -114,6 +114,184 @@ class PersonalReadyTarget:
       "expected_head_sha": self.head_sha,
     }
 
+
+@dataclass(frozen=True)
+class PublicationHandoffSpec:
+  """Immutable reviewed inputs for connecting one published local app."""
+
+  contribution_id: str
+  target_app_id: int
+  source_repo: Path
+  repo_slug: str
+  manifest_url: str
+  manifest_id: str
+  reviewed_base_sha: str
+  reviewed_head_sha: str
+  reviewed_source_sha: str
+  diff_sha256: str
+  package_digest: str
+  capability_digest: str
+
+  def pinned_manifest_url(self, merge_sha: str) -> str:
+    parsed = urlparse(self.manifest_url)
+    parts = [part for part in parsed.path.split("/") if part]
+    return (
+      f"https://raw.githubusercontent.com/{parts[0]}/{parts[1]}/"
+      f"{merge_sha}/mobius.json"
+    )
+
+
+def publication_handoff_spec(
+  record: dict,
+  db: Session,
+) -> PublicationHandoffSpec:
+  """Validate a reviewed app-publication handoff against the live app row.
+
+  The ledger is app-writable, so it is routing data rather than authority. The
+  immutable reviewed Git objects and landed equivalence witness are verified
+  separately before installation; this step narrows that later proof to the
+  one local app, canonical repository, and package the owner reviewed.
+  """
+  from app import install
+  from app.app_capabilities import contract_and_digest
+
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else None
+  handoff = plan.get("after_merge") if plan else None
+  if (
+    record.get("type") != "pr"
+    or record.get("status") != "merged"
+    or not isinstance(handoff, dict)
+    or handoff.get("action") != "connect_app"
+  ):
+    raise ContributionSubmitError(
+      "This contribution has no merged app publication to connect."
+    )
+
+  contribution_id = str(record.get("id") or "")
+  if not _CONTRIBUTION_ID.fullmatch(contribution_id):
+    raise ContributionSubmitError("This contribution record is invalid.")
+  try:
+    target_app_id = int(handoff.get("app_id"))
+  except (TypeError, ValueError):
+    raise ContributionSubmitError(
+      "This publication no longer identifies an installed app."
+    ) from None
+  target = (
+    db.query(models.App)
+    .filter(
+      models.App.id == target_app_id,
+      models.App.deleted_at.is_(None),
+    )
+    .first()
+  )
+  if target is None:
+    raise ContributionSubmitError(
+      "The local app this publication reviewed is no longer installed."
+    )
+
+  source_repo = _safe_equivalence_source_path(plan.get("source_repo_path"))
+  try:
+    target_source = Path(target.source_dir).resolve()
+  except (OSError, RuntimeError):
+    raise ContributionSubmitError(
+      "The local app source is no longer available."
+    ) from None
+  if source_repo != target_source:
+    raise ContributionSubmitError(
+      "This publication no longer points to the reviewed local app."
+    )
+
+  manifest_url = str(handoff.get("manifest_url") or "").strip()
+  parsed = urlparse(manifest_url)
+  parts = [part for part in parsed.path.split("/") if part]
+  if (
+    parsed.scheme != "https"
+    or parsed.hostname != "raw.githubusercontent.com"
+    or parsed.netloc != "raw.githubusercontent.com"
+    or parsed.username is not None
+    or parsed.password is not None
+    or parsed.query
+    or parsed.fragment
+    or len(parts) != 4
+    or parts[0] != "mobius-os"
+    or not parts[1].startswith("app-")
+    or parts[2] != "main"
+    or parts[3] != "mobius.json"
+  ):
+    raise ContributionSubmitError(
+      "This publication does not use a canonical Möbius app manifest."
+    )
+  repo_slug = f"{parts[0]}/{parts[1]}"
+  if str(plan.get("repo") or record.get("repo") or "") != repo_slug:
+    raise ContributionSubmitError(
+      "This publication manifest belongs to a different repository."
+    )
+
+  base_sha = str(plan.get("base_sha") or "").lower()
+  head_sha = str(plan.get("head_sha") or "").lower()
+  source_sha = str(plan.get("source_sha") or "").lower()
+  diff_sha256 = str(plan.get("diff_sha256") or "").lower()
+  if (
+    not _GIT_SHA.fullmatch(base_sha)
+    or not _GIT_SHA.fullmatch(head_sha)
+    or not _GIT_SHA.fullmatch(source_sha)
+    or not re.fullmatch(r"[0-9a-f]{64}", diff_sha256)
+  ):
+    raise ContributionSubmitError(
+      "This older publication is missing its immutable review proof."
+    )
+  try:
+    reviewed_tree = app_git.read_ref_tree(source_repo, head_sha)
+    manifest_id, package_digest = install.package_content_digest_from_tree(
+      reviewed_tree,
+    )
+    reviewed_manifest = json.loads(reviewed_tree["mobius.json"])
+    _contract, capability_digest = contract_and_digest(reviewed_manifest)
+  except (
+    install.PackageContentError,
+    json.JSONDecodeError,
+    KeyError,
+    OSError,
+    RuntimeError,
+    subprocess.SubprocessError,
+    UnicodeDecodeError,
+    ValueError,
+  ) as exc:
+    raise ContributionSubmitError(
+      "The reviewed app package can no longer be reproduced safely."
+    ) from exc
+
+  repo_manifest_id = parts[1].removeprefix("app-")
+  previous_id = reviewed_manifest.get("previous_id")
+  if (
+    manifest_id != repo_manifest_id
+    or target.slug not in {manifest_id, previous_id}
+  ):
+    raise ContributionSubmitError(
+      "The reviewed package belongs to a different local app."
+    )
+  if target.manifest_url is not None and not install._catalog_identity_matches(
+    target.manifest_url, manifest_url, manifest_id,
+  ):
+    raise ContributionSubmitError(
+      "This installed app is already connected to a different package."
+    )
+
+  return PublicationHandoffSpec(
+    contribution_id=contribution_id,
+    target_app_id=target_app_id,
+    source_repo=source_repo,
+    repo_slug=repo_slug,
+    manifest_url=manifest_url,
+    manifest_id=manifest_id,
+    reviewed_base_sha=base_sha,
+    reviewed_head_sha=head_sha,
+    reviewed_source_sha=source_sha,
+    diff_sha256=diff_sha256,
+    package_digest=package_digest,
+    capability_digest=capability_digest,
+  )
+
 def _require_github_access_principal(
   principal: Principal, db: Session
 ) -> models.Owner:

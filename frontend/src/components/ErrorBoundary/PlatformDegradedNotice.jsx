@@ -48,7 +48,6 @@ export default function PlatformDegradedNotice({ onContinue }) {
     // Record the refresh so a still-degraded reload escalates to "ask agent",
     // exactly like the error boundary's manual refresh.
     writeRefreshedRecoveryAttempt({ surfaceKey: SURFACE_KEY, fingerprint: FINGERPRINT })
-    try { sessionStorage.setItem('shell-reload', '1') } catch { /* ignore */ }
     window.location.reload()
   }
 

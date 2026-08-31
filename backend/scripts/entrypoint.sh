@@ -239,6 +239,11 @@ _platform_import_probe_dir() {
   # the uvicorn exec to `su -`/`su -l`/`env -i` would drop SECRET_KEY and make
   # EVERY boot false-negative to baked (or brick uvicorn) — keep them identical.
   #
+  # Importing `app.main` is not by itself a sufficient verdict: the route
+  # registry intentionally catches individual router failures so it can keep a
+  # diagnostic process alive. Ask that registry for its explicit verdict too,
+  # otherwise a caught failure looks like a successful probe.
+  #
   # `timeout 60` bounds the probe: a module-level infinite loop or blocking
   # network call in agent-edited code would otherwise wedge boot forever (before
   # uvicorn and before the baked fallback can serve). A timeout-kill exits 124,
@@ -246,7 +251,8 @@ _platform_import_probe_dir() {
   # GIT_*/PYTHONPATH (see its definition); the uvicorn exec below applies the
   # IDENTICAL scrub so probe and serve stay byte-for-byte the same environment.
   su -s /bin/sh mobius -c \
-    "cd '$_probe_backend' && $_env_scrub timeout 60 python3 -c 'import app.main'"
+    "cd '$_probe_backend' && $_env_scrub timeout 60 python3 -c \
+     'import app.main; from app.routes import require_all_routers_loaded; require_all_routers_loaded()'"
 }
 
 _platform_import_probe() {

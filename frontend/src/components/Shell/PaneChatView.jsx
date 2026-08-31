@@ -40,7 +40,6 @@ function PaneChatView({
   onSystemEvent,
   markStreamingStart,
   markStreamingEnd,
-  markVoiceListening,
   refreshApps,
   acknowledgeAppPreview,
   refreshChats,
@@ -163,7 +162,6 @@ function PaneChatView({
         onInternalNav={onInternalNav}
         onMessageStart={handleMessageStart}
         onOwnerActivity={handleOwnerActivity}
-        onVoiceListeningChange={markVoiceListening}
         composerRequest={composerRequest}
         onComposerRequestHandled={onComposerRequestHandled}
         onDisplayReady={onDisplayReady ? handleDisplayReady : null}
