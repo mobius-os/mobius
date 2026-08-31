@@ -73,6 +73,9 @@ try {
     )
   }
   run(process.execPath, [
+    path.join(frontendDir, 'scripts', 'check-speech-pitch-asset.mjs'),
+  ])
+  run(process.execPath, [
     path.join(frontendDir, 'scripts', 'build-runtime.mjs'),
   ])
   run(process.execPath, [

@@ -8,23 +8,28 @@ export function isModelSelectionRequiredFailure(error) {
     && error?.code === 'model_selection_required'
 }
 
+export function isAmbiguousSendFailure(error) {
+  return error?.name === 'ChatTransportError'
+    || error?.name === 'AbortError'
+}
+
+export function shouldConfirmAmbiguousSend(error) {
+  return isAmbiguousSendFailure(error) && !error?.outboxRetained
+}
+
 export function sendFailureMessage(error, { online = true } = {}) {
   if (!online) {
     return error?.outboxRetained
       ? 'You’re offline. Your message is queued and will send when you reconnect.'
       : 'You’re offline. Your message is back in the composer—send it when you reconnect.'
   }
-  if (error?.name === 'ChatTransportError') {
+  if (isAmbiguousSendFailure(error)) {
     if (error?.outboxRetained) {
-      return 'Möbius couldn’t confirm the send. Your message is queued and will retry automatically.'
+      return error?.name === 'AbortError'
+        ? 'Möbius took too long to confirm the send. Your message is queued and will retry automatically.'
+        : 'Möbius couldn’t confirm the send. Your message is queued and will retry automatically.'
     }
-    return 'Möbius couldn’t confirm the send. Your message is back in the composer—retrying won’t send it twice.'
-  }
-  if (error?.name === 'AbortError') {
-    if (error?.outboxRetained) {
-      return 'Möbius took too long to confirm the send. Your message is queued and will retry automatically.'
-    }
-    return 'Möbius took too long to confirm the send. Your message is back in the composer—retrying won’t send it twice.'
+    return 'Checking whether that message reached the chat… It’s safe here while Möbius confirms.'
   }
   const status = Number(error?.status)
   if (status === 503 || status >= 500) {

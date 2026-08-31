@@ -91,6 +91,81 @@
   gap: 8px;
 }
 
+.screen-control-button {
+  position: fixed;
+  top: max(12px, env(safe-area-inset-top));
+  left: 50%;
+  z-index: 1200;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 7px 8px 7px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 680;
+  cursor: pointer;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.24);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.screen-control-button:hover {
+  background: var(--surface);
+  border-color: var(--accent);
+}
+
+.screen-control-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.screen-control-button:disabled {
+  cursor: wait;
+  opacity: 0.78;
+}
+
+.screen-control-button__live {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 17%, transparent);
+  animation: screen-control-live 1.8s ease-in-out infinite;
+}
+
+.screen-control-button__stop {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--text);
+}
+
+@keyframes screen-control-live {
+  50% { opacity: 0.48; }
+}
+
+@media (max-width: 620px) {
+  .screen-control-button {
+    top: max(8px, env(safe-area-inset-top));
+    max-width: calc(100vw - 24px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .screen-control-button__live { animation: none; }
+}
+
 /* Desktop-only quick actions. Declare the closed state outside the media query
    so adding this shared markup can never leak controls into the phone header. */
 .shell__rail-actions {
@@ -314,11 +389,11 @@
   pointer-events: auto;
 }
 
-/* Chat-to-chat navigation keeps the last painted chat as an inert, opaque
-   cover while the incoming ChatView settles its saved scroll position below.
-   The layout-ready callback removes the cover in the same commit that promotes
-   staging to the ordinary active pane, so the transcript's intentional
-   visibility:hidden settlement frame is never exposed. */
+/* Chat entry keeps the outgoing surface mounted only as a geometry/runtime
+   owner while the incoming ChatView settles below. Its content is hidden
+   immediately: showing the previous chat OR app after the drawer has closed
+   makes the selection look ignored. The neutral cover yields only when the
+   selected chat has a complete frame. */
 .shell__chat-view {
   background: var(--bg);
   /* A ChatView owns several internal paint layers (composer, progress rail,
@@ -333,19 +408,32 @@
   z-index: 1;
 }
 
+.shell__app-view--held,
 .shell__chat-view--held {
   visibility: visible;
   pointer-events: none;
   z-index: 2;
 }
 
-/* An app can be the outgoing visual surface too. Keep its already-painted frame
-   above a settling ChatView until display-ready, while AppCanvas remains an
-   inactive runtime for this short, inert handoff. */
-.shell__app-view--held {
-  visibility: visible;
-  pointer-events: none;
-  z-index: 2;
+/* Preserve the outgoing layout/runtime without preserving its pixels.
+   `visibility` keeps measurements stable and changes in one paint; no old
+   transcript or app can masquerade as the selected chat. */
+.shell__app-view--held > *,
+.shell__chat-view--held > .chat {
+  visibility: hidden;
+}
+
+.shell__app-view--held::after,
+.shell__chat-view--held::after {
+  content: "Opening chat\2026";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.01em;
 }
 
 /* While New chat is allocating, the ordinary landing covers the outgoing
@@ -435,6 +523,13 @@
   box-shadow: inset 0 0 0 2px var(--accent);
   border-radius: 7px;
 }
+.shell__tab-identity {
+  flex: 0 0 auto;
+  margin-right: 6px;
+  color: var(--muted);
+}
+.shell__tab[data-kind="project"] .shell__tab-identity,
+.shell__tab[data-kind="artifact"] .shell__tab-identity { color: var(--accent); }
 .shell__tab-text {
   display: block;
   flex: 1;
@@ -718,6 +813,10 @@
 
   .shell {
     --desktop-rail-width: 58px;
+    /* The desktop workspace starts at y=0, but the expanded drawer begins
+       below its own 58px header. This is intentionally independent of the
+       mobile shell bar height. */
+    --drawer-top-offset: 58px;
     --shell-bar-height: 0px;
   }
 
@@ -824,12 +923,7 @@
     color: var(--muted);
     background: transparent;
     cursor: pointer;
-  }
-
-  .shell__rail-action svg {
-    width: 20px;
-    height: 20px;
-    stroke-width: 1.8;
+    font-size: 20px;
   }
 
   .shell__rail-action:hover,

@@ -79,8 +79,10 @@ test('an explicit drawer close starts visually before consuming its history sent
     navigation.indexOf('function closeDrawer('),
     navigation.indexOf('/**\n   * Mini-app nav-bridge'),
   )
-  const visualClose = close.indexOf('setDrawerVisible(false)')
-  const traversal = close.indexOf('history.back()')
+  const visualClose = close.indexOf(
+    'if (!preserveModalUntilTraversal) setDrawerVisible(false)',
+  )
+  const traversal = close.indexOf('history.back()', visualClose)
   assert.ok(visualClose >= 0)
   assert.ok(traversal > visualClose,
     'tap/swipe dismissal must acknowledge before the asynchronous Back traversal')

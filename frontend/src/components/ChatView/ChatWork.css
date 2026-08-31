@@ -15,7 +15,50 @@
   letter-spacing: 0.02em;
 }
 
+.composer-popover__artifact-heading {
+  align-self: flex-start;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px 0 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+}
+
+.composer-popover__artifact-heading .composer-popover__eyebrow {
+  padding-bottom: 3px;
+}
+
+.composer-popover__artifact-count {
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.composer-popover__artifact-heading svg {
+  transition: transform 0.16s ease;
+}
+
+.composer-popover__artifact-heading--expanded svg {
+  transform: rotate(180deg);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .composer-popover__artifact-heading:hover { color: var(--text); }
+}
+
+.composer-popover__artifact-heading:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .composer-popover__artifact-latest {
+  border-radius: 10px;
   background: color-mix(in srgb, var(--accent) 7%, transparent);
 }
 
@@ -24,49 +67,31 @@
   background: color-mix(in srgb, var(--accent) 11%, var(--surface2));
 }
 
-.composer-popover__artifact-more {
-  margin-top: 2px;
+.composer-popover__app-icon {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  font-size: 10px;
+  box-shadow: 0 5px 14px color-mix(in srgb, var(--text) 10%, transparent);
 }
 
-.composer-popover__artifact-summary {
-  min-height: 36px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 10px;
-  border-radius: 8px;
-  color: var(--muted);
-  cursor: pointer;
-  list-style: none;
-  font-size: 12px;
-  line-height: 1.35;
-}
-
-.composer-popover__artifact-summary::-webkit-details-marker { display: none; }
-
-.composer-popover__artifact-summary span:first-child { flex: 1; }
-
-.composer-popover__artifact-summary svg {
-  transition: transform 0.16s ease;
-}
-
-.composer-popover__artifact-more[open] .composer-popover__artifact-summary svg {
-  transform: rotate(180deg);
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .composer-popover__artifact-summary:hover { background: var(--surface2); }
+/* Transparent artwork has no container surface to cast a shadow from. Keeping
+   the rectangular shadow here exposed the image's full PNG bounds as a dark
+   square around otherwise transparent app icons. */
+.composer-popover__app-icon.is-image {
+  box-shadow: none;
 }
 
 .composer-popover__artifact-list {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  padding-top: 1px;
+  padding-top: 3px;
 }
 
 .composer-popover__artifact-list .composer-popover__row {
-  padding-left: 14px;
+  padding-left: 10px;
 }
 
 .chat-work__overlay {

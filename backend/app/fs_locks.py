@@ -57,6 +57,9 @@ from weakref import WeakValueDictionary
 
 _app_locks: "WeakValueDictionary[int, asyncio.Lock]" = WeakValueDictionary()
 _source_locks: "WeakValueDictionary[str, asyncio.Lock]" = WeakValueDictionary()
+_project_build_locks: "WeakValueDictionary[str, asyncio.Lock]" = (
+  WeakValueDictionary()
+)
 _lifecycle_lock = asyncio.Lock()
 _shared_skills_lock = asyncio.Lock()
 
@@ -103,6 +106,15 @@ def app_storage_lock(app_id: int) -> asyncio.Lock:
   if lock is None:
     lock = asyncio.Lock()
     _app_locks[app_id] = lock
+  return lock
+
+
+def project_build_lock(project_id: str) -> asyncio.Lock:
+  """Serialize artifact builds within one project to one build at a time."""
+  lock = _project_build_locks.get(project_id)
+  if lock is None:
+    lock = asyncio.Lock()
+    _project_build_locks[project_id] = lock
   return lock
 
 

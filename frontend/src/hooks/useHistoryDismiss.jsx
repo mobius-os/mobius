@@ -30,6 +30,14 @@ export function HistoryDismissProvider({
 }
 
 /**
+ * Raw multi-entry access to the shell's history-dismiss stack for a surface that
+ * needs more than one live sentinel at a time.
+ */
+export function useHistoryDismissControls() {
+  return useContext(HistoryDismissContext)
+}
+
+/**
  * Returns the paired open/close operations for one conditionally rendered
  * surface. Opening pushes its sentinel before the surface paints; closing
  * consumes that same sentinel through the shell's navigation owner.

@@ -11,6 +11,7 @@ they cover the wired lifecycle + reconciliation maintenance, not a mock.
 
 import asyncio
 from concurrent.futures import Future
+from datetime import UTC, datetime, timedelta
 
 from app import chat as chat_mod
 from app import models
@@ -208,6 +209,55 @@ def test_finish_run_completes_the_run_record():
   runs = _runs("r2")
   assert runs["rt-2"] == ("completed", True)
   assert _active_status("r2") is None
+
+
+def test_project_agent_completion_advances_recents_and_reconnect_cursor():
+  old_activity = datetime.now(UTC) - timedelta(days=2)
+  db = SessionLocal()
+  try:
+    db.add(models.Project(
+      id="project-recency", name="Project recency", project_type="blank",
+      root_path="projects/project-recency", template_snapshot_json={},
+    ))
+    db.add(models.Chat(
+      id="project-agent", title="Builder", messages=[], pending_messages=[],
+      session_id="sess", provider="claude", project_id="project-recency",
+      activity_at=old_activity,
+    ))
+    db.add(models.ProjectWorkClaim(
+      id="agent-claim", project_id="project-recency",
+      actor_key="agent:project-agent", actor_kind="agent",
+      display_name="Builder", chat_id="project-agent", path="index.html",
+      summary="Editing index.html", updated_at=datetime.now(UTC),
+      expires_at=datetime.now(UTC) + timedelta(minutes=30),
+    ))
+    db.add(models.ChatRun(
+      id="project-run", chat_id="project-agent", status="running",
+      provider="claude", started_at=datetime.now(UTC),
+    ))
+    db.commit()
+  finally:
+    db.close()
+
+  get_writer().submit(FinishRun(
+    chat_id="project-agent", run_token="project-run",
+  )).result(timeout=5)
+  _drain()
+
+  db = SessionLocal()
+  try:
+    chat = db.get(models.Chat, "project-agent")
+    assert chat.activity_at.replace(tzinfo=UTC) > old_activity
+    change = db.query(models.ProjectChange).filter(
+      models.ProjectChange.project_id == "project-recency",
+    ).one()
+    assert change.kind == "agent_run_completed"
+    assert change.actor_key == "agent:project-agent"
+    assert db.query(models.ProjectWorkClaim).filter(
+      models.ProjectWorkClaim.project_id == "project-recency",
+    ).count() == 0
+  finally:
+    db.close()
 
 
 def test_finish_run_preserves_failed_outcome():

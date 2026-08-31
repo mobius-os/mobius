@@ -39,10 +39,31 @@ export function synthesizeInFrame({ input, channel, openModelStream, maxTextChar
   let blobUrl = ''
   let stream = null
   let finished = false
+  let startupComplete = false
+  let startupTimer = null
   let settleResult
   let failResult
   const result = new Promise((resolve, reject) => { settleResult = resolve; failResult = reject })
   result.catch(() => {})
+
+  const clearStartupTimeout = () => {
+    if (startupTimer === null) return
+    clearTimeout(startupTimer)
+    startupTimer = null
+  }
+
+  // Loading a model is a streaming operation. A single wall-clock deadline
+  // falsely fails a healthy load on slower devices, while no deadline leaves
+  // a genuinely stalled worker hanging forever. Reset this inactivity
+  // watchdog only when one side of the startup handshake makes real progress.
+  const armStartupTimeout = () => {
+    if (finished || startupComplete) return
+    clearStartupTimeout()
+    startupTimer = setTimeout(
+      () => fail(speechError('timeout', 'The speech engine stopped making progress while starting.', 'TimeoutError')),
+      LOAD_TIMEOUT_MS,
+    )
+  }
 
   const cleanup = () => {
     try { stream?.cancel?.() } catch { /* already closed */ }
@@ -53,7 +74,7 @@ export function synthesizeInFrame({ input, channel, openModelStream, maxTextChar
   const fail = (error) => {
     if (finished) return
     finished = true
-    clearTimeout(timer)
+    clearStartupTimeout()
     cleanup()
     failResult(error)
   }
@@ -61,15 +82,12 @@ export function synthesizeInFrame({ input, channel, openModelStream, maxTextChar
   const succeed = (value) => {
     if (finished) return
     finished = true
-    clearTimeout(timer)
+    clearStartupTimeout()
     cleanup()
     settleResult(value)
   }
 
-  const timer = setTimeout(
-    () => fail(speechError('timeout', 'The speech engine took too long to start.', 'TimeoutError')),
-    LOAD_TIMEOUT_MS,
-  )
+  armStartupTimeout()
 
   // Messages must wait for the fetched worker script to actually load: the
   // model manifest can arrive (a single postMessage round-trip) before the
@@ -103,16 +121,24 @@ export function synthesizeInFrame({ input, channel, openModelStream, maxTextChar
   const onWorkerMessage = (data) => {
     if (!data || finished) return
     if (data.type === 'load-ready') {
+      armStartupTimeout()
       // The engine has compiled and reserved the model's buffer; only now may
       // the bytes flow, so they are never held twice.
       stream?.control?.('start')
       return
     }
     if (data.type === 'chunk-accepted') {
+      armStartupTimeout()
       stream?.control?.('chunk-accepted')
       return
     }
     if (data.type === 'load-complete') {
+      // This watchdog covers startup only. Long reports can legitimately spend
+      // many minutes generating (especially while playback is paused), so
+      // keeping it armed here turns a healthy resumed player into a false
+      // "engine took too long to start" failure.
+      startupComplete = true
+      clearStartupTimeout()
       channel.event('loading', { stage: 'preparing', percent: 100 })
       generateNext()
       return
@@ -150,6 +176,7 @@ export function synthesizeInFrame({ input, channel, openModelStream, maxTextChar
     if (finished) return
     blobUrl = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }))
     worker = new Worker(blobUrl)
+    armStartupTimeout()
     worker.onerror = (event) => fail(speechError(
       'engine_blocked',
       event?.message || `The speech engine could not start: ${SPEECH_WORKER_URL} did not load.`,
@@ -162,23 +189,35 @@ export function synthesizeInFrame({ input, channel, openModelStream, maxTextChar
   stream = openModelStream({
     modelId: input?.modelId,
     engineId: input?.engineId,
-    onManifest: (value) => send({
-      type: 'load-start',
-      wasmUrl: new URL(SPEECH_WASM_URL, globalThis.location.href).href,
-      assetBytes: value.assetBytes,
-      temperature: value.temperature,
-      clonedVoiceSamples: input?.clonedVoiceSamples || value.clonedVoiceSamples || undefined,
-    }),
-    onChunk: (value) => send({
-      type: 'asset-chunk',
-      chunkId: value.index,
-      assetId: value.assetId,
-      index: value.index,
-      offset: value.offset,
-      bytes: value.bytes,
-    }, [value.bytes]),
-    onProgress: (value) => channel.event('loading', { stage: 'reading', ...value }),
-    onComplete: () => send({ type: 'load-finish' }),
+    onManifest: (value) => {
+      armStartupTimeout()
+      send({
+        type: 'load-start',
+        wasmUrl: new URL(SPEECH_WASM_URL, globalThis.location.href).href,
+        assetBytes: value.assetBytes,
+        temperature: value.temperature,
+        clonedVoiceSamples: input?.clonedVoiceSamples || value.clonedVoiceSamples || undefined,
+      })
+    },
+    onChunk: (value) => {
+      armStartupTimeout()
+      send({
+        type: 'asset-chunk',
+        chunkId: value.index,
+        assetId: value.assetId,
+        index: value.index,
+        offset: value.offset,
+        bytes: value.bytes,
+      }, [value.bytes])
+    },
+    onProgress: (value) => {
+      armStartupTimeout()
+      channel.event('loading', { stage: 'reading', ...value })
+    },
+    onComplete: () => {
+      armStartupTimeout()
+      send({ type: 'load-finish' })
+    },
     onError: fail,
   })
 
@@ -187,7 +226,7 @@ export function synthesizeInFrame({ input, channel, openModelStream, maxTextChar
     cancel() {
       if (finished) return
       finished = true
-      clearTimeout(timer)
+      clearStartupTimeout()
       cleanup()
       failResult(speechError('aborted', 'Speech stopped.', 'AbortError'))
     },

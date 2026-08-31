@@ -22,14 +22,13 @@ test('appearance keeps one icon switch without making the section clickable', ()
   assert.match(css, /\.settings__appearance-toggle\s*\{[^}]*grid-template-columns:\s*repeat\(2, 34px\);/s)
 })
 
-test('model and synced commit use the same normal-weight standard highlight', () => {
+test('model and concise synced version use the same normal-weight standard highlight', () => {
   assert.match(view, /provider-row__status-text settings__last-model/)
   assert.match(view, /Choose which models appear\. New chats use your last pick\./)
   assert.match(view, /Last model: <span className="settings__standard-highlight">/)
-  assert.match(view, /Current with upstream [\s\S]*settings__standard-highlight/)
+  assert.match(view, /upstreamCommitDate[\s\S]*settings__standard-highlight/)
   assert.match(view, /contained_upstream_committed_at/)
-  assert.match(view, /upstream_checked_at/)
-  assert.match(view, /settings__update-check/)
+  assert.doesNotMatch(view, /Current with upstream|Last checked|upstream_checked_at|settings__update-check/)
   assert.doesNotMatch(view, /Serving local \{mobiusVersion\.localSha\}/)
   assert.match(css, /\.settings__last-model\s*\{[^}]*color:\s*var\(--muted\);[^}]*font-weight:\s*400;/s)
   assert.match(css, /\.settings__standard-highlight\s*\{[^}]*color:\s*var\(--green\);[^}]*font-weight:\s*inherit;/s)

@@ -57,6 +57,10 @@ export function derivedBuiltApps(apps, chatId) {
   return scoped.map(a => ({
     id: a.id,
     name: a.name,
+    ...(a.slug ? { slug: a.slug } : {}),
+    ...(a.icon_url ? { icon_url: a.icon_url } : {}),
+    ...(a.background_color ? { background_color: a.background_color } : {}),
+    ...(a.theme_color ? { theme_color: a.theme_color } : {}),
     updated_at: a.updated_at,
     preview_seen_updated_at: a.preview_seen_updated_at ?? null,
     preview_seen_final: Boolean(a.preview_seen_final),

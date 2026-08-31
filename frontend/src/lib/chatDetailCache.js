@@ -191,6 +191,7 @@ export function chatDetailCacheValue(data = {}) {
     pending_question_id: data.pending_question_id || null,
     chatInfo: {
       provider: data.provider || 'claude',
+      session_id: data.session_id || null,
       created_by_app_id: data.created_by_app_id ?? null,
       agent_settings_json: data.agent_settings_json || null,
       effective: data.effective_agent_settings || {},

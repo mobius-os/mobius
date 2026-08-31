@@ -75,3 +75,18 @@ def test_boot_fallback_never_moves_or_prunes_owner_platform_source():
   assert "platform.crashloop-prev" not in entrypoint
   assert "boot_attempt_counter" not in entrypoint
   assert "app.data_volume" not in entrypoint
+
+
+def test_service_token_refresh_uses_selected_backend_and_retries_db_lookup():
+  entrypoint = (ROOT / "backend/scripts/entrypoint.sh").read_text(
+    encoding="utf-8",
+  )
+  refresh = entrypoint.split(
+    "# Generate (or refresh) a service token", 1,
+  )[1].split("# The python block above", 1)[0]
+
+  assert 'cd "$_serve_workdir"' in refresh
+  assert "timeout 15 python3" in refresh
+  assert "for attempt in range(3)" in refresh
+  assert "service token refresh skipped after database errors" in refresh
+  assert "service token refresh command failed" in refresh

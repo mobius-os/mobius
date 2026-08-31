@@ -101,6 +101,21 @@ class Principal:
 
 
 @dataclass(frozen=True)
+class ProjectPrincipal:
+  """Owner or a revocable human identity confined to one Project."""
+
+  owner: models.Owner
+  role: str
+  project_id: str | None = None
+  member_id: str | None = None
+  display_name: str | None = None
+
+  @property
+  def is_owner(self) -> bool:
+    return self.member_id is None
+
+
+@dataclass(frozen=True)
 class PublicAppAccess:
   """One live, anonymous, exact-app capability."""
 
@@ -301,6 +316,48 @@ def get_current_owner(
   routes that should be accessible to mini-apps.
   """
   return resolve_owner_only(token, db)
+
+
+def resolve_project_principal(token: str, db: Session) -> ProjectPrincipal:
+  """Resolve owner authority or one exact live Project membership."""
+  owner, payload = _resolve_owner(token, db)
+  scope = payload.get("scope")
+  if scope is None:
+    return ProjectPrincipal(
+      owner=owner, role="owner", display_name=owner.username,
+    )
+  if scope != "project_collaborator":
+    raise HTTPException(403, "Token scope is not valid for Projects.")
+  member_id = payload.get("project_member")
+  project_id = payload.get("project_id")
+  member_epoch = payload.get("member_epoch")
+  if (
+    not isinstance(member_id, str)
+    or not isinstance(project_id, str)
+    or type(member_epoch) is not int
+  ):
+    raise HTTPException(401, "Invalid project session.")
+  member = db.query(models.ProjectMember).filter(
+    models.ProjectMember.id == member_id,
+    models.ProjectMember.project_id == project_id,
+    models.ProjectMember.revoked_at.is_(None),
+  ).first()
+  if member is None or member.token_epoch != member_epoch:
+    raise HTTPException(401, "Project access has been revoked.")
+  return ProjectPrincipal(
+    owner=owner,
+    role=str(member.role),
+    project_id=str(member.project_id),
+    member_id=str(member.id),
+    display_name=str(member.display_name),
+  )
+
+
+def get_project_principal(
+  token: str = Depends(_oauth2),
+  db: Session = Depends(get_db),
+) -> ProjectPrincipal:
+  return resolve_project_principal(token, db)
 
 
 def _enforce_delegation_claims(
@@ -553,6 +610,23 @@ def authorize_current_owner_or_app_detached(
   db = SessionLocal()
   try:
     resolve_owner_or_app(token, db)
+  finally:
+    db.close()
+
+
+def authorize_current_owner_detached(
+  token: str = Depends(_oauth2),
+) -> str:
+  """Authenticate an owner token without retaining a DB session.
+
+  Long-lived owner-only streams use the returned username to bind their
+  transient in-memory resource while releasing the pooled connection before
+  response iteration begins.
+  """
+  db = SessionLocal()
+  try:
+    owner = resolve_owner_only(token, db)
+    return owner.username
   finally:
     db.close()
 
@@ -864,8 +938,9 @@ def get_owner_or_app_with_github_access(
   """Owner JWT, OR an app-scoped JWT whose App row has github_access=true.
 
   This is the GitHub data grant: the GET-only REST proxy, mutation-rejecting
-  GraphQL proxy, sanitized local source status, and Contribute's narrow reviewed
-  submit endpoints. Credential management is a separate github_connect grant.
+  GraphQL proxy, sanitized local source status, project-bound bounded source
+  previews, and Contribute's narrow reviewed submit endpoints. Credential
+  management is a separate github_connect grant.
   Neither capability can exfiltrate the stored token (INV1).
 
   Permission is read from the App row at request time (not baked into
