@@ -424,7 +424,13 @@ def validate_manifest_contract(manifest) -> None:
       validate_repo_relative_path(value, f"storage_seeds.{sub}")
 
   static_assets = manifest.get("static_assets", {})
-  for dest, src in static_asset_entries(static_assets).items():
+  static_assets_entries = static_asset_entries(static_assets)
+  if len(static_assets_entries) > STATIC_ASSETS_COUNT_MAX:
+    _fail(
+      "Manifest has too many static_assets "
+      f"(max {STATIC_ASSETS_COUNT_MAX})."
+    )
+  for dest, src in static_assets_entries.items():
     validate_repo_relative_path(dest, f"static_assets.{dest}")
     validate_repo_relative_path(src, f"static_assets.{dest}")
 
