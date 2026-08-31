@@ -466,7 +466,7 @@ def test_handler_supports_allowlisted_local_service_http_methods():
   handler = broker_module._Handler
   assert handler.do_GET is handler._handle
   assert handler.do_POST is handler._handle
-  assert not hasattr(handler, "do_PUT")
+  assert handler.do_PUT is handler._handle
   assert not hasattr(handler, "do_DELETE")
 
 
@@ -546,20 +546,61 @@ def test_community_mutations_require_and_forward_idempotency(broker, monkeypatch
 
   broker.client.close()
   broker.client = FakeClient()
-  monkeypatch.setattr(broker, "_capability", lambda **_kwargs: "one-use")
-  path = "/v1/community/apps"
+  capabilities = []
+  monkeypatch.setattr(
+    broker, "_capability",
+    lambda **kwargs: capabilities.append(kwargs) or "one-use",
+  )
+  publish_path = "/v1/community/apps"
   with pytest.raises(ValueError, match="idempotency key is required"):
     broker.proxy(
-      method="POST", path=path, body=b'{"github":{}}', headers={},
+      method="POST", path=publish_path, body=b'{"github":{}}', headers={},
       allow_privileged_routes=True,
     )
-  response = broker.proxy(
-    method="POST", path=path, body=b'{"github":{}}',
+  broker.proxy(
+    method="POST", path=publish_path, body=b'{"github":{}}',
     headers={"idempotency-key": "publish:1234567890abcdef"},
     allow_privileged_routes=True,
-  )
-  response.close()
+  ).close()
   assert seen["headers"]["Idempotency-Key"] == "publish:1234567890abcdef"
+
+  install_path = (
+    "/v1/community/apps/app_12345678/revisions/"
+    "rev_12345678/installs"
+  )
+  broker.proxy(
+    method="POST", path=install_path, body=b'{}',
+    headers={"idempotency-key": "install:1234567890abcdef"},
+    allow_privileged_routes=True,
+  ).close()
+  rating_path = "/v1/community/apps/app_12345678/rating"
+  broker.proxy(
+    method="PUT", path=rating_path, body=b'{"value":5}',
+    headers={"idempotency-key": "rating:1234567890abcdef"},
+    allow_privileged_routes=True,
+  ).close()
+  comment_path = (
+    "/v1/community/apps/app_12345678/revisions/"
+    "rev_12345678/comments"
+  )
+  broker.proxy(
+    method="POST", path=comment_path, body=b'{"body":"Useful"}',
+    headers={"idempotency-key": "comment:1234567890abcdef"},
+    allow_privileged_routes=True,
+  ).close()
+
+  assert [item["scope"] for item in capabilities] == [
+    "community:publish",
+    "community:install",
+    "community:rate",
+    "community:comment",
+  ]
+  assert [item["path"] for item in capabilities] == [
+    publish_path,
+    install_path,
+    rating_path,
+    comment_path,
+  ]
 
 
 def test_contribution_proxy_is_uds_only_and_binds_exact_requests(
@@ -669,7 +710,7 @@ def test_large_body_exception_is_only_for_exact_contribution_mutations():
     ) == broker_module.MAX_BODY
 
 
-def test_unix_handler_rejects_identity_queries_and_forwards_inference():
+def test_unix_handler_rejects_identity_queries_and_forwards_allowlisted_routes():
   # AF_UNIX paths are capped at roughly 108 bytes on Linux; long worktree
   # paths can make pytest's ordinary tmp_path exceed that.
   socket_dir = tempfile.TemporaryDirectory(prefix="mobius-broker-")
@@ -683,7 +724,7 @@ def test_unix_handler_rejects_identity_queries_and_forwards_inference():
     def proxy(
       self, *, method, path, body, headers, allow_privileged_routes=False,
     ):
-      seen.append((method, path, body))
+      seen.append((method, path, body, allow_privileged_routes))
       request = httpx.Request(method, "https://central.test" + path)
       payload = json.dumps({"method": method}).encode()
       return httpx.Response(
@@ -704,8 +745,20 @@ def test_unix_handler_rejects_identity_queries_and_forwards_inference():
       assert client.get("/identity").json() == {"linked": True}
       assert client.get("/identity?subject=user_other").status_code == 404
       models = client.get("/v1/models")
+      rating = client.put(
+        "/v1/community/apps/app_12345678/rating",
+        content=b'{"value":4}',
+        headers={"Idempotency-Key": "rating:1234567890abcdef"},
+      )
     assert models.json() == {"method": "GET"}
-    assert seen == [("GET", "/v1/models", b"")]
+    assert rating.json() == {"method": "PUT"}
+    assert seen == [
+      ("GET", "/v1/models", b"", True),
+      (
+        "PUT", "/v1/community/apps/app_12345678/rating",
+        b'{"value":4}', True,
+      ),
+    ]
   finally:
     server.shutdown()
     server.server_close()

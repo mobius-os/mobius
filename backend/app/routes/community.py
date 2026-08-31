@@ -95,11 +95,23 @@ class ExistingGitHubRevisionIn(BaseModel):
   contribution_id: str = Field(default="", max_length=200)
 
 
+class RatingIn(BaseModel):
+  value: int = Field(ge=1, le=5)
+  revision_id: str = Field(
+    min_length=8, max_length=200, pattern=r"^[A-Za-z0-9_:-]+$",
+  )
+
+
 class InstallReceiptIn(BaseModel):
   local_app_id: str = Field(
     min_length=1, max_length=128,
     pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
   )
+
+
+class CommentIn(BaseModel):
+  body: str = Field(min_length=1, max_length=4000)
+  public_identity: _PUBLIC_IDENTITY = "anonymous"
 
 
 def _idempotency(value: str | None) -> str:
@@ -1037,5 +1049,40 @@ async def record_community_install(
     "POST",
     f"{COMMUNITY_PREFIX}/apps/{safe_app_id}/revisions/"
     f"{safe_revision_id}/installs",
+    body=body.model_dump(), idempotency_key=_idempotency(idempotency_key),
+  )
+
+
+@router.put(
+  "/apps/{app_id}/rating",
+  dependencies=[Depends(reject_cross_site)],
+)
+async def set_community_rating(
+  app_id: str,
+  body: RatingIn,
+  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+  idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> JSONResponse:
+  return await _request(
+    "PUT", f"{COMMUNITY_PREFIX}/apps/{_safe_public_id(app_id, 'App id')}/rating",
+    body=body.model_dump(), idempotency_key=_idempotency(idempotency_key),
+  )
+
+
+@router.post(
+  "/apps/{app_id}/revisions/{revision_id}/comments",
+  dependencies=[Depends(reject_cross_site)],
+)
+async def add_community_comment(
+  app_id: str,
+  revision_id: str,
+  body: CommentIn,
+  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+  idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> JSONResponse:
+  return await _request(
+    "POST",
+    f"{COMMUNITY_PREFIX}/apps/{_safe_public_id(app_id, 'App id')}"
+    f"/revisions/{_safe_public_id(revision_id, 'Revision id')}/comments",
     body=body.model_dump(), idempotency_key=_idempotency(idempotency_key),
   )

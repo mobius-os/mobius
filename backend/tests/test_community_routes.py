@@ -225,6 +225,51 @@ async def test_publication_lifecycle_reads_through_identity_broker(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_feedback_mutations_forward_only_exact_revision_bound_payloads(
+  monkeypatch,
+):
+  calls = []
+
+  async def fake_request(method, path, **kwargs):
+    calls.append((method, path, kwargs))
+    return SimpleNamespace(status_code=200)
+
+  monkeypatch.setattr(community, "_request", fake_request)
+  owner = SimpleNamespace()
+  rating = community.RatingIn(value=5, revision_id="rev_12345678")
+  comment = community.CommentIn(
+    body="Clear and useful.", public_identity="github",
+  )
+
+  await community.set_community_rating(
+    "app_12345678", rating, owner, "rating:1234567890abcdef",
+  )
+  await community.add_community_comment(
+    "app_12345678", "rev_12345678", comment, owner,
+    "comment:1234567890abcdef",
+  )
+
+  assert calls == [
+    (
+      "PUT",
+      "/v1/community/apps/app_12345678/rating",
+      {
+        "body": {"value": 5, "revision_id": "rev_12345678"},
+        "idempotency_key": "rating:1234567890abcdef",
+      },
+    ),
+    (
+      "POST",
+      "/v1/community/apps/app_12345678/revisions/rev_12345678/comments",
+      {
+        "body": {"body": "Clear and useful.", "public_identity": "github"},
+        "idempotency_key": "comment:1234567890abcdef",
+      },
+    ),
+  ]
+
+
+@pytest.mark.asyncio
 async def test_authoritative_live_state_reconciles_only_an_older_local_journal(
   monkeypatch,
 ):
