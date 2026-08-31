@@ -168,6 +168,27 @@ The platform rejects cycles, missing dependencies, premature dependent starts,
 and incomplete repeated tasks marked complete. It computes ready/waiting state;
 do not duplicate that scheduler with prose or timers.
 
+### Make every unfinished wait explicit
+
+A blocked or paused task is truthful bookkeeping, but it is not an owner
+handoff. Before ending a Goal turn with work unfinished, classify the remaining
+gate and create exactly one owning interaction:
+
+- **Observable external condition** — read `waiting.md` and declare a durable,
+  read-only monitor. The platform shows the wait and resumes this chat under the
+  same Goal when it fires. Never leave a shell poller or prose promise instead.
+- **Action or confirmation only the owner can supply** — in an interactive
+  chat, call the real clarifying-question tool. When the owner must do something
+  outside chat, offer concrete choices such as **Done**, **Need help**, and
+  **Not now**, adapted to the action. The question card is the durable visible
+  handoff and keeps the Goal marked **Waiting for you**.
+
+Do not end with “tell me when…”, a bare paused Goal, or a custom persistent
+card. If the required response is intentionally open-ended or a destructive
+confirmation must be written in the owner's own words, ask plainly in the
+visible closing message as required by the core policy; do not pretend that a
+monitor can observe it.
+
 When several ready tasks are independent, run them in parallel only when the
 available delegation capability and write isolation make that safe. Shared
 live writes—including Goal-plan revisions—still need one serialized integrator;

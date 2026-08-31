@@ -79,11 +79,15 @@ export function normalizeGoalPresentation(goal) {
   if (!goal || typeof goal !== 'object') return null
   const objective = compactGoalObjective(goal.objective)
   if (!objective || !GOAL_PRESENTATION_STATUSES.has(goal.status)) return null
+  const waitKind = ['owner_question', 'monitor'].includes(goal.wait_kind)
+    ? goal.wait_kind
+    : null
   return {
     id: goal.id == null ? null : String(goal.id),
     objective,
     status: goal.status,
     resumable: goal.status === 'paused',
+    ...(waitKind ? { waitKind } : {}),
   }
 }
 
@@ -296,7 +300,12 @@ export function visibleGoalTasks(goalPlan) {
   return deepestPlanTasks(tasks, tasks.filter(task => task?.ready === true))
 }
 
-export function progressRailViewModel(goal, buildPhases, goalPlan = null) {
+export function progressRailViewModel(
+  goal,
+  buildPhases,
+  goalPlan = null,
+  waitState = null,
+) {
   const items = []
   const presentation = typeof goal === 'string'
     ? normalizeGoalPresentation({ objective: goal, status: 'active' })
@@ -308,11 +317,25 @@ export function progressRailViewModel(goal, buildPhases, goalPlan = null) {
     const planned = Number.isInteger(completed) && Number.isInteger(total)
     const activeTasks = visibleGoalTasks(goalPlan)
     const activeLabels = activeTasks.map(progressLabel).filter(Boolean)
-    const statusLabel = {
-      paused: 'Paused',
-      completed: 'Completed',
-      failed: 'Needs attention',
-    }[presentation.status]
+    // The Goal lifecycle tells us whether the outcome is active; the chat
+    // interaction tells us who owns the next move. Keep that distinction in
+    // one existing rail instead of inventing a second persistent status card.
+    const ownerActionRequired = waitState?.ownerActionRequired === true
+    const monitoring = !ownerActionRequired && waitState?.monitoring === true
+    const displayStatus = ownerActionRequired
+      ? 'waiting for you'
+      : monitoring
+        ? 'monitoring'
+        : presentation.status
+    const statusLabel = ownerActionRequired
+      ? 'Waiting for you'
+      : monitoring
+        ? 'Monitoring'
+        : {
+            paused: 'Paused',
+            completed: 'Completed',
+            failed: 'Needs attention',
+          }[presentation.status]
     const progressSummary = planned ? `${completed}/${total}` : goalObjective
     items.push({
       key: 'goal',
@@ -325,7 +348,7 @@ export function progressRailViewModel(goal, buildPhases, goalPlan = null) {
       tone: presentation.status,
       ...(goalPlan ? {
         title: `Goal: ${goalObjective}`,
-        ariaLabel: `Goal ${presentation.status} for ${goalObjective}; ${completed} of ${total} complete`,
+        ariaLabel: `Goal ${displayStatus} for ${goalObjective}; ${completed} of ${total} complete`,
       } : {}),
     })
   }
