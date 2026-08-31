@@ -87,6 +87,7 @@ from claude_agent_sdk.types import (
 
 from app import activity
 from app.claude_events import (
+  NativeContinuationTracker,
   _clip_task_text,
   dispatch_sdk_message,
   is_root_conversation_message,
@@ -130,7 +131,7 @@ async def _await_control_mcp_ready(client, *, enabled: bool) -> str | None:
     # the status call. Production's pinned SDK does.
     return None
 
-  from app.platform_tools import CONTROL_SERVER_NAME, CONTROL_TOOL_NAME
+  from app.platform_tools import CONTROL_SERVER_NAME, CONTROL_TOOL_NAMES
 
   loop = asyncio.get_running_loop()
   deadline = loop.time() + _CONTROL_MCP_READY_TIMEOUT_SECONDS
@@ -154,9 +155,12 @@ async def _await_control_mcp_ready(client, *, enabled: bool) -> str | None:
     if server is not None:
       status = str(server.get("status") or "unknown")
       tools = server.get("tools") if isinstance(server.get("tools"), list) else []
-      if status == "connected" and any(
-        isinstance(tool, dict) and tool.get("name") == CONTROL_TOOL_NAME
-        for tool in tools
+      available_tools = {
+        tool.get("name") for tool in tools if isinstance(tool, dict)
+      }
+      if (
+        status == "connected"
+        and set(CONTROL_TOOL_NAMES).issubset(available_tools)
       ):
         return None
       if status in {"failed", "needs-auth", "disabled"}:
@@ -273,7 +277,7 @@ def _claude_cli_path() -> str:
 
 
 async def _drain_background_tasks(
-  client, bc, inflight, session_id, chat_id, usage_state,
+  client, bc, native_work, session_id, chat_id, usage_state,
 ):
   """Carry Claude's native background wake through its parent follow-up.
 
@@ -287,14 +291,18 @@ async def _drain_background_tasks(
   try:
     async for sdk_msg in client.receive_messages():
       session_id, terminal = dispatch_sdk_message(
-        sdk_msg, bc, session_id, inflight, usage_state,
+        sdk_msg,
+        bc,
+        session_id,
+        native_work=native_work,
+        usage_state=usage_state,
       )
-      if terminal is not None and not inflight:
+      if terminal is not None and not native_work.observe_result():
         return session_id, terminal
   except Exception as exc:
     log.warning(
-      "background-task drain ended early chat_id=%s inflight=%d: %s",
-      chat_id, len(inflight), exc,
+      "background-task drain ended early chat_id=%s pending=%d: %s",
+      chat_id, native_work.pending_count, exc,
     )
   return session_id, None
 
@@ -1330,9 +1338,11 @@ async def run_claude_sdk_turn(
       # recovery in the terminal branch below), so a genuinely-empty resume
       # can never loop.
       did_auto_requery = False
-      # task_ids of background subagents/tasks still running, tracked across the
-      # requery loop so a terminal result knows whether to drain before reaping.
-      inflight_tasks: set = set()
+      # Provider-native finite work can finish after its spawning turn, or even
+      # immediately before that turn's ResultMessage. Keep its exact
+      # continuation boundary across the requery loop so neither ordering is
+      # reaped before Claude's parent reacts.
+      native_work = NativeContinuationTracker()
       # Root AssistantMessage usage is per model call, unlike the terminal
       # ResultMessage aggregate. Keep the latest call across retries, steers,
       # and native background follow-ups so context occupancy stays exact.
@@ -1363,7 +1373,11 @@ async def run_claude_sdk_turn(
             if _resets is not None:
               rate_limit_resets_at = _resets
           current_session_id, terminal = dispatch_sdk_message(
-            sdk_msg, bc, current_session_id, inflight_tasks, usage_state,
+            sdk_msg,
+            bc,
+            current_session_id,
+            native_work=native_work,
+            usage_state=usage_state,
           )
           if terminal is None:
             # A steer fires its interrupt synchronously in
@@ -1430,14 +1444,15 @@ async def run_claude_sdk_turn(
           cost_usd = terminal.get("cost_usd")
           if rate_limit_resets_at is not None:
             terminal.setdefault("rate_limit_resets_at", rate_limit_resets_at)
-          # Background subagents/tasks the agent launched but did not block on
-          # are still live at this terminal result. The turn-end reap would kill
-          # them mid-work. Keep the connected client through Claude's parent
-          # follow-up ResultMessage so the synthesized result is not discarded.
-          if inflight_tasks and not active_client.interrupt_requested:
+          # A native task or finite Monitor owns a later parent continuation.
+          # This also covers a fast task that settles immediately before the
+          # spawning result, when a plain in-flight set would already be empty.
+          if (
+            not active_client.interrupt_requested
+            and native_work.observe_result()
+          ):
             current_session_id, followup = await _drain_background_tasks(
-              client, bc, inflight_tasks, current_session_id, chat_id,
-              usage_state,
+              client, bc, native_work, current_session_id, chat_id, usage_state,
             )
             if followup is not None:
               terminal = followup

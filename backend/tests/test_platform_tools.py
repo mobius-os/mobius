@@ -85,7 +85,7 @@ def test_promote_goal_tool_preserves_helper_rejection(monkeypatch):
     control._promote_goal("Ship and verify")
 
 
-def test_control_protocol_advertises_only_the_run_bound_tool():
+def test_control_protocol_advertises_every_run_bound_tool():
   control = _control_module()
 
   initialized = control._dispatch_message({
@@ -102,12 +102,25 @@ def test_control_protocol_advertises_only_the_run_bound_tool():
   listed = control._dispatch_message({
     "jsonrpc": "2.0", "id": 2, "method": "tools/list",
   })
-  assert [tool["name"] for tool in listed["result"]["tools"]] == [
-    platform_tools.CONTROL_TOOL_NAME,
+  tools = {
+    tool["name"]: tool for tool in listed["result"]["tools"]
+  }
+  assert tuple(tools) == platform_tools.CONTROL_TOOL_NAMES
+  assert tools[platform_tools.GOAL_TOOL_NAME]["inputSchema"]["required"] == [
+    "objective",
   ]
-  schema = listed["result"]["tools"][0]["inputSchema"]
-  assert schema["required"] == ["objective"]
-  assert schema["additionalProperties"] is False
+  wait_schema = tools[platform_tools.WAIT_TOOL_NAME]["inputSchema"]
+  assert wait_schema["required"] == ["description"]
+  assert set(wait_schema["properties"]) == {
+    "description",
+    "command",
+    "delay_secs",
+    "interval_secs",
+    "deadline_secs",
+  }
+  assert wait_schema["additionalProperties"] is False
+  assert "server restarts" in tools[platform_tools.WAIT_TOOL_NAME]["description"]
+  assert "silent exit 1" in tools[platform_tools.WAIT_TOOL_NAME]["description"]
 
 
 def test_control_protocol_returns_tool_success_without_framework_wrapping(
@@ -126,7 +139,7 @@ def test_control_protocol_returns_tool_success_without_framework_wrapping(
     "id": 3,
     "method": "tools/call",
     "params": {
-      "name": platform_tools.CONTROL_TOOL_NAME,
+      "name": platform_tools.GOAL_TOOL_NAME,
       "arguments": {"objective": "  Ship and verify  "},
     },
   })
@@ -141,6 +154,52 @@ def test_control_protocol_returns_tool_success_without_framework_wrapping(
   }
 
 
+def test_control_protocol_declares_wait_through_the_canonical_client(monkeypatch):
+  control = _control_module()
+  calls = []
+
+  def fake_call(method, path, payload=None):
+    calls.append((method, path, payload))
+    return {"id": "wait-1", "status": "armed"}
+
+  monkeypatch.setattr(control._WAITS, "_call", fake_call)
+  response = control._dispatch_message({
+    "jsonrpc": "2.0",
+    "id": 4,
+    "method": "tools/call",
+    "params": {
+      "name": platform_tools.WAIT_TOOL_NAME,
+      "arguments": {
+        "description": "  CI becomes green  ",
+        "command": "gh pr checks 123 --watch=false >/dev/null",
+        "interval_secs": 120,
+        "deadline_secs": 3600,
+      },
+    },
+  })
+
+  result = response["result"]
+  assert result["isError"] is False
+  assert json.loads(result["content"][0]["text"]) == {
+    "id": "wait-1", "status": "armed",
+  }
+  assert calls == [("POST", "/api/chat-waits", {
+    "description": "CI becomes green",
+    "kind": "command",
+    "command": "gh pr checks 123 --watch=false >/dev/null",
+    "delay_secs": None,
+    "interval_secs": 120,
+    "deadline_secs": 3600,
+  })]
+
+  invalid = control._call_tool({
+    "name": platform_tools.WAIT_TOOL_NAME,
+    "arguments": {"description": "ambiguous"},
+  })
+  assert invalid["isError"] is True
+  assert "exactly one" in invalid["content"][0]["text"]
+
+
 def test_control_stdio_process_survives_tool_errors_and_keeps_serving():
   script = Path(platform_tools._control_script())
   env = dict(os.environ)
@@ -152,7 +211,7 @@ def test_control_stdio_process_survives_tool_errors_and_keeps_serving():
     }},
     {"jsonrpc": "2.0", "method": "notifications/initialized"},
     {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-      "name": platform_tools.CONTROL_TOOL_NAME,
+      "name": platform_tools.GOAL_TOOL_NAME,
       "arguments": {"objective": "Ship and verify"},
     }},
     {"jsonrpc": "2.0", "id": 3, "method": "ping"},
