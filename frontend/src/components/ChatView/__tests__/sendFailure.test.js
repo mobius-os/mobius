@@ -65,7 +65,7 @@ test('known offline state wins over the transport error shape', () => {
   )
 })
 
-test('the send attempt verdict outranks a connection snapshot that changed later', () => {
+test('either the send attempt or the current snapshot can prove the owner is offline', () => {
   const offline = new ChatTransportError(new TypeError('Failed to fetch'))
   offline.outboxRetained = true
   offline.sendReachability = 'offline'
@@ -79,7 +79,7 @@ test('the send attempt verdict outranks a connection snapshot that changed later
   online.sendReachability = 'online'
   assert.equal(
     sendFailureMessage(online, { online: false }),
-    'Möbius couldn’t confirm the send. Your message is queued and will retry automatically.',
+    'You’re offline. Your message is queued and will send when you reconnect.',
   )
 })
 

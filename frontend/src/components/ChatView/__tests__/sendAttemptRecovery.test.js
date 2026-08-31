@@ -185,8 +185,35 @@ test('transcript or pending evidence arriving during inspection outranks retaine
     )
     current = recoveryOwner(attempt, evidence)
     inspection.resolve('retained')
-    assert.deepEqual(await result, { status: 'durable', sendFailure: null })
+    assert.deepEqual(await result, {
+      status: 'durable',
+      sendFailure: null,
+      evidence: {
+        visibleMessages: current.visibleMessages,
+        pendingMessages: current.pendingMessages,
+      },
+    })
   }
+})
+
+test('authoritative fetch evidence remains the composer settlement owner before ref commit', async () => {
+  const attempt = { cid: 'cid-1', draftIdentity: 'draft-1' }
+  const visibleMessages = [{ role: 'user', cid: 'cid-1' }]
+  let inspected = false
+
+  const result = await coordinate(
+    attempt,
+    async () => { inspected = true; return 'absent' },
+    () => recoveryOwner(attempt),
+    { authoritative: true, visibleMessages },
+  )
+
+  assert.equal(inspected, false)
+  assert.deepEqual(result, {
+    status: 'durable',
+    sendFailure: null,
+    evidence: { visibleMessages, pendingMessages: [] },
+  })
 })
 
 test('a cached optimistic echo cannot retire a retained send during reload recovery', async () => {
