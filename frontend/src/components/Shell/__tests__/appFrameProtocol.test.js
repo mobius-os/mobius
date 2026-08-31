@@ -99,9 +99,17 @@ test('media-session messages are bounded to the drawer contract', () => {
   assert.deepEqual(appMediaSessionEvent({
     type: 'moebius:media-session', event: 'open', sessionId: 'digest-1',
     title: ' Daily digest ', subtitle: ' Untrusted app label ', playbackState: 'playing',
+    playbackRate: 1.5,
   }), {
     event: 'open', sessionId: 'digest-1', title: 'Daily digest',
-    playbackState: 'playing',
+    playbackState: 'playing', playbackRate: 1.5,
+  })
+  assert.deepEqual(appMediaSessionEvent({
+    type: 'moebius:media-session', event: 'update', sessionId: 'digest-1',
+    playbackState: 'paused', playbackRate: 99,
+  }), {
+    event: 'update', sessionId: 'digest-1', title: 'Playing audio',
+    playbackState: 'paused',
   })
   assert.deepEqual(appMediaSessionEvent({
     type: 'moebius:media-session', event: 'close', sessionId: 'digest-1',

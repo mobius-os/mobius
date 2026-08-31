@@ -1431,6 +1431,17 @@ function NowPlaying({ session, app, onOpen, onControl }) {
           <small>{appName} · {stateLabel}</small>
         </span>
       </button>
+      {Number.isFinite(session.playbackRate) && (
+        <button
+          type="button"
+          className="drawer__now-playing-control drawer__now-playing-speed"
+          aria-label={`Playback speed ${session.playbackRate} times. Change to next speed`}
+          title={`${session.playbackRate}× · next speed`}
+          onClick={() => onControl?.('cycle-speed')}
+        >
+          {session.playbackRate}×
+        </button>
+      )}
       <button
         type="button"
         className="drawer__now-playing-control"

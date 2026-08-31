@@ -3,12 +3,13 @@ import test from 'node:test'
 
 import { createMediaSessionOwner } from '../mediaSessionOwner.js'
 
-function event(kind, sessionId, playbackState = 'playing') {
+function event(kind, sessionId, playbackState = 'playing', playbackRate) {
   return {
     event: kind,
     sessionId,
     title: `Title ${sessionId}`,
     playbackState,
+    ...(playbackRate === undefined ? {} : { playbackRate }),
   }
 }
 
@@ -48,4 +49,18 @@ test('stop remains app-confirmed and a failed delivery keeps controls available'
 
   assert.equal(owner.receive(1, event('close', 'one'), () => true), true)
   assert.equal(changes.at(-1), null)
+})
+
+test('speed metadata persists across state updates and enables one cycle control', () => {
+  const changes = []
+  const controls = []
+  const owner = createMediaSessionOwner(value => changes.push(value))
+
+  const sendControl = (action) => { controls.push(action); return true }
+  owner.receive(1, event('open', 'one', 'loading', 1.5), sendControl)
+  owner.receive(1, event('update', 'one', 'playing'), sendControl)
+
+  assert.equal(changes.at(-1).playbackRate, 1.5)
+  assert.equal(owner.control('cycle-speed'), true)
+  assert.deepEqual(controls, ['cycle-speed'])
 })

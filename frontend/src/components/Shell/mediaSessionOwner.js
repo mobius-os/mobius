@@ -1,4 +1,4 @@
-const MEDIA_CONTROLS = new Set(['play', 'pause', 'stop'])
+const MEDIA_CONTROLS = new Set(['play', 'pause', 'stop', 'cycle-speed'])
 
 function sameSession(owner, appId, sessionId) {
   return owner
@@ -27,18 +27,21 @@ export function createMediaSessionOwner(onChange) {
       if (event.event === 'open' && owner && !matches) {
         owner.sendControl?.('stop')
       }
-      owner = { appId, sessionId: event.sessionId, sendControl }
+      const playbackRate = event.playbackRate ?? (matches ? owner.playbackRate : undefined)
+      owner = { appId, sessionId: event.sessionId, sendControl, playbackRate }
       onChange({
         appId,
         sessionId: event.sessionId,
         title: event.title,
         playbackState: event.playbackState,
+        ...(playbackRate === undefined ? {} : { playbackRate }),
       })
       return true
     },
 
     control(action) {
       if (!owner || !MEDIA_CONTROLS.has(action)) return false
+      if (action === 'cycle-speed' && owner.playbackRate === undefined) return false
       // A stop request is not completion. Keep the lease visible until the app
       // closes it, so a dead/stale frame cannot leave audible media unowned.
       return owner.sendControl?.(action) === true

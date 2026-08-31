@@ -26,12 +26,19 @@ export function attributedShellShortcutAction(message, advertisedShortcuts) {
 const MEDIA_EVENTS = new Set(['open', 'update', 'close'])
 const MEDIA_STATES = new Set(['loading', 'playing', 'paused'])
 
+function appPlaybackRate(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  if (value < 0.25 || value > 4) return null
+  return Math.round(value * 100) / 100
+}
+
 export function appMediaSessionEvent(message) {
   if (!message || message.type !== 'moebius:media-session') return null
   if (!MEDIA_EVENTS.has(message.event)) return null
   const sessionId = typeof message.sessionId === 'string' ? message.sessionId : ''
   if (!sessionId || sessionId.length > 160 || sessionId.trim() !== sessionId) return null
   if (message.event === 'close') return { event: 'close', sessionId }
+  const playbackRate = appPlaybackRate(message.playbackRate)
   return {
     event: message.event,
     sessionId,
@@ -41,6 +48,7 @@ export function appMediaSessionEvent(message) {
     playbackState: MEDIA_STATES.has(message.playbackState)
       ? message.playbackState
       : 'loading',
+    ...(playbackRate === null ? {} : { playbackRate }),
   }
 }
 
