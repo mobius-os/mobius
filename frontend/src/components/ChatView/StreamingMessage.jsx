@@ -20,6 +20,7 @@ export default function StreamingMessage({
   autoResumeSaving,
   autoResumeError,
   onAutoResumeChange,
+  limitResetElapsed,
   submissionBlocked,
   liveQuestionId,
   pendingQuestionRef,
@@ -44,6 +45,7 @@ export default function StreamingMessage({
         autoResumeSaving={autoResumeSaving}
         autoResumeError={autoResumeError}
         onAutoResumeChange={onAutoResumeChange}
+        limitResetElapsed={limitResetElapsed}
         submissionBlocked={submissionBlocked}
         isLastMsg
         liveQuestionId={liveQuestionId}

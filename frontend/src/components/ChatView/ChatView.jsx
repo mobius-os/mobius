@@ -120,6 +120,7 @@ import { composerHistoryFromMessages } from './composerHistory.js'
 import { createFileDragHandlers } from './dragUpload.js'
 import useOpenAppCtaAutoDismiss from './hooks/useOpenAppCtaAutoDismiss.js'
 import {
+  isAmbiguousSendFailure,
   isModelSelectionRequiredFailure,
   isPendingQuestionSendFailure,
   sendFailureMessage,
@@ -170,7 +171,7 @@ import {
 } from './sendAttemptIdentity.js'
 import {
   clearFailedSendAttempt,
-  sendAttemptIsDurable,
+  settleFailedSendConfirmation,
 } from './sendAttemptRecovery.js'
 import {
   clearComposerDraft,
@@ -530,6 +531,7 @@ export default function ChatView({
     failedSendAttemptRef,
     clearFailedAttempt,
     rememberFailedAttempt,
+    reconcileFailedAttempt: reconcileFailedSendAttempt,
     pendingFiles,
     clearFiles,
     restoreFiles,
@@ -689,6 +691,13 @@ export default function ChatView({
   // synchronous access (handleStop's pre-await clear, fetchMessages'
   // cid preservation).
   const pendingQueue = usePendingQueue(cached?.pending_messages || [])
+  useEffect(() => {
+    // The POST error and the server's durable transcript can settle in either
+    // order. If a later SSE/reconcile render proves this exact cid is already
+    // visible, retire the restored draft immediately instead of waiting for a
+    // remount or another network read.
+    reconcileFailedSendAttempt(messages, pendingQueue.pendingMessages)
+  }, [messages, pendingQueue.pendingMessages, reconcileFailedSendAttempt])
   // Every delayed visible user row carries one opaque scroll intent under the
   // same stable cid that owns its queue/transcript identity. A queued
   // continuation temporarily moves its rows + intent into one envelope while
@@ -860,6 +869,10 @@ export default function ChatView({
   // snapshot while app context, settings, or the POST is still in flight;
   // that snapshot cannot retire this locally-owned start.
   const localStartRequestRef = useRef(null)
+  // A manual Resume has no composer draft owner. Keep its provisional
+  // confirmation notice under an exact token so an older check cannot clear a
+  // newer send failure or leave the internal `continue` action in the composer.
+  const continuationConfirmationRef = useRef(null)
   // Re-entrancy guard for doSendSilent (answer submissions). sendingRef
   // alone cannot guard doSendSilent because answer sends are deliberately
   // allowed while sendingRef is true (the runner is parked waiting for
@@ -1077,6 +1090,7 @@ export default function ChatView({
     force = false,
     terminal204 = false,
     authoritative = false,
+    expectedFailedAttempt,
   } = {}) => {
     if (sendingRef.current && !force) return
     const gen = fetchGenRef.current
@@ -1100,6 +1114,11 @@ export default function ChatView({
           }
         }
       }
+      reconcileFailedSendAttempt(
+        msgs,
+        data.pending_messages || [],
+        { reportMissing: true, expectedAttempt: expectedFailedAttempt },
+      )
       const preserveLocalTurn =
         !authoritative
         && force
@@ -1198,7 +1217,36 @@ export default function ChatView({
     commitMessages,
     pendingQueue.hydrate,
     queryClient,
+    reconcileFailedSendAttempt,
     setActiveAssistantMessageId,
+  ])
+
+  const settleAmbiguousSendConfirmation = useCallback((
+    failedAttempt,
+    continuationConfirmation = null,
+  ) => (
+    settleFailedSendConfirmation(
+      () => fetchMessages({ force: true, expectedFailedAttempt: failedAttempt }),
+      options => reconcileFailedSendAttempt(
+        messagesRef.current,
+        pendingQueue.pendingMessagesRef.current,
+        { ...options, expectedAttempt: failedAttempt },
+      ),
+      () => {
+        if (
+          !continuationConfirmation
+          || continuationConfirmationRef.current !== continuationConfirmation
+        ) return
+        continuationConfirmationRef.current = null
+        setSendFailure(null)
+      },
+    )
+  ), [
+    fetchMessages,
+    messagesRef,
+    pendingQueue.pendingMessagesRef,
+    reconcileFailedSendAttempt,
+    setSendFailure,
   ])
 
   // Active-turn runtime reconciliation. The SSE stream is authoritative for
@@ -2245,23 +2293,11 @@ export default function ChatView({
         return
       }
       const msgs = detailCache.messages
-      const failedAttempt = failedSendAttemptRef.current
-      if (failedAttempt) {
-        if (sendAttemptIsDurable(
-          failedAttempt,
-          msgs,
-          runtime.pending_messages,
-        )) {
-          clearFailedAttempt()
-          setComposerInput('')
-          clearFiles()
-          setSendFailure(null)
-        } else {
-          setSendFailure(
-            'That message didn’t reach the chat. It’s ready in the composer—try again.',
-          )
-        }
-      }
+      reconcileFailedSendAttempt(
+        msgs,
+        runtime.pending_messages,
+        { reportMissing: true },
+      )
 
       if (reused) {
         // One narrow cache publication updates queue/liveness only. Reconcile
@@ -2436,6 +2472,7 @@ export default function ChatView({
     loadNonce,
     searchReveal?.anchorKey,
     searchReveal?.id,
+    reconcileFailedSendAttempt,
     setActiveAssistantMessageId,
   ])
 
@@ -2608,6 +2645,7 @@ export default function ChatView({
     const pin = opts.pin !== false  // default true
     const continuation = opts.continuation === 'manual' ? 'manual' : undefined
     const preserveComposer = opts.preserveComposer === true
+    continuationConfirmationRef.current = null
     setSendFailure(null)
 
     // Stop voice recognition so a late onresult doesn't refill input
@@ -2961,18 +2999,19 @@ export default function ChatView({
         // Roll back optimistic + restore input.
         if (!directSteer) pendingQueue.cancelByCid(queuedMsg.cid)
         forgetSendIntent({ cid: queuedMsg.cid })
-        if (!continuation) {
-          rememberFailedAttempt({
-            cid,
-            draftIdentity,
-            text,
-            attachments: composerFileSnapshot,
-          })
+        const failedAttempt = continuation ? null : {
+          cid, draftIdentity, text, attachments: composerFileSnapshot,
         }
+        if (failedAttempt) rememberFailedAttempt(failedAttempt)
         restoreComposerAfterFailedSend()
         setSendFailure(modelSelectionBlocked
           ? null
           : sendFailureMessage(err, { online: getOnlineSnapshot() }))
+        if (isAmbiguousSendFailure(err)) {
+          const confirmation = continuation ? {} : null
+          if (confirmation) continuationConfirmationRef.current = confirmation
+          void settleAmbiguousSendConfirmation(failedAttempt, confirmation)
+        }
         if (modelSelectionBlocked) {
           setModelSelectionRequest(request => request + 1)
         } else if (pendingQuestionBlocked) {
@@ -3154,14 +3193,10 @@ export default function ChatView({
         sendingRef.current = false
         setServerRunningState(false)
       }
-      if (!continuation) {
-        rememberFailedAttempt({
-          cid,
-          draftIdentity,
-          text,
-          attachments: composerFileSnapshot,
-        })
+      const failedAttempt = continuation ? null : {
+        cid, draftIdentity, text, attachments: composerFileSnapshot,
       }
+      if (failedAttempt) rememberFailedAttempt(failedAttempt)
       restoreComposerAfterFailedSend()
       // Ambiguity recovery already verified reachability and safely replayed
       // this exact cid once. If even that acknowledgement was lost, keep the
@@ -3176,6 +3211,11 @@ export default function ChatView({
       setSendFailure(modelSelectionBlocked
         ? null
         : sendFailureMessage(err, { online: getOnlineSnapshot() }))
+      if (isAmbiguousSendFailure(err)) {
+        const confirmation = continuation ? {} : null
+        if (confirmation) continuationConfirmationRef.current = confirmation
+        void settleAmbiguousSendConfirmation(failedAttempt, confirmation)
+      }
       if (modelSelectionBlocked) {
         setModelSelectionRequest(request => request + 1)
         onStreamEndRef.current?.({ continues: false })
@@ -3206,6 +3246,7 @@ export default function ChatView({
     pendingFiles,
     commitMessages,
     fetchMessages,
+    settleAmbiguousSendConfirmation,
     clearFiles,
     restoreFiles,
     releaseFiles,
@@ -4487,10 +4528,10 @@ export default function ChatView({
   )
 
   // The resume card publishes the same way, from the TAIL resumable note only
-  // — the same block tailResumableBlock arms the cue on. (MsgContent renders a
-  // Resume button on every resumable block of the last message, so the tail
-  // gate lives at the publication site; one shared ref can only hold one
-  // node.) A tap on the nudge scrolls that node in.
+  // — the same block tailResumableBlock arms the cue on. MsgContent applies
+  // that tail ownership to the card and its actions together, so this shared
+  // ref always names the single actionable recovery surface. A tap on the
+  // nudge scrolls that node in.
   const [resumeCardEl, resumeCardRef] = useNudgeTargetRef()
   const resumeCardOffscreen = useOffscreenNudge(
     scrollRef, hasPendingResume, resumeCardEl,
@@ -4564,9 +4605,18 @@ export default function ChatView({
     if (!pendingResumeBlock) return null
     if (pendingResumeBlock.pause?.resets_at) {
       const label = formatResetTime(pendingResumeBlock.pause.resets_at)
+      if (autoResumeEnabled) {
+        return label
+          ? `Usage limit reached. Queued to continue ${label}.`
+          : 'Usage limit reached. Queued to continue automatically.'
+      }
+      if (limitResetElapsed) return 'Usage is available again. Continue available.'
       return label
-        ? `Rate limit reached, resets ${label} — Resume available.`
-        : 'Rate limit reached — Resume available.'
+        ? `Usage limit reached. Usage resets ${label}. Automatic continuation available.`
+        : 'Usage limit reached. Automatic continuation available.'
+    }
+    if (pendingResumeBlock.pause?.kind === 'restart') {
+      return 'Response paused for restart. Möbius will continue automatically.'
     }
     return 'Turn paused — Resume available.'
   })()
@@ -4844,6 +4894,7 @@ export default function ChatView({
                 onAutoResumeChange={
                   isLastMsg ? handleAutoResumeChange : undefined
                 }
+                limitResetElapsed={isLastMsg && limitResetElapsed}
                 submissionBlocked={providerSwitching}
                 isLastMsg={isLastMsg}
                 liveQuestionId={answerableQuestionId}
@@ -4878,6 +4929,7 @@ export default function ChatView({
                 autoResumeErrorSource === 'card' ? autoResumeError : ''
               }
               onAutoResumeChange={handleAutoResumeChange}
+              limitResetElapsed={limitResetElapsed}
               submissionBlocked={providerSwitching}
               liveQuestionId={answerableQuestionId}
               // Same publication channel as the durable rows above: while the
@@ -4961,8 +5013,21 @@ export default function ChatView({
                       onClick={revealConversationTail}
                     >
                       {pendingResumeBlock?.pause?.resets_at
-                        ? 'Rate limit reached — tap to resume'
-                        : 'Turn paused — tap to resume'}
+                        ? autoResumeEnabled
+                          ? (() => {
+                              const label = formatResetTime(
+                                pendingResumeBlock.pause.resets_at,
+                              )
+                              return label
+                                ? `Queued to continue ${label}`
+                                : 'Queued to continue automatically'
+                            })()
+                          : limitResetElapsed
+                            ? 'Usage available — tap to continue'
+                            : 'Usage limit reached — continuation available'
+                        : pendingResumeBlock?.pause?.kind === 'restart'
+                          ? 'Paused for restart — continuing automatically'
+                          : 'Turn paused — tap to resume'}
                     </button>
                   )}
                   {jumpToLatestVisible && (
