@@ -3,9 +3,11 @@ import assert from 'node:assert/strict'
 
 import {
   appArtifactsFromBuiltApps,
+  artifactRelatedToApps,
   artifactTouchForChat,
   artifactsTouchedByChat,
   chatArtifactPickerItems,
+  loadChatArtifacts,
 } from '../chatArtifacts.js'
 
 test('built apps become durable chat artifacts without duplicate rows', () => {
@@ -84,4 +86,122 @@ test('legacy provenance is retained and malformed ids are ignored', () => {
   assert.equal(artifactTouchForChat({
     id: '../escape', chat_id: 'chat-a',
   }, 'chat-a'), null)
+})
+
+test('artifacts related to an app appear in its maintaining chat only', () => {
+  const record = {
+    id: 'store-concepts-a690',
+    title: 'Store concepts',
+    chat_id: 'origin-chat',
+    created_at: '2026-08-23T14:08:00Z',
+    updated_at: '2026-08-23T14:26:00Z',
+    current_version: 5,
+    related_apps: [{ id: 39, slug: 'app-store', name: 'App Store' }],
+    versions: [
+      { v: 1, chat_id: 'origin-chat', created_at: '2026-08-23T14:08:00Z' },
+      { v: 5, chat_id: 'origin-chat', created_at: '2026-08-23T14:26:00Z' },
+    ],
+  }
+
+  const appChatTouch = artifactTouchForChat(record, 'app-maintaining-chat', [
+    { id: 39, slug: 'app-store' },
+  ])
+  assert.equal(appChatTouch?.id, 'store-concepts-a690')
+  assert.equal(appChatTouch?.version, 5)
+  assert.equal(appChatTouch?.touchedAt, '2026-08-23T14:26:00Z')
+  assert.equal(
+    artifactTouchForChat(record, 'unrelated-chat', [{ id: 12, slug: 'notes' }]),
+    null,
+  )
+  assert.equal(artifactTouchForChat(record, 'origin-chat')?.version, 5)
+})
+
+test('related app matching treats the stable slug as authoritative', () => {
+  const record = {
+    related_apps: [{ id: 39, slug: 'app-store' }],
+  }
+  assert.equal(artifactRelatedToApps(record, [{ id: 104, slug: 'app-store' }]), true)
+  assert.equal(artifactRelatedToApps(record, [{ id: 39, slug: 'renamed-store' }]), false)
+  assert.equal(artifactRelatedToApps({ related_apps: [{ id: 39 }] }, [
+    { id: 39, slug: 'app-store' },
+  ]), true)
+  assert.equal(artifactRelatedToApps({ related_apps: ['app-store'] }, [
+    { id: 39, slug: 'app-store' },
+  ]), false)
+})
+
+test('artifact loading resolves only apps maintained by the current chat', async () => {
+  const calls = []
+  let resolveArtifactResponse
+  const artifactResponse = new Promise(resolve => { resolveArtifactResponse = resolve })
+  const artifact = {
+    id: 'store-concepts-a690',
+    title: 'Store concepts',
+    chat_id: 'origin-chat',
+    updated_at: '2026-08-23T14:26:00Z',
+    current_version: 5,
+    related_apps: [{ id: 39, slug: 'app-store' }],
+  }
+  const request = (path) => {
+    calls.push(path)
+    if (path === '/apps/') {
+      return Promise.resolve({
+        ok: true,
+        json: async () => [
+          { id: 39, slug: 'app-store', chat_id: 'app-chat' },
+          { id: 12, slug: 'notes', chat_id: 'unrelated-chat' },
+        ],
+      })
+    }
+    return artifactResponse
+  }
+
+  const loading = loadChatArtifacts(88, 'app-chat', { request })
+  assert.deepEqual(calls, [
+    '/storage/apps-list/88/artifacts/?limit=500&include_content=true',
+    '/apps/',
+  ], 'app lookup starts without waiting for the artifact response')
+
+  resolveArtifactResponse({
+    ok: true,
+    json: async () => ({ entries: [{ content: artifact }], next_cursor: null }),
+  })
+  const loaded = await loading
+  assert.deepEqual(loaded.map(item => item.id), ['store-concepts-a690'])
+})
+
+test('artifact loading falls back to origin provenance when app lookup fails', async () => {
+  const appLookupFailures = {
+    'thrown error': () => { throw new Error('offline') },
+    'non-ok response': () => ({
+      ok: false,
+      status: 503,
+      json: async () => [{ id: 39, slug: 'app-store', chat_id: 'app-chat' }],
+    }),
+  }
+
+  for (const [mode, failAppLookup] of Object.entries(appLookupFailures)) {
+    const request = async (path) => {
+      if (path === '/apps/') return failAppLookup()
+      return {
+        ok: true,
+        json: async () => ({
+          entries: [
+            { content: { id: 'origin-artifact', chat_id: 'app-chat' } },
+            {
+              content: {
+                id: 'related-artifact',
+                chat_id: 'other-chat',
+                related_apps: [{ slug: 'app-store' }],
+              },
+            },
+          ],
+          next_cursor: null,
+        }),
+      }
+    }
+
+    const loaded = await loadChatArtifacts(88, 'app-chat', { request })
+    assert.deepEqual(loaded.map(item => item.id), ['origin-artifact'], mode)
+  }
 })
