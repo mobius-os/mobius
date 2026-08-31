@@ -206,6 +206,11 @@ class Chat(Base):
   auto_resume_on_restart = Column(
     Boolean, nullable=False, default=True, server_default=true()
   )
+  # The latest Goal presentation the owner explicitly cleared. Goal history
+  # remains on ChatRun for summaries, metrics, and audit; this chat-owned
+  # pointer suppresses only that stable Goal identity. A later Goal receives a
+  # different id and therefore becomes visible without resetting this field.
+  dismissed_goal_id = Column(String(64), nullable=True, default=None)
   # Drawer pinning: NOT NULL = pinned, NULL = unpinned. Sort key for
   # the chats list — pinned rows render first, ordered by this
   # column DESC (newest pin at top of pinned group). PATCH
