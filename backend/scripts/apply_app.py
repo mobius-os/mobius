@@ -10,7 +10,10 @@ import urllib.request
 
 
 def _usage() -> None:
-  print("Usage: apply_app.py <source-dir>", file=sys.stderr)
+  print(
+    "Usage: apply_app.py [--accept-local-package] <source-dir>",
+    file=sys.stderr,
+  )
 
 
 def _receipt(result: dict) -> dict:
@@ -32,11 +35,16 @@ def _receipt(result: dict) -> dict:
 
 
 def main() -> None:
-  if len(sys.argv) != 2:
+  args = sys.argv[1:]
+  accept_local_package = False
+  if "--accept-local-package" in args:
+    accept_local_package = True
+    args.remove("--accept-local-package")
+  if len(args) != 1 or any(value.startswith("-") for value in args):
     _usage()
     raise SystemExit(2)
   try:
-    source_dir = str(Path(sys.argv[1]).resolve(strict=True))
+    source_dir = str(Path(args[0]).resolve(strict=True))
   except (OSError, RuntimeError) as exc:
     print(f"Cannot resolve app source directory: {exc}", file=sys.stderr)
     raise SystemExit(1) from exc
@@ -52,6 +60,7 @@ def main() -> None:
   payload = {
     "source_dir": source_dir,
     "chat_id": os.environ.get("CHAT_ID") or None,
+    "accept_local_package": accept_local_package,
   }
   request = urllib.request.Request(
     f"{base}/api/apps/apply",

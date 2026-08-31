@@ -98,6 +98,10 @@ class AppApply(BaseModel):
 
   source_dir: str = Field(min_length=1, max_length=512)
   chat_id: str | None = Field(default=None, max_length=64)
+  # Store-installed apps normally preserve reviewed package metadata while
+  # accepting local UI source. This explicit opt-in accepts the local manifest
+  # as the package authority for this revision without discarding provenance.
+  accept_local_package: bool = False
 
 
 class AppResolveUpdate(BaseModel):

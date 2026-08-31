@@ -156,6 +156,23 @@ As soon as the first slice compiles and contains one real feature:
 python "$SCRIPTS_DIR/apply_app.py" /data/apps/<slug>
 ```
 
+For a Store-installed app, ordinary apply deliberately accepts local UI source
+while preserving the Store-reviewed manifest, skills, permissions, schedules,
+and project templates. If—and only if—the partner explicitly chose to make the
+local package manifest authoritative for this revision, use the deliberate
+variant:
+
+```bash
+python "$SCRIPTS_DIR/apply_app.py" --accept-local-package /data/apps/<slug>
+```
+
+This keeps the app's Store provenance while accepting the validated local
+runtime declarations, permissions, project templates, skills and schedules,
+icon, and static assets. It does not import installer-owned storage seeds. The
+receipt warns that a future reviewed Store update may replace the accepted
+declarations. Never use it merely to make an ordinary source edit take effect
+or to work around a manifest/permission guard.
+
 The helper validates the manifest and complete source tree, compiles and
 commits that exact revision, returns a compact receipt with `app_id`,
 `preview_path`, and `open_path`, and emits one live-preview action tied to this
