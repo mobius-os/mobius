@@ -2100,6 +2100,46 @@ def _add_chat_goal_dismissal(eng) -> None:
     ))
 
 
+def _add_attached_delegation_work(eng) -> None:
+  """Make delegated startup recoverable and source-chat work explicit."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "delegations" not in inspector.get_table_names():
+    return
+  columns = {
+    column["name"] for column in inspector.get_columns("delegations")
+  }
+  with eng.begin() as conn:
+    additions = {
+      "startup_prompt": "TEXT NULL",
+      "source_work_id": "VARCHAR(64) NULL",
+      "source_work_intent": "VARCHAR(32) NULL",
+      "source_work_context_app_id": "INTEGER NULL",
+      "source_work_envelope": "JSON NULL",
+      "source_work_status": "VARCHAR(32) NULL",
+      "source_work_result": "TEXT NULL",
+      "source_work_active_chat_id": "VARCHAR(64) NULL",
+    }
+    for name, declaration in additions.items():
+      if name not in columns:
+        conn.execute(text(
+          f"ALTER TABLE delegations ADD COLUMN {name} {declaration}"
+        ))
+    conn.execute(text(
+      "CREATE UNIQUE INDEX IF NOT EXISTS ix_delegations_source_work_id "
+      "ON delegations (source_work_id)"
+    ))
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_delegations_source_work_context_app_id "
+      "ON delegations (source_work_context_app_id)"
+    ))
+    conn.execute(text(
+      "CREATE UNIQUE INDEX IF NOT EXISTS "
+      "ix_delegations_source_work_active_chat_id "
+      "ON delegations (source_work_active_chat_id)"
+    ))
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -2127,6 +2167,7 @@ _SCHEMA_MIGRATIONS = (
   ("0022_project_artifacts", _add_project_artifacts),
   ("0023_project_color", _add_project_color),
   ("0024_chat_goal_dismissal", _add_chat_goal_dismissal),
+  ("0025_attached_delegation_work", _add_attached_delegation_work),
 )
 
 

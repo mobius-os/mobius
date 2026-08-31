@@ -154,16 +154,17 @@ auto-scroll to a newer tail. New send and lifecycle paths must use the shared
 state machine rather than deriving intent from geometry alone.
 
 **End-to-end (Playwright).** Comprehensive browser checks run in GitHub for pull
-requests. A prepared platform contribution can run the same suite earlier from
-Contribute: **Run GitHub checks** pushes only the reviewed branch to the owner's
-fork and manually dispatches `.github/workflows/test.yml`; it does not open a
-pull request. From another checkout whose branch is already on GitHub, the
-equivalent manual command is:
+requests. For broad or risky work, select **Draft** in Contribute and use
+**Send PR** (or **Update PR**). Contribute publishes the exact reviewed branch
+and opens or updates a draft pull request; it does not merge anything. Let the
+hosted pull-request checks run, then use **Request review** once they are green.
+From another checkout whose branch is already on GitHub, the equivalent manual
+command is:
 
 Forks inherit every workflow file from upstream even though Contribute enables
 only `test.yml`. Therefore `test.yml` is the sole fork-runnable workflow: every
 job in every other workflow must carry
-`if: github.repository == 'mobius-os/mobius'`. The focused pre-PR contract test
+`if: github.repository == 'mobius-os/mobius'`. The focused hosted-check contract test
 enforces this safe default. A future workflow may run in forks only through an
 explicit allowlist change with corresponding review; never rely on missing
 secrets, package permissions, or repository variables to fail after allocating

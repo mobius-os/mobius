@@ -78,8 +78,9 @@ check_backend_prereqs() {
     die "Docker is unavailable. In the normal Möbius app container this is an
     intentional trust boundary: no daemon or host socket is exposed. Use
     --fast plus focused scripts/wt-pytest.sh tests for local evidence; run
-    --backend on a Docker-capable host, use Contribute's Run GitHub checks for
-    early full coverage, or rely on the merge queue's complete gate."
+    --backend on a Docker-capable host, or, after explicit owner approval, use
+    Contribute to open or update a draft PR and let its hosted checks provide
+    full coverage. The merge queue remains the complete gate."
   fi
   if ! docker compose version >/dev/null 2>&1; then
     die "Docker Compose is not available. Install the compose plugin before --backend."

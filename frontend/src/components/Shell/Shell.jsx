@@ -57,6 +57,7 @@ import { buildEventProjectId, isArtifactBuildEvent } from '../../lib/projectArti
 import { appSourceProject, appSourceProjectId } from '../../lib/appSourceProject.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
 import { bumpChatRunSignal, chatRunSignal } from '../../lib/chatRunSignal.js'
+import { invalidateChatChangesQueries } from '../ChatView/chatChangesQueries.js'
 import { clearAppFrameStorage, clearCachedAppToken } from '../../lib/appFrameStorage.js'
 import * as tabModel from './tabModel.js'
 import * as paneModel from './paneModel.js'
@@ -3021,6 +3022,10 @@ export default function Shell({ onInitialVisualReady }) {
             queryKey: ['projects', 'git', String(projectId)],
           })
         }
+        // Chat edits and their contribution ledger can both settle during an
+        // agent turn. Completion is the shared freshness boundary even when
+        // the chat card was hidden or unmounted while that work ran.
+        void invalidateChatChangesQueries(queryClient, chatId)
         markChatOwnerInput(chatId, { kind: null, questionId: null })
         // Attention iff the finished chat is NOT visible in ANY pane — membership
         // in the visible set, not equality with one global id, so a chat visible
@@ -3031,6 +3036,25 @@ export default function Shell({ onInitialVisualReady }) {
           // detail responses contend with the first native scroll frame. The
           // retained ChatView consumes this run signal when it becomes visible;
           // an unmounted chat uses the existing versioned activation read.
+          setAttentionChatIds(prev => {
+            if (prev.has(chatId)) return prev
+            const next = new Set(prev)
+            next.add(chatId)
+            return next
+          })
+        }
+      }
+    } else if (ev.type === 'delegation_changed') {
+      const chatId = ev.chatId
+      if (chatId) {
+        // Source-attached contribution work has no parent ChatRun by design,
+        // so its own lifecycle event is the freshness boundary for a mounted,
+        // hidden, or later-restored Changes view.
+        void invalidateChatChangesQueries(queryClient, chatId)
+        if (
+          ['completed', 'failed', 'needs_review'].includes(String(ev.status || ''))
+          && !visibleChatIdsRef.current.has(String(chatId))
+        ) {
           setAttentionChatIds(prev => {
             if (prev.has(chatId)) return prev
             const next = new Set(prev)

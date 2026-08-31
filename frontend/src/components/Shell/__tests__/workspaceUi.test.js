@@ -899,6 +899,16 @@ test('chat drawer indicators distinguish owner input, active work, waiting, and 
   )
   assert.match(
     shell,
+    /ev\.type === 'chat_run_finished'[\s\S]*?invalidateChatChangesQueries\(queryClient, chatId\)/,
+    'completion must refresh Changes even when its local card missed the active-to-idle transition',
+  )
+  assert.match(
+    shell,
+    /ev\.type === 'delegation_changed'[\s\S]*?invalidateChatChangesQueries\(queryClient, chatId\)[\s\S]*?\['completed', 'failed', 'needs_review'\][\s\S]*?setAttentionChatIds/,
+    'source-attached completion must refresh its parent and mark hidden work for attention',
+  )
+  assert.match(
+    shell,
     /for \(const cid of visibleChatIds\) clearChatAttention\(cid\)/,
     'viewing a chat must clear its completion dot',
   )

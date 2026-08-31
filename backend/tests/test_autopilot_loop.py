@@ -135,6 +135,18 @@ def _make_fakes(state):
     if args[:2] == ("repo", "fork"):
       state["fork_ready"] = True
       return _cp("")
+    if args[:2] == ("api", "repos/mobius-os/app-demo/pulls/42"):
+      return _cp(json.dumps({
+        "state": "open",
+        "draft": False,
+        "html_url": "https://github.com/mobius-os/app-demo/pull/42",
+        "head": {
+          "ref": _BRANCH,
+          "sha": state["head"],
+          "repo": {"full_name": "octocat/app-demo-1"},
+        },
+        "base": {"ref": "main"},
+      }))
     if args[:2] == ("pr", "list"):
       if state.get("pr_open"):
         return _cp(json.dumps([{
@@ -208,7 +220,10 @@ def test_full_autopilot_loop_end_to_end(client, owner_token, monkeypatch):
   # 1. Submit with autopilot → PR opened + grant stamped + mirror written.
   r = client.post(
     f"/api/github/contributions/{app_id}/{record_id}/submit",
-    json={"autopilot": True}, headers=headers,
+    # The end-to-end loop exercises a review-ready PR. Draft is now the safe
+    # compatibility default, so this test must opt into the public ready stage
+    # instead of relying on the retired implicit-open behavior.
+    json={"autopilot": True, "publication_stage": "ready"}, headers=headers,
   )
   assert r.status_code == 200, r.text
   assert r.json()["record"]["status"] == "open"

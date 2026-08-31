@@ -51,17 +51,24 @@ test('app chat controller shares status enrichment and stop semantics', async ()
         calls.push(['goal', id, options])
         return { ok: true, json: async () => ({ plan: { current: 'review' } }) }
       },
+      usage: async (id, options) => {
+        calls.push(['usage', id, options])
+        return { ok: true, json: async () => ({ totals: { total_tokens: 1200 } }) }
+      },
       stop: async (id, options) => { calls.push(['stop', id, options]); return { kind: 'stop' } },
     },
     readJson: async value => value,
   })
 
   assert.deepEqual(await control(80, { action: 'status', chatId: 'chat-5' }), {
-    kind: 'runtime', goal_plan: { current: 'review' },
+    kind: 'runtime',
+    goal_plan: { current: 'review' },
+    usage: { totals: { total_tokens: 1200 } },
   })
   assert.deepEqual(await control(80, { action: 'stop', chatId: 'chat-5' }), { kind: 'stop' })
   assert.deepEqual(calls, [
     ['goal', 'chat-5', { timeoutMs: 5000 }],
+    ['usage', 'chat-5', { timeoutMs: 5000 }],
     ['runtime', 'chat-5', { timeoutMs: 5000 }],
     ['stop', 'chat-5', { timeoutMs: 15000 }],
   ])

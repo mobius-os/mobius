@@ -30,7 +30,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.responses import Response
 
-from app import github_auth, github_pre_pr_checks, source_status
+from app import github_auth, source_status
 from app.contribution_errors import ContributionSubmitError
 from app.config import get_settings
 from app.database import checked_out_connections
@@ -1645,6 +1645,303 @@ def _write_contribution(app_id, record_id, record, diff_text=""):
     atomic_write(base / f"{record_id}.diff", diff_text)
 
 
+def _write_personal_draft(app_id, record_id="personal-draft", number=58):
+  head = "a" * 40
+  base = "b" * 40
+  repo_path = Path(get_settings().data_dir) / "contrib" / record_id / "repo"
+  (repo_path / ".git").mkdir(parents=True)
+  record = {
+    "id": record_id,
+    "type": "pr",
+    "repo": "mobius-os/app-demo",
+    "status": "draft",
+    "publication_stage": "draft",
+    "number": number,
+    "url": f"https://github.com/mobius-os/app-demo/pull/{number}",
+    "branch": "feat/existing-review",
+    "head_repository": "octocat/app-demo",
+    "last_submit_push_sha": head,
+    "last_submit_upstream_branch": "main",
+    "submitted_at": "2026-08-29T08:00:00Z",
+    "plan": {
+      "action": "pr",
+      "repo": "mobius-os/app-demo",
+      "repo_path": str(repo_path),
+      "branch": "feat/existing-review",
+      "base_sha": base,
+      "head_sha": head,
+      "diff_sha256": hashlib.sha256(b"reviewed").hexdigest(),
+    },
+    "quality_review": {
+      "state": "all_clear",
+      "reviewed_head_sha": head,
+      "reviewed_at": "2026-08-29T07:59:00Z",
+    },
+  }
+  _write_contribution(app_id, record_id, record)
+  return record
+
+def _personal_pr_live(record, *, draft, head_sha=None, auto_merge=None):
+  return {
+    "node_id": "PR_kwDO_ready_58",
+    "html_url": record["url"],
+    "state": "open",
+    "draft": draft,
+    "auto_merge": auto_merge,
+    "head": {
+      "ref": record["plan"]["branch"],
+      "sha": head_sha or record["last_submit_push_sha"],
+      "repo": {"full_name": record["head_repository"]},
+    },
+    "base": {
+      "ref": record["last_submit_upstream_branch"],
+      "repo": {"full_name": record["repo"]},
+    },
+  }
+
+def test_mark_ready_mutates_once_after_exact_live_identity(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record = _write_personal_draft(app_id)
+  monkeypatch.setattr(
+    "app.github_contributions.shutil.which", lambda name: f"/bin/{name}",
+  )
+  calls = []
+  reads = 0
+
+  def fake_gh(_repo_path, *args, check=True):
+    nonlocal reads
+    calls.append(args)
+    if args[:2] == ("api", f"repos/{record['repo']}/pulls/{record['number']}"):
+      reads += 1
+      return _cp(json.dumps(_personal_pr_live(record, draft=reads == 1)))
+    if args[:2] == ("api", "graphql"):
+      return _cp(json.dumps({"data": {
+        "markPullRequestReadyForReview": {"pullRequest": {
+          "id": "PR_kwDO_ready_58",
+          "isDraft": False,
+          "headRefOid": record["last_submit_push_sha"],
+          "url": record["url"],
+        }},
+      }}))
+    pytest.fail(f"unexpected gh call: {args}")
+
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record['id']}/ready",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={"expected_head_sha": record["last_submit_push_sha"]},
+  )
+
+  assert response.status_code == 200, response.text
+  ready = response.json()["record"]
+  assert ready["status"] == "open"
+  assert ready["publication_stage"] == "ready"
+  assert ready["last_ready_head_sha"] == record["last_submit_push_sha"]
+  assert "readying" not in ready
+  assert [call[:2] for call in calls] == [
+    ("api", f"repos/{record['repo']}/pulls/{record['number']}"),
+    ("api", "graphql"),
+    ("api", f"repos/{record['repo']}/pulls/{record['number']}"),
+  ]
+  mutation = calls[1]
+  assert "markPullRequestReadyForReview" in mutation[mutation.index("-f") + 1]
+  assert "pullRequestId=PR_kwDO_ready_58" in mutation
+
+@pytest.mark.parametrize("mutation_failure", ["timeout", "nonzero"])
+def test_mark_ready_lost_response_recovers_by_read_without_second_mutation(
+  client, owner_token, monkeypatch, mutation_failure,
+):
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record = _write_personal_draft(
+    app_id, f"personal-draft-recovery-{mutation_failure}",
+  )
+  monkeypatch.setattr(
+    "app.github_contributions.shutil.which", lambda name: f"/bin/{name}",
+  )
+  calls = []
+  recovering = False
+
+  def fake_gh(_repo_path, *args, check=True):
+    calls.append(args)
+    if args[:2] == ("api", f"repos/{record['repo']}/pulls/{record['number']}"):
+      return _cp(json.dumps(_personal_pr_live(record, draft=not recovering)))
+    if args[:2] == ("api", "graphql"):
+      if mutation_failure == "timeout":
+        raise subprocess.TimeoutExpired(["gh", "api", "graphql"], timeout=30)
+      return _cp("", "network response ended early", returncode=1)
+    pytest.fail(f"unexpected gh call: {args}")
+
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
+  url = f"/api/github/contributions/{app_id}/{record['id']}/ready"
+  headers = {"Authorization": f"Bearer {app_token}"}
+  payload = {"expected_head_sha": record["last_submit_push_sha"]}
+
+  first = client.post(url, headers=headers, json=payload)
+  assert first.status_code == 503, first.text
+  assert first.json()["detail"]["code"] == "ready_unconfirmed"
+  assert first.json()["detail"]["record"]["readying"]["expected_head_sha"] == (
+    record["last_submit_push_sha"]
+  )
+
+  recovering = True
+  second = client.post(url, headers=headers, json=payload)
+  assert second.status_code == 200, second.text
+  assert second.json()["record"]["publication_stage"] == "ready"
+  assert "readying" not in second.json()["record"]
+  assert sum(call[:2] == ("api", "graphql") for call in calls) == 1
+
+def test_mark_ready_recovery_releases_a_changed_live_target(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record = _write_personal_draft(app_id, "personal-draft-recovery-drift")
+  record["readying"] = {
+    "version": 1,
+    "repo": record["repo"],
+    "number": record["number"],
+    "url": record["url"],
+    "head_repository": record["head_repository"],
+    "head_branch": record["plan"]["branch"],
+    "base_branch": record["last_submit_upstream_branch"],
+    "expected_head_sha": record["last_submit_push_sha"],
+    "started_at": "2026-08-29T08:01:00Z",
+  }
+  _write_contribution(app_id, record["id"], record)
+  monkeypatch.setattr(
+    "app.github_contributions.shutil.which", lambda name: f"/bin/{name}",
+  )
+  calls = []
+
+  def fake_gh(_repo_path, *args, check=True):
+    calls.append(args)
+    return _cp(json.dumps(_personal_pr_live(
+      record, draft=True, head_sha="c" * 40,
+    )))
+
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record['id']}/ready",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={"expected_head_sha": record["last_submit_push_sha"]},
+  )
+
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"]["code"] == "ready_target_changed"
+  stored = json.loads(
+    (Path(get_settings().data_dir) / "apps" / str(app_id) /
+     "contributions" / f"{record['id']}.json").read_text()
+  )
+  assert "readying" not in stored
+  assert stored["last_ready_error_code"] == "ready_target_changed"
+  assert len(calls) == 1
+
+def test_mark_ready_rejects_changed_head_and_relay_without_github(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record = _write_personal_draft(app_id, "personal-draft-stale")
+  calls = []
+  monkeypatch.setattr(
+    "app.github_contribution_git._gh",
+    lambda *_args, **_kwargs: calls.append(True) or _cp(""),
+  )
+  headers = {"Authorization": f"Bearer {app_token}"}
+
+  stale = client.post(
+    f"/api/github/contributions/{app_id}/{record['id']}/ready",
+    headers=headers,
+    json={"expected_head_sha": "c" * 40},
+  )
+  assert stale.status_code == 409, stale.text
+  assert "changed after the Ready action was shown" in stale.json()["detail"]
+
+  record["id"] = "relay-draft"
+  record["submission_mode"] = "mobius-bot"
+  record["relay_contribution_id"] = "ctr_1234567890abcdef1234567890abcdef"
+  _write_contribution(app_id, record["id"], record)
+  relay = client.post(
+    f"/api/github/contributions/{app_id}/{record['id']}/ready",
+    headers=headers,
+    json={"expected_head_sha": record["last_submit_push_sha"]},
+  )
+  assert relay.status_code == 409, relay.text
+  assert "relay supports" in relay.json()["detail"]
+  assert calls == []
+
+def test_mark_ready_rejects_live_identity_drift_without_mutation(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record = _write_personal_draft(app_id, "personal-draft-live-drift")
+  monkeypatch.setattr(
+    "app.github_contributions.shutil.which", lambda name: f"/bin/{name}",
+  )
+  calls = []
+
+  def fake_gh(_repo_path, *args, check=True):
+    calls.append(args)
+    if args[:2] == ("api", f"repos/{record['repo']}/pulls/{record['number']}"):
+      return _cp(json.dumps(_personal_pr_live(
+        record, draft=True, head_sha="c" * 40,
+      )))
+    pytest.fail("identity drift must stop before a mutation")
+
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record['id']}/ready",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={"expected_head_sha": record["last_submit_push_sha"]},
+  )
+
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"]["code"] == "ready_target_changed"
+  stored = json.loads(
+    (Path(get_settings().data_dir) / "apps" / str(app_id) /
+     "contributions" / f"{record['id']}.json").read_text()
+  )
+  assert stored["status"] == "draft"
+  assert "readying" not in stored
+  assert len(calls) == 1
+
+def test_mark_ready_refuses_to_trigger_an_armed_auto_merge(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record = _write_personal_draft(app_id, "personal-draft-auto-merge")
+  monkeypatch.setattr(
+    "app.github_contributions.shutil.which", lambda name: f"/bin/{name}",
+  )
+  calls = []
+
+  def fake_gh(_repo_path, *args, check=True):
+    calls.append(args)
+    if args[:2] == ("api", f"repos/{record['repo']}/pulls/{record['number']}"):
+      return _cp(json.dumps(_personal_pr_live(
+        record,
+        draft=True,
+        auto_merge={"merge_method": "squash"},
+      )))
+    pytest.fail("an armed auto-merge must stop before the Ready mutation")
+
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record['id']}/ready",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={"expected_head_sha": record["last_submit_push_sha"]},
+  )
+
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"]["code"] == "ready_auto_merge_enabled"
+  assert len(calls) == 1
+
 def _prepared_real_review(app_id, record_id):
   """Build one exact local review checkout under the route's allowlist."""
   data_dir = Path(get_settings().data_dir)
@@ -1697,204 +1994,6 @@ def _prepared_real_review(app_id, record_id):
   }
   _write_contribution(app_id, record_id, record, diff_text)
   return repo, record, diff_text
-
-
-def _prepared_platform_review(app_id, record_id):
-  """Build the supported standalone platform variant of a real review."""
-  repo, record, diff_text = _prepared_real_review(app_id, record_id)
-  record = {
-    **record,
-    "repo": "mobius-os/mobius",
-    "plan": {**record["plan"], "repo": "mobius-os/mobius"},
-  }
-  _write_contribution(app_id, record_id, record, diff_text)
-  return repo, record, diff_text
-
-
-def test_run_pre_pr_checks_persists_exact_run_and_blocks_duplicates(
-  client, owner_token, monkeypatch,
-):
-  _write_token(login="octocat", user_id=42, scopes=("public_repo", "workflow"))
-  app_id, app_token = _app_token(client, owner_token, github_access=True)
-  _repo, _record, _diff = _prepared_platform_review(
-    app_id, "pre-pr-check-success",
-  )
-
-  requested_at = "2026-08-02T14:00:00Z"
-
-  def fake_dispatch(record, diff_path):
-    assert record["pre_pr_checks"]["state"] == "dispatching"
-    assert diff_path.name == "pre-pr-check-success.diff"
-    assert "requested_at" not in record["pre_pr_checks"]
-    return ({
-      "state": "queued",
-      "run_id": 734,
-      "url": "https://github.com/octocat/mobius/actions/runs/734",
-      "fork_repo": "octocat/mobius",
-      "branch": "fix/demo-review",
-      "head_sha": record["plan"]["head_sha"],
-      "workflow": "test.yml",
-      "requested_at": requested_at,
-      "observed_at": requested_at,
-    }, {"last_submit_push_sha": record["plan"]["head_sha"]})
-
-  monkeypatch.setattr(
-    github_pre_pr_checks, "dispatch_pre_pr_checks", fake_dispatch,
-  )
-  headers = {"Authorization": f"Bearer {app_token}"}
-  response = client.post(
-    f"/api/github/contributions/{app_id}/pre-pr-check-success/pre-pr-checks",
-    headers=headers,
-  )
-  assert response.status_code == 200, response.text
-  record = response.json()["record"]
-  assert record["status"] == "prepared"
-  assert record["pre_pr_checks"]["state"] == "queued"
-  assert record["pre_pr_checks"]["run_id"] == 734
-  assert record["pre_pr_checks"]["request_id"]
-  assert record["last_submit_push_sha"] == record["plan"]["head_sha"]
-
-  duplicate = client.post(
-    f"/api/github/contributions/{app_id}/pre-pr-check-success/pre-pr-checks",
-    headers=headers,
-  )
-  assert duplicate.status_code == 409
-  assert "already" in duplicate.json()["detail"].lower()
-
-
-def test_run_pre_pr_checks_keeps_recoverable_failure_on_the_record(
-  client, owner_token, monkeypatch,
-):
-  _write_token(login="octocat", user_id=42, scopes=("public_repo", "workflow"))
-  app_id, app_token = _app_token(client, owner_token, github_access=True)
-  _repo, record, _diff = _prepared_platform_review(
-    app_id, "pre-pr-check-error",
-  )
-
-  requested_at = "2026-08-02T14:00:00Z"
-
-  def fake_dispatch(_record, _diff_path):
-    raise ContributionSubmitError(
-      "GitHub could not start Tests.",
-      status_code=409,
-      code="pre_pr_checks_dispatch_failed",
-      record_patch={
-        "last_submit_push_sha": record["plan"]["head_sha"],
-        "pre_pr_checks": {
-          "state": "error",
-          "message": "GitHub could not start Tests.",
-          "requested_at": requested_at,
-          "observed_at": requested_at,
-        },
-      },
-    )
-
-  monkeypatch.setattr(
-    github_pre_pr_checks, "dispatch_pre_pr_checks", fake_dispatch,
-  )
-  response = client.post(
-    f"/api/github/contributions/{app_id}/pre-pr-check-error/pre-pr-checks",
-    headers={"Authorization": f"Bearer {app_token}"},
-  )
-  assert response.status_code == 409, response.text
-  stored = response.json()["detail"]["record"]
-  assert stored["status"] == "prepared"
-  assert stored["pre_pr_checks"]["state"] == "error"
-  assert stored["pre_pr_checks"]["request_id"]
-  assert stored["last_submit_push_sha"] == record["plan"]["head_sha"]
-
-
-def test_run_pre_pr_checks_settles_an_invalid_checkout_claim(
-  client, owner_token,
-):
-  _write_token(login="octocat", user_id=42, scopes=("public_repo", "workflow"))
-  app_id, app_token = _app_token(client, owner_token, github_access=True)
-  _repo, record, diff_text = _prepared_platform_review(
-    app_id, "pre-pr-check-invalid-path",
-  )
-  record["plan"]["repo_path"] = ""
-  _write_contribution(app_id, "pre-pr-check-invalid-path", record, diff_text)
-
-  response = client.post(
-    f"/api/github/contributions/{app_id}/pre-pr-check-invalid-path/pre-pr-checks",
-    headers={"Authorization": f"Bearer {app_token}"},
-  )
-  assert response.status_code == 409, response.text
-  stored = response.json()["detail"]["record"]
-  assert stored["status"] == "prepared"
-  assert stored["pre_pr_checks"]["state"] == "error"
-  assert "durable repo_path" in stored["pre_pr_checks"]["message"]
-
-
-def test_refresh_pre_pr_checks_persists_the_exact_terminal_run(
-  client, owner_token, monkeypatch,
-):
-  _write_token(login="octocat", user_id=42, scopes=("public_repo", "workflow"))
-  app_id, app_token = _app_token(client, owner_token, github_access=True)
-  _repo, record, diff_text = _prepared_platform_review(
-    app_id, "pre-pr-check-refresh",
-  )
-  record["pre_pr_checks"] = {
-    "state": "in_progress",
-    "request_id": "request-1",
-    "run_id": 735,
-    "url": "https://github.com/octocat/mobius/actions/runs/735",
-    "fork_repo": "octocat/mobius",
-    "branch": record["plan"]["branch"],
-    "head_sha": record["plan"]["head_sha"],
-  }
-  _write_contribution(app_id, "pre-pr-check-refresh", record, diff_text)
-
-  def fake_refresh(_record):
-    return {
-      **_record["pre_pr_checks"],
-      "state": "completed",
-      "conclusion": "success",
-      "completed_at": "2026-08-02T15:00:00Z",
-    }
-
-  monkeypatch.setattr(
-    github_pre_pr_checks, "refresh_pre_pr_check", fake_refresh,
-  )
-  headers = {"Authorization": f"Bearer {app_token}"}
-  url = f"/api/github/contributions/{app_id}/pre-pr-checks/refresh"
-  response = client.post(url, headers=headers)
-  assert response.status_code == 200, response.text
-  assert response.json()["refreshed"][0]["pre_pr_checks"]["conclusion"] == (
-    "success"
-  )
-
-  repeat = client.post(url, headers=headers)
-  assert repeat.status_code == 200
-  assert repeat.json() == {"refreshed": []}
-
-
-def test_send_waits_while_pre_pr_checks_are_active(client, owner_token):
-  _write_token(login="octocat", user_id=42, scopes=("public_repo", "workflow"))
-  app_id, app_token = _app_token(client, owner_token, github_access=True)
-  _repo, record, diff_text = _prepared_platform_review(
-    app_id, "pre-pr-check-send-lock",
-  )
-  record["pre_pr_checks"] = {
-    "state": "queued",
-    "request_id": "request-2",
-    "run_id": 736,
-  }
-  _write_contribution(app_id, "pre-pr-check-send-lock", record, diff_text)
-
-  response = client.post(
-    f"/api/github/contributions/{app_id}/pre-pr-check-send-lock/submit",
-    headers={"Authorization": f"Bearer {app_token}"},
-  )
-  assert response.status_code == 409
-  assert "starting or running" in response.json()["detail"].lower()
-
-  stored = json.loads(
-    (Path(get_settings().data_dir) / "apps" / str(app_id) /
-     "contributions" / "pre-pr-check-send-lock.json").read_text()
-  )
-  assert stored["status"] == "prepared"
-  assert stored["pre_pr_checks"]["state"] == "queued"
 
 
 def test_review_status_catches_local_drift_before_send(
@@ -2557,11 +2656,11 @@ def test_safe_repo_path_accepts_durable_contribution_roots():
   assert _safe_repo_path(str(data_dir / "platform" / ".worktrees" / "fix")) == (
     data_dir / "platform" / ".worktrees" / "fix"
   ).resolve()
-  assert _safe_repo_path(str(data_dir / "contributions" / "rec" / "repo")) == (
-    data_dir / "contributions" / "rec" / "repo"
-  ).resolve()
   assert _safe_repo_path(str(data_dir / "contrib" / "mobius-fix-x")) == (
     data_dir / "contrib" / "mobius-fix-x"
+  ).resolve()
+  assert _safe_repo_path(str(data_dir / "contributions" / "legacy" / "repo")) == (
+    data_dir / "contributions" / "legacy" / "repo"
   ).resolve()
   assert _safe_repo_path(
     str(data_dir / "contrib" / "audit-20260710-1617" / "scroll-intent-return")
@@ -2577,7 +2676,6 @@ def test_safe_repo_path_rejects_non_durable_locations(tmp_path):
     _safe_repo_path(str(tmp_path / "repo"))
 
   assert "durable contribution folders" in exc.value.message
-  assert "nothing was sent to GitHub" in exc.value.message
 
   data_dir = Path(get_settings().data_dir)
 
@@ -3189,7 +3287,7 @@ def _commit_metadata(
   "failure_kind",
   ["timeout", "launch-error"],
 )
-def test_submit_contribution_keeps_accepted_pr_open_on_label_transport_failure(
+def test_submit_contribution_keeps_accepted_ready_pr_on_label_transport_failure(
   client, owner_token, monkeypatch, failure_kind,
 ):
   label_failure = (
@@ -3200,7 +3298,7 @@ def test_submit_contribution_keeps_accepted_pr_open_on_label_transport_failure(
   _write_token(login="octocat")
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   record_id = f"rec-pr-label-{failure_kind}"
-  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  repo = Path(get_settings().data_dir) / "contrib" / record_id / "repo"
   (repo / ".git").mkdir(parents=True)
   diff_text = "diff --git a/index.jsx b/index.jsx\n+hello\n"
   base = "b" * 40
@@ -3300,12 +3398,14 @@ def test_submit_contribution_keeps_accepted_pr_open_on_label_transport_failure(
   r = client.post(
     f"/api/github/contributions/{app_id}/{record_id}/submit",
     headers={"Authorization": f"Bearer {app_token}"},
+    json={"publication_stage": "ready"},
   )
   assert r.status_code == 200, r.text
   body = r.json()
   assert body["url"] == "https://github.com/mobius-os/app-demo/pull/42"
   assert body["number"] == 42
   assert body["record"]["status"] == "open"
+  assert body["record"]["publication_stage"] == "ready"
   assert body["record"]["url"] == body["url"]
   assert body["record"]["last_submit_labels_requested"] == ["bug"]
   assert body["record"]["last_submit_labels_applied"] == []
@@ -3335,6 +3435,7 @@ def test_submit_contribution_keeps_accepted_pr_open_on_label_transport_failure(
      "contributions" / f"{record_id}.json").read_text()
   )
   assert stored["status"] == "open"
+  assert stored["publication_stage"] == "ready"
   assert stored["number"] == 42
   assert stored["head_repository"] == "octocat/app-demo-1"
   assert stored["last_submit_labels_requested"] == ["bug"]
@@ -3366,7 +3467,7 @@ def test_submit_contribution_recovers_ambiguous_create_by_exact_pushed_head(
   _write_token(login="octocat")
   app_id, app_token = _app_token(client, owner_token, github_access=True)
   record_id = f"rec-pr-create-{failure_kind}-{existing_mode}"
-  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  repo = Path(get_settings().data_dir) / "contrib" / record_id / "repo"
   (repo / ".git").mkdir(parents=True)
   diff_text = "diff --git a/index.jsx b/index.jsx\n+hello\n"
   base = "b" * 40
@@ -3503,7 +3604,8 @@ def test_submit_contribution_recovers_ambiguous_create_by_exact_pushed_head(
   if existing_mode in {"match", "stale-head"}:
     assert response.status_code == 200, response.text
     assert response.json()["url"].endswith("/pull/42")
-    assert stored["status"] == "open"
+    assert stored["status"] == "draft"
+    assert stored["publication_stage"] == "draft"
     assert stored["url"].endswith("/pull/42")
     assert stored["last_submit_push_sha"] == head
     assert stored["last_submit_labels_applied"] == ["bug"]
@@ -3515,13 +3617,57 @@ def test_submit_contribution_recovers_ambiguous_create_by_exact_pushed_head(
     assert "url" not in stored
 
 
+def test_existing_pr_update_confirmation_reads_the_known_pr_directly(
+  tmp_path, monkeypatch,
+):
+  from app.github_contributions import _confirm_existing_pr_update
+
+  expected = "a" * 40
+  calls = []
+
+  def fake_gh(repo_path, *args, check=True):
+    calls.append(args)
+    head = "c" * 40 if len(calls) == 1 else expected
+    return _cp(json.dumps({
+      "html_url": "https://github.com/mobius-os/app-demo/pull/58",
+      "state": "open",
+      "head": {
+        "ref": "feat/existing-review",
+        "sha": head,
+        "repo": {"full_name": "octocat/app-demo"},
+      },
+      "base": {"ref": "main"},
+      "draft": True,
+    }))
+
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
+  monkeypatch.setattr("app.github_contributions.time.sleep", lambda _seconds: None)
+
+  confirmed = _confirm_existing_pr_update(
+    tmp_path,
+    "mobius-os/app-demo",
+    58,
+    expected_head_repository="octocat/app-demo",
+    expected_head_sha=expected,
+    branch="feat/existing-review",
+    base_branch="main",
+  )
+
+  assert confirmed == (
+    "https://github.com/mobius-os/app-demo/pull/58", "draft",
+  )
+  assert calls == [
+    ("api", "repos/mobius-os/app-demo/pulls/58"),
+    ("api", "repos/mobius-os/app-demo/pulls/58"),
+  ]
+
 def test_submit_contribution_normalizes_fallback_author_before_push(
   client, owner_token, monkeypatch,
 ):
   _write_token(login="octocat", user_id=42)
   app_id, _ = _app_token(client, owner_token, github_access=True)
   record_id = "rec-pr-fallback-author"
-  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  repo = Path(get_settings().data_dir) / "contrib" / record_id / "repo"
   (repo / ".git").mkdir(parents=True)
   diff_text = "diff --git a/index.jsx b/index.jsx\n+hello\n"
   base = "b" * 40
@@ -3649,7 +3795,7 @@ def test_submit_contribution_replaces_stale_fork_remote_before_push(
   _write_token(login="octocat")
   app_id, _ = _app_token(client, owner_token, github_access=True)
   record_id = "rec-pr-stale-fork"
-  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  repo = Path(get_settings().data_dir) / "contrib" / record_id / "repo"
   (repo / ".git").mkdir(parents=True)
   diff_text = "diff --git a/index.jsx b/index.jsx\n+hello\n"
   base = "b" * 40
@@ -3817,7 +3963,7 @@ def test_submit_contribution_stack_opens_ordered_incremental_prs(
     ),
   ]
   for record_id, position, base_branch, parent_id, base_sha, head_sha, suffix in specs:
-    repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+    repo = Path(get_settings().data_dir) / "contrib" / record_id / "repo"
     (repo / ".git").mkdir(parents=True)
     diff_text = f"diff --git a/{suffix} b/{suffix}\n+reviewed\n"
     record = {
@@ -3846,6 +3992,10 @@ def test_submit_contribution_stack_opens_ordered_incremental_prs(
           "base_branch": base_branch,
         },
       },
+      "quality_review": {
+        "state": "all_clear",
+        "reviewed_head_sha": head_sha,
+      },
     }
     _write_contribution(app_id, record_id, record, diff_text)
 
@@ -3861,8 +4011,12 @@ def test_submit_contribution_stack_opens_ordered_incremental_prs(
   )
   calls = []
 
-  def fake_submit(record, diff_path, *, direct_base_branch=None):
-    calls.append((record["id"], direct_base_branch, diff_path.name))
+  def fake_submit(
+    record, diff_path, *, direct_base_branch=None, publication_stage="draft",
+  ):
+    calls.append((
+      record["id"], direct_base_branch, diff_path.name, publication_stage,
+    ))
     number = 70 + len(calls)
     return (
       f"https://github.com/mobius-os/mobius/pull/{number}",
@@ -3870,6 +4024,7 @@ def test_submit_contribution_stack_opens_ordered_incremental_prs(
       {
         "last_submit_mode": "stack",
         "last_submit_base_branch": direct_base_branch,
+        "publication_stage": publication_stage,
       },
     )
 
@@ -3878,13 +4033,16 @@ def test_submit_contribution_stack_opens_ordered_incremental_prs(
   r = client.post(
     f"/api/github/contributions/{app_id}/submit-stack",
     headers={"Authorization": f"Bearer {app_token}"},
-    json={"record_ids": record_ids},
+    json={"record_ids": record_ids, "publication_stage": "ready"},
   )
 
   assert r.status_code == 200, r.text
   assert calls == [
-    (record_ids[0], "main", f"{record_ids[0]}.diff"),
-    (record_ids[1], f"stack/{stack_id}/01-stream", f"{record_ids[1]}.diff"),
+    (record_ids[0], "main", f"{record_ids[0]}.diff", "ready"),
+    (
+      record_ids[1], f"stack/{stack_id}/01-stream",
+      f"{record_ids[1]}.diff", "ready",
+    ),
   ]
   body = r.json()
   assert [record["status"] for record in body["records"]] == ["open", "open"]
@@ -3913,7 +4071,7 @@ def test_submit_contribution_stack_preserves_open_parent_when_child_fails(
     ),
   ]
   for record_id, position, base_branch, parent_id, base_sha, head_sha in specs:
-    repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+    repo = Path(get_settings().data_dir) / "contrib" / record_id / "repo"
     (repo / ".git").mkdir(parents=True)
     branch = f"stack/{stack_id}/0{position}-" + (
       "parent" if position == 1 else "child"
@@ -3944,19 +4102,28 @@ def test_submit_contribution_stack_preserves_open_parent_when_child_fails(
           "base_branch": base_branch,
         },
       },
+      "quality_review": {
+        "state": "all_clear",
+        "reviewed_head_sha": head_sha,
+      },
     }
     _write_contribution(app_id, record_id, record, diff_text)
 
   monkeypatch.setattr("app.routes.github._preflight_prepared_stack", lambda rows: None)
   calls = []
 
-  def fake_submit(record, diff_path, *, direct_base_branch=None):
+  def fake_submit(
+    record, diff_path, *, direct_base_branch=None, publication_stage="draft",
+  ):
     calls.append(record["id"])
     if len(calls) == 1:
       return (
         "https://github.com/mobius-os/mobius/pull/81",
         81,
-        {"last_submit_mode": "stack"},
+        {
+          "last_submit_mode": "stack",
+          "publication_stage": publication_stage,
+        },
       )
     raise ContributionSubmitError("Child PR could not be opened.")
 
@@ -3976,7 +4143,7 @@ def test_submit_contribution_stack_preserves_open_parent_when_child_fails(
     "number": 81,
   }]
   assert [record["status"] for record in detail["records"]] == [
-    "open", "prepared",
+    "draft", "prepared",
   ]
   assert detail["records"][1]["last_submit_error"] == (
     "Child PR could not be opened."
@@ -4059,7 +4226,7 @@ def test_stack_preflight_requires_refresh_after_parent_merges(monkeypatch):
   from app.routes.github import ContributionSubmitError, _preflight_prepared_stack
 
   _write_token(login="octocat")
-  repo = Path(get_settings().data_dir) / "contributions" / "merged-retry" / "repo"
+  repo = Path(get_settings().data_dir) / "contrib" / "merged-retry" / "repo"
   (repo / ".git").mkdir(parents=True)
   stack_id = "merged-retry"
   parent_branch = f"stack/{stack_id}/01-parent"
@@ -4124,7 +4291,7 @@ def test_submit_contribution_stack_rejects_broken_parent_link_before_claim(
   stack_id = "broken-chain"
   record_ids = ["broken-01", "broken-02"]
   for position, record_id in enumerate(record_ids, 1):
-    repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+    repo = Path(get_settings().data_dir) / "contrib" / record_id / "repo"
     (repo / ".git").mkdir(parents=True)
     base_sha = "b" * 40 if position == 1 else "9" * 40
     head_sha = "a" * 40 if position == 1 else "c" * 40
@@ -4189,7 +4356,7 @@ def test_direct_stack_layer_pushes_upstream_and_uses_reviewed_base(
 
   _write_token(login="octocat")
   record_id = "direct-stack-layer"
-  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  repo = Path(get_settings().data_dir) / "contrib" / record_id / "repo"
   (repo / ".git").mkdir(parents=True)
   branch = "stack/demo-flow/01-model"
   base = "b" * 40
@@ -4386,25 +4553,25 @@ def test_existing_pr_update_uses_its_verified_fork_destination(
   def confirm(
     _repo,
     upstream,
-    login,
-    pushed_branch,
+    number,
     *,
+    expected_head_repository,
     expected_head_sha,
+    branch,
     base_branch,
-    same_repo,
   ):
     confirmations.append((
       upstream,
-      login,
-      pushed_branch,
+      number,
+      expected_head_repository,
+      branch,
       expected_head_sha,
       base_branch,
-      same_repo,
     ))
-    return "https://github.com/mobius-os/app-demo/pull/58"
+    return "https://github.com/mobius-os/app-demo/pull/58", "draft"
 
   monkeypatch.setattr(
-    "app.github_contributions._find_existing_pr", confirm,
+    "app.github_contributions._confirm_existing_pr_update", confirm,
   )
 
   url, number, patch = _submit_prepared_pr(
@@ -4420,15 +4587,16 @@ def test_existing_pr_update_uses_its_verified_fork_destination(
   assert pushes == [(branch, "HEAD")]
   assert confirmations == [(
     "mobius-os/app-demo",
-    "octocat",
+    58,
+    "octocat/app-demo",
     branch,
     head,
     "main",
-    False,
   )]
   assert patch["head_repository"] == "octocat/app-demo"
   assert patch["last_submit_push_sha"] == head
   assert patch["last_pushed_branch"] == f"octocat:{branch}"
+  assert patch["publication_stage"] == "draft"
 
 
 def test_existing_pr_update_stops_if_verified_fork_remote_does_not_match(
@@ -4500,7 +4668,7 @@ def test_land_contribution_stack_marks_every_layer_merged(
   parent_head = "a" * 40
   top_head = "c" * 40
   for position, record_id in enumerate(record_ids, 1):
-    repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+    repo = Path(get_settings().data_dir) / "contrib" / record_id / "repo"
     (repo / ".git").mkdir(parents=True)
     branch = f"stack/{stack_id}/0{position}-layer"
     diff_text = f"diff --git a/layer-{position} b/layer-{position}\n+green\n"
@@ -4641,7 +4809,7 @@ def test_land_contribution_stack_restores_open_records_on_preflight_failure(
   stack_id = "red-app-stack"
   ids = ["red-stack-01", "red-stack-02"]
   for position, record_id in enumerate(ids, 1):
-    repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+    repo = Path(get_settings().data_dir) / "contrib" / record_id / "repo"
     (repo / ".git").mkdir(parents=True)
     parent = "a" * 40
     branch = f"stack/{stack_id}/0{position}-layer"
@@ -4882,7 +5050,7 @@ def test_submit_contribution_rejects_branch_diff_mismatch(
   _write_token(login="octocat")
   app_id, _ = _app_token(client, owner_token, github_access=True)
   record_id = "rec-pr-diff-mismatch"
-  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  repo = Path(get_settings().data_dir) / "contrib" / record_id / "repo"
   (repo / ".git").mkdir(parents=True)
   reviewed_diff = "diff --git a/index.jsx b/index.jsx\n+reviewed\n"
   branch_diff = "diff --git a/index.jsx b/index.jsx\n+not-reviewed\n"
@@ -4964,7 +5132,7 @@ def test_submit_contribution_rejects_unmergeable_branch_before_push(
   _write_token(login="octocat")
   app_id, _ = _app_token(client, owner_token, github_access=True)
   record_id = "rec-pr-merge-conflict"
-  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  repo = Path(get_settings().data_dir) / "contrib" / record_id / "repo"
   (repo / ".git").mkdir(parents=True)
   diff_text = "diff --git a/index.jsx b/index.jsx\n+hello\n"
   base = "b" * 40
@@ -5050,7 +5218,7 @@ def test_submit_contribution_records_public_branch_after_pr_create_failure(
   _write_token(login="octocat")
   app_id, _ = _app_token(client, owner_token, github_access=True)
   record_id = "rec-pr-push-then-fail"
-  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  repo = Path(get_settings().data_dir) / "contrib" / record_id / "repo"
   (repo / ".git").mkdir(parents=True)
   diff_text = "diff --git a/index.jsx b/index.jsx\n+hello\n"
   base = "b" * 40
@@ -5160,7 +5328,7 @@ def test_submit_contribution_rejects_other_app_scoped_token(
       "body_draft": "Body",
       "branch": "fix/demo-polish",
       "repo_path": str(
-        Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+        Path(get_settings().data_dir) / "contrib" / record_id / "repo"
       ),
       "head_sha": "abc123",
     },
@@ -5200,7 +5368,7 @@ def test_submit_contribution_rejects_app_without_github_access(
       "body_draft": "Body",
       "branch": "fix/demo-polish",
       "repo_path": str(
-        Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+        Path(get_settings().data_dir) / "contrib" / record_id / "repo"
       ),
       "head_sha": "abc123",
     },
@@ -5295,6 +5463,356 @@ def _prepared_existing_pr_update(app_id: int, record_id: str) -> dict:
   return record
 
 
+def _prepared_existing_pr_update_stack(app_id: int) -> tuple[list[str], list[dict]]:
+  stack_id = "existing-update-stack"
+  record_ids = [f"{stack_id}-01", f"{stack_id}-02"]
+  parent_head = "a" * 40
+  specs = [
+    (record_ids[0], 1, "main", "", "b" * 40, parent_head, 58),
+    (
+      record_ids[1], 2, f"stack/{stack_id}/01-parent", record_ids[0],
+      parent_head, "c" * 40, 59,
+    ),
+  ]
+  records = []
+  for record_id, position, base_branch, parent_id, base_sha, head_sha, number in specs:
+    repo_path = (
+      Path(get_settings().data_dir) / "contrib" / record_id / "worktree"
+    )
+    (repo_path / ".git").mkdir(parents=True, exist_ok=True)
+    branch = f"stack/{stack_id}/0{position}-" + (
+      "parent" if position == 1 else "child"
+    )
+    diff_text = f"diff --git a/{record_id} b/{record_id}\n+reviewed\n"
+    record = {
+      "id": record_id,
+      "type": "pr",
+      "repo": "mobius-os/app-demo",
+      "status": "prepared",
+      "title": f"Refine stack layer {position}",
+      "branch": branch,
+      "number": number,
+      "url": f"https://github.com/mobius-os/app-demo/pull/{number}",
+      "head_repository": "octocat/app-demo",
+      "submitted_at": f"2026-08-2{position}T12:00:00Z",
+      "plan": {
+        "action": "pr_update",
+        "repo": "mobius-os/app-demo",
+        "title": f"Refine stack layer {position}",
+        "body_draft": f"Reviewed stack update {position}.",
+        "branch": branch,
+        "repo_path": str(repo_path),
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "diff_sha256": hashlib.sha256(diff_text.encode()).hexdigest(),
+        "stack": {
+          "id": stack_id,
+          "position": position,
+          "total": 2,
+          "parent_record_id": parent_id,
+          "base_branch": base_branch,
+        },
+      },
+      "quality_review": {
+        "state": "all_clear",
+        "reviewed_head_sha": head_sha,
+        "reviewed_at": "2026-08-24T18:00:00Z",
+      },
+    }
+    _write_contribution(app_id, record_id, record, diff_text)
+    records.append(record)
+  return record_ids, records
+
+
+def test_existing_pr_stack_update_fast_forwards_complete_chain_parent_first(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record_ids, originals = _prepared_existing_pr_update_stack(app_id)
+  calls = []
+
+  monkeypatch.setattr(
+    github_routes,
+    "_preflight_prepared_stack",
+    lambda rows: calls.append(("preflight", [row["record"]["id"] for row in rows])),
+  )
+
+  def live_target(repo, number, head_repo, branch):
+    calls.append(("target", number, branch))
+    return {
+      "error": None,
+      "head_sha": str(number - 50) * 40,
+      "base_branch": "main" if number == 58 else originals[0]["branch"],
+    }
+
+  monkeypatch.setattr(github_routes, "_autopilot_live_target", live_target)
+  monkeypatch.setattr(
+    github_routes,
+    "_assert_reviewed_update_contains_live_head",
+    lambda _repo, live, reviewed: calls.append(("ancestry", live, reviewed)),
+  )
+
+  def submit(record, _diff_path, **kwargs):
+    calls.append((
+      "submit", record["id"], kwargs["direct_base_branch"],
+      kwargs["expected_existing_pr_number"],
+    ))
+    number = int(record["number"])
+    return (
+      f"https://github.com/mobius-os/app-demo/pull/{number}",
+      number,
+      {"last_submit_push_sha": record["plan"]["head_sha"]},
+    )
+
+  monkeypatch.setattr(github_routes, "_submit_prepared_pr", submit)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/update-stack",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={"record_ids": record_ids},
+  )
+
+  assert response.status_code == 200, response.text
+  body = response.json()
+  assert [record["status"] for record in body["records"]] == ["open", "open"]
+  assert [item["number"] for item in body["updated"]] == [58, 59]
+  assert [record["submitted_at"] for record in body["records"]] == [
+    record["submitted_at"] for record in originals
+  ]
+  assert [call for call in calls if call[0] == "submit"] == [
+    ("submit", record_ids[0], "main", 58),
+    ("submit", record_ids[1], originals[0]["branch"], 59),
+  ]
+
+
+def test_existing_pr_stack_update_accepts_unchanged_public_create_parent(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record_ids, originals = _prepared_existing_pr_update_stack(app_id)
+  parent = originals[0]
+  parent["status"] = "open"
+  parent["plan"]["action"] = "pr"
+  _write_contribution(
+    app_id,
+    record_ids[0],
+    parent,
+    f"diff --git a/{record_ids[0]} b/{record_ids[0]}\n+reviewed\n",
+  )
+  monkeypatch.setattr(
+    github_routes, "_preflight_prepared_stack", lambda _rows: None,
+  )
+  monkeypatch.setattr(
+    github_routes,
+    "_autopilot_live_target",
+    lambda _repo, number, _head_repo, _branch: {
+      "error": None,
+      "head_sha": "9" * 40,
+      "base_branch": originals[0]["branch"],
+    },
+  )
+  monkeypatch.setattr(
+    github_routes,
+    "_assert_reviewed_update_contains_live_head",
+    lambda *_args: None,
+  )
+  submitted = []
+
+  def submit(record, _diff_path, **_kwargs):
+    submitted.append(record["id"])
+    return (
+      "https://github.com/mobius-os/app-demo/pull/59",
+      59,
+      {"last_submit_push_sha": record["plan"]["head_sha"]},
+    )
+
+  monkeypatch.setattr(github_routes, "_submit_prepared_pr", submit)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/update-stack",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={"record_ids": record_ids},
+  )
+
+  assert response.status_code == 200, response.text
+  body = response.json()
+  assert submitted == [record_ids[1]]
+  assert body["updated"] == [{
+    "id": record_ids[1],
+    "url": "https://github.com/mobius-os/app-demo/pull/59",
+    "number": 59,
+  }]
+  assert [record["status"] for record in body["records"]] == ["open", "open"]
+
+
+def test_existing_pr_stack_update_never_claims_private_create_layer(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record_ids, originals = _prepared_existing_pr_update_stack(app_id)
+  parent = originals[0]
+  parent["plan"]["action"] = "pr"
+  _write_contribution(
+    app_id,
+    record_ids[0],
+    parent,
+    f"diff --git a/{record_ids[0]} b/{record_ids[0]}\n+reviewed\n",
+  )
+  monkeypatch.setattr(
+    github_routes,
+    "_preflight_prepared_stack",
+    lambda _rows: pytest.fail("an unapproved create layer must not reach preflight"),
+  )
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/update-stack",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={"record_ids": record_ids},
+  )
+
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"] == (
+    "A private stack layer is prepared for a different public action."
+  )
+
+
+def test_existing_pr_stack_update_rejects_newer_live_head_before_any_push(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record_ids, _originals = _prepared_existing_pr_update_stack(app_id)
+  monkeypatch.setattr(
+    github_routes, "_preflight_prepared_stack", lambda _rows: None,
+  )
+  monkeypatch.setattr(
+    github_routes,
+    "_autopilot_live_target",
+    lambda _repo, number, _head_repo, _branch: {
+      "error": None,
+      "head_sha": str(number - 50) * 40,
+      "base_branch": "main",
+    },
+  )
+
+  def nonancestor(_repo, *args, check=True):
+    assert args[:2] == ("merge-base", "--is-ancestor")
+    assert check is False
+    return subprocess.CompletedProcess(args, 1, "", "")
+
+  monkeypatch.setattr(github_routes, "_git", nonancestor)
+  monkeypatch.setattr(
+    github_routes,
+    "_submit_prepared_pr",
+    lambda *_args, **_kwargs: pytest.fail(
+      "a non-ancestor review must stop before any push",
+    ),
+  )
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/update-stack",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={"record_ids": record_ids},
+  )
+
+  assert response.status_code == 409, response.text
+  detail = response.json()["detail"]
+  assert detail["code"] == "review_refresh_needed"
+  assert detail["updated"] == []
+  assert [record["status"] for record in detail["records"]] == [
+    "prepared", "prepared",
+  ]
+
+
+def test_existing_pr_stack_update_preserves_parent_when_child_fails(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record_ids, _originals = _prepared_existing_pr_update_stack(app_id)
+  monkeypatch.setattr(github_routes, "_preflight_prepared_stack", lambda _rows: None)
+  monkeypatch.setattr(
+    github_routes,
+    "_autopilot_live_target",
+    lambda _repo, number, _head_repo, _branch: {
+      "error": None,
+      "head_sha": str(number - 50) * 40,
+      "base_branch": "main",
+    },
+  )
+  monkeypatch.setattr(
+    github_routes,
+    "_assert_reviewed_update_contains_live_head",
+    lambda *_args: None,
+  )
+  calls = []
+
+  def submit(record, _diff_path, **_kwargs):
+    calls.append(record["id"])
+    if len(calls) == 2:
+      raise ContributionSubmitError("Child update was rejected.")
+    return (
+      "https://github.com/mobius-os/app-demo/pull/58",
+      58,
+      {"last_submit_push_sha": record["plan"]["head_sha"]},
+    )
+
+  monkeypatch.setattr(github_routes, "_submit_prepared_pr", submit)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/update-stack",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={"record_ids": record_ids},
+  )
+
+  assert response.status_code == 409, response.text
+  detail = response.json()["detail"]
+  assert calls == record_ids
+  assert [record["status"] for record in detail["records"]] == [
+    "open", "prepared",
+  ]
+  assert detail["records"][1]["last_submit_error"] == (
+    "Child update was rejected."
+  )
+  assert detail["updated"] == [{
+    "id": record_ids[0],
+    "url": "https://github.com/mobius-os/app-demo/pull/58",
+    "number": 58,
+  }]
+
+
+def test_existing_pr_target_includes_the_live_base_branch(monkeypatch):
+  _write_token(login="octocat")
+  live = {
+    "state": "open",
+    "head": {
+      "ref": "feat/existing-review",
+      "sha": "9" * 40,
+      "repo": {"full_name": "octocat/app-demo"},
+    },
+    "base": {
+      "ref": "stack/review/01-parent",
+      "repo": {"full_name": "mobius-os/app-demo"},
+    },
+  }
+  monkeypatch.setattr(github_routes.shutil, "which", lambda _name: "/bin/gh")
+  monkeypatch.setattr(
+    github_routes.subprocess,
+    "run",
+    lambda *_args, **_kwargs: _cp(json.dumps(live)),
+  )
+
+  target = github_routes._autopilot_live_target(
+    "mobius-os/app-demo", 58, "octocat/app-demo", "feat/existing-review",
+  )
+
+  assert target == {
+    "error": None,
+    "head_sha": "9" * 40,
+    "base_branch": "stack/review/01-parent",
+  }
+
+
 def test_existing_pr_update_uses_owner_approved_exact_target(
   client, owner_token, monkeypatch,
 ):
@@ -5332,7 +5850,10 @@ def test_existing_pr_update_uses_owner_approved_exact_target(
     return (
       "https://github.com/mobius-os/app-demo/pull/58",
       58,
-      {"last_submit_push_sha": record["plan"]["head_sha"]},
+      {
+        "last_submit_push_sha": record["plan"]["head_sha"],
+        "publication_stage": "draft",
+      },
     )
 
   monkeypatch.setattr(github_routes, "_submit_prepared_pr", submit)
@@ -5344,7 +5865,8 @@ def test_existing_pr_update_uses_owner_approved_exact_target(
 
   assert response.status_code == 200, response.text
   updated = response.json()["record"]
-  assert updated["status"] == "open"
+  assert updated["status"] == "draft"
+  assert updated["publication_stage"] == "draft"
   assert updated["number"] == 58
   assert updated["submitted_at"] == original["submitted_at"]
   assert updated["last_submit_push_sha"] == original["plan"]["head_sha"]
@@ -6075,7 +6597,7 @@ def test_for_chat_returns_the_complete_lifecycle_without_a_hidden_five_card_cap(
 
 
 def test_for_chat_coverage_keeps_display_bounded_without_losing_file_41(
-  client, owner_token,
+  client, owner_token, db, monkeypatch,
 ):
   _write_token(login="octocat", user_id=42)
   app_id, app_token = _app_token(client, owner_token, github_access=True)
@@ -6133,6 +6655,24 @@ def test_for_chat_coverage_keeps_display_bounded_without_losing_file_41(
   )
   assert app_request.status_code == 403
 
+  async def recorded_edit(_db, requested_chat_id):
+    assert requested_chat_id == "chat-wide"
+    return [{
+      "id": "edit-after-file-40",
+      "ts": "2026-08-27T11:00:00Z",
+      "paths": ["/data/platform/file-41.js"],
+    }]
+
+  monkeypatch.setattr(github_routes, "_recorded_chat_edits", recorded_edit)
+  snapshot = asyncio.run(
+    github_routes._contribution_work_snapshot(db, app_id, "chat-wide")
+  )
+  # The helper freshness check must use complete contribution coverage too;
+  # otherwise this covered edit appears unsorted forever and every click 409s.
+  assert len(snapshot["record_views"][0]["files"]) == 40
+  assert snapshot["unsorted_entries"] == []
+  assert snapshot["unsorted_revision"] == ""
+
 
 def test_for_chat_coverage_rejects_an_unbounded_path_request(client, owner_token):
   app_id, _ = _app_token(client, owner_token, github_access=True)
@@ -6157,6 +6697,7 @@ def test_for_chat_coverage_preserves_repo_relative_a_and_b_directories(
     status="open",
   )
   record["quality_review"] = {"reviewed_at": "2026-08-27T12:00:00Z"}
+  record["plan"]["source_repo_path"] = "/data/platform"
   diff_text = "\n".join([
     "diff --git a/a/foo.js b/a/foo.js",
     "--- a/a/foo.js",
@@ -6178,14 +6719,63 @@ def test_for_chat_coverage_preserves_repo_relative_a_and_b_directories(
     f"/api/github/contributions/{app_id}/for-chat/"
     "chat-side-prefix-directories/coverage",
     headers={"Authorization": f"Bearer {owner_token}"},
-    json={"paths": ["a/foo.js", "foo.js", "b/foo.js"]},
+    json={"paths": [
+      "/data/platform/a/foo.js",
+      "/data/platform/foo.js",
+      "/data/platform/b/foo.js",
+    ]},
   )
 
   assert response.status_code == 200, response.text
   assert response.json() == {"coverage": [
-    {"path": "a/foo.js", "coverage_at": "2026-08-27T12:00:00Z"},
-    {"path": "b/foo.js", "coverage_at": "2026-08-27T12:00:00Z"},
+    {
+      "path": "/data/platform/a/foo.js",
+      "coverage_at": "2026-08-27T12:00:00Z",
+    },
+    {
+      "path": "/data/platform/b/foo.js",
+      "coverage_at": "2026-08-27T12:00:00Z",
+    },
   ]}
+
+
+def test_for_chat_coverage_never_trusts_a_hostile_record_source_root(
+  client, owner_token,
+):
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  _, record = _prepared_for_chat(
+    app_id,
+    "hostile-coverage",
+    "chat-hostile",
+    status="open",
+    number=42,
+    url="https://github.com/mobius-os/mobius/pull/42",
+  )
+  record["plan"]["source_repo_path"] = "/data/shared/memory"
+  record["quality_review"] = {"reviewed_at": "2026-08-27T12:00:00Z"}
+  _write_contribution(
+    app_id,
+    "hostile-coverage",
+    record,
+    "\n".join([
+      "diff --git a/private.md b/private.md",
+      "--- a/private.md",
+      "+++ b/private.md",
+      "@@ -1 +1 @@",
+      "-old",
+      "+new",
+      "",
+    ]),
+  )
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/for-chat/chat-hostile/coverage",
+    headers={"Authorization": f"Bearer {owner_token}"},
+    json={"paths": ["/data/shared/memory/private.md"]},
+  )
+  assert response.status_code == 200, response.text
+  assert response.json() == {"coverage": []}
+  assert "hostile-coverage" not in response.text
 
 
 def test_for_chat_releases_storage_lock_before_parsing_contribution_history(
@@ -6236,6 +6826,109 @@ def test_for_chat_releases_storage_lock_before_parsing_contribution_history(
   assert [record["id"] for record in response.json()["records"]] == [
     "lock-friendly",
   ]
+
+
+def test_chat_settlements_are_temporal_idempotent_and_owner_written(
+  client, owner_token,
+):
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  headers = {"Authorization": f"Bearer {owner_token}"}
+  url = f"/api/github/contributions/{app_id}/for-chat/chat-a/settle"
+  path = "/data/platform/frontend/src/example.js"
+
+  first = client.post(url, headers=headers, json={
+    "coverage_at": 1_787_800_000_000,
+    "items": [{
+      "path": path,
+      "disposition": "experimental",
+      "summary": "Kept as a local experiment.",
+    }],
+  })
+  assert first.status_code == 200, first.text
+
+  # A delayed retry from an older source snapshot cannot roll the decision
+  # backwards or replace its newer explanation.
+  older = client.post(url, headers=headers, json={
+    "coverage_at": 1_787_700_000_000,
+    "items": [{
+      "path": path,
+      "disposition": "duplicate",
+      "summary": "Stale retry.",
+    }],
+  })
+  assert older.status_code == 200, older.text
+  settlement = older.json()["settlements"][0]
+  assert settlement["coverage_at"] == 1_787_800_000_000
+  assert settlement["disposition"] == "experimental"
+  assert settlement["summary"] == "Kept as a local experiment."
+
+  projected = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
+  )
+  assert projected.status_code == 200, projected.text
+  assert projected.json()["settlements"] == older.json()["settlements"]
+
+  denied = client.post(
+    url,
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={"coverage_at": 1_787_800_000_000, "items": [{"path": path}]},
+  )
+  assert denied.status_code == 403, denied.text
+
+
+def test_chat_settlements_accept_only_review_worktrees_under_contrib(
+  client, owner_token,
+):
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  headers = {"Authorization": f"Bearer {owner_token}"}
+  url = f"/api/github/contributions/{app_id}/for-chat/chat-a/settle"
+
+  accepted = client.post(url, headers=headers, json={
+    "coverage_at": 1_787_800_000_000,
+    "items": [{
+      "path": "/data/contrib/review-one/worktree/backend/app.py",
+      "disposition": "duplicate",
+      "summary": "Captured by the final review.",
+    }],
+  })
+  assert accepted.status_code == 200, accepted.text
+
+  rejected = client.post(url, headers=headers, json={
+    "coverage_at": 1_787_800_000_000,
+    "items": [{
+      "path": "/data/contrib/review-one/git/config",
+      "disposition": "experimental",
+    }],
+  })
+  assert rejected.status_code == 422, rejected.text
+
+
+def test_chat_action_key_ignores_poll_timestamps_but_changes_with_attention(
+  client, owner_token,
+):
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  _, record = _prepared_for_chat(
+    app_id, "attention-key", "chat-a", status="open", needs_attention=True,
+    attention={"key": "checks_failed:one", "type": "checks_failed"},
+  )
+  headers = {"Authorization": f"Bearer {owner_token}"}
+
+  first = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
+  ).json()["records"][0]["action_key"]
+  record["updated_at"] = "2026-08-27T15:00:00Z"
+  _write_contribution(app_id, "attention-key", record, "")
+  second = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
+  ).json()["records"][0]["action_key"]
+  assert second == first
+
+  record["attention"] = {"key": "checks_failed:two", "type": "checks_failed"}
+  _write_contribution(app_id, "attention-key", record, "")
+  third = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
+  ).json()["records"][0]["action_key"]
+  assert third != first
 
 
 def test_diff_file_paths_reads_headers_not_source_that_looks_like_one(tmp_path):
@@ -6339,9 +7032,82 @@ def test_for_chat_marks_a_stack_layer_so_chat_never_sends_one_alone(
   }
   assert "parent_record_id" not in item["stack"]
   assert "base_branch" not in item["stack"]
-  # A stack layer is never preflighted here: the whole chain is reviewed and
-  # sent together in the app, so the card must not offer a single-layer Send.
+  # A lone stack layer is never preflighted: the complete chain is exposed as a
+  # separate approval unit only when every linked record is available.
   assert item["review"] is None
+
+
+def test_for_chat_exposes_the_complete_reviewed_stack_as_one_approval_unit(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  parent_id = "direct-approval-layer-1"
+  child_id = "direct-approval-layer-2"
+  _, parent = _prepared_for_chat(app_id, parent_id, "older-chat")
+  _, child = _prepared_for_chat(app_id, child_id, "chat-a")
+  stack_id = "direct-approval"
+  parent["plan"]["stack"] = {
+    "id": stack_id, "name": "Direct approval", "position": 1, "total": 2,
+    "parent_record_id": "", "base_branch": "main",
+  }
+  child["plan"]["stack"] = {
+    "id": stack_id, "name": "Direct approval", "position": 2, "total": 2,
+    "parent_record_id": parent_id, "base_branch": parent["plan"]["branch"],
+  }
+  _write_contribution(app_id, parent_id, parent, "")
+  _write_contribution(app_id, child_id, child, "")
+  monkeypatch.setattr(
+    github_routes,
+    "_validate_stack_records",
+    lambda records, **_kwargs: [
+      {"record": record}
+      for record in sorted(records, key=github_routes._chat_stack_position)
+    ],
+  )
+  monkeypatch.setattr(
+    github_routes,
+    "_inspect_prepared_review",
+    lambda record, _diff, _state: {
+      "id": record["id"], "state": "ready", "code": "ready",
+      "message": "Still matches the exact source you reviewed.",
+    },
+  )
+  headers = {"Authorization": f"Bearer {owner_token}"}
+
+  response = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
+  )
+
+  assert response.status_code == 200, response.text
+  body = response.json()
+  assert [record["id"] for record in body["records"]] == [child_id]
+  assert len(body["stack_units"]) == 1
+  unit = body["stack_units"][0]
+  assert unit["id"] == stack_id
+  assert unit["name"] == "Direct approval"
+  assert [record["id"] for record in unit["records"]] == [parent_id, child_id]
+  assert [record["review"]["state"] for record in unit["records"]] == [
+    "ready", "ready",
+  ]
+
+  # Partial publication must not strand the remaining private child in the
+  # other source chat: the public parent still keeps the complete unit here.
+  parent.update({
+    "chat_id": "chat-a", "status": "draft", "number": 7,
+    "url": "https://github.com/mobius-os/mobius/pull/7",
+  })
+  child["chat_id"] = "older-chat"
+  _write_contribution(app_id, parent_id, parent, "")
+  _write_contribution(app_id, child_id, child, "")
+  partial = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
+  )
+  assert partial.status_code == 200, partial.text
+  assert [record["id"] for record in partial.json()["records"]] == [parent_id]
+  assert [record["id"] for record in partial.json()["stack_units"][0]["records"]] == [
+    parent_id, child_id,
+  ]
 
 
 def test_for_chat_requires_the_owner_or_that_app(client, owner_token):
@@ -6377,7 +7143,7 @@ def test_submit_records_where_the_owner_pressed_send(
   # An unknown surface is rejected by the schema rather than stored.
   assert invalid.status_code == 422, invalid.text
 
-  def fake_submit(record, _diff_path):
+  def fake_submit(record, _diff_path, **_kwargs):
     assert record["submitter"] == "chat-review-card"
     return "https://github.com/mobius-os/app-demo/pull/17", 17, {}
 
@@ -6559,7 +7325,7 @@ def test_send_refuses_branch_with_existing_pr_before_any_push(
 
   _write_token(login="octocat")
   record_id = "already-sent-guard"
-  repo = Path(get_settings().data_dir) / "contributions" / record_id / "repo"
+  repo = Path(get_settings().data_dir) / "contrib" / record_id / "repo"
   (repo / ".git").mkdir(parents=True)
   branch = "stack/demo-flow/01-model"
   base = "b" * 40
