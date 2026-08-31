@@ -115,6 +115,10 @@ test('durable Goal presentation survives terminal runtime states', () => {
   }), paused)
   assert.deepEqual(goalPresentationFromRuntime({
     running: false,
+    goal: { ...paused, wait_kind: 'monitor' },
+  }), { ...paused, waitKind: 'monitor' })
+  assert.deepEqual(goalPresentationFromRuntime({
+    running: false,
     goal: {
       id: 'goal-1', objective: 'Finish the migration', status: 'completed',
     },

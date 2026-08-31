@@ -202,6 +202,33 @@ def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
   assert "an attempted tool call returns a failure" in planning_normalized
 
 
+def test_goal_waits_always_name_a_durable_owner_interaction():
+  repo = Path(__file__).resolve().parents[2]
+  core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
+  planning = (
+    repo / "backend" / "scripts" / "seed-skills" / "goal-planning.md"
+  ).read_text(encoding="utf-8")
+  waiting = (
+    repo / "backend" / "scripts" / "seed-skills" / "waiting.md"
+  ).read_text(encoding="utf-8")
+  core_normalized = " ".join(core.split())
+  planning_normalized = " ".join(planning.split())
+  waiting_normalized = " ".join(waiting.split())
+
+  assert "**Never leave an invisible wait.**" in core
+  assert "declare a durable monitor" in core_normalized
+  assert "call the clarifying-question tool" in core_normalized
+  assert "Done**, **Need help**, and **Not now" in core_normalized
+  assert "Never rely on a paused Goal" in core_normalized
+  assert "### Make every unfinished wait explicit" in planning
+  assert "create exactly one owning interaction" in planning_normalized
+  assert "keeps the Goal marked **Waiting for you**" in planning_normalized
+  assert "Do not end with “tell me when…”" in planning_normalized
+  assert "Every wait must have one visible owner" in waiting_normalized
+  assert "exit **0 exactly when the condition is met**" in waiting_normalized
+  assert "A wait declared inside a Goal resumes under the same Goal" in waiting_normalized
+
+
 def test_core_prompt_distinguishes_durable_delegation_and_owner_led_contribution():
   repo = Path(__file__).resolve().parents[2]
   core = (repo / "skill" / "core.md").read_text(encoding="utf-8")

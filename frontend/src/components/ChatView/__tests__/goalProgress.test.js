@@ -133,6 +133,32 @@ test('paused and completed Goals are visibly distinct', () => {
   })[0].label, 'Goal · Completed · 3/3')
 })
 
+test('the Goal rail names who owns an unfinished wait', () => {
+  const goal = { objective: 'Ship it', status: 'paused' }
+  const plan = {
+    summary: { completed: 2, total: 3 },
+    tasks: [{ id: 'verify', title: 'Verify', status: 'running' }],
+  }
+  const ownerWait = progressRailViewModel(goal, [], plan, {
+    ownerActionRequired: true,
+    monitoring: true,
+  })[0]
+  assert.equal(ownerWait.label, 'Goal · Waiting for you · 2/3 · Verify')
+  assert.equal(
+    ownerWait.ariaLabel,
+    'Goal waiting for you for Ship it; 2 of 3 complete',
+  )
+
+  const monitoredWait = progressRailViewModel(goal, [], plan, {
+    monitoring: true,
+  })[0]
+  assert.equal(monitoredWait.label, 'Goal · Monitoring · 2/3 · Verify')
+  assert.equal(
+    monitoredWait.ariaLabel,
+    'Goal monitoring for Ship it; 2 of 3 complete',
+  )
+})
+
 test('stale plan data cannot show tasks after the active goal has ended', () => {
   const plan = {
     tasks: [{ id: 'old', title: 'Old work', status: 'running' }],
@@ -440,6 +466,22 @@ test('the goal rail confirms and clears directly, sourced domain-neutrally', () 
     'a paused Goal should expose the one-tap resume action')
   assert.match(chatView, /actionIcon: <Play width=\{13\} height=\{13\}/,
     'the paused Goal action should spend only icon-sized visual space')
+  assert.match(chatView, /ownerActionRequired: goalPresentation\?\.waitKind === 'owner_question'/,
+    'only a question attributed to this exact Goal may own its wait state')
+  assert.match(chatView, /monitoring: goalPresentation\?\.waitKind === 'monitor'/,
+    'only a monitor attributed to this exact Goal may own its wait state')
+  assert.match(chatView, /actionableGoalPresentation\?\.status === 'paused'[\s\S]{0,80}&& !goalWaitState\.monitoring/,
+    'a monitored Goal must not expose a competing manual Resume action')
+  assert.match(chatView, /actionKind: 'owner-question'[\s\S]*?actionLabel: 'View question'/,
+    'an owner-required Goal should expose the existing question surface')
+  assert.match(chatView, /actionableGoalPresentation && goalWaitState\.ownerActionRequired/,
+    'an unrelated chat-wide question must not become this Goal\'s action')
+  assert.match(chatView, /revealPendingQuestion\(pendingQuestionEl\)/,
+    'the Goal question action must reveal the real pending question card')
+  assert.match(chatView, /const ariaStatus = goalWaitState\.ownerActionRequired && goalAriaStatus/,
+    'screen readers must hear the owner handoff before generic turn activity')
+  assert.match(chatView, /onActionItem=\{handleGoalRailAction\}/,
+    'the rail must route Resume and owner-question actions through their owner')
   assert.match(progressRail, /className="chat__progress-action"/,
     'the shared rail must render item-supplied actions without encoding Goal semantics')
   assert.match(progressRail, /item\.actionIcon \|\| item\.actionLabel/,
