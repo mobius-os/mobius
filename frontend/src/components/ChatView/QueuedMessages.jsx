@@ -9,6 +9,7 @@ import {
 } from '@openai/apps-sdk-ui/components/Icon'
 import { stripAugmentation } from './msgText.js'
 import { cidOf } from './messageIdentity.js'
+import { queuedHint } from './queuedHint.js'
 import { placeCaretAtTextEnd } from './composerFocusPolicy.js'
 import { autoGrowTextarea } from './composerTextareaSizing.js'
 import { restoreQueuedEditorAfterSave } from './queuedEditorFocus.js'
@@ -41,7 +42,7 @@ const EDITOR_MAX_HEIGHT = 160
  */
 export default function QueuedMessages({
   items, onCancel, onEdit, onSteerOne, steerActive, steerBusy = false,
-  focusComposer,
+  turnActive = false, online = true, restarting = false, focusComposer,
 }) {
   const [expanded, setExpanded] = useState(() => new Set())
   const [collapsed, setCollapsed] = useState(false)
@@ -53,6 +54,8 @@ export default function QueuedMessages({
   const editorRef = useRef(null)
 
   if (!items || items.length === 0) return null
+
+  const hint = queuedHint({ turnActive, online, restarting })
 
   // Stable key: the row's `cid` (client-minted, or a `legacy-<ts>`
   // derivation for pre-cid rows). cid is minted once at compose time and
@@ -179,7 +182,7 @@ export default function QueuedMessages({
           {items.length} queued
         </span>
         <span className="queued__hint">
-          Will send after the current turn finishes
+          {hint}
         </span>
         <ChevronDown
           className={`queued__hdr-chevron${collapsed ? ' queued__hdr-chevron--collapsed' : ''}`}

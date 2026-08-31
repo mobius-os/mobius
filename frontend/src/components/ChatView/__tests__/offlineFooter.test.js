@@ -79,7 +79,16 @@ test('floating actions precede the measured rail → connection → queued → c
 test('the shell is the one persistent connection owner while send failures stay contextual', () => {
   assert.match(shell, /ReachabilityPhase\.CHECKING[\s\S]*?'Reconnecting…'/)
   assert.match(shell, /ReachabilityPhase\.OFFLINE \? 'Offline'/)
-  assert.match(shell, /\{reachabilityLabel && \([\s\S]*?className="shell__connection-status"[\s\S]*?shell__sr-only/)
+  assert.match(
+    shell,
+    /const connectionStatusLabel = reachabilityLabel[\s\S]*?restartPending \? 'Restarting…'/,
+  )
+  assert.match(shell, /\{connectionStatusLabel && \([\s\S]*?className="shell__connection-status"[\s\S]*?shell__sr-only/)
+  assert.match(shell, /ev\.type === 'server_restarting'[\s\S]*?setRestartPending\(\)/)
+  assert.match(
+    shell,
+    /const reconcileSystemStateOnOpen = useCallback\(async \(\) => \{[\s\S]*?clearRestartPending\(\)/,
+  )
   assert.doesNotMatch(chatView, /You're offline — chat needs a connection\./)
   assert.doesNotMatch(chatInputBar, /You're offline — chat needs a connection\./)
   assert.match(
