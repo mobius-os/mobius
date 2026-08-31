@@ -1,10 +1,5 @@
 """Provider edit tools preserve bounded, renderable diff previews."""
 
-from openai_codex.generated.v2_all import (
-  FileChangeThreadItem as CodexFileChangeThreadItem,
-  PatchApplyStatus,
-)
-
 from app.codex_events import (
   _file_change_patch_summary,
   _tool_completed_events,
@@ -194,17 +189,20 @@ def test_codex_completed_file_change_summary_uses_owner_language():
   assert "{'type':" not in summary
 
 
-def _codex_file_change_item(status: PatchApplyStatus):
-  return CodexFileChangeThreadItem.model_validate({
-    "id": "edit-1",
-    "type": "fileChange",
-    "status": status.value,
-    "changes": [{
+class CodexFileChangeThreadItem:
+  """Minimal generated-SDK-shaped item for dependency-independent tests."""
+
+  def __init__(self, status: str):
+    self.status = status
+    self.changes = [{
       "path": "new.py",
       "kind": {"type": "add"},
       "diff": "hello\n",
-    }],
-  })
+    }]
+
+
+def _codex_file_change_item(status: str):
+  return CodexFileChangeThreadItem(status)
 
 
 def test_codex_completed_file_change_emits_applied_owner_language():
@@ -214,7 +212,7 @@ def test_codex_completed_file_change_emits_applied_owner_language():
   }
 
   assert _tool_completed_events(
-    _codex_file_change_item(PatchApplyStatus.completed), sdk,
+    _codex_file_change_item("completed"), sdk,
   ) == [
     {"type": "tool_output", "content": "Added new.py"},
     {"type": "tool_end"},
@@ -228,8 +226,8 @@ def test_codex_failed_and_declined_file_changes_never_claim_application():
   }
 
   expected = {
-    PatchApplyStatus.failed: "Failed to add new.py",
-    PatchApplyStatus.declined: "Declined: add new.py",
+    "failed": "Failed to add new.py",
+    "declined": "Declined: add new.py",
   }
   for status, summary in expected.items():
     assert _tool_completed_events(_codex_file_change_item(status), sdk) == [
