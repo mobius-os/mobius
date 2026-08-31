@@ -16,7 +16,8 @@ from datetime import UTC, datetime, timedelta
 from app import chat as chat_mod
 from app import models
 from app.chat_writer import (
-  AppendPending, Barrier, FinishRun, PromotePending, StartTurn,
+  AppendPending, Barrier, FinishRun, PromotePending, StartContinuation,
+  StartContinuationAttached, StartContinuationBlocked, StartTurn,
   RecordRunMetrics, alloc_run_token, get_writer,
 )
 from app.database import SessionLocal
@@ -38,14 +39,14 @@ def _seed_chat(chat_id, messages=None, pending=None):
   return chat_id
 
 
-def _seed_run(run_id, chat_id, status="running"):
+def _seed_run(run_id, chat_id, status="running", root_run_id=None):
   from datetime import UTC, datetime
 
   db = SessionLocal()
   try:
     db.add(models.ChatRun(
       id=run_id, chat_id=chat_id, status=status, provider="claude",
-      started_at=datetime.now(UTC),
+      started_at=datetime.now(UTC), root_run_id=root_run_id,
     ))
     db.commit()
   finally:
@@ -167,6 +168,121 @@ def test_completed_goal_does_not_leak_into_an_ordinary_later_run():
     title_source="ordinary", default_provider="codex",
   )).result(timeout=5)
   assert _goal_objective("r-complete-goal") is None
+
+
+def test_same_root_continuation_attaches_without_a_second_transcript_row():
+  _seed_chat("continuation-attach", messages=[{
+    "role": "user",
+    "content": "Start the controller.",
+    "ts": 1,
+    "viewport": {"width": 390, "height": 844},
+    "timezone": "Etc/UTC",
+  }])
+  _seed_run(
+    "continuation-root", "continuation-attach",
+    status="completed", root_run_id="continuation-root",
+  )
+
+  def command():
+    return StartContinuation(
+      chat_id="continuation-attach",
+      root_run_id="continuation-root",
+      run_token="continuation-physical",
+      content="Continue the controller.",
+      cid="continuation-stable-cid",
+      reason="controller_resume",
+    )
+
+  first = get_writer().submit(command()).result(timeout=5)
+  attached = get_writer().submit(command()).result(timeout=5)
+
+  assert isinstance(first, dict)
+  assert isinstance(attached, StartContinuationAttached)
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, "continuation-attach")
+    assert [
+      message.get("cid") for message in chat.messages
+      if message.get("cid") == "continuation-stable-cid"
+    ] == ["continuation-stable-cid"]
+    assert chat.messages[-1]["viewport"] == {"width": 390, "height": 844}
+    assert chat.messages[-1]["timezone"] == "Etc/UTC"
+    physical = db.get(models.ChatRun, "continuation-physical")
+    assert physical.root_run_id == "continuation-root"
+
+
+def test_continuation_recovers_only_its_exact_legacy_pending_row():
+  _seed_chat("continuation-recovery")
+  _seed_run(
+    "recovery-root", "continuation-recovery",
+    status="completed", root_run_id="recovery-root",
+  )
+  get_writer().submit(AppendPending(
+    chat_id="continuation-recovery",
+    run_token="",
+    user_msg={
+      "role": "user",
+      "content": "Recover this exact continuation.",
+      "ts": 10,
+      "cid": "recovery-stable-cid",
+      "kind": "continuation",
+      "continuation_reason": "controller_resume",
+    },
+  )).result(timeout=5)
+
+  started = get_writer().submit(StartContinuation(
+    chat_id="continuation-recovery",
+    root_run_id="recovery-root",
+    run_token="recovery-physical",
+    content="Recover this exact continuation.",
+    cid="recovery-stable-cid",
+    reason="controller_resume",
+  )).result(timeout=5)
+
+  assert isinstance(started, dict)
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, "continuation-recovery")
+    assert chat.pending_messages == []
+    assert [
+      message.get("cid") for message in chat.messages
+      if message.get("cid") == "recovery-stable-cid"
+    ] == ["recovery-stable-cid"]
+    assert db.get(models.ChatRun, "recovery-physical").root_run_id == "recovery-root"
+
+
+def test_continuation_preserves_foreign_owner_pending_work():
+  _seed_chat("continuation-foreign")
+  _seed_run(
+    "foreign-root", "continuation-foreign",
+    status="completed", root_run_id="foreign-root",
+  )
+  get_writer().submit(AppendPending(
+    chat_id="continuation-foreign",
+    run_token="",
+    user_msg={
+      "role": "user",
+      "content": "Owner queued this independently.",
+      "ts": 10,
+      "cid": "owner-pending-cid",
+    },
+  )).result(timeout=5)
+
+  blocked = get_writer().submit(StartContinuation(
+    chat_id="continuation-foreign",
+    root_run_id="foreign-root",
+    run_token="must-not-start",
+    content="Continue the controller.",
+    cid="foreign-check-cid",
+    reason="controller_resume",
+  )).result(timeout=5)
+
+  assert isinstance(blocked, StartContinuationBlocked)
+  assert blocked.reason == "foreign_pending"
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, "continuation-foreign")
+    assert [message["cid"] for message in chat.pending_messages] == [
+      "owner-pending-cid"
+    ]
+    assert db.get(models.ChatRun, "must-not-start") is None
 
 
 def test_stopped_goal_does_not_leak_into_a_later_question_answer():
