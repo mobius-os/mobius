@@ -31,7 +31,7 @@ export const SLASH_COMMANDS = [
     name: 'goal',
     args: '<what to keep working toward>',
     summary: 'Keep pursuing a goal across turns',
-    detail: 'Runs until the goal holds. /goal clear stops it.',
+    detail: 'Runs until the goal holds. Clear it from the Goal rail.',
     providers: ['claude', 'codex', 'mobius'],
   },
 ]

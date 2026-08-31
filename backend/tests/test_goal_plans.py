@@ -262,6 +262,78 @@ def test_goal_promotion_rejects_browser_wrong_chat_and_terminal_run_tokens(
   assert "no longer active" in terminal.json()["detail"]
 
 
+def test_confirmed_goal_clear_is_exact_and_preserves_real_pending_work(
+  client, owner_token, db,
+):
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  chat_id = client.post(
+    "/api/chats", json={"title": "Clear directly"}, headers=auth,
+  ).json()["id"]
+  chat = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  chat.pending_messages = [{
+    "role": "user", "content": "keep this follow-up", "ts": 2,
+    "cid": "real-follow-up",
+  }]
+  db.add(models.ChatRun(
+    id="clear-goal-run", root_run_id="clear-goal-run", chat_id=chat_id,
+    status="running", provider="claude", goal_objective="Clear safely",
+    goal_id="clear-goal-id",
+  ))
+  db.commit()
+
+  stale = client.request(
+    "DELETE", f"/api/chats/{chat_id}/goal",
+    json={"goal_id": "stale-goal-id"}, headers=auth,
+  )
+  assert stale.status_code == 409, stale.text
+  db.expire_all()
+  chat = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  run = db.query(models.ChatRun).filter(
+    models.ChatRun.id == "clear-goal-run",
+  ).one()
+  assert chat.dismissed_goal_id is None
+  assert [row["cid"] for row in chat.pending_messages] == ["real-follow-up"]
+  assert run.status == "running"
+
+  cleared = client.request(
+    "DELETE", f"/api/chats/{chat_id}/goal",
+    json={"goal_id": "clear-goal-id"}, headers=auth,
+  )
+  assert cleared.status_code == 200, cleared.text
+  assert cleared.json() == {"cleared": True, "goal": None}
+  db.expire_all()
+  chat = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  run = db.query(models.ChatRun).filter(
+    models.ChatRun.id == "clear-goal-run",
+  ).one()
+  assert chat.dismissed_goal_id == "clear-goal-id"
+  assert [row["cid"] for row in chat.pending_messages] == ["real-follow-up"]
+  assert run.status == "stopped"
+
+
+def test_legacy_queued_goal_clear_is_retired_without_opening_a_turn(db, chat):
+  from app.chat_writer import PromotePending, get_writer
+
+  chat.pending_messages = [{
+    "role": "user", "content": "/goal clear", "ts": 1,
+    "cid": "legacy-goal-clear",
+  }]
+  db.commit()
+
+  result = get_writer().submit(PromotePending(
+    chat_id=chat.id, run_token="must-not-open",
+  )).result(timeout=5)
+
+  assert result["promoted"] is None
+  db.expire_all()
+  assert db.query(models.Chat).filter(
+    models.Chat.id == chat.id,
+  ).one().pending_messages == []
+  assert db.query(models.ChatRun).filter(
+    models.ChatRun.id == "must-not-open",
+  ).first() is None
+
+
 def test_goal_promotion_rejects_delegation_and_app_scope_tokens(
   client, owner_token, db,
 ):
