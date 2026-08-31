@@ -1115,6 +1115,53 @@ def test_landed_equivalent_change_rebases_later_local_edit_without_agent(
   assert (repo / "index.jsx").read_text() == 'mode = "local followup"\n'
 
 
+def test_publication_handoff_verifies_exact_landed_review_identity(tmp_path):
+  """A merged badge alone cannot reconnect an app to a mutable package."""
+  repo = tmp_path / "app"
+  _install(repo, b"base\n")
+  base = app_git.head_sha(repo, app_git.UPSTREAM_BRANCH)
+  _write(repo, "reviewed\n")
+  reviewed = app_git.commit_local(repo, "reviewed publication")
+  assert reviewed
+  digest = _review_digest(repo, base, reviewed)
+  assert app_git.record_pending_equivalent_change(
+    repo,
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    diff_sha256=digest,
+    contribution_id="published-app",
+  )
+  upstream = app_git.record_upstream(
+    repo,
+    {"index.jsx": b"reviewed\n"},
+    "https://x/mobius.json",
+    "1.0.0",
+  )
+  assert app_git.mark_equivalent_change_landed(
+    repo, digest, upstream_sha=upstream,
+  )
+
+  assert app_git.verify_landed_equivalent_change(
+    repo,
+    diff_sha256=digest,
+    contribution_id="published-app",
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    upstream_sha=upstream,
+  )
+  assert not app_git.verify_landed_equivalent_change(
+    repo,
+    diff_sha256=digest,
+    contribution_id="different-record",
+    base_sha=base,
+    head_sha=reviewed,
+    source_sha=reviewed,
+    upstream_sha=upstream,
+  )
+
+
 def test_partial_equivalence_materializes_only_residual_app_conflicts(tmp_path):
   """Proven shared work stays out of a later owner-gated conflict merge."""
   repo = tmp_path / "app"

@@ -1135,6 +1135,81 @@ def _landed_equivalent_changes(repo: Path) -> list[EquivalentChange]:
   return _equivalent_changes(repo, _EQUIVALENCE_LANDED_PREFIX)
 
 
+def fetch_origin_commit(source_dir: str | Path, commit_sha: str) -> str:
+  """Fetch one immutable origin commit without moving any local ref.
+
+  Publication handoff verification needs GitHub's merge commit in the live app
+  object database before it can prove that the reviewed change really landed.
+  Importing the object without FETCH_HEAD or a branch update keeps that proof
+  read-only with respect to the app's source and updater-owned refs.
+  """
+  repo = Path(source_dir)
+  requested = str(commit_sha or "").lower()
+  if not _HEX_OID.fullmatch(requested):
+    raise ValueError("invalid origin commit")
+  if origin_url(repo) is None:
+    raise RuntimeError("source repository has no origin")
+  _run(
+    repo,
+    "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+    "origin", requested,
+  )
+  fetched = _resolve_commit(repo, requested)
+  if fetched != requested:
+    raise RuntimeError("origin returned a different commit")
+  return fetched
+
+
+def verify_landed_equivalent_change(
+  source_dir: str | Path,
+  *,
+  diff_sha256: str,
+  contribution_id: str,
+  base_sha: str,
+  head_sha: str,
+  source_sha: str,
+  upstream_sha: str,
+  local: str = LOCAL_BRANCH,
+) -> bool:
+  """Prove one exact reviewed contribution exists locally and upstream.
+
+  The landed equivalence ref is the immutable witness written after the owner
+  sent a reviewed PR.  A publication handoff may reuse it only when every
+  record-bound identity still matches, its local source witness remains in the
+  installed app's history, and GitHub's actual merge commit contains the exact
+  reviewed delta.  This is deliberately stronger than checking a PR state or
+  trusting mutable contribution JSON on its own.
+  """
+  repo = Path(source_dir)
+  digest = str(diff_sha256 or "").lower()
+  if not _DIFF_SHA256.fullmatch(digest):
+    return False
+  ref = _equivalence_ref(_EQUIVALENCE_LANDED_PREFIX, digest)
+  change = _read_equivalent_change(repo, ref)
+  if change is None:
+    return False
+
+  expected_base = _resolve_commit(repo, base_sha)
+  expected_head = _resolve_commit(repo, head_sha)
+  expected_source = _resolve_commit(repo, source_sha)
+  expected_upstream = _resolve_commit(repo, upstream_sha)
+  local_tip = _resolve_commit(repo, local)
+  if None in (
+    expected_base, expected_head, expected_source, expected_upstream, local_tip,
+  ):
+    return False
+  if (
+    change.contribution_id != str(contribution_id or "")[:128]
+    or change.base_sha != expected_base
+    or change.source_sha != expected_source
+    or change.upstream_sha != expected_upstream
+    or _tree_oid(repo, change.anchor_sha) != _tree_oid(repo, expected_head)
+    or ref_is_ancestor(repo, change.source_sha, local_tip) is not True
+  ):
+    return False
+  return _change_landed_in_target(repo, change, expected_upstream)
+
+
 def carry_equivalent_change_sources(
   source_dir: str | Path, old_local: str, new_local: str,
 ) -> int:
