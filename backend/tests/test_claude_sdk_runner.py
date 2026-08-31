@@ -490,12 +490,21 @@ async def test_native_work_drains_through_clean_parent_synthesis(
     )]
     expected_text = "The monitored command is ready."
   else:
-    first_messages = [TaskStartedMessage(
-      subtype="task_started", data={}, task_id="agent-1",
-      description="inspect the implementation", uuid="task-start-1",
-      session_id="root-session", tool_use_id="spawn-1",
-      task_type="local_agent",
-    )]
+    first_messages = [
+      AssistantMessage(
+        content=[ToolUseBlock(
+          id="spawn-1", name="Agent",
+          input={"description": "inspect the implementation"},
+        )],
+        model="claude-sonnet", session_id="root-session",
+      ),
+      TaskStartedMessage(
+        subtype="task_started", data={}, task_id="agent-1",
+        description="inspect the implementation", uuid="task-start-1",
+        session_id="root-session", tool_use_id="spawn-1",
+        task_type="local_agent",
+      ),
+    ]
     followup_messages = child_frames if mode == "agent-running" else []
     if mode == "agent-settled":
       # This is the intermittent ordering a plain in-flight set misses: the
@@ -556,12 +565,85 @@ async def test_native_work_drains_through_clean_parent_synthesis(
   assert "Child raw report" not in str(bus.events)
 
 
+@pytest.mark.asyncio
+async def test_completed_native_work_already_synthesized_uses_current_result(
+  monkeypatch,
+):
+  async def _ignore_session_persistence(*_args):
+    return None
+
+  class _FakeClient:
+    def __init__(self, _options):
+      pass
+
+    async def connect(self):
+      return None
+
+    async def query(self, _message):
+      return None
+
+    async def disconnect(self):
+      return None
+
+    async def receive_response(self):
+      yield TaskStartedMessage(
+        subtype="task_started", data={}, task_id="agent-covered",
+        description="inspect the implementation", uuid="task-start-covered",
+        session_id="root-session", tool_use_id="spawn-covered",
+        task_type="local_agent",
+      )
+      yield TaskNotificationMessage(
+        subtype="task_notification", data={}, task_id="agent-covered",
+        status="completed", output_file="/tmp/agent-covered",
+        summary="inspection complete", uuid="task-done-covered",
+        session_id="root-session", tool_use_id="spawn-covered",
+      )
+      yield AssistantMessage(
+        content=[TextBlock(text="Parent already synthesized the result.")],
+        model="claude-sonnet", session_id="root-session",
+      )
+      yield _success_result("root-session", cost=0.02)
+
+    async def receive_messages(self):
+      raise AssertionError("an already-synthesized result must not drain")
+      yield  # pragma: no cover - keep this an async generator
+
+  monkeypatch.setattr(claude_sdk_runner, "ClaudeSDKClient", _FakeClient)
+  monkeypatch.setattr(
+    claude_sdk_runner, "_persist_session_id", _ignore_session_persistence,
+  )
+  bus = _Bus()
+
+  result = await run_claude_sdk_turn(
+    "inspect and report",
+    session_id=None,
+    base_env={},
+    cwd="/data",
+    chat_id="native-followup-already-synthesized",
+    skill_text="system",
+    bc=bus,
+    pending_questions={},
+    db=None,
+  )
+
+  assert result["cost_usd"] == 0.02
+  assert next(
+    event for event in bus.events if event["type"] == "text_final"
+  )["content"] == "Parent already synthesized the result."
+
+
 def test_native_continuation_tracker_defers_only_the_uncovered_result():
   fast = claude_events.NativeContinuationTracker()
   fast.task_started("fast", "local_agent", "spawn-fast")
   fast.task_finished("fast")
   assert fast.observe_result() is True
   assert fast.observe_result() is False
+
+  covered = claude_events.NativeContinuationTracker()
+  covered.task_started("covered", "local_agent", "spawn-covered")
+  covered.task_finished("covered")
+  covered.root_continuation_observed()
+  assert covered.observe_result() is False
 
   slow = claude_events.NativeContinuationTracker()
   slow.task_started("slow", "local_agent", "spawn-slow")
