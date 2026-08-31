@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import subprocess
@@ -5,8 +6,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import community_publish
-from app.community_publish import CommunityPublicationError, build_public_snapshot
+from app import app_git, community_publish
+from app.community_publish import (
+  CommunityPublicationError,
+  build_public_snapshot,
+  public_store_listing,
+  read_public_store_asset,
+)
 
 
 def _git(repo, *args):
@@ -24,6 +30,160 @@ def _git(repo, *args):
     text=True,
     check=True,
   ).stdout.strip()
+
+
+def _public_file(path, content=b""):
+  return {
+    "path": path,
+    "mode": "100644",
+    "content_base64": base64.b64encode(content).decode("ascii"),
+  }
+
+
+def test_listing_art_is_direct_versioned_source_not_a_runtime_asset():
+  manifest = {
+    "id": "pocket-list",
+    "name": "Pocket List",
+    "description": "A small list.",
+    "version": "1.0.0",
+    "entry": "index.jsx",
+    "icon": "icon.png",
+    "store": {
+      "tagline": "Small and exact.",
+      "description": "A calm list for the things that matter.",
+      "hero": "static/store/hero.png",
+      "screenshots": [{
+        "src": "static/store/screen.png",
+        "alt": "Pocket List showing three items.",
+      }],
+    },
+  }
+  files = [
+    _public_file("mobius.json", json.dumps(manifest).encode()),
+    _public_file("index.jsx", b"export default function App() {}"),
+    _public_file("icon.png", b"icon"),
+    _public_file("static/store/hero.png", b"hero"),
+    _public_file("static/store/screen.png", b"screen"),
+  ]
+
+  listing = public_store_listing(files)
+
+  assert listing["hero"] == {"path": "static/store/hero.png"}
+  assert listing["screenshots"][0]["src"] == "static/store/screen.png"
+  assert "static_assets" not in manifest
+
+
+def test_preview_asset_reads_the_accepted_tree_not_the_editable_worktree(tmp_path):
+  repo, app, _ = _app_repo(tmp_path)
+  manifest = json.loads((repo / "mobius.json").read_text())
+  manifest["icon"] = "icon.png"
+  manifest["store"] = {
+    "tagline": "Small and exact.",
+    "description": "A calm list for the things that matter.",
+    "screenshots": [{
+      "src": "static/store/screen.png",
+      "alt": "Pocket List showing three items.",
+    }],
+  }
+  (repo / "mobius.json").write_text(json.dumps(manifest), encoding="utf-8")
+  (repo / "icon.png").write_bytes(b"accepted-icon")
+  (repo / "static" / "store").mkdir(parents=True)
+  screenshot = repo / "static" / "store" / "screen.png"
+  screenshot.write_bytes(b"accepted-screen")
+  _git(repo, "add", "mobius.json", "icon.png", "static/store/screen.png")
+  _git(repo, "commit", "-m", "accepted listing")
+  accepted = _git(repo, "rev-parse", "HEAD")
+  app.source_commit = accepted
+  screenshot.write_bytes(b"editable-draft")
+
+  assert read_public_store_asset(
+    app, accepted, "static/store/screen.png",
+  ) == b"accepted-screen"
+
+  with pytest.raises(CommunityPublicationError) as unavailable:
+    read_public_store_asset(app, accepted, "index.jsx")
+  assert unavailable.value.code == "listing_asset_unavailable"
+
+  with pytest.raises(CommunityPublicationError) as changed:
+    read_public_store_asset(app, "f" * 40, "static/store/screen.png")
+  assert changed.value.code == "accepted_revision_changed"
+
+
+def test_app_git_accepts_store_art_but_excludes_runtime_static_assets(tmp_path):
+  repo = tmp_path / "app"
+  repo.mkdir()
+  app_git.ensure_repo(repo)
+  manifest = {
+    "id": "pocket-list",
+    "name": "Pocket List",
+    "description": "A small list.",
+    "version": "1.0.0",
+    "entry": "index.jsx",
+    "icon": "icon.png",
+    "store": {
+      "tagline": "Small and exact.",
+      "description": "A calm list for the things that matter.",
+      "screenshots": [{
+        "src": "static/store/screen.png",
+        "alt": "Pocket List showing three items.",
+      }],
+    },
+  }
+  (repo / "mobius.json").write_text(json.dumps(manifest), encoding="utf-8")
+  (repo / "index.jsx").write_text(
+    "export default function App() { return null }\n", encoding="utf-8",
+  )
+  (repo / "icon.png").write_bytes(b"icon")
+  (repo / "static" / "store").mkdir(parents=True)
+  (repo / "static" / "store" / "screen.png").write_bytes(b"screen")
+  (repo / "static" / "runtime").mkdir()
+  (repo / "static" / "runtime" / "bundle.js").write_bytes(b"generated")
+  (repo / ".mobius-static-assets.json").write_text(
+    json.dumps(["runtime/bundle.js"]), encoding="utf-8",
+  )
+
+  snapshot = app_git.snapshot_worktree(repo)
+  accepted = app_git.commit_worktree_tree(repo, snapshot, "apply app")
+  assert accepted is not None
+  app = SimpleNamespace(
+    id=41, source_dir=str(repo), source_commit=accepted, compiled_path="bundle.js",
+  )
+
+  resolved, files = build_public_snapshot(app)
+  listing = public_store_listing(files)
+  published_paths = {item["path"] for item in files}
+
+  assert resolved == accepted
+  assert listing["screenshots"][0]["src"] == "static/store/screen.png"
+  assert "static/store/screen.png" in published_paths
+  assert "static/runtime/bundle.js" not in published_paths
+  assert ".mobius-static-assets.json" not in published_paths
+
+
+def test_listing_art_must_use_the_existing_local_static_route():
+  manifest = {
+    "id": "pocket-list",
+    "name": "Pocket List",
+    "description": "A small list.",
+    "version": "1.0.0",
+    "entry": "index.jsx",
+    "icon": "icon.png",
+    "store": {
+      "tagline": "Small and exact.",
+      "description": "A calm list for the things that matter.",
+      "screenshots": [{"src": "listing/screen.png", "alt": "Pocket List"}],
+    },
+  }
+  files = [
+    _public_file("mobius.json", json.dumps(manifest).encode()),
+    _public_file("icon.png", b"icon"),
+    _public_file("listing/screen.png", b"screen"),
+  ]
+
+  with pytest.raises(CommunityPublicationError) as raised:
+    public_store_listing(files)
+
+  assert raised.value.code == "listing_incomplete"
 
 
 def _app_repo(tmp_path, *, source="export default function App(){return null}"):

@@ -20,6 +20,7 @@ MAX_SOURCE_FILES = 250
 MAX_SOURCE_BYTES = 64 * 1024 * 1024
 MAX_PATH_BYTES = 512
 MAX_JOURNAL_BYTES = 16 * 1024
+MAX_STORE_SCREENSHOTS = 5
 _OID = re.compile(r"^[0-9a-f]{40,64}$")
 _SOURCE_SEGMENT = re.compile(r"^[A-Za-z0-9._@+ -]+$")
 _SENSITIVE_DIRS = {
@@ -50,6 +51,13 @@ class CommunityPublicationError(Exception):
   detail: str
   code: str = "invalid_publication"
   status_code: int = 400
+
+
+@dataclass(frozen=True)
+class _PublicTreeEntry:
+  path: str
+  mode: str
+  oid: str
 
 
 @dataclass
@@ -302,35 +310,134 @@ def _scan_content(path: str, content: bytes) -> None:
     )
 
 
-def build_public_snapshot(app: models.App) -> tuple[str, list[dict[str, str]]]:
-  """Return the exact accepted commit and every regular tracked file.
+def public_store_listing(files: list[dict[str, str]]) -> dict:
+  """Validate and project storefront metadata from one accepted snapshot.
 
-  Reading a Git tree rather than the editable worktree prevents an unsaved or
-  concurrently-changing draft from crossing the public-source consent boundary.
+  Store-only artwork lives below ``static/store/`` so a commit-bound preview
+  can read it directly without a copy step. It remains ordinary accepted source
+  rather than ``static_assets`` package input; the manifest contract reserves
+  this subtree so installer-owned runtime bytes cannot collide with it.
   """
-  repo = Path(app.source_dir)
-  if not repo.is_dir() or not app_git.is_repo(repo):
+  by_path = {
+    str(item.get("path") or ""): item
+    for item in files
+    if isinstance(item, dict)
+  }
+  manifest_item = by_path.get("mobius.json")
+  if manifest_item is None:
     raise CommunityPublicationError(
-      "This app does not have a versioned source tree to publish.",
-      "source_unavailable",
-      409,
+      "The accepted revision must include mobius.json before it can be public.",
+      "invalid_manifest",
     )
-  commit = _accepted_commit(app, repo)
+  try:
+    manifest = json.loads(base64.b64decode(manifest_item["content_base64"]))
+  except (KeyError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    raise CommunityPublicationError(
+      "mobius.json is not valid JSON.", "invalid_manifest",
+    ) from exc
+  if not isinstance(manifest, dict):
+    raise CommunityPublicationError("mobius.json must be an object.", "invalid_manifest")
+
+  store = manifest.get("store")
+  if not isinstance(store, dict):
+    raise CommunityPublicationError(
+      "Add a Store listing with a tagline, description, and screenshots before publishing.",
+      "listing_incomplete",
+    )
+
+  def clean_text(field: str, maximum: int) -> str:
+    value = store.get(field)
+    if not isinstance(value, str):
+      raise CommunityPublicationError(
+        f"The Store {field} is required.", "listing_incomplete",
+      )
+    value = value.strip()
+    if not value or len(value.encode("utf-8")) > maximum or "\x00" in value:
+      raise CommunityPublicationError(
+        f"The Store {field} must be 1–{maximum} bytes.", "listing_incomplete",
+      )
+    return value
+
+  icon = str(manifest.get("icon") or "").strip()
+  if not icon or icon not in by_path:
+    raise CommunityPublicationError(
+      "Add a tracked app icon before publishing.", "listing_incomplete",
+    )
+
+  def listing_asset(value: object, label: str) -> str:
+    if not isinstance(value, str):
+      raise CommunityPublicationError(
+        f"The Store {label} is required.", "listing_incomplete",
+      )
+    source = value.strip()
+    _validate_path(source)
+    if not source.startswith("static/store/") or source not in by_path:
+      raise CommunityPublicationError(
+        f"The Store {label} must be a tracked file under static/store/.",
+        "listing_incomplete",
+      )
+    return source
+
+  hero = None
+  if store.get("hero") not in (None, ""):
+    hero = listing_asset(store.get("hero"), "hero")
+  screenshots = store.get("screenshots")
+  if not isinstance(screenshots, list) or not 1 <= len(screenshots) <= MAX_STORE_SCREENSHOTS:
+    raise CommunityPublicationError(
+      f"Add 1–{MAX_STORE_SCREENSHOTS} Store screenshots before publishing.",
+      "listing_incomplete",
+    )
+  projected = []
+  for index, item in enumerate(screenshots, start=1):
+    if not isinstance(item, dict):
+      raise CommunityPublicationError(
+        f"Store screenshot {index} is invalid.", "listing_incomplete",
+      )
+    alt = item.get("alt")
+    if not isinstance(alt, str) or not alt.strip() or len(alt.encode("utf-8")) > 300:
+      raise CommunityPublicationError(
+        f"Store screenshot {index} needs concise alternative text.",
+        "listing_incomplete",
+      )
+    label = item.get("label")
+    if label is not None and (
+      not isinstance(label, str)
+      or not label.strip()
+      or len(label.encode("utf-8")) > 120
+    ):
+      raise CommunityPublicationError(
+        f"Store screenshot {index} has an invalid label.", "listing_incomplete",
+      )
+    projected.append({
+      "src": listing_asset(item.get("src"), f"screenshot {index}"),
+      "alt": alt.strip(),
+      **({"label": label.strip()} if isinstance(label, str) else {}),
+    })
+
+  return {
+    "tagline": clean_text("tagline", 120),
+    "description": clean_text("description", 4000),
+    "icon": icon,
+    **({"hero": {"path": hero}} if hero else {"hero": None}),
+    "screenshots": projected,
+  }
+
+
+def _public_tree_entries(repo: Path, commit: str) -> list[_PublicTreeEntry]:
   listing = _git(repo, "ls-tree", "-r", "-z", commit, binary=True)
   assert isinstance(listing, bytes)
-  entries = [entry for entry in listing.split(b"\0") if entry]
-  if not entries or len(entries) > MAX_SOURCE_FILES:
+  raw_entries = [entry for entry in listing.split(b"\0") if entry]
+  if not raw_entries or len(raw_entries) > MAX_SOURCE_FILES:
     raise CommunityPublicationError(
       f"A public app must contain 1–{MAX_SOURCE_FILES} files.",
       "payload_too_large",
       413,
     )
 
-  files: list[dict[str, str]] = []
-  total = 0
+  entries: list[_PublicTreeEntry] = []
   seen: set[str] = set()
-  for entry in entries:
-    metadata, separator, raw_path = entry.partition(b"\t")
+  for raw_entry in raw_entries:
+    metadata, separator, raw_path = raw_entry.partition(b"\t")
     if not separator:
       raise CommunityPublicationError("The app source tree is invalid.")
     try:
@@ -351,7 +458,97 @@ def build_public_snapshot(app: models.App) -> tuple[str, list[dict[str, str]]]:
       raise CommunityPublicationError(
         f"{path} is not a regular publishable file.", "invalid_file_type",
       )
-    content = _git(repo, "cat-file", "-p", oid, binary=True)
+    entries.append(_PublicTreeEntry(path=path, mode=mode, oid=oid))
+  return entries
+
+
+def read_public_store_asset(
+  app: models.App, accepted_commit: str, asset_path: str,
+) -> bytes:
+  """Read one listing asset from the exact currently accepted Git tree."""
+  repo = Path(app.source_dir)
+  if not repo.is_dir() or not app_git.is_repo(repo):
+    raise CommunityPublicationError(
+      "This app does not have a versioned source tree to preview.",
+      "source_unavailable",
+      409,
+    )
+  commit = _accepted_commit(app, repo)
+  if commit != accepted_commit.casefold():
+    raise CommunityPublicationError(
+      "The accepted app revision changed. Prepare the listing again.",
+      "accepted_revision_changed",
+      409,
+    )
+  _validate_path(asset_path)
+  entries = _public_tree_entries(repo, commit)
+  by_path = {entry.path: entry for entry in entries}
+  manifest_entry = by_path.get("mobius.json")
+  if manifest_entry is None:
+    raise CommunityPublicationError(
+      "The accepted revision must include mobius.json before it can be public.",
+      "invalid_manifest",
+    )
+  manifest_content = _git(repo, "cat-file", "-p", manifest_entry.oid, binary=True)
+  assert isinstance(manifest_content, bytes)
+  listing_files = [
+    {
+      "path": entry.path,
+      "content_base64": (
+        base64.b64encode(manifest_content).decode("ascii")
+        if entry.path == "mobius.json"
+        else ""
+      ),
+    }
+    for entry in entries
+  ]
+  listing = public_store_listing(listing_files)
+  allowed = {str(listing["icon"])}
+  hero = listing.get("hero")
+  if isinstance(hero, dict):
+    allowed.add(str(hero.get("path") or ""))
+  allowed.update(
+    str(item.get("src") or "")
+    for item in listing.get("screenshots", [])
+    if isinstance(item, dict)
+  )
+  entry = by_path.get(asset_path)
+  if asset_path not in allowed or entry is None:
+    raise CommunityPublicationError(
+      "That file is not part of the accepted Store listing.",
+      "listing_asset_unavailable",
+      404,
+    )
+  content = _git(repo, "cat-file", "-p", entry.oid, binary=True)
+  assert isinstance(content, bytes)
+  if len(content) > MAX_SOURCE_BYTES:
+    raise CommunityPublicationError(
+      "The Store listing asset is too large.", "payload_too_large", 413,
+    )
+  _scan_content(asset_path, content)
+  return content
+
+
+def build_public_snapshot(app: models.App) -> tuple[str, list[dict[str, str]]]:
+  """Return the exact accepted commit and every regular tracked file.
+
+  Reading a Git tree rather than the editable worktree prevents an unsaved or
+  concurrently-changing draft from crossing the public-source consent boundary.
+  """
+  repo = Path(app.source_dir)
+  if not repo.is_dir() or not app_git.is_repo(repo):
+    raise CommunityPublicationError(
+      "This app does not have a versioned source tree to publish.",
+      "source_unavailable",
+      409,
+    )
+  commit = _accepted_commit(app, repo)
+  entries = _public_tree_entries(repo, commit)
+
+  files: list[dict[str, str]] = []
+  total = 0
+  for entry in entries:
+    content = _git(repo, "cat-file", "-p", entry.oid, binary=True)
     assert isinstance(content, bytes)
     total += len(content)
     if total > MAX_SOURCE_BYTES:
@@ -360,10 +557,10 @@ def build_public_snapshot(app: models.App) -> tuple[str, list[dict[str, str]]]:
         "payload_too_large",
         413,
       )
-    _scan_content(path, content)
+    _scan_content(entry.path, content)
     files.append({
-      "path": path,
-      "mode": mode,
+      "path": entry.path,
+      "mode": entry.mode,
       "content_base64": base64.b64encode(content).decode("ascii"),
     })
 
