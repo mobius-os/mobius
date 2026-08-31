@@ -1,0 +1,83 @@
+# Canonical production RUNTIME manifest for a self-hosted Möbius instance.
+#
+# This is the SOLE prod runtime definition — not an overlay whose meaning
+# depends on Compose merge order. Every omission below maps to a specific
+# outage cause we are designing out:
+#
+#   * no `build:`         — a bare `compose up` used to trigger a full image
+#                           rebuild that fails on the Dockerfile BUILD_SHA
+#                           guard. Recovery must NEVER build; the image is
+#                           pre-built and pinned via ${MOBIUS_IMAGE}.
+#   * no bundled `caddy`  — prod is fronted by the shared external `edge-caddy`
+#                           (edge-mobius network). A bundled caddy collides
+#                           with it on host :80.
+#   * no `default` network — the compose-owned default network (`mobius_default`)
+#                           is deletable by the project and, once recreated with
+#                           a new ID, strands the container so Docker's
+#                           `restart: unless-stopped` fails with
+#                           "network not found". The app joins ONLY the external,
+#                           pre-created `edge-mobius`, which the Möbius project
+#                           does not own and cannot tear down.
+#   * external data volume — `mobius_app_data` is external so `compose down`
+#                           can never delete production data.
+#
+# On managed platforms (Railway, etc.) this file is not used at all — the
+# platform runs the image directly and owns networking, TLS, and restarts.
+# Nothing here is required for the image to boot; it is purely the self-hosted
+# wrapper. Docker's native `restart: unless-stopped` (here) and the platform's
+# own restart (there) are the only restart mechanism — no bespoke supervisor.
+
+services:
+  app:
+    image: ${MOBIUS_IMAGE:?set MOBIUS_IMAGE to the pinned prod image, e.g. mobius:<sha>}
+    container_name: mobius
+    init: true
+    restart: unless-stopped
+    environment:
+      # Fail loudly rather than silently blanking these — a missing value would
+      # derive FRONTEND_ORIGIN=https:// and crash-loop, or drift the SECRET_KEY
+      # and invalidate every JWT. Supplied via the prod --env-file.
+      - SECRET_KEY=${SECRET_KEY:?set SECRET_KEY via the prod --env-file}
+      - DOMAIN=${DOMAIN:?set DOMAIN via the prod --env-file}
+      - FRONTEND_ORIGIN=https://${DOMAIN}
+      - MOBIUS_ACCOUNT_ORIGIN=${MOBIUS_ACCOUNT_ORIGIN:-https://www.mobius.you}
+      - MOBIUS_ACCOUNT_CLIENT_ORIGIN=${MOBIUS_ACCOUNT_CLIENT_ORIGIN:-}
+      - MOBIUS_AGENT_GATEWAY_URL=${MOBIUS_AGENT_GATEWAY_URL:-https://www.mobius.you}
+      - MOBIUS_CONTRIBUTION_RELAY_URL=${MOBIUS_CONTRIBUTION_RELAY_URL:-https://www.mobius.you}
+      - MOBIUS_CONTRIBUTION_TARGET_REPO=${MOBIUS_CONTRIBUTION_TARGET_REPO:-}
+      - MOBIUS_CONTRIBUTION_RELAY_TEST_REPOSITORIES=${MOBIUS_CONTRIBUTION_RELAY_TEST_REPOSITORIES:-}
+      - MOBIUS_SERVICE_GATEWAY_ORIGIN=${MOBIUS_SERVICE_GATEWAY_ORIGIN:-}
+      - GITHUB_OAUTH_CLIENT_ID=${GITHUB_OAUTH_CLIENT_ID:-Ov23liMpOLS6qp5YV8Vk}
+      - DATABASE_URL=sqlite:////data/db/ultimate.db
+      - DATA_DIR=/data
+      # The in-product agent has full root by default; set 0 as a kill switch.
+      - MOBIUS_AGENT_SUDO=${MOBIUS_AGENT_SUDO:-1}
+    volumes:
+      - mobius_app_data:/data
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    mem_limit: ${MOBIUS_APP_MEM_LIMIT:-6g}
+    oom_score_adj: 200
+    networks:
+      edge-mobius:
+        aliases:
+          - app
+          - mobius
+
+# Both external and pre-created outside the Möbius compose project, so this
+# project can neither delete the production data volume nor the trust-zone
+# network it shares with edge-caddy.
+networks:
+  edge-mobius:
+    external: true
+
+volumes:
+  mobius_app_data:
+    external: true
+    name: mobius_app_data
