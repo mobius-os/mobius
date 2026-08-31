@@ -10,9 +10,32 @@ export function consumeShellReload(storage) {
     const raw = source.getItem('shell-reload')
     if (!raw) return null
     source.removeItem('shell-reload')
-    try { return JSON.parse(raw) } catch { return null }
+    try {
+      const value = JSON.parse(raw)
+      return value && typeof value === 'object' && !Array.isArray(value)
+        ? value
+        : null
+    } catch { return null }
   } catch {
     return null
+  }
+}
+
+/**
+ * Best-effort one-shot route handoff before a shell-generation reload.
+ *
+ * Session storage can be unavailable or full. Losing this convenience
+ * snapshot may fall back to the ordinary persisted workspace, but it must
+ * never cancel the reload itself and strand an installed app on an obsolete
+ * or broken service-worker generation.
+ */
+export function writeShellReload(storage, value) {
+  try {
+    const target = storage ?? sessionStorage
+    target.setItem('shell-reload', JSON.stringify(value))
+    return true
+  } catch {
+    return false
   }
 }
 

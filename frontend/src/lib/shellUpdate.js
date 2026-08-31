@@ -1,8 +1,31 @@
 // Discovery and lifecycle helpers for leashed shell service-worker updates.
 // Online document freshness belongs to the navigation route in sw.js; this
-// module only discovers a new worker, releases it at a safe boundary, and asks
-// the shell's existing apply-on-idle controller for a reload.
+// module discovers a new worker and reports availability without navigating.
 export const SW_DISCOVERY_SETTLE_TIMEOUT_MS = 2000
+
+async function waitAtMost(promise, {
+  timeoutMs,
+  setTimeoutFn,
+  clearTimeoutFn,
+} = {}) {
+  if (!setTimeoutFn || !Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    try { await promise } catch { /* discovery failure is non-fatal */ }
+    return
+  }
+
+  await new Promise(resolve => {
+    let settled = false
+    let timer = null
+    const finish = () => {
+      if (settled) return
+      settled = true
+      if (timer != null && clearTimeoutFn) clearTimeoutFn(timer)
+      resolve()
+    }
+    timer = setTimeoutFn(finish, timeoutMs)
+    Promise.resolve(promise).then(finish, finish)
+  })
+}
 
 // Force the registration to discover the newest shell generation and wait for
 // that worker's install attempt to settle before choosing `registration.waiting`.
@@ -27,7 +50,10 @@ async function settleRegistrationUpdate({
   }
   registration.addEventListener?.('updatefound', onUpdateFound)
   if (typeof registration.update === 'function') {
-    try { await registration.update() } catch { /* offline/transient — use current state */ }
+    await waitAtMost(
+      Promise.resolve().then(() => registration.update()),
+      { timeoutMs, setTimeoutFn, clearTimeoutFn },
+    )
   }
 
   installing = registration.installing || installing
@@ -149,31 +175,31 @@ export async function reloadIfGenerationStale({
 }
 
 // A backgrounded PWA can miss the transient shell_rebuilt event. Check again on
-// each real browser-return boundary and route a discovered generation through
-// the shell's existing safe-reload policy. Focus covers desktop app switching,
-// pageshow covers BFCache restoration, and online covers connectivity recovery.
+// each real browser-return boundary and report a discovered generation without
+// navigating. Focus covers desktop app switching, pageshow covers BFCache
+// restoration, and online covers connectivity recovery.
 //
-// Deps are injected (doc/win/serviceWorker/rearm) so the wiring is
+// Deps are injected (doc/win/serviceWorker/onAvailable) so the wiring is
 // unit-testable without a live service worker. Returns a dispose function.
 export function watchForShellUpdateOnResume({
   doc,
   win,
   serviceWorker,
-  rearm,
+  onAvailable,
 } = {}) {
   if (!doc || !serviceWorker || typeof serviceWorker.getRegistration !== 'function') {
     return () => {}
   }
   let disposed = false
-  // A reload request is one-shot for this document. Coalescing below also keeps
+  // Availability is one-shot for this document. Coalescing below also keeps
   // simultaneous visibility/online signals on one inspection.
-  let applied = false
+  let reported = false
 
   const decide = (updateAvailable) => {
-    if (disposed || applied) return
+    if (disposed || reported) return
     if (updateAvailable) {
-      applied = true
-      rearm()
+      reported = true
+      onAvailable?.()
     }
   }
 
@@ -185,7 +211,7 @@ export function watchForShellUpdateOnResume({
 
   let inFlight = null
   const check = () => {
-    if (disposed || applied) return inFlight
+    if (disposed || reported) return inFlight
     if (inFlight) return inFlight
     inFlight = runCheck().finally(() => { inFlight = null })
     return inFlight

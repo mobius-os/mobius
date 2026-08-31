@@ -66,18 +66,18 @@ function makeReg({ waiting = null, active = null, installing = null, onUpdate } 
   return reg
 }
 
-test('watchForShellUpdateOnResume: a WAITING worker on return-to-visible re-arms once', async () => {
+test('watchForShellUpdateOnResume: a WAITING worker on return-to-visible reports availability once', async () => {
   const active = { id: 'a' }
   const reg = makeReg({ waiting: { id: 'w' }, active })
   const sw = makeSwWith(reg, { controller: active })
   const doc = makeDoc('visible')
-  let rearms = 0
+  let reports = 0
   const dispose = watchForShellUpdateOnResume({
-    doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 },
+    doc, win: null, serviceWorker: sw, onAvailable: () => { reports += 1 },
   })
   doc.emit('visibilitychange')
   await flush()
-  assert.equal(rearms, 1, 'a waiting worker applies on the first foreground return')
+  assert.equal(reports, 1, 'a waiting worker reports on the first foreground return')
   dispose()
 })
 
@@ -87,14 +87,14 @@ test('watchForShellUpdateOnResume: desktop focus return checks while visibility 
   const sw = makeSwWith(reg, { controller: active })
   const doc = makeDoc('visible')
   const win = makeWin()
-  let rearms = 0
+  let reports = 0
   const dispose = watchForShellUpdateOnResume({
-    doc, win, serviceWorker: sw, rearm: () => { rearms += 1 },
+    doc, win, serviceWorker: sw, onAvailable: () => { reports += 1 },
   })
 
   win.emit('focus')
   await flush()
-  assert.equal(rearms, 1, 'switching back to a still-visible desktop window applies the update')
+  assert.equal(reports, 1, 'switching back to a still-visible desktop window reports the update')
   dispose()
 })
 
@@ -104,55 +104,55 @@ test('watchForShellUpdateOnResume: pageshow checks a restored document', async (
   const sw = makeSwWith(reg, { controller: active })
   const doc = makeDoc('visible')
   const win = makeWin()
-  let rearms = 0
+  let reports = 0
   const dispose = watchForShellUpdateOnResume({
-    doc, win, serviceWorker: sw, rearm: () => { rearms += 1 },
+    doc, win, serviceWorker: sw, onAvailable: () => { reports += 1 },
   })
 
   win.emit('pageshow')
   await flush()
-  assert.equal(rearms, 1, 'a restored page applies the waiting generation')
+  assert.equal(reports, 1, 'a restored page reports the waiting generation')
   dispose()
 })
 
-test('watchForShellUpdateOnResume: no new generation is a NO-OP (no spurious reload)', async () => {
+test('watchForShellUpdateOnResume: no new generation is a NO-OP (no false availability)', async () => {
   const controller = { id: 'a' }
   // active === controller, nothing waiting, no stale flag → current generation.
   const reg = makeReg({ waiting: null, active: controller })
   const sw = makeSwWith(reg, { controller })
   const doc = makeDoc('visible')
   const win = makeWin()
-  let rearms = 0
+  let reports = 0
   const dispose = watchForShellUpdateOnResume({
-    doc, win, serviceWorker: sw, rearm: () => { rearms += 1 },
+    doc, win, serviceWorker: sw, onAvailable: () => { reports += 1 },
   })
   doc.emit('visibilitychange')
   await flush()
-  assert.equal(rearms, 0, 'a return with no new generation never reloads')
+  assert.equal(reports, 0, 'a return with no new generation reports nothing')
   dispose()
 })
 
-test('watchForShellUpdateOnResume: a worker discovered by update() re-arms when it reaches installed', async () => {
+test('watchForShellUpdateOnResume: a worker discovered by update() reports availability when it reaches installed', async () => {
   const active = { id: 'a' }
   const installing = makeInstalling('installing')
   // update() populates reg.installing (the just-discovered worker), still installing.
   const reg = makeReg({ waiting: null, active, onUpdate: (r) => { r.installing = installing } })
   const sw = makeSwWith(reg, { controller: active })
   const doc = makeDoc('visible')
-  let rearms = 0
+  let reports = 0
   const dispose = watchForShellUpdateOnResume({
-    doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 },
+    doc, win: null, serviceWorker: sw, onAvailable: () => { reports += 1 },
   })
   doc.emit('visibilitychange')
   await flush()
-  assert.equal(rearms, 0, 'still installing → not yet applied')
+  assert.equal(reports, 0, 'still installing → not yet reportable')
   // Simulate the install completing: the worker is now waiting (leashed).
   reg.waiting = { id: 'w' }
   installing.become('installed')
   await flush()
-  assert.equal(rearms, 1, 'reaching installed applies on the first return')
+  assert.equal(reports, 1, 'reaching installed reports on the first return')
   installing.become('redundant') // a later transition must not re-fire
-  assert.equal(rearms, 1)
+  assert.equal(reports, 1)
   dispose()
 })
 
@@ -171,20 +171,20 @@ test('watchForShellUpdateOnResume: catches a worker published one task after upd
   }
   const sw = makeSwWith(reg, { controller: active })
   const doc = makeDoc('visible')
-  let rearms = 0
+  let reports = 0
   const dispose = watchForShellUpdateOnResume({
-    doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 },
+    doc, win: null, serviceWorker: sw, onAvailable: () => { reports += 1 },
   })
 
   doc.emit('visibilitychange')
   await published
   await flush()
-  assert.equal(rearms, 0, 'the foreground check waits for the late-published install')
+  assert.equal(reports, 0, 'the foreground check waits for the late-published install')
 
   reg.waiting = { id: 'w' }
   installing.become('installed')
   await flush()
-  assert.equal(rearms, 1, 'the newly-published generation applies without another foreground event')
+  assert.equal(reports, 1, 'the newly-published generation reports without another foreground event')
   dispose()
 })
 
@@ -198,15 +198,15 @@ function makeWin() {
   }
 }
 
-test('finding 1: near-simultaneous visibilitychange + online coalesce to ONE listener + ONE rearm', async () => {
+test('finding 1: near-simultaneous visibilitychange + online coalesce to ONE listener + ONE report', async () => {
   const active = { id: 'a' }
   const installing = makeInstalling('installing')
   const reg = makeReg({ waiting: null, active, onUpdate: (r) => { r.installing = installing } })
   const sw = makeSwWith(reg, { controller: active })
   const doc = makeDoc('visible')
   const win = makeWin()
-  let rearms = 0
-  const dispose = watchForShellUpdateOnResume({ doc, win, serviceWorker: sw, rearm: () => { rearms += 1 } })
+  let reports = 0
+  const dispose = watchForShellUpdateOnResume({ doc, win, serviceWorker: sw, onAvailable: () => { reports += 1 } })
   // Both triggers fire synchronously, before the first check's await resolves.
   doc.emit('visibilitychange')
   win.emit('online')
@@ -216,21 +216,21 @@ test('finding 1: near-simultaneous visibilitychange + online coalesce to ONE lis
   reg.waiting = { id: 'w' }
   installing.become('installed')
   await flush()
-  assert.equal(rearms, 1, 'exactly one rearm despite two concurrent triggers')
+  assert.equal(reports, 1, 'exactly one availability report despite two concurrent triggers')
   dispose()
 })
 
-test('finding 1: sequential returns never double-rearm (performing/applied latch)', async () => {
+test('finding 1: sequential returns never double-report (performing/reported latch)', async () => {
   const active = { id: 'a' }
   const reg = makeReg({ waiting: { id: 'w' }, active })
   const sw = makeSwWith(reg, { controller: active })
   const doc = makeDoc('visible')
-  let rearms = 0
-  const dispose = watchForShellUpdateOnResume({ doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 } })
+  let reports = 0
+  const dispose = watchForShellUpdateOnResume({ doc, win: null, serviceWorker: sw, onAvailable: () => { reports += 1 } })
   doc.emit('visibilitychange'); await flush()
-  assert.equal(rearms, 1)
-  doc.emit('visibilitychange'); await flush() // a second return after the apply was requested
-  assert.equal(rearms, 1, 'applied latch: no second rearm/reload')
+  assert.equal(reports, 1)
+  doc.emit('visibilitychange'); await flush() // a second return after availability was reported
+  assert.equal(reports, 1, 'reported latch: no second availability report')
   dispose()
 })
 
@@ -241,16 +241,16 @@ test('finding 2: waiting A + installing B settles on the NEWEST (no reload into 
   const reg = makeReg({ waiting: workerA, active, onUpdate: (r) => { r.installing = installingB } })
   const sw = makeSwWith(reg, { controller: active })
   const doc = makeDoc('visible')
-  let rearms = 0
-  const dispose = watchForShellUpdateOnResume({ doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 } })
+  let reports = 0
+  const dispose = watchForShellUpdateOnResume({ doc, win: null, serviceWorker: sw, onAvailable: () => { reports += 1 } })
   doc.emit('visibilitychange')
   await flush()
-  assert.equal(rearms, 0, 'must NOT apply the older waiting A while a newer B is installing')
+  assert.equal(reports, 0, 'must NOT report the older waiting A while a newer B is installing')
   // B finishes installing → it is now the waiting generation, A superseded.
   reg.waiting = { id: 'B' }
   installingB.become('installed')
   await flush()
-  assert.equal(rearms, 1, 'applies exactly once, on the newest generation (B)')
+  assert.equal(reports, 1, 'reports exactly once for the newest generation (B)')
   dispose()
 })
 
@@ -261,13 +261,13 @@ test('finding 2: a redundant install falls back to the still-waiting generation'
   const reg = makeReg({ waiting: workerA, active, onUpdate: (r) => { r.installing = installingB } })
   const sw = makeSwWith(reg, { controller: active })
   const doc = makeDoc('visible')
-  let rearms = 0
-  const dispose = watchForShellUpdateOnResume({ doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 } })
+  let reports = 0
+  const dispose = watchForShellUpdateOnResume({ doc, win: null, serviceWorker: sw, onAvailable: () => { reports += 1 } })
   doc.emit('visibilitychange'); await flush()
-  assert.equal(rearms, 0)
+  assert.equal(reports, 0)
   installingB.become('redundant') // B failed; A is still the newest good generation
   await flush()
-  assert.equal(rearms, 1, 'apply the surviving waiting A when the newer install fails')
+  assert.equal(reports, 1, 'report the surviving waiting A when the newer install fails')
   dispose()
 })
 
@@ -277,13 +277,13 @@ test('watchForShellUpdateOnResume: dispose removes listeners', async () => {
   const sw = makeSwWith(reg, { controller })
   const doc = makeDoc('visible')
   const win = makeWin()
-  let rearms = 0
+  let reports = 0
   const dispose = watchForShellUpdateOnResume({
-    doc, win, serviceWorker: sw, rearm: () => { rearms += 1 },
+    doc, win, serviceWorker: sw, onAvailable: () => { reports += 1 },
   })
   doc.emit('visibilitychange')
   await flush()
-  assert.equal(rearms, 0)
+  assert.equal(reports, 0)
   assert.equal(doc.count('visibilitychange'), 1)
   assert.equal(win.count('focus'), 1)
   assert.equal(win.count('pageshow'), 1)
@@ -299,18 +299,18 @@ test('watchForShellUpdateOnResume: a HIDDEN visibilitychange does nothing', asyn
   const reg = makeReg({ waiting: { id: 'w' } })
   const sw = makeSwWith(reg)
   const doc = makeDoc('hidden')
-  let rearms = 0
+  let reports = 0
   const dispose = watchForShellUpdateOnResume({
-    doc, win: null, serviceWorker: sw, rearm: () => { rearms += 1 },
+    doc, win: null, serviceWorker: sw, onAvailable: () => { reports += 1 },
   })
-  doc.emit('visibilitychange') // going hidden — must not check/apply
+  doc.emit('visibilitychange') // going hidden — must not check/report
   await flush()
-  assert.equal(rearms, 0)
+  assert.equal(reports, 0)
   dispose()
 })
 
 test('watchForShellUpdateOnResume: no serviceWorker support → inert dispose', () => {
-  const dispose = watchForShellUpdateOnResume({ doc: makeDoc(), serviceWorker: null, rearm: () => {} })
+  const dispose = watchForShellUpdateOnResume({ doc: makeDoc(), serviceWorker: null, onAvailable: () => {} })
   assert.equal(typeof dispose, 'function')
   dispose() // must not throw
 })
@@ -364,21 +364,29 @@ test('inspectShellUpdate observes a worker published one task after update resol
   const active = { id: 'active' }
   const installingB = makeInstalling('installing')
   const queuedTasks = []
+  let taskSequence = 0
   const reg = makeReg({ waiting: null, active })
   const sw = makeSwWith(reg, { controller: active })
   let result = null
 
   const inspection = inspectShellUpdate({
     serviceWorker: sw,
-    setTimeoutFn: fn => { queuedTasks.push(fn); return queuedTasks.length },
-    clearTimeoutFn: () => {},
+    setTimeoutFn: fn => {
+      const id = ++taskSequence
+      queuedTasks.push({ id, fn })
+      return id
+    },
+    clearTimeoutFn: id => {
+      const index = queuedTasks.findIndex(task => task.id === id)
+      if (index >= 0) queuedTasks.splice(index, 1)
+    },
   }).then(value => { result = value })
   await flush()
   assert.equal(queuedTasks.length, 1, 'inspection yields for the queued registration update')
 
   reg.installing = installingB
   reg.emit('updatefound')
-  queuedTasks.shift()()
+  queuedTasks.shift().fn()
   await flush()
   assert.equal(result, null, 'the late-published worker owns the inspection')
 
@@ -407,6 +415,38 @@ test('inspectShellUpdate has a bounded escape from a wedged install', async () =
   await inspection
   assert.equal(result.registration, reg)
   assert.equal(installing.count('statechange'), 0)
+})
+
+test('inspectShellUpdate cannot be stranded by registration.update itself', async () => {
+  const active = { id: 'active' }
+  const reg = makeReg({ active })
+  const sw = makeSwWith(reg, { controller: active })
+  const timers = fakeTimers()
+  let updates = 0
+  let result = null
+  reg.update = () => {
+    updates += 1
+    return new Promise(() => {})
+  }
+
+  const inspection = inspectShellUpdate({
+    serviceWorker: sw,
+    timeoutMs: 25,
+    setTimeoutFn: timers.setTimeoutFn,
+    clearTimeoutFn: timers.clearTimeoutFn,
+  }).then(value => { result = value })
+  await flush()
+  assert.equal(updates, 1)
+  assert.equal(timers.count(), 1, 'the unresolved update call gets one deadline')
+
+  timers.fire()
+  await flush()
+  assert.equal(timers.count(), 1, 'the queued installing-state read still runs')
+  timers.fire()
+  await inspection
+
+  assert.equal(result.registration, reg)
+  assert.equal(result.updateAvailable, false)
 })
 
 test('SW discovery has a sane bounded fallback', () => {

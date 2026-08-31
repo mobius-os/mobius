@@ -22,7 +22,6 @@ function propBag(overrides = {}) {
     onSystemEvent: () => {},
     markStreamingStart: () => {},
     markStreamingEnd: () => {},
-    markVoiceListening: () => {},
     refreshApps: () => {},
     acknowledgeAppPreview: () => {},
     refreshChats: () => {},
