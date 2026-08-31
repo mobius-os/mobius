@@ -95,11 +95,40 @@ class ExistingGitHubRevisionIn(BaseModel):
   contribution_id: str = Field(default="", max_length=200)
 
 
+class RatingIn(BaseModel):
+  value: int = Field(ge=1, le=5)
+  revision_id: str = Field(
+    min_length=8, max_length=200, pattern=r"^[A-Za-z0-9_:-]+$",
+  )
+
+
 class InstallReceiptIn(BaseModel):
   local_app_id: str = Field(
     min_length=1, max_length=128,
     pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
   )
+
+
+class CommentIn(BaseModel):
+  body: str = Field(min_length=1, max_length=4000)
+  public_identity: _PUBLIC_IDENTITY = "anonymous"
+
+
+class EditorialAssetIn(BaseModel):
+  mime_type: Literal["image/png", "image/jpeg", "image/webp", "image/avif"]
+  data_base64: str = Field(min_length=4, max_length=1_850_000)
+
+
+class EditorialSpotlightItemIn(BaseModel):
+  app_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
+  artwork_asset: str | None = Field(
+    default=None,
+    pattern=r"^[0-9a-f]{64}\.(?:png|jpg|webp|avif)$",
+  )
+
+
+class EditorialSpotlightIn(BaseModel):
+  items: list[EditorialSpotlightItemIn] = Field(min_length=1, max_length=8)
 
 
 def _idempotency(value: str | None) -> str:
@@ -483,6 +512,13 @@ async def list_community_publications(
   return _response(
     _merge_publication_state(payload, local_items), status, headers,
   )
+
+
+@router.get("/editorial/spotlight")
+async def get_editorial_spotlight(
+  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+) -> JSONResponse:
+  return await _request("GET", f"{COMMUNITY_PREFIX}/editorial/spotlight")
 
 
 @router.get("/apps/{app_id}")
@@ -1037,5 +1073,70 @@ async def record_community_install(
     "POST",
     f"{COMMUNITY_PREFIX}/apps/{safe_app_id}/revisions/"
     f"{safe_revision_id}/installs",
+    body=body.model_dump(), idempotency_key=_idempotency(idempotency_key),
+  )
+
+
+@router.put(
+  "/apps/{app_id}/rating",
+  dependencies=[Depends(reject_cross_site)],
+)
+async def set_community_rating(
+  app_id: str,
+  body: RatingIn,
+  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+  idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> JSONResponse:
+  return await _request(
+    "PUT", f"{COMMUNITY_PREFIX}/apps/{_safe_public_id(app_id, 'App id')}/rating",
+    body=body.model_dump(), idempotency_key=_idempotency(idempotency_key),
+  )
+
+
+@router.post(
+  "/apps/{app_id}/revisions/{revision_id}/comments",
+  dependencies=[Depends(reject_cross_site)],
+)
+async def add_community_comment(
+  app_id: str,
+  revision_id: str,
+  body: CommentIn,
+  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+  idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> JSONResponse:
+  return await _request(
+    "POST",
+    f"{COMMUNITY_PREFIX}/apps/{_safe_public_id(app_id, 'App id')}"
+    f"/revisions/{_safe_public_id(revision_id, 'Revision id')}/comments",
+    body=body.model_dump(), idempotency_key=_idempotency(idempotency_key),
+  )
+
+
+@router.post(
+  "/editorial/assets",
+  dependencies=[Depends(reject_cross_site)],
+)
+async def upload_editorial_asset(
+  body: EditorialAssetIn,
+  _: models.Owner = Depends(_store_github_owner),
+  idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> JSONResponse:
+  return await _request(
+    "POST", f"{COMMUNITY_PREFIX}/editorial/assets",
+    body=body.model_dump(), idempotency_key=_idempotency(idempotency_key),
+  )
+
+
+@router.put(
+  "/editorial/spotlight",
+  dependencies=[Depends(reject_cross_site)],
+)
+async def publish_editorial_spotlight(
+  body: EditorialSpotlightIn,
+  _: models.Owner = Depends(_store_github_owner),
+  idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> JSONResponse:
+  return await _request(
+    "PUT", f"{COMMUNITY_PREFIX}/editorial/spotlight",
     body=body.model_dump(), idempotency_key=_idempotency(idempotency_key),
   )

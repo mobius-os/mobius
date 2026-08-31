@@ -81,6 +81,11 @@ INFERENCE_ROUTES = {
 _COMMUNITY_ROUTES = (
   ("GET", re.compile(r"/v1/community/apps"), "community:read"),
   ("GET", re.compile(r"/v1/community/publications"), "community:read"),
+  (
+    "GET",
+    re.compile(r"/v1/community/editorial/spotlight"),
+    "community:read",
+  ),
   ("GET", re.compile(r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}"), "community:read"),
   (
     "GET",
@@ -98,6 +103,29 @@ _COMMUNITY_ROUTES = (
       r"[A-Za-z0-9_:-]{8,200}/installs"
     ),
     "community:install",
+  ),
+  (
+    "PUT",
+    re.compile(r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/rating"),
+    "community:rate",
+  ),
+  (
+    "POST",
+    re.compile(
+      r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/revisions/"
+      r"[A-Za-z0-9_:-]{8,200}/comments"
+    ),
+    "community:comment",
+  ),
+  (
+    "POST",
+    re.compile(r"/v1/community/editorial/assets"),
+    "community:editorial",
+  ),
+  (
+    "PUT",
+    re.compile(r"/v1/community/editorial/spotlight"),
+    "community:editorial",
   ),
 )
 
@@ -768,6 +796,7 @@ class _Handler(BaseHTTPRequestHandler):
 
   do_GET = _handle
   do_POST = _handle
+  do_PUT = _handle
 
 
 class _UnixServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):

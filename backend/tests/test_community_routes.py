@@ -225,6 +225,102 @@ async def test_publication_lifecycle_reads_through_identity_broker(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_feedback_mutations_forward_only_exact_revision_bound_payloads(
+  monkeypatch,
+):
+  calls = []
+
+  async def fake_request(method, path, **kwargs):
+    calls.append((method, path, kwargs))
+    return SimpleNamespace(status_code=200)
+
+  monkeypatch.setattr(community, "_request", fake_request)
+  owner = SimpleNamespace()
+  rating = community.RatingIn(value=5, revision_id="rev_12345678")
+  comment = community.CommentIn(
+    body="Clear and useful.", public_identity="github",
+  )
+
+  await community.set_community_rating(
+    "app_12345678", rating, owner, "rating:1234567890abcdef",
+  )
+  await community.add_community_comment(
+    "app_12345678", "rev_12345678", comment, owner,
+    "comment:1234567890abcdef",
+  )
+
+  assert calls == [
+    (
+      "PUT",
+      "/v1/community/apps/app_12345678/rating",
+      {
+        "body": {"value": 5, "revision_id": "rev_12345678"},
+        "idempotency_key": "rating:1234567890abcdef",
+      },
+    ),
+    (
+      "POST",
+      "/v1/community/apps/app_12345678/revisions/rev_12345678/comments",
+      {
+        "body": {"body": "Clear and useful.", "public_identity": "github"},
+        "idempotency_key": "comment:1234567890abcdef",
+      },
+    ),
+  ]
+
+
+@pytest.mark.asyncio
+async def test_editorial_routes_forward_bounded_hosted_feed_contract(monkeypatch):
+  calls = []
+
+  async def fake_request(method, path, **kwargs):
+    calls.append((method, path, kwargs))
+    return SimpleNamespace(status_code=200)
+
+  monkeypatch.setattr(community, "_request", fake_request)
+  owner = SimpleNamespace()
+  await community.get_editorial_spotlight(owner)
+  await community.upload_editorial_asset(
+    community.EditorialAssetIn(
+      mime_type="image/png", data_base64="iVBORw0KGgo=",
+    ),
+    owner,
+    "editorial:asset:12345678",
+  )
+  await community.publish_editorial_spotlight(
+    community.EditorialSpotlightIn(items=[
+      community.EditorialSpotlightItemIn(
+        app_id="voice", artwork_asset="a" * 64 + ".png",
+      ),
+      community.EditorialSpotlightItemIn(app_id="maps"),
+    ]),
+    owner,
+    "editorial:feed:12345678",
+  )
+
+  assert calls == [
+    ("GET", "/v1/community/editorial/spotlight", {}),
+    (
+      "POST", "/v1/community/editorial/assets",
+      {
+        "body": {"mime_type": "image/png", "data_base64": "iVBORw0KGgo="},
+        "idempotency_key": "editorial:asset:12345678",
+      },
+    ),
+    (
+      "PUT", "/v1/community/editorial/spotlight",
+      {
+        "body": {"items": [
+          {"app_id": "voice", "artwork_asset": "a" * 64 + ".png"},
+          {"app_id": "maps", "artwork_asset": None},
+        ]},
+        "idempotency_key": "editorial:feed:12345678",
+      },
+    ),
+  ]
+
+
+@pytest.mark.asyncio
 async def test_authoritative_live_state_reconciles_only_an_older_local_journal(
   monkeypatch,
 ):

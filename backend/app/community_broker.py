@@ -74,7 +74,7 @@ class CommunityBrokerClient:
     method = method.upper()
     if not path.startswith(COMMUNITY_PREFIX + "/") and path != "/identity":
       raise ValueError("community broker path is outside its allow-list")
-    if method not in {"GET", "POST"}:
+    if method not in {"GET", "POST", "PUT"}:
       raise ValueError("community broker method is not allowed")
     if method != "GET" and path != "/identity":
       if not _IDEMPOTENCY_KEY.fullmatch(str(idempotency_key or "")):
