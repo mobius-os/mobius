@@ -427,6 +427,11 @@ def validate_manifest_contract(manifest) -> None:
   for dest, src in static_asset_entries(static_assets).items():
     validate_repo_relative_path(dest, f"static_assets.{dest}")
     validate_repo_relative_path(src, f"static_assets.{dest}")
+    if dest == "store" or dest.startswith("store/"):
+      _fail(
+        f"Manifest `static_assets.{dest}` collides with the author-owned "
+        "static/store listing-media tree."
+      )
 
   source_files = manifest.get("source_files")
   if source_files is not None:

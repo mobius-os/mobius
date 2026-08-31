@@ -1286,6 +1286,7 @@ def test_install_inline_rejects_malformed_raw_base(client, auth, raw_base):
   ({"storage_seeds": []}, "storage_seeds"),
   ({"static_assets": {"../index.html": "build/index.html"}}, "static_assets.../index.html"),
   ({"static_assets": {"index.html": "/build/index.html"}}, "static_assets.index.html"),
+  ({"static_assets": {"store/screen.png": "art/screen.png"}}, "static_assets.store/screen.png"),
   ({"static_assets": "build/index.html"}, "static_assets"),
 ])
 def test_install_rejects_non_repo_relative_manifest_asset_paths(
