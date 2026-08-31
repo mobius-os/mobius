@@ -1190,7 +1190,9 @@ test('a manual platform reconcile refreshes the persistent Settings surface', ()
 
 test('shell generations advertise one explicit update without intercepting navigation', () => {
   assert.match(shell, /markShellUpdateAvailable\(\)/)
-  assert.match(shell, /label: 'Update now', onAction: applyShellUpdate/)
+  assert.match(shell, /updateAvailable=\{shellUpdateAvailable\}/)
+  assert.match(shell, /onUpdateNow=\{applyShellUpdate\}/)
+  assert.doesNotMatch(shell, /showToast\('A Möbius update is ready\.'/)
   assert.doesNotMatch(shell, /requestShellReload|beforeNavigateRef/)
 })
 

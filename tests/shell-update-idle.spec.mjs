@@ -103,16 +103,26 @@ test.describe('shell update — owner-controlled navigation', () => {
     await resetLoadCount(page)
 
     releaseEvents()
+    await expect(page.getByRole('button', { name: /Notifications, \d+ unread/ })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Update now' })).toHaveCount(0)
+    await page.getByRole('button', { name: /Notifications/ }).click()
     await expect(page.getByRole('button', { name: 'Update now' })).toBeVisible()
     await expect(page.getByText('A Möbius update is ready.')).toHaveCount(1)
     expect(await loadCount(page)).toBe(0)
 
+    await page.getByRole('button', { name: 'Close notifications' }).click()
     await page.getByRole('button', { name: 'Toggle navigation' }).click()
     await page.locator(`[data-drawer-key="chat:${target.id}"]`).click()
     await expect(page.locator(
       `[data-chat-id="${target.id}"][data-chat-surface="painted"]`,
     )).toBeVisible({ timeout: 8000 })
     expect(await loadCount(page)).toBe(0)
+    await page.getByRole('button', { name: 'Notifications' }).click()
+    await expect(page.getByRole('button', { name: 'Update now' })).toBeVisible()
+    await page.getByRole('button', { name: 'Later' }).click()
+    await expect(page.getByRole('heading', { name: 'Notifications' })).toHaveCount(0)
+    expect(await loadCount(page)).toBe(0)
+    await page.getByRole('button', { name: 'Notifications' }).click()
     await expect(page.getByRole('button', { name: 'Update now' })).toBeVisible()
   })
 
@@ -139,6 +149,7 @@ test.describe('shell update — owner-controlled navigation', () => {
     })
 
     releaseEvent()
+    await page.getByRole('button', { name: /Notifications, \d+ unread/ }).click()
     const update = page.getByRole('button', { name: 'Update now' })
     await expect(update).toBeVisible()
     await update.click()

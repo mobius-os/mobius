@@ -20,7 +20,14 @@ const ICONS = {
 // A deliberately small shell preview, not a new navigation world. TRUST:
 // app-authored title/body stay plain text, app-authored icon URLs are ignored,
 // and targets pass through the fail-closed shared parser before navigation.
-export default function NotificationsView({ active = false, onOpenTarget, onClearAll }) {
+export default function NotificationsView({
+  active = false,
+  onOpenTarget,
+  onClearAll,
+  updateAvailable = false,
+  onUpdateNow,
+  onUpdateLater,
+}) {
   const { data, isLoading, isError } = notificationQueries.list.useQuery({ enabled: active })
   const rows = data ?? []
   const [now, setNow] = useState(() => Date.now())
@@ -85,13 +92,46 @@ export default function NotificationsView({ active = false, onOpenTarget, onClea
             Couldn’t clear notifications. Try again when you’re online.
           </p>
         )}
-        {!isLoading && !isError && rows.length === 0 && (
+        {!isLoading && !isError && rows.length === 0 && !updateAvailable && (
           <div className="notifications__empty">
             <Bell width={28} height={28} aria-hidden="true" />
             <p>Updates from your apps and agents will appear here.</p>
           </div>
         )}
         <ul className="notifications__list">
+          {updateAvailable && (
+            <li className="notifications__row-item">
+              <div className="notifications__row notifications__row--update">
+                <span className="notifications__row-icon" aria-hidden="true">
+                  <SettingsSlider width={17} height={17} />
+                </span>
+                <span className="notifications__row-main">
+                  <span className="notifications__row-title">
+                    A Möbius update is ready.
+                  </span>
+                  <span className="notifications__row-body">
+                    Refresh to use the latest changes.
+                  </span>
+                  <span className="notifications__update-actions">
+                    <button
+                      type="button"
+                      className="notifications__update-action notifications__update-action--primary"
+                      onClick={onUpdateNow}
+                    >
+                      Update now
+                    </button>
+                    <button
+                      type="button"
+                      className="notifications__update-action"
+                      onClick={onUpdateLater}
+                    >
+                      Later
+                    </button>
+                  </span>
+                </span>
+              </div>
+            </li>
+          )}
           {rows.map((n) => {
             const nav = parseNotificationTarget(n.target)
             const Icon = ICONS[iconKindForSource(n.source_type)] ?? ICONS.default

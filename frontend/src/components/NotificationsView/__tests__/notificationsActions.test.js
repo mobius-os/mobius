@@ -5,6 +5,10 @@ import test from 'node:test'
 
 const component = readFileSync(new URL('../NotificationsView.jsx', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../NotificationsView.css', import.meta.url), 'utf8')
+const center = readFileSync(
+  new URL('../../NotificationBell/NotificationCenter.jsx', import.meta.url),
+  'utf8',
+)
 
 test('notification header clears immediately and closes through the bell boundary', () => {
   assert.match(component, /onClick=\{handleClearAll\}/)
@@ -18,4 +22,15 @@ test('notification header clears immediately and closes through the bell boundar
   )
   const clearRule = css.match(/\.notifications__clear\s*\{([^}]*)\}/)?.[1] ?? ''
   assert.match(clearRule, /color:\s*var\(--text\)/)
+})
+
+test('a ready shell update is an actionable bell notification, not a banner', () => {
+  assert.match(component, /A Möbius update is ready\./)
+  assert.match(component, /onClick=\{onUpdateNow\}[\s\S]*Update now/)
+  assert.match(component, /onClick=\{onUpdateLater\}[\s\S]*Later/)
+  assert.match(component, /rows\.length === 0 && !updateAvailable/)
+  assert.match(center, /visibleUnreadCount = unreadCount \+ \(/)
+  assert.match(center, /updateAvailable=\{updateNoticeActive\}/)
+  assert.match(center, /bellRef\.current\?\.focus\(\)/)
+  assert.match(css, /\.notifications__update-action\s*\{[\s\S]*?min-height:\s*44px/)
 })
