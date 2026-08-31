@@ -145,7 +145,11 @@ test('ordinary turns retain settled Goals while Resume reactivates a pause', () 
     goalPresentationAtRunStart('/goal Start another', [], paused),
     { id: null, objective: 'Start another', status: 'active', resumable: false },
   )
-  assert.equal(goalPresentationAtRunStart('/goal clear', [], paused), null)
+  assert.deepEqual(
+    goalPresentationAtRunStart('/goal clear', [], paused),
+    { ...paused, resumable: true },
+    'the retired text command must not optimistically hide a durable Goal',
+  )
 })
 
 test('a promoted continuation preserves the matching retained Goal identity', () => {

@@ -53,6 +53,12 @@ class GoalPromotionRequest(BaseModel):
     return cleaned
 
 
+class GoalClearRequest(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+
+  goal_id: str = Field(min_length=1, max_length=64)
+
+
 class GoalTaskUpdate(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
@@ -155,6 +161,43 @@ async def promote_current_run_to_goal(
         "run_id": result["run_id"],
       })
   return result
+
+
+@router.delete(
+  "/{chat_id}/goal",
+  dependencies=[Depends(reject_cross_site)],
+)
+async def clear_presented_goal(
+  chat_id: str,
+  body: GoalClearRequest,
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+):
+  """Stop and dismiss one exact Goal without creating a chat message."""
+  require_chat_embed_operation(principal, "chat:stop")
+  get_active_chat_for_principal(db, chat_id, principal)
+  from app.chat import clear_goal_for
+
+  result = await clear_goal_for(chat_id, body.goal_id)
+  if result["status"] == "still_running":
+    raise HTTPException(
+      status_code=409,
+      detail="The Goal is still stopping; confirm again in a moment.",
+    )
+  if result["status"] == "conflict":
+    raise HTTPException(
+      status_code=409,
+      detail="A newer Goal replaced the one this confirmation targeted.",
+    )
+  if result["status"] == "missing":
+    return {"cleared": False, "goal": None}
+  broadcast = get_broadcast(chat_id)
+  if broadcast is not None and broadcast.running:
+    broadcast.publish({
+      "type": "goal_cleared",
+      "goal_id": result["goal_id"],
+    })
+  return {"cleared": True, "goal": None}
 
 
 @router.put(
