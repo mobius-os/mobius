@@ -25,6 +25,14 @@ import {
 import { chatQueries } from '../../../hooks/queries.js'
 
 const shellSource = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
+const newChatLandingSource = readFileSync(
+  new URL('../NewChatLanding.jsx', import.meta.url),
+  'utf8',
+)
+const chatViewSource = readFileSync(
+  new URL('../../ChatView/ChatView.jsx', import.meta.url),
+  'utf8',
+)
 const queriesSource = readFileSync(new URL('../../../hooks/queries.js', import.meta.url), 'utf8')
 const clientSource = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
 
@@ -150,6 +158,65 @@ test('an accepted allocation hydrates durable draft ownership before handoff', (
   const route = accepted.indexOf("if (changesRoute) navTo('chat', { chatId: intentId })")
   assert.ok(hydrate >= 0 && currentAgain > hydrate && route > currentAgain,
     'destination navigation must wait for durable hydration and reclaimed ownership')
+})
+
+test('a provisional Send becomes one durable handoff and retries on proven recovery', () => {
+  const queue = shellSource.match(
+    /const queueDraftFirstNewChat = useCallback\(\(input\) => \{([\s\S]*?)\n  \}, \[requestComposer, retryDraftFirstNewChat\]\)/,
+  )?.[1] || ''
+  const stage = queue.indexOf('stageVerifiedNewChatHandoff(')
+  const verify = queue.indexOf('if (!staged)')
+  const submitted = queue.indexOf('submitted: true')
+  assert.ok(stage >= 0 && verify > stage && submitted > verify,
+    'the UI must claim a queued send only after its autosend marker reads back')
+
+  assert.match(newChatLandingSource, /onSubmit=\{submitDraft\}/)
+  assert.match(newChatLandingSource,
+    /submissionBlocked=\{submitted \|\| submitPending\}/)
+  assert.match(newChatLandingSource, /\{liveComposer && !submitted && \(/,
+    'the queued snapshot must not remain editable before its handoff')
+  assert.match(newChatLandingSource, /will send when Möbius reconnects/)
+
+  assert.match(shellSource, /const recoveryGeneration = useRecoveryGeneration\(\)/)
+  assert.match(
+    shellSource,
+    /shouldRetryNewChatAllocation\(presentation, recoveryGeneration\)[\s\S]*?retryDraftFirstNewChat\(\)/,
+    'allocation retries only after the shared reachability owner proves recovery',
+  )
+  assert.match(
+    shellSource,
+    /failedNewChatPresentation\([\s\S]*?current,[\s\S]*?result\.verdict/,
+    'a late create failure must merge the live presentation and preserve submitted state',
+  )
+  assert.match(
+    shellSource,
+    /stageComposerHandoff\(decision\.chatId, autoSendDraft, \{ autoSend: true \}\)/,
+    'an authoritative id rotation must move the queued handoff to its new owner',
+  )
+})
+
+test('Send remains owned by the landing after allocation materializes', () => {
+  const queue = shellSource.match(
+    /const queueDraftFirstNewChat = useCallback\(\(input\) => \{([\s\S]*?)\n  \}, \[requestComposer, retryDraftFirstNewChat\]\)/,
+  )?.[1] || ''
+
+  assert.doesNotMatch(queue, /!presentation \|\| presentation\.materialized/,
+    'a materialized row must not turn the still-visible Send button into a no-op')
+  assert.match(
+    queue,
+    /if \(presentation\.materialized\) \{[\s\S]*?requestComposer\(presentation\.chatId, \{[\s\S]*?draft: text,[\s\S]*?submit: true,[\s\S]*?releaseNewChatPresentationToken: presentation\.token/,
+    'the landing must submit through the mounted destination and release itself',
+  )
+  assert.match(
+    queue,
+    /submitted: true,[\s\S]*?handoffRequested: presentation\.materialized[\s\S]*?\|\| presentation\.handoffRequested/,
+    'the submit handoff must claim the request slot before display-ready focus can replace it',
+  )
+  assert.match(
+    chatViewSource,
+    /if \(request\.storedHandoff\) \{[\s\S]*?consumeComposerHandoff[\s\S]*?doSend\(text\)[\s\S]*?onComposerRequestHandled\?\.\(request\.token\)/,
+    'the destination must acknowledge the explicit handoff after starting its send',
+  )
 })
 
 class MemoryStorage {
@@ -495,12 +562,12 @@ test('a created chat enters the cache without displacing pinned chats', () => {
   assert.equal('detail' in result[1], false)
 })
 
-test('ordinary chat selection does not launch a competing drawer refresh', () => {
+test('ordinary chat selection closes navigation without waiting for chat paint', () => {
   const selectChat = shellSource.match(
     /function selectChat\(id, \{ focusComposer = true \} = \{\}\) \{([\s\S]*?)\n  \}/,
   )?.[1] || ''
-  assert.match(selectChat,
-    /navTo\('chat', \{ chatId: id, preserveDrawerPresentation \}\)/)
+  assert.match(selectChat, /navTo\('chat', \{ chatId: id \}\)/)
+  assert.doesNotMatch(selectChat, /preserveDrawerPresentation/)
   assert.doesNotMatch(selectChat, /refreshChats/)
 })
 

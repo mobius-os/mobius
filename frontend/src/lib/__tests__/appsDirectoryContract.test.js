@@ -92,6 +92,8 @@ test('expanded and collapsed navigation share one ChatGPT SDK icon vocabulary', 
   for (const icon of ['ComposeEditSquare', 'Grid', 'SettingsSlider']) {
     assert.match(navigationIcons, new RegExp(icon))
   }
+  assert.match(navigationIcons, /navigationIcon\(/)
+  assert.match(navigationIcons, /navigation-action-icon/)
   assert.match(drawer, /from '\.\.\/navigationIcons\.js'/)
   assert.match(shell, /from '\.\.\/navigationIcons\.js'/)
 })

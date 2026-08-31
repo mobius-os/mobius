@@ -73,6 +73,11 @@
 }
 
 .login__btn {
+  width: 100%;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: var(--accent, #a78bfa);
   color: #fff;
   border: none;
@@ -80,6 +85,8 @@
   padding: 10px;
   font-weight: 600;
   margin-top: 4px;
+  text-decoration: none;
+  cursor: pointer;
   transition: background 0.15s;
 }
 

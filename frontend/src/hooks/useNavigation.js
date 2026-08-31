@@ -22,6 +22,7 @@ import {
 } from '../lib/navigationPersistence.js'
 import { drawerOpenBlockedByDrag } from '../lib/drawerLifecycle.js'
 import { shellReload } from '../lib/shellReloadState.js'
+import { recordClientError } from '../lib/errorLog.js'
 import * as tabModel from '../components/Shell/tabModel.js'
 import * as paneModel from '../components/Shell/paneModel.js'
 
@@ -299,6 +300,12 @@ export default function useNavigation({
   // pending flag must not brick the drawer forever: openDrawer reconciles from
   // the classic History store once the traversal is provably stale.
   const drawerClosePendingAtRef = useRef(0)
+  // Exact identity of the drawer sentinel whose explicit close issued the
+  // outstanding history.back(). A close declared lost after the grace window
+  // may still arrive after that sentinel was re-adopted and retagged by a row
+  // selection. Keep the correlation until the traversal settles so that late
+  // bookkeeping can never be mistaken for a fresh owner Back.
+  const drawerCloseTraversalRef = useRef(null)
   // A first open press while close bookkeeping still traverses history is
   // intent, not noise. Keep it until the close settles; a bounded retry reuses
   // stale-close recovery if WebKit loses the traversal completely.
@@ -635,10 +642,16 @@ export default function useNavigation({
       drawerClosePendingRef.current = false
       if (drawerPushedRef.current
           && isMobiusNavState(history.state) && history.state.kind === 'drawer') {
+        const closeTraversal = drawerCloseTraversalRef.current
+        if (closeTraversal
+            && closeTraversal.entryId === navEntryId(history.state)) {
+          closeTraversal.recovered = true
+        }
         drawerOpenRef.current = true
         setDrawerVisible(true)
         return
       }
+      drawerCloseTraversalRef.current = null
       drawerOpenRef.current = false
       drawerPushedRef.current = false
     }
@@ -653,7 +666,15 @@ export default function useNavigation({
       return
     }
     clearDrawerOpenAfterClose()
-    pushShellEntry('drawer', snapshotRoute())
+    const returnState = currentNavStateRef.current
+    const drawerState = pushShellEntry('drawer', snapshotRoute())
+    drawerCloseTraversalRef.current = {
+      entryId: navEntryId(drawerState),
+      returnEntryId: navEntryId(returnState),
+      recovered: false,
+      selectedRoute: null,
+      selectionChanged: false,
+    }
     drawerPushedRef.current = true
     // Advance the ref synchronously so a same-batch open→close sees "open" and
     // does not leave the just-pushed sentinel dangling (§5.3.2).
@@ -668,6 +689,22 @@ export default function useNavigation({
     if (!drawerOpenRef.current || drawerClosePendingRef.current) return
     if (drawerPushedRef.current) {
       beforeRestoreRouteRef?.current?.(snapshotRoute())
+      const closeTraversal = drawerCloseTraversalRef.current
+      if (closeTraversal?.recovered
+          && closeTraversal.entryId === navEntryId(history.state)) {
+        // history.back() was already issued before stale-close recovery. Do
+        // not issue a second traversal: retire the visible drawer immediately
+        // and correlate whichever Back arrives with this same-route close.
+        const route = snapshotRoute()
+        closeTraversal.selectedRoute = route
+        closeTraversal.selectionChanged = false
+        currentNavStateRef.current = updateCurrentNavEntry(route, { kind: 'nav' })
+          || currentNavStateRef.current
+        drawerPushedRef.current = false
+        drawerOpenRef.current = false
+        setDrawerVisible(false)
+        return
+      }
       clearDrawerOpenAfterClose()
       drawerClosePendingRef.current = true
       drawerClosePendingAtRef.current = Date.now()
@@ -689,15 +726,10 @@ export default function useNavigation({
       clearDrawerOpenAfterClose()
       drawerOpenRef.current = false
       drawerClosePendingRef.current = false
+      drawerCloseTraversalRef.current = null
       setDrawerVisible(false)
     }
   }
-
-  // Finish a drawer deliberately retained after its navigation sentinel was
-  // consumed. A newly reopened logical drawer wins over late readiness.
-  const finishDrawerNavigationPresentation = useCallback(() => {
-    if (!drawerOpenRef.current) setDrawerVisible(false)
-  }, [])
 
   /**
    * Mini-app nav-bridge: install a back-sentinel on behalf of a VISIBLE
@@ -1095,15 +1127,21 @@ export default function useNavigation({
     if (beforeNavigateRef?.current?.(nextRoute) === true) return
 
     navigationEpochRef.current += 1
-    const keepDrawerPresented = opts.preserveDrawerPresentation === true
-      && drawerOpenRef.current
-
     // Ensure exactly one history entry sits above the current one to serve as
     // this navigation's back-target: retag a consumed drawer sentinel, else push
     // a fresh nav entry. Exactly one pushState/retag per navTo (§5.3.12).
     if (drawerPushedRef.current) {
+      const closeTraversal = drawerCloseTraversalRef.current
+      const recoveredClose = closeTraversal?.recovered
+        && closeTraversal.entryId === navEntryId(history.state)
       drawerPushedRef.current = false
       currentNavStateRef.current = updateCurrentNavEntry(nextRoute, { kind: 'nav' })
+      if (recoveredClose) {
+        closeTraversal.selectedRoute = nextRoute
+        closeTraversal.selectionChanged = true
+      } else {
+        drawerCloseTraversalRef.current = null
+      }
     } else {
       try {
         pushShellEntry('nav', nextRoute)
@@ -1115,7 +1153,7 @@ export default function useNavigation({
     // open try to re-adopt a sentinel this navigation has already retagged.
     drawerClosePendingRef.current = false
     drawerOpenRef.current = false
-    setDrawerVisible(keepDrawerPresented)
+    setDrawerVisible(false)
 
     // One reducer action makes payload+view atomic (§1.3.2). The ONE decision
     // point applies the destination to the correct world: a chat/app nav in single
@@ -1387,6 +1425,7 @@ export default function useNavigation({
         clearDrawerOpenAfterClose()
         drawerClosePendingRef.current = false
         drawerOpenRef.current = false
+        drawerCloseTraversalRef.current = null
       }
       // A transient surface is deliberately not recreated by Forward: its
       // resource may have streamed away or its owner may have unmounted. Keep
@@ -1569,6 +1608,65 @@ export default function useNavigation({
       handleBack(committed, source)
     }
 
+    function recoveredDrawerCloseFor(source) {
+      const closeTraversal = drawerCloseTraversalRef.current
+      return closeTraversal?.recovered
+        && closeTraversal.selectedRoute
+        && closeTraversal.entryId === navEntryId(source)
+        ? closeTraversal
+        : null
+    }
+
+    function settleRecoveredDrawerClose(destination, source) {
+      const closeTraversal = recoveredDrawerCloseFor(source)
+      if (!closeTraversal) return false
+      const committed = isMobiusNavState(destination)
+        ? destination
+        : (isMobiusNavState(history.state) ? history.state : null)
+
+      // A sandboxed iframe phantom can sit beneath the drawer sentinel. The
+      // original explicit close owns the seek through it; do not let the
+      // ordinary phantom guard drop this correlated traversal and strand the
+      // selected route above an untagged cursor.
+      if (!committed) {
+        setTimeout(() => history.back(), 0)
+        return true
+      }
+
+      const diagnostic = {
+        sourceKind: source?.kind ?? null,
+        destinationKind: committed.kind ?? null,
+        sourceIndex: navEntryIndex(source),
+        destinationIndex: navEntryIndex(committed),
+        expectedReturn: !closeTraversal.returnEntryId
+          || closeTraversal.returnEntryId === navEntryId(committed),
+        selectionChanged: closeTraversal.selectionChanged,
+      }
+      currentNavStateRef.current = committed
+      drawerCloseTraversalRef.current = null
+
+      if (closeTraversal.selectionChanged) {
+        // The late close moved the physical cursor beneath the selected route.
+        // Rebase that already-painted route above the committed cursor without
+        // restoring the old destination or popping navStack a second time.
+        try {
+          pushShellEntry('nav', closeTraversal.selectedRoute)
+        } catch {
+          currentNavStateRef.current = updateCurrentNavEntry(
+            closeTraversal.selectedRoute,
+            { kind: 'nav' },
+          ) || committed
+        }
+      }
+
+      recordClientError({
+        where: 'useNavigation.recoveredDrawerClose',
+        message: 'A recovered drawer close settled after a newer drawer action.',
+        stack: JSON.stringify(diagnostic),
+      })
+      return true
+    }
+
     function handleBack(destination, source) {
       // Android can synthesize a delayed logo click after a PHYSICAL Back
       // gesture. closeDrawer also traverses history, but that traversal is our
@@ -1613,6 +1711,7 @@ export default function useNavigation({
         drawerPushedRef.current = false
         drawerClosePendingRef.current = false
         drawerOpenRef.current = false
+        drawerCloseTraversalRef.current = null
         if (!reopenAfterClose) closeDrawerNextFrame()
         appLocalPopInFlightRef.current = false
         setTimeout(() => {
@@ -1732,6 +1831,7 @@ export default function useNavigation({
       drawerPushedRef.current = false
       drawerClosePendingRef.current = false
       drawerOpenRef.current = false
+      drawerCloseTraversalRef.current = null
       setDrawerVisible(false)
       const entry = navStackRef.current.pop()
       if (entry) restoreRoute(entry)
@@ -1761,6 +1861,23 @@ export default function useNavigation({
         let destinationEntryIndex
         try { destinationEntryIndex = e.destination?.index } catch { destinationEntryIndex = undefined }
         const source = sourceEntryState || currentNavStateRef.current
+        // A programmatic close whose traversal was declared lost can still
+        // commit after the recovered drawer selected a route. Correlate it by
+        // the retagged sentinel's stable entry id, but never claim an explicitly
+        // user-initiated Back gesture as our bookkeeping.
+        let userInitiated = false
+        try { userInitiated = e.userInitiated === true } catch { /* wedged engine */ }
+        const recoveredSource = isMobiusNavState(source)
+          ? source
+          : currentNavStateRef.current
+        if (!userInitiated && recoveredDrawerCloseFor(recoveredSource)) {
+          const consumeRecoveredClose = () => {
+            settleRecoveredDrawerClose(destination, recoveredSource)
+          }
+          if (e.canIntercept) e.intercept({ handler: consumeRecoveredClose })
+          else setTimeout(consumeRecoveredClose, 0)
+          return
+        }
         // A drawer-sentinel consumption is recognized FIRST — before the
         // phantom guard, and even when the destination's mirror state is
         // unreadable. On a wedged engine the sentinel's mirror write failed, so
@@ -1892,6 +2009,7 @@ export default function useNavigation({
     function onPopState() {
       const destination = history.state
       const source = currentNavStateRef.current
+      if (settleRecoveredDrawerClose(destination, source)) return
       const direction = navTraversalDirection(source, destination)
       const sourceRoute = snapshotRoute()
       // A pop off a dismissible sentinel is ours whatever it lands on: the tag
@@ -2035,7 +2153,6 @@ export default function useNavigation({
     activeProjectId,
     activeArtifactRef,
     drawerOpen: drawerVisible,
-    drawerNavigationCover: drawerVisible && !drawerOpenRef.current,
     // Strictly "the full-workspace takeover overlay is up" — NOT "focused content
     // is Settings" (a builder tab is the latter without the overlay). The render
     // gates pane suppression on THIS, never on activeView, so builder Settings
@@ -2050,7 +2167,6 @@ export default function useNavigation({
     settingsOpenRaw: settingsOpen,
     openDrawer,
     closeDrawer,
-    finishDrawerNavigationPresentation,
     navTo,
     navigateBackward,
     navigateForward,

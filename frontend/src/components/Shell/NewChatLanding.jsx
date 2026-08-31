@@ -1,7 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 import ChatInputBar from '../ChatView/ChatInputBar.jsx'
+import BrainUsageButton from '../ChatView/BrainUsageButton.jsx'
 import ComposerPopover from '../ChatView/ComposerPopover.jsx'
+import { selectedChatModel } from '../ChatView/modelSelectionPolicy.js'
 import {
   composerDraftRevision,
   persistComposerDraft,
@@ -24,9 +26,9 @@ function composerFiles(files) {
  * New Chat's immediate, draft-only compose surface.
  *
  * The client-minted chat id is already the final draft owner, so every edit is
- * durable before POST /chats settles. Server-bound capabilities stay disabled
- * until the real ChatView is ready; Shell keeps this surface mounted above it
- * until that destination has taken focus and re-read the latest draft.
+ * durable before POST /chats settles. The Brain stays disabled only until the
+ * row exists, then the canonical model picker becomes available on this same
+ * surface while Shell hands focus to the real ChatView underneath.
  */
 export default function NewChatLanding({
   chatId = null,
@@ -36,6 +38,7 @@ export default function NewChatLanding({
   onRetry,
   onSubmit,
   submitted = false,
+  chatInfo = null,
 }) {
   const inputRef = useRef(null)
   const listeningRef = useRef(false)
@@ -51,6 +54,22 @@ export default function NewChatLanding({
   const inputValueRef = useRef(initialRef.current.input)
   const [input, setInput] = useState(initialRef.current.input)
   const [attachments, setAttachments] = useState(initialAttachments)
+  const [liveChatInfo, setLiveChatInfo] = useState(chatInfo)
+  const [submitPending, setSubmitPending] = useState(false)
+  const settingsSaveTailRef = useRef(Promise.resolve())
+
+  useEffect(() => {
+    if (chatInfo) setLiveChatInfo(chatInfo)
+  }, [chatInfo])
+
+  function mergeChatInfo({ agent_settings_json, provider, effective }) {
+    setLiveChatInfo(previous => previous ? ({
+      ...previous,
+      agent_settings_json,
+      provider: provider || previous.provider,
+      effective: effective || previous.effective,
+    }) : previous)
+  }
 
   function updateInput(next) {
     const value = String(next)
@@ -101,10 +120,17 @@ export default function NewChatLanding({
     if (chatId != null) persistComposerDraft(chatId, inputValueRef.current, next)
   }
 
-  function submitDraft(event) {
+  async function submitDraft(event) {
     event?.preventDefault?.()
-    if (submitted || !input.trim()) return
-    onSubmit?.(input)
+    if (submitted || submitPending || !input.trim()) return
+    const draft = input
+    setSubmitPending(true)
+    try {
+      await settingsSaveTailRef.current
+      onSubmit?.(draft)
+    } finally {
+      setSubmitPending(false)
+    }
   }
 
   const statusMessage = submitted
@@ -164,10 +190,32 @@ export default function NewChatLanding({
             onSteer={() => {}}
             canSteer={false}
             offline={failure === 'offline'}
-            submissionBlocked={submitted}
+            submissionBlocked={submitted || submitPending}
             pendingFiles={attachments}
             onRemoveFile={removeAttachment}
-            leftButtons={<ComposerPopover pending />}
+            leftButtons={liveChatInfo ? (
+              <BrainUsageButton
+                chatId={chatId}
+                provider={liveChatInfo.provider}
+                providerSessionId={liveChatInfo.session_id}
+                model={selectedChatModel(liveChatInfo)}
+              >
+                {({ icon, ariaLabel, providerUsage }) => (
+                  <ComposerPopover
+                    triggerIcon={icon}
+                    triggerAriaLabel={ariaLabel}
+                    providerUsage={providerUsage}
+                    chatInfo={liveChatInfo}
+                    chatId={chatId}
+                    hasAssistantTurns={false}
+                    onChangeChatInfo={mergeChatInfo}
+                    settingsSaveTailRef={settingsSaveTailRef}
+                    composerInputRef={inputRef}
+                    embedded
+                  />
+                )}
+              </BrainUsageButton>
+            ) : <ComposerPopover pending />}
             attachmentsDisabled
           />
         </div>

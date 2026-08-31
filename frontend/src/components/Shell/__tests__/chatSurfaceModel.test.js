@@ -180,7 +180,7 @@ test('focused Builder presentation never manufactures a stale outgoing cover', (
   assert.equal(layers.every(layer => layer.role === 'active'), true)
 })
 
-test('an app remains a Standard cover until the destination chat is display-ready', () => {
+test('an app retains a Standard handoff layer until the destination chat is display-ready', () => {
   const cover = deriveAppToChatCover(
     standardContentSurface({ single: true, fullBleedKey: 'app:39' }),
     standardContentSurface({ single: true, fullBleedKey: 'chat:audit' }),
@@ -193,7 +193,7 @@ test('an app remains a Standard cover until the destination chat is display-read
   })
 })
 
-test('an app-to-chat cover follows rapid chat navigation without a blank frame', () => {
+test('an app-to-chat handoff follows rapid chat navigation without a blank frame', () => {
   const cover = deriveAppToChatCover(
     standardContentSurface({ single: true, fullBleedKey: 'chat:first' }),
     standardContentSurface({ single: true, fullBleedKey: 'chat:second' }),
@@ -209,7 +209,7 @@ test('an app-to-chat cover follows rapid chat navigation without a blank frame',
   })
 })
 
-test('only an app-to-chat Standard transition creates this cover', () => {
+test('only an app-to-chat Standard transition creates this handoff', () => {
   assert.equal(
     deriveAppToChatCover(
       standardContentSurface({ single: true, fullBleedKey: 'chat:a' }),
