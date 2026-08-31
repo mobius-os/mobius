@@ -369,6 +369,43 @@ def _trusted_catalog_repo_base(url_or_base: str) -> str | None:
   return f"{parsed.scheme}://{parsed.hostname}/{org}/{repo}"
 
 
+def _trusted_catalog_origin_url(url_or_base: str) -> str | None:
+  """Return the one canonical Git origin proven by a trusted catalog URL."""
+  parsed = urlparse(url_or_base)
+  if (
+    parsed.scheme != "https"
+    or parsed.netloc != "raw.githubusercontent.com"
+    or parsed.username is not None
+    or parsed.password is not None
+  ):
+    return None
+  repo_base = _trusted_catalog_repo_base(url_or_base)
+  if repo_base is None:
+    return None
+  parts = [part for part in urlparse(repo_base).path.split("/") if part]
+  if len(parts) != 2:
+    return None
+  return f"https://github.com/{parts[0]}/{parts[1]}.git"
+
+
+def _trusted_origin_catalog_identity_matches(
+  app: models.App,
+  source_url: str,
+  manifest_id: str,
+) -> bool:
+  """Whether a local identity-free row has the catalog package's Git origin."""
+  if app.manifest_url is not None or app.slug != manifest_id:
+    return False
+  expected_origin = _trusted_catalog_origin_url(source_url)
+  if expected_origin is None:
+    return False
+  actual_origin = app_git.origin_url(app.source_dir)
+  return bool(
+    actual_origin
+    and actual_origin.rstrip("/") == expected_origin.rstrip("/")
+  )
+
+
 def _find_ref_independent_catalog_row(
   db: Session, canonical_manifest_url: str, manifest_id: str,
 ) -> models.App | None:
@@ -406,7 +443,6 @@ def _find_trusted_origin_catalog_row(
   db: Session,
   canonical_manifest_url: str,
   manifest_id: str,
-  manifest_url: str,
 ) -> models.App | None:
   """Adopt a legacy local row only when its Git origin proves identity.
 
@@ -416,12 +452,6 @@ def _find_trusted_origin_catalog_row(
   the same id as an unrelated local app. For the narrow trusted root-catalog
   shape, an exact canonical ``origin`` URL is the missing durable witness.
   """
-  if _trusted_catalog_repo_base(canonical_manifest_url) is None:
-    return None
-  repo_ref = _derive_repo_ref(manifest_url)
-  if repo_ref is None:
-    return None
-  expected_origin, _ref = repo_ref
   candidate = (
     db.query(models.App)
     .filter(
@@ -432,10 +462,9 @@ def _find_trusted_origin_catalog_row(
   )
   if candidate is None:
     return None
-  actual_origin = app_git.origin_url(candidate.source_dir)
-  if actual_origin is None:
-    return None
-  return candidate if actual_origin.rstrip("/") == expected_origin.rstrip("/") else None
+  return candidate if _trusted_origin_catalog_identity_matches(
+    candidate, canonical_manifest_url, manifest_id,
+  ) else None
 
 
 def _find_install_identity_row(
@@ -455,7 +484,7 @@ def _find_install_identity_row(
     existing = _find_ref_independent_catalog_row(db, canonical, manifest_id)
   if existing is None:
     existing = _find_trusted_origin_catalog_row(
-      db, canonical, manifest_id, source_url,
+      db, canonical, manifest_id,
     )
   return existing
 
@@ -477,6 +506,36 @@ def _catalog_identity_matches(
     existing_identity.endswith(suffix)
     and existing_repo
     and existing_repo == _trusted_catalog_repo_base(candidate_identity)
+  )
+
+
+def pending_conflict_update_matches_app(
+  app: models.App,
+  receipt: dict,
+) -> bool:
+  """Bind a pending receipt to the app identity it is allowed to promote.
+
+  A normal Store app is bound by its persisted package identity. During the
+  first adoption of a local app, that identity intentionally remains unset
+  until source and capabilities are accepted together; the exact trusted Git
+  origin is the temporary witness for that one pending package.
+  """
+  manifest = receipt.get("manifest")
+  raw_base = receipt.get("raw_base")
+  if (
+    receipt.get("app_id") != app.id
+    or not app.upstream_commit
+    or receipt.get("upstream_commit") != app.upstream_commit
+    or not isinstance(manifest, dict)
+    or not isinstance(manifest.get("id"), str)
+    or not isinstance(raw_base, str)
+  ):
+    return False
+  manifest_id = manifest["id"]
+  if app.manifest_url is not None:
+    return _catalog_identity_matches(app.manifest_url, raw_base, manifest_id)
+  return _trusted_origin_catalog_identity_matches(
+    app, raw_base, manifest_id,
   )
 
 
