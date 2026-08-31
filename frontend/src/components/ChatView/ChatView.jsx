@@ -4521,6 +4521,33 @@ export default function ChatView({
     onDismissApp,
   })
 
+  const handleLoadContributionWorkHistory = useCallback(async (context = null) => {
+    const appId = Number(context?.appId)
+    if (!appId) {
+      return { kind: 'blocked', message: 'The Contribute app is not available.' }
+    }
+    try {
+      const response = await api.contributions.workHistory(appId, chatId)
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) {
+        return {
+          kind: response.status >= 400 && response.status < 500
+            ? 'blocked'
+            : 'unavailable',
+          message: String(payload?.detail || '').trim(),
+        }
+      }
+      return {
+        kind: 'loaded',
+        items: Array.isArray(payload?.items) ? payload.items : [],
+        total: Number.isInteger(payload?.total) ? payload.total : 0,
+        truncated: payload?.truncated === true,
+      }
+    } catch {
+      return { kind: 'unavailable' }
+    }
+  }, [chatId])
+
   const wasTurnActiveRef = useRef(turnActive)
   useEffect(() => {
     if (wasTurnActiveRef.current && !turnActive) {
@@ -5276,6 +5303,7 @@ export default function ChatView({
           }}
           onContinueInChat={handleContributionFollowup}
           onStopWork={handleStopContributionWork}
+          onLoadWorkHistory={handleLoadContributionWorkHistory}
           returnFocusRef={changesReturnFocusRef}
         />
       )}

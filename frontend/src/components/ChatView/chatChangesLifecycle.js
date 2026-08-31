@@ -20,15 +20,6 @@ export function contributionWorkState(work) {
   return null
 }
 
-/**
- * Source chat stays quiet while private preparation is merely progressing.
- * Changes is the durable progress surface; chat only interrupts when the
- * helper reached a state that genuinely needs the owner's judgment.
- */
-export function contributionWorkNeedsSourceAttention(work) {
-  return contributionWorkState(work) === 'attention'
-}
-
 function cleanPath(value) {
   if (typeof value !== 'string') return ''
   const normalized = value.trim().replaceAll('\\', '/').replace(/\/{2,}/g, '/')
@@ -44,6 +35,7 @@ export function contributionStage(record) {
 }
 
 export function contributionNeedsAttention(record) {
+  if (SETTLED.has(record?.status)) return false
   return record?.needs_attention === true
     || Boolean(String(record?.last_submit_error || '').trim())
     || record?.review?.state === 'needs_refresh'
@@ -128,7 +120,7 @@ function settlementCoversEntry(settlement, entry) {
   return coveredAt !== null && (editedAt === null || editedAt <= coveredAt)
 }
 
-export function changeSource(path) {
+function changeSource(path) {
   const clean = cleanPath(path)
   const app = clean.match(/^\/data\/apps\/([^/]+)(?:\/|$)/)
   if (app) return {
@@ -277,6 +269,9 @@ export function chatChangesOverview(entries, payload) {
     stages,
     counts,
     work: payload?.work || null,
+    workHistoryCount: Number.isInteger(payload?.work_history_count)
+      ? payload.work_history_count
+      : 0,
     workState: contributionWorkState(payload?.work),
     hasWork: counts.files > 0 || records.length > 0,
     needsAction: counts.unsorted > 0 || counts.prepared > 0 || attention > 0,
@@ -303,53 +298,22 @@ export function compactChangesSummary(overview) {
     }
     return 'Contribution status unavailable'
   }
+  const hasStages = overview?.stages && typeof overview.stages === 'object'
+  const withoutAttention = stage => hasStages
+    ? (overview.stages?.[stage] || []).filter(record => !contributionNeedsAttention(record)).length
+    : Number(counts[stage] || 0)
+  const working = Number(counts.unsorted || 0)
+    + withoutAttention('open')
+  const ready = withoutAttention('prepared')
+  const needsYou = Number(counts.attention || 0)
+  const done = withoutAttention('settled')
   const parts = []
-  if (overview?.workState === 'active') parts.push('helper working')
-  if (counts.unsorted > 0) parts.push(`${counts.unsorted} unsorted`)
-  if (counts.prepared > 0) parts.push(`${counts.prepared} prepared`)
-  if (counts.open > 0) parts.push(`${counts.open} open`)
-  if (counts.attention > 0) parts.push(`${counts.attention} need attention`)
+  if (working > 0) parts.push(`${working} working`)
+  if (ready > 0) parts.push(`${ready} ready`)
+  if (needsYou > 0) parts.push(`${needsYou} needs you`)
+  if (done > 0) parts.push(`${done} done`)
   if (parts.length > 0) return parts.join(' · ')
-  if (counts.settled > 0) return `${counts.settled} settled · everything organized`
+  if (overview?.workState === 'active') return 'Preparing in background'
+  if (overview?.workState === 'attention') return 'Preparation needs you'
   return 'No changes from this chat yet'
-}
-
-export function initialChangesStage(overview) {
-  const counts = overview?.counts || {}
-  if (counts.unsorted > 0) return 'unsorted'
-  if (counts.prepared > 0) return 'prepared'
-  if (counts.open > 0) return 'open'
-  if (counts.settled > 0) return 'settled'
-  return 'unsorted'
-}
-
-function revisionHash(value) {
-  let hash = 2166136261
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index)
-    hash = Math.imul(hash, 16777619)
-  }
-  return (hash >>> 0).toString(36)
-}
-
-export function unsortedDismissKey(chatId, revision) {
-  if (!chatId || !revision) return null
-  return `mobius:changes-dismissed:${chatId}:${revisionHash(revision)}`
-}
-
-export function isUnsortedDismissed(chatId, revision, storage) {
-  const key = unsortedDismissKey(chatId, revision)
-  if (!key || !storage) return false
-  try { return storage.getItem(key) === '1' } catch { return false }
-}
-
-export function rememberUnsortedDismissed(chatId, revision, storage) {
-  const key = unsortedDismissKey(chatId, revision)
-  if (!key || !storage) return false
-  try {
-    storage.setItem(key, '1')
-    return true
-  } catch {
-    return false
-  }
 }

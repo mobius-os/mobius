@@ -4,7 +4,6 @@ import assert from 'node:assert/strict'
 import {
   chatChangesPrimaryAction,
   preparedChangesPrimaryAction,
-  chatContributionPrepareAction,
   contributionActionOutcome,
   contributionStartFailureOutcome,
   contributionWorkContext,
@@ -82,11 +81,6 @@ test('chat preparation sends compact typed work rather than replaying a provider
   assert.deepEqual(contributionWorkContext({ contributeAppId: null }), {
     appId: null, retryOf: '',
   })
-})
-
-test('action copy names user intent instead of internal queue timing', () => {
-  assert.equal(chatContributionPrepareAction(false).label, 'Prepare to submit')
-  assert.equal(chatContributionPrepareAction(true).label, 'Prepare to submit')
 })
 
 test('Changes exposes one context-aware primary action', () => {

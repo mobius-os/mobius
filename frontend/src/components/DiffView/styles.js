@@ -4,8 +4,8 @@
 
 export const DIFF_VIEWER_STYLES = `
 .diff-view {
-  width: max-content;
-  min-width: 100%;
+  width: 100%;
+  min-width: 0;
   box-sizing: border-box;
   border: 1px solid var(--border, #2a2a2a);
   border-radius: 8px;
@@ -23,7 +23,7 @@ export const DIFF_VIEWER_STYLES = `
 
 .diff-view__content {
   width: 100%;
-  min-width: max-content;
+  min-width: 0;
 }
 
 .diff-view__hunk + .diff-view__hunk {
@@ -32,8 +32,8 @@ export const DIFF_VIEWER_STYLES = `
 
 .diff-view__hunk-header {
   display: grid;
-  grid-template-columns: 16ch minmax(max-content, 1fr);
-  min-width: max-content;
+  grid-template-columns: 8ch minmax(0, 1fr);
+  min-width: 0;
   background: var(--surface2, #212121);
   color: var(--muted, #a8a8a8);
 }
@@ -41,7 +41,8 @@ export const DIFF_VIEWER_STYLES = `
 .diff-view__hunk-header code {
   padding: 5px 10px;
   font: inherit;
-  white-space: pre;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .diff-view__hunk-gutter {
@@ -50,8 +51,8 @@ export const DIFF_VIEWER_STYLES = `
 
 .diff-view__line {
   display: grid;
-  grid-template-columns: 14ch 2ch minmax(max-content, 1fr);
-  min-width: max-content;
+  grid-template-columns: 7ch 1.6ch minmax(0, 1fr);
+  min-width: 0;
 }
 
 .diff-view__line--add {
@@ -77,7 +78,7 @@ export const DIFF_VIEWER_STYLES = `
 
 .diff-view__numbers {
   display: grid;
-  grid-template-columns: repeat(2, 7ch);
+  grid-template-columns: repeat(2, 3.5ch);
   color: var(--muted, #a8a8a8);
   background: color-mix(
     in srgb,
@@ -92,7 +93,7 @@ export const DIFF_VIEWER_STYLES = `
 .diff-view__line-number {
   min-width: 0;
   box-sizing: border-box;
-  padding: 1px 5px;
+  padding: 1px 3px;
   text-align: right;
 }
 
@@ -122,7 +123,8 @@ export const DIFF_VIEWER_STYLES = `
 .diff-view__line-text {
   padding: 1px 10px 1px 2px;
   font: inherit;
-  white-space: pre;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .diff-view--message {
@@ -287,10 +289,12 @@ export const DIFF_VIEWER_STYLES = `
 }
 
 .file-diff-list__panel {
-  /* Bound one expanded file so a long diff cannot displace the modal actions. */
-  max-height: 340px;
+  /* One vertical reading surface: long code wraps instead of creating a
+     second horizontal navigation problem inside an already-scrollable pane. */
+  max-height: min(64dvh, 760px);
   min-width: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   overscroll-behavior: contain;
   border-top: 1px solid var(--border, #2a2a2a);
   background: var(--surface2, #212121);
@@ -306,8 +310,33 @@ export const DIFF_VIEWER_STYLES = `
 }
 
 .file-diff-list__note {
-  min-width: max-content;
   border-top: 1px solid var(--border, #2a2a2a);
+}
+
+@media (max-width: 520px) {
+  .diff-view {
+    font-size: 11px;
+  }
+
+  .diff-view__hunk-header {
+    grid-template-columns: 6ch minmax(0, 1fr);
+  }
+
+  .diff-view__line {
+    grid-template-columns: 5.5ch 1.4ch minmax(0, 1fr);
+  }
+
+  .diff-view__numbers {
+    grid-template-columns: repeat(2, 2.75ch);
+  }
+
+  .diff-view__line-number {
+    padding-inline: 2px;
+  }
+
+  .diff-view__line-text {
+    padding-right: 6px;
+  }
 }
 
 .file-diff-list__more {

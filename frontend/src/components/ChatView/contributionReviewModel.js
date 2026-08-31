@@ -59,12 +59,6 @@ export function sendBlocker(record, { connected } = {}) {
     || 'Refresh this review in Contribute before sending.'
 }
 
-/** Match Contribute's default follow-up grant for a newly opened PR. */
-export function autopilotOnSend(payload) {
-  return payload?.autopilot_available === true
-    && payload.autopilot_default !== false
-}
-
 /** Copy for the one public action represented by this prepared record. */
 export function publicationAction(record) {
   return record?.action === 'pr_update'
@@ -163,7 +157,7 @@ export function reviewActionKey(record) {
   if (typeof record.action_key === 'string' && record.action_key) {
     return `${record.id}:${record.action_key}`
   }
-  if (isTrackingRecord(record) && contributionNeedsAttentionFallback(record)) {
+  if (isTrackingRecord(record) && contributionNeedsAttention(record)) {
     return [
       record.id,
       record.status || '',
@@ -173,12 +167,6 @@ export function reviewActionKey(record) {
     ].join(':')
   }
   return `${record.id}:${record.updated_at || ''}:${record.status || ''}`
-}
-
-function contributionNeedsAttentionFallback(record) {
-  return record?.needs_attention === true
-    || Boolean(String(record?.last_submit_error || '').trim())
-    || record?.review?.state === 'needs_refresh'
 }
 
 function stackDescriptor(record) {
@@ -286,4 +274,14 @@ export function currentReviewItems(expectedItems, payload) {
     actionKeys(item).join('|') === actionKeys(resolved[index]).join('|')
   ))
   return unchanged ? resolved : null
+}
+
+/** Keep the owner's selected units visible when their reviewed heads move.
+ * Callers must show the refreshed actions and ask for a new confirmation;
+ * this deliberately never authorizes the newer heads on its own. */
+export function refreshedReviewItems(expectedItems, payload) {
+  const current = new Map(reviewItems(payload).map(item => [item.id, item]))
+  return (Array.isArray(expectedItems) ? expectedItems : [])
+    .map(item => current.get(item?.id))
+    .filter(Boolean)
 }

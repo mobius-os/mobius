@@ -173,6 +173,17 @@ def test_active_source_accepts_exact_work_and_retry_attaches(
   assert projected.status_code == 200, projected.text
   assert projected.json()["work"]["id"] == first_work["id"]
   assert projected.json()["work"]["status"] == "accepted"
+  assert projected.json()["work_history_count"] == 1
+
+  history = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/{source.id}/work/history",
+    headers=auth,
+  )
+  assert history.status_code == 200, history.text
+  assert [item["id"] for item in history.json()["items"]] == [first_work["id"]]
+  assert history.json()["items"][0]["usage"]["totals"]["total_tokens"] is None
+  assert history.json()["total"] == 1
+  assert history.json()["truncated"] is False
 
 
 def test_accepted_work_starts_once_after_source_settles(

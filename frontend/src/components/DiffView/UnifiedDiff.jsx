@@ -11,6 +11,7 @@ export default function UnifiedDiff({
   diff,
   summaryOverrides,
   diffTruncated = false,
+  initiallyOpenFirst = false,
 }) {
   const files = useMemo(() => parseUnifiedDiff(diff), [diff])
   return (
@@ -18,6 +19,7 @@ export default function UnifiedDiff({
       files={files}
       summaryOverrides={summaryOverrides}
       diffTruncated={diffTruncated}
+      initiallyOpenFirst={initiallyOpenFirst}
     />
   )
 }

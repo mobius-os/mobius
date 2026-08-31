@@ -206,11 +206,13 @@ test('DiffView reserves the empty message for a parsed entry with no hunks', () 
   )
 })
 
-test('canonical styles fill wide scroll content and protect narrow row stats', () => {
+test('canonical styles keep code on one readable scroll axis', () => {
   assert.match(
     DIFF_VIEWER_STYLES,
-    /\.diff-view\s*\{[^}]*width: max-content;[^}]*min-width: 100%;/,
+    /\.diff-view\s*\{[^}]*width: 100%;[^}]*min-width: 0;/,
   )
+  assert.match(DIFF_VIEWER_STYLES, /white-space: pre-wrap;/)
+  assert.match(DIFF_VIEWER_STYLES, /overflow-x: hidden;/)
   assert.match(
     DIFF_VIEWER_STYLES,
     /\.file-diff-list__basename\s*\{[^}]*min-width: 0;[^}]*overflow: hidden;[^}]*text-overflow: ellipsis;/,

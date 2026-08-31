@@ -112,20 +112,6 @@ export function contributionStartFailureOutcome({
   return { kind: 'unavailable' }
 }
 
-export function chatContributionPrepareAction() {
-  return {
-    label: 'Prepare to submit',
-    description: 'Align and review worthwhile work here, then bring back one exact public approval.',
-  }
-}
-
-export function chatContributionFinishAction() {
-  return {
-    label: 'Prepare to submit',
-    description: 'Resolve every private step without repeating work, then bring the exact send decision back here.',
-  }
-}
-
 export function chatChangesPrimaryAction(overview) {
   if (overview?.workState === 'active') return null
   const counts = overview?.counts || {}

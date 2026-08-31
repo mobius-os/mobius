@@ -2,11 +2,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
-  autopilotOnSend,
   contributeApp,
   contributeAppId,
   contributionReviewIntent,
   currentReviewItems,
+  refreshedReviewItems,
   publicationAction,
   publicationFailureOwner,
   publicationItemsAction,
@@ -69,9 +69,6 @@ test('direct send requires the exact reviewed happy path', () => {
   assert.deepEqual(publicationAction({ ...ready, action: 'pr_update' }), {
     label: 'Update PR', busyLabel: 'Updating PR',
   })
-  assert.equal(autopilotOnSend({ autopilot_available: true }), true)
-  assert.equal(autopilotOnSend({ autopilot_available: true, autopilot_default: false }), false)
-  assert.equal(autopilotOnSend({ autopilot_available: false }), false)
 })
 
 test('agent contribution intents start one attached worker without running the source chat', () => {
@@ -214,21 +211,29 @@ test('helper progress and recovery stay inside Changes', () => {
     changesSrc,
     /primaryAction\.kind === 'prepare'[\s\S]*?await requestHelper\([\s\S]*?onPrepareChanges/,
   )
-  assert.match(changesSrc, /Changes will stay open so you can keep reviewing\./)
+  assert.match(changesSrc, /Changes stays open while the background helper starts\./)
   assert.match(changesSrc, /className=\{`chat-work__helper-request/)
-  assert.match(changesSrc, /role=\{helperStartError \? 'alert' : 'status'\}/)
+  assert.match(changesSrc, /role="status"/)
+  assert.match(changesSrc, /retryHelperRef\.current[\s\S]*Try again/)
   assert.match(changesSrc, /const retryingStart = state === 'active' && work\?\.status === 'retrying'/)
   assert.match(changesSrc, /retryingStart[\s\S]*?String\(work\?\.result \|\| ''\)\.trim\(\)/)
   assert.match(changesSrc, /It starts after the current reply, then continues in the background/)
-  assert.match(changesSrc, /'Stop preparation'/)
+  assert.match(changesSrc, /className="is-secondary"[\s\S]*?'Stop'/)
   assert.match(clientSrc, /work\/stop/)
   assert.match(chatViewSrc, /const handleStopContributionWork = useCallback/)
   assert.match(changesSrc, /onStop=\{stopHelper\}/)
   assert.match(changesSrc, /work\?\.child_chat_id[\s\S]*?View helper/)
   assert.match(changesSrc, /usage\?\.totals\?\.total_tokens/)
+  assert.match(changesSrc, /Preparation history/)
+  assert.match(changesSrc, /onLoadWorkHistory/)
+  assert.match(clientSrc, /work\/history/)
+  assert.match(chatViewSrc, /const handleLoadContributionWorkHistory = useCallback/)
+  assert.match(changesSrc, /rawTotal === null \|\| rawTotal === undefined/)
   assert.match(chatViewSrc, /onOpenChat=\{\(childChatId\) => \{/)
   assert.match(changesSrc, /const workContext = contributionWorkContext\(overview\)/)
-  assert.match(changesSrc, /workState === 'active' \? null/)
+  assert.match(changesSrc, /action=\{primaryAction\?\.kind === 'publish-items' \? primaryAction : null\}/)
+  assert.match(changesSrc, /action && typeof onAction === 'function'[\s\S]*action\.label/)
+  assert.match(changesSrc, /state === 'attention'[\s\S]*Continue preparation/)
   assert.doesNotMatch(chatViewSrc, /Continue the attached contribution work|handleContinueContributionWork/)
   assert.doesNotMatch(changesSrc, /Continue here|onContinueWork/)
 })
@@ -280,6 +285,12 @@ test('a public confirmation cannot silently switch to a newer reviewed action', 
     { id: 'one', status: 'prepared', action_key: 'review-c' },
     { id: 'two', status: 'prepared', action_key: 'review-b' },
   ] }), null)
+  const refreshed = refreshedReviewItems(expected, { records: [
+    { id: 'one', status: 'prepared', action_key: 'review-c' },
+    { id: 'two', status: 'prepared', action_key: 'review-b' },
+  ] })
+  assert.equal(refreshed.length, 2)
+  assert.equal(refreshed[0].record.action_key, 'review-c')
 })
 
 test('Changes batch publication refreshes before GitHub and recovers at most once', () => {
@@ -288,7 +299,10 @@ test('Changes batch publication refreshes before GitHub and recovers at most onc
     changesSrc,
     /if \(publishInFlightRef\.current \|\| helperInFlightRef\.current\) return[\s\S]*publishInFlightRef\.current = true/,
   )
-  assert.match(changesSrc, /setConfirming\(\[\{ kind: 'record', id: record\.id, record \}\]\)/)
+  assert.doesNotMatch(changesSrc, /beginConfirmation\(\[selectedPreparedItem\]\)/)
+  assert.match(changesSrc, /chat-work__dock[\s\S]*onClick=\{runPrimaryAction\}/)
+  assert.match(changesSrc, /if \(!refreshed\?\.data\)[\s\S]*nothing was sent/)
+  assert.match(changesSrc, /refreshedReviewItems\(items, refreshed\.data\)/)
   assert.match(
     changesSrc,
     /const recoveries = outcomes[\s\S]*await requestHelper\([\s\S]*?onContributeAll\?\.\(overview\.workflowRevision, workContext\)[\s\S]*recoveries\.forEach/,
