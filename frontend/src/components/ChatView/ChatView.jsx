@@ -1140,9 +1140,14 @@ export default function ChatView({
     if (reconciliation.status === 'none' || reconciliation.status === 'superseded') {
       return reconciliation.status
     }
+    // Coordinate can settle against the authoritative fetch passed into this
+    // call before that fetch is committed to messagesRef. Reconcile the
+    // composer against the exact evidence that produced the durable verdict;
+    // re-reading the older ref here would keep a delivered draft indefinitely.
+    const settledEvidence = reconciliation.evidence
     return reconcileFailedSendAttempt(
-      messagesRef.current,
-      pendingQueue.pendingMessagesRef.current,
+      settledEvidence?.visibleMessages ?? messagesRef.current,
+      settledEvidence?.pendingMessages ?? pendingQueue.pendingMessagesRef.current,
       {
         expectedAttempt,
         reportQueued: reconciliation.status === 'queued',
