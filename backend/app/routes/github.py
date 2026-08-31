@@ -67,6 +67,7 @@ from app import (
   source_status,
 )
 from app.config import get_settings
+from app.broadcast import get_system_broadcast
 from app.contribution_records import (
   MAX_RECORD_BYTES,
   now_iso as _now_iso,
@@ -144,6 +145,7 @@ from app.github_contributions import (
   _record_pending_equivalence_locked,
   _merged_upstream_sha,
   _settle_equivalence,
+  publication_handoff_spec,
   _cleanup_terminal_staging_checkout,
   _claim_record,
   _stack_meta,
@@ -2221,6 +2223,199 @@ async def cleanup_contribution_staging(
     log.debug("autopilot close_out failed %s/%s", app_id, record_id,
               exc_info=True)
   return {"cleaned": cleaned}
+
+
+@router.post(
+  "/contributions/{app_id}/{record_id}/connect-app",
+  dependencies=[Depends(reject_cross_site)],
+)
+@_limiter.limit("5/minute")
+async def connect_published_app(
+  request: Request,
+  app_id: int,
+  record_id: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Connect one reviewed, merged app publication to its original row.
+
+  Contribution JSON only locates the request. Authority comes from the
+  immutable reviewed Git tree, the durable landed-equivalence witness written
+  after the owner sent the PR, GitHub's actual merge commit, and the complete
+  commit-pinned package digest. The normal installer then owns source merging,
+  capability activation, rollback, and data preservation.
+  """
+  from app import install
+
+  expected_nonce = _validate_submit_app(app_id, principal, db)
+  db.close()
+  async with fs_locks.app_storage_lock(app_id):
+    _recheck_submit_app(db, app_id, expected_nonce)
+    record_path, _ = _record_paths(app_id, record_id)
+    record = _read_record(record_path)
+    try:
+      spec = publication_handoff_spec(record, db)
+    except ContributionSubmitError as exc:
+      raise HTTPException(exc.status_code, exc.message) from exc
+    target = (
+      db.query(models.App)
+      .populate_existing()
+      .filter(models.App.id == spec.target_app_id)
+      .one()
+    )
+    already_connected = install._catalog_identity_matches(
+      target.manifest_url, spec.manifest_url, spec.manifest_id,
+    )
+
+    # A lost successful response is an ordinary idempotent retry: recover the
+    # record mirror without reinstalling or touching the app source again.
+    if already_connected:
+      prior = (
+        record.get("publication_connection")
+        if isinstance(record.get("publication_connection"), dict)
+        else {}
+      )
+      pending_conflict = install.read_pending_conflict_update_receipt(
+        target.source_dir,
+        app_id=target.id,
+        upstream_commit=target.upstream_commit,
+      )
+      connection = {
+        **prior,
+        "status": (
+          "connected_conflict" if pending_conflict is not None else "connected"
+        ),
+        "app_id": spec.target_app_id,
+        "manifest_url": target.manifest_url,
+        "version": target.version,
+        "connected_at": prior.get("connected_at") or _now_iso(),
+        "conflict_paths": (
+          pending_conflict.get("conflict_paths", [])
+          if pending_conflict is not None else []
+        ),
+      }
+      record = {
+        **record,
+        "publication_connection": connection,
+        "updated_at": _now_iso(),
+      }
+      _write_record(record_path, record)
+      return {"record": record, "connection": connection}
+  db.close()
+
+  merge_sha = await asyncio.to_thread(
+    _merged_upstream_sha, record, spec.source_repo,
+  )
+  if not merge_sha:
+    raise HTTPException(
+      409,
+      "GitHub has not confirmed this reviewed app publication as merged.",
+    )
+  pinned_manifest_url = spec.pinned_manifest_url(merge_sha)
+
+  # Verify the complete immutable package before the installer is allowed to
+  # grant permissions or attach identity. A branch URL is never used here.
+  candidate = await install.fetch_install_candidate(pinned_manifest_url)
+  if (
+    candidate.manifest.get("id") != spec.manifest_id
+    or install.install_candidate_content_digest(candidate)
+    != spec.package_digest
+    or candidate.capability_digest != spec.capability_digest
+  ):
+    raise HTTPException(
+      409,
+      "The merged app package does not match the exact revision you reviewed.",
+    )
+
+  try:
+    async with fs_locks.source_dir_lock(str(spec.source_repo)):
+      await asyncio.to_thread(
+        app_git.fetch_origin_commit, spec.source_repo, merge_sha,
+      )
+      witnessed = await asyncio.to_thread(
+        app_git.verify_landed_equivalent_change,
+        spec.source_repo,
+        diff_sha256=spec.diff_sha256,
+        contribution_id=spec.contribution_id,
+        base_sha=spec.reviewed_base_sha,
+        head_sha=spec.reviewed_head_sha,
+        source_sha=spec.reviewed_source_sha,
+        upstream_sha=merge_sha,
+      )
+  except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as exc:
+    raise HTTPException(
+      409,
+      "The reviewed publication proof could not be verified in the local app.",
+    ) from exc
+  if not witnessed:
+    raise HTTPException(
+      409,
+      "The merged app no longer matches the publication you reviewed.",
+    )
+
+  async with fs_locks.install_uninstall_lock():
+    current = (
+      db.query(models.App)
+      .populate_existing()
+      .filter(
+        models.App.id == spec.target_app_id,
+        models.App.deleted_at.is_(None),
+      )
+      .first()
+    )
+    if current is None:
+      raise HTTPException(409, "The reviewed local app is no longer installed.")
+    if install._catalog_identity_matches(
+      current.manifest_url, spec.manifest_url, spec.manifest_id,
+    ):
+      connected_app = current
+      mode = "update"
+      conflict_paths: list[str] = []
+    else:
+      result = await install.install_from_manifest(
+        db,
+        manifest_url=pinned_manifest_url,
+        manifest=None,
+        raw_base=None,
+        source="publication_handoff",
+        reviewed_capability_digest=spec.capability_digest,
+        publication_handoff_app_id=spec.target_app_id,
+      )
+      connected_app = result.app
+      mode = result.mode
+      conflict_paths = result.conflict_paths
+
+  connection = {
+    "status": "connected_conflict" if mode == "conflict" else "connected",
+    "app_id": connected_app.id,
+    "manifest_url": connected_app.manifest_url,
+    "version": connected_app.version,
+    "connected_at": _now_iso(),
+    "conflict_paths": conflict_paths,
+  }
+  async with fs_locks.app_storage_lock(app_id):
+    _recheck_submit_app(db, app_id, expected_nonce)
+    current_record = _read_record(record_path)
+    try:
+      current_spec = publication_handoff_spec(current_record, db)
+    except ContributionSubmitError as exc:
+      raise HTTPException(exc.status_code, exc.message) from exc
+    if current_spec != spec:
+      raise HTTPException(
+        409,
+        "This contribution changed while the app was being connected.",
+      )
+    current_record = {
+      **current_record,
+      "publication_connection": connection,
+      "updated_at": _now_iso(),
+    }
+    _write_record(record_path, current_record)
+
+  get_system_broadcast().publish(
+    {"type": "app_updated", "appId": str(connected_app.id)}
+  )
+  return {"record": current_record, "connection": connection}
 
 
 # --- contribution CI feedback (checks refresh + classification) -------

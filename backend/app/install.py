@@ -928,6 +928,7 @@ def stage_pending_conflict_update(
   raw_base: str,
   capability_digest: str,
   candidate_digest: str,
+  conflict_paths: list[str] | None = None,
 ) -> None:
   """Persist everything explicit resolution needs to finish an update.
 
@@ -952,6 +953,7 @@ def stage_pending_conflict_update(
     "raw_base": raw_base,
     "capability_digest": capability_digest,
     "candidate_digest": candidate_digest,
+    "conflict_paths": sorted(set(conflict_paths or [])),
     "resolution_policy": None,
     "reviewed_tree_oid": None,
   }, ensure_ascii=False, sort_keys=True) + "\n")
@@ -976,6 +978,10 @@ def read_pending_conflict_update_receipt(
   reviewed_tree_oid = (
     receipt.get("reviewed_tree_oid") if schema == 2 else None
   ) if isinstance(receipt, dict) else None
+  conflict_paths = (
+    receipt.get("conflict_paths", [])
+    if isinstance(receipt, dict) else None
+  )
   if (
     not isinstance(receipt, dict)
     or schema not in (1, 2)
@@ -986,6 +992,11 @@ def read_pending_conflict_update_receipt(
     or not isinstance(receipt.get("raw_base"), str)
     or not isinstance(receipt.get("capability_digest"), str)
     or not re.fullmatch(r"[0-9a-f]{64}", receipt.get("candidate_digest", ""))
+    or not isinstance(conflict_paths, list)
+    or any(
+      not isinstance(path, str) or not path or len(path) > 1000
+      for path in conflict_paths
+    )
     or policy not in ({None} | UPDATE_RESOLUTION_POLICIES)
     or (
       reviewed_tree_oid is not None
@@ -998,6 +1009,7 @@ def read_pending_conflict_update_receipt(
     )
   ):
     return None
+  receipt["conflict_paths"] = sorted(set(conflict_paths))
   # Schema 1 receipts can survive a rolling restart. Normalize them in memory;
   # the first explicit policy choice upgrades the durable receipt atomically.
   receipt["resolution_policy"] = policy
@@ -2222,6 +2234,7 @@ def _select_install_target(
   manifest_url: str | None,
   source: str,
   expected_app_id: int | None,
+  publication_handoff_app_id: int | None = None,
 ) -> InstallTarget:
   """Resolve install/update/adoption identity without mutating the target row."""
   manifest = candidate.manifest
@@ -2257,8 +2270,13 @@ def _select_install_target(
       if existing:
         adopting_previous_id = True
 
-  if expected_app_id is not None and (
-    existing is None or existing.id != expected_app_id
+  required_app_id = (
+    expected_app_id
+    if expected_app_id is not None
+    else publication_handoff_app_id
+  )
+  if required_app_id is not None and (
+    existing is None or existing.id != required_app_id
   ):
     raise HTTPException(409, "Pending update no longer matches this app.")
   return InstallTarget(
@@ -2543,6 +2561,53 @@ class ActivationPlan:
   capability_contract: dict
 
 
+def _apply_manifest_metadata(
+  app: models.App,
+  *,
+  manifest: dict,
+  canonical_manifest_url: str,
+  capability_contract: dict,
+  entry_source: str,
+) -> None:
+  """Apply one reviewed package's identity and runtime declarations."""
+  app.version = str(manifest.get("version", "")).strip() or None
+  app.theme_color = _manifest_color(manifest.get("theme_color"))
+  app.background_color = (
+    _manifest_color(manifest.get("background_color")) or app.theme_color
+  )
+  app.display = _manifest_display(manifest.get("display"))
+  app.jsx_source = entry_source
+  app.manifest_url = canonical_manifest_url
+  app.published_manifest_url = None
+  permissions = manifest.get("permissions") or {}
+  app.cross_app_access = permissions.get(
+    "cross_app_access", app.cross_app_access,
+  )
+  app.share_with_apps = permissions.get(
+    "share_with_apps", app.share_with_apps,
+  )
+  app.chat_log_access = permissions.get(
+    "chat_log_access", app.chat_log_access,
+  )
+  # Privileged grants are opt-in on every version; omission revokes them.
+  app.manage_apps = bool(permissions.get("manage_apps", False))
+  app.manage_skills = bool(permissions.get("manage_skills", False))
+  app.github_access = bool(permissions.get("github_access", False))
+  app.github_connect = bool(permissions.get("github_connect", False))
+  app.filesystem_access = bool(permissions.get("filesystem_access", False))
+  app.connections_manage = bool(permissions.get("connections_manage", False))
+  app.connect_manage = bool(permissions.get("connect_manage", False))
+  if "offline_capable" in manifest:
+    app.offline_capable = bool(manifest["offline_capable"])
+  if "embeds_agent" in manifest:
+    app.embeds_agent = bool(manifest["embeds_agent"])
+  app.offline_contract = manifest.get("offline") or None
+  app.system_prompt_file = manifest.get("system_prompt") or None
+  app.system_app = bool(manifest.get("system_app", False))
+  app.capability_contract = capability_contract
+  app.project_templates_json = manifest.get("project_templates") or None
+
+
 async def _activate_install_source(
   db: Session,
   *,
@@ -2559,44 +2624,14 @@ async def _activate_install_source(
   journal before this function returns, so the outer transaction retains one
   rollback boundary.
   """
-  app.version = str(manifest.get("version", "")).strip() or None
-  app.theme_color = _manifest_color(manifest.get("theme_color"))
-  app.background_color = (
-    _manifest_color(manifest.get("background_color")) or app.theme_color
-  )
-  app.display = _manifest_display(manifest.get("display"))
-
   entry_source = plan.source_tree[plan.entry_key].decode("utf-8")
-  if plan.updating:
-    permissions = manifest.get("permissions") or {}
-    app.jsx_source = entry_source
-    app.manifest_url = plan.canonical_manifest_url
-    app.cross_app_access = permissions.get(
-      "cross_app_access", app.cross_app_access,
-    )
-    app.share_with_apps = permissions.get(
-      "share_with_apps", app.share_with_apps,
-    )
-    app.chat_log_access = permissions.get(
-      "chat_log_access", app.chat_log_access,
-    )
-    # Privileged grants are opt-in on every version; omission revokes them.
-    app.manage_apps = bool(permissions.get("manage_apps", False))
-    app.manage_skills = bool(permissions.get("manage_skills", False))
-    app.github_access = bool(permissions.get("github_access", False))
-    app.github_connect = bool(permissions.get("github_connect", False))
-    app.filesystem_access = bool(permissions.get("filesystem_access", False))
-    app.connections_manage = bool(permissions.get("connections_manage", False))
-    app.connect_manage = bool(permissions.get("connect_manage", False))
-    if "offline_capable" in manifest:
-      app.offline_capable = bool(manifest["offline_capable"])
-    if "embeds_agent" in manifest:
-      app.embeds_agent = bool(manifest["embeds_agent"])
-    app.offline_contract = manifest.get("offline") or None
-    app.system_prompt_file = manifest.get("system_prompt") or None
-    app.system_app = bool(manifest.get("system_app", False))
-    app.capability_contract = plan.capability_contract
-    app.project_templates_json = manifest.get("project_templates") or None
+  _apply_manifest_metadata(
+    app,
+    manifest=manifest,
+    canonical_manifest_url=plan.canonical_manifest_url,
+    capability_contract=plan.capability_contract,
+    entry_source=entry_source,
+  )
 
   staged_bundle = data_dir / "compiled" / f"app-{app.id}.js.staging"
   source_dir = Path(app.source_dir)
@@ -2695,6 +2730,7 @@ async def install_from_manifest(
   expected_candidate_digest: str | None = None,
   resolution_policy: str | None = None,
   reviewed_resolution_tree_oid: str | None = None,
+  publication_handoff_app_id: int | None = None,
 ) -> InstallResult:
   """Return a structured durable install/update/conflict outcome.
 
@@ -2743,6 +2779,11 @@ async def install_from_manifest(
     and resolution_policy != "preserve_local"
   ):
     raise ValueError("reviewed resolution tree requires preserve-local policy")
+  if publication_handoff_app_id is not None:
+    if source != "publication_handoff":
+      raise ValueError("publication handoff requires its dedicated source")
+    if expected_app_id is not None:
+      raise ValueError("publication handoff cannot be a pending replay")
   # Phase 1: immutable, review-bound candidate. All network I/O ends here.
   candidate = await _fetch_install_candidate(
     manifest_url=manifest_url,
@@ -2775,6 +2816,7 @@ async def install_from_manifest(
     manifest_url=manifest_url,
     source=source,
     expected_app_id=expected_app_id,
+    publication_handoff_app_id=publication_handoff_app_id,
   )
   existing = target.existing
   mode = target.mode
@@ -3269,6 +3311,7 @@ async def install_from_manifest(
           raw_base=raw_base,
           capability_digest=fetched_capability_digest,
           candidate_digest=candidate_digest,
+          conflict_paths=conflict_paths,
         )
 
       # The disk-write phase runs INSIDE the same held lock for the Git path so
@@ -3306,6 +3349,11 @@ async def install_from_manifest(
       source_lock.release()
 
     if mode == "conflict":
+      if publication_handoff_app_id is not None:
+        # The reviewed publication owns catalog identity, but the running local
+        # source retains its old version and capabilities until resolution.
+        app.manifest_url = canonical_manifest_url
+        app.published_manifest_url = None
       # Commit the recorded upstream provenance + return so the App Store can
       # surface a click-gated resolver. The served source/bundle stay the prior
       # good ones until the owner chooses Resolve in chat.
