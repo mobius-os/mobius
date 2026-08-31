@@ -2,12 +2,12 @@
 
 `main.py` does `from app.routes import (...)` with ~15 names. Any one of those
 modules raising on import would otherwise kill uvicorn at boot.
-`app/routes/__init__.py` defends against
-this by wrapping each import in `_load(name)` — on failure, a 503
-stub with the right name is exposed so `main.py` still finds
-every expected attribute.
+`app/routes/__init__.py` defends against this by wrapping each import in
+`_load(name)`. A failure is recorded and replaced by an empty router so
+`main.py` can finish importing; the entrypoint consumes the explicit failure
+verdict and serves the baked platform floor.
 
-These tests lock in the stub contract + verify the scaffold doesn't
+These tests lock in the explicit boot verdict and verify the scaffold doesn't
 collapse when a real route module is forced to fail.
 """
 
@@ -17,7 +17,7 @@ import sys
 import threading
 
 import pytest
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, HTTPException, Response
 from fastapi.testclient import TestClient
 
 
@@ -41,6 +41,9 @@ def _restore_app_routes_modules():
     ]
 
   saved = {k: sys.modules[k] for k in _route_mod_names()}
+  saved_failures = set(getattr(
+    saved.get("app.routes"), "_ROUTER_IMPORT_FAILURES", set(),
+  ))
   try:
     yield
   finally:
@@ -59,6 +62,8 @@ def _restore_app_routes_modules():
     routes_pkg = saved.get("app.routes")
     if routes_pkg is not None:
       sys.modules["app"].routes = routes_pkg
+      routes_pkg._ROUTER_IMPORT_FAILURES.clear()
+      routes_pkg._ROUTER_IMPORT_FAILURES.update(saved_failures)
       for k, mod in saved.items():
         if k.startswith("app.routes."):
           setattr(routes_pkg, k.rsplit(".", 1)[1], mod)
@@ -72,22 +77,44 @@ def _mount(router: APIRouter, prefix: str = "/x") -> TestClient:
   return TestClient(app)
 
 
-def test_load_returns_stub_for_nonexistent_module():
-  """`_load` on a missing module returns a router whose paths 503."""
-  from app.routes import _load
-  stub = _load("definitely_not_a_real_module_xyz")
-  assert isinstance(stub, APIRouter)
-  client = _mount(stub, prefix="/x")
-  for method in ("get", "post", "put", "delete", "patch"):
-    resp = getattr(client, method)("/x/anything/here")
-    assert resp.status_code == 503, (
-      f"{method.upper()} expected 503, got {resp.status_code}"
-    )
-    assert "definitely_not_a_real_module_xyz" in resp.json()["detail"]
-    assert "external Recovery" in resp.json()["detail"]
+def test_canonical_registry_has_no_import_failures():
+  from app.routes import require_all_routers_loaded, router_import_failures
+
+  assert router_import_failures() == ()
+  require_all_routers_loaded()
 
 
-def test_broken_route_module_yields_stub_real_routers_unaffected(
+def test_load_records_failure_without_installing_a_global_catch_all():
+  """A race after preflight may lose one router, never the healthy API."""
+  from app.routes import (
+    _load,
+    require_all_routers_loaded,
+    router_import_failures,
+  )
+
+  name = "definitely_not_a_real_module_xyz"
+  fallback = _load(name)
+  assert isinstance(fallback, APIRouter)
+  assert fallback.routes == []
+  assert router_import_failures() == (name,)
+  with pytest.raises(RuntimeError, match=name):
+    require_all_routers_loaded()
+
+  # An isolated empty router is a normal miss, not an unscoped route that
+  # captures every path registered after it.
+  app = FastAPI()
+  app.include_router(fallback)
+
+  @app.get("/api/health")
+  def healthy_route():
+    return {"status": "ok"}
+
+  client = TestClient(app)
+  assert client.get("/api/health").json() == {"status": "ok"}
+  assert client.get("/api/anything-else").status_code == 404
+
+
+def test_broken_route_module_is_isolated_and_real_routers_remain(
   monkeypatch,
 ):
   """If `app.routes.apps` raises on import, `apps_router` becomes a
@@ -115,12 +142,12 @@ def test_broken_route_module_yields_stub_real_routers_unaffected(
   for name in routes_pkg.__all__:
     assert hasattr(routes_pkg, name), f"missing attribute: {name}"
 
-  # apps_router is a stub: any path returns 503 with apps-named
-  # detail.
-  apps_client = _mount(routes_pkg.apps_router, prefix="/api/apps")
-  resp = apps_client.get("/api/apps/")
-  assert resp.status_code == 503
-  assert "apps" in resp.json()["detail"]
+  # The failed router is empty and the explicit boot verdict fails. It cannot
+  # shadow healthy routers while the entrypoint changes over to baked source.
+  assert routes_pkg.apps_router.routes == []
+  assert routes_pkg.router_import_failures() == ("apps",)
+  with pytest.raises(RuntimeError, match="apps"):
+    routes_pkg.require_all_routers_loaded()
 
   # auth_router is a real router (not a stub): it has at least
   # one route registered, and that route is NOT the catch-all
@@ -132,6 +159,37 @@ def test_broken_route_module_yields_stub_real_routers_unaffected(
   assert not any(
     "{rest_of_path:path}" in p for p in auth_paths
   ), f"auth_router looks like a stub: {auth_paths}"
+
+
+def test_router_failure_degrades_probes_without_hiding_them():
+  """Defense in depth for source changing after the successful preflight."""
+  from app import main as main_module
+  from app.routes import _ROUTER_IMPORT_FAILURES
+
+  _ROUTER_IMPORT_FAILURES.add("apps")
+
+  health_response = Response()
+  health = main_module.health(health_response)
+  assert health_response.status_code == 200
+  assert health["mode"] == "degraded"
+  assert health["failed_routers"] == ["apps"]
+
+  strict_response = Response()
+  strict = main_module.health_strict(strict_response)
+  assert strict_response.status_code == 503
+  assert strict["status"] == "router_import_failure"
+
+  ready_response = Response()
+  ready = main_module.ready(ready_response)
+  assert ready_response.status_code == 503
+  assert ready["reason"] == "router_import_failure"
+
+  with pytest.raises(HTTPException) as exc_info:
+    main_module.unknown_api("apps")
+  assert exc_info.value.status_code == 503
+  assert "apps" in exc_info.value.detail
+  assert "Repair the platform source" in exc_info.value.detail
+  assert "restart Möbius" in exc_info.value.detail
 
 
 def test_lifespan_cannot_mutate_cron_for_a_low_id_test_app(
