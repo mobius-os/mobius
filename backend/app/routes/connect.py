@@ -6,14 +6,12 @@ a per-host bearer token minted through a short-lived, one-time pairing code. A
 command belongs to the paired host, not to one stream or HTTP caller, so a
 reconnect can resume control without repeating work.
 
-Protocol v3 intentionally rotates its event stream before common hosting
-response caps while keeping command execution alive. Older SSE behavior remains
-as an upgrade bridge for already-installed runners; the provisional WebSocket
-v3 route remains only long enough to offer its installed runner an in-place
-update:
+Protocol v4 rotates its event stream before common hosting response caps while
+keeping command execution alive, and carries literal scripts as structured data.
+Older runners are rejected at the transport boundary; their saved host record
+remains visible to the owner with an in-place update command.
 
   POST /api/connect/pair    {code}          -> {host_id, token}   (one-time)
-  WS   /api/connect/socket  (host bearer)   <-> provisional-v3 bridge
   GET  /api/connect/stream  (host bearer)   -> SSE stream of {exec} commands
   POST /api/connect/state   (host bearer)   -> {request_id, state=started}
   POST /api/connect/result  (host bearer)   -> {request_id, stdout, ...}
@@ -52,8 +50,6 @@ from fastapi import (
   Depends,
   HTTPException,
   Request,
-  WebSocket,
-  WebSocketDisconnect,
 )
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -83,29 +79,13 @@ _DEFAULT_EXEC_TIMEOUT = 60
 # error at the tail after a large body.
 _MAX_EXEC_STREAM = 60_000
 _DISCONNECT_COMMAND = "python3 ~/.mobius-connect/runner.py --uninstall"
-# Older runners only understand exec events. The uninstall command can return
-# without stopping a fallback runner, so terminate its parent runner too.
-_LEGACY_DISCONNECT_COMMAND = f'{_DISCONNECT_COMMAND}; kill -TERM "$PPID"'
 _DISCONNECT_ACK_TIMEOUT = 4
-_LEGACY_DISCONNECT_TIMEOUT = 4
 _RUNNER_PROTOCOL_VERSION = 4
-_SSE_PROTOCOL_VERSION = 4
-# Protocol 3 introduced durable start/result acknowledgement. Keep those
-# lifecycle guarantees independent from later transport features so upgrading
-# the runner does not accidentally make an already-safe v3 runner "legacy".
-_COMMAND_LIFECYCLE_PROTOCOL_VERSION = 3
-# Protocol 4 carries literal scripts separately from command-line strings.
-_LITERAL_SCRIPT_PROTOCOL_VERSION = 4
-_LEGACY_WEBSOCKET_PROTOCOL_VERSION = 3
 # Railway permits active HTTP responses for 15 minutes. Rotate current-runner
 # streams well inside that bound; the host-owned command continues separately.
 _STREAM_ROTATION_SECONDS = 10 * 60
 _START_ACK_TIMEOUT = 10
 _RESULT_GRACE_SECONDS = 15
-# Protocol 2 can acknowledge cancellation but cannot retry a dropped result.
-# Keep its command slot reserved briefly for the terminal report, then release
-# it on the next read if that one-shot report never arrived.
-_LEGACY_CANCEL_RESULT_GRACE_SECONDS = 15
 _RESULT_RETENTION_SECONDS = 15 * 60
 
 
@@ -180,10 +160,9 @@ def _command_fingerprint(
   script: str | None = None,
   shell: str | None = None,
 ) -> str:
-  # Preserve the v1-v3 command fingerprint shape so a backend restart during
-  # an in-flight legacy command does not turn the caller's retry into a false
-  # request-id conflict. Scripts use a tagged shape that cannot collide with a
-  # command containing the same text.
+  # Plain commands keep their established list shape so a backend restart does
+  # not turn a caller retry into a false request-id conflict. Scripts use a
+  # tagged shape that cannot collide with a command containing the same text.
   payload_value = (
     [cmd or "", cwd, timeout]
     if script is None
@@ -201,18 +180,11 @@ def _command_fingerprint(
 class _Channel:
   """One replaceable transport for a host-owned command lifecycle."""
 
-  def __init__(
-    self,
-    protocol_version: int = 1,
-    *,
-    transport: str = "sse",
-  ) -> None:
+  def __init__(self) -> None:
     self.queue: asyncio.Queue[dict] = asyncio.Queue()
     self.control_pending: dict[str, asyncio.Future] = {}
     self.closed = asyncio.Event()
     self.connected_at = _now()
-    self.protocol_version = protocol_version
-    self.transport = transport
 
 
 class _ActiveCommand:
@@ -231,7 +203,6 @@ class _ActiveCommand:
     started_at: float | None = None,
     state: str = "dispatching",
     not_after: float | None = None,
-    cancel_not_after: float | None = None,
     fingerprint: str | None = None,
   ) -> None:
     loop = asyncio.get_running_loop()
@@ -245,7 +216,6 @@ class _ActiveCommand:
     self.started_at = started_at
     self.state = state
     self.not_after = not_after
-    self.cancel_not_after = cancel_not_after
     self.fingerprint = fingerprint or _command_fingerprint(
       cmd, cwd, timeout, script=script, shell=shell,
     )
@@ -275,10 +245,6 @@ class _ActiveCommand:
         float(record["not_after"])
         if record.get("not_after") is not None else None
       ),
-      cancel_not_after=(
-        float(record["cancel_not_after"])
-        if record.get("cancel_not_after") is not None else None
-      ),
       fingerprint=str(record.get("fingerprint") or ""),
     )
 
@@ -290,7 +256,6 @@ class _ActiveCommand:
       "started_at": self.started_at,
       "state": self.state,
       "not_after": self.not_after,
-      "cancel_not_after": self.cancel_not_after,
       "fingerprint": self.fingerprint,
     }
     # Replay needs the command only during the short pre-start dispatch window.
@@ -355,21 +320,7 @@ def _restore_command(host_id: str) -> _ActiveCommand | None:
 
 
 def _ensure_command(host_id: str) -> _ActiveCommand | None:
-  command = _restore_command(host_id)
-  if command is None:
-    return None
-  if (
-    command.state == "canceling"
-    and command.cancel_not_after is not None
-    and _now() >= command.cancel_not_after
-  ):
-    _finish_command_as_lost(
-      host_id,
-      command.request_id,
-      "legacy runner did not report a final result after cancellation",
-    )
-    return None
-  return command
+  return _restore_command(host_id)
 
 
 def _mark_command_started(host_id: str, request_id: str) -> bool:
@@ -436,28 +387,13 @@ async def _request_command_cancel(
 ) -> bool:
   ch = _channels.get(host_id)
   host = _load_host(host_id)
-  known_protocol = (
-    ch.protocol_version if ch is not None
-    else int((host or {}).get("runner_protocol") or 1)
-  )
-  if known_protocol < 2 or (ch is None and known_protocol < 3):
+  if ch is None and (
+    int((host or {}).get("runner_protocol") or 0) != _RUNNER_PROTOCOL_VERSION
+    or (host or {}).get("runner_transport") != "sse"
+  ):
     return False
-  changed = False
   if command.state != "canceling":
     command.state = "canceling"
-    changed = True
-  if known_protocol < _COMMAND_LIFECYCLE_PROTOCOL_VERSION:
-    if command.cancel_not_after is None:
-      command.cancel_not_after = (
-        _now() + _LEGACY_CANCEL_RESULT_GRACE_SECONDS
-      )
-      changed = True
-  elif command.cancel_not_after is not None:
-    # A current runner retries terminal results after reconnect, so it must not
-    # inherit a legacy one-shot reporting deadline after an in-place upgrade.
-    command.cancel_not_after = None
-    changed = True
-  if changed:
     _persist_command(host_id, command)
   if ch is not None:
     await ch.queue.put({"type": "cancel", "request_id": command.request_id})
@@ -479,7 +415,7 @@ def _touch(host_id: str) -> None:
 # --------------------------------------------------------------------------- #
 # Host-token auth (runner side) — separate from owner/app JWT auth
 # --------------------------------------------------------------------------- #
-def _auth_host(request: Request | WebSocket) -> dict:
+def _auth_host(request: Request) -> dict:
   header = request.headers.get("authorization", "")
   if not header.lower().startswith("bearer "):
     raise HTTPException(status_code=401, detail="Missing host token.")
@@ -573,21 +509,16 @@ def _public_host(host: dict) -> dict:
   _prune_last_command(host)
   active_public = _active_public(_ensure_command(host["id"]))
   runner_protocol = (
-    ch.protocol_version if ch is not None
+    _RUNNER_PROTOCOL_VERSION if ch is not None
     else host.get("runner_protocol")
   )
   runner_transport = (
-    ch.transport if ch is not None else host.get("runner_transport")
+    "sse" if ch is not None else host.get("runner_transport")
   )
-  # Protocol 3 existed briefly as the provisional WebSocket runner. Records
-  # written before transport persistence can therefore be identified safely:
-  # older SSE runners are protocol 1/2 and current SSE writes this field.
-  if runner_transport is None and runner_protocol == 3:
-    runner_transport = "websocket"
   paired = bool(host.get("token_sha256"))
   runner_update_available = bool(
-    paired and runner_protocol is not None and (
-      int(runner_protocol or 1) < _RUNNER_PROTOCOL_VERSION
+    paired and (
+      int(runner_protocol or 0) != _RUNNER_PROTOCOL_VERSION
       or runner_transport != "sse"
     )
   )
@@ -661,30 +592,13 @@ async def _ask_runner_to_disconnect(ch: _Channel) -> str:
       asyncio.shield(fut), timeout=_DISCONNECT_ACK_TIMEOUT,
     )
   except asyncio.TimeoutError:
-    # Runners installed before the disconnect protocol ignore the event. Their
-    # exec channel can still uninstall the service, then explicitly terminate
-    # the runner if that older uninstaller returns without doing so.
-    legacy_id = secrets.token_hex(8)
-    await ch.queue.put({
-      "type": "exec",
-      "request_id": legacy_id,
-      "cmd": _LEGACY_DISCONNECT_COMMAND,
-      "cwd": None,
-      "timeout": _LEGACY_DISCONNECT_TIMEOUT,
-    })
-    try:
-      await asyncio.wait_for(
-        ch.closed.wait(), timeout=_LEGACY_DISCONNECT_TIMEOUT,
-      )
-    except asyncio.TimeoutError:
-      raise HTTPException(
-        status_code=504,
-        detail=(
-          "The machine did not confirm that its daemon stopped. "
-          "The saved connection was kept."
-        ),
-      )
-    return "legacy-stopped"
+    raise HTTPException(
+      status_code=504,
+      detail=(
+        "The machine did not confirm that its daemon stopped. "
+        "The saved connection was kept."
+      ),
+    )
   finally:
     ch.control_pending.pop(request_id, None)
     if not fut.done():
@@ -891,17 +805,6 @@ async def exec_on_host(
       status_code=409,
       detail=f"{host.get('name') or 'That machine'} is offline right now.",
     )
-  if (
-    body.script is not None
-    and ch.protocol_version < _LITERAL_SCRIPT_PROTOCOL_VERSION
-  ):
-    raise HTTPException(
-      status_code=409,
-      detail=(
-        "This machine’s runner must be updated before it can receive literal "
-        "scripts. Update it in Connect, or send a command instead."
-      ),
-    )
   timeout = body.timeout
   not_after = _now() + _START_ACK_TIMEOUT
   command = _ActiveCommand(
@@ -916,27 +819,24 @@ async def exec_on_host(
   )
   _commands[host_id] = command
   _persist_command(host_id, command)
-  if ch.protocol_version < _COMMAND_LIFECYCLE_PROTOCOL_VERSION:
-    _mark_command_started(host_id, request_id)
   await ch.queue.put(command.event())
   try:
-    if ch.protocol_version >= _COMMAND_LIFECYCLE_PROTOCOL_VERSION:
-      try:
-        await asyncio.wait_for(
-          command.started.wait(), timeout=_START_ACK_TIMEOUT,
-        )
-      except asyncio.TimeoutError:
-        await _request_command_cancel(host_id, command)
-        _finish_command(host_id, request_id, {
-          "stdout": "",
-          "stderr": "command expired before the runner confirmed it started",
-          "exit_code": 124,
-          "outcome": "expired",
-        })
-        raise HTTPException(
-          status_code=504,
-          detail="The machine did not start the command before it expired.",
-        )
+    try:
+      await asyncio.wait_for(
+        command.started.wait(), timeout=_START_ACK_TIMEOUT,
+      )
+    except asyncio.TimeoutError:
+      await _request_command_cancel(host_id, command)
+      _finish_command(host_id, request_id, {
+        "stdout": "",
+        "stderr": "command expired before the runner confirmed it started",
+        "exit_code": 124,
+        "outcome": "expired",
+      })
+      raise HTTPException(
+        status_code=504,
+        detail="The machine did not start the command before it expired.",
+      )
     # Execution time belongs to the runner and begins only after its start ack.
     return await _await_command_result(host_id, command)
   except asyncio.CancelledError:
@@ -1049,9 +949,6 @@ async def _reconcile_runner(
   if command.request_id == runner_active:
     _mark_command_started(host_id, command.request_id)
     if command.state == "canceling":
-      if ch.protocol_version >= _COMMAND_LIFECYCLE_PROTOCOL_VERSION:
-        command.cancel_not_after = None
-        _persist_command(host_id, command)
       await ch.queue.put({"type": "cancel", "request_id": command.request_id})
     return
   if command.request_id in pending_ids:
@@ -1104,163 +1001,58 @@ async def pair(request: Request, body: PairBody) -> dict:
   raise HTTPException(status_code=400, detail="Invalid pairing code.")
 
 
-@router.websocket("/socket")
-async def legacy_command_socket(websocket: WebSocket) -> None:
-  """Upgrade bridge for the provisional WebSocket protocol-v3 runner.
-
-  New runners never use this route. Keeping the already-installed v3 runner
-  online lets Connect show its in-place update command instead of stranding the
-  paired machine when rotating SSE becomes active.
-  """
-  try:
-    host = _auth_host(websocket)
-  except HTTPException:
-    await websocket.close(code=1008, reason="Unknown or revoked host token.")
-    return
-  await websocket.accept()
-  try:
-    hello = await asyncio.wait_for(websocket.receive_json(), timeout=10)
-  except (asyncio.TimeoutError, WebSocketDisconnect, ValueError, TypeError):
-    await websocket.close(code=1002, reason="Runner hello required.")
-    return
-  if not isinstance(hello, dict) or hello.get("type") != "hello":
-    await websocket.close(code=1002, reason="Runner hello required.")
-    return
-
-  host_id = host["id"]
-  ch = _Channel(
-    protocol_version=_LEGACY_WEBSOCKET_PROTOCOL_VERSION,
-    transport="websocket",
-  )
-  platform_name = str(hello.get("platform") or "")[:80]
-  if platform_name:
-    host["platform"] = platform_name
-  host["runner_protocol"] = _LEGACY_WEBSOCKET_PROTOCOL_VERSION
-  host["runner_transport"] = "websocket"
-  _save_host(host)
-  _replace_channel(host_id, ch)
-  _touch(host_id)
-  await _reconcile_runner(host_id, ch, hello)
-  await websocket.send_json({"type": "welcome", "protocol": 3})
-
-  async def send_events() -> None:
-    while True:
-      await websocket.send_json(await ch.queue.get())
-
-  async def receive_events() -> None:
-    while True:
-      message = await websocket.receive_json()
-      if not isinstance(message, dict):
-        continue
-      kind = message.get("type")
-      if kind == "started":
-        request_id = str(message.get("request_id") or "")
-        if not _mark_command_started(host_id, request_id):
-          await ch.queue.put({"type": "cancel", "request_id": request_id})
-      elif kind == "result":
-        try:
-          body = ResultBody.model_validate(message)
-        except ValueError:
-          continue
-        _runner_result(host_id, body)
-        await ch.queue.put({
-          "type": "ack", "kind": "result", "request_id": body.request_id,
-        })
-      _touch(host_id)
-
-  sender = asyncio.create_task(send_events())
-  receiver = asyncio.create_task(receive_events())
-  superseded = asyncio.create_task(ch.closed.wait())
-  tasks = {sender, receiver, superseded}
-  try:
-    done, _ = await asyncio.wait(
-      tasks, return_when=asyncio.FIRST_COMPLETED,
-    )
-    for task in done:
-      try:
-        task.result()
-      except WebSocketDisconnect:
-        pass
-  except asyncio.CancelledError:
-    # A normal Starlette WebSocket context close can cancel this ASGI task.
-    # Treat that as transport shutdown: the finally block still owns complete
-    # channel teardown, but re-raising intermittently leaks CancelledError to
-    # the caller after an otherwise successful close.
-    pass
-  except WebSocketDisconnect:
-    pass
-  finally:
-    for task in tasks:
-      if not task.done():
-        task.cancel()
-    # Retire the channel before yielding again. The transport is allowed to
-    # cancel this ASGI task while it closes, so an awaited child collection
-    # cannot be the gate in front of the durable offline transition.
-    if _channels.get(host_id) is ch:
-      del _channels[host_id]
-    for fut in ch.control_pending.values():
-      if not fut.done():
-        fut.cancel()
-    ch.closed.set()
-    _touch(host_id)
-    try:
-      await asyncio.gather(*tasks, return_exceptions=True)
-    except asyncio.CancelledError:
-      # The state transition above is complete; a repeated transport
-      # cancellation must not escape an otherwise normal WebSocket close.
-      pass
-
-
 @router.get("/stream")
 async def stream(request: Request) -> StreamingResponse:
   host = _auth_host(request)
   host_id = host["id"]
+  try:
+    protocol_version = int(request.query_params.get("protocol") or 0)
+  except ValueError:
+    protocol_version = 0
+  if protocol_version != _RUNNER_PROTOCOL_VERSION:
+    host["runner_protocol"] = protocol_version or None
+    host["runner_transport"] = "sse"
+    _save_host(host)
+    raise HTTPException(
+      status_code=426,
+      detail="This Connect runner is no longer supported. Update it in Connect.",
+    )
   # The runner reports its OS on connect so the app can label the machine.
   plat = request.query_params.get("platform")
   if plat:
     host["platform"] = plat[:80]
     _save_host(host)
-  try:
-    protocol_version = max(1, min(
-      int(request.query_params.get("protocol") or 1), _SSE_PROTOCOL_VERSION,
-    ))
-  except ValueError:
-    protocol_version = 1
-  ch = _Channel(protocol_version=protocol_version)
+  ch = _Channel()
   host["runner_protocol"] = protocol_version
   host["runner_transport"] = "sse"
   _save_host(host)
   # A reconnecting runner replaces any stale channel.
   _replace_channel(host_id, ch)
   _touch(host_id)
-  if protocol_version >= 3:
-    await _reconcile_runner(host_id, ch, {
-      "active_request_id": request.query_params.get("active_request_id"),
-      "pending_result_ids": request.query_params.getlist("pending_result_id"),
-    })
+  await _reconcile_runner(host_id, ch, {
+    "active_request_id": request.query_params.get("active_request_id"),
+    "pending_result_ids": request.query_params.getlist("pending_result_id"),
+  })
 
   async def gen():
     loop = asyncio.get_running_loop()
-    rotation_at = (
-      loop.time() + _STREAM_ROTATION_SECONDS
-      if protocol_version >= 3 else None
-    )
+    rotation_at = loop.time() + _STREAM_ROTATION_SECONDS
     try:
       yield ": connected\n\n"
       while True:
         if ch.closed.is_set() or await request.is_disconnected():
           break
-        if rotation_at is not None and loop.time() >= rotation_at:
+        if loop.time() >= rotation_at:
           break
-        wait_seconds = _HEARTBEAT_SECONDS
-        if rotation_at is not None:
-          wait_seconds = min(wait_seconds, max(0.01, rotation_at - loop.time()))
+        wait_seconds = min(
+          _HEARTBEAT_SECONDS, max(0.01, rotation_at - loop.time()),
+        )
         try:
           evt = await asyncio.wait_for(ch.queue.get(), timeout=wait_seconds)
           yield f"data: {json.dumps(evt)}\n\n"
         except asyncio.TimeoutError:
           if ch.closed.is_set() or (
-            rotation_at is not None and loop.time() >= rotation_at
+            loop.time() >= rotation_at
           ):
             break
           yield ": ping\n\n"

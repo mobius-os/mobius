@@ -229,7 +229,7 @@ async def test_failed_daemon_cleanup_keeps_the_connection(client, auth):
 
 
 @pytest.mark.asyncio
-async def test_old_runner_must_close_after_compatibility_uninstall(
+async def test_unconfirmed_shutdown_keeps_the_connection(
   client, auth, monkeypatch,
 ):
   pairing, _ = _paired_host(client, auth)
@@ -237,34 +237,6 @@ async def test_old_runner_must_close_after_compatibility_uninstall(
   channel = connect_routes._Channel()
   connect_routes._channels[host_id] = channel
   monkeypatch.setattr(connect_routes, "_DISCONNECT_ACK_TIMEOUT", 0.01)
-  monkeypatch.setattr(connect_routes, "_LEGACY_DISCONNECT_TIMEOUT", 0.2)
-
-  removing = asyncio.create_task(
-    connect_routes.delete_host(host_id, _owner=object()),
-  )
-  assert (await asyncio.wait_for(channel.queue.get(), timeout=1))["type"] == (
-    "disconnect"
-  )
-  fallback = await asyncio.wait_for(channel.queue.get(), timeout=1)
-  assert fallback["type"] == "exec"
-  assert "--uninstall" in fallback["cmd"]
-  assert 'kill -TERM "$PPID"' in fallback["cmd"]
-  channel.closed.set()
-
-  assert await removing == {"ok": True, "daemon": "legacy-stopped"}
-  assert connect_routes._load_host(host_id) is None
-
-
-@pytest.mark.asyncio
-async def test_unconfirmed_legacy_shutdown_keeps_the_connection(
-  client, auth, monkeypatch,
-):
-  pairing, _ = _paired_host(client, auth)
-  host_id = pairing["id"]
-  channel = connect_routes._Channel()
-  connect_routes._channels[host_id] = channel
-  monkeypatch.setattr(connect_routes, "_DISCONNECT_ACK_TIMEOUT", 0.01)
-  monkeypatch.setattr(connect_routes, "_LEGACY_DISCONNECT_TIMEOUT", 0.01)
 
   with pytest.raises(connect_routes.HTTPException) as raised:
     await connect_routes.delete_host(host_id, _owner=object())
@@ -326,40 +298,7 @@ def test_exec_rejects_an_offline_machine(client, auth):
   assert response.json()["detail"] == "Workstation is offline right now."
 
 
-def test_provisional_websocket_runner_stays_online_for_in_place_update(
-  client, auth,
-):
-  pairing, runner_token = _paired_host(client, auth)
-  with client.websocket_connect(
-    "/api/connect/socket",
-    headers={"Authorization": f"Bearer {runner_token}"},
-  ) as websocket:
-    websocket.send_json({
-      "type": "hello",
-      "protocol": 3,
-      "platform": "ProvisionalOS 1",
-      "active_request_id": None,
-      "pending_result_ids": [],
-    })
-    assert websocket.receive_json() == {"type": "welcome", "protocol": 3}
-    host = client.get("/api/connect/hosts", headers=auth).json()["hosts"][0]
-    assert host["online"] is True
-    assert host["runner_protocol"] == 3
-    assert host["runner_update_available"] is True
-    assert "--install" in host["update_command"]
-    assert host["platform"] == "ProvisionalOS 1"
-
-  deadline = time.monotonic() + 1
-  while pairing["id"] in connect_routes._channels and time.monotonic() < deadline:
-    time.sleep(0.01)
-  assert pairing["id"] not in connect_routes._channels
-  host = client.get("/api/connect/hosts", headers=auth).json()["hosts"][0]
-  assert host["online"] is False
-  assert host["runner_update_available"] is True
-  assert "--install" in host["update_command"]
-
-
-def test_pre_transport_protocol_three_record_offers_offline_update(client, auth):
+def test_stale_runner_record_offers_an_offline_update(client, auth):
   pairing, _ = _paired_host(client, auth)
   host = connect_routes._load_host(pairing["id"])
   host["runner_protocol"] = 3
@@ -373,13 +312,33 @@ def test_pre_transport_protocol_three_record_offers_offline_update(client, auth)
   assert "--install" in public["update_command"]
 
 
+def test_old_transport_is_rejected_but_keeps_the_update_path(client, auth):
+  pairing, runner_token = _paired_host(client, auth)
+
+  response = client.get(
+    "/api/connect/stream?protocol=3&platform=OldOS",
+    headers={"Authorization": f"Bearer {runner_token}"},
+  )
+
+  assert response.status_code == 426
+  assert "Update it in Connect" in response.json()["detail"]
+  public = client.get("/api/connect/hosts", headers=auth).json()["hosts"][0]
+  assert public["online"] is False
+  assert public["runner_protocol"] == 3
+  assert public["runner_update_available"] is True
+  assert "--install" in public["update_command"]
+  assert "/api/connect/socket" not in {
+    route.path for route in connect_routes.router.routes
+  }
+
+
 @pytest.mark.asyncio
-async def test_protocol_three_stream_rotates_without_losing_running_command(
+async def test_current_stream_rotates_without_losing_running_command(
   client, auth, monkeypatch,
 ):
   pairing, runner_token = _paired_host(client, auth)
   request_id = "0" * 16
-  first = connect_routes._Channel(protocol_version=3)
+  first = connect_routes._Channel()
   connect_routes._channels[pairing["id"]] = first
   caller = asyncio.create_task(connect_routes.exec_on_host(
     pairing["id"],
@@ -402,7 +361,7 @@ async def test_protocol_three_stream_rotates_without_losing_running_command(
     "method": "GET",
     "path": "/api/connect/stream",
     "query_string": (
-      f"protocol=3&platform=TestOS%201&active_request_id={request_id}"
+      f"protocol=4&platform=TestOS%201&active_request_id={request_id}"
     ).encode(),
     "headers": [
       (b"authorization", f"Bearer {runner_token}".encode()),
@@ -413,9 +372,9 @@ async def test_protocol_three_stream_rotates_without_losing_running_command(
   assert current is not first
   assert current.queue.empty()
   host = connect_routes._load_host(pairing["id"])
-  assert host["runner_protocol"] == 3
+  assert host["runner_protocol"] == 4
   assert host["platform"] == "TestOS 1"
-  assert connect_routes._public_host(host)["runner_update_available"] is True
+  assert connect_routes._public_host(host)["runner_update_available"] is False
 
   assert await response.body_iterator.__anext__() == ": connected\n\n"
   with pytest.raises(StopAsyncIteration):
@@ -426,7 +385,7 @@ async def test_protocol_three_stream_rotates_without_losing_running_command(
   assert not caller.done()
   host = connect_routes._load_host(pairing["id"])
   assert host["runner_transport"] == "sse"
-  assert connect_routes._public_host(host)["runner_update_available"] is True
+  assert connect_routes._public_host(host)["runner_update_available"] is False
   connect_routes._runner_result(pairing["id"], connect_routes.ResultBody(
     request_id=request_id,
     stdout="rotating",
@@ -440,7 +399,7 @@ async def test_protocol_three_stream_rotates_without_losing_running_command(
 async def test_reconnect_keeps_one_command_and_returns_its_result(client, auth):
   pairing, _ = _paired_host(client, auth)
   request_id = "7" * 16
-  first = connect_routes._Channel(protocol_version=3)
+  first = connect_routes._Channel()
   connect_routes._channels[pairing["id"]] = first
   caller = asyncio.create_task(connect_routes.exec_on_host(
     pairing["id"],
@@ -454,7 +413,7 @@ async def test_reconnect_keeps_one_command_and_returns_its_result(client, auth):
   connect_routes._mark_command_started(pairing["id"], request_id)
 
   connect_routes._channels.pop(pairing["id"])
-  second = connect_routes._Channel(protocol_version=3)
+  second = connect_routes._Channel()
   connect_routes._replace_channel(pairing["id"], second)
   await connect_routes._reconcile_runner(pairing["id"], second, {
     "active_request_id": request_id, "pending_result_ids": [],
@@ -492,7 +451,7 @@ async def test_reconnect_keeps_one_command_and_returns_its_result(client, auth):
 @pytest.mark.asyncio
 async def test_exec_correlates_the_runner_result(client, auth):
   pairing, _ = _paired_host(client, auth)
-  channel = connect_routes._Channel(protocol_version=3)
+  channel = connect_routes._Channel()
   connect_routes._channels[pairing["id"]] = channel
   request_id = "a" * 16
 
@@ -534,7 +493,7 @@ async def test_protocol_four_carries_a_literal_script_separately(
   client, auth,
 ):
   pairing, _ = _paired_host(client, auth)
-  channel = connect_routes._Channel(protocol_version=4)
+  channel = connect_routes._Channel()
   connect_routes._channels[pairing["id"]] = channel
   request_id = "d" * 16
   script = "set -eu\nname='$literal'\nprintf '%s\\n' \"$name\"\n"
@@ -571,25 +530,6 @@ async def test_protocol_four_carries_a_literal_script_separately(
   assert (await request)["stdout"] == "$literal\n"
 
 
-@pytest.mark.asyncio
-async def test_literal_script_requires_an_updated_runner(client, auth):
-  pairing, _ = _paired_host(client, auth)
-  channel = connect_routes._Channel(protocol_version=3)
-  connect_routes._channels[pairing["id"]] = channel
-
-  with pytest.raises(connect_routes.HTTPException) as raised:
-    await connect_routes.exec_on_host(
-      pairing["id"],
-      connect_routes.ExecBody(script="printf ready\n"),
-      _owner=object(),
-    )
-
-  assert raised.value.status_code == 409
-  assert "runner must be updated" in raised.value.detail
-  assert channel.queue.empty()
-  assert connect_routes._ensure_command(pairing["id"]) is None
-
-
 def test_exec_body_requires_exactly_one_work_form():
   with pytest.raises(ValueError, match="exactly one"):
     connect_routes.ExecBody()
@@ -619,7 +559,7 @@ async def test_persisted_running_command_accepts_result_after_runtime_restart(
 
   # A backend restart drops futures and sockets, but the host record survives.
   connect_routes._commands.clear()
-  channel = connect_routes._Channel(protocol_version=3)
+  channel = connect_routes._Channel()
   await connect_routes._reconcile_runner(pairing["id"], channel, {
     "active_request_id": None,
     "pending_result_ids": [request_id],
@@ -650,12 +590,13 @@ async def test_persisted_running_command_accepts_result_after_runtime_restart(
 
 
 @pytest.mark.asyncio
-async def test_offline_cancel_is_delivered_when_protocol_three_reconnects(
+async def test_offline_cancel_is_delivered_when_current_runner_reconnects(
   client, auth,
 ):
   pairing, _ = _paired_host(client, auth)
   host = connect_routes._load_host(pairing["id"])
-  host["runner_protocol"] = 3
+  host["runner_protocol"] = 4
+  host["runner_transport"] = "sse"
   connect_routes._save_host(host)
   request_id = "6" * 16
   command = connect_routes._ActiveCommand(
@@ -668,7 +609,7 @@ async def test_offline_cancel_is_delivered_when_protocol_three_reconnects(
     pairing["id"], request_id, _owner=object(),
   )
   assert response["state"] == "canceling"
-  channel = connect_routes._Channel(protocol_version=3)
+  channel = connect_routes._Channel()
   await connect_routes._reconcile_runner(pairing["id"], channel, {
     "active_request_id": request_id,
     "pending_result_ids": [],
@@ -681,7 +622,7 @@ async def test_offline_cancel_is_delivered_when_protocol_three_reconnects(
 @pytest.mark.asyncio
 async def test_exec_caps_large_output_and_reports_runner_timeout(client, auth):
   pairing, _ = _paired_host(client, auth)
-  channel = connect_routes._Channel(protocol_version=3)
+  channel = connect_routes._Channel()
   connect_routes._channels[pairing["id"]] = channel
   request_id = "b" * 16
   request = asyncio.create_task(connect_routes.exec_on_host(
@@ -716,7 +657,7 @@ async def test_exec_caps_large_output_and_reports_runner_timeout(client, auth):
 @pytest.mark.asyncio
 async def test_busy_host_rejects_work_instead_of_queueing_it(client, auth):
   pairing, _ = _paired_host(client, auth)
-  channel = connect_routes._Channel(protocol_version=3)
+  channel = connect_routes._Channel()
   connect_routes._channels[pairing["id"]] = channel
   request_id = "c" * 16
   first = asyncio.create_task(connect_routes.exec_on_host(
@@ -750,7 +691,7 @@ async def test_busy_host_rejects_work_instead_of_queueing_it(client, auth):
 @pytest.mark.asyncio
 async def test_cancel_keeps_host_busy_until_runner_confirms_exit(client, auth):
   pairing, _ = _paired_host(client, auth)
-  channel = connect_routes._Channel(protocol_version=3)
+  channel = connect_routes._Channel()
   connect_routes._channels[pairing["id"]] = channel
   request_id = "e" * 16
   running = asyncio.create_task(connect_routes.exec_on_host(
@@ -779,151 +720,11 @@ async def test_cancel_keeps_host_busy_until_runner_confirms_exit(client, auth):
 
 
 @pytest.mark.asyncio
-async def test_old_runner_is_single_flight_but_does_not_claim_cancellation(
-  client, auth,
-):
-  pairing, _ = _paired_host(client, auth)
-  channel = connect_routes._Channel(protocol_version=1)
-  connect_routes._channels[pairing["id"]] = channel
-  request_id = "9" * 16
-  running = asyncio.create_task(connect_routes.exec_on_host(
-    pairing["id"],
-    connect_routes.ExecBody(cmd="legacy task", request_id=request_id),
-    _owner=object(),
-  ))
-  await asyncio.wait_for(channel.queue.get(), timeout=1)
-
-  public = connect_routes._public_host(
-    connect_routes._load_host(pairing["id"]),
-  )
-  assert public["busy"] is True
-  assert public["active_command"]["state"] == "running"
-  assert public["runner_update_available"] is True
-  assert public["update_command"].endswith("python3 - --install")
-
-  with pytest.raises(connect_routes.HTTPException) as raised:
-    await connect_routes.cancel_host_command(
-      pairing["id"], request_id, _owner=object(),
-    )
-  assert raised.value.status_code == 409
-  assert "updated" in raised.value.detail
-  assert connect_routes._ensure_command(pairing["id"]).request_id == request_id
-
-  connect_routes._finish_command(pairing["id"], request_id, {
-    "stdout": "", "stderr": "", "exit_code": 0,
-    "outcome": "completed",
-  })
-  await running
-
-
-@pytest.mark.asyncio
-async def test_protocol_two_does_not_claim_offline_cancellation(client, auth):
-  pairing, _ = _paired_host(client, auth)
-  host = connect_routes._load_host(pairing["id"])
-  host["runner_protocol"] = 2
-  connect_routes._save_host(host)
-  command = connect_routes._ActiveCommand(
-    "5" * 16, 30, started_at=time.time(), state="running",
-  )
-  connect_routes._commands[pairing["id"]] = command
-  connect_routes._persist_command(pairing["id"], command)
-
-  with pytest.raises(connect_routes.HTTPException) as raised:
-    await connect_routes.cancel_host_command(
-      pairing["id"], command.request_id, _owner=object(),
-    )
-  assert raised.value.status_code == 409
-  assert command.state == "running"
-
-
-@pytest.mark.asyncio
-async def test_legacy_timeout_without_result_releases_the_host(client, auth):
-  pairing, _ = _paired_host(client, auth)
-  channel = connect_routes._Channel(protocol_version=1)
-  connect_routes._channels[pairing["id"]] = channel
-  request_id = "1" * 16
-  command = connect_routes._ActiveCommand(
-    request_id,
-    1,
-    cmd="legacy task",
-    started_at=time.time() - 2,
-    state="running",
-  )
-  connect_routes._commands[pairing["id"]] = command
-  connect_routes._persist_command(pairing["id"], command)
-
-  with pytest.raises(connect_routes.HTTPException) as raised:
-    await connect_routes._await_command_result(pairing["id"], command)
-
-  assert raised.value.status_code == 504
-  assert connect_routes._ensure_command(pairing["id"]) is None
-  last = connect_routes._load_host(pairing["id"])["last_command"]
-  assert last["id"] == request_id
-  assert last["result"]["outcome"] == "lost"
-
-  next_request_id = "2" * 16
-  next_request = asyncio.create_task(connect_routes.exec_on_host(
-    pairing["id"],
-    connect_routes.ExecBody(
-      cmd="next task", timeout=30, request_id=next_request_id,
-    ),
-    _owner=object(),
-  ))
-  dispatched = await asyncio.wait_for(channel.queue.get(), timeout=1)
-  assert dispatched["request_id"] == next_request_id
-  connect_routes._finish_command(pairing["id"], next_request_id, {
-    "stdout": "ready", "stderr": "", "exit_code": 0,
-    "outcome": "completed",
-  })
-  assert (await next_request)["stdout"] == "ready"
-
-
-@pytest.mark.asyncio
-async def test_protocol_two_cancel_result_deadline_survives_restart(
-  client, auth, monkeypatch,
-):
-  pairing, _ = _paired_host(client, auth)
-  channel = connect_routes._Channel(protocol_version=2)
-  connect_routes._channels[pairing["id"]] = channel
-  request_id = "3" * 16
-  command = connect_routes._ActiveCommand(
-    request_id, 1, started_at=time.time() - 2, state="running",
-  )
-  connect_routes._commands[pairing["id"]] = command
-  connect_routes._persist_command(pairing["id"], command)
-
-  with pytest.raises(connect_routes.HTTPException) as raised:
-    await connect_routes._await_command_result(pairing["id"], command)
-
-  assert raised.value.status_code == 504
-  assert await asyncio.wait_for(channel.queue.get(), timeout=1) == {
-    "type": "cancel", "request_id": request_id,
-  }
-  persisted = connect_routes._load_host(pairing["id"])["active_command"]
-  assert persisted["state"] == "canceling"
-  assert persisted["cancel_not_after"] > time.time()
-
-  # A backend restart loses the in-memory command object, but the persisted
-  # reporting deadline still releases the host when it is next observed.
-  connect_routes._commands.clear()
-  monkeypatch.setattr(
-    connect_routes, "_now", lambda: persisted["cancel_not_after"] + 1,
-  )
-  public = connect_routes._public_host(
-    connect_routes._load_host(pairing["id"]),
-  )
-  assert public["busy"] is False
-  host = connect_routes._load_host(pairing["id"])
-  assert host["active_command"] is None
-  assert host["last_command"]["result"]["outcome"] == "lost"
-
-
-@pytest.mark.asyncio
 async def test_current_runner_keeps_retryable_result_after_server_timeout(
   client, auth, monkeypatch,
 ):
   pairing, _ = _paired_host(client, auth)
-  channel = connect_routes._Channel(protocol_version=3)
+  channel = connect_routes._Channel()
   connect_routes._channels[pairing["id"]] = channel
   request_id = "4" * 16
   command = connect_routes._ActiveCommand(
@@ -941,7 +742,6 @@ async def test_current_runner_keeps_retryable_result_after_server_timeout(
   }
   persisted = connect_routes._load_host(pairing["id"])["active_command"]
   assert persisted["state"] == "canceling"
-  assert persisted["cancel_not_after"] is None
 
   # Current runners retry terminal results after reconnect, so a long
   # transport loss must not be mistaken for a permanently lost result.
@@ -968,7 +768,7 @@ async def test_unacknowledged_dispatch_expires_and_sends_cancel(
   client, auth, monkeypatch,
 ):
   pairing, _ = _paired_host(client, auth)
-  channel = connect_routes._Channel(protocol_version=3)
+  channel = connect_routes._Channel()
   connect_routes._channels[pairing["id"]] = channel
   request_id = "f" * 16
   monkeypatch.setattr(connect_routes, "_START_ACK_TIMEOUT", 0.01)
