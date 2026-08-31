@@ -28,12 +28,14 @@ export function standardContentSurface({ single, fullBleedKey }) {
 }
 
 /**
- * Keep an app visible only while the next Standard chat reaches display-ready.
+ * Keep an app-backed handoff layer only while the next Standard chat reaches
+ * display-ready.
  *
  * Chat-to-chat transitions already have a retained ChatView cover. A direct
- * app-to-chat transition has no outgoing ChatView to hold, which otherwise
- * exposes ChatView's deliberate first-frame transcript settlement. Retarget a
- * live cover on rapid chat changes so an app never drops away between A -> B.
+ * app-to-chat transition has no outgoing ChatView to hold. Retain the app
+ * wrapper for geometry/runtime continuity while CSS replaces its pixels with
+ * the same neutral chat-opening surface. Retarget that layer on rapid chat
+ * changes so the destination's settlement frame never leaks through.
  */
 export function deriveAppToChatCover(previousSurface, currentSurface, cover) {
   if (currentSurface?.kind !== 'chat') return null

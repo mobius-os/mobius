@@ -26,6 +26,14 @@ export default [
       'node_modules/**',
       'public/vendor/**',
       'public/mobius-runtime.js',
+      // Vendored upstream build (SoundTouchJS, MPL-2.0) pinned by version and
+      // digest in src/lib/speech/speechPitchAsset.js. It stays beside the other
+      // speech assets rather than moving under public/vendor/ because /vendor/*
+      // is served CacheFirst as an immutable lib, and a worklet is a worker-
+      // class script that must keep revalidating (see scripts/precache-policy.mjs).
+      // Its bytes are digest-checked, so it cannot carry an inline globals
+      // annotation either: exclude it rather than lint code we must not edit.
+      'public/speech/soundtouch-processor.js',
     ],
   },
   {

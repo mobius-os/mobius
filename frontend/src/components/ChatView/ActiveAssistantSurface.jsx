@@ -34,6 +34,7 @@ function ActiveAssistantSurface({
   autoResumeSaving,
   autoResumeError,
   onAutoResumeChange,
+  limitResetElapsed,
   submissionBlocked,
   liveQuestionId,
   pendingQuestionRef,
@@ -91,6 +92,7 @@ function ActiveAssistantSurface({
       autoResumeSaving={autoResumeSaving}
       autoResumeError={autoResumeError}
       onAutoResumeChange={onAutoResumeChange}
+      limitResetElapsed={limitResetElapsed}
       submissionBlocked={submissionBlocked}
       liveQuestionId={liveQuestionId}
       pendingQuestionRef={pendingQuestionRef}

@@ -581,6 +581,7 @@ def test_delegated_capability_read_refuses_symlinked_storage(tmp_path):
 # --- Parent auto-wake on child completion ------------------------------------
 
 import asyncio
+import threading
 
 import app.chat as chat_mod
 import app.chat_start as chat_start_mod
@@ -733,6 +734,57 @@ def test_two_finishes_coalesce_into_one_wake(db, monkeypatch):
   # The other child settling now finds nothing eligible → no second wake.
   asyncio.run(delegations_mod.wake_parent_after_child_settled(child_b))
   assert len(starts) == 1
+
+
+def test_parent_wake_bounds_one_notice_and_retries_the_remainder(
+  db, monkeypatch,
+):
+  parent_id, child_a, del_a = _seed_delegation(
+    db, suffix="batch-a", parent_root_id="batch-root",
+    result_blocks=[{"type": "text", "content": "A done"}],
+  )
+  _, child_b, del_b = _seed_delegation(
+    db, suffix="batch-b", parent_id=parent_id,
+    parent_root_id="batch-root",
+    result_blocks=[{"type": "text", "content": "B done"}],
+  )
+  _, child_c, del_c = _seed_delegation(
+    db, suffix="batch-c", parent_id=parent_id,
+    parent_root_id="batch-root",
+    result_blocks=[{"type": "text", "content": "C done"}],
+  )
+  starts = _capture_starts(monkeypatch, running=False)
+  monkeypatch.setattr(delegations_mod, "WAKE_NOTICE_DELEGATION_LIMIT", 2)
+
+  asyncio.run(delegations_mod.wake_parent_after_child_settled(child_a))
+
+  assert len(starts) == 1
+  first_notice = starts[0]["content"]
+  assert sum(
+    key in first_notice for key in ("task-batch-a", "task-batch-b", "task-batch-c")
+  ) == 2
+  db.expire_all()
+  latched = {
+    row.id for row in db.query(models.Delegation).filter(
+      models.Delegation.id.in_((del_a, del_b, del_c)),
+      models.Delegation.parent_woken_at.isnot(None),
+    )
+  }
+  assert len(latched) == 2
+
+  remaining = next(
+    child for delegation, child in (
+      (del_a, child_a), (del_b, child_b), (del_c, child_c),
+    ) if delegation not in latched
+  )
+  asyncio.run(delegations_mod.wake_parent_after_child_settled(remaining))
+
+  assert len(starts) == 2
+  db.expire_all()
+  assert all(
+    db.get(models.Delegation, delegation_id).parent_woken_at is not None
+    for delegation_id in (del_a, del_b, del_c)
+  )
 
 
 def test_finishes_from_different_logical_work_never_share_a_wake(
@@ -1036,7 +1088,8 @@ def test_reconcile_wakes_parent_for_completed_while_away(db, monkeypatch):
   woken = asyncio.run(
     delegations_mod.wake_parents_for_completed_delegations()
   )
-  assert woken == 1
+  assert woken.woken_parents == 1
+  assert woken.attempted_groups == 1
   assert len(starts) == 1
   db.expire_all()
   assert db.get(models.Delegation, delegation_id).parent_woken_at is not None
@@ -1045,8 +1098,139 @@ def test_reconcile_wakes_parent_for_completed_while_away(db, monkeypatch):
   woken_again = asyncio.run(
     delegations_mod.wake_parents_for_completed_delegations()
   )
-  assert woken_again == 0
+  assert woken_again.woken_parents == 0
+  assert woken_again.attempted_groups == 0
   assert len(starts) == 1
+
+
+def test_recovery_selection_runs_off_the_event_loop(db, monkeypatch):
+  # The correlated GROUP BY selection scan must execute in a worker thread, not
+  # on the server event loop, exactly as autopilot_lease_recovery_loop offloads
+  # its sibling sweep. Reverting the asyncio.to_thread offload makes this the
+  # only failing test in the file.
+  _seed_delegation(db, suffix="offloaded", child_status="completed")
+
+  real_select = delegations_mod._wake_recovery_groups
+  select_thread: dict[str, int] = {}
+
+  def probe(*args, **kwargs):
+    select_thread["ident"] = threading.get_ident()
+    return real_select(*args, **kwargs)
+
+  monkeypatch.setattr(delegations_mod, "_wake_recovery_groups", probe)
+
+  async def capture_delivery(parent_chat_id, source_work_id):
+    return False
+
+  monkeypatch.setattr(
+    delegations_mod, "_deliver_parent_wake", capture_delivery,
+  )
+
+  async def drive():
+    loop_thread = threading.get_ident()
+    result = await delegations_mod.wake_parents_for_completed_delegations()
+    return loop_thread, result
+
+  loop_thread, result = asyncio.run(drive())
+  assert result.attempted_groups == 1
+  assert "ident" in select_thread
+  assert select_thread["ident"] != loop_thread
+
+
+def test_recovery_scan_is_bounded_fair_and_status_only(db, monkeypatch):
+  for index in range(20):
+    _seed_delegation(
+      db, suffix=f"ineligible-{index}", child_status="stopped",
+    )
+  expected = set()
+  for index in range(5):
+    _parent, _child, delegation_id = _seed_delegation(
+      db, suffix=f"eligible-{index}", child_status="completed",
+    )
+    expected.add(delegation_id)
+
+  attempts = []
+
+  async def capture_delivery(parent_chat_id, source_work_id):
+    attempts.append((parent_chat_id, source_work_id))
+    return False
+
+  def transcript_probe(*_args, **_kwargs):
+    raise AssertionError("recovery selection must not load child transcripts")
+
+  monkeypatch.setattr(
+    delegations_mod, "_deliver_parent_wake", capture_delivery,
+  )
+  monkeypatch.setattr(delegations_mod, "derived_status", transcript_probe)
+
+  first = asyncio.run(
+    delegations_mod.wake_parents_for_completed_delegations(batch_size=2)
+  )
+  second = asyncio.run(
+    delegations_mod.wake_parents_for_completed_delegations(
+      after=first.next_cursor, batch_size=2,
+    )
+  )
+  third = asyncio.run(
+    delegations_mod.wake_parents_for_completed_delegations(
+      after=second.next_cursor, batch_size=2,
+    )
+  )
+
+  assert [first.attempted_groups, second.attempted_groups, third.attempted_groups] == [
+    2, 2, 1,
+  ]
+  assert first.next_cursor is not None
+  assert second.next_cursor is not None
+  assert third.next_cursor is None
+  assert len(attempts) == 5
+  assert {source_work_id for _parent, source_work_id in attempts} == {
+    f"root-eligible-{index}" for index in range(5)
+  }
+
+  # Failed delivery did not latch or trap the cursor at the first page: every
+  # eligible group was attempted once, while stopped children were never read.
+  db.expire_all()
+  assert {
+    row.id for row in db.query(models.Delegation).filter(
+      models.Delegation.parent_woken_at.is_(None),
+      models.Delegation.id.in_(expected),
+    )
+  } == expected
+
+
+def test_recovery_times_out_one_parent_without_starving_the_next(
+  db, monkeypatch,
+):
+  for index in range(2):
+    _seed_delegation(
+      db, suffix=f"timeout-{index}", child_status="completed",
+    )
+  attempts = []
+  blocked = asyncio.Event()
+
+  async def deliver_once(parent_chat_id, source_work_id):
+    attempts.append((parent_chat_id, source_work_id))
+    if source_work_id == "root-timeout-0":
+      await blocked.wait()
+    return True
+
+  monkeypatch.setattr(
+    delegations_mod, "_deliver_parent_wake_once", deliver_once,
+  )
+  monkeypatch.setattr(
+    delegations_mod, "WAKE_PARENT_DELIVERY_TIMEOUT_SECS", 0.01,
+  )
+
+  result = asyncio.run(
+    delegations_mod.wake_parents_for_completed_delegations(batch_size=2)
+  )
+
+  assert result.attempted_groups == 2
+  assert result.woken_parents == 1
+  assert {source_work_id for _parent, source_work_id in attempts} == {
+    "root-timeout-0", "root-timeout-1",
+  }
 
 
 def test_wake_disposition_gate_excludes_non_durable_terminals():

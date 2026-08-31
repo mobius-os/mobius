@@ -65,6 +65,15 @@ def _selection_hunk(edit: dict[str, Any]) -> list[str]:
   ))[2:]
 
 
+def _content_hunk(content: str, kind_type: str) -> list[str]:
+  """Turn Codex's raw add/delete file body into a real unified hunk."""
+  if kind_type not in {"add", "delete"} or not content:
+    return []
+  before = content.splitlines() if kind_type == "delete" else []
+  after = content.splitlines() if kind_type == "add" else []
+  return list(difflib.unified_diff(before, after, lineterm=""))[2:]
+
+
 def claude_edit_preview(tool: str, inp: Any) -> dict | None:
   """Build an honest selection-relative preview from Claude edit arguments."""
   if not isinstance(inp, dict) or tool not in {"Edit", "MultiEdit"}:
@@ -102,12 +111,20 @@ def codex_edit_preview(changes: Any) -> dict | None:
     patch = change.get("diff")
     if not isinstance(path, str) or not path or not isinstance(patch, str):
       continue
-    if patch.startswith("diff --git "):
-      sections.append(patch)
-      continue
     raw_kind = change.get("kind")
     kind = raw_kind if isinstance(raw_kind, dict) else {}
     kind_type = str(kind.get("type") or "update")
+    # The pinned Codex app-server contract carries complete file content for
+    # add/delete changes and unified diff text for updates. Dispatch on that
+    # typed distinction before inspecting content: a valid new file may itself
+    # begin with diff metadata such as `diff --git`, `@@`, or `GIT binary patch`.
+    if kind_type in {"add", "delete"}:
+      patch_lines = _content_hunk(patch, kind_type)
+    elif patch.startswith("diff --git "):
+      sections.append(patch)
+      continue
+    else:
+      patch_lines = patch.splitlines()
     move_path = kind.get("move_path")
     new_path = move_path if isinstance(move_path, str) and move_path else path
     header = [
@@ -136,5 +153,5 @@ def codex_edit_preview(changes: Any) -> dict | None:
         f"--- {_git_path('a', path)}",
         f"+++ {_git_path('b', new_path)}",
       ])
-    sections.append("\n".join([*header, patch]))
+    sections.append("\n".join([*header, *patch_lines]))
   return _bounded_preview("\n".join(sections))

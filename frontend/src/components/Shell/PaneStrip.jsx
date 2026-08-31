@@ -1,5 +1,7 @@
 import { useLayoutEffect, useRef } from 'react'
 import { CollapseSm, ExpandSm, X } from '@openai/apps-sdk-ui/components/Icon'
+import FolderKanban from 'lucide-react/dist/esm/icons/folder-kanban.mjs'
+import Globe2 from 'lucide-react/dist/esm/icons/globe-2.mjs'
 import * as tabModel from './tabModel.js'
 import { STRIP_H } from './paneModel.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
@@ -131,7 +133,7 @@ export function PaneTab({
   }, [active, focused, revealKey])
 
   return (
-    <div ref={tabRef} className={`shell__tab${active ? ' shell__tab--active' : ''}`}>
+    <div ref={tabRef} className={`shell__tab${active ? ' shell__tab--active' : ''}`} data-kind={tab.kind}>
       <button
         type="button"
         className="shell__tab-open"
@@ -158,6 +160,8 @@ export function PaneTab({
         onMouseDown={(e) => { if (e.button === 1) e.preventDefault() }}
         onContextMenu={onContextMenu}
       >
+        {tab.kind === 'project' && <FolderKanban className="shell__tab-identity" size={14} aria-hidden="true" />}
+        {tab.kind === 'artifact' && <Globe2 className="shell__tab-identity" size={14} aria-hidden="true" />}
         <span ref={titleRef} className="shell__tab-text">
           <span className="shell__tab-text-inner">{label}</span>
         </span>

@@ -46,9 +46,11 @@ test('a pending close landing on a classic-store phantom keeps seeking, not fini
   // the close's tagged home is deeper. Finishing there would clear the pending
   // flags and strand the shell on the untagged entry (caught by e2e
   // navigation 31, "seeks through phantom history").
+  const pendingClose = onNavigate.indexOf('const pendingDrawerClose')
+  const consumeStart = onNavigate.indexOf('const consume = () =>', pendingClose)
   const consume = onNavigate.slice(
-    onNavigate.indexOf('const consume = () =>'),
-    onNavigate.indexOf('if (e.canIntercept)'),
+    consumeStart,
+    onNavigate.indexOf('// Intercept when the engine allows it', consumeStart),
   )
   assert.match(consume,
     /if \(!committed && drawerClosePendingRef\.current\) \{\s*\n\s*continueDrawerCloseAfterPhantom\(\)\s*\n\s*return/,
@@ -90,4 +92,28 @@ test('openDrawer reconciles a provably-stale pending close from the classic stor
   const closeDrawer = src.slice(src.indexOf('function closeDrawer'), src.indexOf('const appNavPush'))
   assert.ok(closeDrawer.includes('drawerClosePendingAtRef.current = Date.now()'),
     'closeDrawer stamps the pending-close start time')
+})
+
+test('a recovered close settles only after its delayed traversal commits', () => {
+  const recovered = src.slice(
+    src.indexOf('function recoveredDrawerCloseFor'),
+    src.indexOf('function handleBack'),
+  )
+  assert.match(recovered,
+    /closeTraversal\.entryId === navEntryId\(source\)/,
+    'the delayed close is correlated by the retagged sentinel identity')
+  assert.match(recovered,
+    /const committed = isMobiusNavState\(destination\)[\s\S]*history\.state/,
+    'settlement reads the committed classic cursor when the Navigation mirror is unavailable')
+  assert.match(recovered,
+    /pushShellEntry\('nav', closeTraversal\.selectedRoute\)/,
+    'a late close rebases the already-painted selection above the committed cursor')
+
+  assert.match(onNavigate,
+    /if \(!userInitiated && recoveredDrawerCloseFor\(recoveredSource\)\) \{[\s\S]*e\.intercept\(\{ handler: consumeRecoveredClose \}\)/,
+    'programmatic recovery is intercepted while an owner Back remains owner-initiated')
+  const recoveredGate = onNavigate.indexOf('recoveredDrawerCloseFor(recoveredSource)')
+  const pendingClose = onNavigate.indexOf('const pendingDrawerClose')
+  assert.ok(recoveredGate > -1 && recoveredGate < pendingClose,
+    'late-close recovery runs before ordinary drawer and phantom traversal handling')
 })

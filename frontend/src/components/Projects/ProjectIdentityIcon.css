@@ -1,0 +1,15 @@
+.project-identity-icon {
+  --project-icon-size: 34px;
+  --project-icon-accent: var(--accent);
+  position: relative;
+  width: var(--project-icon-size);
+  height: var(--project-icon-size);
+  flex: 0 0 var(--project-icon-size);
+  display: inline-grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--project-icon-accent) 24%, var(--border));
+  border-radius: calc(var(--project-icon-size) * .24);
+  color: color-mix(in srgb, var(--project-icon-accent) 72%, var(--text));
+  background: color-mix(in srgb, var(--project-icon-accent) 8%, var(--surface));
+}

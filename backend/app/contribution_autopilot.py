@@ -266,6 +266,34 @@ def _reclaim_expired(
   return result.rowcount == 1, failures
 
 
+def sweep_expired_leases(db: Session) -> int:
+  """Reclaim expired round leases even when no newer event arrives.
+
+  ``claim_for_round`` reclaims lazily when another GitHub event reaches the
+  same record. A round that crashes after the final event would otherwise stay
+  in ``responding`` forever. The runtime supervisor calls this idempotent sweep
+  so the poller's durable attention can be retried. Returns rows reclaimed.
+  """
+  rows = (
+    db.query(models.ContributionAutopilot)
+    .filter(
+      models.ContributionAutopilot.enabled.is_(True),
+      models.ContributionAutopilot.state == "responding",
+      models.ContributionAutopilot.lease_expires_at.isnot(None),
+      models.ContributionAutopilot.lease_expires_at <= now_naive_utc(),
+    )
+    .order_by(models.ContributionAutopilot.lease_expires_at.asc())
+    .limit(100)
+    .all()
+  )
+  reclaimed = 0
+  for row in rows:
+    ok, _failures = _reclaim_expired(db, row)
+    if ok:
+      reclaimed += 1
+  return reclaimed
+
+
 def claim_for_round(
   db: Session,
   app_id: int,
@@ -312,6 +340,11 @@ def claim_for_round(
       if failures >= FAILURE_ESCALATION_THRESHOLD:
         return {"status": "escalate", "reason": "stale_rounds"}
       continue
+    if int(row.consecutive_failures or 0) >= FAILURE_ESCALATION_THRESHOLD:
+      # A periodic lease sweep may have reclaimed the expired row before this
+      # request arrived. Preserve the same escalation verdict as inline reclaim
+      # instead of granting an unbounded sequence of crash/retry rounds.
+      return {"status": "escalate", "reason": "stale_rounds"}
     if row.rounds_used >= row.max_rounds:
       return {"status": "escalate", "reason": "round_limit"}
 

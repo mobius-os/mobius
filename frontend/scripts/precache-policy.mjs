@@ -14,8 +14,13 @@
 // stamp instead and they revalidate on every deploy.
 
 import { SPEECH_WORKER_PATH } from '../src/lib/speech/speechWorkerAsset.js'
+import { SPEECH_PITCH_WORKLET_PATH } from '../src/lib/speech/speechPitchAsset.js'
 
-export const UNPRECACHED_WORKERS = Object.freeze(['sw-push.js', SPEECH_WORKER_PATH])
+export const UNPRECACHED_WORKERS = Object.freeze([
+  'sw-push.js',
+  SPEECH_WORKER_PATH,
+  SPEECH_PITCH_WORKLET_PATH,
+])
 
 // Marks a stamped revision. `check-offline-build.mjs` asserts documents carry
 // one, so a future manifest change cannot silently re-freeze document headers.

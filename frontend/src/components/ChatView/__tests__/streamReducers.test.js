@@ -19,6 +19,7 @@ import {
   attachToolOutput,
   closeToolLifecycle,
   closeAllToolLifecycles,
+  upsertTerminalErrorItem,
   isQuestionTool,
   suppressedQuestionToolIndices,
   appendThinkingChunk,
@@ -510,6 +511,62 @@ test('error sweep closes running tools AND absorbed-card lifecycles', () => {
   assert.equal(next[0].status, 'done', 'running tool flipped')
   assert.equal('absorbedTool' in next[1], false, 'absorbed lifecycle closed')
   assert.equal(next[1].type, 'question', 'card survives the sweep')
+})
+
+test('restart pause stays before an unanswered question in the live surface', () => {
+  const question = questionEvent('q-restart', 'Restart now?')
+  const items = upsertQuestionItem([
+    { type: 'text', content: 'The change is ready.' },
+    toolItem('AskUserQuestion', { tool_use_id: 'ask-restart' }),
+  ], question)
+
+  const next = upsertTerminalErrorItem(items, {
+    message: 'Paused for a platform update.',
+    resumable: true,
+    pause: { kind: 'restart' },
+  })
+
+  assert.deepEqual(next.map(item => item.type), ['text', 'error', 'question'])
+  assert.equal(next[1].resumable, undefined,
+    'the answer, not a competing Resume button, continues the turn')
+  assert.equal(next[2].question_id, 'q-restart')
+  assert.equal('absorbedTool' in next[2], false,
+    'the terminal event still closes the question tool lifecycle')
+})
+
+test('replayed restart pauses coalesce before the same unanswered question', () => {
+  const question = questionEvent('q-restart', 'Restart now?')
+  const once = upsertTerminalErrorItem([
+    { type: 'text', content: 'Ready.' },
+    question,
+  ], {
+    message: 'Paused for a platform update.',
+    pause: { kind: 'restart' },
+  })
+  const twice = upsertTerminalErrorItem(once, {
+    message: 'This turn was paused when Möbius restarted.',
+    resumable: true,
+    pause: { kind: 'restart' },
+  })
+
+  assert.deepEqual(twice.map(item => item.type), ['text', 'error', 'question'])
+  assert.equal(twice[1].message, 'This turn was paused when Möbius restarted.')
+  assert.equal(twice[1].resumable, undefined)
+})
+
+test('ordinary terminal errors still replace the trailing error', () => {
+  const next = upsertTerminalErrorItem([
+    toolItem('Bash'),
+    {
+      type: 'error',
+      message: 'first',
+      resumable: true,
+      pause: { kind: 'limit' },
+    },
+  ], { message: 'final provider error' })
+
+  assert.equal(next[0].status, 'done')
+  assert.deepEqual(next[1], { type: 'error', message: 'final provider error' })
 })
 
 // ---------------------------------------------------------------------------

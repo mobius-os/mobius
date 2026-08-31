@@ -13,7 +13,7 @@ import {
   upsertQuestionItem,
   attachToolOutput,
   closeToolLifecycle,
-  closeAllToolLifecycles,
+  upsertTerminalErrorItem,
   appendThinkingChunk,
   anchorReplayedThinking,
   attachToolSources,
@@ -1251,38 +1251,13 @@ export default function useStreamConnection(chatId, {
             }
           } else if (event.type === 'error') {
             flushBuffer()
-            applyStreamItems(prev => {
-              // A provider error terminates every open tool lifecycle
-              // (running tools flip done; an absorbed question drops
-              // its pending-tool marker — no tool_end is coming).
-              const updated = closeAllToolLifecycles(prev)
-              // Use the same `error` block shape the backend
-              // persists, so MsgContent renders it identically
-              // before and after promote — without this the
-              // streaming "Error: ..." text was a plain text block
-              // and the post-promote DB block was `{type:'error'}`,
-              // and the latter rendered as null because MsgContent
-              // had no branch for it (which is the bug we're
-              // fixing — the error visibly disappeared on chat
-              // return).
-              // Carry the whitelisted extras so the promoted block matches the
-              // persisted shape: `resumable` renders the one-tap Resume, and
-              // the single `pause` descriptor ({kind, resets_at?}) renders the
-              // "Paused" family / the provider-limit "resets at … · Resume now"
-              // card. Accepted limitation (adjudicated 2026-07-11): while this
-              // is still a live stream item, the streaming renderer shows the
-              // generic error styling — the full parked card appears at
-              // promotion. A limit kill is terminal, so `done` (and promotion)
-              // follows within the same breath; not worth a parallel live-card
-              // path. streamItemToBlock carries the same fields on promote.
-              updated.push({
-                type: 'error',
-                message: event.message,
-                ...(event.resumable ? { resumable: true } : {}),
-                ...(event.pause ? { pause: event.pause } : {}),
-              })
-              return updated
-            })
+            // The live and durable reducers share one presentation contract:
+            // terminal errors close open tools, repeated errors coalesce, and
+            // a restart pause stays BEFORE a trailing unanswered question.
+            // Previously the browser appended that pause after the card while
+            // the backend normalized it before the card, so only a refresh
+            // restored chronological order after a platform restart.
+            applyStreamItems(prev => upsertTerminalErrorItem(prev, event))
           } else if (event.type === 'queued_turn_starting') {
             queuedContinuationRef.current = true
             queuedContinuationTsRef.current = event.ts ?? null

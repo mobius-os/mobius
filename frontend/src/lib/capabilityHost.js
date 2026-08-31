@@ -30,6 +30,16 @@ function errorFields(error, fallbackCode = 'provider_error') {
   }
 }
 
+function providerContention(provider, input, activeInput) {
+  if (typeof provider?.contention === 'function') {
+    const decision = provider.contention({ input, activeInput })
+    if (decision === 'share' || decision === 'replace' || decision === 'reject') {
+      return decision
+    }
+  }
+  return provider?.exclusive ? 'reject' : 'share'
+}
+
 export function createCapabilityHost({
   providers,
   getDeclaration,
@@ -94,6 +104,7 @@ export function createCapabilityHost({
     const shellSession = {
       requestId,
       capability,
+      input: msg.input,
       source,
       settled: false,
       control: null,
@@ -126,17 +137,29 @@ export function createCapabilityHost({
       rejectOpen('version_mismatch', `Capability \`${capability}\` version is not supported.`)
       return true
     }
-    if (provider.exclusive && [...sessions.values()].some(
-      (candidate) => candidate.capability === capability,
-    )) {
-      rejectOpen('busy', `Capability \`${capability}\` is already in use.`, 'InvalidStateError')
-      return true
-    }
     if (!msg.input || typeof msg.input !== 'object' || Array.isArray(msg.input)) {
       rejectOpen('invalid_request', 'Capability input must be an object.', 'TypeError')
       return true
     }
-
+    const contentions = [...sessions.values()]
+      .filter((candidate) => candidate.capability === capability)
+      .map((candidate) => ({
+        candidate,
+        decision: providerContention(provider, msg.input, candidate.input),
+      }))
+    if (contentions.some(({ decision }) => decision === 'reject')) {
+      rejectOpen('busy', `Capability \`${capability}\` is already in use.`, 'InvalidStateError')
+      return true
+    }
+    for (const { candidate, decision } of contentions) {
+      if (decision === 'replace') {
+        abortSession(
+          candidate,
+          'Another request took over this capability. You can resume the earlier action when ready.',
+          'superseded',
+        )
+      }
+    }
     sessions.set(requestId, shellSession)
     const channel = {
       ready(value) {
@@ -185,11 +208,11 @@ export function createCapabilityHost({
     return true
   }
 
-  function abortSession(session, message) {
+  function abortSession(session, message, code = 'aborted') {
     if (!current(session)) return
     runControl(session, 'cancel')
     fail(session, {
-      code: 'aborted',
+      code,
       name: 'AbortError',
       message,
     })

@@ -22,6 +22,7 @@ import {
 } from '../lib/navigationPersistence.js'
 import { drawerOpenBlockedByDrag } from '../lib/drawerLifecycle.js'
 import { shellReload } from '../lib/shellReloadState.js'
+import { recordClientError } from '../lib/errorLog.js'
 import * as tabModel from '../components/Shell/tabModel.js'
 import * as paneModel from '../components/Shell/paneModel.js'
 
@@ -63,13 +64,15 @@ function navRoute(view, chatId, appId, paneId, extra = null) {
 }
 
 function isRestorableRoute(route) {
-  return route && ['chat', 'canvas', 'apps', 'settings'].includes(route.view)
+  return route && ['chat', 'canvas', 'apps', 'projects', 'project', 'artifact', 'settings'].includes(route.view)
 }
 
 function sameRoute(a, b) {
   return a?.view === b?.view
     && String(a?.chatId ?? '') === String(b?.chatId ?? '')
     && String(a?.appId ?? '') === String(b?.appId ?? '')
+    && String(a?.projectId ?? '') === String(b?.projectId ?? '')
+    && String(a?.artifactRef ?? '') === String(b?.artifactRef ?? '')
     && String(a?.paneId ?? '') === String(b?.paneId ?? '')
 }
 
@@ -209,6 +212,11 @@ export default function useNavigation({
   const activeView = overlayShowing ? 'settings' : contentRoute.view
   const activeChatId = contentRoute.chatId
   const activeAppId = contentRoute.appId
+  const activeProjectId = contentRoute.projectId ?? null
+  // The composite `<projectId>:<artifactId>` id of the artifact tab the current
+  // world is showing, or null. Shell resolves it back to its project + artifact
+  // to mount the right ArtifactWorkspace.
+  const activeArtifactRef = contentRoute.artifactRef ?? null
 
   // Guards the one-shot HOME seed against a StrictMode double-mount / any
   // remount (pushNavEntry is not idempotent). See the mount effect below.
@@ -219,18 +227,19 @@ export default function useNavigation({
   // Monotonic shell-route generation. Delayed cold-boot slug resolution uses
   // this to avoid reopening an app after the user navigated elsewhere.
   const navigationEpochRef = useRef(0)
-  const projectedRouteRef = useRef({ activeView, activeChatId, activeAppId })
+  const projectedRouteRef = useRef({ activeView, activeChatId, activeAppId, activeProjectId })
   const projectedRoute = projectedRouteRef.current
   if (
     projectedRoute.activeView !== activeView
     || projectedRoute.activeChatId !== activeChatId
     || projectedRoute.activeAppId !== activeAppId
+    || projectedRoute.activeProjectId !== activeProjectId
   ) {
     // Catch workspace-only route changes (for example, closing the active tab)
     // that do not pass through navTo/restoreRoute. The explicit increments in
     // those functions remain synchronous guards before React's next render.
     navigationEpochRef.current += 1
-    projectedRouteRef.current = { activeView, activeChatId, activeAppId }
+    projectedRouteRef.current = { activeView, activeChatId, activeAppId, activeProjectId }
   }
   // The refs mirror the render-time projection so Shell's asynchronous callbacks
   // (system events, shell-reload snapshot, restore probes) read the current
@@ -242,6 +251,8 @@ export default function useNavigation({
   activeViewRef.current = activeView
   const activeAppIdRef = useRef(activeAppId)
   activeAppIdRef.current = activeAppId
+  const activeProjectIdRef = useRef(activeProjectId)
+  activeProjectIdRef.current = activeProjectId
   const settingsOpenRef = useRef(settingsOpen)
   settingsOpenRef.current = settingsOpen
   // Logical/history ownership — never mirror drawerVisible during render.
@@ -289,6 +300,12 @@ export default function useNavigation({
   // pending flag must not brick the drawer forever: openDrawer reconciles from
   // the classic History store once the traversal is provably stale.
   const drawerClosePendingAtRef = useRef(0)
+  // Exact identity of the drawer sentinel whose explicit close issued the
+  // outstanding history.back(). A close declared lost after the grace window
+  // may still arrive after that sentinel was re-adopted and retagged by a row
+  // selection. Keep the correlation until the traversal settles so that late
+  // bookkeeping can never be mistaken for a fresh owner Back.
+  const drawerCloseTraversalRef = useRef(null)
   // A first open press while close bookkeeping still traverses history is
   // intent, not noise. Keep it until the close settles; a bounded retry reuses
   // stale-close recovery if WebKit loses the traversal completely.
@@ -499,7 +516,13 @@ export default function useNavigation({
     // record/restore Settings instead of the builder surface the user saw (M1). It
     // still retains the focused content ids + pane hint (contract §2.2.1).
     const view = overlayShowingForWs(ws) ? 'settings' : content.view
-    return navRoute(view, content.chatId, content.appId, content.paneId)
+    return navRoute(
+      view,
+      content.chatId,
+      content.appId,
+      content.paneId,
+      content.projectId ? { projectId: content.projectId } : null,
+    )
   }, [workspaceStateRef, overlayShowingForWs])
 
   const pushShellEntry = useCallback((kind, route, appNav = null) => {
@@ -619,10 +642,16 @@ export default function useNavigation({
       drawerClosePendingRef.current = false
       if (drawerPushedRef.current
           && isMobiusNavState(history.state) && history.state.kind === 'drawer') {
+        const closeTraversal = drawerCloseTraversalRef.current
+        if (closeTraversal
+            && closeTraversal.entryId === navEntryId(history.state)) {
+          closeTraversal.recovered = true
+        }
         drawerOpenRef.current = true
         setDrawerVisible(true)
         return
       }
+      drawerCloseTraversalRef.current = null
       drawerOpenRef.current = false
       drawerPushedRef.current = false
     }
@@ -637,7 +666,15 @@ export default function useNavigation({
       return
     }
     clearDrawerOpenAfterClose()
-    pushShellEntry('drawer', snapshotRoute())
+    const returnState = currentNavStateRef.current
+    const drawerState = pushShellEntry('drawer', snapshotRoute())
+    drawerCloseTraversalRef.current = {
+      entryId: navEntryId(drawerState),
+      returnEntryId: navEntryId(returnState),
+      recovered: false,
+      selectedRoute: null,
+      selectionChanged: false,
+    }
     drawerPushedRef.current = true
     // Advance the ref synchronously so a same-batch open→close sees "open" and
     // does not leave the just-pushed sentinel dangling (§5.3.2).
@@ -652,6 +689,22 @@ export default function useNavigation({
     if (!drawerOpenRef.current || drawerClosePendingRef.current) return
     if (drawerPushedRef.current) {
       beforeRestoreRouteRef?.current?.(snapshotRoute())
+      const closeTraversal = drawerCloseTraversalRef.current
+      if (closeTraversal?.recovered
+          && closeTraversal.entryId === navEntryId(history.state)) {
+        // history.back() was already issued before stale-close recovery. Do
+        // not issue a second traversal: retire the visible drawer immediately
+        // and correlate whichever Back arrives with this same-route close.
+        const route = snapshotRoute()
+        closeTraversal.selectedRoute = route
+        closeTraversal.selectionChanged = false
+        currentNavStateRef.current = updateCurrentNavEntry(route, { kind: 'nav' })
+          || currentNavStateRef.current
+        drawerPushedRef.current = false
+        drawerOpenRef.current = false
+        setDrawerVisible(false)
+        return
+      }
       clearDrawerOpenAfterClose()
       drawerClosePendingRef.current = true
       drawerClosePendingAtRef.current = Date.now()
@@ -673,15 +726,10 @@ export default function useNavigation({
       clearDrawerOpenAfterClose()
       drawerOpenRef.current = false
       drawerClosePendingRef.current = false
+      drawerCloseTraversalRef.current = null
       setDrawerVisible(false)
     }
   }
-
-  // Finish a drawer deliberately retained after its navigation sentinel was
-  // consumed. A newly reopened logical drawer wins over late readiness.
-  const finishDrawerNavigationPresentation = useCallback(() => {
-    if (!drawerOpenRef.current) setDrawerVisible(false)
-  }, [])
 
   /**
    * Mini-app nav-bridge: install a back-sentinel on behalf of a VISIBLE
@@ -954,9 +1002,15 @@ export default function useNavigation({
     if (mode === 'single') {
       const item = route.view === 'apps'
         ? tabModel.appsTab()
-        : (route.view === 'canvas'
-          ? (route.appId != null ? { kind: 'app', id: route.appId } : null)
-          : (route.chatId != null ? { kind: 'chat', id: route.chatId } : null))
+        : (route.view === 'projects'
+          ? tabModel.projectsTab()
+          : (route.view === 'project'
+            ? (route.projectId != null ? { kind: 'project', id: route.projectId } : null)
+            : (route.view === 'artifact'
+              ? (route.artifactRef != null ? { kind: 'artifact', id: route.artifactRef } : null)
+              : (route.view === 'canvas'
+                ? (route.appId != null ? { kind: 'app', id: route.appId } : null)
+                : (route.chatId != null ? { kind: 'chat', id: route.chatId } : null)))))
       dispatchWorkspace({ type: 'SET_SINGLE_SCREEN', item })
       return
     }
@@ -965,9 +1019,15 @@ export default function useNavigation({
       : ws.focusedPaneId
     const tab = route.view === 'apps'
       ? tabModel.appsTab()
-      : (route.view === 'canvas'
-        ? tabModel.makeTab('app', route.appId)
-        : tabModel.makeTab('chat', route.chatId))
+      : (route.view === 'projects'
+        ? tabModel.projectsTab()
+        : (route.view === 'project'
+          ? tabModel.projectTab(route.projectId)
+          : (route.view === 'artifact'
+            ? tabModel.makeTab('artifact', route.artifactRef)
+            : (route.view === 'canvas'
+              ? tabModel.makeTab('app', route.appId)
+              : tabModel.makeTab('chat', route.chatId)))))
     dispatchWorkspace({ type: 'OPEN_TAB', paneId: targetPaneId, tab, activate: true })
   }, [applySettingsDestination, dispatchWorkspace, workspaceStateRef])
 
@@ -1014,6 +1074,24 @@ export default function useNavigation({
     } else if (view === 'apps') {
       nextRoute = navRoute('apps', null, null, targetPaneId)
       openTab = tabModel.appsTab()
+    } else if (view === 'projects') {
+      nextRoute = navRoute('projects', null, null, targetPaneId)
+      openTab = tabModel.projectsTab()
+    } else if (view === 'project') {
+      const projectId = 'projectId' in opts ? opts.projectId : activeProjectIdRef.current
+      if (projectId == null || String(projectId).trim() === '') return
+      nextRoute = navRoute('project', null, null, targetPaneId, { projectId: String(projectId) })
+      openTab = tabModel.projectTab(projectId)
+    } else if (view === 'artifact') {
+      const projectId = opts.projectId
+      const artifactId = opts.artifactId
+      if (projectId == null || String(projectId).trim() === ''
+        || artifactId == null || String(artifactId).trim() === '') return
+      const artifactRef = tabModel.artifactTabId(projectId, artifactId)
+      nextRoute = navRoute('artifact', null, null, targetPaneId, {
+        projectId: String(projectId), artifactRef,
+      })
+      openTab = tabModel.makeTab('artifact', artifactRef)
     } else if (view === 'canvas') {
       const appId = 'appId' in opts ? opts.appId : activeAppIdRef.current
       const tab = tabModel.makeTab('app', appId)
@@ -1049,15 +1127,21 @@ export default function useNavigation({
     if (beforeNavigateRef?.current?.(nextRoute) === true) return
 
     navigationEpochRef.current += 1
-    const keepDrawerPresented = opts.preserveDrawerPresentation === true
-      && drawerOpenRef.current
-
     // Ensure exactly one history entry sits above the current one to serve as
     // this navigation's back-target: retag a consumed drawer sentinel, else push
     // a fresh nav entry. Exactly one pushState/retag per navTo (§5.3.12).
     if (drawerPushedRef.current) {
+      const closeTraversal = drawerCloseTraversalRef.current
+      const recoveredClose = closeTraversal?.recovered
+        && closeTraversal.entryId === navEntryId(history.state)
       drawerPushedRef.current = false
       currentNavStateRef.current = updateCurrentNavEntry(nextRoute, { kind: 'nav' })
+      if (recoveredClose) {
+        closeTraversal.selectedRoute = nextRoute
+        closeTraversal.selectionChanged = true
+      } else {
+        drawerCloseTraversalRef.current = null
+      }
     } else {
       try {
         pushShellEntry('nav', nextRoute)
@@ -1069,7 +1153,7 @@ export default function useNavigation({
     // open try to re-adopt a sentinel this navigation has already retagged.
     drawerClosePendingRef.current = false
     drawerOpenRef.current = false
-    setDrawerVisible(keepDrawerPresented)
+    setDrawerVisible(false)
 
     // One reducer action makes payload+view atomic (§1.3.2). The ONE decision
     // point applies the destination to the correct world: a chat/app nav in single
@@ -1106,7 +1190,11 @@ export default function useNavigation({
     // empty/home screen; in builder just refocus.
     const tombstoneKey = route.view === 'canvas'
       ? (route.appId != null ? `app:${route.appId}` : null)
-      : (!route.homeSeed && route.chatId != null ? `chat:${route.chatId}` : null)
+      : (route.view === 'project'
+        ? (route.projectId != null ? `project:${route.projectId}` : null)
+        : (route.view === 'artifact'
+          ? (route.artifactRef != null ? `artifact:${route.artifactRef}` : null)
+          : (!route.homeSeed && route.chatId != null ? `chat:${route.chatId}` : null)))
     if (tombstoneKey && tombstonedRouteRef.current.has(tombstoneKey)) {
       if (single) dispatchWorkspace({ type: 'SET_SINGLE_SCREEN', item: null })
       else dispatchWorkspace({ type: 'FOCUS', paneId })
@@ -1121,6 +1209,17 @@ export default function useNavigation({
     let itemRoute = null
     if (route.view === 'apps') {
       itemRoute = { view: 'apps', appId: null, chatId: null, paneId: route.paneId }
+    } else if (route.view === 'projects') {
+      itemRoute = { view: 'projects', appId: null, chatId: null, paneId: route.paneId }
+    } else if (route.view === 'project') {
+      if (route.projectId != null) itemRoute = {
+        view: 'project', projectId: route.projectId, appId: null, chatId: null, paneId: route.paneId,
+      }
+    } else if (route.view === 'artifact') {
+      if (route.artifactRef != null) itemRoute = {
+        view: 'artifact', artifactRef: route.artifactRef, projectId: route.projectId ?? null,
+        appId: null, chatId: null, paneId: route.paneId,
+      }
     } else if (route.view === 'canvas') {
       if (route.appId != null) itemRoute = { view: 'canvas', appId: route.appId, chatId: null, paneId: route.paneId }
     } else {
@@ -1254,6 +1353,16 @@ export default function useNavigation({
           { view: 'chat', chatId: deepLink.chatId, appId: null, paneId: bootPaneId },
           tabModel.makeTab('chat', deepLink.chatId),
         )
+      } else if (deepLink?.view === 'projects') {
+        bootDeepLink(
+          { view: 'projects', chatId: null, appId: null, paneId: bootPaneId },
+          tabModel.projectsTab(),
+        )
+      } else if (deepLink?.view === 'project' && deepLink.projectId) {
+        bootDeepLink(
+          { view: 'project', projectId: deepLink.projectId, chatId: null, appId: null, paneId: bootPaneId },
+          tabModel.projectTab(deepLink.projectId),
+        )
       } else if (!blobValid && initialNav.view === 'canvas' && initialNav.appId != null) {
         // No valid blob: the retained active-destination keys name the item to
         // restore. openBootTab replaces the lone implicit-home fallback and
@@ -1316,6 +1425,7 @@ export default function useNavigation({
         clearDrawerOpenAfterClose()
         drawerClosePendingRef.current = false
         drawerOpenRef.current = false
+        drawerCloseTraversalRef.current = null
       }
       // A transient surface is deliberately not recreated by Forward: its
       // resource may have streamed away or its owner may have unmounted. Keep
@@ -1498,6 +1608,65 @@ export default function useNavigation({
       handleBack(committed, source)
     }
 
+    function recoveredDrawerCloseFor(source) {
+      const closeTraversal = drawerCloseTraversalRef.current
+      return closeTraversal?.recovered
+        && closeTraversal.selectedRoute
+        && closeTraversal.entryId === navEntryId(source)
+        ? closeTraversal
+        : null
+    }
+
+    function settleRecoveredDrawerClose(destination, source) {
+      const closeTraversal = recoveredDrawerCloseFor(source)
+      if (!closeTraversal) return false
+      const committed = isMobiusNavState(destination)
+        ? destination
+        : (isMobiusNavState(history.state) ? history.state : null)
+
+      // A sandboxed iframe phantom can sit beneath the drawer sentinel. The
+      // original explicit close owns the seek through it; do not let the
+      // ordinary phantom guard drop this correlated traversal and strand the
+      // selected route above an untagged cursor.
+      if (!committed) {
+        setTimeout(() => history.back(), 0)
+        return true
+      }
+
+      const diagnostic = {
+        sourceKind: source?.kind ?? null,
+        destinationKind: committed.kind ?? null,
+        sourceIndex: navEntryIndex(source),
+        destinationIndex: navEntryIndex(committed),
+        expectedReturn: !closeTraversal.returnEntryId
+          || closeTraversal.returnEntryId === navEntryId(committed),
+        selectionChanged: closeTraversal.selectionChanged,
+      }
+      currentNavStateRef.current = committed
+      drawerCloseTraversalRef.current = null
+
+      if (closeTraversal.selectionChanged) {
+        // The late close moved the physical cursor beneath the selected route.
+        // Rebase that already-painted route above the committed cursor without
+        // restoring the old destination or popping navStack a second time.
+        try {
+          pushShellEntry('nav', closeTraversal.selectedRoute)
+        } catch {
+          currentNavStateRef.current = updateCurrentNavEntry(
+            closeTraversal.selectedRoute,
+            { kind: 'nav' },
+          ) || committed
+        }
+      }
+
+      recordClientError({
+        where: 'useNavigation.recoveredDrawerClose',
+        message: 'A recovered drawer close settled after a newer drawer action.',
+        stack: JSON.stringify(diagnostic),
+      })
+      return true
+    }
+
     function handleBack(destination, source) {
       // Android can synthesize a delayed logo click after a PHYSICAL Back
       // gesture. closeDrawer also traverses history, but that traversal is our
@@ -1542,6 +1711,7 @@ export default function useNavigation({
         drawerPushedRef.current = false
         drawerClosePendingRef.current = false
         drawerOpenRef.current = false
+        drawerCloseTraversalRef.current = null
         if (!reopenAfterClose) closeDrawerNextFrame()
         appLocalPopInFlightRef.current = false
         setTimeout(() => {
@@ -1661,6 +1831,7 @@ export default function useNavigation({
       drawerPushedRef.current = false
       drawerClosePendingRef.current = false
       drawerOpenRef.current = false
+      drawerCloseTraversalRef.current = null
       setDrawerVisible(false)
       const entry = navStackRef.current.pop()
       if (entry) restoreRoute(entry)
@@ -1690,6 +1861,23 @@ export default function useNavigation({
         let destinationEntryIndex
         try { destinationEntryIndex = e.destination?.index } catch { destinationEntryIndex = undefined }
         const source = sourceEntryState || currentNavStateRef.current
+        // A programmatic close whose traversal was declared lost can still
+        // commit after the recovered drawer selected a route. Correlate it by
+        // the retagged sentinel's stable entry id, but never claim an explicitly
+        // user-initiated Back gesture as our bookkeeping.
+        let userInitiated = false
+        try { userInitiated = e.userInitiated === true } catch { /* wedged engine */ }
+        const recoveredSource = isMobiusNavState(source)
+          ? source
+          : currentNavStateRef.current
+        if (!userInitiated && recoveredDrawerCloseFor(recoveredSource)) {
+          const consumeRecoveredClose = () => {
+            settleRecoveredDrawerClose(destination, recoveredSource)
+          }
+          if (e.canIntercept) e.intercept({ handler: consumeRecoveredClose })
+          else setTimeout(consumeRecoveredClose, 0)
+          return
+        }
         // A drawer-sentinel consumption is recognized FIRST — before the
         // phantom guard, and even when the destination's mirror state is
         // unreadable. On a wedged engine the sentinel's mirror write failed, so
@@ -1821,6 +2009,7 @@ export default function useNavigation({
     function onPopState() {
       const destination = history.state
       const source = currentNavStateRef.current
+      if (settleRecoveredDrawerClose(destination, source)) return
       const direction = navTraversalDirection(source, destination)
       const sourceRoute = snapshotRoute()
       // A pop off a dismissible sentinel is ours whatever it lands on: the tag
@@ -1934,7 +2123,7 @@ export default function useNavigation({
       ? 'nav'
       : history.state.kind
     currentNavStateRef.current = updateCurrentNavEntry(snapshotRoute(), { kind })
-  }, [activeView, activeChatId, activeAppId, contentRoute.paneId, snapshotRoute])
+  }, [activeView, activeChatId, activeAppId, activeProjectId, contentRoute.paneId, snapshotRoute])
 
   // A queued close from a hidden cached app becomes safe once shell Back restores
   // that app and its sentinel to the current tagged entry — or once a split/focus
@@ -1961,8 +2150,9 @@ export default function useNavigation({
     activeView,
     activeAppId,
     activeChatId,
+    activeProjectId,
+    activeArtifactRef,
     drawerOpen: drawerVisible,
-    drawerNavigationCover: drawerVisible && !drawerOpenRef.current,
     // Strictly "the full-workspace takeover overlay is up" — NOT "focused content
     // is Settings" (a builder tab is the latter without the overlay). The render
     // gates pane suppression on THIS, never on activeView, so builder Settings
@@ -1977,7 +2167,6 @@ export default function useNavigation({
     settingsOpenRaw: settingsOpen,
     openDrawer,
     closeDrawer,
-    finishDrawerNavigationPresentation,
     navTo,
     navigateBackward,
     navigateForward,
@@ -1992,6 +2181,7 @@ export default function useNavigation({
     activeViewRef,
     activeChatIdRef,
     activeAppIdRef,
+    activeProjectIdRef,
     appNavPush,
     appNavPop,
     appNavReset,

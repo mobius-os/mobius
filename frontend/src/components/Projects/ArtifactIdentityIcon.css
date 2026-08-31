@@ -1,0 +1,14 @@
+.artifact-identity-icon {
+  --artifact-icon-size: 30px;
+  --artifact-icon-primary: #3b82f6;
+  --artifact-icon-secondary: #1d4ed8;
+  width: var(--artifact-icon-size);
+  height: var(--artifact-icon-size);
+  flex: 0 0 var(--artifact-icon-size);
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--artifact-icon-primary) 24%, var(--border-light));
+  border-radius: calc(var(--artifact-icon-size) * .28);
+  color: color-mix(in srgb, var(--artifact-icon-primary) 78%, var(--text));
+  background: color-mix(in srgb, var(--artifact-icon-primary) 11%, var(--surface));
+}

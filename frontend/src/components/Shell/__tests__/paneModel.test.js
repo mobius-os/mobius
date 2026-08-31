@@ -592,6 +592,34 @@ test('prune drops dead-backed tabs; a null live set keeps everything', () => {
   assertInvariants(kept)
 })
 
+test('project deletion closes its project and artifact tabs in every workspace world', () => {
+  let ws = paneModel.seedFromFlatTabs([
+    makeTab('chat', 'keep'),
+    tabModel.projectTab('project-a'),
+    tabModel.artifactTab('project-a', 'site'),
+    tabModel.artifactTab('project-b', 'report'),
+  ])
+  ws = paneModel.moveTab(ws, 'artifact:project-a:site', {
+    paneId: 'p0', edge: 'right',
+  })
+  ws = paneModel.setSingleScreen(
+    ws, tabModel.artifactTab('project-a', 'phone-preview'),
+  )
+
+  const state = paneModel.workspaceReducer(
+    { ws, undo: { ws, label: 'older workspace' } },
+    { type: 'CLOSE_PROJECT_TABS', projectId: 'project-a' },
+  )
+
+  assert.deepEqual(paneModel.flatten(state.ws), [
+    makeTab('chat', 'keep'),
+    tabModel.artifactTab('project-b', 'report'),
+  ])
+  assert.equal(state.ws.singleScreen, null)
+  assert.equal(state.undo, null, 'deleted project tabs cannot return through undo')
+  assertInvariants(state.ws)
+})
+
 // ── Projection: geometry (projectLayout / modeForRect / canSplit) ───────────
 
 // A depth-2, four-leaf tree: s0 row → s1 col(p1,p2) | s2 col(p3,p4).

@@ -957,6 +957,7 @@ def test_committed_chat_rename_publishes_live_projection_event(
     "chatId": str(chat.id),
     "title": "Current topic",
     "updatedAt": refreshed.updated_at.isoformat(),
+    "activityAt": refreshed.activity_at.isoformat(),
   })
 
 

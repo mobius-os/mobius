@@ -222,6 +222,7 @@ async def test_generated_title_sync_preserves_manual_lock_and_broadcasts(
     "chatId": chat.id,
     "title": "Preparing and reconciling Mobius changes",
     "updatedAt": refreshed.updated_at.isoformat(),
+    "activityAt": refreshed.activity_at.isoformat(),
   }]
 
   refreshed.title = "Owner's name"

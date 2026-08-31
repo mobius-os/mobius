@@ -151,14 +151,14 @@ def test_normalized_postgres_path_finds_unicode_document_text(db, monkeypatch):
   assert "café" in hit["snippet"]
 
 
-def test_postgres_path_ranks_all_matches_beyond_the_old_512_chat_cap(
+def test_postgres_path_keeps_recent_matches_beyond_the_old_512_chat_cap(
   db, monkeypatch,
 ):
   needle = f"completeportable{uuid.uuid4().hex}"
   now = now_naive_utc()
-  best = models.Chat(
+  verbose_old = models.Chat(
     id=str(uuid.uuid4()),
-    title="Older best match",
+    title="Older verbose match",
     messages=[{
       "role": "user",
       "content": f"{needle} {needle} {needle}",
@@ -175,13 +175,13 @@ def test_postgres_path_ranks_all_matches_beyond_the_old_512_chat_cap(
     )
     for index in range(512)
   ]
-  db.add_all([best, *recent])
+  db.add_all([verbose_old, *recent])
   db.commit()
 
   monkeypatch.setattr(chat_search, "_database_dialect", lambda _db: "postgresql")
 
   assert [result["id"] for result in chat_search.search(db, needle, limit=1)] == [
-    best.id,
+    max(chat.id for chat in recent),
   ]
 
 
@@ -380,7 +380,7 @@ def test_long_matching_chat_cannot_crowd_other_chats_out_before_grouping(db):
   assert ids == {long_chat.id, short_a.id, short_b.id}
 
 
-def test_streaming_ranker_keeps_complete_top_k_when_best_chat_arrives_last():
+def test_streaming_ranker_keeps_complete_recent_top_k_when_newest_arrives_last():
   rows = iter((
     ("chat-a", 0, 1, "user", "one lynx", "A", "2026-08-01"),
     ("chat-b", 0, 2, "user", "lynx lynx lynx", "B", "2026-08-02"),
@@ -389,6 +389,26 @@ def test_streaming_ranker_keeps_complete_top_k_when_best_chat_arrives_last():
   results = chat_search._rank_results(rows, ["lynx"], limit=1)
 
   assert [result["id"] for result in results] == ["chat-b"]
+
+
+def test_recent_match_outranks_old_chat_that_repeats_the_query():
+  rows = iter((
+    (
+      "old-verbose", 0, 1, "user",
+      "new chat drawer new chat drawer new chat drawer",
+      "Old verbose discussion", "2026-08-01",
+    ),
+    (
+      "recent-report", -1, None, None, "Missing new chat in web drawer",
+      "Missing new chat in web drawer", "2026-08-28",
+    ),
+  ))
+
+  results = chat_search._rank_results(rows, ["new", "chat", "drawer"], limit=2)
+
+  assert [result["id"] for result in results] == [
+    "recent-report", "old-verbose",
+  ]
 
 
 def test_overlapping_first_searches_leave_one_idempotent_document_generation(db):

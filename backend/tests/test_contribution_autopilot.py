@@ -326,6 +326,78 @@ def test_stale_lease_reclaim_and_double_stale_escalate(db):
   assert v["reason"] == "stale_rounds"
 
 
+def test_expired_lease_is_reclaimed_without_a_new_event(db):
+  autopilot.stamp_grant(db, 1, "wedged", head_sha="abc")
+  autopilot.claim_for_round(
+    db, 1, "wedged", attention_key="checks_failed:abc",
+    event_at="2026-07-01T00:00:00Z",
+  )
+  row = autopilot.get_row(db, 1, "wedged")
+  row.lease_expires_at = now_naive_utc() - timedelta(minutes=1)
+  db.commit()
+
+  assert autopilot.sweep_expired_leases(db) == 1
+  db.expire_all()
+  reclaimed = autopilot.get_row(db, 1, "wedged")
+  assert reclaimed.state == "idle"
+  assert reclaimed.run_id is None
+  assert reclaimed.consecutive_failures == 1
+  assert reclaimed.rounds_json[-1]["outcome"] == "stale"
+  assert autopilot.sweep_expired_leases(db) == 0
+
+  second = autopilot.claim_for_round(
+    db, 1, "wedged", attention_key="checks_failed:def",
+    event_at="2026-07-02T00:00:00Z",
+  )
+  assert second["status"] == "granted"
+  row = autopilot.get_row(db, 1, "wedged")
+  row.lease_expires_at = now_naive_utc() - timedelta(minutes=1)
+  db.commit()
+  assert autopilot.sweep_expired_leases(db) == 1
+
+  escalated = autopilot.claim_for_round(
+    db, 1, "wedged", attention_key="checks_failed:ghi",
+    event_at="2026-07-03T00:00:00Z",
+  )
+  assert escalated == {"status": "escalate", "reason": "stale_rounds"}
+
+
+def test_sweep_reclamation_survives_its_own_session():
+  """The supervisor's sweep must land without a caller commit.
+
+  ``wake_recovery_loop`` drives the sweep through a plain
+  ``with SessionLocal() as db:`` block, which closes the session and discards
+  any still-pending transaction. Reclamation is therefore durable only because
+  ``_reclaim_expired`` commits internally. Asserting through the same session
+  cannot see that difference, so this reads the row back from an independent
+  session: move the commit out to the caller and only this test fails.
+  """
+  writer = SessionLocal()
+  try:
+    autopilot.stamp_grant(writer, 1, "wedged", head_sha="abc")
+    autopilot.claim_for_round(
+      writer, 1, "wedged", attention_key="checks_failed:abc",
+      event_at="2026-07-01T00:00:00Z",
+    )
+    row = autopilot.get_row(writer, 1, "wedged")
+    row.lease_expires_at = now_naive_utc() - timedelta(minutes=1)
+    writer.commit()
+  finally:
+    writer.close()
+
+  with SessionLocal() as sweeper:
+    assert autopilot.sweep_expired_leases(sweeper) == 1
+
+  reader = SessionLocal()
+  try:
+    reclaimed = autopilot.get_row(reader, 1, "wedged")
+    assert reclaimed.state == "idle"
+    assert reclaimed.run_id is None
+    assert reclaimed.consecutive_failures == 1
+  finally:
+    reader.close()
+
+
 def test_round_limit_escalates(db):
   autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
   row = autopilot.get_row(db, 1, "rec")

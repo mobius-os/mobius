@@ -80,6 +80,7 @@ from app.routes import (
   theme_router, uploads_router, platform_router, contribution_relay_router,
   published_router,
   connect_router,
+  projects_router,
 )
 
 _BOOT_ID = os.environ.get("MOBIUS_BOOT_ID") or f"{os.getpid()}-{time.time_ns()}"
@@ -356,6 +357,9 @@ _CONTENT_SECURITY_POLICY = b"content-security-policy"
 _OPAQUE_STATIC_EMBED_PREFIX = "/app-embeds/by-id/"
 _PUBLISHED_SITE_PREFIX = "/sites/"
 _APP_FRAME_PATH = re.compile(r"^/api/apps/[^/]+/frame$")
+_ARTIFACT_OUTPUT_PATH = re.compile(
+  r"^/api/projects/[^/]+/artifacts/[^/]+/output/"
+)
 
 # This isolation boundary must always be enforced, never Report-Only: browsers
 # ignore the CSP sandbox directive in a Report-Only policy. The sandbox omits
@@ -437,6 +441,17 @@ def _app_frame_csp_for_scope(scope) -> str:
 _PUBLISHED_SITE_CSP = PUBLISHED_SITE_CSP
 
 
+# Built website artifacts render in sandboxed iframes without
+# ``allow-same-origin``, so their documents cannot reach the shell's owner
+# credentials. Keep the build-output namespace on the Projects isolation
+# policy instead of inheriting the broader shell policy.
+_ARTIFACT_OUTPUT_CSP = (
+  "default-src 'self'; img-src 'self' data:; font-src 'self' data:; "
+  "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+  "frame-ancestors 'self'"
+)
+
+
 def _is_public_service_surface(scope) -> bool:
   """Whether the gateway host may frame this registered service route."""
   path = scope.get("path") or ""
@@ -471,6 +486,7 @@ class _SecurityHeadersMiddleware:
     published_site = path.startswith(_PUBLISHED_SITE_PREFIX)
     chat_embed = path == "/shell/embed/chat"
     app_frame = bool(_APP_FRAME_PATH.fullmatch(path))
+    artifact_output = bool(_ARTIFACT_OUTPUT_PATH.match(path))
     service_surface = _is_public_service_surface(scope)
     response_headers = list(_SECURITY_HEADERS)
     replaced_header_names = _SECURITY_HEADER_NAMES
@@ -488,6 +504,8 @@ class _SecurityHeadersMiddleware:
         csp = CHAT_EMBED_CSP
       elif app_frame:
         csp = _app_frame_csp_for_scope(scope)
+      elif artifact_output:
+        csp = _ARTIFACT_OUTPUT_CSP
       else:
         csp = _SHELL_CSP
       response_headers.append((
@@ -761,6 +779,7 @@ app.include_router(auth_router)
 app.include_router(apps_router)
 app.include_router(storage_router)
 app.include_router(fs_router)
+app.include_router(projects_router)
 app.include_router(chat_router)
 app.include_router(chat_embed_router)
 app.include_router(chats_router)
@@ -1122,14 +1141,17 @@ def _resolve_asset_file(asset_path: str) -> Path | None:
 # site below.
 _SERVICE_WORKER_SCRIPTS = frozenset({"sw.js", "sw-push.js"})
 
-# Small, same-origin worker scripts that are deliberately NOT precached (mirrors
-# the frontend precache-policy.mjs UNPRECACHED_WORKERS list). A worker runs under
-# the Content-Security-Policy of its OWN response, so — exactly like sw.js — it
-# must revalidate on every load. Without this the browser caches the worker by
-# HTTP heuristic freshness, and a device that fetched it under an earlier policy
-# keeps executing under that stale CSP: this is how on-device Pocket TTS stayed
-# WebAssembly-blocked even after shell_csp restored the 'wasm-unsafe-eval' source.
-_UNPRECACHED_WORKER_SCRIPTS = frozenset({"speech/pocket-tts-worker.js"})
+# Small, same-origin worker-class scripts that are deliberately NOT precached
+# (mirrors the frontend precache-policy.mjs UNPRECACHED_WORKERS list). They use
+# stable URLs, so each load must revalidate instead of retaining old executable
+# bytes under HTTP heuristic freshness. Dedicated workers also run under the
+# Content-Security-Policy of their OWN response: a stale response is how
+# on-device Pocket TTS stayed WebAssembly-blocked after shell_csp restored the
+# 'wasm-unsafe-eval' source.
+_UNPRECACHED_WORKER_SCRIPTS = frozenset({
+  "speech/pocket-tts-worker.js",
+  "speech/soundtouch-processor.js",
+})
 
 # The push worker's scope. It exists only to name a URL prefix inside the
 # shell's PWA scope, and must never resolve to a document — a page here would
@@ -1532,6 +1554,14 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
       )
 
     file = static_dir / path
+    if not file.is_file() and static_dir != _baked_dir and path != "index.html":
+      # A complete live build can still omit an image-installed vendor asset,
+      # or a new public file until that build refreshes. Pick the baked copy
+      # before response policy so executable fallbacks cannot bypass the cache
+      # and Range invariants enforced below.
+      baked = _baked_dir / path
+      if baked.is_file():
+        file = baked
     if file.is_file() and path != "index.html":
       # The service worker MUST be served with `Cache-Control:
       # no-cache` so the browser revalidates it on every page load.
@@ -1555,19 +1585,6 @@ if _baked_dir.is_dir() or _live_dir.is_dir():
         # (same class as the /app-assets + /module fix; see http_caching).
         strip_range(request)
       return FileResponse(str(file), headers=headers or None)
-    # When the live build is being served, a file that lives ONLY in the baked
-    # build (/app/static) would otherwise fall through to the HTML response.
-    # /vendor/pdfjs/* is the canonical example: the npm-install asset copy
-    # lands in /app/static at image build time, but Vite doesn't emit it
-    # into /data/platform/frontend/dist. Falling back to the baked dir for
-    # files-not-in-live keeps app-authored asset URLs working without forcing the
-    # rebuild to mirror the entire vendor tree.
-    if static_dir != _baked_dir and path != "index.html":
-      baked = _baked_dir / path
-      if baked.is_file():
-        return FileResponse(
-          str(baked), headers=_public_static_headers(path) or None
-        )
     # Static asset namespaces 404 on a miss — they must never receive the
     # SPA HTML below (a module URL served as text/html is MIME-rejected by
     # the browser and poisons the cache-first service worker). Only app
