@@ -1,309 +1,237 @@
+import asyncio
 import json
-import os
-import stat
-import sqlite3
-import subprocess
 from pathlib import Path
+import sqlite3
+import stat
+import subprocess
+import sys
+from types import SimpleNamespace
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "backend" / "scripts" / "fork-chat.sh"
+SCRIPTS = ROOT / "backend" / "scripts"
+sys.path.insert(0, str(SCRIPTS))
+
+from fork_session import (  # noqa: E402
+  ForkError,
+  ForkResult,
+  _fork_claude,
+  _fork_codex_async,
+  _load_codex_sdk,
+)
+from fork_chat import _chat_session, coach_chat  # noqa: E402
 
 
-def test_platform_coaching_helper_is_directly_executable():
-  assert SCRIPT.stat().st_mode & stat.S_IXUSR
+def test_platform_coaching_helpers_are_directly_executable():
+  for name in ("fork-chat.sh", "fork-session.sh", "fork_chat.py", "fork_session.py"):
+    assert (SCRIPTS / name).stat().st_mode & stat.S_IXUSR
 
 
-def _seed_chat(
-  data_dir: Path,
+def test_claude_uses_exact_fork_and_reports_distinct_session():
+  seen = {}
+
+  def runner(args, **kwargs):
+    seen["args"] = args
+    seen["kwargs"] = kwargs
+    return subprocess.CompletedProcess(
+      args,
+      0,
+      stdout=json.dumps({"session_id": "fork-session", "result": "reflection"}),
+      stderr="",
+    )
+
+  result = _fork_claude("source-session", "/data", "coach this", runner=runner)
+
+  assert result == ForkResult(
+    provider="claude",
+    source_session_id="source-session",
+    forked_session_id="fork-session",
+    answer="reflection",
+  )
+  assert seen["args"][:5] == [
+    "claude", "--resume", "source-session", "--fork-session", "--print"
+  ]
+  assert seen["kwargs"]["cwd"] == "/data"
+  assert "--output-format" in seen["args"]
+  assert "json" in seen["args"]
+
+
+@pytest.mark.parametrize(
+  ("payload", "expected"),
+  [
+    ({"session_id": "source", "result": "answer"}, "instead of a fork"),
+    ({"session_id": "fork", "result": ""}, "empty coaching response"),
+    ({"session_id": "", "result": "answer"}, "did not return a forked"),
+  ],
+)
+def test_claude_fails_closed_without_a_valid_exact_fork(payload, expected):
+  def runner(args, **kwargs):
+    return subprocess.CompletedProcess(
+      args, 0, stdout=json.dumps(payload), stderr=""
+    )
+
+  with pytest.raises(ForkError, match=expected):
+    _fork_claude("source", "/data", "coach", runner=runner)
+
+
+def test_codex_uses_sdk_thread_fork_and_read_only_turn():
+  calls = {}
+
+  class FakeConfig:
+    def __init__(self, **kwargs):
+      calls["config"] = kwargs
+
+  class FakeApprovalMode:
+    deny_all = "deny_all"
+
+  class FakeSandbox:
+    read_only = "read-only"
+
+  class FakeThread:
+    id = "forked-codex-thread"
+
+    async def run(self, prompt, **kwargs):
+      calls["run"] = (prompt, kwargs)
+      return SimpleNamespace(error=None, final_response="codex reflection")
+
+  class FakeCodex:
+    def __init__(self, config):
+      calls["codex_config"] = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *args):
+      return None
+
+    async def thread_fork(self, source_session_id, **kwargs):
+      calls["fork"] = (source_session_id, kwargs)
+      return FakeThread()
+
+  result = asyncio.run(
+    _fork_codex_async(
+      "source-codex-thread",
+      "/data",
+      "coach this",
+      sdk_loader=lambda: (
+        FakeCodex,
+        FakeConfig,
+        FakeApprovalMode,
+        FakeSandbox,
+      ),
+    )
+  )
+
+  assert result == ForkResult(
+    provider="codex",
+    source_session_id="source-codex-thread",
+    forked_session_id="forked-codex-thread",
+    answer="codex reflection",
+  )
+  assert calls["fork"] == (
+    "source-codex-thread",
+    {"approval_mode": "deny_all", "cwd": "/data", "sandbox": "read-only"},
+  )
+  assert calls["run"] == (
+    "coach this",
+    {"approval_mode": "deny_all", "cwd": "/data", "sandbox": "read-only"},
+  )
+
+
+def test_codex_default_loader_accepts_persisted_completed_subagent_activity():
+  # Coaching must cross the same provider-compatibility boundary as live chat.
+  # The pinned app-server persists this lifecycle marker even though its
+  # generated Python enum omits it until the boundary installs the exact shim.
+  pytest.importorskip("openai_codex")
+  from openai_codex.generated.v2_all import SubAgentActivityKind
+
+  loaded = _load_codex_sdk()
+
+  assert SubAgentActivityKind("completed").value == "completed"
+  assert all(loaded)
+
+
+def _seed_db(
+  path: Path,
   *,
   provider="codex",
-  chat_id="chat-1",
-  session_id="provider-session-id",
-  deleted=False,
-) -> None:
-  db_dir = data_dir / "db"
-  db_dir.mkdir(parents=True)
-  con = sqlite3.connect(db_dir / "ultimate.db")
-  con.execute(
-    "create table chats (id text primary key, provider text, "
-    "session_id text, messages text, deleted_at text)"
-  )
-  messages = [
-    {"role": "user", "content": "please fix the thing"},
-    {"role": "assistant", "content": "I fixed the thing"},
-  ]
-  con.execute(
-    "insert into chats "
-    "(id, provider, session_id, messages, deleted_at) values (?, ?, ?, ?, ?)",
-    (
-      chat_id,
-      provider,
-      session_id,
-      json.dumps(messages),
-      "2026-08-22T00:00:00" if deleted else None,
-    ),
-  )
-  con.commit()
-  con.close()
+  session_id="source-session",
+  deleted_at=None,
+  messages="transcript must never be used",
+):
+  with sqlite3.connect(path) as con:
+    con.execute(
+      "create table chats (id text primary key, provider text, session_id text, "
+      "messages text, deleted_at text)"
+    )
+    con.execute(
+      "insert into chats values (?, ?, ?, ?, ?)",
+      ("chat-1", provider, session_id, messages, deleted_at),
+    )
 
 
-def _write_fake_codex(bin_dir: Path, *, exit_code=0) -> None:
-  bin_dir.mkdir()
-  fake = bin_dir / "codex"
-  fake.write_text(
-    f"""#!/usr/bin/env bash
-set -euo pipefail
-out=""
-args=()
-stdin_payload=""
-if [[ ! -t 0 ]]; then
-  stdin_payload="$(cat)"
-fi
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    -o|--output-last-message)
-      out="$2"; shift 2 ;;
-    *)
-      args+=("$1"); shift ;;
-  esac
-done
-if [[ {exit_code} -ne 0 ]]; then
-  echo "fake codex trust failure"
-  exit {exit_code}
-fi
-{{
-  printf 'pwd=%s\\n' "$PWD"
-  printf 'CODEX_HOME=%s\\n' "${{CODEX_HOME:-}}"
-  printf 'args=%s\\n' "${{args[*]}}"
-  printf 'stdin=%s\\n' "$stdin_payload"
-}} > "$out"
-""",
-    encoding="utf-8",
-  )
-  fake.chmod(0o755)
+def test_chat_coaching_delegates_only_to_its_exact_provider_session(tmp_path):
+  db_dir = tmp_path / "db"
+  db_dir.mkdir()
+  _seed_db(db_dir / "ultimate.db")
+  seen = {}
 
+  def driver(provider, session_id, cwd, prompt):
+    seen["args"] = (provider, session_id, cwd, prompt)
+    return ForkResult(
+      provider=provider,
+      source_session_id=session_id,
+      forked_session_id="forked-session",
+      answer="answer",
+    )
 
-def _write_fake_claude(bin_dir: Path, *, exit_code=0) -> None:
-  bin_dir.mkdir()
-  fake = bin_dir / "claude"
-  fake.write_text(
-    f"""#!/usr/bin/env bash
-set -euo pipefail
-if [[ {exit_code} -ne 0 ]]; then
-  echo "fake claude failure" >&2
-  exit {exit_code}
-fi
-if [[ " $* " == *" --resume "* && " $* " == *" --fork-session "* ]]; then
-  echo "answer from exact session fork"
-else
-  echo "answer from transcript reseed"
-fi
-""",
-    encoding="utf-8",
-  )
-  fake.chmod(0o755)
+  payload = coach_chat("chat-1", "coach", data_dir=tmp_path, driver=driver)
 
-
-def test_codex_fork_uses_prod_auth_home_and_non_git_data_dir(tmp_path):
-  _seed_chat(tmp_path)
-  bin_dir = tmp_path / "bin"
-  _write_fake_codex(bin_dir)
-
-  env = {
-    **os.environ,
-    "DATA_DIR": str(tmp_path),
-    "PATH": f"{bin_dir}:{os.environ['PATH']}",
-  }
-  env.pop("CODEX_HOME", None)
-
-  proc = subprocess.run(
-    ["bash", str(SCRIPT), "chat-1", "what should Reflection learn?"],
-    env=env,
-    text=True,
-    capture_output=True,
-    check=True,
-  )
-
-  assert f"pwd={tmp_path}" in proc.stdout
-  assert f"CODEX_HOME={tmp_path / 'cli-auth' / 'codex'}" in proc.stdout
-  assert "args=exec --skip-git-repo-check --ephemeral --sandbox read-only --color never -" in proc.stdout
-  assert "You previously worked on this" in proc.stdout
-  assert "what should Reflection learn?" in proc.stdout
-
-
-def test_codex_fork_reports_cli_failure(tmp_path):
-  _seed_chat(tmp_path)
-  bin_dir = tmp_path / "bin"
-  _write_fake_codex(bin_dir, exit_code=7)
-
-  env = {
-    **os.environ,
-    "DATA_DIR": str(tmp_path),
-    "PATH": f"{bin_dir}:{os.environ['PATH']}",
-  }
-
-  proc = subprocess.run(
-    ["bash", str(SCRIPT), "chat-1", "interview"],
-    env=env,
-    text=True,
-    capture_output=True,
-  )
-
-  assert proc.returncode == 7
-  assert "fake codex trust failure" in proc.stderr
-  assert "fork-chat: codex coaching failed for chat-1 (rc=7)" in proc.stderr
-
-
-def test_json_contract_labels_codex_reseed(tmp_path):
-  _seed_chat(tmp_path)
-  bin_dir = tmp_path / "bin"
-  _write_fake_codex(bin_dir)
-
-  proc = subprocess.run(
-    ["bash", str(SCRIPT), "--json", "chat-1", "interview"],
-    env={
-      **os.environ,
-      "DATA_DIR": str(tmp_path),
-      "PATH": f"{bin_dir}:{os.environ['PATH']}",
-    },
-    text=True,
-    capture_output=True,
-    check=True,
-  )
-
-  payload = json.loads(proc.stdout)
+  assert seen["args"] == ("codex", "source-session", str(tmp_path), "coach")
   assert payload == {
     "chat_id": "chat-1",
     "provider": "codex",
-    "method": "transcript_reseed",
-    "exact_session_fork": False,
-    "answer": payload["answer"],
-  }
-  assert "You previously worked on this" in payload["answer"]
-  assert "fork-chat: method=transcript_reseed provider=codex" in proc.stderr
-
-
-def test_json_contract_labels_exact_claude_session_fork(tmp_path):
-  _seed_chat(tmp_path, provider="claude", session_id="claude-session")
-  bin_dir = tmp_path / "bin"
-  _write_fake_claude(bin_dir)
-  encoded_cwd = "-" + str(tmp_path).lstrip("/").replace("/", "-")
-  transcript = (
-    tmp_path / "cli-auth" / "claude" / "projects" / encoded_cwd
-    / "claude-session.jsonl"
-  )
-  transcript.parent.mkdir(parents=True)
-  transcript.write_text("{}\n", encoding="utf-8")
-
-  proc = subprocess.run(
-    ["bash", str(SCRIPT), "--json", "chat-1", "interview"],
-    env={
-      **os.environ,
-      "DATA_DIR": str(tmp_path),
-      "CLAUDE_CONFIG_DIR": str(tmp_path / "cli-auth" / "claude"),
-      "PATH": f"{bin_dir}:{os.environ['PATH']}",
-    },
-    text=True,
-    capture_output=True,
-    check=True,
-  )
-
-  payload = json.loads(proc.stdout)
-  assert payload == {
-    "chat_id": "chat-1",
-    "provider": "claude",
+    "source_session_id": "source-session",
+    "forked_session_id": "forked-session",
+    "answer": "answer",
     "method": "session_fork",
     "exact_session_fork": True,
-    "answer": "answer from exact session fork",
   }
-  assert "fork-chat: method=session_fork provider=claude" in proc.stderr
 
 
-def test_json_contract_labels_claude_transcript_reseed(tmp_path):
-  _seed_chat(tmp_path, provider="claude", session_id="missing-session")
-  bin_dir = tmp_path / "bin"
-  _write_fake_claude(bin_dir)
+def test_chat_can_recover_same_provider_exact_session_link(tmp_path):
+  db = tmp_path / "ultimate.db"
+  _seed_db(db, session_id="")
+  with sqlite3.connect(db) as con:
+    con.execute(
+      "create table chat_session_links (provider text, session_id text, "
+      "chat_id text, last_seen_at text)"
+    )
+    con.execute(
+      "insert into chat_session_links values (?, ?, ?, ?)",
+      ("codex", "older", "chat-1", "2026-08-30"),
+    )
+    con.execute(
+      "insert into chat_session_links values (?, ?, ?, ?)",
+      ("codex", "newest", "chat-1", "2026-08-31"),
+    )
 
-  proc = subprocess.run(
-    ["bash", str(SCRIPT), "--json", "chat-1", "interview"],
-    env={
-      **os.environ,
-      "DATA_DIR": str(tmp_path),
-      "PATH": f"{bin_dir}:{os.environ['PATH']}",
-    },
-    text=True,
-    capture_output=True,
-    check=True,
-  )
-
-  payload = json.loads(proc.stdout)
-  assert payload["method"] == "transcript_reseed"
-  assert payload["exact_session_fork"] is False
-  assert payload["answer"] == "answer from transcript reseed"
-  assert "has no resumable transcript; reseeding from DB" in proc.stderr
+  assert _chat_session(db, "chat-1") == ("codex", "newest")
 
 
-def test_claude_session_fork_failure_is_not_emitted_as_coaching(tmp_path):
-  _seed_chat(tmp_path, provider="claude", session_id="claude-session")
-  bin_dir = tmp_path / "bin"
-  _write_fake_claude(bin_dir, exit_code=9)
-  encoded_cwd = "-" + str(tmp_path).lstrip("/").replace("/", "-")
-  transcript = (
-    tmp_path / "cli-auth" / "claude" / "projects" / encoded_cwd
-    / "claude-session.jsonl"
-  )
-  transcript.parent.mkdir(parents=True)
-  transcript.write_text("{}\n", encoding="utf-8")
+def test_chat_without_exact_session_fails_instead_of_reseeding(tmp_path):
+  db = tmp_path / "ultimate.db"
+  _seed_db(db, session_id="", messages='[{"role":"user","content":"seed me"}]')
 
-  proc = subprocess.run(
-    ["bash", str(SCRIPT), "--json", "chat-1", "coaching"],
-    env={
-      **os.environ,
-      "DATA_DIR": str(tmp_path),
-      "CLAUDE_CONFIG_DIR": str(tmp_path / "cli-auth" / "claude"),
-      "PATH": f"{bin_dir}:{os.environ['PATH']}",
-    },
-    text=True,
-    capture_output=True,
-  )
-
-  assert proc.returncode == 9
-  assert proc.stdout == ""
-  assert "claude session fork failed for chat-1 (rc=9)" in proc.stderr
+  with pytest.raises(ForkError, match="no exact provider session"):
+    _chat_session(db, "chat-1")
 
 
-def test_claude_reseed_failure_is_not_emitted_as_coaching(tmp_path):
-  _seed_chat(tmp_path, provider="claude", session_id="missing-session")
-  bin_dir = tmp_path / "bin"
-  _write_fake_claude(bin_dir, exit_code=8)
+def test_deleted_chat_cannot_be_coached(tmp_path):
+  db = tmp_path / "ultimate.db"
+  _seed_db(db, deleted_at="2026-08-31")
 
-  proc = subprocess.run(
-    ["bash", str(SCRIPT), "--json", "chat-1", "coaching"],
-    env={
-      **os.environ,
-      "DATA_DIR": str(tmp_path),
-      "PATH": f"{bin_dir}:{os.environ['PATH']}",
-    },
-    text=True,
-    capture_output=True,
-  )
-
-  assert proc.returncode == 8
-  assert proc.stdout == ""
-  assert "claude transcript reseed failed for chat-1 (rc=8)" in proc.stderr
-
-
-def test_deleted_chat_is_evidence_only_and_never_forked(tmp_path):
-  _seed_chat(tmp_path, provider="claude", deleted=True)
-
-  proc = subprocess.run(
-    ["bash", str(SCRIPT), "--json", "chat-1", "interview"],
-    env={**os.environ, "DATA_DIR": str(tmp_path)},
-    text=True,
-    capture_output=True,
-  )
-
-  assert proc.returncode == 7
-  assert proc.stdout == ""
-  assert "is deleted; refusing to fork" in proc.stderr
+  with pytest.raises(ForkError, match="deleted chats cannot be forked"):
+    _chat_session(db, "chat-1")

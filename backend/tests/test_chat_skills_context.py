@@ -414,9 +414,15 @@ def test_agent_coaching_is_the_single_neutral_coaching_skill():
   assert "What is the most general lesson" in coaching
   assert "platform primitive" in coaching
   assert "exact_session_fork" in coaching
+  assert "transcript_reseed" not in coaching
+  assert "reconstructive coaching" not in coaching
+  assert "evidence-only fallback" not in coaching
+  assert "<claude|codex> <session_id>" in coaching
   assert "`/data/shared/skills/agent-coaching.md` completely" in reflection
   assert "what should Reflection itself change" in reflection
   assert "/data/platform/backend/scripts/reflection-evidence.py" in reflection
+  assert "same-provider transcript reseed" not in reflection
+  assert "exact-session coaching was unavailable" in reflection
 
 
 def test_image_skill_returns_tool_result_without_touching_protected_storage():
