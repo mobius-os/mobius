@@ -99,7 +99,7 @@ test('embedded chat never starts the owner app inventory query', () => {
   )?.[0] || ''
   assert.match(
     changesOverviewCall,
-    /enabled: Boolean\(!embedded && chatId\)/,
+    /enabled: Boolean\(!embedded && chatReady && chatId\)/,
   )
   assert.match(changesSource, /appQueries\.list\.useQuery\(\{ enabled \}\)/)
   assert.match(

@@ -2664,17 +2664,6 @@
   color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
 }
 
-/* A New Chat already has the same final composer geometry, even during its
-   very short allocation handoff. The options button stays deliberately inert
-   until the row exists, but it must not pop into the layout afterwards. */
-.chat__plus--pending:disabled {
-  cursor: default;
-}
-.chat__plus--pending:disabled:hover {
-  background: color-mix(in srgb, var(--surface) 70%, transparent);
-  color: var(--muted);
-}
-
 /* Keyboard-only focus ring on the brain button. No :focus rule (pointer
    focus must not show a ring — the one-halo invariant). :focus-visible
    fires only for keyboard navigation. When the popover is active the

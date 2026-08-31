@@ -32,6 +32,33 @@ test('runtime policy derives resumability from the cached chat contract', () => 
   assert.equal(result.current.autoResumeEnabled, true)
 })
 
+test('a provisional chat adopts its created runtime policy without remounting', () => {
+  resetProviderSwitchMemoryForTests()
+  const props = {
+    chatId: 'policy-provisional',
+    cached: null,
+    hidden: false,
+    onProviderSwitchSettled() {},
+    request: unusedRequest,
+  }
+  const { result, rerender } = renderHook(useChatRuntimePolicy, props)
+  assert.equal(result.current.chatInfo, null)
+
+  rerender({
+    ...props,
+    cached: {
+      chatInfo: {
+        provider: 'codex',
+        auto_resume_on_limit: false,
+        effective: { model: 'gpt-current' },
+      },
+    },
+  })
+
+  assert.equal(result.current.chatInfo.provider, 'codex')
+  assert.deepEqual(result.current.chatInfo.effective, { model: 'gpt-current' })
+})
+
 test('a completed provider switch settles through one owner and clears its store', () => {
   resetProviderSwitchMemoryForTests()
   const chatId = 'policy-switch'

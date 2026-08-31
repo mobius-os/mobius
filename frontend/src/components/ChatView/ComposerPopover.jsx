@@ -19,11 +19,9 @@
  * anchor — the form is only relative so other absolutely-positioned
  * children (none today) could anchor to it.
  *
- * A draft-first New Chat uses this same component with `pending` only until
- * its server row exists, then reuses the model picker with unrelated chat
- * actions omitted. Keeping both states here prevents the provisional composer
- * from maintaining a second lookalike button that can drift from the real
- * control.
+ * A draft-first New Chat mounts this canonical control immediately. Actions
+ * that need the row defer their reads through `chatReady`; local draft actions
+ * such as Attach files remain available throughout allocation.
  *
  * Soft-keyboard contract: opening or using this popover preserves whether the
  * owning textarea was focused. The brain trigger suppresses native button focus
@@ -72,6 +70,7 @@ import './ChatWork.css'
 export default function ComposerPopover({
   chatInfo,
   chatId,
+  chatReady = true,
   onAttachClick,
   onChangeChatInfo,
   // Live-derived in the parent: `chatInfo.has_assistant_turns` is
@@ -100,7 +99,6 @@ export default function ComposerPopover({
   appArtifacts = [],
   onOpenAppArtifact,
   embedded = false,
-  pending = false,
   triggerIcon = null,
   providerUsage = null,
   triggerAriaLabel = 'Chat options',
@@ -124,7 +122,7 @@ export default function ComposerPopover({
     composerInputRef,
   )
   const usageQuery = chatQueries.usage.useQuery(chatId, {
-    enabled: Boolean(open && !embedded && chatId && onOpenUsage),
+    enabled: Boolean(open && !embedded && chatReady && chatId && onOpenUsage),
   })
   const usageSummary = formatUsageMenuText(usageQuery.data?.totals)
   const artifactsQuery = useQuery({
@@ -134,14 +132,14 @@ export default function ComposerPopover({
       chatId,
       { signal, request: apiFetch },
     ),
-    enabled: Boolean(open && !embedded && artifactsAppId && chatId),
+    enabled: Boolean(open && !embedded && chatReady && artifactsAppId && chatId),
     staleTime: 0,
   })
   const changesOverview = useChatChangesOverview(chatId, initialChangeEntries, {
     // This compact query previously stayed live through the persistent review
     // card. Keep it live here after removing that card so the existing Brain
     // button can carry one geometry-free attention dot for Changes.
-    enabled: Boolean(!embedded && chatId),
+    enabled: Boolean(!embedded && chatReady && chatId),
   })
   const chatArtifacts = artifactsQuery.data || []
   const artifactItems = chatArtifactPickerItems(appArtifacts, chatArtifacts)
@@ -324,9 +322,7 @@ export default function ComposerPopover({
       <button
         ref={triggerRef}
         type="button"
-        className={`chat__plus chat__brain-usage${pending ? ' chat__plus--pending' : ''}`
-          + `${open && !pending ? ' chat__plus--active' : ''}`}
-        disabled={pending}
+        className={`chat__plus chat__brain-usage${open ? ' chat__plus--active' : ''}`}
         // PointerDown preventDefault stops the focus from moving off
         // the textarea — keeps the soft keyboard open when the user
         // taps the brain mid-typing. Without this, focus shifts to the
@@ -334,21 +330,19 @@ export default function ComposerPopover({
         // before the popover even renders.
         onPointerDown={(e) => e.preventDefault()}
         onClick={togglePopover}
-        aria-label={pending
-          ? 'Chat options unavailable until this chat is ready'
-          : [
-              triggerAriaLabel,
-              changesNeedAttention ? 'Changes need attention.' : '',
-            ].filter(Boolean).join(' ')}
-        aria-haspopup={pending ? undefined : 'dialog'}
-        aria-expanded={pending ? undefined : open}
+        aria-label={[
+          triggerAriaLabel,
+          changesNeedAttention ? 'Changes need attention.' : '',
+        ].filter(Boolean).join(' ')}
+        aria-haspopup="dialog"
+        aria-expanded={open}
       >
         {triggerIcon || <BrainUsageIcon />}
         {changesNeedAttention && (
           <span className="composer-plus__attention-dot" aria-hidden="true" />
         )}
       </button>
-      {open && !pending && (
+      {open && (
         <div
           className="composer-popover"
           role="dialog"

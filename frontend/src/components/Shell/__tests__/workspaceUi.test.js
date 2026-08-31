@@ -19,6 +19,7 @@ const workspaceSession = readFileSync(
 )
 const shellBrand = readFileSync(new URL('../ShellBrand.jsx', import.meta.url), 'utf8')
 const newChatLanding = readFileSync(new URL('../NewChatLanding.jsx', import.meta.url), 'utf8')
+const chatView = readFileSync(new URL('../../ChatView/ChatView.jsx', import.meta.url), 'utf8')
 const chatInputBar = readFileSync(new URL('../../ChatView/ChatInputBar.jsx', import.meta.url), 'utf8')
 const composerPopover = readFileSync(new URL('../../ChatView/ComposerPopover.jsx', import.meta.url), 'utf8')
 const workspaceViewSrc = readFileSync(new URL('../workspaceView.js', import.meta.url), 'utf8')
@@ -1365,41 +1366,34 @@ test('deletion-evidence contract: probeDeletion classifies 404 vs exists vs unkn
   assert.match(shell, /probeDeletion\(`\/chats\//)
 })
 
-test('round4-3: the New Chat landing renders for a null slot and reuses ChatView empty visuals', () => {
-  // The presentation key + its wiring.
+test('round4-3: the null-slot landing is passive and interactive New Chat uses ChatView', () => {
   assert.match(workspaceViewSrc, /export const EMPTY_SINGLE_SURFACE_KEY = 'home:new-chat'/)
-  assert.match(shell, /const newChatSurface = fullBleedKey === EMPTY_SINGLE_SURFACE_KEY/)
-  assert.match(shell, /<NewChatLanding/)
-  assert.match(shell, /chatId=\{presentingNewChat \? newChatPresentation\.chatId : null\}/)
-  assert.match(shell, /chatInfo=\{newChatPresentation\?\.chatInfo \?\? null\}/)
+  assert.match(shell,
+    /fullBleedKey === EMPTY_SINGLE_SURFACE_KEY && \([\s\S]*<NewChatLanding[\s\S]*failure=\{newChatLandingFailure\}/)
+  assert.match(shell,
+    /setNewChatPresentation\(presentation\)[\s\S]*applyModeDestination\(\{[\s\S]*chatId,[\s\S]*paneId: ws\.focusedPaneId/,
+    'the final client id must mount in the workspace immediately')
+  assert.match(shell,
+    /<PaneChatView[\s\S]*newChatSession=\{newChatSession\}[\s\S]*onNewChatSubmit=\{queueDraftFirstNewChat\}/)
   assert.match(shell,
     /materialized: true,[\s\S]*chatInfo: createdChatDetailCache\(result\.chat\)\?\.chatInfo \?\? null/,
     'the accepted create response must unlock the model picker without another read')
   assert.match(shell, /retryDraftFirstNewChat/)
-  assert.match(newChatLanding, /submissionBlocked[\s\S]*attachmentsDisabled/)
-  assert.match(newChatLanding,
-    /focusComposerElement\(inputRef\.current\)[\s\S]*placeCaretAtTextEnd\(inputRef\.current\)/,
-    'the provisional draft resumes at its text end without changing generic focus policy')
-  assert.match(newChatLanding,
-    /leftButtons=\{liveChatInfo \? \([\s\S]*<BrainUsageButton[\s\S]*<ComposerPopover[\s\S]*chatInfo=\{liveChatInfo\}[\s\S]*embedded[\s\S]*\) : <ComposerPopover pending \/>\}/,
-    'the provisional composer must unlock the canonical model picker once its chat row exists')
-  assert.match(newChatLanding,
-    /async function submitDraft[\s\S]*await settingsSaveTailRef\.current[\s\S]*onSubmit\?\.\(draft\)/,
-    'a first send must follow any model choice the owner just made')
+  assert.match(chatView,
+    /const provisionalNewChat = !!newChatSession[\s\S]*onSubmit=\{provisionalNewChat \? handleProvisionalNewChatSubmit : handleSubmit\}/,
+    'the canonical composer owns both pre-allocation and ordinary Send')
+  assert.match(chatView,
+    /pendingFiles=\{pendingFiles\}[\s\S]*onAddFiles=\{handleComposerAddFiles\}[\s\S]*onAttachClick=\{\(\) => attachTriggerRef\.current\?\.\(\)\}/,
+    'the canonical draft/file owner is available before allocation')
   assert.match(composerPopover, /\{onAttachClick && \(/,
-    'a model-only New Chat Brain must not expose a dead attachment action')
+    'the canonical New Chat Brain exposes Attach files')
   assert.match(composerPopover, /\{!embedded && onOpenChanges && \(/,
-    'a model-only New Chat Brain must not expose a dead Changes action')
-  assert.match(composerPopover, /\{!embedded && \(onOpenUsage \|\| onOpenSummary \|\| onOpenInspector\) && \(/,
-    'a model-only New Chat Brain must not expose dead continuity actions')
-  assert.doesNotMatch(newChatLanding, /attachTriggerRef/,
-    'the pre-allocation surface must not expose server-bound attachment behavior')
-  assert.match(chatInputBar,
-    /const files = attachmentsDisabled \? \[\] : pastedFiles\(e\.clipboardData\)/,
-    'disabled attachments must suppress only pasted files, not text handling')
-  assert.match(chatInputBar, /\{!attachmentsDisabled && \(\s*<input/,
-    'disabled attachments must not mount a hidden file picker')
-  // Seamless swap: the landing reuses ChatView's exact empty treatment.
+    'the canonical New Chat Brain exposes Changes')
+  assert.match(composerPopover,
+    /\{!embedded && \(onOpenUsage \|\| onOpenSummary \|\| onOpenInspector\) && \(/,
+    'the full canonical option set cannot be stranded behind a temporary composer')
+  assert.doesNotMatch(newChatLanding, /ChatInputBar|ComposerPopover|inputRef/,
+    'the passive landing must never become a second interactive owner')
   assert.match(newChatLanding, /className="chat chat--empty"/)
   assert.match(newChatLanding, /className="chat__empty-wrap"/)
   assert.match(newChatLanding, /className="chat__empty-glyph"/)

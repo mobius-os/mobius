@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef } from 'react'
 import ChatView from '../ChatView/ChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import { builtAppsSignature, derivedBuiltApps } from './builtAppState.js'
+import { newChatServerReadsReady } from './newChatPolicy.js'
 import { samePaneChatProps } from './paneChatProps.js'
 import { scheduleAfterBrowserPaint } from './scheduleAfterBrowserPaint.js'
 
@@ -25,6 +26,9 @@ function PaneChatView({
   chatId,
   paneId,
   apps,
+  newChatSession = null,
+  onNewChatSubmit,
+  onNewChatRetry,
   artifactsAppId = null,
   runtimeActive = true,
   previewPresented = false,
@@ -52,12 +56,16 @@ function PaneChatView({
   onDisplayReady,
   onChatBoundaryError,
 }) {
+  // This is the pane boundary for every row-owned projection. Queries added
+  // here must use `{ enabled: chatReady }`: a provisional client id is already
+  // the visible owner, but it is not a readable server entity yet.
+  const chatReady = newChatServerReadsReady(newChatSession)
   // builtApps is derived PER chatId, memoized on the same signature Shell uses
   // for the primary chat — an unrelated app's refetch is a no-op for this pane.
   const builtApps = useMemo(
-    () => derivedBuiltApps(apps, chatId),
+    () => chatReady ? derivedBuiltApps(apps, chatId) : [],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [builtAppsSignature(apps, chatId)],
+    [builtAppsSignature(apps, chatId), chatReady],
   )
 
   const handleStreamEnd = useCallback(({ continues } = {}) => {
@@ -145,6 +153,9 @@ function PaneChatView({
       <ChatView
         key={chatId}
         chatId={chatId}
+        newChatSession={newChatSession}
+        onNewChatSubmit={onNewChatSubmit}
+        onNewChatRetry={onNewChatRetry}
         hidden={!runtimeActive}
         previewPresented={previewPresented}
         keepTranscriptPainted={keepTranscriptPainted}
