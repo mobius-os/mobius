@@ -20,6 +20,7 @@ import shutil
 import stat
 import subprocess
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -5196,6 +5197,7 @@ def test_chat_projection_marks_exact_reviewed_pr_updates_sendable(
   record_id = "existing-pr-chat-card"
   record = _prepared_existing_pr_update(app_id, record_id)
   record["chat_id"] = "chat-existing-update"
+  record["quality_review"]["reviewed_at"] = "2026-08-27T12:34:56Z"
   _write_contribution(app_id, record_id, record, "reviewed diff")
   monkeypatch.setattr(
     github_routes,
@@ -5218,6 +5220,81 @@ def test_chat_projection_marks_exact_reviewed_pr_updates_sendable(
   assert projected["action"] == "pr_update"
   assert projected["quality_review_ready"] is True
   assert projected["review"]["state"] == "ready"
+  assert projected["coverage_at"] == "2026-08-27T12:34:56Z"
+
+
+def test_chat_projection_uses_private_review_time_after_the_public_submission(
+  client, owner_token, monkeypatch,
+):
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  record_id = "existing-pr-newer-private-review"
+  record = _prepared_existing_pr_update(app_id, record_id)
+  record["chat_id"] = "chat-private-update"
+  record["submitted_at"] = "2026-08-27T10:00:00Z"
+  record["quality_review"]["reviewed_at"] = "2026-08-27T12:00:00Z"
+  record["updated_at"] = "2026-08-27T13:00:00Z"
+  _write_contribution(app_id, record_id, record, "reviewed diff")
+  monkeypatch.setattr(
+    github_routes,
+    "_inspect_prepared_review",
+    lambda record, _diff_path, _github_state: {
+      "id": record["id"], "state": "ready", "code": "ready",
+      "message": "Still matches the exact source you reviewed.",
+    },
+  )
+
+  response = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-private-update",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+
+  assert response.status_code == 200, response.text
+  # A scheduled metadata write at 13:00 cannot hide edits. The exact-head
+  # review at 12:00 is the latest moment that actually incorporated source.
+  assert response.json()["records"][0]["coverage_at"] == "2026-08-27T12:00:00Z"
+
+
+def test_chat_projection_does_not_let_push_time_cover_post_review_edits(
+  client, owner_token, monkeypatch,
+):
+  app_id, app_token = _app_token(
+    client, owner_token, github_access=True,
+  )
+  record_id = "existing-pr-reviewed-before-push"
+  record = _prepared_existing_pr_update(app_id, record_id)
+  record["chat_id"] = "chat-review-before-push"
+  record["quality_review"]["reviewed_at"] = "2026-08-27T10:00:00Z"
+  record["submitted_at"] = "2026-08-27T12:00:00Z"
+  record["updated_at"] = "2026-08-27T13:00:00Z"
+  _write_contribution(app_id, record_id, record, "reviewed diff")
+  monkeypatch.setattr(
+    github_routes,
+    "_inspect_prepared_review",
+    lambda record, _diff_path, _github_state: {
+      "id": record["id"], "state": "ready", "code": "ready",
+      "message": "Still matches the exact source you reviewed.",
+    },
+  )
+
+  response = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-review-before-push",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["records"][0]["coverage_at"] == "2026-08-27T10:00:00Z"
+
+
+def test_chat_projection_uses_publication_time_only_for_legacy_records():
+  assert github_routes._chat_record_coverage_at({
+    "submitted_at": "2026-08-27T12:00:00Z",
+    "updated_at": "2026-08-27T13:00:00Z",
+  }) == "2026-08-27T12:00:00Z"
+  assert github_routes._chat_record_coverage_at({
+    "updated_at": "2026-08-27T13:00:00Z",
+  }) == ""
 
 
 # --- contribution CI feedback loop (checks refresh + classification) ---
@@ -5601,6 +5678,8 @@ def test_for_chat_returns_only_this_chat_s_prepared_reviews(client, owner_token)
   assert record["files"] == ["index.jsx"]
   assert record["labels"] == ["bug", "area: ui"]
   assert record["diff_stat"].startswith("1 file changed")
+  assert record["source_root"] == ""
+  assert record["url"] == ""
   assert record["review"] == {
     "id": "mine",
     "state": "ready",
@@ -5612,6 +5691,236 @@ def test_for_chat_returns_only_this_chat_s_prepared_reviews(client, owner_token)
   assert body["autopilot_available"] is True
   # No stored preference means the same default the Contribute app applies.
   assert body["autopilot_default"] is True
+
+
+def test_for_chat_keeps_one_review_attached_to_every_chat_that_refined_it(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  _, record = _prepared_for_chat(app_id, "shared-review", "chat-original")
+  record["chat_ids"] = [
+    "chat-original",
+    *(f"chat-intermediate-{index}" for index in range(40)),
+    " chat-refinement ", "chat-refinement", "", 42,
+  ]
+  _write_contribution(app_id, "shared-review", record, "")
+  headers = {"Authorization": f"Bearer {owner_token}"}
+
+  original = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-original",
+    headers=headers,
+  )
+  refinement = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-refinement",
+    headers=headers,
+  )
+  unrelated = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-unrelated",
+    headers=headers,
+  )
+
+  assert original.status_code == 200, original.text
+  assert refinement.status_code == 200, refinement.text
+  assert unrelated.status_code == 200, unrelated.text
+  assert [item["id"] for item in original.json()["records"]] == ["shared-review"]
+  assert [item["id"] for item in refinement.json()["records"]] == ["shared-review"]
+  assert unrelated.json()["records"] == []
+  # Other chat identities stay private; the projection exposes only the same
+  # publication review and its source-file coverage.
+  assert "chat_ids" not in refinement.json()["records"][0]
+
+
+def test_for_chat_returns_the_complete_lifecycle_without_a_hidden_five_card_cap(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  for index in range(7):
+    _prepared_for_chat(
+      app_id,
+      f"complete-{index}",
+      "chat-complete",
+      status="open",
+      number=index + 1,
+      url=f"https://github.com/mobius-os/app-demo/pull/{index + 1}",
+      updated_at=f"2026-08-27T10:00:0{index}Z",
+    )
+  headers = {"Authorization": f"Bearer {owner_token}"}
+
+  r = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-complete",
+    headers=headers,
+  )
+  assert r.status_code == 200, r.text
+  records = r.json()["records"]
+  assert len(records) == 7
+  assert [record["number"] for record in records] == [7, 6, 5, 4, 3, 2, 1]
+  assert records[0]["url"].endswith("/7")
+
+
+def test_for_chat_coverage_keeps_display_bounded_without_losing_file_41(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  _, record = _prepared_for_chat(
+    app_id,
+    "wide-review",
+    "chat-wide",
+    status="open",
+    number=41,
+    url="https://github.com/mobius-os/mobius/pull/41",
+  )
+  record["plan"]["source_repo_path"] = "/data/platform"
+  record["quality_review"] = {"reviewed_at": "2026-08-27T12:00:00Z"}
+  diff_text = "".join(
+    "\n".join([
+      f"diff --git a/file-{index:02}.js b/file-{index:02}.js",
+      f"--- a/file-{index:02}.js",
+      f"+++ b/file-{index:02}.js",
+      "@@ -1 +1 @@",
+      "-old",
+      "+new",
+      "",
+    ])
+    for index in range(1, 42)
+  )
+  _write_contribution(app_id, "wide-review", record, diff_text)
+  owner_headers = {"Authorization": f"Bearer {owner_token}"}
+
+  lifecycle = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-wide",
+    headers=owner_headers,
+  )
+  assert lifecycle.status_code == 200, lifecycle.text
+  projected = lifecycle.json()["records"][0]
+  assert len(projected["files"]) == 40
+  assert "file-41.js" not in projected["files"]
+
+  coverage = client.post(
+    f"/api/github/contributions/{app_id}/for-chat/chat-wide/coverage",
+    headers=owner_headers,
+    json={"paths": ["/data/platform/file-41.js", "/private/not-requested.js"]},
+  )
+  assert coverage.status_code == 200, coverage.text
+  assert coverage.json() == {"coverage": [{
+    "path": "/data/platform/file-41.js",
+    "coverage_at": "2026-08-27T12:00:00Z",
+  }]}
+  assert "wide-review" not in coverage.text
+  assert "file-01.js" not in coverage.text
+
+  app_request = client.post(
+    f"/api/github/contributions/{app_id}/for-chat/chat-wide/coverage",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={"paths": ["/data/platform/file-41.js"]},
+  )
+  assert app_request.status_code == 403
+
+
+def test_for_chat_coverage_rejects_an_unbounded_path_request(client, owner_token):
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/for-chat/chat-wide/coverage",
+    headers={"Authorization": f"Bearer {owner_token}"},
+    json={"paths": [f"/data/platform/file-{index}.js" for index in range(101)]},
+  )
+  assert response.status_code == 400
+  assert response.json()["detail"] == "At most 100 paths are allowed."
+
+
+def test_for_chat_coverage_preserves_repo_relative_a_and_b_directories(
+  client, owner_token,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  _, record = _prepared_for_chat(
+    app_id,
+    "side-prefix-directories",
+    "chat-side-prefix-directories",
+    status="open",
+  )
+  record["quality_review"] = {"reviewed_at": "2026-08-27T12:00:00Z"}
+  diff_text = "\n".join([
+    "diff --git a/a/foo.js b/a/foo.js",
+    "--- a/a/foo.js",
+    "+++ b/a/foo.js",
+    "@@ -1 +1 @@",
+    "-old a",
+    "+new a",
+    "diff --git a/b/foo.js b/b/foo.js",
+    "--- a/b/foo.js",
+    "+++ b/b/foo.js",
+    "@@ -1 +1 @@",
+    "-old b",
+    "+new b",
+    "",
+  ])
+  _write_contribution(app_id, "side-prefix-directories", record, diff_text)
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/for-chat/"
+    "chat-side-prefix-directories/coverage",
+    headers={"Authorization": f"Bearer {owner_token}"},
+    json={"paths": ["a/foo.js", "foo.js", "b/foo.js"]},
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json() == {"coverage": [
+    {"path": "a/foo.js", "coverage_at": "2026-08-27T12:00:00Z"},
+    {"path": "b/foo.js", "coverage_at": "2026-08-27T12:00:00Z"},
+  ]}
+
+
+def test_for_chat_releases_storage_lock_before_parsing_contribution_history(
+  client, owner_token, monkeypatch,
+):
+  _write_token(login="octocat", user_id=42)
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  _prepared_for_chat(
+    app_id,
+    "lock-friendly",
+    "chat-a",
+    status="open",
+    number=58,
+    url="https://github.com/mobius-os/app-demo/pull/58",
+  )
+  held = False
+  real_lock = github_routes.fs_locks.app_storage_lock
+  real_read = github_routes._read_record_tolerant
+
+  @asynccontextmanager
+  async def observed_lock(requested_app_id):
+    nonlocal held
+    async with real_lock(requested_app_id):
+      held = True
+      try:
+        yield
+      finally:
+        held = False
+
+  def assert_unlocked_history_read(path):
+    if path.parent.name == "contributions":
+      assert held is False, "ledger JSON parsing must not hold the writer lock"
+    return real_read(path)
+
+  monkeypatch.setattr(
+    github_routes.fs_locks, "app_storage_lock", observed_lock,
+  )
+  monkeypatch.setattr(
+    github_routes, "_read_record_tolerant", assert_unlocked_history_read,
+  )
+
+  response = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-a",
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+
+  assert response.status_code == 200, response.text
+  assert [record["id"] for record in response.json()["records"]] == [
+    "lock-friendly",
+  ]
 
 
 def test_diff_file_paths_reads_headers_not_source_that_looks_like_one(tmp_path):

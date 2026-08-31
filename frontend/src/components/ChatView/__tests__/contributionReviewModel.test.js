@@ -8,6 +8,7 @@ import {
   PLATFORM_REPO,
   actionableRecords,
   autopilotOnSend,
+  chatCardRecords,
   chatContributionRecords,
   contributeApp,
   contributeAppId,
@@ -27,6 +28,7 @@ import {
   reviewDestinationLabel,
   reviewItemIntent,
   reviewItems,
+  reviewGroupDefault,
   reviewPanelSummary,
   sendBlocker,
   statusLabel,
@@ -65,6 +67,16 @@ test('the ledger owner is resolved by slug, and a missing app hides the card', (
   assert.equal(contributeApp(APPS, 99), null)
 })
 
+test('the composer card gets unsorted work from the complete chat owner', () => {
+  assert.match(
+    cardSrc,
+    /const overview = useChatChangesOverview\(chatId, initialChangeEntries\)/,
+  )
+  assert.match(cardSrc, /diffsQueryKey/)
+  assert.match(cardSrc, /&& overview\.lifecycleAvailable/)
+  assert.doesNotMatch(cardSrc, /chatChangesOverview\(initialChangeEntries/)
+})
+
 test('publication decisions stay distinct from the lifecycle kept in chat', () => {
   const payload = { records: [
     { id: 'a', status: 'prepared' },
@@ -80,6 +92,15 @@ test('publication decisions stay distinct from the lifecycle kept in chat', () =
   assert.deepEqual(
     chatContributionRecords(payload).map(record => record.id),
     ['a', 'b', 'c', 'd', 'e'],
+  )
+  assert.deepEqual(
+    chatCardRecords(payload).map(record => record.id),
+    ['a', 'b'],
+  )
+  assert.deepEqual(
+    chatCardRecords({ records: [{ id: 'attention', status: 'open', needs_attention: true }] })
+      .map(record => record.id),
+    ['attention'],
   )
   assert.equal(CHAT_VISIBLE_STATUSES.has('abandoned'), false)
 })
@@ -288,15 +309,51 @@ test('the grouped panel uses one stable explanation instead of redundant counts'
     })
   }
   assert.deepEqual(reviewPanelSummary([{
-    kind: 'record', record: { id: 'sent', status: 'open' },
+    kind: 'record', record: { id: 'sent', status: 'open', needs_attention: true },
   }]), {
     count: 1,
-    title: 'Contributions from this chat',
-    copy: 'Follow the latest status where the work happened.',
+    title: 'Needs attention',
+    copy: 'Continue the work in this chat.',
+  })
+  assert.deepEqual(reviewPanelSummary([{ kind: 'unsorted' }]), {
+    count: 1,
+    title: 'Changes ready to organize',
+    copy: 'Sort reusable work into private reviews.',
   })
 })
 
-test('sent records remain as quiet tracking cards and can hand attention back to chat', () => {
+test('grouped cards expose one safe default for the exact visible set', () => {
+  const ready = (id, action = 'pr') => ({
+    kind: 'record', id, record: {
+      id, action, status: 'prepared', quality_review_ready: true,
+      review: { state: 'ready' },
+    },
+  })
+  assert.deepEqual(reviewGroupDefault([ready('one'), ready('two')], { connected: true }), {
+    kind: 'publish',
+    records: [ready('one').record, ready('two').record],
+    label: 'Send all 2',
+    busyLabel: 'Sending 0 of 2',
+  })
+  assert.deepEqual(reviewGroupDefault([
+    ready('one'),
+    { kind: 'stack', id: 'stack:demo', records: [{ id: 'layer' }] },
+  ], { connected: true }), {
+    kind: 'review', intent: 'reviews:queue', label: 'Review all 2',
+  })
+  assert.equal(reviewGroupDefault([
+    ready('one'),
+    { kind: 'record', id: 'sent', record: { id: 'sent', status: 'open' } },
+  ], { connected: true }), null)
+  assert.equal(reviewGroupDefault([ready('one')], { connected: true }), null)
+})
+
+test('healthy sent records leave chat while attention can hand work back to the agent', () => {
+  assert.deepEqual(reviewItems({ records: [
+    { id: 'healthy', status: 'open' },
+    { id: 'done', status: 'merged' },
+    { id: 'attention', status: 'open', needs_attention: true },
+  ] }).map(item => item.id), ['attention'])
   assert.match(cardSrc, /function TrackingRow\(/)
   assert.match(cardSrc, /trackingStatusLabel\(record\)/)
   assert.match(cardSrc, /trackingNarration\(record\)/)
@@ -397,7 +454,7 @@ test('the swipe has a visible focusable equivalent', () => {
   assert.match(cardSrc, /aria-label="Dismiss — keeps it in Contribute"/)
   assert.match(cardSrc, /onClick=\{\(\) => onDismiss\?\.\(\)\}/)
   assert.match(cardSrc, /import \{ X \} from '@openai\/apps-sdk-ui\/components\/Icon'/)
-  assert.equal((cardSrc.match(/<X width=\{14\} height=\{14\} aria-hidden="true" \/>/g) || []).length, 3)
+  assert.equal((cardSrc.match(/<X width=\{14\} height=\{14\} aria-hidden="true" \/>/g) || []).length, 4)
 })
 
 test('the dismissal gesture is claimed with a non-passive touchmove', () => {
@@ -408,6 +465,6 @@ test('the dismissal gesture is claimed with a non-passive touchmove', () => {
 
 test('every card shape shares one swipe implementation', () => {
   assert.equal((cardSrc.match(/function useSwipeToDismiss\(/g) || []).length, 1)
-  assert.equal((cardSrc.match(/= useSwipeToDismiss\(onDismiss\)/g) || []).length, 3)
+  assert.equal((cardSrc.match(/= useSwipeToDismiss\(onDismiss\)/g) || []).length, 4)
   assert.equal((cardSrc.match(/addEventListener\('touchmove'/g) || []).length, 1)
 })
