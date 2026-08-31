@@ -4,10 +4,10 @@
 
 .urm__overlay {
   position: fixed;
-  /* Starts below the 58px shell bar; the card's height cap (below) subtracts the
-     same offset so the header never clips under the bar. One var keeps them in
-     lockstep — mirrors ManageModelsModal. */
-  --modal-top-offset: calc(58px + env(safe-area-inset-top, 0px));
+  /* Starts below the responsive shell bar; the card's height cap (below)
+     subtracts the same offset so the header never clips under the bar. One var
+     keeps them in lockstep — mirrors ManageModelsModal. */
+  --modal-top-offset: calc(var(--shell-bar-height, 58px) + env(safe-area-inset-top, 0px));
   top: var(--modal-top-offset);
   right: 0;
   bottom: 0;
