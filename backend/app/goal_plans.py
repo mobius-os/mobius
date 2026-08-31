@@ -255,6 +255,9 @@ def active_goal_rows(
     .order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc())
     .first()
   )
+  dismissed_goal_id = db.query(models.Chat.dismissed_goal_id).filter(
+    models.Chat.id == chat_id,
+  ).scalar()
   if physical is None:
     # A parent provider turn may finish after launching durable background
     # children. Keep only the latest Goal actionable while its plan or
@@ -268,6 +271,8 @@ def active_goal_rows(
     )
     if physical is None or physical.goal_objective is None:
       return None
+  if physical.goal_id is not None and physical.goal_id == dismissed_goal_id:
+    return None
   rows = _goal_rows_for_physical(db, physical)
   if physical.status in models.NONTERMINAL_RUN_STATUSES:
     return rows
@@ -290,11 +295,10 @@ def presented_goal_rows(
 ) -> tuple[models.ChatRun, models.ChatRun] | None:
   """Return the latest Goal that remains visible until an explicit clear.
 
-  A ``/goal clear`` run carries the cleared Goal's identity with a null
-  objective. That row is a durable presentation tombstone: later ordinary
-  turns do not revive the Goal, while a genuinely new Goal has a newer identity
-  and naturally becomes visible. Execution liveness is deliberately absent
-  from this query so completed and paused Goals survive reloads.
+  ``Chat.dismissed_goal_id`` suppresses only the exact Goal the owner cleared;
+  later ordinary turns cannot revive it, while a genuinely new Goal has a new
+  identity and naturally becomes visible. Execution liveness is deliberately
+  absent from this query so completed and paused Goals survive reloads.
   """
   physical = (
     db.query(models.ChatRun)
@@ -309,6 +313,11 @@ def presented_goal_rows(
     .first()
   )
   if physical is None or physical.goal_objective is None:
+    return None
+  dismissed_goal_id = db.query(models.Chat.dismissed_goal_id).filter(
+    models.Chat.id == chat_id,
+  ).scalar()
+  if physical.goal_id is not None and physical.goal_id == dismissed_goal_id:
     return None
   return _goal_rows_for_physical(db, physical)
 

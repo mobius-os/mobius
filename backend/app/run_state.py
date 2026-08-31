@@ -15,7 +15,6 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.goal_commands import (
-  goal_clear_requested,
   goal_objective,
   is_goal_continue,
 )
@@ -30,14 +29,6 @@ def goal_identity_for_run_start(
   from app.continuations import is_continuation_message
 
   content = message.get("content") if message is not None else ""
-  if goal_clear_requested(content if isinstance(content, str) else ""):
-    from app.goal_plans import presented_goal_rows
-
-    rows = presented_goal_rows(db, chat_id)
-    # A clear turn remains an ordinary non-Goal run, but references the Goal it
-    # dismissed. That null-objective identity is the durable presentation
-    # tombstone consumed by presented_goal_rows.
-    return None, rows[0].goal_id if rows is not None else None
   objective = goal_objective(content if isinstance(content, str) else "")
   if objective is not None:
     return objective, str(uuid.uuid4())
@@ -235,6 +226,26 @@ def running_goal_objective(db: Session, chat_id: str) -> str | None:
 
   rows = active_goal_rows(db, chat_id)
   return rows[0].goal_objective if rows is not None else None
+
+
+def latest_provider_goal_is_dismissed(db: Session, chat_id: str) -> bool:
+  """Whether the newest provider-backed Goal is hidden by direct clearing."""
+  dismissed_goal_id = db.query(models.Chat.dismissed_goal_id).filter(
+    models.Chat.id == chat_id,
+  ).scalar()
+  if not dismissed_goal_id:
+    return False
+  latest_goal_row = (
+    db.query(models.ChatRun.goal_id)
+    .filter(
+      models.ChatRun.chat_id == chat_id,
+      models.ChatRun.goal_id.isnot(None),
+    )
+    .order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc())
+    .first()
+  )
+  latest_goal_id = latest_goal_row[0] if latest_goal_row is not None else None
+  return latest_goal_id == dismissed_goal_id
 
 
 def running_chat_ids(
