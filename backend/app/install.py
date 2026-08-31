@@ -193,6 +193,8 @@ _STATIC_ASSET_MAX_BYTES = _CONTRACT_STATIC_ASSET_MAX_BYTES
 _STATIC_ASSETS_COUNT_MAX = _CONTRACT_STATIC_ASSETS_COUNT_MAX
 _STATIC_ASSETS_TOTAL_MAX = _CONTRACT_STATIC_ASSETS_TOTAL_MAX
 _STATIC_ASSETS_MANIFEST = ".mobius-static-assets.json"
+_STATIC_ASSETS_BACKUP_ASSET_PREFIX = "assets"
+_STATIC_ASSETS_BACKUP_METADATA_PREFIX = "metadata"
 _PENDING_UPDATE_DIR = "mobius-pending-update"
 UPDATE_RESOLUTION_POLICIES = frozenset({
   "preserve_local",
@@ -884,7 +886,9 @@ def _write_static_assets(
       raise HTTPException(400, "Manifest `static_assets` path escapes static dir.")
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
-      backup_existing_file(target, rel)
+      backup_existing_file(
+        target, f"{_STATIC_ASSETS_BACKUP_ASSET_PREFIX}/{rel}",
+      )
     else:
       created_paths.append(target)
     atomic_write(target, content)
@@ -895,11 +899,16 @@ def _write_static_assets(
       continue
     if not target.exists() or not target.is_file():
       continue
-    backup_existing_file(target, rel)
+    backup_existing_file(
+      target, f"{_STATIC_ASSETS_BACKUP_ASSET_PREFIX}/{rel}",
+    )
     target.unlink()
 
   if metadata_path.exists():
-    backup_existing_file(metadata_path, _STATIC_ASSETS_MANIFEST)
+    backup_existing_file(
+      metadata_path,
+      f"{_STATIC_ASSETS_BACKUP_METADATA_PREFIX}/{_STATIC_ASSETS_MANIFEST}",
+    )
   else:
     created_paths.append(metadata_path)
   atomic_write(metadata_path, json.dumps(sorted(assets), indent=2) + "\n")

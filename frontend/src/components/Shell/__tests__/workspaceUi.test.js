@@ -225,7 +225,10 @@ test('the first-run walkthrough remains dismissible in a short landscape viewpor
 test('the authenticated shell offers a keyboard skip link', () => {
   assert.match(shell, /href="#main-content"/)
   assert.match(shell, /event\.preventDefault\(\)[\s\S]*?contentElRef\.current\?\.focus\(\{ preventScroll: true \}\)/)
-  assert.match(shell, /<main className="shell__content" id="main-content" tabIndex=\{-1\}/)
+  assert.match(
+    shell,
+    /<main\s+[\s\S]*?className=\{`shell__content\$\{shellTabStripVisible[\s\S]*?id="main-content"[\s\S]*?tabIndex=\{-1\}/,
+  )
 })
 
 test('drawer lists distinguish loading, error, and confirmed empty data', () => {
@@ -839,7 +842,10 @@ test('navigation surfaces keep the brand close path while the workspace is inert
   assert.match(shell, /const navigationSurfaceOpen = modalDrawerOpen/)
   assert.doesNotMatch(shell, /const navigationSurfaceOpen = .*apps/,
     'the canonical Apps tab is workspace content, not a modal navigation surface')
-  assert.match(shell, /<main className="shell__content"[^>]*inert=\{navigationSurfaceOpen\}/)
+  assert.match(
+    shell,
+    /<main\s+[\s\S]*?className=\{`shell__content\$\{shellTabStripVisible[\s\S]*?inert=\{navigationSurfaceOpen\}/,
+  )
   assert.match(shellBrand, /aria-expanded=\{navigationOpen\}/)
   assert.match(shell, /drawerOpen \? closeDrawer\(\) : openDrawer\(\)/)
 })
@@ -997,6 +1003,10 @@ test('the Möbius header keeps its phone divider but flows into desktop navigati
   )
   assert.match(
     shellCss,
+    /@media \(max-width: 620px\)[\s\S]*?\.shell\s*\{[\s\S]*?--shell-bar-height:\s*46px;/,
+  )
+  assert.match(
+    shellCss,
     /@media \(min-width: 1024px\)[\s\S]*?\.shell__bar\s*\{[\s\S]*?border:\s*0;/,
   )
   assert.match(
@@ -1010,6 +1020,10 @@ test('the Möbius header keeps its phone divider but flows into desktop navigati
   assert.match(
     shellCss,
     /@media \(min-width: 1024px\)[\s\S]*?\.shell\s*\{[\s\S]*?--drawer-top-offset:\s*58px;[\s\S]*?--shell-bar-height:\s*0px;/,
+  )
+  assert.match(
+    shellCss,
+    /\.shell__tabstrip--single-builder\s*\{[\s\S]*?top:\s*calc\(var\(--shell-bar-height,\s*58px\) \+ env\(safe-area-inset-top,\s*0px\)\);/,
   )
 })
 

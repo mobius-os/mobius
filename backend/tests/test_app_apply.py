@@ -10,6 +10,7 @@ import pytest
 from app import app_apply, app_git, icon_assets, models
 from app.config import get_settings
 from app.database import SessionLocal
+from app.manifest_contract import STATIC_ASSETS_COUNT_MAX
 
 
 def _source(slug: str = "demo") -> Path:
@@ -167,6 +168,195 @@ def test_apply_updates_multifile_revision_once(client, auth, db):
       "chatId": "editing-chat",
     }),
   ]
+
+
+def test_local_apply_materializes_versioned_static_assets(client, auth):
+  source = _source()
+  listing_source = source / "listing-assets" / "screen.png"
+  listing_source.parent.mkdir()
+  listing_source.write_bytes(b"accepted-screen-v1")
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["static_assets"] = {
+    "listing/screen.png": "listing-assets/screen.png",
+  }
+  (source / "mobius.json").write_text(json.dumps(manifest))
+
+  created = _apply(client, auth, source)
+
+  assert created.status_code == 200, created.text
+  served = source / "static" / "listing" / "screen.png"
+  assert served.read_bytes() == b"accepted-screen-v1"
+  assert app_git._run(source, "status", "--porcelain").stdout == ""
+
+  listing_source.write_bytes(b"accepted-screen-v2")
+  updated = _apply(client, auth, source)
+
+  assert updated.status_code == 200, updated.text
+  assert served.read_bytes() == b"accepted-screen-v2"
+
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest.pop("static_assets")
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  removed = _apply(client, auth, source)
+
+  assert removed.status_code == 200, removed.text
+  assert not served.exists()
+
+
+def test_local_apply_enforces_static_asset_count_before_materialization(
+  client, auth,
+):
+  source = _source()
+  asset_sources = source / "listing-assets"
+  asset_sources.mkdir()
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["static_assets"] = {}
+  for index in range(STATIC_ASSETS_COUNT_MAX):
+    name = f"item-{index}.txt"
+    (asset_sources / name).write_text(str(index))
+    manifest["static_assets"][f"listing/{name}"] = f"listing-assets/{name}"
+  (source / "mobius.json").write_text(json.dumps(manifest))
+
+  accepted = _apply(client, auth, source)
+
+  assert accepted.status_code == 200, accepted.text
+  served = source / "static" / "listing"
+  assert len(list(served.iterdir())) == STATIC_ASSETS_COUNT_MAX
+  accepted_head = app_git.head_sha(source, app_git.LOCAL_BRANCH)
+
+  extra_name = "item-over-limit.txt"
+  (asset_sources / extra_name).write_text("must not publish")
+  manifest["static_assets"][f"listing/{extra_name}"] = (
+    f"listing-assets/{extra_name}"
+  )
+  (source / "mobius.json").write_text(json.dumps(manifest))
+
+  rejected = _apply(client, auth, source)
+
+  assert rejected.status_code == 422, rejected.text
+  assert rejected.json()["detail"] == {
+    "code": "manifest_invalid",
+    "message": (
+      "Manifest has too many static_assets "
+      f"(max {STATIC_ASSETS_COUNT_MAX})."
+    ),
+  }
+  assert app_git.head_sha(source, app_git.LOCAL_BRANCH) == accepted_head
+  assert len(list(served.iterdir())) == STATIC_ASSETS_COUNT_MAX
+  assert not (served / extra_name).exists()
+
+
+@pytest.mark.parametrize("symlink_component", ["source", "parent"])
+def test_local_apply_rejects_symlinked_static_asset_sources_before_read(
+  client, auth, symlink_component,
+):
+  source = _source()
+  created = _apply(client, auth, source)
+  assert created.status_code == 200, created.text
+  accepted_head = app_git.head_sha(source, app_git.LOCAL_BRANCH)
+  outside = source.parent / "private-static-source.txt"
+  outside.write_text("private bytes must not publish")
+  asset_sources = source / "listing-assets"
+  source_name = "screen.txt"
+  if symlink_component == "source":
+    asset_sources.mkdir()
+    (asset_sources / source_name).symlink_to(outside)
+  else:
+    asset_sources.symlink_to(source.parent, target_is_directory=True)
+    source_name = outside.name
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["static_assets"] = {
+    "listing/screen.txt": f"listing-assets/{source_name}",
+  }
+  (source / "mobius.json").write_text(json.dumps(manifest))
+
+  rejected = _apply(client, auth, source)
+
+  assert rejected.status_code == 422, rejected.text
+  assert rejected.json()["detail"]["code"] == "static_asset_symlink"
+  assert app_git.head_sha(source, app_git.LOCAL_BRANCH) == accepted_head
+  assert outside.read_text() == "private bytes must not publish"
+  assert not (source / "static" / "listing" / "screen.txt").exists()
+
+
+@pytest.mark.parametrize("symlink_component", ["static", "parent"])
+def test_local_apply_rejects_symlinked_static_destinations_before_write(
+  client, auth, symlink_component,
+):
+  source = _source()
+  created = _apply(client, auth, source)
+  assert created.status_code == 200, created.text
+  accepted_head = app_git.head_sha(source, app_git.LOCAL_BRANCH)
+  asset_sources = source / "listing-assets"
+  asset_sources.mkdir()
+  (asset_sources / "screen.txt").write_text("safe app asset")
+  outside = source.parent / "escaped-static-output"
+  outside.mkdir()
+  static_root = source / "static"
+  if symlink_component == "static":
+    static_root.symlink_to(outside, target_is_directory=True)
+  else:
+    static_root.mkdir()
+    (static_root / "listing").symlink_to(outside, target_is_directory=True)
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["static_assets"] = {
+    "listing/screen.txt": "listing-assets/screen.txt",
+  }
+  (source / "mobius.json").write_text(json.dumps(manifest))
+
+  rejected = _apply(client, auth, source)
+
+  assert rejected.status_code == 422, rejected.text
+  assert rejected.json()["detail"]["code"] == "static_asset_symlink"
+  assert app_git.head_sha(source, app_git.LOCAL_BRANCH) == accepted_head
+  assert not (outside / "screen.txt").exists()
+
+
+@pytest.mark.parametrize(
+  "destination",
+  [".mobius-static-assets.json", ".mobius-static-assets.json/screen.txt"],
+)
+def test_static_asset_backups_do_not_collide_with_metadata_on_rollback(
+  client, auth, monkeypatch, destination,
+):
+  source = _source()
+  asset = source / "listing-assets" / "screen.txt"
+  asset.parent.mkdir()
+  asset.write_bytes(b"accepted-screen-v1")
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["static_assets"] = {destination: "listing-assets/screen.txt"}
+  (source / "mobius.json").write_text(json.dumps(manifest))
+
+  created = _apply(client, auth, source)
+
+  assert created.status_code == 200, created.text
+  served = source / "static" / destination
+  metadata = source / ".mobius-static-assets.json"
+  previous_metadata = metadata.read_bytes()
+  asset.write_bytes(b"accepted-screen-v2")
+  original_commit = app_apply.Session.commit
+  calls = 0
+
+  def fail_once(session):
+    nonlocal calls
+    calls += 1
+    if calls == 1:
+      raise RuntimeError("simulated database failure")
+    return original_commit(session)
+
+  monkeypatch.setattr(app_apply.Session, "commit", fail_once)
+  with pytest.raises(RuntimeError, match="simulated database failure"):
+    _apply(client, auth, source)
+
+  assert served.read_bytes() == b"accepted-screen-v1"
+  assert metadata.read_bytes() == previous_metadata
+  assert not (source.parent / ".demo.mobius-static-bak").exists()
+
+  retry = _apply(client, auth, source)
+
+  assert retry.status_code == 200, retry.text
+  assert served.read_bytes() == b"accepted-screen-v2"
+  assert not (source.parent / ".demo.mobius-static-bak").exists()
 
 
 def test_local_apply_converges_schedule_creation_and_removal(client, auth):
@@ -498,6 +688,13 @@ def test_database_failure_after_git_commit_is_retryable(
   (source / "index.jsx").write_text(
     "export default function App() { return <div>accepted-ahead</div> }\n"
   )
+  asset = source / "listing-assets" / "screen.png"
+  asset.parent.mkdir()
+  asset.write_bytes(b"accepted-screen")
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["static_assets"] = {"listing/screen.png": "listing-assets/screen.png"}
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  served = source / "static" / "listing" / "screen.png"
 
   original_commit = app_apply.Session.commit
   calls = 0
@@ -517,6 +714,7 @@ def test_database_failure_after_git_commit_is_retryable(
   assert accepted_head != previous_head
   row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
   assert row.compiled_path == previous_bundle
+  assert not served.exists()
 
   retry = _apply(client, auth, source)
 
@@ -526,6 +724,7 @@ def test_database_failure_after_git_commit_is_retryable(
   assert row.compiled_path != previous_bundle
   assert "accepted-ahead" in row.jsx_source
   assert app_git.head_sha(source, app_git.LOCAL_BRANCH) == accepted_head
+  assert served.read_bytes() == b"accepted-screen"
 
 
 def test_database_failure_during_create_is_retryable_without_orphan_row(
@@ -562,6 +761,64 @@ def test_database_failure_during_create_is_retryable_without_orphan_row(
   assert Path(row.compiled_path).is_file()
   assert not list(app_apply._compiled_dir().glob("*.js.staging"))
   assert app_git.head_sha(source, app_git.LOCAL_BRANCH) == accepted_head
+
+
+def test_refresh_failure_after_commit_keeps_durable_publication(
+  client, auth, monkeypatch,
+):
+  source = _source()
+  asset = source / "listing-assets" / "screen.png"
+  asset.parent.mkdir()
+  asset.write_bytes(b"accepted-screen-v1")
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["static_assets"] = {
+    "listing/screen.png": "listing-assets/screen.png",
+  }
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  created = _apply(client, auth, source)
+  assert created.status_code == 200, created.text
+  app_id = created.json()["app"]["id"]
+  previous_bundle = Path(created.json()["app"]["compiled_path"])
+
+  asset.write_bytes(b"accepted-screen-v2")
+  (source / "index.jsx").write_text(
+    "export default function App() { return <div>durable-v2</div> }\n"
+  )
+  original_refresh = app_apply.Session.refresh
+  calls = 0
+
+  def fail_once(session, *args, **kwargs):
+    nonlocal calls
+    calls += 1
+    if calls == 1:
+      raise RuntimeError("simulated post-commit refresh failure")
+    return original_refresh(session, *args, **kwargs)
+
+  monkeypatch.setattr(app_apply.Session, "refresh", fail_once)
+  with pytest.raises(RuntimeError, match="simulated post-commit refresh failure"):
+    _apply(client, auth, source)
+
+  verify = SessionLocal()
+  try:
+    row = verify.get(models.App, app_id)
+    assert row is not None
+    published = Path(row.compiled_path)
+    assert published != previous_bundle
+    assert published.is_file()
+    assert "durable-v2" in row.jsx_source
+    assert row.source_commit == app_git.head_sha(source, app_git.LOCAL_BRANCH)
+  finally:
+    verify.close()
+  assert not previous_bundle.exists()
+  assert (source / "static" / "listing" / "screen.png").read_bytes() == (
+    b"accepted-screen-v2"
+  )
+  assert not (source.parent / ".demo.mobius-static-bak").exists()
+
+  retry = _apply(client, auth, source)
+
+  assert retry.status_code == 200, retry.text
+  assert Path(retry.json()["app"]["compiled_path"]).is_file()
 
 
 def test_edit_without_apply_remains_a_dirty_invisible_draft(client, auth, db):
