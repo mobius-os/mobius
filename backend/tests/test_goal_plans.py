@@ -10,6 +10,7 @@ import pytest
 
 from app import auth as auth_mod, models
 from app import broadcast as broadcast_mod
+from app.runner_registry import RunnerKind, registry
 
 
 def _goal_plan_script():
@@ -309,6 +310,117 @@ def test_confirmed_goal_clear_is_exact_and_preserves_real_pending_work(
   assert chat.dismissed_goal_id == "clear-goal-id"
   assert [row["cid"] for row in chat.pending_messages] == ["real-follow-up"]
   assert run.status == "stopped"
+
+
+def test_completed_plan_clear_dismisses_without_interrupting_final_response(
+  client, owner_token, db,
+):
+  class FinishingGoal:
+    chat_id = ""
+    kind = RunnerKind.CODEX_SDK
+
+    def __init__(self, chat_id):
+      self.chat_id = chat_id
+      self.clear_calls = 0
+
+    async def clear_goal(self):
+      self.clear_calls += 1
+
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  chat_id = client.post(
+    "/api/chats", json={"title": "Finishing goal"}, headers=auth,
+  ).json()["id"]
+  run = models.ChatRun(
+    id="finishing-goal-run", root_run_id="finishing-goal-run",
+    chat_id=chat_id, status="running", provider="codex",
+    goal_objective="Finish without interruption", goal_id="finishing-goal-id",
+    goal_plan_json={
+      "version": 1,
+      "tasks": [{
+        "id": "finish", "title": "Finish the work", "status": "completed",
+        "depends_on": [],
+      }],
+    },
+    goal_plan_revision=1,
+  )
+  db.add(run)
+  db.commit()
+  handle = FinishingGoal(chat_id)
+  registry.register(handle)
+
+  try:
+    cleared = client.request(
+      "DELETE", f"/api/chats/{chat_id}/goal",
+      json={"goal_id": "finishing-goal-id"}, headers=auth,
+    )
+  finally:
+    registry.unregister(chat_id, handle.kind)
+
+  assert cleared.status_code == 200, cleared.text
+  assert cleared.json() == {"cleared": True, "goal": None}
+  assert handle.clear_calls == 0
+  db.expire_all()
+  chat = db.query(models.Chat).filter(models.Chat.id == chat_id).one()
+  persisted_run = db.query(models.ChatRun).filter(
+    models.ChatRun.id == "finishing-goal-run",
+  ).one()
+  assert chat.dismissed_goal_id == "finishing-goal-id"
+  assert persisted_run.status == "running"
+  assert persisted_run.ended_at is None
+
+
+def test_paused_goal_clear_does_not_interrupt_a_later_ordinary_turn(
+  client, owner_token, db,
+):
+  class OrdinaryTurn:
+    chat_id = ""
+    kind = RunnerKind.CODEX_SDK
+
+    def __init__(self, chat_id):
+      self.chat_id = chat_id
+      self.clear_calls = 0
+
+    async def clear_goal(self):
+      self.clear_calls += 1
+
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  chat_id = client.post(
+    "/api/chats", json={"title": "Retained goal"}, headers=auth,
+  ).json()["id"]
+  started_at = datetime.now(UTC)
+  db.add_all([
+    models.ChatRun(
+      id="paused-retained-goal", root_run_id="paused-retained-goal",
+      chat_id=chat_id, status="stopped", provider="codex",
+      goal_objective="Retained history", goal_id="retained-goal-id",
+      started_at=started_at,
+    ),
+    models.ChatRun(
+      id="later-ordinary-turn", root_run_id="later-ordinary-turn",
+      chat_id=chat_id, status="running", provider="codex",
+      started_at=started_at + timedelta(seconds=1),
+    ),
+  ])
+  db.commit()
+  handle = OrdinaryTurn(chat_id)
+  registry.register(handle)
+
+  try:
+    cleared = client.request(
+      "DELETE", f"/api/chats/{chat_id}/goal",
+      json={"goal_id": "retained-goal-id"}, headers=auth,
+    )
+  finally:
+    registry.unregister(chat_id, handle.kind)
+
+  assert cleared.status_code == 200, cleared.text
+  assert handle.clear_calls == 0
+  db.expire_all()
+  ordinary_run = db.query(models.ChatRun).filter(
+    models.ChatRun.id == "later-ordinary-turn",
+  ).one()
+  assert ordinary_run.status == "running"
+  assert ordinary_run.ended_at is None
 
 
 def test_legacy_queued_goal_clear_is_retired_without_opening_a_turn(db, chat):
