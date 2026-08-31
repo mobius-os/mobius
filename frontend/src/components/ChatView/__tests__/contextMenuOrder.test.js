@@ -19,6 +19,10 @@ const chatViewCss = readFileSync(
   new URL('../ChatView.css', import.meta.url),
   'utf8',
 )
+const chatViewSource = readFileSync(
+  new URL('../ChatView.jsx', import.meta.url),
+  'utf8',
+)
 
 
 test('chat context actions follow model selection and continuation policy', () => {
@@ -33,6 +37,19 @@ test('chat context actions follow model selection and continuation policy', () =
   // Restart continuation is always on and has no toggle to render.
   assert.doesNotMatch(settingsSource, /Continue after planned restarts/)
   assert.doesNotMatch(settingsSource, /Chat summar(?:y|ies)/)
+})
+
+
+test('Changes owns contribution attention without adding a composer card', () => {
+  assert.match(
+    composerSource,
+    /useChatChangesOverview\(chatId, initialChangeEntries,[\s\S]*?enabled: Boolean\(!embedded && chatId\)/,
+  )
+  assert.match(composerSource, /changesOverview\.needsAction \|\| changesOverview\.workState === 'attention'/)
+  assert.match(composerSource, /composer-plus__attention-dot/)
+  assert.match(composerSource, /Changes need attention\./)
+  assert.match(chatViewSource, /initialChangeEntries=\{chatDiffEntries\}/)
+  assert.doesNotMatch(chatViewSource, /ContributionReviewCard|contrib-card-stack/)
 })
 
 

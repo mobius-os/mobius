@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
@@ -38,7 +39,6 @@ from app.github_contribution_contract import (
   GITHUB_LOGIN as _GITHUB_LOGIN,
   GITHUB_REPO as _GITHUB_REPO,
   GIT_SHA as _GIT_SHA,
-  PRE_PR_CHECK_ACTIVE_STATES as _PRE_PR_CHECK_ACTIVE_STATES,
   SUBMIT_TIMEOUT_SECONDS as _SUBMIT_TIMEOUT,
 )
 from app.contribution_records import (
@@ -55,6 +55,64 @@ _PUSH_RETRIES = 3
 _PUSH_RETRY_BASE_SECONDS = 0.5
 _PR_VISIBILITY_RETRIES = 3
 _PR_VISIBILITY_RETRY_BASE_SECONDS = 0.5
+_PUBLICATION_STAGES = frozenset({"draft", "ready"})
+
+
+def _publication_status(stage: str) -> str:
+  """Map the explicit GitHub publication stage onto the ledger lifecycle."""
+  if stage not in _PUBLICATION_STAGES:
+    raise ContributionSubmitError("This pull request has an invalid publication stage.")
+  return "draft" if stage == "draft" else "open"
+
+
+def _require_all_clear_review(record: dict) -> None:
+  """Require an agent verdict pinned to the exact immutable prepared head."""
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  review = (
+    record.get("quality_review")
+    if isinstance(record.get("quality_review"), dict)
+    else {}
+  )
+  head_sha = str(plan.get("head_sha") or "").lower()
+  reviewed_head_sha = str(review.get("reviewed_head_sha") or "").lower()
+  if (
+    review.get("state") != "all_clear"
+    or not _GIT_SHA.fullmatch(head_sha)
+    or reviewed_head_sha != head_sha
+  ):
+    raise HTTPException(
+      status_code=409,
+      detail=(
+        "This contribution needs a complete agent review on its exact current "
+        "head before it can be sent."
+      ),
+    )
+
+
+@dataclass(frozen=True)
+class PersonalReadyTarget:
+  """Exact personal-GitHub PR identity approved by one Ready action."""
+
+  repo_path: Path
+  repo: str
+  number: int
+  url: str
+  head_repository: str
+  head_branch: str
+  base_branch: str
+  head_sha: str
+
+  def journal(self) -> dict:
+    return {
+      "version": 1,
+      "repo": self.repo,
+      "number": self.number,
+      "url": self.url,
+      "head_repository": self.head_repository,
+      "head_branch": self.head_branch,
+      "base_branch": self.base_branch,
+      "expected_head_sha": self.head_sha,
+    }
 
 def _require_github_access_principal(
   principal: Principal, db: Session
@@ -120,15 +178,16 @@ def _safe_repo_path(raw: object) -> Path:
   except (OSError, RuntimeError):
     raise ContributionSubmitError("The staged repo path is invalid.")
   data_dir = Path(get_settings().data_dir).resolve()
-  # A durable repo must live under one of these roots so a restart can find it
-  # again. "contrib" is the de-facto staging root the agent prepares work in
-  # (often nested, e.g. contrib/<audit>/<slug>); the plural "contributions" is
-  # kept alongside it for back-compat with older docs that named that form.
+  # A durable repo must live under one of these roots so a restart can find it.
+  # "contrib" is the staging root agents use for private review worktrees.
   allowed_roots = (
     data_dir / "contrib",
+    # Prepared records created before the staging-root rename still point at
+    # this durable checkout. Keep it reachable for the supported upgrade
+    # window; removing the path would strand reviewed owner work.
+    data_dir / "contributions",
     data_dir / "apps",
     data_dir / "platform",
-    data_dir / "contributions",
   )
   for root in allowed_roots:
     try:
@@ -138,8 +197,9 @@ def _safe_repo_path(raw: object) -> Path:
       continue
   raise ContributionSubmitError(
     "This prepared PR was staged outside Mobius' durable contribution folders. "
-    "Ask the agent to prepare it again from /data/contrib, /data/apps, or "
-    "/data/platform; nothing was sent to GitHub."
+    "Ask the agent to prepare it again from /data/contrib, "
+    "/data/contributions, /data/apps, or /data/platform; nothing was sent "
+    "to GitHub."
   )
 
 
@@ -462,18 +522,6 @@ def _claim_record(
       status_code=409,
       detail="This contribution is no longer waiting for approval.",
     )
-  pre_pr_checks = record.get("pre_pr_checks")
-  if (
-    isinstance(pre_pr_checks, dict)
-    and pre_pr_checks.get("state") in _PRE_PR_CHECK_ACTIVE_STATES
-  ):
-    raise HTTPException(
-      status_code=409,
-      detail=(
-        "GitHub checks are still starting or running for this review. Wait "
-        "for them to finish before opening the pull request."
-      ),
-    )
   plan = record.get("plan")
   if not isinstance(plan, dict):
     raise HTTPException(
@@ -544,8 +592,18 @@ def _stack_meta(record: dict) -> dict:
   }
 
 
-def _validate_stack_records(records: list[dict]) -> list[dict]:
-  """Validate one complete, immutable parent-to-child contribution chain."""
+def _validate_stack_records(
+  records: list[dict],
+  *,
+  allowed_actions: frozenset[str] = frozenset({"pr"}),
+) -> list[dict]:
+  """Validate one complete, immutable parent-to-child contribution chain.
+
+  Publishing a new stack keeps the narrow ``pr`` default. Read-only review
+  callers may additionally admit ``pr_update`` so an already-public stack can
+  be re-reviewed layer by layer without making the stack submit endpoint a
+  second, less-specific update path.
+  """
   if not records:
     raise ContributionSubmitError("This PR stack has no reviewed records.")
   decorated = [(record, _stack_meta(record)) for record in records]
@@ -584,7 +642,7 @@ def _validate_stack_records(records: list[dict]) -> list[dict]:
     branches.add(branch)
     if meta["id"] != stack_id or meta["total"] != total:
       raise ContributionSubmitError("These records do not describe one PR stack.")
-    if record.get("type") != "pr" or plan.get("action") != "pr":
+    if record.get("type") != "pr" or plan.get("action") not in allowed_actions:
       raise ContributionSubmitError("PR stacks can contain pull requests only.")
     if record.get("status") not in allowed_statuses:
       raise ContributionSubmitError(
@@ -630,6 +688,10 @@ def _claim_stack_records(
   record_ids: list[str],
   db: Session,
   expected_nonce: str | None,
+  allowed_actions: frozenset[str] = frozenset({"pr"}),
+  prepared_actions: frozenset[str] | None = None,
+  submitter: str = "contribute-stack-button",
+  already_detail: str = "Every PR in this stack has already been submitted.",
 ) -> list[dict]:
   if not 2 <= len(record_ids) <= 12 or len(set(record_ids)) != len(record_ids):
     raise HTTPException(
@@ -649,10 +711,23 @@ def _claim_stack_records(
       "diff_path": diff_path,
     })
   try:
-    validated = _validate_stack_records([row["record"] for row in rows])
+    validated = _validate_stack_records(
+      [row["record"] for row in rows],
+      allowed_actions=allowed_actions,
+    )
   except ContributionSubmitError as exc:
     raise HTTPException(status_code=409, detail=exc.message) from exc
+  claimable_actions = prepared_actions or allowed_actions
   by_id = {row["record"]["id"]: row for row in rows}
+  for item in validated:
+    if item["record"].get("status") == "prepared":
+      plan = item["record"].get("plan") or {}
+      if plan.get("action") not in claimable_actions:
+        raise HTTPException(
+          status_code=409,
+          detail="A private stack layer is prepared for a different public action.",
+        )
+      _require_all_clear_review(item["record"])
   ordered = []
   now = _now_iso()
   for item in validated:
@@ -662,7 +737,7 @@ def _claim_stack_records(
       record = {
         **record,
         "status": "submitting",
-        "submitter": "contribute-stack-button",
+        "submitter": submitter,
         "submit_started_at": now,
         "updated_at": now,
       }
@@ -671,7 +746,7 @@ def _claim_stack_records(
   if not any(row["record"].get("status") == "submitting" for row in ordered):
     raise HTTPException(
       status_code=409,
-      detail="Every PR in this stack has already been submitted.",
+      detail=already_detail,
     )
   return ordered
 
@@ -1002,10 +1077,14 @@ def _mark_submit_success(
   record_patch: dict | None = None,
 ) -> dict:
   now = _now_iso()
+  publication_stage = str(
+    (record_patch or {}).get("publication_stage") or "draft"
+  )
   next_record = {
     **record,
     **(record_patch or {}),
-    "status": "open",
+    "status": _publication_status(publication_stage),
+    "publication_stage": publication_stage,
     "url": pr_url,
     "updated_at": now,
     "submitted_at": now,
@@ -1034,10 +1113,16 @@ def _mark_existing_pr_update_success(
   gives the ledger an exact lifecycle witness without inventing a second PR.
   """
   now = _now_iso()
+  publication_stage = str(
+    (record_patch or {}).get("publication_stage")
+    or record.get("publication_stage")
+    or "ready"
+  )
   next_record = {
     **record,
     **(record_patch or {}),
-    "status": "open",
+    "status": _publication_status(publication_stage),
+    "publication_stage": publication_stage,
     "url": pr_url,
     "number": number,
     "updated_at": now,
@@ -1301,6 +1386,411 @@ def _find_existing_pr(
     if attempt + 1 < _PR_VISIBILITY_RETRIES:
       time.sleep(_PR_VISIBILITY_RETRY_BASE_SECONDS * (2 ** attempt))
   return None
+
+
+def _confirm_existing_pr_update(
+  repo: Path,
+  upstream_repo: str,
+  number: int,
+  *,
+  expected_head_repository: str,
+  expected_head_sha: str,
+  branch: str,
+  base_branch: str,
+) -> tuple[str, str] | None:
+  """Confirm one known PR after its reviewed branch was pushed.
+
+  Updates already carry an immutable PR number, so a branch-list search is the
+  wrong proof: that index can lag even while the PR endpoint already exposes
+  the new head. Read the known PR directly and retry only this exact,
+  side-effect-free confirmation. The push itself is never repeated here.
+  """
+  if number < 1 or not _GIT_SHA.match(str(expected_head_sha or "")):
+    return None
+  args = ("api", f"repos/{upstream_repo}/pulls/{number}")
+  for attempt in range(_PR_VISIBILITY_RETRIES):
+    try:
+      proc = _git_ops._gh(repo, *args, check=False)
+    except (subprocess.TimeoutExpired, OSError):
+      proc = None
+    live = None
+    if proc is not None and proc.returncode == 0:
+      try:
+        live = json.loads(proc.stdout or "{}")
+      except ValueError:
+        pass
+    if isinstance(live, dict):
+      head = live.get("head") if isinstance(live.get("head"), dict) else {}
+      base = live.get("base") if isinstance(live.get("base"), dict) else {}
+      head_repo = (
+        head.get("repo") if isinstance(head.get("repo"), dict) else {}
+      )
+      url = live.get("html_url")
+      if (
+        live.get("state") == "open"
+        and head_repo.get("full_name") == expected_head_repository
+        and head.get("ref") == branch
+        and head.get("sha") == expected_head_sha
+        and base.get("ref") == base_branch
+        and isinstance(live.get("draft"), bool)
+        and isinstance(url, str)
+        and url == f"https://github.com/{upstream_repo}/pull/{number}"
+      ):
+        return url, ("draft" if bool(live.get("draft")) else "ready")
+    if attempt + 1 < _PR_VISIBILITY_RETRIES:
+      time.sleep(_PR_VISIBILITY_RETRY_BASE_SECONDS * (2 ** attempt))
+  return None
+
+
+def _personal_ready_target(record: dict) -> PersonalReadyTarget:
+  """Derive the one exact personal PR that a record may mark ready."""
+  if (
+    record.get("submission_mode") == "mobius-bot"
+    or record.get("relay_contribution_id")
+  ):
+    raise HTTPException(
+      status_code=409,
+      detail=(
+        "Möbius-published drafts stay draft-only until the relay supports its "
+        "own owner-approved Ready action."
+      ),
+    )
+  if record.get("type") != "pr":
+    raise HTTPException(status_code=400, detail="Ready applies to pull requests only.")
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  try:
+    repo = _git_ops._validate_repo_slug(plan.get("repo") or record.get("repo"))
+    head_repository = _git_ops._validate_repo_slug(
+      record.get("head_repository") or plan.get("head_repository")
+    )
+    head_branch = _git_ops._validate_branch(
+      plan.get("branch") or record.get("branch")
+    )
+    base_branch = _git_ops._validate_branch(
+      record.get("last_submit_base_branch")
+      or record.get("last_submit_upstream_branch")
+    )
+    repo_path = _safe_repo_path(plan.get("repo_path"))
+  except ContributionSubmitError as exc:
+    raise HTTPException(status_code=409, detail=exc.message) from exc
+  try:
+    number = int(record.get("number"))
+  except (TypeError, ValueError):
+    number = 0
+  url = str(record.get("url") or "").rstrip("/")
+  expected_url = f"https://github.com/{repo}/pull/{number}"
+  head_sha = str(record.get("last_submit_push_sha") or "").lower()
+  if number <= 0 or url != expected_url or not _GIT_SHA.fullmatch(head_sha):
+    raise HTTPException(
+      status_code=409,
+      detail=(
+        "This contribution has no exact server-confirmed personal pull request "
+        "head to mark ready. Refresh it before trying again."
+      ),
+    )
+  if not (repo_path / ".git").exists():
+    raise HTTPException(
+      status_code=409,
+      detail="The reviewed checkout for this pull request is no longer available.",
+    )
+
+  # Standalone submission may amend only commit attribution before pushing. In
+  # that case the reviewed diff remains exact while the public commit is the
+  # plan head and `attribution_normalized_from` names the reviewed predecessor.
+  review = (
+    record.get("quality_review")
+    if isinstance(record.get("quality_review"), dict)
+    else {}
+  )
+  plan_head = str(plan.get("head_sha") or "").lower()
+  reviewed_head = str(review.get("reviewed_head_sha") or "").lower()
+  normalized_from = str(plan.get("attribution_normalized_from") or "").lower()
+  if (
+    review.get("state") != "all_clear"
+    or plan_head != head_sha
+    or reviewed_head not in {plan_head, normalized_from}
+  ):
+    raise HTTPException(
+      status_code=409,
+      detail=(
+        "This pull request no longer has an all-clear review pinned to its "
+        "exact public head. Review it again before marking it ready."
+      ),
+    )
+  return PersonalReadyTarget(
+    repo_path=repo_path,
+    repo=repo,
+    number=number,
+    url=url,
+    head_repository=head_repository,
+    head_branch=head_branch,
+    base_branch=base_branch,
+    head_sha=head_sha,
+  )
+
+
+def _ready_claim_matches(record: dict, target: PersonalReadyTarget) -> bool:
+  claim = record.get("readying")
+  if not isinstance(claim, dict):
+    return False
+  expected = target.journal()
+  return all(claim.get(key) == value for key, value in expected.items())
+
+
+def _claim_personal_pr_ready(
+  *,
+  app_id: int,
+  record_id: str,
+  expected_head_sha: str,
+  db: Session,
+  expected_nonce: str | None,
+) -> tuple[dict, Path, PersonalReadyTarget, str]:
+  """Persist one exact Ready approval before any GitHub read or mutation."""
+  _recheck_submit_app(db, app_id, expected_nonce)
+  record_path, _diff_path = _record_paths(app_id, record_id)
+  record = _read_record(record_path)
+  if str(record.get("id") or "") != record_id:
+    raise HTTPException(status_code=409, detail="This contribution record changed.")
+  if record.get("status") not in {"draft", "open"}:
+    raise HTTPException(
+      status_code=409,
+      detail="This contribution is not an open personal draft.",
+    )
+  target = _personal_ready_target(record)
+  approved_head = str(expected_head_sha or "").lower()
+  if not _GIT_SHA.fullmatch(approved_head) or approved_head != target.head_sha:
+    raise HTTPException(
+      status_code=409,
+      detail=(
+        "This pull request changed after the Ready action was shown. Refresh "
+        "Contribute and approve its current head."
+      ),
+    )
+  if isinstance(record.get("readying"), dict):
+    if not _ready_claim_matches(record, target):
+      raise HTTPException(
+        status_code=409,
+        detail="The saved Ready action no longer matches this pull request.",
+      )
+    return record, record_path, target, "recover"
+
+  now = _now_iso()
+  claimed = {
+    **record,
+    "readying": {**target.journal(), "started_at": now},
+    "updated_at": now,
+  }
+  claimed.pop("last_ready_error", None)
+  claimed.pop("last_ready_error_code", None)
+  _write_record(record_path, claimed)
+  return claimed, record_path, target, "new"
+
+
+def _inspect_personal_pr_ready_target(target: PersonalReadyTarget) -> dict:
+  """Read GitHub and prove the saved PR identity and immutable public head."""
+  if not shutil.which("gh"):
+    raise ContributionSubmitError(
+      "This platform needs gh installed before it can mark a pull request ready."
+    )
+  token = github_auth.get_token()
+  state = github_auth.read_state() or {}
+  if not token:
+    raise ContributionSubmitError(
+      "Connect GitHub before marking this pull request ready.", 401,
+    )
+  if not has_full_pr_access(state.get("scopes")):
+    raise ContributionSubmitError(
+      "Reconnect GitHub with full PR access before marking this pull request ready."
+    )
+
+  last_detail = ""
+  for attempt in range(_PR_VISIBILITY_RETRIES):
+    try:
+      proc = _git_ops._gh(
+        target.repo_path,
+        "api", f"repos/{target.repo}/pulls/{target.number}",
+        check=False,
+      )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+      proc = None
+      last_detail = readable_output(str(exc))
+    live = None
+    if proc is not None and proc.returncode == 0:
+      try:
+        live = json.loads(proc.stdout or "{}")
+      except ValueError:
+        last_detail = "GitHub returned invalid pull request metadata."
+    elif proc is not None:
+      last_detail = readable_output(proc.stderr or proc.stdout or "GitHub lookup failed.")
+    if not isinstance(live, dict):
+      if attempt + 1 < _PR_VISIBILITY_RETRIES:
+        time.sleep(_PR_VISIBILITY_RETRY_BASE_SECONDS * (2 ** attempt))
+        continue
+      raise ContributionSubmitError(
+        "Contribute could not verify this pull request on GitHub. Nothing was changed.",
+        status_code=503,
+        code="ready_lookup_failed",
+        detail=last_detail,
+      )
+
+    head = live.get("head") if isinstance(live.get("head"), dict) else {}
+    base = live.get("base") if isinstance(live.get("base"), dict) else {}
+    head_repo = head.get("repo") if isinstance(head.get("repo"), dict) else {}
+    base_repo = base.get("repo") if isinstance(base.get("repo"), dict) else {}
+    node_id = str(live.get("node_id") or "")
+    if (
+      live.get("state") != "open"
+      or live.get("html_url") != target.url
+      or head_repo.get("full_name") != target.head_repository
+      or head.get("ref") != target.head_branch
+      or str(head.get("sha") or "").lower() != target.head_sha
+      or base_repo.get("full_name") != target.repo
+      or base.get("ref") != target.base_branch
+      or not node_id
+      or not isinstance(live.get("draft"), bool)
+    ):
+      raise ContributionSubmitError(
+        "The live pull request no longer matches the exact reviewed Ready action. Nothing was changed.",
+        code="ready_target_changed",
+      )
+    return {
+      "node_id": node_id,
+      "is_draft": live["draft"],
+      # Marking a draft ready can satisfy the last condition of an already
+      # armed auto-merge. Keep that separate public action outside this narrow
+      # endpoint rather than letting Ready trigger it indirectly.
+      "auto_merge_enabled": live.get("auto_merge") is not None,
+    }
+  raise AssertionError("unreachable")
+
+
+_MARK_READY_MUTATION = """
+mutation MarkContributionReady($pullRequestId: ID!) {
+  markPullRequestReadyForReview(input: {pullRequestId: $pullRequestId}) {
+    pullRequest { id isDraft headRefOid url }
+  }
+}
+""".strip()
+
+
+def _mark_personal_pr_ready(
+  target: PersonalReadyTarget, *, node_id: str,
+) -> None:
+  """Issue the one narrow GitHub mutation authorized by a saved Ready claim."""
+  try:
+    proc = _git_ops._gh(
+      target.repo_path,
+      "api", "graphql",
+      "-f", f"query={_MARK_READY_MUTATION}",
+      "-f", f"pullRequestId={node_id}",
+      check=False,
+    )
+  except (subprocess.TimeoutExpired, OSError) as exc:
+    raise ContributionSubmitError(
+      "GitHub did not confirm whether this pull request became ready. Contribute saved the action and will only re-read its state.",
+      status_code=503,
+      code="ready_unconfirmed",
+      detail=readable_output(str(exc)),
+    ) from exc
+  detail = readable_output(proc.stderr or proc.stdout or "")
+  if proc.returncode != 0:
+    raise ContributionSubmitError(
+      "GitHub did not confirm whether this pull request became ready. Contribute saved the action and will only re-read its state.",
+      status_code=503,
+      code="ready_unconfirmed",
+      detail=detail,
+    )
+  try:
+    payload = json.loads(proc.stdout or "{}")
+  except ValueError as exc:
+    raise ContributionSubmitError(
+      "GitHub did not confirm whether this pull request became ready. Contribute saved the action and will only re-read its state.",
+      status_code=503,
+      code="ready_unconfirmed",
+      detail="GitHub returned an invalid mutation result.",
+    ) from exc
+  if not isinstance(payload, dict) or payload.get("errors"):
+    raise ContributionSubmitError(
+      "GitHub did not confirm whether this pull request became ready. Contribute saved the action and will only re-read its state.",
+      status_code=503,
+      code="ready_unconfirmed",
+      detail=detail or "GitHub returned a Ready mutation error.",
+    )
+
+
+def _assert_ready_claim(
+  record: dict, target: PersonalReadyTarget,
+) -> None:
+  current_target = _personal_ready_target(record)
+  if current_target != target or not _ready_claim_matches(record, target):
+    raise ContributionSubmitError(
+      "This contribution changed while its Ready action was being reconciled."
+    )
+
+
+def _settle_personal_pr_ready(
+  record_path: Path, target: PersonalReadyTarget,
+) -> dict:
+  current = _read_record(record_path)
+  _assert_ready_claim(current, target)
+  now = _now_iso()
+  # Never regress a terminal state if another reconciler observed a merge or
+  # close while this owner-approved Ready action was in flight.
+  status = current.get("status")
+  settled_status = status if status in {"merged", "closed"} else "open"
+  updated = {
+    **current,
+    "status": settled_status,
+    "publication_stage": "ready",
+    "ready_at": now,
+    "last_ready_head_sha": target.head_sha,
+    "updated_at": now,
+  }
+  updated.pop("readying", None)
+  updated.pop("last_ready_error", None)
+  updated.pop("last_ready_error_code", None)
+  _write_record(record_path, updated)
+  return updated
+
+
+def _release_personal_pr_ready(
+  record_path: Path,
+  target: PersonalReadyTarget,
+  error: ContributionSubmitError,
+  *,
+  confirmed_draft: bool = False,
+) -> dict:
+  current = _read_record(record_path)
+  _assert_ready_claim(current, target)
+  updated = {
+    **current,
+    "last_ready_error": error.message,
+    "last_ready_error_code": error.code or "ready_failed",
+    "updated_at": _now_iso(),
+  }
+  if confirmed_draft:
+    updated["status"] = "draft"
+    updated["publication_stage"] = "draft"
+  updated.pop("readying", None)
+  _write_record(record_path, updated)
+  return updated
+
+
+def _note_personal_pr_ready_unconfirmed(
+  record_path: Path,
+  target: PersonalReadyTarget,
+  error: ContributionSubmitError,
+) -> dict:
+  current = _read_record(record_path)
+  _assert_ready_claim(current, target)
+  updated = {
+    **current,
+    "last_ready_error": error.message,
+    "last_ready_error_code": "ready_unconfirmed",
+    "updated_at": _now_iso(),
+  }
+  _write_record(record_path, updated)
+  return updated
 
 
 def _existing_branch_pr(
@@ -1584,6 +2074,7 @@ def _submit_prepared_pr(
   direct_base_branch: str | None = None,
   expected_existing_pr_number: int | None = None,
   expected_existing_head_repository: str | None = None,
+  publication_stage: str = "draft",
 ) -> tuple[str, int | None, dict]:
   if not shutil.which("git") or not shutil.which("gh"):
     raise ContributionSubmitError(
@@ -1601,6 +2092,7 @@ def _submit_prepared_pr(
       status_code=409,
     )
   author_name, author_email = _git_ops._connected_git_identity(state, login)
+  _publication_status(publication_stage)
 
   plan = record.get("plan") or {}
   upstream_repo = _git_ops._validate_repo_slug(plan.get("repo") or record.get("repo"))
@@ -1778,26 +2270,30 @@ def _submit_prepared_pr(
     pushed_patch["last_submit_push_sha"] = pushed_sha
 
     if expected_existing_pr_number is not None:
-      existing = _find_existing_pr(
+      existing = _confirm_existing_pr_update(
         repo,
         upstream_repo,
-        login,
-        branch,
+        expected_existing_pr_number,
+        expected_head_repository=existing_head_repository,
         expected_head_sha=pushed_sha,
+        branch=branch,
         base_branch=submit_base,
-        same_repo=bool(direct_base),
       )
-      if (
-        not existing
-        or _parse_pr_number(existing) != expected_existing_pr_number
-      ):
+      if not existing:
         raise ContributionSubmitError(
           "The approved pull request is no longer open on this exact branch. "
           f"The reviewed branch was pushed to {pushed_branch_url}, but no new "
           "pull request was created.",
           record_patch=pushed_patch,
         )
-      return existing, expected_existing_pr_number, pushed_patch
+      existing_url, existing_stage = existing
+      return (
+        existing_url,
+        expected_existing_pr_number,
+        _git_ops._record_patch_with(
+          pushed_patch, {"publication_stage": existing_stage},
+        ),
+      )
 
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
       f.write(body)
@@ -1811,6 +2307,8 @@ def _submit_prepared_pr(
           "--title", title,
           "--body-file", body_file,
         ]
+        if publication_stage == "draft":
+          create_args.append("--draft")
         create_args.extend(("--base", submit_base))
         create_transport_error = None
         try:
@@ -1851,7 +2349,12 @@ def _submit_prepared_pr(
             return (
               existing,
               existing_number,
-              _git_ops._record_patch_with(pushed_patch, label_patch),
+              _git_ops._record_patch_with(
+                _git_ops._record_patch_with(
+                  pushed_patch, {"publication_stage": publication_stage},
+                ),
+                label_patch,
+              ),
             )
           detail = create_transport_error or (
             pr.stderr or pr.stdout or "GitHub command failed."
@@ -1882,7 +2385,16 @@ def _submit_prepared_pr(
       number,
       _reviewed_pr_labels(plan),
     )
-    return url, number, _git_ops._record_patch_with(pushed_patch, label_patch)
+    return (
+      url,
+      number,
+      _git_ops._record_patch_with(
+        _git_ops._record_patch_with(
+          pushed_patch, {"publication_stage": publication_stage},
+        ),
+        label_patch,
+      ),
+    )
   finally:
     if checkout_back:
       _git_ops._git(repo, "checkout", "-q", checkout_back, check=False)

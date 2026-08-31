@@ -2179,11 +2179,8 @@
 .chat__foot .chat__pill,
 .chat__foot .composer-plus { pointer-events: auto; }
 
-/* One geometry-neutral stack for every control that floats above the measured
-   footer. The safe default keeps transient-only controls clear of the composer.
-   When a contribution card actually renders, it becomes the lower anchor and
-   the transient lane grows upward from it without changing --composer-h or the
-   transcript scroll tail. */
+/* One geometry-neutral stack for short-lived controls above the measured
+   footer. Durable contribution state belongs in Changes, never in this layer. */
 .chat__floating-actions {
   position: absolute;
   left: 12px;
@@ -2193,16 +2190,6 @@
   flex-direction: column;
   gap: var(--chat-foot-card-gap);
   pointer-events: none;
-}
-
-/* Only the contribution card gets the goal-rail-like close dock. Using the
-   rendered child as the state owner avoids lowering jump/resume/open-app
-   controls when the async contribution query has nothing to show. */
-.chat__floating-actions:has(> .contrib-card-stack) {
-  bottom: calc(
-    100% - var(--chat-foot-pad-block) - var(--chat-foot-pad-block)
-    + var(--chat-foot-card-gap)
-  );
 }
 
 .chat__floating-transients {
@@ -2638,6 +2625,18 @@
   position: relative;
   flex-shrink: 0;
   align-self: flex-end;
+}
+
+.composer-plus__attention-dot {
+  position: absolute;
+  top: 4px;
+  right: 3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--surface) 90%, transparent);
+  pointer-events: none;
 }
 
 /* Brain button: 48×48, matched 1:1 to the pill's min-height — same

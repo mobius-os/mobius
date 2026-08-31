@@ -958,6 +958,17 @@ export const api = {
         body: JSON.stringify({ paths }),
       },
     ),
+    startWork: (appId, chatId, request) => apiFetch(
+      `/github/contributions/${appId}/for-chat/${encodeURIComponent(chatId)}/work`,
+      {
+        method: 'POST',
+        body: JSON.stringify(request),
+      },
+    ),
+    stopWork: (appId, chatId) => apiFetch(
+      `/github/contributions/${appId}/for-chat/${encodeURIComponent(chatId)}/work/stop`,
+      { method: 'POST' },
+    ),
     publish: (appId, record, { autopilot = false } = {}) => {
       const update = record?.action === 'pr_update'
       const action = update ? 'update-existing' : 'submit'
@@ -968,6 +979,23 @@ export const api = {
           body: JSON.stringify(update ? {} : {
             autopilot,
             submitter: 'chat-review-card',
+            publication_stage: 'ready',
+          }),
+        },
+      )
+    },
+    publishStack: (appId, records) => {
+      const prepared = (Array.isArray(records) ? records : [])
+        .filter(record => record?.status === 'prepared')
+      const updating = prepared.length > 0
+        && prepared.every(record => record?.action === 'pr_update')
+      return apiFetch(
+        `/github/contributions/${appId}/${updating ? 'update-stack' : 'submit-stack'}`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            record_ids: (records || []).map(record => record.id),
+            ...(updating ? {} : { publication_stage: 'ready' }),
           }),
         },
       )

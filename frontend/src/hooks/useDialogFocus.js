@@ -39,6 +39,7 @@ export default function useDialogFocus({
   open = true,
   containerRef,
   initialFocusRef,
+  restoreFocusRef,
   onClose,
   closeOnEscape = true,
   lockScroll = true,
@@ -56,6 +57,7 @@ export default function useDialogFocus({
     const stackEntry = { container }
     dialogStack.push(stackEntry)
     const previouslyFocused = document.activeElement
+    const explicitRestoreTarget = restoreFocusRef?.current
     if (lockScroll) lockBodyScroll()
 
     // The dialog is rendered in place rather than through a body portal. Inert
@@ -124,7 +126,11 @@ export default function useDialogFocus({
       if (stackIndex !== -1) dialogStack.splice(stackIndex, 1)
       siblings.forEach(({ element, inert }) => { element.inert = inert })
       if (lockScroll) unlockBodyScroll()
-      previouslyFocused?.focus?.({ preventScroll: true })
+      if (explicitRestoreTarget) {
+        explicitRestoreTarget.focus?.({ preventScroll: true })
+      } else {
+        previouslyFocused?.focus?.({ preventScroll: true })
+      }
     }
-  }, [open, containerRef, initialFocusRef, lockScroll])
+  }, [open, containerRef, initialFocusRef, restoreFocusRef, lockScroll])
 }

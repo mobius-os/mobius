@@ -63,6 +63,7 @@ class _FakeCodexConfig:
 
 class _FakeApprovalMode:
   auto_review = "auto_review"
+  deny_all = "deny_all"
 
 
 class _FakeSandbox:
@@ -3292,6 +3293,76 @@ def test_ordinary_codex_turns_do_not_expose_provider_private_goal_tools():
     goal_clear=False,
     fallback_goal_objective=None,
   ) is True
+
+
+@pytest.mark.parametrize(
+  "scope, expected_sandbox, expected_approval",
+  [
+    (None, "full-access", "auto_review"),
+    ("read", "read-only", "deny_all"),
+    ("write", "full-access", "deny_all"),
+  ],
+)
+@pytest.mark.parametrize("session_id", [None, "thread-policy"])
+def test_codex_delegation_policy_reaches_the_provider_boundary(
+  monkeypatch,
+  scope,
+  expected_sandbox,
+  expected_approval,
+  session_id,
+):
+  completed = SimpleNamespace(id="turn-policy", usage=None, error=None)
+  thread = _FakeThread(
+    "thread-policy",
+    _FakeTurnHandle([SimpleNamespace(
+      method="turn/completed",
+      payload=_FakeTurnCompletedNotification(completed),
+    )]),
+  )
+  captured = {}
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      captured["config"] = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def thread_start(self, **kwargs):
+      captured["thread"] = kwargs
+      return thread
+
+    async def thread_resume(self, requested, **kwargs):
+      assert requested == "thread-policy"
+      captured["thread"] = kwargs
+      return thread
+
+  monkeypatch.setattr(
+    codex_sdk_runner, "_sdk_imports", lambda: _fake_sdk(FakeAsyncCodex),
+  )
+  policy = None if scope is None else SimpleNamespace(
+    scope=scope,
+    allow_session_reseed=False,
+  )
+
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="inspect",
+    session_id=session_id,
+    base_env={},
+    cwd="/tmp",
+    chat_id=f"policy-{scope or 'owner'}",
+    bc=_FakeBroadcast(),
+    pending_questions={},
+    db=None,
+    run_policy=policy,
+  ))
+
+  assert captured["thread"]["sandbox"] == expected_sandbox
+  assert captured["thread"]["approval_mode"] == expected_approval
+  assert result["error"] is None
 
 
 def test_codex_app_server_launch_args_preserve_overrides_under_setsid(

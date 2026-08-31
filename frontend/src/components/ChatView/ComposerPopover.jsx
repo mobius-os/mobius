@@ -93,6 +93,7 @@ export default function ComposerPopover({
   onOpenInspector,
   onOpenSummary,
   onOpenChanges,
+  initialChangeEntries = [],
   artifactsAppId = null,
   onOpenArtifact,
   onOpenUsage,
@@ -136,14 +137,20 @@ export default function ComposerPopover({
     enabled: Boolean(open && !embedded && artifactsAppId && chatId),
     staleTime: 0,
   })
-  const changesOverview = useChatChangesOverview(chatId, [], {
-    enabled: Boolean(open && !embedded && chatId),
+  const changesOverview = useChatChangesOverview(chatId, initialChangeEntries, {
+    // This compact query previously stayed live through the persistent review
+    // card. Keep it live here after removing that card so the existing Brain
+    // button can carry one geometry-free attention dot for Changes.
+    enabled: Boolean(!embedded && chatId),
   })
   const chatArtifacts = artifactsQuery.data || []
   const artifactItems = chatArtifactPickerItems(appArtifacts, chatArtifacts)
   const latestArtifact = artifactItems[0] || null
   const otherArtifacts = artifactItems.slice(1)
   const [artifactsExpanded, setArtifactsExpanded] = useState(false)
+  const changesNeedAttention = Boolean(
+    changesOverview.needsAction || changesOverview.workState === 'attention',
+  )
   useDiscardUnconfirmedSwitchOnPickerClose(
     open,
     providerSwitchState?.status,
@@ -274,7 +281,7 @@ export default function ComposerPopover({
 
   function handleOpenChanges() {
     setOpen(false)
-    onOpenChanges?.()
+    onOpenChanges?.(triggerRef.current)
   }
 
   function handleOpenArtifact(artifactId) {
@@ -329,11 +336,17 @@ export default function ComposerPopover({
         onClick={togglePopover}
         aria-label={pending
           ? 'Chat options unavailable until this chat is ready'
-          : triggerAriaLabel}
+          : [
+              triggerAriaLabel,
+              changesNeedAttention ? 'Changes need attention.' : '',
+            ].filter(Boolean).join(' ')}
         aria-haspopup={pending ? undefined : 'dialog'}
         aria-expanded={pending ? undefined : open}
       >
         {triggerIcon || <BrainUsageIcon />}
+        {changesNeedAttention && (
+          <span className="composer-plus__attention-dot" aria-hidden="true" />
+        )}
       </button>
       {open && !pending && (
         <div

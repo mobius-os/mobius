@@ -1750,12 +1750,17 @@ async def run_codex_sdk_turn(
           db=db,
         )
 
-      # We use the SDK's `ApprovalMode.auto_review`, which maps to
-      # `approvalPolicy=on_request` with `approvalsReviewer=auto_review`
-      # (rather than an unconditional `approvalPolicy=never`). That may
-      # still surface a human approval prompt in some cases; see
-      # `.pm/features/_003-tech-debt-and-test-gaps.md` OQ-5 for the
-      # required live equivalence check.
+      # Ordinary owner turns use the SDK's `ApprovalMode.auto_review`, which
+      # maps to `approvalPolicy=on_request` with an automatic reviewer.
+      # Delegations deny provider-side escalation. Read helpers retain the
+      # SDK's read-only boundary; write helpers deliberately use the container
+      # boundary below because their workspace is /data and bwrap cannot start
+      # under the normal container seccomp policy.
+      approval_mode = (
+        sdk["ApprovalMode"].deny_all
+        if delegated
+        else sdk["ApprovalMode"].auto_review
+      )
 
       # Sandbox.full_access maps to wire SandboxMode.danger_full_access
       # and disables bwrap. Möbius runs
@@ -1769,12 +1774,12 @@ async def run_codex_sdk_turn(
       # silently broke the agent's ability to verify its own
       # screenshots. Full access here follows the same reasoning, and
       # Möbius's design philosophy
-      # ("trust the agent; container is the sandbox") is consistent.
+      # ("trust the agent; container is the sandbox") is consistent. The
+      # delegated prompt and tool policy still carry the exact project scope;
+      # this only avoids a second write sandbox that cannot function in-container.
       _sandbox = (
         sdk["Sandbox"].read_only
         if delegated and run_policy.scope == "read"
-        else sdk["Sandbox"].workspace_write
-        if delegated
         else sdk["Sandbox"].full_access
       )
       persisted_goal = None
@@ -1814,7 +1819,7 @@ async def run_codex_sdk_turn(
 
       if session_id is None:
         thread = await codex.thread_start(
-          approval_mode=sdk["ApprovalMode"].auto_review,
+          approval_mode=approval_mode,
           sandbox=_sandbox,
           base_instructions=base_instructions,
           developer_instructions="",
@@ -1833,7 +1838,7 @@ async def run_codex_sdk_turn(
         # history), so a native parse is a straight pass-through here.
         thread = await codex.thread_resume(
           session_id,
-          approval_mode=sdk["ApprovalMode"].auto_review,
+          approval_mode=approval_mode,
           sandbox=_sandbox,
           base_instructions=base_instructions,
           developer_instructions="",

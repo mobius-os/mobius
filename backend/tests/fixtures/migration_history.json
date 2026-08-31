@@ -24,6 +24,7 @@
     "0020_app_project_templates": "bdb43c8236d85fce265b6ad92ff5fb590c1a122030c496c888affa22b2f2c1d9",
     "0021_project_chat_collection": "03a5584764da2420f5cdda5256dd1e553fcedf51d488728f57f39278f49966ac",
     "0022_project_artifacts": "ba42d74e4b2795b08f37c2c75116c879dea1686ededb16b0eca0b5c4c79ab29e",
-    "0023_project_color": "aecbaff852f8640f86a9f0695bc26ff8b00e857b31d36a1d345440c301eca5ed"
+    "0023_project_color": "aecbaff852f8640f86a9f0695bc26ff8b00e857b31d36a1d345440c301eca5ed",
+    "0024_attached_delegation_work": "45504079269294dcd1e52d55e581dd7322ed49f8c0b6304b6f1a5e161d057468"
   }
 }

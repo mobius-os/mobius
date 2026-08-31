@@ -24,14 +24,20 @@ from sqlalchemy.orm import Session, aliased
 
 from app import auth, models
 from app.timeutil import now_naive_utc
+from app.usage_metrics import summarize_chat_run_tokens
 
 
 ACTIVE_RUN_STATUSES = frozenset(models.NONTERMINAL_RUN_STATUSES)
+ACTIVE_DELEGATION_STATUSES = frozenset({
+  "accepted", "retrying", "starting", "running", "resuming", "paused",
+})
 TERMINAL_DELEGATION_STATUSES = frozenset({
   "completed", "failed", "needs_review", "stopped", "cancelled",
   "interrupted",
 })
 REVIEW_REQUIRED_MARKER = "DELEGATION_WRITE_REVIEW_REQUIRED"
+MAX_DELEGATION_DEPTH = 4
+CONTRIBUTION_WORKFLOW_SKILL = "/data/apps/contribute/attached-work.md"
 
 
 @dataclass(frozen=True)
@@ -46,6 +52,7 @@ class RunPolicy:
   scope: str
   cwd: str
   depth: int = 1
+  allowed_skill_paths: tuple[str, ...] = ()
 
   @property
   def delegated(self) -> bool:
@@ -87,13 +94,24 @@ class RunPolicy:
         "agent CLI. Complete the bounded task yourself. "
       )
     )
+    skill_rule = (
+      "Do not inspect unrelated chats, Memory, skills, or installed-app "
+      "instructions. For this bounded contribution workflow, read the complete "
+      f"required playbook {self.allowed_skill_paths[0]}; that exact path is "
+      "permitted by this delegated scope. "
+      if len(self.allowed_skill_paths) == 1
+      else (
+        "Do not inspect unrelated chats, Memory, skills, or installed-app "
+        "instructions. "
+      )
+    )
     return (
       "You are a delegated subagent running as a durable child task inside "
       "Möbius. Complete only the bounded user task in this child conversation "
       f"and return a clear result to the parent. {child_work_rule}"
       "Do not ask the owner an interactive question; if a required decision or "
-      "credential is missing, stop and state the blocker precisely. Do not "
-      "inspect unrelated chats, Memory, skills, or installed-app instructions. "
+      "credential is missing, stop and state the blocker precisely. "
+      f"{skill_rule}"
       "Owner-managed MCP connections are not available in this run. "
       "Never read or write /data/cli-auth or /data/.secret-key. "
       f"Working directory: {self.cwd}. {scope_rule}"
@@ -115,6 +133,10 @@ class DelegationIntent:
   scope: str
   cwd: str
   notify_parent_on_complete: bool = True
+  source_work_id: str | None = None
+  source_work_intent: str | None = None
+  source_work_context_app_id: int | None = None
+  source_work_envelope: dict | None = None
 
 
 def same_delegation_intent(
@@ -132,6 +154,10 @@ def same_delegation_intent(
     row.scope == intent.scope,
     row.cwd == intent.cwd,
     row.notify_parent_on_complete == intent.notify_parent_on_complete,
+    row.source_work_id == intent.source_work_id,
+    row.source_work_intent == intent.source_work_intent,
+    row.source_work_context_app_id == intent.source_work_context_app_id,
+    row.source_work_envelope == intent.source_work_envelope,
     row.prompt_sha256 == hashlib.sha256(
       intent.prompt.encode("utf-8")
     ).hexdigest(),
@@ -177,7 +203,18 @@ def create_or_attach_delegation(
     # work deliberately leaves it unset; provider/account limits remain the
     # observable boundary instead of a hidden local spending ceiling.
     max_budget_usd=None,
+    startup_prompt=intent.prompt,
     notify_parent_on_complete=intent.notify_parent_on_complete,
+    source_work_id=intent.source_work_id,
+    source_work_intent=intent.source_work_intent,
+    source_work_context_app_id=intent.source_work_context_app_id,
+    source_work_envelope=intent.source_work_envelope,
+    source_work_status=(
+      "accepted" if intent.source_work_id is not None else None
+    ),
+    source_work_active_chat_id=(
+      intent.parent_chat_id if intent.source_work_id is not None else None
+    ),
   )
   child = models.Chat(
     id=child_id,
@@ -209,6 +246,112 @@ def create_or_attach_delegation(
       )
     return row, True
   return row, False
+
+
+async def ensure_delegation_started(
+  db: Session,
+  row: models.Delegation,
+  prompt: str | None = None,
+  *,
+  start_turn=None,
+) -> bool:
+  """Start one persisted child intent and close its recovery window.
+
+  ``startup_prompt`` is the only state needed after a crash between the
+  Delegation/Chat commit and the writer's first ChatRun. It remains until that
+  run is observable, so a boot or periodic sweep can safely retry this exact
+  child without inventing another task.
+  """
+  existing = db.query(models.ChatRun.id).filter(
+    models.ChatRun.chat_id == row.child_chat_id,
+  ).first()
+  if existing is not None:
+    if row.startup_prompt is not None or row.source_work_status is not None:
+      row.startup_prompt = None
+      row.source_work_status = None
+      row.source_work_result = None
+      db.commit()
+    return False
+
+  content = prompt if prompt is not None else row.startup_prompt
+  if not content:
+    return False
+  if hashlib.sha256(content.encode("utf-8")).hexdigest() != row.prompt_sha256:
+    raise RuntimeError("delegation startup prompt no longer matches intent")
+  if start_turn is None:
+    from app.chat_start import start_programmatic_chat_turn
+    start_turn = start_programmatic_chat_turn
+
+  started = await start_turn(
+    chat_id=row.child_chat_id,
+    title=f"Delegation · {row.task_key}",
+    content=content,
+    provider=row.provider,
+    initiated_by_app_id=row.app_id,
+  )
+  # StartTurn commits through the writer's separate Session. End this request's
+  # read snapshot before proving whether the recovery copy can be discarded.
+  db.rollback()
+  db.expire_all()
+  refreshed = db.query(models.Delegation).filter(
+    models.Delegation.id == row.id,
+  ).first()
+  run_exists = db.query(models.ChatRun.id).filter(
+    models.ChatRun.chat_id == row.child_chat_id,
+  ).first() is not None
+  if refreshed is not None and run_exists and refreshed.startup_prompt is not None:
+    refreshed.startup_prompt = None
+    refreshed.source_work_status = None
+    refreshed.source_work_result = None
+    db.commit()
+    db.expire_all()
+  return bool(started)
+
+
+async def reconcile_unstarted_delegations() -> int:
+  """Start persisted ordinary child intents left before their first ChatRun.
+
+  The same pass also clears source-work leases whose child settled without the
+  live completion hook. It is safe at boot and as a periodic runtime repair.
+  """
+  from app.database import SessionLocal
+
+  with SessionLocal() as db:
+    release_finished_source_work_slots(db)
+    ids = [
+      row_id for (row_id,) in db.query(models.Delegation.id).join(
+        models.Chat,
+        models.Chat.id == models.Delegation.child_chat_id,
+      ).join(
+        models.App,
+        models.App.id == models.Delegation.app_id,
+      ).filter(
+        models.Delegation.startup_prompt.is_not(None),
+        models.Delegation.source_work_id.is_(None),
+        models.Delegation.cancelled_at.is_(None),
+        models.Chat.deleted_at.is_(None),
+        models.App.deleted_at.is_(None),
+      ).order_by(models.Delegation.created_at.asc()).all()
+    ]
+
+  started_count = 0
+  for row_id in ids:
+    try:
+      with SessionLocal() as db:
+        row = db.query(models.Delegation).filter(
+          models.Delegation.id == row_id,
+          models.Delegation.cancelled_at.is_(None),
+        ).first()
+        if row is None:
+          continue
+        started = await ensure_delegation_started(db, row)
+        if started:
+          started_count += 1
+    except Exception:
+      logging.getLogger("moebius.delegations").warning(
+        "unstarted delegation recovery failed id=%s", row_id, exc_info=True,
+      )
+  return started_count
 
 
 def normalize_cwd(raw: str | None) -> str:
@@ -261,6 +404,14 @@ def policy_for_chat(db: Session, chat_id: str) -> RunPolicy | None:
     scope=row.scope,
     cwd=row.cwd,
     depth=depth,
+    allowed_skill_paths=(
+      (CONTRIBUTION_WORKFLOW_SKILL,)
+      if row.source_work_id is not None
+      and row.source_work_intent in {
+        "prepare", "finish", "project", "updates", "followup",
+      }
+      else ()
+    ),
   )
 
 
@@ -361,6 +512,14 @@ def derived_status(
   result = _assistant_result(chat) if chat is not None else ""
   if row.cancelled_at is not None:
     return "cancelled", run, result
+  if run is None and row.source_work_status in {
+    "accepted", "retrying", "needs_review",
+  }:
+    return (
+      row.source_work_status,
+      None,
+      row.source_work_result or "",
+    )
   if run is None:
     return "starting", None, result
   if run.status == "running":
@@ -408,7 +567,10 @@ def _record_lifecycle(
   }
   values = normalize_chat_event(
     chat_id=row.parent_chat_id,
-    chat_run_id=row.parent_root_run_id,
+    # Source-attached work belongs to the chat but deliberately creates no
+    # source ChatRun. Its stable source_work_id is the lifecycle activation;
+    # passing it through the ChatRun FK would manufacture a nonexistent run.
+    chat_run_id=(None if row.source_work_id is not None else row.parent_root_run_id),
     event=event,
   )
   if values is not None and not db.query(models.AgentLifecycleEvent.id).filter(
@@ -461,6 +623,161 @@ def serialize_delegation(
     "result": result,
     "result_truncated": False,
   }
+
+
+_SOURCE_WORK_RESULT_MAX = 3000
+
+
+def serialize_source_work(db: Session, row: models.Delegation) -> dict:
+  """Small durable projection for Changes and the source-chat action card."""
+  if row.source_work_id is None:
+    raise ValueError("delegation is not source-attached work")
+  status, _run, result = derived_status(db, row)
+  usage = summarize_chat_run_tokens(
+    db.query(
+      *[getattr(models.ChatRun, field) for field in (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+      )],
+      models.ChatRun.usage_json,
+    )
+    .filter(models.ChatRun.chat_id == row.child_chat_id)
+    .all()
+  )
+  if (
+    status in TERMINAL_DELEGATION_STATUSES
+    and row.source_work_active_chat_id is not None
+  ):
+    row.source_work_active_chat_id = None
+    db.commit()
+  _record_lifecycle(db, row, status)
+  result = result or ""
+  truncated = len(result) > _SOURCE_WORK_RESULT_MAX
+  return {
+    "id": row.source_work_id,
+    "intent": row.source_work_intent or "",
+    "status": status,
+    "task_key": row.task_key,
+    "child_chat_id": row.child_chat_id,
+    "usage": usage,
+    "result": result[:_SOURCE_WORK_RESULT_MAX],
+    "result_truncated": truncated,
+    "created_at": row.created_at.isoformat() if row.created_at else None,
+  }
+
+
+def latest_source_work(
+  db: Session, parent_chat_id: str, context_app_id: int | None = None,
+) -> models.Delegation | None:
+  """Prefer the one active source job, otherwise return its latest outcome."""
+  query = db.query(models.Delegation).filter(
+    models.Delegation.parent_chat_id == parent_chat_id,
+    models.Delegation.source_work_id.is_not(None),
+  )
+  if context_app_id is not None:
+    query = query.filter(
+      models.Delegation.source_work_context_app_id == context_app_id,
+    )
+  rows = query.order_by(
+    models.Delegation.created_at.desc(), models.Delegation.id.desc(),
+  ).all()
+  active = next((
+    row for row in rows
+    if derived_status(db, row, load_result=False)[0]
+    in ACTIVE_DELEGATION_STATUSES
+  ), None)
+  return active or (rows[0] if rows else None)
+
+
+def release_finished_source_work_slots(
+  db: Session, parent_chat_id: str | None = None,
+) -> int:
+  """Repair active leases whose child has already reached a real terminal."""
+  query = db.query(models.Delegation).filter(
+    models.Delegation.source_work_active_chat_id.is_not(None),
+  )
+  if parent_chat_id is not None:
+    query = query.filter(models.Delegation.parent_chat_id == parent_chat_id)
+  released = 0
+  settled: list[tuple[models.Delegation, str]] = []
+  for row in query.all():
+    status, _run, _result = derived_status(db, row, load_result=False)
+    if status not in TERMINAL_DELEGATION_STATUSES:
+      continue
+    row.source_work_active_chat_id = None
+    _record_lifecycle(db, row, status)
+    settled.append((row, status))
+    released += 1
+  if released:
+    db.commit()
+    for row, status in settled:
+      publish_source_work_changed(row, status)
+  return released
+
+
+def publish_source_work_changed(
+  row: models.Delegation, status: str,
+) -> None:
+  """Publish source-work freshness and one durable terminal attention item."""
+  if row.source_work_id is None:
+    return
+  from app.broadcast import get_system_broadcast
+
+  get_system_broadcast().publish({
+    "type": "delegation_changed",
+    "chatId": row.parent_chat_id,
+    "delegationId": row.id,
+    "sourceWorkId": row.source_work_id,
+    "status": status,
+  })
+  if status not in WAKE_ELIGIBLE_STATUSES:
+    return
+
+  # Source-attached work deliberately does not wake the source agent or write
+  # its transcript. The same parent_woken_at latch records that the owner has
+  # instead received the durable notification which survives a hidden pane,
+  # SSE disconnect, or restart reconciliation. The conditional update and
+  # notification insert commit together inside notify_owner.
+  from app.database import SessionLocal
+  from app.push import notify_owner
+
+  with SessionLocal() as db:
+    claimed = db.query(models.Delegation).filter(
+      models.Delegation.id == row.id,
+      models.Delegation.source_work_id.is_not(None),
+      models.Delegation.parent_woken_at.is_(None),
+      models.Delegation.cancelled_at.is_(None),
+    ).update(
+      {models.Delegation.parent_woken_at: now_naive_utc()},
+      synchronize_session=False,
+    )
+    if claimed != 1:
+      db.rollback()
+      return
+    owner_id = db.query(models.Owner.id).scalar()
+    if not isinstance(owner_id, int):
+      db.rollback()
+      return
+    completed = status == "completed"
+    notify_owner(
+      db,
+      owner_id,
+      title=(
+        "Contribution preparation finished"
+        if completed else "Contribution preparation needs attention"
+      ),
+      body=(
+        "Private reviews and local decisions are ready in Changes."
+        if completed else "The contribution helper stopped at a step that needs review."
+      ),
+      source_type="agent",
+      source_id=row.parent_chat_id,
+      target=f"/shell/?chat={row.parent_chat_id}",
+    )
 
 
 def active_parent_context(
@@ -568,6 +885,8 @@ def mark_cancelled(db: Session, row: models.Delegation) -> None:
     child.auto_resume_on_limit = False
   if row.cancelled_at is None:
     row.cancelled_at = now_naive_utc()
+  if row.source_work_active_chat_id is not None:
+    row.source_work_active_chat_id = None
   # Stage cancellation before recording the terminal lifecycle fact.
   # ``record_event`` commits both when the event is new; the explicit commit
   # covers an idempotent replay where that deterministic event already exists.
@@ -580,7 +899,7 @@ def _delegation_is_active(db: Session, row: models.Delegation) -> bool:
   from app.chat import is_chat_running
 
   status, _physical, _result = derived_status(db, row, load_result=False)
-  return status in {"starting", "running", "resuming", "paused"} or (
+  return status in ACTIVE_DELEGATION_STATUSES or (
     is_chat_running(row.child_chat_id)
   )
 
@@ -990,6 +1309,14 @@ async def wake_parent_after_child_settled(child_chat_id: str) -> None:
         .filter(models.Delegation.child_chat_id == child_chat_id)
         .first()
       )
+      if row is not None and row.source_work_id is not None:
+        status, _, _ = derived_status(db, row)
+        if status in TERMINAL_DELEGATION_STATUSES:
+          row.source_work_active_chat_id = None
+        _record_lifecycle(db, row, status)
+        db.commit()
+        publish_source_work_changed(row, status)
+        return
       if row is not None:
         from app.goal_plans import publish_plan_for_delegation
         publish_plan_for_delegation(db, row)

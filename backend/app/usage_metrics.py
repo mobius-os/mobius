@@ -17,6 +17,38 @@ from __future__ import annotations
 from typing import Any
 
 
+CHAT_TOKEN_FIELDS = (
+  "input_tokens",
+  "output_tokens",
+  "cache_read_input_tokens",
+  "cache_creation_input_tokens",
+  "reasoning_output_tokens",
+  "total_tokens",
+)
+
+
+def summarize_chat_run_tokens(runs: Any) -> dict:
+  """Small provider-neutral token totals for one chat's durable runs."""
+  rows = list(runs or [])
+  totals = {}
+  for field in CHAT_TOKEN_FIELDS:
+    values = [
+      int(getattr(run, field))
+      for run in rows
+      if getattr(run, field, None) is not None
+    ]
+    totals[field] = sum(values) if values else None
+  return {
+    "coverage": {
+      "runs": len(rows),
+      "runs_with_usage": sum(
+        getattr(run, "usage_json", None) is not None for run in rows
+      ),
+    },
+    "totals": totals,
+  }
+
+
 def _count(value: Any) -> int:
   """Return a non-negative integer counter; unknown SDK values become zero."""
   if isinstance(value, bool):

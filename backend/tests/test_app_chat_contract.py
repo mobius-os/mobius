@@ -446,7 +446,7 @@ def test_app_chat_cannot_change_system_prompt_after_it_started(
   assert "new app chat" in changed.json()["detail"]
 
 
-def test_app_chat_list_can_filter_by_scope(client, owner_token):
+def test_app_chat_list_can_filter_by_scope(client, owner_token, db):
   _, app_token = _make_app(client, owner_token, "scoped-chatter")
   _, other_app_token = _make_app(client, owner_token, "other-scoped-chatter")
   app_auth = {"Authorization": f"Bearer {app_token}"}
@@ -471,6 +471,17 @@ def test_app_chat_list_can_filter_by_scope(client, owner_token):
   foreign = create(
     "Other app same scope", "workout-session:session-a", headers=other_auth,
   )
+  db.add(models.ChatRun(
+    id="session-a-measured-run",
+    chat_id=session_a_2,
+    status="completed",
+    provider="codex",
+    input_tokens=900,
+    output_tokens=100,
+    total_tokens=1_000,
+    usage_json={"provider": "codex"},
+  ))
+  db.commit()
 
   owner_list = client.get(
     "/api/app-chats",
@@ -490,6 +501,13 @@ def test_app_chat_list_can_filter_by_scope(client, owner_token):
   assert foreign not in ids
   assert all(row["scope"] == "workout-session:session-a" for row in rows)
   assert all(row["scope_label"] == "Session A" for row in rows)
+  measured = next(row for row in rows if row["id"] == session_a_2)
+  assert measured["usage"]["coverage"] == {
+    "runs": 1,
+    "runs_with_usage": 1,
+  }
+  assert measured["usage"]["totals"]["total_tokens"] == 1_000
+  assert "cost_usd" not in measured["usage"]["totals"]
 
 
 def test_app_chat_create_stores_report_date_and_kind(client, owner_token, db):

@@ -40,11 +40,13 @@ This boundary is not a reason to hide or skip validation. Inside Möbius:
   use a lock-matched environment or hosted checks for that contract; and
 - for concurrency or ordering, persistence, auth or security, migrations,
   provider protocols, dependency/runtime changes, or broad cross-cutting work,
-  explicitly recommend Contribute's **Run GitHub checks** before **Send PR**.
+  explicitly recommend opening or updating a **Draft PR** through Contribute,
+  letting its hosted checks run, and using **Request review** once they pass.
 
 `scripts/test.sh --backend` remains for a Docker-capable contributor host. The
-hosted pre-PR workflow gives early full-suite evidence for the exact reviewed
-commit, and the merge queue remains the unconditional authoritative gate.
+hosted pull-request checks give full-suite evidence for the exact reviewed
+commit without merging it, and the merge queue remains the unconditional
+authoritative gate.
 
 Recovery is not a daemon, listener, alternate boot mode, or second process
 inside Möbius. If the interface is unavailable, ask the partner to open

@@ -3633,6 +3633,19 @@ async def run_chat(
     except Exception:
       _get_logger().debug("delegation parent-wake skipped", exc_info=True)
 
+    # A contribution action pressed while this source turn was active is a
+    # durable accepted job, not a hidden message queued behind the turn. Once
+    # the source settles, revalidate its exact edit revision and start the
+    # attached child automatically (or surface needs_review on drift).
+    try:
+      if chat_id and runtime_settled:
+        from app.routes.github import reconcile_attached_contribution_work
+        await reconcile_attached_contribution_work(chat_id)
+    except Exception:
+      _get_logger().debug(
+        "attached contribution reconcile skipped", exc_info=True,
+      )
+
     # Turn-end chat-note guarantee: when the chat SETTLED (no pending
     # follow-up), the platform's sole publisher updates its three summary
     # granularities. Runs AFTER the reply is sent → no user-facing latency;

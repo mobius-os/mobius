@@ -348,6 +348,17 @@ async def _wake_completed_delegation_parents(context: StartupContext) -> None:
     )
 
 
+async def _reconcile_unstarted_delegations(context: StartupContext) -> None:
+  """Close the persisted-intent to first-ChatRun crash window."""
+  from app.delegations import reconcile_unstarted_delegations
+  from app.routes.github import reconcile_attached_contribution_work
+
+  count = await reconcile_unstarted_delegations()
+  count += await reconcile_attached_contribution_work()
+  if count:
+    context.logger.info("started %d persisted delegation(s)", count)
+
+
 async def _install_bootstrap_apps(context: StartupContext) -> None:
   from app.bootstrap import ensure_bootstrap_apps_installed
 
@@ -441,6 +452,10 @@ DATABASE_STARTUP_TASKS = (
     "install bootstrap apps",
     _install_bootstrap_apps,
     checkpoint="startup_apps_bootstrapped",
+  ),
+  StartupTask(
+    "reconcile unstarted delegations",
+    _reconcile_unstarted_delegations,
   ),
   StartupTask(
     "reconcile app cron supervision",

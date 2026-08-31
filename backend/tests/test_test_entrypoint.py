@@ -5,6 +5,10 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).parents[2] / "scripts" / "test.sh"
 HOST_RUNNER = Path(__file__).parents[2] / "scripts" / "wt-pytest.sh"
+CONTRIBUTING = Path(__file__).parents[2] / "CONTRIBUTING.md"
+PLATFORM_MAINTENANCE = (
+  Path(__file__).parents[1] / "scripts" / "seed-skills" / "platform-maintenance.md"
+)
 
 
 def test_fast_mode_uses_host_runtime_before_any_docker_preflight():
@@ -29,9 +33,19 @@ def test_full_backend_keeps_the_isolated_container_contract():
   source = SCRIPT.read_text()
   assert "normal Möbius app container" in source
   assert "intentional trust boundary" in source
-  assert "Run GitHub checks" in source
+  assert "open or update a draft PR" in source
+  assert "Run GitHub checks" not in source
   assert "docker compose -p \"${TEST_PROJECT}\"" in source
   assert "docker-compose.test.yml run --rm --no-deps" in source
+
+
+def test_hosted_checks_documentation_uses_the_draft_pr_path():
+  contributing = CONTRIBUTING.read_text()
+  maintenance = PLATFORM_MAINTENANCE.read_text()
+  assert "opens or updates a draft pull request" in contributing
+  assert "opening or updating a **Draft PR**" in maintenance
+  assert "Run GitHub checks" not in contributing
+  assert "Run GitHub checks" not in maintenance
 
 
 def test_host_runner_checks_backend_node_surface_not_full_frontend_tree():
