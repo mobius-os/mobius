@@ -13,7 +13,7 @@ const apiClient = readFileSync(new URL('../../../api/client.js', import.meta.url
 const systemStream = readFileSync(new URL('../../../hooks/useSystemEventStream.js', import.meta.url), 'utf8')
 const settingsView = readFileSync(new URL('../../SettingsView/SettingsView.jsx', import.meta.url), 'utf8')
 
-test('floating actions precede the measured rail → connection → queued → composer stack', () => {
+test('only transient nudges float above the measured rail → connection → queued → composer stack', () => {
   const footStart = chatView.indexOf('<div ref={footRef} className="chat__foot">')
   const composer = chatView.indexOf('<ChatInputBar', footStart)
   const foot = chatView.slice(footStart, composer)
@@ -34,26 +34,23 @@ test('floating actions precede the measured rail → connection → queued → c
   const transientLane = foot.indexOf('className="chat__floating-transients"')
   const offscreenNudges = foot.indexOf('className="chat__offscreen-nudges"')
   const openApp = foot.indexOf('className="chat__open-app"')
-  const contribution = foot.indexOf('<ContributionReviewCard')
   assert.ok(
     transientLane > floatingActions
       && offscreenNudges > transientLane
-      && openApp > transientLane
-      && contribution > openApp,
-    'every transient footer action must render above the stable contribution anchor',
+      && openApp > transientLane,
+    'every transient footer action must stay in the one short-lived lane',
   )
-  assert.ok(contribution < rail,
-    'the contribution anchor must stay outside measured footer flow')
+  assert.doesNotMatch(
+    foot,
+    /ContributionReviewCard|contrib-card-stack/,
+    'durable contribution state must not persist above the composer',
+  )
   assert.match(
     chatCss,
     /\.chat__floating-actions\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?bottom:\s*calc\(100% \+ var\(--chat-foot-card-gap\)\);[\s\S]*?pointer-events:\s*none;/,
     'transient-only actions must stay clear of the composer and outside measured footer flow',
   )
-  assert.match(
-    chatCss,
-    /\.chat__floating-actions:has\(> \.contrib-card-stack\)\s*\{[\s\S]*?bottom:\s*calc\([\s\S]*?100% - var\(--chat-foot-pad-block\) - var\(--chat-foot-pad-block\)[\s\S]*?\+ var\(--chat-foot-card-gap\)[\s\S]*?\);/,
-    'only a rendered contribution card may activate the closer goal-rail-like dock',
-  )
+  assert.doesNotMatch(chatCss, /\.chat__floating-actions:has\(> \.contrib-card-stack\)/)
   assert.match(
     chatCss,
     /\.chat__foot\s*\{[\s\S]*?--chat-foot-pad-block:\s*8px;[\s\S]*?padding:\s*var\(--chat-foot-pad-block\) 12px;/,

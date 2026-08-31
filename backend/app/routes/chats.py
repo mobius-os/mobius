@@ -72,6 +72,7 @@ from app.tool_output_storage import (
   decode_tool_output,
   tool_output_length,
 )
+from app.usage_metrics import CHAT_TOKEN_FIELDS, summarize_chat_run_tokens
 
 log = logging.getLogger(__name__)
 
@@ -1938,33 +1939,19 @@ def get_chat_usage(
     .order_by(models.ChatRun.started_at.asc(), models.ChatRun.id.asc())
     .all()
   )
-  count_fields = (
-    "input_tokens",
-    "output_tokens",
-    "cache_read_input_tokens",
-    "cache_creation_input_tokens",
-    "reasoning_output_tokens",
-    "total_tokens",
-  )
-  totals = {}
-  for field in count_fields:
-    values = [
-      int(getattr(run, field))
-      for run in runs
-      if getattr(run, field) is not None
-    ]
-    totals[field] = sum(values) if values else None
+  token_summary = summarize_chat_run_tokens(runs)
   costs = [float(run.cost_usd) for run in runs if run.cost_usd is not None]
-  totals["cost_usd"] = sum(costs) if costs else None
 
   return {
     "chat_id": chat_id,
     "coverage": {
-      "runs": len(runs),
-      "runs_with_usage": sum(run.usage_json is not None for run in runs),
+      **token_summary["coverage"],
       "runs_with_cost": len(costs),
     },
-    "totals": totals,
+    "totals": {
+      **token_summary["totals"],
+      "cost_usd": sum(costs) if costs else None,
+    },
     "runs": [
       {
         "id": run.id,
@@ -1974,7 +1961,7 @@ def get_chat_usage(
         "started_at": run.started_at,
         "ended_at": run.ended_at,
         "cost_usd": run.cost_usd,
-        **{field: getattr(run, field) for field in count_fields},
+        **{field: getattr(run, field) for field in CHAT_TOKEN_FIELDS},
         "model_context_window": run.model_context_window,
         "usage": run.usage_json,
       }
@@ -2724,7 +2711,7 @@ def _app_chat_sort_ts(chat: models.Chat) -> float:
   return ts.timestamp()
 
 
-def _app_chat_summary(chat: models.Chat) -> dict:
+def _app_chat_summary(chat: models.Chat, usage: dict) -> dict:
   return {
     "id": chat.id,
     "title": chat.title,
@@ -2736,6 +2723,7 @@ def _app_chat_summary(chat: models.Chat) -> dict:
     "provider": chat.provider or "claude",
     "scope": _app_chat_scope(chat),
     "scope_label": _app_chat_scope_label(chat),
+    "usage": usage,
   }
 
 
@@ -2780,7 +2768,39 @@ def list_app_chats(
   if clean_scope is not None:
     chats = [c for c in chats if _app_chat_scope(c) == clean_scope]
   chats.sort(key=_app_chat_sort_ts, reverse=True)
-  return [_app_chat_summary(c) for c in chats]
+  usage_by_chat: dict[str, dict] = {}
+  if chats:
+    aggregate_fields = [
+      func.sum(getattr(models.ChatRun, field)).label(field)
+      for field in CHAT_TOKEN_FIELDS
+    ]
+    rows = db.query(
+      models.ChatRun.chat_id,
+      func.count(models.ChatRun.id).label("runs"),
+      func.sum(case(
+        (models.ChatRun.usage_json.is_not(None), 1),
+        else_=0,
+      )).label("runs_with_usage"),
+      *aggregate_fields,
+    ).filter(
+      models.ChatRun.chat_id.in_([chat.id for chat in chats]),
+    ).group_by(models.ChatRun.chat_id).all()
+    for row in rows:
+      usage_by_chat[row.chat_id] = {
+        "coverage": {
+          "runs": int(row.runs or 0),
+          "runs_with_usage": int(row.runs_with_usage or 0),
+        },
+        "totals": {
+          field: getattr(row, field)
+          for field in CHAT_TOKEN_FIELDS
+        },
+      }
+  empty_usage = summarize_chat_run_tokens([])
+  return [
+    _app_chat_summary(chat, usage_by_chat.get(chat.id, empty_usage))
+    for chat in chats
+  ]
 
 
 @app_chat_router.post(

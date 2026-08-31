@@ -17,10 +17,13 @@ from app.chat_start import start_programmatic_chat_turn
 from app.database import get_db
 from app.config import get_settings
 from app.delegations import (
+  ACTIVE_DELEGATION_STATUSES,
   DelegationIntent,
   cancel_delegation_execution,
   create_or_attach_delegation,
   derived_status,
+  ensure_delegation_started,
+  MAX_DELEGATION_DEPTH,
   normalize_cwd,
   parent_root_run_id,
   serialize_delegation,
@@ -177,31 +180,9 @@ def _row_for_principal(
 async def _ensure_started(
   db: Session, row: models.Delegation, prompt: str,
 ) -> None:
-  if (
-    db.query(models.ChatRun.id)
-    .filter(models.ChatRun.chat_id == row.child_chat_id)
-    .first()
-  ) is not None:
-    return
-  started = await start_programmatic_chat_turn(
-    chat_id=row.child_chat_id,
-    title=f"Delegation · {row.task_key}",
-    content=prompt,
-    provider=row.provider,
-    initiated_by_app_id=row.app_id,
+  await ensure_delegation_started(
+    db, row, prompt, start_turn=start_programmatic_chat_turn,
   )
-  if not started:
-    # Another identical submit already owns the transient start claim. Return
-    # the same durable identity in "starting" state; the helper polls it rather
-    # than treating ordinary idempotent contention as a failed delegation.
-    db.rollback()
-    db.expire_all()
-    return
-  # The request Session queried the child before the writer actor committed its
-  # StartTurn on a separate connection. End that read snapshot so derived
-  # status observes the just-created ChatRun instead of reporting "starting".
-  db.rollback()
-  db.expire_all()
 
 
 @router.post("", status_code=201, dependencies=[Depends(reject_cross_site)])
@@ -392,7 +373,7 @@ async def cancel_delegation(
 ):
   row = _row_for_principal(db, delegation_id, principal)
   status, _, _ = derived_status(db, row)
-  if status in ("running", "resuming", "paused", "starting"):
+  if status in ACTIVE_DELEGATION_STATUSES:
     if not await cancel_delegation_execution(row.id):
       raise HTTPException(
         status_code=409,
@@ -415,7 +396,7 @@ async def cancel_active_for_parent(db: Session, parent_chat_id: str) -> list[str
   cancelled: list[str] = []
   for row in rows:
     status, _, _ = derived_status(db, row)
-    if status not in ("running", "resuming", "paused", "starting"):
+    if status not in ACTIVE_DELEGATION_STATUSES:
       continue
     if await cancel_delegation_execution(row.id):
       cancelled.append(row.id)

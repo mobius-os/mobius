@@ -62,10 +62,20 @@ export function makeAppChatController({ knownChats, chats, readJson }) {
     ).then(async response => (
       response.ok ? (await response.json())?.plan ?? null : null
     )).catch(() => null)
+    const usagePromise = chats.usage(
+      request.chatId,
+      { timeoutMs: 5000 },
+    ).then(async response => (
+      response.ok ? (await response.json()) ?? null : null
+    )).catch(() => null)
     const runtime = await readJson(
       await chats.runtime(request.chatId, { timeoutMs: 5000 }),
       'Could not read conversation progress:',
     )
-    return { ...runtime, goal_plan: await goalPlanPromise }
+    return {
+      ...runtime,
+      goal_plan: await goalPlanPromise,
+      usage: await usagePromise,
+    }
   }
 }

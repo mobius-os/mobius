@@ -8,4 +8,4 @@ def test_boot_pruner_preserves_durable_contribution_repositories():
 
   assert "! -path '/data/contrib/*'" in script
   assert "! -path '/data/contributions/*'" in script
-  assert "prepared review cards point at their exact" in script
+  assert "review cards point at exact commits" in script

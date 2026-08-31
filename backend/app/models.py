@@ -362,9 +362,10 @@ class Delegation(Base):
 
   The child conversation is an ordinary hidden app-owned ``Chat`` and its
   physical execution state remains authoritative in ``ChatRun``. This row
-  stores only the immutable intent/policy needed to attach retries, constrain
-  the SDK runner, and relate the child back to its parent logical run. Status is
-  deliberately NOT duplicated here: every read derives it from the child run.
+  stores the immutable intent/policy needed to attach retries, constrain the
+  SDK runner, and relate the child back to its parent logical run. Ordinary
+  status is derived from the child run; source-attached work adds only the
+  narrow pre-run accepted/needs-review state needed for deferred startup.
   """
 
   __tablename__ = "delegations"
@@ -394,6 +395,11 @@ class Delegation(Base):
   scope = Column(String(16), nullable=False)
   cwd = Column(String(1024), nullable=False)
   prompt_sha256 = Column(String(64), nullable=False)
+  # Prompt bytes are retained only across the narrow commit-to-ChatRun startup
+  # gap. Once the writer creates the first physical run, the immutable digest
+  # above and child transcript are sufficient and this transient recovery copy
+  # is cleared.
+  startup_prompt = Column(Text, nullable=True, default=None)
   max_budget_usd = Column(Float, nullable=True)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
   cancelled_at = Column(DateTime, nullable=True, default=None)
@@ -407,6 +413,27 @@ class Delegation(Base):
   # or queues. Delivery is intentionally at-least-once across a crash between
   # those two transactions so a child result is never silently lost.
   parent_woken_at = Column(DateTime, nullable=True, default=None)
+  # A source-attached job (currently contribution preparation) belongs to the
+  # owner-facing source chat without fabricating a ChatRun there. The stable
+  # work id makes retries attach; the explicit intent supports a small durable
+  # projection without parsing task keys. ``source_work_active_chat_id`` is a
+  # nullable unique lease: terminal reconciliation clears it, so at most one
+  # source-attached worker can reserve a chat across concurrent requests.
+  source_work_id = Column(String(64), nullable=True, unique=True, index=True)
+  source_work_intent = Column(String(32), nullable=True, default=None)
+  source_work_context_app_id = Column(
+    Integer, ForeignKey("apps.id"), nullable=True, index=True
+  )
+  # Source work can be accepted while its owner chat is still changing. This
+  # compact server-derived envelope is revalidated once the source settles;
+  # only the pre-start ``accepted``/``retrying``/``needs_review`` override
+  # lives here.
+  source_work_envelope = Column(JSON, nullable=True, default=None)
+  source_work_status = Column(String(32), nullable=True, default=None)
+  source_work_result = Column(Text, nullable=True, default=None)
+  source_work_active_chat_id = Column(
+    String(64), nullable=True, unique=True, index=True
+  )
 
 
 class ChatWait(Base):

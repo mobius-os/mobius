@@ -9,7 +9,7 @@ import {
   summarizeChatDiffs,
 } from '../chatDiffs.js'
 import { chatChangesOverview } from '../chatChangesLifecycle.js'
-import { loadChatContributionCoverage } from '../useChatChangesOverview.js'
+import { loadChatContributionCoverage } from '../chatChangesQueries.js'
 
 const small = {
   diff: 'diff --git a/src/a.js b/src/a.js\n--- a/src/a.js\n+++ b/src/a.js\n@@ -1 +1 @@\n-old\n+new',

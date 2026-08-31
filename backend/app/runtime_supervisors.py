@@ -23,6 +23,7 @@ RESTART_BACKLOG_DRAIN_INTERVAL_SECS = 2.0
 CHAT_WAIT_SWEEP_INTERVAL_SECS = 30.0
 DELEGATION_WAKE_RECOVERY_INTERVAL_SECS = 60.0
 AUTOPILOT_LEASE_RECOVERY_INTERVAL_SECS = 60.0
+DELEGATION_START_RECOVERY_INTERVAL_SECS = 60.0
 
 
 class RuntimeSettings(Protocol):
@@ -272,6 +273,22 @@ class RuntimeSupervisors:
           )
         await asyncio.sleep(sweep_seconds)
 
+    async def delegation_start_recovery_loop():
+      while True:
+        await asyncio.sleep(DELEGATION_START_RECOVERY_INTERVAL_SECS)
+        try:
+          from app.delegations import reconcile_unstarted_delegations
+          from app.routes.github import reconcile_attached_contribution_work
+
+          await reconcile_unstarted_delegations()
+          await reconcile_attached_contribution_work()
+        except asyncio.CancelledError:
+          raise
+        except Exception as exc:
+          self.log.error(
+            "delegation startup recovery failed: %s", exc, exc_info=True,
+          )
+
     async def agent_scratch_loop():
       # Exact physical-completion hints own the normal path. The deadline is
       # independent of event traffic so the broad sweep still repairs missed
@@ -333,6 +350,7 @@ class RuntimeSupervisors:
     )
     self._spawn("writer-supervisor", writer_supervisor_loop())
     self._spawn("browser-profile-quota", browser_profile_loop())
+    self._spawn("delegation-start-recovery", delegation_start_recovery_loop())
     self._spawn("agent-scratch-retention", agent_scratch_loop())
     self._spawn("legacy-tool-output-compression", compress_legacy_tool_outputs())
 

@@ -94,9 +94,12 @@ test('opaque embed boot skips service workers and owner browser storage', () => 
 })
 
 test('embedded chat never starts the owner app inventory query', () => {
+  const changesOverviewCall = composerSource.match(
+    /const changesOverview = useChatChangesOverview\([\s\S]*?\n  \}\)/,
+  )?.[0] || ''
   assert.match(
-    composerSource,
-    /useChatChangesOverview\(chatId, \[\], \{\s*enabled: Boolean\(open && !embedded && chatId\)/,
+    changesOverviewCall,
+    /enabled: Boolean\(!embedded && chatId\)/,
   )
   assert.match(changesSource, /appQueries\.list\.useQuery\(\{ enabled \}\)/)
   assert.match(

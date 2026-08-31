@@ -991,9 +991,10 @@ chown mobius:mobius /data/.gitignore 2>/dev/null || true
 # /data/platform/.git. The outer /data repo ignores those repos so `git add -A`
 # does not try to treat them as submodules, while their owning lifecycle can
 # still keep history across container restarts.
-# Contribution checkouts under /data/contrib and legacy /data/contributions are
-# intentional durable repos too: prepared review cards point at their exact
-# commits and the approved Send path re-verifies that history before pushing.
+# Contribution checkouts under /data/contrib are intentional durable repos too.
+# The legacy /data/contributions root remains protected for prepared records
+# created before the staging-root rename: review cards point at exact commits
+# and the approved Send path re-verifies that history before pushing.
 #
 # The .pre-clone.<ts> quarantines are also preserved WHOLE (including their
 # .git): they hold the agent's migrated-aside platform tree, and the whole point
