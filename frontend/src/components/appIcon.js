@@ -40,35 +40,3 @@ export function rememberAppIconReady(url) {
 export function forgetAppIconReady(url) {
   if (url) readyIconUrls.delete(url)
 }
-
-/**
- * Fetch and decode one versioned icon ahead of its first visible mount.
- * Failures stay an ordinary initials fallback and can be retried by a later
- * visible <img>.
- */
-function preloadAppIcon(url, ImageCtor) {
-  if (!url || typeof ImageCtor !== 'function') return Promise.resolve(false)
-  if (readyIconUrls.has(url)) return Promise.resolve(true)
-
-  return new Promise(resolve => {
-    const image = new ImageCtor()
-    image.onload = async () => {
-      try { await image.decode?.() } catch { /* onload already proved usable bytes */ }
-      rememberAppIconReady(url)
-      resolve(true)
-    }
-    image.onerror = () => { resolve(false) }
-    image.decoding = 'async'
-    image.src = url
-  })
-}
-
-export function preloadAppIcons(apps, {
-  size = 128,
-  ImageCtor = globalThis.Image,
-} = {}) {
-  const urls = new Set(
-    (apps || []).map(app => appIconUrl(app, size)).filter(Boolean),
-  )
-  return Promise.all([...urls].map(url => preloadAppIcon(url, ImageCtor)))
-}
