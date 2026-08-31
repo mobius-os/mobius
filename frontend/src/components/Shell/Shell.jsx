@@ -42,6 +42,7 @@ import {
 import {
   appQueries,
   appSourceQueries,
+  chatAppArtifactQueries,
   chatMessagesQueryKey,
   chatQueries,
   modelQueries,
@@ -68,6 +69,7 @@ import {
   workspaceRequestsForBuiltApps,
   ACTIVATE_FOREGROUND,
 } from './workspacePlacement.js'
+import { chatAppArtifactInvalidation } from './chatAppArtifactState.js'
 import {
   appUpdateStaleMessage,
   findAppStoreApp,
@@ -152,10 +154,6 @@ import {
   shouldFocusComposerAfterPanePointer,
   supportsDesktopPaneComposerFocus,
 } from './paneChatFocus.js'
-import {
-  acknowledgeAppPreview,
-  withAppPreviewSeen,
-} from './builtAppState.js'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
 import {
   deriveContentVisibility, deriveModeSnapshotPlan,
@@ -615,24 +613,6 @@ export default function Shell({ onInitialVisualReady }) {
   const projectTemplatesRef = useRef(projectTemplates)
   useEffect(() => { projectsRef.current = projects }, [projects])
   useEffect(() => { projectTemplatesRef.current = projectTemplates }, [projectTemplates])
-  const appPreviewAckRef = useRef(new Set())
-  const handleAppPreviewSeen = useCallback((app, final) => {
-    acknowledgeAppPreview({
-      app,
-      final,
-      inFlight: appPreviewAckRef.current,
-      request: api.apps.markPreviewSeen,
-      clearCached: (appId, updatedAt, seenAsFinal) => {
-        queryClient.setQueryData(
-          appQueries.keys.all,
-          rows => withAppPreviewSeen(
-            rows, appId, updatedAt, seenAsFinal,
-          ),
-        )
-      },
-      restoreServerTruth: () => appQueries.list.invalidate(queryClient),
-    })
-  }, [queryClient])
   // Warm the model registry as soon as a chat is open so the composer's
   // model picker is instant on the first '+'. The /api/models fetch
   // otherwise runs cold on the first picker open (it's 5-min cached after
@@ -936,9 +916,8 @@ export default function Shell({ onInitialVisualReady }) {
   // landing while a browser scene transition is still displaying it.
   const modeTransitionRef = useRef(modeView.active || modeState.transition)
   modeTransitionRef.current = modeView.active || modeState.transition
-  // Every mounted chat pane derives its OWN built-app CTA list per chatId inside
-  // PaneChatView (builtAppState.js), so Shell no longer holds a global builtApps
-  // bound to a single activeChatId.
+  // Every mounted chat pane owns a chat-scoped artifact query, so an unrelated
+  // global app-list refresh cannot rerender all open transcripts.
 
   // ── Tabs: the flat projection of the workspace (the reducer + wrapper are
   // declared above useNavigation). openTabs is the in-order flat walk that
@@ -2754,6 +2733,15 @@ export default function Shell({ onInitialVisualReady }) {
 
   // Handle non-content SSE events: theme changes, app updates, shell rebuilds.
   const handleSystemEvent = useCallback((ev) => {
+    const artifactInvalidation = chatAppArtifactInvalidation(ev)
+    if (artifactInvalidation?.scope === 'all') {
+      void chatAppArtifactQueries.invalidateAll(queryClient)
+    } else if (artifactInvalidation?.scope === 'chat') {
+      void chatAppArtifactQueries.detail.invalidate(
+        queryClient,
+        artifactInvalidation.chatId,
+      )
+    }
     if (ev.type === 'theme_updated') {
       // Theme is dynamic in iframes since the token-free frame
       // refactor: AppCanvas re-broadcasts the theme via
@@ -2859,8 +2847,8 @@ export default function Shell({ onInitialVisualReady }) {
       // Refresh server truth before warming or placing. app_updated/app_created
       // remain lifecycle refreshes; app_preview_ready is the explicit
       // build-session action that reveals either a new app or an updated one.
-      // `updated_at` drives the iframe live-swap and derived built-app CTA, so
-      // neither needs a separate client mirror.
+      // `updated_at` drives the iframe live-swap; the chat-artifact query above
+      // owns the durable Icon Drop and unread-dot state.
       Promise.all([
         invalidateShellListCache('apps'),
         reconcileIdentity,
@@ -3107,6 +3095,7 @@ export default function Shell({ onInitialVisualReady }) {
       await Promise.all([
         invalidateShellListCache('apps'),
         invalidateShellListCache('chats'),
+        chatAppArtifactQueries.invalidateAll(queryClient),
         reconcileDeletedAppIdentities(),
         reconcileDeletedChatIdentities(),
       ])
@@ -4796,12 +4785,10 @@ export default function Shell({ onInitialVisualReady }) {
               <PaneChatView
                 chatId={chatId}
                 paneId={paneId}
-                apps={apps}
                 artifactsAppId={artifactsAppId}
                 // Runtime activity and painting are independent during a handoff:
                 // staging owns the work while held remains the visual cover.
                 runtimeActive={surfaceVisible && chatPanesVisible && role !== 'held'}
-                previewPresented={chatSurfaceInteractive}
                 keepTranscriptPainted={surfaceVisible && role === 'held'}
                 focusedPresentation={!standardOwner
                   && focusedPaneViewId != null
@@ -4823,7 +4810,6 @@ export default function Shell({ onInitialVisualReady }) {
                 markStreamingStart={markStreamingStart}
                 markStreamingEnd={markStreamingEnd}
                 refreshApps={refreshApps}
-                acknowledgeAppPreview={handleAppPreviewSeen}
                 refreshChats={refreshChats}
                 markChatOwnerActivity={markChatOwnerActivity}
                 loadTheme={loadTheme}

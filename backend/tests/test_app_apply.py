@@ -160,6 +160,9 @@ def test_apply_updates_multifile_revision_once(client, auth, db):
   ).stdout.strip() == "1"
   row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
   assert "import { label }" in row.jsx_source
+  artifact = db.get(models.ChatAppArtifact, ("editing-chat", app_id))
+  assert artifact is not None
+  assert artifact.touched_at == row.updated_at
   assert mock_get_broadcast.return_value.publish.call_args_list == [
     call({"type": "app_updated", "appId": str(app_id)}),
     call({

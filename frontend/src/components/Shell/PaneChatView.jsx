@@ -1,13 +1,14 @@
 import { memo, useCallback, useEffect, useMemo, useRef } from 'react'
 import ChatView from '../ChatView/ChatView.jsx'
 import ErrorBoundary from '../ErrorBoundary/ErrorBoundary.jsx'
-import { builtAppsSignature, derivedBuiltApps } from './builtAppState.js'
+import { chatAppArtifactQueries } from '../../hooks/queries.js'
+import { projectChatAppArtifacts } from './chatAppArtifactState.js'
 import { samePaneChatProps } from './paneChatProps.js'
 import { scheduleAfterBrowserPaint } from './scheduleAfterBrowserPaint.js'
 
 // Per-chat binding for a tiled pane (design §2, M13). The single-mount ChatView
 // in Shell closes every callback over the ONE global `activeChatId`; a second
-// mounted ChatView bound to those closures would fire its stream-end, CTA,
+// mounted ChatView bound to those closures would fire its stream-end, artifact,
 // attention, and repair logic against the wrong chat. This wrapper parameterizes
 // every such callback by its OWN chatId so each visible chat pane is self-bound.
 //
@@ -24,10 +25,8 @@ import { scheduleAfterBrowserPaint } from './scheduleAfterBrowserPaint.js'
 function PaneChatView({
   chatId,
   paneId,
-  apps,
   artifactsAppId = null,
   runtimeActive = true,
-  previewPresented = false,
   keepTranscriptPainted = false,
   focusedPresentation = false,
   paneContentHeight,
@@ -41,7 +40,6 @@ function PaneChatView({
   markStreamingStart,
   markStreamingEnd,
   refreshApps,
-  acknowledgeAppPreview,
   refreshChats,
   markChatOwnerActivity,
   loadTheme,
@@ -52,12 +50,10 @@ function PaneChatView({
   onDisplayReady,
   onChatBoundaryError,
 }) {
-  // builtApps is derived PER chatId, memoized on the same signature Shell uses
-  // for the primary chat — an unrelated app's refetch is a no-op for this pane.
+  const appArtifactsQuery = chatAppArtifactQueries.detail.useQuery(chatId)
   const builtApps = useMemo(
-    () => derivedBuiltApps(apps, chatId),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [builtAppsSignature(apps, chatId)],
+    () => projectChatAppArtifacts(appArtifactsQuery.data),
+    [appArtifactsQuery.data],
   )
 
   const handleStreamEnd = useCallback(({ continues } = {}) => {
@@ -91,21 +87,12 @@ function PaneChatView({
     markStreamingStart(chatId)
   }, [chatId, markStreamingStart])
 
-  // Open the app the CTA points at into THIS pane (design §5, finding D-ii), so
-  // a background chat's "Open app" lands beside it rather than in the globally
-  // focused pane.
-  const handleOpenApp = useCallback((app, { final = false, intent = '' } = {}) => {
+  // Artifact opens stay pane-local, so a background chat never steals the
+  // globally focused pane.
+  const handleOpenApp = useCallback((app, { intent = '' } = {}) => {
     const target = app?.id ?? app?.slug ?? app
     void openAppWithIntent(target, intent, () => true, { paneId })
-    acknowledgeAppPreview?.(app, final)
-  }, [openAppWithIntent, paneId, acknowledgeAppPreview])
-
-  // Auto-dismiss (the settled CTA timing out) is the same durable "final"
-  // acknowledgement opening performs, minus the navigation — the button retires
-  // without stealing the pane the partner is actually using.
-  const handleDismissApp = useCallback((app) => {
-    acknowledgeAppPreview?.(app, true)
-  }, [acknowledgeAppPreview])
+  }, [openAppWithIntent, paneId])
 
   const handleOpenArtifact = useCallback((artifactId) => {
     if (artifactsAppId == null || artifactId == null) return
@@ -146,7 +133,6 @@ function PaneChatView({
         key={chatId}
         chatId={chatId}
         hidden={!runtimeActive}
-        previewPresented={previewPresented}
         keepTranscriptPainted={keepTranscriptPainted}
         paneContentHeight={paneContentHeight}
         externalRunSignal={externalRunSignal}
@@ -155,8 +141,8 @@ function PaneChatView({
         onSystemEvent={onSystemEvent}
         onChatMissing={handleChatMissing}
         builtApps={builtApps}
+        builtAppsReady={appArtifactsQuery.isSuccess}
         onOpenApp={handleOpenApp}
-        onDismissApp={handleDismissApp}
         artifactsAppId={artifactsAppId}
         onOpenArtifact={handleOpenArtifact}
         onInternalNav={onInternalNav}

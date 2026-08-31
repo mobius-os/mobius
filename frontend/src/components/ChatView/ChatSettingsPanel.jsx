@@ -727,7 +727,6 @@ export default function ChatSettingsPanel({
       })}
       {onAutoResumeChange && (
         <div className="csp__automation">
-          <div className="csp__label csp__label--automation">Automation</div>
           <div className="csp__automation-row">
             <label className="csp__automation-copy" htmlFor={autoResumeSwitchId}>
               <span className="csp__automation-title">Automatically continue after usage limits</span>

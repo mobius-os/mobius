@@ -37,7 +37,7 @@
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ChevronDown,
   Code,
@@ -46,14 +46,18 @@ import {
   Paperclip,
 } from '@openai/apps-sdk-ui/components/Icon'
 import BrainUsageIcon from './BrainUsageIcon.jsx'
+import AppIcon from '../AppIcon.jsx'
 import ChatSettingsPanel from './ChatSettingsPanel.jsx'
 import ArtifactPickerSection from './ArtifactPickerSection.jsx'
 import {
   chatArtifactPickerItems,
   loadChatArtifacts,
 } from './chatArtifacts.js'
-import { apiFetch } from '../../api/client.js'
-import { chatQueries } from '../../hooks/queries.js'
+import { api, apiFetch } from '../../api/client.js'
+import {
+  chatAppArtifactQueries,
+  chatQueries,
+} from '../../hooks/queries.js'
 import { popoverMaxHeight, nearestClipTop } from './composerPopoverHeight.js'
 import { focusComposerElement } from './composerFocusPolicy.js'
 import {
@@ -67,6 +71,15 @@ import { resolvedChatSettings } from './modelSelectionPolicy.js'
 import { compactChangesSummary } from './chatChangesLifecycle.js'
 import { useChatChangesOverview } from './useChatChangesOverview.js'
 import { formatUsageMenuText } from './chatUsageFormat.js'
+import {
+  appArtifactAttentionDecision,
+  appArtifactTouchKey,
+  unseenAppArtifactCount,
+} from './appArtifactAttention.js'
+import {
+  acknowledgeChatArtifactRows,
+  appTouchCursorsForBrainOpen,
+} from './chatAppArtifactAcknowledgement.js'
 import './ChatWork.css'
 
 export default function ComposerPopover({
@@ -98,6 +111,7 @@ export default function ComposerPopover({
   onOpenArtifact,
   onOpenUsage,
   appArtifacts = [],
+  appArtifactsReady = false,
   onOpenAppArtifact,
   embedded = false,
   pending = false,
@@ -107,6 +121,7 @@ export default function ComposerPopover({
 }) {
   const wrapRef = useRef(null)
   const triggerRef = useRef(null)
+  const queryClient = useQueryClient()
   // Tracks whether the chat textarea was focused at the moment the
   // popover opened. If yes, refocus after a picker action so the
   // soft keyboard stays open. If no (user tapped the brain with keyboard
@@ -128,11 +143,16 @@ export default function ComposerPopover({
   })
   const usageSummary = formatUsageMenuText(usageQuery.data?.totals)
   const artifactsQuery = useQuery({
-    queryKey: ['chat-work-artifacts', String(artifactsAppId || ''), String(chatId || '')],
+    queryKey: [
+      'chat-work-artifacts',
+      String(artifactsAppId || ''),
+      String(chatId || ''),
+      appArtifacts.map(app => `${app.id}:${app.chat_touched_at || ''}`).join(','),
+    ],
     queryFn: ({ signal }) => loadChatArtifacts(
       artifactsAppId,
       chatId,
-      { signal, request: apiFetch },
+      { signal, request: apiFetch, relatedApps: appArtifacts },
     ),
     enabled: Boolean(open && !embedded && artifactsAppId && chatId),
     staleTime: 0,
@@ -148,9 +168,44 @@ export default function ComposerPopover({
   const latestArtifact = artifactItems[0] || null
   const otherArtifacts = artifactItems.slice(1)
   const [artifactsExpanded, setArtifactsExpanded] = useState(false)
+  const [iconDropQueue, setIconDropQueue] = useState([])
+  const artifactTouchesRef = useRef(null)
+  const unseenArtifactCount = unseenAppArtifactCount(appArtifacts)
   const changesNeedAttention = Boolean(
     changesOverview.needsAction || changesOverview.workState === 'attention',
   )
+  const hasUnseenBrainActivity = unseenArtifactCount > 0 || changesNeedAttention
+  const iconDropApp = iconDropQueue[0] || null
+
+  useEffect(() => {
+    if (!appArtifactsReady) {
+      artifactTouchesRef.current = null
+      setIconDropQueue([])
+      return
+    }
+    const decision = appArtifactAttentionDecision(
+      appArtifacts,
+      artifactTouchesRef.current,
+    )
+    artifactTouchesRef.current = decision.nextTouches
+    const unseenKeys = new Set(
+      appArtifacts
+        .filter(app => app?.has_unseen_chat_update)
+        .map(appArtifactTouchKey)
+        .filter(Boolean),
+    )
+    setIconDropQueue(current => {
+      const next = current.filter(app => unseenKeys.has(appArtifactTouchKey(app)))
+      const queued = new Set(next.map(appArtifactTouchKey))
+      for (const app of decision.dropApps) {
+        const key = appArtifactTouchKey(app)
+        if (!key || queued.has(key)) continue
+        queued.add(key)
+        next.push(app)
+      }
+      return next
+    })
+  }, [appArtifacts, appArtifactsReady])
   useDiscardUnconfirmedSwitchOnPickerClose(
     open,
     providerSwitchState?.status,
@@ -299,6 +354,15 @@ export default function ComposerPopover({
     onOpenAppArtifact?.(app)
   }
 
+  function finishCurrentIconDrop() {
+    setIconDropQueue(current => current.slice(1))
+  }
+
+  function handleOpenIconDrop(app) {
+    finishCurrentIconDrop()
+    handleOpenAppArtifact(app)
+  }
+
   function handleOpenArtifactItem(item) {
     if (item.kind === 'app') {
       handleOpenAppArtifact(item.app)
@@ -307,10 +371,31 @@ export default function ComposerPopover({
     handleOpenArtifact(item.id)
   }
 
+  function acknowledgeUnseenAppUpdates(touches) {
+    if (!chatId || touches.length === 0) return
+    const queryKey = chatAppArtifactQueries.keys.detail(chatId)
+    queryClient.setQueryData(
+      queryKey,
+      rows => acknowledgeChatArtifactRows(rows, touches),
+    )
+    void api.apps.markChatArtifactsSeen(chatId, touches)
+      .then(response => {
+        if (!response.ok) {
+          throw new Error(`artifact acknowledgement failed: ${response.status}`)
+        }
+      })
+      .catch(() => chatAppArtifactQueries.detail.invalidate(queryClient, chatId))
+  }
+
   function togglePopover() {
     const el = composerInputRef?.current
     const wasFocused = document.activeElement === el
-    if (!open) wasInputFocusedRef.current = wasFocused
+    const appTouches = appTouchCursorsForBrainOpen(open, appArtifacts)
+    if (!open) {
+      wasInputFocusedRef.current = wasFocused
+      setIconDropQueue([])
+      acknowledgeUnseenAppUpdates(appTouches)
+    }
     setOpen(current => !current)
     if (!wasFocused && el) {
       requestAnimationFrame(() => {
@@ -321,6 +406,21 @@ export default function ComposerPopover({
 
   return (
     <div className="composer-plus" ref={wrapRef}>
+      {iconDropApp && (
+        <button
+          key={appArtifactTouchKey(iconDropApp)}
+          type="button"
+          className="composer-plus__icon-drop"
+          aria-label={`Open ${iconDropApp.name || 'updated app'}`}
+          title={`Open ${iconDropApp.name || 'updated app'}`}
+          onClick={() => handleOpenIconDrop(iconDropApp)}
+          onAnimationEnd={(event) => {
+            if (event.currentTarget === event.target) finishCurrentIconDrop()
+          }}
+        >
+          <AppIcon item={iconDropApp} label={iconDropApp.name || 'App'} />
+        </button>
+      )}
       <button
         ref={triggerRef}
         type="button"
@@ -338,16 +438,26 @@ export default function ComposerPopover({
           ? 'Chat options unavailable until this chat is ready'
           : [
               triggerAriaLabel,
+              unseenArtifactCount > 0
+                ? `${unseenArtifactCount} app ${unseenArtifactCount === 1 ? 'update' : 'updates'} available.`
+                : '',
               changesNeedAttention ? 'Changes need attention.' : '',
             ].filter(Boolean).join(' ')}
         aria-haspopup={pending ? undefined : 'dialog'}
         aria-expanded={pending ? undefined : open}
       >
         {triggerIcon || <BrainUsageIcon />}
-        {changesNeedAttention && (
+        {hasUnseenBrainActivity && (
           <span className="composer-plus__attention-dot" aria-hidden="true" />
         )}
       </button>
+      <span className="chat__sr-status" aria-live="polite" aria-atomic="true">
+        {iconDropApp && (
+          <span key={appArtifactTouchKey(iconDropApp)}>
+            {iconDropApp.name || 'App'} updated. Select its icon to open it.
+          </span>
+        )}
+      </span>
       {open && !pending && (
         <div
           className="composer-popover"
@@ -382,7 +492,14 @@ export default function ComposerPopover({
                   <Code width={19} height={19} />
                 </span>
                 <span className="composer-popover__row-main">
-                  <span className="composer-popover__row-title">Changes</span>
+                  <span className="composer-popover__row-title-line">
+                    <span className="composer-popover__row-title">Changes</span>
+                    {changesNeedAttention && (
+                      <span className="composer-popover__row-attention">
+                        Needs attention
+                      </span>
+                    )}
+                  </span>
                   <span className="composer-popover__row-sub">
                     {changesOverview.loading && !changesOverview.hasWork
                       ? 'Checking this chat’s work…'

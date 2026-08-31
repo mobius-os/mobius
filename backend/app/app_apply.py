@@ -20,7 +20,7 @@ from typing import Literal
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app import app_git, icon_assets, models, timeutil
+from app import app_git, chat_app_artifacts, icon_assets, models, timeutil
 from app.app_capabilities import (
   contract_from_app_state,
   local_manifest_runtime_fields,
@@ -682,6 +682,13 @@ async def apply_source_revision(
       app.jsx_source = source
       app.compiled_path = str(published)
       app.updated_at = timeutil.now_naive_utc()
+      if chat_id is not None:
+        chat_app_artifacts.record_touch(
+          db,
+          chat_id=chat_id,
+          app_id=app.id,
+          touched_at=app.updated_at,
+        )
       try:
         db.commit()
       except Exception:

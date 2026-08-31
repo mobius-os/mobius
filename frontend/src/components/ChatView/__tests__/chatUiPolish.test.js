@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 const indexCss = readFileSync(new URL('../../../index.css', import.meta.url), 'utf8')
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 const chatInputBar = readFileSync(new URL('../ChatInputBar.jsx', import.meta.url), 'utf8')
+const composerPopover = readFileSync(new URL('../ComposerPopover.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const queuedMessages = readFileSync(new URL('../QueuedMessages.jsx', import.meta.url), 'utf8')
 
@@ -28,6 +29,38 @@ test('theme transition does not animate every descendant or expensive shadows', 
     'theme toggles must not install a document-wide transition')
   assert.doesNotMatch(transitionRules, /box-shadow/,
     'theme toggles should not animate box-shadow across chat surfaces')
+})
+
+test('Icon Drop shadows fallback tiles without outlining transparent artwork', () => {
+  const actionRule = chatCss.match(
+    /\.composer-plus__icon-drop\s*\{[^}]*\}/,
+  )?.[0] || ''
+  const iconRule = chatCss.match(
+    /\.composer-plus__icon-drop \.app-icon\s*\{[^}]*\}/,
+  )?.[0] || ''
+  const fallbackRule = chatCss.match(
+    /\.composer-plus__icon-drop \.app-icon:not\(\.is-image\)\s*\{[^}]*\}/,
+  )?.[0] || ''
+
+  assert.match(actionRule, /width:\s*44px/)
+  assert.match(actionRule, /height:\s*44px/)
+  assert.doesNotMatch(iconRule, /box-shadow/,
+    'transparent image icons must not inherit a rectangular cast shadow')
+  assert.match(fallbackRule, /box-shadow/,
+    'initials fallbacks still need separation from the chat behind them')
+})
+
+test('Icon Drop waits until a retained chat is visibly observed', () => {
+  assert.match(
+    chatView,
+    /appArtifactsReady=\{builtAppsReady && !hidden\}/,
+    'a hidden retained chat must not present its unread app update',
+  )
+  assert.match(
+    composerPopover,
+    /if \(!appArtifactsReady\) \{[\s\S]*?artifactTouchesRef\.current = null[\s\S]*?setIconDropQueue\(\[\]\)/,
+    'hiding the chat must reset the cue so the next visible observation replays it',
+  )
 })
 
 test('restored chat rows and tool blocks do not replay entrance animation', () => {

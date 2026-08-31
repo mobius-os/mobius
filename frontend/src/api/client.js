@@ -573,16 +573,22 @@ export const api = {
       `/apps/${encodeURIComponent(appId)}/source/file?path=${encodeURIComponent(path)}${download ? '&download=true' : ''}`,
       { signal },
     ),
+    chatArtifacts: (chatId, options = {}) => apiFetch(
+      `/apps/chat-artifacts/${encodeURIComponent(chatId)}`,
+      options,
+    ),
+    markChatArtifactsSeen: (chatId, touches) => apiFetch(
+      `/apps/chat-artifacts/${encodeURIComponent(chatId)}/seen`, {
+        method: 'POST',
+        body: JSON.stringify({ touches }),
+      },
+    ),
     markOpened: (appId) => apiFetch(`/apps/${appId}/opened`, {
       method: 'POST',
     }),
     markActivitySeen: (appId, activityVersion) => apiFetch(`/apps/${appId}/activity/seen`, {
       method: 'POST',
       body: JSON.stringify({ activity_version: activityVersion }),
-    }),
-    markPreviewSeen: (appId, updatedAt, final = false) => apiFetch(`/apps/${appId}/preview/seen`, {
-      method: 'POST',
-      body: JSON.stringify({ updated_at: updatedAt, final }),
     }),
     update: (appId, payload) => listAffectingMutation('apps', `/apps/${appId}`, {
       method: 'PATCH',

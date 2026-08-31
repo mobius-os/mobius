@@ -70,6 +70,51 @@ def test_previous_release_database_upgrades_to_current_orm(tmp_path):
   ]
 
 
+def test_chat_app_artifact_migration_preserves_prior_preview_acknowledgement(
+  tmp_path,
+):
+  eng = create_engine(f"sqlite:///{tmp_path / 'chat-app-artifacts.db'}")
+  models.Base.metadata.create_all(eng)
+  touched_at = datetime(2026, 8, 29, 12, 0, 0)
+  with Session(eng) as session:
+    session.add(models.Chat(id="chat-a", title="Chat A"))
+    session.flush()
+    session.add(models.App(
+      id=7,
+      name="Atlas",
+      description="",
+      jsx_source="",
+      compiled_path="/tmp/app.js",
+      slug="atlas",
+      source_dir="/tmp/atlas",
+      chat_id="chat-a",
+      created_at=touched_at,
+      updated_at=touched_at,
+    ))
+    session.commit()
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE app_preview_state ("
+      "app_id INTEGER PRIMARY KEY, seen_updated_at DATETIME NOT NULL, "
+      "seen_as_final BOOLEAN NOT NULL DEFAULT 0)"
+    ))
+    conn.execute(text(
+      "INSERT INTO app_preview_state (app_id, seen_updated_at, seen_as_final) "
+      "VALUES (7, :ts, 1)"
+    ), {"ts": touched_at})
+
+  migrations._backfill_chat_app_artifacts(eng)
+  migrations._backfill_chat_app_artifacts(eng)
+
+  with eng.connect() as conn:
+    rows = conn.execute(text(
+      "SELECT chat_id, app_id, touched_at, seen_at FROM chat_app_artifacts"
+    )).all()
+  assert len(rows) == 1
+  assert rows[0][0:2] == ("chat-a", 7)
+  assert str(rows[0].touched_at) == str(rows[0].seen_at)
+
+
 def test_run_migrations_drops_removed_image_generation_columns(tmp_path):
   db_path = tmp_path / "legacy-image-generation.db"
   eng = create_engine(f"sqlite:///{db_path}")
@@ -1171,6 +1216,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0023_project_color",
     "0024_chat_goal_dismissal",
     "0025_attached_delegation_work",
+    "0026_chat_app_artifacts",
   ]
   assert second == first
 

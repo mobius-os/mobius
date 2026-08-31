@@ -149,7 +149,6 @@ import {
 } from '../../lib/searchTermHighlight.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
 import { createFileDragHandlers } from './dragUpload.js'
-import useOpenAppCtaAutoDismiss from './hooks/useOpenAppCtaAutoDismiss.js'
 import {
   isAmbiguousSendFailure,
   isModelSelectionRequiredFailure,
@@ -173,14 +172,12 @@ import {
 } from './steerContinuity.js'
 import {
   answerKeepsCurrentTurn,
-  builtAppPulseDecision,
   canFastForwardQueue,
   coldTranscriptRenderFrames,
   continuationRowsFromPromotedMessage,
   isContinuationMessage,
   isOwnerUserMessage,
   jumpToLatestShown,
-  openAppCtaViewModel,
   runtimeStreamAttachAction,
   shouldRetireRestoredQuestionSnapshot,
   shouldAttachRunningStream,
@@ -342,8 +339,8 @@ export default function ChatView({
   onSystemEvent,
   onChatMissing,
   builtApps = NO_BUILT_APPS,
+  builtAppsReady = false,
   onOpenApp,
-  onDismissApp,
   onInternalNav,
   onMessageStart,
   onOwnerActivity,
@@ -364,10 +361,6 @@ export default function ChatView({
   // the scroll controller's paneResized() below. Null for a single-pane chat (today's
   // behavior — the controller's own ResizeObserver owns resize there).
   paneContentHeight = null,
-  // Shell presentation is narrower than runtime activity: overlays and modal
-  // navigation can cover a mounted, active chat. App-preview observation uses
-  // this explicit surface fact so covered shortcuts do not expire unseen.
-  previewPresented = false,
   // True when this mounted chat is hidden behind the full-workspace Settings
   // overlay (design §2). Before path-unification the single ChatView UNMOUNTED on
   // Settings, which aborted the mic; now it stays mounted, so we must stop voice
@@ -614,22 +607,10 @@ export default function ChatView({
   const changesReturnFocusRef = useRef(null)
   const [visibleMessageMetaKey, setVisibleMessageMetaKey] = useState(null)
   const messageMetaTimerRef = useRef(null)
-  const [previewReadyStatus, setPreviewReadyStatus] = useState('')
-  // The app id whose CTA is mid recompile-pulse (label swapped to "Preview
-  // updated ✓" for ~2s), or null.
-  const [pulsedAppId, setPulsedAppId] = useState(null)
-  // Last-seen updated_at per built-app id, so the pulse/announce effect can tell
-  // a first build (a new id) from a recompile (an existing id whose updated_at
-  // advanced) without a separate app_built event — updated_at IS the monotonic
-  // re-fire key. Per-ChatView-instance (fresh on remount), which is why the
-  // pulse is naturally scoped to this chat.
-  const lastSeenUpdatedAtRef = useRef(new Map())
   // Build-milestone rail: phases accumulated from chat-scoped `build_phase`
   // stream events (deduped by ts so catch-up replay rebuilds it), reset ONLY
   // when a new run starts for this chat (see buildPhaseRail.js for why a
-  // mid-run reset is replay-incoherent). Rendered as a slim rail in the foot
-  // near the open-app CTA; the announcement mirrors previewReadyStatus for
-  // the polite live region.
+  // mid-run reset is replay-incoherent). Rendered as a slim rail in the foot.
   const [buildPhases, setBuildPhases] = useState(EMPTY_BUILD_PHASE_RAIL)
   const [buildPhaseStatus, setBuildPhaseStatus] = useState('')
   const lastAnnouncedPhaseRef = useRef(null)
@@ -2268,31 +2249,6 @@ export default function ChatView({
     lastAnnouncedPhaseRef.current = latest.ts
     setBuildPhaseStatus(latestBuildPhaseAnnouncement(buildPhases))
   }, [buildPhases])
-
-  // Announce a new build and flash a recompile, both derived from updated_at
-  // deltas on the (server-derived) CTA list — no app_built event, no nonce. A
-  // brand-new CTA id is a first build (announce "Live preview ready …" without
-  // pulsing); an already-seen id whose updated_at advanced is a recompile
-  // (flash "Preview updated ✓" for 2s + announce). builtAppPulseDecision owns
-  // that pure distinction; this effect applies its verdict. Because `builtApps`
-  // is referentially stable (Shell memoizes it on a content signature) this runs
-  // only when THIS chat's derived list actually changes.
-  useEffect(() => {
-    if (builtApps.length === 0) {
-      lastSeenUpdatedAtRef.current = new Map()
-      setPreviewReadyStatus('')
-      return
-    }
-    const { pulseId, announce, nextSeen } = builtAppPulseDecision(
-      builtApps, lastSeenUpdatedAtRef.current,
-    )
-    lastSeenUpdatedAtRef.current = nextSeen
-    if (announce) setPreviewReadyStatus(announce)
-    if (pulseId == null) return
-    setPulsedAppId(pulseId)
-    const t = setTimeout(() => setPulsedAppId(null), 2000)
-    return () => clearTimeout(t)
-  }, [builtApps])
 
   // Fetch messages and connect to an in-progress stream if the agent is running.
   useEffect(() => {
@@ -4514,13 +4470,6 @@ export default function ChatView({
     }
   }, [chatId, queryClient, refreshContributionOverview])
 
-  useOpenAppCtaAutoDismiss({
-    builtApps,
-    turnActive,
-    presented: previewPresented && connectionError !== 'disconnected',
-    onDismissApp,
-  })
-
   const wasTurnActiveRef = useRef(turnActive)
   useEffect(() => {
     if (wasTurnActiveRef.current && !turnActive) {
@@ -5133,11 +5082,6 @@ export default function ChatView({
             && messages[messages.length - 1]?.role === 'assistant'
               ? 'Response ready.'
               : ''))
-  // One CTA row per built app (most recent last). The view-model stays pure
-  // and per-app; the pulse/label-swap is layered on in the render below.
-  const openAppCtas = builtApps
-    .map(app => ({ app, vm: openAppCtaViewModel(app, turnActive) }))
-    .filter(entry => entry.vm)
   const buildPhaseRail = buildPhaseRailViewModel(buildPhases)
   // Goal ownership comes from explicit run boundaries and authoritative
   // runtime reconciliation, never a momentary browser transport signal.
@@ -5228,14 +5172,6 @@ export default function ChatView({
         aria-relevant="text"
       >
         {ariaStatus}
-      </div>
-      <div
-        className="chat__sr-status"
-        aria-live="polite"
-        aria-atomic="true"
-        aria-relevant="text"
-      >
-        {previewReadyStatus}
       </div>
       <div
         className="chat__sr-status"
@@ -5538,7 +5474,7 @@ export default function ChatView({
               Contribution state lives in Changes so it can never cover the
               composer or an unanswered question. */}
           {connectionError !== 'disconnected'
-            && (offscreenControlsVisible || openAppCtas.length > 0) && (
+            && offscreenControlsVisible && (
             <div className="chat__floating-transients">
               {offscreenControlsVisible && (
                 <div className="chat__offscreen-nudges">
@@ -5595,23 +5531,6 @@ export default function ChatView({
                       <ArrowDown size={18} strokeWidth={2.25} aria-hidden="true" />
                     </button>
                   )}
-                </div>
-              )}
-              {openAppCtas.length > 0 && (
-                <div className="chat__open-app">
-                  {openAppCtas.map(({ app, vm }) => {
-                    const pulsing = pulsedAppId === Number(app.id)
-                    return (
-                      <button
-                        key={app.id}
-                        className={`chat__open-app-btn${pulsing ? ' chat__open-app-btn--pulse' : ''}`}
-                        aria-label={pulsing ? `Preview updated for ${app.name || 'app'}` : vm.ariaLabel}
-                        onClick={() => onOpenApp?.(app, { final: !turnActive })}
-                      >
-                        {pulsing ? 'Preview updated ✓' : `${vm.label} →`}
-                      </button>
-                    )
-                  })}
                 </div>
               )}
             </div>
@@ -5724,6 +5643,7 @@ export default function ChatView({
                 onOpenArtifact={onOpenArtifact}
                 onOpenUsage={() => setShowUsage(true)}
                 appArtifacts={builtApps}
+                appArtifactsReady={builtAppsReady && !hidden}
                 onOpenAppArtifact={onOpenApp}
                 embedded={embedded}
               />

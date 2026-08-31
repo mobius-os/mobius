@@ -1,5 +1,7 @@
 /* Chat-scoped projection of records owned by the installed Artifacts app. */
 
+import { parseApiTimestamp } from '../../lib/relativeTime.js'
+
 const ARTIFACT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
 
 function recordFromEntry(entry) {
@@ -15,7 +17,7 @@ function recordFromEntry(entry) {
 }
 
 function timestamp(value) {
-  const parsed = Date.parse(value)
+  const parsed = parseApiTimestamp(value)
   return Number.isFinite(parsed) ? parsed : 0
 }
 
@@ -50,7 +52,9 @@ export function artifactTouchForChat(record, chatId, relatedApps = []) {
     .filter(version => String(version?.chat_id || '') === owner)
   const hasOriginTouch = versionTouches.length > 0 || String(record.chat_id || '') === owner
   const hasRelatedApp = artifactRelatedToApps(record, relatedApps)
-  if (!hasOriginTouch && !hasRelatedApp) return null
+  if (!hasOriginTouch && !hasRelatedApp) {
+    return null
+  }
   const latestVersionTouch = versionTouches.reduce((latest, version) => (
     timestamp(version?.created_at) > timestamp(latest?.created_at)
       ? version
@@ -80,10 +84,8 @@ export function artifactsTouchedByChat(records, chatId, relatedApps = []) {
     .sort((left, right) => timestamp(right.touchedAt) - timestamp(left.touchedAt))
 }
 
-// Apps keep their own durable chat attribution on the app row. Project that
-// same server truth into the chat's artifact picker so opening a preview leaves
-// a reusable way back to the app after the short-lived preview CTA retires.
-// Newest wins if a stale/refetched array briefly carries the same id twice.
+// The backend's chat-app relation is durable across editing chats. Project it
+// into the shared picker, deduping a briefly stale/refetched row by app id.
 export function appArtifactsFromBuiltApps(builtApps) {
   const seen = new Set()
   const items = []
@@ -104,7 +106,8 @@ export function chatArtifactPickerItems(builtApps, artifacts) {
     kind: 'app',
     id: Number(app.id),
     title: String(app.name || 'Untitled app'),
-    touchedAt: app.updated_at || app.created_at || '',
+    touchedAt: app.chat_touched_at || app.updated_at || app.created_at || '',
+    unseen: Boolean(app.has_unseen_chat_update),
     app,
   }))
   const documentItems = (Array.isArray(artifacts) ? artifacts : []).map(artifact => ({
@@ -117,21 +120,14 @@ export function chatArtifactPickerItems(builtApps, artifacts) {
     .sort((left, right) => timestamp(right.touchedAt) - timestamp(left.touchedAt))
 }
 
-async function appsMaintainedByChat(chatId, request, signal) {
-  try {
-    const response = await request('/apps/', { signal })
-    if (!response.ok) return []
-    const apps = await response.json()
-    const owner = String(chatId || '')
-    return (Array.isArray(apps) ? apps : [])
-      .filter(app => String(app?.chat_id || '') === owner)
-  } catch (error) {
-    if (signal?.aborted) throw error
-    return []
+export async function loadChatArtifacts(
+  appId,
+  chatId,
+  { signal, request, relatedApps = [] } = {},
+) {
+  if (typeof request !== 'function') {
+    throw new Error('Artifact loading requires a request function.')
   }
-}
-
-async function loadArtifactRecords(appId, request, signal) {
   const records = []
   let cursor = null
   do {
@@ -149,16 +145,5 @@ async function loadArtifactRecords(appId, request, signal) {
     }
     cursor = page?.next_cursor || null
   } while (cursor)
-  return records
-}
-
-export async function loadChatArtifacts(appId, chatId, { signal, request } = {}) {
-  if (typeof request !== 'function') {
-    throw new Error('Artifact loading requires a request function.')
-  }
-  const [records, relatedApps] = await Promise.all([
-    loadArtifactRecords(appId, request, signal),
-    appsMaintainedByChat(chatId, request, signal),
-  ])
   return artifactsTouchedByChat(records, chatId, relatedApps)
 }

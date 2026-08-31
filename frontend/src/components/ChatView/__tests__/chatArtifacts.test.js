@@ -2,8 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  appArtifactsFromBuiltApps,
   artifactRelatedToApps,
+  appArtifactsFromBuiltApps,
   artifactTouchForChat,
   artifactsTouchedByChat,
   chatArtifactPickerItems,
@@ -21,8 +21,13 @@ test('built apps become durable chat artifacts without duplicate rows', () => {
 
 test('artifact picker orders apps and documents together by their chat touch', () => {
   const items = chatArtifactPickerItems([
-    { id: 7, name: 'Atlas', updated_at: '2026-08-22T10:00:00Z' },
-    { id: 9, name: 'Canvas', updated_at: '2026-08-20T10:00:00Z' },
+    {
+      id: 7,
+      name: 'Atlas',
+      chat_touched_at: '2026-08-22T10:00:00Z',
+      has_unseen_chat_update: true,
+    },
+    { id: 9, name: 'Canvas', chat_touched_at: '2026-08-20T10:00:00Z' },
   ], [
     {
       id: 'launch-brief',
@@ -38,6 +43,7 @@ test('artifact picker orders apps and documents together by their chat touch', (
     'app:9',
   ])
   assert.equal(items[0].title, 'Atlas')
+  assert.equal(items[0].unseen, true)
 })
 
 test('chat artifacts are attributed by version touch, not global record recency', () => {
@@ -130,10 +136,8 @@ test('related app matching treats the stable slug as authoritative', () => {
   ]), false)
 })
 
-test('artifact loading resolves only apps maintained by the current chat', async () => {
+test('artifact loading resolves related apps from the durable chat relation', async () => {
   const calls = []
-  let resolveArtifactResponse
-  const artifactResponse = new Promise(resolve => { resolveArtifactResponse = resolve })
   const artifact = {
     id: 'store-concepts-a690',
     title: 'Store concepts',
@@ -142,66 +146,44 @@ test('artifact loading resolves only apps maintained by the current chat', async
     current_version: 5,
     related_apps: [{ id: 39, slug: 'app-store' }],
   }
-  const request = (path) => {
+  const request = async (path) => {
     calls.push(path)
-    if (path === '/apps/') {
-      return Promise.resolve({
-        ok: true,
-        json: async () => [
-          { id: 39, slug: 'app-store', chat_id: 'app-chat' },
-          { id: 12, slug: 'notes', chat_id: 'unrelated-chat' },
-        ],
-      })
+    return {
+      ok: true,
+      json: async () => ({ entries: [{ content: artifact }], next_cursor: null }),
     }
-    return artifactResponse
   }
 
-  const loading = loadChatArtifacts(88, 'app-chat', { request })
+  const loaded = await loadChatArtifacts(88, 'app-chat', {
+    request,
+    relatedApps: [{ id: 39, slug: 'app-store' }],
+  })
+  assert.deepEqual(loaded.map(item => item.id), ['store-concepts-a690'])
   assert.deepEqual(calls, [
     '/storage/apps-list/88/artifacts/?limit=500&include_content=true',
-    '/apps/',
-  ], 'app lookup starts without waiting for the artifact response')
-
-  resolveArtifactResponse({
-    ok: true,
-    json: async () => ({ entries: [{ content: artifact }], next_cursor: null }),
-  })
-  const loaded = await loading
-  assert.deepEqual(loaded.map(item => item.id), ['store-concepts-a690'])
+  ])
 })
 
-test('artifact loading falls back to origin provenance when app lookup fails', async () => {
-  const appLookupFailures = {
-    'thrown error': () => { throw new Error('offline') },
-    'non-ok response': () => ({
-      ok: false,
-      status: 503,
-      json: async () => [{ id: 39, slug: 'app-store', chat_id: 'app-chat' }],
-    }),
-  }
-
-  for (const [mode, failAppLookup] of Object.entries(appLookupFailures)) {
-    const request = async (path) => {
-      if (path === '/apps/') return failAppLookup()
-      return {
-        ok: true,
-        json: async () => ({
-          entries: [
-            { content: { id: 'origin-artifact', chat_id: 'app-chat' } },
-            {
-              content: {
-                id: 'related-artifact',
-                chat_id: 'other-chat',
-                related_apps: [{ slug: 'app-store' }],
-              },
+test('artifact loading keeps origin provenance when no related apps are supplied', async () => {
+  const request = async (path) => {
+    return {
+      ok: true,
+      json: async () => ({
+        entries: [
+          { content: { id: 'origin-artifact', chat_id: 'app-chat' } },
+          {
+            content: {
+              id: 'related-artifact',
+              chat_id: 'other-chat',
+              related_apps: [{ slug: 'app-store' }],
             },
-          ],
-          next_cursor: null,
-        }),
-      }
+          },
+        ],
+        next_cursor: null,
+      }),
     }
-
-    const loaded = await loadChatArtifacts(88, 'app-chat', { request })
-    assert.deepEqual(loaded.map(item => item.id), ['origin-artifact'], mode)
   }
+
+  const loaded = await loadChatArtifacts(88, 'app-chat', { request })
+  assert.deepEqual(loaded.map(item => item.id), ['origin-artifact'])
 })

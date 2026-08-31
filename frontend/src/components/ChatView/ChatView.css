@@ -2627,6 +2627,65 @@
   align-self: flex-end;
 }
 
+/* Unread app icons wait above the Brain one at a time, then fall into the
+   control. Each icon is a direct route to its app. Animationend advances the
+   queue, so the cue needs no timer or extra layout surface. */
+.composer-plus__icon-drop {
+  position: absolute;
+  z-index: 3;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+  display: grid;
+  place-items: center;
+  animation: composer-icon-drop 2.4s linear forwards;
+}
+
+.composer-plus__icon-drop .app-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  font-size: 12px;
+}
+
+.composer-plus__icon-drop .app-icon:not(.is-image) {
+  box-shadow: 0 8px 22px color-mix(in srgb, var(--text) 20%, transparent);
+}
+
+.composer-plus__icon-drop:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+@keyframes composer-icon-drop {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -9px) scale(0.9);
+    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  8% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+  82% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+    animation-timing-function: cubic-bezier(0.4, 0, 1, 1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, 52px) scale(0.3);
+  }
+}
+
 .composer-plus__attention-dot {
   position: absolute;
   top: 4px;
@@ -2637,6 +2696,23 @@
   background: var(--accent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--surface) 90%, transparent);
   pointer-events: none;
+}
+
+@keyframes composer-icon-presence-reduced {
+  0%, 92% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, 0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-plus__icon-drop {
+    animation-name: composer-icon-presence-reduced;
+  }
 }
 
 /* Brain button: 48×48, matched 1:1 to the pill's min-height — same
