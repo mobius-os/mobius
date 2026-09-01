@@ -25,8 +25,9 @@
  * falls back to persisted localStorage, then to the dark default — so a
  * cold online boot, a warm reload, and a cold-offline reopen all resolve
  * the same way. The pre-paint IIFE does a minimal version of this before
- * first paint; `applyTheme` does the full version (fonts, meta tags,
- * status bar, persistence) once the module loads.
+ * first paint; `applyTheme` does the full version (fonts, theme meta tags,
+ * persistence) once the module loads. The iOS status-bar meta stays static:
+ * it is launch/install-time viewport policy, not live theme state.
  */
 
 // `bg` is owner-controlled but constrained to a hex color everywhere it
@@ -128,8 +129,7 @@ export function resolveTheme({ doc = globalThis.document, store = defaultStore()
  *     re-appended to the END of <head> so it wins the cascade.
  *   - Mirror bg onto body.style.background, <meta theme-color>, the
  *     inline `--bg` on <html> (beats `:root{}`, keeps the pre-paint var
- *     in lockstep), and `color-scheme`/`data-theme`/iOS status bar from
- *     the mode.
+ *     in lockstep), and `color-scheme`/`data-theme` from the mode.
  *   - Persist `mobius-theme` ({bg,mode}), the sole key shared by
  *     resolveTheme and the pre-paint IIFE.
  *
@@ -208,10 +208,6 @@ export function applyTheme(theme, { doc = globalThis.document, store = defaultSt
       doc.head.appendChild(colorSchemeMeta)
     }
     setMetaContent(colorSchemeMeta, colorSchemeMetaContent(mode))
-    // iOS PWA status bar: `default` is a light bar with dark glyphs
-    // (light mode), `black` is opaque dark (dark mode).
-    const sb = doc.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]')
-    setMetaContent(sb, mode === 'light' ? 'default' : 'black')
   }
 
   if (themeStyleEl && doc.head) {
@@ -242,8 +238,8 @@ export function applyTheme(theme, { doc = globalThis.document, store = defaultSt
  * resolve {css?, bg, mode} by the SAME precedence as resolveTheme
  * (slot -> mobius-theme -> dark default), inject the
  * slot css into <style id="mobius-theme"> when present, and set --bg /
- * data-theme / color-scheme on <html>. The full applyTheme (fonts, meta
- * tags, status bar, persistence) runs once the module loads.
+ * data-theme / color-scheme on <html>. The full applyTheme (fonts, theme
+ * meta tags, persistence) runs once the module loads.
  *
  * `applyTheme.prepaint.test.js` asserts the inline script in both HTML
  * files is byte-identical to this string, so they can never drift.

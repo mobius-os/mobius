@@ -238,12 +238,12 @@ test('applyTheme ignores a non-hex bg (no DOM / no persist mutation)', () => {
   assert.equal(store.getItem('mobius-theme'), null)
 })
 
-test('applyTheme sets data-theme + color-scheme + status bar from mode', () => {
+test('applyTheme sets live theme state without rewriting iOS launch policy', () => {
   applyTheme({ css: ':root{--bg:#f0eeeb;}', bg: '#f0eeeb' }, ctx())  // light
   assert.equal(dom.documentElement.getAttribute('data-theme'), 'light')
   assert.equal(dom.documentElement.style.colorScheme, 'light')
   assert.equal(dom.colorScheme.content, 'light dark')
-  assert.equal(dom.statusBar.content, 'default')
+  assert.equal(dom.statusBar.content, 'black')
 
   applyTheme({ css: ':root{--bg:#0d0d0d;}', bg: '#0d0d0d' }, ctx())  // dark
   assert.equal(dom.documentElement.getAttribute('data-theme'), 'dark')
