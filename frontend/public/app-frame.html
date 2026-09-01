@@ -542,7 +542,10 @@
     //      parent. The controlled shell can read the versioned service-worker
     //      cache offline; this opaque frame cannot. The parent transfers only
     //      the exact source-attributed app/version bytes back.
-    //   4. iframe imports those bytes from a short-lived blob URL and mounts.
+    //   4. iframe imports those bytes from a short-lived blob URL, settles every
+    //      platform-owned font face, and mounts. Font settlement happens before
+    //      React's first commit so the visible frame never swaps typefaces after
+    //      promotion and MountSignal keeps its capability-ordering guarantee.
     //   5. iframe posts {type:'moebius:frame-mounted', appId} as the first
     //      render COMMITS (MountSignal's stable ref, not render()-returned).
     //      Ref attachment precedes app layout effects, so their mount-time host
@@ -1054,6 +1057,31 @@
       );
     }
 
+    const OWNED_FONT_FAMILIES = new Set(['Inter', 'JetBrains Mono']);
+
+    async function settleOwnedFontsBeforeMount() {
+      if (!document.fonts) return true;
+      const specs = new Set();
+      for (const face of document.fonts) {
+        const family = String(face.family || '').replace(/^['"]|['"]$/g, '');
+        if (!OWNED_FONT_FAMILIES.has(family)) continue;
+        specs.add([
+          face.style || 'normal', face.weight || '400', '14px', JSON.stringify(family)
+        ].join(' '));
+      }
+      try {
+        const groups = await Promise.all(
+          [...specs].map((font) => document.fonts.load(font, 'Möbius 0123456789'))
+        );
+        await document.fonts.ready;
+        return groups.flat().every((face) => face.status === 'loaded');
+      } catch (_) {
+        // A failed face cannot swap in later, so the browser's stable fallback
+        // is safe to reveal. Only a still-loading face may change geometry.
+        return false;
+      }
+    }
+
     function tokenExpiresSoon(token, skewMs = 60000) {
       try {
         const encoded = String(token || '').split('.')[1];
@@ -1369,6 +1397,7 @@
           showErr('Module error', 'The app module has no default export.');
           return;
         }
+        await settleOwnedFontsBeforeMount();
         mountedRoot = createRoot(document.getElementById('root'));
         mountedComponent = Component;
         renderMountedComponent();

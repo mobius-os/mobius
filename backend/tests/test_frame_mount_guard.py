@@ -90,12 +90,20 @@ def test_mounted_flag_is_set_by_a_commit_ref():
   )
 
 
-def test_font_check_is_requested_separately_from_app_mount():
+def test_owned_fonts_settle_before_commit_without_moving_the_commit_signal():
   html = _frame_html()
   mount_signal = html[
     html.index("function MountSignal"):
     html.index("// Immersive safe-area passthrough")
   ]
   assert "__mobiusFontReadiness" not in mount_signal
+  assert "async function settleOwnedFontsBeforeMount" in html
+  load_module = html[
+    html.index("async function loadModule"):
+    html.index("window.addEventListener('message', (e) =>", html.index("async function loadModule"))
+  ]
+  assert load_module.index("await settleOwnedFontsBeforeMount()") < load_module.index(
+    "mountedRoot = createRoot"
+  )
   assert "msg.type === 'moebius:frame-font-check'" in html
   assert "type: 'moebius:frame-font-check-result'" in html
