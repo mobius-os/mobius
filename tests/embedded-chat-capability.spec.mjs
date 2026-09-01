@@ -224,7 +224,9 @@ test('opaque embedded chat completes authenticated flow and survives remount', a
     await chatFrame.locator('textarea').fill(
       'This is a transport test. Reply exactly `capability-ok`; do not call tools or edit files.',
     )
-    await chatFrame.getByRole('button', { name: /send/i }).press('Enter')
+    const send = chatFrame.getByRole('button', { name: 'Send', exact: true })
+    await expect(send).toBeEnabled({ timeout: 10_000 })
+    await send.press('Enter')
     await expect.poll(() => sendBody, { timeout: 10_000 }).not.toBeNull()
     expect(sendBody.content).toContain('<marker>opaque-context-ok</marker>')
     expect(sendBody.attachments?.[0]?.name).toBe('e2e.txt')
