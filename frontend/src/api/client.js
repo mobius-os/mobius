@@ -136,7 +136,7 @@ export function clearToken() {
 // uses the default and removes it too. Returns
 // a promise so callers can `await` it before reloading the page
 // (otherwise the browser would abort the in-flight delete).
-export function clearQueryCache({ preserveChatOutbox = false } = {}) {
+function clearOwnerClientState({ preserveChatOutbox }) {
   // Owner-scoped in-memory state: the AppCanvas token latch holds resolved
   // app/owner tokens across iframe remounts; drop it on logout so a remount
   // after the session ends can't reuse the previous owner's token.
@@ -160,6 +160,23 @@ export function clearQueryCache({ preserveChatOutbox = false } = {}) {
     delDatabase('mobius-signals', 'signal queue').catch(() => {}),
     wipeSwCaches().catch(() => {}),
   ])
+}
+
+/** Remove every browser-local trace owned by the current signed-in owner. */
+export function clearQueryCache() {
+  return clearOwnerClientState({ preserveChatOutbox: false })
+}
+
+/**
+ * Retire an expired credential while retaining only intent that is already
+ * partitioned by owner and epoch. The same owner may replay that intent after
+ * signing in again; an explicit logout still uses clearQueryCache() and wipes
+ * it with the rest of the owner-scoped browser state.
+ */
+export async function clearExpiredOwnerSession() {
+  clearToken()
+  try { sessionStorage.setItem('auth_expired', '1') } catch {}
+  await clearOwnerClientState({ preserveChatOutbox: true })
 }
 
 // Remove browser-local queues and mirrors after an explicit app-data wipe.
@@ -286,15 +303,13 @@ export async function apiFetch(path, options = {}) {
       window.dispatchEvent(new CustomEvent('mobius:chat-embed-auth-expired'))
       throw new Error('EMBED_AUTH_EXPIRED')
     }
-    clearToken()
-    try { sessionStorage.setItem('auth_expired', '1') } catch {}
     // Await the cache wipe before reloading. Without this, the page
     // reload aborts the IndexedDB delete and the next owner could see
     // stale chats/messages from the cached query data.
     // Keep accepted chat intent through an expired credential. Each record is
     // partitioned by owner+epoch and can only replay after a matching login;
     // explicit Settings logout still uses the default full wipe.
-    await clearQueryCache({ preserveChatOutbox: true })
+    await clearExpiredOwnerSession()
     // Defer reload one tick and throw a typed error so callers'
     // try/catch/finally blocks run (stopping spinners) before the
     // page goes away. Previously we returned a never-resolving
