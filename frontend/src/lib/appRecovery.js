@@ -15,6 +15,12 @@ export function appUpdateStaleMessage(event) {
     + `Review the latest update and start again. ${REASSURANCE}`
 }
 
+export function appCrashReportDraft(name, error) {
+  const detail = String(error ?? '').trim()
+    || 'Unknown app error (no message reached the shell)'
+  return `The app "${name}" crashed with this error:\n\`\`\`\n${detail}\n\`\`\`\nPlease investigate and fix.`
+}
+
 export function findAppStoreApp(apps) {
   let nameFallback = null
   for (const app of Array.isArray(apps) ? apps : []) {
