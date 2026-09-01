@@ -80,6 +80,11 @@ def _record(record_id, repo_path):
       "diff_sha256": hashlib.sha256(_DIFF1.encode()).hexdigest(),
       "labels": ["bug"],
     },
+    "quality_review": {
+      "state": "all_clear",
+      "reviewed_head_sha": _HEAD1,
+      "reviewed_at": "2026-07-09T00:00:00Z",
+    },
   }
 
 
