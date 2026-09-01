@@ -190,6 +190,11 @@ export function chatDetailCacheValue(data = {}) {
       ? data.pending_messages
       : [],
     pending_question_id: data.pending_question_id || null,
+    waits: Array.isArray(data.waits) ? data.waits : [],
+    background_helpers: data.background_helpers
+      && typeof data.background_helpers === 'object'
+      ? data.background_helpers
+      : { count: 0, items: [] },
     chatInfo: {
       provider: data.provider || 'claude',
       session_id: data.session_id || null,

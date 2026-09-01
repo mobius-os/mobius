@@ -1,8 +1,6 @@
-/* WaitingChip renders a chat's armed durable waits: the visible form of "the
-   agent is waiting for X and will resume on its own". One chip per wait, shown
-   only while no turn is active — during a live turn the run surface already
-   owns the status area. Cancel is immediate and local-first; the durable row
-   is cancelled through the platform. */
+/* WaitingChip renders every self-resuming chat handoff: declared monitors and
+   wake-enabled background helpers. It is shown only while no parent turn is
+   active; during a live turn the run surface already owns the status area. */
 
 function intervalLabel(wait) {
   if (wait.kind === 'timer') {
@@ -17,10 +15,35 @@ function intervalLabel(wait) {
   return minutes <= 1 ? 'checking every minute' : `checking every ${minutes} min`
 }
 
-export default function WaitingChip({ waits, onCancel }) {
-  if (!waits?.length) return null
+function helperTaskLabel(taskKey) {
+  return String(taskKey || '')
+    .replace(/[._-]+/g, ' ')
+    .replace(/^./, letter => letter.toUpperCase())
+}
+
+export default function WaitingChip({ waits = [], backgroundHelpers, onCancel }) {
+  const helperCount = Number(backgroundHelpers?.count) || 0
+  if (!waits.length && helperCount === 0) return null
+  const helperTasks = (backgroundHelpers?.items || [])
+    .map(item => helperTaskLabel(item?.task_key))
+    .filter(Boolean)
   return (
     <div className="chat__waits" role="status" aria-live="polite">
+      {helperCount > 0 && (
+        <div className="chat__wait-chip">
+          <span className="chat__wait-tag" aria-hidden="true">
+            <span className="chat__wait-pulse" />
+            Waiting
+          </span>
+          <span
+            className="chat__wait-text"
+            title={helperTasks.length ? helperTasks.join(', ') : undefined}
+          >
+            Waiting on {helperCount} {helperCount === 1 ? 'helper' : 'helpers'}
+          </span>
+          <span className="chat__wait-meta">resumes automatically</span>
+        </div>
+      )}
       {waits.map(wait => (
         <div key={wait.id} className="chat__wait-chip">
           <span className="chat__wait-tag" aria-hidden="true">

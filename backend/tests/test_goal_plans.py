@@ -470,6 +470,32 @@ def test_goal_wait_ownership_excludes_a_later_ordinary_turn(db, chat):
   assert presented_goal(db, chat.id)["wait_kind"] == "monitor"
 
 
+def test_goal_wait_ownership_includes_only_its_waking_helpers(
+  db, chat, monkeypatch,
+):
+  from app.goal_plans import presented_goal
+
+  goal_run = models.ChatRun(
+    id="helper-goal-run", root_run_id="helper-goal-run", chat_id=chat.id,
+    status="parked", provider="codex", goal_objective="Wait on helper",
+    goal_id="helper-goal-id", started_at=datetime.now(UTC),
+  )
+  db.add(goal_run)
+  db.commit()
+
+  monkeypatch.setattr(
+    "app.delegations.background_helper_goal_ids",
+    lambda _db, _chat_id: {"different-goal"},
+  )
+  assert "wait_kind" not in presented_goal(db, chat.id)
+
+  monkeypatch.setattr(
+    "app.delegations.background_helper_goal_ids",
+    lambda _db, _chat_id: {"helper-goal-id"},
+  )
+  assert presented_goal(db, chat.id)["wait_kind"] == "monitor"
+
+
 def test_legacy_queued_goal_clear_is_retired_without_opening_a_turn(db, chat):
   from app.chat_writer import PromotePending, get_writer
 
