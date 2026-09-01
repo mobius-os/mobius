@@ -289,7 +289,7 @@ function AppRoot() {
     const showingDegradedNotice = !STANDALONE_APP
       && servedVersionQuery.data?.serving_source === 'baked'
     if (STANDALONE_APP || shellVisualReady || showingDegradedNotice) {
-      removeSplash()
+      void removeSplashWhenOwnedFontsReady()
     }
   }, [hasToken, isRestoring, shellVisualReady, status, servedVersionQuery.data])
 
@@ -383,6 +383,17 @@ function StartupError({ title, message, retrying = false, onRetry }) {
       </section>
     </div>
   )
+}
+
+let ownedFontSplashRemoval = null
+
+function removeSplashWhenOwnedFontsReady() {
+  if (ownedFontSplashRemoval) return ownedFontSplashRemoval
+  const settle = globalThis.__mobiusFontReadiness?.settleOwnedDocument
+  ownedFontSplashRemoval = Promise.resolve(
+    typeof settle === 'function' ? settle(document) : true,
+  ).catch(() => false).then(() => removeSplash())
+  return ownedFontSplashRemoval
 }
 
 function removeSplash() {

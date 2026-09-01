@@ -7,6 +7,7 @@ cache-first service worker — the failure mode behind the missing
 404 on a miss instead of falling through to HTML.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -37,7 +38,37 @@ def test_shell_and_frame_share_source_owned_font_contract():
   assert "font-family: 'JetBrains Mono'" in fonts
   assert "doc.fonts.load" in readiness
   assert "face.family === family" in readiness
+  assert "settleOwnedDocument" in readiness
   assert "moebius:frame-font-check" in readiness
+
+
+def test_shell_launch_cover_waits_for_owned_rendered_faces():
+  frontend = Path(__file__).resolve().parents[2] / "frontend"
+  app = (frontend / "src" / "App.jsx").read_text(encoding="utf-8")
+
+  assert "void removeSplashWhenOwnedFontsReady()" in app
+  helper_start = app.index("function removeSplashWhenOwnedFontsReady()")
+  helper_end = app.index("\nfunction removeSplash()", helper_start)
+  helper = app[helper_start:helper_end]
+  assert "settleOwnedDocument" in helper
+  assert ".then(() => removeSplash())" in helper
+
+
+def test_live_font_handoff_probe_stresses_cold_owned_fonts():
+  platform = Path(__file__).resolve().parents[2]
+  package = json.loads((platform / "package.json").read_text(encoding="utf-8"))
+  probe = (
+    platform / "backend" / "scripts" / "probe-font-handoff.mjs"
+  ).read_text(encoding="utf-8")
+
+  assert package["scripts"]["probe:font-handoff"].endswith(
+    "probe-font-handoff.mjs"
+  )
+  assert "serviceWorkers: 'block'" in probe
+  assert "**/vendor/fonts/*.woff2" in probe
+  assert "ownedFontsSettled" in probe
+  assert "shellShifts" in probe
+  assert "appShifts" in probe
 
 
 def test_classifies_module_and_asset_paths_as_static():

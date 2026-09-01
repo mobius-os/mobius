@@ -3,8 +3,10 @@
   const OWNED_FAMILIES = new Set(['Inter', 'JetBrains Mono'])
   const FRAME_CHECK_TIMEOUT_MS = 4000
 
-  async function settleDocument(doc) {
-    if (!doc?.fonts || !doc.body) return true
+  function renderedFontRequirements(doc, ownedOnly) {
+    const specs = new Set()
+    const requiredFamilies = new Set()
+    if (!doc?.fonts || !doc.body) return { specs, requiredFamilies }
 
     const elements = new Set([doc.body])
     const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT)
@@ -13,17 +15,23 @@
       if (node.textContent.trim() && node.parentElement) elements.add(node.parentElement)
     }
 
-    const specs = new Set()
-    const requiredFamilies = new Set()
     for (const element of elements) {
       if (!element.getClientRects().length) continue
       const style = doc.defaultView.getComputedStyle(element)
       const family = style.fontFamily.split(',')[0].trim().replace(/^['"]|['"]$/g, '')
+      const owned = OWNED_FAMILIES.has(family)
+      if (ownedOnly && !owned) continue
       specs.add([
         style.fontStyle, style.fontWeight, style.fontSize, JSON.stringify(family),
       ].join(' '))
-      if (OWNED_FAMILIES.has(family)) requiredFamilies.add(family)
+      if (owned) requiredFamilies.add(family)
     }
+    return { specs, requiredFamilies }
+  }
+
+  async function settleRenderedFonts(doc, ownedOnly) {
+    if (!doc?.fonts || !doc.body) return true
+    const { specs, requiredFamilies } = renderedFontRequirements(doc, ownedOnly)
 
     try {
       const groups = await Promise.all([...specs].map((font) => doc.fonts.load(font)))
@@ -35,6 +43,17 @@
     } catch {
       return false
     }
+  }
+
+  function settleDocument(doc) {
+    return settleRenderedFonts(doc, false)
+  }
+
+  // Production launch covers only wait on faces Möbius ships itself. External
+  // theme fonts remain an owner-controlled network dependency and must never
+  // hold the shell hostage; exact screenshots still use settleDocument above.
+  function settleOwnedDocument(doc) {
+    return settleRenderedFonts(doc, true)
   }
 
   function isPainted(element, view) {
@@ -102,5 +121,7 @@
     return true
   }
 
-  scope.__mobiusFontReadiness = { settleDocument, settleCapture }
+  scope.__mobiusFontReadiness = {
+    settleDocument, settleOwnedDocument, settleCapture,
+  }
 })(globalThis)

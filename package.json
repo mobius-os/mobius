@@ -1,5 +1,6 @@
 {
   "scripts": {
+    "probe:font-handoff": "node backend/scripts/probe-font-handoff.mjs",
     "test:e2e-harness": "node --test tests/chat-fixture-registry.test.mjs tests/mock-accepted-messages.test.mjs",
     "test:packager": "node --test scripts/package-static-app.test.mjs"
   },
