@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  appCrashReportDraft,
   appUpdateStaleMessage,
   findAppStoreApp,
 } from '../appRecovery.js'
@@ -10,6 +11,17 @@ test('explains how to recover a stale update without alarming about live state',
   assert.equal(
     appUpdateStaleMessage({ appName: 'Reflection' }),
     'The pending update for Reflection changed upstream. Review the latest update and start again. The previous version is still running.',
+  )
+})
+
+test('crash report drafts never leave an empty error fence', () => {
+  assert.equal(
+    appCrashReportDraft('Notes', '   '),
+    'The app "Notes" crashed with this error:\n```\nUnknown app error (no message reached the shell)\n```\nPlease investigate and fix.',
+  )
+  assert.equal(
+    appCrashReportDraft('Notes', 'TypeError: unavailable'),
+    'The app "Notes" crashed with this error:\n```\nTypeError: unavailable\n```\nPlease investigate and fix.',
   )
 })
 
