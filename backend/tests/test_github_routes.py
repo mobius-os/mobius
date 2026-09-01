@@ -1645,6 +1645,15 @@ def _write_contribution(app_id, record_id, record, diff_text=""):
     atomic_write(base / f"{record_id}.diff", diff_text)
 
 
+def _all_clear_review(head_sha: str) -> dict:
+  """The exact-head review precondition for tests exercising public work."""
+  return {
+    "state": "all_clear",
+    "reviewed_head_sha": head_sha,
+    "reviewed_at": "2026-08-30T00:00:00Z",
+  }
+
+
 def _write_personal_draft(app_id, record_id="personal-draft", number=58):
   head = "a" * 40
   base = "b" * 40
@@ -1982,6 +1991,7 @@ def _prepared_real_review(app_id, record_id):
     "status": "prepared",
     "title": "Reviewed fix",
     "branch": "fix/demo-review",
+    "quality_review": _all_clear_review(head),
     "plan": {
       "action": "pr",
       "repo": "mobius-os/app-demo",
@@ -3312,6 +3322,7 @@ def test_submit_contribution_keeps_accepted_ready_pr_on_label_transport_failure(
     "branch": "fix/demo-polish",
     "created_at": "2026-07-09T00:00:00Z",
     "updated_at": "2026-07-09T00:00:00Z",
+    "quality_review": _all_clear_review(head),
     "plan": {
       "action": "pr",
       "repo": "mobius-os/app-demo",
@@ -3481,6 +3492,7 @@ def test_submit_contribution_recovers_ambiguous_create_by_exact_pushed_head(
     "branch": "fix/demo-polish",
     "created_at": "2026-07-09T00:00:00Z",
     "updated_at": "2026-07-09T00:00:00Z",
+    "quality_review": _all_clear_review(head),
     "plan": {
       "action": "pr",
       "repo": "mobius-os/app-demo",
@@ -3661,6 +3673,47 @@ def test_existing_pr_update_confirmation_reads_the_known_pr_directly(
     ("api", "repos/mobius-os/app-demo/pulls/58"),
   ]
 
+
+def test_existing_pr_update_confirmation_pins_the_reviewed_base_commit(
+  tmp_path, monkeypatch,
+):
+  """A matching base name cannot hide a base ref that advanced after review."""
+  from app.github_contributions import _confirm_existing_pr_update
+
+  expected_head = "a" * 40
+  expected_base = "b" * 40
+  observed_bases = ["c" * 40, expected_base]
+
+  def fake_gh(_repo_path, *_args, **_kwargs):
+    return _cp(json.dumps({
+      "html_url": "https://github.com/mobius-os/app-demo/pull/58",
+      "state": "open",
+      "head": {
+        "ref": "feat/existing-review",
+        "sha": expected_head,
+        "repo": {"full_name": "octocat/app-demo"},
+      },
+      "base": {"ref": "main", "sha": observed_bases.pop(0)},
+      "draft": False,
+    }))
+
+  monkeypatch.setattr("app.github_contribution_git._gh", fake_gh)
+  monkeypatch.setattr("app.github_contributions.time.sleep", lambda _seconds: None)
+
+  assert _confirm_existing_pr_update(
+    tmp_path,
+    "mobius-os/app-demo",
+    58,
+    expected_head_repository="octocat/app-demo",
+    expected_head_sha=expected_head,
+    branch="feat/existing-review",
+    base_branch="main",
+    expected_base_sha=expected_base,
+  ) == (
+    "https://github.com/mobius-os/app-demo/pull/58", "ready",
+  )
+  assert observed_bases == []
+
 def test_submit_contribution_normalizes_fallback_author_before_push(
   client, owner_token, monkeypatch,
 ):
@@ -3680,6 +3733,7 @@ def test_submit_contribution_normalizes_fallback_author_before_push(
     "status": "prepared",
     "title": "Polish demo",
     "branch": "fix/demo-polish",
+    "quality_review": _all_clear_review(old_head),
     "plan": {
       "action": "pr",
       "repo": "mobius-os/app-demo",
@@ -3807,6 +3861,7 @@ def test_submit_contribution_replaces_stale_fork_remote_before_push(
     "status": "prepared",
     "title": "Polish demo",
     "branch": "fix/demo-polish",
+    "quality_review": _all_clear_review(head),
     "plan": {
       "action": "pr",
       "repo": "mobius-os/app-demo",
@@ -5044,6 +5099,70 @@ def test_stack_tip_push_keeps_journal_when_result_cannot_be_read(
   assert caught.value.code == "landing_unconfirmed"
 
 
+def test_stack_tip_push_keeps_journal_when_transport_and_probe_raise(
+  monkeypatch, tmp_path,
+):
+  """Raised transport errors remain an ambiguous public outcome."""
+  from app.routes.github import ContributionSubmitError, _push_stack_tip_with_lease
+
+  monkeypatch.setattr("app.github_contributions._PUSH_RETRIES", 1)
+  monkeypatch.setattr(
+    "app.github_contribution_git._git",
+    lambda *_args, **_kwargs: (_ for _ in ()).throw(
+      subprocess.TimeoutExpired("git push", 1),
+    ),
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git._upstream_branch_sha",
+    lambda *_args, **_kwargs: (_ for _ in ()).throw(
+      OSError("temporary GitHub transport failure"),
+    ),
+  )
+
+  with pytest.raises(ContributionSubmitError) as caught:
+    _push_stack_tip_with_lease(
+      tmp_path,
+      upstream_repo="mobius-os/app-demo",
+      target_branch="main",
+      expected_base="b" * 40,
+      landed_sha="c" * 40,
+    )
+
+  assert caught.value.status_code == 503
+  assert caught.value.code == "landing_unconfirmed"
+
+
+def test_stack_tip_push_timeout_stays_ambiguous_when_probe_is_still_old(
+  monkeypatch, tmp_path,
+):
+  """An early old-tip read cannot prove a timed-out push will not land later."""
+  from app.routes.github import ContributionSubmitError, _push_stack_tip_with_lease
+
+  monkeypatch.setattr("app.github_contributions._PUSH_RETRIES", 1)
+  monkeypatch.setattr(
+    "app.github_contribution_git._git",
+    lambda *_args, **_kwargs: (_ for _ in ()).throw(
+      subprocess.TimeoutExpired("git push", 1),
+    ),
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git._upstream_branch_sha",
+    lambda *_args, **_kwargs: "b" * 40,
+  )
+
+  with pytest.raises(ContributionSubmitError) as caught:
+    _push_stack_tip_with_lease(
+      tmp_path,
+      upstream_repo="mobius-os/app-demo",
+      target_branch="main",
+      expected_base="b" * 40,
+      landed_sha="c" * 40,
+    )
+
+  assert caught.value.status_code == 503
+  assert caught.value.code == "landing_unconfirmed"
+
+
 def test_submit_contribution_rejects_branch_diff_mismatch(
   client, owner_token, monkeypatch,
 ):
@@ -5063,6 +5182,7 @@ def test_submit_contribution_rejects_branch_diff_mismatch(
     "status": "prepared",
     "title": "Polish demo",
     "branch": "fix/demo-polish",
+    "quality_review": _all_clear_review(head),
     "plan": {
       "action": "pr",
       "repo": "mobius-os/app-demo",
@@ -5144,6 +5264,7 @@ def test_submit_contribution_rejects_unmergeable_branch_before_push(
     "status": "prepared",
     "title": "Polish demo",
     "branch": "fix/demo-polish",
+    "quality_review": _all_clear_review(head),
     "plan": {
       "action": "pr",
       "repo": "mobius-os/app-demo",
@@ -5230,6 +5351,7 @@ def test_submit_contribution_records_public_branch_after_pr_create_failure(
     "status": "prepared",
     "title": "Polish demo",
     "branch": "fix/demo-polish",
+    "quality_review": _all_clear_review(head),
     "plan": {
       "action": "pr",
       "repo": "mobius-os/app-demo",
@@ -5389,19 +5511,21 @@ def test_submit_contribution_rolls_back_unready_record(
   _write_token(login="octocat")
   app_id, _ = _app_token(client, owner_token, github_access=True)
   record_id = "rec-pr-unready"
+  head = "a" * 40
   record = {
     "id": record_id,
     "type": "pr",
     "repo": "mobius-os/app-demo",
     "status": "prepared",
     "title": "Polish demo",
+    "quality_review": _all_clear_review(head),
     "plan": {
       "action": "pr",
       "repo": "mobius-os/app-demo",
       "title": "Polish demo",
       "body_draft": "Body",
       "branch": "fix/demo-polish",
-      "head_sha": "abc123",
+      "head_sha": head,
     },
   }
   _write_contribution(app_id, record_id, record)
@@ -5460,6 +5584,22 @@ def _prepared_existing_pr_update(app_id: int, record_id: str) -> dict:
     },
   }
   _write_contribution(app_id, record_id, record, "reviewed diff")
+  return record
+
+
+def _prepared_merged_parent_successor(app_id: int, record_id: str) -> dict:
+  """A standalone reviewed successor that reuses the ordinary update action."""
+  record = _prepared_existing_pr_update(app_id, record_id)
+  record["plan"]["base_sha"] = _SUCCESSOR_TARGET_BASE_SHA
+  record["plan"]["head_sha"] = _SUCCESSOR_NEW_HEAD
+  record["plan"]["successor"] = {
+    "old_head_sha": _SUCCESSOR_OLD_HEAD,
+    "old_base_branch": _SUCCESSOR_OLD_BASE_BRANCH,
+    "old_base_sha": _SUCCESSOR_OLD_BASE_SHA,
+    "base_branch": _SUCCESSOR_TARGET_BASE_BRANCH,
+  }
+  record["quality_review"]["reviewed_head_sha"] = _SUCCESSOR_NEW_HEAD
+  _write_contribution(app_id, record_id, record, "reviewed successor diff")
   return record
 
 
@@ -5781,7 +5921,7 @@ def test_existing_pr_stack_update_preserves_parent_when_child_fails(
   }]
 
 
-def test_existing_pr_target_includes_the_live_base_branch(monkeypatch):
+def test_existing_pr_target_returns_the_authoritative_pr_base_snapshot(monkeypatch):
   _write_token(login="octocat")
   live = {
     "state": "open",
@@ -5792,6 +5932,7 @@ def test_existing_pr_target_includes_the_live_base_branch(monkeypatch):
     },
     "base": {
       "ref": "stack/review/01-parent",
+      "sha": "8" * 40,
       "repo": {"full_name": "mobius-os/app-demo"},
     },
   }
@@ -5810,6 +5951,7 @@ def test_existing_pr_target_includes_the_live_base_branch(monkeypatch):
     "error": None,
     "head_sha": "9" * 40,
     "base_branch": "stack/review/01-parent",
+    "base_sha": "8" * 40,
   }
 
 
@@ -5826,23 +5968,31 @@ def test_existing_pr_update_uses_owner_approved_exact_target(
 
   monkeypatch.setattr(
     github_routes,
-    "_autopilot_live_target_error",
+    "_autopilot_live_target",
     lambda repo, number, head_repo, branch: calls.append(
       ("target", repo, number, head_repo, branch)
-    ) or None,
+    ) or {"error": None, "head_sha": "9" * 40, "base_branch": "release"},
+  )
+  monkeypatch.setattr(
+    github_routes,
+    "_assert_reviewed_update_contains_live_head",
+    lambda repo_path, live_head, reviewed_head: calls.append(
+      ("ancestry", repo_path.name, live_head, reviewed_head)
+    ),
   )
 
   def submit(
     record,
     diff_path,
     *,
+    direct_base_branch=None,
     expected_existing_pr_number=None,
     expected_existing_head_repository=None,
-    **_kwargs,
   ):
     calls.append((
       "submit",
       record["status"],
+      direct_base_branch,
       expected_existing_pr_number,
       expected_existing_head_repository,
       diff_path.name,
@@ -5877,10 +6027,309 @@ def test_existing_pr_update_uses_owner_approved_exact_target(
       "octocat/app-demo", "feat/existing-review",
     ),
     (
-      "submit", "submitting", 58, "octocat/app-demo",
+      "ancestry", "worktree", "9" * 40, original["plan"]["head_sha"],
+    ),
+    (
+      "submit", "submitting", "release", 58, "octocat/app-demo",
       f"{record_id}.diff",
     ),
   ]
+
+
+def test_existing_pr_update_routes_detached_successor_through_state_machine(
+  client, owner_token, monkeypatch,
+):
+  """The existing update endpoint owns both ordinary and successor updates."""
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record_id = "existing-pr-successor"
+  original = _prepared_merged_parent_successor(app_id, record_id)
+  calls = []
+  live_targets = [
+    {
+      "error": None,
+      "head_sha": _SUCCESSOR_OLD_HEAD,
+      "base_branch": _SUCCESSOR_OLD_BASE_BRANCH,
+      "base_sha": _SUCCESSOR_OLD_BASE_SHA,
+    },
+    {
+      "error": None,
+      "head_sha": _SUCCESSOR_NEW_HEAD,
+      "base_branch": _SUCCESSOR_TARGET_BASE_BRANCH,
+      "base_sha": _SUCCESSOR_TARGET_BASE_SHA,
+    },
+  ]
+  monkeypatch.setattr(
+    github_routes,
+    "_autopilot_live_target",
+    lambda *_args: live_targets.pop(0),
+  )
+  monkeypatch.setattr(
+    github_routes,
+    "_assert_reviewed_update_contains_live_head",
+    lambda *_args: pytest.fail("a reviewed successor is intentionally non-fast-forward"),
+  )
+  monkeypatch.setattr(
+    github_routes,
+    "_submit_prepared_pr",
+    lambda *_args, **_kwargs: pytest.fail("successors use the owning state machine"),
+  )
+
+  def advance(record, diff_path, **kwargs):
+    calls.append((record["status"], diff_path.name, kwargs))
+    return (
+      "https://github.com/mobius-os/app-demo/pull/58",
+      58,
+      {
+        "last_submit_push_sha": record["plan"]["head_sha"],
+        "last_submit_base_branch": _SUCCESSOR_TARGET_BASE_BRANCH,
+        "publication_stage": "ready",
+      },
+    )
+
+  monkeypatch.setattr(github_routes, "_advance_merged_parent_successor", advance)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/update-existing",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={},
+  )
+
+  assert response.status_code == 200, response.text
+  updated = response.json()["record"]
+  assert updated["status"] == "open"
+  assert updated["plan"]["action"] == "pr_update"
+  assert updated["plan"]["successor"] == original["plan"]["successor"]
+  assert calls == [(
+    "submitting",
+    f"{record_id}.diff",
+    {
+      "expected_number": 58,
+      "expected_head_repository": "octocat/app-demo",
+      "live_head_sha": _SUCCESSOR_OLD_HEAD,
+      "live_base_branch": _SUCCESSOR_OLD_BASE_BRANCH,
+    },
+  )]
+  assert live_targets == []
+
+
+def test_existing_pr_successor_never_settles_while_public_base_is_old(
+  client, owner_token, monkeypatch,
+):
+  """A pushed head with an ignored retarget remains resumable, never success."""
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record_id = "existing-pr-successor-old-public-base"
+  _prepared_merged_parent_successor(app_id, record_id)
+  live_targets = [
+    {
+      "error": None,
+      "head_sha": _SUCCESSOR_OLD_HEAD,
+      "base_branch": _SUCCESSOR_OLD_BASE_BRANCH,
+      "base_sha": _SUCCESSOR_OLD_BASE_SHA,
+    },
+    {
+      "error": None,
+      "head_sha": _SUCCESSOR_NEW_HEAD,
+      "base_branch": _SUCCESSOR_OLD_BASE_BRANCH,
+      "base_sha": _SUCCESSOR_OLD_BASE_SHA,
+    },
+  ]
+  monkeypatch.setattr(
+    github_routes,
+    "_autopilot_live_target",
+    lambda *_args: live_targets.pop(0),
+  )
+  monkeypatch.setattr(
+    github_routes,
+    "_advance_merged_parent_successor",
+    lambda *_args, **_kwargs: (
+      "https://github.com/mobius-os/app-demo/pull/58",
+      58,
+      {
+        "last_submit_push_sha": _SUCCESSOR_NEW_HEAD,
+        # Model the field incident: an inner helper claimed success while
+        # retaining the obsolete parent branch as submit metadata.
+        "last_submit_base_branch": _SUCCESSOR_OLD_BASE_BRANCH,
+        "publication_stage": "ready",
+      },
+    ),
+  )
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/update-existing",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={},
+  )
+
+  assert response.status_code == 503, response.text
+  detail = response.json()["detail"]
+  assert detail["code"] == "update_unconfirmed"
+  saved = detail["record"]
+  assert saved["status"] == "submitting"
+  assert saved["last_submit_push_sha"] == _SUCCESSOR_NEW_HEAD
+  assert saved["last_successor_base_branch"] == _SUCCESSOR_TARGET_BASE_BRANCH
+  assert saved.get("last_submit_base_branch") != _SUCCESSOR_OLD_BASE_BRANCH
+  assert live_targets == []
+
+
+def test_existing_pr_successor_resumes_its_exact_submitting_claim(
+  client, owner_token, monkeypatch,
+):
+  """A crash after claim can re-enter the same approved state machine."""
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record_id = "existing-pr-successor-resume"
+  record = _prepared_merged_parent_successor(app_id, record_id)
+  record["status"] = "submitting"
+  record["submitter"] = "contribute-update-button"
+  record["submit_started_at"] = "2026-08-30T22:00:00Z"
+  _write_contribution(app_id, record_id, record, "reviewed successor diff")
+  live_targets = [
+    {
+      "error": None,
+      "head_sha": _SUCCESSOR_NEW_HEAD,
+      "base_branch": _SUCCESSOR_OLD_BASE_BRANCH,
+      "base_sha": _SUCCESSOR_OLD_BASE_SHA,
+    },
+    {
+      "error": None,
+      "head_sha": _SUCCESSOR_NEW_HEAD,
+      "base_branch": _SUCCESSOR_TARGET_BASE_BRANCH,
+      "base_sha": _SUCCESSOR_TARGET_BASE_SHA,
+    },
+  ]
+  monkeypatch.setattr(
+    github_routes,
+    "_autopilot_live_target",
+    lambda *_args: live_targets.pop(0),
+  )
+  seen = []
+  monkeypatch.setattr(
+    github_routes,
+    "_advance_merged_parent_successor",
+    lambda claimed, _diff, **_kwargs: (
+      seen.append((claimed["status"], claimed["submit_started_at"]))
+      or (
+        "https://github.com/mobius-os/app-demo/pull/58",
+        58,
+        {
+          "last_submit_push_sha": _SUCCESSOR_NEW_HEAD,
+          "publication_stage": "ready",
+        },
+      )
+    ),
+  )
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/update-existing",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={},
+  )
+
+  assert response.status_code == 200, response.text
+  assert response.json()["record"]["status"] == "open"
+  assert seen == [("submitting", "2026-08-30T22:00:00Z")]
+  assert live_targets == []
+
+
+@pytest.mark.parametrize("error_code", ["update_unconfirmed", "landing_unconfirmed"])
+def test_existing_pr_successor_preserves_ambiguous_public_claim(
+  client, owner_token, monkeypatch, error_code,
+):
+  """A lost public response keeps the prior approval resumable, not re-prepared."""
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record_id = f"existing-pr-successor-{error_code}"
+  _prepared_merged_parent_successor(app_id, record_id)
+  monkeypatch.setattr(
+    github_routes,
+    "_autopilot_live_target",
+    lambda *_args: {
+      "error": None,
+      "head_sha": _SUCCESSOR_NEW_HEAD,
+      "base_branch": _SUCCESSOR_OLD_BASE_BRANCH,
+      "base_sha": _SUCCESSOR_OLD_BASE_SHA,
+    },
+  )
+
+  def unconfirmed(*_args, **_kwargs):
+    raise ContributionSubmitError(
+      "GitHub did not confirm the base retarget.",
+      status_code=503,
+      code=error_code,
+      detail="The exact PR read was inconclusive.",
+      record_patch={"last_submit_push_sha": _SUCCESSOR_NEW_HEAD},
+    )
+
+  monkeypatch.setattr(github_routes, "_advance_merged_parent_successor", unconfirmed)
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/update-existing",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={},
+  )
+
+  assert response.status_code == 503, response.text
+  saved = response.json()["detail"]["record"]
+  assert saved["status"] == "submitting"
+  assert saved["last_submit_push_sha"] == _SUCCESSOR_NEW_HEAD
+  assert saved["last_submit_error_code"] == error_code
+
+
+def test_existing_pr_successor_preserves_claim_after_unexpected_failure(
+  client, owner_token, monkeypatch,
+):
+  """Unknown failures cannot reopen a possibly completed public action."""
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record_id = "existing-pr-successor-unexpected"
+  _prepared_merged_parent_successor(app_id, record_id)
+  monkeypatch.setattr(
+    github_routes,
+    "_autopilot_live_target",
+    lambda *_args: (_ for _ in ()).throw(RuntimeError("unexpected read failure")),
+  )
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/update-existing",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={},
+  )
+
+  assert response.status_code == 500, response.text
+  saved = response.json()["detail"]["record"]
+  assert saved["status"] == "submitting"
+  assert saved["last_submit_error_code"] == "update_unconfirmed"
+  assert "check" in saved["last_submit_error_detail"].lower()
+
+
+def test_existing_pr_successor_rejects_residual_stack_before_public_work(
+  client, owner_token, monkeypatch,
+):
+  """Stack detachment is an explicit private preparation, never a runtime rewrite."""
+  _write_token(login="octocat")
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record_id = "existing-pr-successor-stacked"
+  record = _prepared_merged_parent_successor(app_id, record_id)
+  record["plan"]["stack"] = {"id": "demo", "position": 1, "total": 2}
+  _write_contribution(app_id, record_id, record, "reviewed successor diff")
+  monkeypatch.setattr(
+    github_routes,
+    "_advance_merged_parent_successor",
+    lambda *_args, **_kwargs: pytest.fail("a stacked successor must not mutate"),
+  )
+
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/update-existing",
+    headers={"Authorization": f"Bearer {app_token}"},
+    json={},
+  )
+
+  assert response.status_code == 409, response.text
+  stored = json.loads(
+    (Path(get_settings().data_dir) / "apps" / str(app_id)
+     / "contributions" / f"{record_id}.json").read_text()
+  )
+  assert stored["status"] == "prepared"
 
 
 def test_existing_pr_update_stays_successful_if_followup_metadata_fails(
@@ -5894,7 +6343,12 @@ def test_existing_pr_update_stays_successful_if_followup_metadata_fails(
   original = _prepared_existing_pr_update(app_id, record_id)
   monkeypatch.setattr(
     github_routes,
-    "_autopilot_live_target_error",
+    "_autopilot_live_target",
+    lambda *_args: {"error": None, "head_sha": "9" * 40},
+  )
+  monkeypatch.setattr(
+    github_routes,
+    "_assert_reviewed_update_contains_live_head",
     lambda *_args: None,
   )
   monkeypatch.setattr(
@@ -5940,8 +6394,8 @@ def test_existing_pr_update_rechecks_target_before_any_push(
   pushed = []
   monkeypatch.setattr(
     github_routes,
-    "_autopilot_live_target_error",
-    lambda *_args: "The live branch moved.",
+    "_autopilot_live_target",
+    lambda *_args: {"error": "The live branch moved.", "head_sha": None},
   )
   monkeypatch.setattr(
     github_routes,
@@ -6058,6 +6512,48 @@ def test_chat_projection_marks_exact_reviewed_pr_updates_sendable(
   assert projected["quality_review_ready"] is True
   assert projected["review"]["state"] == "ready"
   assert projected["coverage_at"] == "2026-08-27T12:34:56Z"
+
+
+def test_chat_projection_keeps_an_interrupted_successor_resumable(
+  client, owner_token, monkeypatch,
+):
+  """A durable successor claim stays reviewable after a process restart."""
+  app_id, app_token = _app_token(client, owner_token, github_access=True)
+  record_id = "existing-pr-successor-card"
+  record = _prepared_merged_parent_successor(app_id, record_id)
+  record.update({
+    "chat_id": "chat-successor-resume",
+    "status": "submitting",
+    "submitter": "contribute-update-button",
+    "submit_started_at": "2026-08-30T22:00:00Z",
+  })
+  _write_contribution(app_id, record_id, record, "reviewed successor diff")
+  inspected = []
+  monkeypatch.setattr(
+    github_routes,
+    "_inspect_prepared_review",
+    lambda current, _diff_path, _github_state: (
+      inspected.append(current["status"])
+      or {
+        "id": current["id"], "state": "ready", "code": "ready",
+        "message": "Still matches the exact source you reviewed.",
+      }
+    ),
+  )
+
+  response = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-successor-resume",
+    headers={"Authorization": f"Bearer {app_token}"},
+  )
+
+  assert response.status_code == 200, response.text
+  projected = response.json()["records"][0]
+  assert projected["status"] == "submitting"
+  assert projected["action"] == "pr_update"
+  assert projected["successor"] is True
+  assert projected["quality_review_ready"] is True
+  assert projected["review"]["state"] == "ready"
+  assert inspected == ["submitting"]
 
 
 def test_chat_projection_uses_private_review_time_after_the_public_submission(
@@ -6931,6 +7427,29 @@ def test_chat_action_key_ignores_poll_timestamps_but_changes_with_attention(
   assert third != first
 
 
+def test_chat_action_key_changes_with_successor_authorization(
+  client, owner_token,
+):
+  """Any changed successor mutation invalidates an older confirmation."""
+  app_id, _ = _app_token(client, owner_token, github_access=True)
+  record_id = "successor-action-key"
+  record = _prepared_merged_parent_successor(app_id, record_id)
+  record["chat_id"] = "chat-a"
+  _write_contribution(app_id, record_id, record, "reviewed successor diff")
+  headers = {"Authorization": f"Bearer {owner_token}"}
+
+  first = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
+  ).json()["records"][0]["action_key"]
+  record["plan"]["successor"]["base_branch"] = "release"
+  _write_contribution(app_id, record_id, record, "reviewed successor diff")
+  second = client.get(
+    f"/api/github/contributions/{app_id}/for-chat/chat-a", headers=headers,
+  ).json()["records"][0]["action_key"]
+
+  assert second != first
+
+
 def test_diff_file_paths_reads_headers_not_source_that_looks_like_one(tmp_path):
   diff_path = tmp_path / "review.diff"
   diff_path.write_text(
@@ -7561,3 +8080,823 @@ def test_a_dirty_checkout_is_named_before_an_upstream_conflict(
     headers={"Authorization": f"Bearer {app_token}"},
   )
   assert response.json()["records"][0]["code"] == "working_changes"
+
+
+# --- merged-parent successor transition -------------------------------------
+#
+# A squash/queue-merged parent (#966) leaves its reviewed child (#967) pointed
+# at a base branch that no longer carries that commit. The guarded successor
+# action rewrites the child branch to the reviewed successor with an exact
+# force-with-lease from the old public head, then retargets the PR base to the
+# surviving branch. Both mutations are keyed only on the live PR so every crash
+# resumes state-by-state and any drift fails closed with nothing pushed.
+
+_SUCCESSOR_OLD_HEAD = "a" * 40
+_SUCCESSOR_NEW_HEAD = "b" * 40
+_SUCCESSOR_OLD_BASE_SHA = "c" * 40
+_SUCCESSOR_TARGET_BASE_SHA = "d" * 40
+_SUCCESSOR_MERGED_BASE_SHA = "e" * 40
+_SUCCESSOR_OLD_BASE_BRANCH = "stack/demo/01-parent"
+_SUCCESSOR_TARGET_BASE_BRANCH = "main"
+_SUCCESSOR_BRANCH = "stack/demo/02-child"
+
+
+def _successor_submission(tmp_path, monkeypatch, *, stack=None):
+  """One reviewed detached ``pr_update`` successor card whose parent already squash-merged."""
+  _write_token(login="octocat", user_id=42)
+  repo = tmp_path / "successor-pr"
+  (repo / ".git").mkdir(parents=True)
+  diff_text = "diff --git a/model.py b/model.py\n+reviewed successor\n"
+  diff_path = tmp_path / "successor.diff"
+  diff_path.write_text(diff_text)
+  plan = {
+    "action": "pr_update",
+    "repo": "mobius-os/app-demo",
+    "title": "Rebase the child onto the surviving base",
+    "body_draft": "Reviewed merged-parent successor.",
+    "branch": _SUCCESSOR_BRANCH,
+    "repo_path": str(repo),
+    "base_sha": _SUCCESSOR_TARGET_BASE_SHA,
+    "head_sha": _SUCCESSOR_NEW_HEAD,
+    "diff_sha256": hashlib.sha256(diff_text.encode()).hexdigest(),
+    "successor": {
+      "old_head_sha": _SUCCESSOR_OLD_HEAD,
+      "old_base_branch": _SUCCESSOR_OLD_BASE_BRANCH,
+      "old_base_sha": _SUCCESSOR_OLD_BASE_SHA,
+      "base_branch": _SUCCESSOR_TARGET_BASE_BRANCH,
+    },
+  }
+  if stack is not None:
+    plan["stack"] = stack
+  record = {
+    "id": "successor-pr",
+    "type": "pr",
+    "repo": "mobius-os/app-demo",
+    "status": "submitting",
+    "title": "Rebase the child onto the surviving base",
+    "branch": _SUCCESSOR_BRANCH,
+    "url": "https://github.com/mobius-os/app-demo/pull/967",
+    "number": 967,
+    "head_repository": "mobius-os/app-demo",
+    "plan": plan,
+  }
+  monkeypatch.setattr(
+    "app.github_contributions.shutil.which", lambda name: f"/bin/{name}",
+  )
+  monkeypatch.setattr(
+    "app.github_contributions._safe_repo_path", lambda _raw: repo,
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git._connected_git_identity",
+    lambda *_args, **_kwargs: (
+      "Octo Cat", "octocat@users.noreply.github.com",
+    ),
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git._assert_fresh",
+    lambda *_args, **_kwargs: (
+      _SUCCESSOR_TARGET_BASE_SHA,
+      _SUCCESSOR_NEW_HEAD,
+      record["plan"]["diff_sha256"],
+    ),
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git._assert_clean_worktree", lambda *_args: None,
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git._assert_coauthor_trailer", lambda *_args: None,
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git._assert_head_attribution",
+    lambda *_args, **_kwargs: None,
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git._assert_merges_with_upstream",
+    lambda *_args, **_kwargs: {
+      "last_submit_upstream_branch": _SUCCESSOR_TARGET_BASE_BRANCH,
+      "last_submit_upstream_sha": _SUCCESSOR_TARGET_BASE_SHA,
+    },
+  )
+  monkeypatch.setattr(
+    "app.github_contribution_git._upstream_branch_sha",
+    lambda _repo, _upstream, branch: (
+      _SUCCESSOR_OLD_BASE_SHA
+      if branch == _SUCCESSOR_OLD_BASE_BRANCH
+      else _SUCCESSOR_TARGET_BASE_SHA
+    ),
+  )
+  monkeypatch.setattr(
+    "app.github_contributions._assert_merged_parent_tree_equivalence",
+    lambda *_args, **_kwargs: None,
+  )
+
+  def fake_git(_repo, *args, check=True):
+    if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+      return _cp(_SUCCESSOR_BRANCH + "\n")
+    if args == ("rev-parse", "HEAD"):
+      return _cp(_SUCCESSOR_NEW_HEAD + "\n")
+    return _cp("")
+
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+  return record, diff_path
+
+
+def _capture_successor_confirmations(
+  monkeypatch,
+  *,
+  url="https://github.com/mobius-os/app-demo/pull/967",
+  target_results=None,
+):
+  confirms = []
+  target_results = list(target_results or [None, (url, "ready")])
+
+  def fake_confirm(_repo, _upstream, number, **kwargs):
+    confirms.append({"number": number, **kwargs})
+    if kwargs.get("base_branch") == _SUCCESSOR_TARGET_BASE_BRANCH:
+      if len(target_results) > 1:
+        return target_results.pop(0)
+      return target_results[0]
+    return url, "ready"
+
+  monkeypatch.setattr(
+    "app.github_contributions._confirm_existing_pr_update", fake_confirm,
+  )
+  return confirms
+
+
+def test_merged_parent_successor_leases_promoted_child_after_squash_merge(
+  tmp_path, monkeypatch,
+):
+  """old head + old base -> force-with-lease rewrite, then base retarget."""
+  from app.github_contributions import _advance_merged_parent_successor
+
+  record, diff_path = _successor_submission(tmp_path, monkeypatch)
+  lease_calls = []
+  monkeypatch.setattr(
+    "app.github_contributions._push_stack_tip_with_lease",
+    lambda repo, **kwargs: lease_calls.append(kwargs),
+  )
+  retarget_calls = []
+
+  def fake_retarget(_repo, _upstream, number, *, base_branch):
+    retarget_calls.append((number, base_branch))
+    return "accepted", ""
+
+  monkeypatch.setattr(
+    "app.github_contributions._retarget_pr_base", fake_retarget,
+  )
+  confirms = _capture_successor_confirmations(monkeypatch)
+
+  url, number, patch = _advance_merged_parent_successor(
+    record,
+    diff_path,
+    expected_number=967,
+    expected_head_repository="mobius-os/app-demo",
+    live_head_sha=_SUCCESSOR_OLD_HEAD,
+    live_base_branch=_SUCCESSOR_OLD_BASE_BRANCH,
+  )
+
+  assert (url, number) == ("https://github.com/mobius-os/app-demo/pull/967", 967)
+  # Public mutation #1: exact force-with-lease from the old public head.
+  assert lease_calls == [{
+    "upstream_repo": "mobius-os/app-demo",
+    "target_branch": _SUCCESSOR_BRANCH,
+    "expected_base": _SUCCESSOR_OLD_HEAD,
+    "landed_sha": _SUCCESSOR_NEW_HEAD,
+  }]
+  # Public mutation #2: retarget to the surviving base.
+  assert retarget_calls == [(967, _SUCCESSOR_TARGET_BASE_BRANCH)]
+  # The old public state is re-read before the lease, the rewrite is confirmed
+  # on the old base, and the exact new head+base is confirmed after retarget.
+  assert confirms[0]["base_branch"] == _SUCCESSOR_OLD_BASE_BRANCH
+  assert confirms[0]["expected_base_sha"] == _SUCCESSOR_OLD_BASE_SHA
+  assert confirms[0]["expected_head_sha"] == _SUCCESSOR_OLD_HEAD
+  assert confirms[1]["base_branch"] == _SUCCESSOR_OLD_BASE_BRANCH
+  assert confirms[1]["expected_head_sha"] == _SUCCESSOR_NEW_HEAD
+  assert confirms[-1]["base_branch"] == _SUCCESSOR_TARGET_BASE_BRANCH
+  assert confirms[-1]["expected_base_sha"] == _SUCCESSOR_TARGET_BASE_SHA
+  assert patch["last_submit_push_sha"] == _SUCCESSOR_NEW_HEAD
+  assert patch["last_successor_old_head"] == _SUCCESSOR_OLD_HEAD
+  assert patch["last_successor_base_branch"] == _SUCCESSOR_TARGET_BASE_BRANCH
+  assert patch["last_successor_base_sha"] == _SUCCESSOR_TARGET_BASE_SHA
+  assert patch["publication_stage"] == "ready"
+
+
+def test_merged_parent_successor_proves_tree_equivalence_before_mutation(
+  tmp_path, monkeypatch,
+):
+  """A target base that does not carry the merged parent's tree fails closed."""
+  from app.github_contributions import _assert_merged_parent_tree_equivalence
+
+  repo = tmp_path / "tree"
+  (repo / ".git").mkdir(parents=True)
+
+  def fake_git(_repo, *args, check=True):
+    # rev-parse --verify --quiet <sha>^{tree}
+    if args[:3] == ("rev-parse", "--verify", "--quiet"):
+      spec = args[3]
+      if spec.startswith(_SUCCESSOR_OLD_BASE_SHA):
+        return _cp("1" * 40 + "\n")
+      return _cp("2" * 40 + "\n")
+    return _cp("")
+
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+  with pytest.raises(ContributionSubmitError) as caught:
+    _assert_merged_parent_tree_equivalence(
+      repo,
+      old_base_sha=_SUCCESSOR_OLD_BASE_SHA,
+      target_base_sha=_SUCCESSOR_TARGET_BASE_SHA,
+    )
+  assert caught.value.code == "review_refresh_needed"
+
+  # Matching trees prove the merged parent already reached the target base.
+  monkeypatch.setattr(
+    "app.github_contribution_git._git",
+    lambda _repo, *args, check=True: (
+      _cp("e" * 40 + "\n")
+      if args[:3] == ("rev-parse", "--verify", "--quiet")
+      else _cp("")
+    ),
+  )
+  _assert_merged_parent_tree_equivalence(
+    repo,
+    old_base_sha=_SUCCESSOR_OLD_BASE_SHA,
+    target_base_sha=_SUCCESSOR_TARGET_BASE_SHA,
+  )
+
+
+def test_merged_parent_successor_stops_when_tree_is_unreadable(
+  tmp_path, monkeypatch,
+):
+  """An unresolved merged-parent or target-base tree fails closed, no mutation."""
+  from app.github_contributions import _assert_merged_parent_tree_equivalence
+
+  repo = tmp_path / "tree"
+  (repo / ".git").mkdir(parents=True)
+  monkeypatch.setattr(
+    "app.github_contribution_git._git",
+    lambda _repo, *args, check=True: _cp("", "bad object", 128),
+  )
+  with pytest.raises(ContributionSubmitError) as caught:
+    _assert_merged_parent_tree_equivalence(
+      repo,
+      old_base_sha=_SUCCESSOR_OLD_BASE_SHA,
+      target_base_sha=_SUCCESSOR_TARGET_BASE_SHA,
+    )
+  assert caught.value.code == "update_unconfirmed"
+  assert caught.value.status_code == 503
+
+
+def test_merged_parent_successor_accepts_an_advanced_target_with_exact_merge_proof(
+  tmp_path, monkeypatch,
+):
+  """Later target commits are safe when the exact parent merge is in their history."""
+  from app.github_contributions import _assert_merged_parent_tree_equivalence
+
+  repo = tmp_path / "advanced-tree"
+  (repo / ".git").mkdir(parents=True)
+  calls = []
+
+  def fake_git(_repo, *args, check=True):
+    calls.append(args)
+    if args[:3] == ("rev-parse", "--verify", "--quiet"):
+      # The old public parent and its exact merge commit share one tree. The
+      # later target tip deliberately has a different tree and is not compared.
+      return _cp("1" * 40 + "\n")
+    if args[:2] == ("merge-base", "--is-ancestor"):
+      return _cp("")
+    return _cp("", "unexpected git call", 128)
+
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+  _assert_merged_parent_tree_equivalence(
+    repo,
+    old_base_sha=_SUCCESSOR_OLD_BASE_SHA,
+    merged_base_sha=_SUCCESSOR_MERGED_BASE_SHA,
+    target_base_sha=_SUCCESSOR_TARGET_BASE_SHA,
+  )
+  assert (
+    "merge-base", "--is-ancestor",
+    _SUCCESSOR_MERGED_BASE_SHA, _SUCCESSOR_TARGET_BASE_SHA,
+  ) in calls
+  assert not any(
+    args[:3] == ("rev-parse", "--verify", "--quiet")
+    and args[3].startswith(_SUCCESSOR_TARGET_BASE_SHA)
+    for args in calls
+  )
+
+
+@pytest.mark.parametrize("ancestry_returncode, expected_code", [
+  (1, "review_refresh_needed"),
+  (128, "update_unconfirmed"),
+])
+def test_merged_parent_successor_rejects_unproven_advanced_target_ancestry(
+  tmp_path, monkeypatch, ancestry_returncode, expected_code,
+):
+  """A missing or unreadable parent-to-target edge always fails closed."""
+  from app.github_contributions import _assert_merged_parent_tree_equivalence
+
+  repo = tmp_path / f"advanced-tree-{ancestry_returncode}"
+  (repo / ".git").mkdir(parents=True)
+
+  def fake_git(_repo, *args, check=True):
+    if args[:3] == ("rev-parse", "--verify", "--quiet"):
+      return _cp("1" * 40 + "\n")
+    if args[:2] == ("merge-base", "--is-ancestor"):
+      return _cp("", "bad ancestry", ancestry_returncode)
+    return _cp("")
+
+  monkeypatch.setattr("app.github_contribution_git._git", fake_git)
+  with pytest.raises(ContributionSubmitError) as caught:
+    _assert_merged_parent_tree_equivalence(
+      repo,
+      old_base_sha=_SUCCESSOR_OLD_BASE_SHA,
+      merged_base_sha=_SUCCESSOR_MERGED_BASE_SHA,
+      target_base_sha=_SUCCESSOR_TARGET_BASE_SHA,
+    )
+  assert caught.value.code == expected_code
+
+
+def test_merged_parent_successor_resumes_retarget_without_pushing(
+  tmp_path, monkeypatch,
+):
+  """new head + old base -> skip the push, retarget only."""
+  from app.github_contributions import _advance_merged_parent_successor
+
+  record, diff_path = _successor_submission(tmp_path, monkeypatch)
+  monkeypatch.setattr(
+    "app.github_contributions._push_stack_tip_with_lease",
+    lambda *_args, **_kwargs: pytest.fail(
+      "a resumed successor at the new head must never push again"
+    ),
+  )
+  retarget_calls = []
+  monkeypatch.setattr(
+    "app.github_contributions._retarget_pr_base",
+    lambda _repo, _upstream, number, *, base_branch: (
+      retarget_calls.append((number, base_branch)) or ("accepted", "")
+    ),
+  )
+  confirms = _capture_successor_confirmations(monkeypatch)
+
+  url, number, patch = _advance_merged_parent_successor(
+    record,
+    diff_path,
+    expected_number=967,
+    expected_head_repository="mobius-os/app-demo",
+    live_head_sha=_SUCCESSOR_NEW_HEAD,
+    live_base_branch=_SUCCESSOR_OLD_BASE_BRANCH,
+  )
+
+  assert (url, number) == ("https://github.com/mobius-os/app-demo/pull/967", 967)
+  assert retarget_calls == [(967, _SUCCESSOR_TARGET_BASE_BRANCH)]
+  # A resume first checks whether the retarget already landed, proves the exact
+  # old base before one edit, then confirms the target base after it.
+  assert [c["base_branch"] for c in confirms] == [
+    _SUCCESSOR_TARGET_BASE_BRANCH,
+    _SUCCESSOR_OLD_BASE_BRANCH,
+    _SUCCESSOR_TARGET_BASE_BRANCH,
+  ]
+  assert patch["last_submit_push_sha"] == _SUCCESSOR_NEW_HEAD
+
+
+def test_merged_parent_successor_recovers_a_lost_retarget_response(
+  tmp_path, monkeypatch,
+):
+  """A lost/ambiguous edit response reconciles from the PR read, not a re-edit."""
+  from app.github_contributions import _advance_merged_parent_successor
+
+  record, diff_path = _successor_submission(tmp_path, monkeypatch)
+  monkeypatch.setattr(
+    "app.github_contributions._push_stack_tip_with_lease",
+    lambda *_args, **_kwargs: None,
+  )
+  edit_attempts = []
+
+  def lost_response(_repo, _upstream, number, *, base_branch):
+    edit_attempts.append((number, base_branch))
+    return "ambiguous", "Timed out waiting for GitHub."
+
+  monkeypatch.setattr(
+    "app.github_contributions._retarget_pr_base", lost_response,
+  )
+  # The PR read is the authority: it shows the retarget already landed.
+  confirms = _capture_successor_confirmations(monkeypatch)
+
+  url, number, _patch = _advance_merged_parent_successor(
+    record,
+    diff_path,
+    expected_number=967,
+    expected_head_repository="mobius-os/app-demo",
+    live_head_sha=_SUCCESSOR_NEW_HEAD,
+    live_base_branch=_SUCCESSOR_OLD_BASE_BRANCH,
+  )
+
+  assert number == 967
+  assert edit_attempts == [(967, _SUCCESSOR_TARGET_BASE_BRANCH)]
+  assert confirms[-1]["base_branch"] == _SUCCESSOR_TARGET_BASE_BRANCH
+
+
+def test_merged_parent_successor_fails_when_retarget_is_unconfirmed(
+  tmp_path, monkeypatch,
+):
+  """An accepted edit that GitHub never exposes fails closed with the witness."""
+  from app.github_contributions import _advance_merged_parent_successor
+
+  record, diff_path = _successor_submission(tmp_path, monkeypatch)
+  monkeypatch.setattr(
+    "app.github_contributions._push_stack_tip_with_lease",
+    lambda *_args, **_kwargs: None,
+  )
+  monkeypatch.setattr(
+    "app.github_contributions._retarget_pr_base",
+    lambda *_args, **_kwargs: ("accepted", ""),
+  )
+  monkeypatch.setattr(
+    "app.github_contributions._confirm_existing_pr_update",
+    lambda *_args, **_kwargs: None,
+  )
+
+  with pytest.raises(ContributionSubmitError) as caught:
+    _advance_merged_parent_successor(
+      record,
+      diff_path,
+      expected_number=967,
+      expected_head_repository="mobius-os/app-demo",
+      live_head_sha=_SUCCESSOR_NEW_HEAD,
+      live_base_branch=_SUCCESSOR_OLD_BASE_BRANCH,
+    )
+  assert caught.value.code == "update_unconfirmed"
+  assert caught.value.status_code == 503
+  assert caught.value.record_patch["last_submit_push_sha"] == _SUCCESSOR_NEW_HEAD
+
+
+def test_merged_parent_successor_settles_when_already_live(
+  tmp_path, monkeypatch,
+):
+  """new head + new base -> settle the ledger only; never push or edit."""
+  from app.github_contributions import _advance_merged_parent_successor
+
+  record, diff_path = _successor_submission(tmp_path, monkeypatch)
+  monkeypatch.setattr(
+    "app.github_contribution_git._upstream_branch_sha",
+    lambda _repo, _upstream, branch: (
+      "f" * 40
+      if branch == _SUCCESSOR_OLD_BASE_BRANCH
+      else _SUCCESSOR_TARGET_BASE_SHA
+    ),
+  )
+  monkeypatch.setattr(
+    "app.github_contributions._push_stack_tip_with_lease",
+    lambda *_args, **_kwargs: pytest.fail("settle must never push"),
+  )
+  monkeypatch.setattr(
+    "app.github_contributions._retarget_pr_base",
+    lambda *_args, **_kwargs: pytest.fail("settle must never retarget"),
+  )
+  confirms = _capture_successor_confirmations(
+    monkeypatch,
+    target_results=[("https://github.com/mobius-os/app-demo/pull/967", "ready")],
+  )
+
+  url, number, patch = _advance_merged_parent_successor(
+    record,
+    diff_path,
+    expected_number=967,
+    expected_head_repository="mobius-os/app-demo",
+    live_head_sha=_SUCCESSOR_NEW_HEAD,
+    live_base_branch=_SUCCESSOR_TARGET_BASE_BRANCH,
+  )
+
+  assert (url, number) == ("https://github.com/mobius-os/app-demo/pull/967", 967)
+  assert [c["base_branch"] for c in confirms] == [_SUCCESSOR_TARGET_BASE_BRANCH]
+  assert patch["last_successor_base_sha"] == _SUCCESSOR_TARGET_BASE_SHA
+
+
+def test_merged_parent_successor_settle_rejects_moved_target_base(
+  tmp_path, monkeypatch,
+):
+  """Settle-only recovery remains pinned to the reviewed target-base SHA."""
+  from app.github_contributions import _advance_merged_parent_successor
+
+  record, diff_path = _successor_submission(tmp_path, monkeypatch)
+  monkeypatch.setattr(
+    "app.github_contribution_git._upstream_branch_sha",
+    lambda *_args, **_kwargs: "f" * 40,
+  )
+  monkeypatch.setattr(
+    "app.github_contributions._confirm_existing_pr_update",
+    lambda *_args, **_kwargs: pytest.fail("a moved base must not settle"),
+  )
+  with pytest.raises(ContributionSubmitError) as caught:
+    _advance_merged_parent_successor(
+      record,
+      diff_path,
+      expected_number=967,
+      expected_head_repository="mobius-os/app-demo",
+      live_head_sha=_SUCCESSOR_NEW_HEAD,
+      live_base_branch=_SUCCESSOR_TARGET_BASE_BRANCH,
+      )
+  assert caught.value.code == "review_refresh_needed"
+
+
+@pytest.mark.parametrize(
+  ("live_base_branch", "target_results"),
+  [
+    (
+      _SUCCESSOR_OLD_BASE_BRANCH,
+      [None, ("https://github.com/mobius-os/app-demo/pull/967", "ready")],
+    ),
+    (
+      _SUCCESSOR_TARGET_BASE_BRANCH,
+      [("https://github.com/mobius-os/app-demo/pull/967", "ready")],
+    ),
+  ],
+)
+def test_merged_parent_successor_recovery_revalidates_reviewed_head(
+  tmp_path, monkeypatch, live_base_branch, target_results,
+):
+  """Retarget and settle recovery never substitute public state for review."""
+  from app.github_contributions import _advance_merged_parent_successor
+
+  record, diff_path = _successor_submission(tmp_path, monkeypatch)
+  validations = []
+
+  def assert_fresh(*_args, **_kwargs):
+    validations.append("fresh")
+    return (
+      _SUCCESSOR_TARGET_BASE_SHA,
+      _SUCCESSOR_NEW_HEAD,
+      record["plan"]["diff_sha256"],
+    )
+
+  monkeypatch.setattr("app.github_contribution_git._assert_fresh", assert_fresh)
+  monkeypatch.setattr(
+    "app.github_contributions._retarget_pr_base",
+    lambda *_args, **_kwargs: ("accepted", ""),
+  )
+  _capture_successor_confirmations(
+    monkeypatch, target_results=target_results,
+  )
+
+  _advance_merged_parent_successor(
+    record,
+    diff_path,
+    expected_number=967,
+    expected_head_repository="mobius-os/app-demo",
+    live_head_sha=_SUCCESSOR_NEW_HEAD,
+    live_base_branch=live_base_branch,
+  )
+
+  assert validations == ["fresh"]
+
+
+def test_merged_parent_successor_preserves_witness_when_target_read_raises(
+  tmp_path, monkeypatch,
+):
+  """A recovery-time target lookup exception cannot reopen the public action."""
+  from app.github_contributions import _advance_merged_parent_successor
+
+  record, diff_path = _successor_submission(tmp_path, monkeypatch)
+  monkeypatch.setattr(
+    "app.github_contribution_git._upstream_branch_sha",
+    lambda *_args, **_kwargs: (_ for _ in ()).throw(
+      subprocess.TimeoutExpired("gh api", 1),
+    ),
+  )
+  monkeypatch.setattr(
+    "app.github_contributions._push_stack_tip_with_lease",
+    lambda *_args, **_kwargs: pytest.fail("recovery must never push again"),
+  )
+
+  with pytest.raises(ContributionSubmitError) as caught:
+    _advance_merged_parent_successor(
+      record,
+      diff_path,
+      expected_number=967,
+      expected_head_repository="mobius-os/app-demo",
+      live_head_sha=_SUCCESSOR_NEW_HEAD,
+      live_base_branch=_SUCCESSOR_OLD_BASE_BRANCH,
+    )
+
+  assert caught.value.code == "update_unconfirmed"
+  assert caught.value.status_code == 503
+  assert caught.value.record_patch["last_submit_push_sha"] == _SUCCESSOR_NEW_HEAD
+
+
+def test_merged_parent_successor_rejects_moved_old_base_before_mutation(
+  tmp_path, monkeypatch,
+):
+  """The authoritative PR base SHA must still match the reviewed parent."""
+  from app.github_contributions import _advance_merged_parent_successor
+
+  record, diff_path = _successor_submission(tmp_path, monkeypatch)
+  monkeypatch.setattr(
+    "app.github_contribution_git._upstream_branch_sha",
+    lambda _repo, _upstream, branch: (
+      "f" * 40
+      if branch == _SUCCESSOR_OLD_BASE_BRANCH
+      else _SUCCESSOR_TARGET_BASE_SHA
+    ),
+  )
+  monkeypatch.setattr(
+    "app.github_contributions._push_stack_tip_with_lease",
+    lambda *_args, **_kwargs: pytest.fail("a moved old base must not push"),
+  )
+  monkeypatch.setattr(
+    "app.github_contributions._retarget_pr_base",
+    lambda *_args, **_kwargs: pytest.fail("a moved old base must not retarget"),
+  )
+  with pytest.raises(ContributionSubmitError) as caught:
+    _advance_merged_parent_successor(
+      record,
+      diff_path,
+      expected_number=967,
+      expected_head_repository="mobius-os/app-demo",
+      live_head_sha=_SUCCESSOR_OLD_HEAD,
+      live_base_branch=_SUCCESSOR_OLD_BASE_BRANCH,
+    )
+  assert caught.value.code == "review_refresh_needed"
+
+
+def test_merged_parent_successor_fails_closed_on_unexpected_state(
+  tmp_path, monkeypatch,
+):
+  """Any head/base that is not one of the three known states mutates nothing."""
+  from app.github_contributions import _advance_merged_parent_successor
+
+  record, diff_path = _successor_submission(tmp_path, monkeypatch)
+  monkeypatch.setattr(
+    "app.github_contributions._push_stack_tip_with_lease",
+    lambda *_args, **_kwargs: pytest.fail("a drifted PR must never push"),
+  )
+  monkeypatch.setattr(
+    "app.github_contributions._retarget_pr_base",
+    lambda *_args, **_kwargs: pytest.fail("a drifted PR must never retarget"),
+  )
+  monkeypatch.setattr(
+    "app.github_contributions._confirm_existing_pr_update",
+    lambda *_args, **_kwargs: pytest.fail("a drifted PR must never be confirmed"),
+  )
+
+  with pytest.raises(ContributionSubmitError) as caught:
+    _advance_merged_parent_successor(
+      record,
+      diff_path,
+      expected_number=967,
+      expected_head_repository="mobius-os/app-demo",
+      live_head_sha="9" * 40,
+      live_base_branch=_SUCCESSOR_OLD_BASE_BRANCH,
+      )
+  assert caught.value.code == "review_refresh_needed"
+
+
+def test_merged_parent_successor_never_authorizes_from_ledger_alone(monkeypatch):
+  """The classifier keys only on live facts, so a stale ledger cannot promote."""
+  from app.github_contributions import (
+    _classify_merged_parent_successor,
+    _merged_parent_successor_plan,
+  )
+
+  journal = _merged_parent_successor_plan({
+    "branch": _SUCCESSOR_BRANCH,
+    "plan": {
+      "action": "pr_update",
+      "branch": _SUCCESSOR_BRANCH,
+      "head_sha": _SUCCESSOR_NEW_HEAD,
+      "base_sha": _SUCCESSOR_TARGET_BASE_SHA,
+      "successor": {
+        "old_head_sha": _SUCCESSOR_OLD_HEAD,
+        "old_base_branch": _SUCCESSOR_OLD_BASE_BRANCH,
+        "old_base_sha": _SUCCESSOR_OLD_BASE_SHA,
+        "base_branch": _SUCCESSOR_TARGET_BASE_BRANCH,
+      },
+    },
+  })
+  assert _classify_merged_parent_successor(
+    journal,
+    live_head_sha=_SUCCESSOR_OLD_HEAD,
+    live_base_branch=_SUCCESSOR_OLD_BASE_BRANCH,
+  ) == "push"
+  assert _classify_merged_parent_successor(
+    journal,
+    live_head_sha=_SUCCESSOR_NEW_HEAD,
+    live_base_branch=_SUCCESSOR_OLD_BASE_BRANCH,
+  ) == "retarget"
+  assert _classify_merged_parent_successor(
+    journal,
+    live_head_sha=_SUCCESSOR_NEW_HEAD,
+    live_base_branch=_SUCCESSOR_TARGET_BASE_BRANCH,
+  ) == "settle"
+  # Base retargeted but head never rewritten is not a reachable resume point.
+  with pytest.raises(ContributionSubmitError) as caught:
+    _classify_merged_parent_successor(
+      journal,
+      live_head_sha=_SUCCESSOR_OLD_HEAD,
+      live_base_branch=_SUCCESSOR_TARGET_BASE_BRANCH,
+    )
+  assert caught.value.code == "review_refresh_needed"
+
+
+def test_merged_parent_successor_plan_requires_distinct_branch_and_head():
+  """The durable claim must record a real rewrite AND a real retarget."""
+  from app.github_contributions import _merged_parent_successor_plan
+
+  def plan(**overrides):
+    base = {
+      "action": "pr_update",
+      "branch": _SUCCESSOR_BRANCH,
+      "head_sha": _SUCCESSOR_NEW_HEAD,
+      "base_sha": _SUCCESSOR_TARGET_BASE_SHA,
+      "successor": {
+        "old_head_sha": _SUCCESSOR_OLD_HEAD,
+        "old_base_branch": _SUCCESSOR_OLD_BASE_BRANCH,
+        "old_base_sha": _SUCCESSOR_OLD_BASE_SHA,
+        "base_branch": _SUCCESSOR_TARGET_BASE_BRANCH,
+      },
+    }
+    base.update(overrides)
+    return {"plan": base}
+
+  # Same old/new head is not a rewrite.
+  with pytest.raises(ContributionSubmitError):
+    _merged_parent_successor_plan(plan(head_sha=_SUCCESSOR_OLD_HEAD))
+  # A non-successor action never reaches this owning claim.
+  with pytest.raises(ContributionSubmitError):
+    _merged_parent_successor_plan({"plan": {"action": "pr_update"}})
+  # Same old/target base is not a retarget.
+  same_base = {
+    "action": "pr_update",
+    "branch": _SUCCESSOR_BRANCH,
+    "head_sha": _SUCCESSOR_NEW_HEAD,
+    "base_sha": _SUCCESSOR_TARGET_BASE_SHA,
+    "successor": {
+      "old_head_sha": _SUCCESSOR_OLD_HEAD,
+      "old_base_branch": _SUCCESSOR_TARGET_BASE_BRANCH,
+      "old_base_sha": _SUCCESSOR_OLD_BASE_SHA,
+      "base_branch": _SUCCESSOR_TARGET_BASE_BRANCH,
+    },
+  }
+  with pytest.raises(ContributionSubmitError):
+    _merged_parent_successor_plan({"plan": same_base})
+  # Runtime publication never silently detaches or rewrites stack metadata.
+  stacked = plan()["plan"]
+  stacked["stack"] = {"id": "demo", "position": 1, "total": 2}
+  with pytest.raises(ContributionSubmitError):
+    _merged_parent_successor_plan({"plan": stacked})
+
+  advanced = plan()["plan"]
+  advanced["successor"]["merged_base_sha"] = _SUCCESSOR_MERGED_BASE_SHA
+  assert _merged_parent_successor_plan({"plan": advanced})[
+    "merged_base_sha"
+  ] == _SUCCESSOR_MERGED_BASE_SHA
+  advanced["successor"]["merged_base_sha"] = "not-a-commit"
+  with pytest.raises(ContributionSubmitError):
+    _merged_parent_successor_plan({"plan": advanced})
+
+
+def test_retarget_pr_base_attempts_one_mutation_only(tmp_path, monkeypatch):
+  """An ambiguous base edit response is never followed by a second mutation."""
+  from app.github_contributions import _retarget_pr_base
+
+  attempts = []
+
+  def ambiguous_gh(_repo, *args, check=True):
+    attempts.append(args)
+    return _cp("", "fatal: unable to access: Connection timed out", 1)
+
+  monkeypatch.setattr("app.github_contribution_git._gh", ambiguous_gh)
+  result, error = _retarget_pr_base(
+    tmp_path, "mobius-os/app-demo", 967, base_branch="main",
+  )
+  assert result == "ambiguous"
+  assert "timed out" in error.lower()
+  assert len(attempts) == 1
+  assert attempts[0][:5] == ("pr", "edit", "967", "-R", "mobius-os/app-demo")
+
+
+def test_retarget_pr_base_distinguishes_deterministic_rejection(
+  tmp_path, monkeypatch,
+):
+  """A validation rejection may re-prepare; a transport failure may not."""
+  from app.github_contributions import _retarget_pr_base
+
+  monkeypatch.setattr(
+    "app.github_contribution_git._gh",
+    lambda *_args, **_kwargs: _cp("", "GraphQL: Base branch is invalid", 1),
+  )
+  result, error = _retarget_pr_base(
+    tmp_path, "mobius-os/app-demo", 967, base_branch="main",
+  )
+  assert result == "rejected"
+  assert "invalid" in error.lower()
+
+
+def test_merged_parent_successor_plan_leaves_ordinary_update_path_untouched():
+  """An ordinary reviewed ``pr_update`` restack never enters the successor claim."""
+  from app.github_contributions import _merged_parent_successor_plan
+
+  with pytest.raises(ContributionSubmitError):
+    _merged_parent_successor_plan({
+      "branch": "feat/existing-review",
+      "plan": {"action": "pr_update", "branch": "feat/existing-review"},
+    })

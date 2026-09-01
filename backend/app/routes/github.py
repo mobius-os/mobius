@@ -175,6 +175,7 @@ from app.github_contributions import (
   _mark_submit_failure,
   _mark_submit_success,
   _mark_existing_pr_update_success,
+  _note_submit_unconfirmed,
   _claim_personal_pr_ready,
   _inspect_personal_pr_ready_target,
   _mark_personal_pr_ready,
@@ -198,6 +199,7 @@ from app.github_contributions import (
   _submit_prepared_pr,
   _preflight_prepared_stack,
   _push_stack_tip_with_lease,
+  _advance_merged_parent_successor,
   _land_reviewed_stack,
 )
 from app.deps import (
@@ -1140,6 +1142,7 @@ def _chat_review_projection(record: dict, app_id: int) -> dict:
     "type": text(record.get("type")),
     "status": text(record.get("status")),
     "action": text(plan.get("action")),
+    "successor": isinstance(plan.get("successor"), dict),
     "title": text(plan.get("title") or record.get("title")),
     "summary": text(record.get("summary")),
     "repo": text(plan.get("repo") or record.get("repo")),
@@ -1273,6 +1276,13 @@ def _chat_action_key(record: dict, review: object) -> str:
   identity = json.dumps({
     "status": record.get("status"),
     "action": plan.get("action"),
+    "repo": plan.get("repo") or record.get("repo"),
+    "number": record.get("number"),
+    "url": record.get("url"),
+    "head_repository": record.get("head_repository") or plan.get("head_repository"),
+    "branch": plan.get("branch") or record.get("branch"),
+    "base": plan.get("base_sha"),
+    "successor": plan.get("successor"),
     "head": plan.get("head_sha"),
     "attention": attention.get("key"),
     "needs_attention": record.get("needs_attention") is True,
@@ -1504,7 +1514,12 @@ async def _chat_work_record_views(
       not requested_root or bool(contribution_work.project_root(requested_root))
     )
     review = None
-    if record.get("status") == "prepared" and not view["is_stack"]:
+    resumable_successor = (
+      record.get("status") == "submitting" and view["successor"]
+    )
+    if (
+      record.get("status") == "prepared" or resumable_successor
+    ) and not view["is_stack"]:
       plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
       _, diff_path = _record_paths(app_id, str(record.get("id") or ""))
       try:
@@ -2018,7 +2033,12 @@ async def contributions_for_chat(
   for record in records:
     view = _chat_review_projection(record, app_id)
     review = None
-    if record.get("status") == "prepared" and not view["is_stack"]:
+    resumable_successor = (
+      record.get("status") == "submitting" and view["successor"]
+    )
+    if (
+      record.get("status") == "prepared" or resumable_successor
+    ) and not view["is_stack"]:
       plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
       _, diff_path = _record_paths(app_id, str(record.get("id") or ""))
       try:
@@ -2591,12 +2611,14 @@ async def update_existing_contribution(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
-  """Apply one owner-approved reviewed fast-forward to an existing open PR.
+  """Apply one owner-approved reviewed update to an existing open PR.
 
   A prepared ``pr_update`` record temporarily brings the existing contribution
   back to the private review queue. The owner's Update PR click claims that
   exact head and diff, verifies the live PR identity before any push, then
-  reuses the ordinary guarded push path in existing-PR mode. Normal Send keeps
+  reuses the ordinary guarded push path in existing-PR mode. A detached
+  merged-parent successor carries an additional reviewed journal and uses the
+  exact lease-rewrite + base-retarget state machine instead. Normal Send keeps
   refusing existing branches, so an agent cannot turn an ordinary PR card into
   a silent rewrite.
   """
@@ -2622,13 +2644,14 @@ async def update_existing_contribution(
 
   try:
     repo, number, head_repository, branch = _prepared_existing_pr_target(claimed)
-    target_error = await asyncio.to_thread(
-      _autopilot_live_target_error,
+    live_target = await asyncio.to_thread(
+      _autopilot_live_target,
       repo,
       number,
       head_repository,
       branch,
     )
+    target_error = live_target.get("error")
     if target_error:
       raise ContributionSubmitError(
         "The open pull request changed since this update was prepared. Nothing was pushed.",
@@ -2649,13 +2672,78 @@ async def update_existing_contribution(
         await source_locks.enter_async_context(
           fs_locks.source_dir_lock(lock_path)
         )
-      pr_url, returned_number, record_patch = await asyncio.to_thread(
-        _submit_prepared_pr,
-        claimed,
-        diff_path,
-        expected_existing_pr_number=number,
-        expected_existing_head_repository=head_repository,
-      )
+      if isinstance(plan.get("successor"), dict):
+        pr_url, returned_number, record_patch = await asyncio.to_thread(
+          _advance_merged_parent_successor,
+          claimed,
+          diff_path,
+          expected_number=number,
+          expected_head_repository=head_repository,
+          live_head_sha=str(live_target.get("head_sha") or ""),
+          live_base_branch=str(live_target.get("base_branch") or ""),
+        )
+        # The state machine owns both public mutations, but the route must not
+        # settle its durable claim from a returned success alone. Re-read the
+        # exact PR and independently require the reviewed successor head AND
+        # its reviewed target base. This is deliberately a postcondition, not
+        # another mutation: a stale/ignored base edit leaves the claim
+        # resumable and can never be reported as a successful update.
+        successor = plan["successor"]
+        target_base_branch = str(
+          successor.get("base_branch") or plan.get("base_branch") or ""
+        )
+        settled_target = await asyncio.to_thread(
+          _autopilot_live_target,
+          repo,
+          number,
+          head_repository,
+          branch,
+        )
+        expected_head = str(plan.get("head_sha") or "")
+        if (
+          settled_target.get("error")
+          or str(settled_target.get("head_sha") or "") != expected_head
+          or str(settled_target.get("base_branch") or "")
+          != target_base_branch
+        ):
+          unconfirmed_patch = dict(record_patch or {})
+          # Never persist an old base as the successful submit base merely
+          # because an inner helper returned it. Preserve only the branch
+          # rewrite witness and the reviewed target needed for safe resume.
+          unconfirmed_patch.pop("last_submit_base_branch", None)
+          unconfirmed_patch.update({
+            "last_submit_push_sha": expected_head,
+            "last_successor_base_branch": target_base_branch,
+          })
+          raise ContributionSubmitError(
+            "The reviewed successor branch is live, but GitHub did not "
+            "confirm its base retarget.",
+            status_code=503,
+            code="update_unconfirmed",
+            detail=(
+              str(settled_target.get("error") or "")
+              or (
+                "The public pull request still exposes "
+                f"{settled_target.get('base_branch') or 'an unknown base'}; "
+                f"the reviewed target is {target_base_branch}."
+              )
+            ),
+            record_patch=unconfirmed_patch,
+          )
+      else:
+        _assert_reviewed_update_contains_live_head(
+          repo_path,
+          str(live_target.get("head_sha") or ""),
+          str(plan.get("head_sha") or ""),
+        )
+        pr_url, returned_number, record_patch = await asyncio.to_thread(
+          _submit_prepared_pr,
+          claimed,
+          diff_path,
+          direct_base_branch=str(live_target.get("base_branch") or ""),
+          expected_existing_pr_number=number,
+          expected_existing_head_repository=head_repository,
+        )
       if returned_number != number:
         raise ContributionSubmitError(
           "GitHub returned a different pull request for this reviewed update."
@@ -2676,13 +2764,28 @@ async def update_existing_contribution(
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
       db.close()
-      record = _mark_submit_failure(
-        app_id=app_id,
-        record_path=record_path,
-        message=exc.message,
-        record_patch=exc.record_patch,
-        detail=exc.detail,
-      )
+      successor = isinstance((claimed.get("plan") or {}).get("successor"), dict)
+      if (
+        successor
+        and exc.code in {"update_unconfirmed", "landing_unconfirmed"}
+        and exc.record_patch
+      ):
+        record = _note_submit_unconfirmed(
+          record_path=record_path,
+          message=exc.message,
+          record_patch=exc.record_patch,
+          code=exc.code,
+          detail=exc.detail,
+        )
+      else:
+        record = _mark_submit_failure(
+          app_id=app_id,
+          record_path=record_path,
+          message=exc.message,
+          record_patch=exc.record_patch,
+          code=exc.code or "",
+          detail=exc.detail,
+        )
     raise HTTPException(
       status_code=exc.status_code,
       detail={
@@ -2694,14 +2797,29 @@ async def update_existing_contribution(
     )
   except Exception as exc:
     log.exception("Contribution update failed for %s/%s", app_id, record_id)
-    message = "Could not update this pull request. Nothing else was published."
+    successor = isinstance((claimed.get("plan") or {}).get("successor"), dict)
+    message = (
+      "GitHub did not confirm whether this reviewed successor update completed."
+      if successor else
+      "Could not update this pull request. Nothing else was published."
+    )
     async with fs_locks.app_storage_lock(app_id):
       _recheck_submit_app(db, app_id, expected_nonce)
       db.close()
-      record = _mark_submit_failure(
-        app_id=app_id,
-        record_path=record_path,
-        message=message,
+      record = (
+        _note_submit_unconfirmed(
+          record_path=record_path,
+          message=message,
+          record_patch={},
+          code="update_unconfirmed",
+          detail="The exact public pull request state must be checked again.",
+        )
+        if successor else
+        _mark_submit_failure(
+          app_id=app_id,
+          record_path=record_path,
+          message=message,
+        )
       )
     raise HTTPException(
       status_code=500,
@@ -4074,6 +4192,7 @@ def _autopilot_live_target(
     live_branch = head.get("ref")
     live_head_sha = str(head.get("sha") or "")
     live_base_repository = base_repo.get("full_name")
+    live_base_sha = str(base.get("sha") or "")
     try:
       live_base_branch = _validate_branch(base.get("ref"))
     except ContributionSubmitError:
@@ -4085,6 +4204,7 @@ def _autopilot_live_target(
       or not _GIT_SHA.fullmatch(live_head_sha)
       or live_base_repository != repo
       or not live_base_branch
+      or not _GIT_SHA.fullmatch(live_base_sha)
     ):
       return {
         "error": "The live pull request no longer matches the approved target.",
@@ -4096,6 +4216,7 @@ def _autopilot_live_target(
     "error": None,
     "head_sha": live_head_sha,
     "base_branch": live_base_branch,
+    "base_sha": live_base_sha,
   }
 
 
