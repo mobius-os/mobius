@@ -790,6 +790,21 @@ async def create_railway_deployment(
   )
 
 
+@router.post("/railway/deployments/adopt-current", status_code=202)
+async def adopt_current_railway_deployment(
+  owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
+  db: Session = Depends(get_db),
+):
+  # The account host derives the deployment address from the signed link grant.
+  # Deliberately accept no browser-supplied Railway ids or domain here.
+  return await _railway_mutation(
+    db,
+    owner.id,
+    "POST",
+    "/instances/adopt-current",
+  )
+
+
 @router.post("/railway/connect/start")
 async def start_railway_connection(
   body: RailwayConnectStart | None = None,
