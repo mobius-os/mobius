@@ -64,6 +64,7 @@ _KNOWN_STATES = {
 _ACTIVE_STATES = {"queued", "preparing", "replacing", "verifying"}
 _HANDOFF_VERSION = "external-cutover-v1"
 _RUNTIME_OVERLAY_VERSION = "active-runtime-v1"
+_MANAGED_USER_AGENT = "mobius-managed-deployment/1"
 _managed_recovery_tasks: set[asyncio.Task[None]] = set()
 _UPGRADE_MESSAGE = (
   "The Host replacement helper predates safe active-runtime carry-forward. "
@@ -183,6 +184,9 @@ def _managed_headers() -> dict[str, str]:
     "Authorization": f"Bearer {settings.mobius_sso_client_secret}",
     "X-Mobius-Instance-Id": settings.mobius_sso_instance_id,
     "Accept": "application/json",
+    # Browser-oriented edge checks reject Python's default urllib signature.
+    # Identify this authenticated machine-to-machine client explicitly instead.
+    "User-Agent": _MANAGED_USER_AGENT,
   }
 
 
