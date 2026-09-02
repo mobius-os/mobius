@@ -181,6 +181,26 @@ html, body, #root {
   width: 100%;
 }
 
+/* iOS Home Screen apps combine viewport-fit=cover with the launch-time
+   black-translucent status-bar policy. In that display mode WebKit can leave
+   a bottom strip outside a percentage-height fixed root; sizing the two
+   document owners from the large layout viewport closes that strip while the
+   React root continues to inherit the document height. Keep browser tabs on
+   percentage height so Safari's collapsing toolbar remains the viewport
+   owner there. */
+@media (display-mode: standalone),
+       (display-mode: fullscreen),
+       (display-mode: minimal-ui) {
+  html,
+  body {
+    height: 100vh;
+  }
+
+  #root {
+    height: 100%;
+  }
+}
+
 /* Keep route-level loading handoffs visually blank. The separate static
    pre-React launch surface retains the Möbius mark. */
 .app-route-loading {
