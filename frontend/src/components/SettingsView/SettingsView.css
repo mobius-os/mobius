@@ -64,6 +64,66 @@
   gap: 8px;
 }
 
+.settings__info-button {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  margin: -7px 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.settings__info-anchor {
+  position: relative;
+}
+
+.settings__info-bubble {
+  position: absolute;
+  z-index: 20;
+  bottom: calc(100% + 10px);
+  left: 0;
+  width: min(320px, calc(100vw - 40px));
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.settings__info-bubble::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: calc(100% - 26px);
+  width: 10px;
+  height: 10px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  transform: translateY(-5px) rotate(45deg);
+}
+
+.settings__info-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .settings__info-button:hover {
+    color: var(--text);
+    background: var(--surface2);
+  }
+}
+
 /* "Configured" indicator now uses the shared <StatusDot> component
    (frontend/src/components/ui/StatusDot.jsx) — both this badge
    AND the provider-row "Connected" / "Not connected" status pull
@@ -322,6 +382,14 @@
   font-size: 12px;
   letter-spacing: 0;
   color: var(--muted);
+}
+
+.settings__build-kind {
+  display: inline-block;
+  min-width: 70px;
+  margin-right: 8px;
+  color: var(--muted);
+  font-family: var(--font);
 }
 
 .settings__btn--nowrap { white-space: nowrap; }

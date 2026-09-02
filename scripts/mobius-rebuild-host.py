@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Root-owned controller for one fixed Möbius container replacement."""
+"""Root-owned controller for one fixed Möbius container rebuild."""
 
 from __future__ import annotations
 
@@ -1158,7 +1158,7 @@ def run() -> int:
                 raise ValueError("invalid replacement target")
             write_status(config_value, operation_id=operation, state="queued",
                          expected_sha=expected, code=None,
-                         message="Container replacement queued.")
+                         message="Container rebuild queued.")
             cid, previous = app_container(config_value)
             image_ref = f"{IMAGE}:sha-{expected}"
             require_pull_space(previous)
@@ -1214,7 +1214,7 @@ def run() -> int:
             request_drain(config_value, operation, cid)
             write_status(config_value, operation_id=operation, state="replacing",
                          expected_sha=expected, code=None,
-                         message="Replacing the container.")
+                         message="Rebuilding the container.")
             replacement_started = True
             compose(config_value, "up", "-d", "--no-build", "--no-deps",
                     "--force-recreate", "app", image=image_ref,
@@ -1250,15 +1250,15 @@ def run() -> int:
                 status_code = None
                 if prepared_runtime.carried_paths:
                     message = (
-                        "Container replaced successfully; the active local "
+                        "Container rebuilt successfully; the active local "
                         "runtime overlay was carried forward."
                     )
                 else:
-                    message = "Container replaced successfully."
+                    message = "Container rebuilt successfully."
             else:
                 status_code = "handoff_finalize_failed"
                 message = (
-                    "Container replaced successfully, but the Host could not "
+                    "Container rebuilt successfully, but the Host could not "
                     "verify and retire the exact chat handoff receipt. Check "
                     "the affected chats."
                 )
@@ -1269,7 +1269,7 @@ def run() -> int:
     except BlockingIOError:
         write_status(config_value, operation_id=operation, state="failed",
                      expected_sha=expected, code="already_running",
-                     message="Another replacement is already running.")
+                     message="Another container rebuild is already running.")
         return 1
     except Exception as exc:
         detail = str(exc)[:300]

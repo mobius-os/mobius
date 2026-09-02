@@ -8,7 +8,7 @@ import {
   rebuildProgressMessage,
 } from '../containerRebuild.js'
 
-test('container replacement active states are exactly the controller phases', () => {
+test('container rebuild active states are exactly the controller phases', () => {
   for (const state of [
     'queued', 'preparing', 'replacing', 'verifying',
   ]) {
@@ -30,17 +30,17 @@ test('legacy Railway status exposes the one-time bootstrap action', () => {
   )
 })
 
-test('container replacement polling survives transient status failures', () => {
+test('container rebuild polling survives transient status failures', () => {
   assert.equal(rebuildPollShouldContinue(null), true)
   assert.equal(rebuildPollShouldContinue({ state: 'replacing' }), true)
   assert.equal(rebuildPollShouldContinue({ state: 'succeeded' }), false)
   assert.equal(rebuildPollShouldContinue({ state: 'failed' }), false)
 })
 
-test('container replacement progress copy stays factual', () => {
+test('container rebuild progress copy stays factual', () => {
   assert.equal(
     rebuildProgressMessage({ state: 'succeeded' }),
-    'Container replaced successfully.',
+    'Container rebuilt successfully.',
   )
   assert.equal(
     rebuildProgressMessage({ state: 'needs_recovery' }),

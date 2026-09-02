@@ -1,4 +1,4 @@
-"""Container replacement control for Settings.
+"""Container rebuild control for Settings.
 
 The browser can request only one fixed operation: replace this installation's
 app container with the official image for its applied upstream revision.
@@ -307,7 +307,7 @@ def _read_host_status() -> dict[str, Any]:
       return {
         "state": "queued",
         "expected_sha": expected,
-        "message": "Container replacement queued.",
+        "message": "Container rebuild queued.",
         "handoff": value.get("handoff"),
         "runtime_overlay": value.get("runtime_overlay"),
       }
@@ -327,7 +327,7 @@ def _write_request(expected_sha: str) -> None:
   if request.exists():
     raise DeploymentControlError(
       "already_running",
-      "A container replacement request is already queued.",
+      "A container rebuild request is already queued.",
       status_code=409,
     )
   temp = inbox / f".request-{secrets.token_hex(12)}.tmp"
@@ -344,7 +344,7 @@ def _write_request(expected_sha: str) -> None:
   except FileExistsError as exc:
     raise DeploymentControlError(
       "already_running",
-      "A container replacement request is already queued.",
+      "A container rebuild request is already queued.",
       status_code=409,
     ) from exc
   except OSError as exc:
@@ -415,7 +415,7 @@ async def read_rebuild_status() -> RebuildStatus:
         code="controller_upgrade_required",
         message=(
           "This Railway installation needs one managed upgrade before it can "
-          "replace containers safely."
+          "rebuild containers safely."
         ),
       )
     raw = await asyncio.to_thread(_managed_request, "GET", "status")
@@ -462,7 +462,7 @@ async def request_rebuild() -> RebuildStatus:
     if current["state"] in _ACTIVE_STATES:
       raise DeploymentControlError(
         "already_running",
-        "A container replacement is already running.",
+        "A container rebuild is already running.",
         status_code=409,
       )
   expected_sha = _expected_upstream_sha()
@@ -484,7 +484,7 @@ async def request_rebuild() -> RebuildStatus:
       "local_runtime_changes",
       "The official image cannot preserve these local image inputs: "
       f"{visible}. Commit them upstream, rebuild locally, or remove them "
-      "before replacing this container.",
+      "before rebuilding this container.",
       status_code=409,
     )
   if deployment == "railway":
@@ -495,7 +495,7 @@ async def request_rebuild() -> RebuildStatus:
   return _normalize_status({
     "state": "queued",
     "expected_sha": expected_sha,
-    "message": "Container replacement queued.",
+    "message": "Container rebuild queued.",
   }, expected_sha=expected_sha)
 
 
@@ -505,7 +505,7 @@ async def _request_managed_rebuild(expected_sha: str) -> RebuildStatus:
   if not managed_cutover_ready():
     raise DeploymentControlError(
       "controller_upgrade_required",
-      "Install the current Möbius image once to enable managed container replacement.",
+      "Install the current Möbius image once to enable managed container rebuilds.",
       status_code=409,
     )
   prepared = await asyncio.to_thread(
