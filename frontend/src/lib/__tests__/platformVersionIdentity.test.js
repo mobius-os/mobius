@@ -1,7 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { platformVersionIdentity } from '../platformVersionIdentity.js'
+import {
+  containerVersionIdentity,
+  platformVersionIdentity,
+} from '../platformVersionIdentity.js'
 
 test('the recorded origin commit is the primary synced identity', () => {
   assert.deepEqual(platformVersionIdentity(
@@ -35,4 +38,12 @@ test('served or image identity remains a fallback for untracked builds', () => {
   assert.deepEqual(platformVersionIdentity({}, { sha: 'def567890' }), {
     primarySha: 'def5678', synced: false, localSha: null,
   })
+})
+
+test('container identity stays distinct from the mutable served platform', () => {
+  assert.deepEqual(containerVersionIdentity({
+    sha: '86ff104100cab779d5040fd81dd8dd3c81f372b5',
+    served_sha: 'ec7024a8dcc3654aedafad2d5533e8241ed02c9a',
+  }), { sha: '86ff104' })
+  assert.deepEqual(containerVersionIdentity({ sha: 'unknown' }), { sha: null })
 })

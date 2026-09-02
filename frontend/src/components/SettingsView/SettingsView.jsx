@@ -1,11 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
-import { ChevronDown, Moon, Sun } from '@openai/apps-sdk-ui/components/Icon'
+import { ChevronDown, Info, Moon, Sun } from '@openai/apps-sdk-ui/components/Icon'
 import GripVertical from 'lucide-react/dist/esm/icons/grip-vertical.mjs'
 import { api, clearQueryCache, clearToken } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries, versionQueries } from '../../hooks/queries.js'
-import { platformVersionIdentity } from '../../lib/platformVersionIdentity.js'
+import {
+  containerVersionIdentity,
+  platformVersionIdentity,
+} from '../../lib/platformVersionIdentity.js'
 import { formatUpstreamCommitDate } from '../../lib/platformProvenance.js'
 import {
   rebuildIsActive,
@@ -120,6 +123,61 @@ function PlanUsageToggle({ provider, label, expanded, onToggle }) {
 
 function providerFromSettings(settings) {
   return isKnownProvider(settings?.provider) ? settings.provider : 'claude'
+}
+
+function SettingsInfoLabel({
+  label,
+  infoId,
+  expanded,
+  onToggle,
+  onDismiss,
+  children,
+}) {
+  const anchorRef = useRef(null)
+  const buttonRef = useRef(null)
+
+  useEffect(() => {
+    if (!expanded) return undefined
+
+    const dismissOnOutsidePress = (event) => {
+      if (!anchorRef.current?.contains(event.target)) onDismiss()
+    }
+    const dismissOnEscape = (event) => {
+      if (event.key !== 'Escape') return
+      onDismiss()
+      buttonRef.current?.focus()
+    }
+
+    document.addEventListener('pointerdown', dismissOnOutsidePress)
+    document.addEventListener('keydown', dismissOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', dismissOnOutsidePress)
+      document.removeEventListener('keydown', dismissOnEscape)
+    }
+  }, [expanded, onDismiss])
+
+  return (
+    <span ref={anchorRef} className="settings__label settings__info-anchor">
+      <span>{label}</span>
+      <button
+        ref={buttonRef}
+        className="settings__info-button"
+        type="button"
+        aria-label={`About ${label}`}
+        aria-controls={infoId}
+        aria-describedby={expanded ? infoId : undefined}
+        aria-expanded={expanded}
+        onClick={onToggle}
+      >
+        <Info width={16} height={16} aria-hidden="true" />
+      </button>
+      {expanded && (
+        <span id={infoId} className="settings__info-bubble" role="tooltip">
+          {children}
+        </span>
+      )}
+    </span>
+  )
 }
 
 function normalizeBackgroundAgents(backgroundAgents, defaultProvider = 'claude') {
@@ -394,6 +452,7 @@ export default function SettingsView({
   const [rebuildError, setRebuildError] = useState('')
   const [rebuildRequesting, setRebuildRequesting] = useState(false)
   const [rebuildStartedHere, setRebuildStartedHere] = useState(false)
+  const [serverInfo, setServerInfo] = useState(null)
   const rebuildPreviousBootIdRef = useRef('')
   const rebuildInitiatedHereRef = useRef(false)
   const rebuildReconnectStartedRef = useRef(false)
@@ -1017,7 +1076,7 @@ export default function SettingsView({
         setRebuildStatus({
           supported: false,
           state: 'idle',
-          message: 'Container replacement is not available yet.',
+          message: 'Container rebuilds are not available yet.',
         })
         return null
       }
@@ -1067,7 +1126,7 @@ export default function SettingsView({
         rebuildReconnectStartedRef.current = false
         setRebuildError(freshServerSeen
           ? 'The container changed, but Möbius couldn’t reload the shell. Refresh the page.'
-          : 'Möbius still can’t confirm the replacement. Use your deployment’s Recovery action if it is unavailable.')
+          : 'Möbius still can’t confirm the rebuild. Use your deployment’s Recovery action if it is unavailable.')
       },
     })
   }, [rebuildStatus?.state])
@@ -1078,7 +1137,7 @@ export default function SettingsView({
     setRebuildConfirm(false)
     if (state === 'failed') {
       setRebuildError(
-        rebuildStatus?.message || 'The container could not be replaced.',
+        rebuildStatus?.message || 'The container could not be rebuilt.',
       )
     }
   }, [rebuildStatus?.state, rebuildStatus?.message])
@@ -1111,7 +1170,7 @@ export default function SettingsView({
       setRebuildConfirm(false)
       returnToSettingsAfterReload()
     } catch (err) {
-      setRebuildError(err?.message || 'The container could not be replaced.')
+      setRebuildError(err?.message || 'The container could not be rebuilt.')
     } finally {
       setRebuildRequesting(false)
     }
@@ -1490,11 +1549,10 @@ export default function SettingsView({
   // origin/main; keep that identity as a secondary diagnostic instead of
   // presenting it as the published Möbius version.
   const mobiusVersion = platformVersionIdentity(platform, version)
-  // The commit date (YYYY-MM-DD) baked at build time, shown next to the sha as
-  // a human "version · date". Null on a dev build that didn't stamp it.
-  const buildDate = version?.build_date && version.build_date !== 'unknown'
-    ? version.build_date
-    : null
+  const containerVersion = containerVersionIdentity(version)
+  // The commit date baked at image-build time, formatted independently from
+  // the mutable platform checkout's upstream commit date below.
+  const buildDate = formatUpstreamCommitDate(version?.build_date) || null
   const upstreamCommitDate = formatUpstreamCommitDate(
     platform?.contained_upstream_committed_at,
   )
@@ -1852,6 +1910,7 @@ export default function SettingsView({
               </StatusDot>
               {mobiusVersion.primarySha && (
                 <p className="settings__build">
+                  <span className="settings__build-kind">Möbius</span>
                   {mobiusVersion.synced && upstreamCommitDate
                     ? `${upstreamCommitDate} (`
                     : !mobiusVersion.synced
@@ -1863,6 +1922,14 @@ export default function SettingsView({
                     : !mobiusVersion.synced && buildDate
                       ? ` · ${buildDate}`
                       : ''}
+                </p>
+              )}
+              {containerVersion.sha && (
+                <p className="settings__build">
+                  <span className="settings__build-kind">Container</span>
+                  {buildDate ? `${buildDate} (` : ''}
+                  <span className="settings__standard-highlight">{containerVersion.sha}</span>
+                  {buildDate ? ')' : ''}
                 </p>
               )}
             </div>
@@ -2034,7 +2101,19 @@ export default function SettingsView({
         <section className="settings__section settings__section--compact settings__section--server">
           <h2 className="settings__section-title">Server</h2>
           <div className="settings__row">
-            <span className="settings__label">Restart</span>
+            <SettingsInfoLabel
+              label="Restart"
+              infoId="settings-restart-info"
+              expanded={serverInfo === 'restart'}
+              onToggle={() => setServerInfo((value) => (
+                value === 'restart' ? null : 'restart'
+              ))}
+              onDismiss={() => setServerInfo(null)}
+            >
+              Restarts Möbius inside the current container. This reloads server
+              changes and briefly interrupts active responses, but does not
+              install a newer container image.
+            </SettingsInfoLabel>
             {restartConfirm ? (
               <div className="settings__confirm">
                 <button
@@ -2085,9 +2164,19 @@ export default function SettingsView({
             />
           )}
           <div className="settings__row">
-            <span className="settings__label">
-              {rebuildBootstrap ? 'Container updates' : 'Replace container'}
-            </span>
+            <SettingsInfoLabel
+              label={rebuildBootstrap ? 'Container updates' : 'Rebuild container'}
+              infoId="settings-rebuild-info"
+              expanded={serverInfo === 'rebuild'}
+              onToggle={() => setServerInfo((value) => (
+                value === 'rebuild' ? null : 'rebuild'
+              ))}
+              onDismiss={() => setServerInfo(null)}
+            >
+              {rebuildBootstrap
+                ? 'Enables safe container rebuilds on this Railway deployment with one managed upgrade.'
+                : 'Creates a fresh container from the newest official image for your applied update, while keeping your chats, apps, settings, and other saved data.'}
+            </SettingsInfoLabel>
             {rebuildConfirm ? (
               <div className="settings__confirm">
                 <button
@@ -2105,8 +2194,8 @@ export default function SettingsView({
                   disabled={rebuildRequesting || rebuildIsActive(rebuildStatus)}
                 >
                   {rebuildRequesting || rebuildIsActive(rebuildStatus)
-                    ? (rebuildBootstrap ? 'Enabling…' : 'Replacing…')
-                    : (rebuildBootstrap ? 'Enable now' : 'Replace now')}
+                    ? (rebuildBootstrap ? 'Enabling…' : 'Rebuilding…')
+                    : (rebuildBootstrap ? 'Enable now' : 'Rebuild now')}
                 </button>
               </div>
             ) : (
@@ -2123,7 +2212,7 @@ export default function SettingsView({
               >
                 {rebuildBootstrap
                   ? 'Enable'
-                  : (rebuildStatus?.supported === false ? 'Not set up' : 'Replace')}
+                  : (rebuildStatus?.supported === false ? 'Not set up' : 'Rebuild')}
               </button>
             )}
           </div>
@@ -2134,15 +2223,16 @@ export default function SettingsView({
                 update controller. Finish active responses first; Railway restores
                 the previous container if the upgrade is unhealthy.</>
               ) : (
-                <>Deploys the official image for your applied update. Local-only
-                runtime changes recorded by Möbius block replacement; undeclared
+                <>Rebuilds the container from the official image for your applied
+                update. Local-only runtime changes recorded by Möbius block the
+                rebuild; undeclared
                 container changes are lost. Active chats continue afterward.</>
               )}
             </p>
           )}
           {rebuildStatus?.supported === false && (
             <p className="settings__subtext settings__subtext--tight">
-              {rebuildStatus.message || 'Container replacement is not set up on this installation.'}
+              {rebuildStatus.message || 'Container rebuilds are not set up on this installation.'}
             </p>
           )}
           {(rebuildIsActive(rebuildStatus) || (rebuildStartedHere && [
