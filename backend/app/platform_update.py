@@ -354,6 +354,11 @@ class ReconcileResult:
   new_sha: str | None
   target_sha: str | None
   conflict_paths: list[str] = field(default_factory=list)
+  # Proven semantic merge base for a ``conflict`` result: the equivalence
+  # engine's tree that already eliminates changes proven to have landed
+  # upstream. Callers that rewrite the conflict flag must carry it forward so
+  # the resolver preserves every proven elimination.
+  merge_base: str | None = None
   error: str | None = None
   # Exact reviewed release/upstream commit captured while RECONCILE_LOCK is
   # still held. Hook refresh reads every allowlisted blob from this immutable
@@ -984,24 +989,38 @@ def container_replacement_blockers(
   pending = list(marker["paths"]) if marker else []
 
   # Activation markers record intended work, not the bytes actually mounted at
-  # /app/runtime. When the caller supplies the official replacement target,
-  # verify deployed parity directly and prove that target contains every stale
-  # path. This catches lost markers without blocking a replacement whose exact
-  # official image will repair the drift.
+  # /app/runtime or the commits an agent made directly.  When the caller
+  # supplies the official replacement target, verify parity against the
+  # histories themselves: deployed protected-runtime bytes, plus every path
+  # whose desired local content differs from the official target (local
+  # Dockerfile, dependency-lock, bootstrap-script, or seeded-skill commits
+  # never write a marker, yet the official image would silently replace
+  # them).  This catches lost/cleared/stale markers without blocking a
+  # replacement whose exact official image will repair the drift.  A failed
+  # diff (e.g. an unfetched target) adds nothing here; the replacement
+  # controller independently fails closed on unverifiable provenance.
+  head = _rev(repo, _local_branch(repo)) if expected_sha else None
+  # Paths pending for a reason git parity cannot verify (an unreadable
+  # deployed runtime) must stay blockers even when source matches the target.
+  unverifiable: set[str] = set()
   if expected_sha:
     runtime = _protected_runtime_status(repo)
     if runtime["state"] == "unavailable":
       pending.append("backend/runtime")
+      unverifiable.add("backend/runtime")
     else:
-      runtime_paths = runtime_provenance.activation_paths(runtime)
-      pending.extend(runtime_paths)
-      head = _rev(repo, _local_branch(repo))
-      if head:
-        covered.update(_paths_matching_upstream(
-          repo, head, expected_sha, runtime_paths,
-        ))
+      pending.extend(runtime_provenance.activation_paths(runtime))
+    if head:
+      drift = _git(
+        "diff", "--name-only", "--no-renames", expected_sha, head,
+        repo=repo, check=False,
+      )
+      if drift.returncode == 0:
+        pending.extend(
+          line.strip() for line in drift.stdout.splitlines() if line.strip()
+        )
 
-  blockers: list[str] = []
+  image_pending: list[str] = []
   for path in sorted(set(pending)):
     if preserve_active_runtime and (
       path == "backend/runtime" or path.startswith("backend/runtime/")
@@ -1013,10 +1032,18 @@ def container_replacement_blockers(
     if (
       impact["level"]
       == platform_activation.ActivationLevel.IMAGE_REBUILD.value
-      and path not in covered
     ):
-      blockers.append(path)
-  return sorted(blockers)
+      image_pending.append(path)
+
+  # Actual content parity with the target is authoritative whenever both
+  # revisions are known; a marker's recorded coverage must not excuse a path
+  # that drifted after the marker was written.  Without a verifiable head the
+  # marker's own upstream coverage remains the fallback.
+  if expected_sha and head:
+    covered = set(_paths_matching_upstream(
+      repo, head, expected_sha, image_pending,
+    )) - unverifiable
+  return sorted(path for path in image_pending if path not in covered)
 
 
 def _write_activation_marker(
@@ -1670,6 +1697,7 @@ def reconcile_clone(
           return ReconcileResult(
             "conflict", pre, pre, target,
             conflict_paths=conflict_paths,
+            merge_base=merge_base,
             reconciliation=(
               equivalent.reconciliation
               if equivalent is not None
@@ -2253,7 +2281,10 @@ async def apply_platform_update(
       elif res.status == "conflict":
         # Keep the resolver gated behind the owner's next click. A conflict pass
         # rewrites the flag with target + paths, so preserve a previously opened
-        # chat only when it belongs to this same target.
+        # chat only when it belongs to this same target — and carry the proven
+        # semantic merge base forward so the resolver keeps every elimination
+        # the equivalence engine already proved (falling back to a same-target
+        # base recorded by an earlier pass).
         target = res.target_sha or existing_conflict.get("upstream")
         existing_chat_id = (
           existing_conflict.get("chat_id")
@@ -2265,6 +2296,11 @@ async def apply_platform_update(
           target,
           res.conflict_paths or existing_conflict.get("paths") or [],
           existing_chat_id,
+          merge_base=res.merge_base or (
+            existing_conflict.get("merge_base")
+            if target and existing_conflict.get("upstream") == target
+            else None
+          ),
         )
         state = PlatformUpdateState.CONFLICT
       elif res.status == "rolled_back":
