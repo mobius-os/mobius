@@ -5,8 +5,25 @@ import {
   deploymentKindLabel,
   platformActivationLabel,
   platformStatusFromApply,
+  platformStatusUnavailable,
   platformUpdateStatusLabel,
+  reviewedUpdateUsesContainerRebuild,
 } from '../platformUpdateState.js'
+
+test('an unavailable release check cannot inherit a cached current claim', () => {
+  const unavailable = platformStatusUnavailable({
+    state: 'up_to_date',
+    available: true,
+    contained_upstream_sha: 'a'.repeat(40),
+  })
+
+  assert.equal(unavailable.state, 'unavailable')
+  assert.equal(unavailable.available, false)
+  assert.equal(unavailable.status_unavailable, true)
+  assert.equal(
+    platformUpdateStatusLabel(unavailable), 'Update status unavailable',
+  )
+})
 
 test('the deployment classifier stays as binary as the backend that emits it', () => {
   assert.equal(deploymentKind({ deployment: 'railway' }), 'railway')
@@ -22,6 +39,19 @@ test('the deployment badge names an unresolved deployment self-hosted', () => {
   assert.equal(deploymentKindLabel({ deployment: 'railway' }), 'Railway')
   assert.equal(deploymentKindLabel({ deployment: 'self_hosted' }), 'Self-hosted')
   assert.equal(deploymentKindLabel(null), 'Self-hosted')
+})
+
+test('only reviewed Railway image updates rebuild directly', () => {
+  assert.equal(reviewedUpdateUsesContainerRebuild({
+    activation: { deployment: 'railway', level: 'image_rebuild' },
+  }), true)
+  assert.equal(reviewedUpdateUsesContainerRebuild({
+    activation: { deployment: 'self_hosted', level: 'image_rebuild' },
+  }), false)
+  assert.equal(reviewedUpdateUsesContainerRebuild({
+    activation: { deployment: 'railway', level: 'server_restart' },
+  }), false)
+  assert.equal(reviewedUpdateUsesContainerRebuild(null), false)
 })
 
 test('a clean apply consumes the reviewed target but preserves restart readiness', () => {

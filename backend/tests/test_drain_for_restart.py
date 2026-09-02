@@ -755,6 +755,23 @@ def test_notify_after_reconcile_noop_when_nothing_reconciled(owner_token, monkey
 
 # -- bootstrap rejection may reopen only an idle drain ------------------------
 
+def test_idle_drain_includes_terminal_broadcast_ownership(monkeypatch):
+  monkeypatch.setattr(chat_mod, "has_running_chat_broadcast", lambda: True)
+
+  assert chat_mod.begin_idle_drain() is False
+  # The failed idle proof reopens ordinary admission.
+  assert registry.mark_starting("next-chat") is True
+
+
+def test_idle_drain_blocks_late_runner_reservations(monkeypatch):
+  monkeypatch.setattr(chat_mod, "has_running_chat_broadcast", lambda: False)
+
+  assert chat_mod.begin_idle_drain() is True
+  assert registry.mark_starting("late-chat") is False
+  assert chat_mod.cancel_idle_drain() is True
+  assert registry.mark_starting("after-cancel") is True
+
+
 def test_cancel_idle_drain_keeps_admission_closed_for_a_live_runner():
   chat_mod.begin_drain()
   registry.register(_Handle("bootstrap-live-runner"))

@@ -39,6 +39,7 @@ from app.broadcast import (
   create_broadcast,
   get_broadcast,
   get_system_broadcast,
+  has_running_chat_broadcast,
   set_active_broadcast,
 )
 from app.chat_event_sink import (
@@ -199,7 +200,29 @@ PAUSED_FOR_RESTART_MESSAGE = "Paused for a platform update."
 def begin_drain() -> None:
   """Set the process-wide drain gate. Idempotent."""
   global draining
+  registry.close_admission()
   draining = True
+
+
+def begin_idle_drain() -> bool:
+  """Close admission only if no runner can already own the cutover boundary.
+
+  The registry check and reservation gate are one critical section. A send that
+  already reserved a runner makes this fail; a send that has not reserved yet
+  is forced into the durable pending queue when it reaches ``mark_starting``.
+  """
+  global draining
+  if draining or not registry.close_admission_if_idle():
+    return False
+  # A provider handle unregisters before terminal transcript persistence has
+  # fully settled. Its broadcast remains running through that ownership window.
+  # Admission stays closed while checking it, so no fresh reservation or
+  # broadcast can appear between the idle proof and setting the drain flag.
+  if has_running_chat_broadcast():
+    registry.reopen_admission()
+    return False
+  draining = True
+  return True
 
 
 def cancel_idle_drain() -> bool:
@@ -214,6 +237,7 @@ def cancel_idle_drain() -> bool:
   if registry.all_alive_chat_ids() or _restart_draining_chats:
     return False
   draining = False
+  registry.reopen_admission()
   return True
 
 

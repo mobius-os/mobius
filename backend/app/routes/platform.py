@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
-from app import models, platform_activation, platform_update
+from app import deployment_control, models, platform_activation, platform_update
 from app.database import get_db
 from app.deps import get_current_owner, reject_cross_site
 from app.platform_update import (
@@ -39,27 +39,75 @@ log = logging.getLogger("mobius.platform")
 router = APIRouter(prefix="/api/platform", tags=["platform"])
 
 
+_PLAN_ERROR_MESSAGES = {
+  "update_plan_stale": (
+    "Möbius changed since this preview. Refresh and review the update again."
+  ),
+  "update_plan_invalid": (
+    "This update review is no longer valid. Refresh it and try again."
+  ),
+  "update_plan_target_missing": (
+    "The reviewed release source is unavailable. Refresh and try again shortly."
+  ),
+  "image_release_source_unavailable": (
+    "The official image is published, but its source revision could not be "
+    "verified yet. Try again shortly."
+  ),
+  "image_release_invalid": (
+    "The official image returned an invalid release identity. Try again later."
+  ),
+}
+
+
+def _plan_error_detail(exc: PlatformUpdateError) -> dict[str, str]:
+  code = str(exc)
+  return {
+    "code": code,
+    "message": _PLAN_ERROR_MESSAGES.get(
+      code,
+      "This update could not be verified. Refresh it and try again.",
+    ),
+  }
+
+
 class PlatformApplyIn(BaseModel):
   """The immutable update plan returned by ``GET /update-preview``."""
 
   plan_id: str = Field(min_length=64, max_length=64)
   current_sha: str = Field(min_length=40, max_length=64)
   target_sha: str = Field(min_length=40, max_length=64)
+  image_digest: str | None = Field(
+    default=None,
+    pattern=r"^sha256:[0-9a-f]{64}$",
+  )
 
 
 @router.get("/status")
 async def get_platform_status(
   _: models.Owner = Depends(get_current_owner),
 ) -> PlatformStatus:
-  """Cheap, read-only update availability for Settings. Never raises — a git
-  hiccup degrades to "up to date" rather than breaking the page.
+  """Read-only update availability for Settings. Railway resolves its published
+  GHCR release identity; self-hosting remains a cheap local read. A managed
+  release lookup failure is explicit so Settings never calls an unknown release
+  current. Local Git diagnostics still degrade without breaking the page.
 
   Does NOT clear the restart flag here: a restart-needed set by an owner Apply
   must persist (the running uvicorn still has the old code) until an actual boot
   reconcile clears it. Clearing on ancestry alone would drop it in the SAME stale
   process the moment the on-disk tree looks reconciled."""
   try:
+    if platform_activation.deployment_kind() == "railway":
+      release = await deployment_control.latest_official_release()
+      return await asyncio.to_thread(
+        platform_update.platform_status,
+        target_sha=release["build_sha"],
+      )
     return await asyncio.to_thread(platform_update.platform_status)
+  except deployment_control.DeploymentControlError as exc:
+    raise HTTPException(
+      status_code=exc.status_code,
+      detail={"code": exc.code, "message": exc.message},
+    ) from exc
   except Exception as exc:
     log.warning("platform status failed: %r", exc)
     return PlatformStatus(
@@ -71,6 +119,7 @@ async def get_platform_status(
       contained_upstream_committed_at=None, upstream_checked_at=None,
       seed_required=False, conflict_paths=[],
       conflict_chat_id=None, newer_updates_available=False,
+      rollback_target_sha=None, rollback_error=None,
     )
 
 
@@ -83,7 +132,20 @@ async def check_platform_updates(
   refresh. A failed check is a 503 so Settings cannot mistake stale tracking
   data for an authoritative "No updates found" result."""
   try:
+    if platform_activation.deployment_kind() == "railway":
+      release = await deployment_control.latest_official_release()
+      return await asyncio.to_thread(
+        platform_update.check_for_updates,
+        target_sha=release["build_sha"],
+      )
     return await asyncio.to_thread(platform_update.check_for_updates)
+  except deployment_control.DeploymentControlError as exc:
+    raise HTTPException(
+      status_code=exc.status_code,
+      detail={"code": exc.code, "message": exc.message},
+    ) from exc
+  except platform_update.PlatformUpdateError as exc:
+    raise HTTPException(status_code=503, detail=_plan_error_detail(exc)) from exc
   except Exception as exc:
     log.warning("platform check failed: %r", exc)
     raise HTTPException(
@@ -97,11 +159,26 @@ async def get_platform_update_preview(
   _: models.Owner = Depends(get_current_owner),
 ) -> PlatformUpdatePreview:
   """Read-only preview of the incoming platform update, for the Settings review
-  step the owner sees before Apply. Fetch-free and non-mutating like ``/status``.
-  Never raises — a git hiccup degrades to an empty preview so the review sheet
-  shows "nothing to review" rather than breaking the page."""
+  step the owner sees before Apply. Railway may fetch the exact source object
+  named by GHCR, but never mutates the served branch or working tree. Missing
+  managed release source is explicit; generic self-hosted read failures still
+  degrade to an empty preview rather than breaking Settings."""
   try:
+    if platform_activation.deployment_kind() == "railway":
+      release = await deployment_control.latest_official_release()
+      return await asyncio.to_thread(
+        platform_update.platform_update_preview,
+        target_sha=release["build_sha"],
+        image_digest=release["image_digest"],
+      )
     return await asyncio.to_thread(platform_update.platform_update_preview)
+  except deployment_control.DeploymentControlError as exc:
+    raise HTTPException(
+      status_code=exc.status_code,
+      detail={"code": exc.code, "message": exc.message},
+    ) from exc
+  except platform_update.PlatformUpdateError as exc:
+    raise HTTPException(status_code=503, detail=_plan_error_detail(exc)) from exc
   except Exception as exc:
     log.warning("platform update-preview failed: %r", exc)
     return platform_update.empty_platform_update_preview()
@@ -128,11 +205,41 @@ async def apply_platform_update(
       plan_id=request.plan_id,
       current_sha=request.current_sha,
       target_sha=request.target_sha,
+      image_digest=request.image_digest,
     )
   except PlatformUpdateError as exc:
     # A known, recoverable precondition failure (offline fetch, not a clone) —
     # tell the UI plainly; the instance is untouched.
-    raise HTTPException(status_code=409, detail=str(exc)) from exc
+    raise HTTPException(status_code=409, detail=_plan_error_detail(exc)) from exc
+
+
+@router.post(
+  "/rebuild",
+  dependencies=[Depends(reject_cross_site)],
+  status_code=202,
+)
+async def rebuild_reviewed_platform_update(
+  request: PlatformApplyIn,
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Deploy the exact digest-pinned GHCR image represented by the review."""
+  if not request.image_digest:
+    exc = PlatformUpdateError("update_plan_invalid")
+    raise HTTPException(status_code=409, detail=_plan_error_detail(exc))
+  try:
+    return await deployment_control.request_reviewed_rebuild(
+      plan_id=request.plan_id,
+      current_sha=request.current_sha,
+      target_sha=request.target_sha,
+      image_digest=request.image_digest,
+    )
+  except platform_update.PlatformUpdateError as exc:
+    raise HTTPException(status_code=409, detail=_plan_error_detail(exc)) from exc
+  except deployment_control.DeploymentControlError as exc:
+    raise HTTPException(
+      status_code=exc.status_code,
+      detail={"code": exc.code, "message": exc.message},
+    ) from exc
 
 
 @router.post("/conflict-resolver-chat", dependencies=[Depends(reject_cross_site)])

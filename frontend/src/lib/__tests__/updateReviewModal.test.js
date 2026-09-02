@@ -37,6 +37,28 @@ test('apply outcomes close only for explicit clean states and preserve actionabl
   assert.match(modal, /applyProgress\?\.plan_id === preview\?\.plan_id/)
 })
 
+test('Railway image reviews rebuild the exact immutable image instead of applying in place', () => {
+  assert.match(modal, /reviewedUpdateUsesContainerRebuild\(preview\)/)
+  assert.match(modal, /rebuildUpdate \? onRebuild\(plan\) : onApply\(plan\)/)
+  assert.match(modal, /image_digest: preview\?\.image_digest/)
+  assert.match(modal, /!rebuildUpdate \|\| preview\?\.image_digest/)
+  assert.match(modal, /Rebuild to update/)
+  assert.match(modal, /Starting the exact reviewed official image…/)
+  assert.match(settingsView, /api\.platform\.rebuild\(plan\)/)
+  assert.match(settingsView, /\{ reviewedUpdate: true \}/)
+  assert.match(settingsView, /\|\| rebuildIsActive\(rebuildStatus\)/)
+  assert.match(settingsView, /rebuildRequestOutcome\(body, \{ reviewedUpdate \}\)/)
+  assert.match(settingsView, /rebuildStatus\?\.error[\s\S]*rebuildStatus\?\.message/)
+})
+
+test('an exact no-change completes a reviewed rebuild while failures remain visible', () => {
+  assert.match(modal, /'queued', 'preparing', 'replacing', 'verifying', 'succeeded',[\s\S]*'no_change'/)
+  assert.match(settingsView, /ok: outcome\.accepted/)
+  assert.match(settingsView, /if \(outcome\.alreadyCurrent\) \{[\s\S]*await refreshPlatform\(\)/)
+  assert.doesNotMatch(settingsView, /reviewed image is already running, but this update is still pending/)
+  assert.match(settingsView, /rebuildReviewedUpdateRef\.current = false[\s\S]*return \{ ok: false, message \}/)
+})
+
 test('the apply response is a truthful fallback when status refresh fails', () => {
   assert.match(updateState, /function platformStatusFromApply\(previous, result\)/)
   assert.match(updateState, /available: state === 'rolled_back'/)

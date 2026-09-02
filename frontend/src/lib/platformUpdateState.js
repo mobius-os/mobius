@@ -42,6 +42,15 @@ export function platformStatusFromApply(previous, result) {
   }
 }
 
+export function platformStatusUnavailable(previous) {
+  return {
+    ...(previous || {}),
+    state: 'unavailable',
+    available: false,
+    status_unavailable: true,
+  }
+}
+
 export function platformUpdateStatusLabel(platform) {
   const state = platform?.state
   const needsRestart = !!platform?.needs_restart
@@ -50,6 +59,9 @@ export function platformUpdateStatusLabel(platform) {
     needsRestart ? 'server_restart' : 'live'
   )
 
+  if (platform?.status_unavailable || state === 'unavailable') {
+    return 'Update status unavailable'
+  }
   if (state === 'conflict') return 'Update blocked'
   if (state === 'rolled_back') return 'Update needs repair'
   if (activationLevel !== 'live' && available) return 'More updates available'
@@ -82,6 +94,17 @@ export function deploymentKind(activation) {
 
 export function deploymentKindLabel(activation) {
   return deploymentKind(activation) === 'railway' ? 'Railway' : 'Self-hosted'
+}
+
+/**
+ * Railway image updates are activated by replacing the container, not by
+ * mutating the checkout that is still serving the current container.
+ */
+export function reviewedUpdateUsesContainerRebuild(preview) {
+  return (
+    deploymentKind(preview?.activation) === 'railway'
+    && preview?.activation?.level === 'image_rebuild'
+  )
 }
 
 export function platformActivationLabel(activation) {

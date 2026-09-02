@@ -5,12 +5,32 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import threading
 from types import SimpleNamespace
 import urllib.error
 
 import pytest
 
 from app import deployment_control as dc
+
+
+_TEST_DIGEST = "sha256:" + "d" * 64
+
+
+def _install_latest_release(monkeypatch, sha="a" * 40):
+  async def latest():
+    return {
+      "build_sha": sha,
+      "image_digest": _TEST_DIGEST,
+      "image_ref": f"ghcr.io/mobius-os/mobius:sha-{sha}@{_TEST_DIGEST}",
+    }
+
+  monkeypatch.setattr(dc, "latest_official_release", latest)
+  monkeypatch.setattr(
+    dc.platform_update,
+    "official_image_rebuild_blockers",
+    lambda *_args, **_kwargs: [],
+  )
 
 
 def _install_control(tmp_path, monkeypatch):
@@ -108,18 +128,272 @@ def test_normalize_rejects_unknown_controller_state():
 
 
 @pytest.mark.asyncio
+async def test_latest_official_release_requires_verified_sha_and_digest(
+  monkeypatch,
+):
+  monkeypatch.setattr(dc, "_managed_request", lambda *_args: {
+    "build_sha": "b" * 40,
+    "image_digest": "sha256:" + "c" * 64,
+    "image_ref": "immutable-ref",
+  })
+
+  release = await dc.latest_official_release()
+
+  assert release == {
+    "build_sha": "b" * 40,
+    "image_digest": "sha256:" + "c" * 64,
+    "image_ref": "immutable-ref",
+  }
+
+  monkeypatch.setattr(dc, "_managed_request", lambda *_args: {
+    "build_sha": "b" * 40,
+    "image_digest": "mutable",
+  })
+  with pytest.raises(dc.DeploymentControlError) as exc:
+    await dc.latest_official_release()
+  assert exc.value.code == "controller_invalid_response"
+
+
+def test_managed_status_preserves_controller_failure_detail():
+  status = dc._normalize_managed_status({
+    "state": "rolled_back",
+    "expected_sha": "a" * 40,
+    "message": "Previous deployment restored.",
+    "error": "Public URL served the wrong build SHA.",
+  })
+
+  assert status["state"] == "rolled_back"
+  assert status["error"] == "Public URL served the wrong build SHA."
+  assert status["release_source"] == "latest_ghcr"
+
+
+@pytest.mark.asyncio
+async def test_reviewed_rebuild_uses_exact_plan_target_and_digest(monkeypatch):
+  target = "b" * 40
+  digest = "sha256:" + "c" * 64
+  captured = {}
+
+  monkeypatch.setattr(
+    dc.platform_activation, "deployment_kind", lambda: "railway",
+  )
+  monkeypatch.setattr(
+    dc.platform_update,
+    "reviewed_container_rebuild_plan",
+    lambda **plan: {
+      "target_sha": plan["target_sha"],
+      "image_digest": plan["image_digest"],
+      "local_base_sha": plan["current_sha"],
+      "activation": {
+        "level": "image_rebuild", "deployment": "railway",
+        "reasons": [], "guidance": [],
+      },
+      "blockers": [],
+    },
+  )
+
+  async def start(expected_sha, expected_digest, *, final_check):
+    captured.update(sha=expected_sha, digest=expected_digest)
+    final_check()
+    return {"state": "queued"}
+
+  monkeypatch.setattr(dc, "_request_managed_rebuild", start)
+
+  status = await dc.request_reviewed_rebuild(
+    plan_id="a" * 64,
+    current_sha="1" * 40,
+    target_sha=target,
+    image_digest=digest,
+  )
+
+  assert status["state"] == "queued"
+  assert captured == {"sha": target, "digest": digest}
+
+
+@pytest.mark.asyncio
+async def test_reviewed_immutable_plan_does_not_reconsult_moving_ghcr_main(
+  monkeypatch,
+):
+  target = "b" * 40
+  digest = "sha256:" + "c" * 64
+  monkeypatch.setattr(
+    dc.platform_activation, "deployment_kind", lambda: "railway",
+  )
+
+  async def moving_main_must_not_be_read():
+    raise AssertionError("immutable review reconsulted the moving main tag")
+
+  monkeypatch.setattr(dc, "latest_official_release", moving_main_must_not_be_read)
+  monkeypatch.setattr(
+    dc.platform_update,
+    "reviewed_container_rebuild_plan",
+    lambda **plan: {
+      "target_sha": plan["target_sha"],
+      "image_digest": plan["image_digest"],
+      "local_base_sha": plan["current_sha"],
+      "activation": {
+        "level": "image_rebuild", "deployment": "railway",
+        "reasons": [], "guidance": [],
+      },
+      "blockers": [],
+    },
+  )
+
+  async def start(expected_sha, expected_digest, *, final_check):
+    final_check()
+    return {
+      "state": "queued", "expected_sha": expected_sha,
+      "image_digest": expected_digest,
+    }
+
+  monkeypatch.setattr(dc, "_request_managed_rebuild", start)
+
+  result = await dc.request_reviewed_rebuild(
+    plan_id="a" * 64,
+    current_sha="1" * 40,
+    target_sha=target,
+    image_digest=digest,
+  )
+
+  assert result["expected_sha"] == target
+  assert result["image_digest"] == digest
+
+
+@pytest.mark.asyncio
+async def test_managed_prepare_rejects_mismatched_release_echo(
+  tmp_path, monkeypatch,
+):
+  _install_managed_cutover_marker(tmp_path, monkeypatch)
+  monkeypatch.setattr(
+    dc,
+    "get_settings",
+    lambda: type("S", (), {"data_dir": str(tmp_path)})(),
+  )
+
+  def managed_request(_method, suffix, _payload=None):
+    assert suffix == "prepare"
+    return {
+      "state": "awaiting_handoff",
+      "operation_id": "replace_12345678",
+      "handoff_nonce": "nonce-secret",
+      "expected_sha": "a" * 40,
+      "image_digest": "sha256:" + "e" * 64,
+    }
+
+  monkeypatch.setattr(dc, "_managed_request", managed_request)
+
+  with pytest.raises(dc.DeploymentControlError) as exc:
+    await dc._request_managed_rebuild("a" * 40, _TEST_DIGEST)
+
+  assert exc.value.code == "controller_invalid_response"
+
+
+@pytest.mark.asyncio
+async def test_managed_start_rejects_mismatched_release_echo(
+  tmp_path, monkeypatch,
+):
+  from app import restart_ledger, restart_util
+
+  _install_managed_cutover_marker(tmp_path, monkeypatch)
+  monkeypatch.setattr(
+    dc,
+    "get_settings",
+    lambda: type("S", (), {"data_dir": str(tmp_path)})(),
+  )
+
+  def managed_request(_method, suffix, _payload=None):
+    if suffix == "prepare":
+      return {
+        "state": "awaiting_handoff",
+        "operation_id": "replace_12345678",
+        "handoff_nonce": "nonce-secret",
+        "expected_sha": "a" * 40,
+        "image_digest": _TEST_DIGEST,
+      }
+    return {
+      "state": "queued",
+      "operation_id": "replace_12345678",
+      "expected_sha": "b" * 40,
+      "image_digest": _TEST_DIGEST,
+    }
+
+  monkeypatch.setattr(dc, "_managed_request", managed_request)
+  monkeypatch.setattr(restart_ledger, "current_boot_id", lambda: "boot-12345678")
+  monkeypatch.setattr(restart_ledger, "request_managed_cutover", lambda **_kw: None)
+  monkeypatch.setattr(restart_ledger, "authorized_cutover_challenge", lambda _id: True)
+  monkeypatch.setattr(restart_ledger, "accepted_cutover_receipt", lambda _id: True)
+  monkeypatch.setattr(
+    restart_util,
+    "prepare_managed_container_cutover",
+    lambda _id: asyncio.sleep(0),
+  )
+
+  with pytest.raises(dc.DeploymentControlError) as exc:
+    await dc._request_managed_rebuild("a" * 40, _TEST_DIGEST)
+
+  assert exc.value.code == "controller_invalid_response"
+
+
+@pytest.mark.asyncio
+async def test_managed_final_validation_runs_after_drain_and_before_start(
+  tmp_path, monkeypatch,
+):
+  from app import restart_ledger, restart_util
+
+  _install_managed_cutover_marker(tmp_path, monkeypatch)
+  monkeypatch.setattr(
+    dc,
+    "get_settings",
+    lambda: type("S", (), {"data_dir": str(tmp_path)})(),
+  )
+  events = []
+
+  def managed_request(_method, suffix, _payload=None):
+    events.append(suffix)
+    if suffix == "prepare":
+      return {
+        "state": "awaiting_handoff",
+        "operation_id": "replace_12345678",
+        "handoff_nonce": "nonce-secret",
+        "expected_sha": "a" * 40,
+        "image_digest": _TEST_DIGEST,
+      }
+    return {
+      "state": "queued",
+      "operation_id": "replace_12345678",
+      "expected_sha": "a" * 40,
+      "image_digest": _TEST_DIGEST,
+    }
+
+  async def drain(_operation_id):
+    events.append("drain")
+
+  def final_check():
+    events.append("final_check")
+
+  monkeypatch.setattr(dc, "_managed_request", managed_request)
+  monkeypatch.setattr(restart_ledger, "current_boot_id", lambda: "boot-12345678")
+  monkeypatch.setattr(restart_ledger, "request_managed_cutover", lambda **_kw: None)
+  monkeypatch.setattr(restart_ledger, "authorized_cutover_challenge", lambda _id: True)
+  monkeypatch.setattr(restart_ledger, "accepted_cutover_receipt", lambda _id: True)
+  monkeypatch.setattr(restart_util, "prepare_managed_container_cutover", drain)
+
+  result = await dc._request_managed_rebuild(
+    "a" * 40,
+    _TEST_DIGEST,
+    final_check=final_check,
+  )
+
+  assert result["state"] == "queued"
+  assert events == ["prepare", "drain", "final_check", "start"]
+
+
+@pytest.mark.asyncio
 async def test_legacy_railway_image_offers_managed_bootstrap(tmp_path, monkeypatch):
   from app import chat
-  from app.runner_registry import registry
 
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
   monkeypatch.setattr(dc, "get_settings", lambda: type("S", (), {"data_dir": str(tmp_path)})())
-  monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "a" * 40)
-  monkeypatch.setattr(
-    dc.platform_update,
-    "container_replacement_blockers",
-    lambda *_args, **_kwargs: [],
-  )
+  _install_latest_release(monkeypatch)
   calls = []
 
   def managed_request(method, suffix, payload=None):
@@ -130,16 +404,19 @@ async def test_legacy_railway_image_offers_managed_bootstrap(tmp_path, monkeypat
       return {
         "mode": "bootstrap", "state": "awaiting_bootstrap",
         "operation_id": "bootstrap_123", "handoff_nonce": "nonce",
+        "expected_sha": "a" * 40, "image_digest": _TEST_DIGEST,
       }
     return {
       "mode": "bootstrap", "state": "queued",
       "operation_id": "bootstrap_123", "expected_sha": "a" * 40,
+      "image_digest": _TEST_DIGEST,
     }
 
   monkeypatch.setattr(dc, "_managed_request", managed_request)
-  monkeypatch.setattr(registry, "all_alive_chat_ids", lambda: set())
   began = []
-  monkeypatch.setattr(chat, "begin_drain", lambda: began.append(True))
+  monkeypatch.setattr(
+    chat, "begin_idle_drain", lambda: began.append(True) or True,
+  )
 
   status = await dc.read_rebuild_status()
   assert status["supported"] is False
@@ -152,7 +429,9 @@ async def test_legacy_railway_image_offers_managed_bootstrap(tmp_path, monkeypat
   assert began == [True]
   assert calls == [
     ("GET", "status", None),
-    ("POST", "bootstrap/prepare", {"expected_sha": "a" * 40}),
+    ("POST", "bootstrap/prepare", {
+      "expected_sha": "a" * 40, "expected_digest": _TEST_DIGEST,
+    }),
     ("POST", "bootstrap/start", {
       "operation_id": "bootstrap_123", "handoff_nonce": "nonce",
     }),
@@ -240,16 +519,10 @@ async def test_legacy_railway_bootstrap_does_not_mask_controller_failure(
 @pytest.mark.asyncio
 async def test_legacy_railway_bootstrap_waits_for_idle_chats(tmp_path, monkeypatch):
   from app import chat
-  from app.runner_registry import registry
 
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
   monkeypatch.setattr(dc, "get_settings", lambda: type("S", (), {"data_dir": str(tmp_path)})())
-  monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "a" * 40)
-  monkeypatch.setattr(
-    dc.platform_update,
-    "container_replacement_blockers",
-    lambda *_args, **_kwargs: [],
-  )
+  _install_latest_release(monkeypatch)
   calls = []
 
   def managed_request(method, suffix, payload=None):
@@ -257,18 +530,20 @@ async def test_legacy_railway_bootstrap_waits_for_idle_chats(tmp_path, monkeypat
     return {
       "mode": "bootstrap", "state": "awaiting_bootstrap",
       "operation_id": "bootstrap_123", "handoff_nonce": "nonce",
+      "expected_sha": "a" * 40, "image_digest": _TEST_DIGEST,
     }
 
   monkeypatch.setattr(dc, "_managed_request", managed_request)
-  monkeypatch.setattr(registry, "all_alive_chat_ids", lambda: {"active-chat"})
   began = []
-  monkeypatch.setattr(chat, "begin_drain", lambda: began.append(True))
+  monkeypatch.setattr(
+    chat, "begin_idle_drain", lambda: began.append(True) or False,
+  )
 
   with pytest.raises(dc.DeploymentControlError) as exc:
     await dc.request_rebuild()
 
   assert exc.value.code == "active_chats"
-  assert began == []
+  assert began == [True]
   assert [suffix for _method, suffix, _payload in calls] == ["bootstrap/prepare"]
 
 
@@ -277,17 +552,20 @@ async def test_legacy_bootstrap_reopens_admission_only_after_definitive_rejectio
   monkeypatch,
 ):
   from app import chat
-  from app.runner_registry import registry
 
-  monkeypatch.setattr(registry, "all_alive_chat_ids", lambda: set())
   began = []
   cancelled = []
-  monkeypatch.setattr(chat, "begin_drain", lambda: began.append(True))
+  monkeypatch.setattr(
+    chat, "begin_idle_drain", lambda: began.append(True) or True,
+  )
   monkeypatch.setattr(chat, "cancel_idle_drain", lambda: cancelled.append(True))
 
   def managed_request(method, suffix, _payload=None):
     if suffix == "bootstrap/prepare":
-      return {"operation_id": "bootstrap_123", "handoff_nonce": "nonce"}
+      return {
+        "operation_id": "bootstrap_123", "handoff_nonce": "nonce",
+        "expected_sha": "a" * 40, "image_digest": _TEST_DIGEST,
+      }
     raise dc.DeploymentControlError(
       "controller_rejected", "The managed upgrade was rejected.", status_code=409,
     )
@@ -295,7 +573,7 @@ async def test_legacy_bootstrap_reopens_admission_only_after_definitive_rejectio
   monkeypatch.setattr(dc, "_managed_request", managed_request)
 
   with pytest.raises(dc.DeploymentControlError):
-    await dc._request_managed_bootstrap("a" * 40)
+    await dc._request_managed_bootstrap("a" * 40, _TEST_DIGEST)
 
   assert began == [True]
   assert cancelled == [True]
@@ -328,17 +606,16 @@ async def test_request_rebuild_selects_managed_railway_handoff(tmp_path, monkeyp
   settings = type("S", (), {"data_dir": str(tmp_path)})()
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
   monkeypatch.setattr(dc, "get_settings", lambda: settings)
-  monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "a" * 40)
-  blocker_calls = []
+  _install_latest_release(monkeypatch)
+  request_thread = threading.get_ident()
+  blocker_threads = []
 
-  def blockers(expected, *, preserve_active_runtime):
-    blocker_calls.append((expected, preserve_active_runtime))
+  def blockers(*_args, **_kwargs):
+    blocker_threads.append(threading.get_ident())
     return []
 
   monkeypatch.setattr(
-    dc.platform_update,
-    "container_replacement_blockers",
-    blockers,
+    dc.platform_update, "official_image_rebuild_blockers", blockers,
   )
   calls = []
 
@@ -348,10 +625,12 @@ async def test_request_rebuild_selects_managed_railway_handoff(tmp_path, monkeyp
       return {
         "operation_id": "replace_12345678", "handoff_nonce": "nonce-secret",
         "state": "awaiting_handoff", "expected_sha": "a" * 40,
+        "image_digest": _TEST_DIGEST,
       }
     return {
       "operation_id": "replace_12345678", "state": "queued",
-      "expected_sha": "a" * 40, "message": "Replacement queued.",
+      "expected_sha": "a" * 40, "image_digest": _TEST_DIGEST,
+      "message": "Replacement queued.",
     }
 
   async def prepare(cutover_id):
@@ -369,9 +648,12 @@ async def test_request_rebuild_selects_managed_railway_handoff(tmp_path, monkeyp
 
   assert status["deployment"] == "railway"
   assert status["state"] == "queued"
-  assert blocker_calls == [("a" * 40, False)]
+  assert blocker_threads
+  assert all(thread_id != request_thread for thread_id in blocker_threads)
   assert calls == [
-    ("POST", "prepare", {"expected_sha": "a" * 40}),
+    ("POST", "prepare", {
+      "expected_sha": "a" * 40, "expected_digest": _TEST_DIGEST,
+    }),
     ("POST", "start", {
       "operation_id": "replace_12345678", "handoff_nonce": "nonce-secret",
     }),
@@ -380,12 +662,12 @@ async def test_request_rebuild_selects_managed_railway_handoff(tmp_path, monkeyp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-  ("error_code", "restart_count"),
-  [("controller_rejected", 1), ("controller_unavailable", 0),
-   ("controller_invalid_response", 0)],
+  ("error_code", "restart_count", "reconcile_count"),
+  [("controller_rejected", 1, 0), ("controller_unavailable", 0, 1),
+   ("controller_invalid_response", 0, 1)],
 )
 async def test_managed_start_failure_restarts_only_after_definitive_rejection(
-  tmp_path, monkeypatch, error_code, restart_count,
+  tmp_path, monkeypatch, error_code, restart_count, reconcile_count,
 ):
   from app import restart_ledger, restart_util
 
@@ -394,12 +676,7 @@ async def test_managed_start_failure_restarts_only_after_definitive_rejection(
   settings = type("S", (), {"data_dir": str(tmp_path)})()
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
   monkeypatch.setattr(dc, "get_settings", lambda: settings)
-  monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "a" * 40)
-  monkeypatch.setattr(
-    dc.platform_update,
-    "container_replacement_blockers",
-    lambda *_args, **_kwargs: [],
-  )
+  _install_latest_release(monkeypatch)
 
   def managed_request(method, suffix, payload=None):
     if suffix == "prepare":
@@ -407,10 +684,13 @@ async def test_managed_start_failure_restarts_only_after_definitive_rejection(
         "state": "prepared",
         "operation_id": "replace_12345678",
         "handoff_nonce": "nonce-secret",
+        "expected_sha": "a" * 40,
+        "image_digest": _TEST_DIGEST,
       }
     raise dc.DeploymentControlError(error_code, "start failed")
 
   restarts = []
+  reconciliations = []
 
   async def restart():
     restarts.append(True)
@@ -422,6 +702,13 @@ async def test_managed_start_failure_restarts_only_after_definitive_rejection(
   monkeypatch.setattr(restart_ledger, "accepted_cutover_receipt", lambda _id: True)
   monkeypatch.setattr(restart_util, "prepare_managed_container_cutover", lambda _id: asyncio.sleep(0))
   monkeypatch.setattr(restart_util, "restart_this_worker", restart)
+  monkeypatch.setattr(
+    dc,
+    "_schedule_ambiguous_start_reconciliation",
+    lambda operation_id, nonce, _restart: reconciliations.append(
+      (operation_id, nonce),
+    ),
+  )
 
   with pytest.raises(dc.DeploymentControlError) as exc:
     await dc.request_rebuild()
@@ -429,6 +716,114 @@ async def test_managed_start_failure_restarts_only_after_definitive_rejection(
 
   assert exc.value.code == error_code
   assert len(restarts) == restart_count
+  assert len(reconciliations) == reconcile_count
+  if reconcile_count:
+    assert reconciliations == [("replace_12345678", "nonce-secret")]
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_start_recovers_only_after_atomic_cancel_wins(
+  monkeypatch,
+):
+  requests = []
+
+  def managed_request(method, suffix, payload=None):
+    requests.append((method, suffix, payload))
+    return {
+      "operation_id": "replace_12345678",
+      "state": "failed",
+      "cancelled": True,
+    }
+
+  monkeypatch.setattr(
+    dc,
+    "_managed_request",
+    managed_request,
+  )
+  async def no_sleep(_seconds):
+    return None
+
+  monkeypatch.setattr(dc.asyncio, "sleep", no_sleep)
+  restarts = []
+
+  async def restart():
+    restarts.append(True)
+
+  await dc._reconcile_ambiguous_managed_start(
+    "replace_12345678", "nonce-secret", restart,
+  )
+
+  assert restarts == [True]
+  assert requests == [(
+    "POST",
+    "cancel",
+    {
+      "operation_id": "replace_12345678",
+      "handoff_nonce": "nonce-secret",
+    },
+  )]
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_start_leaves_accepted_operation_to_account(
+  monkeypatch,
+):
+  monkeypatch.setattr(
+    dc,
+    "_managed_request",
+    lambda method, suffix, payload=None: {
+      "operation_id": "replace_12345678", "state": "queued",
+      "cancelled": False,
+    },
+  )
+  async def no_sleep(_seconds):
+    return None
+
+  monkeypatch.setattr(dc.asyncio, "sleep", no_sleep)
+  restarts = []
+
+  async def restart():
+    restarts.append(True)
+
+  await dc._reconcile_ambiguous_managed_start(
+    "replace_12345678", "nonce-secret", restart,
+  )
+
+  assert restarts == []
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_start_retries_stale_or_malformed_cancel_responses(
+  monkeypatch,
+):
+  responses = iter([
+    {"operation_id": "replace_stale", "cancelled": True},
+    {"operation_id": "replace_12345678", "state": "failed"},
+    {"operation_id": "replace_12345678", "cancelled": True},
+  ])
+  requests = []
+
+  def managed_request(method, suffix, payload=None):
+    requests.append((method, suffix, payload))
+    return next(responses)
+
+  monkeypatch.setattr(dc, "_managed_request", managed_request)
+
+  async def no_sleep(_seconds):
+    return None
+
+  monkeypatch.setattr(dc.asyncio, "sleep", no_sleep)
+  restarts = []
+
+  async def restart():
+    restarts.append(True)
+
+  await dc._reconcile_ambiguous_managed_start(
+    "replace_12345678", "nonce-secret", restart,
+  )
+
+  assert len(requests) == 3
+  assert restarts == [True]
 
 
 @pytest.mark.asyncio
@@ -442,12 +837,7 @@ async def test_pre_start_receipt_timeout_recovers_the_drained_worker(
   settings = type("S", (), {"data_dir": str(tmp_path)})()
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
   monkeypatch.setattr(dc, "get_settings", lambda: settings)
-  monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "a" * 40)
-  monkeypatch.setattr(
-    dc.platform_update,
-    "container_replacement_blockers",
-    lambda *_args, **_kwargs: [],
-  )
+  _install_latest_release(monkeypatch)
 
   requests = []
 
@@ -457,6 +847,8 @@ async def test_pre_start_receipt_timeout_recovers_the_drained_worker(
       "state": "awaiting_handoff",
       "operation_id": "replace_12345678",
       "handoff_nonce": "nonce-secret",
+      "expected_sha": "a" * 40,
+      "image_digest": _TEST_DIGEST,
     }
 
   restarts = []
@@ -484,7 +876,9 @@ async def test_pre_start_receipt_timeout_recovers_the_drained_worker(
 
   assert exc.value.code == "controller_unavailable"
   assert requests == [(
-    "POST", "prepare", {"expected_sha": "a" * 40},
+    "POST", "prepare", {
+      "expected_sha": "a" * 40, "expected_digest": _TEST_DIGEST,
+    },
   )]
   assert restarts == [True]
 
@@ -500,12 +894,7 @@ async def test_definitive_rejection_owns_recovery_until_restart_settles(
   settings = type("S", (), {"data_dir": str(tmp_path)})()
   monkeypatch.setattr(dc.platform_activation, "deployment_kind", lambda: "railway")
   monkeypatch.setattr(dc, "get_settings", lambda: settings)
-  monkeypatch.setattr(dc, "_expected_upstream_sha", lambda: "a" * 40)
-  monkeypatch.setattr(
-    dc.platform_update,
-    "container_replacement_blockers",
-    lambda *_args, **_kwargs: [],
-  )
+  _install_latest_release(monkeypatch)
 
   def managed_request(method, suffix, _payload=None):
     if suffix == "prepare":
@@ -513,6 +902,8 @@ async def test_definitive_rejection_owns_recovery_until_restart_settles(
         "state": "awaiting_handoff",
         "operation_id": "replace_12345678",
         "handoff_nonce": "nonce-secret",
+        "expected_sha": "a" * 40,
+        "image_digest": _TEST_DIGEST,
       }
     raise dc.DeploymentControlError("controller_rejected", "rejected")
 

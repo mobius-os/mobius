@@ -7,6 +7,7 @@ check). These pin the endpoint contract + the config wiring in both directions.
 """
 
 import os
+import subprocess
 
 from app.config import Settings
 
@@ -136,7 +137,10 @@ def test_version_always_includes_served_platform_keys(client):
   # The deploy reads these unconditionally; a missing key would make the
   # extractor return empty and silently disable the served-platform assertion.
   body = client.get("/api/version").json()
-  for key in ("serving_source", "platform_sha", "platform_dirty", "baked_sha"):
+  for key in (
+    "serving_source", "platform_sha", "platform_dirty",
+    "applied_upstream_sha", "baked_sha",
+  ):
     assert key in body
 
 
@@ -220,3 +224,124 @@ def test_served_platform_source_reflects_sentinel(client):
         os.remove(_SENTINEL)
       except OSError:
         pass
+
+
+def test_served_platform_identity_exposes_applied_upstream_sha(
+  tmp_path, monkeypatch,
+):
+  from app.main import _served_platform_identity
+
+  repo = tmp_path / "platform"
+  repo.mkdir()
+  subprocess.run(["git", "init", "-q", str(repo)], check=True)
+  subprocess.run(
+    ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+    check=True,
+  )
+  subprocess.run(
+    ["git", "-C", str(repo), "config", "user.name", "Test"], check=True,
+  )
+  (repo / "README.md").write_text("tested\n", encoding="utf-8")
+  subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+  subprocess.run(["git", "-C", str(repo), "commit", "-qm", "seed"], check=True)
+  sha = subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", "HEAD"],
+    check=True, capture_output=True, text=True,
+  ).stdout.strip()
+  subprocess.run(
+    ["git", "-C", str(repo), "branch", "upstream", sha], check=True,
+  )
+  source = tmp_path / "serving-source"
+  served = tmp_path / "serving-sha"
+  source.write_text("platform\n", encoding="utf-8")
+  served.write_text(sha + "\n", encoding="utf-8")
+  monkeypatch.setenv("MOBIUS_SERVING_SOURCE_FILE", str(source))
+  monkeypatch.setenv("MOBIUS_SERVING_SHA_FILE", str(served))
+
+  identity = _served_platform_identity(str(tmp_path), sha)
+
+  assert identity["serving_source"] == "platform"
+  assert identity["applied_upstream_sha"] == sha
+  assert identity["image_build_applied"] is True
+
+
+def test_image_build_applied_accepts_descendant_applied_upstream(
+  tmp_path, monkeypatch,
+):
+  from app.main import _served_platform_identity
+
+  repo = tmp_path / "platform"
+  repo.mkdir()
+  subprocess.run(["git", "init", "-q", str(repo)], check=True)
+  subprocess.run(
+    ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+    check=True,
+  )
+  subprocess.run(
+    ["git", "-C", str(repo), "config", "user.name", "Test"], check=True,
+  )
+  (repo / "README.md").write_text("image\n", encoding="utf-8")
+  subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+  subprocess.run(["git", "-C", str(repo), "commit", "-qm", "image"], check=True)
+  image_sha = subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", "HEAD"],
+    check=True, capture_output=True, text=True,
+  ).stdout.strip()
+  (repo / "README.md").write_text("newer applied source\n", encoding="utf-8")
+  subprocess.run(["git", "-C", str(repo), "commit", "-qam", "newer"], check=True)
+  applied_sha = subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", "HEAD"],
+    check=True, capture_output=True, text=True,
+  ).stdout.strip()
+  subprocess.run(
+    ["git", "-C", str(repo), "branch", "upstream", applied_sha], check=True,
+  )
+  source = tmp_path / "serving-source"
+  source.write_text("platform\n", encoding="utf-8")
+  monkeypatch.setenv("MOBIUS_SERVING_SOURCE_FILE", str(source))
+
+  identity = _served_platform_identity(str(tmp_path), image_sha)
+
+  assert identity["applied_upstream_sha"] == applied_sha
+  assert identity["image_build_applied"] is True
+
+
+def test_image_build_applied_rejects_newer_unapplied_image(
+  tmp_path, monkeypatch,
+):
+  from app.main import _served_platform_identity
+
+  repo = tmp_path / "platform"
+  repo.mkdir()
+  subprocess.run(["git", "init", "-q", str(repo)], check=True)
+  subprocess.run(
+    ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+    check=True,
+  )
+  subprocess.run(
+    ["git", "-C", str(repo), "config", "user.name", "Test"], check=True,
+  )
+  (repo / "README.md").write_text("applied\n", encoding="utf-8")
+  subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+  subprocess.run(["git", "-C", str(repo), "commit", "-qm", "applied"], check=True)
+  applied_sha = subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", "HEAD"],
+    check=True, capture_output=True, text=True,
+  ).stdout.strip()
+  subprocess.run(
+    ["git", "-C", str(repo), "branch", "upstream", applied_sha], check=True,
+  )
+  (repo / "README.md").write_text("new image\n", encoding="utf-8")
+  subprocess.run(["git", "-C", str(repo), "commit", "-qam", "image"], check=True)
+  image_sha = subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", "HEAD"],
+    check=True, capture_output=True, text=True,
+  ).stdout.strip()
+  source = tmp_path / "serving-source"
+  source.write_text("platform\n", encoding="utf-8")
+  monkeypatch.setenv("MOBIUS_SERVING_SOURCE_FILE", str(source))
+
+  identity = _served_platform_identity(str(tmp_path), image_sha)
+
+  assert identity["applied_upstream_sha"] == applied_sha
+  assert identity["image_build_applied"] is False

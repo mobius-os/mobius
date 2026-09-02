@@ -7,6 +7,7 @@ case injects a failure at the route seam, so the test remains hermetic even when
 its runner lives inside a real Möbius installation.
 """
 
+from app import deployment_control
 from app.platform_activation import classify_activation
 
 
@@ -83,6 +84,7 @@ def test_apply_forwards_exact_reviewed_plan(client, auth, monkeypatch):
       "conflict_paths": [],
       "chat_id": None,
       "phase": "complete",
+      "error": None,
       "reconciliation": {
         "proven_present": [],
         "local_only_paths": [],
@@ -106,8 +108,201 @@ def test_apply_forwards_exact_reviewed_plan(client, auth, monkeypatch):
   res = client.post("/api/platform/apply", headers=auth, json=body)
 
   assert res.status_code == 200
-  assert captured == body
+  assert captured == {**body, "image_digest": None}
   assert res.json()["upstream_commit"] == body["target_sha"]
+
+
+def test_reviewed_rebuild_forwards_exact_sha_and_digest(
+  client, auth, monkeypatch,
+):
+  captured = {}
+
+  async def fake_rebuild(**plan):
+    captured.update(plan)
+    return {
+      "supported": True,
+      "bootstrap_available": False,
+      "deployment": "railway",
+      "operation_id": "replace_123",
+      "state": "queued",
+      "expected_sha": plan["target_sha"],
+      "code": None,
+      "message": "Replacement queued.",
+      "error": None,
+      "image_digest": plan["image_digest"],
+      "release_source": "latest_ghcr",
+      "updated_at": None,
+    }
+
+  monkeypatch.setattr(
+    "app.routes.platform.deployment_control.request_reviewed_rebuild",
+    fake_rebuild,
+  )
+  body = {
+    "plan_id": "a" * 64,
+    "current_sha": "1" * 40,
+    "target_sha": "2" * 40,
+    "image_digest": "sha256:" + "d" * 64,
+  }
+
+  response = client.post("/api/platform/rebuild", headers=auth, json=body)
+
+  assert response.status_code == 202
+  assert captured == body
+  assert response.json()["release_source"] == "latest_ghcr"
+
+
+def test_reviewed_rebuild_requires_digest(client, auth):
+  response = client.post("/api/platform/rebuild", headers=auth, json={
+    "plan_id": "a" * 64,
+    "current_sha": "1" * 40,
+    "target_sha": "2" * 40,
+  })
+
+  assert response.status_code == 409
+  assert response.json()["detail"] == {
+    "code": "update_plan_invalid",
+    "message": "This update review is no longer valid. Refresh it and try again.",
+  }
+
+
+def test_railway_preview_uses_latest_verified_ghcr_release(
+  client, auth, monkeypatch,
+):
+  digest = "sha256:" + "e" * 64
+  target = "2" * 40
+  captured = {}
+
+  async def latest():
+    return {
+      "build_sha": target,
+      "image_digest": digest,
+      "image_ref": "immutable",
+    }
+
+  def preview(**kwargs):
+    captured.update(kwargs)
+    return {
+      "state": "available", "available": True,
+      "current_sha": "1" * 40, "target_sha": target,
+      "plan_id": "a" * 64, "image_digest": digest,
+      "activation": classify_activation(
+        ["Dockerfile"], deployment="railway",
+      ),
+      "total_commits": 1, "commits_truncated": False,
+      "commits": [], "files": [], "diff": None,
+      "diff_truncated": False, "conflict_paths": [],
+    }
+
+  monkeypatch.setattr(
+    "app.routes.platform.platform_activation.deployment_kind",
+    lambda: "railway",
+  )
+  monkeypatch.setattr(
+    "app.routes.platform.deployment_control.latest_official_release",
+    latest,
+  )
+  monkeypatch.setattr(
+    "app.routes.platform.platform_update.platform_update_preview",
+    preview,
+  )
+
+  response = client.get("/api/platform/update-preview", headers=auth)
+
+  assert response.status_code == 200
+  assert captured == {"target_sha": target, "image_digest": digest}
+  assert response.json()["image_digest"] == digest
+
+
+def test_railway_status_and_check_use_latest_verified_ghcr_target(
+  client, auth, monkeypatch,
+):
+  target = "2" * 40
+  calls = []
+
+  async def latest():
+    return {
+      "build_sha": target,
+      "image_digest": "sha256:" + "e" * 64,
+      "image_ref": "immutable",
+    }
+
+  def status(*, target_sha):
+    calls.append(("status", target_sha))
+    return {
+      "state": "available", "available": True,
+      "needs_restart": False,
+      "activation": classify_activation([]),
+      "current_build_sha": None,
+      "recorded_upstream_sha": None,
+      "contained_upstream_sha": None,
+      "contained_upstream_committed_at": None,
+      "upstream_checked_at": None,
+      "seed_required": False,
+      "conflict_paths": [], "conflict_chat_id": None,
+      "newer_updates_available": False,
+      "rollback_target_sha": None, "rollback_error": None,
+    }
+
+  def check(*, target_sha):
+    calls.append(("check", target_sha))
+    return status(target_sha=target_sha)
+
+  monkeypatch.setattr(
+    "app.routes.platform.platform_activation.deployment_kind",
+    lambda: "railway",
+  )
+  monkeypatch.setattr(
+    "app.routes.platform.deployment_control.latest_official_release",
+    latest,
+  )
+  monkeypatch.setattr(
+    "app.routes.platform.platform_update.platform_status",
+    status,
+  )
+  monkeypatch.setattr(
+    "app.routes.platform.platform_update.check_for_updates",
+    check,
+  )
+
+  status_response = client.get("/api/platform/status", headers=auth)
+  check_response = client.post("/api/platform/check", headers=auth)
+
+  assert status_response.status_code == 200
+  assert check_response.status_code == 200
+  assert calls == [
+    ("status", target),
+    ("check", target),
+    ("status", target),
+  ]
+
+
+def test_railway_status_does_not_call_unknown_release_current(
+  client, auth, monkeypatch,
+):
+  monkeypatch.setattr(
+    "app.routes.platform.platform_activation.deployment_kind",
+    lambda: "railway",
+  )
+
+  async def unavailable():
+    raise deployment_control.DeploymentControlError(
+      "controller_unavailable",
+      "The official image could not be checked.",
+    )
+
+  monkeypatch.setattr(
+    "app.routes.platform.deployment_control.latest_official_release",
+    unavailable,
+  )
+
+  response = client.get("/api/platform/status", headers=auth)
+
+  assert response.status_code == 503
+  assert response.json()["detail"] == {
+    "code": "controller_unavailable",
+    "message": "The official image could not be checked.",
+  }
 
 
 def test_update_check_reports_fetch_failure(client, auth, monkeypatch):
@@ -120,7 +315,10 @@ def test_update_check_reports_fetch_failure(client, auth, monkeypatch):
                       fail_check)
   res = client.post("/api/platform/check", headers=auth)
   assert res.status_code == 503
-  assert res.json()["detail"] == "Could not reach the platform update source."
+  assert res.json()["detail"] == {
+    "code": "platform_fetch_failed",
+    "message": "This update could not be verified. Refresh it and try again.",
+  }
 
 
 def test_status_failure_does_not_disable_owner_updates(

@@ -985,6 +985,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(plan),
     }),
+    rebuild: (plan) => apiFetch('/platform/rebuild', {
+      method: 'POST',
+      body: JSON.stringify(plan),
+    }),
     conflictResolverChat: () => apiFetch('/platform/conflict-resolver-chat', {
       method: 'POST',
     }),

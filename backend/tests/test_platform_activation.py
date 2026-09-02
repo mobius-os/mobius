@@ -32,6 +32,17 @@ def test_deployment_specific_inputs_share_contract_without_fake_commands():
   assert railway_on_self_hosted["reasons"] == []
 
 
+def test_railway_config_guidance_does_not_promise_an_image_rebuild():
+  impact = activation.classify_activation(
+    ["railway.toml"], deployment="railway",
+  )
+
+  assert impact["level"] == "container_recreate"
+  guidance = " ".join(impact["guidance"])
+  assert "finish this change in Railway" in guidance
+  assert "Möbius will rebuild Railway" not in guidance
+
+
 def test_dependency_and_baked_runtime_never_degrade_to_restart_only():
   # Python deps now apply in place (a rebuild is no longer forced), but they are
   # still MORE than a bare restart. Frontend deps and baked-runtime inputs still
