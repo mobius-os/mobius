@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import {
   BASE, getToken, getAuthHeaders, isEphemeralAuth,
-  clearToken, clearQueryCache,
+  clearExpiredOwnerSession,
 } from '../api/client.js'
 import * as setupSession from '../lib/setupSession.js'
 import {
@@ -75,11 +75,9 @@ export default function useSystemEventStream(
           // credentials and reload so the auth boundary takes over.
           // (Guard against the setup-wizard flow where 401s are expected.)
           if (!setupSession.isInProgress()) {
-            clearToken()
-            try { sessionStorage.setItem('auth_expired', '1') } catch {}
             // Match apiFetch: preserve only principal-partitioned accepted chat
             // intent across credential renewal. Explicit logout still wipes it.
-            await clearQueryCache({ preserveChatOutbox: true })
+            await clearExpiredOwnerSession()
             setTimeout(() => window.location.reload(), 100)
           }
           // Stop the reconnect loop regardless — either the page is

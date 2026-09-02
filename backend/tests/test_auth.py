@@ -61,6 +61,19 @@ def test_setup_creates_owner(client):
   assert "access_token" in r.json()
 
 
+def test_managed_sso_handoff_cannot_cross_into_shell_install_protocol(client):
+  from app import auth as auth_service
+
+  handoff = auth_service.create_access_token({"scope": "mobius_sso_handoff"})
+  client.cookies.set(
+    "mobius_shell_install",
+    handoff,
+    path="/api/auth/shell-install-pass/redeem",
+  )
+
+  assert client.post("/api/auth/shell-install-pass/redeem").status_code == 401
+
+
 def test_self_hosted_setup_status_stays_local(client):
   status = client.get("/api/auth/setup/status")
 

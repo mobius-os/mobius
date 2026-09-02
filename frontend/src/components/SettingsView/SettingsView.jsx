@@ -18,6 +18,8 @@ import {
   platformUpdateStatusLabel,
 } from '../../lib/platformUpdateState.js'
 import { settleBackgroundAgentSave } from '../../lib/backgroundAgentSave.js'
+import { clearExplicitOwnerSession } from '../../lib/explicitLogout.js'
+import { stopShellInstallPassPreparation } from '../../lib/shellInstallPass.js'
 import { captureLayoutSpace, clientLengthToLayout } from '../../lib/layoutSpace.js'
 import {
   PROVIDER_AVAILABILITY_PHASE,
@@ -1120,9 +1122,16 @@ export default function SettingsView({
   async function signOut() {
     if (signingOut) return
     setSigningOut(true)
-    clearToken()
-    await clearQueryCache()
-    window.location.reload()
+    try {
+      await clearExplicitOwnerSession({
+        stopInstallHandoffPreparation: stopShellInstallPassPreparation,
+        revokeInstallHandoffs: () => api.auth.shellInstallPass.revoke(),
+        dropCredential: clearToken,
+        clearOwnerCache: clearQueryCache,
+      })
+    } finally {
+      window.location.reload()
+    }
   }
 
   // Refresh both Möbius update signals on demand: the service worker cache and
