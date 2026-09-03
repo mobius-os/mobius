@@ -17,6 +17,8 @@ sys.path.insert(0, str(SCRIPTS))
 from fork_session import (  # noqa: E402
   ForkError,
   ForkResult,
+  _assert_codex_mcp_isolated,
+  _codex_mcp_isolation_overrides,
   _fork_claude,
   _fork_codex_async,
   _load_codex_sdk,
@@ -54,8 +56,18 @@ def test_claude_uses_exact_fork_and_reports_distinct_session():
     "claude", "--resume", "source-session", "--fork-session", "--print"
   ]
   assert seen["kwargs"]["cwd"] == "/data"
-  assert "--output-format" in seen["args"]
-  assert "json" in seen["args"]
+  assert seen["args"][-6:] == [
+    "--output-format",
+    "json",
+    "--restricted",
+    "--strict-mcp-config",
+    "--tools",
+    "",
+  ]
+  assert all(
+    name not in seen["kwargs"]["env"]
+    for name in ("API_BASE_URL", "AGENT_TOKEN", "CHAT_ID", "MOBIUS_RUN_TOKEN")
+  )
 
 
 @pytest.mark.parametrize(
@@ -76,8 +88,22 @@ def test_claude_fails_closed_without_a_valid_exact_fork(payload, expected):
     _fork_claude("source", "/data", "coach", runner=runner)
 
 
-def test_codex_uses_sdk_thread_fork_and_read_only_turn():
+def test_codex_uses_sdk_thread_fork_and_read_only_turn(monkeypatch):
   calls = {}
+  for name in ("API_BASE_URL", "AGENT_TOKEN", "CHAT_ID", "MOBIUS_RUN_TOKEN"):
+    monkeypatch.setenv(name, f"secret-{name}")
+
+  def mcp_inventory_runner(args, **kwargs):
+    calls["mcp_inventory"] = (args, kwargs)
+    return subprocess.CompletedProcess(
+      args,
+      0,
+      stdout=json.dumps([
+        {"name": "mobius_control", "enabled": True},
+        {"name": "owner.connector", "enabled": True},
+      ]),
+      stderr="",
+    )
 
   class FakeConfig:
     def __init__(self, **kwargs):
@@ -96,9 +122,15 @@ def test_codex_uses_sdk_thread_fork_and_read_only_turn():
       calls["run"] = (prompt, kwargs)
       return SimpleNamespace(error=None, final_response="codex reflection")
 
+  class FakeClient:
+    async def request(self, method, params, *, response_model):
+      calls.setdefault("mcp_checks", []).append((method, params))
+      return response_model.model_validate({"data": [], "nextCursor": None})
+
   class FakeCodex:
     def __init__(self, config):
       calls["codex_config"] = config
+      self._client = FakeClient()
 
     async def __aenter__(self):
       return self
@@ -121,6 +153,7 @@ def test_codex_uses_sdk_thread_fork_and_read_only_turn():
         FakeApprovalMode,
         FakeSandbox,
       ),
+      mcp_inventory_runner=mcp_inventory_runner,
     )
   )
 
@@ -138,6 +171,96 @@ def test_codex_uses_sdk_thread_fork_and_read_only_turn():
     "coach this",
     {"approval_mode": "deny_all", "cwd": "/data", "sandbox": "read-only"},
   )
+  assert calls["config"]["config_overrides"] == (
+    "features.apps=false",
+    "features.enable_mcp_apps=false",
+    "features.plugins=false",
+    "features.remote_plugin=false",
+    "features.skill_mcp_dependency_install=false",
+    'mcp_servers={"mobius_control"={enabled=false},'
+    '"owner.connector"={enabled=false}}',
+  )
+  assert all(
+    name not in calls["config"]["env"]
+    for name in ("API_BASE_URL", "AGENT_TOKEN", "CHAT_ID", "MOBIUS_RUN_TOKEN")
+  )
+  assert calls["mcp_checks"] == [(
+    "mcpServerStatus/list",
+    {
+      "threadId": "forked-codex-thread",
+      "detail": "full",
+      "limit": 100,
+    },
+  )]
+  assert calls["mcp_inventory"][0] == ["codex", "mcp", "list", "--json"]
+  assert calls["mcp_inventory"][1]["cwd"] == "/data"
+
+
+def test_codex_mcp_inventory_is_encoded_as_one_exact_disable_map():
+  def runner(args, **kwargs):
+    return subprocess.CompletedProcess(
+      args,
+      0,
+      stdout=json.dumps([
+        {"name": 'quote"server', "enabled": True},
+        {"name": "dot.server", "enabled": True},
+        {"name": "dot.server", "enabled": False},
+      ]),
+      stderr="",
+    )
+
+  overrides = _codex_mcp_isolation_overrides(
+    "/workspace",
+    {"CODEX_HOME": "/tmp/codex-home"},
+    runner=runner,
+  )
+
+  assert overrides[-1] == (
+    'mcp_servers={"dot.server"={enabled=false},'
+    '"quote\\\"server"={enabled=false}}'
+  )
+
+
+@pytest.mark.parametrize(
+  ("returncode", "stdout", "expected"),
+  [
+    (1, "[]", "inventory failed"),
+    (0, "not-json", "inventory was malformed"),
+    (0, "{}", "unexpected shape"),
+    (0, '[{"name": ""}]', "invalid server name"),
+  ],
+)
+def test_codex_mcp_inventory_fails_closed(returncode, stdout, expected):
+  def runner(args, **kwargs):
+    return subprocess.CompletedProcess(
+      args, returncode, stdout=stdout, stderr="private detail"
+    )
+
+  with pytest.raises(ForkError, match=expected):
+    _codex_mcp_isolation_overrides(
+      "/workspace",
+      {"CODEX_HOME": "/tmp/codex-home"},
+      runner=runner,
+    )
+
+
+def test_codex_fails_before_coaching_when_effective_mcp_tools_survive():
+  class FakeClient:
+    async def request(self, method, params, *, response_model):
+      assert method == "mcpServerStatus/list"
+      return response_model.model_validate({
+        "data": [{
+          "name": "managed-server",
+          "tools": {"preapproved_write": {}},
+          "resources": [],
+          "resourceTemplates": [],
+        }],
+      })
+
+  fake_codex = SimpleNamespace(_client=FakeClient())
+
+  with pytest.raises(ForkError, match="exposed an MCP capability"):
+    asyncio.run(_assert_codex_mcp_isolated(fake_codex, "forked-thread"))
 
 
 def test_codex_default_loader_accepts_persisted_completed_subagent_activity():
