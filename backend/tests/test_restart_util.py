@@ -80,6 +80,47 @@ def test_restart_drains_then_requests_supervisor_and_arms_force_kill(monkeypatch
   assert calls[-1] == (os.getpid(), signal.SIGKILL)
 
 
+def test_restart_announces_server_restarting_on_the_system_bus(monkeypatch):
+  """The drain-gated restart publishes `server_restarting` to the system bus
+  before it drains — the ONLY cue that covers a graceful drain (health still
+  answers, so client reachability alone shows nothing). The shell mirrors it
+  into restartStore and lights its offline dot; see frontend restartStore.js."""
+  from app.broadcast import get_system_broadcast
+
+  _FakeTimer.instances = []
+  monkeypatch.setattr(ru.os, "kill", lambda pid, sig: None)
+  monkeypatch.setattr(ru.threading, "Timer", _FakeTimer)
+  monkeypatch.setattr(restart_ledger, "current_boot_id", lambda: "boot-12345678")
+  monkeypatch.setattr(restart_ledger, "new_nonce", lambda: "nonce-12345678")
+  monkeypatch.setattr(restart_ledger, "request_restart", lambda **kwargs: None)
+
+  async def _prepare(nonce):
+    del nonce
+    return []
+
+  observed_before_drain = []
+
+  async def _fake_drain(timeout=0, *, restart_nonce="", prepared_runs=None):
+    del timeout, restart_nonce, prepared_runs
+    observed_before_drain.append(q.get_nowait())
+    return []
+
+  monkeypatch.setattr(chat_mod, "prepare_restart_intents", _prepare)
+  monkeypatch.setattr(chat_mod, "drain_all_for_restart", _fake_drain)
+  chat_mod.draining = False
+
+  bus = get_system_broadcast()
+  q = bus.subscribe()
+  try:
+    assert q.empty()
+    asyncio.run(ru.restart_this_worker())
+  finally:
+    bus.unsubscribe(q)
+
+  assert observed_before_drain == [{"type": "server_restarting"}]
+  assert q.empty()
+
+
 def test_restart_request_survives_drain_failure(monkeypatch):
   _FakeTimer.instances = []
   calls = []
