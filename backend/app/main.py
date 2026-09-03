@@ -429,6 +429,20 @@ def _loopback_delivery_origin(scope) -> str | None:
   return origin
 
 
+def _static_embed_csp_for_scope(scope) -> str:
+  """Allow packaged games to run on the loopback origin that served them.
+
+  Production documents remain pinned to ``frontend_origin``. Local operator
+  tools and the authenticated screenshot harness deliberately reach uvicorn
+  over loopback; an opaque sandbox cannot use CSP ``'self'`` for its own
+  modules, so name that loopback delivery origin for this response only.
+  """
+  delivery_origin = _loopback_delivery_origin(scope)
+  if delivery_origin is None:
+    return _STATIC_EMBED_CSP
+  return static_embed_csp(settings.frontend_origin, delivery_origin)
+
+
 def _app_frame_csp_for_scope(scope) -> str:
   """Let the loopback test harness exercise the real opaque app frame."""
   delivery_origin = _loopback_delivery_origin(scope)
@@ -516,7 +530,7 @@ class _SecurityHeadersMiddleware:
       ]
     if not service_surface:
       if opaque_static_embed:
-        csp = _STATIC_EMBED_CSP
+        csp = _static_embed_csp_for_scope(scope)
       elif published_site:
         csp = _PUBLISHED_SITE_CSP
       elif chat_embed:
