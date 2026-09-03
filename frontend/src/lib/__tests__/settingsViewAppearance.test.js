@@ -44,10 +44,22 @@ test('restart and rebuild explain their distinct container effects on demand', (
   assert.match(view, /label="Restart"[\s\S]*settings-restart-info/)
   assert.match(view, /label=\{rebuildBootstrap \? 'Container updates' : 'Rebuild container'\}/)
   assert.match(view, /does not[\s\S]*install a newer container image/)
-  assert.match(view, /Creates a fresh container from the newest official image/)
+  assert.match(view, /On Railway, creates a fresh container from the newest published official image/)
   assert.doesNotMatch(view, /Replace container|Replace now|Replacing…/)
   assert.match(css, /\.settings__info-button\s*\{[^}]*width:\s*32px;[^}]*height:\s*32px;/s)
   assert.match(css, /\.settings__info-bubble\s*\{[^}]*position:\s*absolute;[^}]*bottom:\s*calc\(100% \+ 10px\);/s)
+})
+
+test('platform status failures replace cached current claims with unknown state', () => {
+  assert.match(view, /platformStatusUnavailable,/)
+  assert.match(
+    view,
+    /const refreshPlatform = useCallback[\s\S]*if \(!res\.ok\) throw new Error[\s\S]*catch \{[\s\S]*setPlatform\(current => platformStatusUnavailable\(current\)\)/,
+  )
+  assert.match(
+    view,
+    /const platformP = \(async \(\) => \{[\s\S]*catch \(error\) \{[\s\S]*setPlatform\(current => platformStatusUnavailable\(current\)\)[\s\S]*throw error/,
+  )
 })
 
 test('background agents are always draggable without reorder chrome or a trailing caret', () => {

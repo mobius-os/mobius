@@ -1,10 +1,11 @@
 """Container rebuild control for Settings.
 
-The browser can request only one fixed operation: replace this installation's
-app container with the official image for its applied upstream revision.
-Self-hosting crosses the /data mount to a narrow host helper; managed Railway
-uses its account service, while the root-owned restart ledger preserves chat
-continuation across either cutover.
+The browser can request only fixed official-image operations. Managed Railway
+discovers the newest completely published GHCR release, then pins its immutable
+revision and digest; a reviewed image-owned update carries that same identity.
+Self-hosting keeps rebuilding the applied upstream revision through its narrow
+host helper. The root-owned restart ledger preserves chat continuation across
+either cutover.
 """
 
 from __future__ import annotations
@@ -40,7 +41,16 @@ class RebuildStatus(TypedDict):
   expected_sha: str | None
   code: str | None
   message: str | None
+  error: str | None
+  image_digest: str | None
+  release_source: Literal["applied", "latest_ghcr"]
   updated_at: str | None
+
+
+class OfficialImageRelease(TypedDict):
+  build_sha: str
+  image_digest: str
+  image_ref: str
 
 
 class DeploymentControlError(RuntimeError):
@@ -56,6 +66,7 @@ class DeploymentControlError(RuntimeError):
 
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _OPERATION_RE = re.compile(r"^[0-9a-f]{32}$")
 _KNOWN_STATES = {
   "idle", "queued", "preparing", "replacing", "verifying", "succeeded",
@@ -89,6 +100,9 @@ def _empty_status(
     expected_sha=None,
     code=code,
     message=message,
+    error=None,
+    image_digest=None,
+    release_source="applied",
     updated_at=None,
   )
 
@@ -98,6 +112,56 @@ def _schedule_managed_recovery(
 ) -> None:
   """Keep the sole post-rejection restart alive until it settles."""
   task = asyncio.create_task(restart())
+  _managed_recovery_tasks.add(task)
+  task.add_done_callback(_managed_recovery_tasks.discard)
+
+
+async def _reconcile_ambiguous_managed_start(
+  operation_id: str,
+  handoff_nonce: str,
+  recover: Callable[[], Awaitable[None]],
+) -> None:
+  """Recover only when the account atomically cancels an unaccepted Start.
+
+  A timed-out POST may have reached Railway even though this worker saw no
+  response. A read of the old state is not proof that the write will never
+  commit, so the still-running drained worker asks the account service to race
+  Start with one conditional Cancel update against the same handoff state. Only
+  an affirmative Cancel result makes local recovery safe; if Start won, the
+  account service owns the cutover.
+  """
+
+  while True:
+    await asyncio.sleep(2)
+    try:
+      raw = await asyncio.to_thread(
+        _managed_request,
+        "POST",
+        "cancel",
+        {"operation_id": operation_id, "handoff_nonce": handoff_nonce},
+      )
+    except DeploymentControlError:
+      continue
+    if str(raw.get("operation_id") or "") != operation_id:
+      continue
+    cancelled = raw.get("cancelled")
+    if cancelled is True:
+      await recover()
+      return
+    if cancelled is False:
+      return
+
+
+def _schedule_ambiguous_start_reconciliation(
+  operation_id: str,
+  handoff_nonce: str,
+  recover: Callable[[], Awaitable[None]],
+) -> None:
+  """Keep ambiguous Start reconciliation alive after the request returns."""
+
+  task = asyncio.create_task(
+    _reconcile_ambiguous_managed_start(operation_id, handoff_nonce, recover),
+  )
   _managed_recovery_tasks.add(task)
   task.add_done_callback(_managed_recovery_tasks.discard)
 
@@ -167,6 +231,9 @@ def _normalize_status(
     expected_sha=reported_sha or None,
     code=code,
     message=message,
+    error=str(raw.get("error") or "").strip() or None,
+    image_digest=None,
+    release_source="applied",
     updated_at=updated_at,
   )
 
@@ -256,6 +323,8 @@ def _managed_request(method: str, suffix: str, payload: dict[str, str] | None = 
 
 def _normalize_managed_status(
   raw: dict[str, Any], *, bootstrap_available: bool = False,
+  release_source: Literal["applied", "latest_ghcr"] = "latest_ghcr",
+  image_digest: str | None = None,
 ) -> RebuildStatus:
   remote_state = str(raw.get("state") or "idle").lower()
   states: dict[str, RebuildState] = {
@@ -270,6 +339,7 @@ def _normalize_managed_status(
       "controller_invalid_response", "The account service returned an unknown state."
     )
   expected = str(raw.get("expected_sha") or "").lower()
+  digest = str(raw.get("image_digest") or image_digest or "").lower()
   return RebuildStatus(
     supported=not bootstrap_available,
     bootstrap_available=bootstrap_available,
@@ -279,7 +349,34 @@ def _normalize_managed_status(
     expected_sha=expected if _SHA_RE.fullmatch(expected) else None,
     code=None,
     message=str(raw.get("message") or "")[:360] or None,
+    error=str(raw.get("error") or "")[:1000] or None,
+    image_digest=digest if _DIGEST_RE.fullmatch(digest) else None,
+    release_source=release_source,
     updated_at=str(raw.get("updated_at") or "") or None,
+  )
+
+
+async def latest_official_release() -> OfficialImageRelease:
+  """Discover the newest fully published official Railway image from GHCR.
+
+  The account service cross-checks mutable ``main`` against its immutable SHA
+  tag. This method accepts only the resulting commit+digest identity; callers
+  then pass both back to prepare, which prevents a moved tag from changing the
+  reviewed bytes.
+  """
+  raw = await asyncio.to_thread(_managed_request, "GET", "release")
+  build_sha = str(raw.get("build_sha") or "").strip().lower()
+  image_digest = str(raw.get("image_digest") or "").strip().lower()
+  image_ref = str(raw.get("image_ref") or "").strip()
+  if not _SHA_RE.fullmatch(build_sha) or not _DIGEST_RE.fullmatch(image_digest):
+    raise DeploymentControlError(
+      "controller_invalid_response",
+      "The account service returned an invalid official image identity.",
+    )
+  return OfficialImageRelease(
+    build_sha=build_sha,
+    image_digest=image_digest,
+    image_ref=image_ref,
   )
 
 
@@ -465,32 +562,54 @@ async def request_rebuild() -> RebuildStatus:
         "A container rebuild is already running.",
         status_code=409,
       )
-  expected_sha = _expected_upstream_sha()
+  release: OfficialImageRelease | None = None
+  if deployment == "railway":
+    # Railway's deployable release authority is GHCR, not the persisted source
+    # checkout. `main` is used only to discover a verified commit+digest pair;
+    # prepare below pins the immutable SHA tag and that exact digest.
+    release = await latest_official_release()
+    expected_sha = release["build_sha"]
+  else:
+    expected_sha = _expected_upstream_sha()
   if not expected_sha:
     raise DeploymentControlError(
       "target_unavailable",
       "Möbius cannot identify the official version to deploy.",
       status_code=409,
     )
-  blockers = platform_update.container_replacement_blockers(
-    expected_sha,
-    preserve_active_runtime=deployment == "self_hosted",
-  )
-  if blockers:
-    visible = ", ".join(blockers[:5])
-    if len(blockers) > 5:
-      visible += f", and {len(blockers) - 5} more"
-    raise DeploymentControlError(
-      "local_runtime_changes",
-      "The official image cannot preserve these local image inputs: "
-      f"{visible}. Commit them upstream, rebuild locally, or remove them "
-      "before rebuilding this container.",
-      status_code=409,
-    )
+  def validate_image_inputs() -> None:
+    try:
+      blockers = (
+        platform_update.official_image_rebuild_blockers(expected_sha)
+        if deployment == "railway"
+        else platform_update.container_replacement_blockers(
+          expected_sha,
+          preserve_active_runtime=True,
+        )
+      )
+    except platform_update.PlatformUpdateError as exc:
+      raise DeploymentControlError(
+        "target_unavailable",
+        "Möbius found the latest official image but could not verify its source revision.",
+        status_code=409,
+      ) from exc
+    if blockers:
+      _raise_local_runtime_blockers(blockers)
+
+  # Railway verification may fetch the target revision from Git. Keep that
+  # bounded network/filesystem work off the backend event loop.
+  await asyncio.to_thread(validate_image_inputs)
   if deployment == "railway":
+    assert release is not None
     if not managed_cutover_ready():
-      return await _request_managed_bootstrap(expected_sha)
-    return await _request_managed_rebuild(expected_sha)
+      return await _request_managed_bootstrap(
+        expected_sha, release["image_digest"],
+      )
+    return await _request_managed_rebuild(
+      expected_sha,
+      release["image_digest"],
+      final_check=validate_image_inputs,
+    )
   await asyncio.to_thread(_write_request, expected_sha)
   return _normalize_status({
     "state": "queued",
@@ -499,7 +618,105 @@ async def request_rebuild() -> RebuildStatus:
   }, expected_sha=expected_sha)
 
 
-async def _request_managed_rebuild(expected_sha: str) -> RebuildStatus:
+async def request_reviewed_rebuild(
+  *,
+  plan_id: str,
+  current_sha: str,
+  target_sha: str,
+  image_digest: str,
+) -> RebuildStatus:
+  """Cut over Railway to the exact GHCR image bound into an owner review."""
+  if platform_activation.deployment_kind() != "railway":
+    raise DeploymentControlError(
+      "unsupported_deployment",
+      "Reviewed image updates are available on Railway deployments.",
+      status_code=409,
+  )
+  def validate_reviewed_release() -> None:
+    try:
+      reviewed = platform_update.reviewed_container_rebuild_plan(
+        plan_id=plan_id,
+        current_sha=current_sha,
+        target_sha=target_sha,
+        image_digest=image_digest,
+      )
+    except platform_update.PlatformUpdateError as exc:
+      code = str(exc)
+      messages = {
+        "update_plan_stale": (
+          "Möbius changed since this preview. Refresh and review the update again."
+        ),
+        "update_plan_invalid": (
+          "This update review is no longer valid. Refresh it and try again."
+        ),
+        "update_plan_target_missing": (
+          "The reviewed release source is unavailable. Refresh and try again shortly."
+        ),
+      }
+      raise DeploymentControlError(
+        code,
+        messages.get(
+          code,
+          "This update could not be verified. Refresh it and try again.",
+        ),
+        status_code=409,
+      ) from exc
+    if reviewed["activation"]["level"] != (
+      platform_activation.ActivationLevel.IMAGE_REBUILD.value
+    ):
+      raise DeploymentControlError(
+        "activation_changed",
+        "This update no longer requires a container rebuild. Refresh the review.",
+        status_code=409,
+      )
+    if reviewed["blockers"]:
+      _raise_local_runtime_blockers(reviewed["blockers"])
+
+  await asyncio.to_thread(validate_reviewed_release)
+  # The SHA tag and digest are immutable. A newer `main` publication must not
+  # invalidate an already reviewed release, so prepare proves this exact pair
+  # rather than consulting the moving discovery tag again.
+  return await _request_managed_rebuild(
+    target_sha,
+    image_digest,
+    final_check=validate_reviewed_release,
+  )
+
+
+def _raise_local_runtime_blockers(blockers: list[str]) -> None:
+  visible = ", ".join(blockers[:5])
+  if len(blockers) > 5:
+    visible += f", and {len(blockers) - 5} more"
+  raise DeploymentControlError(
+    "local_runtime_changes",
+    "The official image cannot preserve these local image inputs: "
+    f"{visible}. Commit them upstream, rebuild locally, or remove them "
+    "before rebuilding this container.",
+    status_code=409,
+  )
+
+
+def _verify_managed_release_echo(
+  raw: dict[str, Any],
+  expected_sha: str,
+  expected_digest: str,
+) -> None:
+  """Require the account service to echo the exact immutable release pair."""
+  reported_sha = str(raw.get("expected_sha") or "").strip().lower()
+  reported_digest = str(raw.get("image_digest") or "").strip().lower()
+  if reported_sha != expected_sha or reported_digest != expected_digest:
+    raise DeploymentControlError(
+      "controller_invalid_response",
+      "The account service did not confirm the exact reviewed image.",
+    )
+
+
+async def _request_managed_rebuild(
+  expected_sha: str,
+  expected_digest: str,
+  *,
+  final_check: Callable[[], None] | None = None,
+) -> RebuildStatus:
   from app import restart_ledger, restart_util
 
   if not managed_cutover_ready():
@@ -509,10 +726,16 @@ async def _request_managed_rebuild(expected_sha: str) -> RebuildStatus:
       status_code=409,
     )
   prepared = await asyncio.to_thread(
-    _managed_request, "POST", "prepare", {"expected_sha": expected_sha},
+    _managed_request,
+    "POST",
+    "prepare",
+    {"expected_sha": expected_sha, "expected_digest": expected_digest},
   )
+  _verify_managed_release_echo(prepared, expected_sha, expected_digest)
   if prepared.get("state") == "no_change":
-    return _normalize_managed_status(prepared)
+    return _normalize_managed_status(
+      prepared, image_digest=expected_digest,
+    )
   operation_id = str(prepared.get("operation_id") or "")
   handoff_nonce = str(prepared.get("handoff_nonce") or "")
   boot_id = restart_ledger.current_boot_id()
@@ -544,6 +767,11 @@ async def _request_managed_rebuild(expected_sha: str) -> RebuildStatus:
           "controller_unavailable", "The container could not finish the Railway handoff."
         )
       await asyncio.sleep(0.25)
+    # Commits do not take the reconcile lock, so validation performed before
+    # chat drain can become stale. Re-check the exact plan and image-owned
+    # blockers at the last locally-owned boundary before Railway starts.
+    if final_check is not None:
+      await asyncio.to_thread(final_check)
     provider_start_attempted = True
     started = await asyncio.to_thread(
       _managed_request,
@@ -551,19 +779,37 @@ async def _request_managed_rebuild(expected_sha: str) -> RebuildStatus:
       "start",
       {"operation_id": operation_id, "handoff_nonce": handoff_nonce},
     )
-    return _normalize_managed_status(started)
-  except DeploymentControlError as exc:
+    _verify_managed_release_echo(started, expected_sha, expected_digest)
+    return _normalize_managed_status(
+      started, image_digest=expected_digest,
+    )
+  except Exception as exc:
+    code = exc.code if isinstance(exc, DeploymentControlError) else None
     if drained and (
-      not provider_start_attempted or exc.code == "controller_rejected"
+      not provider_start_attempted or code == "controller_rejected"
     ):
       # Before the start request, the provider cannot own the transition. After
       # it, only a definitive rejection proves local recovery cannot race an
       # accepted Railway cutover.
       _schedule_managed_recovery(restart_util.restart_this_worker)
-    raise
+    elif drained and provider_start_attempted and code != "controller_rejected":
+      _schedule_ambiguous_start_reconciliation(
+        operation_id,
+        handoff_nonce,
+        restart_util.restart_this_worker,
+      )
+    if isinstance(exc, DeploymentControlError):
+      raise
+    raise DeploymentControlError(
+      "controller_unavailable",
+      "The final container replacement check could not complete.",
+    ) from exc
 
 
-async def _request_managed_bootstrap(expected_sha: str) -> RebuildStatus:
+async def _request_managed_bootstrap(
+  expected_sha: str,
+  expected_digest: str,
+) -> RebuildStatus:
   """Move one legacy Railway image onto the root-owned handoff protocol.
 
   The account service validates and owns the Railway mutation. The old image
@@ -573,34 +819,58 @@ async def _request_managed_bootstrap(expected_sha: str) -> RebuildStatus:
   the durable queue for the new worker.
   """
   from app import chat
-  from app.runner_registry import registry
 
   prepared = await asyncio.to_thread(
-    _managed_request, "POST", "bootstrap/prepare", {"expected_sha": expected_sha},
+    _managed_request,
+    "POST",
+    "bootstrap/prepare",
+    {"expected_sha": expected_sha, "expected_digest": expected_digest},
   )
+  _verify_managed_release_echo(prepared, expected_sha, expected_digest)
   operation_id = str(prepared.get("operation_id") or "")
   handoff_nonce = str(prepared.get("handoff_nonce") or "")
   if not operation_id or not handoff_nonce:
     raise DeploymentControlError(
       "controller_invalid_response", "The managed upgrade handoff is incomplete."
     )
-  if registry.all_alive_chat_ids():
+  if not chat.begin_idle_drain():
     raise DeploymentControlError(
       "active_chats",
       "Finish active chat responses, then enable container updates again.",
       status_code=409,
     )
 
-  chat.begin_drain()
+  provider_start_attempted = False
   try:
+    provider_start_attempted = True
     started = await asyncio.to_thread(
       _managed_request,
       "POST",
       "bootstrap/start",
       {"operation_id": operation_id, "handoff_nonce": handoff_nonce},
     )
-  except DeploymentControlError as exc:
-    if exc.code == "controller_rejected":
+    _verify_managed_release_echo(started, expected_sha, expected_digest)
+  except Exception as exc:
+    code = exc.code if isinstance(exc, DeploymentControlError) else None
+    if code == "controller_rejected" or not provider_start_attempted:
       chat.cancel_idle_drain()
-    raise
-  return _normalize_managed_status(started, bootstrap_available=True)
+    else:
+      async def recover_idle_drain() -> None:
+        chat.cancel_idle_drain()
+
+      _schedule_ambiguous_start_reconciliation(
+        operation_id,
+        handoff_nonce,
+        recover_idle_drain,
+      )
+    if isinstance(exc, DeploymentControlError):
+      raise
+    raise DeploymentControlError(
+      "controller_unavailable",
+      "The managed container upgrade could not finish its handoff.",
+    ) from exc
+  return _normalize_managed_status(
+    started,
+    bootstrap_available=True,
+    image_digest=expected_digest,
+  )

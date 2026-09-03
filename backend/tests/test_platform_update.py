@@ -1474,6 +1474,121 @@ def test_replacement_blocks_unmarked_local_image_input_drift(
   ]
 
 
+def test_reviewed_image_target_does_not_treat_incoming_dockerfile_as_local(
+  clone_env, monkeypatch,
+):
+  origin, platform = clone_env
+  current = _served_sha(platform)
+  target = _advance_origin(origin, edits={"Dockerfile": "FROM official-new\n"})
+  _git(platform, "fetch", "origin")
+  monkeypatch.setattr(
+    pu,
+    "_protected_runtime_status",
+    lambda _repo: {
+      "state": "current",
+      "source_sha256": "match",
+      "deployed_sha256": "match",
+      "mismatched_paths": [],
+    },
+  )
+
+  assert pu.container_replacement_blockers(
+    target,
+    platform,
+    preserve_active_runtime=True,
+    local_change_base=current,
+  ) == []
+
+  _local_commit(platform, edits={"Dockerfile": "FROM local-divergence\n"})
+  assert pu.container_replacement_blockers(
+    target,
+    platform,
+    preserve_active_runtime=True,
+    local_change_base=current,
+  ) == ["Dockerfile"]
+
+
+def test_reviewed_image_plan_binds_digest_and_preserves_live_tree(
+  clone_env, monkeypatch,
+):
+  origin, platform = clone_env
+  current = _served_sha(platform)
+  target = _advance_origin(origin, edits={"Dockerfile": "FROM official-new\n"})
+  _git(platform, "fetch", "origin")
+  digest = "sha256:" + "d" * 64
+  monkeypatch.setattr(
+    pu,
+    "_protected_runtime_status",
+    lambda _repo: {
+      "state": "current",
+      "source_sha256": "match",
+      "deployed_sha256": "match",
+      "mismatched_paths": [],
+    },
+  )
+
+  preview = pu.platform_update_preview(
+    platform, target_sha=target, image_digest=digest,
+  )
+  reviewed = pu.reviewed_container_rebuild_plan(
+    repo=platform,
+    plan_id=preview["plan_id"],
+    current_sha=current,
+    target_sha=target,
+    image_digest=digest,
+  )
+
+  assert preview["image_digest"] == digest
+  assert preview["plan_id"] == pu._update_plan_id(current, target, digest)
+  assert reviewed["target_sha"] == target
+  assert reviewed["activation"]["level"] == "image_rebuild"
+  assert reviewed["blockers"] == []
+  assert _served_sha(platform) == current
+
+  with pytest.raises(pu.PlatformUpdateError, match="update_plan_invalid"):
+    pu.reviewed_container_rebuild_plan(
+      repo=platform,
+      plan_id=preview["plan_id"],
+      current_sha=current,
+      target_sha=target,
+      image_digest="sha256:" + "e" * 64,
+    )
+
+
+def test_explicit_ghcr_target_is_available_before_source_object_is_fetched(
+  clone_env,
+):
+  _origin, platform = clone_env
+  missing_release = "f" * 40
+
+  status = pu.platform_status(platform, target_sha=missing_release)
+
+  assert status["state"] == pu.PlatformUpdateState.AVAILABLE.value
+  assert status["available"] is True
+  assert _served_sha(platform) != missing_release
+
+
+def test_explicit_ghcr_preview_fails_closed_when_source_fetch_fails(
+  clone_env, monkeypatch,
+):
+  _origin, platform = clone_env
+  served = _served_sha(platform)
+  missing_release = "f" * 40
+  monkeypatch.setattr(pu, "_fetch", lambda *_args, **_kwargs: False)
+
+  with pytest.raises(
+    pu.PlatformUpdateError,
+    match="image_release_source_unavailable",
+  ):
+    pu.platform_update_preview(
+      platform,
+      target_sha=missing_release,
+      image_digest="sha256:" + "d" * 64,
+    )
+
+  assert _served_sha(platform) == served
+
+
 def test_replacement_blocks_image_input_renamed_out_of_its_owned_path(
   clone_env, monkeypatch,
 ):
@@ -1530,6 +1645,75 @@ def test_stale_marker_coverage_cannot_excuse_newer_image_input_drift(
   _local_commit(platform, edits={"Dockerfile": "FROM drifted-later\n"})
   assert pu.container_replacement_blockers(official, platform) == [
     "Dockerfile",
+  ]
+
+
+def test_marker_coverage_survives_newer_descendant_official_image(
+  clone_env, monkeypatch,
+):
+  """An official image path applied from one release is not local drift merely
+  because a newer descendant release advances that same path."""
+  origin, platform = clone_env
+  applied = _advance_origin(
+    origin, edits={"Dockerfile": "FROM official-applied\n"}, msg="applied image",
+  )
+  _git(platform, "fetch", "origin")
+  _git(platform, "merge", "--ff-only", applied)
+  pu._write_activation_marker(
+    applied,
+    ["Dockerfile"],
+    upstream_sha=applied,
+    image_paths=["Dockerfile"],
+  )
+  target = _advance_origin(
+    origin, edits={"Dockerfile": "FROM official-newer\n"}, msg="newer image",
+  )
+  _git(platform, "fetch", "origin")
+  monkeypatch.setattr(
+    pu,
+    "_protected_runtime_status",
+    lambda _repo: {
+      "state": "current",
+      "source_sha256": "match",
+      "deployed_sha256": "match",
+      "mismatched_paths": [],
+    },
+  )
+
+  assert pu.container_replacement_blockers(
+    target, platform, local_change_base=applied,
+  ) == []
+
+  _local_commit(platform, edits={"Dockerfile": "FROM local-only\n"})
+  assert pu.container_replacement_blockers(
+    target, platform, local_change_base=applied,
+  ) == ["Dockerfile"]
+
+
+def test_unverifiable_runtime_overrides_descendant_marker_coverage(
+  clone_env, monkeypatch,
+):
+  _, platform = clone_env
+  applied = _git(platform, "rev-parse", "HEAD").stdout.strip()
+  pu._write_activation_marker(
+    applied,
+    ["backend/runtime"],
+    upstream_sha=applied,
+    image_paths=["backend/runtime"],
+  )
+  monkeypatch.setattr(
+    pu,
+    "_protected_runtime_status",
+    lambda _repo: {
+      "state": "unavailable",
+      "source_sha256": None,
+      "deployed_sha256": None,
+      "mismatched_paths": [],
+    },
+  )
+
+  assert pu.container_replacement_blockers(applied, platform) == [
+    "backend/runtime",
   ]
 
 
@@ -2180,6 +2364,7 @@ async def test_frontend_build_failure_rolls_back_source_and_is_not_success(
   assert result["activation"]["level"] == "server_restart"
   assert result["upstream_commit"] == target
   assert result["merge_commit"] is None
+  assert "frontend_build_failed" in result["error"]
   assert _served_sha(platform) == before
   assert pu.recorded_upstream_sha(platform) == previous_upstream
   assert pu.RESTART_NEEDED_FLAG.read_text() == "preexisting-restart"
@@ -2188,6 +2373,9 @@ async def test_frontend_build_failure_rolls_back_source_and_is_not_success(
   assert rollback["target"] == target
   assert "frontend_build_failed" in rollback["error"]
   assert "vite exploded" in rollback["error"]
+  status = pu.platform_status(platform)
+  assert status["rollback_target_sha"] == target
+  assert "vite exploded" in status["rollback_error"]
   progress = pu.platform_update_progress()
   assert progress["phase"] == pu.PlatformUpdatePhase.BLOCKED.value
   assert progress["active"] is False

@@ -259,13 +259,13 @@ def _guidance(level: ActivationLevel, deployment: DeploymentKind) -> str:
   if deployment == "railway":
     if level is ActivationLevel.CONTAINER_RECREATE:
       return (
-        "Trigger a Railway deployment; an in-product restart cannot apply "
-        "deployment configuration."
+        "Apply updates the checkout, but finish this change in Railway: an "
+        "in-product restart or image rebuild cannot apply deployment configuration."
       )
     if level is ActivationLevel.IMAGE_REBUILD:
       return (
-        "Trigger a Railway image rebuild and deployment; Restart cannot "
-        "install dependencies or baked tools."
+        "Möbius will rebuild Railway to this pinned GHCR image and restore "
+        "the previous container if verification fails."
       )
   else:
     if level is ActivationLevel.PROXY_RELOAD:

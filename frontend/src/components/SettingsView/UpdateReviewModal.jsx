@@ -29,7 +29,11 @@ import {
   summarizePreview,
   isTrivialUpdate,
 } from '../../lib/platformUpdatePreview.js'
-import { deploymentKindLabel, platformActivationLabel } from '../../lib/platformUpdateState.js'
+import {
+  deploymentKindLabel,
+  platformActivationLabel,
+  reviewedUpdateUsesContainerRebuild,
+} from '../../lib/platformUpdateState.js'
 import UnifiedDiff from '../DiffView/UnifiedDiff.jsx'
 import './UpdateReviewModal.css'
 
@@ -53,15 +57,17 @@ const UPDATE_PHASE_LABELS = {
 export default function UpdateReviewModal({
   onClose,
   onApply,
+  onRebuild,
   onResolve,
   applying,
+  rebuilding,
   resolving,
   applyError,
   applyProgress,
 }) {
   const [preview, setPreview] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [loadError, setLoadError] = useState(false)
+  const [loadError, setLoadError] = useState('')
   const [resultState, setResultState] = useState('')
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
@@ -69,13 +75,23 @@ export default function UpdateReviewModal({
 
   const loadPreview = useCallback(async () => {
     setLoading(true)
-    setLoadError(false)
+    setLoadError('')
     try {
       const res = await api.platform.updatePreview()
-      if (!res.ok) throw new Error(`status ${res.status}`)
-      setPreview(await res.json())
-    } catch {
-      setLoadError(true)
+      let body = null
+      try { body = await res.json() } catch {}
+      if (!res.ok) {
+        const detail = body?.detail
+        throw new Error(
+          detail?.message || (typeof detail === 'string' ? detail : '')
+          || 'Couldn’t verify the official release source.',
+        )
+      }
+      setPreview(body)
+    } catch (error) {
+      setLoadError(
+        error?.message || 'Couldn’t verify the official release source.',
+      )
     } finally {
       setLoading(false)
     }
@@ -84,8 +100,8 @@ export default function UpdateReviewModal({
   useEffect(() => { loadPreview() }, [loadPreview])
 
   const requestClose = useCallback(() => {
-    if (!applying && !resolving) onClose()
-  }, [applying, onClose, resolving])
+    if (!applying && !rebuilding && !resolving) onClose()
+  }, [applying, onClose, rebuilding, resolving])
 
   // Escape and backdrop dismissal remain disabled while an update or resolver
   // request is in flight.
@@ -93,15 +109,18 @@ export default function UpdateReviewModal({
     containerRef: dialogRef,
     initialFocusRef: closeRef,
     onClose: requestClose,
-    closeOnEscape: !applying && !resolving,
+    closeOnEscape: !applying && !rebuilding && !resolving,
   })
 
   const handleApply = useCallback(async () => {
-    const result = await onApply({
+    const plan = {
       plan_id: preview?.plan_id,
       current_sha: preview?.current_sha,
       target_sha: preview?.target_sha,
-    })
+      image_digest: preview?.image_digest,
+    }
+    const rebuildUpdate = reviewedUpdateUsesContainerRebuild(preview)
+    const result = await (rebuildUpdate ? onRebuild(plan) : onApply(plan))
     // A successful request can still mean the update was blocked. Keep the
     // reviewed sheet open and show that honest outcome in place; only a clean
     // apply closes automatically and advances Settings to its next step.
@@ -112,12 +131,20 @@ export default function UpdateReviewModal({
     if (
       result?.ok
       && (
-        result.state === 'restart_needed'
-        || result.state === 'activation_needed'
-        || result.state === 'up_to_date'
+        (rebuildUpdate && [
+          'queued', 'preparing', 'replacing', 'verifying', 'succeeded',
+          // The controller returns no_change only after proving the exact image
+          // and reviewed source are already active, so it is a completed update.
+          'no_change',
+        ].includes(result.state))
+        || (!rebuildUpdate && (
+          result.state === 'restart_needed'
+          || result.state === 'activation_needed'
+          || result.state === 'up_to_date'
+        ))
       )
     ) onClose()
-  }, [onApply, onClose, preview])
+  }, [onApply, onClose, onRebuild, preview])
 
   // Applying replaces the focused Apply button with a result surface. Focus a
   // real action in that surface so both Tab directions remain inside the
@@ -132,6 +159,7 @@ export default function UpdateReviewModal({
   const commits = Array.isArray(preview?.commits) ? preview.commits : []
   const files = Array.isArray(preview?.files) ? preview.files : []
   const activation = preview?.activation
+  const rebuildUpdate = reviewedUpdateUsesContainerRebuild(preview)
   const activationGuidance = Array.isArray(activation?.guidance)
     ? activation.guidance
     : []
@@ -143,13 +171,18 @@ export default function UpdateReviewModal({
   const notAvailable = preview && preview.available === false && !loadError
   const hasResult = resultState === 'conflict' || resultState === 'rolled_back'
   const hasPlan = !!(
-    preview?.plan_id && preview?.current_sha && preview?.target_sha
+    preview?.plan_id
+    && preview?.current_sha
+    && preview?.target_sha
+    && (!rebuildUpdate || preview?.image_digest)
   )
-  const progressLabel = (
-    applyProgress?.plan_id === preview?.plan_id
-      ? UPDATE_PHASE_LABELS[applyProgress?.phase]
-      : null
-  ) || 'Preparing update…'
+  const progressLabel = rebuildUpdate && rebuilding
+    ? 'Starting the exact reviewed official image…'
+    : (
+        applyProgress?.plan_id === preview?.plan_id
+          ? UPDATE_PHASE_LABELS[applyProgress?.phase]
+          : null
+      ) || 'Preparing update…'
   const resultTitle = resultState === 'rolled_back'
     ? 'Update rolled back'
     : 'Update not applied'
@@ -183,7 +216,7 @@ export default function UpdateReviewModal({
             className="urm__close"
             onClick={requestClose}
             aria-label="Close"
-            disabled={applying || resolving}
+            disabled={applying || rebuilding || resolving}
           >×</button>
         </div>
 
@@ -218,12 +251,11 @@ export default function UpdateReviewModal({
 
           {!hasResult && !loading && loadError && (
             <div className="urm__notice" role="status">
-              Couldn’t load the change preview. Try again to create a fresh,
-              immutable update plan.
+              {loadError} Try again to create a fresh, immutable update plan.
             </div>
           )}
 
-          {!hasResult && applying && (
+          {!hasResult && (applying || rebuilding) && (
             <div className="urm__notice" role="status">
               {progressLabel}
             </div>
@@ -314,7 +346,7 @@ export default function UpdateReviewModal({
               type="button"
               className="urm__btn urm__btn--ghost"
               onClick={requestClose}
-              disabled={applying || resolving}
+              disabled={applying || rebuilding || resolving}
             >
               Not now
             </button>
@@ -343,7 +375,7 @@ export default function UpdateReviewModal({
               type="button"
               className="urm__btn"
               onClick={loadPreview}
-              disabled={applying}
+              disabled={applying || rebuilding}
             >
               Try again
             </button>
@@ -352,9 +384,15 @@ export default function UpdateReviewModal({
               type="button"
               className="urm__btn"
               onClick={handleApply}
-              disabled={applying || loading || notAvailable || !hasPlan}
+              disabled={applying || rebuilding || loading || notAvailable || !hasPlan}
             >
-              {applying ? 'Applying…' : 'Apply update'}
+              {rebuilding
+                ? 'Starting rebuild…'
+                : applying
+                  ? 'Applying…'
+                  : rebuildUpdate
+                    ? 'Rebuild to update'
+                    : 'Apply update'}
             </button>
           )}
         </div>

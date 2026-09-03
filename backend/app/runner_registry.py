@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
+import threading
 from typing import Protocol, runtime_checkable
 
 
@@ -39,6 +40,11 @@ class RunnerRegistry:
     self._starting: set[str] = set()
     self._handles: dict[tuple[str, RunnerKind], RunnerHandle] = {}
     self._generation: dict[str, int] = {}
+    # The drain gate and a new runner reservation share this lock. A send that
+    # passed the route's early drain check must still fail its final reservation
+    # once a restart closes admission.
+    self._admission_lock = threading.Lock()
+    self._admission_closed = False
     # Chats soft-deleted while a run was in flight. `current_generation`
     # returns +inf for these so a run holding any finite pre-delete run_gen
     # computes `we_own_gen=False` and skips finalize onto the dead row — the
@@ -49,12 +55,31 @@ class RunnerRegistry:
 
   def mark_starting(self, chat_id: str) -> bool:
     """Reserves a spawn slot for a chat if it is currently idle."""
-    if chat_id in self._starting:
-      return False
-    if any(cid == chat_id for cid, _ in self._handles):
-      return False
-    self._starting.add(chat_id)
-    return True
+    with self._admission_lock:
+      if self._admission_closed or chat_id in self._starting:
+        return False
+      if any(cid == chat_id for cid, _ in self._handles):
+        return False
+      self._starting.add(chat_id)
+      return True
+
+  def close_admission(self) -> None:
+    """Prevent future runner reservations until explicitly reopened."""
+    with self._admission_lock:
+      self._admission_closed = True
+
+  def close_admission_if_idle(self) -> bool:
+    """Atomically close admission only when no runner is active or starting."""
+    with self._admission_lock:
+      if self._starting or self._handles:
+        return False
+      self._admission_closed = True
+      return True
+
+  def reopen_admission(self) -> None:
+    """Allow future runner reservations after an idle drain is cancelled."""
+    with self._admission_lock:
+      self._admission_closed = False
 
   def discard_starting(self, chat_id: str) -> None:
     """Clears a chat's starting reservation."""
@@ -181,10 +206,12 @@ class RunnerRegistry:
 
   def reset_for_tests(self) -> None:
     """Clears all registry state between tests."""
-    self._starting.clear()
-    self._handles.clear()
-    self._generation.clear()
-    self._deleted.clear()
+    with self._admission_lock:
+      self._starting.clear()
+      self._handles.clear()
+      self._generation.clear()
+      self._deleted.clear()
+      self._admission_closed = False
 
 
 registry = RunnerRegistry()
