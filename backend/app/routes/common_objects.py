@@ -282,6 +282,8 @@ async def peer_operation(oid: str, request: Request):
       if invite is None and existing_role is None:
         raise HTTPException(status_code=403, detail="Invite is invalid or expired.")
       role = existing_role or invite["role"]
+      if invite is not None and existing_role is None:
+        obj["invites"].pop(_hash_secret(secret), None)
       obj.setdefault("members", {})[sender] = {
         "role": role,
         "name": str(actor.get("name") or "")[:MAX_LABEL_CHARS],
@@ -763,19 +765,20 @@ async def create_invite(
     return {"status": "invited", "host": peer, "role": body.role, "delivery": delivery}
 
   # Capability-code fallback for someone you cannot address directly.
-  obj = _load_object(oid)
-  if obj is None:
-    raise HTTPException(status_code=404, detail="No such object.")
-  _require_app_match(caller, obj["app"])
   ttl = body.ttl_seconds if body.ttl_seconds and body.ttl_seconds > 0 else INVITE_TTL_S
   secret = pysecrets.token_urlsafe(24)
-  _prune_invites(obj)
-  obj.setdefault("invites", {})[_hash_secret(secret)] = {
-    "role": body.role,
-    "created_at": time.time(),
-    "expires_at": time.time() + ttl,
-  }
-  _save_object(obj)
+  async with _object_lock(oid):
+    obj = _load_object(oid)
+    if obj is None:
+      raise HTTPException(status_code=404, detail="No such object.")
+    _require_app_match(caller, obj["app"])
+    _prune_invites(obj)
+    obj.setdefault("invites", {})[_hash_secret(secret)] = {
+      "role": body.role,
+      "created_at": time.time(),
+      "expires_at": time.time() + ttl,
+    }
+    _save_object(obj)
   return {
     "invite": f"{oid}@{_own_host()}#{secret}",
     "role": body.role,

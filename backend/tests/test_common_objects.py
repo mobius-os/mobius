@@ -59,10 +59,10 @@ def _seed_peer_actor_cache(public_b64: str, host: str = PEER_HOST):
   }))
 
 
-def _signed(private_b64: str, envelope: dict) -> dict:
+def _signed(private_b64: str, envelope: dict, host: str = PEER_HOST) -> dict:
   envelope = {
     "v": 0,
-    "from": PEER_HOST,
+    "from": host,
     "to": common_routes._own_host(),
     "sent_at": time.time(),
     **envelope,
@@ -153,6 +153,72 @@ def test_join_requires_valid_invite_and_signature(client, auth):
   assert body["status"] == "joined"
   assert body["object"]["members"][PEER_HOST]["role"] == "editor"
   assert body["doc"]["title"] == "Board"
+
+
+def test_capability_invite_is_consumed_by_first_distinct_peer(client, auth):
+  oid = _create_board(client, auth)
+  first_private, first_public = _make_peer_keypair()
+  _seed_peer_actor_cache(first_public)
+  secret = _invite(client, auth, oid)
+
+  first = client.post(
+    f"/api/common/objects/{oid}/peer",
+    json=_signed(first_private, {"type": "object_join", "invite": secret}),
+  )
+  assert first.status_code == 200, first.text
+
+  second_host = "second.example.com"
+  second_private, second_public = _make_peer_keypair()
+  _seed_peer_actor_cache(second_public, second_host)
+  reused = client.post(
+    f"/api/common/objects/{oid}/peer",
+    json=_signed(
+      second_private,
+      {"type": "object_join", "invite": secret},
+      second_host,
+    ),
+  )
+  assert reused.status_code == 403
+  assert reused.json()["detail"] == "Invite is invalid or expired."
+
+
+def test_capability_invite_mutation_holds_the_object_lock(
+  client, auth, monkeypatch,
+):
+  oid = _create_board(client, auth)
+  held = False
+  original_load = objects_routes._load_object
+  original_save = objects_routes._save_object
+
+  class TrackedLock:
+    async def __aenter__(self):
+      nonlocal held
+      assert not held
+      held = True
+
+    async def __aexit__(self, *_args):
+      nonlocal held
+      held = False
+
+  def load_while_locked(object_id):
+    assert held
+    return original_load(object_id)
+
+  def save_while_locked(obj):
+    assert held
+    original_save(obj)
+
+  monkeypatch.setattr(objects_routes, "_object_lock", lambda _oid: TrackedLock())
+  monkeypatch.setattr(objects_routes, "_load_object", load_while_locked)
+  monkeypatch.setattr(objects_routes, "_save_object", save_while_locked)
+
+  created = client.post(
+    f"/api/common/objects/{oid}/invites",
+    json={"role": "editor"},
+    headers=auth,
+  )
+  assert created.status_code == 200, created.text
+  assert held is False
 
 
 def test_peer_cas_write_and_viewer_confinement(client, auth):
