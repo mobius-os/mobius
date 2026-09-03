@@ -82,13 +82,13 @@ def _naive_utc(value: Any) -> datetime | None:
 def stable_agent_id(
   provider: str, provider_session_id: str | None, provider_agent_id: str,
 ) -> str:
-  """Opaque stable identity; Codex thread ids are globally scoped.
+  """Opaque stable identity; Codex and Möbius agent ids are globally scoped.
 
-  Claude task ids are scoped to their provider session, while Codex child
-  thread ids are already globally unique and can appear with different
-  session-tree identifiers on different notification variants.
+  Claude task ids are scoped to their provider session. Codex child-thread ids
+  and Möbius helper ids are already globally unique and can appear with
+  different session-tree identifiers across notification variants.
   """
-  if provider == "codex":
+  if provider in ("codex", "mobius"):
     material = f"{provider}\0{provider_agent_id}"
   else:
     material = f"{provider}\0{provider_session_id or ''}\0{provider_agent_id}"

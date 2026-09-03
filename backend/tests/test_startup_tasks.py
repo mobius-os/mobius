@@ -38,14 +38,19 @@ async def test_best_effort_startup_failure_is_named_and_does_not_stop_plan(
   async def continue_boot(_context):
     events.append("continued")
 
+  ctx = context()
   with caplog.at_level(logging.ERROR, logger="test.startup"):
-    await run_startup_tasks(context(), (
+    await run_startup_tasks(ctx, (
       StartupTask("optional repair", fail),
       StartupTask("next repair", continue_boot),
     ))
 
   assert events == ["failed", "continued"]
   assert "startup task optional repair failed" in caplog.text
+  # The swallowed failure is recorded on the context (assertable seam), not
+  # only emitted to the log — a contract test can now catch a silently skipped
+  # task instead of it vanishing.
+  assert ctx.failed_tasks == ["optional repair"]
 
 
 @pytest.mark.asyncio

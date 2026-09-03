@@ -66,6 +66,13 @@ class StartupContext:
   manual_reconciled_chats: list[str] = field(default_factory=list)
   restart_fallback_chats: list[str] = field(default_factory=list)
   database_boot: DatabaseBootResult = field(default_factory=DatabaseBootResult)
+  # Names of best-effort startup tasks that raised and were swallowed. A
+  # non-behavioral seam (the plan still fails open) that makes a silently
+  # skipped task — e.g. a database-phase task that ImportErrors because a merge
+  # dropped a chat_writer command it lazily imports (the 2026 assistant-backfill
+  # regression) — assertable by a contract test and visible to diagnostics,
+  # instead of vanishing into a single ERROR log line.
+  failed_tasks: list[str] = field(default_factory=list)
 
 
 TaskAction = Callable[[StartupContext], object | Awaitable[object]]
@@ -89,6 +96,7 @@ async def run_startup_tasks(
       if inspect.isawaitable(result):
         await result
     except Exception as exc:
+      context.failed_tasks.append(task.name)
       context.logger.error(
         "startup task %s failed: %s",
         task.name,
@@ -121,6 +129,16 @@ async def run_startup_plan(context: StartupContext) -> DatabaseBootResult:
     record_memory_checkpoint("startup_database_degraded")
     return context.database_boot
   await run_startup_tasks(context, DATABASE_STARTUP_TASKS)
+  if context.failed_tasks:
+    # Fail-open kept the server serviceable, but a swallowed database-phase task
+    # (e.g. an ImportError from a dropped chat_writer command) means a reconcile
+    # or backfill silently did not run. Surface it prominently so it is not lost
+    # in a single per-task ERROR line — the assistant-backfill regression class.
+    context.logger.error(
+      "startup completed with %d swallowed task failure(s): %s",
+      len(context.failed_tasks),
+      ", ".join(context.failed_tasks),
+    )
   return context.database_boot
 
 
