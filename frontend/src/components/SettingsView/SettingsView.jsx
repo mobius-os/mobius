@@ -1315,7 +1315,9 @@ export default function SettingsView({
   // agent-authored platform work settled. Settings can remain mounted beside a
   // resolver chat, so mount-only fetching leaves a cleared conflict looking
   // blocked until a full page reload.
-  const refreshPlatform = useCallback(async () => {
+  const refreshPlatform = useCallback(async ({
+    preserveCurrentOnFailure = false,
+  } = {}) => {
     try {
       const res = await api.platform.status()
       if (!res.ok) throw new Error(`platform status failed: ${res.status}`)
@@ -1325,9 +1327,14 @@ export default function SettingsView({
         setPlatformError(body.rollback_error)
       }
     } catch {
-      // Never let an unavailable release authority inherit a cached “current”
-      // or update-available claim. The row stays usable and offers a retry.
-      setPlatform(current => platformStatusUnavailable(current))
+      // A successful mutation response is itself authoritative for the state
+      // it just produced. Its best-effort follow-up read must not erase that
+      // known result merely because the status endpoint is temporarily down.
+      if (!preserveCurrentOnFailure) {
+        // Ordinary reads still fail closed: never let an unavailable release
+        // authority inherit a cached “current” or update-available claim.
+        setPlatform(current => platformStatusUnavailable(current))
+      }
     }
   }, [])
   useEffect(() => {
@@ -1421,7 +1428,7 @@ export default function SettingsView({
       if (PLATFORM_APPLY_STATES.has(state)) {
         setPlatform(current => platformStatusFromApply(current, body))
       }
-      await refreshPlatform()
+      await refreshPlatform({ preserveCurrentOnFailure: true })
       if (state === 'restart_needed' || state === 'activation_needed' || state === 'up_to_date') {
         return { ok: true, state }
       }

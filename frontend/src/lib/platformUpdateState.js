@@ -20,6 +20,7 @@ export function platformStatusFromApply(previous, result) {
   return {
     ...(previous || {}),
     state,
+    status_unavailable: false,
     // A clean apply consumed the exact reviewed target. Do not briefly carry
     // the OLD `available:true` through the render before the status refresh:
     // the batched-update UI would otherwise offer the update that just applied.

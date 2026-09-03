@@ -59,6 +59,7 @@ test('a clean apply consumes the reviewed target but preserves restart readiness
     {
       state: 'available',
       available: true,
+      status_unavailable: true,
       needs_restart: false,
       current_build_sha: 'served',
       contained_upstream_sha: 'before',
@@ -71,6 +72,7 @@ test('a clean apply consumes the reviewed target but preserves restart readiness
   )
 
   assert.equal(projected.available, false)
+  assert.equal(projected.status_unavailable, false)
   assert.equal(projected.needs_restart, true)
   assert.equal(projected.contained_upstream_sha, 'applied')
 })

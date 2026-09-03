@@ -66,7 +66,11 @@ test('the apply response is a truthful fallback when status refresh fails', () =
   assert.match(updateState, /conflict_chat_id: state === 'conflict' \? \(result\.chat_id \|\| null\) : null/)
   assert.match(
     settingsView,
-    /setPlatform\(current => platformStatusFromApply\(current, body\)\)[\s\S]*await refreshPlatform\(\)/,
+    /setPlatform\(current => platformStatusFromApply\(current, body\)\)[\s\S]*await refreshPlatform\(\{ preserveCurrentOnFailure: true \}\)/,
+  )
+  assert.match(
+    settingsView,
+    /if \(!preserveCurrentOnFailure\) \{[\s\S]*setPlatform\(current => platformStatusUnavailable\(current\)\)/,
   )
 })
 
