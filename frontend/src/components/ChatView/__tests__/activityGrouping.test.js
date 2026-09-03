@@ -27,6 +27,18 @@ test('activity grouping handles empty and non-activity-only input', () => {
   assert.deepEqual(groupActivityRuns([question]), [{ single: question }])
 })
 
+test('transparent provider separators do not fragment one activity stretch', () => {
+  const thought = entry('thinking', { content: 'Checking the files' })
+  const command = entry('tool', { name: 'exec_command' })
+
+  for (const content of ['', '\n  ']) {
+    const separator = entry('text', { content })
+    assert.deepEqual(groupActivityRuns([thought, separator, command]), [
+      { group: [thought, command] },
+    ])
+  }
+})
+
 test('context compaction breaks activity stretches instead of joining tools', () => {
   const before = entry('tool', { tool: 'Read' })
   const compaction = entry('context_compaction', { provider: 'codex' })

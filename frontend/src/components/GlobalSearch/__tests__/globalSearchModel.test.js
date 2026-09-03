@@ -2,37 +2,16 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   appManifestSearchDocument,
+  buildSearchResultGroups,
   chatSearchOpenTarget,
   chatSearchResultIsCurrent,
-  clearRecentSelections,
   moveSearchSelection,
   pointerPositionChanged,
-  readRecentSelections,
-  rememberRecentSelection,
-  resolveRecentSelections,
   resolvedSearchSelection,
   searchCommands,
   searchInstalledApps,
   visibleChatSearchState,
 } from '../globalSearchModel.js'
-
-class MemoryStorage {
-  constructor(initial = {}) {
-    this.values = new Map(Object.entries(initial))
-  }
-
-  getItem(key) {
-    return this.values.get(key) ?? null
-  }
-
-  setItem(key, value) {
-    this.values.set(key, String(value))
-  }
-
-  removeItem(key) {
-    this.values.delete(key)
-  }
-}
 
 const apps = [
   {
@@ -106,6 +85,23 @@ test('all query terms must match and result limits are stable', () => {
   assert.equal(searchInstalledApps(apps, 'news', 1).length, 1)
 })
 
+test('recency breaks equally relevant app suggestions without beating match quality', () => {
+  const notes = [
+    { id: 3, name: 'Daily Notes', description: 'Plain text' },
+    { id: 4, name: 'Notes Archive', description: 'Plain text' },
+    { id: 5, name: 'Archive', description: 'Includes notes' },
+  ]
+  const recent = [
+    { kind: 'app', id: '4' },
+    { kind: 'app', id: '5' },
+  ]
+
+  assert.deepEqual(
+    searchInstalledApps(notes, 'notes', 8, recent).map(result => result.app.id),
+    [4, 3, 5],
+  )
+})
+
 test('command search covers action copy, keywords, and shortcut labels', () => {
   const commands = [
     {
@@ -123,51 +119,23 @@ test('command search covers action copy, keywords, and shortcut labels', () => {
   assert.deepEqual(searchCommands(commands, ''), commands)
 })
 
-test('recent selections persist as a deduplicated most-recent-first list', () => {
-  const storage = new MemoryStorage()
-  assert.deepEqual(readRecentSelections(storage), [])
+test('recent destinations precede commands until a typed query restores search grouping', () => {
+  const recent = [{ kind: 'app', value: apps[0] }]
+  const commands = [{ id: 'chat.new', title: 'New chat' }]
 
-  rememberRecentSelection({ kind: 'chat', id: 'chat-1' }, storage)
-  rememberRecentSelection({ kind: 'app', id: 42 }, storage)
-  rememberRecentSelection({ kind: 'chat', id: 'chat-1' }, storage)
+  assert.deepEqual(buildSearchResultGroups({
+    query: '',
+    recentSelections: recent,
+    commandResults: commands,
+  }).map(group => group.label), ['Recent selections', 'Commands'])
 
-  assert.deepEqual(readRecentSelections(storage), [
-    { kind: 'chat', id: 'chat-1' },
-    { kind: 'app', id: '42' },
-  ])
-
-  for (let index = 0; index < 14; index += 1) {
-    rememberRecentSelection({ kind: 'chat', id: `chat-${index}` }, storage)
-  }
-  const bounded = readRecentSelections(storage)
-  assert.equal(bounded.length, 12)
-  assert.deepEqual(bounded.slice(0, 2), [
-    { kind: 'chat', id: 'chat-13' },
-    { kind: 'chat', id: 'chat-12' },
-  ])
-
-  clearRecentSelections(storage)
-  assert.deepEqual(readRecentSelections(storage), [])
-})
-
-test('recent selections resolve current items in selection order and omit missing ones', () => {
-  const chats = [
-    { id: 'chat-1', title: 'First chat' },
-    { id: 'chat-2', title: 'Second chat' },
-  ]
-  const installedApps = [
-    { id: 7, name: 'Memory' },
-  ]
-  const rows = resolveRecentSelections([
-    { kind: 'app', id: '7' },
-    { kind: 'chat', id: 'missing' },
-    { kind: 'chat', id: 'chat-2' },
-  ], chats, installedApps)
-
-  assert.deepEqual(rows, [
-    { kind: 'app', value: installedApps[0] },
-    { kind: 'chat', value: chats[1] },
-  ])
+  assert.deepEqual(buildSearchResultGroups({
+    query: 'brief',
+    recentSelections: recent,
+    commandResults: commands,
+    appResults: [{ app: apps[0], matchArea: 'Name' }],
+    visibleChats: { status: 'ready', results: [{ id: 'chat-1' }] },
+  }).map(group => group.label), ['Commands', 'Apps', 'Chats'])
 })
 
 test('keyboard search selection starts at the first result and wraps with arrows', () => {

@@ -576,6 +576,49 @@ test('visible FOLLOW_BOTTOM survives repeated Markdown-sized content growth', ()
   }
 })
 
+test('off-bottom direction correction stays held while the live reply grows', () => {
+  const observers = []
+  const restoreBrowser = installBrowserEnvironment({ observers })
+  try {
+    const { hook, listeners, scroll, list, assistant } = mountTailController(
+      'off-bottom-stream-hold',
+    )
+    const target = { parentElement: scroll, closest: () => null }
+    hook.result.current.followLatest()
+    assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM')
+
+    // Move far into older content, then make the small toward-newer correction
+    // that used to clear the escape latch without ever reaching the tail.
+    listeners.get('wheel')({
+      type: 'wheel', deltaY: -280, shiftKey: false, target,
+    })
+    scroll.scrollTop = 120
+    listeners.get('scroll')()
+    listeners.get('wheel')({
+      type: 'wheel', deltaY: 20, shiftKey: false, target,
+    })
+    scroll.scrollTop = 140
+    listeners.get('scroll')()
+    listeners.get('scrollend')()
+
+    assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT',
+      'settlement must hold the actual off-bottom reading position')
+    const heldTop = scroll.scrollTop
+
+    assistant.offsetHeight += 300
+    list.offsetHeight += 300
+    scroll.scrollHeight += 300
+    observers[0].callback([{ target: list }])
+
+    assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT')
+    assert.equal(scroll.scrollTop, heldTop,
+      'continued streaming must not pull the held reader to the live tail')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
 test('a hidden chat performs no scroll work and returns to its saved hold', () => {
   const observers = []
   const restoreBrowser = installBrowserEnvironment({ observers })

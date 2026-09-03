@@ -37,6 +37,7 @@ test('desktop sidebar storage is versioned, minimal, and failure-safe', () => {
 })
 
 test('desktop sidebar width is clamped, persisted, and failure-safe', () => {
+  assert.equal(DESKTOP_SIDEBAR_DEFAULT_WIDTH, 360)
   assert.equal(clampDesktopSidebarWidth('412.4'), 412)
   assert.equal(clampDesktopSidebarWidth(100), DESKTOP_SIDEBAR_MIN_WIDTH)
   assert.equal(clampDesktopSidebarWidth(1000), DESKTOP_SIDEBAR_MAX_WIDTH)

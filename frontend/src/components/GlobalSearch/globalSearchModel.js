@@ -67,9 +67,14 @@ export function searchCommands(commands, query, limit = 12) {
     .slice(0, Math.max(0, limit))
 }
 
-export function searchInstalledApps(apps, query, limit = 8) {
+export function searchInstalledApps(apps, query, limit = 8, recentSelections = []) {
   const tokens = queryTokens(query)
   if (!tokens.length) return []
+  const recentIndex = new Map(
+    recentSelections
+      .filter(selection => selection?.kind === 'app')
+      .map((selection, index) => [String(selection.id), index]),
+  )
 
   const ranked = []
   for (const app of Array.isArray(apps) ? apps : []) {
@@ -102,6 +107,10 @@ export function searchInstalledApps(apps, query, limit = 8) {
   return ranked
     .sort((left, right) => (
       right.score - left.score
+      // Recency breaks equally relevant suggestions; it never lets a weaker
+      // description/detail match outrank a stronger name match.
+      || (recentIndex.get(String(left.app?.id)) ?? Infinity)
+        - (recentIndex.get(String(right.app?.id)) ?? Infinity)
       || String(left.app?.name || '').localeCompare(String(right.app?.name || ''))
       || Number(left.app?.id || 0) - Number(right.app?.id || 0)
     ))
@@ -109,86 +118,59 @@ export function searchInstalledApps(apps, query, limit = 8) {
     .map(({ score: _score, ...result }) => result)
 }
 
-export const RECENT_SELECTION_LIMIT = 12
-const RECENT_SELECTIONS_STORAGE_KEY = 'mobius:global-search:recent-selections:v1'
-
-function browserStorage() {
-  try {
-    return globalThis.localStorage || null
-  } catch (_) {
-    return null
+export function buildSearchResultGroups({
+  query,
+  commandResults = [],
+  appResults = [],
+  visibleChats = { status: 'idle', results: [] },
+  recentSelections = [],
+}) {
+  if (!String(query || '').trim()) {
+    return [
+      ...(recentSelections.length ? [{
+        headingId: 'global-search-recent-selections',
+        listId: 'global-search-recent-selection-results',
+        label: 'Recent selections',
+        clearable: true,
+        rows: recentSelections.map(({ kind, value }) => ({
+          kind,
+          value,
+          recent: true,
+          matchArea: 'Recent',
+        })),
+      }] : []),
+      ...(commandResults.length ? [{
+        headingId: 'global-search-commands',
+        listId: 'global-search-command-results',
+        label: 'Commands',
+        rows: commandResults.map(command => ({ kind: 'command', value: command })),
+      }] : []),
+    ]
   }
-}
 
-function normalizedRecentSelections(selections) {
-  const seen = new Set()
-  const normalized = []
-  for (const selection of Array.isArray(selections) ? selections : []) {
-    if (!['app', 'chat'].includes(selection?.kind)) continue
-    const id = String(selection?.id ?? '').trim()
-    if (!id) continue
-    const key = `${selection.kind}:${id}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    normalized.push({ kind: selection.kind, id })
-    if (normalized.length === RECENT_SELECTION_LIMIT) break
-  }
-  return normalized
-}
-
-// Selection history intentionally stores only stable item references. Titles,
-// snippets, and the owner's query text remain in their owning data sources and
-// are resolved afresh when the dialog opens.
-export function readRecentSelections(storage = browserStorage()) {
-  try {
-    return normalizedRecentSelections(JSON.parse(
-      storage?.getItem(RECENT_SELECTIONS_STORAGE_KEY) || '[]',
-    ))
-  } catch (_) {
-    return []
-  }
-}
-
-export function rememberRecentSelection(selection, storage = browserStorage()) {
-  const next = normalizedRecentSelections([
-    selection,
-    ...readRecentSelections(storage),
-  ])
-  try {
-    storage?.setItem(RECENT_SELECTIONS_STORAGE_KEY, JSON.stringify(next))
-  } catch (_) {
-    // Restricted and private browsing contexts may reject Web Storage. Search
-    // still works; it simply has no history on the next open.
-  }
-  return next
-}
-
-export function clearRecentSelections(storage = browserStorage()) {
-  try {
-    storage?.removeItem(RECENT_SELECTIONS_STORAGE_KEY)
-  } catch (_) {
-    // Clearing an unavailable store is already the desired end state.
-  }
-}
-
-export function resolveRecentSelections(selections, chats, apps) {
-  const chatsById = new Map(
-    (Array.isArray(chats) ? chats : [])
-      .filter(chat => chat?.id)
-      .map(chat => [String(chat.id), chat]),
-  )
-  const appsById = new Map(
-    (Array.isArray(apps) ? apps : [])
-      .filter(app => app?.id)
-      .map(app => [String(app.id), app]),
-  )
-
-  return normalizedRecentSelections(selections).flatMap(selection => {
-    const value = selection.kind === 'chat'
-      ? chatsById.get(selection.id)
-      : appsById.get(selection.id)
-    return value ? [{ kind: selection.kind, value }] : []
-  })
+  return [
+    ...(commandResults.length ? [{
+      headingId: 'global-search-commands',
+      listId: 'global-search-command-results',
+      label: 'Commands',
+      rows: commandResults.map(command => ({ kind: 'command', value: command })),
+    }] : []),
+    ...(appResults.length ? [{
+      headingId: 'global-search-apps',
+      listId: 'global-search-app-results',
+      label: 'Apps',
+      rows: appResults.map(({ app, matchArea }) => ({
+        kind: 'app', value: app, matchArea,
+      })),
+    }] : []),
+    {
+      headingId: 'global-search-chats',
+      listId: 'global-search-chat-results',
+      label: 'Chats',
+      status: visibleChats.status,
+      rows: visibleChats.results.map(result => ({ kind: 'chat', value: result })),
+    },
+  ]
 }
 
 export function resolvedSearchSelection(index, resultCount) {
