@@ -19,6 +19,7 @@ is still cleaned up because an update can cross this implementation boundary.
 """
 
 import hashlib
+import json
 import os
 import subprocess
 import stat
@@ -1148,6 +1149,37 @@ async def test_apply_conflict_waits_for_owner_before_opening_chat(
   flag = pu._read_conflict_flag()
   assert flag["upstream"] == target
   assert flag["paths"] == ["backend/app/main.py"]
+
+
+@pytest.mark.asyncio
+async def test_apply_conflict_preserves_proven_merge_base(
+  monkeypatch, clone_env,
+):
+  """The apply-path conflict rewrite must carry the equivalence engine's
+  proven semantic base into the flag, or the resolver chat re-surfaces
+  conflicts already proven to have landed upstream."""
+  origin, platform = clone_env
+  target = _advance_origin(origin, edits={"backend/app/main.py":
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'UPSTREAM'")})
+  merge_base = "b" * 40
+
+  monkeypatch.setattr(pu, "_reconcile_under_lock", lambda repo, at_boot, **kwargs: (
+    pu.ReconcileResult(
+      "conflict", _served_sha(platform), _served_sha(platform), target,
+      ["backend/app/main.py"],
+      merge_base=merge_base,
+    )
+  ))
+
+  current = _served_sha(platform)
+  res = await pu.apply_platform_update(
+    SimpleNamespace(), **_apply_plan(current, target, platform),
+  )
+
+  assert res["state"] == pu.PlatformUpdateState.CONFLICT.value
+  flag = pu._read_conflict_flag()
+  assert flag["upstream"] == target
+  assert flag["merge_base"] == merge_base
   assert flag["chat_id"] is None
 
 
@@ -1412,6 +1444,92 @@ def test_replacement_blocks_when_desired_runtime_cannot_be_verified(
 
   assert pu.container_replacement_blockers(official, platform) == [
     "backend/runtime",
+  ]
+
+
+def test_replacement_blocks_unmarked_local_image_input_drift(
+  clone_env, monkeypatch,
+):
+  """Direct local commits to image inputs never write an activation marker,
+  yet the official image would silently replace them; the blockers check must
+  derive that drift from the histories themselves."""
+  _, platform = clone_env
+  official = _git(platform, "rev-parse", "HEAD").stdout.strip()
+  monkeypatch.setattr(
+    pu,
+    "_protected_runtime_status",
+    lambda _repo: {
+      "state": "current",
+      "source_sha256": "match",
+      "deployed_sha256": "match",
+      "mismatched_paths": [],
+    },
+  )
+
+  assert pu.container_replacement_blockers(official, platform) == []
+
+  _local_commit(platform, edits={"Dockerfile": "FROM local-only\n"})
+  assert pu.container_replacement_blockers(official, platform) == [
+    "Dockerfile",
+  ]
+
+
+def test_replacement_blocks_image_input_renamed_out_of_its_owned_path(
+  clone_env, monkeypatch,
+):
+  """Rename detection must not hide the removed image-owned source path."""
+  _, platform = clone_env
+  official = _local_commit(
+    platform, edits={"Dockerfile": "FROM official\n"}, msg="add image input",
+  )
+  monkeypatch.setattr(
+    pu,
+    "_protected_runtime_status",
+    lambda _repo: {
+      "state": "current",
+      "source_sha256": "match",
+      "deployed_sha256": "match",
+      "mismatched_paths": [],
+    },
+  )
+
+  (platform / "docs").mkdir()
+  _git(platform, "mv", "Dockerfile", "docs/Dockerfile")
+  _git(platform, "commit", "-q", "-m", "move image input out")
+
+  assert pu.container_replacement_blockers(official, platform) == [
+    "Dockerfile",
+  ]
+
+
+def test_stale_marker_coverage_cannot_excuse_newer_image_input_drift(
+  clone_env, monkeypatch,
+):
+  """A marker recorded content parity at Apply time; a later local commit to
+  the same image input must still block the replacement."""
+  _, platform = clone_env
+  official = _git(platform, "rev-parse", "HEAD").stdout.strip()
+  monkeypatch.setattr(
+    pu,
+    "_protected_runtime_status",
+    lambda _repo: {
+      "state": "current",
+      "source_sha256": "match",
+      "deployed_sha256": "match",
+      "mismatched_paths": [],
+    },
+  )
+  pu.RESTART_NEEDED_FLAG.write_text(json.dumps({
+    "version": 2,
+    "target_sha": official,
+    "upstream_sha": official,
+    "paths": ["Dockerfile"],
+    "image_paths": ["Dockerfile"],
+  }), encoding="utf-8")
+
+  _local_commit(platform, edits={"Dockerfile": "FROM drifted-later\n"})
+  assert pu.container_replacement_blockers(official, platform) == [
+    "Dockerfile",
   ]
 
 

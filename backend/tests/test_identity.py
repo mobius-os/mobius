@@ -374,6 +374,9 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
     },
     headers=granted,
   )
+  adopted = client.post(
+    "/api/identity/railway/deployments/adopt-current", headers=granted,
+  )
   deleted = client.delete(
     "/api/identity/railway/deployments/mob_example", headers=granted,
   )
@@ -386,6 +389,7 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
   assert connect.status_code == 200
   assert connect.json()["authorization_url"].startswith("https://www.mobius.you/")
   assert created.status_code == 202
+  assert adopted.status_code == 202
   assert deleted.status_code == 202
   assert storage.status_code == 200
   assert calls == [
@@ -399,6 +403,11 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
         "memory_mb": None,
         "volume_mb": None,
       },
+    ),
+    (
+      "POST",
+      "https://www.mobius.you/api/account/v1/railway/instances/adopt-current",
+      None,
     ),
     (
       "DELETE",
