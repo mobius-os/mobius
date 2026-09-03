@@ -773,13 +773,29 @@ served_sha() {
     | head -n1 || true
 }
 
-# A single field from /api/version (string OR bool). Used to verify the SERVED
-# /data/platform identity (serving_source / platform_dirty) — distinct from the
-# IMAGE build sha above (`sha`), which they can disagree with. Empty if missing.
+# A scalar field from /api/version. Parse JSON rather than grepping it: nested
+# provenance objects can contain the same words and field ordering is not an
+# API contract. Empty if the route/key is unavailable or not scalar.
+container_version_field() {  # $1 = container, $2 = json key
+  local target="$1" key="$2"
+  docker exec "$target" sh -c "curl -fsS '${INTERNAL_BASE}/api/version' 2>/dev/null" \
+    | python3 -c '
+import json, sys
+try:
+  value = json.load(sys.stdin).get(sys.argv[1])
+except Exception:
+  raise SystemExit(1)
+if value is None or isinstance(value, (dict, list)):
+  raise SystemExit(1)
+if isinstance(value, bool):
+  print("true" if value else "false")
+else:
+  print(value)
+' "$key" 2>/dev/null || true
+}
+
 served_version_field() {  # $1 = json key
-  docker exec "$CONTAINER" sh -c "curl -fsS '${INTERNAL_BASE}/api/version' 2>/dev/null" \
-    | sed -n "s/.*\"$1\":\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" \
-    | head -n1 || true
+  container_version_field "$CONTAINER" "$1"
 }
 
 # The HTTP status of the complete serviceability probe. /api/health is
@@ -789,6 +805,12 @@ served_version_field() {  # $1 = json key
 readiness_code() {
   local target="$1"
   docker exec "$target" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/ready'" 2>/dev/null || echo "000"
+}
+
+health_code() {
+  docker exec "$CONTAINER" sh -c \
+    "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/health'" \
+    2>/dev/null || echo "000"
 }
 
 ready_code() {
@@ -943,6 +965,8 @@ if [ "$CHECK_ONLY" = "1" ]; then
   info "bundle: ${hash:-<none>}"
   sha=$(served_sha)
   info "backend sha: ${sha:-<none>}"
+  runtime_state=$(served_version_field protected_runtime_state)
+  info "protected runtime: ${runtime_state:-<unavailable>}"
   code=$(docker exec "$CONTAINER" sh -c "curl -s -o /dev/null -w '%{http_code}' '${INTERNAL_BASE}/api/health'" 2>/dev/null || echo "000")
   info "internal /api/health: ${code}"
   rcode=$(ready_code)
@@ -1106,10 +1130,10 @@ attempt_rollback() {
 # Wait for a live-container probe to return 200, then roll back + exit if it
 # never does. Consolidates the four formerly-near-identical cutover waits so
 # the window is honest and configurable in ONE place. Args:
-#   $1 probe command (a string eval'd each poll; must echo an HTTP status)
+#   $1 probe function (must echo an HTTP status)
 #   $2 success label   (e.g. "healthy", "serviceable")
 #   $3 failure summary (printed before rollback, names what didn't come up)
-#   $4 optional diagnostic command to run before rollback
+#   $4 optional diagnostic function to run before rollback
 #
 # Two behaviors replace the old `for i in $(seq 1 120); … if [ "$i" = "30" ]`
 # loops, whose 120 bound was dead code: the i==30 trap rolled back at 30s, so
@@ -1129,7 +1153,7 @@ wait_for_cutover() {
   local code="000" baseline_restarts now_restarts i
   baseline_restarts=$(container_restart_count)
   for i in $(seq 1 "$CUTOVER_WAIT_SECONDS"); do
-    code=$(eval "$probe")
+    code=$("$probe")
     if [ "$code" = "200" ]; then
       ok "${ok_label} after ${i}s"
       return 0
@@ -1147,14 +1171,14 @@ wait_for_cutover() {
        [ "$baseline_restarts" -ge 0 ] 2>/dev/null &&
        [ $((now_restarts - baseline_restarts)) -ge "$CRASH_RESTART_THRESHOLD" ]; then
       fail "${fail_summary} (last: ${code}); ${CONTAINER} restarted $((now_restarts - baseline_restarts))× — it is crash-looping, not just slow."
-      [ -z "$diagnostic" ] || eval "$diagnostic"
+      [ -z "$diagnostic" ] || "$diagnostic"
       attempt_rollback || true
       exit 1
     fi
     sleep 1
   done
   fail "${fail_summary} after ${CUTOVER_WAIT_SECONDS}s (last: ${code}) — the new image is not serving."
-  [ -z "$diagnostic" ] || eval "$diagnostic"
+  [ -z "$diagnostic" ] || "$diagnostic"
   attempt_rollback || true
   exit 1
 }
@@ -1445,6 +1469,15 @@ if [ "$BUILT_THIS_RUN" = "1" ] && [ -n "$IMAGE_TAG" ]; then
     docker logs "$PREFLIGHT_CONTAINER" --tail 40 2>&1 | sed 's/^/    /' >&2 || true
     exit 1
   fi
+  _pf_runtime=$(container_version_field "$PREFLIGHT_CONTAINER" protected_runtime_state)
+  if [ "$_pf_runtime" != "current" ]; then
+    fail "preflight: protected runtime parity is '${_pf_runtime:-unavailable}', not current."
+    fail "the image does not contain the same protected bytes as its served platform source."
+    fail "the LIVE ${CONTAINER} was NOT touched. Last 40 log lines:"
+    docker logs "$PREFLIGHT_CONTAINER" --tail 40 2>&1 | sed 's/^/    /' >&2 || true
+    exit 1
+  fi
+  ok "preflight protected runtime: current"
   _cleanup_preflight
   ok "preflight passed — the new image is serviceable; cutting over"
 elif [ "$SKIP_BUILD" = "1" ]; then
@@ -1495,7 +1528,7 @@ else
 fi
 info "waiting up to ${CUTOVER_WAIT_SECONDS}s for ${INTERNAL_BASE}/api/health"
 wait_for_cutover \
-  "docker exec \"\$CONTAINER\" sh -c \"curl -s -o /dev/null -w '%{http_code}' '\${INTERNAL_BASE}/api/health'\" 2>/dev/null || echo 000" \
+  "health_code" \
   "healthy" \
   "health check never returned 200"
 
@@ -1585,6 +1618,18 @@ else
   # --skip-build: we didn't build, so don't compare against BUILD_SHA — just
   # report what's serving.
   info "backend sha: ${served:-<none>} (no build this run; not compared)"
+fi
+
+# BUILD_SHA proves image identity; this proves the protected root-started
+# modules in that image match the source generation the backend reports.
+protected_runtime_state=$(served_version_field protected_runtime_state)
+if [ "$protected_runtime_state" = "current" ]; then
+  ok "protected runtime: current"
+else
+  fail "protected runtime is '${protected_runtime_state:-unavailable}' after cutover."
+  fail "The container is serviceable, but protected broker bytes do not match the served platform source."
+  fail "Do not report this deployment complete; investigate image/source provenance."
+  exit 1
 fi
 
 # ── served PLATFORM ancestry assertion (prod only) ─────────────────────
