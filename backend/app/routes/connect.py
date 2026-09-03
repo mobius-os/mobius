@@ -137,11 +137,25 @@ def _new_id() -> str:
   return "h_" + secrets.token_hex(8)
 
 
+# Human-friendly, unambiguous alphabet (no 0/O/1/I), grouped for readability.
+_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
 def _new_code() -> str:
-  # Human-friendly, unambiguous alphabet (no 0/O/1/I), grouped for readability.
-  alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-  raw = "".join(secrets.choice(alphabet) for _ in range(8))
+  raw = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(8))
   return f"{raw[:4]}-{raw[4:]}"
+
+
+def _normalize_code(raw: str) -> str | None:
+  """Return the canonical XXXX-XXXX code, or None if it is not well-formed.
+
+  The result only ever contains characters from `_CODE_ALPHABET` and a single
+  hyphen, so it is safe to interpolate into the install shell script below.
+  """
+  body = (raw or "").strip().upper().replace("-", "")
+  if len(body) != 8 or any(ch not in _CODE_ALPHABET for ch in body):
+    return None
+  return f"{body[:4]}-{body[4:]}"
 
 
 def _hash(token: str) -> str:
@@ -491,12 +505,11 @@ def _base_url() -> str:
 
 
 def _install_command(base: str, code: str) -> str:
-  # --install sets up a service that survives reboot; drop it to run in the
-  # foreground for a quick try.
-  return (
-    f'curl -fsSL "{base}/api/connect/runner" | python3 - '
-    f'--pair {code} --url "{base}" --install'
-  )
+  # One fetch with the code + instance URL baked into the path. No pipe-into-
+  # python arguments and no quotes, so nothing gets corrupted when the command
+  # is copied and pasted into a terminal. The served script pairs and installs
+  # a service that survives reboot (see `install_script`).
+  return f"curl -fsSL {base}/api/connect/i/{code} | sh"
 
 
 def _update_command(base: str) -> str:
@@ -1110,3 +1123,36 @@ async def runner_script() -> PlainTextResponse:
   return PlainTextResponse(
     _RUNNER_PATH.read_text("utf-8"), media_type="text/x-python",
   )
+
+
+# A POSIX shell bootstrap with the pairing code + instance URL baked in. It
+# fetches the Python runner and hands it the same flags the pipe form uses, so
+# the single-line install command carries no arguments or quotes of its own.
+_INSTALL_SCRIPT_TEMPLATE = """\
+#!/bin/sh
+# Mobius Connect installer -- pairs this machine and installs the background
+# runner. It only makes outbound HTTPS requests and runs commands as you.
+set -eu
+base="{base}"
+code="{code}"
+runner="$(mktemp)"
+trap 'rm -f "$runner"' EXIT INT TERM
+curl -fsSL "$base/api/connect/runner" -o "$runner"
+python3 "$runner" --pair "$code" --url "$base" --install
+"""
+
+
+@router.get("/i/{code}")
+async def install_script(code: str) -> PlainTextResponse:
+  """Serve the single-line install bootstrap: `curl .../i/<code> | sh`.
+
+  Collapsing the fetch, pipe, and flags into one URL removes the quotes and
+  arguments that get mangled when the command is copied and pasted. The code is
+  normalized to its shell-safe canonical form before it is interpolated; an
+  unredeemed or expired code still fails clearly at the runner's pairing step.
+  """
+  normalized = _normalize_code(code)
+  if normalized is None:
+    raise HTTPException(status_code=404, detail="Unknown pairing code.")
+  script = _INSTALL_SCRIPT_TEMPLATE.format(base=_base_url(), code=normalized)
+  return PlainTextResponse(script, media_type="text/x-shellscript")

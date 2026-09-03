@@ -66,6 +66,39 @@ def _paired_host(client, auth, name="Workstation"):
   return pairing, paired.json()["token"]
 
 
+def test_install_command_is_single_fetch_and_serves_shell_bootstrap(client, auth):
+  created = client.post(
+    "/api/connect/hosts", headers=auth, json={"name": "Laptop"},
+  )
+  assert created.status_code == 200, created.text
+  pairing = created.json()
+  code = pairing["pairing_code"]
+
+  # The copyable command is one fetch with the code in the path -- no pipe-into-
+  # python arguments and no quotes to be corrupted when it is pasted.
+  command = pairing["install_command"]
+  assert command.startswith("curl -fsSL ")
+  assert command.endswith(f"/api/connect/i/{code} | sh")
+  assert '"' not in command
+
+  script = client.get(f"/api/connect/i/{code}")
+  assert script.status_code == 200, script.text
+  body = script.text
+  assert body.startswith("#!/bin/sh")
+  # The bootstrap fetches the runner and hands it the same flags the pipe form
+  # used, so a machine ends up paired and installed as a service.
+  assert "/api/connect/runner" in body
+  assert f'code="{code}"' in body
+  assert "--pair" in body and "--install" in body
+
+  # A malformed code never reaches the shell template.
+  assert client.get("/api/connect/i/nope").status_code == 404
+  # A lowercased/ungrouped code is normalized back to canonical form.
+  loose = client.get(f"/api/connect/i/{code.replace('-', '').lower()}")
+  assert loose.status_code == 200, loose.text
+  assert f'code="{code}"' in loose.text
+
+
 def test_pairing_code_exchange_is_rate_limited(client):
   for _ in range(10):
     response = client.post("/api/connect/pair", json={"code": "AAAA-AAAA"})
