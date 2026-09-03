@@ -1648,6 +1648,75 @@ def test_stale_marker_coverage_cannot_excuse_newer_image_input_drift(
   ]
 
 
+def test_marker_coverage_survives_newer_descendant_official_image(
+  clone_env, monkeypatch,
+):
+  """An official image path applied from one release is not local drift merely
+  because a newer descendant release advances that same path."""
+  origin, platform = clone_env
+  applied = _advance_origin(
+    origin, edits={"Dockerfile": "FROM official-applied\n"}, msg="applied image",
+  )
+  _git(platform, "fetch", "origin")
+  _git(platform, "merge", "--ff-only", applied)
+  pu._write_activation_marker(
+    applied,
+    ["Dockerfile"],
+    upstream_sha=applied,
+    image_paths=["Dockerfile"],
+  )
+  target = _advance_origin(
+    origin, edits={"Dockerfile": "FROM official-newer\n"}, msg="newer image",
+  )
+  _git(platform, "fetch", "origin")
+  monkeypatch.setattr(
+    pu,
+    "_protected_runtime_status",
+    lambda _repo: {
+      "state": "current",
+      "source_sha256": "match",
+      "deployed_sha256": "match",
+      "mismatched_paths": [],
+    },
+  )
+
+  assert pu.container_replacement_blockers(
+    target, platform, local_change_base=applied,
+  ) == []
+
+  _local_commit(platform, edits={"Dockerfile": "FROM local-only\n"})
+  assert pu.container_replacement_blockers(
+    target, platform, local_change_base=applied,
+  ) == ["Dockerfile"]
+
+
+def test_unverifiable_runtime_overrides_descendant_marker_coverage(
+  clone_env, monkeypatch,
+):
+  _, platform = clone_env
+  applied = _git(platform, "rev-parse", "HEAD").stdout.strip()
+  pu._write_activation_marker(
+    applied,
+    ["backend/runtime"],
+    upstream_sha=applied,
+    image_paths=["backend/runtime"],
+  )
+  monkeypatch.setattr(
+    pu,
+    "_protected_runtime_status",
+    lambda _repo: {
+      "state": "unavailable",
+      "source_sha256": None,
+      "deployed_sha256": None,
+      "mismatched_paths": [],
+    },
+  )
+
+  assert pu.container_replacement_blockers(applied, platform) == [
+    "backend/runtime",
+  ]
+
+
 def test_legacy_activation_marker_cannot_claim_official_image_coverage(
   tmp_path, monkeypatch,
 ):

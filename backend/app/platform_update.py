@@ -1071,13 +1071,28 @@ def container_replacement_blockers(
       image_pending.append(path)
 
   # Actual content parity with the target is authoritative whenever both
-  # revisions are known; a marker's recorded coverage must not excuse a path
-  # that drifted after the marker was written.  Without a verifiable head the
-  # marker's own upstream coverage remains the fallback.
+  # revisions are known. A newer official image may legitimately advance a
+  # marker-covered path, though, so preserve that coverage when the current
+  # local bytes still match the marker's official upstream and the replacement
+  # target descends from it. This distinguishes incoming official changes from
+  # real local drift without letting stale marker coverage excuse either an
+  # unrelated release or unverifiable runtime bytes.
   if expected_sha and head:
-    covered = set(_paths_matching_upstream(
+    exact_target_coverage = set(_paths_matching_upstream(
       repo, head, expected_sha, image_pending,
-    )) - unverifiable
+    ))
+    marker_upstream = marker["upstream_sha"] if marker else None
+    carried_marker_coverage: set[str] = set()
+    if marker_upstream and _is_ancestor(repo, marker_upstream, expected_sha):
+      carried_marker_coverage.update(_paths_matching_upstream(
+        repo,
+        head,
+        marker_upstream,
+        [path for path in image_pending if path in covered],
+      ))
+    covered = (
+      exact_target_coverage | carried_marker_coverage
+    ) - unverifiable
   return sorted(path for path in image_pending if path not in covered)
 
 
