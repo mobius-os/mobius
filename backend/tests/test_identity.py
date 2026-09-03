@@ -1,12 +1,155 @@
 """Identity app authorization and local-account behavior."""
 
 import httpx
+import pytest
 
 from urllib.parse import parse_qs, urlparse
 
 from app import models
 from app.database import SessionLocal
 from test_app_fixtures import create_local_app
+
+
+@pytest.mark.asyncio
+async def test_linked_instance_resolves_another_accounts_handle(db, monkeypatch):
+  from app.routes import identity
+
+  owner = models.Owner(username="owner", hashed_password="test")
+  db.add(owner)
+  db.flush()
+  db.add(models.IdentityAccountLink(
+    owner_id=owner.id,
+    access_token_encrypted=identity._seal("linked-account-token-" + "x" * 32),
+    scopes_json=["identity:read"],
+  ))
+  db.commit()
+  request_seen = {}
+
+  class Client:
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def get(self, url, *, headers):
+      request_seen.update(url=url, headers=headers)
+      request = httpx.Request("GET", url)
+      return httpx.Response(
+        200,
+        json={"handle": "collaborator", "hosts": ["collaborator.example"]},
+        request=request,
+      )
+
+  monkeypatch.setattr(identity.httpx, "AsyncClient", lambda **_kwargs: Client())
+
+  hosts = await identity.resolve_handle_hosts(db, owner.id, "@Collaborator")
+
+  assert hosts == ["collaborator.example"]
+  assert request_seen["url"].endswith("/api/account/v1/identity/handles/collaborator")
+  assert request_seen["headers"]["Authorization"].startswith("Bearer ")
+
+
+@pytest.mark.asyncio
+async def test_handle_resolution_falls_back_until_account_route_is_deployed(db, monkeypatch):
+  from app.routes import identity
+
+  owner = models.Owner(username="owner", hashed_password="test")
+  db.add(owner)
+  db.flush()
+  db.add(models.IdentityAccountLink(
+    owner_id=owner.id,
+    access_token_encrypted=identity._seal("linked-account-token-" + "x" * 32),
+    scopes_json=["identity:read"],
+  ))
+  db.commit()
+
+  class Client:
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def get(self, url, *, headers):
+      return httpx.Response(
+        404,
+        text="<!doctype html><title>Not Found</title>",
+        request=httpx.Request("GET", url),
+      )
+
+  monkeypatch.setattr(identity.httpx, "AsyncClient", lambda **_kwargs: Client())
+
+  assert await identity.resolve_handle_hosts(db, owner.id, "collaborator") is None
+
+
+@pytest.mark.asyncio
+async def test_handle_resolution_preserves_explicit_missing_handle(db, monkeypatch):
+  from app.routes import identity
+
+  owner = models.Owner(username="owner", hashed_password="test")
+  db.add(owner)
+  db.flush()
+  db.add(models.IdentityAccountLink(
+    owner_id=owner.id,
+    access_token_encrypted=identity._seal("linked-account-token-" + "x" * 32),
+    scopes_json=["identity:read"],
+  ))
+  db.commit()
+
+  class Client:
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def get(self, url, *, headers):
+      return httpx.Response(
+        404,
+        json={"detail": "No one has claimed that mobius.you handle."},
+        request=httpx.Request("GET", url),
+      )
+
+  monkeypatch.setattr(identity.httpx, "AsyncClient", lambda **_kwargs: Client())
+
+  with pytest.raises(identity.HTTPException) as exc:
+    await identity.resolve_handle_hosts(db, owner.id, "collaborator")
+  assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_handle_resolution_rejects_invalid_success_payload(db, monkeypatch):
+  from app.routes import identity
+
+  owner = models.Owner(username="owner", hashed_password="test")
+  db.add(owner)
+  db.flush()
+  db.add(models.IdentityAccountLink(
+    owner_id=owner.id,
+    access_token_encrypted=identity._seal("linked-account-token-" + "x" * 32),
+    scopes_json=["identity:read"],
+  ))
+  db.commit()
+
+  class Client:
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def get(self, url, *, headers):
+      return httpx.Response(
+        200, json=["not", "a", "handle", "result"],
+        request=httpx.Request("GET", url),
+      )
+
+  monkeypatch.setattr(identity.httpx, "AsyncClient", lambda **_kwargs: Client())
+
+  with pytest.raises(identity.HTTPException) as exc:
+    await identity.resolve_handle_hosts(db, owner.id, "collaborator")
+  assert exc.value.status_code == 502
 
 
 def _app_auth(client, auth, *, granted: bool, railway_granted: bool = False):

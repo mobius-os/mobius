@@ -14,7 +14,7 @@ import hmac
 import re
 import secrets
 from datetime import timedelta
-from urllib.parse import urlencode, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
@@ -55,6 +55,7 @@ _LINK_SCOPE = " ".join(sorted(_LINK_SCOPES))
 _LINK_TTL = timedelta(minutes=10)
 _AVATAR_MAX_BYTES = 5 * 1024 * 1024
 _AVATAR_TYPES = {"image/jpeg", "image/png", "image/webp"}
+_HANDLE_RE = re.compile(r"^[a-z0-9_]{3,30}$")
 
 
 class ProfilePatch(BaseModel):
@@ -342,6 +343,91 @@ async def resolve_owner_profile(db: Session, owner: models.Owner) -> dict | None
     return None
   profile = linked.get("profile")
   return profile if isinstance(profile, dict) else None
+
+
+async def resolve_handle_hosts(
+  db: Session, owner_id: int, handle: str,
+) -> list[str] | None:
+  """Resolve one mobius.you handle for a linked instance.
+
+  ``None`` means this deployment has no mobius.you credential and callers may
+  fall back to another directory. An empty list is a valid account record with
+  no routable deployment; a missing handle remains a 404.
+  """
+  normalized = str(handle or "").strip().lower().lstrip("@")
+  if not _HANDLE_RE.fullmatch(normalized):
+    raise HTTPException(400, "That handle is not valid.")
+
+  settings = get_settings()
+  link = None
+  if settings.mobius_sso_enabled:
+    url = (
+      settings.mobius_sso_issuer
+      + _REMOTE_PATH
+      + "/handles/"
+      + quote(normalized, safe="")
+    )
+    headers = _remote_headers()
+  else:
+    link = _linked_row(db, owner_id)
+    if link is None:
+      return None
+    try:
+      token = _open(link.access_token_encrypted)
+    except HTTPException:
+      db.delete(link)
+      db.commit()
+      return None
+    url = (
+      settings.mobius_account_origin
+      + _ACCOUNT_PATH
+      + "/handles/"
+      + quote(normalized, safe="")
+    )
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+  try:
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
+      response = await client.get(url, headers=headers)
+  except httpx.HTTPError as exc:
+    raise HTTPException(502, "The Möbius account service could not be reached.") from exc
+  if response.status_code == 401 and link is not None:
+    db.delete(link)
+    db.commit()
+    return None
+  if response.status_code == 404:
+    try:
+      detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+      # The account host may not have rolled out the resolver route yet. Keep
+      # the existing Common directory available during that external rollout;
+      # the new route's explicit 404 below remains authoritative once present.
+      return None
+    if detail != "No one has claimed that mobius.you handle.":
+      return None
+    raise HTTPException(404, detail)
+  if response.status_code != 200:
+    detail = "The Möbius account service could not resolve that handle."
+    try:
+      detail = response.json().get("detail") or detail
+    except (ValueError, AttributeError):
+      pass
+    status = response.status_code if response.status_code in (400, 409) else 502
+    raise HTTPException(status, detail)
+  try:
+    payload = response.json()
+  except ValueError as exc:
+    raise HTTPException(502, "The Möbius account service returned an invalid response.") from exc
+  hosts = payload.get("hosts") if isinstance(payload, dict) else None
+  if (
+    not isinstance(payload, dict)
+    or payload.get("handle") != normalized
+    or not isinstance(hosts, list)
+    or len(hosts) > 100
+    or not all(isinstance(host, str) and len(host) <= 253 for host in hosts)
+  ):
+    raise HTTPException(502, "The Möbius account service returned an invalid handle result.")
+  return hosts
 
 
 def _linked_since(db: Session, owner_id: int) -> str | None:
