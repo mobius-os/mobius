@@ -19,6 +19,7 @@ import {
 } from '../../lib/standaloneBoot.js'
 import { readableAppDiagnostic } from '../../lib/appDiagnostic.js'
 import { makeAppChatController } from '../../lib/appChatControl.js'
+import { handleAppProjectsRequest } from '../../lib/appProjectControl.js'
 import {
   MAX_STANDALONE_HISTORY_ENTRIES,
   readStandaloneHistoryEntries,
@@ -203,6 +204,19 @@ export default function StandaloneApp({ initialApp }) {
       if (request.type === 'moebius:chat-control') {
         return appChatControllerRef.current(initialApp.id, request)
       }
+      if (request.type === 'moebius:projects') {
+        return handleAppProjectsRequest({
+          app: initialApp,
+          client: api.projects,
+          readJson: jsonOrThrow,
+          browseProjects: () => {
+            window.location.href = shellUrl({ projects: 1 })
+          },
+          openProject: project => {
+            window.location.href = shellUrl({ project: project.id })
+          },
+        }, request)
+      }
       if (request.type === 'moebius:open-app') {
         window.location.href = shellUrl({ app: request.appId, intent: request.intent })
         return
@@ -235,7 +249,7 @@ export default function StandaloneApp({ initialApp }) {
       null,
     ))
     return undefined
-  }, [captureCrash, initialApp.id])
+  }, [captureCrash, initialApp])
 
   const refreshCrash = useCallback(() => {
     if (!crash || repairControllerRef.current) return

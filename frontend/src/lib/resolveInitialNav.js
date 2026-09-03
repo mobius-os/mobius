@@ -71,7 +71,7 @@ export function resolveInitialNav({
   // and the seed would resolve to the chat you're already on — a dead Back press
   // that just delays the PWA exit. Backing out of a root chat exits the PWA,
   // which is the standard, pre-existing behavior.
-  const seedHome = dest.view === 'canvas' || dest.view === 'settings'
+  const seedHome = ['canvas', 'settings', 'projects', 'project'].includes(dest.view)
 
   return {
     view: dest.view,

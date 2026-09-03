@@ -34,3 +34,15 @@ test('standalone navigation delegates chat ownership and shares crash recovery',
   assert.match(standalone, /<RecoveryPanel/)
   assert.match(boundary, /<RecoveryPanel/)
 })
+
+test('workspace and standalone hosts share the Projects controller and response bridge', () => {
+  const shell = read('src/components/Shell/Shell.jsx')
+  const standalone = read('src/components/StandaloneApp/StandaloneApp.jsx')
+  const canvas = read('src/components/AppCanvas/AppCanvas.jsx')
+  const runtime = read('src/runtime/index.js')
+
+  assert.match(shell, /handleAppProjectsRequest\(\{/)
+  assert.match(standalone, /handleAppProjectsRequest\(\{/)
+  assert.match(canvas, /'moebius:projects-result'/)
+  assert.match(runtime, /projects: makeProjects\(\)|const projects = makeProjects\(\)/)
+})

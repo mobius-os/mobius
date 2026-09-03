@@ -32,12 +32,16 @@ export function parseShellDeepLink(location = globalThis.location) {
       const params = new URLSearchParams(location?.search || '')
       const app = params.get('app')
       const chat = params.get('chat')
+      const project = params.get('project')
+      const projects = params.get('projects')
       const intent = params.get('intent')
       if (app) {
         const appId = /^\d+$/.test(app) ? Number.parseInt(app, 10) : null
         return { view: 'canvas', app, appId, intent }
       }
       if (chat) return { view: 'chat', chatId: chat, intent }
+      if (project) return { view: 'project', projectId: project }
+      if (projects === '1') return { view: 'projects' }
     } catch { /* malformed query is an ordinary empty destination */ }
     return null
   }

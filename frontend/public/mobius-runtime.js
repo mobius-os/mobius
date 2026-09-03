@@ -3935,6 +3935,75 @@ function makeClipboard() {
 }
 
 //#endregion
+//#region src/runtime/projects.js
+const REQUEST_TIMEOUT_MS = 15e3;
+function cleanText(value, maximum = 256) {
+	return typeof value === "string" ? value.trim().slice(0, maximum) : "";
+}
+/** Host-mediated Projects access for opaque mini-app frames.
+*
+* The shell attributes every request to the exact AppCanvas window and only
+* exposes projects created from that app's own installed templates. Apps never
+* receive the owner's bearer token or arbitrary project filesystem access.
+*/
+function makeProjects() {
+	let sequence = 0;
+	const pending = /* @__PURE__ */ new Map();
+	function onMessage(event) {
+		if (event.origin !== window.location.origin || event.source !== window.parent) return;
+		const message = event.data;
+		if (!message || message.type !== "moebius:projects-result") return;
+		const request = pending.get(message.requestId);
+		if (!request) return;
+		pending.delete(message.requestId);
+		clearTimeout(request.timeout);
+		if (message.ok === true) request.resolve(message.result);
+		else request.reject(new Error(cleanText(message.error, 500) || "Projects request failed."));
+	}
+	window.addEventListener("message", onMessage);
+	function request(action, payload = {}) {
+		const requestId = `projects:${Date.now().toString(36)}:${(++sequence).toString(36)}`;
+		return new Promise((resolve, reject) => {
+			const timeout = setTimeout(() => {
+				pending.delete(requestId);
+				reject(/* @__PURE__ */ new Error("Möbius did not answer the Projects request."));
+			}, REQUEST_TIMEOUT_MS);
+			pending.set(requestId, {
+				resolve,
+				reject,
+				timeout
+			});
+			window.parent.postMessage({
+				type: "moebius:projects",
+				requestId,
+				action,
+				projectId: cleanText(payload.projectId, 128),
+				templateId: cleanText(payload.templateId, 128),
+				name: cleanText(payload.name)
+			}, window.location.origin);
+		});
+	}
+	return {
+		list: () => request("list"),
+		migrate: () => request("migrate"),
+		create: ({ templateId, name } = {}) => request("create", {
+			templateId,
+			name
+		}),
+		open: (projectId) => request("open", { projectId }),
+		browse: () => request("browse"),
+		_destroy() {
+			window.removeEventListener("message", onMessage);
+			for (const value of pending.values()) {
+				clearTimeout(value.timeout);
+				value.reject(/* @__PURE__ */ new Error("Projects runtime was replaced."));
+			}
+			pending.clear();
+		}
+	};
+}
+
+//#endregion
 //#region src/runtime/index.js
 let _online = typeof navigator !== "undefined" ? navigator.onLine : true;
 const _onlineListeners = /* @__PURE__ */ new Set();
@@ -3956,7 +4025,10 @@ if (typeof window !== "undefined") {
 	window.addEventListener("offline", () => _setOnline(false));
 }
 let _runtimeContext = null;
-const runtimeFeatures = Object.freeze({ idleDocument: true });
+const runtimeFeatures = Object.freeze({
+	idleDocument: true,
+	projects: true
+});
 function init({ appId, appInstanceId = null, getToken, capabilityContract = null }) {
 	const identityKey = `${String(appId)}:${appInstanceId || "legacy"}`;
 	if (_runtimeContext && _runtimeContext.identityKey === identityKey) {
@@ -3968,6 +4040,7 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 		_runtimeContext.signal?._destroy?.();
 		_runtimeContext.storage?._destroy?.();
 		_runtimeContext.capabilities?._destroy?.();
+		_runtimeContext.projects?._destroy?.();
 		_runtimeContext.chat?._destroy?.();
 	}
 	const tokenRef = { current: getToken };
@@ -3983,6 +4056,7 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 	});
 	const signal = makeSignal(appId, storage, appInstanceId);
 	const capabilities = makeCapabilities({ declarations: capabilityContract?.runtime || {} });
+	const projects = makeProjects();
 	const chat = makeChat({
 		appId,
 		getToken: scopedToken,
@@ -4015,7 +4089,8 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 		nav: makeNav(),
 		split: makeSplit(),
 		immersive: makeImmersive({ appId }),
-		clipboard: makeClipboard()
+		clipboard: makeClipboard(),
+		projects
 	};
 	window.mobius = api;
 	_runtimeContext = {
@@ -4024,6 +4099,7 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 		storage,
 		signal,
 		capabilities,
+		projects,
 		chat,
 		api
 	};
@@ -4036,4 +4112,4 @@ function init({ appId, appInstanceId = null, getToken, capabilityContract = null
 }
 
 //#endregion
-export { CapabilityError, DurableWriteError, appChatMetadataBody, createUseDocument, init, makeCapabilities, makeChat, makeEmbedAuthorizationHandoff, makeEmbedFrameReveal, makeImmersive, makeNav, makeSignal, makeSplit, makeStorage, overlayPending, purgeAppRuntimeData, runtimeFeatures, sanitizeEmbedGuidance };
+export { CapabilityError, DurableWriteError, appChatMetadataBody, createUseDocument, init, makeCapabilities, makeChat, makeEmbedAuthorizationHandoff, makeEmbedFrameReveal, makeImmersive, makeNav, makeProjects, makeSignal, makeSplit, makeStorage, overlayPending, purgeAppRuntimeData, runtimeFeatures, sanitizeEmbedGuidance };
