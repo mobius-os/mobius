@@ -19,6 +19,26 @@ import subprocess
 import sys
 from typing import Any, Callable
 
+from pydantic import BaseModel, ConfigDict, Field
+
+
+_MOBIUS_CONTROL_ENV_VARS = (
+  "API_BASE_URL",
+  "AGENT_TOKEN",
+  "CHAT_ID",
+  "MOBIUS_RUN_TOKEN",
+)
+_CODEX_MCP_FEATURE_OVERRIDES = (
+  "features.apps=false",
+  "features.enable_mcp_apps=false",
+  "features.plugins=false",
+  "features.remote_plugin=false",
+  "features.skill_mcp_dependency_install=false",
+)
+_MAX_CODEX_MCP_SERVERS = 256
+_MAX_CODEX_MCP_NAME_CHARS = 256
+_MAX_CODEX_MCP_INVENTORY_CHARS = 1_000_000
+
 
 class ForkError(RuntimeError):
   """Raised when an exact provider-session fork cannot be completed."""
@@ -32,6 +52,168 @@ class ForkResult:
   answer: str
   method: str = "session_fork"
   exact_session_fork: bool = True
+
+
+class _CodexMcpSurface(BaseModel):
+  """Only the effective MCP surface needed for the coaching deny check."""
+
+  model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+  name: str
+  tools: dict[str, Any] = Field(default_factory=dict)
+  resources: list[Any] = Field(default_factory=list)
+  resource_templates: list[Any] = Field(
+    default_factory=list, alias="resourceTemplates",
+  )
+
+
+class _CodexMcpSurfacePage(BaseModel):
+  model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+  data: list[_CodexMcpSurface]
+  next_cursor: str | None = Field(default=None, alias="nextCursor")
+
+
+def _coaching_env() -> dict[str, str]:
+  """Keep provider auth while removing Möbius run-control authority."""
+  env = os.environ.copy()
+  for name in _MOBIUS_CONTROL_ENV_VARS:
+    env.pop(name, None)
+  return env
+
+
+def _codex_mcp_isolation_overrides(
+  cwd: str,
+  env: dict[str, str],
+  *,
+  runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> tuple[str, ...]:
+  """Disable every effective Codex MCP source before app-server starts.
+
+  Codex config overlays merge maps, so an empty ``mcp_servers`` table does not
+  clear user or project servers. Inventory their names without starting them,
+  then override each entry's ``enabled`` field in one higher-precedence map.
+  Plugin/app MCP sources are disabled separately because they need not appear
+  in ``codex mcp list``.
+  """
+  try:
+    proc = runner(
+      ["codex", "mcp", "list", "--json"],
+      cwd=cwd,
+      env=env,
+      text=True,
+      capture_output=True,
+      timeout=15,
+    )
+  except (OSError, subprocess.TimeoutExpired) as exc:
+    raise ForkError(
+      "Codex MCP inventory failed; refusing an unisolated coaching fork"
+    ) from exc
+  if proc.returncode:
+    raise ForkError(
+      "Codex MCP inventory failed; refusing an unisolated coaching fork"
+    )
+  stdout = proc.stdout or ""
+  if len(stdout) > _MAX_CODEX_MCP_INVENTORY_CHARS:
+    raise ForkError(
+      "Codex MCP inventory was unexpectedly large; refusing coaching"
+    )
+  try:
+    payload = json.loads(stdout)
+  except (TypeError, ValueError) as exc:
+    raise ForkError(
+      "Codex MCP inventory was malformed; refusing an unisolated coaching fork"
+    ) from exc
+  if not isinstance(payload, list):
+    raise ForkError(
+      "Codex MCP inventory had an unexpected shape; refusing coaching"
+    )
+
+  names: set[str] = set()
+  for item in payload:
+    if not isinstance(item, dict):
+      raise ForkError(
+        "Codex MCP inventory had an unexpected entry; refusing coaching"
+      )
+    name = item.get("name")
+    if (
+      not isinstance(name, str)
+      or not name
+      or len(name) > _MAX_CODEX_MCP_NAME_CHARS
+    ):
+      raise ForkError(
+        "Codex MCP inventory had an invalid server name; refusing coaching"
+      )
+    names.add(name)
+  if len(names) > _MAX_CODEX_MCP_SERVERS:
+    raise ForkError(
+      "Codex MCP inventory had too many servers; refusing coaching"
+    )
+
+  overrides = list(_CODEX_MCP_FEATURE_OVERRIDES)
+  if names:
+    disabled = ",".join(
+      f"{json.dumps(name, ensure_ascii=True)}={{enabled=false}}"
+      for name in sorted(names)
+    )
+    overrides.append(f"mcp_servers={{{disabled}}}")
+  return tuple(overrides)
+
+
+async def _assert_codex_mcp_isolated(codex: Any, thread_id: str) -> None:
+  """Fail before the prompt if any MCP tool or resource survived config."""
+  if not thread_id:
+    raise ForkError(
+      "Codex MCP isolation could not be verified; refusing coaching"
+    )
+  client = getattr(codex, "_client", None)
+  request = getattr(client, "request", None)
+  if not callable(request):
+    raise ForkError(
+      "Codex MCP isolation could not be verified; refusing coaching"
+    )
+
+  cursor = None
+  seen_cursors: set[str] = set()
+  server_count = 0
+  while True:
+    params: dict[str, Any] = {
+      "threadId": thread_id,
+      "detail": "full",
+      "limit": 100,
+    }
+    if cursor is not None:
+      params["cursor"] = cursor
+    try:
+      page = await request(
+        "mcpServerStatus/list",
+        params,
+        response_model=_CodexMcpSurfacePage,
+      )
+    except Exception as exc:
+      raise ForkError(
+        "Codex MCP isolation could not be verified; refusing coaching"
+      ) from exc
+    if any(
+      server.tools or server.resources or server.resource_templates
+      for server in page.data
+    ):
+      raise ForkError(
+        "Codex coaching fork exposed an MCP capability; refusing coaching"
+      )
+    server_count += len(page.data)
+    if server_count > _MAX_CODEX_MCP_SERVERS:
+      raise ForkError(
+        "Codex MCP isolation returned too many servers; refusing coaching"
+      )
+    cursor = page.next_cursor
+    if cursor is None:
+      return
+    if cursor in seen_cursors:
+      raise ForkError(
+        "Codex MCP isolation pagination repeated; refusing coaching"
+      )
+    seen_cursors.add(cursor)
 
 
 def _validated_result(
@@ -60,7 +242,7 @@ def _fork_claude(
   *,
   runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> ForkResult:
-  env = os.environ.copy()
+  env = _coaching_env()
   env.setdefault("CLAUDE_CONFIG_DIR", "/data/cli-auth/claude")
   proc = runner(
     [
@@ -73,6 +255,7 @@ def _fork_claude(
       "--output-format",
       "json",
       "--restricted",
+      "--strict-mcp-config",
       "--tools",
       "",
     ],
@@ -125,26 +308,36 @@ async def _fork_codex_async(
   prompt: str,
   *,
   sdk_loader: Callable[[], tuple[Any, Any, Any, Any]] | None = None,
+  mcp_inventory_runner: Callable[
+    ..., subprocess.CompletedProcess[str]
+  ] = subprocess.run,
 ) -> ForkResult:
   if sdk_loader is None:
     AsyncCodex, CodexConfig, ApprovalMode, Sandbox = _load_codex_sdk()
   else:
     AsyncCodex, CodexConfig, ApprovalMode, Sandbox = sdk_loader()
 
-  env = os.environ.copy()
+  env = _coaching_env()
   env.setdefault("CODEX_HOME", "/data/cli-auth/codex")
   codex_home = Path(env["CODEX_HOME"]).resolve()
   try:
     data_dir = codex_home.parents[1]
   except IndexError as exc:
     raise ForkError("Codex home cannot resolve its storage owner") from exc
+  config_overrides = _codex_mcp_isolation_overrides(
+    cwd,
+    env,
+    runner=mcp_inventory_runner,
+  )
   config = CodexConfig(
     cwd=cwd,
     env=env,
+    config_overrides=config_overrides,
     client_name="mobius_agent_coaching",
     client_title="Möbius Agent Coaching",
   )
   from app.codex_session_lock import acquire_codex_session_activity_async
+
   ownership = await acquire_codex_session_activity_async(data_dir)
   try:
     async with AsyncCodex(config) as codex:
@@ -154,6 +347,7 @@ async def _fork_codex_async(
         cwd=cwd,
         sandbox=Sandbox.read_only,
       )
+      await _assert_codex_mcp_isolated(codex, str(thread.id or ""))
       result = await thread.run(
         prompt,
         approval_mode=ApprovalMode.deny_all,
