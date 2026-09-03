@@ -4,6 +4,7 @@ import initXnRuntime, {
   free_allocated_model_weights as freeAllocatedModelWeights,
   model_from_allocated_weights as modelFromAllocatedWeights,
 } from './pocketTtsXnRuntime.js'
+import { completePostEosFrames } from './pocketTtsGenerationPolicy.js'
 
 // XN's Q8 Pocket TTS runtime, isolated in a dedicated worker. The XN runtime is
 // bundled into this script at build time and its Wasm binary is fetched from
@@ -229,7 +230,17 @@ async function generate(text, requestId) {
   generation.claim(requestId)
   let steps = 0
   try {
-    const [processedText, framesAfterEos] = model.prepare_text(text)
+    const [processedText, rawFramesAfterEos] = model.prepare_text(text)
+    // prepare_text returns Kyutai's default post-EOS tail: 1 frame (80 ms) for
+    // >4-word blocks (3 for shorter). Measured against the Alba voice, that 80 ms
+    // clips the final phoneme mid-decay — a long block's audio ended at full
+    // ~0.017 RMS instead of reaching silence, i.e. "eats the end of each block".
+    // A downstream boundary trimmer dropped 0 ms because the raw audio remained
+    // audible to the very end, confirming generation itself was short. Render the
+    // decay so the phoneme completes. Consumers that need tighter timing may trim
+    // the resulting quiet tail at their own playback boundary.
+    // 1 frame = 80 ms at the 12.5 Hz mimi frame rate; 6 frames ≈ 480 ms.
+    const framesAfterEos = completePostEosFrames(rawFramesAfterEos)
     const tokens = tokenizer.encode(processedText)
     model.start_generation(voiceIndex, tokens, framesAfterEos, generationTemperature)
     // Reference guardrail (pocket_tts tts_model.py): a generation should last at

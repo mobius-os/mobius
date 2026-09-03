@@ -45,8 +45,9 @@ a consumer that deliberately writes elsewhere remains outside this boundary.
 
 Never call the create/consume endpoints with curl or a general HTTP tool. The
 helper keeps the one-use capability and secret response out of model-visible
-tool output. One request may be open per chat; it expires after 15 minutes and
-is cancelled on Stop.
+tool output. One request may be open per chat. It stays open until it is
+submitted or cancelled on Stop; once submitted, transient values are cleared
+if the helper does not consume them within two minutes.
 
 ## Explicit reveal for debugging
 
