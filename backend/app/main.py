@@ -80,6 +80,7 @@ from app.routes import (
   secrets_router, self_reminders_router, settings_router, skills_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
   theme_router, uploads_router, platform_router, community_router,
+  common_router, common_groups_router,
   contribution_relay_router,
   published_router,
   connect_router,
@@ -819,6 +820,8 @@ app.include_router(connect_router)
 app.include_router(client_error_router)
 app.include_router(client_signal_router)
 app.include_router(community_router)
+app.include_router(common_router)
+app.include_router(common_groups_router)
 app.include_router(contribution_relay_router)
 app.include_router(settings_router)
 app.include_router(platform_router)

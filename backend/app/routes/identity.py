@@ -325,6 +325,25 @@ async def _linked_remote(
   return _identity_contract(payload)
 
 
+async def resolve_owner_profile(db: Session, owner: models.Owner) -> dict | None:
+  """The owner's connected mobius.you profile, or None when none is linked.
+
+  The shared identity primitive for platform features that want the one
+  cross-cutting identity (display name, handle, avatar) instead of inventing
+  a per-feature profile. Raises HTTPException(502) when an account is linked
+  but the account service is unreachable; callers decide how to degrade.
+  """
+  if get_settings().mobius_sso_enabled:
+    remote = await _managed_remote("GET")
+    profile = remote.get("profile")
+    return profile if isinstance(profile, dict) else None
+  linked = await _linked_remote(db, owner.id, "GET")
+  if linked is None:
+    return None
+  profile = linked.get("profile")
+  return profile if isinstance(profile, dict) else None
+
+
 def _linked_since(db: Session, owner_id: int) -> str | None:
   """UTC link-creation instant, or None when no link row survives.
 
