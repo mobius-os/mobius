@@ -40,11 +40,15 @@ function isTrackingRecord(record) {
 
 /** Why direct publication is unavailable, or null when the exact review can send. */
 export function sendBlocker(record, { connected } = {}) {
-  if (record?.status === 'submitting') {
+  const resumableSuccessor = record?.status === 'submitting'
+    && record?.successor === true
+  if (record?.status === 'submitting' && !resumableSuccessor) {
     return 'This GitHub action is still being confirmed.'
   }
-  if (!record || record.status !== 'prepared') return null
-  if (typeof record.last_submit_error === 'string' && record.last_submit_error.trim()) {
+  if (!record || (record.status !== 'prepared' && !resumableSuccessor)) return null
+  if (!resumableSuccessor
+    && typeof record.last_submit_error === 'string'
+    && record.last_submit_error.trim()) {
     return 'This contribution needs a fresh check before it can continue.'
   }
   if (record.stack || record.is_stack) {
@@ -59,11 +63,31 @@ export function sendBlocker(record, { connected } = {}) {
     || 'Refresh this review in Contribute before sending.'
 }
 
+export function isUpdateAction(action) {
+  return action === 'pr_update'
+}
+
 /** Copy for the one public action represented by this prepared record. */
 export function publicationAction(record) {
-  return record?.action === 'pr_update'
+  if (record?.status === 'submitting' && record?.successor === true) {
+    return { label: 'Resume update', busyLabel: 'Resuming update' }
+  }
+  return isUpdateAction(record?.action)
     ? { label: 'Update PR', busyLabel: 'Updating PR' }
     : { label: 'Send PR', busyLabel: 'Sending PR' }
+}
+
+export function publicationMutations(record) {
+  if (record?.successor === true) {
+    return [
+      'Force-update the pull request branch to the reviewed successor commit',
+      'Retarget the pull request base branch to the surviving branch',
+    ]
+  }
+  if (isUpdateAction(record?.action)) {
+    return ['Update the pull request branch with the reviewed commit']
+  }
+  return ['Open a new pull request for the reviewed branch']
 }
 
 /** Why one complete reviewed stack cannot use its guarded public action yet. */
@@ -120,7 +144,7 @@ export function publicationItemsAction(items) {
       : [item?.record].filter(Boolean)
   ))
   const updating = records.length > 0
-    && records.every(record => record?.action === 'pr_update')
+    && records.every(record => isUpdateAction(record?.action))
   const verb = updating ? 'Update' : 'Send'
   return {
     count: records.length,
@@ -128,6 +152,15 @@ export function publicationItemsAction(items) {
     promptLabel: `${verb} ${records.length} reviewed pull ${records.length === 1 ? 'request' : 'requests'}?`,
     confirmLabel: `${verb} ${records.length} ${records.length === 1 ? 'PR' : 'PRs'}`,
   }
+}
+
+export function publicationItemsMutations(items) {
+  const records = (Array.isArray(items) ? items : []).flatMap(item => (
+    item?.kind === 'stack'
+      ? (item.records || []).filter(record => record?.status === 'prepared')
+      : [item?.record].filter(Boolean)
+  ))
+  return [...new Set(records.flatMap(publicationMutations))]
 }
 
 const RECORD_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/

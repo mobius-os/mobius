@@ -224,8 +224,9 @@ def standalone_manifest(
   `id` is the stable install identity (`/apps/<slug>/`). `scope` and
   `start_url` are both `/apps/<slug>/` so the OS treats this as a
   distinct PWA from Möbius. `display` (from the app's mobius.json,
-  default "standalone") removes browser chrome on launch; "fullscreen"
-  additionally drops the OS status bar so a game covers the notch.
+  default "standalone") requests the browser presentation on launch.
+  "fullscreen" asks for the most immersive supported mode, but iOS may still
+  retain its OS status bar; apps must honor safe-area insets in every mode.
   """
   app = _get_app_by_slug(db, slug)
   base = f"/apps/{slug}/"
@@ -256,9 +257,9 @@ def standalone_manifest(
       "start_url": start_url,
       "scope": base,
       # Per-app display mode (mobius.json `display`); defaults to
-      # "standalone". Games declare "fullscreen" so the installed PWA
-      # launches with no OS status bar and paints under the notch/cutout
-      # (the standalone <head> already carries viewport-fit=cover).
+      # "standalone". "fullscreen" is a request, not an iOS guarantee that
+      # the OS status bar disappears; viewport-fit + safe insets remain the
+      # portable edge-to-edge contract.
       "display": app.display or "standalone",
       "background_color": bg,
       "theme_color": theme,

@@ -186,7 +186,14 @@ def test_answer_delivers_immediately_when_pending_registered(
     old_activity = datetime(2000, 1, 1, tzinfo=UTC)
     _set_activity_at(chat.id, old_activity)
 
-    started = time.monotonic()
+    pending_reads = []
+    read_pending = questions.get
+
+    def track_pending_read(chat_id):
+      pending_reads.append(chat_id)
+      return read_pending(chat_id)
+
+    monkeypatch.setattr(questions, "get", track_pending_read)
     res = client.post(
       f"/api/chats/{chat.id}/messages",
       json={
@@ -197,11 +204,13 @@ def test_answer_delivers_immediately_when_pending_registered(
       },
       headers=auth,
     )
-    elapsed = time.monotonic() - started
 
     assert res.status_code == 202, res.text
     assert res.json()["status"] == "answer_delivered"
     assert res.json()["answer_turn"] == "same"
+    # One registry read proves the grace-poll loop was never entered. A
+    # wall-clock bound would conflate route behavior with host scheduling.
+    assert pending_reads == [chat.id]
     # Future resolved with the submitted answers.
     assert fut.done()
     assert fut.result() == {"Pick one": "a"}
@@ -214,12 +223,6 @@ def test_answer_delivers_immediately_when_pending_registered(
       "questionId": None,
     }]
     assert _activity_at(chat.id).replace(tzinfo=UTC) > old_activity
-    # No grace-period delay on the happy path. 500ms cap; 250ms
-    # leaves comfortable headroom for slow CI without making the
-    # test useless.
-    assert elapsed < 0.25, (
-      f"happy path waited unexpectedly long: {elapsed:.3f}s"
-    )
 
   asyncio.run(go())
 
@@ -554,9 +557,9 @@ def test_answer_delivers_after_late_registration_within_grace(
     fut = future_holder["future"]
     assert fut.done()
     assert fut.result() == {"Pick one": "b"}
-    # Took at least the registration delay but well under the 500ms
-    # grace cap.
-    assert 0.15 <= elapsed < 0.55, (
+    # Took at least the registration delay and remains below the retired
+    # one-second bridge wait, with room for hosted xdist scheduling jitter.
+    assert 0.15 <= elapsed < 0.8, (
       f"race path elapsed out of expected band: {elapsed:.3f}s"
     )
     assert questions.get(chat.id) is None

@@ -32,7 +32,7 @@ log = logging.getLogger("mobius.bootstrap")
 # reviewed commit provides the same immutable input until it does.
 BOOTSTRAP_STORE_MANIFEST_URL = (
   "https://raw.githubusercontent.com/mobius-os/app-store/"
-  "44468e72008d6b9a4a5a0344e8148d69e7b58fa1/mobius.json"
+  "4371719331644b7f5005ef46f2011f7cab0f4851/mobius.json"
 )
 
 # The Skills app (browse/install ecosystem skills + the skill-agent chat).

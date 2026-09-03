@@ -32,8 +32,10 @@ from app.deps import (
   require_chat_embed_operation,
 )
 from app.timeutil import now_naive_utc
+from app.routes.shell_install_pass import router as shell_install_pass_router
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+router.include_router(shell_install_pass_router)
 _limiter = Limiter(key_func=get_remote_address)
 log = logging.getLogger("moebius.auth")
 

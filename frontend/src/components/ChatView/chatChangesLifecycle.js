@@ -36,6 +36,9 @@ export function contributionStage(record) {
 
 export function contributionNeedsAttention(record) {
   if (SETTLED.has(record?.status)) return false
+  if (record?.status === 'submitting' && record?.successor === true) {
+    return record?.review?.state === 'needs_refresh'
+  }
   return record?.needs_attention === true
     || Boolean(String(record?.last_submit_error || '').trim())
     || record?.review?.state === 'needs_refresh'

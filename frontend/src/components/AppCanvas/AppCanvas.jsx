@@ -1365,17 +1365,30 @@ const AppCanvas = forwardRef(function AppCanvas({
   // the cutout on a side, so top→0 and left/right gain the inset), but the
   // effect above only fires on the immersive FLIP — without this the app keeps
   // padding for the pre-rotation orientation and a control slides under the
-  // cutout. Windowed apps receive zeros and don't change on resize, so the
-  // listener is only attached while immersive (and torn down on exit). The
-  // probe element resolves the fresh env() values after layout settles.
+  // cutout. iOS can also refresh VisualViewport or restore a Home Screen app
+  // from suspension without firing window.resize, so those owning lifecycle
+  // signals re-read the real env() probe too. Windowed apps receive zeros and
+  // don't change, so the listeners exist only while immersive.
   useEffect(() => {
     if (immersiveMode !== 'full') return
     function onGeometryChange() { sendInsets(liveVersionRef.current) }
+    function onVisibilityChange() {
+      if (document.visibilityState === 'visible') onGeometryChange()
+    }
+    const viewport = window.visualViewport
     window.addEventListener('resize', onGeometryChange)
     window.addEventListener('orientationchange', onGeometryChange)
+    window.addEventListener('pageshow', onGeometryChange)
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    viewport?.addEventListener('resize', onGeometryChange)
+    viewport?.addEventListener('scroll', onGeometryChange)
     return () => {
       window.removeEventListener('resize', onGeometryChange)
       window.removeEventListener('orientationchange', onGeometryChange)
+      window.removeEventListener('pageshow', onGeometryChange)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      viewport?.removeEventListener('resize', onGeometryChange)
+      viewport?.removeEventListener('scroll', onGeometryChange)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [immersiveMode])

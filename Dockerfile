@@ -42,7 +42,8 @@ RUN useradd -m -s /bin/bash mobius
 # agent-browser looks by default).
 # Discard npm's download cache in each layer: installed packages are the
 # runtime artifact; registry tarballs only make the production image larger.
-ARG CLAUDE_CODE_VERSION=2.1.251
+ARG CLAUDE_CODE_VERSION=2.1.258
+ARG CODEX_VERSION=0.152.1
 ARG AGENT_BROWSER_VERSION=0.35.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     age ca-certificates cron curl git jq procps ripgrep sqlite3 sudo unzip util-linux \
@@ -51,9 +52,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
     fonts-liberation fonts-noto-color-emoji \
     && npm install -g --engine-strict --strict-allow-scripts \
-      --allow-scripts="@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION},agent-browser@${AGENT_BROWSER_VERSION}" \
+      --allow-scripts="@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION},@openai/codex@${CODEX_VERSION},agent-browser@${AGENT_BROWSER_VERSION}" \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-      @openai/codex@0.150.1 \
+      "@openai/codex@${CODEX_VERSION}" \
       "agent-browser@${AGENT_BROWSER_VERSION}" \
     && agent-browser install \
     && mv /root/.agent-browser /opt/agent-browser \
@@ -143,8 +144,8 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.lock \
 # lockstep npm CLI. This preserves the external SDK contract without storing a
 # second ~350 MB runtime or running a second protocol version.
 # Pinned to commit SHA (not tag) for full reproducibility — tags are
-# mutable on GitHub. SHA corresponds to refs/tags/rust-v0.150.1
-# as of 2026-08-27, and is kept in lockstep with the npm @openai/codex
+# mutable on GitHub. SHA corresponds to refs/tags/rust-v0.152.1
+# as of 2026-09-01, and is kept in lockstep with the npm @openai/codex
 # binary above (the SDK spawns it via codex_bin=shutil.which("codex")).
 # We moved from rust-v0.144.5 to this tag because the 0.144.x generated
 # ReasoningEffort enum was strict (none/minimal/low/medium/high/xhigh)
@@ -152,14 +153,14 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.lock \
 # codex.models() and ThreadResumeResponse validation failed and broke a
 # real chat resume. alpha.13 turned ReasoningEffort into a forgiving
 # `str, Enum` with a `_missing_` hook that accepts any effort string;
-# 0.150.1 is the latest stable tag published to BOTH the git repo and npm, so
+# 0.152.1 is the latest stable tag published to BOTH the git repo and npm, so
 # binary and schema stay matched. The SDK exposes the request bridge as a
 # public `approval_handler` constructor argument on
 # `openai_codex.client.CodexClient`; `AsyncCodex` still does not forward
 # it, so codex_sdk_runner.py installs the handler on the wrapped sync
 # client's `_approval_handler`.
 RUN pip install --no-cache-dir --no-deps \
-      'openai-codex @ git+https://github.com/openai/codex.git@90854393966b21e9ebfd21b122334eb09a20c93d#subdirectory=sdk/python' \
+      'openai-codex @ git+https://github.com/openai/codex.git@5adb68a49933ae446bf11935662c83dba55a0804#subdirectory=sdk/python' \
     && pip install --no-cache-dir 'openai-codex-cli-bin==0.147.0' \
     && _codex_cli_bin="$(python -c \
       'from pathlib import Path; import codex_cli_bin; print(Path(codex_cli_bin.__file__).parent)')" \

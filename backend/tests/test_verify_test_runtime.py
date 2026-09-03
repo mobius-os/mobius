@@ -150,6 +150,7 @@ def test_node_runtime_satisfies_the_pinned_agent_browser_engine():
   assert "FROM node:24-trixie-slim AS node-runtime" in dockerfile
   pinned_script_packages = {
     "@anthropic-ai/claude-code": "CLAUDE_CODE_VERSION",
+    "@openai/codex": "CODEX_VERSION",
     "agent-browser": "AGENT_BROWSER_VERSION",
   }
   for version_argument in pinned_script_packages.values():

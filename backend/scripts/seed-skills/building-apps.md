@@ -736,21 +736,19 @@ useEffect(() => {
 ```
 
 - `value: true` hides the top bar while your app is the active canvas; `value: false` (your effect cleanup) restores it. The shell also restores chrome on app switch or unmount on its own, so you can't strand the user — but post the cleanup anyway for the in-place case.
-- The background bleeds full-screen, but **keep your controls clear of the cutout**: pad HUD / score / buttons so the notch or punch-hole doesn't cover them. Two equivalent ways, pick either:
-  - `env(safe-area-inset-*)` works directly — the iframe's `viewport-fit=cover` makes it resolve to the real device insets (e.g. `padding-top: max(12px, env(safe-area-inset-top))`). This matches how a standalone PWA pads, so the same code works in both contexts.
-  - `--mobius-safe-top/right/bottom/left` CSS variables on `:root` — the shell forwards the real insets and **zeroes them while your app is windowed**, so a control padded with `padding-top: var(--mobius-safe-top)` clears the notch immersive and sits flush when not. Use these when you want inset padding *only* while immersive; use `env()` when you want it always. They also re-forward on rotation, so a landscape flip (cutout moves to a side) re-pads correctly.
+- The background bleeds full-screen, but **keep your controls clear of the cutout**: pad HUD / score / buttons so the notch or punch-hole doesn't cover them. Use the canonical `--mobius-safe-top/right/bottom/left` CSS variables on `:root` — the top-level host resolves `env(safe-area-inset-*)` and forwards the concrete values into the opaque app frame, where direct `env()` values may be zero. The host **zeroes them while your app is windowed**, so `padding-top: max(12px, var(--mobius-safe-top))` clears the notch immersive and stays compact when not. It re-forwards on rotation, VisualViewport changes, and Home Screen resume, so a landscape flip or iOS restore re-pads correctly.
 - The shell renders its own floating exit button at the top-left (safe-area inset) while immersive. Don't draw a competing exit control, and keep critical tap targets out of that corner. If the user taps it, the shell stays in normal chrome until your app remounts and posts again — respect that choice; don't re-post on a timer.
 - Standalone opens (`/apps/<slug>/`) use the same AppCanvas host without the
   workspace chrome. The host still receives this message and tracks immersive
   state; covering the OS status bar is separate (see below).
-  `env(safe-area-inset-*)` and the forwarded `--mobius-safe-*` variables remain
-  portable across workspace and installed entry points.
+  The forwarded `--mobius-safe-*` variables remain portable across workspace
+  and installed entry points.
 
-### Covering the notch on Android (the OS status bar)
+### Requesting the most immersive OS presentation
 
-`viewport-fit=cover` already lets your background paint under the **iOS** notch (its status bar is translucent). On **Android** the OS draws an opaque status bar over the top whenever the PWA is `display: standalone` — so hiding the Möbius toolbar isn't enough to reach the cutout. Two knobs close the gap:
+`viewport-fit=cover` lets the top-level host paint edge-to-edge, while the safe variables above keep controls clear. Hiding the Möbius toolbar is separate from asking the browser or OS to remove its own status bar:
 
-- **Installed standalone PWA** — declare `"display": "fullscreen"` in your `mobius.json`. The installed game then launches with no OS status bar and paints edge-to-edge under the cutout. Valid values: `standalone` (default), `fullscreen`, `minimal-ui`, `browser`.
+- **Installed standalone PWA** — declare `"display": "fullscreen"` in your `mobius.json` to request the browser's most immersive supported launch. Supported Chromium installs can remove the OS status bar. iOS accepts the display mode but can retain its OS status bar, so safe-area padding remains mandatory. Valid values: `standalone` (default), `fullscreen`, `minimal-ui`, `browser`.
 - **In-shell (inside Möbius)** — Möbius itself is one `display: standalone` PWA, so the OS status bar can only be dropped at runtime via the Fullscreen API, which the browser grants **only on a user gesture**. Request it on the player's first tap (re-requesting after a system-gesture exit); the shell calls `exitFullscreen()` for you when the game is left:
 
   ```js
@@ -762,7 +760,7 @@ useEffect(() => {
   }, { passive: true })
   ```
 
-  No-op on iOS (no element fullscreen) and redundant in a `display: fullscreen` standalone launch (already fullscreen) — guard with `matchMedia('(display-mode: fullscreen)').matches` to skip it there.
+  Element fullscreen remains unavailable for this path on iOS. In a launch where `matchMedia('(display-mode: fullscreen)').matches`, skip the redundant request — but do not infer that iOS removed its own status bar.
 
 ### Splash / status-bar color
 

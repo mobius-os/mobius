@@ -16,7 +16,9 @@ import {
 } from '../lib/connectivityStore.js'
 import { SHELL_DATA_CACHE } from '../sw-cache-policy.js'
 
-export const BASE = (import.meta.env.BASE_URL || '/').replace(/\/$/, '')
+export const BASE = (import.meta.env?.BASE_URL || '/').replace(/\/$/, '')
+export const SHELL_INSTALL_PASS_TIMEOUT_MS = 5000
+export const OWNER_TOKEN_CHANGED_EVENT = 'mobius:owner-token-changed'
 
 // The opaque embedded-chat document must never read or receive the owner's
 // browser token. App.jsx enables this mode before ChatEmbed mounts; the only
@@ -84,6 +86,7 @@ export function getAuthHeaders(extra = {}) {
 
 export function setToken(token) {
   try { localStorage.setItem('token', token) } catch {}
+  try { window.dispatchEvent(new Event(OWNER_TOKEN_CHANGED_EVENT)) } catch {}
 }
 
 export function clearToken() {
@@ -92,6 +95,7 @@ export function clearToken() {
     return
   }
   try { localStorage.removeItem('token') } catch {}
+  try { window.dispatchEvent(new Event(OWNER_TOKEN_CHANGED_EVENT)) } catch {}
   // Setup-wizard resume state assumes an active token. If the token
   // is gone (logout / expiry), clear the resume key + in-progress
   // flag so the user doesn't get bounced back into the wizard after
@@ -132,7 +136,7 @@ export function clearToken() {
 // uses the default and removes it too. Returns
 // a promise so callers can `await` it before reloading the page
 // (otherwise the browser would abort the in-flight delete).
-export function clearQueryCache({ preserveChatOutbox = false } = {}) {
+function clearOwnerClientState({ preserveChatOutbox }) {
   // Owner-scoped in-memory state: the AppCanvas token latch holds resolved
   // app/owner tokens across iframe remounts; drop it on logout so a remount
   // after the session ends can't reuse the previous owner's token.
@@ -156,6 +160,23 @@ export function clearQueryCache({ preserveChatOutbox = false } = {}) {
     delDatabase('mobius-signals', 'signal queue').catch(() => {}),
     wipeSwCaches().catch(() => {}),
   ])
+}
+
+/** Remove every browser-local trace owned by the current signed-in owner. */
+export function clearQueryCache() {
+  return clearOwnerClientState({ preserveChatOutbox: false })
+}
+
+/**
+ * Retire an expired credential while retaining only intent that is already
+ * partitioned by owner and epoch. The same owner may replay that intent after
+ * signing in again; an explicit logout still uses clearQueryCache() and wipes
+ * it with the rest of the owner-scoped browser state.
+ */
+export async function clearExpiredOwnerSession() {
+  clearToken()
+  try { sessionStorage.setItem('auth_expired', '1') } catch {}
+  await clearOwnerClientState({ preserveChatOutbox: true })
 }
 
 // Remove browser-local queues and mirrors after an explicit app-data wipe.
@@ -236,14 +257,26 @@ export async function apiFetch(path, options = {}) {
   const { timeoutMs, ...fetchOptions } = options
   let signal = fetchOptions.signal
   let timeoutTimer
+  let removeCallerAbort
   if (timeoutMs) {
     const ctrl = new AbortController()
+    if (signal) {
+      const callerSignal = signal
+      const relayCallerAbort = () => ctrl.abort(callerSignal.reason)
+      if (callerSignal.aborted) relayCallerAbort()
+      else {
+        callerSignal.addEventListener('abort', relayCallerAbort, { once: true })
+        removeCallerAbort = () => {
+          callerSignal.removeEventListener('abort', relayCallerAbort)
+        }
+      }
+    }
     timeoutTimer = setTimeout(() => {
       const error = new Error('Request timed out')
       error.name = 'TimeoutError'
       ctrl.abort(error)
     }, timeoutMs)
-    signal = signal ? AbortSignal.any([signal, ctrl.signal]) : ctrl.signal
+    signal = ctrl.signal
   }
 
   let res
@@ -260,6 +293,7 @@ export async function apiFetch(path, options = {}) {
     throw error
   } finally {
     if (timeoutTimer) clearTimeout(timeoutTimer)
+    removeCallerAbort?.()
   }
 
   if (res.status === 401 && sentCredential && !setupSession.isInProgress()) {
@@ -269,15 +303,13 @@ export async function apiFetch(path, options = {}) {
       window.dispatchEvent(new CustomEvent('mobius:chat-embed-auth-expired'))
       throw new Error('EMBED_AUTH_EXPIRED')
     }
-    clearToken()
-    try { sessionStorage.setItem('auth_expired', '1') } catch {}
     // Await the cache wipe before reloading. Without this, the page
     // reload aborts the IndexedDB delete and the next owner could see
     // stale chats/messages from the cached query data.
     // Keep accepted chat intent through an expired credential. Each record is
     // partitioned by owner+epoch and can only replay after a matching login;
     // explicit Settings logout still uses the default full wipe.
-    await clearQueryCache({ preserveChatOutbox: true })
+    await clearExpiredOwnerSession()
     // Defer reload one tick and throw a typed error so callers'
     // try/catch/finally blocks run (stopping spinners) before the
     // page goes away. Previously we returned a never-resolving
@@ -436,6 +468,20 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ install_pass: installPass, slug }),
       }),
+    },
+    // iOS copies cookies, but not localStorage, into a newly installed Home
+    // Screen web app. Prepare places only an opaque one-use reference in an
+    // HttpOnly cookie; the installed shell exchanges it for its own session.
+    shellInstallPass: {
+      prepare: ({ signal, timeoutMs = SHELL_INSTALL_PASS_TIMEOUT_MS } = {}) => (
+        apiFetch('/auth/shell-install-pass', { method: 'POST', signal, timeoutMs })
+      ),
+      redeem: ({ signal, timeoutMs = SHELL_INSTALL_PASS_TIMEOUT_MS } = {}) => (
+        apiFetch('/auth/shell-install-pass/redeem', { method: 'POST', signal, timeoutMs })
+      ),
+      revoke: ({ signal, timeoutMs = SHELL_INSTALL_PASS_TIMEOUT_MS } = {}) => (
+        apiFetch('/auth/shell-install-pass/revoke', { method: 'POST', signal, timeoutMs })
+      ),
     },
     setup: {
       status: () => apiFetch('/auth/setup/status'),

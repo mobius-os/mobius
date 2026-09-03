@@ -10,6 +10,10 @@ import App from './App.jsx'
 import { installGlobalErrorHandlers } from './lib/errorLog.js'
 import { installPerfProbe } from './lib/perfProbe.js'
 import { SHELL_BUILD } from './lib/buildInfo.js'
+import {
+  redeemInstalledShellSession,
+  startShellInstallSessionLifecycle,
+} from './lib/shellInstallSessionRuntime.js'
 import './index.css'
 
 // Capture errors React's ErrorBoundary can't see (async/event-handler throws,
@@ -27,8 +31,16 @@ installPerfProbe()
 // whole job is to move the entry bundle's content hash (see buildInfo.js).
 console.info(`Mobius shell build: ${SHELL_BUILD}`)
 
-ReactDOM.createRoot(document.getElementById('root')).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-)
+async function mount() {
+  // iOS copies cookies but not localStorage into a new Home Screen shell.
+  // Settle that bounded one-use exchange before App chooses setup or login.
+  await redeemInstalledShellSession()
+  startShellInstallSessionLifecycle()
+  ReactDOM.createRoot(document.getElementById('root')).render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>
+  )
+}
+
+void mount()

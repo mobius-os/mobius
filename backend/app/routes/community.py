@@ -724,7 +724,8 @@ async def _publish_local_source(
     repo, repo_status = await _github_json(
       github, "GET", f"/repos/{encoded_repo}", allow_not_found=True,
     )
-    if repo_status == 404:
+    created_repository = repo_status == 404
+    if created_repository:
       repo, _ = await _github_json(
         github, "POST", "/user/repos",
         body={
@@ -749,9 +750,23 @@ async def _publish_local_source(
       repository_marker=repository_marker, accepted_commit=accepted_commit,
     )
     ref_path = f"/repos/{encoded_repo}/git/ref/heads/main"
-    ref, ref_status = await _github_json(
-      github, "GET", ref_path, allow_not_found=True,
-    )
+    # GitHub answers 409 (not 404) when this newly-created repository has no
+    # commits yet. More importantly, we already know no branch can exist: skip
+    # the inconsistent read and create the first commit directly.
+    if created_repository:
+      ref, ref_status = None, 404
+    else:
+      try:
+        ref, ref_status = await _github_json(
+          github, "GET", ref_path, allow_not_found=True,
+        )
+      except HTTPException as exc:
+        # A publication may resume after repository creation but before its
+        # first commit. GitHub reports that unborn branch as 409, rather than
+        # the 404 it uses for an absent branch in an initialized repository.
+        if exc.status_code != 409:
+          raise
+        ref, ref_status = None, 404
     parent_sha = ""
     parent_message = ""
     if ref_status != 404:
@@ -767,6 +782,30 @@ async def _publish_local_source(
           409,
           "That repository already exists and was not created for this local app. Choose another name.",
         )
+    else:
+      # GitHub rejects every Git Database write while a repository has no
+      # commits. Seed it with one real source file through the Contents API;
+      # the managed marker makes an interrupted publication safely resumable,
+      # and the full accepted tree below replaces this partial seed atomically.
+      seed = next(
+        (item for item in files if item["path"] == "mobius.json"), files[0],
+      )
+      seed_path = quote(seed["path"], safe="/")
+      initialized, _ = await _github_json(
+        github,
+        "PUT",
+        f"/repos/{encoded_repo}/contents/{seed_path}",
+        body={
+          "message": f"Initialize {app.name} publication\n\n{repository_marker}",
+          "content": seed["content_base64"],
+          "branch": "main",
+        },
+      )
+      parent_sha = str((initialized.get("commit") or {}).get("sha") or "").lower()
+      if not re.fullmatch(r"[0-9a-f]{40}", parent_sha):
+        raise HTTPException(502, "GitHub did not initialize the source repository.")
+      parent_message = repository_marker
+      ref_status = 200
 
     if release_marker in parent_message:
       return repository, parent_sha
@@ -810,16 +849,10 @@ async def _publish_local_source(
     source_commit_sha = str(commit.get("sha") or "").lower()
     if not re.fullmatch(r"[0-9a-f]{40}", source_commit_sha):
       raise HTTPException(502, "GitHub did not return the source commit.")
-    if ref_status == 404:
-      await _github_json(
-        github, "POST", f"/repos/{encoded_repo}/git/refs",
-        body={"ref": "refs/heads/main", "sha": source_commit_sha},
-      )
-    else:
-      await _github_json(
-        github, "PATCH", f"/repos/{encoded_repo}/git/refs/heads/main",
-        body={"sha": source_commit_sha, "force": False},
-      )
+    await _github_json(
+      github, "PATCH", f"/repos/{encoded_repo}/git/refs/heads/main",
+      body={"sha": source_commit_sha, "force": False},
+    )
     return repository, source_commit_sha
 
 

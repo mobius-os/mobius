@@ -24,6 +24,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import column_property, validates
 
 from app.database import Base
+from app.shell_install_pass import ShellInstallPassGrant
 from app.timeutil import now_naive_utc
 from app.tool_output_storage import CompressedToolOutputText
 

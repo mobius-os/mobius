@@ -7,6 +7,20 @@ const indexHtml = readFileSync(new URL('../../../index.html', import.meta.url), 
 const indexCss = readFileSync(new URL('../../index.css', import.meta.url), 'utf8')
 const shellCss = readFileSync(new URL('../../components/Shell/Shell.css', import.meta.url), 'utf8')
 const appFrameHtml = readFileSync(new URL('../../../public/app-frame.html', import.meta.url), 'utf8')
+const offlineHtml = readFileSync(new URL('../../../public/offline.html', import.meta.url), 'utf8')
+const appCanvas = readFileSync(
+  new URL('../../components/AppCanvas/AppCanvas.jsx', import.meta.url),
+  'utf8',
+)
+const applyTheme = readFileSync(new URL('../applyTheme.js', import.meta.url), 'utf8')
+const standaloneRoute = readFileSync(
+  new URL('../../../../backend/app/routes/standalone.py', import.meta.url),
+  'utf8',
+)
+const viewportMetrics = readFileSync(
+  new URL('../../../public/gesture-repros/metrics.js', import.meta.url),
+  'utf8',
+)
 const buildingApps = readFileSync(
   new URL('../../../../backend/scripts/seed-skills/building-apps.md', import.meta.url),
   'utf8',
@@ -30,7 +44,9 @@ test('browser pinch cannot scale the shell chrome and active app together', () =
   assert.match(viewport, /viewport-fit=cover/)
   assert.match(viewport, /interactive-widget=resizes-content/)
 
-  const rootTouchRule = indexCss.match(/html,\s*body\s*\{[\s\S]*?\}/)?.[0] || ''
+  const rootTouchRule = indexCss.match(
+    /html,\s*body\s*\{\s*touch-action:[^}]+\}/,
+  )?.[0] || ''
   assert.match(rootTouchRule, /touch-action:\s*pan-x pan-y/)
   assert.doesNotMatch(rootTouchRule, /pinch-zoom|manipulation/)
 })
@@ -54,4 +70,60 @@ test('app authors are told to zoom content locally, with an accessible control p
   assert.match(buildingApps, /transform only the\s+content/)
   assert.match(buildingApps, /zoom-in, zoom-out, and reset controls/)
   assert.match(buildingApps, /Do not add `user-scalable=no`/)
+})
+
+test('installed shell owns one stable edge-to-edge iOS viewport', () => {
+  assert.match(
+    indexHtml,
+    /apple-mobile-web-app-status-bar-style" content="black-translucent"/,
+  )
+  assert.match(
+    indexCss,
+    /@media \(display-mode: standalone\)[\s\S]*html,[\s\S]*body\s*\{\s*height:\s*100vh/,
+  )
+  assert.match(indexCss, /#root\s*\{\s*height:\s*100%/)
+  assert.doesNotMatch(
+    applyTheme,
+    /querySelector\(['"]meta\[name=["']apple-mobile-web-app-status-bar-style/,
+  )
+  assert.match(
+    offlineHtml,
+    /apple-mobile-web-app-status-bar-style" content="black-translucent"/,
+  )
+  assert.match(
+    offlineHtml,
+    /@media \(display-mode:standalone\)[\s\S]*height:100vh/,
+  )
+})
+
+test('immersive insets follow resume geometry and fullscreen stays a request', () => {
+  for (const signal of [
+    "window.addEventListener('pageshow'",
+    "document.addEventListener('visibilitychange'",
+    "viewport?.addEventListener('resize'",
+    "viewport?.addEventListener('scroll'",
+  ]) {
+    assert.ok(appCanvas.includes(signal), `missing geometry signal: ${signal}`)
+  }
+  assert.match(buildingApps, /iOS accepts the display mode but can retain its OS status bar/)
+  assert.match(buildingApps, /opaque app frame, where direct `env\(\)` values may be zero/)
+  assert.match(standaloneRoute, /iOS may still\s+retain its OS status bar/)
+  assert.doesNotMatch(
+    standaloneRoute,
+    /"fullscreen" additionally drops the OS status bar/,
+  )
+})
+
+test('viewport lab records resume, VisualViewport, root rects, and insets', () => {
+  for (const signal of [
+    'visualViewport.resize',
+    'visualViewport.scroll',
+    'pageshow',
+    'visibilitychange',
+    'html rect',
+    'root rect',
+    'safe insets T/R/B/L',
+  ]) {
+    assert.ok(viewportMetrics.includes(signal), `missing viewport metric: ${signal}`)
+  }
 })

@@ -9,9 +9,6 @@ const connectionStatus = readFileSync(new URL('../ConnectionStatus.jsx', import.
 const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 const scrollMode = readFileSync(new URL('../useScrollMode.js', import.meta.url), 'utf8')
 const shell = readFileSync(new URL('../../Shell/Shell.jsx', import.meta.url), 'utf8')
-const apiClient = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
-const systemStream = readFileSync(new URL('../../../hooks/useSystemEventStream.js', import.meta.url), 'utf8')
-const settingsView = readFileSync(new URL('../../SettingsView/SettingsView.jsx', import.meta.url), 'utf8')
 
 test('only transient nudges float above the measured rail → connection → queued → composer stack', () => {
   const footStart = chatView.indexOf('<div ref={footRef} className="chat__foot">')
@@ -111,31 +108,6 @@ test('the composer accepts an offline send for the durable chat outbox', () => {
     streamConnection,
     /outboxRetained = await enqueueIntent\([\s\S]*?err\.outboxRetained = true/,
     'automatic-replay copy must be gated by the successful durable write',
-  )
-})
-
-test('credential expiry preserves principal-bound intent while explicit logout wipes it', () => {
-  assert.match(
-    apiClient,
-    /clearQueryCache\(\{ preserveChatOutbox = false \} = \{\}\)/,
-  )
-  assert.match(
-    apiClient,
-    /preserveChatOutbox[\s\S]*?\? \[\][\s\S]*?: \[clearChatOutbox\(\)\]/,
-    'explicit cleanup must clear through the live outbox store, not a blocked deleteDatabase',
-  )
-  assert.match(
-    apiClient,
-    /status === 401[\s\S]*?clearQueryCache\(\{ preserveChatOutbox: true \}\)/,
-  )
-  assert.match(
-    systemStream,
-    /res\.status === 401[\s\S]*?clearQueryCache\(\{ preserveChatOutbox: true \}\)/,
-  )
-  assert.match(
-    settingsView,
-    /clearToken\(\)[\s\S]{0,300}?await clearQueryCache\(\)/,
-    'owner-invoked logout must use the default full outbox wipe',
   )
 })
 

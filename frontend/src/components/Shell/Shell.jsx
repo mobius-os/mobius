@@ -69,6 +69,7 @@ import {
   ACTIVATE_FOREGROUND,
 } from './workspacePlacement.js'
 import {
+  appCrashReportDraft,
   appUpdateStaleMessage,
   findAppStoreApp,
 } from '../../lib/appRecovery.js'
@@ -2522,7 +2523,7 @@ export default function Shell({ onInitialVisualReady }) {
   const handleAppError = useCallback((appId, error, chatId) => {
     const appEntry = appsRef.current.find(a => String(a.id) === String(appId))
     const appName = appEntry?.name || `app ${appId}`
-    const report = `The app "${appName}" crashed with this error:\n\`\`\`\n${error}\n\`\`\`\nPlease investigate and fix.`
+    const report = appCrashReportDraft(appName, error)
     const buildingChatId = appEntry?.chat_id || chatId || null
     const buildingChat = buildingChatId
       && chatsRef.current.find(c => c.id === buildingChatId)

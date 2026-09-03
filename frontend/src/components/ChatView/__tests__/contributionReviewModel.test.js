@@ -6,10 +6,13 @@ import {
   contributeAppId,
   contributionReviewIntent,
   currentReviewItems,
+  isUpdateAction,
   refreshedReviewItems,
   publicationAction,
   publicationFailureOwner,
   publicationItemsAction,
+  publicationItemsMutations,
+  publicationMutations,
   publicationStackAction,
   reviewActionKey,
   reviewItems,
@@ -23,6 +26,24 @@ const publicationSrc = readFileSync(new URL('../chatContributionPublication.js',
 const clientSrc = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
 const PLATFORM_REPO = 'mobius-os/mobius'
 const APPS = [{ id: 3, slug: 'other' }, { id: 8, slug: 'contribute' }]
+
+test('a merged-parent successor exposes both public mutations and remains resumable', () => {
+  const successor = {
+    id: 'child', status: 'prepared', action: 'pr_update', successor: true,
+    quality_review_ready: true, review: { state: 'ready' },
+  }
+  assert.equal(isUpdateAction('pr_update'), true)
+  assert.equal(publicationMutations(successor).length, 2)
+  assert.deepEqual(
+    publicationItemsMutations([{ kind: 'record', record: successor }]),
+    publicationMutations(successor),
+  )
+  assert.deepEqual(publicationAction({ ...successor, status: 'submitting' }), {
+    label: 'Resume update', busyLabel: 'Resuming update',
+  })
+  assert.equal(sendBlocker({ ...successor, status: 'submitting' }), null)
+  assert.match(sendBlocker({ ...successor, status: 'submitting', successor: false }), /still being confirmed/)
+})
 
 test('the ledger owner is resolved by slug', () => {
   assert.equal(contributeAppId(APPS), 8)
@@ -239,7 +260,8 @@ test('helper progress and recovery stay inside Changes', () => {
 })
 
 test('durable submitting state is visible but never offers a duplicate action', () => {
-  assert.match(changesSrc, /const publicationPending = overview\.counts\.submitting > 0/)
+  assert.match(changesSrc, /const publicationPending = overview\.stages\.prepared\.some\(/)
+  assert.match(changesSrc, /record => record\?\.status === 'submitting' && record\?\.successor !== true/)
   assert.match(changesSrc, /publicationPending \? \(/)
   assert.match(
     changesSrc,

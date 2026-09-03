@@ -13,3 +13,9 @@ export function platformVersionIdentity(platform, version) {
     localSha: syncedSha && servedSha && syncedSha !== servedSha ? servedSha : null,
   }
 }
+
+export function containerVersionIdentity(version) {
+  return {
+    sha: shortSha(version?.sha),
+  }
+}

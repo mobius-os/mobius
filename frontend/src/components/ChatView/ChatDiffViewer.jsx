@@ -25,6 +25,7 @@ import {
   publicationAction,
   publicationFailureOwner,
   publicationItemsAction,
+  publicationItemsMutations,
   reviewItems,
   refreshedReviewItems,
   sendBlocker,
@@ -320,7 +321,9 @@ export default function ChatDiffViewer({
   const workState = contributionWorkState(work)
   const workContext = contributionWorkContext(overview)
   const workActive = workState === 'active'
-  const publicationPending = overview.counts.submitting > 0
+  const publicationPending = overview.stages.prepared.some(
+    record => record?.status === 'submitting' && record?.successor !== true,
+  )
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
   const expansionSequenceRef = useRef(0)
@@ -432,6 +435,7 @@ export default function ChatDiffViewer({
       ? preparedPrimaryAction
       : lifecycleAction
   const confirmingAction = confirming ? publicationItemsAction(confirming) : null
+  const confirmingMutations = confirming ? publicationItemsMutations(confirming) : []
 
   function consume(record) {
     setAccepted(current => new Set(current).add(recordRevision(record)))
@@ -680,6 +684,7 @@ export default function ChatDiffViewer({
     const canOpenPr = typeof record?.url === 'string' && record.url.startsWith('https://github.com/')
     const action = publicationAction(record)
     const publicationPending = record?.status === 'submitting'
+      && record?.successor !== true
     const attentionMessage = attention
       ? String(record?.attention?.message
         || record?.last_submit_error
@@ -885,6 +890,7 @@ export default function ChatDiffViewer({
                 const pending = stack
                   ? selectedPreparedItem.records.some(record => record?.status === 'submitting')
                   : representative?.status === 'submitting'
+                    && representative?.successor !== true
                 const records = stack ? selectedPreparedItem.records : [representative]
                 return (
                   <article className="chat-work__review-detail">
@@ -1003,6 +1009,11 @@ export default function ChatDiffViewer({
               <span className={confirmationNotice ? 'is-attention' : ''}>
                 {confirmationNotice || 'GitHub will receive only these exact reviewed heads. Nothing will be merged.'}
               </span>
+              {confirmingMutations.length > 1 ? (
+                <ul className="chat-work__confirm-mutations">
+                  {confirmingMutations.map(mutation => <li key={mutation}>{mutation}</li>)}
+                </ul>
+              ) : null}
             </div>
             <div>
               <button type="button" disabled={helperStarting || Boolean(publishPhase)} onClick={() => {

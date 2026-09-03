@@ -151,8 +151,13 @@ test('a staging chat cannot leave the outgoing transcript held on a wedged reque
   )
   assert.match(chatView, /initialLoadController\.abort\(\)/,
     'hiding or unmounting a staging chat must release its request immediately')
-  assert.match(apiClient, /AbortSignal\.any\(\[signal, ctrl\.signal\]\)/,
-    'apiFetch must compose lifecycle cancellation with its deadline')
+  assert.match(
+    apiClient,
+    /relayCallerAbort = \(\) => ctrl\.abort\(callerSignal\.reason\)[\s\S]*signal = ctrl\.signal/,
+    'apiFetch must compose lifecycle cancellation with its deadline',
+  )
+  assert.doesNotMatch(apiClient, /AbortSignal\.any/,
+    'the bounded lifecycle path must work on the original iOS 17.2 handoff floor')
   assert.match(apiClient, /error\.name = 'TimeoutError'\s*ctrl\.abort\(error\)/,
     'a deadline remains distinguishable from routine lifecycle cancellation')
   assert.match(apiClient, /if \(error\?\.name !== 'AbortError'\) void verifyConnectivity\(\)/,

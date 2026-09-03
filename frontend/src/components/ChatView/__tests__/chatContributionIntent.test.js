@@ -107,6 +107,22 @@ test('prepared work resolves to one direct top action', () => {
   assert.equal(preparedChangesPrimaryAction([
     { ...send, status: 'submitting' }, update,
   ], { connected: true }), null)
+  const successor = {
+    ...update,
+    status: 'submitting',
+    successor: true,
+    last_submit_error: 'GitHub did not confirm the base retarget.',
+    last_submit_error_code: 'update_unconfirmed',
+  }
+  assert.deepEqual(
+    preparedChangesPrimaryAction([successor], { connected: true }),
+    {
+      kind: 'publish-items',
+      items: [{ kind: 'record', id: 'update', record: successor }],
+      label: 'Resume update',
+      description: 'Complete this exact reviewed GitHub action.',
+    },
+  )
   assert.equal(preparedChangesPrimaryAction([
     { ...send, review: { state: 'needs_refresh' } }, update,
   ], { connected: true }).label, 'Fix and review all 2')

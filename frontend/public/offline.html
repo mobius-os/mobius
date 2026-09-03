@@ -3,6 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="color-scheme" content="dark light" />
   <title>Offline — Möbius</title>
   <!-- Self-contained on purpose: this page renders when there is no
        network, so it must not fetch anything. The service worker serves
@@ -14,6 +17,9 @@
     :root { --bg:#0d0d0d; --text:#ececec; --muted:#a8a8a8; --accent:#8b6cf7; }
     * { box-sizing:border-box; margin:0; padding:0; }
     html, body { height:100%; }
+    @media (display-mode:standalone), (display-mode:fullscreen), (display-mode:minimal-ui) {
+      html, body { height:100vh; }
+    }
     body {
       background:var(--bg); color:var(--text);
       font-family:'Inter', system-ui, -apple-system, sans-serif;

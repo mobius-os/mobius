@@ -28,10 +28,26 @@ test('model and concise synced version use the same normal-weight standard highl
   assert.match(view, /Last model: <span className="settings__standard-highlight">/)
   assert.match(view, /upstreamCommitDate[\s\S]*settings__standard-highlight/)
   assert.match(view, /contained_upstream_committed_at/)
+  assert.match(view, /containerVersionIdentity\(version\)/)
+  assert.match(view, /settings__build-kind">Möbius/)
+  assert.match(view, /settings__build-kind">Container/)
   assert.doesNotMatch(view, /Current with upstream|Last checked|upstream_checked_at|settings__update-check/)
   assert.doesNotMatch(view, /Serving local \{mobiusVersion\.localSha\}/)
   assert.match(css, /\.settings__last-model\s*\{[^}]*color:\s*var\(--muted\);[^}]*font-weight:\s*400;/s)
   assert.match(css, /\.settings__standard-highlight\s*\{[^}]*color:\s*var\(--green\);[^}]*font-weight:\s*inherit;/s)
+})
+
+test('restart and rebuild explain their distinct container effects on demand', () => {
+  assert.match(view, /SettingsInfoLabel[\s\S]*aria-expanded=\{expanded\}/)
+  assert.match(view, /settings__info-bubble[\s\S]*role="tooltip"/)
+  assert.match(view, /dismissOnOutsidePress[\s\S]*dismissOnEscape/)
+  assert.match(view, /label="Restart"[\s\S]*settings-restart-info/)
+  assert.match(view, /label=\{rebuildBootstrap \? 'Container updates' : 'Rebuild container'\}/)
+  assert.match(view, /does not[\s\S]*install a newer container image/)
+  assert.match(view, /Creates a fresh container from the newest official image/)
+  assert.doesNotMatch(view, /Replace container|Replace now|Replacing…/)
+  assert.match(css, /\.settings__info-button\s*\{[^}]*width:\s*32px;[^}]*height:\s*32px;/s)
+  assert.match(css, /\.settings__info-bubble\s*\{[^}]*position:\s*absolute;[^}]*bottom:\s*calc\(100% \+ 10px\);/s)
 })
 
 test('background agents are always draggable without reorder chrome or a trailing caret', () => {

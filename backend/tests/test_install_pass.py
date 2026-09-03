@@ -11,7 +11,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from app import auth as auth_lib, models
+from app.shell_install_pass import hash_secret as _shell_install_hash
 import app.routes.standalone as standalone_routes
+from app.routes.auth import _install_pass_hash
 from app.timeutil import now_naive_utc
 from test_app_fixtures import create_local_app
 
@@ -200,3 +202,105 @@ def test_manifest_never_mints_a_pass_for_an_anonymous_fetch(client, auth):
   app_row = _create_app(client, auth)
   body = client.get(f"/apps/{app_row['slug']}/manifest.json").json()
   assert "pass" not in body["start_url"]
+
+
+def test_shell_install_cookie_is_opaque_copied_and_durably_one_use(
+  client, auth, db,
+):
+  prepared = client.post("/api/auth/shell-install-pass", headers=auth)
+  assert prepared.status_code == 204
+  assert prepared.headers["cache-control"] == "no-store"
+  set_cookie = prepared.headers["set-cookie"]
+  assert "mobius_shell_install=" in set_cookie
+  assert "HttpOnly" in set_cookie
+  assert "SameSite=strict" in set_cookie
+  assert "Path=/api/auth/shell-install-pass/redeem" in set_cookie
+
+  secret = client.cookies.get("mobius_shell_install")
+  assert secret
+  assert auth_lib.decode_access_token(secret) is None
+  digest = _shell_install_hash(secret)
+  grant = db.query(models.ShellInstallPassGrant).filter(
+    models.ShellInstallPassGrant.token_hash == digest,
+  ).one()
+  assert grant.token_hash != secret
+
+  blocked = client.post(
+    "/api/auth/shell-install-pass/redeem",
+    headers={"Sec-Fetch-Site": "cross-site"},
+  )
+  assert blocked.status_code == 403
+
+  redeemed = client.post("/api/auth/shell-install-pass/redeem")
+  assert redeemed.status_code == 200
+  payload = auth_lib.decode_access_token(redeemed.json()["access_token"])
+  assert payload["sub"] == "test"
+  assert datetime.fromtimestamp(payload["exp"], UTC) >= (
+    datetime.now(UTC) + timedelta(days=29)
+  )
+  db.expire_all()
+  assert grant.consumed_at is not None
+
+  client.cookies.set(
+    "mobius_shell_install",
+    secret,
+    path="/api/auth/shell-install-pass/redeem",
+  )
+  assert client.post("/api/auth/shell-install-pass/redeem").status_code == 401
+
+
+def test_shell_install_preparation_requires_owner_session(client):
+  assert client.post("/api/auth/shell-install-pass").status_code == 401
+
+
+def test_shell_install_logout_revokes_a_cookie_already_copied_to_an_app(
+  client, auth, db,
+):
+  prepared = client.post("/api/auth/shell-install-pass", headers=auth)
+  assert prepared.status_code == 204
+  copied_secret = client.cookies.get("mobius_shell_install")
+  grant = db.query(models.ShellInstallPassGrant).filter(
+    models.ShellInstallPassGrant.token_hash == _shell_install_hash(copied_secret),
+  ).one()
+
+  revoked = client.post("/api/auth/shell-install-pass/revoke", headers=auth)
+  assert revoked.status_code == 204
+  assert revoked.headers["cache-control"] == "no-store"
+  assert "mobius_shell_install=" in revoked.headers["set-cookie"]
+  assert "Max-Age=0" in revoked.headers["set-cookie"]
+  assert "Path=/api/auth/shell-install-pass/redeem" in revoked.headers["set-cookie"]
+  db.expire_all()
+  assert grant.consumed_at is not None
+
+  # The Home Screen container may already hold its own copied cookie when the
+  # browser signs out. Restoring that copy must not restore the owner session.
+  client.cookies.set(
+    "mobius_shell_install",
+    copied_secret,
+    path="/api/auth/shell-install-pass/redeem",
+  )
+  assert client.post("/api/auth/shell-install-pass/redeem").status_code == 401
+
+
+def test_shell_install_logout_requires_auth_and_same_site_request(
+  client, auth, db,
+):
+  client.post("/api/auth/shell-install-pass", headers=auth)
+  grant = db.query(models.ShellInstallPassGrant).one()
+
+  assert client.post("/api/auth/shell-install-pass/revoke").status_code == 401
+  blocked = client.post(
+    "/api/auth/shell-install-pass/revoke",
+    headers={**auth, "Sec-Fetch-Site": "cross-site"},
+  )
+  assert blocked.status_code == 403
+  db.expire_all()
+  assert grant.consumed_at is None
+
+
+def test_shell_install_honors_owner_epoch(client, auth, db):
+  client.post("/api/auth/shell-install-pass", headers=auth)
+  owner = db.query(models.Owner).one()
+  owner.token_epoch += 1
+  db.commit()
+  assert client.post("/api/auth/shell-install-pass/redeem").status_code == 401

@@ -90,6 +90,9 @@ standalone_router = _load("standalone")
 client_error_router = _load("client_error")
 client_signal_router = _load("client_signal")
 community_router = _load("community")
+common_router = _load("common")
+common_groups_router = _load("common_groups")
+common_objects_router = _load("common_objects")
 contribution_relay_router = _load("contribution_relay")
 platform_router = _load("platform")
 published_router = _load("published")
@@ -135,6 +138,9 @@ __all__ = [
   "client_error_router",
   "client_signal_router",
   "community_router",
+  "common_router",
+  "common_groups_router",
+  "common_objects_router",
   "contribution_relay_router",
   "platform_router",
   "published_router",

@@ -151,7 +151,8 @@ def _manifest_color(value) -> str | None:
 
 # Web-manifest `display` values an app may request. Anything else drops to
 # None so the served manifest falls back to "standalone" rather than emitting
-# a bogus mode. "fullscreen" is the one games want (no OS status bar / notch).
+# a bogus mode. "fullscreen" asks for the browser's most immersive supported
+# presentation; iOS can retain its OS status bar, so it never replaces insets.
 _VALID_DISPLAY = frozenset(("standalone", "fullscreen", "minimal-ui", "browser"))
 
 

@@ -30,6 +30,8 @@ relay_route._limiter.enabled = False
 
 _RELAY_ID = "ctr_1234567890abcdef1234567890abcdef"
 _OTHER_RELAY_ID = "ctr_fedcba0987654321fedcba0987654321"
+_REVIEWED_BASE = "a" * 40
+_REVIEWED_HEAD = "c" * 40
 
 
 def _git(repo, *args, input_bytes=None):
@@ -71,7 +73,15 @@ def _prepared_relay_record(client, owner_token, tmp_path, record_id):
       "repo": "mobius-os/mobius",
       "repo_path": str(tmp_path),
       "branch": "fix/relay-review",
+      "title": "Reviewed relay change",
       "body_draft": "## What\n\nA reviewed relay change.",
+      "base_sha": _REVIEWED_BASE,
+      "head_sha": _REVIEWED_HEAD,
+    },
+    "quality_review": {
+      "state": "all_clear",
+      "reviewed_head_sha": _REVIEWED_HEAD,
+      "reviewed_at": "2026-08-20T12:00:00Z",
     },
   })
   return app_id, record_path

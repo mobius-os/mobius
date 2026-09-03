@@ -18,9 +18,11 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <!-- black-translucent extends the web view UNDER the iOS status bar /
          notch — the shell bar pads by env(safe-area-inset-top), and
-         immersive mode (moebius:immersive, .pm/128) relies on it for true
-         full-viewport games. iOS reads this at PWA LAUNCH: changing it
-         needs the installed PWA fully relaunched from the home screen. -->
+         immersive mode (moebius:immersive, .pm/128) relies on that stable
+         edge-to-edge coordinate space. WebKit establishes this policy from
+         the installed document; runtime theme changes must not rewrite it,
+         and changing it can require removing + reinstalling the Home Screen
+         app before iOS adopts the new viewport contract. -->
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Möbius" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />

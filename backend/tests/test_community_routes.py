@@ -516,8 +516,9 @@ async def test_local_publish_rejects_an_incomplete_listing_before_github_writes(
 
 
 @pytest.mark.asyncio
-async def test_local_app_publish_creates_public_github_source_then_lists_exact_commit(
-  monkeypatch, db,
+@pytest.mark.parametrize("repository_preexists_empty", [False, True])
+async def test_local_app_publish_creates_or_resumes_empty_github_source_then_lists_exact_commit(
+  monkeypatch, db, repository_preexists_empty,
 ):
   github_calls = []
   listed = {}
@@ -550,23 +551,37 @@ async def test_local_app_publish_creates_public_github_source_then_lists_exact_c
     if path == "/user":
       return {"id": 77, "login": "octo-owner"}, 200
     if path == "/repos/octo-owner/pocket-list":
+      if repository_preexists_empty:
+        return {
+          "full_name": "octo-owner/pocket-list",
+          "private": False,
+          "owner": {"id": 77},
+        }, 200
       return None, 404
     if path == "/user/repos":
+      assert repository_preexists_empty is False
       return {
         "full_name": "octo-owner/pocket-list",
         "private": False,
         "owner": {"id": 77},
       }, 201
     if path.endswith("/git/ref/heads/main"):
-      return None, 404
+      if repository_preexists_empty:
+        raise community.HTTPException(409, "Git Repository is empty.")
+      raise AssertionError("a newly-created empty repository has no ref to inspect")
+    if path.endswith("/contents/mobius.json"):
+      assert method == "PUT"
+      assert body["content"] == "e30="
+      assert "[mobius-store-repository:" in body["message"]
+      return {"commit": {"sha": "d" * 40}}, 201
     if path.endswith("/git/blobs"):
       return {"sha": format(len(github_calls), "040x")}, 201
     if path.endswith("/git/trees"):
       return {"sha": "b" * 40}, 201
     if path.endswith("/git/commits"):
       return {"sha": "c" * 40}, 201
-    if path.endswith("/git/refs"):
-      return {"ref": body["ref"]}, 201
+    if method == "PATCH" and path.endswith("/git/refs/heads/main"):
+      return {"object": {"sha": body["sha"]}}, 200
     raise AssertionError((method, path, body, allow_not_found))
 
   async def fake_prepare(body, key, *, local_app_id=""):
@@ -617,6 +632,7 @@ async def test_local_app_publish_creates_public_github_source_then_lists_exact_c
   )
 
   assert response.status_code == 201
+  assert any(path.endswith("/git/ref/heads/main") for _, path, _ in github_calls) is repository_preexists_empty
   assert listed["body"].repository == "octo-owner/pocket-list"
   assert listed["body"].commit_sha == "c" * 40
   assert listed["key"].startswith("store:publish-local:")
@@ -627,7 +643,7 @@ async def test_local_app_publish_creates_public_github_source_then_lists_exact_c
   )
   assert "[mobius-store-repository:" in source_commit["message"]
   assert "[mobius-store-source:" in source_commit["message"]
-  assert source_commit["parents"] == []
+  assert source_commit["parents"] == ["d" * 40]
   assert "local-only-token" not in repr(listed)
 
 

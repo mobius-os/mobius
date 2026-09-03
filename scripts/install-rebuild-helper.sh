@@ -173,7 +173,7 @@ ExecStopPost=/usr/local/libexec/mobius-rebuild-host reconcile
 EOF
 cat >/etc/systemd/system/mobius-rebuild.path <<EOF
 [Unit]
-Description=Watch for a Möbius container replacement request
+Description=Watch for a Möbius container rebuild request
 
 [Path]
 PathExists=$DATA_SOURCE/mobius-rebuild/inbox/request.json
@@ -184,7 +184,7 @@ WantedBy=multi-user.target
 EOF
 cat >/etc/systemd/system/mobius-rebuild-reconcile.service <<'EOF'
 [Unit]
-Description=Reconcile interrupted Möbius container replacement state
+Description=Reconcile interrupted Möbius container rebuild state
 After=docker.service
 Requires=docker.service
 Before=mobius-rebuild.path
@@ -204,6 +204,6 @@ systemctl daemon-reload
 systemctl enable mobius-rebuild-reconcile.service
 systemctl enable --now mobius-rebuild.path
 
-echo "Container replacement installed for Compose project '$PROJECT'."
+echo "Container rebuild support installed for Compose project '$PROJECT'."
 echo "Topology: ${FILES[*]:-$FROZEN_SOURCE}"
 echo "Rerun this installer after an intentional Compose topology change."

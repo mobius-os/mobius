@@ -8,6 +8,7 @@ import {
   requestInstall,
   subscribeInstallPrompt,
 } from '../../lib/installPrompt.js'
+import { prepareShellInstallPass } from '../../lib/shellInstallPass.js'
 import {
   detectInstallPlatform,
   installCopyForPlatform,
@@ -17,6 +18,7 @@ import './WalkthroughOverlay.css'
 export default function WalkthroughOverlay({ onDone, onOpenSettings, onExploreApps }) {
   const queryClient = useQueryClient()
   const closingRef = useRef(false)
+  const installAbortRef = useRef(null)
   const [platform] = useState(() => detectInstallPlatform())
   const [installCopy] = useState(() => installCopyForPlatform(platform))
   const [showInstallHelp, setShowInstallHelp] = useState(false)
@@ -47,6 +49,17 @@ export default function WalkthroughOverlay({ onDone, onOpenSettings, onExploreAp
 
   async function handleInstall() {
     setInstallFeedback('')
+    if (platform.ios) {
+      const controller = new AbortController()
+      installAbortRef.current = controller
+      setInstallBusy(true)
+      // Best effort: installing still works if the short sign-in handoff
+      // cannot be refreshed; the new app will simply show normal login.
+      await prepareShellInstallPass({ force: true, signal: controller.signal })
+      if (controller.signal.aborted) return
+      installAbortRef.current = null
+      setInstallBusy(false)
+    }
     if (installState !== 'ready') {
       setShowInstallHelp((visible) => !visible)
       return
@@ -73,6 +86,10 @@ export default function WalkthroughOverlay({ onDone, onOpenSettings, onExploreAp
     // The event can arrive after mount; finish is guarded across rerenders.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [installState])
+
+  useEffect(() => () => {
+    installAbortRef.current?.abort()
+  }, [])
 
   const nativeInstallReady = installState === 'ready'
   const installButtonLabel = installBusy
