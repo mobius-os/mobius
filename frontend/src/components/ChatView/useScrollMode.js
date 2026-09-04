@@ -315,6 +315,7 @@ export default function useScrollMode({
   // the gesture's dirty state lives inside the layout effect. This bridge reads
   // the exact hold only on that rare semantic boundary, never in the hot scroll
   // path.
+  const questionSubmissionLayoutRef = useRef(null)
   // Monotonic generation for actual reader scroll intent. Send/steer snapshots
   // and every deferred/automatic geometry commit use this same authority:
   // once a newer gesture lands, older work can never regain ownership merely
@@ -708,6 +709,13 @@ export default function useScrollMode({
       nextMode,
       'send:question-freeze',
     )
+    // Pointer activation can dismiss the mobile keyboard before React commits
+    // the card's pending state. Reserve the held anchor against that imminent
+    // viewport growth in this same task so the browser never gets one paint in
+    // which it can clamp the question away from its submitted position.
+    questionSubmissionLayoutRef.current?.(
+      readerIntentVersionRef.current,
+    )
     return {
       mode,
       readerIntentVersion: readerIntentVersionRef.current,
@@ -1093,6 +1101,8 @@ export default function useScrollMode({
         persistMode()
       }
     }
+
+    questionSubmissionLayoutRef.current = sizeSpacer
 
     function rememberAppliedMode() {
       const mode = modeRef.current
@@ -2077,6 +2087,9 @@ export default function useScrollMode({
       clearTimeout(deferredGestureLayoutTimer)
       if (resumeLayoutAfterGestureRef.current === resumeLayoutAfterGesture) {
         resumeLayoutAfterGestureRef.current = null
+      }
+      if (questionSubmissionLayoutRef.current === sizeSpacer) {
+        questionSubmissionLayoutRef.current = null
       }
       mountMutationObserver?.disconnect()
       scrollEl.removeEventListener('load', requestRevealOnQuiet, true)

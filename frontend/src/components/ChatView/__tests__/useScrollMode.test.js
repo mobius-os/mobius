@@ -1799,6 +1799,17 @@ test('question submission reserves the exact room that keeps its anchor reachabl
     _computeSpacerH(scrollEl, listEl, latestUser, mode),
     340,
   )
+  assert.equal(
+    _computeSpacerH(
+      scrollEl,
+      listEl,
+      latestUser,
+      mode,
+      { pinViewportHeight: 1000 },
+    ),
+    740,
+    'submit activation pre-reserves the known keyboard-closed viewport',
+  )
   scrollEl.clientHeight = 700
   assert.equal(
     _computeSpacerH(scrollEl, listEl, latestUser, mode),

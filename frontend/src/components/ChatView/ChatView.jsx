@@ -3288,6 +3288,13 @@ export default function ChatView({
       // comment above for the full rationale.
     }
     setSending(true)
+    // Close the synchronous re-entry window before React publishes the state
+    // update, then reconcile the completed turn this send follows. The forced
+    // read deliberately uses the local-turn preservation path: it replaces a
+    // stale live assistant projection with its durable settled row while
+    // retaining this optimistic user row and its stable pin.
+    sendingRef.current = true
+    void fetchMessages({ force: true })
     // Pin per the R2 send rule via the funnel: it arms the reservation spacer
     // on every send and, when not pinning, retires any stale PIN to the
     // reader's anchor so their viewport stays fixed. The row carries its final
