@@ -552,7 +552,7 @@ export default function ChatSettingsPanel({
     typeof providerUsage?.contextTokensUsed === 'number'
     && typeof providerUsage?.contextTokensMaximum === 'number'
   )
-    ? `${formatRoundedTokenCount(providerUsage.contextTokensUsed)} / ${formatRoundedTokenCount(providerUsage.contextTokensMaximum)} tokens`
+    ? `${formatRoundedTokenCount(providerUsage.contextTokensUsed)}/${formatRoundedTokenCount(providerUsage.contextTokensMaximum)} context`
     : 'Context'
   return (
     <div className="csp">

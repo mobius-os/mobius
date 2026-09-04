@@ -129,3 +129,24 @@ def test_debug_status_does_not_silently_enable_guessed_payload_option(
     "omitted": True,
     "detail_url": "/api/debug/memory",
   }
+
+
+def test_debug_logs_bounds_each_returned_line(client, auth, tmp_path, monkeypatch):
+  from app.routes import debug
+
+  log_dir = tmp_path / "logs"
+  log_dir.mkdir()
+  (log_dir / "chat.log").write_text("start-" + ("x" * 5000) + "-finish\n")
+  monkeypatch.setattr(
+    debug,
+    "get_settings",
+    lambda: type("Settings", (), {"data_dir": str(tmp_path)})(),
+  )
+
+  response = client.get("/api/debug/logs?lines=10", headers=auth)
+
+  assert response.status_code == 200
+  line = response.json()["lines"][0]
+  assert len(line) == 4000
+  assert "characters truncated" in line
+  assert line.endswith("-finish")
