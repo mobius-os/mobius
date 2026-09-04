@@ -1416,6 +1416,44 @@ def _sync_python_dependencies(repo: Path) -> tuple[bool, str]:
   return True, ""
 
 
+def _frontend_deps_changed(
+  repo: Path, before: str | None, after: str | None
+) -> bool:
+  """Whether the locked frontend dependency inputs changed between two commits."""
+  return any(
+    path in ("frontend/package.json", "frontend/package-lock.json")
+    for path in (_changed_paths(repo, before, after) or [])
+  )
+
+
+def _sync_frontend_dependencies(repo: Path) -> tuple[bool, str]:
+  """Install the locked frontend deps in place — the SAME command the image build
+  runs (``npm ci --ignore-scripts``) — so an owner Apply lands a frontend
+  dependency bump and rebuilds the shell without a container rebuild. This is the
+  frontend twin of :func:`_sync_python_dependencies`; the caller runs it just
+  before the frontend rebuild so the build sees the new ``node_modules``.
+
+  Returns ``(ok, error_tail)`` and never raises for an operational failure.
+  """
+  frontend = repo / "frontend"
+  if not (frontend / "package-lock.json").is_file():
+    return True, ""
+  try:
+    proc = subprocess.run(
+      ["npm", "ci", "--ignore-scripts"],
+      cwd=str(frontend),
+      capture_output=True,
+      text=True,
+      timeout=_DEP_SYNC_TIMEOUT,
+    )
+  except (subprocess.TimeoutExpired, OSError) as exc:
+    return False, repr(exc)[-500:]
+  if proc.returncode != 0:
+    detail = (proc.stderr or proc.stdout or "npm ci failed").strip()
+    return False, detail[-500:]
+  return True, ""
+
+
 def _hook_git(repo: Path, *args: str) -> subprocess.CompletedProcess:
   """Run one bounded, non-interactive Git plumbing command for hook refresh."""
   return subprocess.run(
@@ -1948,6 +1986,14 @@ def _reconcile_under_lock(
       if progress:
         progress(PlatformUpdatePhase.BUILDING)
       try:
+        # Install the newly locked frontend deps in place before the build, the
+        # same way an owner Apply syncs Python deps — so a frontend dependency
+        # bump lands live and no longer forces a container rebuild. The build
+        # below would otherwise compile against stale node_modules.
+        if _frontend_deps_changed(repo, result.pre_sha, result.new_sha):
+          deps_ok, deps_err = _sync_frontend_dependencies(repo)
+          if not deps_ok:
+            raise RuntimeError(f"frontend dependency install failed: {deps_err}")
         _rebuild_frontend_after_update_if_needed(repo, result)
       except Exception as exc:
         log.warning(

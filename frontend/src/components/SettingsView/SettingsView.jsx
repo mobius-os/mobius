@@ -12,7 +12,6 @@ import {
 import { formatUpstreamCommitDate } from '../../lib/platformProvenance.js'
 import {
   rebuildIsActive,
-  rebuildNeedsBootstrap,
   rebuildPollShouldContinue,
   rebuildProgressMessage,
   rebuildRequestOutcome,
@@ -449,7 +448,6 @@ export default function SettingsView({
   // A manual restart interrupts any live chat, so it's a deliberate two-step:
   // the first tap arms the confirm, the second actually restarts.
   const [restartConfirm, setRestartConfirm] = useState(false)
-  const [rebuildConfirm, setRebuildConfirm] = useState(false)
   const [rebuildStatus, setRebuildStatus] = useState(null)
   const [rebuildError, setRebuildError] = useState('')
   const [rebuildRequesting, setRebuildRequesting] = useState(false)
@@ -1137,7 +1135,16 @@ export default function SettingsView({
   useEffect(() => {
     const state = rebuildStatus?.state
     if (!['failed', 'rolled_back', 'needs_recovery'].includes(state)) return
-    setRebuildConfirm(false)
+    // The controller keeps its last terminal result for diagnosis. That is not
+    // a current Settings error: after the standalone rebuild action was
+    // removed, only a rebuild started by this mounted update flow owns visible
+    // progress or failure UI. Otherwise an old failed attempt survives every
+    // reload indefinitely and looks like an action the owner still needs to
+    // take even when no image update is pending.
+    if (
+      !rebuildInitiatedHereRef.current
+      && !rebuildReviewedUpdateRef.current
+    ) return
     const message = rebuildStatus?.error
       || rebuildStatus?.message
       || (state === 'needs_recovery'
@@ -1180,7 +1187,6 @@ export default function SettingsView({
       rebuildInitiatedHereRef.current = outcome.cutoverAccepted
       setRebuildStartedHere(outcome.cutoverAccepted)
       setRebuildStatus(body)
-      setRebuildConfirm(false)
       if (outcome.cutoverAccepted) returnToSettingsAfterReload()
       if (outcome.alreadyCurrent) {
         rebuildReviewedUpdateRef.current = false
@@ -1207,16 +1213,13 @@ export default function SettingsView({
     }
   }
 
-  async function rebuildContainer() {
-    return startContainerRebuild(() => api.admin.rebuild())
-  }
-
   async function rebuildPlatformUpdate(plan) {
+    // Railway pins an immutable GHCR digest; self-hosted anchors on the
+    // sha-<target> tag and has no digest, so the digest is not required here.
     if (
       !plan?.plan_id
       || !plan?.current_sha
       || !plan?.target_sha
-      || !plan?.image_digest
     ) {
       setPlatformError('The update plan is incomplete. Refresh the preview and try again.')
       return { ok: false }
@@ -1226,8 +1229,6 @@ export default function SettingsView({
       { reviewedUpdate: true },
     )
   }
-
-  const rebuildBootstrap = rebuildNeedsBootstrap(rebuildStatus)
 
   async function signOut() {
     if (signingOut) return
@@ -2242,79 +2243,13 @@ export default function SettingsView({
               description={restartError}
             />
           )}
-          <div className="settings__row">
-            <SettingsInfoLabel
-              label={rebuildBootstrap ? 'Container updates' : 'Rebuild container'}
-              infoId="settings-rebuild-info"
-              expanded={serverInfo === 'rebuild'}
-              onToggle={() => setServerInfo((value) => (
-                value === 'rebuild' ? null : 'rebuild'
-              ))}
-              onDismiss={() => setServerInfo(null)}
-            >
-              {rebuildBootstrap
-                ? 'Enables safe container rebuilds on this Railway deployment with one managed upgrade.'
-                : 'On Railway, creates a fresh container from the newest published official image. Self-hosted setups rebuild the applied version. Your chats, apps, settings, and other saved data stay in place.'}
-            </SettingsInfoLabel>
-            {rebuildConfirm ? (
-              <div className="settings__confirm">
-                <button
-                  className="settings__btn settings__btn--outline settings__btn--sm"
-                  type="button"
-                  onClick={() => setRebuildConfirm(false)}
-                  disabled={rebuildRequesting || rebuildIsActive(rebuildStatus)}
-                >
-                  Cancel
-                </button>
-                <button
-                  className="settings__btn settings__btn--sm settings__btn--nowrap"
-                  type="button"
-                  onClick={rebuildContainer}
-                  disabled={rebuildRequesting || rebuildIsActive(rebuildStatus)}
-                >
-                  {rebuildRequesting || rebuildIsActive(rebuildStatus)
-                    ? (rebuildBootstrap ? 'Enabling…' : 'Rebuilding…')
-                    : (rebuildBootstrap ? 'Enable now' : 'Rebuild now')}
-                </button>
-              </div>
-            ) : (
-              <button
-                className="settings__btn settings__btn--outline settings__btn--sm"
-                type="button"
-                onClick={() => { setRebuildError(''); setRebuildConfirm(true) }}
-                disabled={
-                  restartPhase === 'restarting'
-                  || rebuildRequesting
-                  || rebuildIsActive(rebuildStatus)
-                  || (rebuildStatus?.supported === false && !rebuildBootstrap)
-                }
-              >
-                {rebuildBootstrap
-                  ? 'Enable'
-                  : (rebuildStatus?.supported === false ? 'Not set up' : 'Rebuild')}
-              </button>
-            )}
-          </div>
-          {rebuildConfirm && !rebuildIsActive(rebuildStatus) && (
-            <p className="settings__subtext settings__subtext--tight">
-              {rebuildBootstrap ? (
-                <>Performs one managed Railway redeploy, then verifies the safe
-                update controller. Finish active responses first; Railway restores
-                the previous container if the upgrade is unhealthy.</>
-              ) : (
-                <>Rebuilds the container from a pinned official image. Railway
-                first checks the newest image published to GHCR; self-hosted
-                setups use the applied version. Local-only runtime changes
-                recorded by Möbius block the rebuild; undeclared
-                container changes are lost. Active chats continue afterward.</>
-              )}
-            </p>
-          )}
-          {rebuildStatus?.supported === false && (
-            <p className="settings__subtext settings__subtext--tight">
-              {rebuildStatus.message || 'Container rebuilds are not set up on this installation.'}
-            </p>
-          )}
+          {/* The container rebuild is no longer a separate manual action: an
+              image-level update drives it on confirmation from the "Möbius"
+              update review above (Railway pins the GHCR image; self-hosted
+              applies the reviewed source in place, then rebuilds the matching
+              image). Only the in-progress status and any failure remain here so
+              a rebuild started from the update flow stays visible after the
+              review sheet closes and the shell reloads. */}
           {(rebuildIsActive(rebuildStatus) || (rebuildStartedHere && [
             'succeeded', 'no_change', 'rolled_back', 'needs_recovery',
           ].includes(rebuildStatus?.state))) && (

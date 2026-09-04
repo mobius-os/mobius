@@ -624,18 +624,35 @@ async def request_rebuild() -> RebuildStatus:
 
 async def request_reviewed_rebuild(
   *,
+  db: Any,
   plan_id: str,
   current_sha: str,
   target_sha: str,
-  image_digest: str,
-) -> RebuildStatus:
-  """Cut over Railway to the exact GHCR image bound into an owner review."""
+  image_digest: str | None,
+) -> RebuildStatus | dict[str, Any]:
+  """Drive the container rebuild bound to an owner-reviewed update target.
+
+  Railway cuts over to the exact digest-pinned GHCR image. Self-hosted applies
+  the reviewed source in place first — activating every live/restart part and
+  advancing the upstream marker to the target — then queues the host helper to
+  rebuild the pinned ``sha-<target>`` image. Both deployments finish an
+  image-level update from the single reviewed-update confirmation instead of a
+  separate Apply followed by a manual Rebuild.
+  """
   if platform_activation.deployment_kind() != "railway":
+    return await _request_self_hosted_reviewed_rebuild(
+      db,
+      plan_id=plan_id,
+      current_sha=current_sha,
+      target_sha=target_sha,
+      image_digest=image_digest,
+    )
+  if not image_digest:
     raise DeploymentControlError(
-      "unsupported_deployment",
-      "Reviewed image updates are available on Railway deployments.",
+      "update_plan_invalid",
+      "This update review is no longer valid. Refresh it and try again.",
       status_code=409,
-  )
+    )
   def validate_reviewed_release() -> None:
     try:
       reviewed = platform_update.reviewed_container_rebuild_plan(
@@ -685,6 +702,61 @@ async def request_reviewed_rebuild(
     image_digest,
     final_check=validate_reviewed_release,
   )
+
+
+async def _request_self_hosted_reviewed_rebuild(
+  db: Any,
+  *,
+  plan_id: str,
+  current_sha: str,
+  target_sha: str,
+  image_digest: str | None,
+) -> RebuildStatus | dict[str, Any]:
+  """Apply a reviewed self-hosted image update, then queue the host rebuild.
+
+  The host image ``sha-<target>`` carries the target's baked runtime, while the
+  served source lives in the persistent ``/data/platform`` checkout. Applying
+  the reviewed plan first lands every live-activatable part and advances the
+  upstream marker to the target, so the subsequent host rebuild pins the exact
+  matching image and boots onto source already at the target. ``request_rebuild``
+  re-derives the expected SHA from the advanced marker and keeps its own
+  local-image-input blocker guard, so a local-only image change still fails
+  closed there rather than being silently dropped by the official image.
+  """
+  # Fail before mutating any source if the host helper cannot rebuild.
+  status = await read_rebuild_status()
+  if not status.get("supported"):
+    raise DeploymentControlError(
+      status.get("code") or "not_configured",
+      status.get("message")
+      or "Container rebuilds are not available on this host yet.",
+      status_code=409,
+    )
+  if status.get("state") in _ACTIVE_STATES:
+    raise DeploymentControlError(
+      "already_running",
+      "A container rebuild is already running.",
+      status_code=409,
+    )
+
+  apply_result = await platform_update.apply_platform_update(
+    db,
+    plan_id=plan_id,
+    current_sha=current_sha,
+    target_sha=target_sha,
+    image_digest=image_digest,
+  )
+  state = apply_result.get("state")
+  if state in (
+    platform_update.PlatformUpdateState.CONFLICT.value,
+    platform_update.PlatformUpdateState.ROLLED_BACK.value,
+  ):
+    # Nothing was activated; surface the apply outcome so the review sheet can
+    # render its conflict / rolled-back result instead of a rebuild.
+    return apply_result
+
+  # Source is now at the reviewed target. Queue the host rebuild bound to it.
+  return await request_rebuild()
 
 
 def _raise_local_runtime_blockers(blockers: list[str]) -> None:

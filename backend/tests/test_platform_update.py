@@ -1846,7 +1846,7 @@ def test_boot_clears_restart_but_preserves_unverified_image_work(clone_env):
   target = _served_sha(platform)
   pu.mark_activation_needed(
     target,
-    ["backend/app/main.py", "frontend/package-lock.json"],
+    ["backend/app/main.py", "Dockerfile"],
   )
 
   res = pu.reconcile_clone(platform, at_boot=True)
@@ -1856,7 +1856,7 @@ def test_boot_clears_restart_but_preserves_unverified_image_work(clone_env):
     "version": 2,
     "target_sha": target,
     "upstream_sha": None,
-    "paths": ["frontend/package-lock.json"],
+    "paths": ["Dockerfile"],
     "image_paths": [],
   }
 
@@ -1868,11 +1868,11 @@ def test_boot_rebuild_retires_only_upstream_covered_image_paths(
   upstream = _served_sha(platform)
   local = _local_commit(
     platform,
-    edits={"frontend/package-lock.json": "local-only image input\n"},
+    edits={"protected-files.txt": "local-only image input\n"},
   )
   pu._write_activation_marker(
     local,
-    ["Dockerfile", "frontend/package-lock.json"],
+    ["Dockerfile", "protected-files.txt"],
     upstream_sha=upstream,
     image_paths=["Dockerfile"],
   )
@@ -1884,7 +1884,7 @@ def test_boot_rebuild_retires_only_upstream_covered_image_paths(
     "version": 2,
     "target_sha": local,
     "upstream_sha": upstream,
-    "paths": ["frontend/package-lock.json"],
+    "paths": ["protected-files.txt"],
     "image_paths": [],
   }
 
@@ -1973,6 +1973,88 @@ def test_apply_rolls_back_when_dependency_install_fails(clone_env, monkeypatch):
   assert res.status == "rolled_back"
   assert "boom" in (res.error or "")
   assert pu._rev(platform, pu._local_branch(platform)) == pre
+
+
+@pytest.mark.asyncio
+async def test_apply_installs_frontend_dependencies_in_place(
+  clone_env, monkeypatch,
+):
+  # A frontend dependency bump lands via an in-place `npm ci` during Apply and
+  # a live shell rebuild — no container/image rebuild, mirroring Python deps.
+  origin, platform = clone_env
+  target = _advance_origin(
+    origin,
+    edits={"frontend/package-lock.json": "new-locked-frontend-deps\n"},
+    msg="bump frontend deps",
+  )
+  pu._fetch(platform)
+  preview = pu.platform_update_preview(platform)
+
+  # A frontend dep change is classified as an in-place live activation, not a
+  # rebuild.
+  assert preview["activation"]["level"] == "live"
+
+  synced = {}
+
+  def fake_sync(repo):
+    synced["ran"] = True
+    return True, ""
+
+  monkeypatch.setattr(pu, "_sync_frontend_dependencies", fake_sync)
+  monkeypatch.setattr(
+    pu, "_rebuild_frontend_after_update_if_needed", lambda repo, result: None,
+  )
+
+  result = await pu.apply_platform_update(
+    SimpleNamespace(),
+    plan_id=preview["plan_id"],
+    current_sha=preview["current_sha"],
+    target_sha=preview["target_sha"],
+    repo=platform,
+  )
+
+  assert result["state"] != pu.PlatformUpdateState.ROLLED_BACK.value
+  assert result["state"] != pu.PlatformUpdateState.CONFLICT.value
+  assert synced.get("ran") is True  # npm ci ran during Apply, before the build
+  assert _served_sha(platform) == target
+
+
+@pytest.mark.asyncio
+async def test_apply_rolls_back_when_frontend_dependency_install_fails(
+  clone_env, monkeypatch,
+):
+  origin, platform = clone_env
+  before = _served_sha(platform)
+  target = _advance_origin(
+    origin,
+    edits={"frontend/package-lock.json": "new-locked-frontend-deps\n"},
+    msg="bump frontend deps",
+  )
+  pu._fetch(platform)
+  preview = pu.platform_update_preview(platform)
+
+  monkeypatch.setattr(
+    pu, "_sync_frontend_dependencies", lambda repo: (False, "npm boom"),
+  )
+  # If the source is not reset, a subsequent real build could run; keep it a
+  # no-op so the test isolates the dependency-install failure path.
+  monkeypatch.setattr(
+    pu, "_rebuild_frontend_after_update_if_needed", lambda repo, result: None,
+  )
+
+  result = await pu.apply_platform_update(
+    SimpleNamespace(),
+    plan_id=preview["plan_id"],
+    current_sha=preview["current_sha"],
+    target_sha=preview["target_sha"],
+    repo=platform,
+  )
+
+  # A failed in-place frontend install is fail-closed like a failed build: the
+  # source resets to the pre-Apply commit and the old tree keeps serving.
+  assert result["state"] == pu.PlatformUpdateState.ROLLED_BACK.value
+  assert "npm boom" in (result["error"] or "")
+  assert _served_sha(platform) == before
 
 
 # --- restart flag lifecycle -------------------------------------------------
