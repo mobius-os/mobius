@@ -84,6 +84,8 @@ MAX_ENVELOPE_BYTES = MAX_DOC_BYTES + 8 * 1024
 MAX_KIND_CHARS = 40
 MAX_LABEL_CHARS = 120
 INVITE_TTL_S = 7 * 24 * 3600
+PRESENCE_TTL_S = 12
+PRESENCE_RETENTION_S = 5 * 60
 ROLES = ("editor", "viewer")
 
 _OID_RE = re.compile(r"^[a-f0-9]{32}$")
@@ -94,6 +96,7 @@ _INVITE_RE = re.compile(
 )
 
 _object_locks: "WeakValueDictionary[str, asyncio.Lock]" = WeakValueDictionary()
+_object_presence: dict[tuple[str, str], float] = {}
 
 
 def _object_lock(oid: str) -> asyncio.Lock:
@@ -102,6 +105,25 @@ def _object_lock(oid: str) -> asyncio.Lock:
     lock = asyncio.Lock()
     _object_locks[oid] = lock
   return lock
+
+
+def _mark_present(oid: str, host: str, now: float | None = None) -> None:
+  """Record ephemeral board presence without turning heartbeats into disk I/O."""
+  observed_at = time.time() if now is None else now
+  _object_presence[(oid, host)] = observed_at
+  if len(_object_presence) > 2048:
+    cutoff = observed_at - PRESENCE_RETENTION_S
+    for key, seen_at in list(_object_presence.items()):
+      if seen_at < cutoff:
+        _object_presence.pop(key, None)
+
+
+def _member_is_active(oid: str, host: str, now: float | None = None) -> bool:
+  observed_at = _object_presence.get((oid, host))
+  if observed_at is None:
+    return False
+  current = time.time() if now is None else now
+  return observed_at >= current - PRESENCE_TTL_S
 
 
 # ── paths ────────────────────────────────────────────────────────────────────
@@ -190,6 +212,11 @@ def _public_object(obj: dict) -> dict:
         "name": m.get("name") or "",
         "handle": m.get("handle") or "",
         **({"pending": True} if m.get("pending") else {}),
+        **(
+          {"active": True}
+          if not m.get("pending") and _member_is_active(obj["id"], h)
+          else {}
+        ),
       }
       for h, m in (obj.get("members") or {}).items()
     },
@@ -278,7 +305,8 @@ async def peer_operation(oid: str, request: Request):
       invite = None
       if isinstance(secret, str) and secret:
         invite = (obj.get("invites") or {}).get(_hash_secret(secret))
-      existing_role = _member_role(obj, sender)
+      existing = (obj.get("members") or {}).get(sender) or {}
+      existing_role = existing.get("role")
       if invite is None and existing_role is None:
         raise HTTPException(status_code=403, detail="Invite is invalid or expired.")
       role = existing_role or invite["role"]
@@ -286,10 +314,11 @@ async def peer_operation(oid: str, request: Request):
         obj["invites"].pop(_hash_secret(secret), None)
       obj.setdefault("members", {})[sender] = {
         "role": role,
-        "name": str(actor.get("name") or "")[:MAX_LABEL_CHARS],
-        "handle": str(actor.get("handle") or "")[:MAX_LABEL_CHARS],
+        "name": str(actor.get("name") or existing.get("name") or "")[:MAX_LABEL_CHARS],
+        "handle": str(actor.get("handle") or existing.get("handle") or "")[:MAX_LABEL_CHARS],
         "joined_at": time.time(),
       }
+      _mark_present(oid, sender)
       _save_object(obj)
       return {
         "status": "joined",
@@ -307,6 +336,7 @@ async def peer_operation(oid: str, request: Request):
       return {"status": "left"}
 
     if kind == "object_state":
+      _mark_present(oid, sender)
       since = envelope.get("since_version")
       since = since if isinstance(since, int) else -1
       payload = {"status": "ok", "version": obj["version"], "object": _public_object(obj)}
@@ -329,6 +359,7 @@ async def peer_operation(oid: str, request: Request):
         "doc": _load_doc(oid),
       }
     _save_doc(oid, doc)
+    _mark_present(oid, sender)
     obj["version"] += 1
     obj["updated_at"] = time.time()
     obj.setdefault("members", {}).get(sender, {})["last_write_at"] = time.time()
@@ -820,6 +851,7 @@ async def revoke_member(
     if member_host not in (obj.get("members") or {}):
       raise HTTPException(status_code=404, detail="No such member.")
     obj["members"].pop(member_host, None)
+    _object_presence.pop((oid, member_host), None)
     _save_object(obj)
   return {"status": "revoked"}
 
@@ -846,6 +878,8 @@ async def delete_object(
         d.rmdir()
       except OSError:
         pass
+    for key in [key for key in _object_presence if key[0] == oid]:
+      _object_presence.pop(key, None)
   return {"status": "deleted"}
 
 
@@ -927,6 +961,7 @@ async def read_state(
     if obj is None:
       raise HTTPException(status_code=404, detail="No such object.")
     _require_app_match(caller, obj["app"])
+    _mark_present(oid, _own_host())
     payload = {"status": "ok", "version": obj["version"], "object": _public_object(obj)}
     if obj["version"] > since_version:
       payload["doc"] = _load_doc(oid)
@@ -964,6 +999,7 @@ async def write_state(
           "doc": _load_doc(oid),
         }
       _save_doc(oid, body.doc)
+      _mark_present(oid, _own_host())
       obj["version"] += 1
       obj["updated_at"] = time.time()
       _save_object(obj)

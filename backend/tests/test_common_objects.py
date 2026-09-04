@@ -99,6 +99,7 @@ def test_create_and_local_state_roundtrip(client, auth):
   body = read.json()
   assert body["version"] == 1
   assert body["doc"]["title"] == "Roadmap"
+  assert body["object"]["members"][common_routes._own_host()]["active"] is True
 
   write = client.put(
     f"/api/common/objects/{host}/{oid}/state",
@@ -152,7 +153,16 @@ def test_join_requires_valid_invite_and_signature(client, auth):
   body = joined.json()
   assert body["status"] == "joined"
   assert body["object"]["members"][PEER_HOST]["role"] == "editor"
+  assert body["object"]["members"][PEER_HOST]["active"] is True
   assert body["doc"]["title"] == "Board"
+
+
+def test_presence_is_ephemeral_and_expires():
+  oid = "fe" * 16
+  objects_routes._mark_present(oid, PEER_HOST, now=100.0)
+  assert objects_routes._member_is_active(oid, PEER_HOST, now=111.9) is True
+  assert objects_routes._member_is_active(oid, PEER_HOST, now=112.1) is False
+  objects_routes._object_presence.pop((oid, PEER_HOST), None)
 
 
 def test_capability_invite_is_consumed_by_first_distinct_peer(client, auth):
@@ -367,6 +377,7 @@ def test_handle_invite_preauthorizes_member_and_join_needs_no_code(client, auth)
   )
   assert joined.status_code == 200, joined.text
   assert joined.json()["object"]["members"][PEER_HOST].get("pending") is None
+  assert joined.json()["object"]["members"][PEER_HOST]["handle"] == "ana"
 
   # Re-inviting an active member is rejected.
   again = client.post(
