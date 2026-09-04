@@ -3528,7 +3528,9 @@ export default function ChatView({
   // POST /question-answers that could race with the GET on a mid-
   // stream remount, causing answers to disappear on first return
   // and reappear on the second.
-  const doSendSilent = useCallback(async (text, resolvedAnswers, questionId) => {
+  const doSendSilent = useCallback(async (
+    text, resolvedAnswers, questionId, preparedQuestionSubmission = null,
+  ) => {
     // Synchronous re-entrancy guard: flip BEFORE any other logic so a
     // second concurrent call (fast double-tap) bails immediately. This
     // is separate from sendingRef because answer submissions are
@@ -3559,7 +3561,7 @@ export default function ChatView({
     // output. Acceptance alone keeps this hold: the scroll owner may restore
     // prior follow only when the first post-answer activity actually renders.
     const questionSubmission = resolvedAnswers
-      ? freezeQuestionSubmission()
+      ? (preparedQuestionSubmission || freezeQuestionSubmission())
       : null
     const responseQuestionKey = resolvedAnswers
       ? (questionId
@@ -5459,6 +5461,7 @@ export default function ChatView({
                 chatId={chatId}
                 messageKey={dataKey}
                 onQuestionAnswer={doSendSilent}
+                onQuestionAnswerPrepare={freezeQuestionSubmission}
                 onResume={doSend}
                 onInternalNav={internalNav}
                 autoResumeEnabled={
@@ -5502,6 +5505,7 @@ export default function ChatView({
               dataKey={streamingDataKey}
               chatId={chatId}
               onAnswer={doSendSilent}
+              onAnswerPrepare={freezeQuestionSubmission}
               onResume={activeAssistantIsStreaming ? undefined : doSend}
               onInternalNav={internalNav}
               autoResumeEnabled={autoResumeEnabled}
