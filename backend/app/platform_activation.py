@@ -367,11 +367,57 @@ def dependency_fingerprint_paths(root: Path) -> list[str]:
   return sorted(paths)
 
 
+def image_input_paths(root: Path) -> list[str]:
+  """Every source path the container image bakes in, as it exists in ``root``.
+
+  The dependency inputs plus the baked runtime/bootstrap tree: exactly the
+  paths whose change the classifier says needs a new image (or, for Python
+  requirements, an in-place install). Hashing them at build time and again at
+  runtime answers "does the running image still match this source?" directly,
+  instead of remembering which update touched what.
+  """
+  paths: set[str] = set(dependency_fingerprint_paths(root))
+  for rule in _RULES:
+    if rule.level is not ActivationLevel.IMAGE_REBUILD or rule.dependency_fingerprint:
+      continue
+    for exact in rule.exact:
+      if (root / exact).is_file():
+        paths.add(exact)
+    for prefix in rule.prefixes:
+      base = root / prefix
+      if base.is_dir():
+        paths.update(
+          str(path.relative_to(root))
+          for path in base.rglob("*")
+          if path.is_file()
+        )
+  return sorted(path for path in paths if (root / path).is_file())
+
+
+def image_input_hashes(root: Path) -> dict[str, str]:
+  import hashlib
+
+  return {
+    path: hashlib.sha256((root / path).read_bytes()).hexdigest()
+    for path in image_input_paths(root)
+  }
+
+
 def _main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("root", type=Path)
+  parser.add_argument(
+    "--hashes", action="store_true",
+    help="print the image input hashes as JSON instead of the fingerprint paths",
+  )
   args = parser.parse_args()
-  for path in dependency_fingerprint_paths(args.root.resolve()):
+  root = args.root.resolve()
+  if args.hashes:
+    import json
+
+    print(json.dumps(image_input_hashes(root), sort_keys=True))
+    return 0
+  for path in dependency_fingerprint_paths(root):
     print(path)
   return 0
 

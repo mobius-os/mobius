@@ -274,6 +274,10 @@ class PlatformReviewedRebuild(TypedDict):
   local_base_sha: str
   activation: PlatformActivationImpact
   blockers: list[str]
+  # Packages installed live in this container that the running image does not
+  # carry (``pip``/``apt`` entries as ``name==version`` / ``name=version``).
+  # A replacement drops them; the owner decides whether that matters.
+  live_installs: dict[str, list[str]]
 
 
 class _ActivationMarker(TypedDict):
@@ -1130,6 +1134,7 @@ def reviewed_container_rebuild_plan(
       local_base_sha=base,
       activation=activation,
       blockers=blockers,
+      live_installs=live_install_drift(),
     )
 
 
@@ -1284,7 +1289,95 @@ def _pending_activation_paths(repo: Path = PLATFORM_REPO) -> list[str]:
     except Exception:
       head = None
     paths.extend(_activation_paths_between(repo, served, head))
+  paths.extend(image_input_drift(repo) or [])
   return sorted({str(path) for path in paths if str(path)})
+
+
+def _build_info() -> dict:
+  path = Path(os.environ.get("MOBIUS_BUILD_INFO_PATH", "/app/build-info.json"))
+  try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+  except Exception:
+    return {}
+  return data if isinstance(data, dict) else {}
+
+
+def image_input_drift(repo: Path = PLATFORM_REPO) -> list[str] | None:
+  """Image inputs whose served source no longer matches the running image.
+
+  The image records the hash of every input it was built from
+  (``build-info.json`` ``image_inputs``). Comparing those with the same paths
+  in the served checkout says, from state alone, whether this container still
+  matches its source — no marker to remember, no ancestry to prove. The
+  classifier then turns each differing path into its activation level
+  (Python requirements install in place; anything else needs a new image).
+  Returns None when the running image predates the record.
+  """
+  baked = _build_info().get("image_inputs")
+  if not isinstance(baked, dict) or not baked:
+    return None
+  try:
+    current = platform_activation.image_input_hashes(repo)
+  except OSError:
+    return None
+  return sorted(
+    path for path in set(baked) | set(current)
+    if baked.get(path) != current.get(path)
+  )
+
+
+def _inventory_drift(
+  baked_path: Path, current: list[str],
+) -> list[str] | None:
+  try:
+    baked = set(
+      line.strip() for line in baked_path.read_text(encoding="utf-8").splitlines()
+    )
+  except OSError:
+    return None
+  return sorted(
+    line.strip() for line in current
+    if line.strip() and line.strip() not in baked
+  )
+
+
+def live_install_drift(
+  inventory_dir: Path | None = None,
+  *,
+  run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> dict[str, list[str]]:
+  """Packages present in this container that its image did not install.
+
+  Agents may ``pip``/``apt`` install into the running container; that is the
+  cheap, restart-free path and it survives a process restart, but a container
+  replacement rebuilds from the image and silently drops it. The image bakes
+  its own ``pip freeze`` and ``dpkg-query`` inventories; anything the current
+  container has beyond them is what a replacement would lose. An image
+  without inventories reports nothing rather than guessing.
+  """
+  root = inventory_dir or Path(
+    os.environ.get("MOBIUS_IMAGE_INVENTORY_DIR", "/app/image-inventory"),
+  )
+  commands = {
+    "pip": [sys.executable or "python3", "-m", "pip", "freeze",
+            "--disable-pip-version-check"],
+    "apt": ["dpkg-query", "-W", "-f", "${Package}=${Version}\n"],
+  }
+  drift: dict[str, list[str]] = {}
+  for kind, command in commands.items():
+    baked_path = root / f"{kind}.txt"
+    if not baked_path.is_file():
+      continue
+    try:
+      proc = run(command, capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError):
+      continue
+    if proc.returncode != 0:
+      continue
+    extras = _inventory_drift(baked_path, proc.stdout.splitlines())
+    if extras:
+      drift[kind] = extras
+  return drift
 
 
 def _platform_activation_impact(

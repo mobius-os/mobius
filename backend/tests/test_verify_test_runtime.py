@@ -150,6 +150,10 @@ def test_test_wrapper_isolates_compose_and_rejects_stale_images():
     'git -C /app/platform-baked remote set-url origin "$MOBIUS_PLATFORM_ORIGIN"'
     in dockerfile
   )
+  assert (
+    'platform_activation.py", "--hashes", "/app/platform-baked"'
+    in dockerfile
+  )
   compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
   assert "MOBIUS_USE_LOCAL_PLATFORM_SOURCE:" in compose
   assert "MOBIUS_LOCAL_PLATFORM_SHA:" in compose
