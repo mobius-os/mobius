@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { ownsRecoveryAction } from '../recoveryCard.js'
 import { upsertTerminalErrorItem } from '../streamReducers.js'
+import { isResourcePause, resourcePauseLabel } from '../resourcePause.js'
 
 // Provider-limit parking (design §2.4): a limit-killed turn persists an error
 // block carrying a single `pause` descriptor ({kind, resets_at?}), which
@@ -13,6 +14,7 @@ import { upsertTerminalErrorItem } from '../streamReducers.js'
 const msgContent = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
 const streamingMessage = readFileSync(new URL('../StreamingMessage.jsx', import.meta.url), 'utf8')
 const errorCard = readFileSync(new URL('../ErrorCard.jsx', import.meta.url), 'utf8')
+const waitingChip = readFileSync(new URL('../WaitingChip.jsx', import.meta.url), 'utf8')
 const resetTime = readFileSync(new URL('../resetTime.js', import.meta.url), 'utf8')
 const promotion = readFileSync(new URL('../streamPromotion.js', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
@@ -112,7 +114,7 @@ test('the rate-limit card presents one recovery action at a time', () => {
     'a future reset names the persistent chat policy')
   assert.match(msgContent, /Turn off auto-continue/,
     'an enabled policy stays reversible without a competing retry')
-  assert.match(msgContent, /manualResumeAvailable = recoveryOwner && \([\s\S]*!parked \|\| \(!!limitResetElapsed && !autoResumeEnabled\)/,
+  assert.match(msgContent, /manualResumeAvailable = recoveryOwner && !resourceWait && \([\s\S]*!parked \|\| \(!!limitResetElapsed && !autoResumeEnabled\)/,
     'manual continuation appears only after reset and only when auto continuation is off')
   assert.doesNotMatch(msgContent, /<Switch/,
     'the card must not present a switch beside a competing action')
@@ -247,4 +249,22 @@ test('the park card keeps provider mechanics behind progressive disclosure', () 
     'technical detail has an explicit visible disclosure indicator')
   assert.match(css, /\[open\] \.chat__recovery-details-chevron[\s\S]*rotate\(90deg\)/,
     'the disclosure indicator reflects its open state')
+})
+
+
+test('platform resource pauses use Waiting and never expose manual Resume', () => {
+  const storage = { pause: { kind: 'storage', resets_at: '2026-09-04T20:00:00Z' } }
+  const memory = { pause: { kind: 'memory' } }
+  assert.equal(isResourcePause(storage), true)
+  assert.equal(isResourcePause(memory), true)
+  assert.equal(isResourcePause({ pause: { kind: 'rate_limit' } }), false)
+  assert.equal(resourcePauseLabel(storage), 'Waiting for storage headroom')
+  assert.equal(resourcePauseLabel(memory), 'Waiting for memory headroom')
+  assert.match(msgContent, /manualResumeAvailable = recoveryOwner && !resourceWait/)
+  assert.match(chatView, /const pendingLimitResetAt = resourcePause[\s\S]*\? null/)
+  assert.match(chatView, /armedWaits.length > 0 \|\| resourcePause/)
+  assert.match(chatView, /const resumeStatus = \(\(\) => \{[\s\S]*if \(resourcePause\)[\s\S]*if \(!pendingResumeBlock\) return null/)
+  assert.match(waitingChip, /resourcePause && \(/)
+  assert.match(waitingChip, /Waiting for storage headroom/)
+  assert.doesNotMatch(waitingChip, /onCancel\?\.\(resourcePause/)
 })

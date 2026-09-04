@@ -16,6 +16,7 @@ import {
 } from './streamReducers.js'
 import { stripAugmentation } from './msgText.js'
 import ErrorCard from './ErrorCard.jsx'
+import { isResourcePause } from './resourcePause.js'
 import { ownsRecoveryAction } from './recoveryCard.js'
 import ContextCompactionMarker from './ContextCompactionMarker.jsx'
 import { assistantBlockKey } from './streamPromotion.js'
@@ -348,9 +349,10 @@ function MsgContentInner({
           canResume: !!onResume,
           questionOwnsTurn,
         })
-        const parked = !!block.pause?.resets_at
+        const resourceWait = isResourcePause(block)
+        const parked = !!block.pause?.resets_at && !resourceWait
         const automaticContinuation = recoveryOwner && parked && !!autoResumeEnabled
-        const manualResumeAvailable = recoveryOwner && (
+        const manualResumeAvailable = recoveryOwner && !resourceWait && (
           !parked || (!!limitResetElapsed && !autoResumeEnabled)
         )
         return (

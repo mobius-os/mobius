@@ -17,10 +17,30 @@ function intervalLabel(wait) {
   return minutes <= 1 ? 'checking every minute' : `checking every ${minutes} min`
 }
 
-export default function WaitingChip({ waits, onCancel }) {
-  if (!waits?.length) return null
+export default function WaitingChip({ waits, resourcePause, onCancel }) {
+  if (!waits?.length && !resourcePause) return null
+  const resourceLabel = resourcePause?.pause?.kind === 'memory'
+    ? 'Waiting for memory headroom'
+    : 'Waiting for storage headroom'
+  const resourceMeta = resourcePause?.pause?.resets_at
+    ? `checks again ${new Date(resourcePause.pause.resets_at).toLocaleTimeString([], {
+        hour: '2-digit', minute: '2-digit',
+      })}`
+    : 'checks again automatically'
   return (
     <div className="chat__waits" role="status" aria-live="polite">
+      {resourcePause && (
+        <div className="chat__wait-chip">
+          <span className="chat__wait-tag" aria-hidden="true">
+            <span className="chat__wait-pulse" />
+            Waiting
+          </span>
+          <span className="chat__wait-text" title={`${resourceLabel} — ${resourceMeta}`}>
+            {resourceLabel}
+          </span>
+          <span className="chat__wait-meta">{resourceMeta}</span>
+        </div>
+      )}
       {waits.map(wait => (
         <div key={wait.id} className="chat__wait-chip">
           <span className="chat__wait-tag" aria-hidden="true">
