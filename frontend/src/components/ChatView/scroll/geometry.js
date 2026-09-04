@@ -543,14 +543,15 @@ export function _anchorReapplyNeeded(scrollEl, mode, lastAnchorTop) {
  *  the pre-cushion behavior; a >0 value re-adds breathing room if the exact
  *  end-of-scroll rest ever feels cramped.)
  *
- *  PIN_USER_MSG may calculate that exact deficit against a larger, already
- *  observed same-width viewport so software-keyboard close cannot make the
- *  target unreachable for one paint. FOLLOW and ordinary anchors remain based
- *  on the active viewport.
+ *  PIN_USER_MSG and the transient question-submit hold may calculate that
+ *  exact deficit against a larger, already observed same-width viewport so
+ *  software-keyboard close cannot make the target unreachable for one paint.
+ *  FOLLOW and ordinary anchors remain based on the active viewport.
  *
- *  A question-submit anchor instead reserves only its exact reachability
- *  deficit. Viewport changes recompute that deficit and reapply the same
- *  anchor, so submission remains visually fixed until response activity.
+ *  A question-submit anchor still reserves only its exact reachability
+ *  deficit. The same-width ceiling merely precomputes the imminent viewport;
+ *  later changes recompute that deficit and reapply the same anchor, so
+ *  submission remains visually fixed until response activity.
  */
 export function _computeSpacerH(
   scrollEl,
@@ -567,7 +568,7 @@ export function _computeSpacerH(
   // largest same-width viewport already observed so that imminent growth is
   // reachable before it happens. FOLLOW_BOTTOM and ordinary anchors keep using
   // the active box and therefore retain their responsive keyboard behavior.
-  const viewH = mode?.kind === 'PIN_USER_MSG'
+  const viewH = mode?.kind === 'PIN_USER_MSG' || isQuestionSubmissionMode(mode)
     ? Math.max(activeViewH, Number(pinViewportHeight) || 0)
     : activeViewH
   if (isQuestionSubmissionMode(mode)) {

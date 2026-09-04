@@ -90,7 +90,6 @@ test('reserved-bottom reader settlement enters follow without moving backward', 
   const settledMode = modeAfterReaderGesture({
     escaped: false,
     reachedNearBottom: true,
-    wasFollowing: false,
     holdMode,
   })
   assert.deepEqual(settledMode, { kind: 'FOLLOW_BOTTOM' })
@@ -105,13 +104,11 @@ test('physical reader bottom creates follow without a reservation branch', () =>
   assert.deepEqual(modeAfterReaderGesture({
     escaped: false,
     reachedNearBottom: true,
-    wasFollowing: false,
     holdMode: hold,
   }), { kind: 'FOLLOW_BOTTOM' })
   assert.equal(modeAfterReaderGesture({
     escaped: false,
     reachedNearBottom: false,
-    wasFollowing: false,
     holdMode: hold,
   }), hold)
 })
@@ -230,6 +227,26 @@ test('two gestures inside one quiet settlement advance two generations', () => {
     reachedBottom: reachedTail.reachedBottom,
     atBottom: false,
   }), reachedTail, 'lazy output cannot erase tail intent before settlement')
+
+  const leftTail = readerIntentAfterScroll({
+    gestureSequence: 11,
+    claimedSequence: reachedTail.claimedSequence,
+    version: reachedTail.version,
+    reachedBottom: reachedTail.reachedBottom,
+    atBottom: false,
+    movementDirection: 'up',
+  })
+  assert.deepEqual(leftTail, {
+    claimedSequence: 11, version: 5, reachedBottom: false,
+  }, 'an upward reader move retires the earlier tail arrival')
+  assert.deepEqual(readerIntentAfterScroll({
+    gestureSequence: 11,
+    claimedSequence: leftTail.claimedSequence,
+    version: leftTail.version,
+    reachedBottom: leftTail.reachedBottom,
+    atBottom: false,
+    movementDirection: 'down',
+  }), leftTail, 'a direction correction far up-thread cannot relatch follow')
 
   const secondGesture = readerIntentAfterScroll({
     gestureSequence: 12,

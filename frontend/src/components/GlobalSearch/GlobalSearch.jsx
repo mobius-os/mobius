@@ -18,19 +18,21 @@ import {
 import { searchSnippetPresentation } from '../../lib/searchTermHighlight.js'
 import { formatRelativeTime } from '../../lib/relativeTime.js'
 import {
-  clearRecentSelections,
+  buildSearchResultGroups,
   chatSearchOpenTarget,
   chatSearchResultIsCurrent,
   moveSearchSelection,
   pointerPositionChanged,
-  readRecentSelections,
-  rememberRecentSelection,
-  resolveRecentSelections,
   resolvedSearchSelection,
   searchCommands,
   searchInstalledApps,
   visibleChatSearchState,
 } from './globalSearchModel.js'
+import {
+  clearRecentSelections,
+  readRecentSelections,
+  resolveRecentSelections,
+} from '../../lib/recentSelections.js'
 import './GlobalSearch.css'
 
 const SEARCH_DEBOUNCE_MS = 180
@@ -251,8 +253,13 @@ export default function GlobalSearch({ commands = [], onClose, onOpenTarget, onR
   const normalizedQuery = query.trim()
   const visibleChats = visibleChatSearchState(chatState, normalizedQuery)
   const appResults = useMemo(
-    () => searchInstalledApps(appsQuery.data, normalizedQuery),
-    [appsQuery.data, normalizedQuery],
+    () => searchInstalledApps(
+      appsQuery.data,
+      normalizedQuery,
+      8,
+      recentSelectionRefs,
+    ),
+    [appsQuery.data, normalizedQuery, recentSelectionRefs],
   )
   const commandResults = useMemo(
     () => searchCommands(commands, normalizedQuery).filter(command => command.id !== 'search.open'),
@@ -268,7 +275,6 @@ export default function GlobalSearch({ commands = [], onClose, onOpenTarget, onR
   )
   const openChat = useCallback((result) => {
     if (!chatSearchResultIsCurrent(result, latestQueryRef.current)) return
-    rememberRecentSelection({ kind: 'chat', id: result.id })
     if (result.anchor_key) {
       requestChatSearchReveal(result.id, {
         anchorKey: result.anchor_key,
@@ -281,14 +287,12 @@ export default function GlobalSearch({ commands = [], onClose, onOpenTarget, onR
 
   const openApp = useCallback((app) => {
     if (!app?.id) return
-    rememberRecentSelection({ kind: 'app', id: app.id })
     onClose()
     onOpenTarget?.({ view: 'canvas', app: String(app.id), intent: null })
   }, [onClose, onOpenTarget])
 
   const openRecentChat = useCallback((chat) => {
     if (!chat?.id) return
-    rememberRecentSelection({ kind: 'chat', id: chat.id })
     onClose()
     onOpenTarget?.(chatSearchOpenTarget(chat))
   }, [onClose, onOpenTarget])
@@ -300,56 +304,13 @@ export default function GlobalSearch({ commands = [], onClose, onOpenTarget, onR
   }, [onClose, onRunCommand])
 
   const resultGroups = useMemo(() => {
-    const groups = normalizedQuery
-      ? [
-          ...(commandResults.length ? [{
-            headingId: 'global-search-commands',
-            listId: 'global-search-command-results',
-            label: 'Commands',
-            rows: commandResults.map(command => ({
-              kind: 'command', value: command,
-            })),
-          }] : []),
-          ...(appResults.length ? [{
-            headingId: 'global-search-apps',
-            listId: 'global-search-app-results',
-            label: 'Apps',
-            rows: appResults.map(({ app, matchArea }) => ({
-              kind: 'app', value: app, matchArea,
-            })),
-          }] : []),
-          {
-            headingId: 'global-search-chats',
-            listId: 'global-search-chat-results',
-            label: 'Chats',
-            status: visibleChats.status,
-            rows: visibleChats.results.map(result => ({
-              kind: 'chat', value: result,
-            })),
-          },
-        ]
-      : [
-          ...(commandResults.length ? [{
-            headingId: 'global-search-commands',
-            listId: 'global-search-command-results',
-            label: 'Commands',
-            rows: commandResults.map(command => ({
-              kind: 'command', value: command,
-            })),
-          }] : []),
-          ...(recentSelectionRows.length ? [{
-            headingId: 'global-search-recent-selections',
-            listId: 'global-search-recent-selection-results',
-            label: 'Recent selections',
-            clearable: true,
-            rows: recentSelectionRows.map(({ kind, value }) => ({
-              kind,
-              value,
-              recent: true,
-              matchArea: 'Recent',
-            })),
-          }] : []),
-        ]
+    const groups = buildSearchResultGroups({
+      query: normalizedQuery,
+      commandResults,
+      appResults,
+      visibleChats,
+      recentSelections: recentSelectionRows,
+    })
 
     let nextIndex = 0
     return groups.map(group => ({
@@ -502,10 +463,10 @@ export default function GlobalSearch({ commands = [], onClose, onOpenTarget, onR
               <span className="global-search__empty-icon" aria-hidden="true">
                 <MagnifyingGlassSearch width={30} height={30} />
               </span>
-              <h3>{loadingRecentSelections ? 'Loading workspace actions…' : 'No commands are available'}</h3>
+              <h3>{loadingRecentSelections ? 'Loading recent destinations…' : 'No commands are available'}</h3>
               <p>
                 {loadingRecentSelections
-                  ? 'Commands and the chats and apps you opened through search will appear here.'
+                  ? 'Your recently opened chats and apps will appear here.'
                   : 'Search for a command, chat, or app.'}
               </p>
             </div>

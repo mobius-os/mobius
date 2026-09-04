@@ -822,29 +822,24 @@ test('reader settlement follows the physical tail even while reservation remains
   assert.deepEqual(modeAfterReaderGesture({
     escaped: false,
     reachedNearBottom: true,
-    wasFollowing: false,
     holdMode: exactHold,
   }), { kind: 'FOLLOW_BOTTOM' })
   // Not following and never reached the band → hold exactly where the reader is.
   assert.equal(modeAfterReaderGesture({
     escaped: false,
     reachedNearBottom: false,
-    wasFollowing: false,
     holdMode: exactHold,
   }), exactHold)
-  // Already following and the reader did NOT scroll up → stay glued, even if
-  // streamed content pushed the tail out of the band during the gesture.
-  assert.deepEqual(modeAfterReaderGesture({
+  // Prior follow state cannot override the gesture's actual off-bottom result.
+  assert.equal(modeAfterReaderGesture({
     escaped: false,
     reachedNearBottom: false,
-    wasFollowing: true,
     holdMode: exactHold,
-  }), { kind: 'FOLLOW_BOTTOM' })
-  // An explicit scroll UP is the only thing that breaks an engaged follow.
+  }), exactHold)
+  // An upward escape wins even if the gesture had touched the tail earlier.
   assert.equal(modeAfterReaderGesture({
     escaped: true,
     reachedNearBottom: true,
-    wasFollowing: true,
     holdMode: exactHold,
   }), exactHold)
 
@@ -861,8 +856,8 @@ test('reader settlement follows the physical tail even while reservation remains
 
 // Direction helpers are part of the same bottom-follow contract exercised above.
 {
-  // Wheel up escapes the bottom lock; wheel down re-engages it; no vertical
-  // delta is neutral.
+  // Wheel up escapes; wheel down points toward the tail but still needs bottom
+  // geometry before it may follow. No vertical delta is neutral.
   assert.equal(readerInputEscapeDirection('wheel', { deltaY: -20 }), 'up')
   assert.equal(readerInputEscapeDirection('wheel', { deltaY: 20 }), 'down')
   assert.equal(readerInputEscapeDirection('wheel', { deltaY: 0 }), null)
@@ -1803,6 +1798,17 @@ test('question submission reserves the exact room that keeps its anchor reachabl
   assert.equal(
     _computeSpacerH(scrollEl, listEl, latestUser, mode),
     340,
+  )
+  assert.equal(
+    _computeSpacerH(
+      scrollEl,
+      listEl,
+      latestUser,
+      mode,
+      { pinViewportHeight: 1000 },
+    ),
+    740,
+    'submit activation pre-reserves the known keyboard-closed viewport',
   )
   scrollEl.clientHeight = 700
   assert.equal(

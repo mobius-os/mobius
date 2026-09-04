@@ -69,3 +69,31 @@ test('failed recovery records the exact content passed by both send paths', () =
   assert.ok(contextSend >= 0 && contextRecovery > contextSend,
     'fresh/context recovery must record the augmented content passed to transport')
 })
+
+test('fresh-send transcript reconciliation starts only after acknowledgement', () => {
+  const source = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+  const start = source.indexOf('// FRESH SEND PATH: no active turn, no queue.')
+  const end = source.indexOf('\n  }, [', start)
+  const freshSend = source.slice(start, end)
+  const transport = freshSend.indexOf('const result = await sendAfterSettingsSaved(')
+  const canonicalCommit = freshSend.indexOf(
+    'replaceOptimisticWithBatch(prev, cid, startedMessages)',
+    transport,
+  )
+  const reconcile = freshSend.indexOf('void fetchMessages({ force: true,', transport)
+
+  assert.ok(transport >= 0 && canonicalCommit > transport,
+    'the accepted server row must replace its optimistic twin after acknowledgement')
+  assert.ok(reconcile > canonicalCommit,
+    'a compact snapshot must not reconcile before the send is acknowledged and canonical')
+  assert.match(
+    freshSend.slice(reconcile, reconcile + 120),
+    /preserveAcceptedCid:\s*cid/,
+    'the handoff must retain the accepted row until the compact snapshot proves its cid',
+  )
+  assert.equal(
+    freshSend.slice(0, transport).includes('fetchMessages({ force: true })'),
+    false,
+    'an idle pre-ack snapshot must never erase the optimistic turn',
+  )
+})

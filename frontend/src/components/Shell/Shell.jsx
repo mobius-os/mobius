@@ -180,6 +180,7 @@ import ShellBrand from './ShellBrand.jsx'
 import ScreenControlButton from './ScreenControlButton.jsx'
 import { createMediaSessionOwner } from './mediaSessionOwner.js'
 import { HistoryDismissProvider } from '../../hooks/useHistoryDismiss.jsx'
+import { rememberRecentDestination } from '../../lib/recentSelections.js'
 
 const APP_SETTINGS_SECTIONS = new Set([
   'ai-providers',
@@ -260,6 +261,16 @@ export default function Shell({ onInitialVisualReady }) {
     dragActiveRef,
     beforeRestoreRouteRef,
   })
+
+  // Navigation owns the search MRU so drawer, history, deep-link, and search
+  // activations all contribute the same current destination.
+  useEffect(() => {
+    rememberRecentDestination({
+      view: activeView,
+      chatId: activeChatId,
+      appId: activeAppId,
+    })
+  }, [activeAppId, activeChatId, activeView])
 
   // A mobile drawer is a history-backed virtual route. A desktop sidebar is a
   // saved layout preference. Keep those state machines separate: while a mobile

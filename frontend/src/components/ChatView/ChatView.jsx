@@ -190,6 +190,7 @@ import {
   stopConfirmedIdle,
   stopRequestSucceeded,
   serverSnapshotBehindLocal,
+  serverSnapshotMissingAcceptedCid,
   shouldFreezeStreamingReturn,
   startedMessagesFromResponse,
   stripInternalUserMessageFields,
@@ -1246,6 +1247,7 @@ export default function ChatView({
     authoritative = false,
     expectedFailedAttempt,
     failedAttemptTerminalOutcome = null,
+    preserveAcceptedCid = null,
   } = {}) => {
     if (sendingRef.current && !force) return
     const gen = fetchGenRef.current
@@ -1279,10 +1281,19 @@ export default function ChatView({
           : expectedFailedAttempt,
         expectedFetchGeneration: gen,
       })
+      const preserveAcceptedTurn = serverSnapshotMissingAcceptedCid(
+        msgs,
+        preserveAcceptedCid,
+      )
       const preserveLocalTurn =
         !authoritative
         && force
-        && (sendingRef.current || isStreamingRef.current || serverRunningRef.current)
+        && (
+          preserveAcceptedTurn
+          || sendingRef.current
+          || isStreamingRef.current
+          || serverRunningRef.current
+        )
       const staleSnapshot =
         !terminal204
         && !preserveLocalTurn
@@ -3288,6 +3299,11 @@ export default function ChatView({
       // comment above for the full rationale.
     }
     setSending(true)
+    // Close the synchronous re-entry window before React publishes the state
+    // update. Transcript reconciliation waits for the POST acknowledgement
+    // below: before that boundary an idle compact snapshot can still predate
+    // this turn and must never retire its optimistic row.
+    sendingRef.current = true
     // Pin per the R2 send rule via the funnel: it arms the reservation spacer
     // on every send and, when not pinning, retires any stale PIN to the
     // reader's anchor so their viewport stays fixed. The row carries its final
@@ -3409,6 +3425,12 @@ export default function ChatView({
           return replaceOptimisticWithBatch(prev, cid, startedMessages)
         })
       }
+      // The accepted row is now durable, so the compact read may safely hand
+      // the preceding live assistant projection over to its settled source.
+      // Keep this after the acknowledgement and canonical-row commit: doing
+      // it at optimistic-send time lets an idle pre-ack snapshot erase the
+      // entire visible turn.
+      void fetchMessages({ force: true, preserveAcceptedCid: cid })
       return true
     } catch (err) {
       const pendingQuestionBlocked = isPendingQuestionSendFailure(err)
@@ -3528,7 +3550,9 @@ export default function ChatView({
   // POST /question-answers that could race with the GET on a mid-
   // stream remount, causing answers to disappear on first return
   // and reappear on the second.
-  const doSendSilent = useCallback(async (text, resolvedAnswers, questionId) => {
+  const doSendSilent = useCallback(async (
+    text, resolvedAnswers, questionId, preparedQuestionSubmission = null,
+  ) => {
     // Synchronous re-entrancy guard: flip BEFORE any other logic so a
     // second concurrent call (fast double-tap) bails immediately. This
     // is separate from sendingRef because answer submissions are
@@ -3559,7 +3583,7 @@ export default function ChatView({
     // output. Acceptance alone keeps this hold: the scroll owner may restore
     // prior follow only when the first post-answer activity actually renders.
     const questionSubmission = resolvedAnswers
-      ? freezeQuestionSubmission()
+      ? (preparedQuestionSubmission || freezeQuestionSubmission())
       : null
     const responseQuestionKey = resolvedAnswers
       ? (questionId
@@ -5459,6 +5483,7 @@ export default function ChatView({
                 chatId={chatId}
                 messageKey={dataKey}
                 onQuestionAnswer={doSendSilent}
+                onQuestionAnswerPrepare={freezeQuestionSubmission}
                 onResume={doSend}
                 onInternalNav={internalNav}
                 autoResumeEnabled={
@@ -5502,6 +5527,7 @@ export default function ChatView({
               dataKey={streamingDataKey}
               chatId={chatId}
               onAnswer={doSendSilent}
+              onAnswerPrepare={freezeQuestionSubmission}
               onResume={activeAssistantIsStreaming ? undefined : doSend}
               onInternalNav={internalNav}
               autoResumeEnabled={autoResumeEnabled}

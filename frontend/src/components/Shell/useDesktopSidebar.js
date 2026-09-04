@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from 'react'
 export const DESKTOP_SIDEBAR_QUERY = '(min-width: 1024px)'
 export const DESKTOP_SIDEBAR_STORAGE_KEY = 'mobius:desktop-sidebar-open:v1'
 export const DESKTOP_SIDEBAR_WIDTH_STORAGE_KEY = 'mobius:desktop-sidebar-width:v1'
-export const DESKTOP_SIDEBAR_DEFAULT_WIDTH = 320
+export const DESKTOP_SIDEBAR_DEFAULT_WIDTH = 360
 export const DESKTOP_SIDEBAR_MIN_WIDTH = 240
 export const DESKTOP_SIDEBAR_MAX_WIDTH = 560
 export const DESKTOP_RAIL_WIDTH = 58

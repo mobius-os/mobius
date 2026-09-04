@@ -93,6 +93,7 @@ function MsgContentInner({
   chatId,
   messageKey,
   onQuestionAnswer,
+  onQuestionAnswerPrepare,
   // Resume a turn paused by a drain-gated restart (or interrupted by a crash):
   // a stable send callback that re-sends a short "continue". Only the tail
   // interrupt note (a resumable error block on the last message) shows the
@@ -302,6 +303,7 @@ function MsgContentInner({
               questionId={block.question_id}
               answeredMap={answers}
               onAnswer={answerable ? onQuestionAnswer : undefined}
+              onAnswerPrepare={answerable ? onQuestionAnswerPrepare : undefined}
               disabled={!answerable && !answers}
               pendingCardRef={answerable ? pendingQuestionRef : undefined}
             />
@@ -509,6 +511,7 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.chatId === next.chatId
     && prev.messageKey === next.messageKey
     && prev.onQuestionAnswer === next.onQuestionAnswer
+    && prev.onQuestionAnswerPrepare === next.onQuestionAnswerPrepare
     && prev.onResume === next.onResume
     && prev.onInternalNav === next.onInternalNav
     && prev.autoResumeEnabled === next.autoResumeEnabled

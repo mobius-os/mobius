@@ -99,35 +99,29 @@ export function modeAfterTerminalLayout(mode, spacerH, layoutStable) {
 }
 
 
-/** Resolve the quiet edge of a real reader gesture, using use-stick-to-bottom's
- * escape-latch semantics rather than a pixel-exact bottom test.
+/** Resolve the quiet edge of a real reader gesture.
  *
- * Stickiness is a latch broken only by an explicit scroll UP (`escaped`).
- *   - Already following: stay in FOLLOW_BOTTOM unless the reader escaped upward.
- *     Content growth or downward momentum that drifted the viewport out of the
- *     band never breaks follow (the layout owner re-glues the tail).
- *   - Not following: enter FOLLOW_BOTTOM only when the gesture reached the
- *     bottom band (`reachedNearBottom`) and did not end escaped — i.e. the
- *     reader scrolled down to the tail.
- * Anything else holds the exact reader position. */
+ * A gesture enters FOLLOW_BOTTOM only after it reaches the physical tail. The
+ * mode that happened to own the viewport before the gesture is deliberately
+ * irrelevant: once the reader moves off the tail, even a later direction
+ * correction far up-thread remains an exact hold. Stream growth may preserve a
+ * tail arrival already expressed by the reader, but it may never manufacture
+ * one from prior follow state. */
 export function modeAfterReaderGesture({
   escaped,
   reachedNearBottom,
-  wasFollowing,
   holdMode,
 }) {
-  const stick = !escaped && (wasFollowing || reachedNearBottom)
+  const stick = !escaped && reachedNearBottom
   if (stick) return { kind: 'FOLLOW_BOTTOM' }
   return holdMode || { kind: 'INITIAL' }
 }
 
 
-/** The escape/re-engage direction a raw reader input implies, mirroring
- * use-stick-to-bottom's wheel + keyboard handling: scrolling UP escapes the
- * bottom lock, scrolling DOWN re-engages it. Returns null for inputs with no
- * vertical scroll intent (they neither escape nor re-engage the latch). Read
- * from the input event itself so a single wheel tick or arrow press flips the
- * latch immediately, with zero layout cost. */
+/** The direction a raw reader input implies. Scrolling UP escapes follow;
+ * scrolling DOWN may express tail intent, but physical tail geometry remains
+ * the only authority that can actually re-enter follow. Returns null for input
+ * with no vertical scroll intent. */
 export function readerInputEscapeDirection(
   type,
   { deltaY = 0, key = '', shiftKey = false } = {},
@@ -163,7 +157,7 @@ export function readerInputClaimsPhysicalTail(
 }
 
 
-/** Infer the same escape/re-engage direction from an actual scroll position.
+/** Infer the same reader direction from an actual scroll position.
  * Wheel, keyboard, and touch inputs expose direction before scrolling, but a
  * mouse scrollbar drag does not. Comparing consecutive owned positions keeps
  * that native path inside the same latch instead of snapping an upward drag
@@ -267,8 +261,10 @@ export function scrollAuthorityAllowsCommit({
 
 /** Reduce one scroll frame into the current input sequence's intent.
  * A sequence advances the monotonic generation once and latches physical-tail
- * arrival until settlement. A newer sequence starts a fresh tail decision even
- * when several nearby gestures share one quiet-edge layout pass.
+ * arrival through layout drift. An explicit upward reader move clears that
+ * latch; a later downward correction cannot recreate it until geometry proves
+ * the reader reached the tail again. A newer sequence also starts a fresh tail
+ * decision even when several nearby gestures share one quiet-edge layout pass.
  */
 export function readerIntentAfterScroll({
   gestureSequence,
@@ -276,12 +272,14 @@ export function readerIntentAfterScroll({
   version,
   reachedBottom = false,
   atBottom = false,
+  movementDirection = null,
 }) {
   const sameSequence = gestureSequence === claimedSequence
+  const leftTail = movementDirection === 'up'
   return {
     claimedSequence: gestureSequence,
     version: sameSequence ? version : version + 1,
-    reachedBottom: atBottom || (sameSequence && reachedBottom),
+    reachedBottom: !leftTail && (atBottom || (sameSequence && reachedBottom)),
   }
 }
 
