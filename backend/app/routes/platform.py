@@ -220,14 +220,19 @@ async def apply_platform_update(
 )
 async def rebuild_reviewed_platform_update(
   request: PlatformApplyIn,
+  db: Session = Depends(get_db),
   _: models.Owner = Depends(get_current_owner),
 ):
-  """Deploy the exact digest-pinned GHCR image represented by the review."""
-  if not request.image_digest:
-    exc = PlatformUpdateError("update_plan_invalid")
-    raise HTTPException(status_code=409, detail=_plan_error_detail(exc))
+  """Rebuild the container for the reviewed update target.
+
+  Railway pins the exact GHCR image (digest required); self-hosted applies the
+  reviewed source in place, then rebuilds the matching ``sha-<target>`` image.
+  Per-deployment preconditions (including Railway's digest) are enforced in
+  ``deployment_control.request_reviewed_rebuild``.
+  """
   try:
     return await deployment_control.request_reviewed_rebuild(
+      db=db,
       plan_id=request.plan_id,
       current_sha=request.current_sha,
       target_sha=request.target_sha,

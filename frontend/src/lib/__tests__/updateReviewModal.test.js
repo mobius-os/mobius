@@ -37,11 +37,13 @@ test('apply outcomes close only for explicit clean states and preserve actionabl
   assert.match(modal, /applyProgress\?\.plan_id === preview\?\.plan_id/)
 })
 
-test('Railway image reviews rebuild the exact immutable image instead of applying in place', () => {
+test('image reviews rebuild the container instead of applying in place, on both deployments', () => {
   assert.match(modal, /reviewedUpdateUsesContainerRebuild\(preview\)/)
   assert.match(modal, /rebuildUpdate \? onRebuild\(plan\) : onApply\(plan\)/)
   assert.match(modal, /image_digest: preview\?\.image_digest/)
-  assert.match(modal, /!rebuildUpdate \|\| preview\?\.image_digest/)
+  // Only Railway pins a GHCR digest; self-hosted has none, so the plan is
+  // complete without one.
+  assert.match(modal, /!reviewedRebuildNeedsDigest\(preview\) \|\| preview\?\.image_digest/)
   assert.match(modal, /Rebuild to update/)
   assert.match(modal, /Starting the exact reviewed official image…/)
   assert.match(settingsView, /api\.platform\.rebuild\(plan\)/)

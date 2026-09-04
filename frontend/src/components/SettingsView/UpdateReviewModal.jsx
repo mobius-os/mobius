@@ -33,6 +33,7 @@ import {
   deploymentKindLabel,
   platformActivationLabel,
   reviewedUpdateUsesContainerRebuild,
+  reviewedRebuildNeedsDigest,
 } from '../../lib/platformUpdateState.js'
 import UnifiedDiff from '../DiffView/UnifiedDiff.jsx'
 import './UpdateReviewModal.css'
@@ -174,7 +175,7 @@ export default function UpdateReviewModal({
     preview?.plan_id
     && preview?.current_sha
     && preview?.target_sha
-    && (!rebuildUpdate || preview?.image_digest)
+    && (!reviewedRebuildNeedsDigest(preview) || preview?.image_digest)
   )
   const progressLabel = rebuildUpdate && rebuilding
     ? 'Starting the exact reviewed official image…'
