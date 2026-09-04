@@ -2986,7 +2986,7 @@ def test_standalone_app_review_persists_equivalence_in_installed_repo():
   assert app_git.ref_exists(live, landed)
 
 
-def test_cleanup_terminal_staging_checkout_unregisters_linked_worktree():
+def test_cleanup_terminal_staging_checkout_unlocks_and_unregisters_linked_worktree():
   from app.routes.github import _cleanup_terminal_staging_checkout
 
   data_dir = Path(get_settings().data_dir)
@@ -3005,6 +3005,13 @@ def test_cleanup_terminal_staging_checkout_unregisters_linked_worktree():
   checkout.parent.mkdir(parents=True)
   subprocess.run(
     ["git", "-C", str(owner), "worktree", "add", "-qb", "fix/cleanup-test", str(checkout)],
+    check=True,
+  )
+  subprocess.run(
+    [
+      "git", "-C", str(owner), "worktree", "lock",
+      "--reason", "durable contribution review", str(checkout),
+    ],
     check=True,
   )
 
