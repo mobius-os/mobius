@@ -55,6 +55,30 @@ def _install_managed_cutover_marker(tmp_path, monkeypatch, boot_id="boot-test"):
   monkeypatch.setenv("MOBIUS_BOOT_ID", boot_id)
 
 
+def test_managed_request_identifies_the_machine_client(monkeypatch):
+  settings = SimpleNamespace(
+    mobius_account_origin="https://account.example",
+    mobius_sso_enabled=True,
+    mobius_sso_client_secret="secret",
+    mobius_sso_instance_id="instance",
+  )
+  captured = []
+
+  def open_request(request, **_kwargs):
+    captured.append(request)
+    return io.BytesIO(b"{}")
+
+  opener = SimpleNamespace(open=open_request)
+  monkeypatch.setattr(dc, "get_settings", lambda: settings)
+  monkeypatch.setattr(dc.urllib.request, "build_opener", lambda *_args: opener)
+
+  assert dc._managed_request("GET", "status") == {}
+  headers = {name.lower(): value for name, value in captured[0].header_items()}
+  assert headers["user-agent"] == "mobius-managed-deployment/1"
+  assert headers["authorization"] == "Bearer secret"
+  assert headers["x-mobius-instance-id"] == "instance"
+
+
 @pytest.mark.parametrize("status", [400, 409])
 def test_managed_request_recognizes_only_structured_client_rejections(
   monkeypatch, status,
