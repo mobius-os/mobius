@@ -1,6 +1,9 @@
 """Activation classification is one ordered contract across deployments."""
 
+import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 from app import platform_activation as activation
@@ -171,3 +174,45 @@ def test_bootstrap_allowlist_covers_entrypoint_app_script_references():
     assert activation.classify_activation([
       f"backend/scripts/{name}",
     ])["level"] == "image_rebuild", name
+
+
+def test_image_inputs_cover_dependency_and_baked_runtime_paths(tmp_path):
+  (tmp_path / "backend" / "runtime").mkdir(parents=True)
+  (tmp_path / "backend" / "app").mkdir(parents=True)
+  (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+  (tmp_path / "backend" / "requirements.lock").write_text("a==1\n")
+  (tmp_path / "backend" / "runtime" / "broker.py").write_text("x = 1\n")
+  (tmp_path / "backend" / "app" / "main.py").write_text("y = 2\n")
+
+  paths = activation.image_input_paths(tmp_path)
+
+  # Only existing files; the served backend app is not an image input.
+  assert paths == [
+    "Dockerfile", "backend/requirements.lock", "backend/runtime/broker.py",
+  ]
+  hashes = activation.image_input_hashes(tmp_path)
+  assert set(hashes) == set(paths)
+  assert all(len(value) == 64 for value in hashes.values())
+  # Every input is a path the classifier already treats as image-owned.
+  for path in paths:
+    level = activation.classify_activation([path])["level"]
+    assert level in {
+      activation.ActivationLevel.IMAGE_REBUILD.value,
+      activation.ActivationLevel.DEPENDENCY_SYNC.value,
+    }
+
+
+def test_image_input_hashes_cli_matches_the_library_contract(tmp_path):
+  (tmp_path / "backend" / "runtime").mkdir(parents=True)
+  (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+  (tmp_path / "backend" / "runtime" / "broker.py").write_text("x = 1\n")
+
+  module = Path(activation.__file__)
+  completed = subprocess.run(
+    [sys.executable, str(module), "--hashes", str(tmp_path)],
+    check=True,
+    capture_output=True,
+    text=True,
+  )
+
+  assert json.loads(completed.stdout) == activation.image_input_hashes(tmp_path)

@@ -15,7 +15,11 @@ services:
     ports: !override ["${TEST_PORT:-8001}:${TEST_PORT:-8001}"]
     depends_on:
       app:
-        condition: service_healthy
+        # CI owns one bounded 120-second readiness gate after Compose returns.
+        # Waiting for this healthcheck here as well made Compose enforce its
+        # shorter retry budget first, so a cold first boot could fail before
+        # the deliberate gate had a chance to observe it.
+        condition: service_started
 
   app:
     # container_name and image are GLOBAL (not Compose-project-scoped), so two

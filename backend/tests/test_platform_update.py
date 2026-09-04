@@ -2473,3 +2473,63 @@ def test_boot_policy_ignores_durable_update_progress_from_outer_data_repo():
 
   assert "init_data_repo.py write-ignore /data" in entrypoint
   assert ".platform-update-progress.json" in data_repo_helper
+
+
+# --- the running image compared with the served source -----------------------
+
+def test_image_input_drift_feeds_the_activation_state(clone_env, monkeypatch, tmp_path):
+  _origin, platform = clone_env
+  (platform / "Dockerfile").write_text("FROM python:3.12\n")
+  (platform / "backend" / "requirements.lock").write_text("a==1\n")
+  _git(platform, "add", "-A")
+  _git(platform, "commit", "-q", "-m", "image inputs")
+  info = tmp_path / "build-info.json"
+  monkeypatch.setenv("MOBIUS_BUILD_INFO_PATH", str(info))
+
+  # An image that predates the record says nothing.
+  info.write_text(json.dumps({"sha": "x"}))
+  assert pu.image_input_drift(platform) is None
+
+  # An image built from exactly these inputs matches.
+  info.write_text(json.dumps({
+    "sha": "x",
+    "image_inputs": platform_activation.image_input_hashes(platform),
+  }))
+  assert pu.image_input_drift(platform) == []
+  assert pu.platform_status(platform)["activation"]["level"] == "live"
+
+  # A dependency bump is an in-place install; a Dockerfile change needs a new
+  # image. Both come from state, not from remembering which update did it.
+  (platform / "backend" / "requirements.lock").write_text("a==2\n")
+  assert pu.image_input_drift(platform) == ["backend/requirements.lock"]
+  assert pu.platform_status(platform)["activation"]["level"] == "dependency_sync"
+  (platform / "Dockerfile").write_text("FROM python:3.13\n")
+  assert pu.image_input_drift(platform) == [
+    "Dockerfile", "backend/requirements.lock",
+  ]
+  assert pu.platform_status(platform)["activation"]["level"] == "image_rebuild"
+
+
+def test_live_install_drift_reports_only_what_the_image_lacks(tmp_path):
+  inventory = tmp_path / "inventory"
+  inventory.mkdir()
+  (inventory / "pip.txt").write_text("fastapi==0.1\nhttpx==2\n")
+  (inventory / "apt.txt").write_text("curl=8\ngit=2\n")
+  outputs = {
+    "pip": "fastapi==0.1\nhttpx==3\nrich==13\n",
+    "dpkg-query": "curl=8\ngit=2\nffmpeg=6\n",
+  }
+
+  def fake_run(command, **_kwargs):
+    key = "pip" if "pip" in command else "dpkg-query"
+    return SimpleNamespace(returncode=0, stdout=outputs[key])
+
+  assert pu.live_install_drift(inventory, run=fake_run) == {
+    "pip": ["httpx==3", "rich==13"],
+    "apt": ["ffmpeg=6"],
+  }
+  # No inventories (an older image): nothing is claimed.
+  assert pu.live_install_drift(tmp_path / "missing", run=fake_run) == {}
+  # A failing query is not reported as drift.
+  failing = lambda command, **_k: SimpleNamespace(returncode=1, stdout="")
+  assert pu.live_install_drift(inventory, run=failing) == {}
