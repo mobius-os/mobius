@@ -42,6 +42,7 @@ from app.broadcast import (
   has_running_chat_broadcast,
   set_active_broadcast,
 )
+from app.agent_admission import AgentTurnDeferred, require_agent_turn_admission
 from app.chat_event_sink import (
   ChatEventSink as _ChatEventSink,
   _pause_note,
@@ -555,15 +556,31 @@ async def _finish_run_strict(
   await _await_ack(ack)
 
 
-async def _recover_wedged_run_strict(chat_id: str, run_token: str) -> None:
-  """Atomically leave a durable interruption marker and close a wedged run."""
+async def _recover_wedged_run_strict(
+  chat_id: str,
+  run_token: str,
+  *,
+  message: str = "This response could not be saved. You can resume the turn.",
+  kind: str | None = None,
+  resumable: bool = True,
+  parked_until: datetime | None = None,
+  park_reason: str | None = None,
+) -> None:
+  """Atomically leave a durable interruption marker and close a wedged run.
+
+  Callers pass ``message`` (and optionally ``kind``/``resumable``) so the same
+  atomic "append a durable pause block + close or park the run + preserve
+  pending_messages" command serves both mid-turn recovery and setup/admission
+  outcomes. ``RecoverWedgedRun`` self-fences on the run token/status, so a run
+  a successor already superseded is a safe no-op.
+  """
   ack = get_writer().submit(
     RecoverWedgedRun(
       chat_id=chat_id,
       run_token=run_token,
-      interruption_block=_pause_note(
-        "This response could not be saved. You can resume the turn.",
-      ),
+      interruption_block=_pause_note(message, kind=kind, resumable=resumable),
+      parked_until=parked_until,
+      park_reason=park_reason,
     )
   )
   await _await_ack(ack)
@@ -1736,12 +1753,7 @@ async def _auto_resume_chat(
                 and accepted_nonce == park.restart_nonce
               )
             policy_enabled = bool(
-              chat is not None
-              and (
-                chat.auto_resume_on_restart
-                if park is not None and park.park_reason == "restart"
-                else chat.auto_resume_on_limit
-              )
+              chat is not None and _park_continues_automatically(chat, park)
             )
             if (
               chat is None
@@ -1757,6 +1769,7 @@ async def _auto_resume_chat(
               or (
                 park.initiated_by_app_id is not None
                 and not restart_park
+                and park.park_reason not in RESOURCE_PARK_REASONS
               )
               or latest_id != park.id
               or any(
@@ -1768,14 +1781,20 @@ async def _auto_resume_chat(
               return False
             current_provider = chat.provider or "claude"
             resume_reason = (
-              "restart" if restart_park else "usage_limit"
+              "restart" if restart_park
+              else park.park_reason
+              if park.park_reason in RESOURCE_PARK_REASONS
+              else "usage_limit"
             )
             resume_app_id = (
               # A real owner follow-up already waiting behind an app-owned
               # turn takes ownership of the resumed turn. This matches normal
               # pending promotion, where the first queued row owns attribution.
               park.initiated_by_app_id
-              if restart_park and not pending else None
+              if (
+                (restart_park or park.park_reason in RESOURCE_PARK_REASONS)
+                and not pending
+              ) else None
             )
           if not mark_starting(chat_id):
             return False
@@ -1986,6 +2005,8 @@ async def sweep_reset_parks(
   notification_requests: list[tuple[str, bool]] = []
 
   def queue_due_notification(chat_id: str, run: models.ChatRun) -> None:
+    if run.park_reason in RESOURCE_PARK_REASONS:
+      return
     notification_requests.append((chat_id, run.park_reason == "restart"))
 
   def auto_resume_rejection(chat, run) -> str | None:
@@ -1999,14 +2020,15 @@ async def sweep_reset_parks(
     restart_park = run.park_reason == "restart"
     if app_work_queued:
       return "app-attributed work"
-    if run.initiated_by_app_id is not None and not restart_park:
+    if (
+      run.initiated_by_app_id is not None
+      and not restart_park
+      and run.park_reason not in RESOURCE_PARK_REASONS
+    ):
       return "app-attributed work"
     if _has_unanswered_question(chat):
       return "waiting for an answer"
-    policy_enabled = bool(
-      chat.auto_resume_on_restart
-      if restart_park else chat.auto_resume_on_limit
-    )
+    policy_enabled = _park_continues_automatically(chat, run)
     if not policy_enabled:
       return "policy disabled"
     if restart_park and not (
@@ -3093,6 +3115,25 @@ def _parse_reset_text(text: str, now: datetime) -> datetime | None:
   return None
 
 
+RESOURCE_PARK_REASONS = frozenset({"memory", "storage"})
+RESOURCE_PARK_RECHECK = timedelta(seconds=60)
+
+
+def _park_continues_automatically(chat, park) -> bool:
+  reason = park.park_reason if park is not None else None
+  if reason == "restart":
+    return bool(chat.auto_resume_on_restart)
+  if reason in RESOURCE_PARK_REASONS:
+    return True
+  return bool(chat.auto_resume_on_limit)
+
+
+def _resource_park_fields(reason: str, now: datetime | None = None):
+  if now is None:
+    now = datetime.now(UTC).replace(tzinfo=None)
+  return now + RESOURCE_PARK_RECHECK, reason
+
+
 def _limit_park_fields(
   runner_result: dict,
   error_text: str | None,
@@ -3639,6 +3680,7 @@ async def run_chat(
   disposition = chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
   runtime_settled = False
   try:
+    await require_agent_turn_admission(get_settings().data_dir)
     disposition = await _run_chat_impl(
       messages, chat_id=chat_id, session_id=session_id,
       provider_id=provider_id, run_gen=run_gen,
@@ -3657,32 +3699,93 @@ async def run_chat(
     # other failure paths and durably fail the run. The queue marker keeps
     # its FAILED_LEAVE_MARKER default above, so reconciliation still sees
     # the evidence it needs.
-    _get_logger().exception(
-      "chat turn failed before the agent started chat_id=%s", chat_id,
-    )
-    bc = get_broadcast(chat_id) if chat_id else None
-    if bc is not None:
-      bc.publish({
-        "type": "error",
-        "message": (
+    if isinstance(exc, AgentTurnDeferred):
+      # Admission deferral is an expected protective outcome. Keep one concise
+      # breadcrumb, but do not allocate a traceback while disk is constrained.
+      _get_logger().warning(
+        "chat turn deferred before the agent started chat_id=%s: %s",
+        chat_id,
+        exc,
+      )
+    else:
+      _get_logger().exception(
+        "chat turn failed before the agent started chat_id=%s", chat_id,
+      )
+    if isinstance(exc, AgentTurnDeferred):
+      # Persist an actionable pause in the transcript rather than leaving a
+      # saved user message with an empty assistant reply. RecoverWedgedRun
+      # self-fences on run ownership, parks this run, and preserves the queue;
+      # the continuation sweep rechecks admission after pressure may ease.
+      recovered = False
+      if chat_id:
+        try:
+          parked_until, park_reason = _resource_park_fields(exc.resource)
+          await _recover_wedged_run_strict(
+            chat_id, run_token or "",
+            message=f"{exc} Your message is saved.",
+            kind=park_reason,
+            resumable=False,
+            parked_until=parked_until,
+            park_reason=park_reason,
+          )
+          recovered = True
+        except Exception:
+          _get_logger().warning(
+            "admission-deferral recovery did not persist chat_id=%s "
+            "(reconciliation will repair)", chat_id, exc_info=True,
+          )
+      # A Stop during admission may already have handed the chat to a fresh
+      # turn. Only this generation may close the shared live broadcast.
+      still_ours = run_gen is None or current_run_generation(chat_id) == run_gen
+      bc = get_broadcast(chat_id) if chat_id else None
+      if bc is not None and still_ours:
+        parked_until, park_reason = _resource_park_fields(exc.resource)
+        resource_event = _limit_error_event(
+          f"{exc} Your message is saved.", parked_until, park_reason,
+        )
+        resource_event.pop("resumable", None)
+        bc.publish(resource_event)
+        bc.publish({"type": "done"})
+        bc.mark_completed()
+      if chat_id and still_ours:
+        _publish_chat_run_finished(chat_id)
+      if chat_id and not recovered:
+        # The durable resumable pause could not persist; fall back to durably
+        # failing the run so it is never stranded 'running'.
+        try:
+          await _finish_run_strict(
+            chat_id, run_token or "", terminal_status="failed",
+          )
+        except Exception:
+          _get_logger().warning(
+            "admission-deferral FinishRun fallback did not persist chat_id=%s "
+            "(reconciliation will repair)", chat_id, exc_info=True,
+          )
+    else:
+      bc = get_broadcast(chat_id) if chat_id else None
+      if bc is not None:
+        message = (
           "This turn failed before the agent could start "
           f"({type(exc).__name__}). Your message is saved; the full error "
           "is in the server log."
-        ),
-      })
-      bc.publish({"type": "done"})
-      bc.mark_completed()
-    if chat_id:
-      _publish_chat_run_finished(chat_id)
-      try:
-        await _finish_run_strict(
-          chat_id, run_token or "", terminal_status="failed",
         )
-      except Exception:
-        _get_logger().warning(
-          "setup-failure FinishRun did not persist chat_id=%s "
-          "(reconciliation will repair)", chat_id, exc_info=True,
-        )
+        bc.publish({
+          "type": "error",
+          "message": message,
+        })
+        bc.publish({"type": "done"})
+        bc.mark_completed()
+      if chat_id:
+        _publish_chat_run_finished(chat_id)
+        try:
+          await _finish_run_strict(
+            chat_id, run_token or "", terminal_status="failed",
+          )
+        except Exception:
+          _get_logger().warning(
+            "setup-failure FinishRun did not persist chat_id=%s "
+            "(reconciliation will repair)", chat_id, exc_info=True,
+          )
   finally:
     stopped_gen = _clear_after_terminal_generation.get(chat_id)
     clear_stopped_run = run_gen is not None and stopped_gen == run_gen

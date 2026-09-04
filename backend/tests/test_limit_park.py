@@ -2126,3 +2126,87 @@ def test_limit_park_releases_starting_claim_before_returning():
     assert chat_mod.mark_starting(cid)
   finally:
     chat_mod.discard_starting(cid)
+
+# -- (h) platform-resource parks ----------------------------------------------
+
+def test_sweep_continues_resource_park_without_limit_opt_in(
+  owner_token, monkeypatch,
+):
+  del owner_token
+  notified = []
+  monkeypatch.setattr(
+    "app.push.notify_owner_async",
+    _async_notify(lambda db, owner_id, **kw: notified.append(kw) or "n"),
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw),
+  )
+  monkeypatch.setattr(chat_mod, "_limit_auto_resume_now", lambda: 10**9)
+  _due_park(
+    "sweep-storage", "rt-sweep-storage",
+    auto_resume=False, park_reason="storage",
+  )
+  try:
+    assert _run_sweep() == ["sweep-storage"]
+    assert len(scheduled) == 1
+    assert scheduled[0]["chat_id"] == "sweep-storage"
+    assert notified == []
+  finally:
+    chat_mod.discard_starting("sweep-storage")
+
+
+def test_admission_recovery_command_parks_exact_run():
+  from app.chat_writer import RecoverWedgedRun
+
+  cid = "defer-storage-park"
+  _seed_chat(cid)
+  _seed_run(cid, "rt-defer-storage-park")
+  due = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=60)
+  event = chat_mod._limit_error_event("waiting", due, "storage")
+  event.pop("resumable", None)
+  ack = get_writer().submit(RecoverWedgedRun(
+    chat_id=cid,
+    run_token="rt-defer-storage-park",
+    interruption_block=event,
+    parked_until=due,
+    park_reason="storage",
+  ))
+  assert ack.result(timeout=5) is True
+
+  row = _run_row("rt-defer-storage-park")
+  assert row["status"] == "parked"
+  assert row["park_reason"] == "storage"
+  assert row["parked_until"] == due
+  tail = _chat_row(cid)["messages"][-1]
+  assert tail["blocks"][-1]["pause"]["kind"] == "storage"
+
+
+def test_app_initiated_resource_park_preserves_attribution(
+  owner_token, monkeypatch,
+):
+  del owner_token
+  monkeypatch.setattr(
+    "app.push.notify_owner_async", _async_notify(lambda *args, **kwargs: "n"),
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw),
+  )
+  monkeypatch.setattr(chat_mod, "_limit_auto_resume_now", lambda: 10**9)
+  cid = "sweep-app-storage"
+  app_id = 42
+  _due_park(
+    cid, f"rt-{cid}", auto_resume=False, park_reason="storage",
+    initiated_by_app_id=app_id,
+  )
+  try:
+    assert _run_sweep() == [cid]
+    assert len(scheduled) == 1
+    resumed = _run_row(scheduled[0]["run_token"])
+    assert resumed["initiated_by_app_id"] == app_id
+    assert scheduled[0]["next_user"]["_messages"][-1][
+      "continuation_reason"
+    ] == "storage"
+  finally:
+    chat_mod.discard_starting(cid)

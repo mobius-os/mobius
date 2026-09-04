@@ -48,6 +48,7 @@ import time
 import uuid
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import SQLAlchemyError
@@ -713,6 +714,8 @@ class RecoverWedgedRun(_Command):
   chat_id: str = ""
   run_token: str = ""
   interruption_block: dict = field(default_factory=dict)
+  parked_until: datetime | None = None
+  park_reason: str | None = None
 
 
 @dataclass
@@ -3435,8 +3438,14 @@ class ChatWriterActor:
       and owner_is_ours
       and self._run_is_latest(db, run)
     )
+    parks = cmd.parked_until is not None and run_is_current
     if run is not None and run.status == "running":
-      run.status = "interrupted"
+      if parks:
+        run.status = "parked"
+        run.parked_until = cmd.parked_until
+        run.park_reason = cmd.park_reason
+      else:
+        run.status = "interrupted"
       run.ended_at = datetime.now(UTC)
       run.restart_nonce = None
       changed = True

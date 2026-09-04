@@ -1,5 +1,6 @@
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import { formatResetTime } from './resetTime.js'
+import { isResourcePause } from './resourcePause.js'
 import { ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 
 // The single renderer for the error/pause/park card family. MsgContent consumes
@@ -16,13 +17,14 @@ import { ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 // danger-red "Error" card is reserved for genuine failures (no `pause`). Old
 // persisted blocks predate `pause` and fall back to the error rendering.
 export function errorCardViewModel(block) {
-  const parked = !!block.pause?.resets_at
+  const resourceWait = isResourcePause(block)
+  const parked = !!block.pause?.resets_at && !resourceWait
   const benign = !!block.pause
   return {
     parked,
     benign,
     className: `chat__text--error${benign ? ' chat__text--parked' : ''}`,
-    label: parked ? 'Rate limit' : (block.pause ? 'Paused' : 'Error'),
+    label: resourceWait ? 'Waiting' : parked ? 'Rate limit' : (block.pause ? 'Paused' : 'Error'),
     resetLabel: parked ? formatResetTime(block.pause.resets_at) : null,
   }
 }

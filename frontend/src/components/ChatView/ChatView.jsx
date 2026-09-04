@@ -97,6 +97,7 @@ import MessageMetaRow from './MessageMetaRow.jsx'
 import ActivityLineHeader from './ActivityLineHeader.jsx'
 import { messageCopyText } from './messageCopy.js'
 import { formatResetTime } from './resetTime.js'
+import { isResourcePause } from './resourcePause.js'
 import {
   resetDeadlineDelay,
   resetDeadlineState,
@@ -327,6 +328,17 @@ function tailResumableBlock(messages) {
     if (message.role !== 'assistant' || !message.blocks?.length) return null
     const tail = message.blocks[message.blocks.length - 1]
     return tail.type === 'error' && tail.resumable ? tail : null
+  }
+  return null
+}
+
+function tailResourcePauseBlock(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].hidden) continue
+    const message = messages[i]
+    if (message.role !== 'assistant' || !message.blocks?.length) return null
+    const tail = message.blocks[message.blocks.length - 1]
+    return tail.type === 'error' && isResourcePause(tail) ? tail : null
   }
   return null
 }
@@ -4961,10 +4973,15 @@ export default function ChatView({
   // nudge + SR status can name the recovery. A pause is terminal (the turn has
   // ended), so it only ever lives in `messages`, never in a live stream item.
   const pendingResumeBlock = tailResumableBlock(messages)
-  // An open question is the single blocker: answering it IS the continuation,
-  // so don't surface a competing Resume (which the backend would now refuse).
-  const hasPendingResume = !!pendingResumeBlock && !hasPendingQuestion
-  const pendingLimitResetAt = pendingResumeBlock?.pause?.resets_at || null
+  const resourcePause = tailResourcePauseBlock(messages)
+  // Resource parks retry themselves and use the standard Waiting indicator;
+  // presenting Resume would offer an action admission must reject.
+  const hasPendingResume = !!pendingResumeBlock
+    && !resourcePause
+    && !hasPendingQuestion
+  const pendingLimitResetAt = resourcePause
+    ? null
+    : pendingResumeBlock?.pause?.resets_at || null
   useEffect(() => {
     if (!embedded || !autoResumeEnabled || !pendingLimitResetAt) {
       if (!pendingLimitResetAt) armedEmbeddedResetRef.current = null
@@ -5135,6 +5152,11 @@ export default function ChatView({
   // ready, it's waiting on the owner), and a screen-reader user has no visual
   // Resume card to fall back on.
   const resumeStatus = (() => {
+    if (resourcePause) {
+      return resourcePause.pause?.kind === 'memory'
+        ? 'Waiting for memory headroom. Möbius will continue automatically.'
+        : 'Waiting for storage headroom. Möbius will continue automatically.'
+    }
     if (!pendingResumeBlock) return null
     if (pendingResumeBlock.pause?.resets_at) {
       const label = formatResetTime(pendingResumeBlock.pause.resets_at)
@@ -5679,8 +5701,12 @@ export default function ChatView({
           onActionItem={handleGoalRailAction}
         />
         {draftGoal !== null && <GoalDraftChip objective={draftGoal} />}
-        {!turnActive && armedWaits.length > 0 && (
-          <WaitingChip waits={armedWaits} onCancel={handleCancelWait} />
+        {!turnActive && (armedWaits.length > 0 || resourcePause) && (
+          <WaitingChip
+            waits={armedWaits}
+            resourcePause={resourcePause}
+            onCancel={handleCancelWait}
+          />
         )}
         <ConnectionStatus
           error={connectionError}
