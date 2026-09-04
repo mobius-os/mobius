@@ -1026,8 +1026,97 @@ WAKE_ELIGIBLE_RUN_STATUSES = frozenset({"completed", "failed"})
 _WAKE_RESULT_MAX = 3000
 WAKE_RECOVERY_BATCH_SIZE = 16
 WAKE_NOTICE_DELEGATION_LIMIT = 16
+BACKGROUND_HELPER_ITEM_LIMIT = 16
 WAKE_PARENT_DELIVERY_TIMEOUT_SECS = 40.0
 _LOG = logging.getLogger("moebius.delegations")
+
+
+def _self_resuming_helper_rows(
+  db: Session, parent_chat_ids: set[str],
+) -> list[tuple[models.Delegation, str]]:
+  """Wake-enabled helper rows that still own a future parent continuation."""
+  if not parent_chat_ids:
+    return []
+  candidate_run_statuses = tuple(
+    set(models.NONTERMINAL_RUN_STATUSES) | WAKE_ELIGIBLE_RUN_STATUSES
+  )
+  rows = (
+    db.query(models.Delegation)
+    .outerjoin(models.ChatRun, models.ChatRun.id == _latest_child_run_id())
+    .filter(
+      models.Delegation.parent_chat_id.in_(parent_chat_ids),
+      models.Delegation.notify_parent_on_complete.is_(True),
+      models.Delegation.source_work_id.is_(None),
+      models.Delegation.cancelled_at.is_(None),
+      models.Delegation.parent_woken_at.is_(None),
+      or_(
+        models.ChatRun.status.in_(candidate_run_statuses),
+        and_(
+          models.ChatRun.id.is_(None),
+          models.Delegation.startup_prompt.is_not(None),
+        ),
+      ),
+    )
+    .order_by(models.Delegation.created_at.asc(), models.Delegation.id.asc())
+    .all()
+  )
+  waiting_statuses = ACTIVE_DELEGATION_STATUSES | WAKE_ELIGIBLE_STATUSES
+  projected = []
+  for row in rows:
+    status, _run, _result = derived_status(db, row, load_result=False)
+    if status in waiting_statuses:
+      projected.append((row, status))
+  return projected
+
+
+def background_helper_chat_ids(db: Session, parent_chat_ids) -> set[str]:
+  """Chats that are idle while wake-enabled helpers own their next move."""
+  requested = {str(chat_id) for chat_id in parent_chat_ids if chat_id}
+  return {
+    row.parent_chat_id
+    for row, _status in _self_resuming_helper_rows(db, requested)
+  }
+
+
+def background_helper_goal_ids(db: Session, parent_chat_id: str) -> set[str]:
+  """Logical Goal/root identities owned by this chat's waking helpers."""
+  return {
+    row.parent_root_run_id
+    for row, _status in _self_resuming_helper_rows(db, {parent_chat_id})
+  }
+
+
+def serialize_background_helpers(db: Session, parent_chat_id: str) -> dict:
+  """Compact owner-facing helper summary; child transcripts stay private."""
+  rows = _self_resuming_helper_rows(db, {parent_chat_id})
+  return {
+    "count": len(rows),
+    "items": [
+      {
+        "id": row.id,
+        "task_key": row.task_key,
+        "provider": row.provider,
+        "status": status,
+      }
+      for row, status in rows[:BACKGROUND_HELPER_ITEM_LIMIT]
+    ],
+  }
+
+
+def publish_parent_waiting_changed(parent_chat_id: str) -> None:
+  """Reconcile every owner surface that projects self-resuming idle work."""
+  if not parent_chat_id:
+    return
+  try:
+    from app.broadcast import get_system_broadcast
+
+    get_system_broadcast().publish({
+      "type": "chat_wait_changed",
+      "chatId": parent_chat_id,
+      "source": "background_helpers",
+    })
+  except Exception:
+    _LOG.debug("background helper wait broadcast failed", exc_info=True)
 
 
 @dataclass(frozen=True)
@@ -1294,6 +1383,7 @@ async def _deliver_parent_wake_once(
         synchronize_session=False,
       )
       db.commit()
+    publish_parent_waiting_changed(parent_chat_id)
     return True
 
 
@@ -1320,6 +1410,7 @@ async def wake_parent_after_child_settled(child_chat_id: str) -> None:
       if row is not None:
         from app.goal_plans import publish_plan_for_delegation
         publish_plan_for_delegation(db, row)
+        publish_parent_waiting_changed(row.parent_chat_id)
       if (
         row is None
         or not row.notify_parent_on_complete

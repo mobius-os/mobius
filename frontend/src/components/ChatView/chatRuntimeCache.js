@@ -9,13 +9,46 @@ function samePendingMessages(current, next) {
   return true
 }
 
+export const EMPTY_BACKGROUND_HELPERS = Object.freeze({
+  count: 0,
+  items: Object.freeze([]),
+})
+
+export function normalizeBackgroundHelpers(value) {
+  if (!value || typeof value !== 'object') return EMPTY_BACKGROUND_HELPERS
+  const items = Array.isArray(value.items) ? value.items : []
+  const count = Number.isInteger(value.count) && value.count >= items.length
+    ? value.count
+    : items.length
+  if (count === 0 && items.length === 0) return EMPTY_BACKGROUND_HELPERS
+  return { count, items }
+}
+
+export function chatHasSelfResumingHandoff({
+  turnActive = false,
+  waits = [],
+  backgroundHelpers = null,
+} = {}) {
+  const helpers = normalizeBackgroundHelpers(backgroundHelpers)
+  return !turnActive && (
+    (Array.isArray(waits) && waits.length > 0) || helpers.count > 0
+  )
+}
+
 function runtimeFieldMatches(current, field, value) {
   if (field === 'pending_messages') {
     return samePendingMessages(current?.pending_messages || [], value || [])
   }
-  if (field === 'goal' || field === 'chatInfo') {
-    const currentValue = current?.[field] || null
-    const nextValue = value || null
+  if (
+    field === 'goal'
+    || field === 'chatInfo'
+    || field === 'background_helpers'
+  ) {
+    const empty = field === 'background_helpers'
+      ? EMPTY_BACKGROUND_HELPERS
+      : null
+    const currentValue = current?.[field] || empty
+    const nextValue = value || empty
     if (currentValue === nextValue) return true
     return JSON.stringify(currentValue) === JSON.stringify(nextValue)
   }

@@ -10,11 +10,14 @@ from app.codex_sdk_runner import _codex_config_overrides
 from app.claude_sdk_runner import _guarded_subagent_bash
 from app.delegations import (
   RunPolicy,
+  background_helper_chat_ids,
+  background_helper_goal_ids,
   delegation_execution_token,
   derived_status,
   mark_cancelled,
   parent_root_run_id,
   policy_for_chat,
+  serialize_background_helpers,
 )
 from test_app_fixtures import create_local_app
 
@@ -656,6 +659,86 @@ def _seed_delegation(
   return parent_id, child_id, delegation_id
 
 
+def test_background_helper_projection_owns_waiting_until_parent_wake(
+  client, owner_token, db,
+):
+  parent_id, _child_id, delegation_id = _seed_delegation(
+    db, suffix="waiting-owner", child_status="running",
+  )
+  _seed_delegation(
+    db,
+    suffix="detached-owner",
+    parent_id=parent_id,
+    child_status="running",
+    notify=False,
+  )
+
+  assert background_helper_chat_ids(db, [parent_id]) == {parent_id}
+  assert background_helper_goal_ids(db, parent_id) == {"root-waiting-owner"}
+  summary = serialize_background_helpers(db, parent_id)
+  assert summary == {
+    "count": 1,
+    "items": [{
+      "id": delegation_id,
+      "task_key": "task-waiting-owner",
+      "provider": "claude",
+      "status": "running",
+    }],
+  }
+
+  auth_headers = {"Authorization": f"Bearer {owner_token}"}
+  chats = client.get("/api/chats", headers=auth_headers)
+  assert chats.status_code == 200, chats.text
+  parent_summary = next(row for row in chats.json() if row["id"] == parent_id)
+  assert parent_summary["waiting"] is True
+
+  detail = client.get(f"/api/chats/{parent_id}", headers=auth_headers)
+  assert detail.status_code == 200, detail.text
+  assert detail.json()["background_helpers"] == summary
+  runtime = client.get(f"/api/chats/{parent_id}/runtime", headers=auth_headers)
+  assert runtime.status_code == 200, runtime.text
+  assert runtime.json()["background_helpers"] == summary
+
+  child_run = db.get(models.ChatRun, "child-run-waiting-owner")
+  child_run.status = "completed"
+  db.commit()
+  assert serialize_background_helpers(db, parent_id)["count"] == 1
+
+  delegation = db.get(models.Delegation, delegation_id)
+  delegation.parent_woken_at = now_naive_utc()
+  db.commit()
+  assert background_helper_chat_ids(db, [parent_id]) == set()
+  assert background_helper_goal_ids(db, parent_id) == set()
+  assert serialize_background_helpers(db, parent_id) == {"count": 0, "items": []}
+
+
+def test_background_helper_wait_event_is_parent_scoped_and_best_effort(
+  monkeypatch,
+):
+  events = []
+
+  class Broadcast:
+    def publish(self, event):
+      events.append(event)
+
+  monkeypatch.setattr("app.broadcast.get_system_broadcast", lambda: Broadcast())
+  delegations_mod.publish_parent_waiting_changed("parent-visible")
+  assert events == [{
+    "type": "chat_wait_changed",
+    "chatId": "parent-visible",
+    "source": "background_helpers",
+  }]
+
+  class BrokenBroadcast:
+    def publish(self, _event):
+      raise RuntimeError("socket is already closed")
+
+  monkeypatch.setattr(
+    "app.broadcast.get_system_broadcast", lambda: BrokenBroadcast(),
+  )
+  delegations_mod.publish_parent_waiting_changed("parent-visible")
+
+
 def _capture_starts(monkeypatch, *, running=False):
   """Stub start_programmatic_chat_turn + is_chat_running; return the start log."""
   starts = []
@@ -690,6 +773,18 @@ def test_child_completion_wakes_idle_parent_once(db, monkeypatch):
     result_blocks=[{"type": "text", "content": "All 3 checks passed."}],
   )
   starts = _capture_starts(monkeypatch, running=False)
+  waiting_counts = []
+
+  def capture_waiting_change(changed_parent_id):
+    assert changed_parent_id == parent_id
+    db.expire_all()
+    waiting_counts.append(
+      serialize_background_helpers(db, changed_parent_id)["count"]
+    )
+
+  monkeypatch.setattr(
+    delegations_mod, "publish_parent_waiting_changed", capture_waiting_change,
+  )
 
   asyncio.run(delegations_mod.wake_parent_after_child_settled(child_id))
 
@@ -703,6 +798,7 @@ def test_child_completion_wakes_idle_parent_once(db, monkeypatch):
   assert starts[0]["source_work_id"] == "root-idle"
   db.expire_all()
   assert db.get(models.Delegation, delegation_id).parent_woken_at is not None
+  assert waiting_counts[:2] == [1, 0]
 
   # Second settle is a no-op — the latch holds.
   asyncio.run(delegations_mod.wake_parent_after_child_settled(child_id))

@@ -26,6 +26,7 @@ from app.delegations import (
   MAX_DELEGATION_DEPTH,
   normalize_cwd,
   parent_root_run_id,
+  publish_parent_waiting_changed,
   serialize_delegation,
 )
 from app.deps import Principal, get_delegation_principal, reject_cross_site
@@ -269,6 +270,7 @@ async def submit_or_attach(
     await _ensure_started(db, row, body.prompt)
     from app.goal_plans import publish_plan_for_delegation
     publish_plan_for_delegation(db, row)
+    publish_parent_waiting_changed(row.parent_chat_id)
   payload = serialize_delegation(db, row)
   payload["attached"] = attached
   return payload
@@ -384,6 +386,7 @@ async def cancel_delegation(
   payload = serialize_delegation(db, row)
   from app.goal_plans import publish_plan_for_delegation
   publish_plan_for_delegation(db, row)
+  publish_parent_waiting_changed(row.parent_chat_id)
   return payload
 
 
@@ -401,4 +404,6 @@ async def cancel_active_for_parent(db: Session, parent_chat_id: str) -> list[str
     if await cancel_delegation_execution(row.id):
       cancelled.append(row.id)
   db.rollback()
+  if cancelled:
+    publish_parent_waiting_changed(parent_chat_id)
   return cancelled

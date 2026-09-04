@@ -2972,10 +2972,9 @@ export default function Shell({ onInitialVisualReady }) {
       }
     } else if (ev.type === 'chat_wait_changed') {
       if (ev.chatId) {
-        // Waits are durable chat state, not a running turn. Reconcile the
-        // visible ChatView immediately so its chip cannot depend on a later
-        // run-finished refresh, and refresh the compact list projection so
-        // Recents shows the same state across tabs and reconnects.
+        // Self-resuming handoffs are durable chat state, not a running turn.
+        // Reconcile ChatView immediately and refresh the compact list so its
+        // Waiting card and Recents marker agree across tabs and reconnects.
         markChatRunReconcile(ev.chatId)
         void invalidateShellListCache('chats').then(refreshChats)
       }

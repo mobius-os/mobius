@@ -124,7 +124,11 @@ import {
   shouldApplyComposerFocusRequest,
 } from './composerFocusPolicy.js'
 import { shouldDismissComposerKeyboardOnSubmit } from './composerKeyboardPolicy.js'
-import { updateChatRuntimeCache } from './chatRuntimeCache.js'
+import {
+  chatHasSelfResumingHandoff,
+  normalizeBackgroundHelpers,
+  updateChatRuntimeCache,
+} from './chatRuntimeCache.js'
 import {
   assistantAnchorKey,
   chatCacheEntryState,
@@ -656,6 +660,9 @@ export default function ChatView({
   // trigger those reads, so declare and resume both refresh this without a
   // dedicated event channel.
   const [armedWaits, setArmedWaits] = useState(() => cached?.waits || [])
+  const [backgroundHelpers, setBackgroundHelpers] = useState(() => (
+    normalizeBackgroundHelpers(cached?.background_helpers)
+  ))
   const handleCancelWait = useCallback(async (waitId) => {
     setArmedWaits(prev => {
       const next = prev.filter(wait => wait.id !== waitId)
@@ -739,6 +746,7 @@ export default function ChatView({
     // destination's cached waits immediately so the previous chat's promise
     // never flashes while the authoritative detail read catches up.
     setArmedWaits(Array.isArray(runtime?.waits) ? runtime.waits : [])
+    setBackgroundHelpers(normalizeBackgroundHelpers(runtime?.background_helpers))
   }, [chatId, queryClient, setGoalPresentationLocalState])
 
   useEffect(() => {
@@ -1341,6 +1349,7 @@ export default function ChatView({
       }
       setLiveQuestionId(data.pending_question_id || null)
       if (Array.isArray(data.waits)) setArmedWaits(data.waits)
+      setBackgroundHelpers(normalizeBackgroundHelpers(data.background_helpers))
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
         goal: runtimeGoal,
@@ -1353,6 +1362,7 @@ export default function ChatView({
           activeAssistantMessageId: data.active_assistant_message_id || null,
         } : {}),
         waits: data.waits || [],
+        background_helpers: normalizeBackgroundHelpers(data.background_helpers),
         chatInfo: refreshedChatInfo,
       })
       // Reconcile pending queue against authoritative server state.
@@ -1526,6 +1536,7 @@ export default function ChatView({
       const pendingQuestionId = runtime.pendingQuestionId
       setLiveQuestionId(pendingQuestionId)
       if (Array.isArray(data.waits)) setArmedWaits(data.waits)
+      setBackgroundHelpers(normalizeBackgroundHelpers(data.background_helpers))
       updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
         running: !!data.running,
         goal: runtimeGoal,
@@ -1538,6 +1549,7 @@ export default function ChatView({
           activeAssistantMessageId: runtime.activeAssistantMessageId,
         } : {}),
         waits: data.waits || [],
+        background_helpers: normalizeBackgroundHelpers(data.background_helpers),
       })
       // Don't let the fallback poll add/clobber the queue while a turn is live
       // (localAuthoritative, above) — the optimistic queue + confirmQueued
@@ -2392,6 +2404,8 @@ export default function ChatView({
       ))
       hadMessagesRef.current = visibleMessages.length > 0
       setLiveQuestionId(runtime.pending_question_id || null)
+      setArmedWaits(Array.isArray(runtime.waits) ? runtime.waits : [])
+      setBackgroundHelpers(normalizeBackgroundHelpers(runtime.background_helpers))
       setBridgeMountInputs({
         runningAtMount: running,
         lastMsgAtMount: visibleMessages.length > 0
@@ -2510,6 +2524,10 @@ export default function ChatView({
             : '',
           pending_messages: runtime.pending_messages || [],
           pending_question_id: runtime.pending_question_id || null,
+          waits: runtime.waits || [],
+          background_helpers: normalizeBackgroundHelpers(
+            runtime.background_helpers,
+          ),
         })
         applyMessagesToView(msgs, detailCache.offset)
         settleRuntime(runtime, msgs)
@@ -5210,6 +5228,11 @@ export default function ChatView({
         : {}),
     }
   })
+  const showWaitingHandoff = chatHasSelfResumingHandoff({
+    turnActive,
+    waits: armedWaits,
+    backgroundHelpers,
+  })
   // A `/goal ` composer draft keeps the goal visual open while the objective is
   // still being typed (null once the draft is no longer a goal command).
   const draftGoal = draftGoalObjective(input)
@@ -5653,8 +5676,12 @@ export default function ChatView({
           onActionItem={handleGoalRailAction}
         />
         {draftGoal !== null && <GoalDraftChip objective={draftGoal} />}
-        {!turnActive && armedWaits.length > 0 && (
-          <WaitingChip waits={armedWaits} onCancel={handleCancelWait} />
+        {showWaitingHandoff && (
+          <WaitingChip
+            waits={armedWaits}
+            backgroundHelpers={backgroundHelpers}
+            onCancel={handleCancelWait}
+          />
         )}
         <ConnectionStatus
           error={connectionError}

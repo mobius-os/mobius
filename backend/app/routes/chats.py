@@ -46,6 +46,7 @@ from app.chat_titles import (
   renamed_event,
 )
 from app.database import get_db
+from app.delegations import background_helper_chat_ids, serialize_background_helpers
 from app.goal_plans import presented_goal
 from app.memory_observability import record_memory_checkpoint_once
 from app.owner_input import OwnerInputKind
@@ -653,6 +654,10 @@ def _chat_detail_response(
     "waits": [
       serialize_wait(row) for row in armed_waits_for_chat(db, chat.id)
     ] if expose_session else [],
+    "background_helpers": (
+      serialize_background_helpers(db, chat.id)
+      if expose_session else {"count": 0, "items": []}
+    ),
   }
   if requested_anchor_found is not None:
     response["requested_anchor_found"] = requested_anchor_found
@@ -720,7 +725,9 @@ def list_chats(
     # owner conversation into the drawer by setting owner_visible at creation.
     chats = [c for c in chats if _visible_in_owner_drawer(c)]
   durable_running = running_chat_ids(db, (chat.id for chat in chats))
-  durable_waiting = armed_wait_chat_ids(db)
+  durable_waiting = armed_wait_chat_ids(db) | background_helper_chat_ids(
+    db, (chat.id for chat in chats)
+  )
   secure_input_chats = secure_inputs.pending_chat_ids()
   record_memory_checkpoint_once(
     "shell_chat_list_first_response",
@@ -1497,6 +1504,10 @@ def get_chat_runtime(
     "waits": [
       serialize_wait(row) for row in armed_waits_for_chat(db, chat.id)
     ] if principal.scope != "chat_embed" else [],
+    "background_helpers": (
+      serialize_background_helpers(db, chat.id)
+      if principal.scope != "chat_embed" else {"count": 0, "items": []}
+    ),
   }
 
 

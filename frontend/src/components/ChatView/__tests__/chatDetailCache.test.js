@@ -103,6 +103,11 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
     },
     pending_messages: [{ id: 'queued' }],
     pending_question_id: 'question-1',
+    waits: [{ id: 'wait-1', description: 'CI finishes', status: 'armed' }],
+    background_helpers: {
+      count: 1,
+      items: [{ id: 'helper-1', task_key: 'audit', status: 'running' }],
+    },
     provider: 'codex',
     session_id: 'thread-current',
     created_by_app_id: 7,
@@ -123,6 +128,8 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
   assert.equal(cached.activeGoalObjective, 'Finish the migration')
   assert.deepEqual(cached.goal, source.goal)
   assert.equal(cached.pending_question_id, 'question-1')
+  assert.deepEqual(cached.waits, source.waits)
+  assert.deepEqual(cached.background_helpers, source.background_helpers)
   assert.deepEqual(cached.chatInfo, {
     provider: 'codex',
     session_id: 'thread-current',

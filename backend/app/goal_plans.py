@@ -629,16 +629,18 @@ def _goal_wait_kind(
       models.ChatWait.created_by_run_id.isnot(None),
     ).all()
   ]
-  if not wait_run_ids:
-    return None
-  wait_owners = db.query(models.ChatRun).filter(
-    models.ChatRun.chat_id == physical.chat_id,
-    models.ChatRun.id.in_(wait_run_ids),
-  ).all()
-  if any(
-    (owner.goal_id or owner.root_run_id or owner.id) == goal_id
-    for owner in wait_owners
-  ):
+  if wait_run_ids:
+    wait_owners = db.query(models.ChatRun).filter(
+      models.ChatRun.chat_id == physical.chat_id,
+      models.ChatRun.id.in_(wait_run_ids),
+    ).all()
+    if any(
+      (owner.goal_id or owner.root_run_id or owner.id) == goal_id
+      for owner in wait_owners
+    ):
+      return "monitor"
+  from app.delegations import background_helper_goal_ids
+  if goal_id in background_helper_goal_ids(db, physical.chat_id):
     return "monitor"
   return None
 
