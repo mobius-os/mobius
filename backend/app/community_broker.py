@@ -21,8 +21,19 @@ import httpx
 
 DEFAULT_SOCKET = "/run/mobius-identity-broker.sock"
 COMMUNITY_PREFIX = "/v1/community"
+COMMUNITY_BASE_URL = os.environ.get(
+  "MOBIUS_COMMUNITY_REGISTRY_URL", "https://www.mobius.you",
+).rstrip("/")
 MAX_RESPONSE_BYTES = 10_000_000
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$")
+_PUBLIC_APP_READS = (
+  re.compile(r"/v1/community/apps"),
+  re.compile(r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}"),
+  re.compile(
+    r"/v1/community/apps/[A-Za-z0-9_:-]{8,200}/revisions/"
+    r"[A-Za-z0-9_:-]{8,200}"
+  ),
+)
 
 
 @dataclass(frozen=True)
@@ -48,6 +59,32 @@ def bound_request_id(
   material += method.upper().encode("ascii") + b"\0" + path.encode("utf-8")
   material += b"\0" + (idempotency_key or "").encode("utf-8") + b"\0" + body
   return "community:" + hashlib.sha256(material).hexdigest()
+
+
+def _public_read_target(method: str, path: str, target: str) -> str | None:
+  if method != "GET":
+    return None
+  if path == "/v1/community/editorial/spotlight" or any(
+    pattern.fullmatch(path) for pattern in _PUBLIC_APP_READS
+  ):
+    return "/api/store/v1" + target.removeprefix(COMMUNITY_PREFIX)
+  return None
+
+
+def _decode_response(response: httpx.Response) -> tuple[Any, dict[str, str]]:
+  if len(response.content) > MAX_RESPONSE_BYTES:
+    raise CommunityBrokerError(502, "The community service response was too large.")
+  try:
+    payload = response.json() if response.content else {}
+  except ValueError as exc:
+    raise CommunityBrokerError(
+      502, "The community service returned an invalid response.",
+    ) from exc
+  response_headers = {
+    key.lower(): value for key, value in response.headers.items()
+    if key.lower() in {"retry-after", "etag", "last-modified"}
+  }
+  return payload, response_headers
 
 
 class CommunityBrokerClient:
@@ -98,10 +135,12 @@ class CommunityBrokerClient:
       headers["Content-Type"] = "application/json"
     if idempotency_key:
       headers["Idempotency-Key"] = idempotency_key
-    transport = self.transport or httpx.AsyncHTTPTransport(uds=self.socket_path)
+    broker_transport = self.transport or httpx.AsyncHTTPTransport(
+      uds=self.socket_path,
+    )
     try:
       async with httpx.AsyncClient(
-        transport=transport,
+        transport=broker_transport,
         base_url="http://mobius-identity-broker",
         timeout=45.0,
         follow_redirects=False,
@@ -109,22 +148,26 @@ class CommunityBrokerClient:
         response = await client.request(
           method, target, content=encoded if encoded else None, headers=headers,
         )
+      payload, response_headers = _decode_response(response)
+      public_target = _public_read_target(method, path, target)
+      if (
+        response.status_code == 401
+        and isinstance(payload, dict)
+        and payload.get("error") == "a mobius.you account must be linked"
+        and public_target is not None
+      ):
+        async with httpx.AsyncClient(
+          transport=self.transport,
+          base_url=COMMUNITY_BASE_URL,
+          timeout=45.0,
+          follow_redirects=False,
+        ) as client:
+          response = await client.request("GET", public_target, headers=headers)
+        payload, response_headers = _decode_response(response)
     except httpx.HTTPError as exc:
       raise CommunityBrokerError(
         503, "The Möbius community service could not be reached.",
       ) from exc
-    if len(response.content) > MAX_RESPONSE_BYTES:
-      raise CommunityBrokerError(502, "The community service response was too large.")
-    try:
-      payload = response.json() if response.content else {}
-    except ValueError as exc:
-      raise CommunityBrokerError(
-        502, "The community service returned an invalid response.",
-      ) from exc
-    response_headers = {
-      key.lower(): value for key, value in response.headers.items()
-      if key.lower() in {"retry-after", "etag", "last-modified"}
-    }
     if response.is_error:
       error = payload.get("error") if isinstance(payload, dict) else None
       if isinstance(error, dict):
