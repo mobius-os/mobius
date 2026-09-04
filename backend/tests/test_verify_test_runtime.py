@@ -143,7 +143,7 @@ def test_test_wrapper_isolates_compose_and_rejects_stale_images():
   backend_source = "COPY backend/app ./app/"
   backend_scripts = "COPY backend/scripts ./scripts/"
   platform_seed = (
-    'git clone --depth 1 "$_platform_fetch_origin" /app/platform-baked'
+    'git clone --depth 1 "$MOBIUS_PLATFORM_ORIGIN" /app/platform-baked'
   )
   frontend_source = "COPY frontend/ ./shell-src/"
   assert dockerfile.count(backend_source) == 1
@@ -153,15 +153,21 @@ def test_test_wrapper_isolates_compose_and_rejects_stale_images():
     assert dockerfile.index(asset_stage) < dockerfile.index(frontend_source)
   assert dockerfile.index(frontend_source) < dockerfile.index(platform_seed)
   assert dockerfile.index(platform_seed) < dockerfile.index(backend_source)
-  assert "ARG MOBIUS_PLATFORM_FETCH_ORIGIN=" in dockerfile
   assert (
     '[ "${MOBIUS_USE_LOCAL_PLATFORM_SOURCE:-0}" != "1" ]'
     in dockerfile
   )
+  assert 'ARG MOBIUS_LOCAL_PLATFORM_BASE_SHA=unknown' in dockerfile
+  assert "FROM scratch AS mobius-local-platform-source" in dockerfile
+  assert dockerfile.startswith("# syntax=docker/dockerfile:1\n")
   assert (
-    'git -C /app/platform-baked fetch --depth 1 "$_platform_fetch_origin"'
+    "RUN --mount=type=bind,from=mobius-local-platform-source"
     in dockerfile
   )
+  assert "/tmp/mobius-local-platform-source/platform.bundle" in dockerfile
+  assert 'git -C /app/platform-baked fetch --no-tags "$_bundle" HEAD' in dockerfile
+  assert 'git -C /app/platform-baked checkout --detach' in dockerfile
+  assert "COPY . /tmp/mobius-local-platform-source" not in dockerfile
   assert (
     'git -C /app/platform-baked remote set-url origin "$MOBIUS_PLATFORM_ORIGIN"'
     in dockerfile
@@ -171,12 +177,73 @@ def test_test_wrapper_isolates_compose_and_rejects_stale_images():
     in dockerfile
   )
   compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+  assert "additional_contexts:" in compose
+  assert "mobius-local-platform-source:" in compose
+  assert "MOBIUS_LOCAL_PLATFORM_CONTEXT:-./.docker/empty-context" in compose
   assert "MOBIUS_USE_LOCAL_PLATFORM_SOURCE:" in compose
   assert "MOBIUS_LOCAL_PLATFORM_SHA:" in compose
+  assert "MOBIUS_LOCAL_PLATFORM_BASE_SHA:" in compose
   assert "MOBIUS_LOCAL_PLATFORM_DATE:" in compose
   deploy = (ROOT / "scripts" / "deploy-prod.sh").read_text(encoding="utf-8")
   assert "MOBIUS_USE_LOCAL_PLATFORM_SOURCE=1 requires a clean" in deploy
   assert 'export MOBIUS_LOCAL_PLATFORM_SHA="$_sha"' in deploy
+  assert 'bundle create "$LOCAL_SOURCE_CONTEXT/platform.bundle"' in deploy
+  assert 'export MOBIUS_LOCAL_PLATFORM_CONTEXT="$LOCAL_SOURCE_CONTEXT"' in deploy
+
+
+def test_local_platform_bundle_preserves_source_deletions(tmp_path):
+  def git(repo, *args):
+    return subprocess.run(
+      ["git", "-C", str(repo), *args],
+      check=True,
+      capture_output=True,
+      text=True,
+    ).stdout.strip()
+
+  public = tmp_path / "public"
+  public.mkdir()
+  git(public, "init", "-b", "main")
+  git(public, "config", "user.name", "Test")
+  git(public, "config", "user.email", "test@example.com")
+  (public / "kept.txt").write_text("base\n", encoding="utf-8")
+  (public / "deleted.txt").write_text("remove me\n", encoding="utf-8")
+  git(public, "add", ".")
+  git(public, "commit", "-m", "base")
+  base_sha = git(public, "rev-parse", "HEAD")
+
+  local = tmp_path / "local"
+  subprocess.run(
+    ["git", "clone", str(public), str(local)],
+    check=True,
+    capture_output=True,
+    text=True,
+  )
+  git(local, "config", "user.name", "Test")
+  git(local, "config", "user.email", "test@example.com")
+  (local / "deleted.txt").unlink()
+  (local / "kept.txt").write_text("local\n", encoding="utf-8")
+  git(local, "add", "-A")
+  git(local, "commit", "-m", "local change")
+  local_sha = git(local, "rev-parse", "HEAD")
+  local_tree = git(local, "rev-parse", "HEAD^{tree}")
+  bundle = tmp_path / "local.bundle"
+  git(local, "bundle", "create", str(bundle), "HEAD", f"^{base_sha}")
+
+  baked = tmp_path / "baked"
+  subprocess.run(
+    ["git", "clone", "--depth", "1", f"file://{public}", str(baked)],
+    check=True,
+    capture_output=True,
+    text=True,
+  )
+  git(baked, "fetch", "--depth", "1", str(public), base_sha)
+  git(baked, "fetch", "--no-tags", str(bundle), "HEAD")
+  assert git(baked, "rev-parse", "FETCH_HEAD") == local_sha
+  git(baked, "checkout", "--detach", local_sha)
+
+  assert not (baked / "deleted.txt").exists()
+  assert (baked / "kept.txt").read_text(encoding="utf-8") == "local\n"
+  assert git(baked, "rev-parse", "HEAD^{tree}") == local_tree
 
 
 def test_node_runtime_satisfies_the_pinned_agent_browser_engine():
