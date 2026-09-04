@@ -397,7 +397,7 @@ export default function QuestionCard({
           <button
             type="button"
             className="qcard__submit"
-            onPointerDown={(event) => {
+            onPointerDownCapture={(event) => {
               if (event.button === 0 && event.isPrimary !== false) prepareSubmit()
             }}
             onClick={handleSubmit}

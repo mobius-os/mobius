@@ -132,8 +132,8 @@ test('question submission freezes the visible anchor before the async handoff', 
 
   assert.ok(freeze >= 0 && send > freeze,
     'the reader anchor must freeze synchronously before answer delivery resumes output')
-  assert.match(component, /onPointerDown=\{\(event\) => \{[\s\S]*prepareSubmit\(\)/,
-    'pointer activation must freeze before keyboard-dismiss geometry can change')
+  assert.match(component, /onPointerDownCapture=\{\(event\) => \{[\s\S]*prepareSubmit\(\)/,
+    'capture-phase pointer activation must freeze before the scroll owner claims the pointer')
   assert.match(silentSubmit, /preparedQuestionSubmission \|\| freezeQuestionSubmission\(\)/,
     'click submission must consume the pointer-prepared anchor with a keyboard fallback')
 })
