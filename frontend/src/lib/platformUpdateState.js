@@ -98,13 +98,25 @@ export function deploymentKindLabel(activation) {
 }
 
 /**
- * Railway image updates are activated by replacing the container, not by
- * mutating the checkout that is still serving the current container.
+ * An image-level update is finished by rebuilding the container, on both
+ * deployments. Railway cuts over to the pinned GHCR image; self-hosted applies
+ * the reviewed source in place and then rebuilds the matching sha-<target>
+ * image via the host helper. Either way the single reviewed-update confirmation
+ * drives the rebuild — there is no separate manual rebuild step.
  */
 export function reviewedUpdateUsesContainerRebuild(preview) {
+  return preview?.activation?.level === 'image_rebuild'
+}
+
+/**
+ * Only Railway pins the rebuild to an immutable GHCR image digest. Self-hosted
+ * anchors on the sha-<target> tag, so its reviewed rebuild has no digest and
+ * must not be blocked on one.
+ */
+export function reviewedRebuildNeedsDigest(preview) {
   return (
-    deploymentKind(preview?.activation) === 'railway'
-    && preview?.activation?.level === 'image_rebuild'
+    reviewedUpdateUsesContainerRebuild(preview)
+    && deploymentKind(preview?.activation) === 'railway'
   )
 }
 
