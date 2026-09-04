@@ -33,6 +33,14 @@
 #                           target maximum retained build cache after success (8)
 #   MOBIUS_IMAGE            stable Compose app image tag used for build,
 #                           preflight, cutover, and rollback (default: mobius)
+#   MOBIUS_PLATFORM_FETCH_ORIGIN
+#                           optional trusted build-only Git origin for a local
+#                           commit; the baked checkout keeps the public
+#                           MOBIUS_PLATFORM_ORIGIN as its durable remote
+#   MOBIUS_USE_LOCAL_PLATFORM_SOURCE
+#                           set to 1 to bake the clean local checkout rather
+#                           than fetching BUILD_SHA from the public origin;
+#                           intended for committed local instance overlays
 #
 # Safety: only the `docker compose build` step prompts (it's slow and
 # has OOM'd this 7.6GB host before). Everything else auto-proceeds.
@@ -1366,6 +1374,16 @@ else
     *-dirty) export BUILD_DATE="$(date -u +%Y-%m-%d)" ;;
     *) export BUILD_DATE="$(git -C "$REPO_ROOT" show -s --format=%cs HEAD 2>/dev/null || echo unknown)" ;;
   esac
+  if [ "${MOBIUS_USE_LOCAL_PLATFORM_SOURCE:-0}" = "1" ]; then
+    case "$_sha" in
+      *-dirty)
+        fail "MOBIUS_USE_LOCAL_PLATFORM_SOURCE=1 requires a clean committed checkout"
+        exit 1
+        ;;
+    esac
+    export MOBIUS_LOCAL_PLATFORM_SHA="$_sha"
+    export MOBIUS_LOCAL_PLATFORM_DATE="$BUILD_DATE"
+  fi
   BUILT_THIS_RUN=1
   info "baking BUILD_SHA=${BUILD_SHA:0:18}… (${BUILD_DATE}) into the image"
   intent "docker compose ${COMPOSE_ARGS[*]} build"
