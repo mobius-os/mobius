@@ -26,13 +26,15 @@ services:
   app:
     build:
       context: .
+      additional_contexts:
+        mobius-local-platform-source: ${MOBIUS_LOCAL_PLATFORM_CONTEXT:-./.docker/empty-context}
       args:
         BUILD_SHA: ${BUILD_SHA:-unknown}
         BUILD_DATE: ${BUILD_DATE:-unknown}
         MOBIUS_PLATFORM_ORIGIN: ${MOBIUS_PLATFORM_ORIGIN:-https://github.com/mobius-os/mobius.git}
-        MOBIUS_PLATFORM_FETCH_ORIGIN: ${MOBIUS_PLATFORM_FETCH_ORIGIN:-}
         MOBIUS_USE_LOCAL_PLATFORM_SOURCE: ${MOBIUS_USE_LOCAL_PLATFORM_SOURCE:-0}
         MOBIUS_LOCAL_PLATFORM_SHA: ${MOBIUS_LOCAL_PLATFORM_SHA:-unknown}
+        MOBIUS_LOCAL_PLATFORM_BASE_SHA: ${MOBIUS_LOCAL_PLATFORM_BASE_SHA:-unknown}
         MOBIUS_LOCAL_PLATFORM_DATE: ${MOBIUS_LOCAL_PLATFORM_DATE:-unknown}
     image: ${MOBIUS_IMAGE:-mobius}
     container_name: mobius

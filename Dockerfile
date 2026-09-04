@@ -1,7 +1,12 @@
+# syntax=docker/dockerfile:1
 # Single-container Möbius image.
 #
 # Builds the frontend, installs the backend + CLI tools, and serves
 # everything from one FastAPI process.  Works on VPS, Railway, PikaPods.
+
+# An ordinary Dockerfile build has no local source input. Compose may override
+# this named stage with a dedicated context containing one reviewed Git bundle.
+FROM scratch AS mobius-local-platform-source
 
 # Keep the Node runtime source independent of the frontend build. Copying Node
 # from the completed frontend stage made every UI edit invalidate the backend's
@@ -277,11 +282,6 @@ RUN python /tmp/verify-legacy-jose.py && rm /tmp/verify-legacy-jose.py
 # the checkout being built. The disposable test compose is the sole explicit
 # exception because it mounts and verifies its checkout at runtime.
 ARG MOBIUS_PLATFORM_ORIGIN=https://github.com/mobius-os/mobius.git
-# A local deployment may fetch an unpushed reviewed commit from a temporary,
-# trusted Host-side Git service. Keep that transport separate from the durable
-# origin written into the baked checkout so a container never retains an
-# ephemeral or host-private URL.
-ARG MOBIUS_PLATFORM_FETCH_ORIGIN=
 ARG BUILD_SHA=unknown
 ARG BUILD_DATE=unknown
 ARG RAILWAY_GIT_COMMIT_SHA=unknown
@@ -289,11 +289,11 @@ ARG RAILWAY_DEPLOYMENT_ID=unknown
 ARG MOBIUS_ALLOW_UNKNOWN_BUILD_SHA=0
 ARG MOBIUS_USE_LOCAL_PLATFORM_SOURCE=0
 ARG MOBIUS_LOCAL_PLATFORM_SHA=unknown
+ARG MOBIUS_LOCAL_PLATFORM_BASE_SHA=unknown
 ARG MOBIUS_LOCAL_PLATFORM_DATE=unknown
 RUN set -eux; \
     _build_sha="${BUILD_SHA:-unknown}"; \
     _railway_sha="${RAILWAY_GIT_COMMIT_SHA:-unknown}"; \
-    _platform_fetch_origin="${MOBIUS_PLATFORM_FETCH_ORIGIN:-$MOBIUS_PLATFORM_ORIGIN}"; \
     case "${MOBIUS_USE_LOCAL_PLATFORM_SOURCE:-0}" in 0|1) ;; *) \
       echo "FATAL: MOBIUS_USE_LOCAL_PLATFORM_SOURCE must be 0 or 1" >&2; exit 1;; \
     esac; \
@@ -308,14 +308,14 @@ RUN set -eux; \
       echo "FATAL: an exact 40-character BUILD_SHA is required; set it to the checkout commit before building" >&2; \
       exit 1; \
     fi; \
-    git clone --depth 1 "$_platform_fetch_origin" /app/platform-baked; \
+    git clone --depth 1 "$MOBIUS_PLATFORM_ORIGIN" /app/platform-baked; \
     _build_date="${BUILD_DATE:-unknown}"; \
     if [ "$_build_date" = "unknown" ] || [ -z "$_build_date" ]; then \
       _build_date="$(date -u +%Y-%m-%d)"; \
     fi; \
     if [ "${MOBIUS_USE_LOCAL_PLATFORM_SOURCE:-0}" != "1" ] \
        && printf '%s' "$_build_sha" | grep -Eq '^[0-9a-fA-F]{40}$'; then \
-      if git -C /app/platform-baked fetch --depth 1 "$_platform_fetch_origin" "$_build_sha" \
+      if git -C /app/platform-baked fetch --depth 1 "$MOBIUS_PLATFORM_ORIGIN" "$_build_sha" \
          && git -C /app/platform-baked checkout "$_build_sha"; then \
         :; \
       else \
@@ -349,11 +349,11 @@ RUN set -eux; \
 # `railway up` uploads a working tree rather than a Git source deployment, so
 # Railway cannot provide RAILWAY_GIT_COMMIT_SHA. Review deployments may still
 # need the exact unpushed checkout to seed /data/platform. Keep that exception
-# explicit and provenance-bound: normal builds never copy this overlay, while
-# the opt-in path requires the caller to name the exact local commit and records
-# a synthetic Git commit whose tree is the uploaded source.
-COPY . /tmp/mobius-local-platform-source/
-RUN set -eux; \
+# explicit and provenance-bound: normal builds mount an empty context, while
+# the opt-in path mounts only a temporary bundle of committed Git objects.
+# Nothing from this read-only mount is retained in an image layer.
+RUN --mount=type=bind,from=mobius-local-platform-source,source=/,target=/tmp/mobius-local-platform-source,ro \
+    set -eux; \
     case "${MOBIUS_USE_LOCAL_PLATFORM_SOURCE:-0}" in 0|1) ;; *) \
       echo "FATAL: MOBIUS_USE_LOCAL_PLATFORM_SOURCE must be 0 or 1" >&2; exit 1;; \
     esac; \
@@ -361,10 +361,20 @@ RUN set -eux; \
       printf '%s' "${MOBIUS_LOCAL_PLATFORM_SHA:-unknown}" \
         | grep -Eq '^[0-9a-fA-F]{40}$' \
         || { echo "FATAL: local platform source requires its exact Git SHA" >&2; exit 1; }; \
-      cp -a /tmp/mobius-local-platform-source/. /app/platform-baked/; \
-      git -C /app/platform-baked add -A; \
-      git -C /app/platform-baked commit --allow-empty \
-        -m "Seed local review source ${MOBIUS_LOCAL_PLATFORM_SHA}"; \
+      printf '%s' "${MOBIUS_LOCAL_PLATFORM_BASE_SHA:-unknown}" \
+        | grep -Eq '^[0-9a-fA-F]{40}$' \
+        || { echo "FATAL: local platform source requires its public base SHA" >&2; exit 1; }; \
+      _bundle=/tmp/mobius-local-platform-source/platform.bundle; \
+      [ -f "$_bundle" ] \
+        || { echo "FATAL: local platform source bundle is missing" >&2; exit 1; }; \
+      git -C /app/platform-baked fetch --depth 1 "$MOBIUS_PLATFORM_ORIGIN" \
+        "${MOBIUS_LOCAL_PLATFORM_BASE_SHA}"; \
+      git -C /app/platform-baked fetch --no-tags "$_bundle" HEAD; \
+      [ "$(git -C /app/platform-baked rev-parse FETCH_HEAD)" = \
+        "${MOBIUS_LOCAL_PLATFORM_SHA}" ] \
+        || { echo "FATAL: local platform source bundle does not match its declared SHA" >&2; exit 1; }; \
+      git -C /app/platform-baked checkout --detach \
+        "${MOBIUS_LOCAL_PLATFORM_SHA}"; \
       git -C /app/platform-baked checkout -B main HEAD; \
       git -C /app/platform-baked branch -f upstream HEAD; \
       git -C /app/platform-baked update-ref refs/remotes/origin/main HEAD; \
@@ -382,8 +392,7 @@ RUN set -eux; \
         "${RAILWAY_DEPLOYMENT_ID:-unknown}" > /app/build-info.json; \
       chown -R root:root /app/platform-baked; \
       chmod -R a+rX,go-w /app/platform-baked; \
-    fi; \
-    rm -rf /tmp/mobius-local-platform-source
+    fi
 
 # What this image actually contains, so a running container can compare itself
 # with the source it serves instead of remembering which update touched what:

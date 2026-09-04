@@ -33,10 +33,6 @@
 #                           target maximum retained build cache after success (8)
 #   MOBIUS_IMAGE            stable Compose app image tag used for build,
 #                           preflight, cutover, and rollback (default: mobius)
-#   MOBIUS_PLATFORM_FETCH_ORIGIN
-#                           optional trusted build-only Git origin for a local
-#                           commit; the baked checkout keeps the public
-#                           MOBIUS_PLATFORM_ORIGIN as its durable remote
 #   MOBIUS_USE_LOCAL_PLATFORM_SOURCE
 #                           set to 1 to bake the clean local checkout rather
 #                           than fetching BUILD_SHA from the public origin;
@@ -172,6 +168,13 @@ else
 fi
 
 CURRENT_STEP=""
+LOCAL_SOURCE_CONTEXT=""
+cleanup_local_source_context() {
+  if [ -n "$LOCAL_SOURCE_CONTEXT" ]; then
+    rm -rf "$LOCAL_SOURCE_CONTEXT"
+    LOCAL_SOURCE_CONTEXT=""
+  fi
+}
 on_err() {
   local rc=$?
   if [ -n "$CURRENT_STEP" ]; then
@@ -182,6 +185,7 @@ on_err() {
   exit "$rc"
 }
 trap on_err ERR
+trap cleanup_local_source_context EXIT
 
 step()  { CURRENT_STEP="$1"; printf '\n%s[%s] %s%s\n' "$C_BOLD$C_BLUE" "$(date +%H:%M:%S)" "$1" "$C_RESET"; }
 info()  { printf '  %s\n' "$1"; }
@@ -1382,6 +1386,16 @@ else
         ;;
     esac
     export MOBIUS_LOCAL_PLATFORM_SHA="$_sha"
+    _local_base="$(git -C "$REPO_ROOT" merge-base HEAD "$PLATFORM_RELEASE_TRACKING_REF" 2>/dev/null || true)"
+    if ! printf '%s' "$_local_base" | grep -Eq '^[0-9a-fA-F]{40}$'; then
+      fail "could not identify the public base for the local platform commit"
+      exit 1
+    fi
+    if [ "$_local_base" = "$_sha" ]; then
+      fail "local platform source has no commits beyond ${PLATFORM_RELEASE_LABEL}; disable MOBIUS_USE_LOCAL_PLATFORM_SOURCE"
+      exit 1
+    fi
+    export MOBIUS_LOCAL_PLATFORM_BASE_SHA="$_local_base"
     export MOBIUS_LOCAL_PLATFORM_DATE="$BUILD_DATE"
   fi
   BUILT_THIS_RUN=1
@@ -1408,7 +1422,16 @@ else
       exit 1
     fi
   fi
+  if [ "${MOBIUS_USE_LOCAL_PLATFORM_SOURCE:-0}" = "1" ]; then
+    LOCAL_SOURCE_CONTEXT="$(mktemp -d "${TMPDIR:-/tmp}/mobius-platform-source.XXXXXX")"
+    git -C "$REPO_ROOT" bundle create "$LOCAL_SOURCE_CONTEXT/platform.bundle" \
+      HEAD "^${MOBIUS_LOCAL_PLATFORM_BASE_SHA}"
+    git -C "$REPO_ROOT" bundle verify \
+      "$LOCAL_SOURCE_CONTEXT/platform.bundle" >/dev/null
+    export MOBIUS_LOCAL_PLATFORM_CONTEXT="$LOCAL_SOURCE_CONTEXT"
+  fi
   docker compose "${COMPOSE_ARGS[@]}" build
+  cleanup_local_source_context
   ok "image rebuilt"
 fi
 
