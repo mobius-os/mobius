@@ -23,6 +23,7 @@ import useContextMenuOutsideDismiss from '../../hooks/useContextMenuOutsideDismi
 import { placeContextMenu } from '../../lib/contextMenuGeometry.js'
 import { captureLayoutSpace, clientPointToLayout } from '../../lib/layoutSpace.js'
 import { makeAppChatController } from '../../lib/appChatControl.js'
+import { handleAppProjectsRequest } from '../../lib/appProjectControl.js'
 import { parseNotificationTarget } from '../../lib/notificationTarget.js'
 import { recordClientError } from '../../lib/errorLog.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
@@ -2551,6 +2552,21 @@ export default function Shell({ onInitialVisualReady }) {
       if (request.type === 'moebius:chat-control') {
         return appChatControllerRef.current(appId, request)
       }
+      if (request.type === 'moebius:projects') {
+        const app = appsRef.current.find(row => String(row.id) === String(appId))
+        return handleAppProjectsRequest({
+          app,
+          client: api.projects,
+          readJson: jsonOrThrow,
+          browseProjects: () => navToRef.current('projects'),
+          openProject: project => openProjectRef.current(project),
+          publishProjects: rows => {
+            projectsRef.current = rows
+            queryClient.setQueryData(projectQueries.keys.all, rows)
+          },
+          onProjectCreated: project => setProjectRenameId(String(project.id)),
+        }, request)
+      }
       if (request.type === 'moebius:new-chat') {
         await newChatRef.current?.({
           draft: request.draft || undefined,
@@ -2597,7 +2613,7 @@ export default function Shell({ onInitialVisualReady }) {
       setSettingsFocusTarget({ section, nonce: Date.now() })
       if (activeViewRef.current !== 'settings') navToRef.current('settings')
     })()
-  }, [openAppWithIntent, refreshChats, requestComposer])
+  }, [openAppWithIntent, queryClient, refreshChats, requestComposer])
 
   // Restore the active chat after Shell mount. Two cache layers can
   // satisfy this effect: (1) the persisted TanStack cache hydrated

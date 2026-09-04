@@ -3,6 +3,7 @@ const REQUEST_TYPES = new Set([
   'moebius:open-chat',
   'moebius:open-app',
   'moebius:open-settings',
+  'moebius:projects',
   'moebius:chat-control',
 ])
 
@@ -34,6 +35,22 @@ export function appHostRequest(message) {
       type: message.type,
       appId: message.appId,
       intent: typeof message.intent === 'string' ? message.intent : '',
+    }
+  }
+  if (message.type === 'moebius:projects') {
+    const actions = new Set(['list', 'migrate', 'create', 'open', 'browse'])
+    if (
+      typeof message.requestId !== 'string'
+      || !/^projects:[a-z0-9]+:[a-z0-9]+$/i.test(message.requestId)
+      || !actions.has(message.action)
+    ) return null
+    return {
+      type: message.type,
+      requestId: message.requestId,
+      action: message.action,
+      projectId: typeof message.projectId === 'string' ? message.projectId.slice(0, 128) : '',
+      templateId: typeof message.templateId === 'string' ? message.templateId.slice(0, 128) : '',
+      name: typeof message.name === 'string' ? message.name.trim().slice(0, 256) : '',
     }
   }
   if (message.type === 'moebius:chat-control') {
