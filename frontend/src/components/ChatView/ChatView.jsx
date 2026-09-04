@@ -3289,12 +3289,10 @@ export default function ChatView({
     }
     setSending(true)
     // Close the synchronous re-entry window before React publishes the state
-    // update, then reconcile the completed turn this send follows. The forced
-    // read deliberately uses the local-turn preservation path: it replaces a
-    // stale live assistant projection with its durable settled row while
-    // retaining this optimistic user row and its stable pin.
+    // update. Transcript reconciliation waits for the POST acknowledgement
+    // below: before that boundary an idle compact snapshot can still predate
+    // this turn and must never retire its optimistic row.
     sendingRef.current = true
-    void fetchMessages({ force: true })
     // Pin per the R2 send rule via the funnel: it arms the reservation spacer
     // on every send and, when not pinning, retires any stale PIN to the
     // reader's anchor so their viewport stays fixed. The row carries its final
@@ -3416,6 +3414,12 @@ export default function ChatView({
           return replaceOptimisticWithBatch(prev, cid, startedMessages)
         })
       }
+      // The accepted row is now durable, so the compact read may safely hand
+      // the preceding live assistant projection over to its settled source.
+      // Keep this after the acknowledgement and canonical-row commit: doing
+      // it at optimistic-send time lets an idle pre-ack snapshot erase the
+      // entire visible turn.
+      void fetchMessages({ force: true })
       return true
     } catch (err) {
       const pendingQuestionBlocked = isPendingQuestionSendFailure(err)
