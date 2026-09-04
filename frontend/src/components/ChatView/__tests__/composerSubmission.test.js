@@ -80,12 +80,17 @@ test('fresh-send transcript reconciliation starts only after acknowledgement', (
     'replaceOptimisticWithBatch(prev, cid, startedMessages)',
     transport,
   )
-  const reconcile = freshSend.indexOf('void fetchMessages({ force: true })', transport)
+  const reconcile = freshSend.indexOf('void fetchMessages({ force: true,', transport)
 
   assert.ok(transport >= 0 && canonicalCommit > transport,
     'the accepted server row must replace its optimistic twin after acknowledgement')
   assert.ok(reconcile > canonicalCommit,
     'a compact snapshot must not reconcile before the send is acknowledged and canonical')
+  assert.match(
+    freshSend.slice(reconcile, reconcile + 120),
+    /preserveAcceptedCid:\s*cid/,
+    'the handoff must retain the accepted row until the compact snapshot proves its cid',
+  )
   assert.equal(
     freshSend.slice(0, transport).includes('fetchMessages({ force: true })'),
     false,

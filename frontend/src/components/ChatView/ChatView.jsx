@@ -190,6 +190,7 @@ import {
   stopConfirmedIdle,
   stopRequestSucceeded,
   serverSnapshotBehindLocal,
+  serverSnapshotMissingAcceptedCid,
   shouldFreezeStreamingReturn,
   startedMessagesFromResponse,
   stripInternalUserMessageFields,
@@ -1246,6 +1247,7 @@ export default function ChatView({
     authoritative = false,
     expectedFailedAttempt,
     failedAttemptTerminalOutcome = null,
+    preserveAcceptedCid = null,
   } = {}) => {
     if (sendingRef.current && !force) return
     const gen = fetchGenRef.current
@@ -1279,10 +1281,19 @@ export default function ChatView({
           : expectedFailedAttempt,
         expectedFetchGeneration: gen,
       })
+      const preserveAcceptedTurn = serverSnapshotMissingAcceptedCid(
+        msgs,
+        preserveAcceptedCid,
+      )
       const preserveLocalTurn =
         !authoritative
         && force
-        && (sendingRef.current || isStreamingRef.current || serverRunningRef.current)
+        && (
+          preserveAcceptedTurn
+          || sendingRef.current
+          || isStreamingRef.current
+          || serverRunningRef.current
+        )
       const staleSnapshot =
         !terminal204
         && !preserveLocalTurn
@@ -3419,7 +3430,7 @@ export default function ChatView({
       // Keep this after the acknowledgement and canonical-row commit: doing
       // it at optimistic-send time lets an idle pre-ack snapshot erase the
       // entire visible turn.
-      void fetchMessages({ force: true })
+      void fetchMessages({ force: true, preserveAcceptedCid: cid })
       return true
     } catch (err) {
       const pendingQuestionBlocked = isPendingQuestionSendFailure(err)
