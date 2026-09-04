@@ -108,6 +108,22 @@ def test_test_compose_pins_runtime_to_mounted_checkout():
   assert "\n    init: true\n" in pytest_service
 
 
+def test_e2e_startup_has_one_bounded_readiness_owner():
+  compose = (ROOT / "docker-compose.test.yml").read_text(encoding="utf-8")
+  caddy_service = compose.split("\n  caddy:\n", 1)[1].split("\n  app:\n", 1)[0]
+  assert "condition: service_started" in caddy_service
+  assert "condition: service_healthy" not in caddy_service
+
+  workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
+    encoding="utf-8"
+  )
+  startup = workflow.split("- name: Start test container", 1)[1].split(
+    "- name: Set up Node with npm cache", 1
+  )[0]
+  assert "timeout 120" in startup
+  assert ".State.Health.Status" in startup
+
+
 def test_test_wrapper_isolates_compose_and_rejects_stale_images():
   wrapper = (ROOT / "scripts" / "test.sh").read_text(encoding="utf-8")
   assert 'TEST_PROJECT="${MOBIUS_TEST_PROJECT:-mobius-test-' in wrapper
