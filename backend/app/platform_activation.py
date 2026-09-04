@@ -129,8 +129,9 @@ _RULES = (
   ),
   _Rule(
     "frontend_dependencies",
-    ActivationLevel.IMAGE_REBUILD,
-    "Frontend or app-compiler dependencies changed and need a new image.",
+    ActivationLevel.LIVE,
+    "Frontend dependencies changed; Apply installs them in place and rebuilds "
+    "the shell — no image rebuild.",
     exact=("frontend/package.json", "frontend/package-lock.json"),
     dependency_fingerprint=True,
   ),

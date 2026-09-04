@@ -45,12 +45,11 @@ def test_railway_config_guidance_does_not_promise_an_image_rebuild():
 
 def test_dependency_and_baked_runtime_never_degrade_to_restart_only():
   # Python deps now apply in place (a rebuild is no longer forced), but they are
-  # still MORE than a bare restart. Frontend deps and baked-runtime inputs still
-  # require a new image.
+  # still MORE than a bare restart. Baked-runtime inputs still require a new
+  # image. (Frontend deps now apply in place too — see the dedicated test.)
   expected = {
     "backend/requirements.txt": "dependency_sync",
     "backend/requirements.lock": "dependency_sync",
-    "frontend/package-lock.json": "image_rebuild",
     "backend/scripts/entrypoint.sh": "image_rebuild",
     "backend/scripts/init_skills.py": "image_rebuild",
     "backend/scripts/seed-skills/platform-maintenance.md": "image_rebuild",
@@ -62,6 +61,34 @@ def test_dependency_and_baked_runtime_never_degrade_to_restart_only():
     impact = activation.classify_activation([path], deployment="self_hosted")
     assert impact["level"] == level, path
     assert impact["level"] not in {"live", "server_restart"}, path
+
+
+def test_frontend_dependencies_apply_in_place_not_via_rebuild():
+  # A frontend dependency bump is installed in place during Apply (npm ci) and
+  # the shell is rebuilt live — it no longer forces a container/image rebuild,
+  # mirroring the Python dependency precedent.
+  for path in ("frontend/package.json", "frontend/package-lock.json"):
+    for deployment in ("self_hosted", "railway"):
+      impact = activation.classify_activation([path], deployment=deployment)
+      assert impact["level"] == "live", (path, deployment)
+
+  # It still contributes to the image dependency fingerprint (node_modules are
+  # baked at image-build time), so a rebuild's image content stays reproducible.
+  root = Path(__file__).resolve().parents[2]
+  fingerprint = activation.dependency_fingerprint_paths(root)
+  assert "frontend/package.json" in fingerprint
+  assert "frontend/package-lock.json" in fingerprint
+
+  # A frontend dep bump does not trigger the backend import probe.
+  assert not activation.backend_import_probe_required(
+    ["frontend/package-lock.json"],
+  )
+
+  # But a Dockerfile change in the same update still forces a rebuild.
+  with_dockerfile = activation.classify_activation(
+    ["frontend/package-lock.json", "Dockerfile"], deployment="self_hosted",
+  )
+  assert with_dockerfile["level"] == "image_rebuild"
 
 
 def test_dependency_fingerprint_comes_from_the_image_rules():

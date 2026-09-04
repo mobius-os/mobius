@@ -37,17 +37,29 @@ test('model and concise synced version use the same normal-weight standard highl
   assert.match(css, /\.settings__standard-highlight\s*\{[^}]*color:\s*var\(--green\);[^}]*font-weight:\s*inherit;/s)
 })
 
-test('restart and rebuild explain their distinct container effects on demand', () => {
+test('restart explains its container effect on demand', () => {
   assert.match(view, /SettingsInfoLabel[\s\S]*aria-expanded=\{expanded\}/)
   assert.match(view, /settings__info-bubble[\s\S]*role="tooltip"/)
   assert.match(view, /dismissOnOutsidePress[\s\S]*dismissOnEscape/)
   assert.match(view, /label="Restart"[\s\S]*settings-restart-info/)
-  assert.match(view, /label=\{rebuildBootstrap \? 'Container updates' : 'Rebuild container'\}/)
   assert.match(view, /does not[\s\S]*install a newer container image/)
-  assert.match(view, /On Railway, creates a fresh container from the newest published official image/)
+  // The standalone manual container-rebuild control was removed: an image-level
+  // update now drives the rebuild on confirmation from the update review flow.
+  assert.doesNotMatch(view, /label=\{rebuildBootstrap \? 'Container updates' : 'Rebuild container'\}/)
+  assert.doesNotMatch(view, /Rebuild now|Rebuild container|settings-rebuild-info/)
   assert.doesNotMatch(view, /Replace container|Replace now|Replacing…/)
   assert.match(css, /\.settings__info-button\s*\{[^}]*width:\s*32px;[^}]*height:\s*32px;/s)
   assert.match(css, /\.settings__info-bubble\s*\{[^}]*position:\s*absolute;[^}]*bottom:\s*calc\(100% \+ 10px\);/s)
+})
+
+test('historical rebuild failures do not become permanent Settings errors', () => {
+  // The host controller deliberately retains its last terminal status. Only a
+  // rebuild initiated by this mounted, reviewed update flow may surface that
+  // result; otherwise a stale failure would outlive the removed manual action.
+  assert.match(
+    view,
+    /\['failed', 'rolled_back', 'needs_recovery'\][\s\S]*!rebuildInitiatedHereRef\.current[\s\S]*!rebuildReviewedUpdateRef\.current[\s\S]*return/,
+  )
 })
 
 test('platform status failures replace cached current claims with unknown state', () => {

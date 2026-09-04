@@ -223,6 +223,7 @@ async def test_reviewed_rebuild_uses_exact_plan_target_and_digest(monkeypatch):
   monkeypatch.setattr(dc, "_request_managed_rebuild", start)
 
   status = await dc.request_reviewed_rebuild(
+    db=None,
     plan_id="a" * 64,
     current_sha="1" * 40,
     target_sha=target,
@@ -272,6 +273,7 @@ async def test_reviewed_immutable_plan_does_not_reconsult_moving_ghcr_main(
   monkeypatch.setattr(dc, "_request_managed_rebuild", start)
 
   result = await dc.request_reviewed_rebuild(
+    db=None,
     plan_id="a" * 64,
     current_sha="1" * 40,
     target_sha=target,
@@ -280,6 +282,128 @@ async def test_reviewed_immutable_plan_does_not_reconsult_moving_ghcr_main(
 
   assert result["expected_sha"] == target
   assert result["image_digest"] == digest
+
+
+@pytest.mark.asyncio
+async def test_self_hosted_reviewed_rebuild_applies_then_queues_host_rebuild(
+  monkeypatch,
+):
+  # Self-hosted has no GHCR digest: the reviewed image update applies the source
+  # in place (advancing the upstream marker to the target), then queues the host
+  # rebuild for the matching sha-<target> image — one confirmation.
+  target = "b" * 40
+  calls = []
+
+  monkeypatch.setattr(
+    dc.platform_activation, "deployment_kind", lambda *a, **k: "self_hosted",
+  )
+
+  async def ready_status():
+    return {"supported": True, "state": "idle"}
+
+  monkeypatch.setattr(dc, "read_rebuild_status", ready_status)
+
+  async def fake_apply(db, **plan):
+    calls.append(("apply", plan))
+    return {
+      "state": dc.platform_update.PlatformUpdateState.ACTIVATION_NEEDED.value,
+      "activation": {"level": "image_rebuild", "deployment": "self_hosted"},
+    }
+
+  monkeypatch.setattr(dc.platform_update, "apply_platform_update", fake_apply)
+
+  async def fake_request_rebuild():
+    calls.append(("rebuild", None))
+    return {"state": "queued", "expected_sha": target, "supported": True}
+
+  monkeypatch.setattr(dc, "request_rebuild", fake_request_rebuild)
+
+  result = await dc.request_reviewed_rebuild(
+    db=SimpleNamespace(),
+    plan_id="a" * 64,
+    current_sha="1" * 40,
+    target_sha=target,
+    image_digest=None,
+  )
+
+  assert result["state"] == "queued"
+  assert result["expected_sha"] == target
+  # Apply ran with the reviewed plan, then the host rebuild was queued — in order.
+  assert [name for name, _ in calls] == ["apply", "rebuild"]
+  assert calls[0][1]["target_sha"] == target
+
+
+@pytest.mark.asyncio
+async def test_self_hosted_reviewed_rebuild_surfaces_apply_conflict(monkeypatch):
+  # If applying the source hits a conflict, nothing is rebuilt; the apply result
+  # is returned so the review sheet renders its conflict surface.
+  monkeypatch.setattr(
+    dc.platform_activation, "deployment_kind", lambda *a, **k: "self_hosted",
+  )
+
+  async def ready_status():
+    return {"supported": True, "state": "idle"}
+
+  monkeypatch.setattr(dc, "read_rebuild_status", ready_status)
+
+  async def fake_apply(db, **plan):
+    return {
+      "state": dc.platform_update.PlatformUpdateState.CONFLICT.value,
+      "chat_id": "chat-1",
+    }
+
+  monkeypatch.setattr(dc.platform_update, "apply_platform_update", fake_apply)
+
+  async def must_not_rebuild():
+    raise AssertionError("a conflicted apply must not queue a rebuild")
+
+  monkeypatch.setattr(dc, "request_rebuild", must_not_rebuild)
+
+  result = await dc.request_reviewed_rebuild(
+    db=SimpleNamespace(),
+    plan_id="a" * 64,
+    current_sha="1" * 40,
+    target_sha="b" * 40,
+    image_digest=None,
+  )
+
+  assert result["state"] == "conflict"
+
+
+@pytest.mark.asyncio
+async def test_self_hosted_reviewed_rebuild_fails_closed_when_host_not_ready(
+  monkeypatch,
+):
+  # The host readiness check runs BEFORE any source is applied, so an unconfigured
+  # host never leaves a half-applied update behind.
+  monkeypatch.setattr(
+    dc.platform_activation, "deployment_kind", lambda *a, **k: "self_hosted",
+  )
+
+  async def unconfigured_status():
+    return {
+      "supported": False,
+      "code": "not_configured",
+      "message": "Finish the one-time host setup.",
+    }
+
+  monkeypatch.setattr(dc, "read_rebuild_status", unconfigured_status)
+
+  async def must_not_apply(db, **plan):
+    raise AssertionError("source was applied before verifying host readiness")
+
+  monkeypatch.setattr(dc.platform_update, "apply_platform_update", must_not_apply)
+
+  with pytest.raises(dc.DeploymentControlError) as excinfo:
+    await dc.request_reviewed_rebuild(
+      db=SimpleNamespace(),
+      plan_id="a" * 64,
+      current_sha="1" * 40,
+      target_sha="b" * 40,
+      image_digest=None,
+    )
+
+  assert excinfo.value.code == "not_configured"
 
 
 @pytest.mark.asyncio

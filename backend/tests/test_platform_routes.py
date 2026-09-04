@@ -118,7 +118,9 @@ def test_reviewed_rebuild_forwards_exact_sha_and_digest(
   captured = {}
 
   async def fake_rebuild(**plan):
-    captured.update(plan)
+    # The route also threads a DB session for the self-hosted apply step; the
+    # forwarded update-plan identity is what this test asserts.
+    captured.update({k: v for k, v in plan.items() if k != "db"})
     return {
       "supported": True,
       "bootstrap_available": False,
@@ -152,7 +154,14 @@ def test_reviewed_rebuild_forwards_exact_sha_and_digest(
   assert response.json()["release_source"] == "latest_ghcr"
 
 
-def test_reviewed_rebuild_requires_digest(client, auth):
+def test_reviewed_rebuild_railway_requires_digest(client, auth, monkeypatch):
+  # On Railway the image is pinned by GHCR digest, so a review with no digest is
+  # invalid. (Self-hosted has no GHCR digest and anchors on the sha-<target>
+  # tag, so it does not require one — see the deployment_control tests.)
+  monkeypatch.setattr(
+    "app.platform_activation.deployment_kind",
+    lambda *a, **k: "railway",
+  )
   response = client.post("/api/platform/rebuild", headers=auth, json={
     "plan_id": "a" * 64,
     "current_sha": "1" * 40,
