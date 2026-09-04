@@ -1487,6 +1487,7 @@ def put_project_work_claim(
     )
   db.query(models.ProjectWorkClaim).filter(
     models.ProjectWorkClaim.project_id == project.id,
+    models.ProjectWorkClaim.actor_key != actor_key,
     models.ProjectWorkClaim.expires_at <= now,
   ).delete(synchronize_session=False)
   db.commit()

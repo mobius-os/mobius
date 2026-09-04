@@ -121,6 +121,27 @@ def test_same_claude_task_id_in_different_sessions_has_distinct_identity():
   assert one["event_key"] != two["event_key"]
 
 
+def test_same_mobius_thread_in_different_sessions_has_one_identity():
+  def event(session_id: str):
+    return normalize_chat_event(
+      chat_id="chat-life",
+      chat_run_id="run-life",
+      event={
+        "type": "agent_lifecycle",
+        "provider": "mobius",
+        "provider_session_id": session_id,
+        "provider_agent_id": "globally-scoped-thread",
+        "event_type": "agent_spawned",
+      },
+    )
+
+  one = event("notification-session")
+  two = event("sdk-session")
+
+  assert one["agent_id"] == two["agent_id"]
+  assert one["event_key"] == two["event_key"]
+
+
 def test_same_logical_agent_in_new_chat_run_has_distinct_activation():
   one = _start(run_id="run-life")
   two = _start(run_id="run-followup")
