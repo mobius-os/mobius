@@ -91,7 +91,6 @@ async def create_secure_input(
   return {
     "request_id": pending.request_id,
     "capability": capability,
-    "expires_in": secure_inputs.REQUEST_TTL_SECONDS,
   }
 
 

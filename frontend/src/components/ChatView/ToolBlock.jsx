@@ -278,6 +278,15 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
   const detailReady = previewReady && imageReady
   const open = desiredOpen && detailReady
   const opening = desiredOpen && !open
+  // A successful edit preview already owns the complete disclosure: its file
+  // headers name every path and its diff proves what changed. Generic Input
+  // and Result sections would repeat the first path plus a provider-specific
+  // success sentence/model repr. Failed or unpreviewable edits keep those
+  // diagnostics because editPreview is deliberately absent for them.
+  const showGenericInput = !!(open && t.input && !isImageTool && !editPreview)
+  const showGenericResult = !!(
+    open && !editPreview && (r || t.output_truncated || isImageTool)
+  )
   desiredOpenRef.current = desiredOpen
   visibleOpenRef.current = open
   // Failure exit code, field-or-parse (contract rule 6): a block reduced at the
@@ -508,7 +517,7 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
               </ul>
             </div>
           )}
-          {open && t.input && !isImageTool && (
+          {showGenericInput && (
             <div className="chat__tool-section">
               <span className="chat__tool-section-label">
                 {isShell ? 'Command' : 'Input'}
@@ -522,7 +531,7 @@ function GenericToolBlock({ t, chatId, compact = false, disclosureKey }) {
             </div>
           )}
           {open && editPreview && <ToolEditPreview preview={editPreview} />}
-          {open && (r || t.output_truncated || isImageTool) && (
+          {showGenericResult && (
             <div className={isImageTool ? 'chat__tool-image-result' : 'chat__tool-section'}>
               {!isImageTool && (
                 <div className="chat__tool-section-head">

@@ -9,21 +9,20 @@
   and @media print. No JavaScript — this page renders inside a sandboxed iframe
   with no script, so it must NOT host the morning chat or any interactive card.
 
-  The chat lives BELOW this brief: the Reflection app renders this static page, then
-  mounts the morning-chat thread underneath it. Keep this page a clean READ. The
-  A genuinely necessary structured decision can ride in the brief as an optional
+  Keep this page a clean READ. A genuinely necessary structured decision can
+  ride in the brief as an optional
   declarative question carrier — the app lifts that out and renders native tap
   cards whose answers are saved for the NEXT run. The default template asks
-  nothing. Do NOT call
-  AskUserQuestion from the nightly run (it parks a future a reset orphans). The
-  morning chat is the open-ended escape hatch for anything the cards can't capture.
+  nothing. Do NOT call AskUserQuestion from the nightly run (it parks a future
+  a reset orphans). The app already provides an optional discussion affordance;
+  the report itself ends when the useful information ends.
 
-  HOW TO FILL: replace every {{TOKEN}} and the blocks marked by "repeatable"
+  HOW TO FILL: replace every template token and the blocks marked by "repeatable"
   comments. (Spelling out the comment markup here would close THIS comment
   early and leak the rest of it into the rendered page.)
-  SHAPE IS THE CONTRACT: the lede's TL;DR (3-6 sentences MAX) plus the one-line
+  SHAPE IS THE CONTRACT: the lede's TL;DR (2-4 sentences MAX) plus the one-line
   keypoint cards are the only always-visible prose. EVERY item below the lede
-  (§2-§5) is a <details class="item"> collapsed by default — never author the
+  is a <details class="item"> collapsed by default — never author the
   `open` attribute — whose <summary> is the one-line headline; the lead
   paragraph and the anti-noise triad (trigger / why / next-action, the .meta
   rows) live INSIDE. Delete sections or items that are empty for a given night
@@ -198,19 +197,8 @@
   .sec-head {
     display: flex;
     align-items: center;
-    gap: var(--sp-3);
+    gap: var(--sp-2);
     margin-bottom: var(--sp-4);
-  }
-  .sec-num {
-    flex: none;
-    width: 1.6em; height: 1.6em;
-    display: grid; place-items: center;
-    font-size: var(--step--1);
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
-    color: var(--accent);
-    background: var(--accent-tint);
-    border-radius: 50%;
   }
   .sec-head h2 {
     margin: 0;
@@ -256,7 +244,7 @@
   }
 
   /* ----------------------------------------------------------------------
-     Item lists (used in §2–§5)
+     Item lists
      ---------------------------------------------------------------------- */
   .items { display: grid; gap: var(--sp-4); }
   .item {
@@ -323,7 +311,7 @@
     color: var(--faint);
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    font-size: 0.72rem;
+    font-size: .75rem;
     font-weight: 600;
     padding-top: 0.15em;
   }
@@ -335,7 +323,7 @@
      ---------------------------------------------------------------------- */
   .badge {
     flex: none;
-    font-size: 0.7rem;
+    font-size: .75rem;
     font-weight: 650;
     letter-spacing: 0.04em;
     text-transform: uppercase;
@@ -353,15 +341,13 @@
   .badge.rank   { color: var(--muted);  background: var(--bg-2);
                   font-variant-numeric: tabular-nums; }
 
-  /* Decision items in §4 carry a left accent rail + tint. */
+  /* Decision items use a quiet tint without extra chrome. */
   .decision {
-    border-left: 3px solid var(--accent);
     background:
       linear-gradient(90deg, var(--accent-tint) 0%, transparent 22%),
       var(--surface);
   }
   .decision.urgent {
-    border-left-color: var(--danger);
     background:
       linear-gradient(90deg, var(--danger-tint) 0%, transparent 22%),
       var(--surface);
@@ -386,7 +372,6 @@
     margin-top: var(--sp-5);
     padding: var(--sp-4) var(--sp-5);
     border: 1px solid var(--accent);
-    border-left-width: 3px;
     border-radius: var(--radius);
     background:
       linear-gradient(90deg, var(--accent-tint) 0%, transparent 40%),
@@ -400,7 +385,7 @@
   }
 
   /* ----------------------------------------------------------------------
-     Details (§5) — compact, scannable
+     Details — compact, scannable
      ---------------------------------------------------------------------- */
   .detail-group { margin-top: var(--sp-4); }
   .detail-group > summary {
@@ -440,37 +425,35 @@
 
   .empty {
     color: var(--faint);
-    font-style: italic;
     font-size: var(--step--1);
   }
 
-  /* ----------------------------------------------------------------------
-     Foot — hand-off to the chat (which the app mounts below this page)
-     ---------------------------------------------------------------------- */
-  .handoff {
-    margin-top: var(--sp-7);
-    padding: var(--sp-5);
-    text-align: center;
-    border: 1px dashed var(--border-2);
-    border-radius: var(--radius);
-    background: var(--surface-2);
-    color: var(--muted);
+  .run-facts {
+    display: grid;
+    gap: 0;
+    margin: var(--sp-2) 0 0;
   }
-  .handoff strong { color: var(--text); }
-  .arrow { display: block; margin: var(--sp-2) auto 0; color: var(--accent); }
-
-  footer {
-    margin-top: var(--sp-6);
-    padding-top: var(--sp-4);
+  .run-facts > div {
+    display: grid;
+    grid-template-columns: minmax(9rem, .65fr) minmax(0, 1.35fr);
+    gap: var(--sp-4);
+    padding: var(--sp-3) 0;
     border-top: 1px solid var(--border);
-    color: var(--faint);
+  }
+  .run-facts dt {
+    color: var(--muted);
     font-size: var(--step--1);
-    display: flex; justify-content: space-between; gap: var(--sp-3);
-    flex-wrap: wrap;
+    font-weight: 600;
+  }
+  .run-facts dd {
+    margin: 0;
+    color: var(--text);
+    font-size: var(--step--1);
+    line-height: 1.5;
   }
 
   /* ----------------------------------------------------------------------
-     Print — flatten chrome, drop the chat-handoff, keep it legible on paper
+     Print — flatten chrome and keep it legible on paper
      ---------------------------------------------------------------------- */
   @media print {
     :root {
@@ -483,8 +466,11 @@
     .lede, .item, .commits { box-shadow: none; }
     section { break-inside: avoid; }
     .item, .lede { break-inside: avoid; }
-    .handoff { display: none; }
     a { color: #000; text-decoration: underline; }
+  }
+
+  @media (max-width: 560px) {
+    .run-facts > div { grid-template-columns: 1fr; gap: var(--sp-1); }
   }
 
   @media (prefers-reduced-motion: no-preference) {
@@ -508,14 +494,14 @@
     <h1>{{TITLE}}</h1>
   </header>
 
-  <!-- ===================== §1 Exec summary ===================== -->
+  <!-- ===================== Summary ===================== -->
   <section id="summary" aria-labelledby="summary-h">
     <div class="lede">
-      <!-- TL;DR: 3-6 sentences MAX — what happened tonight + what needs the
+      <!-- TL;DR: 2-4 sentences MAX — what happened tonight + what needs the
            owner. The only always-visible prose in the brief; never collapsed. -->
       <p class="headline" id="summary-h">{{SUMMARY_HEADLINE}}</p>
       <ul class="keypoints">
-        <!-- repeatable: 3-5 one-line headline cards ("Fixed: …", "Decide: …").
+        <!-- repeatable: 1-3 one-line headline cards ("Fixed: …", "Decide: …").
              One line each — no sub-prose, no meta rows up here. -->
         <li>{{KEYPOINT_1}}</li>
         <li>{{KEYPOINT_2}}</li>
@@ -524,10 +510,10 @@
     </div>
   </section>
 
-  <!-- ===================== §2 What I did ===================== -->
+  <!-- ===================== What changed ===================== -->
   <section id="did" aria-labelledby="did-h">
-    <div class="sec-head"><span class="sec-num">2</span><h2 id="did-h">What I did</h2></div>
-    <p class="sec-sub">Verified outcomes from tonight’s work.</p>
+    <div class="sec-head"><h2 id="did-h">What changed</h2></div>
+    <p class="sec-sub">Only the changes that matter.</p>
     <div class="items">
       <!-- repeatable collapsed item; badge: done | fixed. The summary is the
            ONE-line headline; lead + triad live inside. Never author `open`. -->
@@ -544,61 +530,30 @@
     </div>
   </section>
 
-  <!-- ===================== §3 What I learned ===================== -->
-  <section id="learned" aria-labelledby="learned-h">
-    <div class="sec-head"><span class="sec-num">3</span><h2 id="learned-h">What I learned</h2></div>
-    <p class="sec-sub">From verified evidence, direct review, and focused research.</p>
-    <div class="items">
-      <!-- repeatable collapsed item; badge: learn -->
-      <details class="item">
-        <summary><span class="badge learn">Learned</span> {{LEARN_TITLE_1}}</summary>
-        <p class="lead">{{LEARN_DESC_1}}</p>
-        <dl class="meta">
-          <div><dt>Trigger</dt><span class="v">{{LEARN_TRIGGER_1}}</span></div>
-          <div><dt>Why</dt><span class="v">{{LEARN_WHY_1}}</span></div>
-          <div><dt>Next</dt><span class="v action">{{LEARN_NEXT_1}}</span></div>
-        </dl>
-      </details>
-      <!-- /repeatable. Use this section too for research findings, one item
-           each, tied to a known interest. Delete if nothing cleared the bar. -->
-    </div>
-  </section>
-
-  <!-- §4 What needs your input is intentionally absent by default. Add that
+  <!-- What needs your input is intentionally absent by default. Add that
        section and ONE declarative question carrier only when a real decision
        blocks a better next step and no safe reversible default is good enough.
        The Reflection skill owns the exact carrier shape. -->
 
-  <!-- ===================== §5 Details ===================== -->
+  <!-- ===================== More detail ===================== -->
   <section id="details" aria-labelledby="details-h">
-    <div class="sec-head"><span class="sec-num">5</span><h2 id="details-h">Details</h2></div>
-    <p class="sec-sub">The receipts — for when you want them. Safe to skip.</p>
+    <div class="sec-head"><h2 id="details-h">More detail</h2></div>
+    <p class="sec-sub">Optional context. The main result is already above.</p>
 
     <details class="detail-group">
-      <summary>Commits</summary>
-      <pre class="commits">{{COMMIT_LOG}}</pre>
+      <summary>Run at a glance</summary>
+      <dl class="run-facts">
+        <div><dt>Relative token use</dt><dd>{{AVERAGE_TOKEN_RATIO}}</dd></div>
+        <!-- Add at most two more plain-language facts only when they explain
+             a meaningful exception or consequence. Never paste a metric dump. -->
+      </dl>
     </details>
 
     <details class="detail-group">
-      <summary>Skipped / deferred</summary>
+      <summary>What stayed quiet</summary>
       <p class="empty">{{SKIPPED_NOTE}}</p>
     </details>
   </section>
-
-  <!-- ===================== Hand-off to chat ===================== -->
-  <div class="handoff">
-    <strong>The conversation continues below.</strong><br>
-    Your answers above guide my next run, not this brief. The conversation below is open for anything else.
-    <svg class="arrow" width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M12 5v14M6 13l6 6 6-6" stroke="currentColor" stroke-width="1.8"
-            stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>
-  </div>
-
-  <footer>
-    <span>Möbius · Reflection run {{RUN_ID}}</span>
-    <span>{{DATE}}</span>
-  </footer>
 
 </main>
 </body>
