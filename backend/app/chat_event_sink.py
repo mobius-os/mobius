@@ -946,7 +946,9 @@ class ChatEventSink:
       )
     return stored_result
 
-  async def publish_question(self, event: ChatEvent) -> None:
+  async def publish_question(
+    self, event: ChatEvent, *, secure_request: dict | None = None,
+  ) -> None:
     """Save-before-broadcast for an AskUserQuestion card.
 
     A question is a protocol barrier: its `question_id` MUST be durably
@@ -973,6 +975,18 @@ class ChatEventSink:
       "publish_question only accepts question events; ordinary events go "
       "through publish()"
     )
+    # A continuation card and a native provider question share one owner-input
+    # slot. Claim it synchronously in the reducer before awaiting persistence,
+    # so concurrently dispatched tools cannot publish competing cards.
+    if any(
+      block.get("type") == "question"
+      and not block.get("answers")
+      and block.get("question_id") != event.get("question_id")
+      and (block.get("response_mode") == "continuation"
+           or event.get("response_mode") == "continuation")
+      for block in self.assistant_blocks
+    ):
+      raise RuntimeError("Another unanswered question owns this chat.")
     # Capture EXACTLY what process_event will do to assistant_blocks BEFORE
     # it runs, so a failed commit can be reverted by identity (not the old
     # tail-slice, which was wrong when process_event COALESCED into an
@@ -988,6 +1002,7 @@ class ChatEventSink:
       QuestionCommit(
         chat_id=self.chat_id, run_token=self.run_token or "", snapshot=snapshot,
         thinking_stashes=stashes,
+        **({"secure_request": secure_request} if secure_request is not None else {}),
       )
     )
     try:

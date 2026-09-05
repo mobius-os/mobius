@@ -17,7 +17,7 @@ from typing import Any, TextIO
 
 
 SERVER_NAME = "Möbius control"
-SERVER_VERSION = "1.1.0"
+SERVER_VERSION = "1.2.0"
 LATEST_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = {
   "2024-11-05",
@@ -27,6 +27,8 @@ SUPPORTED_PROTOCOL_VERSIONS = {
 }
 PROMOTE_GOAL_TOOL = "promote_goal"
 DECLARE_WAIT_TOOL = "declare_wait"
+REQUEST_APPROVAL_TOOL = "request_approval"
+REQUEST_QUESTION_TOOL = "request_question"
 PROMOTE_GOAL_DESCRIPTION = (
   "Promote the current ordinary top-level owner turn into a durable, "
   "platform-owned Goal after the goal-planning criteria are satisfied. "
@@ -60,6 +62,7 @@ def _helper_module(filename: str, module_name: str) -> ModuleType:
 
 _GOALS = _helper_module("goal_promote.py", "mobius_goal_promote")
 _WAITS = _helper_module("chat_wait.py", "mobius_chat_wait")
+_APPROVALS = _helper_module("owner_approval.py", "mobius_owner_approval")
 
 
 def _promote_goal(objective: str) -> dict:
@@ -153,6 +156,24 @@ def _call_promote_goal(arguments: dict[str, Any]) -> dict:
   return _promote_goal(objective.strip())
 
 
+def _call_request_approval(arguments: dict[str, Any]) -> dict:
+  if set(arguments) != {"question", "options"}:
+    raise ValueError("request_approval needs question and options")
+  try:
+    return _APPROVALS.request_approval(**arguments)
+  except SystemExit as exc:
+    raise RuntimeError(str(exc)) from exc
+
+
+def _call_request_question(arguments: dict[str, Any]) -> dict:
+  if set(arguments) != {"questions"}:
+    raise ValueError("request_question needs questions")
+  try:
+    return _APPROVALS.request_question(**arguments)
+  except SystemExit as exc:
+    raise RuntimeError(str(exc)) from exc
+
+
 def _optional_int(arguments: dict[str, Any], name: str) -> int | None:
   value = arguments.get(name)
   if value is None:
@@ -184,6 +205,76 @@ def _call_declare_wait(arguments: dict[str, Any]) -> dict:
 
 
 _TOOL_DEFINITIONS = {
+  REQUEST_APPROVAL_TOOL: {
+    "name": REQUEST_APPROVAL_TOOL,
+    "description": (
+      "Ask the owner to approve a proposed Möbius action, including a server "
+      "restart. This is an application decision, not a sandbox or tool-permission "
+      "escalation. Saves an ordinary answerable question card and returns a "
+      "receipt immediately, NOT an answer or permission. After success, end "
+      "the turn without further text or tools. Put all explanation, preparation and "
+      "closeout BEFORE this final call. The owner's answer resumes "
+      "the chat; no process needs to wait, and there is no human-answer timeout. "
+      "Use this instead of the provider's clarifying-question tool for owner "
+      "approvals. Explain the action and its impact in the question and option "
+      "descriptions. Include a decline/defer choice. Identical retries within "
+      "a turn reuse the same saved card. Never request secrets through this tool. "
+      "Background agents leave approvals pending for a live chat instead."
+    ),
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "question": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "options": {
+          "type": "array", "minItems": 2, "maxItems": 3,
+          "items": {
+            "type": "object",
+            "properties": {
+              "label": {"type": "string", "minLength": 1, "maxLength": 100},
+              "description": {"type": "string", "minLength": 1, "maxLength": 500},
+            },
+            "required": ["label", "description"], "additionalProperties": False,
+          },
+        },
+      },
+      "required": ["question", "options"], "additionalProperties": False,
+    },
+  },
+  REQUEST_QUESTION_TOOL: {
+    "name": REQUEST_QUESTION_TOOL,
+    "description": (
+      "Ask 1–3 ordinary clarifying questions as the FINAL action of your turn. "
+      "Finish useful preparation, explanation and closeout BEFORE this call. "
+      "The saved card blocks further work until the owner answers or Stops; "
+      "it returns a receipt, NOT an answer. After success end immediately with "
+      "no further text or tools. Do not guess, poll or keep a process waiting. "
+      "The saved answer resumes the chat even after a restart. Prefer this "
+      "over provider-native questions in live owner chats. Use request_approval "
+      "for permission; use the sealed secure-input helper for secrets. "
+      "Never use in background or scheduled work."
+    ),
+    "inputSchema": {
+      "type": "object", "additionalProperties": False,
+      "required": ["questions"],
+      "properties": {"questions": {
+        "type": "array", "minItems": 1, "maxItems": 3,
+        "items": {
+          "type": "object", "additionalProperties": False,
+          "required": ["id", "header", "question", "options"],
+          "properties": {
+            "id": {"type": "string"}, "header": {"type": "string"},
+            "question": {"type": "string"},
+            "options": {"type": "array", "maxItems": 3, "items": {
+              "type": "object", "additionalProperties": False,
+              "required": ["label", "description"],
+              "properties": {"label": {"type": "string"},
+                             "description": {"type": "string"}},
+            }},
+          },
+        },
+      }},
+    },
+  },
   PROMOTE_GOAL_TOOL: {
     "name": PROMOTE_GOAL_TOOL,
     "description": PROMOTE_GOAL_DESCRIPTION,
@@ -233,6 +324,8 @@ _TOOL_DEFINITIONS = {
 }
 
 _TOOL_HANDLERS = {
+  REQUEST_APPROVAL_TOOL: _call_request_approval,
+  REQUEST_QUESTION_TOOL: _call_request_question,
   PROMOTE_GOAL_TOOL: _call_promote_goal,
   DECLARE_WAIT_TOOL: _call_declare_wait,
 }

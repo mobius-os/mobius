@@ -339,6 +339,14 @@ def pending_chat_ids() -> frozenset[str]:
   )
 
 
+def has_open_request(chat_id: str) -> bool:
+  """Whether a legacy live/reveal operation still owns this chat's input."""
+  _cleanup()
+  return any(request.chat_id == chat_id
+             and request.status in {"pending", "filled", "consuming"}
+             for request in _requests.values())
+
+
 def publish_request(request: SecureInputRequest) -> None:
   """Publish one newly registered prompt through both of its safe channels."""
   if request.status != "pending":
@@ -412,6 +420,8 @@ def cancel_request(request: SecureInputRequest) -> None:
 
 def cancel_chat(chat_id: str) -> None:
   """Cancel every transient request owned by a stopped/deleted chat."""
+  from app.saved_secure_inputs import cancel_running
+  cancel_running(chat_id)
   _cleanup()
   for request in list(_requests.values()):
     if (

@@ -131,6 +131,25 @@ class SystemPromptSnapshot(Base):
   created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
 
+class SavedSecureInput(Base):
+  """Private execution receipt; submitted field values have no durable column.
+
+  The public prompt is an ordinary continuation question. This row owns only
+  its pre-authored local operation and the irreversible execution claim.
+  """
+
+  __tablename__ = "saved_secure_inputs"
+
+  request_id = Column(String(64), primary_key=True)
+  chat_id = Column(String(64), ForeignKey("chats.id", ondelete="CASCADE"), nullable=False, index=True)
+  command_json = Column(JSON, nullable=False)
+  cwd = Column(Text, nullable=False)
+  action = Column(String(32), nullable=False)
+  status = Column(String(24), nullable=False, default="pending", index=True)
+  outcome = Column(String(320), nullable=True)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+
+
 class Chat(Base):
   """A chat conversation with the agent."""
 

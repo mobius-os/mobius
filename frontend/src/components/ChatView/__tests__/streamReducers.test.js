@@ -1017,3 +1017,15 @@ test('reconcile returns the fresh array when prev is empty', () => {
   const next = [{ type: 'text', content: 'x' }]
   assert.equal(reconcileStreamItems([], next), next)
 })
+
+
+test('saved sealed question replay preserves consuming state and cannot reopen answered input', () => {
+  const pending = { ...questionEvent('sealed-1', 'Connect'), response_mode: 'continuation',
+    secure_input: { title: 'Connect', fields: [], status: 'pending' } }
+  const consuming = { ...pending, secure_input: { ...pending.secure_input, status: 'consuming' } }
+  assert.equal(upsertQuestionItem([consuming], pending)[0].secure_input.status, 'consuming')
+  const answered = { ...consuming, answers: { 'Secure input': 'Used securely', Status: 'completed' } }
+  const replay = upsertQuestionItem([answered], pending)[0]
+  assert.deepEqual(replay.answers, answered.answers)
+  assert.equal(replay.response_mode, 'continuation')
+})

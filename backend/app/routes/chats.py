@@ -3118,7 +3118,10 @@ async def save_question_answers(
   """
   from app.chat_writer import AnswerQuestion, await_ack, get_writer
 
-  get_active_chat_or_404(db, chat_id)
+  chat = get_active_chat_or_404(db, chat_id)
+  from app.questions import is_secure_question
+  if is_secure_question(chat, body.question_id):
+    raise HTTPException(409, detail="Use the secure input card to respond.")
   ack = get_writer().submit(
     AnswerQuestion(
       chat_id=chat_id,

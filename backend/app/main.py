@@ -74,6 +74,7 @@ from app.routes import (
   chat_waits_router,
   debug_router, delegations_router, fs_router, goal_plans_router, github_router, media_router,
   identity_router,
+  owner_approvals_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
   screen_control_router,
   public_apps_router,
@@ -241,6 +242,8 @@ async def lifespan(app):
   record_memory_checkpoint("startup_frontend_watcher_started")
   if database_boot.serviceable:
     await supervisors.start_database_services()
+    from app.saved_secure_inputs import recover_interrupted
+    await recover_interrupted()
     record_memory_checkpoint("startup_ready")
   try:
     yield
@@ -254,6 +257,8 @@ async def lifespan(app):
     # Preserve the final partial request-error windows across graceful restarts.
     # This is one bounded batch append, not one write per response.
     activity.flush_request_errors()
+    from app.saved_secure_inputs import shutdown as stop_sealed_consumers
+    await stop_sealed_consumers()
     # Supervisors stop before the persistence actor they monitor.
     await supervisors.stop()
     # Drain + join the chat-writer actor so any in-flight persistence
@@ -821,6 +826,7 @@ app.include_router(secure_inputs_router)
 app.include_router(delegations_router)
 app.include_router(chat_waits_router)
 app.include_router(goal_plans_router)
+app.include_router(owner_approvals_router)
 app.include_router(chat_logs_router)
 app.include_router(connectors_router)
 app.include_router(connectors_public_router)

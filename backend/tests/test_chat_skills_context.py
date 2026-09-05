@@ -217,7 +217,7 @@ def test_goal_waits_always_name_a_durable_owner_interaction():
 
   assert "**Never leave an invisible wait.**" in core
   assert "declare a durable monitor" in core_normalized
-  assert "call the clarifying-question tool" in core_normalized
+  assert "use the saved owner-input card as the final action" in core_normalized
   assert "Done**, **Need help**, and **Not now" in core_normalized
   assert "Never rely on a paused Goal" in core_normalized
   assert "### Make every unfinished wait explicit" in planning
@@ -255,7 +255,13 @@ def test_restart_guidance_requires_activation_proof_and_fresh_approval():
   assert "If no changed runtime owner requires a restart, do not offer one" in (
     normalized_core
   )
-  assert "immediately before each restart" in normalized_core
+  assert "ALWAYS ask through Möbius's `request_approval` tool for the exact restart" in (
+    normalized_core
+  )
+  assert "End the turn after its saved receipt and act only" in normalized_core
+  assert "on the owner's explicit **Restart now** answer in the continuation" in (
+    normalized_core
+  )
   assert "authorizes one restart call only" in normalized_core
   assert "## Choose the smallest activation action" in maintenance
   assert "No shell rebuild or server restart" in maintenance
@@ -279,6 +285,9 @@ def test_restart_guidance_requires_activation_proof_and_fresh_approval():
   assert "For a constitution-only change, default to leaving it pending" in (
     normalized_maintenance
   )
+  assert "Its receipt confirms only that the card was saved" in normalized_maintenance
+  assert "It does not grant approval: end the turn" in normalized_maintenance
+  assert "let the owner's answer resume the chat" in normalized_maintenance
   assert (
     "A **Restart now** answer authorizes exactly one safe restart call"
     in maintenance

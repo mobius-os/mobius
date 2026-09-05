@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -12,9 +11,63 @@ from app import models, secure_inputs
 from app.broadcast import get_broadcast
 from app.database import get_db
 from app.deps import get_current_owner, reject_cross_site
+from app.deps import Principal, get_agent_run_principal
 
 
 router = APIRouter(prefix="/api/secure-inputs", tags=["secure-inputs"])
+
+
+@router.post("/{chat_id}/saved", dependencies=[Depends(reject_cross_site)])
+async def create_saved_secure_input(
+  chat_id: str, request: Request,
+  principal: Principal = Depends(get_agent_run_principal),
+  db: Session = Depends(get_db),
+):
+  """Save a sealed prompt and pre-authored consumer; acknowledge, never wait."""
+  from app.saved_secure_inputs import validate_consumer_spec
+  from app.routes.owner_approvals import save_owner_question
+
+  payload = await _json_object(request)
+  try:
+    title, description, mode, fields = secure_inputs.validate_request_spec(
+      title=payload.get("title"), description=payload.get("description", ""),
+      mode=payload.get("mode", "sealed"), fields=payload.get("fields"),
+    )
+    if mode != "sealed":
+      raise ValueError("Revealing values requires the explicit live reveal flow.")
+    spec = validate_consumer_spec(payload)
+  except ValueError as exc:
+    raise HTTPException(400, detail=str(exc)) from exc
+  finally:
+    payload.clear()
+  card = {
+    "questions": [{"id": "secure_input", "header": "Secure input", "question": title, "options": []}],
+    "secure_input": {"title": title, "description": description, "mode": mode, "fields": fields},
+  }
+  receipt = await save_owner_question(
+    chat_id, card, principal, db, secure_request=spec,
+    identity_payload={"card": card, "consumer": spec},
+  )
+  return {**receipt, "request_id": receipt["question_id"]}
+
+
+def _saved_request(db: Session, chat_id: str, request_id: str):
+  row = db.get(models.SavedSecureInput, request_id)
+  return row if row is not None and row.chat_id == chat_id else None
+
+
+@router.get("/{chat_id}/{request_id}/saved-state")
+async def saved_secure_input_state(
+  chat_id: str, request_id: str,
+  _: models.Owner = Depends(get_current_owner), db: Session = Depends(get_db),
+):
+  chat = _active_owner_chat(db, chat_id)
+  row = _saved_request(db, chat_id, request_id)
+  if row is None:
+    raise HTTPException(404, detail="Secure input request not found.")
+  if row.status in {"pending", "consuming"} and chat.pending_question_id != request_id:
+    return {"status": "cancelled", "outcome": "Secure input was cancelled."}
+  return {"status": row.status, "outcome": row.outcome}
 
 
 async def _json_object(request: Request) -> dict[str, Any]:
@@ -57,41 +110,46 @@ async def create_secure_input(
   db: Session = Depends(get_db),
 ):
   """Create a bounded card for a running owner chat."""
-  _active_owner_chat(db, chat_id)
-  bc = get_broadcast(chat_id)
-  if bc is None or not bc.running:
-    raise HTTPException(409, detail="This chat is not running.")
+  from app import chat_queue
+  async with chat_queue.get_transition_lock(chat_id), chat_queue.get_lock(chat_id):
+    db.expire_all()
+    chat = _active_owner_chat(db, chat_id)
+    if chat.pending_question_id is not None:
+      raise HTTPException(409, detail="Answer the open question before requesting secure input.")
+    bc = get_broadcast(chat_id)
+    if bc is None or not bc.running:
+      raise HTTPException(409, detail="This chat is not running.")
 
-  payload = await _json_object(request)
-  try:
-    title, description, mode, fields = secure_inputs.validate_request_spec(
-      title=payload.get("title"),
-      description=payload.get("description", ""),
-      mode=payload.get("mode", "sealed"),
-      fields=payload.get("fields"),
-    )
-  except ValueError as exc:
+    payload = await _json_object(request)
+    try:
+      title, description, mode, fields = secure_inputs.validate_request_spec(
+        title=payload.get("title"),
+        description=payload.get("description", ""),
+        mode=payload.get("mode", "sealed"),
+        fields=payload.get("fields"),
+      )
+    except ValueError as exc:
+      payload.clear()
+      raise HTTPException(400, detail=str(exc)) from exc
     payload.clear()
-    raise HTTPException(400, detail=str(exc)) from exc
-  payload.clear()
-  try:
-    pending, capability = secure_inputs.create_request(
-      chat_id=chat_id,
-      mode=mode,
-      title=title,
-      description=description,
-      fields=fields,
-    )
-    secure_inputs.publish_request(pending)
-  except ValueError as exc:
-    raise HTTPException(409, detail=str(exc)) from exc
-  except RuntimeError as exc:
-    raise HTTPException(503, detail=str(exc)) from exc
+    try:
+      pending, capability = secure_inputs.create_request(
+        chat_id=chat_id,
+        mode=mode,
+        title=title,
+        description=description,
+        fields=fields,
+      )
+      secure_inputs.publish_request(pending)
+    except ValueError as exc:
+      raise HTTPException(409, detail=str(exc)) from exc
+    except RuntimeError as exc:
+      raise HTTPException(503, detail=str(exc)) from exc
 
-  return {
-    "request_id": pending.request_id,
-    "capability": capability,
-  }
+    return {
+      "request_id": pending.request_id,
+      "capability": capability,
+    }
 
 
 @router.post(
@@ -106,7 +164,43 @@ async def submit_secure_input(
   db: Session = Depends(get_db),
 ):
   """Move submitted fields into process memory without logging or persistence."""
-  _active_owner_chat(db, chat_id)
+  chat = _active_owner_chat(db, chat_id)
+  saved = _saved_request(db, chat_id, request_id)
+  if saved is not None:
+    from app import saved_secure_inputs
+    from app.chat import current_run_generation
+    from types import SimpleNamespace
+    generation = current_run_generation(chat_id)
+    if chat.pending_question_id != request_id:
+      if saved.status in {"completed", "failed", "interrupted"}:
+        return {"status": saved.status}
+      raise HTTPException(410, detail="Secure input request is no longer open.")
+    if saved.status != "pending":
+      return {"status": saved.status}
+    card = next((block.get("secure_input") for message in reversed(chat.messages or [])
+                 for block in message.get("blocks") or []
+                 if block.get("question_id") == request_id), None)
+    if not isinstance(card, dict):
+      raise HTTPException(409, detail="Secure input prompt is unavailable.")
+    payload = await _json_object(request)
+    values_payload = payload.pop("fields", None)
+    payload.clear()
+    try:
+      values = secure_inputs.validate_submitted_values(SimpleNamespace(fields=card["fields"]), values_payload)
+    except ValueError as exc:
+      raise HTTPException(400, detail=str(exc)) from exc
+    finally:
+      if isinstance(values_payload, dict):
+        values_payload.clear()
+    try:
+      result = await saved_secure_inputs.submit(chat_id, request_id, values, generation)
+    except Exception as exc:
+      values.clear()
+      raise HTTPException(503, detail="Could not accept secure input; its execution will not be repeated automatically.") from exc
+    if result["status"] in {"closed", "cancelled"}:
+      values.clear()
+      raise HTTPException(410, detail="Secure input request is no longer open.")
+    return result
   pending = secure_inputs.get_request(request_id)
   if pending is None or pending.chat_id != chat_id:
     raise HTTPException(404, detail="Secure input request not found.")
@@ -136,18 +230,54 @@ async def submit_secure_input(
   return {"status": "filled"}
 
 
+@router.post(
+  "/{chat_id}/{request_id}/cancel",
+  dependencies=[Depends(reject_cross_site)],
+)
+async def cancel_secure_input_by_owner(
+  chat_id: str,
+  request_id: str,
+  _: models.Owner = Depends(get_current_owner),
+  db: Session = Depends(get_db),
+):
+  """Let the owner dismiss their own open card without the helper's capability.
+
+  The capability-based cancel is for the local helper on exit; if that process
+  dies the card would otherwise sit in the chat's one-per-chat slot with no way
+  for the owner to clear it. Owner authentication plus chat ownership stands in
+  for the capability here.
+  """
+  chat = _active_owner_chat(db, chat_id)
+  saved = _saved_request(db, chat_id, request_id)
+  if saved is not None:
+    from app import saved_secure_inputs
+    from app.chat import current_run_generation
+    if chat.pending_question_id != request_id or saved.status != "pending":
+      raise HTTPException(409, detail="Secure input request is no longer open.")
+    result = await saved_secure_inputs.finish(
+      chat_id, request_id, "cancelled", "cancelled", generation=current_run_generation(chat_id),
+    )
+    return {"status": result["status"]}
+  pending = secure_inputs.get_request(request_id)
+  if pending is None or pending.chat_id != chat_id:
+    raise HTTPException(404, detail="Secure input request not found.")
+  if pending.status not in {"pending", "filled"}:
+    raise HTTPException(409, detail="Secure input request is no longer open.")
+  secure_inputs.cancel_request(pending)
+  return {"status": pending.status}
+
+
 @router.post("/{request_id}/wait")
 async def wait_for_secure_input(request_id: str, request: Request):
-  """Long-poll state with a one-way capability; returns no submitted values."""
+  """Wait for owner submission or cancellation; return no submitted values."""
   payload = await _json_object(request)
   capability = payload.pop("capability", None)
   payload.clear()
   pending = _authorized_request(request_id, capability)
   if pending.status == "pending":
-    try:
-      await asyncio.wait_for(pending.event.wait(), timeout=25)
-    except TimeoutError:
-      pass
+    # Like a question card, waiting for a person has no deadline. Only an
+    # owner action (including Stop) resolves the pending event.
+    await pending.event.wait()
   return {
     "status": pending.status,
     "result": pending.result if pending.status not in {"pending", "filled"} else None,

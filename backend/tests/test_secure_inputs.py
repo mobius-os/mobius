@@ -6,6 +6,9 @@ import io
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
+
+import pytest
 
 
 def _create_request(client, auth, chat, *, mode="sealed"):
@@ -486,6 +489,110 @@ def test_pending_request_stays_open_without_an_expiry(monkeypatch):
   assert secure_inputs.get_request(pending.request_id) is pending
 
 
+@pytest.mark.parametrize("action", ["submit", "cancel", "stop"])
+def test_secure_input_wait_parks_without_a_deadline_until_owner_action(
+  monkeypatch, action,
+):
+  from app import secure_inputs
+  from app.routes.secure_inputs import wait_for_secure_input
+
+  async def scenario():
+    pending, capability = secure_inputs.create_request(
+      chat_id="patient-wait-chat",
+      mode="sealed",
+      title="No rush",
+      description="",
+      fields=[{"name": "password", "label": "Password", "type": "password"}],
+    )
+
+    async def body():
+      return {"capability": capability}
+
+    async def timed_wait(*args, **kwargs):
+      raise AssertionError("Human input must not use a timed wait")
+
+    monkeypatch.setattr(asyncio, "wait_for", timed_wait)
+    waiter = asyncio.create_task(wait_for_secure_input(
+      pending.request_id, SimpleNamespace(json=body),
+    ))
+    try:
+      await asyncio.sleep(0)
+      assert not waiter.done()
+      # Advance the registry's clock, not asyncio's, without waiting a year.
+      monkeypatch.setattr(secure_inputs, "time", SimpleNamespace(
+        monotonic=lambda: pending.created_at + 365 * 24 * 60 * 60,
+      ))
+      secure_inputs._cleanup()
+      await asyncio.sleep(0)
+      assert pending.status == "pending"
+      assert not waiter.done()
+
+      if action == "submit":
+        secure_inputs.fill_request(pending, {"password": "wait-secret-canary"})
+      elif action == "cancel":
+        secure_inputs.cancel_request(pending)
+      else:
+        secure_inputs.cancel_chat(pending.chat_id)
+
+      result = await waiter
+      assert result["status"] == ("filled" if action == "submit" else "cancelled")
+      assert "wait-secret-canary" not in json.dumps(result)
+      assert capability not in json.dumps(result)
+      assert secure_inputs.pending_chat_ids() == frozenset()
+    finally:
+      if not waiter.done():
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+          await waiter
+
+  asyncio.run(scenario())
+
+
+def test_secure_input_helper_wait_has_no_socket_deadline(monkeypatch):
+  script_path = Path(__file__).resolve().parents[1] / "scripts" / "secure-input.py"
+  spec = importlib.util.spec_from_file_location("secure_input_helper", script_path)
+  helper = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(helper)
+  monkeypatch.setenv("API_BASE_URL", "http://local.test")
+  monkeypatch.setenv("AGENT_TOKEN", "test-token")
+  monkeypatch.setenv("CHAT_ID", "patient-chat")
+
+  calls = []
+  responses = iter([
+    {"request_id": "request-id", "capability": "one-use-capability"},
+    {"status": "filled", "result": None},
+    {"fields": {"password": "secret-canary"}},
+  ])
+
+  class Response:
+    status = 200
+
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *_args):
+      pass
+
+    def read(self):
+      return json.dumps(next(responses)).encode()
+
+  def urlopen(request, *, timeout):
+    calls.append((request.full_url, timeout))
+    return Response()
+
+  monkeypatch.setattr(helper.urllib.request, "urlopen", urlopen)
+  request_id, capability, values = helper._request_and_consume({"title": "No rush"})
+  assert request_id == "request-id"
+  assert capability == "one-use-capability"
+  assert values == {"password": "secret-canary"}
+  values.clear()
+  assert calls == [
+    ("http://local.test/api/secure-inputs/patient-chat", 35),
+    ("http://local.test/api/secure-inputs/request-id/wait", None),
+    ("http://local.test/api/secure-inputs/request-id/consume", 35),
+  ]
+
+
 def test_filled_values_expire_without_another_request(monkeypatch):
   from app import secure_inputs
 
@@ -512,126 +619,42 @@ def test_filled_values_expire_without_another_request(monkeypatch):
   asyncio.run(scenario())
 
 
-def test_sealed_consumer_discards_stdout_and_stderr(capsys):
-  script_path = (
-    Path(__file__).resolve().parents[1] / "scripts" / "secure-input.py"
-  )
-  spec = importlib.util.spec_from_file_location("secure_input_helper", script_path)
+def test_sealed_helper_saves_and_exits_without_waiting_or_receiving_values(monkeypatch, capsys):
+  spec = importlib.util.spec_from_file_location("secure_input_helper", Path(__file__).resolve().parents[1] / "scripts/secure-input.py")
   helper = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(helper)
+  monkeypatch.setenv("API_BASE_URL", "http://local.test")
+  monkeypatch.setenv("AGENT_TOKEN", "test-token")
+  monkeypatch.setenv("CHAT_ID", "patient-chat")
+  monkeypatch.setattr(sys, "argv", ["secure-input.py", "run", "--title", "Private connection",
+    "--field", "password:password:Password", "--", "consumer"])
+  calls = []
+  receipt = {"state": "waiting_for_owner", "question_id": "saved-1", "next_action": "End now"}
+  def post(url, payload, token=None, **kwargs):
+    calls.append((url, payload))
+    return 200, receipt
+  monkeypatch.setattr(helper, "_post", post)
+  assert helper.main() == 0
+  assert json.loads(capsys.readouterr().out) == receipt
+  assert len(calls) == 1 and calls[0][0].endswith("/patient-chat/saved")
+  assert calls[0][1]["command"] == ["consumer"]
+  assert "environment" not in calls[0][1]
+  assert "capability" not in calls[0][1]
 
-  secret = "private value+/with spaces"
-  values = {"password": secret}
-  command = [
-    sys.executable,
-    "-c",
-    (
-      "import base64,json,sys,urllib.parse; "
-      "v=json.load(sys.stdin)['password']; "
-      "print(v); print(urllib.parse.quote(v,safe='')); "
-      "print(base64.b64encode(v.encode()).decode()); "
-      "print(v, file=sys.stderr)"
-    ),
-  ]
-  assert helper._run_consumer(command, values) == 0
-  captured = capsys.readouterr()
-  assert captured.out == ""
-  assert captured.err == ""
 
-
-def test_sealed_consumer_keeps_the_two_minute_runtime_limit(monkeypatch):
-  script_path = (
-    Path(__file__).resolve().parents[1] / "scripts" / "secure-input.py"
-  )
-  spec = importlib.util.spec_from_file_location("secure_input_helper", script_path)
+def test_sealed_helper_failed_save_does_not_echo_server_or_exception_data(monkeypatch, capsys):
+  spec = importlib.util.spec_from_file_location("secure_input_helper", Path(__file__).resolve().parents[1] / "scripts/secure-input.py")
   helper = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(helper)
-
-  observed = {}
-
-  def run(command, **kwargs):
-    observed["command"] = command
-    observed.update(kwargs)
-    return type("Completed", (), {"returncode": 0})()
-
-  monkeypatch.setattr(helper.subprocess, "run", run)
-  assert helper._run_consumer(["consumer"], {"password": "private"}) == 0
-  assert observed["timeout"] == 120
-  assert observed["stdout"] is helper.subprocess.DEVNULL
-  assert observed["stderr"] is helper.subprocess.DEVNULL
-
-
-def test_consumer_outcomes_are_predefined():
-  script_path = (
-    Path(__file__).resolve().parents[1] / "scripts" / "secure-input.py"
-  )
-  spec = importlib.util.spec_from_file_location("secure_input_helper", script_path)
-  helper = importlib.util.module_from_spec(spec)
-  spec.loader.exec_module(helper)
-
-  assert helper._consumer_outcome("run", 0) == (
-    True, 0, "Secure input was consumed without exposing its values.",
-  )
-  assert helper._consumer_outcome("run", 19) == (
-    False, 19, "The sealed consumer failed; submitted values were discarded.",
-  )
-  assert helper._consumer_outcome("owner-credentials", 5) == (
-    False, 1, "Current password is incorrect.",
-  )
-  assert helper._consumer_outcome("owner-credentials", 73) == (
-    False, 1, "Credentials could not be changed.",
-  )
-
-
-def test_sealed_consumer_exception_settles_without_reflecting_values(
-  monkeypatch, capsys,
-):
-  script_path = (
-    Path(__file__).resolve().parents[1] / "scripts" / "secure-input.py"
-  )
-  spec = importlib.util.spec_from_file_location("secure_input_helper", script_path)
-  helper = importlib.util.module_from_spec(spec)
-  spec.loader.exec_module(helper)
-
-  secret = "consumer-exception-secret"
-  monkeypatch.setattr(sys, "argv", [
-    "secure-input.py",
-    "run",
-    "--title", "Private connection",
-    "--field", "password:password:Password",
-    "--", "consumer",
-  ])
-  monkeypatch.setattr(
-    helper,
-    "_request_and_consume",
-    lambda _spec: ("request-id", "capability", {"password": secret}),
-  )
-
-  def fail_consumer(_command, _values):
-    raise RuntimeError(f"consumer failed with {secret}")
-
-  settled = []
-  monkeypatch.setattr(helper, "_run_consumer", fail_consumer)
-  monkeypatch.setattr(
-    helper,
-    "_settle",
-    lambda request_id, capability, **outcome: settled.append(
-      (request_id, capability, outcome),
-    ),
-  )
-
+  monkeypatch.setattr(sys, "argv", ["secure-input.py", "run", "--title", "Private connection",
+    "--field", "password:password:Password", "--", "consumer"])
+  def fail(*args):
+    raise RuntimeError("private-untrusted-error-canary")
+  monkeypatch.setattr(helper, "_request_saved", fail)
   assert helper.main() == 1
   output = capsys.readouterr().out
-  assert secret not in output
-  assert output == "Secure input failed; submitted values were discarded.\n"
-  assert settled == [(
-    "request-id",
-    "capability",
-    {
-      "ok": False,
-      "message": "The sealed consumer failed; submitted values were discarded.",
-    },
-  )]
+  assert "private-untrusted-error-canary" not in output
+  assert "save was not confirmed" in output
 
 
 def test_owner_credentials_consumer_changes_login_without_printing_values(

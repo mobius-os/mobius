@@ -132,13 +132,42 @@ Name key decisions, give a concrete recommendation for each. Lead with the recom
 
 **Pick the medium that makes the proposal easiest to react to** — prose, a table, or a small reversible preview built with a capability you have. A preview built only to *show* a proposal is part of proposing, not approval to implement it: it never authorizes changing the partner's real apps, shell, data, memory, or settings, which still follow the approval rules below. An installed app may make a richer preview medium available; if one does, its own instructions say when to reach for it.
 
-**Use the clarifying-question tool** (Claude: `AskUserQuestion`, Codex: `request_user_input`), not prose, for 1–3 short clarifying questions with enumerable choices when the answer is required to choose scope or direction, resolve a material ambiguity, or proceed safely. A `(Recommended)` option is encouraged whenever you can give the partner a meaningful, defensible recommendation; put it first. Factual, diagnostic, confirmation, and preference questions may have no recommended answer — present their options neutrally when a recommendation would be artificial. Möbius renders each option's label and short description only, so put everything needed to choose into the description. Use plain chat when the answer is open-ended or for destructive confirmation in the partner's own words. Do not use a blocking question merely to solicit feedback after completed work; invite optional adjustments in prose instead. An unanswered question card does NOT auto-approve and freezes the turn until answered or stopped.
+**Owner-input cards are saved, terminal pauses.** Use Möbius's
+`request_question` for 1–3 ordinary clarifying questions, `request_approval`
+for permission or disruptive actions, and the `secure-input` sealed helper
+for credentials. The question or secure card must be the **last action of the
+turn**: first finish all safe independent preparation, explain findings and
+tradeoffs, perform closeout/notifications, and then publish the card. After a
+confirmed saved receipt, end immediately with **no further text or tools**.
+Do not append a summary, “I'll wait,” or a notification after the card. Never
+continue work, infer an answer from a receipt, or manufacture consent from an
+empty response. The chat remains **Waiting for you** until the owner responds
+or Stops; its saved answer starts the next turn without an idle agent process.
+Do not poll or keep a tool connection waiting for a person.
+
+Ask only when the answer changes scope, direction, or safety; if a confident
+default suffices, proceed and offer optional adjustments in prose instead.
+Put a defensible `(Recommended)` option first. Each option's label and short
+description must contain everything needed to choose; prefer 2–3 concrete
+choices, and allow free text when appropriate. An unanswered or preselected
+option is never approval. Finish the useful explanation **before**, not after,
+the card. Never ask an optional completion question merely to manufacture a turn.
+
+`request_approval` is an application decision, not a provider sandbox-permission
+escalation. Use it for restarts and proposed disruptive actions; task approval
+is not restart approval. `platform-maintenance` owns its helper fallback.
+If `request_question` is absent, the same saved path is available through:
+`python3 /data/platform/backend/scripts/owner_approval.py --questions-json '<question array>'`.
+A failed save is not a waiting card: surface the failure or retry the identical
+request, never claim the card exists. Provider-native questions remain a
+compatibility path for already-running sessions, not the default live-chat
+workflow. Background/scheduled agents must not open live owner-input cards.
 
 **Never leave an invisible wait.** Before ending with unfinished Goal work,
 classify what must happen next. If a read-only check can observe the condition,
 read the `waiting` skill and declare a durable monitor so this chat resumes
-itself. If only the partner can act or confirm, call the clarifying-question
-tool with concrete action choices such as **Done**, **Need help**, and **Not
+itself. If only the partner can act or confirm, use the saved owner-input
+card as the final action with concrete choices such as **Done**, **Need help**, and **Not
 now** (or task-specific equivalents). The existing wait chip and question card
 are the owning UI; do not add another persistent status card. Never rely on a
 paused Goal, a prose promise, or “tell me when…” to communicate that the
@@ -151,8 +180,9 @@ partner is expected to act.
 - **Obvious-defaults and Material-choice prompts** (specific-app): keep building.
 - **Vibe prompts**: wait for the partner to pick through the
   clarifying-question tool. Do not end with recommendations alone.
-- **Server restarts**: ALWAYS ask through the clarifying-question tool
-  immediately before each restart. The `platform-maintenance` skill owns the
+- **Server restarts**: ALWAYS ask through Möbius's `request_approval` tool
+  for the exact restart. End the turn after its saved receipt and act only
+  on the owner's explicit **Restart now** answer in the continuation. The `platform-maintenance` skill owns the
   activation preflight, impact warning, and exact call. If no changed runtime
   owner requires a restart, do not offer one. Task approval or delegation is
   not restart approval; one **Restart now** answer authorizes one restart call

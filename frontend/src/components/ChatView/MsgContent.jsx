@@ -296,6 +296,23 @@ function MsgContentInner({
         const answerable = !!(
           onQuestionAnswer && isQuestionAnswerable?.(block)
         )
+        if (block.secure_input) {
+          return (
+            <div key={assistantBlockKey(block, i)} ref={answerable ? pendingQuestionRef : undefined}>
+              <SecureInputCard
+                chatId={chatId}
+                interactive={answerable}
+                block={{
+                  ...block.secure_input,
+                  request_id: block.question_id,
+                  saved: true,
+                  status: answers?.Status || block.secure_input.status || 'pending',
+                  outcome: answers?.['Secure input'],
+                }}
+              />
+            </div>
+          )
+        }
         return (
           <div key={assistantBlockKey(block, i)}>
             <QuestionCard

@@ -5,24 +5,22 @@ private username, or other value that should not pass through the LLM API or
 enter the chat transcript. The trusted card is an interactive live-chat
 primitive, not a background/scheduled-agent mechanism.
 
-## Default: sealed execution
+## Default: saved sealed pause
 
-Tell the owner what the local operation will do, then invoke the trusted helper:
+Prepare the narrow local consumer, explain what it will do, and finish all
+other work and closeout **before** invoking the helper. The card is the final
+action of the turn, exactly like Möbius's saved Q&A and approval cards.
 
 ```bash
 python3 /data/platform/backend/scripts/secure-input.py owner-credentials
 ```
 
-That built-in flow requests the current password, new username, new password,
-and confirmation. Möbius holds the submitted strings only in server memory
-until the helper consumes them once. The helper passes them to the credential
-updater as JSON on stdin, discards its stdout and stderr, and maps only fixed
-outcome codes to trusted messages. The card's title,
-field prompts, and completion state remain as a safe receipt; submitted values
-do not enter chat, tool arguments, environment variables, temporary files, or
-the durable transcript.
-The helper gives a local consumer two minutes to finish; on timeout it
-terminates the process, redacts any partial output, and discards the values.
+This requests the current password, new username, new password and confirmation.
+The helper saves the safe request and returns a receipt immediately. It does
+**not** wait for the owner or receive values. On a confirmed receipt, end the
+turn with **no further text or tools**. Do not append “I'll wait,” poll, or run
+a background consumer. No answer and no permission may be inferred from the
+receipt. The saved card blocks further work until the owner submits or cancels.
 
 For another local consumer:
 
@@ -35,19 +33,33 @@ python3 /data/platform/backend/scripts/secure-input.py run \
   -- python3 /data/path/to/safe-consumer.py
 ```
 
-The consumer reads one JSON object from stdin. Its source may be durable, but it
-must never contain submitted values. It should consume the values immediately
-and must not log, persist, cache, shell-expand, or copy them into another
-command's arguments or environment. Prefer a narrow operation that writes only
-the intended hashed/encrypted destination. The helper discards all consumer
-stdout and stderr and reports only a predefined success, failure, or timeout;
-a consumer that deliberately writes elsewhere remains outside this boundary.
+Möbius persists only the prompts, pre-authored command, working directory and
+safe lifecycle status. Unsubmitted cards survive agent completion and server
+restarts with no human deadline. Only one owner-input card may be open per chat.
+A lost save response is recovered by retrying the **identical** request; a
+failed save is not a waiting card and never means credentials were provided.
 
-Never call the create/consume endpoints with curl or a general HTTP tool. The
-helper keeps the one-use capability and secret response out of model-visible
-tool output. One request may be open per chat. It stays open until it is
-submitted or cancelled on Stop; once submitted, transient values are cleared
-if the helper does not consume them within two minutes.
+When the owner submits, the backend runs the consumer once with one JSON object
+on stdin. Values exist only transiently in memory. The consumer must never log,
+persist, cache, shell-expand or copy them into arguments or environment. Write
+only the intended hashed/encrypted destination. Its command source may be
+durable but must never contain submitted values. All stdout/stderr is discarded;
+only fixed outcome codes become a safe receipt and resume the chat.
+
+The consumer runs from the saved working directory with a minimal runtime
+environment, not the publishing agent's session. Do not depend on `AGENT_TOKEN`
+or other turn-only credentials. Prepare a self-contained narrow local operation;
+if it needs additional authority, resolve that before opening the card rather
+than saving credentials in its execution specification.
+
+Consumer execution has a two-minute safety limit. Stop cancels the operation
+without resuming the chat. A crash or restart during execution leaves its
+outcome explicitly unknown and **never automatically repeats** the operation:
+side effects may already have happened. Submitted values have no recovery copy.
+A fresh request requires checking the operation's outcome first.
+
+Never call secret-bearing create/consume endpoints with curl or a general HTTP
+tool. Use the trusted helper; values must not enter tool output or model context.
 
 ## Explicit reveal for debugging
 
@@ -78,6 +90,7 @@ unreachable after submission/consumption and are never intentionally written
 to disk. A process crash lets the OS reclaim that memory; it does not create a
 recovery copy.
 
-A background or scheduled agent must not open this card: nobody may be present,
-and the transient request cannot survive a restart. Leave a declarative
-request for the next live chat instead.
+A background or scheduled agent must not open a live card. Leave a declarative
+request for the next interactive chat instead. The explicitly approved reveal
+path is exceptional: it remains a live, transient handoff to the current model;
+never convert it into a persisted secret or use it to bypass sealed execution.

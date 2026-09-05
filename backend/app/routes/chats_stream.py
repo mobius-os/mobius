@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from contextlib import nullcontext
 from pathlib import Path as FilePath
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -62,6 +63,40 @@ from app.resource_access import (
 router = APIRouter(prefix="/api/chats", tags=["chats"])
 
 log = logging.getLogger(__name__)
+
+
+async def start_queued_owner_continuation(chat_id: str, db: Session) -> dict | None:
+  """Start an already-committed owner response through the ordinary queue.
+
+  Caller holds the queue lock (saved input also holds the transition gate).
+  A still-finishing publishing turn
+  owns its terminal drain; otherwise this is the one immediate admission path
+  shared by saved questions and sealed consumer outcomes.
+  """
+  if is_chat_running(chat_id):
+    return None
+  chat = db.get(models.Chat, chat_id)
+  db.refresh(chat)
+  if _selected_model_for_chat(chat) is None:
+    raise _model_selection_required_conflict()
+  if not mark_starting(chat_id):
+    raise HTTPException(409, detail="The chat is starting another turn; please try again.")
+  try:
+    drain_token = alloc_run_token()
+    messages, next_user, session_id = await chat_queue.promote_pending_messages_locked(
+      db, chat_id, drain_token,
+    )
+    if not next_user:
+      raise HTTPException(503, detail="Could not resume the question; please try again.")
+    get_system_broadcast().publish({"type": "chat_run_started", "chatId": chat_id})
+    _schedule_continuation(
+      chat_id=chat_id, messages=messages, session_id=session_id,
+      provider_id=chat.provider, next_user=next_user, run_token=drain_token,
+    )
+    return next_user
+  except Exception:
+    discard_starting(chat_id)
+    raise
 
 
 def _delegation_manages_chat(db: Session, chat_id: str) -> bool:
@@ -618,6 +653,10 @@ async def send_message(
   # practice; after that, the durable-transcript fallback below decides
   # whether this is recoverable or genuinely stale.
   if body.answers:
+    # Secure cards share the saved question pause, never its plaintext answer
+    # input. Only the sealed consumer may queue their fixed safe outcome.
+    if questions.is_secure_question(chat, body.question_id):
+      raise HTTPException(409, detail="Use the secure input card to respond.")
     # Snapshot the Stop tombstone BEFORE waiting on the queue lock. A Stop
     # that lands after this request began must still win the race (410); a
     # Stop that had already completed is different: pressing Submit afterward
@@ -627,12 +666,60 @@ async def send_message(
     cancelled_when_submitted = questions.was_cancelled(
       chat_id, body.question_id,
     )
-    async with chat_queue.get_lock(chat_id):
+    continuation_when_submitted = questions.open_continuation_question(
+      chat, body.question_id,
+    ) is not None
+    from app.chat import current_run_generation
+
+    answer_generation = current_run_generation(chat_id)
+    # A continuation answer is a queued send and shares Stop's transition
+    # gate. Native answers MUST NOT take that gate: Stop needs to cancel their
+    # provider future while answer persistence is in flight.
+    answer_gate = (
+      chat_queue.get_transition_lock(chat_id)
+      if continuation_when_submitted else nullcontext()
+    )
+    async with answer_gate, chat_queue.get_lock(chat_id):
+      if (continuation_when_submitted
+          and current_run_generation(chat_id) != answer_generation):
+        raise HTTPException(
+          status_code=410, detail="The question was stopped while submitting.",
+        )
+      db.expire(chat)
+      continuation_card = questions.open_continuation_question(
+        chat, body.question_id,
+      )
+      if continuation_card is not None and is_chat_running(chat_id):
+        # A saved approval does not park a provider future. An immediate
+        # answer belongs to the next turn, even before this one has settled.
+        # Answer + queue commit together; ordinary terminal draining owns the
+        # wake, so neither a second runner nor a polling task is needed.
+        stored = await _append_to_pending(
+          chat, body, db, initiated_by_app_id=principal.app_id,
+          front=True, require_answer_match=True,
+        )
+        from app.chat_event_sink import get_active_sink
+
+        event = {
+          "type": "answers_applied", "question_id": body.question_id,
+          "answers": body.answers,
+        }
+        sink = get_active_sink(chat_id)
+        if sink is not None:
+          sink.publish(event)
+        else:
+          bc = get_broadcast(chat_id)
+          if bc is not None:
+            bc.publish(event)
+        publish_owner_input_changed(chat_id, None, question_id=None)
+        return JSONResponse(status_code=202, content={
+          "status": "queued", "answer_turn": "queued", "message": stored,
+        })
       _GRACE_ATTEMPTS = 10
       _GRACE_INTERVAL = 0.05  # seconds — total ~500ms
       pending = questions.get(chat_id)
       for _ in range(_GRACE_ATTEMPTS):
-        if pending is not None:
+        if pending is not None or continuation_card is not None:
           break
         await asyncio.sleep(_GRACE_INTERVAL)
         pending = questions.get(chat_id)
@@ -695,13 +782,19 @@ async def send_message(
         # suppressed while a same-id streaming card is still in flight. The
         # event rides the broadcast's event_log, so catch-up replay sees it
         # too (this closes the navigate-away-and-back blank-card bug).
+        from app.chat_event_sink import get_active_sink
+
+        event = {
+          "type": "answers_applied",
+          "question_id": body.question_id or pending.question_id,
+          "answers": body.answers,
+        }
+        sink = get_active_sink(chat_id)
         bc = get_broadcast(chat_id)
-        if bc is not None:
-          bc.publish({
-            "type": "answers_applied",
-            "question_id": body.question_id or pending.question_id,
-            "answers": body.answers,
-          })
+        if sink is not None:
+          sink.publish(event)
+        elif bc is not None:
+          bc.publish(event)
         publish_owner_input_changed(chat_id, None, question_id=None)
         return _answer_delivered_response(chat_id)
       # No in-memory pending question. If the chat is still alive, this is a
@@ -736,12 +829,6 @@ async def send_message(
       if _selected_model_for_chat(chat) is None:
         raise _model_selection_required_conflict()
 
-      if not mark_starting(chat_id):
-        raise HTTPException(
-          status_code=409,
-          detail="The chat is starting another turn; please try again.",
-        )
-
       started_message = None
       try:
         await _append_to_pending(
@@ -752,30 +839,7 @@ async def send_message(
           front=True,
           require_answer_match=True,
         )
-        drain_token = alloc_run_token()
-        next_messages, next_user, next_session_id = (
-          await chat_queue.promote_pending_messages_locked(
-            db, chat_id, drain_token,
-          )
-        )
-        if not next_user:
-          raise HTTPException(
-            status_code=503,
-            detail="Could not resume the question; please try again.",
-          )
-        started_message = next_user
-        get_system_broadcast().publish({
-          "type": "chat_run_started",
-          "chatId": chat_id,
-        })
-        _schedule_continuation(
-          chat_id=chat_id,
-          messages=next_messages,
-          session_id=next_session_id,
-          provider_id=chat.provider,
-          next_user=next_user,
-          run_token=drain_token,
-        )
+        started_message = await start_queued_owner_continuation(chat_id, db)
         bc = get_broadcast(chat_id)
         if bc is not None:
           bc.publish({
@@ -784,13 +848,10 @@ async def send_message(
             "answers": body.answers,
           })
       except chat_queue.PendingQuestionBlocksPromotion:
-        discard_starting(chat_id)
         raise _pending_question_open_conflict()
       except HTTPException:
-        discard_starting(chat_id)
         raise
       except Exception as exc:
-        discard_starting(chat_id)
         log.warning(
           "Could not resume durable question chat_id=%s: %s", chat_id, exc,
         )

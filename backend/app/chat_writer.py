@@ -223,6 +223,27 @@ class QuestionCommit(_Command):
   run_token: str = ""
   snapshot: dict = field(default_factory=dict)
   thinking_stashes: list = field(default_factory=list)
+  secure_request: dict | None = None
+
+
+@dataclass
+class ClaimSecureInput(_Command):
+  """Irreversibly claim a sealed operation before any side effect begins."""
+
+  chat_id: str = ""
+  run_token: str = ""
+  request_id: str = ""
+
+
+@dataclass
+class SettleSecureInput(_Command):
+  """Commit a fixed safe outcome and its single owner-answer continuation."""
+
+  chat_id: str = ""
+  run_token: str = ""
+  request_id: str = ""
+  status: str = "failed"
+  outcome: str = ""
 
 
 @dataclass
@@ -876,6 +897,7 @@ _FENCE_COMMANDS = (
   Finalize,
   PersistError,
   QuestionCommit,
+  SettleSecureInput,
   AnswerQuestion,
   StartTurn,
   StartContinuation,
@@ -920,6 +942,8 @@ def _needs_broad_chat_fence(cmd: _Command) -> bool:
   if isinstance(cmd, ReplaceTranscript):
     return True
   if isinstance(cmd, AppendSteeredUserMessage):
+    return True
+  if isinstance(cmd, SettleSecureInput):
     return True
   if isinstance(cmd, AnswerQuestion):
     return not cmd.run_token
@@ -1569,12 +1593,33 @@ class ChatWriterActor:
       )
       if not qid:
         raise _PersistFailed("QuestionCommit has no open question id")
-      outcome = self._persist_question_required(
-        db, cmd.chat_id, cmd.snapshot, qid, cmd.thinking_stashes,
-      )
+      if cmd.secure_request is None:
+        outcome = self._persist_question_required(
+          db, cmd.chat_id, cmd.snapshot, qid, cmd.thinking_stashes,
+        )
+      else:
+        outcome = self._persist_question_required(
+          db, cmd.chat_id, cmd.snapshot, qid, cmd.thinking_stashes,
+          secure_request=cmd.secure_request,
+        )
       if outcome is not _WriteOutcome.APPLIED:
         raise _PersistFailed(f"QuestionCommit did not persist ({outcome.value})")
       return True
+    if isinstance(cmd, ClaimSecureInput):
+      chat = _active_chat(db, cmd.chat_id)
+      row = db.get(models.SavedSecureInput, cmd.request_id)
+      if (chat is None or row is None or row.chat_id != cmd.chat_id
+          or chat.pending_question_id != cmd.request_id):
+        return {"status": "closed"}
+      if row.status != "pending":
+        return {"status": row.status}
+      row.status = "consuming"
+      if not _commit_or_rollback(db):
+        raise _PersistFailed("ClaimSecureInput did not persist")
+      return {"status": "claimed", "command": list(row.command_json),
+              "cwd": row.cwd, "action": row.action}
+    if isinstance(cmd, SettleSecureInput):
+      return self._settle_secure_input(db, cmd)
     if isinstance(cmd, Finalize):
       # Must-persist terminal write: a NOOP (missing row / empty transcript /
       # no blocks) is a silent loss, not a success — raise so the caller does
@@ -1701,6 +1746,7 @@ class ChatWriterActor:
     snapshot: dict,
     question_id: str,
     thinking_stashes: list | None = None,
+    *, secure_request: dict | None = None,
   ):
     """Atomically persist a question card and its open-question identity.
 
@@ -1715,6 +1761,15 @@ class ChatWriterActor:
     if chat is None:
       return _WriteOutcome.NOOP
     chat.pending_question_id = question_id
+    if secure_request is not None:
+      # Only pre-authored execution metadata crosses this persistence seam.
+      # Deliberately enumerate keys: submitted values can never be staged.
+      db.add(models.SavedSecureInput(
+        request_id=question_id, chat_id=chat_id,
+        command_json=list(secure_request["command"]),
+        cwd=secure_request["cwd"], action=secure_request["action"],
+        status="pending",
+      ))
     if thinking_stashes:
       self._stage_thinking_stashes(db, thinking_stashes)
     outcome = _apply_last_assistant_message(db, chat_id, snapshot)
@@ -1746,13 +1801,19 @@ class ChatWriterActor:
     chat = _active_chat(db, chat_id)
     if chat is None:
       return _WriteOutcome.NOOP
-    # Finalize persists the turn's terminal blocks and assumes the turn is
-    # ending, so it clears the open-question marker. A resumable pause is NOT
-    # Finalize's concern — ParkRun runs after this in the restart drain and
-    # re-derives the marker from the parked transcript. Staged before the
-    # transcript helper commits so both facts become durable together; a
-    # failed/no-op transcript write rolls the clear back.
-    chat.pending_question_id = None
+    # Native questions end with their provider turn. A continuation card is
+    # deliberately handed off BY ending the turn, so keep its exact committed
+    # marker. Never reconstruct it from an old snapshot: an early answer or
+    # Stop may already have cleared it while the turn was finishing.
+    keeps_owner_handoff = any(
+      block.get("type") == "question"
+      and block.get("response_mode") == "continuation"
+      and block.get("question_id") == chat.pending_question_id
+      and not block.get("answers")
+      for block in (snapshot.get("blocks") or [])
+    )
+    if not keeps_owner_handoff:
+      chat.pending_question_id = None
     if thinking_stashes:
       self._stage_thinking_stashes(db, thinking_stashes)
     terminal_snapshot = copy.deepcopy(snapshot)
@@ -2706,6 +2767,45 @@ class ChatWriterActor:
       raise _PersistFailed("ClearPresentedGoal did not persist")
     return {"status": "cleared", "goal_id": goal_id}
 
+  def _settle_secure_input(self, db, cmd: SettleSecureInput) -> dict:
+    from app.saved_secure_inputs import SAFE_OUTCOMES
+
+    if cmd.status not in {"completed", "failed", "interrupted", "cancelled"}:
+      raise _PersistFailed("Invalid secure input terminal status")
+    if cmd.outcome not in SAFE_OUTCOMES:
+      raise _PersistFailed("Invalid secure input outcome")
+    row = db.get(models.SavedSecureInput, cmd.request_id)
+    chat = _active_chat(db, cmd.chat_id)
+    if row is None or row.chat_id != cmd.chat_id:
+      return {"status": "closed"}
+    if row.status not in {"pending", "consuming"}:
+      return {"status": row.status}
+    if cmd.status == "cancelled" and row.status != "pending":
+      # Card Cancel cannot pretend an already-admitted side effect never ran.
+      # Stop owns process interruption and suppresses continuation separately.
+      return {"status": row.status}
+    if cmd.status != "cancelled" and row.status != "consuming":
+      return {"status": "pending"}
+    if chat is None or chat.pending_question_id != cmd.request_id:
+      row.status = "cancelled"
+      row.outcome = SAFE_OUTCOMES["cancelled"]
+      if not _commit_or_rollback(db):
+        raise _PersistFailed("Secure input cancellation did not persist")
+      return {"status": "cancelled"}
+    row.status = cmd.status
+    row.outcome = SAFE_OUTCOMES[cmd.outcome]
+    answers = {"Secure input": row.outcome, "Status": cmd.status}
+    queued = self._append_pending(db, AppendPending(
+      chat_id=cmd.chat_id, question_id=cmd.request_id, answers=answers,
+      require_answer_match=True, front=True,
+      user_msg={"role": "user", "hidden": True,
+                "kind": "continuation", "continuation_reason": "question_answer",
+                "cid": f"secure-input:{cmd.request_id}",
+                "content": f"Secure input: {row.outcome}"},
+    ))
+    return {"status": cmd.status, "queued": True, "answers": answers,
+            "message": queued["stored"]}
+
   def _append_pending(self, db, cmd: AppendPending) -> dict:
     """Queue `user_msg` behind the active turn; optionally apply answers.
 
@@ -2753,14 +2853,14 @@ class ChatWriterActor:
       pending.append(new_msg)
     chat.pending_messages = pending
     if applied:
-      # The recovered-answer path (an answer submitted after a restart, when no
-      # in-memory pending question survives) reaches AppendPending instead of
-      # AnswerQuestion. No physical runner remains to continue the old assistant
-      # row, so retire both its question marker and browser owner; the admitted
-      # continuation atomically installs its own owner. Gated on `applied` so an
-      # ordinary queue-behind send never disturbs a genuinely open question.
+      # Both a recovered answer and an early continuation-card answer use the
+      # queue. Retire the question, but leave a still-running turn's browser
+      # identity intact until its terminal transition owns the handoff.
       chat.pending_question_id = None
-      chat.active_assistant_message_id = None
+      if db.query(models.ChatRun.id).filter_by(
+        chat_id=cmd.chat_id, status="running",
+      ).first() is None:
+        chat.active_assistant_message_id = None
     chat.updated_at = datetime.now(UTC)
     chat.activity_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
@@ -3369,13 +3469,28 @@ class ChatWriterActor:
       from app.project_activity import append_project_change
 
       chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
+      if cmd.terminal_status == "stopped":
+        for request in db.query(models.SavedSecureInput).filter(
+          models.SavedSecureInput.chat_id == cmd.chat_id,
+          models.SavedSecureInput.status.in_(("pending", "consuming")),
+        ).all():
+          request.status = "cancelled"
+          request.outcome = "Secure input was cancelled."
+          changed = True
       preserve_parked_question = bool(
         chat is not None
         and cmd.terminal_status == "interrupted"
         and chat.pending_question_id is not None
       )
+      from app.questions import open_continuation_question
+
+      preserve_owner_question = bool(
+        chat is not None
+        and cmd.terminal_status != "stopped"
+        and open_continuation_question(chat, chat.pending_question_id) is not None
+      )
       if chat is not None and not preserve_parked_question:
-        if chat.pending_question_id is not None:
+        if chat.pending_question_id is not None and not preserve_owner_question:
           chat.pending_question_id = None
           changed = True
         if chat.active_assistant_message_id is not None:
