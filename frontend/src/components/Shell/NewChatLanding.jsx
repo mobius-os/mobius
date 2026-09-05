@@ -1,169 +1,27 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-
-import ChatInputBar from '../ChatView/ChatInputBar.jsx'
-import BrainUsageButton from '../ChatView/BrainUsageButton.jsx'
-import ComposerPopover from '../ChatView/ComposerPopover.jsx'
-import { selectedChatModel } from '../ChatView/modelSelectionPolicy.js'
-import {
-  composerDraftRevision,
-  persistComposerDraft,
-  readComposerDraft,
-  readComposerDraftAsync,
-} from '../ChatView/composerDraft.js'
-import {
-  focusComposerElement,
-  placeCaretAtTextEnd,
-} from '../ChatView/composerFocusPolicy.js'
-
-function composerFiles(files) {
-  return (files || []).map((file, index) => ({
-    ...file,
-    id: file.id || `new-chat-restored-${index}-${file.name || 'file'}`,
-  }))
-}
-
 /**
- * New Chat's immediate, draft-only compose surface.
+ * Passive home for a genuinely empty Standard slot.
  *
- * The client-minted chat id is already the final draft owner, so every edit is
- * durable before POST /chats settles. The Brain stays disabled only until the
- * row exists, then the canonical model picker becomes available on this same
- * surface while Shell hands focus to the real ChatView underneath.
+ * Interactive New Chat actions never render here: Shell mounts the canonical
+ * ChatView immediately on the client-minted final id. Keeping this component
+ * passive prevents a second composer from owning draft, files, focus, model
+ * settings, or first-send state.
  */
-export default function NewChatLanding({
-  chatId = null,
-  failure = null,
-  focusToken = 0,
-  onComposerReady,
-  onRetry,
-  onSubmit,
-  submitted = false,
-  chatInfo = null,
-}) {
-  const inputRef = useRef(null)
-  const listeningRef = useRef(false)
-  const readyRef = useRef(null)
-  const initialRef = useRef(null)
-  if (!initialRef.current) {
-    initialRef.current = chatId == null
-      ? { input: '', attachments: [] }
-      : readComposerDraft(chatId)
-  }
-  const initialAttachments = composerFiles(initialRef.current.attachments)
-  const attachmentsRef = useRef(initialAttachments)
-  const inputValueRef = useRef(initialRef.current.input)
-  const [input, setInput] = useState(initialRef.current.input)
-  const [attachments, setAttachments] = useState(initialAttachments)
-  const [liveChatInfo, setLiveChatInfo] = useState(chatInfo)
-  const [submitPending, setSubmitPending] = useState(false)
-  const settingsSaveTailRef = useRef(Promise.resolve())
-
-  useEffect(() => {
-    if (chatInfo) setLiveChatInfo(chatInfo)
-  }, [chatInfo])
-
-  function mergeChatInfo({ agent_settings_json, provider, effective }) {
-    setLiveChatInfo(previous => previous ? ({
-      ...previous,
-      agent_settings_json,
-      provider: provider || previous.provider,
-      effective: effective || previous.effective,
-    }) : previous)
-  }
-
-  function updateInput(next) {
-    const value = String(next)
-    inputValueRef.current = value
-    if (chatId != null) {
-      persistComposerDraft(chatId, value, attachmentsRef.current)
-    }
-    setInput(value)
-  }
-
-  // The synchronous session/live mirror wins first paint. IndexedDB repairs a
-  // reload whose session write was older, but never overwrites a newer keypress.
-  useEffect(() => {
-    if (chatId == null) return undefined
-    let cancelled = false
-    const revision = composerDraftRevision(chatId)
-    readComposerDraftAsync(chatId).then(saved => {
-      if (cancelled || composerDraftRevision(chatId) !== revision) return
-      const nextAttachments = composerFiles(saved.attachments)
-      attachmentsRef.current = nextAttachments
-      setAttachments(nextAttachments)
-      if (saved.input !== inputValueRef.current) {
-        inputValueRef.current = saved.input
-        setInput(saved.input)
-      }
-    }).catch(() => {})
-    return () => { cancelled = true }
-  }, [chatId])
-
-  // Shell mounts this during the New Chat tap. A layout effect transfers the
-  // tap's live activation from the tiny fallback lease before the browser can
-  // paint or dispatch another key event.
-  useLayoutEffect(() => {
-    if (chatId == null || !focusToken) return
-    const readyKey = `${chatId}:${focusToken}`
-    if (readyRef.current === readyKey) return
-    readyRef.current = readyKey
-    focusComposerElement(inputRef.current)
-    placeCaretAtTextEnd(inputRef.current)
-    const focused = globalThis.document?.activeElement === inputRef.current
-    onComposerReady?.({ chatId: String(chatId), focusToken, focused })
-  }, [chatId, focusToken, onComposerReady])
-
-  function removeAttachment(fileId) {
-    const next = attachmentsRef.current.filter(file => String(file.id) !== String(fileId))
-    attachmentsRef.current = next
-    setAttachments(next)
-    if (chatId != null) persistComposerDraft(chatId, inputValueRef.current, next)
-  }
-
-  async function submitDraft(event) {
-    event?.preventDefault?.()
-    if (submitted || submitPending || !input.trim()) return
-    const draft = input
-    setSubmitPending(true)
-    try {
-      await settingsSaveTailRef.current
-      onSubmit?.(draft)
-    } finally {
-      setSubmitPending(false)
-    }
-  }
-
-  const statusMessage = submitted
-    ? (failure === 'offline'
-        ? 'Queued — your message will send when Möbius reconnects.'
-        : (failure
-            ? 'Queued — waiting to start this chat.'
-            : 'Queued — starting this chat…'))
-    : (failure === 'offline'
-        ? 'You’re offline — your draft is safe.'
-        : (failure === 'queue'
-            ? 'Couldn’t queue this message — your draft is safe.'
-            : (failure ? 'Couldn’t start a new chat — your draft is safe.' : null)))
-
-  const liveComposer = chatId != null
+export default function NewChatLanding({ failure = null, onRetry }) {
   return (
     <div className="chat chat--empty">
       <div className="chat__empty-wrap">
         <div className="chat__empty">
           <img className="chat__empty-glyph" src="/moebius.png" alt="" width="76" height="76" />
           <p className="chat__empty-title">What&apos;s on your mind?</p>
-          {statusMessage && (
+          {failure && (
             <>
               <p className="chat__empty-sub" role="status">
-                {statusMessage}
+                {failure === 'offline'
+                  ? 'You’re offline — a new chat needs the network.'
+                  : 'Couldn’t start a new chat — please try again.'}
               </p>
-              {failure && failure !== 'queue' && onRetry && (
-                <button
-                  type="button"
-                  className="chat__empty-action"
-                  onPointerDown={event => event.preventDefault()}
-                  onClick={onRetry}
-                >
+              {onRetry && (
+                <button type="button" className="chat__empty-action" onClick={onRetry}>
                   Retry
                 </button>
               )}
@@ -171,55 +29,6 @@ export default function NewChatLanding({
           )}
         </div>
       </div>
-      {liveComposer && !submitted && (
-        <div className="chat__foot">
-          <ChatInputBar
-            chatId={chatId}
-            input={input}
-            onInputChange={updateInput}
-            onInputIntent={() => {}}
-            onSubmit={submitDraft}
-            onSubmitSteer={submitDraft}
-            inputRef={inputRef}
-            sending={false}
-            listening={false}
-            listeningRef={listeningRef}
-            onManualVoiceEdit={() => {}}
-            onToggleVoice={() => {}}
-            onStop={() => {}}
-            onSteer={() => {}}
-            canSteer={false}
-            offline={failure === 'offline'}
-            submissionBlocked={submitted || submitPending}
-            pendingFiles={attachments}
-            onRemoveFile={removeAttachment}
-            leftButtons={liveChatInfo ? (
-              <BrainUsageButton
-                chatId={chatId}
-                provider={liveChatInfo.provider}
-                providerSessionId={liveChatInfo.session_id}
-                model={selectedChatModel(liveChatInfo)}
-              >
-                {({ icon, ariaLabel, providerUsage }) => (
-                  <ComposerPopover
-                    triggerIcon={icon}
-                    triggerAriaLabel={ariaLabel}
-                    providerUsage={providerUsage}
-                    chatInfo={liveChatInfo}
-                    chatId={chatId}
-                    hasAssistantTurns={false}
-                    onChangeChatInfo={mergeChatInfo}
-                    settingsSaveTailRef={settingsSaveTailRef}
-                    composerInputRef={inputRef}
-                    embedded
-                  />
-                )}
-              </BrainUsageButton>
-            ) : <ComposerPopover pending />}
-            attachmentsDisabled
-          />
-        </div>
-      )}
     </div>
   )
 }

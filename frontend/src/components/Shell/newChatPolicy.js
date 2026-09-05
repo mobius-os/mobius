@@ -18,8 +18,13 @@ export function stageVerifiedNewChatHandoff(chatId, input, {
 /** A failed allocation retries only after the shared owner proves recovery. */
 export function shouldRetryNewChatAllocation(presentation, recoveryGeneration) {
   if (!presentation?.failure || presentation.failure === 'queue') return false
-  if (presentation.materialized || presentation.releasing) return false
+  if (presentation.materialized) return false
   return recoveryGeneration > (presentation.failedAtRecoveryGeneration ?? 0)
+}
+
+/** Row-owned reads stay dormant until the client-minted chat exists server-side. */
+export function newChatServerReadsReady(newChatSession) {
+  return !newChatSession || newChatSession.materialized === true
 }
 
 /** Preserve live presentation state when an asynchronous allocation fails. */
@@ -31,82 +36,27 @@ export function failedNewChatPresentation(current, verdict, recoveryGeneration) 
   }
 }
 
-/**
- * Whether an immediate New Chat surface still owns what the user is seeing.
- *
- * Allocation is allowed to finish only while the route generation, layout
- * world, and drawer-history ownership captured by the tap are unchanged. A
- * provisional client UUID is still allocation-owned. Once the server row is
- * accepted, the concrete chat route is the simpler authority: it owns the
- * cover until that ChatView reports a painted frame.
- */
+/** Whether an allocating New Chat still owns the canonical destination. */
 export function newChatPresentationIsCurrent(presentation, {
-  navigationEpoch,
   viewMode,
-  drawerEntryOpen,
   activeView,
   activeChatId,
   focusedPaneId,
   paneActiveKey,
 } = {}) {
   if (!presentation || presentation.viewMode !== viewMode) return false
-  if (presentation.materialized && presentation.chatId != null) {
-    if (activeView !== 'chat') return false
-    // The temporary cover owns the exact drawer state captured by the
-    // destination handoff. Reopening navigation is an explicit superseding
-    // action, even while the destination ChatView is still becoming ready.
-    if (presentation.drawerEntryOpen !== !!drawerEntryOpen) return false
-    // The concrete chat route owns the cover once it exists — but navTo bumps
-    // the epoch and commits `activeChatId` a render later, so the route is still
-    // catching up to the resolved chat for one commit. Treat that in-flight
-    // window as current: `activeChatId` already matches, OR no navigation has
-    // happened since the cover resolved (epoch unchanged). A real supersede
-    // (Back, another chat, an app) bumps the epoch past the resolved value and
-    // retires the cover. Without this the cover retires over the OUTGOING chat
-    // mid-transition, flashing it between the New chat surface and its
-    // destination.
-    return normalizedId(activeChatId) === normalizedId(presentation.chatId)
-      || presentation.navigationEpoch === navigationEpoch
-  }
-  const allocationContextCurrent = presentation.navigationEpoch === navigationEpoch
-    && presentation.drawerEntryOpen === !!drawerEntryOpen
-  if (!allocationContextCurrent || presentation.viewMode !== 'panes') {
-    return allocationContextCurrent
-  }
-  // Builder's immediate draft surface temporarily covers exactly the pane and
-  // tab that owned the New Chat tap. Focusing another pane or selecting another
-  // tab is a newer intent even if it does not change the browser route.
+  // The client id is the final route from the first commit, before and after
+  // allocation. Drawer state and history epochs are therefore irrelevant: the
+  // presentation lives exactly as long as its canonical ChatView remains the
+  // active destination.
+  if (activeView !== 'chat') return false
+  if (normalizedId(activeChatId) !== normalizedId(presentation.chatId)) return false
+  if (presentation.viewMode !== 'panes') return true
+  // Builder additionally owns one exact focused pane/tab. Focusing another
+  // pane or selecting another tab is a newer intent even when the global route
+  // still names a chat.
   return normalizedId(presentation.paneId) === normalizedId(focusedPaneId)
     && normalizedId(presentation.paneActiveKey) === normalizedId(paneActiveKey)
-}
-
-/**
- * Whether the immediate New Chat cover owns a rendered workspace surface.
- *
- * Standard covers the whole content world. Builder covers only the pane that
- * received the New Chat action, leaving sibling panes available to supersede
- * it. Once allocation succeeds, the matching destination ChatView is the sole
- * covered surface allowed to become interactive so it can accept the durable
- * draft/focus handoff. A mode-mismatched cover blocks the current world for its
- * final pre-retirement commit; otherwise the newly exposed surface could steal
- * focus through the stale cover.
- */
-export function newChatPresentationCoversSurface(presentation, {
-  viewMode,
-  paneId = null,
-  chatId = null,
-} = {}) {
-  if (!presentation) return false
-  if (presentation.viewMode !== viewMode) return true
-
-  const coversWholeWorld = presentation.viewMode !== 'panes'
-    || presentation.paneId == null
-  if (!coversWholeWorld
-      && normalizedId(presentation.paneId) !== normalizedId(paneId)) {
-    return false
-  }
-  return !presentation.materialized
-    || normalizedId(presentation.chatId) !== normalizedId(chatId)
 }
 
 /**

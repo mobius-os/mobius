@@ -11,8 +11,8 @@ import {
   clearNewChatIntent,
   mergeChatListWithCreatedGuards,
   mintNewChatIntentId,
-  newChatPresentationCoversSurface,
   newChatPresentationIsCurrent,
+  newChatServerReadsReady,
   readNewChatIntent,
   reconcileCreatedChatGuard,
   reconcileNewChatIntentCreate,
@@ -25,14 +25,11 @@ import {
 import { chatQueries } from '../../../hooks/queries.js'
 
 const shellSource = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
-const newChatLandingSource = readFileSync(
-  new URL('../NewChatLanding.jsx', import.meta.url),
-  'utf8',
-)
 const chatViewSource = readFileSync(
   new URL('../../ChatView/ChatView.jsx', import.meta.url),
   'utf8',
 )
+const paneChatViewSource = readFileSync(new URL('../PaneChatView.jsx', import.meta.url), 'utf8')
 const queriesSource = readFileSync(new URL('../../../hooks/queries.js', import.meta.url), 'utf8')
 const clientSource = readFileSync(new URL('../../../api/client.js', import.meta.url), 'utf8')
 
@@ -60,6 +57,18 @@ test('New Chat intent id: valid UUID, unique, injectable, fail-safe', () => {
   // A throwing or malformed source falls back to a valid manual v4 mint.
   assert.match(mintNewChatIntentId({ randomUUID: () => { throw new Error('nope') } }), UUID_RE)
   assert.match(mintNewChatIntentId({ randomUUID: () => 'not-a-uuid' }), UUID_RE)
+})
+
+test('server-backed pane projections wait for the provisional row', () => {
+  assert.equal(newChatServerReadsReady(null), true)
+  assert.equal(newChatServerReadsReady({ materialized: false }), false)
+  assert.equal(newChatServerReadsReady({}), false)
+  assert.equal(newChatServerReadsReady({ materialized: true }), true)
+  assert.match(
+    paneChatViewSource,
+    /const chatReady = newChatServerReadsReady\(newChatSession\)[\s\S]*\(\) => chatReady \? derivedBuiltApps\(apps, chatId\) : \[\]/,
+    'another entity projection must not read through a provisional chat id',
+  )
 })
 
 test('resolveNewChatIntentId resumes every open intent, else mints fresh', () => {
@@ -146,18 +155,21 @@ test('a superseded create waiter cannot rotate the reopened New Chat draft', () 
     'rotation must reclaim presentation ownership after durable hydration')
 })
 
-test('an accepted allocation hydrates durable draft ownership before handoff', () => {
+test('an accepted allocation activates the already-mounted canonical composer', () => {
   const settle = shellSource.match(
     /async function settleDraftFirstNewChat\(presentation\) \{([\s\S]*?)\n  \}\n\n  settleDraftFirstNewChatRef\.current/,
   )?.[1] || ''
   const accepted = settle.slice(settle.indexOf("if (decision.action !== 'accept')"))
-  const hydrate = accepted.indexOf('await readComposerDraftAsync(intentId)')
-  const currentAgain = accepted.indexOf(
-    'if (!draftFirstPresentationIsCurrent(presentation)) return', hydrate,
-  )
-  const route = accepted.indexOf("if (changesRoute) navTo('chat', { chatId: intentId })")
-  assert.ok(hydrate >= 0 && currentAgain > hydrate && route > currentAgain,
-    'destination navigation must wait for durable hydration and reclaimed ownership')
+  const activate = accepted.indexOf('materialized: true')
+  assert.ok(activate >= 0,
+    'allocation activates the ChatView already mounted on the final id')
+  assert.doesNotMatch(accepted, /navTo\(|applyModeDestination\(/,
+    'normal allocation must not navigate or replace its canonical destination')
+  assert.doesNotMatch(accepted, /await readComposerDraftAsync\(intentId\)/,
+    'normal allocation must not re-read a draft merely to transfer it between composers')
+  assert.match(chatViewSource,
+    /const provisionalNewChat = !!newChatSession[\s\S]*if \(hidden \|\| provisionalNewChat\) return/,
+    'the canonical view pauses only its server activation while the row is provisional')
 })
 
 test('a provisional Send becomes one durable handoff and retries on proven recovery', () => {
@@ -170,12 +182,13 @@ test('a provisional Send becomes one durable handoff and retries on proven recov
   assert.ok(stage >= 0 && verify > stage && submitted > verify,
     'the UI must claim a queued send only after its autosend marker reads back')
 
-  assert.match(newChatLandingSource, /onSubmit=\{submitDraft\}/)
-  assert.match(newChatLandingSource,
-    /submissionBlocked=\{submitted \|\| submitPending\}/)
-  assert.match(newChatLandingSource, /\{liveComposer && !submitted && \(/,
-    'the queued snapshot must not remain editable before its handoff')
-  assert.match(newChatLandingSource, /will send when Möbius reconnects/)
+  assert.match(chatViewSource,
+    /handleProvisionalNewChatSubmit[\s\S]*await settingsSaveTailRef\.current[\s\S]*onNewChatSubmit\?\.\(input\)/,
+    'the canonical composer owns provisional Send and waits for any settings save')
+  assert.match(chatViewSource,
+    /submissionBlocked=\{providerSwitching \|\| !!newChatSession\?\.submitted\}/,
+    'a verified queued snapshot cannot be submitted twice')
+  assert.match(chatViewSource, /will send when Möbius reconnects/)
 
   assert.match(shellSource, /const recoveryGeneration = useRecoveryGeneration\(\)/)
   assert.match(
@@ -195,23 +208,21 @@ test('a provisional Send becomes one durable handoff and retries on proven recov
   )
 })
 
-test('Send remains owned by the landing after allocation materializes', () => {
-  const queue = shellSource.match(
-    /const queueDraftFirstNewChat = useCallback\(\(input\) => \{([\s\S]*?)\n  \}, \[requestComposer, retryDraftFirstNewChat\]\)/,
+test('a queued first Send continues in the same ChatView after allocation', () => {
+  const settle = shellSource.match(
+    /async function settleDraftFirstNewChat\(presentation\) \{([\s\S]*?)\n  \}\n\n  settleDraftFirstNewChatRef\.current/,
   )?.[1] || ''
-
-  assert.doesNotMatch(queue, /!presentation \|\| presentation\.materialized/,
-    'a materialized row must not turn the still-visible Send button into a no-op')
   assert.match(
-    queue,
-    /if \(presentation\.materialized\) \{[\s\S]*?requestComposer\(presentation\.chatId, \{[\s\S]*?draft: text,[\s\S]*?submit: true,[\s\S]*?releaseNewChatPresentationToken: presentation\.token/,
-    'the landing must submit through the mounted destination and release itself',
+    settle,
+    /const autoSendDraft = readComposerHandoff\(intentId\)\.autoSendDraft[\s\S]*current\.submitted && autoSendDraft[\s\S]*requestComposer\(intentId, \{[\s\S]*draft: autoSendDraft,[\s\S]*submit: true/,
+    'allocation resumes the verified queued send through the already-mounted view',
   )
-  assert.match(
-    queue,
-    /submitted: true,[\s\S]*?handoffRequested: presentation\.materialized[\s\S]*?\|\| presentation\.handoffRequested/,
-    'the submit handoff must claim the request slot before display-ready focus can replace it',
-  )
+  assert.match(chatViewSource,
+    /onSubmit=\{provisionalNewChat \? handleProvisionalNewChatSubmit : handleSubmit\}/,
+    'the one composer switches from provisional queueing to ordinary Send without remounting')
+  assert.doesNotMatch(shellSource,
+    /releaseNewChatPresentationToken|handoffRequested/,
+    'normal first Send must not coordinate a second composer handoff')
   assert.match(
     chatViewSource,
     /if \(request\.storedHandoff\) \{[\s\S]*?consumeComposerHandoff[\s\S]*?doSend\(text\)[\s\S]*?onComposerRequestHandled\?\.\(request\.token\)/,
@@ -260,43 +271,31 @@ test('New Chat intent ids are canonicalized before storage and allocation', () =
   assert.equal(clearNewChatIntent(upper, storage), true)
 })
 
-test('New Chat presentation ownership follows allocation context then destination', () => {
+test('New Chat presentation ownership is the canonical destination from birth', () => {
   const presentation = {
-    chatId: null,
+    chatId: 'client-owned',
     materialized: false,
-    navigationEpoch: 4,
     viewMode: 'single',
-    drawerEntryOpen: true,
   }
   const current = {
-    navigationEpoch: 4,
     viewMode: 'single',
-    drawerEntryOpen: true,
     activeView: 'chat',
-    activeChatId: 'old',
+    activeChatId: 'client-owned',
   }
 
   for (const [change, expected] of [
     [{}, true],
-    [{ navigationEpoch: 5 }, false],
-    [{ drawerEntryOpen: false }, false],
     [{ viewMode: 'panes' }, false],
+    [{ activeView: 'canvas' }, false],
+    [{ activeChatId: 'other' }, false],
   ]) {
     assert.equal(newChatPresentationIsCurrent(presentation, {
       ...current, ...change,
     }), expected)
   }
   assert.equal(newChatPresentationIsCurrent({
-    ...presentation, drawerEntryOpen: false,
-  }, current), false)
-  // A provisional client UUID is still allocation-owned until the server row
-  // has been accepted; merely having an id must not adopt route semantics.
-  assert.equal(newChatPresentationIsCurrent({
-    ...presentation, chatId: 'client-owned',
-  }, current), true)
-  assert.equal(newChatPresentationIsCurrent({
-    ...presentation, chatId: 'client-owned',
-  }, { ...current, navigationEpoch: 5 }), false)
+    ...presentation, materialized: true,
+  }, current), true, 'allocation does not change presentation ownership')
 
   const builderPresentation = {
     ...presentation,
@@ -322,22 +321,15 @@ test('New Chat presentation ownership follows allocation context then destinatio
   const resolvedPresentation = {
     chatId: 'new',
     materialized: true,
-    navigationEpoch: 4,
     viewMode: 'single',
-    drawerEntryOpen: false,
   }
   const resolvedCurrent = {
-    navigationEpoch: 9,
     viewMode: 'single',
-    drawerEntryOpen: false,
     activeView: 'chat',
     activeChatId: 'new',
   }
 
   assert.equal(newChatPresentationIsCurrent(resolvedPresentation, resolvedCurrent), true)
-  assert.equal(newChatPresentationIsCurrent(resolvedPresentation, {
-    ...resolvedCurrent, drawerEntryOpen: true,
-  }), false, 'reopening navigation supersedes a materialized cover')
   assert.equal(newChatPresentationIsCurrent(resolvedPresentation, {
     ...resolvedCurrent, activeView: 'canvas', activeChatId: null,
   }), false)
@@ -345,55 +337,6 @@ test('New Chat presentation ownership follows allocation context then destinatio
     ...resolvedCurrent, activeChatId: 'other',
   }), false)
 
-  // Route still catching up to the resolved chat: activeChatId has not
-  // committed yet, but no navigation happened since it resolved (epoch
-  // unchanged). The cover stays current so the outgoing chat never flashes
-  // between the New chat surface and its destination.
-  assert.equal(newChatPresentationIsCurrent(resolvedPresentation, {
-    ...resolvedCurrent, navigationEpoch: 4, activeChatId: 'old',
-  }), true)
-  // A genuine supersede in that same window (navigation bumped the epoch and
-  // landed elsewhere) must still retire the cover.
-  assert.equal(newChatPresentationIsCurrent(resolvedPresentation, {
-    ...resolvedCurrent, navigationEpoch: 5, activeChatId: 'old',
-  }), false)
-})
-
-test('New Chat cover gates only its owned surface and destination handoff', () => {
-  const standard = {
-    chatId: 'new',
-    materialized: false,
-    viewMode: 'single',
-    paneId: null,
-  }
-  assert.equal(newChatPresentationCoversSurface(null, {
-    viewMode: 'single', paneId: 'single', chatId: 'old',
-  }), false)
-  assert.equal(newChatPresentationCoversSurface(standard, {
-    viewMode: 'single', paneId: 'single', chatId: 'old',
-  }), true)
-  assert.equal(newChatPresentationCoversSurface({ ...standard, materialized: true }, {
-    viewMode: 'single', paneId: 'single', chatId: 'new',
-  }), false, 'the matching destination becomes interactive for handoff')
-  assert.equal(newChatPresentationCoversSurface({ ...standard, materialized: true }, {
-    viewMode: 'single', paneId: 'single', chatId: 'old',
-  }), true)
-
-  const builder = {
-    chatId: 'new',
-    materialized: false,
-    viewMode: 'panes',
-    paneId: 'left',
-  }
-  assert.equal(newChatPresentationCoversSurface(builder, {
-    viewMode: 'panes', paneId: 'left', chatId: 'old',
-  }), true)
-  assert.equal(newChatPresentationCoversSurface(builder, {
-    viewMode: 'panes', paneId: 'right', chatId: 'sibling',
-  }), false, 'Builder sibling panes remain usable')
-  assert.equal(newChatPresentationCoversSurface(builder, {
-    viewMode: 'single', paneId: 'single', chatId: 'old',
-  }), true, 'a stale world stays blocked until layout-effect retirement')
 })
 
 test('empty-single policy fires only on the transition edge', () => {

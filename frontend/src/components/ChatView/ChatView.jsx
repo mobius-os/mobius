@@ -350,6 +350,9 @@ const NO_BUILT_APPS = []
 
 export default function ChatView({
   chatId,
+  newChatSession = null,
+  onNewChatSubmit,
+  onNewChatRetry,
   onStreamEnd,
   onFirstMessage,
   onSystemEvent,
@@ -398,6 +401,7 @@ export default function ChatView({
   onOpenArtifact = null,
 }) {
   const queryClient = useQueryClient()
+  const provisionalNewChat = !!newChatSession && !newChatSession.materialized
   const hiddenRef = useRef(hidden)
   hiddenRef.current = hidden
   // A drawer search may target a ChatView that is already mounted. Subscribe
@@ -472,9 +476,13 @@ export default function ChatView({
     initialActivationAnchorKey,
     !searchReveal && savedReadingAnchorHasNestedPart(chatId),
   )
-  const [loading, setLoading] = useState(initialCacheEntryState === 'missing')
+  const [loading, setLoading] = useState(
+    provisionalNewChat ? false : initialCacheEntryState === 'missing',
+  )
   const [initialEntryPhase, setInitialEntryPhase] = useState(
-    initialCacheEntryState === 'paintable'
+    provisionalNewChat
+      ? 'ready'
+      : initialCacheEntryState === 'paintable'
       ? 'cached'
       : initialCacheEntryState === 'validating'
         ? 'cache-validating'
@@ -484,7 +492,7 @@ export default function ChatView({
   // be stale. Do not publish a chat-to-chat handoff until this activation's
   // runtime/detail verdict has arrived: otherwise an apparently idle cache can
   // be promoted before the server reports that its turn is still running.
-  const [activationSettled, setActivationSettled] = useState(false)
+  const [activationSettled, setActivationSettled] = useState(provisionalNewChat)
   const acceptCachedReadingCoordinate = useCallback(() => {
     // The scroll owner has proved the exact nested part against committed DOM.
     setInitialEntryPhase(current => (
@@ -1130,13 +1138,14 @@ export default function ChatView({
   // freshness so the surface cannot paint stale history when it returns.
   useLayoutEffect(() => {
     if (!hidden) return
+    if (provisionalNewChat) return
     if (keepTranscriptPainted) return
     // Arm the freshness + restoration gate while this surface is still
     // physically hidden. A retained ChatView must not reappear with the
     // transcript from its previous visible lifetime for even one frame.
     setInitialEntryPhase('history')
     setLoading(true)
-  }, [hidden, keepTranscriptPainted])
+  }, [hidden, keepTranscriptPainted, provisionalNewChat])
 
   function rememberSendIntent(cid, intent) {
     if (!cid || !intent) return
@@ -1628,6 +1637,11 @@ export default function ChatView({
     request: apiFetch,
   })
 
+  useLayoutEffect(() => {
+    if (!newChatSession?.materialized || !newChatSession.chatInfo) return
+    setChatInfo(newChatSession.chatInfo)
+  }, [newChatSession?.chatInfo, newChatSession?.materialized, setChatInfo])
+
   const {
     streamItems,
     latestItemsRef,
@@ -2053,9 +2067,9 @@ export default function ChatView({
     }
   }, [chatId, connectToStream, embedded, fetchMessages, isStreamingRef])
   useEffect(() => {
-    if (hidden) return
+    if (hidden || provisionalNewChat) return
     reconcileExternalActivity()
-  }, [effectiveRunSignal.seq, hidden, reconcileExternalActivity])
+  }, [effectiveRunSignal.seq, hidden, provisionalNewChat, reconcileExternalActivity])
 
   const ensureRuntimeStreamConnected = useCallback((runtime) => {
     const action = runtimeStreamAttachAction({
@@ -2322,7 +2336,7 @@ export default function ChatView({
     // A hidden retained pane is not an active runtime. Returning to visibility
     // changes this dependency and re-runs the version + stream handshake
     // without losing the pane's DOM identity.
-    if (hidden) return
+    if (hidden || provisionalNewChat) return
     setActivationSettled(false)
     let cancelled = false
     const initialLoadController = new AbortController()
@@ -2599,6 +2613,17 @@ export default function ChatView({
         offset: refreshed.offset,
       })
 
+      // A freshly created chat has no transcript work to prepare. Settle this
+      // tiny activation immediately so the canonical composer finishes its
+      // allocation state without competing with unrelated continuous updates.
+      // Populated returns keep the interruptible paths below because they can
+      // own real reflow.
+      if (refreshed.messages.length === 0) {
+        applyMessagesToView([], refreshed.offset)
+        settleRuntime(runtime, [])
+        return
+      }
+
       // A return with a complete local window is a warm restoration even when
       // the version changed while away. Apply the authoritative replacement and
       // readiness in the SAME React batch (the transition callback runs
@@ -2709,6 +2734,7 @@ export default function ChatView({
     chatId,
     hidden,
     loadNonce,
+    provisionalNewChat,
     searchReveal?.anchorKey,
     searchReveal?.id,
     reconcileFailedSendOutbox,
@@ -3749,6 +3775,13 @@ export default function ChatView({
     doSend(input.trim())
   }
 
+  async function handleProvisionalNewChatSubmit(e) {
+    e.preventDefault()
+    if (!provisionalNewChat || newChatSession?.submitted || !input.trim()) return
+    await settingsSaveTailRef.current
+    onNewChatSubmit?.(input)
+  }
+
   function handleSubmitSteer(e) {
     e.preventDefault()
     if (isProviderSwitchBlocking(chatId)) return
@@ -4780,6 +4813,21 @@ export default function ChatView({
   // whether the chat is empty — surfacing that branch separately keeps
   // us from lying with "What's on your mind?" over a network failure.
   const showEmpty = !loadError && messages.length === 0 && !turnActive && !loading
+  const newChatStatusMessage = !provisionalNewChat
+    ? null
+    : newChatSession.submitted
+      ? (newChatSession.failure === 'offline'
+          ? 'Queued — your message will send when Möbius reconnects.'
+          : (newChatSession.failure
+              ? 'Queued — waiting to start this chat.'
+              : 'Queued — starting this chat…'))
+      : (newChatSession.failure === 'offline'
+          ? 'You’re offline — your draft is safe.'
+          : (newChatSession.failure === 'queue'
+              ? 'Couldn’t queue this message — your draft is safe.'
+              : (newChatSession.failure
+                  ? 'Couldn’t start a new chat — your draft is safe.'
+                  : null)))
 
   // Collect the question keys currently live in streamItems so MsgContent
   // can suppress any persisted question block that is already rendered by
@@ -5395,6 +5443,25 @@ export default function ChatView({
             <div className="chat__empty">
               <img className="chat__empty-glyph" src="/moebius.png" alt="" width="76" height="76" />
               <p className="chat__empty-title">What's on your mind?</p>
+              {newChatStatusMessage && (
+                <>
+                  <p className="chat__empty-sub" role="status">
+                    {newChatStatusMessage}
+                  </p>
+                  {newChatSession.failure
+                    && newChatSession.failure !== 'queue'
+                    && onNewChatRetry && (
+                    <button
+                      type="button"
+                      className="chat__empty-action"
+                      onPointerDown={event => event.preventDefault()}
+                      onClick={onNewChatRetry}
+                    >
+                      Retry
+                    </button>
+                  )}
+                </>
+              )}
             </div>
           )}
         </div>
@@ -5732,8 +5799,10 @@ export default function ChatView({
           input={input}
           onInputChange={handleComposerInputChange}
           onInputIntent={composerEdited}
-          onSubmit={handleSubmit}
-          onSubmitSteer={handleSubmitSteer}
+          onSubmit={provisionalNewChat ? handleProvisionalNewChatSubmit : handleSubmit}
+          onSubmitSteer={provisionalNewChat
+            ? handleProvisionalNewChatSubmit
+            : handleSubmitSteer}
           inputRef={inputRef}
           sending={composerBusy}
           listening={listening}
@@ -5748,7 +5817,7 @@ export default function ChatView({
           canRequestSteer={canRequestSteer}
           canSubmitSteer={canSubmitSteer}
           sendFailure={sendFailure}
-          submissionBlocked={providerSwitching}
+          submissionBlocked={providerSwitching || !!newChatSession?.submitted}
           questionBlocked={hasPendingQuestion}
           pendingFiles={pendingFiles}
           onAddFiles={handleComposerAddFiles}
@@ -5771,6 +5840,7 @@ export default function ChatView({
                 triggerAriaLabel={embedded ? 'Attach files' : ariaLabel}
                 chatInfo={showPicker ? chatInfo : null}
                 chatId={chatId}
+                chatReady={!provisionalNewChat}
                 onAttachClick={() => attachTriggerRef.current?.()}
                 /* Derive live — `chatInfo.has_assistant_turns` is set
                    once on mount via the API and never refreshed when

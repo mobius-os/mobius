@@ -43,7 +43,7 @@ test('chat context actions follow model selection and continuation policy', () =
 test('Changes owns contribution attention without adding a composer card', () => {
   assert.match(
     composerSource,
-    /useChatChangesOverview\(chatId, initialChangeEntries,[\s\S]*?enabled: Boolean\(!embedded && chatId\)/,
+    /useChatChangesOverview\(chatId, initialChangeEntries,[\s\S]*?enabled: Boolean\(!embedded && chatReady && chatId\)/,
   )
   assert.match(composerSource, /changesOverview\.needsAction \|\| changesOverview\.workState === 'attention'/)
   assert.match(composerSource, /composer-plus__attention-dot/)
