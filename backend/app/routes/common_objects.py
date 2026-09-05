@@ -13,6 +13,10 @@ Design, deliberately mirroring the proven pieces of the platform:
   federation host); every peer request is an Ed25519-signed envelope verified
   against the sender's cached actor card, exactly like a DM. The document's
   home is its creator's instance; each member instance talks to that host.
+- **Account-handle invitations fan out** to the current registry-verified
+  deployments, with a shared collaborator ID for explicit group revocation.
+  This is a snapshot, not a lasting account credential: new deployments need
+  another invitation. Offline delivery is reported, not silently retried.
 - **Writes are compare-and-swap, reads are version-gated** — the same
   semantics as app storage `If-Match` and Shared Apps state, so concurrent
   editors merge instead of clobbering. The platform treats the document as
@@ -52,6 +56,7 @@ import re
 import secrets as pysecrets
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from weakref import WeakValueDictionary
 
@@ -211,6 +216,7 @@ def _public_object(obj: dict) -> dict:
         "role": m.get("role"),
         "name": m.get("name") or "",
         "handle": m.get("handle") or "",
+        **({"collaborator_id": m["collaborator_id"]} if m.get("collaborator_id") else {}),
         **({"pending": True} if m.get("pending") else {}),
         **(
           {"active": True}
@@ -313,11 +319,13 @@ async def peer_operation(oid: str, request: Request):
       if invite is not None and existing_role is None:
         obj["invites"].pop(_hash_secret(secret), None)
       obj.setdefault("members", {})[sender] = {
+        **existing,
         "role": role,
         "name": str(actor.get("name") or existing.get("name") or "")[:MAX_LABEL_CHARS],
         "handle": str(actor.get("handle") or existing.get("handle") or "")[:MAX_LABEL_CHARS],
         "joined_at": time.time(),
       }
+      obj["members"][sender].pop("pending", None)
       _mark_present(oid, sender)
       _save_object(obj)
       return {
@@ -386,34 +394,34 @@ def _invitation_path(host: str, oid: str) -> Path:
   return _invitations_dir() / f"{safe}__{oid}.json"
 
 
-async def _resolve_invitee(address: str, db: Session, owner_id: int) -> str:
-  """A handle, `name@host`, or bare host → the routable instance host.
+@dataclass(frozen=True)
+class InviteRecipient:
+  hosts: list[str]
+  account_handle: str | None = None
 
-  A bare handle (no dot, no host part) resolves through the community-host
-  directory, which maps mobius.you handles to instance hosts. Address forms
-  that already carry a host skip the directory.
+
+async def _resolve_invitees(address: str, db: Session, owner_id: int) -> InviteRecipient:
+  """Resolve a verified account's hosts, or one explicitly addressed instance.
+
+  Only the account registry can establish that multiple deployments belong to
+  one person. The opt-in directory's duplicate handles remain ambiguous.
   """
   raw = address.strip().lower().lstrip("@")
   if "@" in raw:
     host = raw.rsplit("@", 1)[-1]
     if not _valid_host(host):
       raise HTTPException(status_code=400, detail="That handle is not valid.")
-    return host
+    return InviteRecipient([host])
   if "." in raw and _valid_host(raw):
-    return raw
+    return InviteRecipient([raw])
   # A mobius.you account link is the authoritative handle registry and does
   # not require the recipient to have installed or joined Social.
   from app.routes.identity import resolve_handle_hosts
   account_hosts = await resolve_handle_hosts(db, owner_id, raw)
   if account_hosts is not None:
     matches = [host for host in dict.fromkeys(account_hosts) if _valid_host(host)]
-    if len(matches) == 1:
-      return matches[0]
-    if len(matches) > 1:
-      raise HTTPException(
-        status_code=409,
-        detail="That handle is linked to more than one Möbius. Try their full address.",
-      )
+    if matches:
+      return InviteRecipient(matches, account_handle=raw)
     raise HTTPException(
       status_code=409,
       detail="That handle exists but does not have a reachable Möbius yet.",
@@ -447,7 +455,7 @@ async def _resolve_invitee(address: str, db: Session, owner_id: int) -> str:
     if str(entry.get("handle") or "").lower() == raw
   ]
   if len(matches) == 1:
-    return matches[0]
+    return InviteRecipient([matches[0]])
   if len(matches) > 1:
     raise HTTPException(
       status_code=409, detail="That handle matches more than one instance."
@@ -741,59 +749,79 @@ async def create_invite(
     raise HTTPException(status_code=400, detail="Role must be editor or viewer.")
 
   if body.address:
-    # Handle invitation: pre-authorize the invitee's instance as a pending
-    # member, then deliver a signed invitation to it. Their verified signature
-    # is the credential when they accept — no code changes hands.
-    peer = await _resolve_invitee(body.address, db, principal.owner.id)
-    if peer == _own_host():
-      raise HTTPException(status_code=400, detail="That handle is this instance.")
+    # A registry handle names one account's CURRENT deployments. Explicit
+    # addresses and the opt-in directory still name one instance. Never merge
+    # accounts based on the self-asserted handle in a peer actor document.
     async with _object_lock(oid):
       obj = _load_object(oid)
       if obj is None:
         raise HTTPException(status_code=404, detail="No such object.")
       _require_app_match(caller, obj["app"])
-      existing = (obj.get("members") or {}).get(peer)
-      if existing and not existing.get("pending"):
+    recipient = await _resolve_invitees(body.address, db, principal.owner.id)
+    if _own_host() in recipient.hosts:
+      raise HTTPException(status_code=400, detail="That account includes this instance.")
+    async with _object_lock(oid):
+      obj = _load_object(oid)
+      if obj is None:
+        raise HTTPException(status_code=404, detail="No such object.")
+      _require_app_match(caller, obj["app"])
+      members = obj.setdefault("members", {})
+      existing = [members[h] for h in recipient.hosts if h in members]
+      pending_hosts = [h for h in recipient.hosts if h not in members or members[h].get("pending")]
+      if not pending_hosts:
         raise HTTPException(status_code=400, detail="They are already a member.")
-      invited_handle = body.address.strip().lstrip("@")
-      if "@" in invited_handle:
-        invited_handle = invited_handle.rsplit("@", 1)[0]
-      obj.setdefault("members", {})[peer] = {
-        "role": body.role,
-        "name": body.address.strip()[:MAX_LABEL_CHARS],
-        "handle": invited_handle[:MAX_LABEL_CHARS] if "." not in invited_handle else "",
-        "invited_at": time.time(),
-        "pending": True,
-      }
+      if any(m.get("role") != body.role for m in existing):
+        raise HTTPException(409, "They already have different permissions. Remove their access before changing the role.")
+      group_ids = {m["collaborator_id"] for m in existing if m.get("collaborator_id")}
+      if len(group_ids) > 1:
+        raise HTTPException(409, "These deployments have separate invitations. Remove their access before inviting them together.")
+      collaborator_id = (next(iter(group_ids), None) or uuid.uuid4().hex) if recipient.account_handle else None
+      invited_handle = recipient.account_handle or body.address.strip().lstrip("@").rsplit("@", 1)[0]
+      for peer in recipient.hosts:
+        if peer not in members:
+          members[peer] = {
+            "role": body.role,
+            "name": body.address.strip()[:MAX_LABEL_CHARS],
+            "handle": invited_handle[:MAX_LABEL_CHARS] if "." not in invited_handle else "",
+            "invited_at": time.time(),
+            "pending": True,
+          }
+        if collaborator_id:
+          members[peer]["collaborator_id"] = collaborator_id
       _save_object(obj)
       meta = {
-        "id": oid,
-        "app": obj["app"],
-        "kind": obj.get("kind") or "",
-        "label": obj.get("label") or "",
-        "role": body.role,
+        "id": oid, "app": obj["app"], "kind": obj.get("kind") or "",
+        "label": obj.get("label") or "", "role": body.role,
       }
+      public_members = _public_object(obj)["members"]
     identity = _load_identity()
-    envelope = {
-      "v": 0,
-      "type": "object_invitation",
-      "from": _own_host(),
-      "to": peer,
-      "object": meta,
-      "sent_at": time.time(),
+    limit = asyncio.Semaphore(4)
+    async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
+      async def deliver(peer):
+        async with limit:
+          envelope = {
+            "v": 0, "type": "object_invitation", "from": _own_host(),
+            "to": peer, "object": meta, "sent_at": time.time(),
+          }
+          envelope["sig"] = _sign(envelope, identity["private_key_b64"])
+          try:
+            response = await client.post(
+              f"{_peer_base_url(peer)}/api/common/objects/invitations/deliver",
+              json=envelope,
+            )
+            response.raise_for_status()
+          except httpx.HTTPError:
+            return {"host": peer, "delivery": "unreachable"}
+          return {"host": peer, "delivery": "delivered"}
+      deliveries = await asyncio.gather(*(deliver(peer) for peer in pending_hosts))
+    delivered = sum(d["delivery"] == "delivered" for d in deliveries)
+    delivery = "delivered" if delivered == len(deliveries) else "partial" if delivered else "unreachable"
+    return {
+      "status": "invited", "role": body.role, "delivery": delivery,
+      "recipients": deliveries, "members": public_members,
+      # Keep the established single-instance response for older app clients.
+      **({"host": recipient.hosts[0]} if len(recipient.hosts) == 1 else {}),
     }
-    envelope["sig"] = _sign(envelope, identity["private_key_b64"])
-    delivery = "delivered"
-    try:
-      async with httpx.AsyncClient(timeout=OUTBOUND_TIMEOUT_S) as client:
-        response = await client.post(
-          f"{_peer_base_url(peer)}/api/common/objects/invitations/deliver",
-          json=envelope,
-        )
-        response.raise_for_status()
-    except Exception:
-      delivery = "unreachable"
-    return {"status": "invited", "host": peer, "role": body.role, "delivery": delivery}
 
   # Capability-code fallback for someone you cannot address directly.
   ttl = body.ttl_seconds if body.ttl_seconds and body.ttl_seconds > 0 else INVITE_TTL_S
@@ -835,6 +863,7 @@ def get_members(
 async def revoke_member(
   oid: str,
   member_host: str,
+  all_deployments: bool = False,
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
@@ -850,10 +879,17 @@ async def revoke_member(
       raise HTTPException(status_code=400, detail="The host cannot revoke itself.")
     if member_host not in (obj.get("members") or {}):
       raise HTTPException(status_code=404, detail="No such member.")
-    obj["members"].pop(member_host, None)
-    _object_presence.pop((oid, member_host), None)
+    group = obj["members"][member_host].get("collaborator_id")
+    removed = [h for h, m in obj["members"].items()
+               if h == member_host or (all_deployments and group and m.get("collaborator_id") == group)]
+    for host in removed:
+      if host == _own_host():
+        raise HTTPException(status_code=400, detail="The host cannot revoke itself.")
+    for host in removed:
+      obj["members"].pop(host, None)
+      _object_presence.pop((oid, host), None)
     _save_object(obj)
-  return {"status": "revoked"}
+  return {"status": "revoked", "hosts": removed}
 
 
 @router.delete("/{oid}")
