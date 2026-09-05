@@ -8,6 +8,7 @@ clients can subscribe.  Provider env / auth wiring lives in
 """
 
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -95,14 +96,15 @@ from app.chat_writer import (
   ReconcileStartupChat,
   RecoverWedgedRun,
   ResolvePark,
-  RollbackAutoResume,
   StartContinuation,
+  StartContinuationAttached,
   StartContinuationBlocked,
   alloc_run_token,
   await_ack as _await_ack,
   cid_of,
   get_writer,
   next_message_ts as _next_message_ts,
+  recover_start_continuation,
   update_last_assistant_message as _update_last_assistant_message,
   wait_ack as _wait_ack,
 )
@@ -308,21 +310,11 @@ def bump_run_generation(chat_id: str) -> int:
   return registry.bump_generation(chat_id)
 
 
-def _parked_until_for_chat(
+def _latest_continuation_park(
   db: Session,
   chat_id: str,
-) -> datetime | None:
-  """Return the provider-park reset time when the chat's LATEST run is parked.
-
-  Latest-run-wins, deliberately: only the chat's most recent `chat_runs` row
-  counts, and only while it still reads ``status`` as ``parked`` or
-  ``resume_pending``. A fresh turn
-  on a previously-parked chat inserts a newer "running" row (and StartTurn /
-  PromotePending close the stale park via `_close_running_runs`), so an
-  orphaned park can never suppress recovery for the NEW live turn. Query
-  failures read as not-parked — recovery checks must never crash on this
-  probe.
-  """
+) -> models.ChatRun | None:
+  """Return the chat's latest run only while it owns continuation recovery."""
   try:
     # id.desc() is a deterministic tiebreak: two rows CAN share a started_at
     # (a park + the fresh run that superseded it within the same timestamp
@@ -343,12 +335,75 @@ def _parked_until_for_chat(
     )
   except Exception:
     return None
-  if run is None or run.status not in ("parked", "resume_pending"):
+  if run is None or run.status not in models.CONTINUATION_RUN_STATUSES:
+    return None
+  return run
+
+
+def _parked_until_for_chat(
+  db: Session,
+  chat_id: str,
+) -> datetime | None:
+  """Return the provider-park reset time when the chat's LATEST run is parked.
+
+  Latest-run-wins, deliberately: only the chat's most recent `chat_runs` row
+  counts, and only while it still reads ``status`` as ``parked`` or
+  ``resume_pending``. A fresh turn
+  on a previously-parked chat inserts a newer "running" row (and StartTurn /
+  PromotePending close the stale park via `_close_running_runs`), so an
+  orphaned park can never suppress recovery for the NEW live turn. Query
+  failures read as not-parked — recovery checks must never crash on this
+  probe.
+  """
+  run = _latest_continuation_park(db, chat_id)
+  if run is None:
     return None
   parked_until = run.parked_until
   if isinstance(parked_until, datetime):
     return parked_until
   return None
+
+
+def _future_auto_resuming_limit_park_for_chat(
+  db: Session,
+  chat_id: str,
+  *,
+  now: datetime | None = None,
+) -> models.ChatRun | None:
+  """Return a not-yet-due limit park that will consume owner messages.
+
+  Ordinary owner messages queue behind this exact run instead of silently
+  spending an early provider retry. The explicit recovery action bypasses the
+  hold after the owner has added credits or applied an account reset. Only a
+  park the ordinary reset sweep can actually resume qualifies: notify-only,
+  app-attributed, and app-queued work must keep the existing immediate-send
+  path rather than accepting input into a queue nobody owns.
+  """
+  run = _latest_continuation_park(db, chat_id)
+  if (
+    run is None
+    or run.park_reason not in {"usage_limit", "rate_limit"}
+    or not isinstance(run.parked_until, datetime)
+  ):
+    return None
+  try:
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+  except Exception:
+    return None
+  if (
+    chat is None
+    or not chat.auto_resume_on_limit
+    or run.initiated_by_app_id is not None
+    or _has_unanswered_question(chat)
+    or any(
+      isinstance(message, dict)
+      and message.get("_initiated_by_app_id") is not None
+      for message in list(chat.pending_messages or [])
+    )
+  ):
+    return None
+  current = now or datetime.now(UTC).replace(tzinfo=None)
+  return run if run.parked_until > current else None
 
 
 def _restart_manual_hold_for_chat(db: Session, chat_id: str) -> bool:
@@ -709,6 +764,26 @@ def reconcile_startup_chats(
         .first()
       )
       latest_id = latest[0] if latest is not None else None
+      # Durable coordinators reserve their writer slot before the actor
+      # atomically appends the continuation + ChatRun. Preserve the exact
+      # no-output Delegation/Wait/auto-resume orphan created by a crash after that
+      # commit but before asyncio task creation; its coordinator safely
+      # reschedules it.
+      # Ambiguous or partially executed attempts continue through ordinary
+      # interruption.
+      if len(running_runs) == 1:
+        from app.delegations import safe_parent_wake_startup_writer_orphan
+        from app.chat_waits import (
+          safe_startup_writer_orphan as safe_wait_startup_writer_orphan,
+        )
+        if (
+          safe_parent_wake_startup_writer_orphan(
+            db, chat, running_runs[0],
+          )
+          or safe_wait_startup_writer_orphan(db, chat, running_runs[0])
+          or safe_auto_resume_startup_orphan(db, chat, running_runs[0])
+        ):
+          continue
       restart_run = next((
         run for run in running_runs
         if (
@@ -723,16 +798,34 @@ def reconcile_startup_chats(
         and msg.get("_initiated_by_app_id") is not None
         for msg in pending
       )
-      restart_question_wait = bool(
+      delegated_restart_app_id = None
+      if (
         restart_run is not None
-        and restart_run.initiated_by_app_id is None
+        and restart_run.initiated_by_app_id is not None
+      ):
+        from app.delegations import restart_resume_app_id
+        delegated_restart_app_id = restart_resume_app_id(
+          db,
+          child_chat_id=chat.id,
+          run_token=restart_run.id,
+          initiated_by_app_id=restart_run.initiated_by_app_id,
+          restart_nonce=restart_authorization,
+        )
+      restart_identity_owned = bool(
+        restart_run is not None
+        and (
+          restart_run.initiated_by_app_id is None
+          or delegated_restart_app_id == restart_run.initiated_by_app_id
+        )
+      )
+      restart_question_wait = bool(
+        restart_identity_owned
         and chat.auto_resume_on_restart
         and not app_work_queued
         and _has_unanswered_question(chat)
       )
       restart_eligible = bool(
-        restart_run is not None
-        and restart_run.initiated_by_app_id is None
+        restart_identity_owned
         and chat.auto_resume_on_restart
         and not app_work_queued
         and not _has_unanswered_question(chat)
@@ -1132,6 +1225,24 @@ async def sweep_wedged_runs(db: Session) -> list[str]:
         async with chat_queue.get_lock(chat_id):
           if registry.is_alive(chat_id):
             continue
+          db.expire_all()
+          physical = db.query(models.ChatRun).filter(
+            models.ChatRun.id == run.id,
+            models.ChatRun.chat_id == chat_id,
+          ).first()
+          chat = db.query(models.Chat).filter(
+            models.Chat.id == chat_id,
+            models.Chat.deleted_at.is_(None),
+          ).first()
+          if physical is not None and chat is not None:
+            from app.delegations import safe_parent_wake_startup_writer_orphan
+            from app.chat_waits import safe_startup_writer_orphan
+            if (
+              safe_startup_writer_orphan(db, chat, physical)
+              or safe_parent_wake_startup_writer_orphan(db, chat, physical)
+              or safe_auto_resume_startup_orphan(db, chat, physical)
+            ):
+              continue
           # Identity-keyed on the wedged run's token: a fresh turn that raced in
           # owns a different token, so the actor no-ops.
           # Strict variant so a failed ack RAISES and is retried later.
@@ -1658,6 +1769,172 @@ def _has_unanswered_question(chat: models.Chat | None) -> bool:
   return chat is not None and chat.pending_question_id is not None
 
 
+_AUTO_RESUME_RUN_PREFIX = "auto-retry-"
+
+
+def _auto_resume_run_token(park_token: str) -> str:
+  """Stable physical identity for one exact park's successor."""
+  digest = hashlib.sha256(park_token.encode("utf-8")).hexdigest()[:48]
+  return f"{_AUTO_RESUME_RUN_PREFIX}{digest}"
+
+
+def _auto_resume_recovery(
+  db: Session,
+  chat: models.Chat | None,
+  physical: models.ChatRun | None,
+  *,
+  park_token: str | None = None,
+) -> tuple[models.ChatRun, dict] | None:
+  """Validate and reconstruct one exact committed automatic continuation.
+
+  This is the durable owner of the post-commit/pre-task crash boundary.  The
+  writer's causal envelope proves which transcript rows formed the provider
+  prompt; the original park and its coordinator policy prove that the same
+  bounded execution still owns a retry. Any cancellation, supersession,
+  partial output, or policy drift fails closed.
+  """
+  if chat is None or physical is None:
+    return None
+  messages = list(chat.messages or [])
+  source = messages[-1] if messages else None
+  recorded_park = (
+    source.get("_continuation_supersedes_run_token")
+    if isinstance(source, dict) else None
+  )
+  if not isinstance(recorded_park, str) or not recorded_park:
+    return None
+  if park_token is not None and recorded_park != park_token:
+    return None
+  if physical.id != _auto_resume_run_token(recorded_park):
+    return None
+  reason = source.get("continuation_reason")
+  park_reasons = (
+    ("restart",) if reason == "restart"
+    else ("usage_limit", "rate_limit") if reason == "usage_limit"
+    else (reason,) if reason in RESOURCE_PARK_REASONS
+    else ()
+  )
+  if not park_reasons:
+    return None
+  park = db.query(models.ChatRun).filter(
+    models.ChatRun.id == recorded_park,
+    models.ChatRun.chat_id == chat.id,
+    models.ChatRun.status == "completed",
+    models.ChatRun.park_reason.in_(park_reasons),
+  ).first()
+  latest = db.query(models.ChatRun.id).filter(
+    models.ChatRun.chat_id == chat.id,
+  ).order_by(
+    models.ChatRun.started_at.desc(), models.ChatRun.id.desc(),
+  ).first()
+  if (
+    park is None
+    or latest is None
+    or latest[0] != physical.id
+    or (physical.root_run_id or physical.id) != (park.root_run_id or park.id)
+  ):
+    return None
+  payload = recover_start_continuation(
+    db,
+    chat,
+    physical,
+    continuation_id=(
+      f"restart-resume-{recorded_park}"
+      if reason == "restart" else f"limit-resume-{recorded_park}"
+    ),
+    content="continue",
+    reason=reason,
+    supersedes_run_token=recorded_park,
+  )
+  if payload is None:
+    return None
+
+  if reason == "restart" or reason in RESOURCE_PARK_REASONS:
+    consumed = source.get("_continuation_consumed_cids")
+    expected_app_id = (
+      None if isinstance(consumed, list) and consumed
+      else park.initiated_by_app_id
+    )
+    if physical.initiated_by_app_id != expected_app_id:
+      return None
+    # Resource admission owns its own retry policy: once a storage/memory
+    # pause is due, it always continues. It must not inherit the provider-
+    # quota opt-in merely because both use the same deterministic successor.
+    if reason == "restart" and not chat.auto_resume_on_restart:
+      return None
+    return park, payload
+
+  if park.initiated_by_app_id is not None:
+    from app.delegations import limit_resume_successor_app_id
+    if limit_resume_successor_app_id(
+      db,
+      child_chat_id=chat.id,
+      parked_run_token=park.id,
+      successor_run_token=physical.id,
+      initiated_by_app_id=park.initiated_by_app_id,
+    ) != park.initiated_by_app_id:
+      return None
+  elif not chat.auto_resume_on_limit or physical.initiated_by_app_id is not None:
+    return None
+  return park, payload
+
+
+def safe_auto_resume_startup_orphan(
+  db: Session, chat: models.Chat, physical: models.ChatRun,
+) -> bool:
+  """Whether boot/wedge recovery must preserve an automatic continuation."""
+  return _auto_resume_recovery(db, chat, physical) is not None
+
+
+def _schedule_auto_resume_orphan_locked(
+  chat_id: str, park_token: str,
+) -> bool | None:
+  """Attach and schedule a committed automatic successor under lifecycle locks.
+
+  ``None`` means no deterministic successor exists yet. ``False`` means a row
+  exists but is no longer a safe automatic retry. ``True`` means the exact
+  attempt is already live or has just been rescheduled.
+  """
+  from app.database import SessionLocal
+
+  run_token = _auto_resume_run_token(park_token)
+  with SessionLocal() as db:
+    physical = db.query(models.ChatRun).filter(
+      models.ChatRun.id == run_token,
+      models.ChatRun.chat_id == chat_id,
+    ).first()
+    if physical is None:
+      return None
+    chat = db.query(models.Chat).filter(
+      models.Chat.id == chat_id,
+      models.Chat.deleted_at.is_(None),
+    ).first()
+    recovered = _auto_resume_recovery(
+      db, chat, physical, park_token=park_token,
+    )
+    if recovered is None:
+      return False
+    _park, payload = recovered
+    provider = payload["provider"]
+  if is_chat_running(chat_id):
+    return True
+  if not mark_starting(chat_id):
+    return False
+  get_system_broadcast().publish({
+    "type": "chat_run_started",
+    "chatId": chat_id,
+  })
+  scheduled = _schedule_continuation(
+    chat_id=chat_id,
+    messages=payload["history"],
+    session_id=payload["session_id"],
+    provider_id=provider,
+    next_user=payload["promoted"],
+    run_token=run_token,
+  )
+  return scheduled is not False
+
+
 async def _auto_resume_chat(
   chat_id: str, park_token: str | None = None,
   *,
@@ -1667,31 +1944,12 @@ async def _auto_resume_chat(
 ) -> bool:
   """Start one continuation for an eligible due park.
 
-  The policy-enabled half of design §2.4 — mirrors the stale-pending drain in
-  chats_stream.send_message (the same claim → append → promote → schedule
-  sequence), minus the HTTP request:
-
-    - `mark_starting` claims the chat; a concurrent owner send (or another
-      sweep tick) that got there first makes this a no-op — never two turns.
-    - The synthetic "continue" lands in `pending_messages` via the actor's
-      AppendPending, exactly the message the one-tap Resume button sends, so
-      the agent sees the same instruction either way. It is appended BEHIND
-      any queue preserved by the limit park, and the promote combines the
-      whole queue into ONE continuation turn — the preserved sends run, in
-      order, with "continue" trailing; no per-message limit storm.
-    - `promote_pending_messages` (self-locking) moves the queue into the
-      transcript and sets the run marker under a fresh run token;
-      `_schedule_continuation` spawns the runner (its precondition — caller
-      holds _starting and the promote landed — is satisfied here) and owns
-      the failure path (releases _starting, leaves the marker for
-      reconciliation).
-
-  A reported task-creation failure is rolled back below using the exact
-  pre-promote rows returned by PromotePending. One crash boundary remains by
-  design: SIGKILL after that promote commits but before task creation loses the
-  in-memory rollback payload. Boot reconciliation then marks the promoted turn
-  interrupted/resumable for manual recovery; automatic retry across that
-  window requires a durable predecessor/payload link and is not claimed here.
+  The writer atomically consumes the pending head group, appends the synthetic
+  continuation, completes the exact parked attempt, and inserts a deterministic
+  successor. A cancellation or owner send that wins the same transition first
+  makes that compare-and-swap a no-op. If the process dies after the commit but
+  before task creation, the persisted causal envelope reconstructs the exact
+  provider prompt and this same owner reschedules the same physical run.
 
   Re-park-on-re-hit is automatic: the resumed turn is an ordinary turn, so
   if it dies on the limit again it parks again with a fresh reset time.
@@ -1717,6 +1975,11 @@ async def _auto_resume_chat(
         # set that was already live together before the restart, so each chat
         # may reclaim its own slot independently.
         async with chat_queue.get_lock(chat_id):
+          attached = _schedule_auto_resume_orphan_locked(
+            chat_id, park_token or "",
+          ) if park_token else None
+          if attached is not None:
+            return attached
           with SessionLocal() as check_db:
             chat = check_db.query(models.Chat).filter(
               models.Chat.id == chat_id,
@@ -1740,6 +2003,15 @@ async def _auto_resume_chat(
             restart_park = (
               park is not None and park.park_reason == "restart"
             )
+            delegation_resume_app_id = None
+            if park is not None and not restart_park:
+              from app.delegations import limit_resume_app_id
+              delegation_resume_app_id = limit_resume_app_id(
+                check_db,
+                child_chat_id=chat_id,
+                run_token=park.id,
+                initiated_by_app_id=park.initiated_by_app_id,
+              )
             restart_authorized = True
             if restart_park:
               if restart_authorization is _RESTART_AUTHORIZATION_UNSET:
@@ -1753,7 +2025,11 @@ async def _auto_resume_chat(
                 and accepted_nonce == park.restart_nonce
               )
             policy_enabled = bool(
-              chat is not None and _park_continues_automatically(chat, park)
+              chat is not None
+              and (
+                _park_continues_automatically(chat, park)
+                or delegation_resume_app_id is not None
+              )
             )
             if (
               chat is None
@@ -1763,13 +2039,14 @@ async def _auto_resume_chat(
               or _has_unanswered_question(chat)
               or park is None
               or park.status != "resume_pending"
-              # Provider-limit retries remain owner-only. A planned restart
-              # instead restores the exact authenticated turn and carries its
-              # app attribution into the synthetic continuation below.
+              # Generic app work stays manual. A planned restart restores its
+              # exact authenticated turn; a live Delegation keeps the already-
+              # approved bounded app identity.
               or (
                 park.initiated_by_app_id is not None
                 and not restart_park
                 and park.park_reason not in RESOURCE_PARK_REASONS
+                and delegation_resume_app_id is None
               )
               or latest_id != park.id
               or any(
@@ -1786,84 +2063,57 @@ async def _auto_resume_chat(
               if park.park_reason in RESOURCE_PARK_REASONS
               else "usage_limit"
             )
-            resume_app_id = (
-              # A real owner follow-up already waiting behind an app-owned
-              # turn takes ownership of the resumed turn. This matches normal
-              # pending promotion, where the first queued row owns attribution.
-              park.initiated_by_app_id
-              if (
-                (restart_park or park.park_reason in RESOURCE_PARK_REASONS)
-                and not pending
-              ) else None
-            )
+            # A real owner follow-up waiting behind a restart or resource park
+            # takes ownership through normal pending promotion. A provider-
+            # limit continuation retains only a verified Delegation identity.
+            if (
+              (restart_park or park.park_reason in RESOURCE_PARK_REASONS)
+              and not pending
+            ):
+              resume_app_id = park.initiated_by_app_id
+            elif park.park_reason not in RESOURCE_PARK_REASONS:
+              resume_app_id = delegation_resume_app_id
+            else:
+              resume_app_id = None
           if not mark_starting(chat_id):
             return False
           claimed = True
-          drain_token = alloc_run_token()
+          drain_token = _auto_resume_run_token(park.id)
           continuation_cid = (
             f"restart-resume-{park_token or chat_id}"
             if resume_reason == "restart"
             else f"limit-resume-{park_token or chat_id}"
           )
-          if restart_park:
-            promoted = await _await_ack(get_writer().submit(
-              StartContinuation(
-                chat_id=chat_id,
-                run_token=drain_token,
-                root_run_id=park.root_run_id or park.id,
-                content="continue",
-                cid=continuation_cid,
-                reason=resume_reason,
-                initiated_by_app_id=resume_app_id,
-                supersedes_run_token=park.id,
-                consume_pending=True,
-              )
-            ))
-            if isinstance(promoted, StartContinuationBlocked):
-              discard_starting(chat_id)
-              claimed = False
-              return False
-            next_messages = promoted["history"]
-            next_user = promoted["promoted"]
-            next_session_id = promoted["session_id"]
-          else:
-            # Provider-limit recovery stays retryable if task creation fails.
-            # Its existing queue rollback owns that paid-usage policy; planned
-            # restarts use the atomic continuation above and never expose the
-            # synthetic control marker as pending UI.
-            await _await_ack(get_writer().submit(
-              AppendPending(
-                chat_id=chat_id,
-                run_token="",
-                user_msg={
-                  "role": "user",
-                  "content": "continue",
-                  "ts": int(time.time() * 1000),
-                  "kind": "continuation",
-                  "continuation_reason": resume_reason,
-                  "cid": continuation_cid,
-                },
-                initiated_by_app_id=resume_app_id,
-              )
-            ))
-            try:
-              next_messages, next_user, next_session_id = (
-                await chat_queue.promote_pending_messages_locked(
-                  None, chat_id, drain_token,
-                )
-              )
-            except chat_queue.PendingQuestionBlocksPromotion:
-              # A question committed between the locked preflight and the
-              # actor transition. Remove only this synthetic retry marker;
-              # real queued owner/product rows stay behind the question.
-              await _await_ack(get_writer().submit(CancelPending(
-                chat_id=chat_id,
-                run_token="",
-                cid=continuation_cid,
-              )))
-              discard_starting(chat_id)
-              claimed = False
-              return False
+          promoted = await _await_ack(get_writer().submit(
+            StartContinuation(
+              chat_id=chat_id,
+              run_token=drain_token,
+              root_run_id=park.root_run_id or park.id,
+              content="continue",
+              cid=continuation_cid,
+              reason=resume_reason,
+              initiated_by_app_id=resume_app_id,
+              supersedes_run_token=park.id,
+              consume_pending=True,
+            )
+          ))
+          if isinstance(promoted, StartContinuationAttached):
+            # Another process committed the same deterministic successor
+            # after our preflight. Release this process-local claim, then
+            # attach through the same durable reconstruction path.
+            discard_starting(chat_id)
+            claimed = False
+            attached = _schedule_auto_resume_orphan_locked(
+              chat_id, park.id,
+            )
+            return bool(attached)
+          if isinstance(promoted, StartContinuationBlocked):
+            discard_starting(chat_id)
+            claimed = False
+            return False
+          next_messages = promoted["history"]
+          next_user = promoted["promoted"]
+          next_session_id = promoted["session_id"]
           if not next_user:
             discard_starting(chat_id)
             claimed = False
@@ -1881,22 +2131,6 @@ async def _auto_resume_chat(
             run_token=drain_token,
           )
           if scheduled is False:
-            if not restart_park:
-              # PromotePending committed before task creation. Reverse only
-              # this paid-limit handoff so the later sweep can retry it.
-              rolled_back = await _await_ack(get_writer().submit(
-                RollbackAutoResume(
-                  chat_id=chat_id,
-                  run_token=park_token or "",
-                  promoted_run_token=drain_token,
-                  promoted_pending=list(
-                    next_user.get("_promoted_pending") or []
-                  ),
-                  retry_park=True,
-                )
-              ))
-              if rolled_back:
-                forget_chat(chat_id)
             claimed = False
             return False
           return True
@@ -1926,21 +2160,21 @@ async def sweep_reset_parks(
   the event loop or produce an unbounded burst of database work. For each row:
 
     - Notify-only parks resolve first, then send one best-effort notification.
-    - Auto-resume parks first become ``resume_pending``. That durable
-      state suppresses duplicate notifications but remains sweepable until a
-      continuation is actually scheduled; a race or reported task-creation
-      failure cannot silently consume the promised continuation. The narrow
-      post-promote SIGKILL boundary is documented on `_auto_resume_chat`.
+    - Auto-resume parks first become ``resume_pending``. The writer then
+      atomically replaces the exact park with a deterministic continuation.
+      A task-creation failure or process death leaves that successor as the
+      durable recovery owner; this sweep reconstructs and reschedules it.
     - A park whose chat was deleted resolves silently.
     - Auto-resume is controlled per chat. Provider-limit retries are staggered:
       at most one starts per sweep and launches are spaced even when unrelated
-      chats are live. App-attributed provider-limit runs never auto-resume.
-      Planned-restart continuations reclaim the exact set that was already live
-      before the restart and preserve each run's attribution. A pass launches a
-      small restart batch, then the supervisor promptly drains the durable
-      remainder without waiting for those turns to finish. A staggered enabled
-      chat stays pending while notify-only chats in the same due batch still
-      resolve normally.
+      chats are live. Generic app-attributed provider-limit runs never
+      auto-resume; an exact active Delegation may resume under its original app
+      identity after ownership is re-verified. Planned-restart continuations
+      reclaim the exact set that was already live before the restart and
+      preserve each run's attribution. A pass launches a small restart batch,
+      then the supervisor promptly drains the durable remainder without waiting
+      for those turns to finish. A staggered enabled chat stays pending while
+      notify-only chats in the same due batch still resolve normally.
       App-attributed messages newly queued behind either kind of park still
       require an ordinary app-owned handoff rather than being swept into the
       synthetic continuation.
@@ -1954,6 +2188,62 @@ async def sweep_reset_parks(
   if draining:
     return ContinuationSweepResult()
   now = datetime.now(UTC).replace(tzinfo=None)
+  limit_resume_started = False
+  restart_resume_started = 0
+  # A deterministic successor may already own the work when the previous
+  # process died after the writer commit but before task creation. Recover it
+  # before scanning parks: its predecessor is intentionally completed, so it
+  # no longer appears in the ordinary due-park query below.
+  try:
+    orphan_candidates = (
+      db.query(models.ChatRun)
+      .join(models.Chat, models.Chat.id == models.ChatRun.chat_id)
+      .filter(models.ChatRun.status == "running")
+      .filter(models.ChatRun.id.like(f"{_AUTO_RESUME_RUN_PREFIX}%"))
+      .filter(models.Chat.deleted_at.is_(None))
+      .order_by(models.ChatRun.started_at.asc(), models.ChatRun.id.asc())
+      .limit(CONTINUATION_SWEEP_BATCH_SIZE)
+      .all()
+    )
+  except Exception:
+    log.exception("sweep_reset_parks: orphan query failed")
+    orphan_candidates = []
+  for physical in orphan_candidates:
+    if is_chat_running(physical.chat_id):
+      continue
+    chat = db.query(models.Chat).filter(
+      models.Chat.id == physical.chat_id,
+      models.Chat.deleted_at.is_(None),
+    ).first()
+    recovered = _auto_resume_recovery(db, chat, physical)
+    if recovered is None:
+      continue
+    park, _payload = recovered
+    restart_orphan = park.park_reason == "restart"
+    if restart_orphan:
+      if restart_resume_started >= RESTART_AUTO_RESUME_BATCH_SIZE:
+        restart_deferred = True
+        continue
+    elif limit_resume_started or not _claim_limit_auto_resume_slot():
+      continue
+    try:
+      started = await _auto_resume_chat(
+        physical.chat_id, park_token=park.id,
+      )
+    except Exception:
+      log.warning(
+        "sweep_reset_parks: orphan resume failed chat_id=%s run_token=%s",
+        physical.chat_id,
+        physical.id,
+        exc_info=True,
+      )
+      continue
+    if started:
+      resolved.append(physical.chat_id)
+      if restart_orphan:
+        restart_resume_started += 1
+      else:
+        limit_resume_started = True
   try:
     due = (
       db.query(models.ChatRun)
@@ -1966,9 +2256,9 @@ async def sweep_reset_parks(
     )
   except Exception:
     log.exception("sweep_reset_parks: query failed")
-    return ContinuationSweepResult()
+    return ContinuationSweepResult(tuple(resolved))
   if not due:
-    return ContinuationSweepResult()
+    return ContinuationSweepResult(tuple(resolved))
   chat_ids = {run.chat_id for run in due}
   try:
     chats = {
@@ -2018,17 +2308,30 @@ async def sweep_reset_parks(
     if chat is None or chat.deleted_at is not None:
       return "chat unavailable"
     restart_park = run.park_reason == "restart"
+    delegation_resume_app_id = None
+    if not restart_park:
+      from app.delegations import limit_resume_app_id
+      delegation_resume_app_id = limit_resume_app_id(
+        db,
+        child_chat_id=run.chat_id,
+        run_token=run.id,
+        initiated_by_app_id=run.initiated_by_app_id,
+      )
     if app_work_queued:
       return "app-attributed work"
     if (
       run.initiated_by_app_id is not None
       and not restart_park
       and run.park_reason not in RESOURCE_PARK_REASONS
+      and delegation_resume_app_id is None
     ):
       return "app-attributed work"
     if _has_unanswered_question(chat):
       return "waiting for an answer"
-    policy_enabled = _park_continues_automatically(chat, run)
+    policy_enabled = bool(
+      _park_continues_automatically(chat, run)
+      or delegation_resume_app_id is not None
+    )
     if not policy_enabled:
       return "policy disabled"
     if restart_park and not (
@@ -2042,8 +2345,6 @@ async def sweep_reset_parks(
   def wants_auto_resume(chat, run) -> bool:
     return auto_resume_rejection(chat, run) is None
 
-  limit_resume_started = False
-  restart_resume_started = 0
   for run in due:
     chat_id = run.chat_id
     chat = chats.get(chat_id)
@@ -2136,12 +2437,9 @@ async def sweep_reset_parks(
         else:
           limit_resume_started = True
       elif restart_auto_resume:
-        # The atomic restart handoff may already have opened a durable running
-        # continuation before task creation failed. It deliberately leaves no
-        # pending control row to retry; startup reconciliation (or the owner's
-        # next send) recovers that exact opened run. If the handoff was blocked
-        # before it committed, the original resume_pending park remains due and
-        # the supervisor should sweep it again.
+        # A planned-restart continuation retains its existing conservative
+        # recovery policy. If the actor was blocked, the exact park remains
+        # due; if the handoff committed, startup reconciliation owns it.
         db.expire_all()
         still_parked = db.query(models.ChatRun.id).filter(
           models.ChatRun.id == run.id,
@@ -2595,7 +2893,9 @@ def _schedule_continuation(
   allocated one (the turn-end drain, where `PromotePending` set the run
   marker under that token), it is passed in so the runner reuses it;
   otherwise one is allocated here so the runner still keys on a non-None
-  token.
+  token. A promoted product result carries the actor-selected deterministic
+  token in ``next_user._run_token``; that durable identity supersedes the
+  caller's provisional allocation at this final scheduling seam.
 
   Precondition: the caller already holds the 'starting' claim for
   this chat. Two paths satisfy that:
@@ -2618,6 +2918,9 @@ def _schedule_continuation(
   log = _get_logger()
   bc = None
   coro = None
+  persisted_run_token = next_user.get("_run_token")
+  if isinstance(persisted_run_token, str) and persisted_run_token:
+    run_token = persisted_run_token
   if run_token is None:
     run_token = alloc_run_token()
   try:
@@ -2643,6 +2946,19 @@ def _schedule_continuation(
     asyncio.create_task(coro)
     # Task owns the coroutine now — don't close it in the except.
     coro = None
+    try:
+      from app.chat_waits import claim_scheduled_wait_result
+      from app.delegations import claim_scheduled_parent_wake
+
+      claim_scheduled_wait_result(chat_id, next_user)
+      claim_scheduled_parent_wake(chat_id, next_user)
+    except Exception:
+      # The deterministic running row remains the recovery owner if this
+      # second transaction fails. Product sweeps retry the still-open latch.
+      log.warning(
+        "scheduled product-result latch failed chat_id=%s run_token=%s",
+        chat_id, run_token, exc_info=True,
+      )
     return True
   except Exception as exc:
     log.exception(
@@ -2729,6 +3045,133 @@ async def _drain_and_release(
     ending_run_token=ending_run_token,
     ending_status=ending_status,
   )
+
+
+def _goal_handoff_is_owned(
+  db: Session,
+  chat_id: str,
+  goal_id: str,
+  sink: "_ChatEventSink | None" = None,
+) -> bool:
+  """Whether a durable actor already owns an unfinished Goal's next move."""
+  chat = (
+    db.query(
+      models.Chat.pending_messages,
+      models.Chat.pending_question_id,
+    )
+    .filter(models.Chat.id == chat_id)
+    .first()
+  )
+  if chat is None:
+    return True
+  if chat.pending_question_id is not None:
+    return True
+  # A pending row owns this handoff only when it will actually resume the same
+  # Goal. Ordinary owner prose deliberately opens a fresh logical root; it can
+  # run first, but it must not suppress the bounded corrective continuation
+  # that remains responsible for the unfinished Goal.
+  for pending in chat.pending_messages or []:
+    if not isinstance(pending, Mapping):
+      continue
+    _objective, pending_goal_id = run_state.goal_identity_for_run_start(
+      db, chat_id, pending,
+    )
+    if pending_goal_id == goal_id:
+      return True
+  if questions.is_waiting(chat_id):
+    return True
+  if sink is not None and any(
+    isinstance(block, dict)
+    and block.get("type") == "question"
+    and not block.get("answers")
+    for block in sink.assistant_blocks
+  ):
+    return True
+
+  from app.chat_waits import armed_waits_for_chat
+  wait_run_ids = {
+    wait.created_by_run_id
+    for wait in armed_waits_for_chat(db, chat_id)
+    if wait.created_by_run_id
+  }
+  if wait_run_ids and db.query(models.ChatRun.id).filter(
+    models.ChatRun.id.in_(wait_run_ids),
+    models.ChatRun.goal_id == goal_id,
+  ).first() is not None:
+    return True
+  from app.delegations import background_helper_goal_ids
+  return goal_id in background_helper_goal_ids(db, chat_id)
+
+
+def _prepare_goal_handoff(
+  db: Session,
+  chat_id: str,
+  ending_run_token: str,
+  sink: "_ChatEventSink",
+) -> run_state.GoalSettlementTarget | None:
+  """Return a correction target, or persistently mark an exhausted handoff."""
+  target = run_state.goal_settlement_target(db, chat_id, ending_run_token)
+  if target is None or _goal_handoff_is_owned(
+    db, chat_id, target.goal_id, sink,
+  ):
+    return None
+  if target.retry_allowed:
+    return target
+  sink.publish(_pause_note(
+    "This Goal paused repeatedly without a visible owner for the next "
+    "action. Resume it to continue; before pausing again, use a question "
+    "card, a durable wait, or a wake-enabled helper."
+  ))
+  return None
+
+
+async def _maybe_enqueue_goal_handoff(
+  db: Session,
+  chat_id: str,
+  ending_run_token: str,
+  target: run_state.GoalSettlementTarget,
+  sink: "_ChatEventSink | None" = None,
+) -> None:
+  """Queue one corrective turn when an unfinished Goal has no next owner.
+
+  The marker flows through the ordinary append/drain/promote path, so it gains
+  the same durable run identity and recovery semantics as every continuation.
+  Re-checking ownership immediately before append lets a real queued message,
+  question, wait, or waking helper that arrived during finalization win.
+  """
+  if _goal_handoff_is_owned(db, chat_id, target.goal_id, sink):
+    return
+  current = run_state.goal_settlement_target(db, chat_id, ending_run_token)
+  if (
+    current is None
+    or current.goal_id != target.goal_id
+    or not current.retry_allowed
+  ):
+    return
+  await _await_ack(get_writer().submit(
+    AppendPending(
+      chat_id=chat_id,
+      run_token="",
+      user_msg={
+        "role": "user",
+        "content": (
+          "This Goal is still unfinished, but the last turn ended without "
+          "assigning who or what will advance it. Continue the work now. "
+          "Before ending again, either complete or update the Goal, ask "
+          "through the clarifying-question tool if only the partner can act, "
+          "declare a durable wait for an observable external condition, or "
+          "leave a wake-enabled helper as the next owner. Do not stop on a "
+          "prose-only request for user action."
+        ),
+        "ts": int(time.time() * 1000),
+        "kind": "continuation",
+        "continuation_reason": run_state.GOAL_HANDOFF_REASON,
+        "goal_id": target.goal_id,
+        # One correction per finishing run; an ambiguous retry cannot double-send.
+        "cid": f"goal-handoff-{ending_run_token}",
+      },
+    )
+  ))
 
 
 _BROWSER_CLOSE_CREATE_TIMEOUT = 5.0
@@ -3262,6 +3705,21 @@ def _limit_exit(
   else:
     limit = _is_limit_error_text(error_text)
   if not limit:
+    if runner_result is not None and runner_result.get("resume_incomplete"):
+      # A steer's soft interrupt raced turn-end (its text already re-queried and
+      # drained pending_steer), or the CLI interrupted unexpectedly, so the turn
+      # ended with no answer. This is NOT a failure: render a calm, resumable
+      # "Paused" note — the owner taps Resume to continue — instead of a red
+      # "Execution interrupted." error block. The runner already defused the
+      # provider error to None (stop_reason=="interrupt" is always our own
+      # interrupt); an owner Stop writes its own resumable note through the stop
+      # flow and never sets `resume_incomplete`, so this branch is steer-only.
+      sink.publish(_pause_note(
+        "This turn was interrupted before it finished. Tap Resume to continue.",
+        kind="interrupted",
+        resumable=True,
+      ))
+      return {"limit_reached": False}
     if error_text:
       sink.publish({"type": "error", "message": error_text})
     elif runner_result is None:
@@ -3412,6 +3870,24 @@ async def _complete_turn(
     db.close()
     return chat_queue.TerminalDisposition.STALE_NO_ACTION
 
+  # A platform-promoted Goal has no provider-native stop hook. Before a clean
+  # turn can settle, require a truthful next owner: a queued message, an open
+  # question, a durable monitor, or a wake-enabled helper. With no owner, one
+  # progress-bounded corrective continuation gets queued after finalization.
+  # If the agent repeats the unowned handoff without plan progress, publish a
+  # resumable failure NOW so the same terminal snapshot makes the stop visible
+  # and durable rather than leaving the Goal looking benignly paused.
+  goal_handoff_target = None
+  if (
+    we_own_gen
+    and not stop_handoff_successor
+    and not limit_reached
+    and not sink._last_error
+  ):
+    goal_handoff_target = _prepare_goal_handoff(
+      db, chat_id, sink.run_token or "", sink,
+    )
+
   # Lost-reply backstop (defense-in-depth behind the runner-side fixes). A
   # normally-owned run that reached a CLEAN provider terminal (no error, no
   # limit/park) yet produced ZERO renderable content is a genuine dropped reply
@@ -3545,6 +4021,16 @@ async def _complete_turn(
       await _close_browser_session(chat_id)
     db.close()
     return chat_queue.TerminalDisposition.LIMIT_PARKED
+  # A clean, unfinished auto-promoted Goal with no durable owner gets its one
+  # bounded correction through the same queue path as every other continuation.
+  if ending_status == "completed" and goal_handoff_target is not None:
+    await _maybe_enqueue_goal_handoff(
+      db,
+      chat_id,
+      sink.run_token or "",
+      goal_handoff_target,
+      sink,
+    )
   # The continuation is a fresh turn — give it its own run_token. The
   # turn-end drain's PromotePending sets the next turn's run marker under
   # this token, and _schedule_continuation hands the SAME token to the
@@ -4388,7 +4874,8 @@ async def _run_chat_impl_with_db(
   raw_user_message = messages[-1].content
   user_message = raw_user_message
   goal_objective = _goal_objective(raw_user_message)
-  goal_mode = _chat_has_goal_intent(messages)
+  historical_goal_mode = _chat_has_goal_intent(messages)
+  goal_mode = historical_goal_mode
   clear_dismissed_provider_goal = (
     run_state.latest_provider_goal_is_dismissed(db, chat_id)
     if chat_id else False
@@ -4430,6 +4917,17 @@ async def _run_chat_impl_with_db(
   if run_token is None:
     run_token = alloc_run_token()
 
+  # The writer commits the exact ChatRun before provider launch.  Its Goal
+  # identity, not a historical `/goal` anywhere in the transcript, decides
+  # whether this physical turn may resume Codex's native Goal operation.
+  # Otherwise an unrelated question after a paused/stopped Goal can be steered
+  # into that old operation even though the platform correctly opened an
+  # ordinary run.
+  if chat_id:
+    goal_mode = _run_owns_active_goal(
+      db, chat_id=chat_id, run_token=run_token,
+    )
+
   app_context_block = ""
   app_context_env: dict[str, str] = {}
   chat_row = None
@@ -4468,6 +4966,7 @@ async def _run_chat_impl_with_db(
     goal_objective = None
     clear_dismissed_provider_goal = False
     goal_mode = False
+    historical_goal_mode = False
     goal_continue = False
     is_slash_command = False
 
@@ -4481,7 +4980,7 @@ async def _run_chat_impl_with_db(
     _latest_goal_objective(messages)
     if (
       goal_continue
-      and goal_mode
+      and historical_goal_mode
       and goal_objective is None
       and _goal_resume_requested(chat_row, raw_user_message)
     )
@@ -4621,6 +5120,19 @@ async def _run_chat_impl_with_db(
         user_message = f"{user_message}\n\n{delegation_context}"
       else:
         user_message = f"{delegation_context}\n\n{user_message}"
+
+  # Waiting is not a lock: owner messages do not cancel an armed condition.
+  # Only the top-level chat owns durable waits; delegated children return any
+  # future condition to this parent instead. A result that lands after this
+  # snapshot queues behind the live turn rather than mutating its request.
+  if run_policy is None and chat_id:
+    from app.chat_waits import build_active_waits_context
+    waits_context = build_active_waits_context(db, chat_id)
+    if waits_context:
+      if is_slash_command:
+        user_message = f"{user_message}\n\n{waits_context}"
+      else:
+        user_message = f"{waits_context}\n\n{user_message}"
 
   # Per-turn time context (EVERY turn, not just the first) so the agent has a
   # clock + a sense of recency (how long since the user last wrote). Prepended

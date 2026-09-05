@@ -13,6 +13,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.deps import (
   Principal, get_current_owner_or_app, get_principal, reject_cross_site,
+  require_nondelegated_owner_control,
 )
 from app.manifest_contract import ManifestContractError, validate_cron_expr
 from app.resource_access import live_app_or_404
@@ -399,6 +400,7 @@ def run_app_job(
   check on the icon-write route above.
   """
   from datetime import UTC, datetime
+  require_nondelegated_owner_control(principal)
   if principal.app_id is not None and principal.app_id != app_id:
     raise HTTPException(
       status_code=403,
@@ -489,6 +491,7 @@ def update_app_schedule(
   The scaffold writes both the live crontab and durable init-cron.sh so
   the change survives container restarts.
   """
+  require_nondelegated_owner_control(principal)
   if principal.app_id is not None and principal.app_id != app_id:
     raise HTTPException(
       status_code=403,

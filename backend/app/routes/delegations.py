@@ -20,12 +20,15 @@ from app.delegations import (
   ACTIVE_DELEGATION_STATUSES,
   DelegationIntent,
   cancel_delegation_execution,
+  claim_inline_delegation_observation,
   create_or_attach_delegation,
   derived_status,
   ensure_delegation_started,
   MAX_DELEGATION_DEPTH,
   normalize_cwd,
   parent_root_run_id,
+  publish_parent_waiting_changed,
+  retry_limit_park,
   serialize_delegation,
 )
 from app.deps import Principal, get_delegation_principal, reject_cross_site
@@ -214,7 +217,7 @@ async def submit_or_attach(
       detail="The selected model does not belong to that provider.",
     )
   try:
-    cwd = normalize_cwd(body.cwd)
+    requested_cwd = normalize_cwd(body.cwd) if body.cwd is not None else None
   except ValueError as exc:
     raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -242,6 +245,20 @@ async def submit_or_attach(
         status_code=409,
         detail="Delegation requires an active parent chat run.",
       )
+    existing = db.query(models.Delegation).filter(
+      models.Delegation.parent_root_run_id == root_id,
+      models.Delegation.task_key == body.task_key,
+    ).first()
+    # Omitted cwd means "attach wherever this exact task already runs". This
+    # preserves legacy rows created when older helpers materialized their shell
+    # cwd, while a new task still gets the platform's stable /data default.
+    # An explicit cwd remains immutable and is checked below with every other
+    # task-defining field.
+    cwd = (
+      existing.cwd
+      if requested_cwd is None and existing is not None
+      else requested_cwd or normalize_cwd(None)
+    )
     intent = DelegationIntent(
       app_id=body.app_id,
       parent_chat_id=parent.id,
@@ -266,10 +283,29 @@ async def submit_or_attach(
         ),
       ) from exc
 
+    observation_mode = (
+      claim_inline_delegation_observation(db, row)
+      if attached and not body.notify_parent_on_complete
+      else (
+        "parent_wake" if row.notify_parent_on_complete else "inline"
+      )
+    )
+
     await _ensure_started(db, row, body.prompt)
     from app.goal_plans import publish_plan_for_delegation
     publish_plan_for_delegation(db, row)
-  payload = serialize_delegation(db, row)
+    publish_parent_waiting_changed(row.parent_chat_id)
+  # A blocking observer that lost to an already-durable parent wake must not
+  # receive the same result inline. The response remains a successful attach
+  # and names the winning observation channel explicitly.
+  payload = serialize_delegation(
+    db,
+    row,
+    include_result=(
+      not body.notify_parent_on_complete and observation_mode == "inline"
+    ),
+  )
+  payload["observation_mode"] = observation_mode
   payload["attached"] = attached
   return payload
 
@@ -359,6 +395,36 @@ def get_delegation(
   if include_history:
     child = db.query(models.Chat).filter(models.Chat.id == row.child_chat_id).first()
     payload["history"] = list(child.messages or []) if child is not None else []
+  return payload
+
+
+class DelegationRetry(BaseModel):
+  run_token: str = Field(min_length=1, max_length=128)
+
+
+@router.post(
+  "/{delegation_id}/retry",
+  dependencies=[Depends(reject_cross_site)],
+)
+async def retry_delegation(
+  delegation_id: str,
+  body: DelegationRetry,
+  principal: Principal = Depends(get_delegation_principal),
+  db: Session = Depends(get_db),
+):
+  """Try one exact quota-paused child after credits or a manual reset.
+
+  The physical run token is a compare-and-swap boundary: an HTTP replay may
+  observe the already-started replacement, but can never spend another retry
+  against a newer park.
+  """
+  row = _row_for_principal(db, delegation_id, principal)
+  started = await retry_limit_park(db, row, run_token=body.run_token)
+  db.rollback()
+  row = _row_for_principal(db, delegation_id, principal)
+  payload = serialize_delegation(db, row)
+  payload["retry_started"] = started
+  publish_parent_waiting_changed(row.parent_chat_id)
   return payload
 
 

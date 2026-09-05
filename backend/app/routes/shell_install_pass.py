@@ -10,7 +10,9 @@ from sqlalchemy.orm import Session
 from app import auth, models
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_owner, reject_cross_site
+from app.deps import (
+  get_current_owner_for_lifecycle_control, reject_cross_site,
+)
 from app.shell_install_pass import (
   COOKIE_NAME,
   COOKIE_PATH,
@@ -45,7 +47,7 @@ def _failure() -> JSONResponse:
   dependencies=[Depends(reject_cross_site)],
 )
 def prepare_shell_install_pass(
-  owner: models.Owner = Depends(get_current_owner),
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Prepare the owner session iOS copies into a new Home Screen shell."""
@@ -92,7 +94,7 @@ def prepare_shell_install_pass(
   dependencies=[Depends(reject_cross_site)],
 )
 def revoke_shell_install_passes(
-  owner: models.Owner = Depends(get_current_owner),
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Revoke copied-but-unspent shell handoffs before explicit sign-out."""

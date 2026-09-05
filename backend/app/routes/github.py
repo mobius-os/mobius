@@ -207,6 +207,8 @@ from app.deps import (
   get_principal,
   get_owner_or_app_with_github_access,
   get_owner_or_app_with_github_connect,
+  require_nondelegated_owner_control,
+  require_nondelegated_owner_or_app_control,
   reject_cross_site,
 )
 from app.push import notify_owner
@@ -1632,7 +1634,10 @@ async def reconcile_attached_contribution_work(
 @router.post(
   "/contributions/{app_id}/for-chat/{chat_id}/work",
   status_code=202,
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
 )
 @_limiter.limit("20/minute")
 async def start_contribution_work(
@@ -1856,7 +1861,10 @@ async def start_contribution_work(
 
 @router.post(
   "/contributions/{app_id}/for-chat/{chat_id}/work/stop",
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
 )
 @_limiter.limit("20/minute")
 async def stop_contribution_work(
@@ -2236,7 +2244,10 @@ async def settle_chat_changes(
 
 @router.post(
   "/contributions/{app_id}/{record_id}/submit",
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
 )
 @_limiter.limit("10/minute")
 async def submit_contribution(
@@ -2407,6 +2418,7 @@ async def submit_contribution(
   "/contributions/{app_id}/{record_id}/ready",
   dependencies=[
     Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
     Depends(_serialize_ready_action),
   ],
 )
@@ -2601,7 +2613,10 @@ def _prepared_existing_pr_target(record: dict) -> tuple[str, int, str, str]:
 
 @router.post(
   "/contributions/{app_id}/{record_id}/update-existing",
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
 )
 @_limiter.limit("10/minute")
 async def update_existing_contribution(
@@ -2874,7 +2889,10 @@ async def update_existing_contribution(
 
 @router.post(
   "/contributions/{app_id}/update-stack",
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
 )
 @_limiter.limit("5/minute")
 async def update_contribution_stack(
@@ -3110,7 +3128,10 @@ async def update_contribution_stack(
 
 @router.post(
   "/contributions/{app_id}/submit-stack",
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
 )
 @_limiter.limit("5/minute")
 async def submit_contribution_stack(
@@ -3271,7 +3292,10 @@ async def submit_contribution_stack(
 
 @router.post(
   "/contributions/{app_id}/land-stack",
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
 )
 @_limiter.limit("5/minute")
 async def land_contribution_stack(
@@ -3471,7 +3495,10 @@ async def cleanup_contribution_staging(
 
 @router.post(
   "/contributions/{app_id}/{record_id}/connect-app",
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
 )
 @_limiter.limit("5/minute")
 async def connect_published_app(
@@ -3811,6 +3838,7 @@ _HUMAN_REQUIRED_TITLE = "Your contribution needs you"
 
 def _require_autopilot_agent(principal: Principal) -> None:
   """Mutation rounds run under the owner's agent credential, never an app JWT."""
+  require_nondelegated_owner_control(principal)
   if principal.app_id is not None:
     raise HTTPException(
       status_code=403,
@@ -3923,7 +3951,10 @@ async def _autopilot_escalate_and_notify(
 
 @router.post(
   "/contributions/{app_id}/{record_id}/respond",
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
 )
 @_limiter.limit("10/minute")
 async def autopilot_respond(
@@ -4096,7 +4127,10 @@ def _autopilot_round_brief(
 
 @router.post(
   "/contributions/{app_id}/{record_id}/reply",
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
 )
 @_limiter.limit("30/minute")
 async def autopilot_reply(
@@ -4369,7 +4403,10 @@ async def autopilot_escalate(
 
 @router.post(
   "/contributions/{app_id}/{record_id}/autopilot",
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
 )
 @_limiter.limit("20/minute")
 async def autopilot_toggle(
@@ -4415,7 +4452,10 @@ def _autopilot_changed_paths(
 
 @router.post(
   "/contributions/{app_id}/{record_id}/update",
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
 )
 @_limiter.limit("10/minute")
 async def autopilot_update(

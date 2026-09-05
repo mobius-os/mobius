@@ -15,7 +15,12 @@ from sqlalchemy.orm import Session
 from app import fs_locks, models
 from app.config import get_settings
 from app.database import get_db
-from app.deps import Principal, get_principal, reject_cross_site
+from app.deps import (
+  Principal,
+  get_principal,
+  reject_cross_site,
+  require_nondelegated_owner_or_app_control,
+)
 
 router = APIRouter(prefix="/api/apps", tags=["app-secrets"])
 
@@ -91,7 +96,10 @@ def _secret_count(directory: Path) -> int:
 @router.put(
   "/{app_id}/secrets/{name}",
   status_code=204,
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
 )
 async def put_secret(
   app_id: int,
@@ -176,7 +184,10 @@ async def get_secret(
 @router.delete(
   "/{app_id}/secrets/{name}",
   status_code=204,
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
 )
 async def delete_secret(
   app_id: int,

@@ -65,7 +65,9 @@ from sqlalchemy.orm import Session
 from app import fs_locks, models, push
 from app.config import get_settings
 from app.database import get_db
-from app.deps import Principal, get_principal
+from app.deps import (
+  Principal, get_principal, require_nondelegated_owner_control,
+)
 from app.routes import identity as identity_routes
 from app.storage_io import atomic_write, read_capped_body
 
@@ -1098,6 +1100,7 @@ async def join_community(
   db: Session = Depends(get_db), principal: Principal = Depends(get_principal)
 ):
   """Join Common as the owner's mobius.you identity."""
+  require_nondelegated_owner_control(principal)
   _require_owner_or_common_app(db, principal)
   state = await _refresh_profile_cache(db, principal)
   identity = state["identity"]
@@ -1159,6 +1162,7 @@ async def update_me(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
+  require_nondelegated_owner_control(principal)
   _require_owner_or_common_app(db, principal)
   identity = _load_identity()
   if update.bio is not None:
@@ -1183,6 +1187,7 @@ async def send_message(
   principal: Principal = Depends(get_principal),
 ):
   """Sign a DM, deliver it to the peer instance, and store our own copy."""
+  require_nondelegated_owner_control(principal)
   app = _require_owner_or_common_app(db, principal)
   to_host = message.to.strip().lower()
   text = message.text.strip()
@@ -1273,6 +1278,7 @@ async def publish_post(
   principal: Principal = Depends(get_principal),
 ):
   """Sign a board post and submit it to the community host."""
+  require_nondelegated_owner_control(principal)
   _require_owner_or_common_app(db, principal)
   text = post.text.strip()
   attachment = _validate_attachment(post.attachment)
@@ -1403,6 +1409,7 @@ async def like_post(
   principal: Principal = Depends(get_principal),
 ):
   """Toggle a like on a community-board post, signed as this instance."""
+  require_nondelegated_owner_control(principal)
   _require_owner_or_common_app(db, principal)
   post_id = body.post_id.strip()
   if not re.fullmatch(r"[a-f0-9-]{8,64}", post_id):
@@ -1439,6 +1446,7 @@ async def reply_to_post(
   principal: Principal = Depends(get_principal),
 ):
   """Reply to a community-board post, signed as this instance."""
+  require_nondelegated_owner_control(principal)
   _require_owner_or_common_app(db, principal)
   post_id = body.post_id.strip()
   if not re.fullmatch(r"[a-f0-9-]{8,64}", post_id):

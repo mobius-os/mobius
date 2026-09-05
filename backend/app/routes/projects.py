@@ -43,8 +43,8 @@ from app.chat import (
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
-  ProjectPrincipal, get_current_owner, get_project_principal, reject_cross_site,
-  resolve_project_principal,
+  ProjectPrincipal, get_current_owner, get_current_owner_for_lifecycle_control,
+  get_project_principal, reject_cross_site, resolve_project_principal,
 )
 from app.path_utils import validate_path_within_base
 from app.project_activity import append_project_change, project_change_view
@@ -1534,7 +1534,7 @@ def delete_project_work_claim(
 def create_project_invite(
   project_id: str,
   body: ProjectInviteCreate,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   project = _live_project(db, project_id)
@@ -1577,7 +1577,7 @@ def create_project_invite(
 def revoke_project_invite(
   project_id: str,
   invite_id: str,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   _live_project(db, project_id)
@@ -1602,7 +1602,7 @@ def update_project_member(
   project_id: str,
   member_id: str,
   body: ProjectMemberPatch,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   _live_project(db, project_id)
@@ -1625,7 +1625,7 @@ def update_project_member(
 def revoke_project_member(
   project_id: str,
   member_id: str,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   _live_project(db, project_id)
@@ -1699,7 +1699,7 @@ def list_project_agent_messages(
 def send_project_agent_message(
   project_id: str,
   body: ProjectAgentMessageCreate,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   project = _live_project(db, project_id)
@@ -1881,7 +1881,7 @@ def patch_project(
 )
 async def delete_project(
   project_id: str,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   project = _live_project(db, project_id)
@@ -1937,7 +1937,7 @@ async def delete_project(
 @router.post("/{project_id}/recover", dependencies=[Depends(reject_cross_site)])
 def recover_project(
   project_id: str,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   with PROJECT_LIFECYCLE_LOCK:
@@ -2221,7 +2221,7 @@ def pull_project_git_remote(
 def push_project_git_remote(
   project_id: str,
   body: ProjectRemotePush,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   project = _live_project(db, project_id)

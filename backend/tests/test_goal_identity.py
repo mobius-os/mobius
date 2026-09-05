@@ -1,6 +1,8 @@
 """A native Goal keeps one identity across physical recovery, not new Goals."""
 
-from app import models
+import pytest
+
+from app import chat as chat_mod, models
 from app.chat_writer import AppendPending, Barrier, PromotePending, get_writer
 from app.goal_plans import presented_goal
 from app.run_state import (
@@ -65,6 +67,254 @@ def test_plain_continue_keeps_a_completed_physical_run_with_unfinished_plan(
   assert goal_identity_for_run_start(
     db, chat.id, {"content": "continue"},
   ) == ("Ship it", "stable-goal")
+
+
+def test_natural_owner_follow_up_keeps_a_paused_goal_with_unfinished_plan(
+  db, chat,
+):
+  db.add(models.ChatRun(
+    id="planned-natural-goal", root_run_id="planned-natural-goal",
+    chat_id=chat.id, status="interrupted", provider="codex",
+    goal_objective="Ship it", goal_id="stable-natural-goal",
+    goal_plan_json={
+      "tasks": [{"id": "prepare", "status": "running"}],
+    },
+  ))
+  db.commit()
+
+  assert goal_identity_for_run_start(
+    db, chat.id, {"content": "keep going please"},
+  ) == ("Ship it", "stable-natural-goal")
+
+
+def test_unrelated_owner_follow_up_does_not_revive_an_unfinished_goal(db, chat):
+  db.add(models.ChatRun(
+    id="unrelated-natural-goal", root_run_id="unrelated-natural-goal",
+    chat_id=chat.id, status="interrupted", provider="claude",
+    goal_objective="Ship it", goal_id="unrelated-natural-id",
+    goal_plan_json={
+      "tasks": [{"id": "prepare", "status": "running"}],
+    },
+  ))
+  db.commit()
+
+  assert goal_identity_for_run_start(
+    db, chat.id, {"content": "Can you explain the result?"},
+  ) == (None, None)
+  assert goal_identity_for_run_start(
+    db, chat.id, {"content": "Please continue with a separate question"},
+  ) == (None, None)
+
+
+def test_natural_resume_never_overrides_explicit_stop(db, chat):
+  db.add(models.ChatRun(
+    id="stopped-natural-goal", root_run_id="stopped-natural-goal",
+    chat_id=chat.id, status="stopped", provider="codex",
+    goal_objective="Ship it", goal_id="stopped-natural-id",
+    goal_plan_json={
+      "tasks": [{"id": "prepare", "status": "running"}],
+    },
+  ))
+  db.commit()
+
+  assert goal_identity_for_run_start(
+    db, chat.id, {"content": "keep going please"},
+  ) == (None, None)
+  assert goal_identity_for_run_start(db, chat.id, {
+    "content": "answer", "kind": "continuation",
+    "continuation_reason": "question_answer",
+  }) == (None, None)
+  assert goal_identity_for_run_start(
+    db, chat.id, {"content": "continue"},
+  ) == ("Ship it", "stopped-natural-id")
+
+
+def test_result_continuations_never_tunnel_through_explicit_stop(db, chat):
+  db.add(models.ChatRun(
+    id="stopped-result-goal", root_run_id="stopped-result-goal",
+    chat_id=chat.id, status="stopped", provider="codex",
+    goal_objective="Ship it", goal_id="stopped-result-id",
+    goal_plan_json={
+      "tasks": [{"id": "prepare", "status": "running"}],
+    },
+  ))
+  db.commit()
+
+  for kind, source_work_id in (
+    ("wait_result", "stopped-result-goal"),
+    ("delegation_result", "stopped-result-id"),
+  ):
+    assert goal_identity_for_run_start(db, chat.id, {
+      "content": "controller result",
+      "kind": kind,
+      "hidden": True,
+      "source_work_id": source_work_id,
+    }) == (None, None)
+
+
+@pytest.mark.parametrize(("kind", "source_work_id"), [
+  ("wait_result", "result-origin"),
+  ("delegation_result", "result-goal-id"),
+])
+def test_stale_result_does_not_revive_stopped_goal_after_later_ordinary_run(
+  db, chat, kind, source_work_id,
+):
+  db.add_all([
+    models.ChatRun(
+      id="result-origin", root_run_id="result-origin", chat_id=chat.id,
+      status="completed", provider="codex", goal_objective="Ship it",
+      goal_id="result-goal-id", started_at=chat.created_at,
+    ),
+    models.ChatRun(
+      id="yy-stopped-goal", root_run_id="result-origin", chat_id=chat.id,
+      status="stopped", provider="codex", goal_objective="Ship it",
+      goal_id="result-goal-id", started_at=chat.created_at,
+    ),
+    models.ChatRun(
+      id="zz-later-ordinary", root_run_id="zz-later-ordinary",
+      chat_id=chat.id, status="completed", provider="codex",
+      started_at=chat.created_at,
+    ),
+  ])
+  db.commit()
+
+  assert goal_identity_for_run_start(db, chat.id, {
+    "content": "stale controller result",
+    "kind": kind,
+    "hidden": True,
+    "source_work_id": source_work_id,
+  }) == (None, None)
+
+
+@pytest.mark.parametrize(("kind", "source_work_id"), [
+  ("wait_result", "dismissed-result-origin"),
+  ("delegation_result", "dismissed-result-goal-id"),
+])
+def test_stale_result_does_not_revive_dismissed_goal(
+  db, chat, kind, source_work_id,
+):
+  db.add_all([
+    models.ChatRun(
+      id="dismissed-result-origin", root_run_id="dismissed-result-origin",
+      chat_id=chat.id, status="completed", provider="claude",
+      goal_objective="Ship it", goal_id="dismissed-result-goal-id",
+      started_at=chat.created_at,
+    ),
+    models.ChatRun(
+      id="zz-dismissed-later-ordinary",
+      root_run_id="zz-dismissed-later-ordinary", chat_id=chat.id,
+      status="completed", provider="claude", started_at=chat.created_at,
+    ),
+  ])
+  chat.dismissed_goal_id = "dismissed-result-goal-id"
+  db.commit()
+
+  assert goal_identity_for_run_start(db, chat.id, {
+    "content": "stale controller result",
+    "kind": kind,
+    "hidden": True,
+    "source_work_id": source_work_id,
+  }) == (None, None)
+
+
+@pytest.mark.parametrize("status", ["completed", "interrupted"])
+@pytest.mark.parametrize(("kind", "source_work_id"), [
+  ("wait_result", "recoverable-result-origin"),
+  ("delegation_result", "recoverable-result-goal-id"),
+])
+def test_result_recovers_origin_goal_while_latest_physical_is_recoverable(
+  db, chat, kind, source_work_id, status,
+):
+  db.add(models.ChatRun(
+    id="recoverable-result-origin", root_run_id="recoverable-result-origin",
+    chat_id=chat.id, status=status, provider="codex",
+    goal_objective="Ship it", goal_id="recoverable-result-goal-id",
+  ))
+  db.commit()
+
+  assert goal_identity_for_run_start(db, chat.id, {
+    "content": "current controller result",
+    "kind": kind,
+    "hidden": True,
+    "source_work_id": source_work_id,
+  }) == ("Ship it", "recoverable-result-goal-id")
+
+
+def test_native_goal_mode_follows_the_exact_committed_run(db, chat):
+  db.add_all([
+    models.ChatRun(
+      id="historical-goal", root_run_id="historical-goal",
+      chat_id=chat.id, status="completed", provider="codex",
+      goal_objective="Old work", goal_id="old-goal-id",
+    ),
+    models.ChatRun(
+      id="ordinary-question", root_run_id="ordinary-question",
+      chat_id=chat.id, status="running", provider="codex",
+    ),
+  ])
+  db.commit()
+
+  assert chat_mod._run_owns_active_goal(
+    db, chat_id=chat.id, run_token="ordinary-question",
+  ) is False
+  assert chat_mod._run_owns_active_goal(
+    db, chat_id=chat.id, run_token="historical-goal",
+  ) is False
+
+  ordinary = db.get(models.ChatRun, "ordinary-question")
+  ordinary.goal_objective = "Current work"
+  ordinary.goal_id = "current-goal-id"
+  db.commit()
+  assert chat_mod._run_owns_active_goal(
+    db, chat_id=chat.id, run_token="ordinary-question",
+  ) is True
+
+
+def test_natural_resume_does_not_compete_with_question_or_wait(db, chat):
+  goal = models.ChatRun(
+    id="blocked-natural-goal", root_run_id="blocked-natural-goal",
+    chat_id=chat.id, status="interrupted", provider="claude",
+    goal_objective="Ship it", goal_id="blocked-natural-id",
+    goal_plan_json={
+      "tasks": [{"id": "prepare", "status": "running"}],
+    },
+  )
+  db.add(goal)
+  chat.pending_question_id = "owner-choice"
+  db.commit()
+
+  assert goal_identity_for_run_start(
+    db, chat.id, {"content": "please keep going"},
+  ) == (None, None)
+
+  chat.pending_question_id = None
+  db.add(models.ChatWait(
+    id="natural-resume-wait", chat_id=chat.id,
+    created_by_run_id=goal.id, description="external work",
+    kind="timer", due_at=None, interval_secs=300,
+    deadline_at=goal.started_at, status="armed",
+    next_check_at=goal.started_at,
+  ))
+  db.commit()
+  assert goal_identity_for_run_start(
+    db, chat.id, {"content": "continue please!"},
+  ) == (None, None)
+
+
+def test_natural_owner_follow_up_does_not_revive_a_settled_plan(db, chat):
+  db.add(models.ChatRun(
+    id="settled-natural-goal", root_run_id="settled-natural-goal",
+    chat_id=chat.id, status="completed", provider="codex",
+    goal_objective="Done", goal_id="settled-natural-id",
+    goal_plan_json={
+      "tasks": [{"id": "verify", "status": "completed"}],
+    },
+  ))
+  db.commit()
+
+  assert goal_identity_for_run_start(
+    db, chat.id, {"content": "Can you explain the result?"},
+  ) == (None, None)
 
 
 def test_plain_continue_with_upload_manifest_resumes_the_same_goal(db, chat):

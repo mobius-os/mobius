@@ -67,6 +67,7 @@ import signal
 import shutil
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from app.codex_sdk_contract import (
@@ -130,6 +131,11 @@ log = logging.getLogger("moebius.chat")
 _CODEX_CALL_EXECUTOR_WORKERS = 3
 _PROCESS_GROUP_CAPTURE_SPIN_SECONDS = 0.1
 _PROCESS_GROUP_CAPTURE_POLL_SECONDS = 0.01
+
+
+def _ensure_codex_home(env: dict[str, str], data_dir: str) -> None:
+  """Supply the configured-data fallback without overriding provider setup."""
+  env.setdefault("CODEX_HOME", str(Path(data_dir) / "cli-auth" / "codex"))
 
 
 def _process_group_capture_delay(elapsed: float) -> float:
@@ -1514,6 +1520,7 @@ async def run_codex_sdk_turn(
   run_policy=None,
   connector_plan=None,
   provider_id: str = "codex",
+  data_dir: str | None = None,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -1531,6 +1538,9 @@ async def run_codex_sdk_turn(
       out-of-band turn with no Chat row (for example nightly Reflection).
     connector_plan: Detached owner-managed MCP configuration built before the
       request session was released. It is plain data and never queries SQLite.
+    data_dir: Explicit durable-data root for an out-of-band caller. Normal
+      server turns omit it and use application settings; scheduled callers can
+      supply it without needing the server's complete settings environment.
 
   Returns:
     Dict with `session_id`, `cost_usd`, and `error`.
@@ -1602,7 +1612,11 @@ async def run_codex_sdk_turn(
         base_instructions = None
 
   env = dict(base_env)
-  env.setdefault("CODEX_HOME", "/data/cli-auth/codex")
+  if data_dir is None:
+    from app.config import get_settings as _get_settings
+
+    data_dir = _get_settings().data_dir
+  _ensure_codex_home(env, data_dir)
 
   # Remote MCP connections are materialized in chat.py while its DB session is
   # still live. Secrets use Codex's env indirection rather than thread config or
@@ -1811,7 +1825,7 @@ async def run_codex_sdk_turn(
       )
       persisted_goal = None
       goal_store_available = True
-      if session_id is not None and (goal_mode or clear_dismissed_goal):
+      if session_id is not None and needs_goal_control:
         try:
           persisted_goal = await _codex_thread_goal(
             goal_client, sdk, session_id,

@@ -414,7 +414,9 @@ def test_owner_endpoint_rejects_app_token(client, owner_token):
 def test_stale_chat_hard_purge_removes_lifecycle_before_run(db):
   from app.chat_retention import purge_expired_chat_tombstones
 
-  _chat_run(db, "chat-stale", "run-stale", deleted=True)
+  _, run = _chat_run(db, "chat-stale", "run-stale", deleted=True)
+  run.status = "completed"
+  db.commit()
   values = normalize_chat_event(
     chat_id="chat-stale",
     chat_run_id="run-stale",

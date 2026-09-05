@@ -51,10 +51,10 @@ export default function ErrorCard({
     : null
   const recoveryCopy = vm.parked
     ? autoResume
-      ? 'Your work is safe. Möbius will continue automatically here and at future usage limits in this chat.'
+      ? 'Your work is safe. Möbius will continue automatically at the reset. Added credits or reset usage? You can try now.'
       : resetElapsed
         ? 'Your work is safe. Continue when you’re ready.'
-        : 'Your work is safe. Turn on auto-continue for this and future usage limits in this chat.'
+        : 'Your work is safe. Turn on auto-continue, or try now after adding credits or resetting usage.'
     : null
   return (
     <div className={vm.className} ref={cardRef}>

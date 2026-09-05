@@ -128,6 +128,37 @@ def test_later_boot_migrates_only_unmodified_graph_aware_base_skill(
   assert live.read_text(encoding="utf-8") == "owner edit"
 
 
+def test_waiting_predecessor_migrates_but_owner_edits_remain(
+  tmp_path, monkeypatch,
+):
+  module = _load("init_skills")
+  seed = tmp_path / "seed"
+  skills = tmp_path / "skills"
+  seed.mkdir()
+  skills.mkdir()
+  current = (SCRIPTS / "seed-skills" / "waiting.md").read_bytes()
+  predecessor = (
+    Path(__file__).parent / "fixtures" / "waiting-pre-parent-owned.md"
+  ).read_bytes()
+  predecessor_hash = hashlib.sha256(predecessor).hexdigest()
+  assert predecessor_hash == (
+    "52be8224de1586a91a0a2149907ac09da547aeead99e0649840ea794f8685847"
+  )
+  (seed / "waiting.md").write_bytes(current)
+  live = skills / "waiting.md"
+  live.write_bytes(predecessor)
+  monkeypatch.setattr(module, "_SEED_CANDIDATES", [seed])
+  monkeypatch.setattr(module, "SKILLS", skills)
+  monkeypatch.setattr(module, "_chown_mobius", lambda _path: None)
+
+  module.init()
+  assert live.read_bytes() == current
+
+  live.write_text("owner-authored waiting policy", encoding="utf-8")
+  module.init()
+  assert live.read_text(encoding="utf-8") == "owner-authored waiting policy"
+
+
 def test_controlled_skills_have_fix_forward_migrations():
   module = _load("init_skills")
 
@@ -142,6 +173,15 @@ def test_controlled_skills_have_fix_forward_migrations():
     "0c2b88ff8a79ff05f75ebaa60af2899f0b9ed27d0a23bfff83b54f4e2a1de97a",
     "7a80e90870f75be7c8802f421e76ac21790f1ef812d4a4d0d923d474e5dadd2d",
     "07ac534c61899fc1154dc4ba99a4eda0f648b2f33c839dc65879d12952e09533",
+    "630fe9ca1e8f080e052ed87d9e7d7b8ea92e4e891efcfc952a0bdf80e37afd66",
+    "d00214c37ba549f5ea4f043714ca33073176b47f1e3085230791b74dd49e2b49",
+  }
+  assert module._UNMODIFIED_MIGRATIONS["waiting.md"] == {
+    "3993e84013d0359a46306b5a3c21f498b4799767aef84b226a7b07997ab538b9",
+    "52be8224de1586a91a0a2149907ac09da547aeead99e0649840ea794f8685847",
+  }
+  assert module._UNMODIFIED_MIGRATIONS["claude.md"] == {
+    "ea58419a5a654c3b6e547426867434c8c25830a5ca3487045728c816352712f9",
   }
   assert "1086688efd4dede48ebc95b12b92fb958280e67896a53e52e02cd5def3aa265f" in (
     module._UNMODIFIED_MIGRATIONS["reflection.md"]

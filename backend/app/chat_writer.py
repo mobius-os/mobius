@@ -483,10 +483,113 @@ class StartContinuation(_Command):
   cid: str = ""
   reason: str = ""
   initiated_by_app_id: int | None = None
+  message_kind: str = "continuation"
+  source_work_id: str | None = None
+  hidden: bool = False
   # A restart continuation atomically replaces its exact parked physical run.
   # Other programmatic continuations require an already-idle logical root.
   supersedes_run_token: str | None = None
   consume_pending: bool = False
+
+
+def recover_start_continuation(
+  db,
+  chat,
+  physical,
+  *,
+  continuation_id: str,
+  content: str,
+  reason: str,
+  supersedes_run_token: str,
+) -> dict | None:
+  """Rebuild one exact committed-but-unscheduled continuation handoff.
+
+  ``StartContinuation`` stores a small causal envelope on its synthetic tail
+  row when it atomically supersedes a parked run and consumes pending input.
+  That envelope identifies the exact transcript rows that formed the provider
+  prompt.  A fresh process can therefore reconstruct the original provider
+  handoff without duplicating user content or relying on an in-memory rollback
+  payload.  Any drift or partial output fails closed into ordinary recovery.
+  """
+  if (
+    physical is None
+    or chat is None
+    or physical.status != "running"
+    or physical.chat_id != chat.id
+  ):
+    return None
+  live = chat.live_assistant or {}
+  if live.get("id") != physical.id or (live.get("blocks") or []):
+    return None
+  messages = list(chat.messages or [])
+  source = messages[-1] if messages else None
+  if not isinstance(source, dict):
+    return None
+  consumed_cids = source.get("_continuation_consumed_cids")
+  provider_cids = source.get("_continuation_provider_cids")
+  if not isinstance(consumed_cids, list) or not isinstance(provider_cids, list):
+    return None
+  if any(not isinstance(cid, str) or not cid for cid in consumed_cids):
+    return None
+  if any(not isinstance(cid, str) or not cid for cid in provider_cids):
+    return None
+  if len(set(consumed_cids)) != len(consumed_cids):
+    return None
+  expected_source = bool(
+    source.get("role") == "user"
+    and cid_of(source) == continuation_id
+    and source.get("content") == content
+    and source.get("kind") == "continuation"
+    and source.get("continuation_reason") == reason
+    and source.get("_continuation_run_token") == physical.id
+    and source.get("_continuation_supersedes_run_token")
+      == supersedes_run_token
+  )
+  if not expected_source:
+    return None
+  tail_size = len(consumed_cids) + 1
+  if len(messages) < tail_size:
+    return None
+  transcript_tail = messages[-tail_size:]
+  expected_tail_cids = [*consumed_cids, continuation_id]
+  if [cid_of(row) for row in transcript_tail] != expected_tail_cids:
+    return None
+  allowed_provider_cids = (
+    consumed_cids
+    if consumed_cids and bool(transcript_tail[0].get("hidden"))
+    else expected_tail_cids
+  )
+  if provider_cids != allowed_provider_cids:
+    return None
+  provider_rows = [
+    row for row in transcript_tail if cid_of(row) in set(provider_cids)
+  ]
+  if [cid_of(row) for row in provider_rows] != provider_cids:
+    return None
+  try:
+    agent_message = _combine_pending_messages(provider_rows)
+    history = [
+      schemas.ChatMessage(
+        role=row.get("role", "user"),
+        content=row.get("content", "") or "",
+      )
+      for row in messages[:-tail_size]
+    ]
+    history.append(schemas.ChatMessage(
+      role="user", content=agent_message.get("content", "") or "",
+    ))
+  except Exception:
+    return None
+  return {
+    "history": history,
+    "promoted": {
+      **agent_message,
+      "_messages": transcript_tail,
+      "_consumed_cids": consumed_cids,
+    },
+    "session_id": chat.session_id,
+    "provider": chat.provider or "claude",
+  }
 
 
 @dataclass
@@ -581,11 +684,14 @@ class PromotePending(_Command):
   `{"history", "promoted", "session_id"}` with `promoted=None` only when
   there was nothing to promote. Returns
   ``PromotePendingBlockedByPendingQuestion`` when an owner question is open.
-  Newer code persists each promoted pending row as its own visible user message,
-  while `promoted.content` remains the combined provider-facing text for the
-  continuation turn. A malformed pending entry that can't build a valid history
-  instead RAISES `_PersistFailed` — the turn-end drain maps that to
-  FAILED_LEAVE_MARKER (leave the marker for reconciliation) rather than
+  Newer code persists each promoted pending row as its own visible user
+  message, while `promoted.content` remains the combined provider-facing text
+  for the continuation turn. Product-result groups replace the caller's
+  provisional token with their deterministic durable run identity and return
+  it as ``promoted._run_token`` for the scheduler. A malformed pending entry
+  that can't build a valid history instead RAISES `_PersistFailed`; the
+  turn-end drain maps that to FAILED_LEAVE_MARKER (leave the marker for
+  reconciliation) rather than
   confusing it with an empty queue and clearing the marker on stranded work.
   """
 
@@ -595,6 +701,12 @@ class PromotePending(_Command):
   # not turn-end handoffs and keep the clean default; drain_and_release passes
   # "failed" when the provider returned an error before queued work continues.
   ending_status: str = "completed"
+  # An explicit owner Resume may find real messages already queued behind a
+  # parked provider turn.  Those visible rows remain ordinary owner messages,
+  # but this private execution hint makes the single promoted provider turn a
+  # manual continuation instead of minting a new logical root.  The hint is
+  # actor-owned (never accepted as pending-row metadata from a client).
+  continuation_reason: str | None = None
 
 
 @dataclass
@@ -795,26 +907,6 @@ class PrepareAutoResume(_Command):
 
 
 @dataclass
-class RollbackAutoResume(_Command):
-  """Undo a speculative auto-resume promote whose task could not spawn.
-
-  ``PromotePending`` must land before a continuation may run, but task creation
-  can still fail afterward.  This command reverses that narrow handoff: remove
-  the speculative run, put the exact promoted rows back at the head of the
-  queue, and re-upgrade the original park to ``resume_pending``.  Both run
-  identities are required so a stale rollback can never unwind a newer turn.
-  """
-
-  chat_id: str = ""
-  run_token: str = ""
-  promoted_run_token: str = ""
-  promoted_pending: list[dict] = field(default_factory=list)
-  # Provider-limit retries remain eligible after a task-creation failure.
-  # A restart authorization is one-shot, so that path resolves to manual.
-  retry_park: bool = True
-
-
-@dataclass
 class Barrier(_Command):
   """Acked only after every preceding command is processed.
 
@@ -891,7 +983,6 @@ _FENCE_COMMANDS = (
   ParkRun,
   ResolvePark,
   PrepareAutoResume,
-  RollbackAutoResume,
 )
 
 
@@ -1649,8 +1740,6 @@ class ChatWriterActor:
       return self._resolve_park(db, cmd)
     if isinstance(cmd, PrepareAutoResume):
       return self._prepare_auto_resume(db, cmd)
-    if isinstance(cmd, RollbackAutoResume):
-      return self._rollback_auto_resume(db, cmd)
     raise NotImplementedError(type(cmd).__name__)
 
   # -- real DB dispatch (one method per command) -------------------------
@@ -2422,7 +2511,7 @@ class ChatWriterActor:
     """
     from datetime import UTC, datetime
 
-    from app.continuations import is_continuation_message
+    from app.continuations import continues_logical_root
     from app.models import ChatRun
 
     chat = _active_chat(db, cmd.chat_id)
@@ -2487,19 +2576,25 @@ class ChatWriterActor:
       "content": cmd.content,
       "ts": next_message_ts(existing + pending),
       "cid": cmd.cid,
-      "kind": "continuation",
-      "continuation_reason": cmd.reason,
+      "kind": cmd.message_kind,
     }
+    if cmd.message_kind == "continuation":
+      source["continuation_reason"] = cmd.reason
+    if cmd.source_work_id is not None:
+      source["source_work_id"] = cmd.source_work_id
+    if cmd.hidden:
+      source["hidden"] = True
     if cmd.initiated_by_app_id is not None:
       source["_initiated_by_app_id"] = cmd.initiated_by_app_id
 
     selected_pending: list[dict] = []
     remaining_pending: list[dict] = []
     if cmd.consume_pending and pending:
-      head_hidden = bool(pending[0].get("hidden"))
+      from app.continuations import pending_message_group_key
+      head_group = pending_message_group_key(pending[0])
       promote_count = 0
       for row in pending:
-        if bool(row.get("hidden")) != head_hidden:
+        if pending_message_group_key(row) != head_group:
           break
         promote_count += 1
       selected_pending = pending[:promote_count]
@@ -2516,8 +2611,12 @@ class ChatWriterActor:
         queued.get("role") == "user"
         and cid_of(queued) == cmd.cid
         and queued.get("content") == cmd.content
-        and queued.get("kind") == "continuation"
-        and queued.get("continuation_reason") == cmd.reason
+        and queued.get("kind") == cmd.message_kind
+        and queued.get("continuation_reason") == (
+          cmd.reason if cmd.message_kind == "continuation" else None
+        )
+        and queued.get("source_work_id") == cmd.source_work_id
+        and bool(queued.get("hidden")) == cmd.hidden
         and queued.get("_initiated_by_app_id") == cmd.initiated_by_app_id
       )
       if not expected:
@@ -2544,6 +2643,22 @@ class ChatWriterActor:
     provider_sources = list(selected_pending)
     if not provider_sources or not bool(provider_sources[0].get("hidden")):
       provider_sources.append(source)
+    if cmd.supersedes_run_token is not None and cmd.consume_pending:
+      # Persist the minimum causal envelope needed to reconstruct the exact
+      # provider prompt after a crash between this commit and task creation.
+      # The transcript rows remain the source of truth; this records only
+      # which contiguous tail rows participated and which parked run the
+      # continuation atomically replaced.
+      source["_continuation_run_token"] = cmd.run_token
+      source["_continuation_supersedes_run_token"] = (
+        cmd.supersedes_run_token
+      )
+      source["_continuation_consumed_cids"] = [
+        cid_of(row) for row in selected_pending if cid_of(row) is not None
+      ]
+      source["_continuation_provider_cids"] = [
+        cid_of(row) for row in provider_sources if cid_of(row) is not None
+      ]
     agent_message = _combine_pending_messages(provider_sources)
     stored_rows = _pending_messages_for_transcript(
       [*selected_pending, source], existing,
@@ -2567,10 +2682,12 @@ class ChatWriterActor:
     chat.messages = existing + stored_rows
     chat.pending_messages = remaining_pending
     chat.live_assistant = {
+      "id": cmd.run_token,
       "role": "assistant",
       "blocks": [],
       "ts": next_message_ts(chat.messages),
     }
+    chat.active_assistant_message_id = cmd.run_token
     started_at = datetime.now(UTC)
     chat.updated_at = started_at
     provider = chat.provider or "claude"
@@ -2588,7 +2705,7 @@ class ChatWriterActor:
       status="running",
       root_run_id=(
         cmd.root_run_id
-        if is_continuation_message(agent_message)
+        if continues_logical_root(agent_message)
         else cmd.run_token
       ),
       provider=provider,
@@ -2647,9 +2764,25 @@ class ChatWriterActor:
       db.rollback()
       return GoalPromotionRejected("different_goal_active")
 
-    changed = run.goal_objective is None or root.goal_objective is None
+    if (
+      run.goal_id is not None
+      and root.goal_id is not None
+      and run.goal_id != root.goal_id
+    ):
+      db.rollback()
+      return GoalPromotionRejected("different_goal_active")
+
+    goal_id = run.goal_id or root.goal_id or root_id
+    changed = (
+      run.goal_objective is None
+      or root.goal_objective is None
+      or run.goal_id is None
+      or root.goal_id is None
+    )
     run.goal_objective = cmd.objective
     root.goal_objective = cmd.objective
+    run.goal_id = goal_id
+    root.goal_id = goal_id
     if changed and not _commit_or_rollback(db):
       raise _PersistFailed("PromoteRunToGoal did not persist")
     if not changed:
@@ -3013,8 +3146,10 @@ class ChatWriterActor:
 
     Replicates `promote_pending_messages_locked`: builds the next-turn
     history BEFORE committing (a malformed entry can't silently consume a
-    turn), moves the queued rows into `messages`, sets the durable run marker,
-    commits.  `promoted` is None (queue left intact) only when there was
+    turn), moves one causal queue group into `messages`, sets the durable run
+    marker, commits. Product Wait/delegation results are never coalesced across
+    their independent receipts and replace the provisional token with a stable
+    identity. `promoted` is None (queue left intact) only when there was
     nothing to promote; a malformed head that fails schema construction
     instead RAISES `_PersistFailed` (the drain maps that to
     FAILED_LEAVE_MARKER, not an empty-queue clear).
@@ -3033,40 +3168,71 @@ class ChatWriterActor:
       db.rollback()
       return PromotePendingBlockedByPendingQuestion(question_id)
     pending = list(chat.pending_messages or [])
-    # `/goal clear` is no longer a runnable message. Retire any row queued by
-    # an older shell before it can reach a provider, while preserving every
-    # real follow-up around it. New sends are rejected at the HTTP boundary;
-    # this is the durable-upgrade path for already-stored queues.
+    # `/goal clear` is no longer a runnable message. A bounded Goal-handoff
+    # marker is likewise no longer runnable after its exact Goal is stopped or
+    # dismissed. Retire either stale control row before it can reach a
+    # provider as ordinary prose, while preserving every real follow-up around
+    # it. This writer-owned admission point serializes the decision with Goal
+    # dismissal and Stop instead of relying on a read-side identity projection.
     from app.goal_commands import goal_clear_requested
-    without_retired_goal_clear = [
-      row for row in pending
-      if not goal_clear_requested(str(row.get("content") or ""))
-    ]
-    retired_goal_clear = len(without_retired_goal_clear) != len(pending)
-    if retired_goal_clear:
-      pending = without_retired_goal_clear
+    from app.continuations import continuation_reason
+    from app.run_state import GOAL_HANDOFF_REASON, goal_identity_for_run_start
+
+    def runnable_pending(row: dict) -> bool:
+      if goal_clear_requested(str(row.get("content") or "")):
+        return False
+      if continuation_reason(row) != GOAL_HANDOFF_REASON:
+        return True
+      _objective, goal_id = goal_identity_for_run_start(
+        db, cmd.chat_id, row,
+      )
+      return goal_id is not None
+
+    runnable = [row for row in pending if runnable_pending(row)]
+    retired_control = len(runnable) != len(pending)
+    if retired_control:
+      pending = runnable
       chat.pending_messages = pending
     if not pending:
-      if retired_goal_clear and not _commit_or_rollback(db):
-        raise _PersistFailed("PromotePending could not retire /goal clear")
+      if retired_control and not _commit_or_rollback(db):
+        raise _PersistFailed("PromotePending could not retire stale control")
       return {"history": [], "promoted": None, "session_id": chat.session_id}
     existing = list(chat.messages or [])
-    head_hidden = bool(pending[0].get("hidden"))
+    from app.continuations import (
+      PRODUCT_RESULT_MESSAGE_KINDS,
+      pending_message_group_key,
+      product_result_run_token,
+    )
+    head_group = pending_message_group_key(pending[0])
     promote_count = 0
     for msg in pending:
-      if bool(msg.get("hidden")) != head_hidden:
+      if pending_message_group_key(msg) != head_group:
         break
       promote_count += 1
     promoted_group = pending[:promote_count]
     remaining_pending = pending[promote_count:]
     agent_pending = _combine_pending_messages(promoted_group)
+    if (
+      cmd.continuation_reason is not None
+      and agent_pending.get("kind") not in PRODUCT_RESULT_MESSAGE_KINDS
+    ):
+      # A manual Try-now owns ordinary queued context, but a Wait/delegation
+      # receipt already owns a stronger product identity. Re-labeling it here
+      # would discard its deterministic run token and prevent the scheduler
+      # from claiming the delivery latch after provider admission.
+      agent_pending["kind"] = "continuation"
+      agent_pending["continuation_reason"] = cmd.continuation_reason
     consumed_cids = agent_pending.pop("_consumed_cids", [])
     initiated_by_app_id = agent_pending.pop("_initiated_by_app_id", None)
+    durable_run_token = (
+      product_result_run_token(cmd.chat_id, agent_pending) or cmd.run_token
+    )
     stored_messages = _pending_messages_for_transcript(
       promoted_group, existing,
     )
     returned_promoted = {
       **agent_pending,
+      "_run_token": durable_run_token,
       "_consumed_cids": consumed_cids,
       "_messages": stored_messages,
       # Exact pre-promote rows for the auto-resume scheduling rollback. Kept
@@ -3114,14 +3280,14 @@ class ChatWriterActor:
     chat.messages = existing + stored_messages
     chat.pending_messages = remaining_pending
     chat.live_assistant = {
-      "id": cmd.run_token,
+      "id": durable_run_token,
       "role": "assistant",
       "blocks": [],
       "ts": next_message_ts(
         chat.messages + list(chat.pending_messages or [])
       ),
     }
-    chat.active_assistant_message_id = cmd.run_token
+    chat.active_assistant_message_id = durable_run_token
     started_at = datetime.now(UTC)
     chat.updated_at = datetime.now(UTC)
     # Restart recovery can route the first send through PromotePending instead
@@ -3133,8 +3299,10 @@ class ChatWriterActor:
     # continuation. Close its run record and open the continuation's in the
     # SAME commit as the queue handoff.
     from app.models import ChatRun
-    from app.continuations import is_continuation_message
-    from app.run_state import goal_identity_for_run_start
+    from app.continuations import continues_logical_root
+    from app.run_state import (
+      product_result_continuation_root,
+    )
     goal_objective, goal_id = goal_identity_for_run_start(
       db, cmd.chat_id, agent_pending,
     )
@@ -3152,16 +3320,22 @@ class ChatWriterActor:
       .order_by(ChatRun.started_at.desc(), ChatRun.id.desc())
       .first()
     )
+    causal_root = product_result_continuation_root(
+      db, cmd.chat_id, agent_pending,
+    )
     root_run_id = (
-      (prior_run.root_run_id or prior_run.id)
-      if prior_run is not None and is_continuation_message(agent_pending)
-      else cmd.run_token
+      causal_root
+      or (
+        (prior_run.root_run_id or prior_run.id)
+        if prior_run is not None and continues_logical_root(agent_pending)
+        else durable_run_token
+      )
     )
     self._close_nonterminal_runs(
-      db, cmd.chat_id, cmd.ending_status, except_token=cmd.run_token
+      db, cmd.chat_id, cmd.ending_status, except_token=durable_run_token
     )
     db.add(ChatRun(
-      id=cmd.run_token, chat_id=cmd.chat_id, status="running",
+      id=durable_run_token, chat_id=cmd.chat_id, status="running",
       root_run_id=root_run_id,
       provider=chat.provider, started_at=started_at,
       initiated_by_app_id=initiated_by_app_id,
@@ -3171,7 +3345,7 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("PromotePending did not persist")
     # The promoted continuation now owns the in-process handoff fence.
-    self._run_token_owner[cmd.chat_id] = cmd.run_token
+    self._run_token_owner[cmd.chat_id] = durable_run_token
     return {
       "history": history,
       "promoted": returned_promoted,
@@ -3695,7 +3869,9 @@ class ChatWriterActor:
     from app.models import ChatRun
 
     run = db.query(ChatRun).filter(ChatRun.id == cmd.run_token).first()
-    if run is None or run.status not in ("parked", "resume_pending"):
+    if run is None or run.status not in (
+      "parked", "resume_pending", "parked_notified",
+    ):
       return {"active": False, "notify": False}
     if not self._run_is_latest(db, run):
       run.status = "completed"
@@ -3718,54 +3894,6 @@ class ChatWriterActor:
   def _run_is_latest(db, run) -> bool:
     from app.run_state import run_is_latest
     return run_is_latest(db, run)
-
-  def _rollback_auto_resume(self, db, cmd: RollbackAutoResume) -> bool:
-    """Reverse only the exact unscheduled PromotePending handoff."""
-    from app.models import Chat, ChatRun
-
-    chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
-    park = db.query(ChatRun).filter(ChatRun.id == cmd.run_token).first()
-    promoted_run = db.query(ChatRun).filter(
-      ChatRun.id == cmd.promoted_run_token,
-    ).first()
-    if (
-      chat is None
-      or park is None
-      or promoted_run is None
-      or park.chat_id != cmd.chat_id
-      or promoted_run.chat_id != cmd.chat_id
-      or park.status != "completed"
-      or promoted_run.status != "running"
-      or not self._run_is_latest(db, promoted_run)
-      or self._run_token_owner.get(cmd.chat_id) != cmd.promoted_run_token
-    ):
-      return False
-
-    promoted_pending = [dict(row) for row in cmd.promoted_pending]
-    promoted_cids = [cid_of(row) for row in promoted_pending]
-    if not promoted_pending or any(cid is None for cid in promoted_cids):
-      return False
-    messages = list(chat.messages or [])
-    if len(messages) < len(promoted_pending):
-      return False
-    transcript_tail = messages[-len(promoted_pending):]
-    if [cid_of(row) for row in transcript_tail] != promoted_cids:
-      # A successor wrote after the promote. Never peel arbitrary transcript
-      # rows off the end; its turn owns recovery now.
-      return False
-
-    chat.messages = messages[:-len(promoted_pending)]
-    chat.pending_messages = promoted_pending + list(chat.pending_messages or [])
-    db.delete(promoted_run)
-    if cmd.retry_park:
-      park.status = "resume_pending"
-    else:
-      park.status = "interrupted"
-      park.restart_nonce = None
-    if not _commit_or_rollback(db):
-      raise _PersistFailed("RollbackAutoResume did not persist")
-    self._run_token_owner.pop(cmd.chat_id, None)
-    return True
 
   @staticmethod
   def _commit_snapshot(db, snapshot: dict):
@@ -4273,6 +4401,22 @@ def _combine_pending_messages(pending: list[dict]) -> dict:
       cid_of(msg) for msg in pending if cid_of(msg) is not None
     ],
   }
+  # Queue rows remain separate in the visible transcript, but the provider
+  # receives one coalesced message. Preserve a controller continuation's
+  # semantics even when ordinary owner follow-ups precede it: otherwise the
+  # resumed physical run silently mints a new logical root and drops an
+  # unfinished Goal merely because the owner added useful context while the
+  # provider was parked.
+  from app.continuations import is_continuation_message
+  continuation = next(
+    (msg for msg in reversed(pending) if is_continuation_message(msg)),
+    None,
+  )
+  if continuation is not None:
+    combined["kind"] = "continuation"
+    combined["continuation_reason"] = (
+      continuation.get("continuation_reason") or "automatic recovery"
+    )
   if attachments:
     combined["attachments"] = attachments
   else:

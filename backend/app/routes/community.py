@@ -38,9 +38,10 @@ from app.community_publish import (
 )
 from app.database import get_db
 from app.deps import (
+  Principal, get_principal,
   get_owner_or_app_with_github_access,
   get_owner_or_app_with_manage_apps,
-  reject_cross_site,
+  reject_cross_site, require_nondelegated_owner_control,
 )
 
 
@@ -69,6 +70,24 @@ def _store_github_owner(
   _github: models.Owner = Depends(get_owner_or_app_with_github_access),
 ) -> models.Owner:
   """Require both Store authority and the separately revocable GitHub grant."""
+  return owner
+
+
+def _store_github_owner_control(
+  owner: models.Owner = Depends(_store_github_owner),
+  principal: Principal = Depends(get_principal),
+) -> models.Owner:
+  """Require explicit owner confirmation without dropping Store app grants."""
+  require_nondelegated_owner_control(principal)
+  return owner
+
+
+def _store_owner_control(
+  owner: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+  principal: Principal = Depends(get_principal),
+) -> models.Owner:
+  """Protect public expression while preserving the Store app capability."""
+  require_nondelegated_owner_control(principal)
   return owner
 
 
@@ -551,7 +570,7 @@ async def get_community_revision(
 async def publish_local_app_to_github(
   body: PublishLocalGitHubAppIn,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(_store_github_owner),
+  _: models.Owner = Depends(_store_github_owner_control),
   idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> JSONResponse:
   """Publish one accepted local app revision through the inherited GitHub account.
@@ -1082,7 +1101,7 @@ async def _publish_existing_github_revision(
 )
 async def publish_existing_github_revision(
   body: ExistingGitHubRevisionIn,
-  _: models.Owner = Depends(_store_github_owner),
+  _: models.Owner = Depends(_store_github_owner_control),
   idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> JSONResponse:
   return await _publish_existing_github_revision(body, _idempotency(idempotency_key))
@@ -1096,7 +1115,7 @@ async def record_community_install(
   app_id: str,
   revision_id: str,
   body: InstallReceiptIn,
-  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+  _: models.Owner = Depends(_store_owner_control),
   idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> JSONResponse:
   """Keep one exact installed revision available in the Host release cache."""
@@ -1117,7 +1136,7 @@ async def record_community_install(
 async def set_community_rating(
   app_id: str,
   body: RatingIn,
-  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+  _: models.Owner = Depends(_store_owner_control),
   idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> JSONResponse:
   return await _request(
@@ -1134,7 +1153,7 @@ async def add_community_comment(
   app_id: str,
   revision_id: str,
   body: CommentIn,
-  _: models.Owner = Depends(get_owner_or_app_with_manage_apps),
+  _: models.Owner = Depends(_store_owner_control),
   idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> JSONResponse:
   return await _request(
@@ -1151,7 +1170,7 @@ async def add_community_comment(
 )
 async def upload_editorial_asset(
   body: EditorialAssetIn,
-  _: models.Owner = Depends(_store_github_owner),
+  _: models.Owner = Depends(_store_github_owner_control),
   idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> JSONResponse:
   return await _request(
@@ -1166,7 +1185,7 @@ async def upload_editorial_asset(
 )
 async def publish_editorial_spotlight(
   body: EditorialSpotlightIn,
-  _: models.Owner = Depends(_store_github_owner),
+  _: models.Owner = Depends(_store_github_owner_control),
   idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> JSONResponse:
   return await _request(

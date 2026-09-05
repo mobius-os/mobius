@@ -46,12 +46,18 @@ from app.chat_titles import (
   renamed_event,
 )
 from app.database import get_db
+from app.delegations import (
+  background_helper_chat_ids,
+  serialize_background_helpers,
+)
 from app.goal_plans import presented_goal
 from app.memory_observability import record_memory_checkpoint_once
 from app.owner_input import OwnerInputKind
 from app.deps import (
-  Principal, get_owner_or_chat_embed_principal, get_current_owner, get_principal,
-  reject_cross_site,
+  Principal, get_current_owner_for_lifecycle_control,
+  get_current_owner_for_owner_input,
+  get_owner_or_chat_embed_principal, get_current_owner, get_principal,
+  reject_cross_site, require_nondelegated_owner_control,
   require_chat_embed_operation,
 )
 from app.resource_access import (
@@ -605,6 +611,20 @@ def _chat_detail_response(
       projected_message["goal_summaries"] = summaries
       next_page[relative_index] = projected_message
     page = next_page
+  from app.chat_waits import terminal_wait_summaries_by_message_index
+  wait_summaries_by_index = terminal_wait_summaries_by_message_index(
+    db, chat.id, all_msgs,
+  )
+  if wait_summaries_by_index:
+    next_page = list(page)
+    for relative_index, message in enumerate(page):
+      summaries = wait_summaries_by_index.get(start + relative_index)
+      if not summaries:
+        continue
+      projected_message = dict(message)
+      projected_message["wait_summaries"] = summaries
+      next_page[relative_index] = projected_message
+    page = next_page
 
   settings_obj = _coerce_agent_settings(chat.agent_settings_json) or None
   _has_assistant_turns = any(m.get("role") == "assistant" for m in all_msgs)
@@ -653,6 +673,10 @@ def _chat_detail_response(
     "waits": [
       serialize_wait(row) for row in armed_waits_for_chat(db, chat.id)
     ] if expose_session else [],
+    "background_helpers": (
+      serialize_background_helpers(db, chat.id)
+      if expose_session else {"count": 0, "items": []}
+    ),
   }
   if requested_anchor_found is not None:
     response["requested_anchor_found"] = requested_anchor_found
@@ -720,7 +744,9 @@ def list_chats(
     # owner conversation into the drawer by setting owner_visible at creation.
     chats = [c for c in chats if _visible_in_owner_drawer(c)]
   durable_running = running_chat_ids(db, (chat.id for chat in chats))
-  durable_waiting = armed_wait_chat_ids(db)
+  durable_waiting = armed_wait_chat_ids(db) | background_helper_chat_ids(
+    db, (chat.id for chat in chats)
+  )
   secure_input_chats = secure_inputs.pending_chat_ids()
   record_memory_checkpoint_once(
     "shell_chat_list_first_response",
@@ -1092,7 +1118,7 @@ def update_pinned_order(
 async def update_chat(
   body: ChatUpdate,
   chat_id: str,
-  _: models.Owner = Depends(get_current_owner),
+  principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ):
   """Updates a chat's title and/or messages.
@@ -1112,6 +1138,11 @@ async def update_chat(
   does for a full replace.
   """
   from app.chat_writer import ReplaceTranscript, await_ack, get_writer
+
+  if principal.scope != "owner" or principal.app_id is not None:
+    raise HTTPException(status_code=403, detail="App token is not valid here.")
+  if body.messages is not None:
+    require_nondelegated_owner_control(principal)
 
   get_active_chat_or_404(db, chat_id)
   if body.messages is not None:
@@ -1168,6 +1199,13 @@ async def patch_chat(
   if principal.scope == "app":
     raise HTTPException(status_code=403, detail="App token is not valid here.")
   require_chat_embed_operation(principal, "chat:settings")
+  if (
+    body.provider is not None
+    or body.clear_agent_settings
+    or body.agent_settings_json is not None
+    or body.auto_resume_on_limit is not None
+  ):
+    require_nondelegated_owner_control(principal)
   if principal.scope == "chat_embed" and (
     body.title is not None
     or body.pinned is not None
@@ -1497,6 +1535,10 @@ def get_chat_runtime(
     "waits": [
       serialize_wait(row) for row in armed_waits_for_chat(db, chat.id)
     ] if principal.scope != "chat_embed" else [],
+    "background_helpers": (
+      serialize_background_helpers(db, chat.id)
+      if principal.scope != "chat_embed" else {"count": 0, "items": []}
+    ),
   }
 
 
@@ -2051,7 +2093,7 @@ def get_current_chat_usage(
 )
 async def delete_chat(
   chat_id: str,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Soft-deletes a chat under its send/delegation admission gate."""
@@ -2155,7 +2197,7 @@ async def _delete_chat_locked(chat_id: str, db: Session) -> None:
 @router.post("/{chat_id}/recover", dependencies=[Depends(reject_cross_site)])
 def recover_chat(
   chat_id: str,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Restores a soft-deleted chat if the TTL window has not expired."""
@@ -2199,7 +2241,7 @@ def recover_chat(
 async def switch_chat_provider(
   body: ChatProviderSwitch,
   chat_id: str,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Have the incoming provider prepare and atomically commit a handoff.
@@ -2425,7 +2467,7 @@ async def _compact_chat_locked(
 )
 async def compact_chat(
   chat_id: str,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Keep the pre-PM219 bodyless compaction protocol rolling-upgrade safe.
@@ -3101,7 +3143,7 @@ class QuestionAnswers(BaseModel):
 async def save_question_answers(
   chat_id: str,
   body: QuestionAnswers,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_owner_input),
   db: Session = Depends(get_db),
 ):
   """Saves the user's answers into the question block being answered.

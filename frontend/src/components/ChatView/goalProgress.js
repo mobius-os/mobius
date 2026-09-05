@@ -73,15 +73,14 @@ function isContinue(text) {
 const GOAL_PRESENTATION_STATUSES = new Set([
   'active', 'paused', 'completed', 'failed',
 ])
+const GOAL_WAIT_KINDS = new Set(['owner_question', 'monitor'])
 
 /** Normalize the durable Goal presentation shared by detail/runtime reads. */
 export function normalizeGoalPresentation(goal) {
   if (!goal || typeof goal !== 'object') return null
   const objective = compactGoalObjective(goal.objective)
   if (!objective || !GOAL_PRESENTATION_STATUSES.has(goal.status)) return null
-  const waitKind = ['owner_question', 'monitor'].includes(goal.wait_kind)
-    ? goal.wait_kind
-    : null
+  const waitKind = GOAL_WAIT_KINDS.has(goal.wait_kind) ? goal.wait_kind : null
   return {
     id: goal.id == null ? null : String(goal.id),
     objective,

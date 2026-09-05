@@ -30,6 +30,7 @@ from app.database import get_db
 from app.deps import (
   get_owner_or_app_with_identity_manage,
   get_owner_or_app_with_railway_manage,
+  require_nondelegated_owner_or_app_control,
   reject_cross_site,
 )
 from app.runtime_identity import broker_request as runtime_identity_broker_request
@@ -523,7 +524,10 @@ async def read_identity(
   return _managed_payload(remote, owner)
 
 
-@router.patch("/profile")
+@router.patch(
+  "/profile",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def update_profile(
   body: ProfilePatch,
   owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
@@ -543,7 +547,10 @@ async def update_profile(
   return _merge_local_deployment(remote, _linked_since(db, owner.id))
 
 
-@router.post("/avatar")
+@router.post(
+  "/avatar",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def update_avatar(
   avatar: UploadFile = File(...),
   owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
@@ -871,7 +878,11 @@ async def _railway_connect_start(
   return {"authorization_url": authorization_url}
 
 
-@router.post("/railway/deployments", status_code=202)
+@router.post(
+  "/railway/deployments",
+  status_code=202,
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def create_railway_deployment(
   body: RailwayCreate,
   owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
@@ -910,7 +921,10 @@ async def adopt_current_railway_deployment(
   )
 
 
-@router.post("/railway/connect/start")
+@router.post(
+  "/railway/connect/start",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def start_railway_connection(
   body: RailwayConnectStart | None = None,
   owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
@@ -931,7 +945,10 @@ async def read_railway_workspaces(
   )
 
 
-@router.post("/railway/workspace")
+@router.post(
+  "/railway/workspace",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def select_railway_workspace(
   body: RailwaySelectWorkspace,
   owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
@@ -946,7 +963,10 @@ async def select_railway_workspace(
   return {"ok": True}
 
 
-@router.post("/railway/plan/refresh")
+@router.post(
+  "/railway/plan/refresh",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def refresh_railway_plan(
   owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
   db: Session = Depends(get_db),
@@ -955,7 +975,10 @@ async def refresh_railway_plan(
   return {"ok": True}
 
 
-@router.post("/railway/disconnect")
+@router.post(
+  "/railway/disconnect",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def disconnect_railway(
   owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
   db: Session = Depends(get_db),
@@ -977,7 +1000,11 @@ async def read_railway_metrics(
   )
 
 
-@router.post("/railway/deployments/{instance_id}/recovery", status_code=202)
+@router.post(
+  "/railway/deployments/{instance_id}/recovery",
+  status_code=202,
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def open_railway_recovery(
   instance_id: str,
   owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
@@ -1002,7 +1029,11 @@ async def read_railway_recovery_status(
   )
 
 
-@router.post("/railway/deployments/{instance_id}/retry", status_code=202)
+@router.post(
+  "/railway/deployments/{instance_id}/retry",
+  status_code=202,
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def retry_railway_deployment(
   instance_id: str,
   owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
@@ -1013,7 +1044,10 @@ async def retry_railway_deployment(
   )
 
 
-@router.patch("/railway/deployments/{instance_id}/compute")
+@router.patch(
+  "/railway/deployments/{instance_id}/compute",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def update_railway_compute(
   instance_id: str,
   body: RailwayCompute,
@@ -1029,7 +1063,10 @@ async def update_railway_compute(
   )
 
 
-@router.patch("/railway/deployments/{instance_id}/storage")
+@router.patch(
+  "/railway/deployments/{instance_id}/storage",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def update_railway_storage(
   instance_id: str,
   body: RailwayStorage,
@@ -1045,7 +1082,11 @@ async def update_railway_storage(
   )
 
 
-@router.delete("/railway/deployments/{instance_id}", status_code=202)
+@router.delete(
+  "/railway/deployments/{instance_id}",
+  status_code=202,
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def delete_railway_deployment(
   instance_id: str,
   owner: models.Owner = Depends(get_owner_or_app_with_railway_manage),
@@ -1056,7 +1097,10 @@ async def delete_railway_deployment(
   )
 
 
-@router.post("/link/start")
+@router.post(
+  "/link/start",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def start_link(
   body: LinkStart,
   owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
@@ -1119,7 +1163,10 @@ async def start_link(
   }
 
 
-@router.post("/link/complete")
+@router.post(
+  "/link/complete",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def complete_link(
   body: LinkComplete,
   owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
@@ -1242,7 +1289,11 @@ async def complete_link(
   return _merge_local_deployment(identity, _linked_since(db, owner.id))
 
 
-@router.delete("/link", status_code=204)
+@router.delete(
+  "/link",
+  status_code=204,
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def delete_link(
   owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
   db: Session = Depends(get_db),

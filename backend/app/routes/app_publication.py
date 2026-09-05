@@ -33,7 +33,10 @@ from app.artifact_data import (
 )
 from app.config import get_settings
 from app.database import get_db
-from app.deps import Principal, get_principal, reject_cross_site
+from app.deps import (
+  Principal, get_principal, reject_cross_site,
+  require_nondelegated_owner_control,
+)
 from app.publication import (
   InvalidPublicationRegistry,
   PublicationRecord,
@@ -546,6 +549,7 @@ async def publish_app_site(
   stable per project (kept in the project's build/ dir) so re-publishing
   updates the SAME URL. Owner or the app's own token only.
   """
+  require_nondelegated_owner_control(principal)
   if principal.app_id is not None and principal.app_id != app_id:
     raise HTTPException(403, "An app may only publish its own site.")
   project_id = (body.project_id or "").strip() or None
@@ -679,6 +683,7 @@ async def unpublish_app_site(
   principal: Principal = Depends(get_principal),
 ):
   """Revoke a published URL permanently, then remove its snapshot and hint."""
+  require_nondelegated_owner_control(principal)
   if principal.app_id is not None and principal.app_id != app_id:
     raise HTTPException(403, "An app may only unpublish its own site.")
   if project_id and not _PUBLISH_PROJECT_RE.match(project_id):

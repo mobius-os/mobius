@@ -29,6 +29,8 @@ import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from app import chat as chat_mod
 from app import models
 from app.chat_writer import (
@@ -38,7 +40,6 @@ from app.chat_writer import (
   PrepareAutoResume,
   PromotePending,
   ResolvePark,
-  RollbackAutoResume,
   StartTurn,
   _tail_open_question_id,
   get_writer,
@@ -272,6 +273,26 @@ def test_limit_exit_non_limit_error_stays_plain():
   kwargs = chat_mod._limit_exit(sink, {"error": "syntax error"}, "syntax error")
   assert kwargs == {"limit_reached": False}
   assert sink.events[-1] == {"type": "error", "message": "syntax error"}
+
+
+def test_limit_exit_resume_incomplete_publishes_calm_resumable_note():
+  """A steer-interrupted turn (error defused to None, resume_incomplete set)
+  publishes a calm, resumable "Paused" note — never a red error block."""
+  sink = _Sink()
+  kwargs = chat_mod._limit_exit(
+    sink,
+    {"error": None, "terminal_status": "interrupted", "resume_incomplete": True},
+    None,
+  )
+  assert kwargs == {"limit_reached": False}
+  note = sink.events[-1]
+  assert note["type"] == "error"
+  assert note["resumable"] is True
+  # A `pause` descriptor makes the card render in the calm "Paused" family, not
+  # the danger-red error styling; the kind is distinct from a restart pause.
+  assert note["pause"]["kind"] == "interrupted"
+  assert "resets_at" not in note["pause"]
+  assert "Resume" in note["message"]
 
 
 def test_limit_exit_bare_429_synthesizes_the_card_block():
@@ -545,48 +566,6 @@ def test_prepare_and_resolve_retire_a_stale_nonlatest_park():
   assert _run_row("rt-old-notify")["status"] == "completed"
 
 
-def test_auto_resume_rollback_cannot_unwind_a_newer_successor():
-  cid = "park-stale-rollback"
-  park_token = "rt-stale-rollback-park"
-  promoted_token = "rt-stale-rollback-promoted"
-  successor_token = "rt-stale-rollback-successor"
-  queued = {
-    "role": "user", "content": "continue", "ts": 5,
-    "cid": f"limit-resume-{park_token}",
-  }
-  _seed_chat(cid, pending=[queued])
-  _seed_run(cid, park_token, status="resume_pending", started_offset=-30)
-  get_writer().submit(PromotePending(
-    chat_id=cid, run_token=promoted_token,
-  )).result(timeout=5)
-  get_writer().submit(StartTurn(
-    chat_id=cid,
-    run_token=successor_token,
-    user_msg={
-      "role": "user", "content": "new owner turn", "ts": 10,
-      "cid": "new-owner-turn",
-    },
-    title_source="new owner turn",
-    default_provider="claude",
-  )).result(timeout=5)
-
-  rolled_back = get_writer().submit(RollbackAutoResume(
-    chat_id=cid,
-    run_token=park_token,
-    promoted_run_token=promoted_token,
-    promoted_pending=[queued],
-  )).result(timeout=5)
-  assert rolled_back is False
-  assert _run_row(successor_token)["status"] == "running"
-  state = _chat_row(cid)
-  assert state["running_status"] == "running"
-  assert state["messages"][-1]["cid"] == "new-owner-turn"
-
-  get_writer().submit(FinishRun(
-    chat_id=cid, run_token=successor_token,
-  )).result(timeout=5)
-
-
 # -- (c) latest-run-wins + supersession ----------------------------------------
 
 def test_parked_probe_latest_run_wins():
@@ -630,6 +609,269 @@ def test_fresh_start_turn_closes_stale_park():
     db.close()
 
 
+def test_owner_message_queues_behind_future_limit_park(
+  client, auth, db, monkeypatch,
+):
+  """Normal owner input preserves the parked run; Try now is explicit."""
+  cid = "park-owner-queue"
+  _seed_chat(cid, auto_resume=True)
+  with SessionLocal() as setup_db:
+    setup_db.get(models.Chat, cid).agent_settings_json = {
+      "model": "claude-opus-4-8",
+    }
+    setup_db.commit()
+  parked_until = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+  _seed_run(
+    cid, "rt-park-owner-queue", status="parked",
+    parked_until=parked_until, park_reason="usage_limit",
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    "app.routes.chats_stream._schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+  assert chat_mod.is_chat_running(cid) is False
+
+  response = client.post(
+    f"/api/chats/{cid}/messages",
+    json={"content": "also check the weekly limit", "cid": "queued-owner"},
+    headers=auth,
+  )
+
+  assert response.status_code == 202, response.text
+  assert response.json()["status"] == "queued"
+  assert scheduled == []
+  assert _run_row("rt-park-owner-queue")["status"] == "parked"
+  assert _chat_row(cid)["pending"] == [{
+    "role": "user",
+    "content": "also check the weekly limit",
+    "ts": response.json()["ts"],
+    "cid": "queued-owner",
+  }]
+
+
+def test_owner_message_also_waits_behind_a_transient_rate_limit(
+  client, auth, db, monkeypatch,
+):
+  del db
+  cid = "park-owner-rate-queue"
+  _seed_chat(cid, auto_resume=True)
+  with SessionLocal() as setup_db:
+    setup_db.get(models.Chat, cid).agent_settings_json = {
+      "model": "claude-opus-4-8",
+    }
+    setup_db.commit()
+  _seed_run(
+    cid, "rt-park-owner-rate-queue", status="parked",
+    parked_until=(
+      datetime.now(UTC).replace(tzinfo=None) + timedelta(minutes=5)
+    ),
+    park_reason="rate_limit",
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    "app.routes.chats_stream._schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+
+  response = client.post(
+    f"/api/chats/{cid}/messages",
+    json={"content": "keep this with the parked turn", "cid": "rate-owner"},
+    headers=auth,
+  )
+
+  assert response.status_code == 202, response.text
+  assert response.json()["status"] == "queued"
+  assert scheduled == []
+  assert _run_row("rt-park-owner-rate-queue")["status"] == "parked"
+
+
+def test_notify_only_park_does_not_capture_an_owner_message(
+  client, auth, db, monkeypatch,
+):
+  del db
+  del monkeypatch
+  cid = "park-owner-notify-only"
+  _seed_chat(cid, auto_resume=False)
+  with SessionLocal() as setup_db:
+    setup_db.get(models.Chat, cid).agent_settings_json = {
+      "model": "claude-opus-4-8",
+    }
+    setup_db.commit()
+  _seed_run(
+    cid, "rt-park-owner-notify-only", status="parked",
+    parked_until=(
+      datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+    ),
+    park_reason="usage_limit",
+  )
+  response = client.post(
+    f"/api/chats/{cid}/messages",
+    json={"content": "start a new turn now", "cid": "notify-owner"},
+    headers=auth,
+  )
+
+  assert response.status_code == 202, response.text
+  assert response.json()["status"] == "started"
+  assert _run_row("rt-park-owner-notify-only")["status"] == "interrupted"
+  assert _chat_row(cid)["pending"] == []
+  chat_mod.discard_starting(cid)
+
+
+def test_manual_try_now_drains_messages_queued_behind_future_limit_park(
+  client, auth, monkeypatch,
+):
+  cid = "park-owner-try-now"
+  _seed_chat(cid, auto_resume=True)
+  with SessionLocal() as setup_db:
+    setup_db.get(models.Chat, cid).agent_settings_json = {
+      "model": "claude-opus-4-8",
+    }
+    setup_db.commit()
+  _seed_run(
+    cid, "rt-park-owner-try-now", status="parked",
+    parked_until=(
+      datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+    ),
+    park_reason="usage_limit",
+  )
+  with SessionLocal() as setup_db:
+    parked = setup_db.get(models.ChatRun, "rt-park-owner-try-now")
+    parked.root_run_id = parked.id
+    parked.goal_objective = "Finish the durable Goal"
+    parked.goal_id = parked.id
+    parked.goal_plan_json = {
+      "tasks": [{"id": "finish", "status": "running"}],
+    }
+    setup_db.commit()
+  first = client.post(
+    f"/api/chats/{cid}/messages",
+    json={"content": "preserve this context", "cid": "queued-context"},
+    headers=auth,
+  )
+  assert first.status_code == 202, first.text
+  scheduled = []
+  monkeypatch.setattr(
+    "app.routes.chats_stream._schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+  assert chat_mod.is_chat_running(cid) is False
+
+  response = client.post(
+    f"/api/chats/{cid}/messages",
+    json={
+      "content": "continue", "cid": "manual-early-retry",
+      "hidden": True, "continuation": "manual",
+    },
+    headers=auth,
+  )
+
+  assert response.status_code == 202, response.text
+  assert response.json()["status"] == "started"
+  assert len(scheduled) == 1
+  assert "preserve this context" in scheduled[0]["next_user"]["content"]
+  assert scheduled[0]["next_user"]["kind"] == "continuation"
+  assert scheduled[0]["next_user"]["continuation_reason"] == "manual"
+  assert _run_row("rt-park-owner-try-now")["status"] == "completed"
+  assert _chat_row(cid)["pending"] == []
+  with SessionLocal() as db:
+    successor = db.query(models.ChatRun).filter(
+      models.ChatRun.id == scheduled[0]["run_token"],
+    ).one()
+    assert successor.root_run_id == "rt-park-owner-try-now"
+    assert successor.goal_id == "rt-park-owner-try-now"
+    assert successor.goal_objective == "Finish the durable Goal"
+
+
+@pytest.mark.parametrize(
+  ("kind", "result_cid"),
+  [
+    ("wait_result", "wait-result-manual-product"),
+    ("delegation_result", "delegation-result-manual-product"),
+  ],
+)
+def test_manual_try_now_preserves_product_result_identity_and_claims_latch(
+  client, auth, monkeypatch, kind, result_cid,
+):
+  from app.broadcast import remove_broadcast
+  from app.continuations import product_result_run_token
+
+  cid = f"park-manual-{kind}"
+  _seed_chat(cid, auto_resume=True)
+  _seed_run(
+    cid,
+    f"rt-{kind}-park",
+    status="parked",
+    parked_until=(
+      datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+    ),
+    park_reason="usage_limit",
+  )
+  result = {
+    "role": "user",
+    "content": f"hidden {kind} receipt",
+    "hidden": True,
+    "kind": kind,
+    "source_work_id": f"source-{kind}",
+    "cid": result_cid,
+    "ts": 1,
+  }
+  with SessionLocal() as setup_db:
+    target = setup_db.get(models.Chat, cid)
+    target.agent_settings_json = {"model": "claude-opus-4-8"}
+    target.pending_messages = [result]
+    setup_db.commit()
+  expected_run = product_result_run_token(cid, result)
+  claimed_waits = []
+  claimed_wakes = []
+
+  monkeypatch.setattr(
+    "app.chat_waits.claim_scheduled_wait_result",
+    lambda chat_id, next_user: claimed_waits.append((chat_id, next_user)),
+  )
+  monkeypatch.setattr(
+    "app.delegations.claim_scheduled_parent_wake",
+    lambda chat_id, next_user: claimed_wakes.append((chat_id, next_user)),
+  )
+
+  def schedule(**kwargs):
+    from app.chat_waits import claim_scheduled_wait_result
+    from app.delegations import claim_scheduled_parent_wake
+
+    claim_scheduled_wait_result(cid, kwargs["next_user"])
+    claim_scheduled_parent_wake(cid, kwargs["next_user"])
+    return True
+
+  monkeypatch.setattr(
+    "app.routes.chats_stream._schedule_continuation", schedule,
+  )
+
+  response = client.post(
+    f"/api/chats/{cid}/messages",
+    json={
+      "content": "continue",
+      "cid": f"manual-{kind}",
+      "hidden": True,
+      "continuation": "manual",
+    },
+    headers=auth,
+  )
+
+  assert response.status_code == 202, response.text
+  assert response.json()["status"] == "started"
+  with SessionLocal() as check_db:
+    successor = check_db.get(models.ChatRun, expected_run)
+    assert successor is not None
+  for claimed in (claimed_waits, claimed_wakes):
+    assert len(claimed) == 1
+    assert claimed[0][0] == cid
+    assert claimed[0][1]["kind"] == kind
+    assert claimed[0][1]["_run_token"] == expected_run
+  assert _chat_row(cid)["pending"] == []
+  chat_mod.discard_starting(cid)
+  remove_broadcast(cid)
+
+
 def test_park_run_strict_tokenless_finishes_all_running_rows():
   cid = "park-tokenless"
   _seed_chat(cid)
@@ -661,6 +903,48 @@ def _due_park(
             initiated_by_app_id=initiated_by_app_id)
 
 
+def _delegated_limit_park(
+  cid: str,
+  token: str,
+  *,
+  status: str = "resume_pending",
+  pending=None,
+) -> int:
+  """Seed one exact active Delegation-owned provider-limit attempt."""
+  _seed_chat(cid, pending=pending, auto_resume=False)
+  _seed_run(
+    cid,
+    token,
+    status=status,
+    parked_until=datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=1),
+    park_reason="usage_limit",
+  )
+  with SessionLocal() as db:
+    app = models.App(
+      slug=f"limit-{cid}", source_dir=f"/tmp/mobius-tests/{cid}",
+      name="Subagents", description="", jsx_source="",
+    )
+    db.add(app)
+    db.flush()
+    parent_id = f"{cid}-parent"
+    db.add(models.Chat(
+      id=parent_id, title="Parent", messages=[], provider="codex",
+    ))
+    child = db.get(models.Chat, cid)
+    child.created_by_app_id = app.id
+    physical = db.get(models.ChatRun, token)
+    physical.initiated_by_app_id = app.id
+    db.add(models.Delegation(
+      id=f"delegation-{cid}", app_id=app.id,
+      parent_chat_id=parent_id, parent_root_run_id="parent-root",
+      task_key="bounded", child_chat_id=cid, provider="claude",
+      model="claude-opus-4-8", effort="low", scope="read", cwd="/data",
+      prompt_sha256="digest",
+    ))
+    db.commit()
+    return int(app.id)
+
+
 def _set_pending_question(cid: str, question_id: str | None) -> None:
   """Set the chat's durable open-question marker (what QuestionCommit does)."""
   db = SessionLocal()
@@ -682,6 +966,21 @@ def _run_sweep_result():
 
 def _run_sweep():
   return list(_run_sweep_result().resolved)
+
+
+def _pause_finish_run(monkeypatch):
+  """Hold cancellation inside its stop-to-latch window for race tests."""
+  entered = asyncio.Event()
+  release = asyncio.Event()
+  original = chat_mod._finish_run
+
+  async def paused_finish(*args, **kwargs):
+    entered.set()
+    await release.wait()
+    return await original(*args, **kwargs)
+
+  monkeypatch.setattr(chat_mod, "_finish_run", paused_finish)
+  return entered, release
 
 
 def test_sweep_notifies_once_and_resolves(owner_token, monkeypatch):
@@ -819,6 +1118,18 @@ def test_sweep_auto_resume_on_starts_one_staggered_continue(
   _due_park(
     "sweep-auto", "rt-sweep-auto", pending=list(queued), auto_resume=True,
   )
+  with SessionLocal() as db:
+    parked = db.get(models.ChatRun, "rt-sweep-auto")
+    db.add(models.ChatRun(
+      id="goal-logical-root", root_run_id="goal-logical-root",
+      chat_id="sweep-auto", status="completed", provider="claude",
+      started_at=parked.started_at - timedelta(seconds=1),
+      goal_id="goal-stable-id", goal_objective="Finish the recovery",
+    ))
+    parked.root_run_id = "goal-logical-root"
+    parked.goal_id = "goal-stable-id"
+    parked.goal_objective = "Finish the recovery"
+    db.commit()
 
   try:
     resolved = _run_sweep()
@@ -834,13 +1145,346 @@ def test_sweep_auto_resume_on_starts_one_staggered_continue(
     assert "continue" in promoted["content"]
     assert promoted["_messages"][-1]["kind"] == "continuation"
     assert promoted["_messages"][-1]["continuation_reason"] == "usage_limit"
+    assert promoted["kind"] == "continuation"
+    assert promoted["continuation_reason"] == "usage_limit"
     state = _chat_row("sweep-auto")
     assert state["pending"] == []
     assert state["running_status"] == "running"  # PromotePending set the marker
+    with SessionLocal() as db:
+      resumed = db.query(models.ChatRun).filter(
+        models.ChatRun.chat_id == "sweep-auto",
+        models.ChatRun.status == "running",
+      ).one()
+      assert resumed.root_run_id == "goal-logical-root"
+      assert resumed.goal_id == "goal-stable-id"
+      assert resumed.goal_objective == "Finish the recovery"
   finally:
     # _schedule_continuation was stubbed, so release the claim it would have
     # handed to the spawned turn.
     chat_mod.discard_starting("sweep-auto")
+
+
+def test_sweep_auto_resumes_an_active_delegation_under_its_app_identity(
+  owner_token, monkeypatch,
+):
+  """Quota suspension must not strand a bounded child behind its parent."""
+  del owner_token
+  monkeypatch.setattr(
+    "app.push.notify_owner_async",
+    _async_notify(lambda db, owner_id, **kw: "notif-id"),
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kw: scheduled.append(kw),
+  )
+  cid = "sweep-delegation"
+  token = "rt-sweep-delegation"
+  _due_park(cid, token, auto_resume=False)
+  with SessionLocal() as db:
+    app = models.App(
+      slug="limit-resume-delegation",
+      source_dir="/tmp/mobius-tests/limit-resume-delegation",
+      name="Subagents", description="", jsx_source="",
+    )
+    db.add(app)
+    db.flush()
+    app_id = app.id
+    db.add(models.Chat(
+      id="sweep-delegation-parent", title="Parent", messages=[],
+      provider="codex",
+    ))
+    child = db.get(models.Chat, cid)
+    child.created_by_app_id = app_id
+    physical = db.get(models.ChatRun, token)
+    physical.initiated_by_app_id = app_id
+    db.add(models.Delegation(
+      id="limit-resume-delegation", app_id=app_id,
+      parent_chat_id="sweep-delegation-parent",
+      parent_root_run_id="parent-root", task_key="bounded",
+      child_chat_id=cid, provider="claude", model="claude-opus-4-8",
+      effort="low", scope="read", cwd="/data",
+      prompt_sha256="digest",
+    ))
+    db.commit()
+
+  try:
+    assert _run_sweep() == [cid]
+    assert len(scheduled) == 1
+    assert scheduled[0]["chat_id"] == cid
+    assert _run_row(scheduled[0]["run_token"])["initiated_by_app_id"] == app_id
+    assert _run_row(token)["status"] == "completed"
+  finally:
+    chat_mod.discard_starting(cid)
+
+
+def test_limit_handoff_hidden_result_preserves_goal_root_and_app(monkeypatch):
+  """A hidden result is the resumed prompt; Continue stays transcript-only."""
+  cid = "limit-hidden-result"
+  token = f"rt-{cid}"
+  goal_id = "goal-hidden-result"
+  hidden = {
+    "role": "user",
+    "content": "The delegated audit found the exact defect.",
+    "ts": 5,
+    "cid": "delegation-result-hidden",
+    "kind": "delegation_result",
+    "source_work_id": goal_id,
+    "hidden": True,
+  }
+  app_id = _delegated_limit_park(cid, token, pending=[hidden])
+  with SessionLocal() as db:
+    root = db.get(models.ChatRun, token)
+    root.goal_id = goal_id
+    root.goal_objective = "Finish the lifecycle repair"
+    db.commit()
+  scheduled = []
+  def schedule(**kwargs):
+    scheduled.append(kwargs)
+    if len(scheduled) == 1:
+      chat_mod.discard_starting(cid)
+      return False
+    return True
+
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    schedule,
+  )
+
+  try:
+    assert not asyncio.run(chat_mod._auto_resume_chat(cid, park_token=token))
+    assert asyncio.run(chat_mod._auto_resume_chat(cid, park_token=token))
+    assert len(scheduled) == 2
+    next_user = scheduled[-1]["next_user"]
+    assert next_user["content"] == hidden["content"]
+    assert next_user["kind"] == "delegation_result"
+    assert next_user["hidden"] is True
+    assert [row["cid"] for row in next_user["_messages"]] == [
+      hidden["cid"], f"limit-resume-{token}",
+    ]
+    resumed = _run_row(scheduled[-1]["run_token"])
+    assert resumed["initiated_by_app_id"] == app_id
+    with SessionLocal() as db:
+      physical = db.get(models.ChatRun, scheduled[-1]["run_token"])
+      assert physical.root_run_id == token
+      assert physical.goal_id == goal_id
+      assert physical.goal_objective == "Finish the lifecycle repair"
+  finally:
+    chat_mod.discard_starting(cid)
+
+
+def test_cancelled_delegation_cannot_mint_a_limit_successor(monkeypatch):
+  """Cancellation that wins before the atomic compare-and-swap stays final."""
+  from app.delegations import mark_cancelled
+
+  cid = "limit-cancel-before"
+  token = f"rt-{cid}"
+  _delegated_limit_park(cid, token)
+  with SessionLocal() as db:
+    row = db.get(models.Delegation, f"delegation-{cid}")
+    mark_cancelled(db, row)
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+
+  assert asyncio.run(chat_mod._auto_resume_chat(cid, park_token=token)) is False
+  assert scheduled == []
+  assert _run_row(chat_mod._auto_resume_run_token(token)) is None
+
+
+def test_cancel_after_atomic_handoff_stops_and_cannot_reattach(monkeypatch):
+  """Cancellation after commit retires the successor before any retry."""
+  from app.delegations import cancel_delegation_execution
+
+  cid = "limit-cancel-after"
+  token = f"rt-{cid}"
+  _delegated_limit_park(cid, token)
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+
+  assert asyncio.run(chat_mod._auto_resume_chat(cid, park_token=token))
+  resume_token = chat_mod._auto_resume_run_token(token)
+  assert _run_row(resume_token)["status"] == "running"
+  assert asyncio.run(cancel_delegation_execution(f"delegation-{cid}"))
+  assert _run_row(resume_token)["status"] == "stopped"
+  assert asyncio.run(chat_mod._auto_resume_chat(cid, park_token=token)) is False
+  assert len(scheduled) == 1
+
+
+def test_cancellation_serializes_with_due_auto_resume(monkeypatch):
+  """A due retry cannot cross cancellation's stop-to-latch window."""
+  from app.delegations import cancel_delegation_execution
+
+  cid = "limit-cancel-resume-race"
+  token = f"rt-{cid}"
+  delegation_id = f"delegation-{cid}"
+  _delegated_limit_park(cid, token)
+  entered_finish, release_finish = _pause_finish_run(monkeypatch)
+
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs) or True,
+  )
+
+  async def scenario():
+    cancelling = asyncio.create_task(
+      cancel_delegation_execution(delegation_id)
+    )
+    await entered_finish.wait()
+    resuming = asyncio.create_task(
+      chat_mod._auto_resume_chat(cid, park_token=token)
+    )
+    await asyncio.sleep(0)
+    assert not resuming.done()
+    release_finish.set()
+    assert await cancelling is True
+    assert await resuming is False
+
+  asyncio.run(scenario())
+  assert scheduled == []
+  assert _run_row(token)["status"] == "stopped"
+  assert _run_row(chat_mod._auto_resume_run_token(token)) is None
+  with SessionLocal() as db:
+    assert db.get(models.Delegation, delegation_id).cancelled_at is not None
+
+
+def test_cancellation_serializes_with_committed_successor_reattach(
+  monkeypatch,
+):
+  """An orphan reattach cannot relaunch between stop and cancellation."""
+  from app.delegations import cancel_delegation_execution
+
+  cid = "limit-cancel-reattach-race"
+  token = f"rt-{cid}"
+  delegation_id = f"delegation-{cid}"
+  _delegated_limit_park(cid, token)
+  scheduled = []
+
+  def first_schedule(**kwargs):
+    scheduled.append(kwargs)
+    # Match the real scheduler failure path: its transient starting claim is
+    # released while the committed successor remains the durable owner.
+    chat_mod.discard_starting(cid)
+    return False
+
+  monkeypatch.setattr(chat_mod, "_schedule_continuation", first_schedule)
+  assert asyncio.run(chat_mod._auto_resume_chat(cid, park_token=token)) is False
+  successor = chat_mod._auto_resume_run_token(token)
+  assert _run_row(successor)["status"] == "running"
+
+  entered_finish, release_finish = _pause_finish_run(monkeypatch)
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs) or True,
+  )
+
+  async def scenario():
+    cancelling = asyncio.create_task(
+      cancel_delegation_execution(delegation_id)
+    )
+    await entered_finish.wait()
+    reattaching = asyncio.create_task(
+      chat_mod._auto_resume_chat(cid, park_token=token)
+    )
+    await asyncio.sleep(0)
+    assert not reattaching.done()
+    release_finish.set()
+    assert await cancelling is True
+    assert await reattaching is False
+
+  asyncio.run(scenario())
+  assert len(scheduled) == 1
+  assert _run_row(successor)["status"] == "stopped"
+  with SessionLocal() as db:
+    assert db.get(models.Delegation, delegation_id).cancelled_at is not None
+
+
+def test_notified_park_cancellation_serializes_with_explicit_retry(
+  monkeypatch,
+):
+  """Try-now cannot revive a notified park while cancellation is latching."""
+  from app.delegations import cancel_delegation_execution, retry_limit_park
+
+  cid = "limit-cancel-notified-race"
+  token = f"rt-{cid}"
+  delegation_id = f"delegation-{cid}"
+  _delegated_limit_park(cid, token, status="parked_notified")
+  entered_finish, release_finish = _pause_finish_run(monkeypatch)
+
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs) or True,
+  )
+
+  async def retry():
+    with SessionLocal() as db:
+      row = db.get(models.Delegation, delegation_id)
+      return await retry_limit_park(db, row, run_token=token)
+
+  async def scenario():
+    cancelling = asyncio.create_task(
+      cancel_delegation_execution(delegation_id)
+    )
+    await entered_finish.wait()
+    retrying = asyncio.create_task(retry())
+    await asyncio.sleep(0)
+    assert not retrying.done()
+    release_finish.set()
+    assert await cancelling is True
+    assert await retrying is False
+
+  asyncio.run(scenario())
+  assert scheduled == []
+  assert _run_row(token)["status"] == "stopped"
+  assert _run_row(chat_mod._auto_resume_run_token(token)) is None
+  with SessionLocal() as db:
+    row = db.get(models.Delegation, delegation_id)
+    chat = db.get(models.Chat, cid)
+    assert row.cancelled_at is not None
+    assert chat.auto_resume_on_limit is False
+    assert chat.auto_resume_on_restart is False
+
+
+def test_second_quota_hit_gets_a_new_deterministic_attempt(monkeypatch):
+  """A resumed child can park again without attaching to its prior retry."""
+  cid = "limit-second-hit"
+  first_park = f"rt-{cid}"
+  app_id = _delegated_limit_park(cid, first_park)
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+
+  try:
+    assert asyncio.run(chat_mod._auto_resume_chat(cid, park_token=first_park))
+    first_retry = chat_mod._auto_resume_run_token(first_park)
+    chat_mod.discard_starting(cid)
+    with SessionLocal() as db:
+      retried = db.get(models.ChatRun, first_retry)
+      retried.status = "resume_pending"
+      retried.park_reason = "usage_limit"
+      retried.parked_until = (
+        datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=1)
+      )
+      retried.ended_at = datetime.now(UTC).replace(tzinfo=None)
+      db.commit()
+
+    assert asyncio.run(chat_mod._auto_resume_chat(cid, park_token=first_retry))
+    second_retry = chat_mod._auto_resume_run_token(first_retry)
+    assert second_retry != first_retry
+    assert scheduled[-1]["run_token"] == second_retry
+    assert _run_row(second_retry)["initiated_by_app_id"] == app_id
+    assert _run_row(first_retry)["status"] == "completed"
+  finally:
+    chat_mod.discard_starting(cid)
 
 
 def test_limit_auto_resumes_are_staggered_not_blocked_by_live_work(
@@ -1307,7 +1951,7 @@ def test_restart_park_rejects_ack_for_the_wrong_nonce(
   assert _run_row(token)["restart_nonce"] is None
 
 
-def test_restart_spawn_failure_retires_one_shot_authorization(
+def test_restart_spawn_failure_reattaches_deterministic_successor(
   owner_token, monkeypatch,
 ):
   del owner_token
@@ -1342,26 +1986,50 @@ def test_restart_spawn_failure_retires_one_shot_authorization(
   row = _run_row(token)
   assert row["status"] == "completed"
   assert row["restart_nonce"] is None
+  resume_token = chat_mod._auto_resume_run_token(token)
+  assert _run_row(resume_token)["status"] == "running"
   state = _chat_row(cid)
   assert state["running_status"] == "running"
   assert state["pending"] == []
   assert state["messages"][-1]["cid"] == f"restart-resume-{token}"
-  assert _run_sweep() == []
 
-  # The promoted-but-unscheduled run is recoverable evidence, not a queued
-  # control message. The next startup turns it into the ordinary interrupted
-  # boundary rather than trying to replay an already-consumed restart nonce.
-  db = SessionLocal()
+  # Both the runtime wedge sweep and cold-start reconciliation preserve the
+  # exact no-output successor. The consumed one-shot nonce is not needed to
+  # trust a writer-committed continuation with a validated causal envelope.
+  with SessionLocal() as db:
+    predecessor = db.get(models.ChatRun, token)
+    persisted = db.get(models.ChatRun, resume_token)
+    predecessor.started_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(
+      minutes=11,
+    )
+    persisted.started_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(
+      minutes=10,
+    )
+    db.commit()
+  with SessionLocal() as db:
+    assert asyncio.run(chat_mod.sweep_wedged_runs(db)) == []
+  assert _run_row(resume_token)["status"] == "running"
+  with SessionLocal() as db:
+    assert chat_mod.safe_auto_resume_startup_orphan(
+      db, db.get(models.Chat, cid), db.get(models.ChatRun, resume_token),
+    )
+    recovered = chat_mod.reconcile_startup_chats(db)
+  assert cid not in recovered.manual
+  assert _run_row(resume_token)["status"] == "running"
+
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
   try:
-    recovered = chat_mod.reconcile_interrupted_chats(db)
+    assert _run_sweep() == [cid]
+    assert len(scheduled) == 1
+    assert scheduled[0]["run_token"] == resume_token
+    assert scheduled[0]["next_user"]["cid"] == f"restart-resume-{token}"
   finally:
-    db.close()
-  assert recovered == [cid]
+    chat_mod.discard_starting(cid)
   assert _chat_row(cid)["pending"] == []
-  assert _chat_row(cid)["running_status"] is None
-  get_writer().submit(FinishRun(
-    chat_id=cid, run_token="",
-  )).result(timeout=5)
 
 
 def test_unacknowledged_restart_pending_cannot_bypass_via_idle_sweep(
@@ -1643,10 +2311,19 @@ def test_sweep_paces_restart_batch_without_waiting_for_live_turns(
       chat_mod.discard_starting(cid)
 
 
-def test_auto_resume_spawn_failure_rolls_back_and_retries_once(
-  owner_token, monkeypatch,
+@pytest.mark.parametrize(
+  ("park_reason", "auto_resume", "expected_notifications"),
+  [
+    ("usage_limit", True, 1),
+    ("storage", False, 0),
+    ("memory", False, 0),
+  ],
+)
+def test_auto_resume_spawn_failure_reattaches_deterministic_successor_once(
+  owner_token, monkeypatch, park_reason, auto_resume,
+  expected_notifications,
 ):
-  """A failed task spawn restores the park + exact queue, without re-notify."""
+  """Every automatic park leaves one deterministic successor for retry."""
   del owner_token
   cid = "sweep-spawn-rollback"
   park_token = f"rt-{cid}"
@@ -1662,7 +2339,8 @@ def test_auto_resume_spawn_failure_rolls_back_and_retries_once(
     "cid": "queued-before-limit",
   }
   _due_park(
-    cid, park_token, pending=[queued], auto_resume=True,
+    cid, park_token, pending=[queued], auto_resume=auto_resume,
+    park_reason=park_reason,
   )
   original_create_broadcast = chat_mod.create_broadcast
 
@@ -1678,20 +2356,29 @@ def test_auto_resume_spawn_failure_rolls_back_and_retries_once(
   finally:
     chat_mod.get_system_broadcast().unsubscribe(system_queue)
     monkeypatch.setattr(chat_mod, "create_broadcast", original_create_broadcast)
-  assert len(notifications) == 1
+  assert len(notifications) == expected_notifications
   assert [event["type"] for event in system_events] == [
     "chat_run_started", "chat_run_finished",
   ]
-  assert _run_row(park_token)["status"] == "resume_pending"
+  assert _run_row(park_token)["status"] == "completed"
+  resume_token = chat_mod._auto_resume_run_token(park_token)
+  assert _run_row(resume_token)["status"] == "running"
   state = _chat_row(cid)
-  assert state["running_status"] is None
-  assert [m.get("cid") for m in state["pending"]] == [
-    "queued-before-limit", f"limit-resume-{park_token}",
-  ]
-  assert all(
-    m.get("cid") not in {"queued-before-limit", f"limit-resume-{park_token}"}
-    for m in state["messages"]
-  )
+  assert state["running_status"] == "running"
+  assert state["pending"] == []
+  assert [
+    m.get("cid") for m in state["messages"][-2:]
+  ] == ["queued-before-limit", f"limit-resume-{park_token}"]
+
+  # The cold-start reconciler recognizes this exact no-output writer orphan
+  # and leaves the same physical run for the reset sweep to reschedule.
+  with SessionLocal() as db:
+    assert chat_mod.safe_auto_resume_startup_orphan(
+      db, db.get(models.Chat, cid), db.get(models.ChatRun, resume_token),
+    )
+    recovered = chat_mod.reconcile_startup_chats(db)
+  assert cid not in recovered.manual
+  assert _run_row(resume_token)["status"] == "running"
 
   scheduled = []
   monkeypatch.setattr(
@@ -1702,8 +2389,74 @@ def test_auto_resume_spawn_failure_rolls_back_and_retries_once(
   try:
     assert _run_sweep() == [cid]
     assert len(scheduled) == 1
-    assert len(notifications) == 1
+    assert len(notifications) == expected_notifications
     assert "preserve me" in scheduled[0]["next_user"]["content"]
+    assert scheduled[0]["run_token"] == resume_token
+    state = _chat_row(cid)
+    assert [
+      m.get("cid") for m in state["messages"]
+      if m.get("cid") in {
+        "queued-before-limit", f"limit-resume-{park_token}",
+      }
+    ] == ["queued-before-limit", f"limit-resume-{park_token}"]
+  finally:
+    chat_mod.discard_starting(cid)
+
+
+@pytest.mark.parametrize("park_reason", ["storage", "memory"])
+def test_app_resource_spawn_failure_reattaches_with_original_attribution(
+  owner_token, monkeypatch, park_reason,
+):
+  """A resource orphan keeps app ownership when no owner work took over."""
+  del owner_token
+  cid = f"sweep-app-{park_reason}-spawn"
+  park_token = f"rt-{cid}"
+  app_id = 42
+  monkeypatch.setattr(
+    "app.push.notify_owner_async",
+    _async_notify(lambda *args, **kwargs: "notif-id"),
+  )
+  clock = [10**9]
+  monkeypatch.setattr(chat_mod, "_limit_auto_resume_now", lambda: clock[0])
+  _due_park(
+    cid,
+    park_token,
+    auto_resume=False,
+    park_reason=park_reason,
+    initiated_by_app_id=app_id,
+  )
+  original_create_broadcast = chat_mod.create_broadcast
+
+  def _spawn_fails(chat_id):
+    del chat_id
+    raise RuntimeError("spawn failed")
+
+  monkeypatch.setattr(chat_mod, "create_broadcast", _spawn_fails)
+  try:
+    assert _run_sweep() == []
+  finally:
+    monkeypatch.setattr(chat_mod, "create_broadcast", original_create_broadcast)
+
+  resume_token = chat_mod._auto_resume_run_token(park_token)
+  assert _run_row(park_token)["status"] == "completed"
+  assert _run_row(resume_token)["initiated_by_app_id"] == app_id
+  with SessionLocal() as db:
+    assert chat_mod.safe_auto_resume_startup_orphan(
+      db, db.get(models.Chat, cid), db.get(models.ChatRun, resume_token),
+    )
+
+  scheduled = []
+  monkeypatch.setattr(
+    chat_mod, "_schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+  clock[0] += chat_mod.LIMIT_AUTO_RESUME_STAGGER_SECS
+  try:
+    assert _run_sweep() == [cid]
+    assert len(scheduled) == 1
+    assert scheduled[0]["run_token"] == resume_token
+    assert scheduled[0]["next_user"]["continuation_reason"] == park_reason
+    assert _run_row(resume_token)["initiated_by_app_id"] == app_id
   finally:
     chat_mod.discard_starting(cid)
 

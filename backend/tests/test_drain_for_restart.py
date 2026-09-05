@@ -14,8 +14,11 @@ Locks in the five contracts that distinguish a restart-drain from a Stop:
 """
 
 import asyncio
+import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
+
+import pytest
 
 from app import chat as chat_mod
 from app import models
@@ -116,6 +119,45 @@ def _live_turn(chat_id: str, *, pending=None, partial="partial answer"):
   handle = _Handle(chat_id)
   registry.register(handle)
   return bc, sink, handle
+
+
+def _delegated_live_turn(chat_id: str, *, pending=None):
+  """One live app-attributed turn backed by an active Delegation."""
+  bc, sink, handle = _live_turn(chat_id, pending=pending)
+  with SessionLocal() as db:
+    app = models.App(
+      slug=f"restart-helper-{chat_id}",
+      source_dir=f"/tmp/mobius-tests/restart-helper-{chat_id}",
+      name="Subagents",
+      description="",
+      jsx_source="",
+    )
+    db.add(app)
+    db.flush()
+    app_id = app.id
+    db.add(models.Chat(
+      id=f"parent-{chat_id}", title="Parent", messages=[], provider="claude",
+    ))
+    child = db.get(models.Chat, chat_id)
+    child.created_by_app_id = app_id
+    physical = db.get(models.ChatRun, f"rt-{chat_id}")
+    physical.initiated_by_app_id = app_id
+    db.add(models.Delegation(
+      id=f"delegation-{chat_id}",
+      app_id=app_id,
+      parent_chat_id=f"parent-{chat_id}",
+      parent_root_run_id=f"parent-root-{chat_id}",
+      task_key=f"restart-{chat_id}",
+      child_chat_id=chat_id,
+      provider="claude",
+      model="claude-sonnet-4-6",
+      effort="high",
+      scope="read",
+      cwd="/data/platform",
+      prompt_sha256=hashlib.sha256(b"do work").hexdigest(),
+    ))
+    db.commit()
+  return bc, sink, handle, app_id
 
 
 def _run_drain():
@@ -424,6 +466,120 @@ def test_authenticated_restart_fallback_becomes_due_park():
   ]
   assert len(errors) == 1
   assert errors[0]["resumable"] is True
+
+
+@pytest.mark.parametrize("failure", ["finalize", "park"])
+def test_delegated_restart_failure_recovers_with_exact_app_identity(
+  failure, monkeypatch,
+):
+  """A failed drain still restores the accepted delegated execution."""
+  cid = f"reco-delegated-{failure}-failure"
+  nonce = "restart-nonce-drain"
+  _, sink, _, app_id = _delegated_live_turn(cid)
+
+  if failure == "finalize":
+    async def _fail_finalize():
+      raise TypeError("terminal snapshot unavailable")
+
+    monkeypatch.setattr(sink, "finalize", _fail_finalize)
+  else:
+    async def _fail_park(*args, **kwargs):
+      del args, kwargs
+      raise RuntimeError("writer unavailable")
+
+    monkeypatch.setattr(chat_mod, "_park_run_strict", _fail_park)
+
+  assert _run_drain() == [{
+    "chat_id": cid,
+    "run_token": f"rt-{cid}",
+  }]
+  _drain_writer()
+  assert _run(cid)["status"] == "running"
+
+  # Simulate the new process: only the durable Delegation + exact restart
+  # nonce survive. The generic app-work fallback would leave this manual.
+  registry.reset_for_tests()
+  chat_mod.unregister_active_sink(cid, sink)
+  chat_mod._restart_draining_chats.clear()
+  chat_mod.draining = False
+  with SessionLocal() as db:
+    result = chat_mod.reconcile_startup_chats(
+      db, restart_authorization=nonce,
+    )
+
+  assert result.manual == []
+  assert result.restart_parks == [cid]
+  with SessionLocal() as db:
+    recovered = db.get(models.ChatRun, f"rt-{cid}")
+    assert recovered.status == "parked"
+    assert recovered.park_reason == "restart"
+    assert recovered.restart_nonce == nonce
+    assert recovered.initiated_by_app_id == app_id
+
+
+def test_authenticated_restart_fallback_keeps_generic_app_work_manual():
+  """A restart nonce alone does not authorize an arbitrary app turn."""
+  cid = "reco-generic-app-restart"
+  nonce = "restart-nonce-generic-app"
+  _seed(cid)
+  with SessionLocal() as db:
+    app = models.App(
+      slug="restart-generic-app",
+      source_dir="/tmp/mobius-tests/restart-generic-app",
+      name="Generic app",
+      description="",
+      jsx_source="",
+    )
+    db.add(app)
+    db.flush()
+    chat = db.get(models.Chat, cid)
+    chat.created_by_app_id = app.id
+    run = db.get(models.ChatRun, f"rt-{cid}")
+    run.initiated_by_app_id = app.id
+    run.restart_nonce = nonce
+    db.commit()
+    result = chat_mod.reconcile_startup_chats(
+      db, restart_authorization=nonce,
+    )
+
+  assert result.manual == [cid]
+  assert result.restart_parks == []
+  assert _run(cid)["status"] == "interrupted"
+
+
+def test_delegated_restart_fallback_does_not_absorb_queued_app_work():
+  """A valid Delegation restores only its turn, never later app work."""
+  cid = "reco-delegated-app-work"
+  nonce = "restart-nonce-app-work"
+  queued = [{
+    "role": "user",
+    "content": "new unattended app task",
+    "ts": 2,
+    "_initiated_by_app_id": 1,
+  }]
+  _, sink, _, app_id = _delegated_live_turn(cid, pending=queued)
+  with SessionLocal() as db:
+    pending = list(db.get(models.Chat, cid).pending_messages or [])
+    pending[0]["_initiated_by_app_id"] = app_id
+    db.get(models.Chat, cid).pending_messages = pending
+    db.get(models.ChatRun, f"rt-{cid}").restart_nonce = nonce
+    db.commit()
+
+  registry.reset_for_tests()
+  chat_mod.unregister_active_sink(cid, sink)
+  with SessionLocal() as db:
+    result = chat_mod.reconcile_startup_chats(
+      db, restart_authorization=nonce,
+    )
+
+  assert result.manual == [cid]
+  assert result.restart_parks == []
+  assert _chat(cid)["pending"] == [{
+    "role": "user",
+    "content": "new unattended app task",
+    "ts": 2,
+    "_initiated_by_app_id": app_id,
+  }]
 
 
 def test_unacknowledged_restart_intent_remains_manual():

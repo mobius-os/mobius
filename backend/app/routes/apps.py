@@ -59,8 +59,10 @@ from app.chat_start import start_programmatic_chat_turn
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
-  get_current_owner, get_current_owner_or_app, get_principal, Principal,
+  get_current_owner, get_current_owner_for_lifecycle_control,
+  get_current_owner_or_app, get_principal, Principal,
   get_owner_or_app_with_manage_apps, reject_cross_site,
+  require_nondelegated_owner_control,
 )
 from app.resource_access import live_app, live_app_or_404
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
@@ -79,6 +81,29 @@ log = logging.getLogger("mobius.apps")
 _APP_SOURCE_HIDDEN_DIRS = frozenset({
   ".git", ".build", "__pycache__", "dist", "node_modules",
 })
+
+
+def _require_nondelegated_control(
+  principal: Principal = Depends(get_principal),
+) -> None:
+  """Protect an owner-confirmed action without narrowing app capabilities."""
+  require_nondelegated_owner_control(principal)
+
+
+def _require_app_update_control(
+  body: schemas.AppUpdate,
+  principal: Principal = Depends(get_principal),
+) -> None:
+  """Require confirmation only when PATCH changes trust or publication state."""
+  owner_confirmed_fields = (
+    body.cross_app_access,
+    body.share_with_apps,
+    body.chat_log_access,
+    body.published_manifest_url,
+    body.manage_skills,
+  )
+  if any(value is not None for value in owner_confirmed_fields):
+    require_nondelegated_owner_control(principal)
 
 
 def _app_source_root(db: Session, app_id: int) -> tuple[models.App, Path]:
@@ -499,7 +524,10 @@ async def preview_app_install(
   "/install",
   response_model=schemas.AppInstallOut,
   status_code=201,
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(_require_nondelegated_control),
+  ],
 )
 async def install_app(
   body: schemas.AppInstall,
@@ -1427,7 +1455,10 @@ async def stream_app_events(
 @router.post(
   "/{app_id}/conflict-resolver-chat",
   response_model=schemas.AppConflictResolverChatOut,
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(_require_nondelegated_control),
+  ],
 )
 async def create_conflict_resolver_chat(
   app_id: int,
@@ -1771,7 +1802,10 @@ async def _apply_update_resolution_policy(
 @router.post(
   "/resolve-update/policy",
   response_model=schemas.AppUpdateResolutionPolicyOut,
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(_require_nondelegated_control),
+  ],
 )
 async def choose_app_update_resolution_policy(
   body: schemas.AppUpdateResolutionPolicy,
@@ -1892,7 +1926,10 @@ async def review_app_update_resolution(
 @router.post(
   "/resolve-update",
   response_model=schemas.AppResolveUpdateOut,
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(_require_nondelegated_control),
+  ],
 )
 async def resolve_app_update(
   body: schemas.AppResolveUpdate,
@@ -2109,7 +2146,7 @@ def accept_local_runtime_capabilities(
   app_id: int,
   body: RuntimeCapabilityAcceptanceRequest,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Accept one reviewed declaration through the live server lifecycle."""
   try:
@@ -2214,7 +2251,10 @@ def mark_app_preview_seen(
 @router.patch(
   "/{app_id}",
   response_model=schemas.AppOut,
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(_require_app_update_control),
+  ],
 )
 async def update_app(
   app_id: int,
@@ -2373,7 +2413,7 @@ async def update_app(
 async def publish_hosted_app(
   app_id: int,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Publish the app's exact current module and anonymous network contract."""
   from app.app_capabilities import (
@@ -2439,7 +2479,7 @@ async def publish_hosted_app(
 async def stop_hosted_app(
   app_id: int,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Revoke the active anonymous snapshot and every token minted for it."""
   previous_bundle = None
@@ -2636,7 +2676,10 @@ async def get_icon(
 @router.delete(
   "/{app_id}",
   status_code=204,
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(_require_nondelegated_control),
+  ],
 )
 async def delete_app(
   app_id: int,
@@ -2783,7 +2826,10 @@ async def delete_app(
 @router.delete(
   "/{app_id}/data",
   status_code=204,
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(_require_nondelegated_control),
+  ],
 )
 async def delete_app_data(
   app_id: int,
@@ -2860,7 +2906,10 @@ async def delete_app_data(
 
 @router.post(
   "/{app_id}/recover",
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(_require_nondelegated_control),
+  ],
 )
 async def recover_app(
   app_id: int,

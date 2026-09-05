@@ -7,6 +7,7 @@ reconstructed from a second per-chat marker.
 """
 
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 import json
 import uuid
@@ -17,7 +18,51 @@ from app import models
 from app.goal_commands import (
   goal_objective,
   is_goal_continue,
+  is_natural_goal_resume,
 )
+
+
+def _recoverable_result_goal(
+  db: Session,
+  chat_id: str,
+  source: models.ChatRun | None,
+) -> tuple[str | None, str | None]:
+  """Resolve a product result without crossing an owner stop or dismissal.
+
+  The result's source identifies the Goal, while that Goal's latest physical
+  run owns its current stop state. Later ordinary turns are deliberately
+  irrelevant: they must not hide the stable Goal's tombstone, just as they do
+  not hide its presentation in the Goal rail.
+  """
+  if source is None or source.goal_objective is None:
+    return None, None
+
+  stable_goal_id = source.goal_id or source.root_run_id or source.id
+  dismissed_goal_id = db.query(models.Chat.dismissed_goal_id).filter(
+    models.Chat.id == chat_id,
+  ).scalar()
+  if dismissed_goal_id == stable_goal_id:
+    return None, None
+
+  latest_query = db.query(models.ChatRun).filter(
+    models.ChatRun.chat_id == chat_id,
+  )
+  if source.goal_id is not None:
+    latest_query = latest_query.filter(
+      models.ChatRun.goal_id == source.goal_id,
+    )
+  else:
+    latest_query = latest_query.filter(
+      models.ChatRun.goal_id.is_(None),
+      models.ChatRun.root_run_id == stable_goal_id,
+      models.ChatRun.goal_objective.isnot(None),
+    )
+  latest = latest_query.order_by(
+    models.ChatRun.started_at.desc(), models.ChatRun.id.desc(),
+  ).first()
+  if latest is None or latest.status == "stopped":
+    return None, None
+  return source.goal_objective, source.goal_id
 
 
 def goal_identity_for_run_start(
@@ -26,12 +71,13 @@ def goal_identity_for_run_start(
   message: Mapping[str, Any] | None,
 ) -> tuple[str | None, str | None]:
   """Resolve objective + stable Goal identity before prior runs are closed."""
-  from app.continuations import is_continuation_message
+  from app.continuations import continuation_reason, is_continuation_message
 
   content = message.get("content") if message is not None else ""
   objective = goal_objective(content if isinstance(content, str) else "")
   if objective is not None:
     return objective, str(uuid.uuid4())
+  previous = latest_run(db, chat_id)
   from app.continuations import DELEGATION_RESULT_MESSAGE_KIND
   if (
     isinstance(message, Mapping)
@@ -50,7 +96,7 @@ def goal_identity_for_run_start(
         .first()
       )
       if source is not None:
-        return source.goal_objective, source.goal_id
+        return _recoverable_result_goal(db, chat_id, source)
     return None, None
   from app.continuations import WAIT_RESULT_MESSAGE_KIND
   if (
@@ -71,12 +117,33 @@ def goal_identity_for_run_start(
         .first()
       )
       if source is not None:
-        return source.goal_objective, source.goal_id
+        return _recoverable_result_goal(db, chat_id, source)
     return None, None
-  previous = latest_run(db, chat_id)
   semantic_continuation = is_continuation_message(message)
+  if continuation_reason(message) == GOAL_HANDOFF_REASON:
+    # The bounded settlement correction names the Goal it owns. Resolve that
+    # exact identity rather than borrowing whichever Goal happens to be newest
+    # when older queued owner work finishes first. The shared recovery helper
+    # also preserves explicit Stop and dismissal as authoritative fences.
+    requested_goal_id = message.get("goal_id") if message is not None else None
+    if isinstance(requested_goal_id, str) and requested_goal_id:
+      source = (
+        db.query(models.ChatRun)
+        .filter(
+          models.ChatRun.chat_id == chat_id,
+          models.ChatRun.goal_id == requested_goal_id,
+          models.ChatRun.goal_objective.isnot(None),
+        )
+        .order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc())
+        .first()
+      )
+      return _recoverable_result_goal(db, chat_id, source)
+    return None, None
   literal_continue = is_goal_continue(str(content or ""))
-  if literal_continue:
+  manual_continue = bool(
+    semantic_continuation and continuation_reason(message) == "manual"
+  )
+  if literal_continue or manual_continue:
     from app.goal_plans import presented_goal_rows, serialize_goal
 
     rows = presented_goal_rows(db, chat_id)
@@ -86,7 +153,49 @@ def goal_identity_for_run_start(
     if presentation["status"] == "paused":
       return rows[0].goal_objective, rows[0].goal_id
     return None, None
-  if not semantic_continuation and not literal_continue:
+  natural_resume = bool(
+    not semantic_continuation
+    and isinstance(message, Mapping)
+    and message.get("kind") is None
+    and is_natural_goal_resume(str(content or ""))
+  )
+  if natural_resume:
+    # Only a complete, unambiguous owner utterance may revive an unfinished
+    # conversational Goal.  Explicit Stop remains authoritative; provider
+    # limit parks, owner questions, and declared Waits keep their own recovery
+    # owner instead of receiving a competing turn.
+    chat_state = db.query(models.Chat.pending_question_id).filter(
+      models.Chat.id == chat_id,
+    ).first()
+    waiting = db.query(models.ChatWait.id).filter(
+      models.ChatWait.chat_id == chat_id,
+      models.ChatWait.status == "armed",
+    ).first()
+    if (
+      (chat_state is None or chat_state[0] is None)
+      and waiting is None
+    ):
+      from app.goal_plans import presented_goal_rows, serialize_goal
+
+      rows = presented_goal_rows(db, chat_id)
+      if rows is not None:
+        presentation = serialize_goal(db, *rows)
+        physical = rows[0]
+        goal_id = rows[0].goal_id
+        if (
+          presentation["status"] == "paused"
+          and physical.status in ("completed", "interrupted")
+          and goal_id is not None
+          and _goal_plan_is_unfinished(db, chat_id, goal_id)
+        ):
+          return rows[0].goal_objective, goal_id
+    return None, None
+  if not semantic_continuation:
+    return None, None
+  if previous is not None and previous.status == "stopped":
+    # A product continuation (question answer, restart marker, helper result)
+    # must not tunnel through an explicit Stop.  The visible manual Continue
+    # path was handled above and is the deliberate reversal of that choice.
     return None, None
   if (
     previous is not None
@@ -107,9 +216,6 @@ def goal_identity_for_run_start(
       and _goal_plan_is_unfinished(db, chat_id, previous.goal_id)
     ):
       return previous.goal_objective, previous.goal_id
-  if not semantic_continuation:
-    return None, None
-
   # A restart can interrupt a physical continuation after its provider turn
   # has already closed, leaving one no-goal recovery row between the new
   # continuation marker and the logical Goal. Follow only an explicitly
@@ -130,13 +236,71 @@ def goal_identity_for_run_start(
     if candidate.goal_id in seen:
       continue
     seen.add(candidate.goal_id)
+    if candidate.status == "stopped":
+      continue
     if _goal_plan_is_unfinished(db, chat_id, candidate.goal_id):
       return candidate.goal_objective, candidate.goal_id
   return None, None
 
 
-def _goal_plan_is_unfinished(db: Session, chat_id: str, goal_id: str) -> bool:
-  """Whether a stable Goal identity owns a plan with unsettled work."""
+def product_result_continuation_root(
+  db: Session,
+  chat_id: str,
+  message: Mapping[str, Any] | None,
+) -> str | None:
+  """Resolve queued result data to the work that produced it, not queue tail."""
+  if not isinstance(message, Mapping):
+    return None
+  from app.continuations import (
+    DELEGATION_RESULT_MESSAGE_KIND,
+    WAIT_RESULT_MESSAGE_KIND,
+    product_result_run_token,
+  )
+
+  kind = message.get("kind")
+  source_work_id = message.get("source_work_id")
+  physical_result_id = product_result_run_token(chat_id, message)
+  if not isinstance(source_work_id, str) or not source_work_id:
+    # Legacy Wait rows may predate declaring-run attribution. Their stable cid
+    # still identifies exactly one physical result turn, but there is no
+    # logical source whose Goal/root may safely be inherited.
+    return (
+      physical_result_id
+      if kind == WAIT_RESULT_MESSAGE_KIND else None
+    )
+  query = db.query(models.ChatRun).filter(models.ChatRun.chat_id == chat_id)
+  if kind == WAIT_RESULT_MESSAGE_KIND:
+    source = query.filter(models.ChatRun.id == source_work_id).first()
+  elif kind == DELEGATION_RESULT_MESSAGE_KIND:
+    source = query.filter(
+      models.ChatRun.goal_id == source_work_id,
+    ).order_by(
+      models.ChatRun.started_at.desc(), models.ChatRun.id.desc(),
+    ).first()
+    if source is None:
+      source = query.filter(models.ChatRun.id == source_work_id).first()
+  else:
+    return None
+  if source is None:
+    # A Wait can outlive retention or repair of its declaring ChatRun. Keep the
+    # result independently recoverable instead of borrowing whichever owner
+    # run happened to precede queue promotion.
+    return (
+      physical_result_id
+      if kind == WAIT_RESULT_MESSAGE_KIND else None
+    )
+  root_run_id = source.root_run_id or source.id
+  exists = db.query(models.ChatRun.id).filter(
+    models.ChatRun.chat_id == chat_id,
+    models.ChatRun.id == root_run_id,
+  ).first()
+  return root_run_id if exists is not None else None
+
+
+def _goal_plan_tasks(
+  db: Session, chat_id: str, goal_id: str,
+) -> list[dict[str, Any]] | None:
+  """Return one stable Goal's validated task list, if it owns a plan."""
   owner = (
     db.query(models.ChatRun.goal_plan_json)
     .filter(
@@ -148,17 +312,153 @@ def _goal_plan_is_unfinished(db: Session, chat_id: str, goal_id: str) -> bool:
     .first()
   )
   if owner is None:
-    return False
+    return None
   raw = owner[0]
   try:
     plan = json.loads(raw) if isinstance(raw, str) else raw
   except (TypeError, json.JSONDecodeError):
-    return False
+    return None
   tasks = (plan or {}).get("tasks") if isinstance(plan, dict) else None
+  return tasks if isinstance(tasks, list) and tasks else None
+
+
+def _goal_plan_is_unfinished(db: Session, chat_id: str, goal_id: str) -> bool:
+  """Whether a stable Goal identity owns a plan with unsettled work."""
+  tasks = _goal_plan_tasks(db, chat_id, goal_id)
   return bool(tasks) and any(
     isinstance(task, dict)
     and task.get("status") not in ("completed", "cancelled")
     for task in tasks
+  )
+
+
+# --- Owned settlement for auto-promoted Goals -------------------------------
+
+# Explicit ``/goal`` starts already have a provider-owned continuation loop.
+# A Goal promoted during an ordinary turn has no such owner, so a clean turn
+# end must either leave a durable handoff or receive one bounded corrective
+# continuation. Each newly settled plan task earns one further correction;
+# lack of progress then becomes a visible resumable failure instead of an
+# unbounded provider loop or a Goal that silently looks paused.
+GOAL_HANDOFF_REASON = "goal_handoff"
+
+
+@dataclass(frozen=True)
+class GoalSettlementTarget:
+  """An unfinished auto-promoted Goal reaching a clean physical turn end."""
+
+  goal_id: str
+  retry_allowed: bool
+
+
+def _goal_started_explicitly(
+  db: Session,
+  chat_id: str,
+  messages: Any,
+  run: models.ChatRun,
+) -> bool:
+  """Whether this Goal belongs to the provider-native ``/goal`` path.
+
+  Current explicit starts mint a Goal id distinct from their original logical
+  root, while mid-turn promotion deliberately adopts that root as its id. A
+  later wait/helper wake may itself have a fresh physical root, so classify
+  from the Goal's earliest run rather than the turn that happens to be ending.
+  Historical rows predate the id distinction; for those inspect only the owner
+  message that opened the exact original assistant segment. Never scan for an
+  unrelated ``/goal`` elsewhere in a long-lived chat.
+  """
+  origin = (
+    db.query(models.ChatRun)
+    .filter(
+      models.ChatRun.chat_id == chat_id,
+      models.ChatRun.goal_id == run.goal_id,
+    )
+    .order_by(models.ChatRun.started_at.asc(), models.ChatRun.id.asc())
+    .first()
+  )
+  if origin is None:
+    return True
+  logical_root = origin.root_run_id or origin.id
+  if origin.goal_id != logical_root:
+    return True
+
+  from app.goal_commands import is_goal_command
+
+  rows = list(messages or [])
+  for index, message in enumerate(rows):
+    if not (
+      isinstance(message, dict)
+      and message.get("role") == "assistant"
+      and message.get("id") == logical_root
+    ):
+      continue
+    for prior in reversed(rows[:index]):
+      if not isinstance(prior, dict) or prior.get("role") != "user":
+        continue
+      return is_goal_command(str(prior.get("content") or ""))
+    return False
+  return False
+
+
+def _goal_handoff_attempt_count(messages: Any, goal_id: str) -> int:
+  """Count this Goal's already-promoted corrective continuation markers."""
+  return sum(
+    1
+    for message in (messages or [])
+    if isinstance(message, dict)
+    and message.get("role") == "user"
+    and message.get("continuation_reason") == GOAL_HANDOFF_REASON
+    and message.get("goal_id") == goal_id
+  )
+
+
+def goal_settlement_target(
+  db: Session, chat_id: str, ending_run_token: str | None,
+) -> GoalSettlementTarget | None:
+  """Describe an unfinished auto-promoted Goal at clean turn settlement.
+
+  Explicit ``/goal`` paths stay under their existing Claude/Codex continuation
+  owners. Auto-promoted Goals get one baseline corrective continuation and one
+  additional attempt per task that has become completed/cancelled. The caller
+  turns an exhausted target into a visible failure rather than silently doing
+  nothing.
+  """
+  if not ending_run_token:
+    return None
+  run = (
+    db.query(models.ChatRun)
+    .filter(
+      models.ChatRun.id == ending_run_token,
+      models.ChatRun.chat_id == chat_id,
+    )
+    .first()
+  )
+  if run is None or run.goal_objective is None or run.goal_id is None:
+    return None
+  chat_row = (
+    db.query(models.Chat.messages)
+    .filter(models.Chat.id == chat_id)
+    .first()
+  )
+  messages = chat_row[0] if chat_row is not None else []
+  if _goal_started_explicitly(db, chat_id, messages, run):
+    return None
+  tasks = _goal_plan_tasks(db, chat_id, run.goal_id)
+  if not tasks or not any(
+    isinstance(task, dict)
+    and task.get("status") not in ("completed", "cancelled")
+    for task in tasks
+  ):
+    return None
+  completed = sum(
+    1
+    for task in tasks
+    if isinstance(task, dict) and task.get("status") in ("completed", "cancelled")
+  )
+  attempts = _goal_handoff_attempt_count(messages, run.goal_id)
+  return GoalSettlementTarget(
+    goal_id=run.goal_id,
+    retry_allowed=attempts < 1 + completed,
   )
 
 

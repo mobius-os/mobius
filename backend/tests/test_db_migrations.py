@@ -1171,6 +1171,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0023_project_color",
     "0024_chat_goal_dismissal",
     "0025_attached_delegation_work",
+    "0026_chat_wait_condition_owner",
   ]
   assert second == first
 
@@ -2215,6 +2216,33 @@ def test_goal_dismissal_migration_adds_nullable_chat_pointer(tmp_path):
     assert conn.execute(text(
       "SELECT COUNT(*) FROM schema_migrations "
       "WHERE version = '0024_chat_goal_dismissal'"
+    )).scalar_one() == 1
+
+
+def test_chat_wait_condition_owner_migration_adds_nullable_column(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'wait-condition-owner.db'}")
+  models.Base.metadata.create_all(eng)
+  with eng.begin() as conn:
+    conn.execute(text("ALTER TABLE chat_waits DROP COLUMN condition_owner"))
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version in _migration_versions_before("0026_chat_wait_condition_owner"):
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
+      ), {"v": version, "at": datetime(2026, 9, 4)})
+
+  run_migrations(eng)
+
+  columns = {
+    column["name"] for column in inspect(eng).get_columns("chat_waits")
+  }
+  assert "condition_owner" in columns
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT COUNT(*) FROM schema_migrations "
+      "WHERE version = '0026_chat_wait_condition_owner'"
     )).scalar_one() == 1
 
 

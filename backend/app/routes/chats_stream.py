@@ -15,6 +15,7 @@ from app import activity, models, questions, schemas
 from app.broadcast import create_broadcast, get_broadcast, get_system_broadcast
 from app.chat_event_sink import active_sink_stream_snapshot
 from app.chat import (
+  _future_auto_resuming_limit_park_for_chat,
   _schedule_continuation,
   discard_starting,
   is_chat_running,
@@ -53,6 +54,7 @@ from app.deps import (
   Principal, get_chat_view_principal, get_owner_or_chat_embed_principal,
   get_current_owner, reject_cross_site,
   chat_embed_session_is_active, require_chat_embed_operation,
+  require_nondelegated_owner_control, require_owner_input_principal,
 )
 from app.resource_access import (
   get_active_chat_for_principal, get_active_chat_or_404,
@@ -578,9 +580,14 @@ async def send_message(
   Owner tokens may send to any active chat. App tokens may send only to
   a chat they created (`created_by_app_id == app_id`) — the app-
   attributed contract (design §1). Foreign chats are 403; the runner /
-  queue / SSE internals are reused unchanged for both actors.
+  queue / SSE internals are reused unchanged for both actors. Delegated
+  execution bearers use the peer/delegation channels rather than forging an
+  owner-authored transcript row.
   """
   require_chat_embed_operation(principal, "chat:send")
+  require_nondelegated_owner_control(principal)
+  if body.answers:
+    require_owner_input_principal(principal)
   chat = get_active_chat_for_principal(db, chat_id, principal)
   if goal_clear_requested(body.content or ""):
     raise HTTPException(
@@ -930,6 +937,23 @@ async def _send_message_locked(
     db.expire(chat)
     return _queued_response(new_msg, len(chat.pending_messages or []))
 
+  # A provider-limit park has no live process, but it is still the chat's
+  # exact unfinished run. Ordinary owner messages join its durable queue and
+  # are consumed when that run resumes; they do not implicitly spend a new
+  # provider attempt or disable automatic recovery. The explicit recovery
+  # control sends ``continuation=manual`` and deliberately bypasses this hold
+  # after credits or an account reset restore availability.
+  if (
+    principal.app_id is None
+    and body.continuation != "manual"
+    and _future_auto_resuming_limit_park_for_chat(db, chat_id) is not None
+  ):
+    new_msg = await _append_to_pending(
+      chat, body, db, initiated_by_app_id=principal.app_id,
+    )
+    db.expire(chat)
+    return _queued_response(new_msg, len(chat.pending_messages or []))
+
   # Queue path: agent is running OR stale pending exists from a
   # previous crash. Appending the new send at the END of pending
   # preserves chronological order. When pending was stale (server
@@ -1031,7 +1055,16 @@ async def _send_message_locked(
     if body.force_steer:
       return _not_steered_response(chat_id)
 
-    new_msg = await _append_to_pending(
+    # If real owner messages already wait behind a provider park, the explicit
+    # Try now action starts that queue directly. Persisting an extra hidden
+    # ``continue`` after visible rows would split by visibility and buy a
+    # second, content-free provider turn after the real work.
+    manual_pending_drain = (
+      body.continuation == "manual"
+      and not is_chat_running(chat_id)
+      and bool(chat.pending_messages)
+    )
+    new_msg = None if manual_pending_drain else await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
     )
     started_message = None
@@ -1047,7 +1080,12 @@ async def _send_message_locked(
           drain_token = alloc_run_token()
           next_messages, next_user, next_session_id = (
             await chat_queue.promote_pending_messages_locked(
-              db, chat_id, drain_token,
+              db,
+              chat_id,
+              drain_token,
+              continuation_reason=(
+                "manual" if manual_pending_drain else None
+              ),
             )
           )
           if next_user:
@@ -1082,6 +1120,11 @@ async def _send_message_locked(
     # copy so this read reflects the actor's committed write.
     db.expire(chat)
     remaining = list(chat.pending_messages or [])
+    if new_msg is None:
+      payload = {"status": "started"}
+      if started_message is not None:
+        payload["message"] = started_message
+      return JSONResponse(status_code=202, content=payload)
     try:
       position = [m.get("ts") for m in remaining].index(new_msg["ts"]) + 1
     except ValueError:
@@ -1254,6 +1297,7 @@ async def cancel_pending_message(
   if principal.scope == "app":
     raise HTTPException(status_code=403, detail="App token is not valid here.")
   require_chat_embed_operation(principal, "chat:send")
+  require_nondelegated_owner_control(principal)
   require_active_chat_access(db, chat_id, principal)
 
   # The actor's CancelPending removes the matching cid and commits — the
@@ -1296,6 +1340,7 @@ async def update_pending_message(
   if principal.scope == "app":
     raise HTTPException(status_code=403, detail="App token is not valid here.")
   require_chat_embed_operation(principal, "chat:send")
+  require_nondelegated_owner_control(principal)
   chat = get_active_chat_for_principal(
     db, chat_id, principal, load_fields=(models.Chat.uploads,),
   )

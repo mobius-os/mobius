@@ -13,6 +13,8 @@ import asyncio
 from concurrent.futures import Future
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from app import chat as chat_mod
 from app import models
 from app.chat_writer import (
@@ -206,6 +208,8 @@ def test_same_root_continuation_attaches_without_a_second_transcript_row():
     ] == ["continuation-stable-cid"]
     assert chat.messages[-1]["viewport"] == {"width": 390, "height": 844}
     assert chat.messages[-1]["timezone"] == "Etc/UTC"
+    assert chat.live_assistant["id"] == "continuation-physical"
+    assert chat.active_assistant_message_id == "continuation-physical"
     physical = db.get(models.ChatRun, "continuation-physical")
     assert physical.root_run_id == "continuation-root"
 
@@ -312,6 +316,38 @@ def test_stopped_goal_does_not_leak_into_a_later_question_answer():
     title_source="answer", default_provider="codex",
   )).result(timeout=5)
   assert _goal_objective("r-stopped-goal") is None
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+def test_natural_owner_follow_up_reactivates_the_unfinished_goal(provider):
+  chat_id = f"r-natural-goal-{provider}"
+  _seed_chat(chat_id)
+  with SessionLocal() as db:
+    chat = db.get(models.Chat, chat_id)
+    chat.provider = provider
+    db.add(models.ChatRun(
+      id=f"rt-paused-{provider}", root_run_id=f"rt-paused-{provider}",
+      chat_id=chat_id, status="interrupted", provider=provider,
+      goal_objective="Finish the review", goal_id=f"goal-{provider}",
+      goal_plan_json={
+        "tasks": [{"id": "prepare", "status": "running"}],
+      },
+    ))
+    db.commit()
+
+  get_writer().submit(StartTurn(
+    chat_id=chat_id, run_token=f"rt-resumed-{provider}",
+    user_msg={
+      "role": "user", "content": "keep going please", "ts": 2,
+    },
+    title_source="keep going please", default_provider=provider,
+  )).result(timeout=5)
+
+  with SessionLocal() as db:
+    resumed = db.get(models.ChatRun, f"rt-resumed-{provider}")
+    assert resumed.status == "running"
+    assert resumed.goal_objective == "Finish the review"
+    assert resumed.goal_id == f"goal-{provider}"
 
 
 # -- clean close ----------------------------------------------------------

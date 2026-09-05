@@ -1,6 +1,6 @@
 """Owner-gated platform self-update routes.
 
-Small endpoints behind ``get_current_owner`` + ``reject_cross_site``:
+Small endpoints behind owner authentication + ``reject_cross_site``:
 ``GET /status`` (cheap, read-only, fetch-free — drives the Settings "Updates"
 line), ``POST /check`` (owner-triggered ``git fetch`` + fresh status, the
 on-demand refresh for the "Check for updates" button), ``GET /update-preview``
@@ -9,9 +9,11 @@ and merge it with local edits, or record a conflict),
 ``GET /update-progress`` (the active Apply phase),
 ``POST /conflict-resolver-chat`` (owner-clicked resolver chat), and
 ``POST /restart`` (owner-confirmed self-restart, same SIGTERM pattern as the
-normal Settings restart). The status/check routes are wrapped so a transient git
-error can never break the Settings page. Conflict resolution is a separate
-owner-clicked endpoint so applying an update never silently starts an agent turn.
+normal Settings restart). Apply/rebuild/conflict resolution/restart additionally
+exclude delegated execution bearers. The status/check routes are wrapped so a
+transient git error can never break the Settings page. Conflict resolution is a
+separate owner-clicked endpoint so applying an update never silently starts an
+agent turn.
 """
 
 from __future__ import annotations
@@ -27,7 +29,10 @@ from starlette.background import BackgroundTask
 
 from app import deployment_control, models, platform_activation, platform_update
 from app.database import get_db
-from app.deps import get_current_owner, reject_cross_site
+from app.deps import (
+  get_current_owner, get_current_owner_for_lifecycle_control,
+  reject_cross_site,
+)
 from app.platform_update import (
   PlatformApplyResult, PlatformConflictResolverChatOut, PlatformStatus,
   PlatformUpdateError, PlatformUpdatePreview, PlatformUpdateProgress,
@@ -196,7 +201,7 @@ async def get_platform_update_progress(
 async def apply_platform_update(
   request: PlatformApplyIn,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ) -> PlatformApplyResult:
   """Apply exactly the release represented by the reviewed immutable plan."""
   try:
@@ -221,7 +226,7 @@ async def apply_platform_update(
 async def rebuild_reviewed_platform_update(
   request: PlatformApplyIn,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Rebuild the container for the reviewed update target.
 
@@ -250,7 +255,7 @@ async def rebuild_reviewed_platform_update(
 @router.post("/conflict-resolver-chat", dependencies=[Depends(reject_cross_site)])
 async def create_platform_conflict_resolver_chat(
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ) -> PlatformConflictResolverChatOut:
   """Create or return the resolver chat for a recorded platform update conflict."""
   try:
@@ -261,7 +266,7 @@ async def create_platform_conflict_resolver_chat(
 
 @router.post("/restart", dependencies=[Depends(reject_cross_site)])
 def restart_platform(
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ) -> JSONResponse:
   """Owner-confirmed restart to finish an update. Sends the response, then
   restarts this worker (force-exit fallback) so it reboots with the new code."""

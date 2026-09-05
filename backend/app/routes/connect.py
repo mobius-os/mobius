@@ -58,7 +58,11 @@ from slowapi.util import get_remote_address
 
 from app import models
 from app.config import get_settings
-from app.deps import get_owner_or_app_with_connect_manage, reject_cross_site
+from app.deps import (
+  get_owner_or_app_with_connect_manage,
+  reject_cross_site,
+  require_nondelegated_owner_or_app_control,
+)
 
 router = APIRouter(
   prefix="/api/connect",
@@ -653,7 +657,10 @@ async def _await_command_result(
     raise HTTPException(status_code=504, detail=detail)
 
 
-@router.post("/hosts")
+@router.post(
+  "/hosts",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def create_host(
   body: CreateHostBody,
   _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
@@ -711,7 +718,10 @@ async def rename_host(
   return _public_host(host)
 
 
-@router.get("/hosts/{host_id}/pairing")
+@router.get(
+  "/hosts/{host_id}/pairing",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def host_pairing(
   host_id: str,
   _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
@@ -737,7 +747,10 @@ async def host_pairing(
   }
 
 
-@router.delete("/hosts/{host_id}")
+@router.delete(
+  "/hosts/{host_id}",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def delete_host(
   host_id: str,
   force: bool = False,

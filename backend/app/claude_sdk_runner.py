@@ -179,6 +179,14 @@ async def _await_control_mcp_ready(client, *, enabled: bool) -> str | None:
 _CONCISE_REGISTER = r"""# Concise register
 
 Be concise by default: lead with the result, skip preamble and narration, keep only what the partner needs — full detail on request. Concision trims length and preamble, never substance: it never drops a required citation, the escaped `\$` for currency, a screenshot embedded before you describe it, the detail the platform summary or a future continuation needs, or the deliberate speech acts the constitution requires (the one-sentence intent opener, making non-obvious findings explicit, clarifying-question cards, destructive-op and restart confirmations, and the turn closeout)."""
+# Cross-turn scheduling has one owner in Möbius: the durable Waiting lifecycle.
+# Provider-native schedulers cannot render its card, survive the same restart
+# boundary, or reliably wake a top-level parent from a delegated child.
+_CLAUDE_NATIVE_SCHEDULING_TOOLS = (
+  "Monitor",
+  "ScheduleWakeup",
+  "CronCreate",
+)
 
 
 def _system_prompt_with_register(skill_text: str) -> str:
@@ -496,6 +504,14 @@ class ActiveClaudeClient:
     # text together. Stop's hard `interrupt()` does not consult this — Stop
     # always cuts immediately.
     self._interrupt_in_flight = False
+    # Sticky, per-turn: True once WE (a steer OR an owner Stop) have actually
+    # called `client.interrupt()` this turn. The runner only defuses a
+    # `stop_reason == "interrupt"` terminal into a benign resumable interrupt
+    # when this is set — so the "an interrupt terminal is always our own
+    # interrupt" invariant is ENFORCED, not merely assumed. A CLI/provider
+    # abort we never initiated leaves this False, so a genuine failure still
+    # surfaces as an error instead of being silently masked as "Paused".
+    self._interrupt_issued = False
     self._finished: asyncio.Future[None] = (
       asyncio.get_running_loop().create_future()
     )
@@ -573,6 +589,7 @@ class ActiveClaudeClient:
     # guard no-ops rather than interrupting a torn-down client.
     if not self._interrupt_in_flight and not self._finished.done():
       self._interrupt_in_flight = True
+      self._interrupt_issued = True
       await self._client.interrupt()
     return True
 
@@ -602,6 +619,7 @@ class ActiveClaudeClient:
     clear-and-resend path is what preserves them.
     """
     self._interrupt_requested = True
+    self._interrupt_issued = True
     self.pending_steer = []
     self._steer_user_msgs = []
     self._steer_consume_cids = []
@@ -1017,6 +1035,14 @@ async def run_claude_sdk_turn(
     input_data: dict[str, Any],
     context,
   ) -> PermissionResultAllow | PermissionResultDeny:
+    if tool_name in _CLAUDE_NATIVE_SCHEDULING_TOOLS:
+      return PermissionResultDeny(
+        message=(
+          "Provider-native scheduling is unavailable. Await finite work in "
+          "this turn, or let the top-level chat use Möbius Waiting before it "
+          "ends. A delegated child must return the condition to its parent."
+        )
+      )
     if run_policy is not None:
       nested_tools = {
         "Task", "TaskOutput", "TaskStop", "Workflow", "Workflows", "Agent",
@@ -1211,6 +1237,7 @@ async def run_claude_sdk_turn(
       "include_partial_messages": True,
       "max_buffer_size": _CLAUDE_SDK_MAX_BUFFER_SIZE,
       "can_use_tool": can_use_tool,
+      "disallowed_tools": list(_CLAUDE_NATIVE_SCHEDULING_TOOLS),
       "cli_path": _claude_cli_path(),
       "stderr": _capture_stderr,
       "hooks": {
@@ -1230,6 +1257,7 @@ async def run_claude_sdk_turn(
         "disallowed_tools": [
           "AskUserQuestion", "Task", "TaskOutput", "TaskStop",
           "Workflow", "Workflows", "Agent",
+          *_CLAUDE_NATIVE_SCHEDULING_TOOLS,
         ],
         "agents": {},
       })
@@ -1389,16 +1417,35 @@ async def run_claude_sdk_turn(
             # path seals A1 and re-asks with the buffered steer text.
             continue
           if (
-            active_client.interrupt_requested
-            and isinstance(sdk_msg, ResultMessage)
+            isinstance(sdk_msg, ResultMessage)
             and sdk_msg.stop_reason == "interrupt"
+            and (
+              active_client._interrupt_issued
+              or active_client.interrupt_requested
+            )
           ):
-            # The SDK describes a deliberate Stop with the same
-            # error_during_execution envelope it uses for an unexpected
-            # interruption. Preserve its usage/cost, but do not let the
-            # provider-shaped error overwrite chat.py's resumable stop note.
+            # A `stop_reason == "interrupt"` terminal we caused is ONLY ever an
+            # interrupt() WE issued — an owner Stop (`interrupt_requested`) OR a
+            # steer's soft interrupt (`_interrupt_issued`). Either proves we
+            # initiated it; a CLI/provider abort we never issued leaves BOTH
+            # False and keeps its error visible. The SDK wraps both of our cases
+            # in the same error_during_execution envelope ("Execution
+            # interrupted."), so that provider error is never a genuine failure
+            # to surface. Defuse it in every case and preserve usage/cost:
+            #   - a steer with buffered text discards this terminal at the
+            #     requery below, so clearing here is a harmless belt;
+            #   - an owner Stop keeps writing its own resumable note through the
+            #     stop flow (interrupt_requested), so it needs no finalize note;
+            #   - a steer whose interrupt raced turn-end (its text already
+            #     re-queried and drained pending_steer) OR an unexpected CLI
+            #     interrupt ends the turn HERE with nothing left to requery.
+            #     That is not an error — mark it resume_incomplete so the
+            #     finalize seam renders a calm, resumable "Paused" note instead
+            #     of a red "Execution interrupted." error block.
             terminal["error"] = None
             terminal["terminal_status"] = "interrupted"
+            if not active_client.interrupt_requested:
+              terminal["resume_incomplete"] = True
           # Terminal result: the interrupt cycle (if any) is closed, so a
           # fresh boundary cut may fire on a later turn.
           active_client._interrupt_in_flight = False
@@ -1427,6 +1474,7 @@ async def run_claude_sdk_turn(
           # retry is also empty the finalize backstop records a retry marker.
           if (
             session_id is not None            # a resume (non-first turn)
+            and sdk_msg.stop_reason != "interrupt"  # a clean end, not our interrupt
             and not active_client.interrupt_requested  # Stop is terminal
             and not terminal.get("error")     # clean terminal (is_error False)
             and terminal.get("api_error_status") != 429  # not a bare 429/park
@@ -1434,6 +1482,13 @@ async def run_claude_sdk_turn(
             and not did_auto_requery
             and len(bc.assistant_blocks) == 0  # zero blocks: the synthetic no-op
           ):
+            # The `stop_reason != "interrupt"` guard is load-bearing: the block
+            # above now defuses an interrupt terminal's error to None, so
+            # `not terminal.get("error")` alone would let a steer-interrupt that
+            # raced turn-end (session_id set, blocks reset to [] by the seal)
+            # masquerade as a synthetic no-op and silently re-run the ORIGINAL
+            # prompt — re-executing its side effects and dropping the resumable
+            # Paused note. An interrupt is never a synthetic no-op resume.
             did_auto_requery = True
             log.info(
               "claude resume produced no reply (synthetic no-op); "
@@ -1444,7 +1499,7 @@ async def run_claude_sdk_turn(
           cost_usd = terminal.get("cost_usd")
           if rate_limit_resets_at is not None:
             terminal.setdefault("rate_limit_resets_at", rate_limit_resets_at)
-          # A native task or finite Monitor owns a later parent continuation.
+          # A native task owns a later parent continuation.
           # This also covers a fast task that settles immediately before the
           # spawning result, when a plain in-flight set would already be empty.
           if (

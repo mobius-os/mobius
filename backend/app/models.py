@@ -411,8 +411,9 @@ class Delegation(Base):
     Boolean, nullable=False, default=False
   )
   # Retry latch for the parent wake, stamped after the completion notice starts
-  # or queues. Delivery is intentionally at-least-once across a crash between
-  # those two transactions so a child result is never silently lost.
+  # or queues. If a crash lands between those transactions, recovery recognizes
+  # the exact durable hidden envelope before either retrying or yielding its
+  # observation claim to a blocking attachment.
   parent_woken_at = Column(DateTime, nullable=True, default=None)
   # A source-attached job (currently contribution preparation) belongs to the
   # owner-facing source chat without fabricating a ChatRun there. The stable
@@ -446,8 +447,9 @@ class ChatWait(Base):
   programmatic-turn boundary when the condition passes or the deadline expires.
   Restart-immune by construction — no live process owns the wait.
 
-  A purely new table: ``create_all`` builds it on the next boot, so no
-  schema-migration entry is needed for existing databases.
+  The table itself was introduced additively through ``create_all``. Later
+  fields still need numbered migrations because ``create_all`` does not alter
+  an existing table; ``condition_owner`` is added by migration 0026.
   """
 
   __tablename__ = "chat_waits"
@@ -458,6 +460,7 @@ class ChatWait(Base):
   )
   created_by_run_id = Column(String(64), nullable=True, default=None)
   description = Column(String(500), nullable=False)
+  condition_owner = Column(String(200), nullable=True, default=None)
   kind = Column(String(16), nullable=False)
   command = Column(Text, nullable=True, default=None)
   due_at = Column(DateTime, nullable=True, default=None)
@@ -474,8 +477,9 @@ class ChatWait(Base):
   last_checked_at = Column(DateTime, nullable=True, default=None)
   met_at = Column(DateTime, nullable=True, default=None)
   cancelled_at = Column(DateTime, nullable=True, default=None)
-  # Delivery is at-least-once across a crash between starting the continuation
-  # and stamping this latch, preferring a repeated wake to a silently lost one.
+  # Retry latch for the resume, stamped only after a deterministic wake turn
+  # starts/attaches or its stable cid is durably queued.  The wait-derived run
+  # and message ids make a crash retry reattach rather than minting a twin.
   resume_delivered_at = Column(DateTime, nullable=True, default=None)
   created_at = Column(DateTime, nullable=False, default=lambda: now_naive_utc())
 

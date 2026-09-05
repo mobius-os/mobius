@@ -622,6 +622,10 @@ def _goal_wait_kind(
     ):
       return "owner_question"
 
+  from app.delegations import background_helper_goal_ids
+  if goal_id in background_helper_goal_ids(db, physical.chat_id):
+    return "monitor"
+
   wait_run_ids = [
     run_id for (run_id,) in db.query(models.ChatWait.created_by_run_id).filter(
       models.ChatWait.chat_id == physical.chat_id,
@@ -650,6 +654,7 @@ def serialize_goal(
 ) -> dict[str, Any]:
   """Project durable Goal presentation independently of turn liveness."""
   plan = serialize_plan(db, physical, root)
+  wait_kind = _goal_wait_kind(db, physical, root)
   if physical.status == "running":
     status = "active"
   elif physical.status in {
@@ -660,15 +665,20 @@ def serialize_goal(
     status = "failed"
   elif (
     physical.status == "completed"
-    and plan is not None
-    and not plan["summary"]["can_complete"]
+    and (
+      wait_kind is not None
+      or (
+        plan is not None
+        and not plan["summary"]["can_complete"]
+      )
+    )
   ):
-    # A clean physical turn can end before a multi-turn plan is complete. The
-    # Goal remains resumable; physical completion is not Goal completion.
+    # A clean physical turn can end while its exact Goal still owns a durable
+    # handoff or before a multi-turn plan is complete. Physical completion is
+    # not Goal completion in either case.
     status = "paused"
   else:
     status = "completed"
-  wait_kind = _goal_wait_kind(db, physical, root)
   return {
     "id": physical.goal_id or root.id,
     "objective": physical.goal_objective,

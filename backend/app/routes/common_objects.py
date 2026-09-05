@@ -63,7 +63,7 @@ from sqlalchemy.orm import Session
 from app import models, push
 from app.config import get_settings
 from app.database import get_db
-from app.deps import Principal, get_principal
+from app.deps import Principal, get_principal, require_nondelegated_owner_control
 from app.storage_io import atomic_write, read_capped_body
 from app.routes.common import (
   CLOCK_SKEW_S,
@@ -529,6 +529,7 @@ async def decline_invitation(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
+  require_nondelegated_owner_control(principal)
   caller = _caller_app_slug(db, principal)
   path = _invitation_path(host, oid) if _valid_host(host) else None
   if path is None or not path.is_file():
@@ -589,6 +590,7 @@ async def create_object(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
+  require_nondelegated_owner_control(principal)
   caller = _caller_app_slug(db, principal)
   if not _APP_SLUG_RE.fullmatch(body.app):
     raise HTTPException(status_code=400, detail="Invalid app slug.")
@@ -658,6 +660,7 @@ async def join_object(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
+  require_nondelegated_owner_control(principal)
   caller = _caller_app_slug(db, principal)
   if not _APP_SLUG_RE.fullmatch(body.app):
     raise HTTPException(status_code=400, detail="Invalid app slug.")
@@ -734,6 +737,7 @@ async def create_invite(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
+  require_nondelegated_owner_control(principal)
   caller = _caller_app_slug(db, principal)
   if not _OID_RE.fullmatch(oid):
     raise HTTPException(status_code=404, detail="No such object.")
@@ -838,6 +842,7 @@ async def revoke_member(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
+  require_nondelegated_owner_control(principal)
   caller = _caller_app_slug(db, principal)
   if not _OID_RE.fullmatch(oid):
     raise HTTPException(status_code=404, detail="No such object.")
@@ -862,6 +867,7 @@ async def delete_object(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
+  require_nondelegated_owner_control(principal)
   caller = _caller_app_slug(db, principal)
   if not _OID_RE.fullmatch(oid):
     raise HTTPException(status_code=404, detail="No such object.")
@@ -890,6 +896,7 @@ async def leave_object(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
+  require_nondelegated_owner_control(principal)
   caller = _caller_app_slug(db, principal)
   membership = _load_remote(host, oid) if _valid_host(host) else None
   if membership is None:
@@ -981,6 +988,7 @@ async def write_state(
   db: Session = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
+  require_nondelegated_owner_control(principal)
   caller = _caller_app_slug(db, principal)
   if not _OID_RE.fullmatch(oid) or not _valid_host(host):
     raise HTTPException(status_code=404, detail="No such object.")

@@ -41,7 +41,7 @@ from sqlalchemy.orm import Session
 
 from app import fs_locks, models, push
 from app.database import get_db
-from app.deps import Principal, get_principal
+from app.deps import Principal, get_principal, require_nondelegated_owner_control
 from app.routes.common import (
   MAX_NAME_CHARS,
   OUTBOUND_TIMEOUT_S,
@@ -436,6 +436,7 @@ async def create_group(
   principal: Principal = Depends(get_principal),
 ):
   """Create a group hosted on this instance and invite its first members."""
+  require_nondelegated_owner_control(principal)
   app = _require_owner_or_common_app(db, principal)
   name = body.name.strip()[:MAX_NAME_CHARS]
   if not name:
@@ -492,6 +493,7 @@ async def send_group_message(
   principal: Principal = Depends(get_principal),
 ):
   """Send a message to a group, as host (fan out) or member (post to host)."""
+  require_nondelegated_owner_control(principal)
   app = _require_owner_or_common_app(db, principal)
   if not _GID_RE.fullmatch(gid):
     raise HTTPException(status_code=400, detail="Group id is invalid.")
@@ -551,6 +553,7 @@ async def add_group_member(
   principal: Principal = Depends(get_principal),
 ):
   """Add a member to a group hosted here, and tell everyone."""
+  require_nondelegated_owner_control(principal)
   app = _require_owner_or_common_app(db, principal)
   group = _load_host_group(gid)
   if group is None:

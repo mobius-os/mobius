@@ -1,9 +1,24 @@
 import { readFileSync } from 'node:fs'
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { createServer } from 'vite'
 import { ownsRecoveryAction } from '../recoveryCard.js'
 import { upsertTerminalErrorItem } from '../streamReducers.js'
 import { isResourcePause, resourcePauseLabel } from '../resourcePause.js'
+
+const vite = await createServer({
+  appType: 'custom',
+  logLevel: 'error',
+  server: { middlewareMode: true, hmr: false, ws: false },
+  ssr: { noExternal: ['@openai/apps-sdk-ui'] },
+})
+const { default: ErrorCard } = await vite.ssrLoadModule(
+  '/src/components/ChatView/ErrorCard.jsx',
+)
+
+after(() => vite.close())
 
 // Provider-limit parking (design §2.4): a limit-killed turn persists an error
 // block carrying a single `pause` descriptor ({kind, resets_at?}), which
@@ -37,8 +52,38 @@ test('ErrorCard renders a parked card for a block whose pause has a reset time',
     'a parked block must lead with a plain-language reset outcome')
   assert.match(errorCard, /Queued to continue/,
     'enabled automatic continuation is the authoritative state')
-  assert.match(msgContent, /\{parked \? 'Continue now' : 'Resume'\}/,
-    'an elapsed park offers Continue now rather than a premature retry')
+  assert.match(msgContent, /limitResetElapsed \? 'Continue now' : 'Try now'/,
+    'a park distinguishes ordinary continuation from an early retry after credits')
+})
+
+test('the rendered limit card explains automatic and early recovery states', () => {
+  const block = {
+    type: 'error',
+    message: '',
+    pause: { kind: 'limit', resets_at: '2026-09-04T09:00:00Z' },
+  }
+  const automatic = renderToStaticMarkup(createElement(ErrorCard, {
+    block,
+    autoResume: true,
+  }))
+  assert.match(automatic, /Queued to continue/)
+  assert.match(automatic, /continue automatically at the reset/)
+  assert.match(automatic, /Added credits or reset usage\? You can try now\./)
+
+  const manual = renderToStaticMarkup(createElement(ErrorCard, {
+    block,
+    autoResume: false,
+  }))
+  assert.match(manual, /Usage resets/)
+  assert.match(manual, /Turn on auto-continue, or try now/)
+
+  const elapsed = renderToStaticMarkup(createElement(ErrorCard, {
+    block,
+    autoResume: false,
+    resetElapsed: true,
+  }))
+  assert.match(elapsed, /Usage is available again/)
+  assert.match(elapsed, /Continue when you’re ready/)
 })
 
 test('the one block renderer owns ErrorCard for both active sources', () => {
@@ -107,15 +152,17 @@ test('the parked card has styling distinct from a plain error', () => {
     'the authoritative recovery outcome has its own hierarchy')
 })
 
-test('the rate-limit card presents one recovery action at a time', () => {
+test('the rate-limit card keeps automatic recovery and an explicit early retry', () => {
   assert.match(msgContent, /recoveryOwner && parked && autoResumeAvailable && onAutoResumeChange/,
     'the action must require the tail resumable rate-limit state')
   assert.match(msgContent, /Auto-continue this chat/,
     'a future reset names the persistent chat policy')
   assert.match(msgContent, /Turn off auto-continue/,
     'an enabled policy stays reversible without a competing retry')
-  assert.match(msgContent, /manualResumeAvailable = recoveryOwner && !resourceWait && \([\s\S]*!parked \|\| \(!!limitResetElapsed && !autoResumeEnabled\)/,
-    'manual continuation appears only after reset and only when auto continuation is off')
+  assert.match(msgContent, /manualResumeAvailable = recoveryOwner && !resourceWait/,
+    'manual continuation remains available when credits restore usage early')
+  assert.match(errorCard, /Added credits or reset usage\? You can try now\./,
+    'the early retry explains when it is useful rather than encouraging blind retries')
   assert.doesNotMatch(msgContent, /<Switch/,
     'the card must not present a switch beside a competing action')
   assert.match(css, /\.chat__recovery-actions\s*\{/,

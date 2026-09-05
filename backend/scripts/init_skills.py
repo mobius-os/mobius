@@ -84,6 +84,28 @@ _UNMODIFIED_MIGRATIONS = {
     # Mandatory turn-local routing seed before every unfinished Goal wait had
     # to declare a durable monitor or present an explicit owner action.
     "07ac534c61899fc1154dc4ba99a4eda0f648b2f33c839dc65879d12952e09533",
+    # Provider-neutral promotion seed before the execution loop was
+    # front-loaded so a bounded skill read could not miss plan/parallel/handoff.
+    "630fe9ca1e8f080e052ed87d9e7d7b8ea92e4e891efcfc952a0bdf80e37afd66",
+    # Front-loaded execution-loop seed before routing became an explicit serial
+    # gate and the repeated guidance was condensed below Claude's read limit.
+    "d00214c37ba549f5ea4f043714ca33073176b47f1e3085230791b74dd49e2b49",
+  },
+  "waiting.md": {
+    # Untouched shared copy before explicit owner/deadline requirements and
+    # the no-model polling contract. The seed already carried the repair, but
+    # existing instances could never receive it without this migration.
+    "3993e84013d0359a46306b5a3c21f498b4799767aef84b226a7b07997ab538b9",
+    # Seed immediately before parent-owned Wait discovery and the explicit
+    # no-inert-monitor rule. Existing untouched installations must advance to
+    # the same contract as a fresh install, while owner-edited copies remain
+    # protected by the digest gate.
+    "52be8224de1586a91a0a2149907ac09da547aeead99e0649840ea794f8685847",
+  },
+  "claude.md": {
+    # Legacy direct-CLI guide before the installed Subagents app became the
+    # authoritative configured and restart-safe delegation boundary.
+    "ea58419a5a654c3b6e547426867434c8c25830a5ca3487045728c816352712f9",
   },
   "reflection.md": {
     "c0f57c227f61cd8539a56b70eadfbbe2212125c23b7137472dd173a578baacd8",

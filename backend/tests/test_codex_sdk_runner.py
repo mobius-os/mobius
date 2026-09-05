@@ -13,6 +13,16 @@ from app.database import SessionLocal
 from app.runner_registry import RunnerKind, registry
 
 
+def test_codex_home_fallback_follows_data_dir_without_overriding_provider_env():
+  missing = {}
+  codex_sdk_runner._ensure_codex_home(missing, "/srv/mobius-data")
+  assert missing == {"CODEX_HOME": "/srv/mobius-data/cli-auth/codex"}
+
+  explicit = {"CODEX_HOME": "/provider-owned/codex"}
+  codex_sdk_runner._ensure_codex_home(explicit, "/srv/mobius-data")
+  assert explicit == {"CODEX_HOME": "/provider-owned/codex"}
+
+
 # Mirrors the installed SDK:
 # - ErrorNotification: /usr/local/lib/python3.12/site-packages/openai_codex/generated/v2_all.py:6958
 # - CodexRpcError: /usr/local/lib/python3.12/site-packages/openai_codex/errors.py:24
@@ -1065,6 +1075,65 @@ def test_run_codex_sdk_turn_resume_skips_skill_lookup(monkeypatch):
   assert registry.get_handle("chat-1", RunnerKind.CODEX_SDK) is None
 
 
+def test_explicit_data_dir_keeps_out_of_band_runner_off_server_settings(
+  monkeypatch, tmp_path,
+):
+  from app import config
+
+  completed_turn = SimpleNamespace(id="turn-1", usage=None, error=None)
+  notifications = [
+    SimpleNamespace(
+      method="turn/completed",
+      payload=_FakeTurnCompletedNotification(completed_turn),
+    )
+  ]
+  resumed_thread = _FakeThread("thread-1", _FakeTurnHandle(notifications))
+
+  class FakeAsyncCodex:
+    last = None
+
+    def __init__(self, config=None):
+      self.config = config
+      type(self).last = self
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_resume(self, *_args, **_kwargs):
+      return resumed_thread
+
+  monkeypatch.setattr(
+    codex_sdk_runner,
+    "_sdk_imports",
+    lambda: _fake_sdk(FakeAsyncCodex),
+  )
+  monkeypatch.setattr(
+    config,
+    "get_settings",
+    lambda: pytest.fail("explicit data_dir must not load server settings"),
+  )
+
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="nightly",
+    session_id="thread-1",
+    base_env={},
+    cwd=str(tmp_path),
+    chat_id="reflection-nightly",
+    bc=_FakeBroadcast(),
+    pending_questions={},
+    db=None,
+    data_dir=str(tmp_path),
+  ))
+
+  assert result["error"] is None
+  assert FakeAsyncCodex.last.config.kwargs["env"]["CODEX_HOME"] == str(
+    tmp_path / "cli-auth" / "codex"
+  )
+
+
 def test_new_goal_uses_sdk_logical_operation_not_ordinary_turn(monkeypatch):
   ordinary_turn = _FakeTurnHandle(_goal_completion_notifications())
   thread = _FakeThread("thread-1", ordinary_turn)
@@ -1264,6 +1333,56 @@ def test_paused_goal_reactivates_and_steers_real_owner_message(monkeypatch):
     ("thread-1", "physical-turn", "Use the smaller durable design"),
   ]
   assert thread.turn_args is None
+
+
+def test_ordinary_turn_does_not_reactivate_a_historical_paused_goal(
+  monkeypatch,
+):
+  goal = SimpleNamespace(status=_FakeThreadGoalStatus.paused)
+  ordinary_turn = _FakeTurnHandle(_goal_completion_notifications())
+  thread = _FakeThread("thread-1", ordinary_turn)
+
+  class FakeAsyncCodex:
+    last = None
+
+    def __init__(self, config=None):
+      self.config = config
+      self._client = _FakeGoalClient(goal)
+      type(self).last = self
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_resume(self, _thread_id, **_kwargs):
+      assert self._client.register_calls == []
+      return thread
+
+  monkeypatch.setattr(
+    codex_sdk_runner, "_sdk_imports", lambda: _fake_sdk(FakeAsyncCodex),
+  )
+
+  result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="Can you explain the result?",
+    session_id="thread-1",
+    base_env={},
+    cwd="/tmp",
+    chat_id="chat-goal",
+    bc=_FakeBroadcast(),
+    pending_questions={},
+    db=None,
+    goal_mode=False,
+  ))
+
+  client = FakeAsyncCodex.last._client
+  assert result["error"] is None
+  assert client.register_calls == []
+  assert client.set_calls == []
+  assert client.steer_calls == []
+  assert thread.turn_args is not None
+  assert thread.turn_args[0] == "Can you explain the result?"
 
 
 def test_goal_turn_interrupt_uses_sdk_pause_and_interrupt_operation():

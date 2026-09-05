@@ -1,69 +1,143 @@
-/* WaitingChip renders a chat's armed durable waits: the visible form of "the
-   agent is waiting for X and will resume on its own". One chip per wait, shown
-   only while no turn is active — during a live turn the run surface already
-   owns the status area. Cancel is immediate and local-first; the durable row
-   is cancelled through the platform. */
+/* WaitingChip renders a chat's self-resuming handoffs above the composer. The
+   collapsed row stays glanceable; expansion shows the full condition and who
+   owns it without reviving the older background-helper rail. */
 
-function intervalLabel(wait) {
-  if (wait.kind === 'timer') {
-    return wait.due_at
-      ? `resumes ${new Date(wait.due_at + 'Z').toLocaleTimeString([], {
-          hour: '2-digit', minute: '2-digit',
-        })}`
-      : 'resumes later'
-  }
-  const secs = Number(wait.interval_secs) || 300
-  const minutes = Math.round(secs / 60)
-  return minutes <= 1 ? 'checking every minute' : `checking every ${minutes} min`
+import { useState } from 'react'
+import { ChevronDown, X } from '@openai/apps-sdk-ui/components/Icon'
+import {
+  resourcePausePresentation,
+  waitPresentation,
+} from './waitingPresentation.js'
+
+function DetailRow({ label, children, primary = false }) {
+  return (
+    <div className={`chat__wait-detail-row${primary ? ' chat__wait-detail-row--primary' : ''}`}>
+      <dt>{label}</dt>
+      <dd>{children}</dd>
+    </div>
+  )
 }
 
-export default function WaitingChip({ waits, resourcePause, onCancel }) {
-  if (!waits?.length && !resourcePause) return null
-  const resourceLabel = resourcePause?.pause?.kind === 'memory'
-    ? 'Waiting for memory headroom'
-    : 'Waiting for storage headroom'
-  const resourceMeta = resourcePause?.pause?.resets_at
-    ? `checks again ${new Date(resourcePause.pause.resets_at).toLocaleTimeString([], {
-        hour: '2-digit', minute: '2-digit',
-      })}`
-    : 'checks again automatically'
+function WaitTag() {
   return (
-    <div className="chat__waits" role="status" aria-live="polite">
-      {resourcePause && (
-        <div className="chat__wait-chip">
-          <span className="chat__wait-tag" aria-hidden="true">
-            <span className="chat__wait-pulse" />
-            Waiting
-          </span>
-          <span className="chat__wait-text" title={`${resourceLabel} — ${resourceMeta}`}>
-            {resourceLabel}
-          </span>
-          <span className="chat__wait-meta">{resourceMeta}</span>
-        </div>
-      )}
-      {waits.map(wait => (
-        <div key={wait.id} className="chat__wait-chip">
-          <span className="chat__wait-tag" aria-hidden="true">
-            <span className="chat__wait-pulse" />
-            Waiting
-          </span>
-          <span
-            className="chat__wait-text"
-            title={`${wait.description} — ${intervalLabel(wait)}`}
-          >
-            {wait.description}
-          </span>
-          <span className="chat__wait-meta">{intervalLabel(wait)}</span>
+    <span className="chat__wait-tag" aria-hidden="true">
+      <span className="chat__wait-pulse" />
+      Waiting
+    </span>
+  )
+}
+
+export function WaitCard({ wait, expanded, onToggle, onCancel }) {
+  const presentation = waitPresentation(wait)
+  return (
+    <div className={`chat__wait-card${expanded ? ' chat__wait-card--expanded' : ''}`}>
+      <button
+        type="button"
+        className="chat__wait-summary"
+        aria-expanded={expanded}
+        aria-label={`${expanded ? 'Collapse' : 'Expand'} waiting details: ${wait.description}`}
+        title={`${wait.description} — ${presentation.summary}`}
+        onPointerDown={(event) => event.preventDefault()}
+        onClick={onToggle}
+      >
+        <WaitTag />
+        <span className="chat__wait-text">{wait.description}</span>
+        <span className="chat__wait-meta">{presentation.summary}</span>
+        <ChevronDown
+          className="chat__wait-chevron"
+          width={15}
+          height={15}
+          aria-hidden="true"
+        />
+      </button>
+      {expanded && (
+        <div className="chat__wait-details">
+          <dl className="chat__wait-detail-list">
+            <DetailRow label="Waiting for" primary>{presentation.condition}</DetailRow>
+            <DetailRow label="Condition owner">{presentation.owner}</DetailRow>
+            <DetailRow label="Checker">{presentation.checker}</DetailRow>
+            <DetailRow label="Activity">{presentation.activity}</DetailRow>
+            <DetailRow label="If it takes too long">{presentation.timeout}</DetailRow>
+            <DetailRow label="Agent usage">{presentation.usage}</DetailRow>
+          </dl>
           <button
             type="button"
             className="chat__wait-cancel"
-            aria-label={`Stop waiting for: ${wait.description}`}
+            onPointerDown={(event) => event.preventDefault()}
             onClick={() => onCancel?.(wait.id)}
           >
-            ×
+            <X width={14} height={14} aria-hidden="true" />
+            Stop waiting
           </button>
         </div>
-      ))}
+      )}
     </div>
+  )
+}
+
+function ResourceCard({ resourcePause, expanded, onToggle }) {
+  const resourceLabel = resourcePause?.pause?.kind === 'memory'
+    ? 'Waiting for memory headroom'
+    : 'Waiting for storage headroom'
+  const presentation = resourcePausePresentation(resourcePause, resourceLabel)
+  return (
+    <div className={`chat__wait-card${expanded ? ' chat__wait-card--expanded' : ''}`}>
+      <button
+        type="button"
+        className="chat__wait-summary"
+        aria-expanded={expanded}
+        aria-label={`${expanded ? 'Collapse' : 'Expand'} resource waiting details`}
+        title={`${presentation.summary} — ${presentation.next}`}
+        onPointerDown={(event) => event.preventDefault()}
+        onClick={onToggle}
+      >
+        <WaitTag />
+        <span className="chat__wait-text">{presentation.summary}</span>
+        <span className="chat__wait-meta">{presentation.next}</span>
+        <ChevronDown
+          className="chat__wait-chevron"
+          width={15}
+          height={15}
+          aria-hidden="true"
+        />
+      </button>
+      {expanded && (
+        <div className="chat__wait-details">
+          <dl className="chat__wait-detail-list">
+            <DetailRow label="Waiting on">{presentation.pressure}</DetailRow>
+            <DetailRow label="Owner">{presentation.owner}</DetailRow>
+            <DetailRow label="Wake-up">{presentation.wakeUp}</DetailRow>
+            <DetailRow label="Agent usage">{presentation.usage}</DetailRow>
+          </dl>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default function WaitingChip({ waits = [], resourcePause, onCancel }) {
+  const [expandedKey, setExpandedKey] = useState(null)
+  if (!waits.length && !resourcePause) return null
+
+  const toggle = key => setExpandedKey(current => current === key ? null : key)
+  return (
+    <section className="chat__waits" aria-label="Waiting handoffs">
+      {resourcePause && (
+        <ResourceCard
+          resourcePause={resourcePause}
+          expanded={expandedKey === 'resource'}
+          onToggle={() => toggle('resource')}
+        />
+      )}
+      {waits.map(wait => (
+        <WaitCard
+          key={wait.id}
+          wait={wait}
+          expanded={expandedKey === wait.id}
+          onToggle={() => toggle(wait.id)}
+          onCancel={onCancel}
+        />
+      ))}
+    </section>
   )
 }

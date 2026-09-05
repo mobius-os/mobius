@@ -1067,6 +1067,7 @@ async def _run_codex_session(
       bc=_LogBroadcast(log_fh),
       pending_questions={},
       db=None,
+      data_dir=str(DATA_DIR),
       agent_settings={
         "model": model,
         "effort": effort,

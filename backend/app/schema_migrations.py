@@ -2140,6 +2140,22 @@ def _add_attached_delegation_work(eng) -> None:
       "ON delegations (source_work_active_chat_id)"
     ))
 
+
+def _add_chat_wait_condition_owner(eng) -> None:
+  """Persist the executor named by each observable command wait."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chat_waits" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chat_waits")}
+  if "condition_owner" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE chat_waits ADD COLUMN condition_owner VARCHAR(200) NULL"
+    ))
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -2168,6 +2184,7 @@ _SCHEMA_MIGRATIONS = (
   ("0023_project_color", _add_project_color),
   ("0024_chat_goal_dismissal", _add_chat_goal_dismissal),
   ("0025_attached_delegation_work", _add_attached_delegation_work),
+  ("0026_chat_wait_condition_owner", _add_chat_wait_condition_owner),
 )
 
 

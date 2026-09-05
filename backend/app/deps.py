@@ -676,6 +676,100 @@ def get_delegation_principal(
     )
   # Any non-delegation token resolves through the generic principal path.
   return get_principal(token, db)
+def require_nondelegated_owner_control(principal: Principal) -> None:
+  """Keep delegated execution bearers out of owner-confirmed controls.
+
+  Read children carry a delegation-only bearer and write children carry the
+  parent app's reviewed capabilities. ``delegation_id`` is the additional
+  authority boundary for app-capability routes whose external effect still
+  requires an owner decision. Top-level agent bearers remain valid owner
+  principals, while ordinary scoped app/embed callers keep their route gates.
+  """
+  if principal.delegation_id is not None:
+    raise HTTPException(
+      status_code=403,
+      detail="Delegated agents cannot perform owner-confirmed controls.",
+    )
+
+
+def require_nondelegated_owner_or_app_control(
+  principal: Principal = Depends(get_principal),
+) -> None:
+  """Admit owner/top-level-agent and scoped-app actors, never a child agent.
+
+  Pair this with a route's existing capability dependency when the same
+  externally visible mutation is intentionally available to both the owner
+  and one reviewed system app. The capability dependency still owns app
+  authorization; this dependency preserves the delegated-agent boundary.
+  """
+  require_nondelegated_owner_control(principal)
+
+
+def _owner_principal_or_403(principal: Principal) -> models.Owner:
+  """Preserve the existing owner-only scope check for narrower controls."""
+  if principal.scope != "owner" or principal.app_id is not None:
+    raise HTTPException(
+      status_code=403,
+      detail="Only an owner token can access this endpoint.",
+    )
+  return principal.owner
+
+
+def get_current_owner_for_lifecycle_control(
+  principal: Principal = Depends(get_principal),
+) -> models.Owner:
+  """Resolve a plain owner or top-level agent for lifecycle controls.
+
+  This is intentionally narrower than ``get_current_owner`` only along the
+  delegation boundary. Do not use it for the child's exact control plane.
+  """
+  owner = _owner_principal_or_403(principal)
+  require_nondelegated_owner_control(principal)
+  return owner
+
+
+def require_owner_input_principal(principal: Principal) -> None:
+  """Admit human owner input, including an exact server-verified chat embed."""
+  if principal.scope == "chat_embed" and principal.delegation_id is None:
+    return
+  if (
+    principal.scope != "owner"
+    or principal.app_id is not None
+    or principal.chat_id is not None
+    or principal.run_id is not None
+    or principal.delegation_id is not None
+  ):
+    raise HTTPException(
+      status_code=403,
+      detail="Agent tokens cannot supply owner input.",
+    )
+
+
+def get_current_owner_for_owner_input(
+  principal: Principal = Depends(get_principal),
+) -> models.Owner:
+  """Resolve the human/browser owner for answers and secret-value supply.
+
+  A top-level agent may open an owner-input card, but no agent bearer may fill
+  one. The browser's plain owner token has no chat/run/delegation binding.
+  """
+  owner = _owner_principal_or_403(principal)
+  require_owner_input_principal(principal)
+  return owner
+
+
+def authorize_current_owner_input_detached(
+  token: str = Depends(_oauth2),
+) -> str:
+  """Authenticate human browser input without retaining a DB session."""
+  db = SessionLocal()
+  try:
+    principal = get_principal(token, db)
+    owner = _owner_principal_or_403(principal)
+    require_owner_input_principal(principal)
+    return owner.username
+  finally:
+    db.close()
 
 
 def get_agent_run_principal(
@@ -722,6 +816,9 @@ def get_chat_view_principal(
       app_id=app_id,
       app_instance_id=payload.get("app_nonce") if app_id is not None else None,
       scope="app" if app_id is not None else "owner",
+      chat_id=payload.get("agent_chat") or payload.get("delegation_chat"),
+      run_id=payload.get("agent_run"),
+      delegation_id=payload.get("delegation_id"),
     )
   return Principal(
     owner=owner,
@@ -1084,6 +1181,7 @@ def get_owner_or_app_with_github_connect(
   db: Session = Depends(get_db),
 ) -> models.Owner:
   """Owner JWT, or an app token with live GitHub credential authority."""
+  require_nondelegated_owner_control(principal)
   owner = principal.owner
   if principal.app_id is None:
     db.close()

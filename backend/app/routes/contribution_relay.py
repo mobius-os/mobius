@@ -31,7 +31,12 @@ from app.contribution_records import (
   write_record,
 )
 from app.database import get_db
-from app.deps import Principal, get_principal, reject_cross_site
+from app.deps import (
+  Principal,
+  get_principal,
+  reject_cross_site,
+  require_nondelegated_owner_or_app_control,
+)
 from app.github_contribution_git import (
   _assert_clean_worktree,
   _assert_coauthor_trailer,
@@ -494,7 +499,10 @@ async def _settle_relay_equivalence(record: dict) -> None:
 
 @router.post(
   "/{app_id}/{record_id}/submit",
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
 )
 @_limiter.limit("5/minute")
 async def submit_through_mobius(
@@ -728,7 +736,10 @@ async def relay_contribution_status(
 
 @router.post(
   "/{app_id}/{record_id}/withdraw",
-  dependencies=[Depends(reject_cross_site)],
+  dependencies=[
+    Depends(reject_cross_site),
+    Depends(require_nondelegated_owner_or_app_control),
+  ],
 )
 @_limiter.limit("5/minute")
 async def withdraw_mobius_contribution(

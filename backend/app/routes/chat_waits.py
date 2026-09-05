@@ -27,12 +27,17 @@ router = APIRouter(prefix="/api/chat-waits", tags=["chat-waits"])
 
 
 def _require_owner(principal: Principal) -> None:
-  if principal.scope != "owner" or principal.app_id is not None:
+  if (
+    principal.scope != "owner"
+    or principal.app_id is not None
+    or principal.delegation_id is not None
+  ):
     raise HTTPException(status_code=403, detail="Owner authority required.")
 
 
 class WaitDeclare(BaseModel):
   description: str = Field(min_length=1, max_length=500)
+  condition_owner: str | None = Field(default=None, max_length=200)
   kind: str = Field(pattern="^(command|timer)$")
   command: str | None = Field(default=None, max_length=4000)
   delay_secs: int | None = Field(default=None, gt=0)
@@ -46,12 +51,14 @@ def declare(
   principal: Principal = Depends(get_agent_run_principal),
   db: Session = Depends(get_db),
 ):
+  _require_owner(principal)
   get_active_chat_or_404(db, principal.chat_id)
   try:
     row = declare_wait(
       db,
       chat_id=principal.chat_id,
       description=payload.description,
+      condition_owner=payload.condition_owner,
       kind=payload.kind,
       command=payload.command,
       delay_secs=payload.delay_secs,

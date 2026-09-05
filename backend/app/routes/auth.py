@@ -1,4 +1,9 @@
-"""Authentication routes: first-boot setup and login."""
+"""Authentication routes: first-boot setup and login.
+
+Owner-authorized credential minting and provider-link mutations reject delegated
+execution bearers; otherwise a child could exchange inherited tool access for a
+new unrestricted owner or app credential and bypass its delegation boundary.
+"""
 
 import asyncio
 import hashlib
@@ -27,7 +32,8 @@ from app.database import get_db
 from app.deps import (
   Principal,
   get_chat_view_principal,
-  get_current_owner, get_current_owner_or_app,
+  get_current_owner, get_current_owner_for_lifecycle_control,
+  get_current_owner_or_app,
   get_owner_app_or_chat_embed_for_models, reject_cross_site,
   require_chat_embed_operation,
 )
@@ -445,7 +451,7 @@ def _invalid_install_pass() -> None:
 )
 def mint_install_pass(
   body: schemas.InstallPassRequest,
-  owner: models.Owner = Depends(get_current_owner),
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Mints a one-time pass for installing one app to the home screen.
@@ -603,7 +609,7 @@ def login(
 @router.post("/app-token", dependencies=[Depends(reject_cross_site)])
 def create_app_token_endpoint(
   body: schemas.AppTokenRequest,
-  owner: models.Owner = Depends(get_current_owner),
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Returns a short-lived JWT scoped to a specific mini-app."""
@@ -629,7 +635,7 @@ def create_app_token_endpoint(
 @router.post("/app-job-token", dependencies=[Depends(reject_cross_site)])
 def create_app_job_token_endpoint(
   body: schemas.AppTokenRequest,
-  owner: models.Owner = Depends(get_current_owner),
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   """Mint a narrower-lifetime app token for one supervised job run."""
@@ -741,7 +747,7 @@ def _write_credentials(token_data: dict) -> None:
 @_limiter.limit("3/minute")
 async def provider_login(
   request: Request,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Generates PKCE params and returns the OAuth URL."""
   global _active_pkce
@@ -767,7 +773,7 @@ async def provider_login(
 async def provider_code(
   request: Request,
   body: schemas.ProviderCodeRequest,
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Exchanges the authorization code for tokens via the token endpoint."""
   global _active_pkce
@@ -1010,7 +1016,7 @@ async def _watch_codex_login(proc):
   "/provider/codex/login", dependencies=[Depends(reject_cross_site)],
 )
 async def codex_login_start(
-  _: models.Owner = Depends(get_current_owner),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ):
   """Starts codex login --device-auth and returns the URL + code."""
   # Kill any existing login process before starting a new one.

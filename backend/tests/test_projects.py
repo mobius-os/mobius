@@ -938,11 +938,13 @@ def test_project_delete_and_recover_are_atomic_with_its_live_chats(
   second = _create_project_chat(client, auth, project, "Build")
   first_wait = declare_wait(
     db, chat_id=first["id"], description="plan gate",
-    kind="command", command="false",
+    condition_owner="project workflow", kind="command", command="false",
+    deadline_secs=3600,
   )
   second_wait = declare_wait(
     db, chat_id=second["id"], description="build gate",
-    kind="command", command="false",
+    condition_owner="project workflow", kind="command", command="false",
+    deadline_secs=3600,
   )
   row = db.get(models.Project, project["id"])
   root = Path(os.environ["DATA_DIR"]) / row.root_path
