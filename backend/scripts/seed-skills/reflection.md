@@ -210,14 +210,25 @@ deterministic helper to decide what matters.
 
 On nights with user activity, this is the first phase and the one you may not skip. The agents that did today's work hold context you don't: what surprised them, what they'd warn future-you about, where a skill let them down. You recover it by **forking their session and asking them.**
 
-**Work every unreviewed chat and subagent run in order.**
+**Give every unreviewed chat and subagent run one disposition in order; coach
+the high-signal subset.**
 
 User chats are already staged in `inputs/chats.md`: every chat changed since
 the last completed Reflection run, oldest first. Do not replace this queue with
 a newest-N query or jump ahead to a more recent chat. The staged list includes
 app-attributed chats (`created_by_app_id` set): those are hidden from the
 owner's drawer but are real conversations an app's agent had. Review each
-summary in order; fork only when the summary leaves a material question.
+summary in order. A complete-sounding summary is not sufficient when it carries
+a contradiction signal: a partner correction or rejection; a claimed-complete
+change that remains dirty, unintegrated, unsent, or paired with an open action;
+substantial later replacement or rework; delegated writers colliding on the
+same artifact; a final response that is empty or only a preamble; or a
+malformed/thin summary. On a user-activity night, when any exact-session-eligible
+high-signal candidate exists, exact-fork at least the highest-value one or
+record that the interview was unavailable. This is signal-driven, not a nightly
+quota—zero forks is correct when no candidate has such a signal. Never mark a
+high-signal row `summary_sufficient` merely because its summary states a tidy
+conclusion.
 
 Recoverable deleted chats remain evidence: deletion removes them from the
 partner's workspace, not from Reflection's ability to learn what worked, what
@@ -236,15 +247,16 @@ session caches.
 
 **Review before forking.** For each staged row, read its chat summary/Digest
 (`/data/shared/memory/chats/<id>/index.md`), or, absent that, its transcript.
-Routine work whose summary is complete needs no fork. Fork when the row contains
-friction, novel durable learning, a partner correction, or a thin/suspicious
-summary that prevents a sound conclusion. Record the outcome, then move to the
-next row. Empty app-created stubs have no work to review and may be skipped.
+Routine work whose summary is complete and has no contradiction signal needs no
+fork. Fork when the row contains friction, novel durable learning, a partner
+correction, a contradiction signal above, or a thin/suspicious summary that
+prevents a sound conclusion. Record the outcome, then move to the next row.
+Empty app-created stubs have no work to review and may be skipped.
 
 **Coach each selected candidate — use the shared Agent Coaching method.** Read
 `/data/shared/skills/agent-coaching.md` completely before the first coaching
 conversation. It owns the neutral feedback-first posture, historical
-fork-or-reseed mechanics, provenance labels, learning questions, and
+exact-session fork mechanics, provenance validation, learning questions, and
 verify-before-acting rule. Do not maintain a second Reflection-only coaching
 script here.
 
@@ -257,17 +269,18 @@ verifies, or acts on agents next time?** This turns the conversation into input
 for phase 2 rather than a retrospective defect report.
 
 - Active chats: `timeout 150 /data/apps/reflection/fork-chat.sh --json
-  <chat_id> "<focused coaching prompt>"`. The structured result says whether
-  continuity came from an exact Claude session fork or a same-provider
-  transcript reseed. The original transcript is never modified. Deleted chats
-  are never forked; use their summary/transcript as read-only evidence.
+  <chat_id> "<focused coaching prompt>"`. Accept only `method: session_fork`,
+  `exact_session_fork: true`, and distinct source/fork session ids. The original
+  session is never modified. Deleted chats are never forked or coached.
 - App subagent runs: `timeout 150 bash "$SCRIPTS_DIR/fork-session.sh"
-  <session_id> <cwd> "<focused coaching prompt>"`.
+  <claude|codex> <session_id> <cwd> "<focused coaching prompt>"`.
 
-Follow Agent Coaching's timeout and validation rules. On failure, synthesize
-from the chat transcript or a bounded messages tail and say the coaching did
-not complete. That is an **evidence review**, never agent testimony; do not
-count a non-empty error string as coaching.
+Follow Agent Coaching's timeout and validation rules. On failure, record that
+exact-session coaching was unavailable and skip that coaching branch. Do not
+reseed from a transcript, synthesize substitute testimony, or count a non-empty
+error string as coaching. Give that candidate the explicit
+`interview_unavailable` method, `verification: unverified`, and a concrete
+`reason`; do not disguise it as `summary_sufficient` or `evidence_review`.
 
 **Don't repeat yourself across nights.** Agent Coaching's question sequence is a
 *frame*, not a fixed script. Before forking a recurring chat, skim what prior
@@ -278,7 +291,7 @@ what is genuinely new since the last coverage. A chat with nothing moved since
 then needs no coaching. Repeating the same sequence every night burns budget
 and buries the new signal under answers already captured.
 
-**Coaching testimony is not ground truth — verify before you act.** A forked agent missing recent state will confidently invent a plausible cause, or report a fix that never landed. Agent Coaching's evidence request makes verification cheap: `Grep` for the cited token. If it isn't there, the testimony confabulated — fall back to the raw record (the same transcript / DB `messages` JSON fallback as the failure note above) and trust *that*. Treat mismatches as the default expectation, not the exception. Two traps make a sincere "I fixed it" false even when the agent is honest:
+**Coaching testimony is not ground truth — verify before you act.** A forked agent may confidently invent a plausible cause, or report a fix that never landed. Agent Coaching's evidence request makes verification cheap: `Grep` for the cited token. If it isn't there, the testimony confabulated — reject that claim and use the owning source to establish what actually happened. This verification is not replacement coaching. Treat mismatches as the default expectation, not the exception. Two traps make a sincere "I fixed it" false even when the agent is honest:
 - **Real but already gone.** Backend fixes must land in the served clone under `/data/platform`, not in image-floor paths under `/app` (for example `/app/platform-baked/backend/app` or `/app/shell-src`). `/app` is replaced when the container is recreated from a new image, so a claimed fix whose file mtime predates the last recreate may no longer exist.
 - **Never landed.** Frontend fixes must land in the served clone under `/data/platform/frontend`, not in image-floor paths. A claimed shell edit with no newer mtime, no `grep` hit, and no relevant `/data/platform` diff simply didn't happen — the agent's working memory was confident; the filesystem is the truth.
 
@@ -298,13 +311,16 @@ Capture the readable detail in
 `/data/apps/reflection/runs/<date>/interviews.md`. Also append one compact JSON
 object per staged candidate to `interview-outcomes.jsonl` in that run directory
 with: `subject_id`, `subject_kind` (`chat`, `app_run`, or `memory_writer`),
-`method` (`interview`, `evidence_review`, `summary_sufficient`, or
-`skipped_stub`), `verification` (`verified`, `contradicted`, `unverified`, or
+`method` (`interview`, `interview_unavailable`, `evidence_review`,
+`summary_sufficient`, or `skipped_stub`), `verification` (`verified`,
+`contradicted`, `unverified`, or
 `not_applicable`), `outcome`, `evidence` (a list of checkable pointers), and the
 optional `friction`, `skill_signal`, `memory_signal`, `next_action`, and
 `reason`. This is a receipt, not a second narrative: do not copy transcripts or
 invent a finding to fill fields. A candidate reviewed from source must say
-`evidence_review`, never `interview`.
+`evidence_review`, never `interview`. Every `interview` row must also copy the
+validated fork receipt's `provider`, `source_session_id`, `forked_session_id`,
+and `exact_session_fork: true`; the source and fork ids must be distinct.
 
 Before phase 2, validate and summarize the receipts:
 `python3 /data/apps/reflection/interview_outcomes.py --ledger

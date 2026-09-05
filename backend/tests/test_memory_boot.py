@@ -131,6 +131,9 @@ def test_later_boot_migrates_only_unmodified_graph_aware_base_skill(
 def test_controlled_skills_have_fix_forward_migrations():
   module = _load("init_skills")
 
+  assert module._UNMODIFIED_MIGRATIONS["agent-coaching.md"] == {
+    "1730bcf614f0689f2c6459396c342f4090c1374eeb62450e21a81463fe0098bd",
+  }
   assert module._UNMODIFIED_MIGRATIONS["platform-maintenance.md"] == {
     "bcc617354747c49ddad7fa1f419cf921fd7280909358096323cdbc427ad063c3",
     "b591d15e335c72c0acf394ca7ce4b0daa633e124a487df7a713847cafc13ab6d",
@@ -150,6 +153,9 @@ def test_controlled_skills_have_fix_forward_migrations():
     module._UNMODIFIED_MIGRATIONS["reflection.md"]
   )
   assert "3b9af10ffe3db873df8ba7fd9719c126e1de2951c10c7b85cac9f47f27c82217" in (
+    module._UNMODIFIED_MIGRATIONS["reflection.md"]
+  )
+  assert "e5099eee9c5479312a0565c95477d59bab78da325c1622efc7b24d2a81459f34" in (
     module._UNMODIFIED_MIGRATIONS["reflection.md"]
   )
   assert module._UNMODIFIED_MIGRATIONS["cron.md"] == {
