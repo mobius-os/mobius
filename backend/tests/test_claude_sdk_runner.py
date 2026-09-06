@@ -1485,6 +1485,7 @@ def test_dispatch_thinking_delta_emits_thinking(monkeypatch):
 
 def test_control_mcp_readiness_waits_for_every_platform_tool():
   from app import claude_sdk_runner
+  from app.platform_tools import CONTROL_TOOL_NAMES
 
   class _Client:
     def __init__(self):

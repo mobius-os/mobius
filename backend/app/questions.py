@@ -42,6 +42,36 @@ _pending: dict[str, PendingQuestion] = {}
 _cancelled: dict[str, str | None] = {}
 
 
+def open_continuation_question(chat, question_id: str | None) -> dict | None:
+  """Find an exact open card whose answer belongs to a subsequent turn.
+
+  The durable marker is authoritative even while its publishing turn is still
+  finishing. Native provider questions retain their existing future contract.
+  """
+  if not question_id or chat.pending_question_id != question_id:
+    return None
+  for message in reversed(chat.messages or []):
+    for block in message.get("blocks") or []:
+      if (block.get("type") == "question"
+          and block.get("question_id") == question_id
+          and block.get("response_mode") == "continuation"
+          and not block.get("answers")):
+        return block
+  return None
+
+
+def is_secure_question(chat, question_id: str | None) -> bool:
+  """Plaintext answer surfaces must never settle a sealed-input receipt."""
+  target = question_id or chat.pending_question_id
+  for message in reversed(chat.messages or []):
+    for block in reversed(message.get("blocks") or []):
+      if block.get("type") == "question" and (
+        target is None or block.get("question_id") == target
+      ):
+        return bool(block.get("secure_input"))
+  return False
+
+
 def question_memory_diagnostics() -> dict[str, int]:
   """Return registry cardinalities without exposing answers or futures."""
   return {

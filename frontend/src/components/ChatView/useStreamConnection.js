@@ -1195,6 +1195,8 @@ export default function useStreamConnection(chatId, {
               // streamReducers.js for the full policy; mirrors
               // backend/app/events.py:process_event identity keying.
               const incoming = { type: 'question', questions }
+              if (event.response_mode) incoming.response_mode = event.response_mode
+              if (event.secure_input) incoming.secure_input = event.secure_input
               if (event.question_id) incoming.question_id = event.question_id
               // Re-arm the replayed event with any answer the user already
               // submitted this turn. After a reconnect wipe upsertQuestionItem
@@ -1244,7 +1246,10 @@ export default function useStreamConnection(chatId, {
               item.type === 'secure_input'
               && item.request_id === event.request_id
                 ? { ...item, status }
-                : item
+                : item.type === 'question' && item.secure_input
+                    && item.question_id === event.request_id && !item.answers
+                  ? { ...item, secure_input: { ...item.secure_input, status } }
+                  : item
             )))
           } else if (event.type === 'answers_applied') {
             // The question was answered (by this tab, another tab, or the

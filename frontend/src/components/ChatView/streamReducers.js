@@ -371,6 +371,10 @@ export function upsertQuestionItem(prev, incoming) {
   if (idx !== -1) {
     const existing = prev[idx]
     const merged = { ...incoming }
+    if (existing.secure_input) {
+      merged.secure_input = { ...incoming.secure_input, ...existing.secure_input }
+    }
+    if (existing.response_mode) merged.response_mode = existing.response_mode
     if (existing.answers && !merged.answers) merged.answers = existing.answers
     if (existing.absorbedTool) merged.absorbedTool = existing.absorbedTool
     if (existing.absorbedToolUseId) {

@@ -52,6 +52,7 @@ class QuestionEvent(ChatEventBase):
   # is shown. Optional: a defensive runner that omits it still dedups by
   # question_block_key (see app.events).
   question_id: NotRequired[str]
+  response_mode: NotRequired[str]
 
 
 class ErrorEvent(ChatEventBase):

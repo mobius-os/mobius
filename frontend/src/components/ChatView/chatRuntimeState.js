@@ -134,12 +134,17 @@ export function shouldFreezeStreamingReturn({
 // next stream promotion.
 export function answerTurnDisposition(response) {
   if (response?.answer_turn === 'same') return 'same'
+  if (response?.answer_turn === 'queued') return 'queued'
   if (response?.answer_turn === 'new') return 'new'
   return 'unknown'
 }
 
 export function answerKeepsCurrentTurn(response) {
-  return answerTurnDisposition(response) === 'same'
+  // A fast approval answer queues a subsequent turn. Preserve the current
+  // streamed row until the ordinary queued-turn promotion seals it; do not
+  // append its hidden answer or retire the bridge before that boundary.
+  const disposition = answerTurnDisposition(response)
+  return disposition === 'same' || disposition === 'queued'
 }
 
 /**

@@ -63,6 +63,19 @@ test('pending secure input renders one uncontrolled field per prompt', () => {
 })
 
 
+test('an open pending card offers an owner cancel control', () => {
+  const html = renderCard({}, true)
+  assert.match(html, /secure-card__cancel/)
+  assert.match(html, />Cancel</)
+})
+
+
+test('a settled card shows no cancel control', () => {
+  const html = renderCard({ status: 'cancelled' }, true)
+  assert.doesNotMatch(html, /secure-card__cancel/)
+})
+
+
 test('an explicit owner credential flow keeps its password-manager contract', () => {
   const html = renderCard({
     fields: [
@@ -157,4 +170,19 @@ test('reveal mode is visually distinct and requires explicit confirmation', () =
   assert.match(html, /name="reveal_confirmed"/)
   assert.match(html, /sent to the AI provider/)
   assert.match(html, />Reveal for this turn</)
+})
+
+
+test('saved input is answerable while no provider turn is streaming', () => {
+  const html = renderCard({ saved: true }, true)
+  assert.match(html, /<form/)
+  assert.match(html, />Enter securely</)
+})
+
+test('an interrupted sealed operation says outcome unknown and does not invite repeat execution', () => {
+  const html = renderCard({ saved: true, status: 'interrupted',
+    outcome: 'Möbius restarted during this operation. Its outcome is unknown; it was not repeated.' }, true)
+  assert.match(html, /Outcome unknown/)
+  assert.match(html, /was not repeated/)
+  assert.doesNotMatch(html, /<form|<input/)
 })

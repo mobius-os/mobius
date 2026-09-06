@@ -16,6 +16,8 @@ CONTROL_SERVER_NAME = "mobius_control"
 GOAL_TOOL_NAME = "promote_goal"
 WAIT_TOOL_NAME = "declare_wait"
 CANCEL_WAIT_TOOL_NAME = "cancel_wait"
+APPROVAL_TOOL_NAME = "request_approval"
+QUESTION_TOOL_NAME = "request_question"
 LIST_PEERS_TOOL_NAME = "list_agent_peers"
 SEND_MESSAGE_TOOL_NAME = "send_agent_message"
 READ_MESSAGES_TOOL_NAME = "read_agent_messages"
@@ -29,6 +31,8 @@ CONTROL_TOOL_NAMES = (
   GOAL_TOOL_NAME,
   WAIT_TOOL_NAME,
   CANCEL_WAIT_TOOL_NAME,
+  APPROVAL_TOOL_NAME,
+  QUESTION_TOOL_NAME,
   *COORDINATION_TOOL_NAMES,
 )
 CONTROL_ENV_VARS = (

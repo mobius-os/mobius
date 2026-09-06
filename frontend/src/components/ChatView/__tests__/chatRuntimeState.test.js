@@ -115,7 +115,7 @@ test('an in-process question answer keeps ownership of the active assistant turn
   }), true)
 })
 
-test('only a recovered question answer starts a new hidden turn', () => {
+test('a recovered question answer starts a new hidden turn', () => {
   assert.equal(answerTurnDisposition({
     status: 'started',
     answer_turn: 'new',
@@ -125,6 +125,12 @@ test('only a recovered question answer starts a new hidden turn', () => {
     answer_turn: 'new',
   }), false)
   assert.equal(answerKeepsCurrentTurn(null), false)
+})
+
+test('an early approval answer preserves the current row until queue promotion', () => {
+  const response = { status: 'queued', answer_turn: 'queued' }
+  assert.equal(answerTurnDisposition(response), 'queued')
+  assert.equal(answerKeepsCurrentTurn(response), true)
 })
 
 test('answer turn ownership requires the explicit semantic field', () => {

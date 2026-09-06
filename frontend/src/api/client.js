@@ -596,9 +596,16 @@ export const api = {
     ),
   },
   secureInputs: {
+    savedState: (chatId, requestId) => apiFetch(
+      `/secure-inputs/${encodeURIComponent(chatId)}/${encodeURIComponent(requestId)}/saved-state`,
+    ),
     submit: (chatId, requestId, payload) => apiFetch(
       `/secure-inputs/${encodeURIComponent(chatId)}/${encodeURIComponent(requestId)}/submit`,
       { method: 'POST', body: JSON.stringify(payload) },
+    ),
+    cancel: (chatId, requestId) => apiFetch(
+      `/secure-inputs/${encodeURIComponent(chatId)}/${encodeURIComponent(requestId)}/cancel`,
+      { method: 'POST', body: JSON.stringify({}) },
     ),
   },
   apps: {

@@ -153,8 +153,8 @@
 
 .csp__mobius-logo {
   display: block;
-  width: 20px;
-  height: 20px;
+  width: 23px;
+  height: 23px;
   background: currentColor;
   -webkit-mask: url('/icons/notification-badge.svg') center / contain no-repeat;
   mask: url('/icons/notification-badge.svg') center / contain no-repeat;

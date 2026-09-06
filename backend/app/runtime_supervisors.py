@@ -91,6 +91,8 @@ class RuntimeSupervisors:
       while True:
         await asyncio.sleep(60)
         try:
+          from app.saved_secure_inputs import recover_interrupted
+          await recover_interrupted()
           with SessionLocal() as db:
             await sweep_wedged_runs(db)
             await sweep_idle_pending_chats(db)

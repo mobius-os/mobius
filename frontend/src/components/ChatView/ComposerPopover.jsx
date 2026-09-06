@@ -461,7 +461,7 @@ export default function ComposerPopover({
                   onClick={handleOpenUsage}
                 >
                   <span className="composer-popover__row-icon" aria-hidden="true">
-                    <BrainUsageIcon width={18} height={18} />
+                    <BrainUsageIcon width={18} height={18} color="var(--text)" />
                   </span>
                   <span className="composer-popover__row-main">
                     <span className="composer-popover__row-title">Chat usage</span>
