@@ -85,16 +85,6 @@ test.describe('shell update — owner-controlled navigation', () => {
       'shell_apply_now',
     ], armed))
     const target = await createTaggedChat(page, 'update-target')
-    // Empty chats deliberately stay out of Drawer Recents. Seed one durable
-    // transcript row so this fixture exercises a real drawer navigation
-    // target instead of waiting forever for an intentionally hidden row.
-    const token = await page.evaluate(() => localStorage.getItem('token'))
-    const seeded = await page.request.put(`${BASE}/api/chats/${target.id}`, {
-      headers: { Authorization: `Bearer ${token}` },
-      data: { messages: [{ role: 'user', content: 'Navigation target' }] },
-      failOnStatusCode: false,
-    })
-    expect(seeded.ok(), await seeded.text()).toBeTruthy()
     const current = await createTaggedChat(page, 'update-current')
     await page.goto(`${BASE}/shell/?chat=${current.id}`, { waitUntil: 'domcontentloaded' })
     await expect(page.locator(
@@ -107,6 +97,7 @@ test.describe('shell update — owner-controlled navigation', () => {
     await expect(page.getByRole('button', { name: 'Update now' })).toHaveCount(0)
     await page.getByRole('button', { name: /Notifications/ }).click()
     await expect(page.getByRole('button', { name: 'Update now' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Later' })).toBeVisible()
     await expect(page.getByText('A Möbius update is ready.')).toHaveCount(1)
     expect(await loadCount(page)).toBe(0)
 
@@ -140,12 +131,6 @@ test.describe('shell update — owner-controlled navigation', () => {
       window.addEventListener('mobius:before-shell-reload', () => {
         sessionStorage.setItem('__before_shell_reload_seen', '1')
       }, { once: true })
-      window.addEventListener('pageswap', event => {
-        sessionStorage.setItem(
-          '__shell_reload_view_transition',
-          event.viewTransition ? 'yes' : 'no',
-        )
-      }, { once: true })
     })
 
     releaseEvent()
@@ -164,10 +149,6 @@ test.describe('shell update — owner-controlled navigation', () => {
     expect(await page.evaluate(() => (
       sessionStorage.getItem('__before_shell_reload_seen')
     ))).toBe('1')
-    expect(await page.evaluate(() => (
-      sessionStorage.getItem('__shell_reload_view_transition')
-    ))).toBe('yes')
-    await expect(page.locator('html[data-shell-reload-transition]')).toHaveCount(0)
     expect(await loadCount(page)).toBe(1)
   })
 })

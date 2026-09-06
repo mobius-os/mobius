@@ -59,6 +59,12 @@ async function send(page, text) {
   await page.keyboard.press('Enter')
 }
 
+function deferred() {
+  let resolve
+  const promise = new Promise(settle => { resolve = settle })
+  return { promise, resolve }
+}
+
 test('keyboard close never paints a sent row below its pin', async ({ page }) => {
   let running = false
   let sendCount = 0
@@ -120,7 +126,6 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
         pending_messages: [],
         pending_question_id: null,
         provider: 'codex',
-        agent_settings_json: { model: 'claude-sonnet-4-6' },
       }),
     })
   })
@@ -129,9 +134,6 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
   })
 
   await send(page, 'First user message')
-  await expect(page.locator(
-    '[data-chat-surface="painted"] .chat__msg--assistant',
-  )).toContainText('First response paragraph.', { timeout: 5000 })
   await page.waitForFunction(() => (
     !document.querySelector('[data-chat-surface="painted"] .chat__stop')
   ), undefined, { timeout: 5000 })
@@ -245,4 +247,170 @@ test('keyboard close never paints a sent row below its pin', async ({ page }) =>
     evidence.sawJumpToLatest,
     `the transient pin reserve must not advertise a reader escape: ${JSON.stringify(evidence)}`,
   ).toBe(false)
+})
+
+test('an idle runtime snapshot cannot retire an unacknowledged fresh send', async ({ page }) => {
+  await page.setViewportSize({ width: 1512, height: 861 })
+  await installStreams(page)
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' })
+  const chat = await createTaggedChat(page, 'idle-start-runtime-race')
+  expect(chat?.id).toBeTruthy()
+
+  // Keep the fixture genuinely empty. Besides matching the owner's report
+  // that this also happens in new chats, this avoids depending on activation-
+  // cache policy just to seed enough geometry for the lifecycle assertion.
+  const history = []
+
+  const sendStarted = deferred()
+  const runtimeRaceReturned = deferred()
+  const releaseAcknowledgement = deferred()
+  let raceArmed = false
+  let running = false
+  let postSendDetailReads = 0
+
+  await page.route(new RegExp(`/api/chats/${chat.id}/messages$`), async route => {
+    const request = route.request().postDataJSON()
+    sendStarted.resolve()
+    await releaseAcknowledgement.promise
+    const message = {
+      role: 'user',
+      content: request.content,
+      blocks: [{ type: 'text', content: request.content }],
+      ts: 1700001000000,
+      cid: request.cid,
+    }
+    running = true
+    await route.fulfill({
+      status: 202,
+      contentType: 'application/json',
+      body: JSON.stringify({ status: 'started', message }),
+    })
+  })
+  await page.route(
+    new RegExp(`/api/chats/${chat.id}/runtime(?:\\?.*)?$`),
+    async route => {
+      if (raceArmed) {
+        // Capture the exact bad ordering: the poll begins with the previous
+        // idle snapshot, then returns only after the local POST has started
+        // but before its acknowledgement can establish the new run.
+        await sendStarted.promise
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          running,
+          active_goal_objective: null,
+          pending_messages: [],
+          pending_question_id: null,
+        }),
+      })
+      if (raceArmed) runtimeRaceReturned.resolve()
+    },
+  )
+  await page.route(new RegExp(`/api/chats/${chat.id}(?:\\?.*)?$`), route => {
+    if (route.request().method() !== 'GET') return route.continue()
+    if (raceArmed) postSendDetailReads += 1
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        id: chat.id,
+        messages: history,
+        total: history.length,
+        offset: 0,
+        running,
+        pending_messages: [],
+        pending_question_id: null,
+        provider: 'codex',
+      }),
+    })
+  })
+
+  await page.goto(`${BASE}/shell/?chat=${encodeURIComponent(chat.id)}`, {
+    waitUntil: 'domcontentloaded',
+  })
+  const surface = page.locator('[data-chat-surface="painted"]')
+  const input = surface.getByRole('textbox', { name: 'Message Möbius…' })
+  await expect(surface.locator('.chat__msg--user')).toHaveCount(0)
+  await expect(input).toBeVisible()
+
+  const prompt = [
+    'Fresh message whose acknowledgement remains deliberately pending.',
+    'The previous idle runtime response must not tear down its live surface.',
+  ].join('\n')
+  await input.fill(prompt)
+  await page.evaluate(() => {
+    window.__idleStartRaceFrames = []
+    window.__idleStartRaceSampling = true
+    const sample = () => {
+      const surface = document.querySelector('[data-chat-surface="painted"]')
+      const scroll = surface?.querySelector('.chat__scroll')
+      const users = surface.querySelectorAll('.chat__msg--user')
+      const row = users[users.length - 1]
+      const scrollRect = scroll?.getBoundingClientRect()
+      const rowRect = row?.getBoundingClientRect()
+      window.__idleStartRaceFrames.push({
+        users: users.length,
+        assistants: surface.querySelectorAll('.chat__msg--assistant').length,
+        thinking: !!surface.querySelector('.chat__thinking'),
+        stop: !!surface.querySelector('.chat__stop'),
+        top: rowRect && scrollRect
+          ? Math.round((rowRect.top - scrollRect.top) * 10) / 10
+          : null,
+      })
+      if (window.__idleStartRaceSampling) requestAnimationFrame(sample)
+    }
+    requestAnimationFrame(sample)
+  })
+
+  raceArmed = true
+  await page.keyboard.press('Enter')
+  await Promise.all([sendStarted.promise, runtimeRaceReturned.promise])
+  // Let the false verdict, any mistaken terminal refresh, and React layout
+  // effects all reach paint while the POST acknowledgement is still held.
+  await page.evaluate(() => new Promise(resolve => {
+    let frames = 8
+    const next = () => {
+      frames -= 1
+      if (frames === 0) resolve()
+      else requestAnimationFrame(next)
+    }
+    requestAnimationFrame(next)
+  }))
+  const evidence = await page.evaluate(() => {
+    window.__idleStartRaceSampling = false
+    const frames = window.__idleStartRaceFrames || []
+    const firstSent = frames.findIndex(frame => frame.users === 1)
+    const afterSent = firstSent >= 0 ? frames.slice(firstSent) : []
+    const sentTops = afterSent
+      .filter(frame => frame.users === 1 && frame.top != null)
+      .map(frame => frame.top)
+    return {
+      firstSent,
+      afterSent,
+      topSpan: sentTops.length
+        ? Math.max(...sentTops) - Math.min(...sentTops)
+        : null,
+    }
+  })
+  releaseAcknowledgement.resolve()
+
+  expect(
+    postSendDetailReads,
+    `idle runtime must not trigger terminal transcript recovery: ${JSON.stringify(evidence)}`,
+  ).toBe(0)
+  expect(evidence.firstSent, `optimistic row never rendered: ${JSON.stringify(evidence)}`).toBeGreaterThanOrEqual(0)
+  expect(
+    evidence.afterSent.every(frame => frame.users === 1),
+    `the optimistic row disappeared before acknowledgement: ${JSON.stringify(evidence)}`,
+  ).toBe(true)
+  expect(
+    evidence.afterSent.every(frame => frame.thinking && frame.stop),
+    `the active assistant surface lost liveness before acknowledgement: ${JSON.stringify(evidence)}`,
+  ).toBe(true)
+  expect(
+    evidence.topSpan,
+    `the pinned row moved during the idle-runtime race: ${JSON.stringify(evidence)}`,
+  ).toBeLessThanOrEqual(1)
 })

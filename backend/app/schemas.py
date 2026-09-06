@@ -36,7 +36,7 @@ class SetupRequest(BaseModel):
 
 class SetupStatus(BaseModel):
   configured: bool
-  auth_mode: Literal["local", "mobius_sso"] = "local"
+  auth_mode: Literal["local", "mobius"] = "local"
 
 
 class TokenResponse(BaseModel):
@@ -198,11 +198,6 @@ class AppOut(BaseModel):
   # opened. The shell renders the same quiet activity dot used for chats.
   has_unseen_activity: bool = False
   unseen_activity_version: int | None = None
-  # Exact executable build last opened from the owning chat's CTA. Opening a
-  # live preview and opening the settled result are separate acknowledgements:
-  # the same build may surface once more when its agent turn finishes.
-  preview_seen_updated_at: datetime | None = None
-  preview_seen_final: bool = False
   cross_app_access: ShareLevel = "none"
   share_with_apps: ShareLevel = "none"
   offline_capable: bool = False
@@ -338,6 +333,27 @@ class AppOut(BaseModel):
     )
 
   model_config = {"from_attributes": True}
+
+
+class ChatAppArtifactOut(BaseModel):
+  """A live app related to one chat and its durable update cursor."""
+
+  app: AppOut
+  touched_at: datetime
+  seen_at: datetime | None = None
+
+
+class ChatAppArtifactSeenCursor(BaseModel):
+  """One exact app touch that was visible when the Brain was opened."""
+
+  app_id: int = Field(gt=0)
+  touched_at: datetime
+
+
+class ChatAppArtifactsSeenRequest(BaseModel):
+  """Exact cursors acknowledged by opening one chat's Brain."""
+
+  touches: list[ChatAppArtifactSeenCursor] = Field(default_factory=list)
 
 
 class AppApplyOut(BaseModel):
@@ -674,8 +690,8 @@ class ChatProviderSwitch(BaseModel):
       "codex": {
         "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
       },
-      "mobius": {"minimal", "low", "medium", "high", "max"},
       "claude": {"low", "medium", "high", "xhigh", "max", "ultracode"},
+      "mobius": {"minimal", "low", "medium", "high", "max"},
     }
     if effort not in allowed_efforts[self.provider]:
       raise ValueError("target effort does not belong to target provider")

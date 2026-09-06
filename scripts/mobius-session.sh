@@ -51,12 +51,20 @@ if [[ -f .env && ! -f "$worktree/.env" ]]; then
   echo "copied .env into $worktree/"
 fi
 
-# Share the main checkout's installed dependencies. These symlinks are
-# untracked; remove them before `git worktree remove`.
+# Share the main checkout's installed dependencies only when the worktree has
+# the exact same lockfile. A package.json range can accept a newer compiler
+# while its generated output differs, so package compatibility is not enough
+# for review evidence.
 for dir in . frontend; do
   if [[ -d "$dir/node_modules" && ! -e "$worktree/$dir/node_modules" ]]; then
-    ln -s "$(pwd)/$dir/node_modules" "$worktree/$dir/node_modules"
-    echo "linked $dir/node_modules into $worktree/$dir/"
+    if [[ -f "$dir/package-lock.json" || -f "$worktree/$dir/package-lock.json" ]] \
+        && ! cmp -s "$dir/package-lock.json" "$worktree/$dir/package-lock.json"; then
+      echo "not linking $dir/node_modules: worktree lockfile differs"
+      echo "  install exact dependencies with: (cd $worktree/$dir && npm ci)"
+    else
+      ln -s "$(pwd)/$dir/node_modules" "$worktree/$dir/node_modules"
+      echo "linked $dir/node_modules into $worktree/$dir/"
+    fi
   fi
 done
 
@@ -71,7 +79,7 @@ Next steps (run from the repo root or from inside the worktree):
   cd $worktree && scripts/wt-pytest.sh tests
 
   # Frontend unit tests + production build:
-  cd $worktree/frontend && npm test && npm run build
+  cd $worktree && scripts/wt-npm.sh test && scripts/wt-npm.sh run build
 
   # Browser tests use a committed, disposable standalone snapshot. The script
   # owns its isolated containers and port; pass one or more focused specs:

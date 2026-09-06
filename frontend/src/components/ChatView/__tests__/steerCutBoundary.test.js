@@ -73,13 +73,10 @@ test('only the cut re-bases the stream, and a replay refetches instead', () => {
   )
   const replay = sliceBranch(cut, 'if (isCatchUp) {', '} else {')
   assert.match(
-    replay, /catchUpItems = Array\.isArray\(event\.items\)/,
-    'the cut replaces replayed pre-steer output with the server-owned '
-    + 'continuation snapshot',
-  )
-  assert.match(
-    replay, /event\.next_assistant_message_id/,
-    'the continuation snapshot carries the identity of its exact assistant row',
+    replay,
+    /catchUpItems = Array\.isArray\(event\.items\)[\s\S]*?event\.next_assistant_message_id/,
+    'the cut is the boundary a reconnect reconstructs: replace the replayed '
+    + 'pre-cut segment with the server-owned continuation and its identity',
   )
   assert.ok(
     !replay.includes('onSteeredIntoTurnRef'),
@@ -131,7 +128,7 @@ test('the cut hands the steered rows off the tray and into the transcript', () =
   assert.match(
     handler,
     /promoteStreamToMessages\(\{[\s\S]*?keepTurnOpen: true,[\s\S]*?items: sealedItems,[\s\S]*?assistantMessageId,[\s\S]*?\}\)/,
-    'the cut seals the server-owned items into their exact assistant row',
+    'the cut promotes the server-sealed segment and its assistant identity',
   )
   assert.match(
     handler,

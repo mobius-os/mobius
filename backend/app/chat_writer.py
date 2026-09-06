@@ -45,7 +45,6 @@ import secrets
 import sys
 import threading
 import time
-import uuid
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -424,12 +423,12 @@ class ReconcileStartupChat(_Command):
 # These own the read-modify-write of the chat's `messages` /
 # `pending_messages` blobs: initial-send (`StartTurn`, from
 # routes/chats_stream.py), append (`AppendPending`), cancel
-# (`CancelPending`), edit (`UpdatePending`), promote (`PromotePending`, from
-# chat_queue.py), and clear / run markers (`ClearPending`, from chat.py).  The
-# routes/queue submit these instead of mutating the row directly, so every
-# mutation is serialized on the actor thread.  Each is must-persist (commit-
-# before-ack, non-coalescing) and fences any pending coalescible snapshot for
-# its (chat_id, run_token) key on submit.
+# (`CancelPending`), promote (`PromotePending`, from chat_queue.py), and
+# clear / run markers (`ClearPending`, from chat.py).  The routes/queue
+# submit these instead of mutating the row directly, so every mutation is
+# serialized on the actor thread.  Each is must-persist (commit-before-ack,
+# non-coalescing) and fences any pending coalescible snapshot for its
+# (chat_id, run_token) key on submit.
 
 
 @dataclass(frozen=True)
@@ -702,17 +701,14 @@ class PromotePending(_Command):
   committing (so a malformed entry can't silently consume a turn — building
   the validated schema surfaces it), moves pending rows into `messages`,
   sets the durable run marker, stamps `updated_at`, and commits. Returns
-  `{"history", "promoted", "session_id"}` with `promoted=None` only when
-  there was nothing to promote. Returns
+  `{"history", "promoted", "session_id"}`; `promoted` is None (queue
+  unchanged) only when there was nothing to promote, or
   ``PromotePendingBlockedByPendingQuestion`` when an owner question is open.
   Newer code persists each promoted pending row as its own visible user
   message, while `promoted.content` remains the combined provider-facing text
-  for the continuation turn. Product-result groups replace the caller's
-  provisional token with their deterministic durable run identity and return
-  it as ``promoted._run_token`` for the scheduler. A malformed pending entry
-  that can't build a valid history instead RAISES `_PersistFailed`; the
-  turn-end drain maps that to FAILED_LEAVE_MARKER (leave the marker for
-  reconciliation) rather than
+  for the continuation turn. A malformed pending entry that can't build a
+  valid history instead RAISES `_PersistFailed` — the turn-end drain maps that
+  to FAILED_LEAVE_MARKER (leave the marker for reconciliation) rather than
   confusing it with an empty queue and clearing the marker on stranded work.
   """
 
@@ -847,6 +843,8 @@ class RecoverWedgedRun(_Command):
   chat_id: str = ""
   run_token: str = ""
   interruption_block: dict = field(default_factory=dict)
+  # When set, the exact run is parked for the continuation sweep (a resource
+  # wait that resolves itself) instead of closed as an interrupted failure.
   parked_until: datetime | None = None
   park_reason: str | None = None
 
@@ -2236,6 +2234,13 @@ class ChatWriterActor:
           restart_nonce=None,
         )
       )
+      from app.chat_failure_activity import mark_failed
+      mark_failed(
+        db,
+        chat_id=cmd.chat_id,
+        run_id=interrupted_ids[-1],
+        failed_at=cmd.recovered_at,
+      )
     if cmd.restart_run_id:
       db.execute(
         update(ChatRun)
@@ -2803,10 +2808,13 @@ class ChatWriterActor:
       db.rollback()
       return GoalPromotionRejected("run_not_active")
 
-    from app.run_state import latest_run
-
-    latest = latest_run(db, cmd.chat_id)
-    if latest is None or latest.id != run.id:
+    latest = (
+      db.query(models.ChatRun.id)
+      .filter(models.ChatRun.chat_id == cmd.chat_id)
+      .order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc())
+      .first()
+    )
+    if latest is None or latest[0] != run.id:
       db.rollback()
       return GoalPromotionRejected("run_not_current")
     if run.goal_objective not in (None, cmd.objective):
@@ -2824,7 +2832,6 @@ class ChatWriterActor:
     if root.goal_objective not in (None, cmd.objective):
       db.rollback()
       return GoalPromotionRejected("different_goal_active")
-
     if (
       run.goal_id is not None
       and root.goal_id is not None
@@ -3239,9 +3246,7 @@ class ChatWriterActor:
       raise _PersistFailed("PersistCompaction did not persist")
     return {"status": "committed", "stored": new_msg}
 
-  def _promote_pending(
-    self, db, cmd: PromotePending,
-  ) -> dict | PromotePendingBlockedByPendingQuestion:
+  def _promote_pending(self, db, cmd: PromotePending) -> dict:
     """Move pending follow-ups into the transcript and mark the run.
 
     Replicates `promote_pending_messages_locked`: builds the next-turn
@@ -3260,7 +3265,7 @@ class ChatWriterActor:
     if chat is None:
       raise _PersistFailed("PromotePending: chat not found or deleted")
     # Moving queued rows into the transcript is a turn-admission operation,
-    # just like StartTurn. Keep the owner-question barrier
+    # just like StartTurn / StartContinuation. Keep the owner-question barrier
     # at the actor-owned commit boundary so every caller — including recovery
     # sweepers and future programmatic wakes — gets the same TOCTOU-safe rule.
     if chat.pending_question_id is not None:
@@ -3406,9 +3411,9 @@ class ChatWriterActor:
     goal_objective, goal_id = goal_identity_for_run_start(
       db, cmd.chat_id, agent_pending,
     )
-    # This event-only metadata lets the mounted UI cross the physical-turn
+    # Event-only metadata lets the mounted UI cross the physical-turn
     # boundary without briefly clearing a Goal while the runtime refetch lands.
-    # It is not written into the transcript row.
+    # It is deliberately not written into the transcript row.
     returned_promoted["_goal_objective"] = goal_objective
     returned_promoted["_goal_id"] = goal_id
     prior_run = (
@@ -3592,11 +3597,22 @@ class ChatWriterActor:
     if except_token is not None:
       q = q.filter(ChatRun.id != except_token)
     changed = False
-    for run in q.all():
+    failed_run = None
+    for run in q.order_by(ChatRun.started_at.asc(), ChatRun.id.asc()).all():
       run.status = status
       run.ended_at = datetime.now(UTC)
       run.restart_nonce = None
       changed = True
+      if status == "failed":
+        failed_run = run
+    if failed_run is not None:
+      from app.chat_failure_activity import mark_failed
+      mark_failed(
+        db,
+        chat_id=chat_id,
+        run_id=failed_run.id,
+        failed_at=failed_run.ended_at,
+      )
     return changed
 
   def _finish_run(self, db, cmd: FinishRun):
@@ -3623,11 +3639,19 @@ class ChatWriterActor:
         ChatRun.id == cmd.run_token,
         ChatRun.chat_id == cmd.chat_id,
       ).first()
-      if run is not None and run.status == "running":
+      if run is not None and run.status in models.NONTERMINAL_RUN_STATUSES:
         run.status = cmd.terminal_status
         run.ended_at = datetime.now(UTC)
         run.restart_nonce = None
         run_changed = True
+        if cmd.terminal_status == "failed":
+          from app.chat_failure_activity import mark_failed
+          mark_failed(
+            db,
+            chat_id=cmd.chat_id,
+            run_id=run.id,
+            failed_at=run.ended_at,
+          )
     else:
       run_changed = self._close_nonterminal_runs(
         db, cmd.chat_id, cmd.terminal_status
@@ -3746,6 +3770,16 @@ class ChatWriterActor:
 
     chat = db.query(Chat).filter(Chat.id == cmd.chat_id).first()
     if chat is not None and chat.deleted_at is None:
+      if not parks:
+        # A parked wait continues by itself; only a real interruption earns
+        # the drawer's attention mark.
+        from app.chat_failure_activity import mark_failed
+        mark_failed(
+          db,
+          chat_id=cmd.chat_id,
+          run_id=cmd.run_token,
+          failed_at=run.ended_at,
+        )
       messages = list(chat.messages or [])
       live = copy.deepcopy(chat.live_assistant)
       if (
@@ -4673,7 +4707,7 @@ def _tail_open_question_state(
 
 
 def _tail_open_question_id(messages) -> str | None:
-  """Return only the open question id for callers that do not own its row."""
+  """Compatibility projection for callers that only need the question id."""
   return _tail_open_question_state(messages)[0]
 
 

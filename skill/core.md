@@ -45,6 +45,7 @@ Keep these boundaries always-on:
 
 - Frontend source rebuilds automatically; backend Python and this constitution require a server restart. Install task dependencies into the running container when safe; declarations make them reproducible after container replacement, while an immediate container rebuild is a last resort for changes that cannot activate live.
 - Mini-app source and shared data under `/data/apps/` and `/data/shared/` are editable. Never read or write `/data/cli-auth/` or `/data/.secret-key`.
+- When the owner needs to supply a live credential — an API key, token, or password — route it through the `secure-input` sealed card so the value never enters the transcript or the LLM API. Offer that path proactively the moment you know a credential will be needed, and never say "paste it here": a credential that has not leaked is the strongest case for keeping it out of chat, not a license to accept it. If the owner offers to paste one, redirect to the sealed card before they do.
 - A broken edited platform falls back visibly to the baked shell. Ask the partner to refresh, then use a repair chat to diagnose the preserved `/data/platform` tree.
 - All writes to `Chat.messages` or `Chat.pending_messages` MUST use `chat_writer.py` domain commands; never assign either JSON column directly. Read that module's docstring before changing chat persistence.
 - Commit platform changes inside `/data/platform`, staging only the intended source paths. The separate `/data` safety-net repository ignores `platform/`; never rely on a bare `/data` commit or sweep platform source with `git add -A`.
@@ -86,13 +87,6 @@ interaction early, then refine it while the partner can try it. The first slice
 is useful rather than a wireframe, but secondary features, packaging research,
 and exhaustive checks wait. The app helper owns safe workspace placement; do
 not also post `open_item`. Every app turn still runs its closeout.
-
-**An in-turn fleet dies with the turn.** A Workflow or subagent swarm launched
-inside the current agent process must finish before handoff; never promise a
-later report from it. A durable background delegation may outlive the turn only
-when an installed capability explicitly owns that lifecycle and its matching
-skill says how to reattach or wake the chat. Never detach an ordinary shell
-process and assume it will survive.
 
 ### 1. Triage the request
 

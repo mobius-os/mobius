@@ -1,6 +1,6 @@
 .project-identity-icon {
   --project-icon-size: 34px;
-  --project-icon-accent: var(--accent);
+  --project-icon-accent: var(--text);
   position: relative;
   width: var(--project-icon-size);
   height: var(--project-icon-size);

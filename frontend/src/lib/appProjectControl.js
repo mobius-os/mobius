@@ -64,6 +64,17 @@ export async function handleAppProjectsRequest({
     return { opened: true }
   }
 
+  if (request.action === 'templates') {
+    const rows = await readRows(client.templates(), 'Project templates failed')
+    return rows.filter(row => String(row.source_app_id) === String(app.id)).map(row => ({
+      key: row.key,
+      id: row.id,
+      name: row.name,
+      description: row.description || '',
+      kind: row.kind || '',
+    }))
+  }
+
   if (request.action === 'migrate') {
     const legacyRows = await readRows(client.legacy(), 'Legacy project discovery failed')
     for (const legacy of legacyRows) {

@@ -679,6 +679,11 @@ def _process_subagent_event(event: dict, assistant_blocks: list) -> bool:
           break
     if target is None:
       return False
+    # A background Memory lookup settles on its task's terminal event: the
+    # sink stamps the recall onto the task_done, and it lands on the same tool
+    # block the placeholder result deferred from.
+    if event_type == "task_done" and isinstance(event.get("recall"), dict):
+      target["recall"] = event["recall"]
     subagent = target.setdefault("subagent", {})
     entry = subagent.setdefault(task_key, {
       "description": "",

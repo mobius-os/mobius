@@ -28,6 +28,7 @@ _tmp = tempfile.mkdtemp()
 os.environ["SECRET_KEY"] = "test-secret-key-at-least-32-characters-long"
 os.environ["DATABASE_URL"] = f"sqlite:///{_tmp}/test.db"
 os.environ["DATA_DIR"] = _tmp
+os.environ["DOMAIN"] = "localhost"
 os.environ["FRONTEND_ORIGIN"] = "http://localhost:5173"
 os.environ["MOBIUS_TEST_RUNTIME"] = "1"
 # Fail closed when pytest is launched from inside a running production

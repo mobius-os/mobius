@@ -37,9 +37,12 @@ export function goalMessageObjectiveFromText(text) {
  * The objective a `/goal ` composer draft is building, or null when the draft
  * is not a goal command.
  *
- * The draft chip takes over once the whitespace after `/goal` closes the slash
- * picker. An empty string means the command is armed but no objective has been
- * typed yet. `/goal clear` is a control phrase, never a new objective.
+ * The draft chip is meant to take over exactly as the slash-command menu
+ * dismisses, so it requires the whitespace after `/goal` that closes that menu
+ * (see slashQueryFor) — a bare `/goal` still belongs to the picker. It returns
+ * '' (not null) once that space exists but before an objective is typed, so the
+ * composer can show the goal is armed while the owner is still writing it.
+ * `/goal clear` is a control phrase, never a new objective, so it shows no chip.
  */
 export function draftGoalObjective(text) {
   if (typeof text !== 'string') return null
@@ -86,7 +89,7 @@ export function normalizeGoalPresentation(goal) {
     objective,
     status: goal.status,
     resumable: goal.status === 'paused',
-    ...(waitKind ? { waitKind } : {}),
+    ...(waitKind ? { wait_kind: waitKind } : {}),
   }
 }
 
@@ -170,20 +173,8 @@ export function goalObjectiveAtRunStart(text, messages) {
   return priorGoalObjective(messages, tailIndex)
 }
 
-/** Prefer the ChatRun identity committed with a queue promotion over parsing. */
-export function goalObjectiveForQueuedStart(message, messages) {
-  if (message && Object.hasOwn(message, '_goal_objective')) {
-    return compactGoalObjective(message._goal_objective)
-  }
-  return goalObjectiveAtRunStart(message?.content, messages)
-}
-
 /** Keep settled Goals visible across ordinary turns; reactivate only Resume. */
 export function goalPresentationAtRunStart(text, messages, current = null) {
-  const normalizedCurrent = normalizeGoalPresentation(current)
-  if (isContinue(text) && normalizedCurrent?.status === 'paused') {
-    return { ...normalizedCurrent, status: 'active', resumable: false }
-  }
   const directObjective = goalObjectiveAtRunStart(text, messages)
   if (directObjective) {
     return normalizeGoalPresentation({
@@ -191,33 +182,11 @@ export function goalPresentationAtRunStart(text, messages, current = null) {
       status: 'active',
     })
   }
-  return normalizedCurrent
-}
-
-/**
- * Prefer the Goal identity committed with a promoted queue row, while keeping
- * an already-settled Goal visible for ordinary queued turns.
- */
-export function goalPresentationForQueuedStart(message, messages, current = null) {
   const normalizedCurrent = normalizeGoalPresentation(current)
-  if (message && Object.hasOwn(message, '_goal_objective')) {
-    const objective = compactGoalObjective(message._goal_objective)
-    if (objective) {
-      if (objective === normalizedCurrent?.objective) {
-        return {
-          ...normalizedCurrent,
-          status: 'active',
-          resumable: false,
-        }
-      }
-      return normalizeGoalPresentation({ objective, status: 'active' })
-    }
+  if (isContinue(text) && normalizedCurrent?.status === 'paused') {
+    return { ...normalizedCurrent, status: 'active', resumable: false }
   }
-  return goalPresentationAtRunStart(
-    message?.content,
-    messages,
-    normalizedCurrent,
-  )
+  return normalizedCurrent
 }
 
 /**
@@ -268,34 +237,26 @@ function deepestPlanTasks(tasks, candidates) {
 export function visibleGoalTasks(goalPlan) {
   const activeStatuses = new Set(['starting', 'running', 'resuming', 'paused'])
   const delegatedLeaves = []
-  const delegatedTaskKeys = new Set()
   const collectDelegatedLeaves = (node, ancestors = new Set()) => {
-    if (!node || ancestors.has(node.id)) return false
+    if (!node || ancestors.has(node.id)) return
     const branch = new Set(ancestors).add(node.id)
-    let childActive = false
-    for (const child of node?.children || []) {
-      childActive = collectDelegatedLeaves(child, branch) || childActive
-    }
-    const ownActive = activeStatuses.has(node?.status)
-    const subtreeActive = ownActive || childActive
-    if (subtreeActive && node?.task_key) delegatedTaskKeys.add(node.task_key)
-    if (ownActive && !childActive) {
+    const activeChildren = (node?.children || []).filter(child => (
+      activeStatuses.has(child?.status) && !branch.has(child?.id)
+    ))
+    if (activeChildren.length) {
+      activeChildren.forEach(child => collectDelegatedLeaves(child, branch))
+    } else if (activeStatuses.has(node?.status)) {
       const title = String(node.task_key || '')
         .replace(/[._-]+/g, ' ')
         .replace(/^./, letter => letter.toUpperCase())
       delegatedLeaves.push({ id: node.id, title, status: 'running' })
     }
-    return subtreeActive
   }
   ;(goalPlan?.delegations || []).forEach(node => collectDelegatedLeaves(node))
+  if (delegatedLeaves.length) return delegatedLeaves
   const tasks = Array.isArray(goalPlan?.tasks) ? goalPlan.tasks : []
-  const running = deepestPlanTasks(
-    tasks,
-    tasks.filter(task => task?.status === 'running'),
-  ).filter(task => !delegatedTaskKeys.has(task.id))
-  if (running.length || delegatedLeaves.length) {
-    return [...running, ...delegatedLeaves]
-  }
+  const running = tasks.filter(task => task?.status === 'running')
+  if (running.length) return deepestPlanTasks(tasks, running)
   return deepestPlanTasks(tasks, tasks.filter(task => task?.ready === true))
 }
 
@@ -309,7 +270,10 @@ export function progressRailViewModel(
   const presentation = typeof goal === 'string'
     ? normalizeGoalPresentation({ objective: goal, status: 'active' })
     : normalizeGoalPresentation(goal)
-  const goalObjective = presentation?.objective || ''
+  const actionable = presentation && ['active', 'paused'].includes(presentation.status)
+    ? presentation
+    : null
+  const goalObjective = actionable?.objective || ''
   if (goalObjective) {
     const completed = goalPlan?.summary?.completed
     const total = goalPlan?.summary?.total
@@ -325,7 +289,7 @@ export function progressRailViewModel(
       ? 'waiting for you'
       : monitoring
         ? 'monitoring'
-        : presentation.status
+        : actionable.status
     const statusLabel = ownerActionRequired
       ? 'Waiting for you'
       : monitoring
@@ -334,17 +298,17 @@ export function progressRailViewModel(
             paused: 'Paused',
             completed: 'Completed',
             failed: 'Needs attention',
-          }[presentation.status]
+          }[actionable.status]
     const progressSummary = planned ? `${completed}/${total}` : goalObjective
     items.push({
       key: 'goal',
       label: `Goal${statusLabel ? ` · ${statusLabel}` : ''} · ${progressSummary}${
-        activeLabels.length && presentation.status !== 'completed'
+        activeLabels.length
           ? ` · ${activeLabels.join(' + ')}`
           : ''
       }`,
       expandable: true,
-      tone: presentation.status,
+      tone: actionable.status,
       ...(goalPlan ? {
         title: `Goal: ${goalObjective}`,
         ariaLabel: `Goal ${displayStatus} for ${goalObjective}; ${completed} of ${total} complete`,

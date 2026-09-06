@@ -151,7 +151,8 @@ def test_publish_accepts_declared_and_browser_globals(fw_dirs):
   staging = fw_dirs["staging"]
   _write_build(staging, "valid-globals")
   (staging / "assets" / "index-valid-globals.js").write_text(
-    "const timer = setTimeout(() => window.fetch(new URL('/ok', location)), 1);"
+    "const pixels = new ImageData(new Uint8ClampedArray(4), 1, 1);"
+    " const timer = setTimeout(() => window.fetch(new URL('/ok', location)), 1);"
     " export function cleanup() { clearTimeout(timer) }",
     encoding="utf-8",
   )
@@ -900,3 +901,40 @@ async def test_memory_deferral_is_visible_in_health_and_clears():
     handler._clear_build_deferral()
   finally:
     handler.close()
+
+
+def test_served_frontend_freshness_names_why_the_bundle_is_behind(
+  fw_dirs, monkeypatch,
+):
+  src = fw_dirs["frontend"] / "src"
+  src.mkdir()
+  source_file = src / "main.jsx"
+  source_file.write_text("export default 1\n", encoding="utf-8")
+  monkeypatch.setattr(fw, "watcher_health", lambda: {
+    "running": True, "building": False, "last_error": "vite exploded",
+  })
+
+  # No live build at all: the baked floor is serving.
+  fresh = fw.served_frontend_freshness()
+  assert fresh["stale"] is True
+  assert fresh["reason"] == "incomplete_build"
+  assert fresh["build_error"] == "vite exploded"
+
+  # A complete dist newer than every source is fresh, and reading the fact
+  # never seeds the build stamp (that stays the startup path's decision).
+  _write_build(fw_dirs["dist"], "fresh")
+  assert fw.served_frontend_freshness()["stale"] is False
+  assert not fw._source_stamp_path().exists()
+
+  # Source moved after the build (a checkout, a merge): stale until rebuilt.
+  dist_ns = (fw_dirs["dist"] / "index.html").stat().st_mtime_ns
+  os.utime(source_file, ns=(dist_ns + 1, dist_ns + 1))
+  fresh = fw.served_frontend_freshness()
+  assert fresh["stale"] is True
+  assert fresh["reason"] == "source_newer"
+  assert fresh["watcher_running"] is True
+
+  # A demand build's exact stamp proves freshness even with odd mtimes.
+  signature, _ = fw._source_snapshot()
+  fw._write_source_stamp(signature)
+  assert fw.served_frontend_freshness()["stale"] is False

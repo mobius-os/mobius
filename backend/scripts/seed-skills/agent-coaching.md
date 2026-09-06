@@ -36,8 +36,8 @@ Do not begin with an accusation. State the concrete outcome neutrally and keep
 observation, testimony, and inference separate.
 
 Never fork a deleted chat. Deletion leaves read-only evidence during recovery,
-not permission to revive its provider session. Review its stored summary or
-transcript instead and label the result an evidence review.
+not permission to revive its provider session. If the exact provider session
+cannot be forked, coaching is unavailable for that chat.
 
 ## 2. Start with useful, specific feedback
 
@@ -52,7 +52,7 @@ have made this easier to catch?" Avoid prosecutorial framing, leading questions,
 or telling the agent the lesson before it has reflected. The aim is candour,
 not agreement or defensiveness.
 
-## 3. Recover the historical agent when possible
+## 3. Fork the historical agent's exact session
 
 For a chat agent, use the platform helper with structured provenance:
 
@@ -65,34 +65,26 @@ Give the outer tool call more time than the inner limit (normally 170 seconds;
 up to 300/280 seconds for one genuinely giant, high-value chat). The original
 chat and transcript are never modified.
 
-The JSON result says how continuity was obtained:
+Success has exactly one provenance: `method: session_fork` and
+`exact_session_fork: true`. The named Claude or Codex provider session was
+branched into a new throwaway session, and the coaching prompt ran there.
+Require a non-empty `forked_session_id` different from `source_session_id`.
 
-- `method: session_fork`, `exact_session_fork: true` — a preserved Claude
-  provider session was branched into a throwaway fork.
-- `method: transcript_reseed`, `exact_session_fork: false` — a fresh agent of
-  the same provider received a bounded tail of complete stored messages because
-  the original provider session was unavailable or could not be cleanly forked.
-
-Codex chat coaching currently uses transcript reseeding because its CLI has no
-clean thread-fork operation. Call that reconstructive coaching, not revival of
-the original process, and never blur the distinction in the closeout.
-
-For an app or background run whose owning evidence supplies a Claude session id
-and working directory, use:
+For an app or background run whose owning evidence supplies a provider, session
+id, and working directory, use:
 
 ```bash
 timeout 150 /data/platform/backend/scripts/fork-session.sh \
-  <session_id> <cwd> "<focused coaching prompt>"
+  <claude|codex> <session_id> <cwd> "<focused coaching prompt>"
 ```
 
-This raw-session helper has no transcript-reseed fallback. Do not scan provider
-credential or session stores to discover ids; use only ids surfaced by the
-owning run record.
+Do not scan provider credential or session stores to discover ids; use only ids
+surfaced by the owning run record.
 
 Treat empty, very short, malformed, timed-out, auth/quota, or provider-error
-output as failed coaching. Fall back to the durable transcript and say the
-coaching did not complete; call the fallback an evidence review, never the
-agent's testimony.
+output as failed coaching. Do not reseed another agent from a transcript, offer
+an evidence-only substitute, or claim coaching occurred. Say that exact-session
+coaching was unavailable and stop that coaching branch.
 
 ## 4. Ask questions that invite learning
 
@@ -145,5 +137,6 @@ does not by itself authorise behaviour-changing edits, risky operations, or a
 restart. An unattended Reflection run makes only conservative reversible
 changes and leaves other proposals in its brief.
 
-In the closeout, say whether the coaching used an exact session fork, a
-same-provider transcript reseed, or an evidence-only fallback.
+In the closeout, say that coaching used an exact session fork, including the
+provider. If the fork failed, say coaching did not complete; do not replace it
+with a differently sourced review.

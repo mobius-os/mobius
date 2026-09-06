@@ -13,12 +13,16 @@
  *                                  — user msg at top (post-send), keyed on
  *                                    the stable client `cid` (data-cid)
  *   { kind: 'FOLLOW_BOTTOM' }     — sticky-bottom for streaming
- *   { kind: 'ANCHOR_AT', key, offset, part?, questionSubmitBaseMode? }
+ *   { kind: 'ANCHOR_AT', key, offset, part?, targetKey?,
+ *     questionSubmitBaseMode?, questionPrepareCancelMode? }
  *                                  — anchored at a message and, when that row
  *                                    is taller than the viewport, an ordered
- *                                    child-index path within it; `offset` is
+ *                                    child-index path within it (including
+ *                                    layout-transparent wrappers); `offset` is
  *                                    measured from the addressed element's
- *                                    top. An in-message question may
+ *                                    top. `targetKey` gives question cards a
+ *                                    stable identity across sibling changes.
+ *                                    An in-message question may
  *                                    temporarily preserve its submit-time
  *                                    position across responsive geometry
  *
@@ -139,6 +143,7 @@ const REVEAL_CAP_MS = 1500
 const PREPARING_REVEAL_CAP_MS = 5000
 const GESTURE_SETTLE_MS = 250
 const PENDING_GESTURE_CAP_MS = 2000
+const QUESTION_PREPARE_MAX_AGE_MS = 2000
 // Breathing room above a question card's top edge when the question nudge
 // reveals it, so its prompt sits just below the top fade rather than flush
 // against the viewport edge.
@@ -315,7 +320,6 @@ export default function useScrollMode({
   // the gesture's dirty state lives inside the layout effect. This bridge reads
   // the exact hold only on that rare semantic boundary, never in the hot scroll
   // path.
-  const questionSubmissionLayoutRef = useRef(null)
   // Monotonic generation for actual reader scroll intent. Send/steer snapshots
   // and every deferred/automatic geometry commit use this same authority:
   // once a newer gesture lands, older work can never regain ownership merely
@@ -382,6 +386,11 @@ export default function useScrollMode({
   // transition can render. React's change handler invokes this effect-owned
   // bridge after accepting the new value.
   const composerEditRunRef = useRef(null)
+  // Question activation captures before the browser focuses Submit and may
+  // close the software keyboard. The effect-owned bridge below commits that
+  // prepared semantic mode together with spacer sizing + scrollTop before the
+  // submitting render can paint.
+  const questionSubmissionRunRef = useRef(null)
   const initialEntryPhaseRef = useRef(initialEntryPhase)
   initialEntryPhaseRef.current = initialEntryPhase
   // A normal reveal ends entry stabilization. A forced safety-cap reveal keeps
@@ -692,14 +701,84 @@ export default function useScrollMode({
     )
   }, [scrollRef, transitionMode])
 
-  const freezeQuestionSubmission = useCallback(() => {
+  const prepareQuestionSubmission = useCallback((questionCard) => {
+    // Preserve a real reader scroll that may have positioned the card just
+    // before activation. Pointerdown itself can open the gesture gate, but it
+    // has not changed the reader generation unless an actual scroll occurs.
+    settlePendingReaderGestureRef.current?.()
+    const cancelBaseMode = modeRef.current
+    const proposedMode = modeForQuestionSubmission(
+      scrollRef.current, modeRef.current, questionCard,
+    )
+    if (!isQuestionSubmissionMode(proposedMode)) return null
+    // The press itself is the activation boundary. Commit the semantic hold
+    // and its known full-height reservation now, before native button focus can
+    // dismiss a software keyboard or clamp the scroll range for one paint.
+    // This also closes the generic pointer gesture gate opened while the event
+    // bubbled through the scroll box; a later wheel/drag starts a fresh reader
+    // generation and can therefore invalidate this preparation honestly.
+    readerLocationExplicitRef.current = true
+    supersedePendingReaderGesture()
+    const mode = transitionMode({
+      ...proposedMode,
+      // Cancellation belongs to this one activation, not to a successful
+      // response handoff. A retry over a failed submission therefore returns
+      // to that failed-card hold rather than flattening all the way to follow.
+      questionPrepareCancelMode: cancelBaseMode,
+    }, 'send:question-prepare')
+    const prepared = {
+      mode,
+      questionCard,
+      readerIntentVersion: readerIntentVersionRef.current,
+      preparedAt: Date.now(),
+    }
+    questionSubmissionRunRef.current?.({
+      mode,
+      authorityVersion: prepared.readerIntentVersion,
+      event: 'send:question-prepare',
+      writePosition: false,
+      explicitSemantic: true,
+    })
+    return prepared
+  }, [scrollRef, supersedePendingReaderGesture, transitionMode])
+
+  const cancelQuestionSubmission = useCallback((prepared) => {
+    if (!prepared?.mode
+        || modeRef.current !== prepared.mode
+        || prepared.readerIntentVersion !== readerIntentVersionRef.current) return false
+    const baseMode = prepared.mode.questionPrepareCancelMode
+    if (!baseMode) return false
+    const mode = transitionMode(baseMode, 'send:question-prepare-cancel')
+    questionSubmissionRunRef.current?.({
+      mode,
+      authorityVersion: prepared.readerIntentVersion,
+      event: 'send:question-prepare-cancel',
+    })
+    return true
+  }, [transitionMode])
+
+  const freezeQuestionSubmission = useCallback((context = null) => {
     // A real wheel/touch scroll can update the viewport and reader generation
     // before its 250ms quiet settlement publishes ANCHOR_AT. Commit that
     // reader-owned location before choosing the pre-submit base; discarding the
     // settlement first would preserve a stale FOLLOW_BOTTOM and yank the reader
     // back to the tail when the answer resumes.
     settlePendingReaderGestureRef.current?.()
-    const nextMode = modeForQuestionSubmission(scrollRef.current, modeRef.current)
+    const prepared = context?.preparedSubmission
+    const preparedIsCurrent = !!(
+      prepared?.mode
+      && prepared.mode === modeRef.current
+      && prepared.readerIntentVersion === readerIntentVersionRef.current
+      && Date.now() - prepared.preparedAt <= QUESTION_PREPARE_MAX_AGE_MS
+      && prepared.questionCard?.isConnected !== false
+    )
+    const nextMode = preparedIsCurrent
+      ? prepared.mode
+      : modeForQuestionSubmission(
+          scrollRef.current,
+          modeRef.current,
+          context?.questionCard,
+        )
     // Submit is a newer semantic reading action. Its current-geometry snapshot
     // must not be replaced a few milliseconds later by the quiet settlement of
     // the scroll that positioned the question card.
@@ -709,13 +788,14 @@ export default function useScrollMode({
       nextMode,
       'send:question-freeze',
     )
-    // Pointer activation can dismiss the mobile keyboard before React commits
-    // the card's pending state. Reserve the held anchor against that imminent
-    // viewport growth in this same task so the browser never gets one paint in
-    // which it can clamp the question away from its submitted position.
-    questionSubmissionLayoutRef.current?.(
-      readerIntentVersionRef.current,
-    )
+    // The semantic transition, reservation, and position write are one visible
+    // transaction. Leaving spacer sizing to a later ResizeObserver frame lets
+    // a keyboard-close clamp or active→durable source commit paint the card at
+    // an intermediate position before the anchor repairs it.
+    questionSubmissionRunRef.current?.({
+      mode,
+      authorityVersion: readerIntentVersionRef.current,
+    })
     return {
       mode,
       readerIntentVersion: readerIntentVersionRef.current,
@@ -730,19 +810,17 @@ export default function useScrollMode({
     })
     if (nextMode === modeRef.current) return modeRef.current
     const mode = transitionMode(nextMode, 'stream:question-response-follow')
-    const scrollEl = scrollRef.current
-    if (mode === nextMode && scrollEl) {
-      writeMode(
-        scrollEl,
-        mode,
-        'stream:question-response-follow',
-        submission.readerIntentVersion,
-      )
-      lastAppliedModeRef.current = mode
-      persistMode()
-    }
+    // Response release consumes the question reservation before following the
+    // real tail. This is the same effect-owned atomic transaction as Submit;
+    // if a resting touch owns the viewport, spacer + write are deferred and
+    // replayed together when contact ends rather than marking a failed write.
+    questionSubmissionRunRef.current?.({
+      mode,
+      authorityVersion: submission.readerIntentVersion,
+      event: 'stream:question-response-follow',
+    })
     return mode
-  }, [persistMode, scrollRef, transitionMode, writeMode])
+  }, [transitionMode])
 
   const anchorPagination = useCallback((key, offset) => {
     if (!key) return modeRef.current
@@ -1064,7 +1142,10 @@ export default function useScrollMode({
     }
     resumeLayoutAfterGestureRef.current = resumeLayoutAfterGesture
 
-    function sizeSpacer(authorityVersion = currentAuthority()) {
+    function sizeSpacer(
+      authorityVersion = currentAuthority(),
+      { explicitSemantic = false } = {},
+    ) {
       // The list's bottom padding is derived from the absolutely-positioned
       // composer height. React commits the emptied composer / new turn footer
       // in the same render as a sent row, but the foot's ResizeObserver runs
@@ -1075,7 +1156,7 @@ export default function useScrollMode({
       // before ANY list/spacer reads, so reservation + scrollTop land from one
       // geometry snapshot. Respect reader ownership: the CSS-variable write is
       // scroll geometry too and must wait with the spacer during a gesture.
-      if (!layoutOwnsScroll(authorityVersion)) {
+      if (!explicitSemantic && !layoutOwnsScroll(authorityVersion)) {
         deferLayoutUntilReaderYields(authorityVersion)
         return
       }
@@ -1102,8 +1183,6 @@ export default function useScrollMode({
       }
     }
 
-    questionSubmissionLayoutRef.current = sizeSpacer
-
     function rememberAppliedMode() {
       const mode = modeRef.current
       lastAppliedModeRef.current = mode
@@ -1118,6 +1197,30 @@ export default function useScrollMode({
         ? _scrollTopOf(scrollEl, anchorEl)
         : null
     }
+
+    const commitQuestionSubmission = ({
+      mode,
+      authorityVersion,
+      event = 'send:question-freeze',
+      writePosition = true,
+      explicitSemantic = false,
+    }) => {
+      if (scrollRef.current !== scrollEl || modeRef.current !== mode) return false
+      // Submit pointerdown is an explicit semantic action, not a layout task.
+      // It may safely add room below the current card while the activating
+      // finger is still down; ordinary resize/stream work must keep yielding.
+      sizeSpacer(authorityVersion, { explicitSemantic })
+      if (writePosition && !writeMode(
+        scrollEl,
+        mode,
+        event,
+        authorityVersion,
+      )) return false
+      rememberAppliedMode()
+      persistMode()
+      return true
+    }
+    questionSubmissionRunRef.current = commitQuestionSubmission
 
     /** Keep the focused answer fully visible above the overlaid composer, then
      * record that exact position as the ordinary reading hold. Keyboard resize,
@@ -1339,7 +1442,6 @@ export default function useScrollMode({
     // The observer tells us when the field actually changed size; ordinary
     // characters read only scrollTop and therefore do not force layout.
     let pendingInlineEditorInput = null
-    let pendingInlineEditorGrowth = null
     let inlineEditorRaf = 0
     let observedQuestionEditor = null
 
@@ -1372,11 +1474,6 @@ export default function useScrollMode({
         scrollTop: scrollEl.scrollTop,
         authorityVersion: currentAuthority(),
       }
-      pendingInlineEditorGrowth = {
-        editor: event.target,
-        mode: anchorModeFromScroll(scrollEl),
-        authorityVersion: currentAuthority(),
-      }
     }
 
     const settleInlineEditorInput = (event) => {
@@ -1390,9 +1487,6 @@ export default function useScrollMode({
         // second frame is still layout-free unless scrollTop actually changed.
         inlineEditorRaf = requestAnimationFrame(() => {
           inlineEditorRaf = 0
-          // React may commit textarea auto-sizing after this caret pass. Keep
-          // the pre-input anchor until ResizeObserver consumes it, a newer
-          // input replaces it, or blur retires it.
           if (Math.abs(scrollEl.scrollTop - plan.scrollTop) <= 0.5) return
           revealFocusedQuestionEditor('reader:inline-editor-caret', {
             editor: plan.editor,
@@ -1403,12 +1497,7 @@ export default function useScrollMode({
       })
     }
     const onInlineEditorFocus = (event) => observeQuestionEditor(event.target)
-    const onInlineEditorBlur = (event) => {
-      if (pendingInlineEditorGrowth?.editor === event.target) {
-        pendingInlineEditorGrowth = null
-      }
-      stopObservingQuestionEditor(event.target)
-    }
+    const onInlineEditorBlur = (event) => stopObservingQuestionEditor(event.target)
 
     // ResizeObserver — re-runs spacer sizing on content size changes.
     // Re-applies content-tracking modes:
@@ -1502,21 +1591,10 @@ export default function useScrollMode({
         // steady output below an unchanged anchor remains a no-op.
         settleAnchoredMode(authorityVersion)
       }
-      if (editorResized) {
-        const growth = pendingInlineEditorGrowth
-        pendingInlineEditorGrowth = null
-        if (growth?.editor === focusedQuestionEditor()
-            && growth.mode
-            && growth.authorityVersion === currentAuthority()) {
-          // Textarea growth is content geometry, not a request to move the
-          // conversation. Hold the card at its pre-input coordinate; once the
-          // field reaches its cap, the field itself owns overflow. A genuine
-          // keyboard/viewport resize takes the viewportChanged branch above
-          // and still adopts the browser's caret-visible position.
-          transitionMode(growth.mode, 'layout:question-edit-growth')
-          applyLayoutMode('layout:question-edit-growth', authorityVersion)
-        }
-      }
+      if (editorResized) revealFocusedQuestionEditor(
+        'layout:question-edit-resize',
+        { nativePositionAlreadyApplied: true, authorityVersion },
+      )
       requestRevealOnQuiet()  // each RO firing pushes the reveal back
     })
     ro.observe(listEl)
@@ -1617,12 +1695,7 @@ export default function useScrollMode({
         // settled semantic mode atomically; a bare sizeSpacer here would let
         // native scroll anchoring paint an intermediate displaced frame.
         if (!replayDeferredLayoutNow()) {
-          // Spacer changes can trigger native scroll anchoring or a clamp in
-          // the same frame. Re-apply the semantic mode after sizing so the
-          // quiet-edge handoff preserves the exact reader coordinate it just
-          // captured instead of publishing a hold and then moving underneath
-          // it.
-          syncLayout({ forceApply: true, authorityVersion: currentAuthority() })
+          sizeSpacer(currentAuthority())
         }
       }
 
@@ -2088,9 +2161,6 @@ export default function useScrollMode({
       if (resumeLayoutAfterGestureRef.current === resumeLayoutAfterGesture) {
         resumeLayoutAfterGestureRef.current = null
       }
-      if (questionSubmissionLayoutRef.current === sizeSpacer) {
-        questionSubmissionLayoutRef.current = null
-      }
       mountMutationObserver?.disconnect()
       scrollEl.removeEventListener('load', requestRevealOnQuiet, true)
       scrollEl.removeEventListener('error', requestRevealOnQuiet, true)
@@ -2117,6 +2187,9 @@ export default function useScrollMode({
       chatEl?.removeEventListener('pointerdown', onComposerPointerDown)
       if (composerEditRunRef.current === runComposerTailIntent) {
         composerEditRunRef.current = null
+      }
+      if (questionSubmissionRunRef.current === commitQuestionSubmission) {
+        questionSubmissionRunRef.current = null
       }
       cancelAnimationFrame(inlineEditorRaf)
       if (forceRevealRef.current === forceReveal) forceRevealRef.current = null
@@ -2295,6 +2368,8 @@ export default function useScrollMode({
     anchorPagination,
     captureSendIntent,
     commitSendIntent,
+    cancelQuestionSubmission,
+    prepareQuestionSubmission,
     freezeForegroundReturn,
     freezeQuestionSubmission,
     freezeQueuedSubmission,

@@ -117,7 +117,7 @@ def test_move_a_folder_into_its_own_descendant_is_rejected(client, auth):
   ).status_code == 200
 
 
-def test_move_touching_reserved_artifacts_area_is_rejected(client, auth, db):
+def test_move_touching_reserved_artifacts_area_is_rejected(client, auth):
   project = _make_project(client, auth)
   _write_file(client, auth, project, "a.txt", "hi")
   into_artifacts = client.post(
@@ -126,12 +126,7 @@ def test_move_touching_reserved_artifacts_area_is_rejected(client, auth, db):
   )
   assert into_artifacts.status_code == 409
   # A move OUT of the artifacts area is refused too.
-  row = db.get(models.Project, project["id"])
-  generated = (
-    Path(os.environ["DATA_DIR"]) / row.root_path / "artifacts" / "keep.txt"
-  )
-  generated.parent.mkdir(parents=True)
-  generated.write_text("managed")
+  _write_file(client, auth, project, "artifacts/keep.txt", "managed")
   out_of_artifacts = client.post(
     f"/api/projects/{project['id']}/move", headers=auth,
     json={"from_path": "artifacts/keep.txt", "to_path": "keep.txt"},

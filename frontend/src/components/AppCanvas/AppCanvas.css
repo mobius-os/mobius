@@ -1,9 +1,11 @@
-/* Wrapper holds the iframe + the loading overlay so the overlay can
-   absolute-position over the iframe before it paints. */
+/* Wrapper holds the iframe + shell-owned overlays. Clipping here keeps those
+   overlays inside the app's current pane even when the pane resizes after a
+   bounded overlay rectangle was received. */
 .canvas-wrap {
   position: relative;
   width: 100%;
   height: 100%;
+  overflow: hidden;
   background: var(--bg);
 }
 
@@ -40,6 +42,30 @@
    (a fade from 0 would flash the wrapper background as the old frame leaves). */
 .canvas--live {
   opacity: 1;
+}
+
+/* Camera frames remain top-level shell resources. The opaque app sends only
+   bounded viewfinder geometry; this non-interactive layer paints the stream in
+   that slot without exposing MediaStream, tracks, or shell DOM to the app. */
+.canvas-camera-preview {
+  position: absolute;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: none;
+  border-radius: 15px;
+  background: #050705;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.13);
+}
+
+.canvas-camera-preview > video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.canvas-camera-preview--mirrored > video {
+  transform: scaleX(-1);
 }
 
 /* A shell deep link is a destination handoff, not a visit to the app's home

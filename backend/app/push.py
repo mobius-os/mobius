@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from py_vapid import Vapid
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import models, presence
@@ -148,6 +149,7 @@ def _prepare_owner_notification(
   icon: str | None = None,
   target: str | None = None,
   actions: list[dict] | None = None,
+  notification_id: str | None = None,
 ) -> tuple[str, _PreparedPush | None]:
   """Persist and announce one notification, returning optional push work.
 
@@ -171,7 +173,11 @@ def _prepare_owner_notification(
       '/shell/?chat=<id>' (legacy '/app/:id' and '/chat/:id' still parse).
       Clients treat it as UNTRUSTED and fail closed on anything else.
   """
-  notification_id = str(uuid.uuid4())
+  notification_id = notification_id or str(uuid.uuid4())
+  if db.query(models.Notification.id).filter(
+    models.Notification.id == notification_id,
+  ).first() is not None:
+    return notification_id, None
   notif = models.Notification(
     id=notification_id,
     owner_id=owner_id,
@@ -194,6 +200,17 @@ def _prepare_owner_notification(
   )
   try:
     db.commit()
+  except IntegrityError:
+    # A deterministic producer may be repaired concurrently (for example by
+    # startup and a status read). The primary key is the authority: losing
+    # that insert race is ordinary idempotent attach, not a failed push. The
+    # winning transaction owns the live bus nudge and remote delivery.
+    db.rollback()
+    if db.query(models.Notification.id).filter(
+      models.Notification.id == notification_id,
+    ).first() is not None:
+      return notification_id, None
+    raise
   except Exception:
     # Persist failure → SKIP push delivery. Sending a push for a
     # notification that has no history row creates a state-mismatch
@@ -314,6 +331,7 @@ def notify_owner(
   icon: str | None = None,
   target: str | None = None,
   actions: list[dict] | None = None,
+  notification_id: str | None = None,
 ) -> str:
   """Save a notification and synchronously deliver its optional Web Push."""
   notification_id, prepared = _prepare_owner_notification(
@@ -326,6 +344,7 @@ def notify_owner(
     icon=icon,
     target=target,
     actions=actions,
+    notification_id=notification_id,
   )
   if prepared is not None:
     _deliver_prepared_push(prepared)
@@ -343,6 +362,7 @@ async def notify_owner_async(
   icon: str | None = None,
   target: str | None = None,
   actions: list[dict] | None = None,
+  notification_id: str | None = None,
 ) -> str:
   """Save a notification, then deliver Web Push without blocking the loop."""
   notification_id, prepared = _prepare_owner_notification(
@@ -355,6 +375,7 @@ async def notify_owner_async(
     icon=icon,
     target=target,
     actions=actions,
+    notification_id=notification_id,
   )
   if prepared is not None:
     await asyncio.to_thread(_deliver_prepared_push, prepared)

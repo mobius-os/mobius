@@ -105,8 +105,9 @@ def goal_identity_for_run_start(
     isinstance(message, Mapping)
     and message.get("kind") in (WAIT_RESULT_MESSAGE_KIND, PEER_MESSAGE_WAKE_KIND)
   ):
-    # `source_work_id` is the physical run that declared the wait or the
-    # paused Goal a peer woke. Resume under that exact Goal identity.
+    # `source_work_id` is the physical run that declared the wait (or the
+    # paused Goal's run a peer note woke); resume under that run's Goal
+    # identity so a Goal spanning the wait continues.
     source_work_id = message.get("source_work_id")
     if isinstance(source_work_id, str) and source_work_id:
       source = (
@@ -263,13 +264,7 @@ def product_result_continuation_root(
   source_work_id = message.get("source_work_id")
   physical_result_id = product_result_run_token(chat_id, message)
   if not isinstance(source_work_id, str) or not source_work_id:
-    # Legacy Wait rows may predate declaring-run attribution. Their stable cid
-    # still identifies exactly one physical result turn, but there is no
-    # logical source whose Goal/root may safely be inherited.
-    return (
-      physical_result_id
-      if kind == WAIT_RESULT_MESSAGE_KIND else None
-    )
+    return physical_result_id if kind == WAIT_RESULT_MESSAGE_KIND else None
   query = db.query(models.ChatRun).filter(models.ChatRun.chat_id == chat_id)
   if kind == WAIT_RESULT_MESSAGE_KIND:
     source = query.filter(models.ChatRun.id == source_work_id).first()
@@ -284,13 +279,7 @@ def product_result_continuation_root(
   else:
     return None
   if source is None:
-    # A Wait can outlive retention or repair of its declaring ChatRun. Keep the
-    # result independently recoverable instead of borrowing whichever owner
-    # run happened to precede queue promotion.
-    return (
-      physical_result_id
-      if kind == WAIT_RESULT_MESSAGE_KIND else None
-    )
+    return physical_result_id if kind == WAIT_RESULT_MESSAGE_KIND else None
   root_run_id = source.root_run_id or source.id
   exists = db.query(models.ChatRun.id).filter(
     models.ChatRun.chat_id == chat_id,

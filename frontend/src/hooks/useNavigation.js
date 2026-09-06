@@ -678,11 +678,14 @@ export default function useNavigation({
     setDrawerVisible(true)
   }
 
+  // Returns true when this call owns the close (the drawer WILL read closed),
+  // false when it is refused. The refusal is what lets a swipe-close snap back
+  // instead of parking the panel off-screen under a still-open `open` prop.
   function closeDrawer({ preserveModalUntilTraversal = false } = {}) {
     // A modal close owns one serialized traversal. Escape, overlay, toggle, and
     // breakpoint cleanup can arrive in the same frame; a second back() would
     // skip past the drawer's sentinel before the first traversal settles.
-    if (!drawerOpenRef.current || drawerClosePendingRef.current) return
+    if (!drawerOpenRef.current || drawerClosePendingRef.current) return false
     if (drawerPushedRef.current) {
       beforeRestoreRouteRef?.current?.(snapshotRoute())
       const closeTraversal = drawerCloseTraversalRef.current
@@ -699,7 +702,7 @@ export default function useNavigation({
         drawerPushedRef.current = false
         drawerOpenRef.current = false
         setDrawerVisible(false)
-        return
+        return true
       }
       clearDrawerOpenAfterClose()
       drawerClosePendingRef.current = true
@@ -725,6 +728,7 @@ export default function useNavigation({
       drawerCloseTraversalRef.current = null
       setDrawerVisible(false)
     }
+    return true
   }
 
   /**

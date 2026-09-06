@@ -142,7 +142,7 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.lock \
     && ln -s "$(python -c 'from pathlib import Path; import claude_agent_sdk; print(Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude")')" /usr/local/bin/claude \
     && python -c \
       'from pathlib import Path; import shutil, claude_agent_sdk; assert Path(shutil.which("claude")).samefile(Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude")' \
-    && claude --version | grep -Fx '2.1.259 (Claude Code)'
+    && claude --version | grep -Fx "$(python -c 'from claude_agent_sdk._cli_version import __cli_version__; print(__cli_version__ + " (Claude Code)")')"
 
 # openai-codex Python SDK: its upstream pyproject pins a second, older
 # openai-codex-cli-bin payload. Keep that declared package so `pip check` and

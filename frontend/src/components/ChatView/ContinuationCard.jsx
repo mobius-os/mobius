@@ -10,6 +10,8 @@ export default function ContinuationCard({ msg }) {
   const subtitle = {
     restart: 'Server restarted — continuing automatically',
     usage_limit: 'Usage available again — continuing automatically',
+    memory: 'Memory freed up — continuing automatically',
+    storage: 'Storage freed up — continuing automatically',
   }[reason]
 
   return (

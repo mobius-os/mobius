@@ -102,19 +102,88 @@ def _normalize_public_query(value: Any, *, rule_index: int) -> dict[str, Any]:
   return normalized
 
 
+_PUBLIC_STORAGE_ROOT = "public/"
+# Public storage paths share the same shape mini-app storage keys already use
+# (see routes/storage.py `_SAFE_RE`): word chars, dot, dash, slash only.
+_PUBLIC_WRITE_PREFIX_RE = re.compile(r"^[A-Za-z0-9._\-/]+$")
+
+
+def storage_grant(value: Any) -> dict[str, Any]:
+  """The anonymous storage grant `{read, write_prefix}` from any stored shape.
+
+  Anything other than a well-formed object is the closed default: no read, no
+  write.
+  """
+  if not isinstance(value, dict):
+    return {"read": False, "write_prefix": None}
+  write_prefix = value.get("write_prefix")
+  return {
+    "read": bool(value.get("read")),
+    "write_prefix": write_prefix if isinstance(write_prefix, str) else None,
+  }
+
+
+def _normalize_public_storage(raw: Any) -> dict[str, Any]:
+  """Validate the opt-in anonymous storage declaration.
+
+  Reads, when enabled, expose ONLY the app's `public/` folder — never its
+  private storage. Writes are confined to one declared sub-prefix of `public/`
+  so admin-authored data (config, moderated messages) stays owner-writable
+  while visitor submissions land in a narrow, world-writable inbox.
+  """
+  if raw is None:
+    return storage_grant(None)
+  if not isinstance(raw, dict) or set(raw) - {"read", "write_prefix"}:
+    raise ValueError(
+      "Manifest `public_access.storage` must be an object with only "
+      "`read` and `write_prefix`."
+    )
+  read = raw.get("read", False)
+  if not isinstance(read, bool):
+    raise ValueError(
+      "Manifest `public_access.storage.read` must be true or false."
+    )
+  raw_prefix = raw.get("write_prefix")
+  write_prefix = None
+  if raw_prefix is not None:
+    if not isinstance(raw_prefix, str):
+      raise ValueError(
+        "Manifest `public_access.storage.write_prefix` must be a string."
+      )
+    prefix = raw_prefix.strip()
+    normalized = prefix if prefix.endswith("/") else prefix + "/"
+    if (
+      not normalized.startswith(_PUBLIC_STORAGE_ROOT)
+      or normalized == _PUBLIC_STORAGE_ROOT
+      or normalized.startswith("/")
+      or "//" in normalized
+      or ".." in normalized.split("/")
+      or len(normalized) > 256
+      or not _PUBLIC_WRITE_PREFIX_RE.match(normalized)
+    ):
+      raise ValueError(
+        "Manifest `public_access.storage.write_prefix` must be a plain path "
+        "strictly under `public/` (for example `public/submissions/`)."
+      )
+    write_prefix = normalized
+  return {"read": read, "write_prefix": write_prefix}
+
+
 def normalize_public_access(manifest: dict[str, Any]) -> dict[str, Any]:
-  """Normalize the network surface available to anonymous app sessions.
+  """Normalize the network + storage surface for anonymous app sessions.
 
   Publication itself is owner state and deliberately does not live in the
   manifest. The package may only declare a bounded set of exact HTTPS origins
-  and path prefixes that the public, GET-only fetch capability may reach.
+  and path prefixes that the public, GET-only fetch capability may reach, plus
+  an opt-in bounded storage surface (see `_normalize_public_storage`).
   """
   raw = manifest.get("public_access")
   if raw is None:
-    return {"network": []}
-  if not isinstance(raw, dict) or set(raw) - {"network"}:
+    return {"network": [], "storage": storage_grant(None)}
+  if not isinstance(raw, dict) or set(raw) - {"network", "storage"}:
     raise ValueError(
-      "Manifest `public_access` must be an object containing only `network`."
+      "Manifest `public_access` must be an object containing only `network` "
+      "and `storage`."
     )
   network = raw.get("network", [])
   if not isinstance(network, list):
@@ -191,7 +260,8 @@ def normalize_public_access(manifest: dict[str, Any]) -> dict[str, Any]:
       if query:
         normalized_rule["query"] = query
       normalized.append(normalized_rule)
-  return {"network": normalized}
+  storage = _normalize_public_storage(raw.get("storage"))
+  return {"network": normalized, "storage": storage}
 
 
 def public_access_declaration_from_contract(
@@ -201,8 +271,9 @@ def public_access_declaration_from_contract(
   value = contract.get("public") if isinstance(contract, dict) else None
   network = value.get("network") if isinstance(value, dict) else None
   if not isinstance(network, list):
-    return {"network": []}
-  return {"network": deepcopy(network)}
+    network = []
+  storage = storage_grant(value.get("storage") if isinstance(value, dict) else None)
+  return {"network": deepcopy(network), "storage": storage}
 
 
 # Host-mediated browser capabilities. These are deliberately separate from
@@ -214,6 +285,18 @@ def public_access_declaration_from_contract(
 # its own integer version, so adding (say) camera v2 never forces every storage
 # or microphone consumer onto a new global runtime version.
 RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
+  "device.storage": {
+    "version": 1,
+    "kind": "invoke",
+    "title": "Remember data on this device",
+    "description": (
+      "Keep a small app-owned JSON value in this browser profile."
+    ),
+    "risk": "storage",
+    "lifecycle": "active_frame",
+    "default_limits": {"max_bytes": 64 * 1024},
+    "hard_limits": {"max_bytes": (1024, 1024 * 1024)},
+  },
   "device.asset-cache": {
     "version": 1,
     "kind": "session",
@@ -273,6 +356,24 @@ RUNTIME_CAPABILITY_DEFINITIONS: dict[str, dict[str, Any]] = {
     "lifecycle": "active_frame",
     "default_limits": {"max_duration_ms": 30_000},
     "hard_limits": {"max_duration_ms": (100, 60_000)},
+  },
+  "media.camera.capture": {
+    "version": 1,
+    "kind": "session",
+    "title": "Record video",
+    "description": (
+      "Use a device camera, and optionally its microphone, while this app is visible."
+    ),
+    "risk": "device",
+    "lifecycle": "active_frame",
+    "default_limits": {
+      "max_duration_ms": 60_000,
+      "max_bytes": 128 * 1024 * 1024,
+    },
+    "hard_limits": {
+      "max_duration_ms": (100, 300_000),
+      "max_bytes": (64 * 1024, 256 * 1024 * 1024),
+    },
   },
   "workspace.screen-control": {
     "version": 1,

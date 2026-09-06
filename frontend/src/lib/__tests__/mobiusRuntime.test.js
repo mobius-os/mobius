@@ -13,6 +13,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { IDBFactory } from 'fake-indexeddb'
 import {
   appChatMetadataBody,
   makeChat,
@@ -35,6 +36,81 @@ test('runtime normalizes app guidance at the same boundary used by setGuidance',
   assert.equal(sanitizeEmbedGuidance('   '), null)
   assert.equal(sanitizeEmbedGuidance(42), null)
   assert.equal(sanitizeEmbedGuidance('x'.repeat(500)).length, 300)
+})
+
+test('a probed reachability verdict outranks later raw browser events', async (t) => {
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document')
+  const originalIndexedDb = Object.getOwnPropertyDescriptor(globalThis, 'indexedDB')
+  const handlers = {}
+
+  const restore = (name, descriptor) => {
+    if (descriptor) Object.defineProperty(globalThis, name, descriptor)
+    else delete globalThis[name]
+  }
+  t.after(() => {
+    restore('navigator', originalNavigator)
+    restore('window', originalWindow)
+    restore('document', originalDocument)
+    restore('indexedDB', originalIndexedDb)
+  })
+
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { onLine: true },
+  })
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: {
+      location: { origin: 'https://mobius.test' },
+      addEventListener(type, callback) {
+        handlers[type] = [...(handlers[type] || []), callback]
+      },
+      removeEventListener() {},
+    },
+  })
+  Object.defineProperty(globalThis, 'document', {
+    configurable: true,
+    value: {
+      visibilityState: 'visible',
+      addEventListener() {},
+      removeEventListener() {},
+    },
+  })
+  Object.defineProperty(globalThis, 'indexedDB', {
+    configurable: true,
+    value: new IDBFactory(),
+  })
+
+  const runtime = await import(
+    `../../../public/mobius-runtime.js?reachability=${Date.now()}`
+  )
+  const api = runtime.init({ appId: 999, getToken: async () => null })
+  const emit = (type, event = {}) => {
+    for (const callback of handlers[type] || []) callback(event)
+  }
+
+  assert.equal(api.online, true)
+  emit('message', {
+    origin: window.location.origin,
+    data: { type: 'moebius:online-status', online: false },
+  })
+  assert.equal(api.online, false)
+  emit('online')
+  assert.equal(api.online, false)
+
+  emit('message', {
+    origin: window.location.origin,
+    data: { type: 'moebius:online-status', online: true },
+  })
+  assert.equal(api.online, true)
+  emit('offline')
+  assert.equal(api.online, true)
+  await api.storage.pendingCount()
+  await api.storage._drain()
+  api.storage._destroy()
+  await new Promise(resolve => setTimeout(resolve, 0))
 })
 
 test('no pending op → fallback stands (the cached/server value)', () => {
@@ -531,6 +607,57 @@ test('microphone capability can cancel while permission is still pending', async
     assert.equal(parent.messages.at(-1).data.action, 'cancel')
     await assert.rejects(session.ready, { name: 'AbortError' })
     await assert.rejects(session.result, { name: 'AbortError' })
+    capabilities._destroy()
+  })
+})
+
+test('camera capability exposes readiness, progress, and transferred video bytes', async () => {
+  await withFakeWindow(async ({ window, parent }) => {
+    const progress = []
+    const capabilities = makeCapabilities({
+      declarations: {
+        'media.camera.capture': {
+          version: 1,
+          limits: { max_duration_ms: 30_000, max_bytes: 16 * 1024 * 1024 },
+        },
+      },
+    })
+    const session = capabilities.open('media.camera.capture', {
+      facingMode: 'environment', maxDurationMs: 20_000, audio: false,
+    })
+    session.on('progress', (value) => progress.push(value))
+    const start = parent.messages.at(-1).data
+    assert.deepEqual(start.input, {
+      facingMode: 'environment', maxDurationMs: 20_000, audio: false,
+    })
+
+    const ready = {
+      mimeType: 'video/webm', width: 1920, height: 1080, audio: false,
+    }
+    window.emit({
+      type: 'moebius:capability-ready', requestId: start.requestId,
+      capability: start.capability, value: ready,
+    })
+    assert.deepEqual(await session.ready, ready)
+    window.emit({
+      type: 'moebius:capability-event', requestId: start.requestId,
+      capability: start.capability, event: 'progress',
+      value: { durationMs: 500, bytes: 4096 },
+    })
+
+    const bytes = new Uint8Array([1, 2, 3, 4]).buffer
+    window.emit({
+      type: 'moebius:capability-result', requestId: start.requestId,
+      capability: start.capability,
+      value: {
+        mimeType: 'video/webm', durationMs: 900,
+        width: 1920, height: 1080, bytes,
+      },
+    })
+    const result = await session.result
+
+    assert.equal(result.bytes, bytes)
+    assert.deepEqual(progress, [{ durationMs: 500, bytes: 4096 }])
     capabilities._destroy()
   })
 })

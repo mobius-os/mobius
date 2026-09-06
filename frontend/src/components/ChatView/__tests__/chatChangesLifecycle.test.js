@@ -56,17 +56,6 @@ test('one lifecycle separates recorded edits from prepared, open, and settled wo
   assert.equal(compactChangesSummary(overview), '2 working · 1 ready · 1 done')
 })
 
-test('settled work cannot remain an owner action because of stale review metadata', () => {
-  for (const status of ['merged', 'superseded', 'closed']) {
-    assert.equal(contributionNeedsAttention({
-      status,
-      needs_attention: true,
-      last_submit_error: 'old failure',
-      review: { state: 'needs_refresh' },
-    }), false)
-  }
-})
-
 test('repeated edits become one file row while retaining every diff hunk', () => {
   const first = entry('first', '/data/platform/repeated.js')
   first.preview.files[0] = {
@@ -207,22 +196,24 @@ test('exact bounded coverage supersedes the 40-file display preview', () => {
   assert.deepEqual(overview.unsortedPaths, ['/data/platform/file-42.js'])
 })
 
-test('exact coverage preserves legitimate repo-relative a and b directories', () => {
-  const entries = [
-    entry('a-directory', 'a/foo.js'),
-    entry('b-directory', 'b/foo.js'),
-  ]
-  entries.forEach(item => { item.ts = Date.parse('2026-08-27T11:00:00Z') })
-
-  const overview = chatChangesOverview(entries, {
+test('exact record coverage preserves local settlement coverage', () => {
+  const overview = chatChangesOverview([
+    entry('record', '/data/platform/shared.js'),
+    entry('local', '/data/platform/local.js'),
+  ], {
     records: [],
     coverage: [{
-      path: 'foo.js',
+      path: '/data/platform/shared.js',
       coverage_at: '2026-08-27T12:00:00Z',
+    }],
+    settlements: [{
+      id: 'local:a', kind: 'local', path: '/data/platform/local.js',
+      disposition: 'local-only', coverage_at: '2026-08-27T12:00:00Z',
     }],
   })
 
-  assert.deepEqual(overview.unsortedPaths, ['a/foo.js', 'b/foo.js'])
+  assert.deepEqual(overview.unsortedPaths, [])
+  assert.equal(overview.counts.settled, 1)
 })
 
 test('a local settlement hides only edits through the reviewed instant', () => {

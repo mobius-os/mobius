@@ -39,11 +39,12 @@ from app.chat_writer import (
   get_writer,
 )
 from app import claude_sdk_runner, codex_sdk_runner
-from app.chat_provider import resolve_chat_provider
 from app.chat_visibility import coerce_agent_settings
 from app.providers import (
   _load_agent_settings,
   effective_agent_settings,
+  owner_default_provider,
+  provider_of_model,
 )
 from app.runner_registry import RunnerKind, registry
 from app.config import get_settings
@@ -102,7 +103,13 @@ async def start_queued_owner_continuation(chat_id: str, db: Session) -> dict | N
 
 
 def _delegation_manages_chat(db: Session, chat_id: str) -> bool:
-  """Whether a parent delegation owns this chat's send lifecycle."""
+  """Return whether a parent delegation owns this chat's send lifecycle.
+
+  Keep the send gate beside the route that enforces it. Delegation policy
+  loading is intentionally a separate concern and may evolve independently;
+  this guard only needs the durable ownership row already available through
+  the request session.
+  """
   return db.query(models.Delegation.id).filter(
     models.Delegation.child_chat_id == chat_id,
   ).first() is not None
@@ -141,14 +148,37 @@ def _selected_model_for_chat(
   return model.strip() if isinstance(model, str) and model.strip() else None
 
 
-def _next_execution_provider(chat: models.Chat) -> str:
+def _next_execution_provider(db: Session, chat: models.Chat) -> str:
   """Match the provider the current send path will actually execute on."""
-  return resolve_chat_provider(
-    chat,
-    data_dir=get_settings().data_dir,
-    running=is_chat_running(chat.id),
-    draining=is_draining(),
-  )
+  provider = chat.provider or "claude"
+  # A model selected on this exact pristine chat is more specific than the
+  # owner's latest global pick. This occurs when an app/test/API client creates
+  # an empty chat and then chooses its model before the first send. Re-routing
+  # it to an unrelated global provider makes the explicit model invalid and
+  # rejects the turn. Ordinary newly-created owner chats carry no per-chat
+  # model, so they still follow the latest owner selection below.
+  chat_settings = coerce_agent_settings(chat.agent_settings_json) or {}
+  explicit_provider = provider_of_model(chat_settings.get("model"))
+  if explicit_provider is not None:
+    return explicit_provider
+  # StartTurn alone re-reads the owner's latest provider for a pristine owner
+  # chat. Queued, draining, app-owned, and already-started chats keep their
+  # durable provider, so the model check must evaluate against that same value.
+  if (
+    chat.created_by_app_id is None
+    and not (chat.messages or [])
+    and not (chat.pending_messages or [])
+    and not is_chat_running(chat.id)
+    and not is_draining()
+  ):
+    owner = db.query(models.Owner).first()
+    # Provider follows the last-selected model, matching new-chat creation, so a
+    # pristine chat's first send can't re-diverge onto a family whose remembered
+    # model belongs to the other provider.
+    return owner_default_provider(
+      get_settings().data_dir, owner.provider if owner else None,
+    )
+  return provider
 
 # Keepalive interval for the SSE stream to prevent proxy timeouts.
 _KEEPALIVE_INTERVAL = 30  # seconds
@@ -640,7 +670,6 @@ async def send_message(
         "message": "This evaluator chat is managed by its parent workflow.",
       },
     )
-
   # AskUserQuestion answer delivery. If a live SDK turn is blocked waiting for
   # the answer (held in `questions._pending[chat_id]`), persist through the
   # writer actor, then resolve the future in-place and return — the SDK
@@ -904,7 +933,11 @@ async def send_message(
   # Lock order is transition then queue; all send predicates refresh inside.
   async with chat_queue.get_transition_lock(chat_id):
     async with chat_queue.get_lock(chat_id):
-      db.expire(chat)
+      # End the pre-lock read snapshot, then evaluate all admission predicates
+      # against state committed by a concurrent Gauntlet creator/provider
+      # switch that may have won the transition lock first.
+      db.rollback()
+      chat = get_active_chat_for_principal(db, chat_id, principal)
       return await _send_message_locked(body, chat_id, principal, db, chat)
 
 
@@ -920,8 +953,22 @@ async def _send_message_locked(
   duplicate = _duplicate_send_response(chat_id, chat, body.cid)
   if duplicate is not None:
     return duplicate
-  # Re-check after acquiring the transition lock: creation may have attached
-  # this chat to a delegation after the request's initial admission read.
+
+  from app.gauntlets import active_controller_gauntlet
+  active_gauntlet = active_controller_gauntlet(db, chat_id)
+  if active_gauntlet is not None:
+    raise HTTPException(
+      status_code=409,
+      detail={
+        "code": "gauntlet_active",
+        "run_id": active_gauntlet.id,
+        "message": (
+          "This controller is owned by an active Gauntlet. Stop the "
+          "Gauntlet before sending or steering another message."
+        ),
+      },
+    )
+
   if _delegation_manages_chat(db, chat_id):
     raise HTTPException(
       status_code=409,
@@ -930,12 +977,13 @@ async def _send_message_locked(
         "message": "This evaluator chat is managed by its parent workflow.",
       },
     )
+
   if body.continuation == "manual" and principal.app_id is not None:
     raise HTTPException(
       status_code=403,
       detail="Only the owner can resume a paused chat.",
     )
-  next_execution_provider = _next_execution_provider(chat)
+  next_execution_provider = _next_execution_provider(db, chat)
   if _selected_model_for_chat(
     chat, provider=next_execution_provider,
   ) is None:

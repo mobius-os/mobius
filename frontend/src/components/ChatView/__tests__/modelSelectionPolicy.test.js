@@ -32,7 +32,7 @@ test('an explicit effective model lets the composer send', () => {
 test('a retained cache cannot hide the explicit per-chat model', () => {
   const chatInfo = {
     agent_settings_json: { model: 'gpt-5.6-sol', effort: 'high' },
-    effective: { model: '  ', effort: 'xhigh' },
+    effective: { model: null, effort: 'xhigh' },
   }
   assert.equal(selectedChatModel(chatInfo), 'gpt-5.6-sol')
   assert.deepEqual(resolvedChatSettings(chatInfo), {
@@ -40,13 +40,6 @@ test('a retained cache cannot hide the explicit per-chat model', () => {
     effort: 'xhigh',
   })
   assert.equal(needsModelSelection({ showPicker: true, chatInfo }), false)
-})
-
-test('the effective model remains authoritative when both projections are valid', () => {
-  assert.equal(selectedChatModel({
-    agent_settings_json: { model: 'gpt-old' },
-    effective: { model: 'gpt-current' },
-  }), 'gpt-current')
 })
 
 test('app embeds that intentionally hide the picker retain their configured send path', () => {

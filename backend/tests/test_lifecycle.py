@@ -36,6 +36,31 @@ def test_purge_after_seven_days(db, chat):
   assert gone is None, "Chat deleted 8 days ago must be purged"
 
 
+def test_hard_purge_skips_chat_with_nonterminal_run(db, chat):
+  """A tombstoned chat that still owns a running/parked/resumable run must not
+  be purged — cleanup must never delete transcript/tool-output/session-link
+  data linked to an active or resumable turn. The next sweep reclaims it once
+  the run is terminal (idempotent)."""
+  chat_id = chat.id
+  run_id = f"run-{uuid.uuid4().hex}"
+  db.add(models.ChatRun(
+    id=run_id, root_run_id=run_id, chat_id=chat_id, status="parked",
+  ))
+  chat.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
+  db.commit()
+
+  purge_expired_chat_tombstones(db)
+  assert db.get(models.Chat, chat_id) is not None, (
+    "a parked (resumable) run must block the hard purge"
+  )
+
+  # Once the run reaches a terminal state, the next sweep reclaims the chat.
+  db.get(models.ChatRun, run_id).status = "completed"
+  db.commit()
+  purge_expired_chat_tombstones(db)
+  assert db.get(models.Chat, chat_id) is None
+
+
 def test_hard_purge_removes_durable_waits(db, chat):
   """A deleted chat cannot leave executable wait checks behind."""
   chat_id = chat.id

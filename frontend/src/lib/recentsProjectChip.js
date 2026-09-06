@@ -6,11 +6,12 @@
 // "is there a chip and what does it say" decision so the Drawer row stays a thin
 // renderer and the rule is unit-testable.
 
-// Returns { id, name, color } for the chip, or null when the row shows none. Chats and
-// artifacts carry a project; an app row never does. A malformed/partial project
+// Returns { id, name, color } for the chip, or null when the row shows none. Only a
+// chat carries a project chip: an artifact is its own destination and stands on
+// its own in Recents, and an app row never has one. A malformed/partial project
 // object (missing id) yields no chip rather than a dead control.
 export function recentsProjectChip(kind, item) {
-  if (kind !== 'chat' && kind !== 'artifact') return null
+  if (kind !== 'chat') return null
   const project = item?.project
   if (!project || typeof project !== 'object') return null
   if (project.id == null || String(project.id).trim() === '') return null

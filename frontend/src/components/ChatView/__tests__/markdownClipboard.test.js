@@ -196,7 +196,7 @@ test('assistant prose and the composer share the Markdown clipboard boundary', (
     'a partial cold render must not fall back to the hidden full message source')
   assert.match(composer, /assistantClipboardText\(\s*e\.clipboardData,\s*preferPlainText/)
   assert.match(composer, /pasteAsPlainTextRef\.current = isPlainTextPasteShortcut\(e\)/)
-  assert.match(composer, /if \(queueClipboardTextUndoably\(/,
+  assert.match(composer, /if \(queueClipboardTextUndoably\(textarea, pastedText, applyControlledFallback\)\) return/,
     'Markdown paste should enter the browser undo stack before using the controlled fallback')
   assert.match(composer, /pendingComposerCaretRef\.current = next/,
     'paste and sent-message history should share the controlled caret handoff')

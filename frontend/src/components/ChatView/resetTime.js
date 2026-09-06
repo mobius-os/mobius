@@ -4,8 +4,12 @@
 // ambiguously across a day boundary ("Resets at 1:40 AM" — today or Tuesday?).
 //
 // The label carries its own preposition so a caller can splice it after
-// "Resets" / "resets" and read naturally in every bucket: same-day → "at
-// 1:40 AM", tomorrow → "tomorrow at 1:40 AM", further out → "Tue at 1:40 AM".
+// "Resets" / "resets" and read naturally in every bucket. It always names the
+// day so a bare clock time can never read ambiguously across a boundary — a park
+// clamps up to 7 days out, so "at 1:40 AM" alone can't say today vs next week:
+//   same-day  → "today at 1:40 AM"
+//   tomorrow  → "tomorrow at 1:40 AM"
+//   further   → "Tue, Sep 9 at 1:40 AM"  (weekday + date, unambiguous at 7d)
 // Returns null on a missing / unparseable value so the card degrades to just
 // the message rather than showing a garbage label.
 export function formatResetTime(iso) {
@@ -20,7 +24,12 @@ export function formatResetTime(iso) {
   const dayDelta = Math.round(
     (startOfDay(d) - startOfDay(new Date())) / 86400000,
   )
-  if (dayDelta <= 0) return `at ${time}`
+  if (dayDelta <= 0) return `today at ${time}`
   if (dayDelta === 1) return `tomorrow at ${time}`
-  return `${d.toLocaleDateString([], { weekday: 'short' })} at ${time}`
+  const date = d.toLocaleDateString([], {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  })
+  return `${date} at ${time}`
 }

@@ -16,8 +16,9 @@ import shutil
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Callable
 from urllib.parse import quote, urlparse
 
 from fastapi import HTTPException
@@ -57,6 +58,67 @@ _PR_VISIBILITY_RETRIES = 3
 _PR_VISIBILITY_RETRY_BASE_SECONDS = 0.5
 _PUBLICATION_STAGES = frozenset({"draft", "ready"})
 
+_PERSONAL_PUBLIC_INPUT_FIELDS = (
+  "id", "type", "status", "repo", "branch", "title", "url", "number",
+  "head_repository", "publication_stage", "submission_mode", "submitter",
+  "plan", "quality_review",
+)
+_PREPARED_PR_ACTIONS = frozenset(("pr", "pr_update"))
+
+
+def _exact_reviewed_pr_text(record: dict) -> tuple[str, str]:
+  """Return GitHub text only when it can be published byte-for-byte.
+
+  GitHub normalizes surrounding title whitespace and rejects oversized text.
+  Reject those inputs during the private preflight rather than silently
+  changing the review at publication time.
+  """
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  title = plan.get("title") if "title" in plan else record.get("title")
+  body = plan.get("body_draft")
+  if (
+    not isinstance(title, str)
+    or not title
+    or title != title.strip()
+    or "\n" in title
+    or "\r" in title
+    or "\x00" in title
+    or len(title) > 256
+  ):
+    raise ContributionSubmitError(
+      "This prepared PR has a title GitHub cannot publish exactly. Ask the "
+      "agent to prepare a nonblank single-line title without surrounding "
+      "whitespace."
+    )
+  if (
+    not isinstance(body, str)
+    or not body.strip()
+    or "\x00" in body
+    or len(body.encode("utf-8")) > 65_536
+  ):
+    raise ContributionSubmitError(
+      "This prepared PR has a body GitHub cannot publish exactly. Ask the "
+      "agent to prepare a nonblank body within GitHub's size limit."
+    )
+  return title, body
+
+
+def _personal_publication_input(record: dict) -> dict:
+  """Canonical app-writable inputs consumed by one personal publication."""
+  return {
+    key: record.get(key)
+    for key in _PERSONAL_PUBLIC_INPUT_FIELDS
+  }
+
+
+def _personal_publication_input_sha256(record: dict) -> str:
+  return hashlib.sha256(json.dumps(
+    _personal_publication_input(record),
+    sort_keys=True,
+    separators=(",", ":"),
+    ensure_ascii=False,
+  ).encode("utf-8")).hexdigest()
+
 
 def _publication_status(stage: str) -> str:
   """Map the explicit GitHub publication stage onto the ledger lifecycle."""
@@ -73,11 +135,21 @@ def _require_all_clear_review(record: dict) -> None:
     if isinstance(record.get("quality_review"), dict)
     else {}
   )
-  head_sha = str(plan.get("head_sha") or "").lower()
-  reviewed_head_sha = str(review.get("reviewed_head_sha") or "").lower()
+  try:
+    _git_ops._canonical_reviewed_oid(plan.get("base_sha"), "base sha")
+    head_sha = _git_ops._canonical_reviewed_oid(
+      plan.get("head_sha"), "head sha",
+    )
+    reviewed_head_sha = _git_ops._canonical_reviewed_oid(
+      review.get("reviewed_head_sha"), "quality-review head sha",
+    )
+    canonical = True
+  except ContributionSubmitError:
+    head_sha = reviewed_head_sha = ""
+    canonical = False
   if (
-    review.get("state") != "all_clear"
-    or not _GIT_SHA.fullmatch(head_sha)
+    not canonical
+    or review.get("state") != "all_clear"
     or reviewed_head_sha != head_sha
   ):
     raise HTTPException(
@@ -116,15 +188,37 @@ class PersonalReadyTarget:
 
 
 @dataclass(frozen=True)
-class PublicationHandoffSpec:
-  """Immutable reviewed inputs for connecting one published local app."""
+class PublicReconciliation:
+  """Authoritative exact public state for one reviewed publication retry."""
+
+  head_repository: str
+  pr_url: str | None = None
+  pr_number: int | None = None
+  publication_stage: str | None = None
+
+
+@dataclass(frozen=True)
+class PublicationHandoffIdentity:
+  """Ledger-owned routing identity for one app publication handoff.
+
+  This shape is deliberately weaker than :class:`PublicationHandoffSpec`: it
+  is enough to settle an already-true connection in the private ledger, but
+  never enough to install or update source.  Source and package proof stay
+  mandatory for any operation that would mutate the app itself.
+  """
 
   contribution_id: str
   target_app_id: int
-  source_repo: Path
   repo_slug: str
   manifest_url: str
   manifest_id: str
+
+
+@dataclass(frozen=True)
+class PublicationHandoffSpec(PublicationHandoffIdentity):
+  """Immutable reviewed inputs for connecting one published local app."""
+
+  source_repo: Path
   reviewed_base_sha: str
   reviewed_head_sha: str
   reviewed_source_sha: str
@@ -141,20 +235,7 @@ class PublicationHandoffSpec:
     )
 
 
-def publication_handoff_spec(
-  record: dict,
-  db: Session,
-) -> PublicationHandoffSpec:
-  """Validate a reviewed app-publication handoff against the live app row.
-
-  The ledger is app-writable, so it is routing data rather than authority. The
-  immutable reviewed Git objects and landed equivalence witness are verified
-  separately before installation; this step narrows that later proof to the
-  one local app, canonical repository, and package the owner reviewed.
-  """
-  from app import install
-  from app.app_capabilities import contract_and_digest
-
+def publication_handoff_identity(record: dict) -> PublicationHandoffIdentity:
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else None
   handoff = plan.get("after_merge") if plan else None
   if (
@@ -176,30 +257,6 @@ def publication_handoff_spec(
     raise ContributionSubmitError(
       "This publication no longer identifies an installed app."
     ) from None
-  target = (
-    db.query(models.App)
-    .filter(
-      models.App.id == target_app_id,
-      models.App.deleted_at.is_(None),
-    )
-    .first()
-  )
-  if target is None:
-    raise ContributionSubmitError(
-      "The local app this publication reviewed is no longer installed."
-    )
-
-  source_repo = _safe_equivalence_source_path(plan.get("source_repo_path"))
-  try:
-    target_source = Path(target.source_dir).resolve()
-  except (OSError, RuntimeError):
-    raise ContributionSubmitError(
-      "The local app source is no longer available."
-    ) from None
-  if source_repo != target_source:
-    raise ContributionSubmitError(
-      "This publication no longer points to the reviewed local app."
-    )
 
   manifest_url = str(handoff.get("manifest_url") or "").strip()
   parsed = urlparse(manifest_url)
@@ -225,6 +282,55 @@ def publication_handoff_spec(
   if str(plan.get("repo") or record.get("repo") or "") != repo_slug:
     raise ContributionSubmitError(
       "This publication manifest belongs to a different repository."
+    )
+  return PublicationHandoffIdentity(
+    contribution_id=contribution_id,
+    target_app_id=target_app_id,
+    repo_slug=repo_slug,
+    manifest_url=manifest_url,
+    manifest_id=parts[1].removeprefix("app-"),
+  )
+
+
+def publication_handoff_spec(
+  record: dict,
+  db: Session,
+) -> PublicationHandoffSpec:
+  """Validate a reviewed app-publication handoff against the live app row.
+
+  The ledger is app-writable, so it is routing data rather than authority. The
+  immutable reviewed Git objects and landed equivalence witness are verified
+  separately before installation; this step narrows that later proof to the
+  one local app, canonical repository, and package the owner reviewed.
+  """
+  from app import install
+  from app.app_capabilities import contract_and_digest
+
+  identity = publication_handoff_identity(record)
+  plan = record["plan"]
+  target = (
+    db.query(models.App)
+    .filter(
+      models.App.id == identity.target_app_id,
+      models.App.deleted_at.is_(None),
+    )
+    .first()
+  )
+  if target is None:
+    raise ContributionSubmitError(
+      "The local app this publication reviewed is no longer installed."
+    )
+
+  source_repo = _safe_equivalence_source_path(plan.get("source_repo_path"))
+  try:
+    target_source = Path(target.source_dir).resolve()
+  except (OSError, RuntimeError):
+    raise ContributionSubmitError(
+      "The local app source is no longer available."
+    ) from None
+  if source_repo != target_source:
+    raise ContributionSubmitError(
+      "This publication no longer points to the reviewed local app."
     )
 
   base_sha = str(plan.get("base_sha") or "").lower()
@@ -261,29 +367,24 @@ def publication_handoff_spec(
       "The reviewed app package can no longer be reproduced safely."
     ) from exc
 
-  repo_manifest_id = parts[1].removeprefix("app-")
   previous_id = reviewed_manifest.get("previous_id")
   if (
-    manifest_id != repo_manifest_id
+    manifest_id != identity.manifest_id
     or target.slug not in {manifest_id, previous_id}
   ):
     raise ContributionSubmitError(
       "The reviewed package belongs to a different local app."
     )
   if target.manifest_url is not None and not install._catalog_identity_matches(
-    target.manifest_url, manifest_url, manifest_id,
+    target.manifest_url, identity.manifest_url, manifest_id,
   ):
     raise ContributionSubmitError(
       "This installed app is already connected to a different package."
     )
 
   return PublicationHandoffSpec(
-    contribution_id=contribution_id,
-    target_app_id=target_app_id,
+    **asdict(identity),
     source_repo=source_repo,
-    repo_slug=repo_slug,
-    manifest_url=manifest_url,
-    manifest_id=manifest_id,
     reviewed_base_sha=base_sha,
     reviewed_head_sha=head_sha,
     reviewed_source_sha=source_sha,
@@ -291,6 +392,7 @@ def publication_handoff_spec(
     package_digest=package_digest,
     capability_digest=capability_digest,
   )
+
 
 def _require_github_access_principal(
   principal: Principal, db: Session
@@ -382,24 +484,47 @@ def _safe_repo_path(raw: object) -> Path:
 
 
 def _safe_equivalence_source_path(raw: object) -> Path:
-  """Installed app/platform repo allowed to own durable provenance refs."""
-  repo = _safe_repo_path(raw)
+  """Durable owner source allowed to own private provenance refs.
+
+  Installed apps and the live platform remain the ordinary sources. A direct
+  primary checkout under ``/data/worktrees`` is the standalone-project
+  adapter: it is durable, owner-controlled, and cannot be a disposable review
+  checkout or a linked worktree masquerading as its own source.
+  """
+  if not isinstance(raw, str) or not raw:
+    raise ContributionSubmitError(
+      "This review is missing its durable source checkout."
+    )
+  try:
+    repo = Path(raw).resolve()
+  except (OSError, RuntimeError):
+    raise ContributionSubmitError(
+      "The contribution source path is invalid."
+    ) from None
   data_dir = Path(get_settings().data_dir).resolve()
   platform = data_dir / "platform"
   apps = data_dir / "apps"
-  if repo != platform and not repo.is_relative_to(apps):
+  worktrees = data_dir / "worktrees"
+  standalone = repo.parent == worktrees
+  if repo != platform and not repo.is_relative_to(apps) and not standalone:
     raise ContributionSubmitError(
-      "The contribution source must be an installed app or the live platform."
+      "The contribution source must be the live platform, an installed app, "
+      "or a direct checkout under /data/worktrees."
     )
   if not app_git.is_repo(repo):
     raise ContributionSubmitError(
-      "The contribution source is no longer a Git-backed app or platform."
+      "The contribution source is no longer a Git-backed project."
+    )
+  if standalone and app_git.primary_worktree_path(repo) is not None:
+    raise ContributionSubmitError(
+      "A standalone contribution source must be its primary checkout, not a "
+      "linked review worktree."
     )
   return repo
 
 
 def _equivalence_source_repo(record: dict) -> tuple[Path, Path] | None:
-  """Return ``(installed source, review checkout)`` for one contribution."""
+  """Return ``(durable source, review checkout)`` for one contribution."""
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
   review_repo = _safe_repo_path(plan.get("repo_path"))
   raw_source_repo = plan.get("source_repo_path")
@@ -408,7 +533,7 @@ def _equivalence_source_repo(record: dict) -> tuple[Path, Path] | None:
   primary = app_git.primary_worktree_path(review_repo)
   if primary is not None:
     return _safe_equivalence_source_path(str(primary)), review_repo
-  # Legacy prepared records sometimes used the installed source checkout
+  # Legacy prepared records sometimes used the live source checkout
   # directly rather than a linked worktree. It is already under the stricter
   # apps/platform allowlist, so it can safely own the witness itself.
   try:
@@ -417,70 +542,244 @@ def _equivalence_source_repo(record: dict) -> tuple[Path, Path] | None:
     return None
 
 
+@dataclass(frozen=True)
+class _PendingEquivalenceSpec:
+  source_repo: Path
+  review_repo: Path
+  base_sha: str
+  head_sha: str
+  diff_sha256: str
+  contribution_id: str
+  captured_source_sha: str
+  review_identity_sha256: str
+  source_candidates: tuple[str, ...]
+  source_projection: app_git.PublicationSourceProjection | None
+
+
+_REVIEWED_SOURCE_IDENTITY_VERSION = 1
+
+
+def _reviewed_source_identity(record: dict) -> str:
+  """Return the canonical identity for one continuity-review envelope.
+
+  The agent request carries this SHA-256 after reading the locked record. The
+  host recomputes it while holding the record lock, then stores it only inside
+  a private immutable Git ref. App-writable JSON therefore selects what the
+  agent must review but cannot create publication authority by itself.
+
+  Version 1 hashes canonical UTF-8 JSON with sorted keys and compact
+  separators. The envelope freezes the fields that define source-chat
+  authority, the private review verdict, and every reviewed/public PR input;
+  operational mirrors such as the prepared-to-submitting lifecycle claim,
+  timestamps, checks, and Autopilot state are intentionally outside it so they
+  can advance without invalidating source continuity.
+  """
+  material = {
+    "version": _REVIEWED_SOURCE_IDENTITY_VERSION,
+    "record": {
+      key: record.get(key)
+      for key in (
+        "id", "type", "repo", "title", "branch",
+        "chat_id", "chat_ids", "plan", "quality_review",
+      )
+    },
+  }
+  return hashlib.sha256(json.dumps(
+    material, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+  ).encode("utf-8")).hexdigest()
+
+
+def _pending_equivalence_spec(record: dict) -> _PendingEquivalenceSpec | None:
+  """Resolve the immutable inputs shared by preview and witness creation."""
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  repos = _equivalence_source_repo(record)
+  if repos is None:
+    return None
+  source_repo, review_repo = repos
+  base_sha = str(plan.get("base_sha") or "")
+  head_sha = str(plan.get("head_sha") or "")
+  try:
+    source_projection = app_git.publication_source_projection(
+      plan.get("source_projection"),
+      repo_slug=str(plan.get("repo") or record.get("repo") or ""),
+    )
+  except ValueError:
+    return None
+  # Older cleanup could remove a linked review worktree before the merged-state
+  # poll created its durable witness. The reviewed commits remain in the live
+  # repository, but only reuse it when both immutable commits still resolve.
+  if (
+    not app_git.ref_exists(review_repo, f"{base_sha}^{{commit}}")
+    or not app_git.ref_exists(review_repo, f"{head_sha}^{{commit}}")
+  ) and (
+    app_git.ref_exists(source_repo, f"{base_sha}^{{commit}}")
+    and app_git.ref_exists(source_repo, f"{head_sha}^{{commit}}")
+  ):
+    review_repo = source_repo
+
+  try:
+    current_source = app_git.head_sha(source_repo, "HEAD")
+    dirty = app_git.worktree_dirty(source_repo)
+  except (OSError, RuntimeError, subprocess.SubprocessError, ValueError):
+    current_source = ""
+    dirty = True
+  # Send must prove the source that is installed *now*. Its clean committed
+  # HEAD is the only source-of-truth candidate. Falling back to the captured
+  # preparation SHA when HEAD is unreadable would publish against stale source.
+  # Dirty working bytes are equally unprovable: the app serves those bytes, not
+  # merely HEAD, so force them through the normal commit + review path first.
+  candidates = (current_source,) if current_source and not dirty else ()
+  return _PendingEquivalenceSpec(
+    source_repo=source_repo,
+    review_repo=review_repo,
+    base_sha=base_sha,
+    head_sha=head_sha,
+    diff_sha256=str(plan.get("diff_sha256") or ""),
+    contribution_id=str(record.get("id") or ""),
+    captured_source_sha=str(plan.get("source_sha") or "").lower(),
+    review_identity_sha256=_reviewed_source_identity(record),
+    source_candidates=candidates,
+    source_projection=source_projection,
+  )
+
+
+def _prepublication_source_continuity(
+  spec: _PendingEquivalenceSpec,
+  current_source_sha: str,
+) -> app_git.ReviewedSourceContinuity | None:
+  return app_git.prepublication_source_continuity(
+    spec.source_repo,
+    base_sha=spec.base_sha,
+    head_sha=spec.head_sha,
+    source_sha=spec.captured_source_sha,
+    current_source_sha=current_source_sha,
+    diff_sha256=spec.diff_sha256,
+    contribution_id=spec.contribution_id,
+    review_identity_sha256=spec.review_identity_sha256,
+    source_projection=spec.source_projection,
+  )
+
+
+def _record_prepublication_source_continuity(
+  record: dict,
+  *,
+  reviewed_through_sha: str,
+  source_resolution_sha256: str | None = None,
+) -> str | None:
+  """Create one private continuity witness from the locked clean source."""
+  spec = _pending_equivalence_spec(record)
+  if (
+    spec is None
+    or spec.source_candidates != (reviewed_through_sha,)
+  ):
+    return None
+  return app_git.record_prepublication_source_continuity(
+    spec.source_repo,
+    base_sha=spec.base_sha,
+    head_sha=spec.head_sha,
+    source_sha=spec.captured_source_sha,
+    reviewed_through_sha=reviewed_through_sha,
+    diff_sha256=spec.diff_sha256,
+    contribution_id=spec.contribution_id,
+    review_identity_sha256=spec.review_identity_sha256,
+    review_source_dir=spec.review_repo,
+    source_projection=spec.source_projection,
+    source_resolution_sha256=source_resolution_sha256,
+  )
+
+
+def _assert_pending_equivalence_preflight(record: dict) -> str:
+  """Require one read-only proof that Send can later persist as a witness."""
+  spec = _pending_equivalence_spec(record)
+  if spec is None:
+    raise ContributionSubmitError(
+      "This review is missing its durable source provenance.",
+      code="missing_source_provenance",
+    )
+  for source_sha in spec.source_candidates:
+    proof_mode = app_git.preview_pending_equivalent_change(
+      spec.source_repo,
+      base_sha=spec.base_sha,
+      head_sha=spec.head_sha,
+      source_sha=source_sha,
+      diff_sha256=spec.diff_sha256,
+      review_source_dir=spec.review_repo,
+      source_projection=spec.source_projection,
+    )
+    if proof_mode is not None:
+      return proof_mode
+    continuity = _prepublication_source_continuity(spec, source_sha)
+    if continuity is not None:
+      return (
+        "reviewed_source_resolution" if continuity.source_resolution_sha256
+        else "reviewed_source_continuity"
+      )
+  raise ContributionSubmitError(
+    "The durable source no longer proves that it contains this reviewed change.",
+    code="source_provenance_mismatch",
+  )
+
+
+def _assert_pending_equivalence_before_publication(record: dict) -> str:
+  """Prove a first push or recognize an exact public reconciliation.
+
+  Contribution JSON is app-writable, so its ``last_submit_*`` journal can only
+  select a candidate recovery; it can never authorize one. A retry skips the
+  local-source proof only after GitHub itself confirms the exact reviewed
+  head on the exact open PR or remote branch. A definitely rejected push has
+  no ``pushed`` stage, and a forged/stale journal has no matching public proof,
+  so both take the strict live-source path.
+  """
+  if _authoritative_public_reconciliation(record) is not None:
+    return "public_reconciliation"
+  return _assert_pending_equivalence_preflight(record)
+
+
 def _record_pending_equivalence(record: dict) -> str | None:
   """Persist the reviewed local-history witness after the owner sends a PR.
 
   Linked review worktrees derive their primary live checkout automatically.
   Standalone app review clones carry an explicit ``plan.source_repo_path``;
   :mod:`app_git` copies only the verified reviewed commits into that installed
-  repo before recording the witness. A prepared record should pin
-  ``plan.source_sha``; old linked records safely use the primary HEAD observed
-  at send time.
+  repo before recording the witness. The current clean installed HEAD observed
+  under the source lock is the only state eligible for a new witness.
   """
-  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
-  repos = _equivalence_source_repo(record)
-  if repos is None:
-    return None
-  source_repo, review_repo = repos
-  plan_base_sha = str(plan.get("base_sha") or "")
-  plan_head_sha = str(plan.get("head_sha") or "")
-  # Older cleanup could remove a linked review worktree before the merged-state
-  # poll created its durable witness. The reviewed commits remain in the live
-  # repository, but only reuse it when both immutable commits still resolve.
-  if (
-    not app_git.ref_exists(review_repo, f"{plan_base_sha}^{{commit}}")
-    or not app_git.ref_exists(review_repo, f"{plan_head_sha}^{{commit}}")
-  ) and (
-    app_git.ref_exists(source_repo, f"{plan_base_sha}^{{commit}}")
-    and app_git.ref_exists(source_repo, f"{plan_head_sha}^{{commit}}")
-  ):
-    review_repo = source_repo
-  source_sha = str(plan.get("source_sha") or "").strip()
-  current_source = app_git.head_sha(source_repo, "HEAD")
-  if not source_sha:
-    source_sha = current_source
-  elif (
-    current_source
-    and source_sha != current_source
-    and app_git.ref_is_ancestor(source_repo, source_sha, current_source) is not True
-  ):
-    # The app model may have replayed the accepted tree onto a new upstream
-    # parent before Send, so the captured commit is no longer causal history.
-    # Use the stable current tip; the exact diff/tree proof below still decides.
-    source_sha = current_source
-  if not source_sha:
+  spec = _pending_equivalence_spec(record)
+  if spec is None:
     return None
   kwargs = {
-    "base_sha": plan_base_sha,
-    "head_sha": plan_head_sha,
-    "diff_sha256": str(plan.get("diff_sha256") or ""),
-    "contribution_id": str(record.get("id") or ""),
-    "review_source_dir": review_repo,
+    "base_sha": spec.base_sha,
+    "head_sha": spec.head_sha,
+    "diff_sha256": spec.diff_sha256,
+    "contribution_id": spec.contribution_id,
+    "review_source_dir": spec.review_repo,
+    "source_projection": spec.source_projection,
   }
-  recorded = app_git.record_pending_equivalent_change(
-    source_repo, source_sha=source_sha, **kwargs,
-  )
-  if recorded is not None:
-    return recorded
-  # An App Store update can intentionally replay the accepted source tree onto
-  # a new upstream parent between preparation and Send. Under the source lock,
-  # retry the *current* immutable tip: record_pending repeats the exact diff-hash
-  # and tree-subsumption proofs, so this carries a preserved change across that
-  # pre-witness rewrite without blessing a source that removed the change.
-  if current_source and current_source != source_sha:
-    return app_git.record_pending_equivalent_change(
-      source_repo, source_sha=current_source, **kwargs,
+  for source_sha in spec.source_candidates:
+    recorded = app_git.record_pending_equivalent_change(
+      spec.source_repo, source_sha=source_sha, **kwargs,
     )
+    if recorded is not None:
+      app_git.discard_prepublication_source_continuity(
+        spec.source_repo, spec.contribution_id,
+      )
+      return recorded
+    continuity = _prepublication_source_continuity(spec, source_sha)
+    if continuity is None:
+      continue
+    if continuity.source_resolution_sha256:
+      recorded = app_git.record_reviewed_source_equivalence(
+        spec.source_repo, witness=continuity,
+      )
+    else:
+      recorded = app_git.record_pending_equivalent_change(
+        spec.source_repo, source_sha=continuity.source_sha, **kwargs,
+      )
+    if recorded is not None:
+      app_git.discard_prepublication_source_continuity(
+        spec.source_repo, spec.contribution_id,
+      )
+      return recorded
   return None
 
 
@@ -706,6 +1005,8 @@ def _claim_record(
   *, app_id: int, record_id: str, db: Session, expected_nonce: str | None,
   submitter: str = "contribute-button",
   expected_action: str = "pr",
+  allow_personal_resume: bool = False,
+  before_claim_write: Callable[[dict, Path, bool, dict], None] | None = None,
 ) -> tuple[dict, Path, Path]:
   record_path, diff_path = _record_paths(app_id, record_id)
   _recheck_submit_app(db, app_id, expected_nonce)
@@ -731,7 +1032,17 @@ def _claim_record(
     and isinstance(plan.get("successor"), dict)
     and record.get("submitter") == submitter
   )
-  if record.get("status") != "prepared" and not resumable_successor:
+  resumable_personal = (
+    allow_personal_resume
+    and record.get("status") == "submitting"
+    and expected_action in _PREPARED_PR_ACTIONS
+    and record.get("submitter") == submitter
+  )
+  if (
+    record.get("status") != "prepared"
+    and not resumable_successor
+    and not resumable_personal
+  ):
     raise HTTPException(
       status_code=409,
       detail="This contribution is no longer waiting for approval.",
@@ -744,9 +1055,16 @@ def _claim_record(
         "chain together."
       ),
     )
+  if resumable_successor or resumable_personal:
+    claimed = {
+      **record,
+      "personal_submit_input_sha256": _personal_publication_input_sha256(record),
+    }
+    if before_claim_write is not None:
+      before_claim_write(claimed, record_path, True, record)
+    _write_record(record_path, claimed)
+    return claimed, record_path, diff_path
   _require_all_clear_review(record)
-  if resumable_successor:
-    return record, record_path, diff_path
   now = _now_iso()
   claimed = {
     **record,
@@ -755,6 +1073,11 @@ def _claim_record(
     "submit_started_at": now,
     "updated_at": now,
   }
+  claimed["personal_submit_input_sha256"] = (
+    _personal_publication_input_sha256(claimed)
+  )
+  if before_claim_write is not None:
+    before_claim_write(claimed, record_path, False, record)
   _write_record(record_path, claimed)
   return claimed, record_path, diff_path
 
@@ -801,10 +1124,9 @@ def _validate_stack_records(
 ) -> list[dict]:
   """Validate one complete, immutable parent-to-child contribution chain.
 
-  Publishing a new stack keeps the narrow ``pr`` default. Read-only review
-  callers may additionally admit ``pr_update`` so an already-public stack can
-  be re-reviewed layer by layer without making the stack submit endpoint a
-  second, less-specific update path.
+  Publishing a new stack keeps the narrow ``pr`` default. Callers that execute
+  one explicit phase may additionally admit ``pr_update`` as structural
+  context; only ``prepared_actions`` are claimed by the endpoint.
   """
   if not records:
     raise ContributionSubmitError("This PR stack has no reviewed records.")
@@ -892,9 +1214,17 @@ def _claim_stack_records(
   expected_nonce: str | None,
   allowed_actions: frozenset[str] = frozenset({"pr"}),
   prepared_actions: frozenset[str] | None = None,
+  deferred_prepared_actions: frozenset[str] = frozenset(),
   submitter: str = "contribute-stack-button",
   already_detail: str = "Every PR in this stack has already been submitted.",
+  before_claim_write: Callable[[dict, Path, bool, dict], None] | None = None,
 ) -> list[dict]:
+  """Claim only the current public phase of one complete reviewed stack.
+
+  ``deferred_prepared_actions`` remain byte-for-byte prepared. They are still
+  validated as part of the ordered chain but receive no attempt owner and no
+  public authority from this call.
+  """
   if not 2 <= len(record_ids) <= 12 or len(set(record_ids)) != len(record_ids):
     raise HTTPException(
       status_code=400,
@@ -919,12 +1249,41 @@ def _claim_stack_records(
     )
   except ContributionSubmitError as exc:
     raise HTTPException(status_code=409, detail=exc.message) from exc
-  claimable_actions = prepared_actions or allowed_actions
+  claimable_actions = (
+    prepared_actions if prepared_actions is not None else allowed_actions
+  )
+  private_actions = [
+    str((item["record"].get("plan") or {}).get("action") or "")
+    for item in validated
+    if item["record"].get("status") in {"prepared", "submitting"}
+  ]
+  if private_actions:
+    phase_action = private_actions[0]
+    saw_create = False
+    for action in private_actions:
+      if action == "pr":
+        saw_create = True
+      elif action == "pr_update" and saw_create:
+        raise HTTPException(
+          status_code=409,
+          detail=(
+            "An existing pull-request update cannot follow a new private "
+            "stack layer."
+          ),
+        )
+    if phase_action not in claimable_actions:
+      raise HTTPException(
+        status_code=409,
+        detail="A private stack layer is prepared for a different public action.",
+      )
   by_id = {row["record"]["id"]: row for row in rows}
   for item in validated:
     if item["record"].get("status") == "prepared":
       plan = item["record"].get("plan") or {}
-      if plan.get("action") not in claimable_actions:
+      action = str(plan.get("action") or "")
+      if action in deferred_prepared_actions:
+        continue
+      if action not in claimable_actions:
         raise HTTPException(
           status_code=409,
           detail="A private stack layer is prepared for a different public action.",
@@ -935,7 +1294,12 @@ def _claim_stack_records(
   for item in validated:
     row = by_id[item["record"]["id"]]
     record = row["record"]
-    if record.get("status") == "prepared":
+    resumed = record.get("status") == "submitting"
+    if (
+      record.get("status") == "prepared"
+      and str((record.get("plan") or {}).get("action") or "")
+          in claimable_actions
+    ):
       record = {
         **record,
         "status": "submitting",
@@ -943,8 +1307,17 @@ def _claim_stack_records(
         "submit_started_at": now,
         "updated_at": now,
       }
+      record["personal_submit_input_sha256"] = (
+        _personal_publication_input_sha256(record)
+      )
+      if before_claim_write is not None:
+        before_claim_write(record, row["record_path"], False, row["record"])
       _write_record(row["record_path"], record)
-    ordered.append({**row, "record": record, "stack": item["stack"]})
+    elif resumed and before_claim_write is not None:
+      before_claim_write(record, row["record_path"], True, row["record"])
+    ordered.append({
+      **row, "record": record, "stack": item["stack"], "resumed": resumed,
+    })
   if not any(row["record"].get("status") == "submitting" for row in ordered):
     raise HTTPException(
       status_code=409,
@@ -1332,7 +1705,10 @@ def _mark_existing_pr_update_success(
   number: int,
   record_patch: dict | None = None,
 ) -> dict:
-  """Settle an owner-approved fast-forward of an already-open PR.
+  """Settle an owner-approved update of an already-open PR.
+
+  Standalone and stack-root updates remain fast-forward-only. A reviewed stack
+  child may instead be restacked under exact public-head and parent leases.
 
   Keep the original submission timestamp: this action updates one existing
   public request rather than opening a new one. The reviewed update timestamp
@@ -1614,6 +1990,179 @@ def _find_existing_pr(
   return None
 
 
+def _authoritative_public_reconciliation(
+  record: dict,
+  *,
+  base_branch: str | None = None,
+  same_repo: bool | None = None,
+  expected_pr_number: int | None = None,
+  expected_head_repository: str | None = None,
+) -> PublicReconciliation | None:
+  """Return an exact public PR/branch recovery authenticated by GitHub.
+
+  The contribution ledger is deliberately not a trust anchor: an app or agent
+  can rewrite it. Its post-push journal only makes this bounded read eligible;
+  the returned PR must independently match the reviewed commit, branch, target
+  base, and connected owner's head repository. No remote branch mutation occurs
+  here, so a lost create/update response can reconcile after local source moves
+  without turning forged journal fields into publication authority.
+  """
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  reviewed_head = str(plan.get("head_sha") or "").strip().lower()
+  reviewed_metadata = None
+  if plan.get("action") == "pr_update":
+    try:
+      reviewed_metadata = _reviewed_existing_pr_metadata(record)
+    except ContributionSubmitError:
+      return None
+  journal_head = str(record.get("last_submit_push_sha") or "").strip().lower()
+  if (
+    record.get("last_submit_stage") not in {
+      "pushed", "push_pending", "push_ambiguous",
+    }
+    or not _GIT_SHA.fullmatch(reviewed_head)
+    or journal_head != reviewed_head
+  ):
+    return None
+
+  state = github_auth.read_state() or {}
+  login = str(state.get("login") or "").strip()
+  if not github_auth.get_token() or not login or not has_full_pr_access(
+    state.get("scopes")
+  ):
+    return None
+
+  try:
+    repo = _safe_repo_path(plan.get("repo_path"))
+    upstream_repo = _git_ops._validate_repo_slug(
+      plan.get("repo") or record.get("repo")
+    )
+    branch = _git_ops._validate_branch(
+      plan.get("branch") or record.get("branch")
+    )
+    stack = plan.get("stack") if isinstance(plan.get("stack"), dict) else {}
+    target_base = _git_ops._validate_branch(
+      base_branch
+      or record.get("last_submit_base_branch")
+      or record.get("last_submit_upstream_branch")
+      or stack.get("base_branch")
+    )
+    head_repository = _git_ops._validate_repo_slug(
+      expected_head_repository or record.get("head_repository")
+    )
+  except (ContributionSubmitError, TypeError, ValueError):
+    return None
+  if not (repo / ".git").exists():
+    return None
+
+  inferred_same_repo = head_repository.casefold() == upstream_repo.casefold()
+  if same_repo is not None and bool(same_repo) != inferred_same_repo:
+    return None
+  expected_owner = (
+    upstream_repo.split("/", 1)[0] if inferred_same_repo else login
+  )
+  if head_repository.split("/", 1)[0].casefold() != expected_owner.casefold():
+    return None
+
+  number = expected_pr_number
+  if number is None:
+    try:
+      number = int(record.get("number"))
+    except (TypeError, ValueError):
+      number = 0
+  if number and number > 0:
+    reviewed_title, reviewed_body = reviewed_metadata or (None, None)
+    confirmed = _confirm_existing_pr_update(
+      repo,
+      upstream_repo,
+      number,
+      expected_head_repository=head_repository,
+      expected_head_sha=reviewed_head,
+      branch=branch,
+      base_branch=target_base,
+      expected_title=reviewed_title,
+      expected_body=reviewed_body,
+    )
+    if confirmed is not None:
+      url, stage = confirmed
+      return PublicReconciliation(
+        head_repository=head_repository,
+        pr_url=url,
+        pr_number=number,
+        publication_stage=stage,
+      )
+    # The known PR endpoint can briefly lag an accepted branch update. The
+    # exact remote branch is still enough to suppress a duplicate push, while
+    # the ordinary known-PR confirmation below remains responsible for the
+    # final success result. Never infer this from the local journal alone.
+    try:
+      remote_head = _git_ops._upstream_branch_sha(
+        repo, head_repository, branch,
+      )
+    except (subprocess.TimeoutExpired, OSError):
+      return None
+    if remote_head == reviewed_head:
+      return PublicReconciliation(head_repository=head_repository)
+    return None
+
+  url = _find_existing_pr(
+    repo,
+    upstream_repo,
+    login,
+    branch,
+    expected_head_sha=reviewed_head,
+    base_branch=target_base,
+    same_repo=inferred_same_repo,
+  )
+  parsed_number = _parse_pr_number(url or "")
+  if url and parsed_number is not None:
+    reviewed_title, reviewed_body = reviewed_metadata or (None, None)
+    confirmed = _confirm_existing_pr_update(
+      repo,
+      upstream_repo,
+      parsed_number,
+      expected_head_repository=head_repository,
+      expected_head_sha=reviewed_head,
+      branch=branch,
+      base_branch=target_base,
+      expected_title=reviewed_title,
+      expected_body=reviewed_body,
+    )
+    if confirmed is None or confirmed[0] != url:
+      return None
+    return PublicReconciliation(
+      head_repository=head_repository,
+      pr_url=url,
+      pr_number=parsed_number,
+      publication_stage=confirmed[1],
+    )
+
+  # A push can succeed while PR creation loses its response before GitHub has
+  # an open PR to list. The exact remote branch tip is sufficient authority to
+  # skip a second push, but never to ignore an existing open/merged PR.
+  try:
+    conflict = _existing_branch_pr(
+      repo,
+      upstream_repo,
+      login,
+      branch,
+      same_repo=inferred_same_repo,
+    )
+  except ContributionSubmitError:
+    return None
+  if conflict is not None:
+    return None
+  try:
+    remote_head = _git_ops._upstream_branch_sha(
+      repo, head_repository, branch,
+    )
+  except (subprocess.TimeoutExpired, OSError):
+    return None
+  if remote_head != reviewed_head:
+    return None
+  return PublicReconciliation(head_repository=head_repository)
+
+
 def _confirm_existing_pr_update(
   repo: Path,
   upstream_repo: str,
@@ -1624,6 +2173,8 @@ def _confirm_existing_pr_update(
   branch: str,
   base_branch: str,
   expected_base_sha: str | None = None,
+  expected_title: str | None = None,
+  expected_body: str | None = None,
 ) -> tuple[str, str] | None:
   """Confirm one known PR after its reviewed branch was pushed.
 
@@ -1635,13 +2186,13 @@ def _confirm_existing_pr_update(
   if (
     number < 1
     or not _GIT_SHA.match(str(expected_head_sha or ""))
-    or (
-      expected_base_sha is not None
-      and not _GIT_SHA.match(str(expected_base_sha or ""))
-    )
+    or ((expected_title is None) != (expected_body is None))
   ):
     return None
   args = ("api", f"repos/{upstream_repo}/pulls/{number}")
+  moved_reviewed_base = False
+  moved_reviewed_metadata = False
+  unconfirmed_reviewed_base = False
   for attempt in range(_PR_VISIBILITY_RETRIES):
     try:
       proc = _git_ops._gh(repo, *args, check=False)
@@ -1660,24 +2211,117 @@ def _confirm_existing_pr_update(
         head.get("repo") if isinstance(head.get("repo"), dict) else {}
       )
       url = live.get("html_url")
-      if (
+      exact_identity = (
         live.get("state") == "open"
         and head_repo.get("full_name") == expected_head_repository
         and head.get("ref") == branch
         and head.get("sha") == expected_head_sha
         and base.get("ref") == base_branch
-        and (
-          expected_base_sha is None
-          or base.get("sha") == expected_base_sha
-        )
         and isinstance(live.get("draft"), bool)
         and isinstance(url, str)
         and url == f"https://github.com/{upstream_repo}/pull/{number}"
+      )
+      exact_metadata = (
+        expected_title is None
+        or (
+          live.get("title") == expected_title
+          and live.get("body") == expected_body
+        )
+      )
+      if exact_identity and not exact_metadata:
+        moved_reviewed_metadata = True
+      exact_pr = exact_identity and exact_metadata
+      current_base_sha = None
+      if exact_pr and expected_base_sha is not None:
+        try:
+          current_base_sha = _git_ops._upstream_branch_sha(
+            repo, upstream_repo, base_branch,
+          )
+        except (ContributionSubmitError, subprocess.TimeoutExpired, OSError):
+          current_base_sha = None
+        if current_base_sha is None:
+          unconfirmed_reviewed_base = True
+      if (
+        exact_pr
+        and expected_base_sha is not None
+        and current_base_sha is not None
+        and current_base_sha != expected_base_sha
+      ):
+        moved_reviewed_base = True
+      elif exact_pr and (
+        expected_base_sha is None or current_base_sha == expected_base_sha
       ):
         return url, ("draft" if bool(live.get("draft")) else "ready")
     if attempt + 1 < _PR_VISIBILITY_RETRIES:
       time.sleep(_PR_VISIBILITY_RETRY_BASE_SECONDS * (2 ** attempt))
+  if moved_reviewed_metadata:
+    raise ContributionSubmitError(
+      "The pull request title or body changed during publication validation. "
+      "Refresh and review the current public text before trying again.",
+      code="review_refresh_needed",
+      detail="The live pull request text differs from the exact reviewed witness.",
+    )
+  if moved_reviewed_base:
+    raise ContributionSubmitError(
+      "The reviewed child branch was pushed, but its parent branch moved before "
+      "GitHub confirmed the update.",
+      code="review_refresh_needed",
+      detail="The pull request's base branch moved from the reviewed parent commit.",
+    )
+  if unconfirmed_reviewed_base:
+    raise ContributionSubmitError(
+      "The reviewed child branch was pushed, but GitHub did not confirm its "
+      "current parent branch.",
+      status_code=503,
+      code="update_unconfirmed",
+      detail="The current base branch tip could not be verified after the push.",
+    )
   return None
+
+
+def _reviewed_existing_pr_metadata(record: dict) -> tuple[str, str]:
+  """Return the exact public text witnessed by one reviewed PR update."""
+  plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+  title, body = _exact_reviewed_pr_text(record)
+  metadata = plan.get("pr_metadata")
+  if (
+    plan.get("action") != "pr_update"
+    or plan.get("title") != title
+    or not isinstance(metadata, dict)
+    or metadata.get("old_title") != title
+    or metadata.get("old_body") != body
+  ):
+    raise ContributionSubmitError(
+      "This pull request update is missing its exact reviewed public title/body "
+      "witness. Nothing was pushed. Ask the agent to refresh the review.",
+      code="review_refresh_needed",
+    )
+  return title, body
+
+
+def _assert_reviewed_existing_pr_metadata(
+  record: dict, *, live_title: object, live_body: object,
+) -> str:
+  """Require exact reviewed text before mutating an existing PR branch.
+
+  GitHub does not expose a conditional title/body update. Reading old text and
+  then editing would therefore race maintainers, so Contribute never edits an
+  existing PR's metadata. The reviewed old-text witness and desired text must
+  be byte-identical and already public.
+  """
+  desired = _reviewed_existing_pr_metadata(record)
+  live = (
+    live_title if isinstance(live_title, str) else None,
+    live_body if isinstance(live_body, str) else None,
+  )
+  if live == desired:
+    return "desired"
+  raise ContributionSubmitError(
+    "This pull request's title or body does not match the reviewed update. "
+    "Nothing was pushed. Ask the agent to refresh and review the current PR text.",
+    code="review_refresh_needed",
+    detail="The live pull request text differs from the exact reviewed desired text.",
+  )
 
 
 def _personal_ready_target(record: dict) -> PersonalReadyTarget:
@@ -1717,8 +2361,13 @@ def _personal_ready_target(record: dict) -> PersonalReadyTarget:
     number = 0
   url = str(record.get("url") or "").rstrip("/")
   expected_url = f"https://github.com/{repo}/pull/{number}"
-  head_sha = str(record.get("last_submit_push_sha") or "").lower()
-  if number <= 0 or url != expected_url or not _GIT_SHA.fullmatch(head_sha):
+  try:
+    head_sha = _git_ops._canonical_reviewed_oid(
+      record.get("last_submit_push_sha"), "published head sha",
+    )
+  except ContributionSubmitError:
+    head_sha = ""
+  if number <= 0 or url != expected_url or not head_sha:
     raise HTTPException(
       status_code=409,
       detail=(
@@ -1740,9 +2389,23 @@ def _personal_ready_target(record: dict) -> PersonalReadyTarget:
     if isinstance(record.get("quality_review"), dict)
     else {}
   )
-  plan_head = str(plan.get("head_sha") or "").lower()
-  reviewed_head = str(review.get("reviewed_head_sha") or "").lower()
-  normalized_from = str(plan.get("attribution_normalized_from") or "").lower()
+  try:
+    _git_ops._canonical_reviewed_oid(plan.get("base_sha"), "base sha")
+    plan_head = _git_ops._canonical_reviewed_oid(
+      plan.get("head_sha"), "head sha",
+    )
+    reviewed_head = _git_ops._canonical_reviewed_oid(
+      review.get("reviewed_head_sha"), "quality-review head sha",
+    )
+    normalized_from_raw = plan.get("attribution_normalized_from")
+    normalized_from = (
+      _git_ops._canonical_reviewed_oid(
+        normalized_from_raw, "pre-normalization head sha",
+      )
+      if normalized_from_raw else ""
+    )
+  except ContributionSubmitError as exc:
+    raise HTTPException(status_code=409, detail=exc.message) from exc
   if (
     review.get("state") != "all_clear"
     or plan_head != head_sha
@@ -2113,26 +2776,33 @@ def _push_branch(
   remote: str,
   branch: str,
   source: str = "HEAD",
+  expected_remote_sha: str | None = None,
 ) -> str | None:
-  """Push once on deterministic failures; briefly retry transient failures."""
-  last_error = ""
-  for attempt in range(_PUSH_RETRIES):
-    proc = _git_ops._git(
-      repo, "push", remote, f"{source}:refs/heads/{branch}", check=False,
-    )
-    if proc.returncode == 0:
-      return None
-    last_error = (proc.stderr or proc.stdout or "").strip()
-    if not _is_transient_push_error(last_error):
-      break
-    if attempt + 1 < _PUSH_RETRIES:
-      time.sleep(_PUSH_RETRY_BASE_SECONDS * (2 ** attempt))
-  return last_error or "Git push failed."
+  """Push once behind the exact remote tip observed before the intent.
+
+  A transport failure is ambiguous: retrying before an authoritative read can
+  turn an accepted first request into a misleading lease rejection. The
+  caller probes GitHub and resumes from its signed intent instead.
+  """
+  if expected_remote_sha is not None:
+    _git_ops._canonical_reviewed_oid(expected_remote_sha, "remote branch head")
+  lease = f"--force-with-lease=refs/heads/{branch}:{expected_remote_sha or ''}"
+  proc = _git_ops._git(
+    repo, "push", lease, remote, f"{source}:refs/heads/{branch}", check=False,
+  )
+  if proc.returncode == 0:
+    return None
+  return (proc.stderr or proc.stdout or "").strip() or "Git push failed."
 
 
-def _push_topic_branch(repo: Path, branch: str, source: str = "HEAD") -> str | None:
+def _push_topic_branch(
+  repo: Path,
+  branch: str,
+  source: str = "HEAD",
+  expected_remote_sha: str | None = None,
+) -> str | None:
   """Push a reviewed topic to the owner's configured fork remote."""
-  return _push_branch(repo, "fork", branch, source)
+  return _push_branch(repo, "fork", branch, source, expected_remote_sha)
 
 
 def _github_remote_slug(remote_url: str) -> str | None:
@@ -2305,6 +2975,32 @@ def _sync_owner_fork(
   return {**verified, "last_submit_fork_sync": "fast-forwarded"}
 
 
+def _recover_normalized_attribution(
+  record: dict,
+  repo: Path,
+  branch: str,
+  request: dict,
+) -> dict:
+  """Accept only the exact deterministic commit named before ref mutation."""
+  old_head = str(request.get("previous_head_sha") or "").lower()
+  expected_head = str(
+    request.get("expected_normalized_head_sha") or ""
+  ).lower()
+  if (
+    not _GIT_SHA.fullmatch(old_head)
+    or not _GIT_SHA.fullmatch(expected_head)
+  ):
+    raise ContributionSubmitError("The attribution recovery receipt is incomplete.")
+  current_head = _git_ops._head_commit_metadata(repo, branch)["sha"].lower()
+  if current_head == old_head:
+    return {}
+  if current_head != expected_head:
+    raise ContributionSubmitError(
+      "The branch changed during attribution recovery; nothing was sent."
+    )
+  return _git_ops._head_sha_patch(record, old_head, current_head)
+
+
 def _submit_prepared_pr(
   record: dict,
   diff_path: Path,
@@ -2312,7 +3008,13 @@ def _submit_prepared_pr(
   direct_base_branch: str | None = None,
   expected_existing_pr_number: int | None = None,
   expected_existing_head_repository: str | None = None,
+  expected_existing_head_sha: str | None = None,
+  expected_existing_base_sha: str | None = None,
+  existing_branch_lease_sha: str | None = None,
   publication_stage: str = "draft",
+  attempt_event: Callable[[str, dict, dict | None], None] | None = None,
+  prior_attempt_phase: str | None = None,
+  prior_attempt_receipt: dict | None = None,
 ) -> tuple[str, int | None, dict]:
   if not shutil.which("git") or not shutil.which("gh"):
     raise ContributionSubmitError(
@@ -2336,6 +3038,9 @@ def _submit_prepared_pr(
   upstream_repo = _git_ops._validate_repo_slug(plan.get("repo") or record.get("repo"))
   branch = _git_ops._validate_branch(plan.get("branch") or record.get("branch"))
   existing_head_repository = None
+  existing_base_sha = None
+  branch_lease_sha = None
+  reviewed_existing_metadata = None
   if expected_existing_pr_number is not None:
     if expected_existing_head_repository is None:
       raise ContributionSubmitError(
@@ -2344,6 +3049,10 @@ def _submit_prepared_pr(
     existing_head_repository = _git_ops._validate_repo_slug(
       expected_existing_head_repository
     )
+    expected_existing_head_sha = _git_ops._canonical_reviewed_oid(
+      expected_existing_head_sha, "existing pull request head sha",
+    )
+    reviewed_existing_metadata = _reviewed_existing_pr_metadata(record)
     if (
       existing_head_repository.casefold() != upstream_repo.casefold()
       and existing_head_repository.split("/", 1)[0].casefold()
@@ -2353,21 +3062,50 @@ def _submit_prepared_pr(
         "This pull request branch is not owned by the connected GitHub account. "
         "Nothing was pushed."
       )
+    if existing_branch_lease_sha is not None:
+      branch_lease_sha = str(existing_branch_lease_sha).strip()
+      if not _GIT_SHA.fullmatch(branch_lease_sha):
+        raise ContributionSubmitError(
+          "This reviewed stack update is missing its exact public branch lease. "
+          "Nothing was pushed."
+        )
+    if expected_existing_base_sha is not None:
+      existing_base_sha = str(expected_existing_base_sha).strip()
+      if not _GIT_SHA.fullmatch(existing_base_sha):
+        raise ContributionSubmitError(
+          "This reviewed stack update is missing its exact public base commit. "
+          "Nothing was pushed."
+        )
+  elif (
+    existing_branch_lease_sha is not None
+    or expected_existing_base_sha is not None
+  ):
+    raise ContributionSubmitError(
+      "A stack base or branch lease is valid only for a verified existing "
+      "pull request update."
+    )
   direct_base = (
     _git_ops._validate_branch(direct_base_branch) if direct_base_branch else None
   )
+  if (
+    branch_lease_sha is not None or existing_base_sha is not None
+  ) and direct_base is None:
+    raise ContributionSubmitError(
+      "A stack base or branch lease is valid only for a reviewed pull request "
+      "stack update."
+    )
+  if branch_lease_sha is not None and existing_base_sha is None:
+    raise ContributionSubmitError(
+      "A reviewed child restack must include its exact parent commit."
+    )
   repo = _safe_repo_path(plan.get("repo_path"))
   if not (repo / ".git").exists():
     raise ContributionSubmitError("The staged repo is not a git checkout.")
 
-  title = str(plan.get("title") or record.get("title") or "").strip()
-  body = str(plan.get("body_draft") or "").strip()
-  if not title:
-    raise ContributionSubmitError("This prepared PR is missing a title.")
-  if not body:
-    raise ContributionSubmitError("This prepared PR is missing its reviewed body.")
+  title, body = _exact_reviewed_pr_text(record)
 
   checkout_back = None
+  recovered_attribution_patch: dict = {}
   try:
     current_branch = _git_ops._git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
     checkout_back = (
@@ -2379,9 +3117,44 @@ def _submit_prepared_pr(
     _git_ops._assert_clean_worktree(repo)
     _git_ops._git(repo, "checkout", "-q", branch)
     _git_ops._assert_clean_worktree(repo)
-    expected_base, _, expected_diff = _git_ops._assert_fresh(record, diff_path, repo, branch)
+    if prior_attempt_phase == "normalizing":
+      request = (
+        prior_attempt_receipt.get("effective_request")
+        if isinstance(prior_attempt_receipt, dict) else None
+      )
+      if not isinstance(request, dict):
+        raise ContributionSubmitError("The attribution recovery receipt is incomplete.")
+      recovered_patch = _recover_normalized_attribution(
+        record, repo, branch, request,
+      )
+      if recovered_patch:
+        current_head = str(recovered_patch.get("head_sha") or "")
+        recovered_attribution_patch = recovered_patch
+        if attempt_event is not None:
+          attempt_event("armed", {
+            **request, "action": "attribution_normalized",
+            "head_sha": current_head,
+          }, recovered_patch)
+        record = {**record, **recovered_patch}
+        plan = record.get("plan") or {}
+    expected_base, expected_head, expected_diff = _git_ops._assert_fresh(
+      record, diff_path, repo, branch,
+    )
     _git_ops._assert_coauthor_trailer(repo, branch)
-    if direct_base:
+    if existing_head_repository is not None:
+      # Updating a known PR is not the same routing decision as creating a new
+      # one. Its live identity fixes the destination repository regardless of
+      # generic upstream permission discovered for the connected account.
+      same_repo_submission = (
+        existing_head_repository.casefold() == upstream_repo.casefold()
+      )
+    else:
+      same_repo_submission = bool(
+        direct_base
+        or upstream_repo.split("/", 1)[0].casefold() == login.casefold()
+        or _git_ops._has_upstream_push_permission(repo, upstream_repo)
+      )
+    if same_repo_submission:
       _git_ops._assert_head_attribution(
         repo,
         branch,
@@ -2390,7 +3163,9 @@ def _submit_prepared_pr(
       )
       record_patch = {}
     else:
-      record_patch = _git_ops._normalize_head_attribution(
+      record_patch = _git_ops._record_patch_with(
+        recovered_attribution_patch,
+        _git_ops._normalize_head_attribution(
         repo,
         branch,
         author_name=author_name,
@@ -2398,8 +3173,113 @@ def _submit_prepared_pr(
         base_sha=expected_base,
         expected_diff=expected_diff,
         record=record,
+        before_amend=(
+          (lambda before: attempt_event("normalizing", {
+            "action": "normalize_attribution",
+            "previous_head_sha": before["sha"], "tree": before["tree"],
+            "parents": before["parents"],
+            "expected_normalized_head_sha": before[
+              "expected_normalized_head_sha"
+            ],
+            "author_date": before["author_date"], "base_sha": expected_base,
+            "diff_sha256": expected_diff, "author_name": author_name,
+            "author_email": author_email,
+          }, {})) if attempt_event is not None else None
+        ),
+        ),
       )
+      if record_patch and attempt_event is not None:
+        attempt_event("armed", {
+          "action": "attribution_normalized",
+          "repo": upstream_repo,
+          "branch": branch,
+          "base_sha": expected_base,
+          "previous_head_sha": expected_head,
+          "head_sha": str(record_patch.get("head_sha") or ""),
+          "author_name": author_name,
+          "author_email": author_email,
+        }, record_patch)
     _git_ops._assert_clean_worktree(repo)
+
+    # An exact already-public PR is a terminal reconciliation, not a new
+    # publication. Confirm it after every immutable local freshness and
+    # attribution check but before fetching today's upstream: later upstream
+    # movement must not make an already-completed owner action unrecoverable.
+    # A branch-only recovery is different: it suppresses a duplicate push but
+    # still passes through the current merge preflight before PR creation.
+    recorded_base = (
+      direct_base
+      or record.get("last_submit_base_branch")
+      or record.get("last_submit_upstream_branch")
+      or (
+        (plan.get("stack") or {}).get("base_branch")
+        if isinstance(plan.get("stack"), dict)
+        else None
+      )
+    )
+    recovery = _authoritative_public_reconciliation(
+      record,
+      base_branch=str(recorded_base or "") or None,
+      # Existing-PR updates carry an authoritative head repository; their
+      # explicit base branch does not imply that the head lives upstream.
+      same_repo=(
+        None if expected_existing_pr_number is not None else bool(direct_base)
+      ),
+      expected_pr_number=expected_existing_pr_number,
+      expected_head_repository=existing_head_repository,
+    )
+    if recovery is not None and recovery.pr_url is not None:
+      pushed_patch = _git_ops._record_patch_with(record_patch, {
+        "head_repository": recovery.head_repository,
+        "last_submit_stage": "pushed",
+        "last_submit_push_sha": str(plan.get("head_sha") or "").lower(),
+        "last_submit_base_branch": str(recorded_base or ""),
+        "last_pushed_branch": (
+          branch if same_repo_submission else f"{login}:{branch}"
+        ),
+        "last_pushed_branch_url": (
+          f"https://github.com/{recovery.head_repository}/tree/"
+          f"{quote(branch, safe='/')}"
+        ),
+        "publication_stage": recovery.publication_stage,
+      })
+      reconcile_request = {
+        "action": "reconcile_pr",
+        "repo": upstream_repo,
+        "number": recovery.pr_number,
+        "url": recovery.pr_url,
+        "head_repository": recovery.head_repository,
+        "branch": branch,
+        "head_sha": str(plan.get("head_sha") or "").lower(),
+        "base_branch": str(recorded_base or ""),
+        "labels": _reviewed_pr_labels(plan),
+      }
+      label_patch = _apply_reviewed_pr_labels(
+        repo,
+        upstream_repo,
+        recovery.pr_number,
+        _reviewed_pr_labels(plan),
+      )
+      completed_patch = _git_ops._record_patch_with(pushed_patch, label_patch)
+      if attempt_event is not None:
+        attempt_event(
+          "complete", reconcile_request, completed_patch,
+        )
+      return (
+        recovery.pr_url,
+        recovery.pr_number,
+        completed_patch,
+      )
+    public_branch_recovery = recovery is not None
+    if prior_attempt_phase in {"branch_published", "pr_ambiguous", "complete"} and (
+      recovery is None
+    ):
+      # The caller's authoritative read is not a lease: the branch can be
+      # reset between that read and this owning publication primitive. Before
+      # this function can repush after a post-mutation receipt, prove the
+      # currently installed source again while the caller still holds its
+      # source lock. A receipt alone never authorizes recreating public state.
+      _assert_pending_equivalence_preflight(record)
 
     try:
       merge_patch = _git_ops._assert_merges_with_upstream(repo, upstream_repo, branch)
@@ -2414,6 +3294,37 @@ def _submit_prepared_pr(
     submit_base = direct_base or _git_ops._validate_branch(
       str(merge_patch.get("last_submit_upstream_branch") or "")
     )
+    record_patch = _git_ops._record_patch_with(
+      record_patch, {"last_submit_base_branch": submit_base},
+    )
+
+    # The route's earlier PR read is not a lease. Re-read the exact old public
+    # head, base, and reviewed text immediately before the branch mutation.
+    # Title/body are preconditions only: this path never PATCHes them.
+    if (
+      expected_existing_pr_number is not None
+      and not public_branch_recovery
+    ):
+      reviewed_title, reviewed_body = reviewed_existing_metadata or (None, None)
+      exact_old_state = _confirm_existing_pr_update(
+        repo,
+        upstream_repo,
+        expected_existing_pr_number,
+        expected_head_repository=existing_head_repository,
+        expected_head_sha=expected_existing_head_sha,
+        branch=branch,
+        base_branch=submit_base,
+        expected_base_sha=existing_base_sha,
+        expected_title=reviewed_title,
+        expected_body=reviewed_body,
+      )
+      if exact_old_state is None:
+        raise ContributionSubmitError(
+          "GitHub could not confirm the exact reviewed pull request state "
+          "immediately before its branch update. Nothing was pushed.",
+          status_code=503,
+          code="update_unconfirmed",
+        )
 
     # Pre-publication truth check: everything above proves WHAT would be sent;
     # only the ledger row says WHETHER it was already sent, and that row is
@@ -2424,13 +3335,13 @@ def _submit_prepared_pr(
     # branch) before GitHub refused the create. The resume path
     # (expected_existing_pr_number) legitimately expects its open PR and
     # keeps its own stricter exact-commit verification below.
-    if expected_existing_pr_number is None:
+    if expected_existing_pr_number is None and not public_branch_recovery:
       conflict = _existing_branch_pr(
         repo,
         upstream_repo,
         login,
         branch,
-        same_repo=bool(direct_base),
+        same_repo=same_repo_submission,
       )
       if conflict is not None:
         conflict_url, conflict_state = conflict
@@ -2443,7 +3354,80 @@ def _submit_prepared_pr(
         )
 
     push_source = "HEAD"
-    if direct_base:
+    push_source_sha = str(
+      record_patch.get("head_sha") or expected_head
+    ).strip().lower()
+    if not _GIT_SHA.fullmatch(push_source_sha):
+      raise ContributionSubmitError(
+        "Could not resolve the exact reviewed commit before pushing."
+      )
+
+    prior_push_request = None
+    if prior_attempt_phase in {"push_pending", "push_ambiguous"}:
+      prior_push_request = (
+        prior_attempt_receipt.get("effective_request")
+        if isinstance(prior_attempt_receipt, dict) else None
+      )
+      if (
+        not isinstance(prior_push_request, dict)
+        or prior_push_request.get("action") != "push"
+        or prior_push_request.get("repo") != upstream_repo
+        or prior_push_request.get("branch") != branch
+        or prior_push_request.get("head_sha") != push_source_sha
+        or "expected_remote_sha" not in prior_push_request
+      ):
+        raise ContributionSubmitError(
+          "The prior branch push receipt is incomplete. Nothing was pushed; "
+          "refresh and review this contribution again.",
+          code="review_refresh_needed",
+          record_patch=record_patch,
+        )
+
+    def expected_remote_tip(head_repository: str) -> str | None:
+      """Bind first push or no-effect replay to one authoritative old tip."""
+      actual = _git_ops._authoritative_upstream_branch_sha(
+        repo, head_repository, branch,
+      )
+      if prior_push_request is not None:
+        if prior_push_request.get("head_repository") != head_repository:
+          raise ContributionSubmitError(
+            "The prior branch push targeted a different repository. Nothing "
+            "was pushed.", code="review_refresh_needed",
+          )
+        expected = prior_push_request.get("expected_remote_sha")
+        if expected is not None:
+          expected = _git_ops._canonical_reviewed_oid(
+            expected, "previous remote branch head",
+          )
+        if actual != expected:
+          raise ContributionSubmitError(
+            "The GitHub branch changed after the prior push attempt. Nothing "
+            "was pushed again; refresh and review the public branch.",
+            code="review_refresh_needed",
+            record_patch=record_patch,
+          )
+        return expected
+      if expected_existing_head_sha is not None and actual != expected_existing_head_sha:
+        raise ContributionSubmitError(
+          "The pull request branch changed during publication validation. "
+          "Nothing was pushed; refresh and review the update again.",
+          code="review_refresh_needed",
+          record_patch=record_patch,
+        )
+      return expected_existing_head_sha if expected_existing_head_sha is not None else actual
+
+    def push_was_authoritatively_accepted(
+      head_repository: str,
+    ) -> bool | None:
+      """Resolve one exhausted ambiguous push without trusting its journal."""
+      try:
+        return _git_ops._authoritative_upstream_branch_sha(
+          repo, head_repository, branch,
+        ) == push_source_sha
+      except (ContributionSubmitError, subprocess.TimeoutExpired, OSError):
+        return None
+
+    if same_repo_submission:
       try:
         _git_ops._assert_upstream_push_permission(repo, upstream_repo)
       except ContributionSubmitError as exc:
@@ -2452,20 +3436,107 @@ def _submit_prepared_pr(
       published_repo = upstream_repo
       record_patch = _git_ops._record_patch_with(record_patch, {
         "head_repository": upstream_repo,
-        "last_submit_base_branch": direct_base,
-        "last_submit_mode": "stack",
-        "last_submit_push_sha": _git_ops._git(repo, "rev-parse", "HEAD").stdout.strip(),
+        "last_submit_base_branch": submit_base,
+        "last_submit_mode": "stack" if direct_base else "upstream-repo",
       })
-      last_push_error = _push_branch(
-        repo, push_remote, branch, push_source,
-      )
-      if last_push_error:
-        raise push_rejected(last_push_error, record_patch=record_patch)
+      if not public_branch_recovery:
+        remote_before_push = expected_remote_tip(upstream_repo)
+        pending_patch = _git_ops._record_patch_with(record_patch, {
+          "last_submit_stage": "push_pending",
+          "last_submit_push_sha": push_source_sha,
+          "head_repository": upstream_repo,
+        })
+        if attempt_event is not None:
+          attempt_event("push_pending", {
+            "action": "push",
+            "repo": upstream_repo,
+            "head_repository": upstream_repo,
+            "branch": branch,
+            "head_sha": push_source_sha,
+            "base_branch": submit_base,
+            "expected_remote_sha": remote_before_push,
+          }, pending_patch)
+        try:
+          if branch_lease_sha is not None:
+            if remote_before_push != branch_lease_sha:
+              raise ContributionSubmitError(
+                "The reviewed stack branch lease changed before its push. "
+                "Nothing was pushed.",
+                code="review_refresh_needed",
+                record_patch=pending_patch,
+              )
+            _push_stack_tip_with_lease(
+              repo,
+              upstream_repo=upstream_repo,
+              target_branch=branch,
+              expected_base=branch_lease_sha,
+              landed_sha=push_source_sha,
+            )
+            last_push_error = None
+          else:
+            last_push_error = _push_branch(
+              repo, push_remote, branch, push_source, remote_before_push,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+          ambiguous_patch = _git_ops._record_patch_with(record_patch, {
+            "last_submit_stage": "push_ambiguous",
+            "last_submit_push_sha": push_source_sha,
+            "head_repository": upstream_repo,
+          })
+          if attempt_event is not None:
+            attempt_event("push_ambiguous", {
+              "action": "push", "repo": upstream_repo,
+              "head_repository": upstream_repo, "branch": branch,
+              "head_sha": push_source_sha, "base_branch": submit_base,
+              "expected_remote_sha": remote_before_push,
+            }, ambiguous_patch)
+          raise ContributionSubmitError(
+            "The branch push outcome is ambiguous; GitHub must confirm the "
+            "exact reviewed head before retrying.", status_code=503,
+            code="push_ambiguous", record_patch=ambiguous_patch,
+          ) from exc
+        if last_push_error:
+          accepted = push_was_authoritatively_accepted(upstream_repo)
+          if accepted is True:
+            last_push_error = None
+          elif (
+            (accepted is None and prior_push_request is not None)
+            or _is_transient_push_error(last_push_error)
+          ):
+            ambiguous_patch = _git_ops._record_patch_with(record_patch, {
+              "last_submit_stage": "push_ambiguous",
+              "last_submit_push_sha": push_source_sha,
+              "head_repository": upstream_repo,
+            })
+            if attempt_event is not None:
+              attempt_event("push_ambiguous", {
+                "action": "push", "repo": upstream_repo,
+                "head_repository": upstream_repo, "branch": branch,
+                "head_sha": push_source_sha, "base_branch": submit_base,
+                "expected_remote_sha": remote_before_push,
+              }, ambiguous_patch)
+            raise ContributionSubmitError(
+              "The branch push outcome is ambiguous; GitHub must confirm "
+              "the exact reviewed head before retrying.", status_code=503,
+              code="push_ambiguous", record_patch=ambiguous_patch,
+            )
+          else:
+            if attempt_event is not None:
+              attempt_event("armed", {
+                "action": "push_rejected", "repo": upstream_repo,
+                "head_repository": upstream_repo, "branch": branch,
+                "head_sha": push_source_sha, "base_branch": submit_base,
+              }, record_patch)
+            raise push_rejected(last_push_error, record_patch=record_patch)
+
     else:
-      try:
-        fork_slug = _ensure_owner_fork_remote(repo, upstream_repo, login)
-      except ContributionSubmitError as exc:
-        raise _git_ops._merge_error_patch(exc, record_patch) from exc
+      if public_branch_recovery:
+        fork_slug = recovery.head_repository
+      else:
+        try:
+          fork_slug = _ensure_owner_fork_remote(repo, upstream_repo, login)
+        except ContributionSubmitError as exc:
+          raise _git_ops._merge_error_patch(exc, record_patch) from exc
       if (
         existing_head_repository is not None
         and fork_slug.casefold() != existing_head_repository.casefold()
@@ -2477,9 +3548,96 @@ def _submit_prepared_pr(
         )
       record_patch = _git_ops._record_patch_with(record_patch, {"head_repository": fork_slug})
       push_source = "HEAD"
-      last_push_error = _push_topic_branch(repo, branch, push_source)
-      if last_push_error:
-        raise push_rejected(last_push_error, record_patch=record_patch)
+      if not public_branch_recovery:
+        remote_before_push = expected_remote_tip(fork_slug)
+        pending_patch = _git_ops._record_patch_with(record_patch, {
+          "last_submit_stage": "push_pending",
+          "last_submit_push_sha": push_source_sha,
+          "head_repository": fork_slug,
+        })
+        if attempt_event is not None:
+          attempt_event("push_pending", {
+            "action": "push",
+            "repo": upstream_repo,
+            "head_repository": fork_slug,
+            "branch": branch,
+            "head_sha": push_source_sha,
+            "base_branch": submit_base,
+            "expected_remote_sha": remote_before_push,
+          }, pending_patch)
+        try:
+          if branch_lease_sha is not None:
+            if remote_before_push != branch_lease_sha:
+              raise ContributionSubmitError(
+                "The reviewed stack branch lease changed before its push. "
+                "Nothing was pushed.",
+                code="review_refresh_needed",
+                record_patch=pending_patch,
+              )
+            _push_stack_tip_with_lease(
+              repo,
+              upstream_repo=fork_slug,
+              target_branch=branch,
+              expected_base=branch_lease_sha,
+              landed_sha=push_source_sha,
+            )
+            last_push_error = None
+          else:
+            last_push_error = _push_topic_branch(
+              repo, branch, push_source, remote_before_push,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+          ambiguous_patch = _git_ops._record_patch_with(record_patch, {
+            "last_submit_stage": "push_ambiguous",
+            "last_submit_push_sha": push_source_sha,
+            "head_repository": fork_slug,
+          })
+          if attempt_event is not None:
+            attempt_event("push_ambiguous", {
+              "action": "push", "repo": upstream_repo,
+              "head_repository": fork_slug, "branch": branch,
+              "head_sha": push_source_sha, "base_branch": submit_base,
+              "expected_remote_sha": remote_before_push,
+            }, ambiguous_patch)
+          raise ContributionSubmitError(
+            "The branch push outcome is ambiguous; GitHub must confirm the "
+            "exact reviewed head before retrying.", status_code=503,
+            code="push_ambiguous", record_patch=ambiguous_patch,
+          ) from exc
+        if last_push_error:
+          accepted = push_was_authoritatively_accepted(fork_slug)
+          if accepted is True:
+            last_push_error = None
+          elif (
+            (accepted is None and prior_push_request is not None)
+            or _is_transient_push_error(last_push_error)
+          ):
+            ambiguous_patch = _git_ops._record_patch_with(record_patch, {
+              "last_submit_stage": "push_ambiguous",
+              "last_submit_push_sha": push_source_sha,
+              "head_repository": fork_slug,
+            })
+            if attempt_event is not None:
+              attempt_event("push_ambiguous", {
+                "action": "push", "repo": upstream_repo,
+                "head_repository": fork_slug, "branch": branch,
+                "head_sha": push_source_sha, "base_branch": submit_base,
+                "expected_remote_sha": remote_before_push,
+              }, ambiguous_patch)
+            raise ContributionSubmitError(
+              "The branch push outcome is ambiguous; GitHub must confirm "
+              "the exact reviewed head before retrying.", status_code=503,
+              code="push_ambiguous", record_patch=ambiguous_patch,
+            )
+          else:
+            if attempt_event is not None:
+              attempt_event("armed", {
+                "action": "push_rejected", "repo": upstream_repo,
+                "head_repository": fork_slug, "branch": branch,
+                "head_sha": push_source_sha, "base_branch": submit_base,
+              }, record_patch)
+            raise push_rejected(last_push_error, record_patch=record_patch)
+
       published_repo = fork_slug
     pushed_branch_url = (
       f"https://github.com/{published_repo}/tree/{quote(branch, safe='/')}"
@@ -2488,7 +3646,8 @@ def _submit_prepared_pr(
       **record_patch,
       "last_submit_stage": "pushed",
       "last_pushed_branch": (
-        branch if direct_base else f"{login}:{branch}"
+        branch if same_repo_submission else f"{login}:{branch}"
+
       ),
       "last_pushed_branch_url": pushed_branch_url,
     }
@@ -2496,6 +3655,7 @@ def _submit_prepared_pr(
       pushed_patch.get("last_submit_push_sha")
       or pushed_patch.get("head_sha")
       or plan.get("head_sha")
+      or push_source_sha
       or ""
     ).strip()
     if not _GIT_SHA.match(pushed_sha):
@@ -2506,17 +3666,39 @@ def _submit_prepared_pr(
         record_patch=pushed_patch,
       )
     pushed_patch["last_submit_push_sha"] = pushed_sha
+    if attempt_event is not None:
+      attempt_event("branch_published", {
+        "action": "push",
+        "repo": upstream_repo,
+        "head_repository": published_repo,
+        "branch": branch,
+        "head_sha": pushed_sha,
+        "base_branch": submit_base,
+      }, pushed_patch)
 
     if expected_existing_pr_number is not None:
-      existing = _confirm_existing_pr_update(
-        repo,
-        upstream_repo,
-        expected_existing_pr_number,
-        expected_head_repository=existing_head_repository,
-        expected_head_sha=pushed_sha,
-        branch=branch,
-        base_branch=submit_base,
-      )
+      reviewed_title, reviewed_body = reviewed_existing_metadata or (None, None)
+      try:
+        existing = _confirm_existing_pr_update(
+          repo,
+          upstream_repo,
+          expected_existing_pr_number,
+          expected_head_repository=existing_head_repository,
+          expected_head_sha=pushed_sha,
+          branch=branch,
+          base_branch=submit_base,
+          expected_base_sha=existing_base_sha,
+          expected_title=reviewed_title,
+          expected_body=reviewed_body,
+        )
+      except ContributionSubmitError as exc:
+        raise ContributionSubmitError(
+          exc.message,
+          exc.status_code,
+          record_patch=pushed_patch,
+          code=exc.code,
+          detail=exc.detail,
+        ) from exc
       if not existing:
         raise ContributionSubmitError(
           "The approved pull request is no longer open on this exact branch. "
@@ -2525,12 +3707,34 @@ def _submit_prepared_pr(
           record_patch=pushed_patch,
         )
       existing_url, existing_stage = existing
+      completed_patch = _git_ops._record_patch_with(
+        pushed_patch, {"publication_stage": existing_stage},
+      )
+      if attempt_event is not None:
+        attempt_event("complete", {
+          "action": "update_pr",
+          "repo": upstream_repo,
+          "number": expected_existing_pr_number,
+          "url": existing_url,
+          "head_repository": published_repo,
+          "branch": branch,
+          "head_sha": pushed_sha,
+          "base_branch": submit_base,
+        }, completed_patch)
       return (
         existing_url,
         expected_existing_pr_number,
-        _git_ops._record_patch_with(
-          pushed_patch, {"publication_stage": existing_stage},
-        ),
+        completed_patch,
+      )
+
+    if prior_attempt_phase == "pr_ambiguous":
+      raise ContributionSubmitError(
+        "GitHub has not yet confirmed whether the earlier pull request "
+        "creation completed. The exact branch is preserved; retry after "
+        "GitHub exposes the pull request.",
+        status_code=503,
+        code="create_unconfirmed",
+        record_patch=pushed_patch,
       )
 
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as f:
@@ -2541,7 +3745,8 @@ def _submit_prepared_pr(
         create_args = [
           "pr", "create",
           "-R", upstream_repo,
-          "-H", branch if direct_base else f"{login}:{branch}",
+          "-H", branch if same_repo_submission else f"{login}:{branch}",
+
           "--title", title,
           "--body-file", body_file,
         ]
@@ -2550,6 +3755,20 @@ def _submit_prepared_pr(
         create_args.extend(("--base", submit_base))
         create_transport_error = None
         try:
+          create_request = {
+            "action": "create_pr",
+            "repo": upstream_repo,
+            "head_repository": published_repo,
+            "branch": branch,
+            "head_sha": pushed_sha,
+            "base_branch": submit_base,
+            "title": title,
+            "body": body,
+            "publication_stage": publication_stage,
+            "labels": _reviewed_pr_labels(plan),
+          }
+          if attempt_event is not None:
+            attempt_event("branch_published", create_request, pushed_patch)
           pr = _git_ops._gh(repo, *create_args, check=False)
         except subprocess.TimeoutExpired:
           pr = None
@@ -2561,6 +3780,17 @@ def _submit_prepared_pr(
           create_transport_error = (
             "Could not start the GitHub pull request creation command."
           )
+        create_detail = (
+          create_transport_error
+          or ((pr.stderr or pr.stdout or "").strip() if pr is not None else "")
+        )
+        create_outcome_uncertain = (
+          pr is None
+          or pr.returncode == 0
+          or _is_transient_push_error(create_detail)
+        )
+        if attempt_event is not None and create_outcome_uncertain:
+          attempt_event("pr_ambiguous", create_request, pushed_patch)
         if pr is None or pr.returncode != 0:
           # Retried sends commonly arrive after GitHub already created the PR.
           # A create transport failure is also ambiguous: GitHub may have
@@ -2574,35 +3804,66 @@ def _submit_prepared_pr(
             branch,
             expected_head_sha=pushed_sha,
             base_branch=submit_base,
-            same_repo=bool(direct_base),
+            same_repo=same_repo_submission,
+
           )
           if existing:
             existing_number = _parse_pr_number(existing)
+            confirmed_existing = (
+              _confirm_existing_pr_update(
+                repo,
+                upstream_repo,
+                existing_number,
+                expected_head_repository=published_repo,
+                expected_head_sha=pushed_sha,
+                branch=branch,
+                base_branch=submit_base,
+              )
+              if existing_number is not None else None
+            )
+            if confirmed_existing is None or confirmed_existing[0] != existing:
+              existing = None
+          if existing:
+            existing_number = _parse_pr_number(existing)
+            if attempt_event is not None:
+              attempt_event("pr_ambiguous", {
+                **create_request,
+                "number": existing_number,
+                "url": existing,
+              }, pushed_patch)
             label_patch = _apply_reviewed_pr_labels(
               repo,
               upstream_repo,
               existing_number,
               _reviewed_pr_labels(plan),
             )
+            completed_patch = _git_ops._record_patch_with(
+              _git_ops._record_patch_with(
+                pushed_patch,
+                {"publication_stage": confirmed_existing[1]},
+              ),
+              label_patch,
+            )
+            if attempt_event is not None:
+              attempt_event("complete", {
+                **create_request,
+                "number": existing_number,
+                "url": existing,
+              }, completed_patch)
             return (
               existing,
               existing_number,
-              _git_ops._record_patch_with(
-                _git_ops._record_patch_with(
-                  pushed_patch, {"publication_stage": publication_stage},
-                ),
-                label_patch,
-              ),
+              completed_patch,
             )
-          detail = create_transport_error or (
-            pr.stderr or pr.stdout or "GitHub command failed."
-          ).strip()
+          detail = create_detail or "GitHub command failed."
           raise ContributionSubmitError(detail[:600] or "GitHub command failed.")
       except ContributionSubmitError as exc:
         raise ContributionSubmitError(
           f"{exc.message} The branch was pushed to {pushed_branch_url}.",
           exc.status_code,
           record_patch=pushed_patch,
+          code=exc.code,
+          detail=exc.detail,
         )
     finally:
       try:
@@ -2610,35 +3871,74 @@ def _submit_prepared_pr(
       except OSError:
         pass
     url = (pr.stdout or "").strip().splitlines()[-1].strip()
-    if not url.startswith("https://github.com/"):
+    number = _parse_pr_number(url)
+    if (
+      number is None
+      or url != f"https://github.com/{upstream_repo}/pull/{number}"
+    ):
       raise ContributionSubmitError(
-        f"GitHub did not return a pull request URL. The branch was pushed "
-        f"to {pushed_branch_url}.",
+        f"GitHub did not return the exact expected pull request URL. The "
+        f"branch was pushed to {pushed_branch_url}.",
         record_patch=pushed_patch,
       )
-    number = _parse_pr_number(url)
+    confirmed = _confirm_existing_pr_update(
+      repo,
+      upstream_repo,
+      number,
+      expected_head_repository=published_repo,
+      expected_head_sha=pushed_sha,
+      branch=branch,
+      base_branch=submit_base,
+    )
+    if confirmed is None or confirmed[0] != url:
+      raise ContributionSubmitError(
+        "GitHub returned a pull request URL, but did not confirm that it "
+        f"points to the exact reviewed branch. The branch was pushed to "
+        f"{pushed_branch_url}.",
+        status_code=503,
+        code="create_unconfirmed",
+        record_patch=pushed_patch,
+      )
+    _confirmed_url, confirmed_stage = confirmed
+    if attempt_event is not None:
+      attempt_event("pr_ambiguous", {
+        **create_request,
+        "number": number,
+        "url": url,
+      }, pushed_patch)
     label_patch = _apply_reviewed_pr_labels(
       repo,
       upstream_repo,
       number,
       _reviewed_pr_labels(plan),
     )
+    completed_patch = _git_ops._record_patch_with(
+      _git_ops._record_patch_with(
+        pushed_patch, {"publication_stage": confirmed_stage},
+      ),
+      label_patch,
+    )
+    if attempt_event is not None:
+      attempt_event("complete", {
+        **create_request,
+        "number": number,
+        "url": url,
+      }, completed_patch)
     return (
       url,
       number,
-      _git_ops._record_patch_with(
-        _git_ops._record_patch_with(
-          pushed_patch, {"publication_stage": publication_stage},
-        ),
-        label_patch,
-      ),
+      completed_patch,
     )
   finally:
     if checkout_back:
       _git_ops._git(repo, "checkout", "-q", checkout_back, check=False)
 
 
-def _preflight_prepared_stack(rows: list[dict]) -> None:
+def _preflight_prepared_stack(
+  rows: list[dict],
+  *,
+  source_preflight: Callable[[dict], str] | None = None,
+) -> None:
   """Prove every private layer before the first upstream branch is pushed."""
   if not shutil.which("git") or not shutil.which("gh"):
     raise ContributionSubmitError(
@@ -2719,6 +4019,14 @@ def _preflight_prepared_stack(rows: list[dict]) -> None:
       _git_ops._assert_clean_worktree(repo)
       _git_ops._assert_fresh(record, row["diff_path"], repo, branch)
       _git_ops._assert_coauthor_trailer(repo, branch)
+      # This runs under the complete review/source lock set acquired by the
+      # route. It is the last local-source boundary before any stack layer can
+      # push, not merely a review-card hint that can go stale before Send.
+      (
+        source_preflight(record)
+        if source_preflight is not None
+        else _assert_pending_equivalence_before_publication(record)
+      )
       _git_ops._assert_head_attribution(
         repo,
         branch,
@@ -2828,19 +4136,30 @@ def _merged_parent_successor_plan(record: dict) -> dict:
   merged_base_sha = str(successor.get("merged_base_sha") or "").strip()
   successor_head_sha = str(plan.get("head_sha") or "").strip()
   target_base_sha = str(plan.get("base_sha") or "").strip()
-  if not all(
-    _GIT_SHA.fullmatch(value)
-    for value in (old_head_sha, old_base_sha, successor_head_sha, target_base_sha)
-  ):
+  try:
+    for label, value in (
+      ("old successor head sha", old_head_sha),
+      ("old successor base sha", old_base_sha),
+      ("successor head sha", successor_head_sha),
+      ("successor target base sha", target_base_sha),
+    ):
+      _git_ops._canonical_reviewed_oid(value, label)
+  except ContributionSubmitError:
     raise ContributionSubmitError(
       "This merged-parent successor is missing its exact reviewed commits. "
       "Nothing was pushed."
-    )
-  if merged_base_sha and not _GIT_SHA.fullmatch(merged_base_sha):
-    raise ContributionSubmitError(
-      "This merged-parent successor has an invalid merged-parent commit. "
-      "Nothing was pushed."
-    )
+    ) from None
+  if merged_base_sha:
+    try:
+      _git_ops._canonical_reviewed_oid(
+        merged_base_sha, "merged-parent commit sha",
+      )
+    except ContributionSubmitError:
+      raise ContributionSubmitError(
+        "This merged-parent successor has an invalid merged-parent commit. "
+        "Nothing was pushed."
+      ) from None
+
   old_base_branch = _git_ops._validate_branch(successor.get("old_base_branch"))
   target_base_branch = _git_ops._validate_branch(
     successor.get("base_branch") or plan.get("base_branch")
@@ -2988,7 +4307,7 @@ def _retarget_pr_base(
   if proc.returncode == 0:
     return "accepted", ""
   error = (proc.stderr or proc.stdout or "").strip()
-  if _is_transient_push_error(error):
+  if _git_ops._is_transient_transport_error(error):
     return "ambiguous", error
   return "rejected", error
 
@@ -3013,6 +4332,7 @@ def _advance_merged_parent_successor(
   expected_head_repository: str,
   live_head_sha: str,
   live_base_branch: str,
+  attempt_event: Callable[[str, dict, dict | None], None] | None = None,
 ) -> tuple[str, int, dict]:
   """Apply one reviewed merged-parent successor to an already-open PR.
 
@@ -3063,6 +4383,7 @@ def _advance_merged_parent_successor(
   new_head = journal["successor_head_sha"]
   old_base_branch = journal["old_base_branch"]
   target_base_branch = journal["target_base_branch"]
+  reviewed_title, reviewed_body = _reviewed_existing_pr_metadata(record)
 
   step = _classify_merged_parent_successor(
     journal, live_head_sha=live_head_sha, live_base_branch=live_base_branch,
@@ -3093,10 +4414,22 @@ def _advance_merged_parent_successor(
       branch=branch,
       base_branch=base_branch,
       expected_base_sha=expected_base_sha,
+      expected_title=reviewed_title,
+      expected_body=reviewed_body,
     )
 
   def confirm(base_branch: str, expected_base_sha: str | None):
     return confirm_state(new_head, base_branch, expected_base_sha)
+
+  def complete_successor(
+    confirmed: tuple[str, str], target_base_sha: str,
+  ) -> tuple[str, int, dict]:
+    """Return the exact successor state after both public mutations settle."""
+    url, stage = confirmed
+    successor_patch = _successor_record_patch(
+      journal, witness, target_base_sha=target_base_sha, stage=stage,
+    )
+    return url, expected_number, successor_patch
 
   def require_target_base(*, record_patch: dict | None = None) -> str:
     try:
@@ -3193,10 +4526,7 @@ def _advance_merged_parent_successor(
         ),
         record_patch=witness,
       )
-    url, stage = confirmed
-    return url, expected_number, _successor_record_patch(
-      journal, witness, target_base_sha=target_base_sha, stage=stage,
-    )
+    return complete_successor(confirmed, target_base_sha)
 
   # GitHub's pull-request ``base.sha`` is a comparison snapshot, not a lease on
   # the current base ref. Resolve the named old base directly before either
@@ -3263,6 +4593,19 @@ def _advance_merged_parent_successor(
         code="update_unconfirmed",
         detail="The exact old head and base could not be confirmed before push.",
       )
+    push_request = {
+      "action": "advance_successor_branch",
+      "repo": upstream_repo,
+      "number": expected_number,
+      "head_repository": head_repository,
+      "branch": branch,
+      "previous_head_sha": old_head,
+      "head_sha": new_head,
+      "base_branch": old_base_branch,
+      "target_base_branch": target_base_branch,
+    }
+    if attempt_event is not None:
+      attempt_event("push_pending", push_request, witness)
     # Public mutation #1: exact force-with-lease from the old public head to
     # the reviewed successor. A moved lease fails closed inside this call.
     try:
@@ -3283,6 +4626,8 @@ def _advance_merged_parent_successor(
           record_patch=witness,
         ) from exc
       raise
+    if attempt_event is not None:
+      attempt_event("branch_published", push_request, witness)
     # Confirm the rewrite while the merged-parent base still stands, before
     # any retarget. A base that already moved here is drift, not this action.
     try:
@@ -3323,10 +4668,7 @@ def _advance_merged_parent_successor(
       record_patch=_git_ops._record_patch_with(witness, exc.record_patch),
     ) from exc
   if confirmed:
-    url, stage = confirmed
-    return url, expected_number, _successor_record_patch(
-      journal, witness, target_base_sha=target_base_sha, stage=stage,
-    )
+    return complete_successor(confirmed, target_base_sha)
   try:
     confirmed_old = confirm(old_base_branch, journal["old_base_sha"])
   except ContributionSubmitError as exc:
@@ -3350,6 +4692,18 @@ def _advance_merged_parent_successor(
   # Public mutation #2: retarget the base to the surviving branch, then confirm
   # the exact new head and base. Each request attempts the edit once, and only
   # after the authoritative read above proves it still has not landed.
+  retarget_request = {
+    "action": "retarget_successor_pr",
+    "repo": upstream_repo,
+    "number": expected_number,
+    "head_repository": head_repository,
+    "branch": branch,
+    "head_sha": new_head,
+    "previous_base_branch": old_base_branch,
+    "base_branch": target_base_branch,
+  }
+  if attempt_event is not None:
+    attempt_event("pr_ambiguous", retarget_request, witness)
   edit_result, edit_error = _retarget_pr_base(
     repo, upstream_repo, expected_number, base_branch=target_base_branch,
   )
@@ -3384,10 +4738,7 @@ def _advance_merged_parent_successor(
       detail=(edit_error[:300] if edit_error else "The base retarget was rejected."),
       record_patch=witness,
     )
-  url, stage = confirmed
-  return url, expected_number, _successor_record_patch(
-    journal, witness, target_base_sha=target_base_sha, stage=stage,
-  )
+  return complete_successor(confirmed, target_base_sha)
 
 
 def _land_reviewed_stack(rows: list[dict]) -> tuple[str, str]:

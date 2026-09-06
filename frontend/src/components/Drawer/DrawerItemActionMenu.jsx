@@ -25,6 +25,7 @@ export default function DrawerItemActionMenu({
   pinned,
   canInstall,
   canShare,
+  canInspectSource,
   placement,
   focusFirstAction = false,
   restoreFocusRef,
@@ -34,6 +35,7 @@ export default function DrawerItemActionMenu({
   onRename,
   onInstall,
   onShare,
+  onInspectSource,
   onDelete,
   onDeleteData,
 }) {
@@ -331,6 +333,16 @@ export default function DrawerItemActionMenu({
                   onClick={() => run(onShare, { restoreFocus: false })}
                 >
                   Share app
+                </button>
+              )}
+              {canInspectSource && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="drawer__item-action-item"
+                  onClick={() => run(onInspectSource, { restoreFocus: false })}
+                >
+                  View source
                 </button>
               )}
               <div className="drawer__item-action-separator" role="separator" />

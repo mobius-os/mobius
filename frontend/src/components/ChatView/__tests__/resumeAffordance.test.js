@@ -161,8 +161,8 @@ test('ChatView routes both offscreen attention nudges through the controller', (
     'an elapsed manual park names its now-available action')
   assert.match(
     chatView,
-    /className="chat__question-nudge"\s+onClick=\{revealConversationTail\}/,
-    'the question nudge routes through the scroll controller',
+    /className="chat__question-nudge"\s+onClick=\{\(\) => revealPendingQuestion\(pendingQuestionEl\)\}/,
+    'the question nudge reveals the card from its top through the scroll controller',
   )
   assert.match(
     chatView,

@@ -15,8 +15,7 @@ import {
   suppressedQuestionToolIndices,
 } from './streamReducers.js'
 import { stripAugmentation } from './msgText.js'
-import ErrorCard from './ErrorCard.jsx'
-import { isResourcePause } from './resourcePause.js'
+import ErrorCard, { errorCardViewModel } from './ErrorCard.jsx'
 import { ownsRecoveryAction } from './recoveryCard.js'
 import ContextCompactionMarker from './ContextCompactionMarker.jsx'
 import { assistantBlockKey } from './streamPromotion.js'
@@ -102,7 +101,8 @@ function MsgContentInner({
   chatId,
   messageKey,
   onQuestionAnswer,
-  onQuestionAnswerPrepare,
+  onQuestionSubmitIntent,
+  onQuestionSubmitCancel,
   // Resume a turn paused by a drain-gated restart (or interrupted by a crash):
   // a stable send callback that re-sends a short "continue". Only the tail
   // interrupt note (a resumable error block on the last message) shows the
@@ -329,7 +329,8 @@ function MsgContentInner({
               questionId={block.question_id}
               answeredMap={answers}
               onAnswer={answerable ? onQuestionAnswer : undefined}
-              onAnswerPrepare={answerable ? onQuestionAnswerPrepare : undefined}
+              onPrepareAnswer={answerable ? onQuestionSubmitIntent : undefined}
+              onCancelAnswer={answerable ? onQuestionSubmitCancel : undefined}
               disabled={!answerable && !answers}
               pendingCardRef={answerable ? pendingQuestionRef : undefined}
             />
@@ -374,16 +375,19 @@ function MsgContentInner({
           canResume: !!onResume,
           questionOwnsTurn,
         })
-        const resourceWait = isResourcePause(block)
-        const parked = !!block.pause?.resets_at && !resourceWait
+        const { parked, resourceWait } = errorCardViewModel(block)
         const automaticContinuation = recoveryOwner && parked && !!autoResumeEnabled
-        const manualResumeAvailable = recoveryOwner && !resourceWait
+        // A resource wait owns its automatic retry. Offering Resume while the
+        // same measured pressure remains only launches a turn admission will
+        // re-park, so it is a false action rather than useful recovery.
+        const manualResumeAvailable = recoveryOwner && !resourceWait && (
+          !parked || (!!limitResetElapsed && !autoResumeEnabled)
+        )
         return (
           <ErrorCard
             key={assistantBlockKey(block, i)}
             block={block}
             autoResume={automaticContinuation}
-            restartAutoContinue={recoveryOwner && block.pause?.kind === 'restart'}
             resetElapsed={!!limitResetElapsed}
             cardRef={recoveryOwner ? resumeCardRef : undefined}
           >
@@ -540,7 +544,8 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.chatId === next.chatId
     && prev.messageKey === next.messageKey
     && prev.onQuestionAnswer === next.onQuestionAnswer
-    && prev.onQuestionAnswerPrepare === next.onQuestionAnswerPrepare
+    && prev.onQuestionSubmitIntent === next.onQuestionSubmitIntent
+    && prev.onQuestionSubmitCancel === next.onQuestionSubmitCancel
     && prev.onResume === next.onResume
     && prev.onInternalNav === next.onInternalNav
     && prev.autoResumeEnabled === next.autoResumeEnabled

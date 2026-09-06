@@ -94,7 +94,6 @@ test('explicit cleanup wipes principal-bound intent from the live outbox store',
 
   assert.equal((await listIntents(owner)).length, 0)
 })
-
 test('explicit logout revokes copied handoffs before local owner state', async () => {
   const calls = []
   await clearExplicitOwnerSession({

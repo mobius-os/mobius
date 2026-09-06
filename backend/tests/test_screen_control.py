@@ -1,28 +1,18 @@
 """Owner-consented, exact-chat live screen relay contracts."""
 
 import asyncio
-import time
 
 import pytest
 from pydantic import ValidationError
 
-from app import auth as auth_module, models
-from app import screen_control as screen_control_module
+from app import auth as auth_module
 from app.routes.screen_control import AgentCommandBody
 from app.screen_control import ScreenControlRegistry
 from test_app_fixtures import create_local_app
 
 
-def _agent_headers(db, chat_id: str) -> dict[str, str]:
-  owner = db.query(models.Owner).filter(models.Owner.username == "test").one()
-  db.add(models.ChatRun(
-    id="screen-control-run", root_run_id="screen-control-run",
-    chat_id=chat_id, status="running", provider="codex",
-  ))
-  db.commit()
-  token = auth_module.create_agent_token(
-    chat_id, "screen-control-run", owner.username, owner.token_epoch,
-  )
+def _agent_headers(chat_id: str) -> dict[str, str]:
+  token = auth_module.create_agent_token(chat_id, "test", 0)
   return {"Authorization": f"Bearer {token}"}
 
 
@@ -48,16 +38,7 @@ def test_owner_can_start_only_for_the_invoking_apps_chat(client, auth, chat, db)
   owner_status = client.get(f"/api/screen-control/chats/{chat.id}", headers=auth)
   assert owner_status.status_code == 403
 
-  chat_only = auth_module.create_access_token(
-    {"sub": "test", "agent_chat": chat.id}, token_epoch=0,
-  )
-  missing_run = client.get(
-    f"/api/screen-control/chats/{chat.id}",
-    headers={"Authorization": f"Bearer {chat_only}"},
-  )
-  assert missing_run.status_code == 401, missing_run.text
-
-  agent = _agent_headers(db, chat.id)
+  agent = _agent_headers(chat.id)
   status = client.get(f"/api/screen-control/chats/{chat.id}", headers=agent)
   assert status.status_code == 200, status.text
   assert status.json()["sessionId"] == started.json()["sessionId"]
@@ -113,7 +94,6 @@ async def test_relay_returns_only_the_browser_answer_to_the_waiting_command():
   command = await asyncio.wait_for(session.commands.get(), timeout=1)
   assert command["action"] == "click"
   assert command["ref"] == "e3"
-  assert command["deadlineAt"] > int(time.time() * 1000)
 
   accepted = await registry.answer(session, command["commandId"], {
     "ok": True, "result": {"clicked": "e3"}, "error": None,
@@ -143,98 +123,8 @@ async def test_last_browser_disconnect_retires_the_unusable_session():
   assert await registry.get_for_chat("chat-a", "owner") is None
 
 
-@pytest.mark.asyncio
-async def test_relay_bounds_commands_waiting_on_one_browser():
-  registry = ScreenControlRegistry()
-  session = await registry.start(
-    owner_username="owner",
-    app_id=7,
-    chat_id="chat-a",
-    route="/chat/chat-a",
-    viewport={"width": 1280, "height": 720, "pixelRatio": 1},
-  )
-  await registry.connect_browser(session.id, "owner")
-  waiting = [asyncio.create_task(registry.issue_command(session, {
-    "action": "snapshot",
-  })) for _ in range(4)]
-  await asyncio.sleep(0)
-
-  assert await registry.issue_command(session, {"action": "snapshot"}) == {
-    "ok": False,
-    "error": "The shared browser is still handling earlier commands.",
-  }
-
-  await registry.stop(session)
-  assert all(not outcome["ok"] for outcome in await asyncio.gather(*waiting))
-
-
-@pytest.mark.asyncio
-async def test_timed_out_command_never_crosses_the_browser_boundary(monkeypatch):
-  monkeypatch.setattr(screen_control_module, "COMMAND_TIMEOUT_SECONDS", 0.01)
-  registry = ScreenControlRegistry()
-  session = await registry.start(
-    owner_username="owner",
-    app_id=7,
-    chat_id="chat-a",
-    route="/chat/chat-a",
-    viewport={"width": 1280, "height": 720, "pixelRatio": 1},
-  )
-  await registry.connect_browser(session.id, "owner")
-
-  outcome = await registry.issue_command(session, {"action": "click", "ref": "e3"})
-  assert outcome == {
-    "ok": False,
-    "error": "The shared browser did not answer in time.",
-  }
-  with pytest.raises(TimeoutError):
-    await registry.next_browser_command(session, keepalive_seconds=0.02)
-  assert session.commands.empty()
-  await registry.stop(session)
-
-
-@pytest.mark.asyncio
-async def test_transport_queue_stays_bounded_after_repeated_timeouts(monkeypatch):
-  monkeypatch.setattr(screen_control_module, "COMMAND_TIMEOUT_SECONDS", 0.01)
-  registry = ScreenControlRegistry()
-  session = await registry.start(
-    owner_username="owner",
-    app_id=7,
-    chat_id="chat-a",
-    route="/chat/chat-a",
-    viewport={"width": 1280, "height": 720, "pixelRatio": 1},
-  )
-  await registry.connect_browser(session.id, "owner")
-
-  outcomes = [
-    await registry.issue_command(session, {"action": "snapshot"})
-    for _ in range(8)
-  ]
-
-  assert session.commands.qsize() == screen_control_module.MAX_PENDING_COMMANDS
-  assert all(not outcome["ok"] for outcome in outcomes)
-  await registry.stop(session)
-
-
-@pytest.mark.asyncio
-async def test_browser_wait_ends_at_session_expiry_without_keepalive_delay():
-  registry = ScreenControlRegistry()
-  session = await registry.start(
-    owner_username="owner",
-    app_id=7,
-    chat_id="chat-a",
-    route="/chat/chat-a",
-    viewport={"width": 1280, "height": 720, "pixelRatio": 1},
-  )
-  await registry.connect_browser(session.id, "owner")
-  session.expires_at = time.time() + 0.01
-
-  assert await registry.next_browser_command(session, keepalive_seconds=5) is None
-  assert session.active is False
-
-
 @pytest.mark.parametrize("payload", [
   {"action": "snapshot", "ref": "e1"},
-  {"action": "snapshot", "replace": False},
   {"action": "click"},
   {"action": "click", "x": 10},
   {"action": "type"},

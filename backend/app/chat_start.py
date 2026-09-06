@@ -11,6 +11,7 @@ import asyncio
 from contextlib import nullcontext
 import time
 
+from app import models, providers
 from app.broadcast import (
   create_broadcast,
   get_system_broadcast,
@@ -29,6 +30,36 @@ from app.chat_writer import (
   await_ack,
   get_writer,
 )
+from app.chat_visibility import coerce_agent_settings
+from app.database import SessionLocal
+
+
+class ProgrammaticChatModelRequired(RuntimeError):
+  """A system caller attempted to start a chat with no persisted model."""
+
+
+def require_programmatic_chat_model(chat_id: str, provider: str) -> str:
+  """Return the chat's explicit model or fail before any turn is committed."""
+  with SessionLocal() as db:
+    chat = db.query(models.Chat).filter(
+      models.Chat.id == chat_id,
+      models.Chat.deleted_at.is_(None),
+    ).first()
+    if chat is None:
+      raise ProgrammaticChatModelRequired(
+        f"Programmatic chat {chat_id} does not exist."
+      )
+    model = coerce_agent_settings(chat.agent_settings_json).get("model")
+    model = model.strip() if isinstance(model, str) and model.strip() else None
+    if model is None:
+      raise ProgrammaticChatModelRequired(
+        f"Programmatic chat {chat_id} has no explicitly selected model."
+      )
+    if providers._model_belongs_to_other_provider(model, provider):
+      raise ProgrammaticChatModelRequired(
+        f"Programmatic chat {chat_id} model does not match provider {provider}."
+      )
+    return model
 
 
 async def start_programmatic_chat_turn(
@@ -50,6 +81,7 @@ async def start_programmatic_chat_turn(
   after releasing the transient claim; the durable run remains available to
   normal reconciliation.
   """
+  require_programmatic_chat_model(chat_id, provider)
   if not mark_starting(chat_id):
     return False
 

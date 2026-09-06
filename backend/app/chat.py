@@ -15,7 +15,7 @@ import os
 import re
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -81,6 +81,7 @@ from app.chat_logging import (
 )
 from app.chat_titles import apply_generated_title, renamed_event
 from app.goal_commands import is_goal_continue
+from app.memory_observability import claim_oom_kill
 from app.chat_writer import (
   AppendPending,
   Barrier,
@@ -115,11 +116,10 @@ from app.events import (
   finalize_blocks,
 )
 from app.providers import (
-  PROVIDERS,
+  authenticated_provider_ids,
   effective_agent_settings,
   get_provider,
   get_skill_path,
-  provider_requirement_error,
   provider_runtime_kind,
 )
 from app.runner_registry import registry
@@ -229,12 +229,11 @@ def begin_idle_drain() -> bool:
 
 
 def cancel_idle_drain() -> bool:
-  """Reopen admission when a pre-cutover request was definitively rejected.
+  """Reopen admission after a pre-cutover request was definitively rejected.
 
-  This is intentionally narrower than a general drain reset. Once any live
-  runner exists or restart draining has claimed a chat, only process exit may
+  Once a live runner or planned-restart claim exists, only process exit may
   clear the gate. The legacy Railway bootstrap calls this solely after its
-  one-use provider start receives a definitive rejection.
+  one-use provider start is rejected before any deployment can begin.
   """
   global draining
   if registry.all_alive_chat_ids() or _restart_draining_chats:
@@ -370,15 +369,7 @@ def _future_auto_resuming_limit_park_for_chat(
   *,
   now: datetime | None = None,
 ) -> models.ChatRun | None:
-  """Return a not-yet-due limit park that will consume owner messages.
-
-  Ordinary owner messages queue behind this exact run instead of silently
-  spending an early provider retry. The explicit recovery action bypasses the
-  hold after the owner has added credits or applied an account reset. Only a
-  park the ordinary reset sweep can actually resume qualifies: notify-only,
-  app-attributed, and app-queued work must keep the existing immediate-send
-  path rather than accepting input into a queue nobody owns.
-  """
+  """Return a not-yet-due limit park that will consume owner messages."""
   run = _latest_continuation_park(db, chat_id)
   if (
     run is None
@@ -404,6 +395,63 @@ def _future_auto_resuming_limit_park_for_chat(
     return None
   current = now or datetime.now(UTC).replace(tzinfo=None)
   return run if run.parked_until > current else None
+
+
+def _latest_run_is_usage_park(db: Session, chat_id: str) -> bool:
+  """Whether the chat's LATEST run is a usage-limit park awaiting resume.
+
+  Latest-run-wins, exactly like `_parked_until_for_chat`: a fresh turn inserts a
+  newer running row, so a superseded park never keeps the mark. Query failures
+  read as not-waiting — this only feeds a passive drawer indicator.
+  """
+  try:
+    run = (
+      db.query(models.ChatRun.status, models.ChatRun.park_reason)
+      .filter(models.ChatRun.chat_id == chat_id)
+      .order_by(
+        models.ChatRun.started_at.desc(),
+        models.ChatRun.id.desc(),
+      )
+      .first()
+    )
+  except Exception:
+    return False
+  if run is None:
+    return False
+  status, park_reason = run
+  return status in ("parked", "resume_pending") and park_reason == "usage_limit"
+
+
+def usage_limit_waiting_chat_ids(
+  db: Session,
+  chat_ids: Iterable[str],
+) -> set[str]:
+  """Chat ids parked on a provider usage limit, awaiting resume.
+
+  A usage-limit park can sit for hours until the provider reset (or a manual /
+  credit-driven Resume) with no other running signal, so the drawer marks it as
+  "waiting" — the same passive indicator armed Waits and background helpers use.
+  Bounded to the caller's chat set and confirmed latest-run-wins so a formerly
+  parked chat that has since moved on clears the mark.
+  """
+  bounded = tuple(dict.fromkeys(chat_ids))
+  if not bounded:
+    return set()
+  try:
+    rows = (
+      db.query(models.ChatRun.chat_id)
+      .filter(
+        models.ChatRun.chat_id.in_(bounded),
+        models.ChatRun.status.in_(("parked", "resume_pending")),
+        models.ChatRun.park_reason == "usage_limit",
+      )
+      .distinct()
+      .all()
+    )
+  except Exception:
+    return set()
+  candidates = {str(row[0]) for row in rows}
+  return {cid for cid in candidates if _latest_run_is_usage_park(db, cid)}
 
 
 def _restart_manual_hold_for_chat(db: Session, chat_id: str) -> bool:
@@ -434,19 +482,31 @@ def _restart_manual_hold_for_chat(db: Session, chat_id: str) -> bool:
   )
 
 
+def _pending_owner_question_for_chat(db: Session, chat_id: str) -> bool:
+  """Whether durable owner input is the chat's current protocol barrier."""
+  try:
+    row = db.query(models.Chat.pending_question_id).filter(
+      models.Chat.id == chat_id,
+      models.Chat.deleted_at.is_(None),
+    ).first()
+  except Exception:
+    return True  # Fail closed: an unreadable barrier cannot authorize a wake.
+  return bool(row is not None and row[0] is not None)
+
+
 def programmatic_start_blocked(db: Session, chat_id: str) -> bool:
   """Whether a product wake (delegation result, wait resume) must queue
   instead of starting a turn.
 
-  A limit-parked or restart-held chat has no live process, so
+  An owner question, limit-park, or restart hold can have no live process, so
   ``is_chat_running`` reads False — but a fresh ``StartTurn`` supersedes the
-  parked row as if the owner resumed the chat themselves, silently destroying
-  the park's promised auto-resume. Machine wakes are not owner intent: they
-  append to ``pending_messages``, which the park's own resume path promotes
-  after the interrupted turn settles (or the owner's manual Resume releases).
+  durable barrier as if the owner resumed the chat themselves. Machine wakes
+  are not owner intent: they append to ``pending_messages``, which the answer,
+  park resume, or owner's manual Resume promotes at the legitimate boundary.
   """
   return (
-    _parked_until_for_chat(db, chat_id) is not None
+    _pending_owner_question_for_chat(db, chat_id)
+    or _parked_until_for_chat(db, chat_id) is not None
     or _restart_manual_hold_for_chat(db, chat_id)
   )
 
@@ -618,15 +678,13 @@ async def _recover_wedged_run_strict(
   message: str = "This response could not be saved. You can resume the turn.",
   kind: str | None = None,
   resumable: bool = True,
-  parked_until: datetime | None = None,
-  park_reason: str | None = None,
 ) -> None:
   """Atomically leave a durable interruption marker and close a wedged run.
 
   Callers pass ``message`` (and optionally ``kind``/``resumable``) so the same
-  atomic "append a durable pause block + close or park the run + preserve
+  atomic "append a durable, resumable pause block + close the run + preserve
   pending_messages" command serves both mid-turn recovery and setup/admission
-  outcomes. ``RecoverWedgedRun`` self-fences on the run token/status, so a run
+  failures. ``RecoverWedgedRun`` self-fences on the run token/status, so a run
   a successor already superseded is a safe no-op.
   """
   ack = get_writer().submit(
@@ -634,8 +692,6 @@ async def _recover_wedged_run_strict(
       chat_id=chat_id,
       run_token=run_token,
       interruption_block=_pause_note(message, kind=kind, resumable=resumable),
-      parked_until=parked_until,
-      park_reason=park_reason,
     )
   )
   await _await_ack(ack)
@@ -765,19 +821,21 @@ def reconcile_startup_chats(
       )
       latest_id = latest[0] if latest is not None else None
       # Durable coordinators reserve their writer slot before the actor
-      # atomically appends the continuation + ChatRun. Preserve the exact
-      # no-output Delegation/Wait/auto-resume orphan created by a crash after that
-      # commit but before asyncio task creation; its coordinator safely
-      # reschedules it.
-      # Ambiguous or partially executed attempts continue through ordinary
-      # interruption.
+      # atomically appends the continuation + ChatRun. Preserve an exact
+      # no-output orphan created after that commit but before task creation;
+      # each owning coordinator safely reschedules it. Ambiguous or partially
+      # executed attempts continue through ordinary interruption.
       if len(running_runs) == 1:
-        from app.delegations import safe_parent_wake_startup_writer_orphan
         from app.chat_waits import (
           safe_startup_writer_orphan as safe_wait_startup_writer_orphan,
         )
+        from app.delegations import safe_parent_wake_startup_writer_orphan
+        from app.gauntlets import (
+          safe_startup_writer_orphan as safe_gauntlet_startup_writer_orphan,
+        )
         if (
-          safe_parent_wake_startup_writer_orphan(
+          safe_gauntlet_startup_writer_orphan(db, chat, running_runs[0])
+          or safe_parent_wake_startup_writer_orphan(
             db, chat, running_runs[0],
           )
           or safe_wait_startup_writer_orphan(db, chat, running_runs[0])
@@ -1113,12 +1171,14 @@ def reconcile_interrupted_chats(db: Session) -> list[str]:
 
 
 def notify_after_reconcile(db: Session, reconciled: list[str]) -> str | None:
-  """Push-notify once that paused turn(s) can be resumed (design §2.2 step 4).
+  """Push-notify once that crash-interrupted turn(s) need a manual Resume.
 
-  Called from the lifespan right after `reconcile_interrupted_chats`, so a
-  drain-gated restart (or any crash that left turns mid-flight) surfaces a
-  single "tap to resume" prompt on the next boot. Fires ONE notification, not
-  one per chat — a multi-turn restart must not storm the owner; a single
+  Called from the lifespan right after `reconcile_startup_chats` with the
+  MANUAL outcomes only: a planned restart parks and resumes its own turns, so
+  what reaches here is a boot the previous process did not prepare for — an
+  out-of-memory kill, a host-side stop, or a drain that timed out. Say so;
+  calling it "an update" hid the 2026-09-03 OOM crash. Fires ONE notification,
+  not one per chat — a multi-turn crash must not storm the owner; a single
   reconciled chat deep-links straight to it.
 
   Best-effort: a missing owner or a push-delivery failure never blocks boot
@@ -1133,11 +1193,16 @@ def notify_after_reconcile(db: Session, reconciled: list[str]) -> str | None:
   from app import push
 
   single = reconciled[0] if len(reconciled) == 1 else None
+  count = len(reconciled)
   return push.notify_owner(
     db,
     owner.id,
-    title="Turn paused for an update",
-    body="Your turn was paused for an update — tap to resume.",
+    title="Möbius restarted unexpectedly",
+    body=(
+      "Your turn was interrupted — tap to resume."
+      if single
+      else f"{count} turns were interrupted — open each chat to resume."
+    ),
     source_type="system",
     source_id=single,
     target=(f"/shell/?chat={single}" if single else None),
@@ -1317,9 +1382,7 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
     # sweep_reset_parks (when the chat policy is enabled) or the user's own
     # next send. A terminal-looking queue alone cannot distinguish "crashed
     # drain" from "parked on purpose".
-    if _parked_until_for_chat(db, chat_id) is not None:
-      continue
-    if _restart_manual_hold_for_chat(db, chat_id):
+    if programmatic_start_blocked(db, chat_id):
       continue
     claimed = False
     try:
@@ -1339,9 +1402,7 @@ async def sweep_idle_pending_chats(db: Session) -> list[str]:
             if (
               has_running_run(db, chat_id)
               or not _pending_head_is_stale(pending, now_ms)
-              or chat.pending_question_id is not None
-              or _parked_until_for_chat(db, chat_id) is not None
-              or _restart_manual_hold_for_chat(db, chat_id)
+              or programmatic_start_blocked(db, chat_id)
               or not mark_starting(chat_id)
             ):
               continue
@@ -1866,16 +1927,43 @@ def _auto_resume_recovery(
 
   if park.initiated_by_app_id is not None:
     from app.delegations import limit_resume_successor_app_id
-    if limit_resume_successor_app_id(
+    delegation_app_id = limit_resume_successor_app_id(
       db,
       child_chat_id=chat.id,
       parked_run_token=park.id,
       successor_run_token=physical.id,
       initiated_by_app_id=park.initiated_by_app_id,
-    ) != park.initiated_by_app_id:
+    )
+    from app.gauntlets import limit_resume_policy
+    gauntlet_policy = limit_resume_policy(
+      db,
+      child_chat_id=chat.id,
+      run_token=park.id,
+      initiated_by_app_id=park.initiated_by_app_id,
+    )
+    if (
+      delegation_app_id != park.initiated_by_app_id
+      and not (
+        gauntlet_policy is not None
+        and gauntlet_policy.allowed
+        and gauntlet_policy.initiated_by_app_id
+          == physical.initiated_by_app_id
+      )
+    ):
       return None
-  elif not chat.auto_resume_on_limit or physical.initiated_by_app_id is not None:
-    return None
+  else:
+    from app.gauntlets import limit_resume_policy
+    gauntlet_policy = limit_resume_policy(
+      db,
+      child_chat_id=chat.id,
+      run_token=park.id,
+      initiated_by_app_id=None,
+    )
+    if (
+      not chat.auto_resume_on_limit
+      and not (gauntlet_policy is not None and gauntlet_policy.allowed)
+    ) or physical.initiated_by_app_id is not None:
+      return None
   return park, payload
 
 
@@ -2003,10 +2091,22 @@ async def _auto_resume_chat(
             restart_park = (
               park is not None and park.park_reason == "restart"
             )
+            resource_park = (
+              park is not None
+              and park.park_reason in RESOURCE_PARK_REASONS
+            )
             delegation_resume_app_id = None
-            if park is not None and not restart_park:
+            gauntlet_resume_policy = None
+            if park is not None and not restart_park and not resource_park:
               from app.delegations import limit_resume_app_id
               delegation_resume_app_id = limit_resume_app_id(
+                check_db,
+                child_chat_id=chat_id,
+                run_token=park.id,
+                initiated_by_app_id=park.initiated_by_app_id,
+              )
+              from app.gauntlets import limit_resume_policy
+              gauntlet_resume_policy = limit_resume_policy(
                 check_db,
                 child_chat_id=chat_id,
                 run_token=park.id,
@@ -2024,12 +2124,11 @@ async def _auto_resume_chat(
                 and bool(park.restart_nonce)
                 and accepted_nonce == park.restart_nonce
               )
-            policy_enabled = bool(
-              chat is not None
-              and (
-                _park_continues_automatically(chat, park)
-                or delegation_resume_app_id is not None
+            policy_enabled = chat is not None and (
+              _park_continues_automatically(
+                chat, park, gauntlet_resume_policy,
               )
+              or delegation_resume_app_id is not None
             )
             if (
               chat is None
@@ -2039,14 +2138,19 @@ async def _auto_resume_chat(
               or _has_unanswered_question(chat)
               or park is None
               or park.status != "resume_pending"
-              # Generic app work stays manual. A planned restart restores its
-              # exact authenticated turn; a live Delegation keeps the already-
-              # approved bounded app identity.
+              or (
+                gauntlet_resume_policy is not None
+                and not gauntlet_resume_policy.allowed
+              )
+              # Provider-limit retries remain owner-only. A planned restart
+              # instead restores the exact authenticated turn and carries its
+              # app attribution into the synthetic continuation below.
               or (
                 park.initiated_by_app_id is not None
                 and not restart_park
-                and park.park_reason not in RESOURCE_PARK_REASONS
+                and not resource_park
                 and delegation_resume_app_id is None
+                and gauntlet_resume_policy is None
               )
               or latest_id != park.id
               or any(
@@ -2063,18 +2167,19 @@ async def _auto_resume_chat(
               if park.park_reason in RESOURCE_PARK_REASONS
               else "usage_limit"
             )
-            # A real owner follow-up waiting behind a restart or resource park
-            # takes ownership through normal pending promotion. A provider-
-            # limit continuation retains only a verified Delegation identity.
-            if (
-              (restart_park or park.park_reason in RESOURCE_PARK_REASONS)
-              and not pending
-            ):
-              resume_app_id = park.initiated_by_app_id
-            elif park.park_reason not in RESOURCE_PARK_REASONS:
-              resume_app_id = delegation_resume_app_id
-            else:
-              resume_app_id = None
+            resume_app_id = (
+              # A real owner follow-up already waiting behind an app-owned
+              # turn takes ownership of the resumed turn. This matches normal
+              # pending promotion, where the first queued row owns attribution.
+              park.initiated_by_app_id
+              if (restart_park or resource_park) and not pending else (
+                delegation_resume_app_id
+                if delegation_resume_app_id is not None else (
+                  gauntlet_resume_policy.initiated_by_app_id
+                  if gauntlet_resume_policy is not None else None
+                )
+              )
+            )
           if not mark_starting(chat_id):
             return False
           claimed = True
@@ -2293,6 +2398,8 @@ async def sweep_reset_parks(
   # concurrently through push.notify_owner_async (which keeps remote I/O off
   # the event loop).
   notification_requests: list[tuple[str, bool]] = []
+  gauntlet_boundary_parks: set[str] = set()
+  gauntlet_boundary_runs: set[str] = set()
 
   def queue_due_notification(chat_id: str, run: models.ChatRun) -> None:
     if run.park_reason in RESOURCE_PARK_REASONS:
@@ -2308,8 +2415,10 @@ async def sweep_reset_parks(
     if chat is None or chat.deleted_at is not None:
       return "chat unavailable"
     restart_park = run.park_reason == "restart"
+    resource_park = run.park_reason in RESOURCE_PARK_REASONS
     delegation_resume_app_id = None
-    if not restart_park:
+    gauntlet_resume_policy = None
+    if not restart_park and not resource_park:
       from app.delegations import limit_resume_app_id
       delegation_resume_app_id = limit_resume_app_id(
         db,
@@ -2317,21 +2426,35 @@ async def sweep_reset_parks(
         run_token=run.id,
         initiated_by_app_id=run.initiated_by_app_id,
       )
+      from app.gauntlets import limit_resume_policy
+      gauntlet_resume_policy = limit_resume_policy(
+        db,
+        child_chat_id=run.chat_id,
+        run_token=run.id,
+        initiated_by_app_id=run.initiated_by_app_id,
+      )
+      if (
+        gauntlet_resume_policy is not None
+        and not gauntlet_resume_policy.allowed
+      ):
+        gauntlet_boundary_parks.add(run.id)
+        gauntlet_boundary_runs.add(gauntlet_resume_policy.run_id)
+        return "Gauntlet boundary reached"
     if app_work_queued:
       return "app-attributed work"
     if (
       run.initiated_by_app_id is not None
       and not restart_park
-      and run.park_reason not in RESOURCE_PARK_REASONS
+      and not resource_park
       and delegation_resume_app_id is None
+      and gauntlet_resume_policy is None
     ):
       return "app-attributed work"
     if _has_unanswered_question(chat):
       return "waiting for an answer"
-    policy_enabled = bool(
-      _park_continues_automatically(chat, run)
-      or delegation_resume_app_id is not None
-    )
+    policy_enabled = _park_continues_automatically(
+      chat, run, gauntlet_resume_policy,
+    ) or delegation_resume_app_id is not None
     if not policy_enabled:
       return "policy disabled"
     if restart_park and not (
@@ -2399,6 +2522,11 @@ async def sweep_reset_parks(
       auto_resume = auto_resume and wants_auto_resume(chat, run)
 
       if not auto_resume:
+        if run.id in gauntlet_boundary_parks:
+          # The refreshed boundary check owns this park now. Keep the prepared
+          # resume_pending marker intact so the coordinator can close the exact
+          # physical run rather than turning it into a generic notification.
+          continue
         try:
           was_pending = await _await_ack(get_writer().submit(
             ResolvePark(chat_id=chat_id, run_token=run.id)
@@ -2460,6 +2588,13 @@ async def sweep_reset_parks(
           )
       continue
 
+    # An owned Gauntlet park whose boundary closed was latched into the
+    # coordinator above. Leave its physical marker intact for the coordinator's
+    # exact cancellation path instead of consuming it as a generic
+    # parked-notified turn (which would look like a failed critic).
+    if run.id in gauntlet_boundary_parks:
+      continue
+
     # Notify-only/app/deleted path: resolve before the best-effort push so a
     # crash cannot send it repeatedly. A previously prepared auto-resume has
     # already sent its notification, so only a raw `parked` row notifies here.
@@ -2479,6 +2614,17 @@ async def sweep_reset_parks(
     resolved.append(chat_id)
     if should_notify and not chat_gone:
       queue_due_notification(chat_id, run)
+  for gauntlet_run_id in sorted(gauntlet_boundary_runs):
+    try:
+      from app.gauntlets import reconcile_gauntlet
+      await reconcile_gauntlet(gauntlet_run_id)
+    except Exception:
+      log.warning(
+        "Gauntlet boundary cancellation deferred run=%s",
+        gauntlet_run_id,
+        exc_info=True,
+      )
+
   if notification_requests:
     try:
       owner_row = db.query(models.Owner.id).first()
@@ -2696,7 +2842,10 @@ async def stop_chat_for(
   `cleared_pending_cids`, which closes the natural-finish-races-Stop
   double-send (PM 115).
 
-  Waits for the process to die with a bounded timeout.
+  Waits for the process to die with a bounded timeout. The complete stop owns
+  the same per-chat transition gate as sends, settings changes, and provider
+  handoffs: once Stop wins that gate, a racing send cannot observe the old
+  handle, queue behind it, and then be stranded when Stop releases ownership.
   """
   async with chat_queue.get_transition_lock(chat_id):
     return await _stop_chat_for_locked(chat_id, db=db)
@@ -2705,12 +2854,12 @@ async def stop_chat_for(
 async def clear_goal_for(chat_id: str, expected_goal_id: str) -> dict:
   """Dismiss one exact Goal, stopping only work that remains unfinished.
 
-  A Goal that no longer owns live execution is presentation-only, as is a plan
-  whose tasks and delegations are settled while its physical turn composes the
-  final response. Only an unfinished Goal that still owns a nonterminal run is
-  stopped. Unlike ordinary Stop, that path preserves the pending queue and does
-  not bump the chat generation, so real owner follow-ups still hand off
-  normally. Every path retains transcript, plan, and metrics as history.
+  A plan whose tasks and delegations are all settled is presentation-only: its
+  physical turn may still be composing the final response and must finish
+  normally. An unfinished Goal clear retains the existing cancellation
+  behavior. Unlike ordinary Stop, that path preserves the pending queue and
+  does not bump the chat generation, so real owner follow-ups still hand off
+  normally. Both paths retain the transcript, plan, and metrics as history.
   """
   async with chat_queue.get_transition_lock(chat_id):
     # Fence a stale confirmation before touching any live runner. The writer
@@ -2730,10 +2879,6 @@ async def clear_goal_for(chat_id: str, expected_goal_id: str) -> dict:
       current_plan = (
         serialize_plan(state_db, *goal_rows) if goal_rows is not None else None
       )
-      goal_execution_active = bool(
-        goal_rows is not None
-        and goal_rows[0].status in models.NONTERMINAL_RUN_STATUSES
-      )
     if current_goal is None:
       return {"status": "missing", "goal_id": None}
     if current_goal["id"] != expected_goal_id:
@@ -2742,8 +2887,7 @@ async def clear_goal_for(chat_id: str, expected_goal_id: str) -> dict:
     plan_complete = bool(
       current_plan is not None and current_plan["summary"]["can_complete"]
     )
-    stop_execution = goal_execution_active and not plan_complete
-    if stop_execution:
+    if not plan_complete:
       handles = registry.get_handles(chat_id)
       all_stopped = True
       for handle in handles:
@@ -2773,7 +2917,7 @@ async def clear_goal_for(chat_id: str, expected_goal_id: str) -> dict:
     return await _await_ack(get_writer().submit(ClearPresentedGoal(
       chat_id=chat_id,
       expected_goal_id=expected_goal_id,
-      preserve_execution=not stop_execution,
+      preserve_execution=plan_complete,
     )))
 
 
@@ -3558,23 +3702,38 @@ def _parse_reset_text(text: str, now: datetime) -> datetime | None:
   return None
 
 
+# A turn stopped for a platform resource (memory, storage) parks at the park
+# floor (`_PARK_MIN_DELAY`) so the continuation sweep re-checks admission and
+# re-parks while the resource is still short without spinning on its own
+# `chat_run_finished` wake-ups. These parks always continue: the platform
+# interrupted the turn, not a provider quota, so the paid-retry opt-in for
+# limits does not apply.
 RESOURCE_PARK_REASONS = frozenset({"memory", "storage"})
-RESOURCE_PARK_RECHECK = timedelta(seconds=60)
 
 
-def _park_continues_automatically(chat, park) -> bool:
+def _park_continues_automatically(chat, park, gauntlet_policy=None) -> bool:
+  """The owner-facing rule for whether a due park relaunches on its own.
+
+  Restart parks follow the restart latch; platform-resource parks always
+  continue; provider-limit parks need the paid-retry opt-in (or a Gauntlet
+  policy that allows it). Shared by the sweep and the resumed task so the two
+  checks cannot drift.
+  """
   reason = park.park_reason if park is not None else None
   if reason == "restart":
     return bool(chat.auto_resume_on_restart)
   if reason in RESOURCE_PARK_REASONS:
     return True
-  return bool(chat.auto_resume_on_limit)
+  return bool(
+    chat.auto_resume_on_limit
+    or (gauntlet_policy is not None and gauntlet_policy.allowed)
+  )
 
 
-def _resource_park_fields(reason: str, now: datetime | None = None):
-  if now is None:
-    now = datetime.now(UTC).replace(tzinfo=None)
-  return now + RESOURCE_PARK_RECHECK, reason
+MEMORY_KILL_MESSAGE = (
+  "Möbius ran low on memory and this turn was stopped. Your work is safe; it "
+  "continues automatically when memory settles."
+)
 
 
 def _limit_park_fields(
@@ -3617,7 +3776,7 @@ def _limit_park_fields(
     return now + PARK_FALLBACK_DELAY, "rate_limit"
 
 
-def _limit_error_event(
+def _park_event(
   message: str,
   parked_until: datetime,
   park_reason: str,
@@ -3674,12 +3833,12 @@ async def _park_run_strict(
   return bool(await _await_ack(ack))
 
 
-def _limit_exit(
+def _park_exit(
   sink, runner_result: dict | None, error_text: str | None,
 ) -> dict:
   """Classify a turn exit for limit parking and publish its error event.
 
-  One seam shared by every SDK exit (including Möbius through Codex) so
+  One seam shared by all four SDK exits (claude/codex × success/except) so
   the classification, the park-target parse, and the enriched error event
   can't drift apart. `runner_result` is None on an exception exit (classify
   by text only); on a terminal-result exit the structured
@@ -3699,11 +3858,23 @@ def _limit_exit(
   `_complete_turn` kwargs for the limit disposition.
   """
   if getattr(sink, "chat_id", None) in _restart_draining_chats:
-    return {"limit_reached": False}
+    return {"parked": False}
   if runner_result is not None:
     limit = _is_limit_terminal(runner_result)
   else:
     limit = _is_limit_error_text(error_text)
+  failed = bool(error_text) or runner_result is None
+  if not limit and failed and claim_oom_kill():
+    parked_until = datetime.now(UTC).replace(tzinfo=None) + _PARK_MIN_DELAY
+    park_reason = "memory"
+    sink.publish(
+      _park_event(MEMORY_KILL_MESSAGE, parked_until, park_reason)
+    )
+    return {
+      "parked": True,
+      "parked_until": parked_until,
+      "park_reason": park_reason,
+    }
   if not limit:
     if runner_result is not None and runner_result.get("resume_incomplete"):
       # A steer's soft interrupt raced turn-end (its text already re-queried and
@@ -3719,7 +3890,7 @@ def _limit_exit(
         kind="interrupted",
         resumable=True,
       ))
-      return {"limit_reached": False}
+      return {"parked": False}
     if error_text:
       sink.publish({"type": "error", "message": error_text})
     elif runner_result is None:
@@ -3733,7 +3904,7 @@ def _limit_exit(
         "type": "error",
         "message": "The turn failed unexpectedly. Please try again.",
       })
-    return {"limit_reached": False}
+    return {"parked": False}
   parked_until, park_reason = _limit_park_fields(
     runner_result or {}, error_text
   )
@@ -3741,9 +3912,9 @@ def _limit_exit(
     "The provider's rate limit was reached; this turn is paused until the "
     "limit resets."
   )
-  sink.publish(_limit_error_event(message, parked_until, park_reason))
+  sink.publish(_park_event(message, parked_until, park_reason))
   return {
-    "limit_reached": True,
+    "parked": True,
     "parked_until": parked_until,
     "park_reason": park_reason,
   }
@@ -3759,7 +3930,7 @@ async def _complete_turn(
   provider_id: str | None,
   cost_usd: float | int,
   close_browser: bool,
-  limit_reached: bool = False,
+  parked: bool = False,
   parked_until: datetime | None = None,
   park_reason: str | None = None,
   provider_free: bool = False,
@@ -3881,7 +4052,7 @@ async def _complete_turn(
   if (
     we_own_gen
     and not stop_handoff_successor
-    and not limit_reached
+    and not parked
     and not sink._last_error
   ):
     goal_handoff_target = _prepare_goal_handoff(
@@ -3894,14 +4065,14 @@ async def _complete_turn(
   # — a silent user->user gap. Flag it so finalize() persists a neutral,
   # recoverable marker instead of silently no-oping. Every guard self-excludes a
   # legitimately-silent turn: a user Stop lands as stop_handoff_successor (or
-  # disowns the generation above), a park sets limit_reached, an errored/refused
+  # disowns the generation above), a park sets parked, an errored/refused
   # turn sets _last_error, and any real text/thinking/tool_use makes the blocks
   # renderable. Provider usage/cost is accounting data, not proof of a reply,
   # and is deliberately not consulted.
   lost_reply = (
     we_own_gen
     and not stop_handoff_successor
-    and not limit_reached
+    and not parked
     and not sink._last_error
     and not blocks_have_renderable_content(sink.assistant_blocks)
   )
@@ -3921,13 +4092,36 @@ async def _complete_turn(
       "finalize did not persist chat_id=%s: %s — emitting transport "
       "error, leaving run marker for reconciliation", chat_id, exc,
     )
-    bc.publish({
-      "type": "error",
-      "message": (
-        "Your last response could not be saved (persistence "
-        "unavailable). It will be recovered automatically."
-      ),
-    })
+    unsaved_note = (
+      "Your last response could not be saved (persistence "
+      "unavailable). It will be recovered automatically."
+    )
+    # Route the note through the sink so it also submits a small
+    # non-coalescing PersistError: the terminal snapshot's ack timed out,
+    # but the writer may still accept this write (or land it once it
+    # recovers), leaving a durable error block instead of a transcript
+    # that silently renders as a cleanly completed turn (owner-reported).
+    # The run marker stays set either way; reconciliation remains the
+    # authority for repairing the turn itself.
+    # Re-check after the failed await: a fresh turn may now own the chat.
+    current_gen_after_finalize = current_run_generation(chat_id)
+    failure_is_still_ours = (
+      run_gen is None
+      or current_gen_after_finalize == run_gen
+      or (
+        _clear_after_terminal_generation.get(chat_id) == run_gen
+        and current_gen_after_finalize == run_gen + 1
+        and not registry.is_alive(chat_id)
+      )
+    )
+    try:
+      if failure_is_still_ours:
+        sink.publish({"type": "error", "message": unsaved_note})
+      else:
+        bc.publish({"type": "error", "message": unsaved_note})
+    except Exception:
+      # Transport-only fallback: at least anyone watching live sees it.
+      bc.publish({"type": "error", "message": unsaved_note})
     # Identity-keyed: a Stop + fresh send racing in during the finalize await
     # may already hold the active pointer; clear only if it's still ours.
     clear_active_broadcast_if(bc)
@@ -3943,7 +4137,7 @@ async def _complete_turn(
   # above may already hold the active pointer; clear only if it's still ours
   # (an unconditional clear would erase the successor's pointer).
   clear_active_broadcast_if(bc)
-  if limit_reached:
+  if parked:
     # Provider rate/usage-limit kill. PARK the run (design §2.4): the marker
     # is cleared (the turn is over) but the run's `chat_runs` row moves to
     # "parked" carrying `parked_until` + `park_reason`, so the reset sweep
@@ -4166,7 +4360,9 @@ async def run_chat(
   disposition = chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
   runtime_settled = False
   try:
-    await require_agent_turn_admission(get_settings().data_dir)
+    await require_agent_turn_admission(
+      get_settings().data_dir,
+    )
     disposition = await _run_chat_impl(
       messages, chat_id=chat_id, session_id=session_id,
       provider_id=provider_id, run_gen=run_gen,
@@ -4198,39 +4394,44 @@ async def run_chat(
         "chat turn failed before the agent started chat_id=%s", chat_id,
       )
     if isinstance(exc, AgentTurnDeferred):
-      # Persist an actionable pause in the transcript rather than leaving a
-      # saved user message with an empty assistant reply. RecoverWedgedRun
-      # self-fences on run ownership, parks this run, and preserves the queue;
-      # the continuation sweep rechecks admission after pressure may ease.
+      # Admission refused the turn for a platform resource. Persist a durable
+      # wait card and PARK the run so the continuation sweep re-checks
+      # admission on its own; while the resource stays short the resumed turn
+      # simply lands here again and re-parks. A saved user message must never
+      # be left with an empty reply, and a resource wait must never look like
+      # a failure. RecoverWedgedRun self-fences on the run token/status and
+      # preserves pending_messages.
+      parked_until = datetime.now(UTC).replace(tzinfo=None) + _PARK_MIN_DELAY
+      park_reason = exc.resource
+      pause = _park_event(
+        f"{exc} Your message is saved.", parked_until, park_reason,
+      )
       recovered = False
       if chat_id:
         try:
-          parked_until, park_reason = _resource_park_fields(exc.resource)
-          await _recover_wedged_run_strict(
-            chat_id, run_token or "",
-            message=f"{exc} Your message is saved.",
-            kind=park_reason,
-            resumable=False,
+          ack = get_writer().submit(RecoverWedgedRun(
+            chat_id=chat_id,
+            run_token=run_token or "",
+            interruption_block=pause,
             parked_until=parked_until,
             park_reason=park_reason,
-          )
+          ))
+          await _await_ack(ack)
           recovered = True
         except Exception:
           _get_logger().warning(
             "admission-deferral recovery did not persist chat_id=%s "
             "(reconciliation will repair)", chat_id, exc_info=True,
           )
-      # A Stop during admission may already have handed the chat to a fresh
-      # turn. Only this generation may close the shared live broadcast.
+      # Only THIS run may settle the chat's live broadcast. A Stop during the
+      # admission await may have handed the chat to a fresh turn; an unfenced
+      # error/done/mark_completed would cut the successor's stream short — the
+      # stale-terminal-write class fenced in _complete_turn (888551497) but
+      # previously unapplied on this path.
       still_ours = run_gen is None or current_run_generation(chat_id) == run_gen
       bc = get_broadcast(chat_id) if chat_id else None
       if bc is not None and still_ours:
-        parked_until, park_reason = _resource_park_fields(exc.resource)
-        resource_event = _limit_error_event(
-          f"{exc} Your message is saved.", parked_until, park_reason,
-        )
-        resource_event.pop("resumable", None)
-        bc.publish(resource_event)
+        bc.publish(dict(pause))
         bc.publish({"type": "done"})
         bc.mark_completed()
       if chat_id and still_ours:
@@ -4403,6 +4604,16 @@ async def run_chat(
       _get_logger().debug(
         "attached contribution reconcile skipped", exc_info=True,
       )
+
+    # A settled controller or critic may release a Gauntlet all-of barrier.
+    # The coordinator owns transitions; model-authored checkpoints/goals are
+    # display context only and cannot strand or duplicate the next phase.
+    try:
+      if chat_id and disposition in _DELEGATION_WAKE_DISPOSITIONS:
+        from app.gauntlets import reconcile_after_chat_settled
+        await reconcile_after_chat_settled(chat_id)
+    except Exception:
+      _get_logger().debug("gauntlet reconcile hook skipped", exc_info=True)
 
     # Turn-end chat-note guarantee: when the chat SETTLED (no pending
     # follow-up), the platform's sole publisher updates its three summary
@@ -4855,6 +5066,15 @@ async def _run_chat_impl(
     db.close()
 
 
+def _should_inject_peer_context(
+  chat_id: str | None,
+  run_token: str | None,
+  gauntlet_writer_policy,
+) -> bool:
+  """Keep independent Gauntlet writers outside the shared peer context."""
+  return bool(chat_id and run_token and gauntlet_writer_policy is None)
+
+
 def _should_enable_coordination_tools(
   *,
   chat_id: str,
@@ -4966,9 +5186,17 @@ async def _run_chat_impl_with_db(
       )
   from app.delegations import policy_for_chat
   run_policy = policy_for_chat(db, chat_id) if chat_row is not None else None
+  gauntlet_writer_policy = None
+  if run_policy is None and chat_row is not None and run_token:
+    from app.gauntlets import writer_policy_for_run
+    gauntlet_writer_policy = writer_policy_for_run(
+      db, chat_id=chat_id, run_token=run_token,
+    )
+  if gauntlet_writer_policy is not None:
+    provider_id = gauntlet_writer_policy.provider
   provider = get_provider(provider_id)
   codex_native_skills_ready = False
-  if run_policy is None and provider.name == "Codex":
+  if provider.name == "Codex":
     try:
       from app.codex_skills import sync_codex_skills_for_prompt
       from app.providers import skills_enabled as _skills_enabled
@@ -4992,6 +5220,20 @@ async def _run_chat_impl_with_db(
     goal_continue = False
     is_slash_command = False
 
+  if gauntlet_writer_policy is not None:
+    # The platform owns the barrier. Preserve the controller's owner token,
+    # provider/settings, prompt snapshot, and installed skills, while removing
+    # every interactive/nested control path for this physical writer turn.
+    goal_objective = None
+    clear_dismissed_provider_goal = False
+    goal_mode = False
+    goal_continue = False
+    is_slash_command = False
+    # The coordinator freezes the complete execution policy. The controller's
+    # picker may be changed for a later ordinary turn, but it cannot silently
+    # switch the model/provider under a reserved writer slot.
+    provider_id = gauntlet_writer_policy.provider
+
   # Chats created before native Codex goal handling have the /goal objective in
   # their durable transcript but no provider-side ThreadGoal yet.  Either the
   # automatic restart handoff or the visible one-tap Resume sends "continue";
@@ -5008,7 +5250,6 @@ async def _run_chat_impl_with_db(
     )
     else None
   )
-
   # Durable run identity: the turn's StartTurn (initial send) or
   # PromotePending (continuation / stale-pending drain) writer-actor
   # command ALREADY inserted ChatRun(status="running") atomically with the
@@ -5116,10 +5357,11 @@ async def _run_chat_impl_with_db(
       user_message = f"{block}\n\n{user_message}"
 
   # Coordination is a peer-network context surface, not transcript history.
-  # Every durable child has its own chat address, so a peer note never has to
-  # impersonate an owner steer to reach another model.
+  # Every durable child has its own chat address. Gauntlet writers remain
+  # isolated from both tools and injected peer data so their evidence stays
+  # independent of concurrent agents.
   coordination_context = ""
-  if chat_id and run_token:
+  if _should_inject_peer_context(chat_id, run_token, gauntlet_writer_policy):
     from app.agent_coordination import build_coordination_context
     coordination_context = build_coordination_context(db, chat_id, run_token)
     if coordination_context:
@@ -5152,9 +5394,10 @@ async def _run_chat_impl_with_db(
 
   # A planned restart can replace the parent provider process while durable
   # child tasks keep running. Re-attach their immutable ids/statuses to every
-  # parent turn so both the root agent and a nested delegated owner wait on
-  # their existing direct children rather than launching duplicates.
-  if chat_id and run_token:
+  # ordinary parent turn so a resumed agent waits on the existing child rather
+  # than launching a duplicate. Delegated children attach to their own
+  # descendants through the guarded helper instead of inheriting this block.
+  if run_policy is None and chat_id and run_token:
     from app.delegations import active_parent_context
     delegation_context = active_parent_context(db, chat_id, run_token)
     if delegation_context:
@@ -5167,7 +5410,7 @@ async def _run_chat_impl_with_db(
   # Only the top-level chat owns durable waits; delegated children return any
   # future condition to this parent instead. A result that lands after this
   # snapshot queues behind the live turn rather than mutating its request.
-  if run_policy is None and chat_id:
+  if run_policy is None and gauntlet_writer_policy is None and chat_id:
     from app.chat_waits import build_active_waits_context
     waits_context = build_active_waits_context(db, chat_id)
     if waits_context:
@@ -5221,10 +5464,15 @@ async def _run_chat_impl_with_db(
 
   if run_policy is not None:
     from app.delegations import delegation_execution_token
-    agent_token = delegation_execution_token(db, run_policy, run_token or "")
+    agent_token = delegation_execution_token(
+      db, run_policy, run_id=run_token,
+    )
   else:
     agent_token = auth.create_agent_token(
-      chat_id, run_token, owner.username, owner.token_epoch,
+      chat_id,
+      owner.username,
+      owner.token_epoch,
+      run_id=run_token,
     )
 
   # Build the base environment shared by all providers.
@@ -5237,11 +5485,12 @@ async def _run_chat_impl_with_db(
     k: v for k, v in os.environ.items() if k in _safe_keys
   }
   base_env.update({
-    "AGENT_TOKEN": agent_token,
     "API_BASE_URL": get_settings().api_base_url,
     "SCRIPTS_DIR": str(scripts_dir),
     "CHAT_ID": chat_id,
   })
+  if agent_token is not None:
+    base_env["AGENT_TOKEN"] = agent_token
   base_env.update(app_context_env)
   if run_policy is None:
     base_env["MOBIUS_RUN_TOKEN"] = run_token
@@ -5250,11 +5499,8 @@ async def _run_chat_impl_with_db(
       "MOBIUS_SUBAGENT_DEPTH": str(run_policy.depth),
       "MOBIUS_DELEGATION_ID": run_policy.delegation_id,
       "MOBIUS_SUBAGENT_PROVIDER": run_policy.provider,
+      "MOBIUS_SUBAGENT_HELPER": "/data/apps/subagents/subagents.py",
     })
-    if run_policy.provider == "claude":
-      base_env["MOBIUS_SUBAGENT_HELPER"] = (
-        "/data/apps/subagents/subagents.py"
-      )
   # Overrides any inherited TMPDIR from _safe_keys: agent scratch belongs on
   # the bounded data volume, never the container's unbounded overlay. TMP and
   # TEMP travel with it so a tool reading either does not escape back to /tmp.
@@ -5302,6 +5548,11 @@ async def _run_chat_impl_with_db(
   agent_settings = (
     {"model": run_policy.model, "effort": run_policy.effort}
     if run_policy is not None
+    else {
+      "model": gauntlet_writer_policy.model,
+      "effort": gauntlet_writer_policy.effort,
+    }
+    if gauntlet_writer_policy is not None
     else effective_agent_settings(
       settings.data_dir, chat_overrides, provider=provider_id,
     )
@@ -5326,10 +5577,10 @@ async def _run_chat_impl_with_db(
       if k not in agent_settings:
         continue
       value = agent_settings.get(k)
-      # Interactive sends never reach this point without a model. A ``None``
-      # model is retained only for non-interactive programmatic/background
-      # starts, whose separately configured policy may deliberately choose the
-      # provider SDK's native model instead of the composer's picker contract.
+      # Interactive sends never reach this point without a model. Programmatic
+      # starts carry the same persisted-model invariant at their shared
+      # admission boundary, so a ``None`` model here can only be the genuine
+      # first-install chat before its first turn is admitted.
       if value is None and k != "model":
         continue
       snapshot[k] = value
@@ -5396,15 +5647,13 @@ async def _run_chat_impl_with_db(
   # provider's native tools instead of breaking chat.
   try:
     from app.connectors import build_turn_plan
-    # Connections follow the owner's own chats. A delegated child run or an
-    # app-attributed chat (embedded app panels, headless scheduled runs) must
-    # not inherit the owner's remote services; a per-app grant can opt in at
-    # this call site if a background app ever genuinely needs one. When the
-    # run has a chat_id but its row could not be loaded, attribution is
-    # unknown — fail closed rather than grant.
+    # A delegated child is an owner-authorized extension of the current agent,
+    # so it inherits the same detached connection snapshot. Other app-attributed
+    # chats (embedded panels and scheduled runs) remain isolated unless their
+    # app has its own grant. When attribution is unknown, fail closed.
     include_owner_connectors = (
-      run_policy is None
-      and (
+      run_policy is not None
+      or (
         not chat_id
         or (chat_row is not None and chat_row.created_by_app_id is None)
       )
@@ -5449,14 +5698,6 @@ async def _run_chat_impl_with_db(
     else None
   )
 
-  # App ownership is database state, so snapshot every provider requirement
-  # before releasing this turn's request session. Credential checks remain
-  # after close because they can perform local I/O and must not pin the pool.
-  provider_requirement_errors = {
-    candidate_id: provider_requirement_error(candidate, db)
-    for candidate_id, candidate in PROVIDERS.items()
-  }
-
   # Everything needed to launch the provider is now detached or copied into
   # plain values. Return this turn's checked-out connection before the
   # potentially hours-long SDK await. A Session may be reused after close(),
@@ -5471,13 +5712,10 @@ async def _run_chat_impl_with_db(
 
   # Pre-flight: check that provider credentials exist before invoking
   # the SDK runner. Without this, the SDK fails with a cryptic error.
-  auth_error = provider_requirement_errors.get(provider_id)
-  if auth_error is None:
-    # check_auth may perform blocking I/O (e.g. MobiusProvider probes the
-    # local broker over a Unix socket). Run it off the event loop so a slow
-    # or hung broker cannot stall this single-worker ASGI loop and the other
-    # turns and SSE streams sharing it.
-    auth_error = await run_in_threadpool(provider.check_auth, settings.data_dir)
+  # For the mobius provider this probes the local broker over a Unix socket,
+  # so run it off the event loop — a slow or hung broker must not stall this
+  # single-worker ASGI loop and the other turns and SSE streams sharing it.
+  auth_error = await run_in_threadpool(provider.check_auth, settings.data_dir)
   if auth_error:
     # A fresh install may intentionally finish setup without connecting an
     # agent; a returning owner's sole credential can also expire. When no
@@ -5489,17 +5727,7 @@ async def _run_chat_impl_with_db(
     # disconnected. If another provider is connected, this chat's selected
     # provider genuinely failed and the existing error path below remains the
     # honest response.
-    def _has_runnable_provider() -> bool:
-      return any(
-        provider_requirement_errors.get(candidate_id) is None
-        and candidate.check_auth(settings.data_dir) is None
-        for candidate_id, candidate in PROVIDERS.items()
-      )
-
-    # The scan calls check_auth for each provider, so offload the whole loop
-    # off the event loop for the same broker-stall reason as the probe above.
-    runnable_provider = await run_in_threadpool(_has_runnable_provider)
-    if not runnable_provider:
+    if not await run_in_threadpool(authenticated_provider_ids, settings.data_dir):
       await _record_run_metrics(
         chat_id=chat_id,
         run_token=run_token or "",
@@ -5544,7 +5772,9 @@ async def _run_chat_impl_with_db(
     return disposition
   data_dir = Path(settings.data_dir)
   cwd = (
-    run_policy.cwd
+    gauntlet_writer_policy.target_path
+    if gauntlet_writer_policy is not None
+    else run_policy.cwd
     if run_policy is not None
     else str(data_dir) if data_dir.exists() else str(Path.cwd())
   )
@@ -5600,6 +5830,7 @@ async def _run_chat_impl_with_db(
         goal_continue=goal_continue,
         fallback_goal_objective=fallback_goal_objective,
         run_policy=run_policy,
+        gauntlet_writer=gauntlet_writer_policy is not None,
         provider_id=provider_id,
         connector_plan=connector_turn_plan,
         coordination_enabled=coordination_tools_enabled,
@@ -5650,22 +5881,22 @@ async def _run_chat_impl_with_db(
       # _limit_exit publishes through the sink BEFORE finalize so the error
       # (with park fields on a limit kill) lands in the persisted assistant
       # transcript, not just the live wire.
-      limit_kwargs = _limit_exit(sink, None, str(exc))
+      park_kwargs = _park_exit(sink, None, str(exc))
       return await _complete_turn(
         bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
         provider_id=provider_id, cost_usd=0, close_browser=True,
-        **limit_kwargs,
+        **park_kwargs,
       )
     err = runner_result.get("error")
     # Same save-before-broadcast rationale: _limit_exit publishes through the
     # sink before finalize so the error is persisted alongside any partial
     # response that streamed before the failure (enriched with the park
     # fields when the terminal was a limit kill).
-    limit_kwargs = _limit_exit(sink, runner_result, err)
+    park_kwargs = _park_exit(sink, runner_result, err)
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
       provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
-      close_browser=True, **limit_kwargs,
+      close_browser=True, **park_kwargs,
     )
 
   if is_claude:
@@ -5766,11 +5997,13 @@ async def _run_chat_impl_with_db(
         pending_questions=questions._pending,
         db=db,
         agent_settings=runner_agent_settings,
-        skills_enabled=(
-          False if run_policy is not None
-          else _skills_enabled(settings.data_dir)
-        ),
+        skills_enabled=_skills_enabled(settings.data_dir),
         run_policy=run_policy,
+        gauntlet_writer=gauntlet_writer_policy is not None,
+        gauntlet_max_budget_usd=(
+          gauntlet_writer_policy.max_budget_usd
+          if gauntlet_writer_policy is not None else None
+        ),
         connector_plan=connector_turn_plan,
         coordination_enabled=coordination_tools_enabled,
       )
@@ -5812,20 +6045,20 @@ async def _run_chat_impl_with_db(
       # _limit_exit publishes through the sink BEFORE finalize so the error
       # (with park fields on a limit kill) lands in the persisted assistant
       # transcript, not just the live wire.
-      limit_kwargs = _limit_exit(sink, None, str(exc))
+      park_kwargs = _park_exit(sink, None, str(exc))
       return await _complete_turn(
         bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
         provider_id=provider_id, cost_usd=0, close_browser=True,
-        **limit_kwargs,
+        **park_kwargs,
       )
     # Same save-before-broadcast rationale: _limit_exit persists the error
     # alongside any partial response that streamed before the failure
     # (enriched with the park fields when the terminal was a limit kill).
-    limit_kwargs = _limit_exit(sink, runner_result, err)
+    park_kwargs = _park_exit(sink, runner_result, err)
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
       provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
-      close_browser=True, **limit_kwargs,
+      close_browser=True, **park_kwargs,
     )
 
   # Unknown provider — every supported provider is handled by an SDK

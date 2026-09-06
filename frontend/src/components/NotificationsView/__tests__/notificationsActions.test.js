@@ -25,12 +25,23 @@ test('notification header clears immediately and closes through the bell boundar
 })
 
 test('a ready shell update is an actionable bell notification, not a banner', () => {
-  assert.match(component, /A Möbius update is ready\./)
-  assert.match(component, /onClick=\{onUpdateNow\}[\s\S]*Update now/)
+  assert.match(component, /New shell ready\./)
+  assert.match(component, /Reload to use the latest interface changes\./)
+  assert.match(component, /onClick=\{onUpdateNow\}[\s\S]*Reload shell/)
   assert.match(component, /onClick=\{onUpdateLater\}[\s\S]*Later/)
   assert.match(component, /rows\.length === 0 && !updateAvailable/)
   assert.match(center, /visibleUnreadCount = unreadCount \+ \(/)
   assert.match(center, /updateAvailable=\{updateNoticeActive\}/)
   assert.match(center, /bellRef\.current\?\.focus\(\)/)
-  assert.match(css, /\.notifications__update-action\s*\{[\s\S]*?min-height:\s*44px/)
+  assert.match(css, /\.notifications__update-action\s*\{[\s\S]*?min-height:\s*36px/)
+})
+
+test('notification preview stays content-sized until its compact scroll cap', () => {
+  const panelRule = css.match(/\.notifications\s*\{([^}]*)\}/)?.[1] ?? ''
+  const contentRule = css.match(/\.notifications__content\s*\{([^}]*)\}/)?.[1] ?? ''
+
+  assert.match(panelRule, /max-height:\s*min\([\s\S]*?70dvh/)
+  assert.doesNotMatch(panelRule, /(?:^|\n)\s*height:/)
+  assert.match(contentRule, /overflow-y:\s*auto/)
+  assert.doesNotMatch(contentRule, /(?:^|\n)\s*flex:/)
 })

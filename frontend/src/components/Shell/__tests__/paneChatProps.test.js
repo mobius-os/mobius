@@ -14,8 +14,7 @@ const useTheme = readFileSync(
   new URL('../../../hooks/useTheme.js', import.meta.url), 'utf8',
 )
 
-// A realistic prop bag: the identities Shell passes, with `apps` carrying rows
-// for this chat and for another one.
+// A realistic prop bag containing the identities Shell passes.
 function propBag(overrides = {}) {
   const stable = {
     onComposerRequestHandled: () => {},
@@ -23,7 +22,6 @@ function propBag(overrides = {}) {
     markStreamingStart: () => {},
     markStreamingEnd: () => {},
     refreshApps: () => {},
-    acknowledgeAppPreview: () => {},
     refreshChats: () => {},
     markChatOwnerActivity: () => {},
     loadTheme: () => {},
@@ -37,40 +35,25 @@ function propBag(overrides = {}) {
     chatId: 'chat-a',
     paneId: 'pane-1',
     runtimeActive: true,
-    previewPresented: true,
     keepTranscriptPainted: false,
     paneContentHeight: 640,
     externalRunSignal: { startedAt: 1, activityAt: 2 },
     composerRequest: null,
-    apps: [
-      { id: 7, chat_id: 'chat-a', name: 'Atlas', updated_at: 't1' },
-      { id: 9, chat_id: 'chat-b', name: 'Beat', updated_at: 't1' },
-    ],
     ...stable,
     ...overrides,
   }
 }
 
-test('an unrelated chat’s update does not rerender this pane', () => {
+test('an identity-stable prop bag does not rerender this pane', () => {
   const previous = propBag()
-  // Everything this pane was given is identity-stable; only the `apps` array was
-  // reallocated by a refetch, and only another chat's row changed inside it.
-  const next = propBag({
-    ...previous,
-    apps: [
-      { id: 7, chat_id: 'chat-a', name: 'Atlas', updated_at: 't1' },
-      { id: 9, chat_id: 'chat-b', name: 'Beat', updated_at: 't2' },
-    ],
-  })
-  assert.equal(samePaneChatProps(previous, next), true)
+  assert.equal(samePaneChatProps(previous, { ...previous }), true)
 })
 
-test('every prop except apps is compared by identity', () => {
+test('every prop is compared by identity', () => {
   const previous = propBag()
   // Driven off the bag's own keys so a prop added later is covered without
   // editing this test — the realistic way isolation regresses is a new prop.
   for (const key of Object.keys(previous)) {
-    if (key === 'apps') continue
     const churned = typeof previous[key] === 'function'
       ? () => {}
       : { churned: key }
@@ -79,17 +62,6 @@ test('every prop except apps is compared by identity', () => {
       `a changed ${key} must rerender the pane`,
     )
   }
-})
-
-test('this chat’s own app projection still rerenders the pane', () => {
-  const previous = propBag()
-  const next = propBag({
-    apps: [
-      { id: 7, chat_id: 'chat-a', name: 'Atlas', updated_at: 't2' },
-      { id: 9, chat_id: 'chat-b', name: 'Beat', updated_at: 't1' },
-    ],
-  })
-  assert.equal(samePaneChatProps(previous, next), false)
 })
 
 test('an added or removed prop rerenders rather than being skipped', () => {
@@ -114,8 +86,8 @@ test('Shell hands the pane only identity-stable props', () => {
   // The intent navigator is a stable callback and preserves this pane while it
   // opens the app at an exact in-app review.
   assert.match(slice, /openAppWithIntent=\{openAppWithIntent\}/)
-  assert.match(slice, /previewPresented=\{chatSurfaceInteractive\}/,
-    'preview expiry must use the shell surface that is actually presented')
+  assert.doesNotMatch(slice, /apps=\{apps\}/,
+    'chat artifact queries must not make every app-list refresh rerender the pane')
   assert.doesNotMatch(shell, /const stablePaneNavTo = useCallback\(/)
   // loadTheme is a dependency of handleSystemEvent, which is itself a pane prop.
   assert.match(useTheme, /const loadTheme = useCallback\(/)

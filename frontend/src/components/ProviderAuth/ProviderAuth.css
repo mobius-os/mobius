@@ -645,3 +645,9 @@
     transition: none;
   }
 }
+
+.provider-connection { display: grid; gap: 10px; font-size: 13px; line-height: 1.5; }
+.provider-connection p { margin: 0; }
+.provider-connection__actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.provider-connection__actions .pa__btn { min-height: 36px; }
+.provider-connection__disconnect { color: var(--danger); }

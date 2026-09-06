@@ -1,4 +1,6 @@
 import { startMicrophoneCapture } from './microphoneCapture.js'
+import { startCameraCapture } from './cameraCapture.js'
+import { readCameraPreviewRect } from './cameraPreview.js'
 import {
   createDeviceAssetCacheProvider,
   DEVICE_ASSET_CACHE,
@@ -7,8 +9,13 @@ import {
   createScreenControlProvider,
   SCREEN_CONTROL,
 } from './screenControlHost.js'
+import {
+  createDeviceStorageProvider,
+  DEVICE_STORAGE,
+} from './deviceStorage.js'
 
 export const MICROPHONE_CAPTURE = 'media.microphone.capture'
+export const CAMERA_CAPTURE = 'media.camera.capture'
 export const SPEECH = 'media.speech'
 export const SPEECH_MODELS = 'device.speech-models'
 
@@ -91,9 +98,103 @@ export function createMicrophoneProvider({ startCapture = startMicrophoneCapture
   }
 }
 
+function cameraRequest(input, declaration) {
+  const allowed = new Set(['facingMode', 'maxDurationMs', 'audio'])
+  const unknown = Object.keys(input || {}).filter((key) => !allowed.has(key))
+  if (unknown.length) {
+    throw new TypeError(`Unknown camera capture input: ${unknown.sort().join(', ')}.`)
+  }
+
+  const facingMode = input?.facingMode ?? 'environment'
+  if (facingMode !== 'environment' && facingMode !== 'user') {
+    throw new TypeError('Camera facingMode must be `environment` or `user`.')
+  }
+  const audio = input?.audio ?? false
+  if (typeof audio !== 'boolean') {
+    throw new TypeError('Camera audio must be true or false.')
+  }
+
+  const declaredDuration = Number(declaration?.limits?.max_duration_ms) || 60_000
+  const requestedDuration = input?.maxDurationMs == null
+    ? declaredDuration
+    : input.maxDurationMs
+  if (
+    typeof requestedDuration !== 'number'
+    || !Number.isFinite(requestedDuration)
+    || requestedDuration <= 0
+  ) {
+    throw new TypeError('Camera maxDurationMs must be a positive number.')
+  }
+  const maxBytes = Number(declaration?.limits?.max_bytes)
+  if (!Number.isFinite(maxBytes) || maxBytes <= 0) {
+    throw new TypeError('Camera capture requires a reviewed max_bytes limit.')
+  }
+
+  return {
+    facingMode,
+    audio,
+    maxDurationMs: Math.max(100, Math.min(declaredDuration, requestedDuration)),
+    maxBytes,
+  }
+}
+
+export function createCameraProvider({
+  startCapture = startCameraCapture,
+  onPreview,
+} = {}) {
+  return {
+    version: 1,
+    exclusive: true,
+    onDeactivate: 'finish',
+    open({ input, declaration, channel }) {
+      const request = cameraRequest(input, declaration)
+      let previewStream = null
+      let previewRect = null
+
+      function publishPreview() {
+        if (typeof onPreview !== 'function') return
+        try {
+          onPreview(previewStream && previewRect ? {
+            stream: previewStream,
+            rect: previewRect,
+            facingMode: request.facingMode,
+          } : null)
+        } catch {}
+      }
+
+      const capture = startCapture({
+        ...request,
+        onProgress(value) { channel.event('progress', value) },
+        onPreviewStream(stream) {
+          previewStream = stream
+          publishPreview()
+        },
+      })
+      capture.ready.then((value) => {
+        channel.ready(value)
+        return capture.done
+      }).then((result) => {
+        channel.result(result, result?.bytes ? [result.bytes] : [])
+      }).catch((error) => channel.error(error))
+      return {
+        control(action, value) {
+          if (action === 'finish') capture.stop()
+          else if (action === 'cancel') capture.cancel()
+          else if (action === 'preview-rect') {
+            previewRect = readCameraPreviewRect(value)
+            publishPreview()
+          }
+        },
+      }
+    },
+  }
+}
+
 export function builtInCapabilityProviders(options = {}) {
   return {
     [DEVICE_ASSET_CACHE]: createDeviceAssetCacheProvider(options.deviceAssets),
+    [DEVICE_STORAGE]: createDeviceStorageProvider(options.deviceStorage),
+    [CAMERA_CAPTURE]: createCameraProvider(options.camera),
     [MICROPHONE_CAPTURE]: createMicrophoneProvider(options.microphone),
     [SPEECH]: createSpeechProvider(options.speech),
     [SPEECH_MODELS]: createSpeechModelsProvider({

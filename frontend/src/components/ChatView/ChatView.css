@@ -634,9 +634,15 @@
      read as standalone, not as something the agent typed. */
   max-width: none;
 }
+.chat__error-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
 .chat__error-label {
   display: block;
-  margin-bottom: 4px;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
@@ -671,11 +677,6 @@
   color: var(--muted);
   font-size: 12px;
 }
-/* The chevron is the only disclosure indicator. Blink and Gecko drop the native
-   marker once summary stops being display: list-item; older WebKit keeps
-   painting ::-webkit-details-marker regardless of display, so it needs its own
-   reset. Matches the other custom summaries (ChatUsageInspector,
-   ContributionReviewCard, AgentContextInspector). */
 .chat__recovery-details summary {
   display: flex;
   align-items: center;
@@ -683,10 +684,6 @@
   width: fit-content;
   min-height: 44px;
   cursor: pointer;
-  list-style: none;
-}
-.chat__recovery-details summary::-webkit-details-marker {
-  display: none;
 }
 .chat__recovery-details-chevron {
   flex: 0 0 auto;
@@ -807,15 +804,27 @@
 /* ── Reasoning lane (reused by the activity stretch) ── */
 
 .chat__cursor {
+  /* The live marker sits in the existing inter-message gap rather than
+     creating a trailing line box. Removing it at terminal promotion must not
+     change scrollHeight or make a followed conversation bounce downward. */
   position: absolute;
-  display: inline-block;
+  inset-inline-start: 4px;
+  bottom: -16px;
   width: 6px;
   height: 6px;
   background: var(--accent); /* CONTRACT: vivid opaque accent fill */
   border-radius: 50%;
-  margin-left: 4px;
-  vertical-align: middle;
+  pointer-events: none;
   animation: cursorPulse 1.5s ease-in-out infinite;
+}
+
+.progressive-markdown[data-is-streaming="true"] {
+  position: relative;
+}
+
+@keyframes cursorPulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -823,11 +832,6 @@
     animation: none;
     opacity: 0.65;
   }
-}
-
-@keyframes cursorPulse {
-  0%, 100% { opacity: 0.3; }
-  50% { opacity: 1; }
 }
 
 /* ── Spacer ──────────────────────────────────────── */
@@ -2297,6 +2301,10 @@
 .chat__foot .chat__resume-nudge,
 .chat__foot .chat__jump-latest,
 .chat__foot .chat__progress-step--toggle,
+.chat__foot .chat__progress-action,
+.chat__foot .chat__progress-clear,
+.chat__foot .chat__goal-plan,
+.chat__foot .chat__wait-summary,
 .chat__foot .chat__wait-cancel,
 .chat__foot .slash-menu,
 .chat__foot .chat__pill,
@@ -2624,7 +2632,7 @@
    AskUserQuestion card sits outside the viewport, so the frozen turn
    doesn't read as a hang. A tap scrolls the card into view (user-initiated
    — the no-auto-scroll contract stays intact). Same frosted accent chip
-   recipe as .chat__open-app-btn: it must read as a card over the chat
+   recipe uses a translucent surface floor so it reads as a card over the chat
    scrolling behind the transparent foot. Centered, because it speaks for
    the whole conversation rather than the queued tray. Its parent stack owns
    the absolute position; this lane only orders nearby floating controls. */
@@ -2750,7 +2758,64 @@
   align-self: flex-end;
 }
 
-.composer-plus__attention-dot {
+/* Unread app icons wait above the Brain one at a time, then fall into the
+   control. Each icon is a direct route to its app. Animationend advances the
+   queue, so the cue needs no timer or extra layout surface. */
+.composer-plus__icon-drop {
+  position: absolute;
+  z-index: 3;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 12px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+  animation: composer-icon-drop 2.4s linear forwards;
+}
+
+.composer-plus__icon-drop .app-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  font-size: 12px;
+}
+
+.composer-plus__icon-drop .app-icon:not(.is-image) {
+  box-shadow: 0 8px 22px color-mix(in srgb, var(--text) 20%, transparent);
+}
+
+.composer-plus__icon-drop:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+@keyframes composer-icon-drop {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -9px) scale(0.9);
+    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  8% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+  82% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+    animation-timing-function: cubic-bezier(0.4, 0, 1, 1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, 52px) scale(0.3);
+  }
+}
+
+.composer-plus__activity-dot {
   position: absolute;
   top: 4px;
   right: 3px;
@@ -2760,6 +2825,24 @@
   background: var(--accent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--surface) 90%, transparent);
   pointer-events: none;
+}
+
+
+@keyframes composer-icon-presence-reduced {
+  0%, 92% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, 0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-plus__icon-drop {
+    animation-name: composer-icon-presence-reduced;
+  }
 }
 
 /* Brain button: 48×48, matched 1:1 to the pill's min-height — same
@@ -2785,17 +2868,6 @@
 .chat__plus:hover {
   background: color-mix(in srgb, var(--surface2) 70%, transparent);
   color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
-}
-
-/* A New Chat already has the same final composer geometry, even during its
-   very short allocation handoff. The options button stays deliberately inert
-   until the row exists, but it must not pop into the layout afterwards. */
-.chat__plus--pending:disabled {
-  cursor: default;
-}
-.chat__plus--pending:disabled:hover {
-  background: color-mix(in srgb, var(--surface) 70%, transparent);
-  color: var(--muted);
 }
 
 /* Keyboard-only focus ring on the brain button. No :focus rule (pointer
@@ -2828,7 +2900,6 @@
    selected surface and the existing accent border for open state. */
 .chat__brain-usage {
   align-self: flex-end;
-  position: relative;
 }
 .chat__brain-usage:focus { outline: none; }
 .chat__brain-usage:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -2874,25 +2945,26 @@
   overscroll-behavior: contain;
 }
 
-/* Shell scrollbars stay hidden by default (see index.css) — normally gated
-   back on with `(hover: hover) and (pointer: fine)` for pointer-accurate
-   clients only (see .chat__tool-diff-scroll). This panel opts in
-   unconditionally instead: the model list can run well past the popover's
-   capped height (two providers, several models each, plus the effort
-   stepper and automation toggles), and a hidden, discovery-only scrollbar
-   left that overflow with no visible affordance at all on a touch client,
-   which is exactly the environment the hover/pointer gate was written for. */
+/* Opts into a scrollbar unconditionally, not behind .chat__tool-diff-scroll's
+   hover/pointer gate: the model list overflows on touch clients too.
+   Keep the gutter stable, but reveal its thumb only during scrolling.
+   Opening the Brain must not flash a scrollbar before any movement. */
 .composer-popover {
   --shell-scrollbar-width: thin;
   --shell-scrollbar-display: block;
-  scrollbar-color: color-mix(in srgb, var(--muted) 32%, transparent) transparent;
+  --composer-scrollbar-thumb: transparent;
+  scrollbar-color: var(--composer-scrollbar-thumb) transparent;
+}
+
+.composer-popover[data-scrolling] {
+  --composer-scrollbar-thumb: color-mix(in srgb, var(--muted) 32%, transparent);
 }
 
 .composer-popover::-webkit-scrollbar { width: 10px; }
 .composer-popover::-webkit-scrollbar-thumb {
   border: 3px solid transparent;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--muted) 32%, transparent);
+  background: var(--composer-scrollbar-thumb);
   background-clip: padding-box;
 }
 
@@ -2970,11 +3042,53 @@
   color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
 }
 
+.composer-popover__row-title-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.composer-popover__row-attention {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--warning, #d8922f);
+}
+
 .composer-popover__row-sub {
   font-size: 12px;     /* --font-text-xs */
   font-weight: 400;
   color: var(--muted); /* CONTRACT: low-contrast text on opaque fill */
   line-height: 1.4;
+}
+
+@media (max-width: 480px) {
+  .composer-popover {
+    width: min(296px, calc(100vw - 18px));
+    padding: 4px;
+  }
+
+  .composer-popover__section--picker,
+  .composer-popover__section--context {
+    margin-top: 3px;
+    padding-top: 3px;
+  }
+
+  .composer-popover__row {
+    min-height: 44px;
+    gap: 10px;
+    padding: 7px 8px;
+  }
+
+  .composer-popover__row-icon {
+    width: 28px;
+    height: 28px;
+  }
 }
 
 /* ── File chips: attach cards inside the pill ────────────────
@@ -3374,7 +3488,7 @@
   white-space: nowrap;
 }
 
-/* ── Open app CTA ──────────────────────────────────── */
+/* ── Shared chat-foot entrance ─────────────────────── */
 
 /* Chat-foot entrance: opacity + translateY ONLY. The foot is absolutely
    positioned and its ResizeObserver publishes --composer-h to size the
@@ -3385,97 +3499,10 @@
   to   { opacity: 1; transform: translateY(0); }
 }
 
-/* One accent ring that expands and fades — box-shadow only, so it never
-   affects layout. Reused for the CTA's first-plant welcome and the recompile
-   confirmation so "your change landed" rhymes with the app's arrival. */
-@keyframes chat-cta-ring {
-  from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); }
-  to   { box-shadow: 0 0 0 7px transparent; }
-}
-
-.chat__open-app {
-  width: min(100%, 720px);
-  margin: 0 auto;
-  display: flex;
-  /* One CTA row per built app, stacked and right-aligned (most recent last). */
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 6px;
-  padding: 0 4px;
-  pointer-events: none;
-}
-
-.chat__open-app > * {
-  pointer-events: auto;
-}
-
-.chat__open-app-btn {
-  /* Frosted accent card: an accent-tinted translucent SURFACE floor (so it
-     reads as a card over any chat content) plus a backdrop-blur that softens
-     the chat behind it — the same frosted-glass technique as the composer
-     pill (.chat__pill). The old `var(--accent-dim)` alone had no surface and
-     no blur, so live chat showed through it SHARP and it read as a stray
-     transparent overlay floating on the messages. */
-  background: color-mix(in srgb, var(--accent) 16%, color-mix(in srgb, var(--surface) 78%, transparent));
-  backdrop-filter: blur(16px) saturate(140%);
-  -webkit-backdrop-filter: blur(16px) saturate(140%);
-  border: 1px solid var(--accent); /* CONTRACT: vivid accent line */
-  color: var(--accent); /* CONTRACT: vivid accent text */
-  border-radius: 8px;
-  padding: 8px 16px;
-  max-width: min(100%, 360px);
-  position: relative; /* anchors the recompile-pulse ring pseudo-element */
-  overflow: hidden; /* long app names ellipsis; an element's OWN box-shadow
-                       (the plant ring below) is not clipped by its overflow */
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  /* Entrance on plant: rise in, then one subtle accent ring (the button's own
-     box-shadow, so overflow:hidden doesn't clip it). Both run once on mount
-     and never replay — the recompile pulse rides a pseudo-element, not this
-     list, so toggling that class can't restart these. NO fill mode on the
-     rise: a filled animation's transform keeps applying after it ends and —
-     animations outrank author rules in the cascade — would beat the :active
-     press scale below forever. With no delay there is no pre-play gap for
-     fill to cover, and the `to` keyframe equals the natural styles, so the
-     end of the animation is seamless. */
-  animation:
-    chat-foot-rise 0.22s var(--ease-out-soft, ease-out),
-    chat-cta-ring 0.9s ease-out 0.12s;
-  transition: background 0.15s, transform 0.08s;
-}
-
-.chat__open-app-btn:hover {
-  background: var(--accent); /* CONTRACT: vivid opaque accent fill */
-  color: var(--bg); /* CONTRACT: paint app-bg color on the accent fill — needs --bg solid to stay readable */
-}
-
-.chat__open-app-btn:active { transform: scale(0.97); }
-
-/* Recompile confirmation: a one-shot INSET accent ring on a pseudo-element. It
-   plays whenever the --pulse class toggles without disturbing the button's own
-   one-time entrance animation, and an inset ring stays inside overflow:hidden
-   (a descendant's box-shadow would otherwise be clipped). Label swap is in JSX. */
-.chat__open-app-btn--pulse::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
-  animation: chat-cta-flash 0.9s ease-out;
-}
-
-@keyframes chat-cta-flash {
-  from { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 75%, transparent); }
-  to   { box-shadow: inset 0 0 0 2px transparent; }
-}
-
 /* ── Goal/build progress rail ──────────────────────── */
 /* A slim progress rail in the foot, directly above the composer:
    the active goal (when present) followed by each build milestone emitted this
-   turn. Attention, connection, queue, and open-app notices deliberately stack
+   turn. Attention, connection, and queue notices deliberately stack
    ABOVE this rail so nothing interrupts its relationship to the chat controls.
    Frosted so it reads as a card over the chat scrolling behind the transparent
    foot, muted so it stays quiet next to the composer. The most recent phase is
@@ -3581,7 +3608,7 @@
 }
 
 .chat__progress-step--completed {
-  color: var(--green);
+  color: var(--muted);
 }
 
 .chat__progress-step--paused {
@@ -3640,19 +3667,21 @@
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--accent);
+  color: var(--muted);
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+  transition: color 0.14s ease, background 0.14s ease;
 }
 
 @media (hover: hover) and (pointer: fine) {
   .chat__progress-action:hover {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: color-mix(in srgb, var(--text) 8%, transparent);
+    color: var(--text);
   }
 }
 
 .chat__progress-action:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--text);
   outline-offset: 2px;
 }
 
@@ -3666,19 +3695,6 @@
 .chat__progress-clear:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-}
-
-/* Keep compact desktop controls while giving touch users distinct, reliable
-   targets. The row may grow on coarse pointers; avoiding overlapping hit-slop
-   is more important than preserving its desktop height. */
-@media (pointer: coarse) {
-  .chat__progress-action,
-  .chat__progress-clear {
-    width: 44px;
-    height: 44px;
-    margin: 0;
-    border-radius: 10px;
-  }
 }
 
 .chat__progress-clear--confirm {
@@ -3937,7 +3953,6 @@
     align-self: flex-start;
   }
 }
-
 .chat__goal-plan {
   flex: 1 0 100%;
   display: flex;
@@ -4440,67 +4455,41 @@
   line-height: 1.3;
 }
 
+/* Compact, evenly spaced send / edit / cancel wells. The button IS the visible
+   well now (no oversized transparent target or per-button nudges), so the row
+   of actions takes less of the queued message's width and spaces uniformly. */
 .queued__action {
-  --queued-action-visual-shift: 0px;
   flex-shrink: 0;
-  width: 44px;
-  height: 44px;
-  margin: 0;
+  width: 30px;
+  height: 30px;
+  /* Sit the well against the first line of queued text. */
+  margin-top: 3px;
   display: flex;
   align-items: center;
   justify-content: center;
-  position: relative;
-  isolation: isolate;
-  background: transparent;
-  border: none;
+  background: var(--surface2); /* CONTRACT: neutral compact well on opaque fill */
+  border: 1px solid var(--border-light); /* CONTRACT: subtle hairline around the well */
   border-radius: 8px;
   color: var(--muted); /* CONTRACT: low-contrast icon on opaque fill */
   cursor: pointer;
-  transition: color 0.15s;
+  transition: color 0.15s, background-color 0.15s, border-color 0.15s, transform 0.08s;
 }
 
-.queued__action::before {
-  content: "";
-  position: absolute;
-  z-index: -1;
-  width: 30px;
-  height: 30px;
-  border: 1px solid var(--border-light); /* CONTRACT: subtle hairline around the visible action well */
-  border-radius: 9px;
-  background: var(--surface2); /* CONTRACT: neutral compact well inside the full 44px target */
-  transform: translateX(var(--queued-action-visual-shift));
-  transition:
-    background-color 0.15s,
-    border-color 0.15s,
-    box-shadow 0.15s,
-    transform 0.08s;
+/* One consistent, tight gap between every action. */
+.queued__action + .queued__action {
+  margin-left: 3px;
 }
 
 .queued__action svg {
   display: block;
-  position: relative;
-  z-index: 1;
-  transform: translateX(var(--queued-action-visual-shift));
-  transition: transform 0.08s;
 }
 
-.queued__steer {
-  --queued-action-visual-shift: 3px;
-}
-
-.queued__cancel {
-  --queued-action-visual-shift: -3px;
-}
-
-.queued__action:hover::before {
-  transform: translate(var(--queued-action-visual-shift), -1px);
+.queued__action:not(:disabled):hover {
+  color: var(--text);
 }
 
 .queued__steer:not(:disabled):hover {
   color: var(--accent); /* CONTRACT: forwarding stays neutral at rest and reveals its meaning on interaction */
-}
-
-.queued__steer:not(:disabled):hover::before {
   background: color-mix(in srgb, var(--accent) 9%, var(--surface));
   border-color: color-mix(in srgb, var(--accent) 32%, var(--border-light));
 }
@@ -4508,17 +4497,12 @@
 .queued__cancel:not(:disabled):hover,
 .queued__cancel:not(:disabled):active {
   color: var(--danger); /* CONTRACT: removal becomes destructive only at interaction */
-}
-
-.queued__cancel:not(:disabled):hover::before,
-.queued__cancel:not(:disabled):active::before {
   background: color-mix(in srgb, var(--danger) 9%, var(--surface));
   border-color: color-mix(in srgb, var(--danger) 32%, var(--border-light));
 }
 
-.queued__action:active::before,
-.queued__action:active svg {
-  transform: translateX(var(--queued-action-visual-shift)) scale(0.9);
+.queued__action:not(:disabled):active {
+  transform: scale(0.9);
 }
 
 .queued__action:disabled {
@@ -4526,26 +4510,14 @@
   cursor: default;
 }
 
-.queued__action:disabled:hover::before {
-  transform: translateX(var(--queued-action-visual-shift));
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .queued__action::before,
-  .queued__action svg { transition: none; }
-  .queued__action:hover::before,
-  .queued__action:active::before,
-  .queued__action:active svg {
-    transform: translateX(var(--queued-action-visual-shift));
-  }
+  .queued__action { transition: color 0.15s, background-color 0.15s, border-color 0.15s; }
+  .queued__action:not(:disabled):active { transform: none; }
 }
 
 .queued__action:focus-visible {
   outline: none;
-}
-
-.queued__action:focus-visible::before {
-  box-shadow: 0 0 0 2px var(--accent); /* CONTRACT: focus follows the visible 30px well, not its transparent 44px target */
+  box-shadow: 0 0 0 2px var(--accent); /* CONTRACT: focus ring on the visible well */
 }
 
 /* ── Screen-reader-only utility ─────────────────────────────────────────── */

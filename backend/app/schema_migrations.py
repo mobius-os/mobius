@@ -1446,6 +1446,136 @@ def _add_app_connect_manage(eng) -> None:
     ))
 
 
+def _add_owner_auth_mode(eng) -> None:
+  """Add the durable owner login mode (models.Owner.auth_mode).
+
+  Column-existence gated so it is a no-op on a fresh install whose owner table
+  was built from ORM metadata, and safe to retry after a crash. Every existing
+  row defaults to 'local', so behaviour is byte-identical until an operator
+  flips an owner to 'mobius' host-side.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "owner" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("owner")}
+  if "auth_mode" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE owner ADD COLUMN auth_mode VARCHAR(16) "
+      "NOT NULL DEFAULT 'local'"
+    ))
+
+
+def _add_chat_active_assistant_identity(eng) -> None:
+  """Add the scalar owner of regenerable assistant browser state.
+
+  A pending question is the stronger protocol boundary, so locate the exact
+  unanswered card it names first. Otherwise backfill from the bounded live
+  snapshot. This also repairs a stale pre-upgrade live value instead of letting
+  it outrank a committed owner decision. Everything is self-contained because
+  migration history is immutable after publication.
+  """
+  from sqlalchemy import JSON as SAJSON, bindparam, inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chats" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chats")}
+  with eng.begin() as conn:
+    if "active_assistant_message_id" not in columns:
+      conn.execute(text(
+        "ALTER TABLE chats ADD COLUMN "
+        "active_assistant_message_id VARCHAR(128) NULL"
+      ))
+      columns.add("active_assistant_message_id")
+    if not {"id", "messages"}.issubset(columns):
+      return
+    # Keep the common upgrade path scalar-only. Historical transcripts can be
+    # large; hydrate one only for the small set of chats actually parked on a
+    # question instead of pulling every chat blob through the migration.
+    selected = ["id"]
+    if "live_assistant" in columns:
+      selected.append("live_assistant")
+    if "pending_question_id" in columns:
+      selected.append("pending_question_id")
+    filters = ["active_assistant_message_id IS NULL"]
+    if "deleted_at" in columns:
+      filters.append("deleted_at IS NULL")
+    rows = conn.execute(text(
+      "SELECT " + ", ".join(selected) + " FROM chats WHERE "
+      + " AND ".join(filters)
+    )).mappings().all()
+
+    def decoded(value):
+      if not isinstance(value, str):
+        return value
+      try:
+        return json.loads(value)
+      except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+    def bounded_id(value):
+      return value if isinstance(value, str) and 0 < len(value) <= 128 else None
+
+    update_messages = text(
+      "UPDATE chats SET messages = :messages WHERE id = :chat_id"
+    ).bindparams(bindparam("messages", type_=SAJSON))
+
+    for row in rows:
+      owner_id = None
+      pending_question_id = row.get("pending_question_id")
+      if isinstance(pending_question_id, str):
+        raw_messages = conn.execute(text(
+          "SELECT messages FROM chats WHERE id = :chat_id"
+        ), {"chat_id": row["id"]}).scalar_one_or_none()
+        messages = decoded(raw_messages)
+        if isinstance(messages, list):
+          for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if not isinstance(message, dict) or message.get("hidden"):
+              continue
+            if message.get("role") != "assistant":
+              continue
+            matching_question = any(
+              isinstance(block, dict)
+              and block.get("type") == "question"
+              and block.get("question_id") == pending_question_id
+              and not block.get("answers")
+              for block in (message.get("blocks") or [])
+            )
+            if matching_question:
+              owner_id = bounded_id(message.get("id"))
+              if owner_id is None:
+                # Pre-identity assistant rows still have one unambiguous owner:
+                # the exact unanswered card named by the durable marker. Give
+                # only that row a deterministic id and persist the same value in
+                # the scalar; inventing an id without updating the transcript
+                # would point the browser at a row that does not exist.
+                generated = f"assistant-question-{pending_question_id}"
+                owner_id = bounded_id(generated)
+                if owner_id is not None:
+                  repaired = dict(message)
+                  repaired["id"] = owner_id
+                  messages[index] = repaired
+                  conn.execute(update_messages, {
+                    "chat_id": row["id"],
+                    "messages": messages,
+                  })
+              break
+      if owner_id is None:
+        live = decoded(row.get("live_assistant"))
+        if isinstance(live, dict):
+          owner_id = bounded_id(live.get("id"))
+      if owner_id is not None:
+        conn.execute(text(
+          "UPDATE chats SET active_assistant_message_id = :owner_id "
+          "WHERE id = :chat_id AND active_assistant_message_id IS NULL"
+        ), {"chat_id": row["id"], "owner_id": owner_id})
+
+
 def _add_chat_pending_question_id(eng) -> None:
   """Add the durable open-AskUserQuestion marker (models.Chat).
 
@@ -1643,7 +1773,385 @@ def _add_app_hosted_publication(eng) -> None:
         conn.execute(text(f"ALTER TABLE apps DROP COLUMN {retired}"))
 
 
-def _retire_restart_resume_toggle(eng) -> None:
+def _repair_chat_retention_orphans(eng) -> None:
+  """Finish chat purges performed before workflow-aware retention existed.
+
+  Older releases could hard-delete a controller or child chat without removing
+  its Gauntlet/Delegation graph. They could also leave optional Autopilot links
+  and lifecycle rows pointing at already-purged chat/run rows. Current
+  ``chat_retention`` removes the whole graph in one transaction; this one-shot
+  repair gives databases upgraded from the older behavior that same terminal
+  state instead of carrying corrupt compatibility data forever.
+
+  The graph expansion is deliberately data-driven. A broken workflow may have
+  nested delegated children, or a task may be the only surviving edge between
+  an otherwise-valid run and an orphaned delegation. Once any control edge is
+  invalid, reclaim its entire workflow-owned branch just as the current hard
+  purge does. Ordinary chats are never inferred abandoned by age or content.
+  """
+  from sqlalchemy import bindparam, inspect as sa_inspect, text
+
+  tables = set(sa_inspect(eng).get_table_names())
+  if "chats" not in tables:
+    return
+
+  def _rows(conn, table: str, columns: str):
+    if table not in tables:
+      return []
+    return conn.execute(text(f"SELECT {columns} FROM {table}")).all()
+
+  def _delete_ids(conn, table: str, column: str, values: set[str]) -> None:
+    if table not in tables or not values:
+      return
+    ordered = sorted(values)
+    statement = text(
+      f"DELETE FROM {table} WHERE {column} IN :values"
+    ).bindparams(bindparam("values", expanding=True))
+    # Stay below conservative SQLite/PostgreSQL parameter limits on a database
+    # carrying many years of legacy workflow artifacts.
+    for offset in range(0, len(ordered), 500):
+      conn.execute(statement, {"values": ordered[offset:offset + 500]})
+
+  reclaimed_chat_ids: set[str] = set()
+  with eng.begin() as conn:
+    chat_ids = {str(row[0]) for row in _rows(conn, "chats", "id")}
+    delegations = {
+      str(row[0]): (str(row[1]), str(row[2]))
+      for row in _rows(
+        conn, "delegations", "id, parent_chat_id, child_chat_id",
+      )
+    }
+    gauntlets = {
+      str(row[0]): str(row[1])
+      for row in _rows(conn, "gauntlet_runs", "id, parent_chat_id")
+    }
+    tasks = [
+      (str(row[0]), str(row[1]), str(row[2]) if row[2] is not None else None)
+      for row in _rows(
+        conn, "gauntlet_tasks", "id, gauntlet_run_id, delegation_id",
+      )
+    ]
+
+    delete_delegations = {
+      delegation_id
+      for delegation_id, (parent_id, child_id) in delegations.items()
+      if parent_id not in chat_ids or child_id not in chat_ids
+    }
+    delete_gauntlets = {
+      gauntlet_id
+      for gauntlet_id, parent_id in gauntlets.items()
+      if parent_id not in chat_ids
+    }
+    delete_tasks = {
+      task_id
+      for task_id, gauntlet_id, delegation_id in tasks
+      if gauntlet_id not in gauntlets
+      or (delegation_id is not None and delegation_id not in delegations)
+    }
+    # A task whose other control parent already disappeared identifies the
+    # surviving side as part of that same incomplete workflow, not as a new
+    # standalone authority.
+    for task_id, gauntlet_id, delegation_id in tasks:
+      if task_id not in delete_tasks:
+        continue
+      if gauntlet_id in gauntlets:
+        delete_gauntlets.add(gauntlet_id)
+      if delegation_id in delegations:
+        delete_delegations.add(delegation_id)
+
+    while True:
+      before = (
+        len(reclaimed_chat_ids), len(delete_delegations),
+        len(delete_gauntlets), len(delete_tasks),
+      )
+      reclaimed_chat_ids.update(
+        child_id
+        for delegation_id, (_parent_id, child_id) in delegations.items()
+        if delegation_id in delete_delegations and child_id in chat_ids
+      )
+      delete_gauntlets.update(
+        gauntlet_id
+        for gauntlet_id, parent_id in gauntlets.items()
+        if parent_id in reclaimed_chat_ids
+      )
+      delete_delegations.update(
+        delegation_id
+        for delegation_id, (parent_id, child_id) in delegations.items()
+        if parent_id in reclaimed_chat_ids or child_id in reclaimed_chat_ids
+      )
+      for task_id, gauntlet_id, delegation_id in tasks:
+        if (
+          gauntlet_id in delete_gauntlets
+          or delegation_id in delete_delegations
+        ):
+          delete_tasks.add(task_id)
+          if gauntlet_id in gauntlets:
+            delete_gauntlets.add(gauntlet_id)
+          if delegation_id in delegations:
+            delete_delegations.add(delegation_id)
+      after = (
+        len(reclaimed_chat_ids), len(delete_delegations),
+        len(delete_gauntlets), len(delete_tasks),
+      )
+      if after == before:
+        break
+
+    if "contribution_autopilot" in tables:
+      # The follow-up chat is a convenience pointer, not the Autopilot record's
+      # identity. Preserve the ledger while clearing both old and newly-reclaimed
+      # targets.
+      conn.execute(text(
+        "UPDATE contribution_autopilot SET followup_chat_id = NULL "
+        "WHERE followup_chat_id IS NOT NULL AND NOT EXISTS ("
+        "SELECT 1 FROM chats c WHERE c.id = followup_chat_id)"
+      ))
+      if reclaimed_chat_ids:
+        statement = text(
+          "UPDATE contribution_autopilot SET followup_chat_id = NULL "
+          "WHERE followup_chat_id IN :values"
+        ).bindparams(bindparam("values", expanding=True))
+        ordered = sorted(reclaimed_chat_ids)
+        for offset in range(0, len(ordered), 500):
+          conn.execute(statement, {"values": ordered[offset:offset + 500]})
+
+    _delete_ids(conn, "gauntlet_tasks", "id", delete_tasks)
+    _delete_ids(conn, "gauntlet_runs", "id", delete_gauntlets)
+    _delete_ids(conn, "delegations", "id", delete_delegations)
+
+    if "agent_lifecycle_events" in tables:
+      conn.execute(text(
+        "DELETE FROM agent_lifecycle_events "
+        "WHERE NOT EXISTS ("
+        "SELECT 1 FROM chats c WHERE c.id = agent_lifecycle_events.chat_id"
+        ") OR (chat_run_id IS NOT NULL AND NOT EXISTS ("
+        "SELECT 1 FROM chat_runs r "
+        "WHERE r.id = agent_lifecycle_events.chat_run_id))"
+      ))
+
+    if reclaimed_chat_ids:
+      # Match the current hard-purge dependency order. Lifecycle events also
+      # bind ChatRun, so remove them before the run rows even if corrupt legacy
+      # data gave the event a mismatched chat_id.
+      if "agent_lifecycle_events" in tables and "chat_runs" in tables:
+        statement = text(
+          "DELETE FROM agent_lifecycle_events WHERE chat_id IN :values "
+          "OR chat_run_id IN (SELECT id FROM chat_runs "
+          "WHERE chat_id IN :values)"
+        ).bindparams(bindparam("values", expanding=True))
+        ordered = sorted(reclaimed_chat_ids)
+        for offset in range(0, len(ordered), 500):
+          conn.execute(statement, {"values": ordered[offset:offset + 500]})
+      for table in (
+        "chat_embed_grants",
+        "agent_lifecycle_run_updates",
+        "tool_outputs",
+        "thinking_traces",
+        "chat_session_links",
+        "chat_runs",
+        "chat_search_docs",
+        "chat_search_state",
+      ):
+        _delete_ids(conn, table, "chat_id", reclaimed_chat_ids)
+      _delete_ids(conn, "chats", "id", reclaimed_chat_ids)
+
+    if eng.dialect.name == "sqlite":
+      violations = conn.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+      if violations:
+        kinds = sorted({f"{row[0]}->{row[2]}" for row in violations})
+        raise RuntimeError(
+          "chat-retention repair left foreign-key violations: "
+          + ", ".join(kinds)
+        )
+
+  # The database commit is authoritative. Derived filesystem state follows the
+  # same best-effort rule as normal retention and never risks erasing a chat
+  # whose database transaction could still roll back.
+  if reclaimed_chat_ids:
+    import shutil
+
+    # Keep this historical migration self-contained. Calling the ordinary
+    # retention helper would make a future cleanup refactor silently rewrite
+    # what an already-published database migration does.
+    data_dir = Path(os.environ.get("DATA_DIR", "/data"))
+    for chat_id in sorted(reclaimed_chat_ids):
+      shutil.rmtree(data_dir / "chats" / chat_id, ignore_errors=True)
+      shutil.rmtree(
+        data_dir / "agent-browser-profiles" / f"chat-{chat_id}",
+        ignore_errors=True,
+      )
+      shutil.rmtree(
+        data_dir / "shared" / "memory" / "chats" / chat_id,
+        ignore_errors=True,
+      )
+
+
+def _add_app_project_templates(eng) -> None:
+  """Persist validated manifest project-template declarations on App rows."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "apps" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("apps")}
+  if "project_templates_json" not in columns:
+    with eng.begin() as conn:
+      conn.execute(text(
+        "ALTER TABLE apps ADD COLUMN project_templates_json JSON NULL"
+      ))
+
+
+def _add_project_artifacts(eng) -> None:
+  """Persist the per-project artifact registry and build status.
+
+  Additive and idempotent: the column is inspector-gated so a re-run no-ops.
+  ``create_all`` builds a fresh projects table with the column already present,
+  so this ALTER only covers an already-deployed projects table. Nullable with no
+  backfill — every existing row reads NULL as "no artifacts yet." Project files
+  (including the ``artifacts/`` output trees) live outside the database and are
+  untouched.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "projects" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("projects")}
+  if "artifacts_json" not in columns:
+    with eng.begin() as conn:
+      conn.execute(text(
+        "ALTER TABLE projects ADD COLUMN artifacts_json JSON NULL"
+      ))
+
+
+def _add_project_color(eng) -> None:
+  """Add an optional owner-chosen color to project identity controls.
+
+  Existing projects remain NULL and continue following the instance accent.
+  The inspector gate makes a retry and a fresh ORM-created database no-ops.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "projects" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("projects")}
+  if "color" not in columns:
+    with eng.begin() as conn:
+      conn.execute(text(
+        "ALTER TABLE projects ADD COLUMN color VARCHAR(7) NULL"
+      ))
+
+
+def _add_project_chat_collection(eng) -> None:
+  """Move Projects from one required primary chat to zero-or-more chats.
+
+  Existing primary chats are preserved and associated through
+  ``chats.project_id``. SQLite cannot drop a NOT NULL constraint in place, so
+  its small metadata-only Projects table is rebuilt transactionally. Project
+  files remain outside the database and are untouched.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  tables = set(inspector.get_table_names())
+  if not {"projects", "chats"}.issubset(tables):
+    return
+  project_columns = {
+    column["name"]: column for column in inspector.get_columns("projects")
+  }
+  if not project_columns["chat_id"].get("nullable", True):
+    if eng.dialect.name == "sqlite":
+      # No table points at Projects before this migration. Rebuild it before
+      # adding chats.project_id so SQLite cannot retarget an incoming FK to the
+      # temporary table name during ALTER TABLE RENAME.
+      raw = eng.raw_connection()
+      try:
+        cursor = raw.cursor()
+        cursor.execute("PRAGMA foreign_keys=OFF")
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute("ALTER TABLE projects RENAME TO projects__pre_0014")
+        cursor.execute(
+          "CREATE TABLE projects ("
+          "id VARCHAR(64) NOT NULL PRIMARY KEY, "
+          "name VARCHAR(256) NOT NULL, "
+          "project_type VARCHAR(128) NOT NULL, "
+          "root_path VARCHAR(1024) NOT NULL UNIQUE, "
+          "chat_id VARCHAR(64) NULL UNIQUE REFERENCES chats(id), "
+          "source_app_id INTEGER NULL REFERENCES apps(id) ON DELETE SET NULL, "
+          "template_snapshot_json JSON NOT NULL, "
+          "legacy_source_json JSON NULL, "
+          "deleted_at DATETIME NULL, "
+          "created_at DATETIME NULL, "
+          "updated_at DATETIME NULL"
+          ")"
+        )
+        cursor.execute(
+          "INSERT INTO projects "
+          "(id, name, project_type, root_path, chat_id, source_app_id, "
+          "template_snapshot_json, legacy_source_json, deleted_at, created_at, updated_at) "
+          "SELECT id, name, project_type, root_path, chat_id, source_app_id, "
+          "template_snapshot_json, legacy_source_json, deleted_at, created_at, updated_at "
+          "FROM projects__pre_0014"
+        )
+        cursor.execute("DROP TABLE projects__pre_0014")
+        cursor.execute("CREATE INDEX ix_projects_chat_id ON projects (chat_id)")
+        cursor.execute("CREATE INDEX ix_projects_source_app_id ON projects (source_app_id)")
+        raw.commit()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+      except Exception:
+        raw.rollback()
+        raise
+      finally:
+        raw.close()
+    else:
+      with eng.begin() as conn:
+        conn.execute(text(
+          "ALTER TABLE projects ALTER COLUMN chat_id DROP NOT NULL"
+        ))
+
+  inspector = sa_inspect(eng)
+  chat_columns = {column["name"] for column in inspector.get_columns("chats")}
+  with eng.begin() as conn:
+    if "project_id" not in chat_columns:
+      if eng.dialect.name == "sqlite":
+        conn.execute(text(
+          "ALTER TABLE chats ADD COLUMN project_id VARCHAR(64) NULL"
+        ))
+      else:
+        conn.execute(text(
+          "ALTER TABLE chats ADD COLUMN project_id VARCHAR(64) NULL"
+        ))
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_chats_project_id ON chats (project_id)"
+    ))
+    conn.execute(text(
+      "UPDATE chats SET project_id = ("
+      "SELECT projects.id FROM projects WHERE projects.chat_id = chats.id"
+      ") WHERE project_id IS NULL AND EXISTS ("
+      "SELECT 1 FROM projects WHERE projects.chat_id = chats.id"
+      ")"
+    ))
+    conn.execute(text("UPDATE projects SET chat_id = NULL WHERE chat_id IS NOT NULL"))
+
+
+def _add_chat_goal_dismissal(eng) -> None:
+  """Give Goal presentation a first-class chat-owned dismissal pointer."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chats" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chats")}
+  if "dismissed_goal_id" in columns:
+    return
+  with eng.begin() as conn:
+    conn.execute(text(
+      "ALTER TABLE chats ADD COLUMN dismissed_goal_id VARCHAR(64) NULL"
+    ))
+
+
+def _retire_restart_resume_toggle_v2(eng) -> None:
   """Retire the owner restart-resume seed and lift chats a toggle latched off.
 
   Restart continuation is now always on with no owner toggle. Earlier installs
@@ -1683,94 +2191,6 @@ def _retire_restart_resume_toggle(eng) -> None:
     conn.execute(text(
       "ALTER TABLE owner DROP COLUMN auto_resume_on_restart_default"
     ))
-
-
-def _add_chat_active_assistant_identity(eng) -> None:
-  """Add the scalar owner of regenerable assistant browser state.
-
-  A pending question is the stronger protocol boundary, so locate the exact
-  unanswered card it names first. Otherwise backfill from the bounded live
-  snapshot. Rows whose exact parked-question owner predates assistant message
-  ids stay null here: startup repairs that transcript through the chat-writer
-  actor, then stores both identities in one serialized transaction. Schema
-  migrations never rewrite ``Chat.messages``.
-  """
-  from sqlalchemy import inspect as sa_inspect, text
-
-  inspector = sa_inspect(eng)
-  if "chats" not in inspector.get_table_names():
-    return
-  columns = {column["name"] for column in inspector.get_columns("chats")}
-  with eng.begin() as conn:
-    if "active_assistant_message_id" not in columns:
-      conn.execute(text(
-        "ALTER TABLE chats ADD COLUMN "
-        "active_assistant_message_id VARCHAR(128) NULL"
-      ))
-      columns.add("active_assistant_message_id")
-    if not {"id", "messages"}.issubset(columns):
-      return
-    # Keep the common upgrade path scalar-only. Historical transcripts can be
-    # large; hydrate one only for the small set of chats actually parked on a
-    # question instead of pulling every chat blob through the migration.
-    selected = ["id"]
-    if "live_assistant" in columns:
-      selected.append("live_assistant")
-    if "pending_question_id" in columns:
-      selected.append("pending_question_id")
-    filters = ["active_assistant_message_id IS NULL"]
-    if "deleted_at" in columns:
-      filters.append("deleted_at IS NULL")
-    rows = conn.execute(text(
-      "SELECT " + ", ".join(selected) + " FROM chats WHERE "
-      + " AND ".join(filters)
-    )).mappings().all()
-
-    def decoded(value):
-      if not isinstance(value, str):
-        return value
-      try:
-        return json.loads(value)
-      except (TypeError, ValueError, json.JSONDecodeError):
-        return None
-
-    def bounded_id(value):
-      return value if isinstance(value, str) and 0 < len(value) <= 128 else None
-
-    for row in rows:
-      owner_id = None
-      pending_question_id = row.get("pending_question_id")
-      if isinstance(pending_question_id, str):
-        raw_messages = conn.execute(text(
-          "SELECT messages FROM chats WHERE id = :chat_id"
-        ), {"chat_id": row["id"]}).scalar_one_or_none()
-        messages = decoded(raw_messages)
-        if isinstance(messages, list):
-          for index in range(len(messages) - 1, -1, -1):
-            message = messages[index]
-            if not isinstance(message, dict) or message.get("hidden"):
-              continue
-            if message.get("role") != "assistant":
-              continue
-            matching_question = any(
-              isinstance(block, dict)
-              and block.get("type") == "question"
-              and block.get("question_id") == pending_question_id
-              and not block.get("answers")
-              for block in (message.get("blocks") or [])
-            )
-            if matching_question:
-              owner_id = bounded_id(message.get("id"))
-              break
-      if owner_id is None:
-        live = decoded(row.get("live_assistant"))
-        if isinstance(live, dict):
-          owner_id = bounded_id(live.get("id"))
-      if owner_id is not None:
-        conn.execute(text(
-          "UPDATE chats SET active_assistant_message_id = :owner_id "
-          "WHERE id = :chat_id AND active_assistant_message_id IS NULL"
-        ), {"chat_id": row["id"], "owner_id": owner_id})
 
 
 def _pin_established_legacy_chat_models(eng) -> None:
@@ -1815,11 +2235,9 @@ def _pin_established_legacy_chat_models(eng) -> None:
       return "claude"
     if normalized.startswith("gpt-"):
       return "codex"
-    if normalized == "inkling":
-      return "mobius"
     return None
 
-  provider_ids = {"claude", "codex", "mobius"}
+  provider_ids = {"claude", "codex"}
   selected_models = {}
 
   # The shared file contains the latest picker choice. Associate a future or
@@ -1862,7 +2280,12 @@ def _pin_established_legacy_chat_models(eng) -> None:
   select_columns = [
     "id", "provider", "messages", "agent_settings_json", *optional_columns,
   ]
-  source_where = " WHERE deleted_at IS NULL" if "deleted_at" in columns else ""
+  source_filters = []
+  if "deleted_at" in columns:
+    source_filters.append("deleted_at IS NULL")
+  source_where = (
+    " WHERE " + " AND ".join(source_filters) if source_filters else ""
+  )
   order_columns = [
     name for name in ("activity_at", "updated_at", "created_at")
     if name in columns
@@ -1912,6 +2335,8 @@ def _pin_established_legacy_chat_models(eng) -> None:
       selected_model = selected_models.get(provider)
       if selected_model is None:
         continue
+      if "deleted_at" in columns and row.get("deleted_at") is not None:
+        continue
       settings = decoded_json(row["agent_settings_json"])
       if settings is invalid_json:
         # A malformed JSON value is partner data, not an empty settings object.
@@ -1937,167 +2362,708 @@ def _pin_established_legacy_chat_models(eng) -> None:
       })
 
 
-def _add_app_project_templates(eng) -> None:
-  """Persist validated manifest project-template declarations on App rows."""
-  from sqlalchemy import inspect as sa_inspect, text
+def _pin_all_active_chat_models(eng) -> None:
+  """Pin every active non-draft chat to a same-provider model.
 
-  inspector = sa_inspect(eng)
-  if "apps" not in inspector.get_table_names():
-    return
-  columns = {column["name"] for column in inspector.get_columns("apps")}
-  if "project_templates_json" not in columns:
-    with eng.begin() as conn:
-      conn.execute(text(
-        "ALTER TABLE apps ADD COLUMN project_templates_json JSON NULL"
-      ))
+  Migration 0019 repaired established conversations with assistant history.
+  Other programmatic and app-owned chats could still have escaped creation
+  without a model, which now makes their unattended start fail closed. Repair
+  those rows without changing provider identity. A genuinely untouched shell
+  draft remains lazy so it can inherit the owner's latest picker choice when
+  its first turn is admitted, even if another pane changed that choice after
+  the empty row was materialized.
 
-def _add_project_chat_collection(eng) -> None:
-  """Move Projects from one required primary chat to zero-or-more chats.
-
-  Existing primary chats are preserved and associated through
-  ``chats.project_id``. SQLite cannot drop a NOT NULL constraint in place, so
-  its small metadata-only Projects table is rebuilt transactionally. Project
-  files remain outside the database and are untouched.
+  This is a frozen migration: model classification/defaults and the untouched
+  draft predicate are copied here and must not drift with live runtime helpers
+  after publication.
   """
-  from sqlalchemy import inspect as sa_inspect, text
+  from sqlalchemy import JSON as SAJSON, bindparam, inspect as sa_inspect, text
 
   inspector = sa_inspect(eng)
   tables = set(inspector.get_table_names())
-  if not {"projects", "chats"}.issubset(tables):
-    return
-  project_columns = {
-    column["name"]: column for column in inspector.get_columns("projects")
-  }
-  if not project_columns["chat_id"].get("nullable", True):
-    if eng.dialect.name == "sqlite":
-      # No table points at Projects before this migration. Rebuild it before
-      # adding chats.project_id so SQLite cannot retarget an incoming FK to the
-      # temporary table name during ALTER TABLE RENAME.
-      raw = eng.raw_connection()
-      try:
-        cursor = raw.cursor()
-        cursor.execute("PRAGMA foreign_keys=OFF")
-        cursor.execute("BEGIN IMMEDIATE")
-        cursor.execute("ALTER TABLE projects RENAME TO projects__pre_0021")
-        cursor.execute(
-          "CREATE TABLE projects ("
-          "id VARCHAR(64) NOT NULL PRIMARY KEY, "
-          "name VARCHAR(256) NOT NULL, "
-          "project_type VARCHAR(128) NOT NULL, "
-          "root_path VARCHAR(1024) NOT NULL UNIQUE, "
-          "chat_id VARCHAR(64) NULL UNIQUE REFERENCES chats(id), "
-          "source_app_id INTEGER NULL REFERENCES apps(id) ON DELETE SET NULL, "
-          "template_snapshot_json JSON NOT NULL, "
-          "legacy_source_json JSON NULL, "
-          "deleted_at DATETIME NULL, "
-          "created_at DATETIME NULL, "
-          "updated_at DATETIME NULL"
-          ")"
-        )
-        cursor.execute(
-          "INSERT INTO projects "
-          "(id, name, project_type, root_path, chat_id, source_app_id, "
-          "template_snapshot_json, legacy_source_json, deleted_at, created_at, updated_at) "
-          "SELECT id, name, project_type, root_path, chat_id, source_app_id, "
-          "template_snapshot_json, legacy_source_json, deleted_at, created_at, updated_at "
-          "FROM projects__pre_0021"
-        )
-        cursor.execute("DROP TABLE projects__pre_0021")
-        cursor.execute("CREATE INDEX ix_projects_chat_id ON projects (chat_id)")
-        cursor.execute("CREATE INDEX ix_projects_source_app_id ON projects (source_app_id)")
-        raw.commit()
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
-      except Exception:
-        raw.rollback()
-        raise
-      finally:
-        raw.close()
-    else:
-      with eng.begin() as conn:
-        conn.execute(text(
-          "ALTER TABLE projects ALTER COLUMN chat_id DROP NOT NULL"
-        ))
-
-  inspector = sa_inspect(eng)
-  chat_columns = {column["name"] for column in inspector.get_columns("chats")}
-  with eng.begin() as conn:
-    if "project_id" not in chat_columns:
-      if eng.dialect.name == "sqlite":
-        conn.execute(text(
-          "ALTER TABLE chats ADD COLUMN project_id VARCHAR(64) NULL"
-        ))
-      else:
-        conn.execute(text(
-          "ALTER TABLE chats ADD COLUMN project_id VARCHAR(64) NULL"
-        ))
-    conn.execute(text(
-      "CREATE INDEX IF NOT EXISTS ix_chats_project_id ON chats (project_id)"
-    ))
-    conn.execute(text(
-      "UPDATE chats SET project_id = ("
-      "SELECT projects.id FROM projects WHERE projects.chat_id = chats.id"
-      ") WHERE project_id IS NULL AND EXISTS ("
-      "SELECT 1 FROM projects WHERE projects.chat_id = chats.id"
-      ")"
-    ))
-    conn.execute(text("UPDATE projects SET chat_id = NULL WHERE chat_id IS NOT NULL"))
-
-def _add_project_artifacts(eng) -> None:
-  """Persist the per-project artifact registry and build status.
-
-  Additive and idempotent: the column is inspector-gated so a re-run no-ops.
-  ``create_all`` builds a fresh projects table with the column already present,
-  so this ALTER only covers an already-deployed projects table. Nullable with no
-  backfill — every existing row reads NULL as "no artifacts yet." Project files
-  (including the ``artifacts/`` output trees) live outside the database and are
-  untouched.
-  """
-  from sqlalchemy import inspect as sa_inspect, text
-
-  inspector = sa_inspect(eng)
-  if "projects" not in inspector.get_table_names():
-    return
-  columns = {column["name"] for column in inspector.get_columns("projects")}
-  if "artifacts_json" not in columns:
-    with eng.begin() as conn:
-      conn.execute(text(
-        "ALTER TABLE projects ADD COLUMN artifacts_json JSON NULL"
-      ))
-
-def _add_project_color(eng) -> None:
-  """Add an optional owner-chosen color to project identity controls.
-
-  Existing projects remain NULL and continue following the instance accent.
-  The inspector gate makes a retry and a fresh ORM-created database no-ops.
-  """
-  from sqlalchemy import inspect as sa_inspect, text
-
-  inspector = sa_inspect(eng)
-  if "projects" not in inspector.get_table_names():
-    return
-  columns = {column["name"] for column in inspector.get_columns("projects")}
-  if "color" not in columns:
-    with eng.begin() as conn:
-      conn.execute(text(
-        "ALTER TABLE projects ADD COLUMN color VARCHAR(7) NULL"
-      ))
-
-
-def _add_chat_goal_dismissal(eng) -> None:
-  """Give Goal presentation a first-class chat-owned dismissal pointer."""
-  from sqlalchemy import inspect as sa_inspect, text
-
-  inspector = sa_inspect(eng)
-  if "chats" not in inspector.get_table_names():
+  if "chats" not in tables:
     return
   columns = {column["name"] for column in inspector.get_columns("chats")}
-  if "dismissed_goal_id" in columns:
+  required = {"id", "title", "provider", "messages", "agent_settings_json"}
+  if not required.issubset(columns):
     return
+
+  invalid_json = object()
+
+  def decoded(value):
+    if isinstance(value, str):
+      try:
+        return json.loads(value)
+      except (TypeError, ValueError):
+        return invalid_json
+    return value
+
+  def model_provider(model):
+    if not isinstance(model, str) or not model.strip():
+      return None
+    normalized = model.strip()
+    if normalized.endswith("[1m]"):
+      normalized = normalized[:-4]
+    if normalized.startswith("claude-"):
+      return "claude"
+    if normalized.startswith("gpt-"):
+      return "codex"
+    if normalized in {"spark", "inkling"}:
+      return "mobius"
+    return None
+
+  def compatible_model(model, provider):
+    if not isinstance(model, str) or not model.strip():
+      return None
+    normalized = model.strip()
+    if normalized.endswith("[1m]"):
+      normalized = normalized[:-4]
+    classified = model_provider(normalized)
+    return normalized if classified in {None, provider} else None
+
+  defaults = {
+    "claude": "claude-opus-4-8",
+    "codex": "gpt-5.6-sol",
+    "mobius": "inkling",
+  }
+  provider_ids = set(defaults)
+  try:
+    global_settings = json.loads(
+      (Path(os.environ.get("DATA_DIR", "/data"))
+       / "shared" / "agent-settings.json").read_text(encoding="utf-8")
+    )
+  except (OSError, TypeError, ValueError):
+    global_settings = {}
+  if not isinstance(global_settings, dict):
+    global_settings = {}
+
+  owner_provider = None
+  if "owner" in tables:
+    owner_columns = {column["name"] for column in inspector.get_columns("owner")}
+    if "provider" in owner_columns:
+      with eng.connect() as conn:
+        owner_provider = conn.execute(text(
+          "SELECT provider FROM owner ORDER BY id LIMIT 1"
+        )).scalar_one_or_none()
+  global_model = global_settings.get("model")
+  global_provider = model_provider(global_model)
+  if global_provider is None:
+    stored_provider = global_settings.get("provider")
+    if stored_provider in provider_ids:
+      global_provider = stored_provider
+    elif owner_provider in provider_ids:
+      global_provider = owner_provider
+  global_model = compatible_model(global_model, global_provider)
+
+  optional_columns = [name for name in (
+    "deleted_at", "created_by_app_id", "project_id", "pending_messages",
+    "has_messages", "live_assistant", "active_assistant_message_id",
+    "pending_question_id", "session_id", "system_prompt_snapshot_id",
+    "activity_at", "updated_at", "created_at",
+  ) if name in columns]
+  order_columns = [
+    name for name in ("activity_at", "updated_at", "created_at") if name in columns
+  ]
+  if len(order_columns) > 1:
+    order_sql = " ORDER BY COALESCE(" + ", ".join(order_columns) + ") DESC"
+  elif order_columns:
+    order_sql = f" ORDER BY {order_columns[0]} DESC"
+  else:
+    order_sql = " ORDER BY id DESC"
+
+  with eng.begin() as conn:
+    select_columns = [
+      "id", "title", "provider", "messages", "agent_settings_json",
+      *optional_columns,
+    ]
+    rows = conn.execute(text(
+      "SELECT " + ", ".join(select_columns) + " FROM chats" + order_sql
+    )).mappings().all()
+
+    selected_models = {}
+    if global_provider in provider_ids and global_model is not None:
+      selected_models[global_provider] = global_model
+    # The latest explicit same-provider chat is the strongest evidence for a
+    # provider not represented by the current global picker choice.
+    for row in rows:
+      if "deleted_at" in columns and row.get("deleted_at") is not None:
+        continue
+      provider = row["provider"]
+      if provider not in provider_ids or provider in selected_models:
+        continue
+      settings = decoded(row["agent_settings_json"])
+      if not isinstance(settings, dict):
+        continue
+      candidate = compatible_model(settings.get("model"), provider)
+      if candidate is not None:
+        selected_models[provider] = candidate
+    for provider, model in defaults.items():
+      selected_models.setdefault(provider, model)
+
+    update_settings = text(
+      "UPDATE chats SET agent_settings_json = :settings WHERE id = :chat_id"
+    ).bindparams(bindparam("settings", type_=SAJSON))
+
+    has_runs = "chat_runs" in tables
+    usage_rows_by_chat = {}
+    run_chat_ids = set()
+    if has_runs:
+      run_columns = {
+        column["name"] for column in inspector.get_columns("chat_runs")
+      }
+      if "chat_id" in run_columns:
+        run_chat_ids = set(conn.execute(text(
+          "SELECT DISTINCT chat_id FROM chat_runs"
+        )).scalars().all())
+      if {
+        "chat_id", "usage_json", "status", "id",
+      }.issubset(run_columns):
+        if {"ended_at", "started_at"}.issubset(run_columns):
+          usage_order = (
+            " ORDER BY chat_id, COALESCE(ended_at, started_at) DESC, id DESC"
+          )
+        else:
+          usage_order = " ORDER BY chat_id, id DESC"
+        usage_rows = conn.execute(text(
+          "SELECT chat_id, usage_json FROM chat_runs "
+          "WHERE status = 'completed'" + usage_order
+        )).mappings().all()
+        for usage_row in usage_rows:
+          usage_rows_by_chat.setdefault(
+            usage_row["chat_id"], []
+          ).append(usage_row["usage_json"])
+    session_link_chat_ids = set()
+    if "chat_session_links" in tables:
+      link_columns = {
+        column["name"] for column in inspector.get_columns("chat_session_links")
+      }
+      if "chat_id" in link_columns:
+        session_link_chat_ids = set(conn.execute(text(
+          "SELECT DISTINCT chat_id FROM chat_session_links"
+        )).scalars().all())
+
+    def actual_model_for(row):
+      for raw_usage in usage_rows_by_chat.get(row["id"], []):
+        usage = decoded(raw_usage)
+        if not isinstance(usage, dict):
+          continue
+        by_model = usage.get("provider_model_usage")
+        if not isinstance(by_model, dict):
+          continue
+        candidates = []
+        for raw_model, totals in by_model.items():
+          candidate = compatible_model(raw_model, row["provider"])
+          if candidate is None:
+            continue
+          totals = totals if isinstance(totals, dict) else {}
+          weight = sum(
+            int(totals.get(key) or 0)
+            for key in (
+              "inputTokens", "outputTokens", "cacheReadInputTokens",
+              "cacheCreationInputTokens",
+            )
+          )
+          candidates.append((weight, candidate))
+        if candidates:
+          return max(candidates)[1]
+      return None
+
+    def is_untouched_owner_draft(row, settings, messages):
+      """Whether this row may still inherit a future owner picker choice."""
+      if row["title"] != "New chat":
+        return False
+      if "created_by_app_id" in columns and row.get("created_by_app_id") is not None:
+        return False
+      if "project_id" in columns and row.get("project_id") is not None:
+        return False
+      if messages is invalid_json or not isinstance(messages, list) or messages:
+        return False
+      pending = decoded(row.get("pending_messages"))
+      if "pending_messages" in columns and (
+        pending is invalid_json or not isinstance(pending, list) or pending
+      ):
+        return False
+      if "has_messages" in columns and bool(row.get("has_messages")):
+        return False
+      for column in (
+        "live_assistant", "active_assistant_message_id",
+        "pending_question_id", "session_id", "system_prompt_snapshot_id",
+      ):
+        if column in columns and row.get(column) is not None:
+          return False
+      if row["id"] in run_chat_ids or row["id"] in session_link_chat_ids:
+        return False
+      # Picker effort can be chosen before a model. All other settings mark an
+      # app/internal/runtime-owned row rather than an untouched shell draft.
+      if set(settings) - {"effort", "effort_by_provider"}:
+        return False
+      return True
+
+    for row in rows:
+      if "deleted_at" in columns and row.get("deleted_at") is not None:
+        continue
+      settings = decoded(row["agent_settings_json"])
+      if settings is invalid_json or (settings is not None and not isinstance(settings, dict)):
+        continue
+      settings = dict(settings or {})
+      if isinstance(settings.get("model"), str) and settings["model"].strip():
+        continue
+      messages = decoded(row["messages"])
+      if is_untouched_owner_draft(row, settings, messages):
+        continue
+
+      provider = row["provider"]
+      chosen = actual_model_for(row)
+      if chosen is None:
+        chosen = selected_models.get(provider) or defaults.get(provider)
+      if chosen is None:
+        continue
+      settings["model"] = chosen
+      conn.execute(update_settings, {
+        "settings": settings, "chat_id": row["id"],
+      })
+
+
+def _repair_post_0032_model_gaps(eng) -> None:
+  """Pin model-less rows left by deployments that kept owner drafts lazy.
+
+  Some installations applied 0032 while ordinary shell chat creation still
+  allowed any number of empty rows to defer their model choice. Repair those
+  post-0032 gaps without moving a chat to another provider or disturbing its
+  queued/session state. The only nullable exception is one genuinely untouched
+  first-install owner chat when no model has ever been selected.
+
+  This is a frozen migration: provider classification, defaults, and the
+  first-install predicate are deliberately self-contained.
+  """
+  from sqlalchemy import JSON as SAJSON, bindparam, inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  tables = set(inspector.get_table_names())
+  if "chats" not in tables:
+    return
+  columns = {column["name"] for column in inspector.get_columns("chats")}
+  required = {"id", "provider", "messages", "agent_settings_json"}
+  if not required.issubset(columns):
+    return
+
+  invalid_json = object()
+
+  def decoded(value):
+    if isinstance(value, str):
+      try:
+        return json.loads(value)
+      except (TypeError, ValueError):
+        return invalid_json
+    return value
+
+  def model_provider(model):
+    if not isinstance(model, str) or not model.strip():
+      return None
+    normalized = model.strip()
+    if normalized.endswith("[1m]"):
+      normalized = normalized[:-4]
+    if normalized.startswith("claude-"):
+      return "claude"
+    if normalized.startswith("gpt-"):
+      return "codex"
+    if normalized in {"spark", "inkling"}:
+      return "mobius"
+    return None
+
+  def compatible_model(model, provider):
+    if not isinstance(model, str) or not model.strip():
+      return None
+    normalized = model.strip()
+    if normalized.endswith("[1m]"):
+      normalized = normalized[:-4]
+    classified = model_provider(normalized)
+    return normalized if classified in {None, provider} else None
+
+  defaults = {
+    "claude": "claude-opus-4-8",
+    "codex": "gpt-5.6-sol",
+    "mobius": "inkling",
+  }
+  provider_ids = set(defaults)
+  try:
+    global_settings = json.loads(
+      (Path(os.environ.get("DATA_DIR", "/data"))
+       / "shared" / "agent-settings.json").read_text(encoding="utf-8")
+    )
+  except (OSError, TypeError, ValueError):
+    global_settings = {}
+  if not isinstance(global_settings, dict):
+    global_settings = {}
+
+  owner_provider = None
+  if "owner" in tables:
+    owner_columns = {column["name"] for column in inspector.get_columns("owner")}
+    if "provider" in owner_columns:
+      with eng.connect() as conn:
+        owner_provider = conn.execute(text(
+          "SELECT provider FROM owner ORDER BY id LIMIT 1"
+        )).scalar_one_or_none()
+  global_model = global_settings.get("model")
+  global_provider = model_provider(global_model)
+  if global_provider is None:
+    stored_provider = global_settings.get("provider")
+    if stored_provider in provider_ids:
+      global_provider = stored_provider
+    elif owner_provider in provider_ids:
+      global_provider = owner_provider
+  global_model = compatible_model(global_model, global_provider)
+
+  optional_columns = [name for name in (
+    "deleted_at", "created_by_app_id", "project_id", "pending_messages",
+    "has_messages", "live_assistant", "active_assistant_message_id",
+    "pending_question_id", "session_id", "system_prompt_snapshot_id",
+    "activity_at", "updated_at", "created_at",
+  ) if name in columns]
+  order_columns = [
+    name for name in ("activity_at", "updated_at", "created_at")
+    if name in columns
+  ]
+  if len(order_columns) > 1:
+    order_sql = " ORDER BY COALESCE(" + ", ".join(order_columns) + ") DESC"
+  elif order_columns:
+    order_sql = f" ORDER BY {order_columns[0]} DESC"
+  else:
+    order_sql = " ORDER BY id DESC"
+
+  with eng.begin() as conn:
+    select_columns = [
+      "id", "provider", "messages", "agent_settings_json", *optional_columns,
+    ]
+    rows = conn.execute(text(
+      "SELECT " + ", ".join(select_columns) + " FROM chats" + order_sql
+    )).mappings().all()
+    total_chat_count = len(rows)
+
+    selected_models = {}
+    if global_provider in provider_ids and global_model is not None:
+      selected_models[global_provider] = global_model
+    for row in rows:
+      if "deleted_at" in columns and row.get("deleted_at") is not None:
+        continue
+      provider = row["provider"]
+      if provider not in provider_ids or provider in selected_models:
+        continue
+      settings = decoded(row["agent_settings_json"])
+      if not isinstance(settings, dict):
+        continue
+      candidate = compatible_model(settings.get("model"), provider)
+      if candidate is not None:
+        selected_models[provider] = candidate
+    for provider, model in defaults.items():
+      selected_models.setdefault(provider, model)
+
+    run_chat_ids = set()
+    usage_rows_by_chat = {}
+    if "chat_runs" in tables:
+      run_columns = {
+        column["name"] for column in inspector.get_columns("chat_runs")
+      }
+      if "chat_id" in run_columns:
+        run_chat_ids = set(conn.execute(text(
+          "SELECT DISTINCT chat_id FROM chat_runs"
+        )).scalars().all())
+      if {
+        "chat_id", "usage_json", "status", "id",
+      }.issubset(run_columns):
+        if {"ended_at", "started_at"}.issubset(run_columns):
+          usage_order = (
+            " ORDER BY chat_id, COALESCE(ended_at, started_at) DESC, id DESC"
+          )
+        else:
+          usage_order = " ORDER BY chat_id, id DESC"
+        usage_rows = conn.execute(text(
+          "SELECT chat_id, usage_json FROM chat_runs "
+          "WHERE status = 'completed'" + usage_order
+        )).mappings().all()
+        for usage_row in usage_rows:
+          usage_rows_by_chat.setdefault(
+            usage_row["chat_id"], []
+          ).append(usage_row["usage_json"])
+
+    session_link_chat_ids = set()
+    if "chat_session_links" in tables:
+      link_columns = {
+        column["name"]
+        for column in inspector.get_columns("chat_session_links")
+      }
+      if "chat_id" in link_columns:
+        session_link_chat_ids = set(conn.execute(text(
+          "SELECT DISTINCT chat_id FROM chat_session_links"
+        )).scalars().all())
+
+    def token_weight(totals):
+      weight = 0
+      for key in (
+        "inputTokens", "outputTokens", "cacheReadInputTokens",
+        "cacheCreationInputTokens",
+      ):
+        try:
+          weight += int(totals.get(key) or 0)
+        except (TypeError, ValueError):
+          continue
+      return weight
+
+    def actual_model_for(row):
+      for raw_usage in usage_rows_by_chat.get(row["id"], []):
+        usage = decoded(raw_usage)
+        if not isinstance(usage, dict):
+          continue
+        by_model = usage.get("provider_model_usage")
+        if not isinstance(by_model, dict):
+          continue
+        candidates = []
+        for raw_model, totals in by_model.items():
+          candidate = compatible_model(raw_model, row["provider"])
+          if candidate is None:
+            continue
+          totals = totals if isinstance(totals, dict) else {}
+          candidates.append((token_weight(totals), candidate))
+        if candidates:
+          return max(candidates)[1]
+      return None
+
+    def genuine_first_install(row, settings, messages):
+      if total_chat_count != 1 or global_model is not None:
+        return False
+      if "deleted_at" in columns and row.get("deleted_at") is not None:
+        return False
+      if "created_by_app_id" in columns and row.get("created_by_app_id") is not None:
+        return False
+      if "project_id" in columns and row.get("project_id") is not None:
+        return False
+      if messages is invalid_json or not isinstance(messages, list) or messages:
+        return False
+      pending = decoded(row.get("pending_messages"))
+      if "pending_messages" in columns and (
+        pending is invalid_json or not isinstance(pending, list) or pending
+      ):
+        return False
+      if "has_messages" in columns and bool(row.get("has_messages")):
+        return False
+      for column in (
+        "live_assistant", "active_assistant_message_id",
+        "pending_question_id", "session_id", "system_prompt_snapshot_id",
+      ):
+        if column in columns and row.get(column) is not None:
+          return False
+      if row["id"] in run_chat_ids or row["id"] in session_link_chat_ids:
+        return False
+      return not (set(settings) - {"effort", "effort_by_provider"})
+
+    update_settings = text(
+      "UPDATE chats SET agent_settings_json = :settings WHERE id = :chat_id"
+    ).bindparams(bindparam("settings", type_=SAJSON))
+    for row in rows:
+      if "deleted_at" in columns and row.get("deleted_at") is not None:
+        continue
+      settings = decoded(row["agent_settings_json"])
+      if settings is invalid_json or (
+        settings is not None and not isinstance(settings, dict)
+      ):
+        continue
+      settings = dict(settings or {})
+      if isinstance(settings.get("model"), str) and settings["model"].strip():
+        continue
+      messages = decoded(row["messages"])
+      if genuine_first_install(row, settings, messages):
+        continue
+      provider = row["provider"]
+      chosen = actual_model_for(row)
+      if chosen is None:
+        chosen = selected_models.get(provider) or defaults.get(provider)
+      if chosen is None:
+        continue
+      settings["model"] = chosen
+      conn.execute(update_settings, {
+        "settings": settings, "chat_id": row["id"],
+      })
+
+
+def _add_shared_app_retention(eng) -> None:
+  """Make shared app removal reversible on existing installations."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "shared_app_instances" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("shared_app_instances")}
+  with eng.begin() as conn:
+    if "deleted_at" not in columns:
+      conn.execute(text(
+        "ALTER TABLE shared_app_instances ADD COLUMN deleted_at DATETIME NULL"
+      ))
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_shared_app_instances_deleted_at "
+      "ON shared_app_instances (deleted_at)"
+    ))
+
+
+def _migrate_shared_app_state_files(eng) -> None:
+  """Move prototype JSON blobs into the path-based shared storage namespace."""
+  import re
+  import tempfile
+  from sqlalchemy import (
+    JSON as SAJSON,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    bindparam,
+    inspect as sa_inspect,
+    text,
+  )
+
+  inspector = sa_inspect(eng)
+  if "shared_app_instances" not in inspector.get_table_names():
+    return
+
+  # Keep the published migration independent of today's ORM. A minimal parent
+  # declaration resolves the foreign key without asking SQLAlchemy to create or
+  # reinterpret the already-deployed shared_app_instances table.
+  metadata = MetaData()
+  Table(
+    "shared_app_instances", metadata,
+    Column("id", String(64), primary_key=True),
+  )
+  changes = Table(
+    "shared_app_changes", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column(
+      "instance_id",
+      String(64),
+      ForeignKey("shared_app_instances.id", ondelete="CASCADE"),
+      nullable=False,
+    ),
+    Column("kind", String(16), nullable=False),
+    Column("path", String(200), nullable=False),
+    Column("version", String(128), nullable=True),
+    Column("actor_key", String(72), nullable=False),
+    Column("display_name", String(256), nullable=False),
+    Column("created_at", DateTime, nullable=False),
+  )
+  changes.create(bind=eng, checkfirst=True)
   with eng.begin() as conn:
     conn.execute(text(
-      "ALTER TABLE chats ADD COLUMN dismissed_goal_id VARCHAR(64) NULL"
+      "CREATE INDEX IF NOT EXISTS ix_shared_app_changes_instance_id "
+      "ON shared_app_changes (instance_id)"
     ))
+    conn.execute(text(
+      "CREATE INDEX IF NOT EXISTS ix_shared_app_changes_created_at "
+      "ON shared_app_changes (created_at)"
+    ))
+
+  safe_path = re.compile(r"^[\w._/@+ -]+$")
+
+  def owned_snapshot_root(instance_id: str, snapshot_path: str) -> Path | None:
+    data_root = Path(os.environ.get("DATA_DIR", "/data")).resolve()
+    instances_root = data_root / "shared" / "app-instances"
+    expected = instances_root / str(instance_id)
+    stored = Path(snapshot_path)
+    lexical = stored if stored.is_absolute() else data_root / stored
+    try:
+      if lexical.absolute() != (expected / "build").absolute():
+        return None
+      instances_root.resolve().relative_to(data_root)
+    except (OSError, ValueError):
+      return None
+    return expected
+
+  def validate_state_path(path: str) -> str:
+    if (
+      not path or len(path) > 200 or path.startswith("/") or "\\" in path
+      or ".." in Path(path).parts or not safe_path.fullmatch(path)
+    ):
+      raise RuntimeError("shared app state has an invalid data path")
+    return path
+
+  def atomic_write(file_path: Path, content: bytes) -> None:
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+      dir=file_path.parent, prefix=f".{file_path.name}.", suffix=".tmp",
+    )
+    try:
+      with os.fdopen(fd, "wb") as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+      os.chmod(temporary, 0o644)
+      os.replace(temporary, file_path)
+    except BaseException:
+      try:
+        os.unlink(temporary)
+      except OSError:
+        pass
+      raise
+
+  # Fresh installations use path storage directly and never create the
+  # prototype blob columns. Existing installations keep this one-way data
+  # migration, but the compatibility shape is not part of normal runtime.
+  columns = {column["name"] for column in inspector.get_columns("shared_app_instances")}
+  if not {"state_json", "revision"}.issubset(columns):
+    return
+
+  clear = text(
+    "UPDATE shared_app_instances SET state_json = :empty, revision = 0 WHERE id = :id"
+  ).bindparams(bindparam("empty", type_=SAJSON))
+  with eng.begin() as conn:
+    rows = conn.execute(text(
+      "SELECT id, snapshot_path, state_json FROM shared_app_instances"
+    )).mappings().all()
+    for row in rows:
+      values = row["state_json"]
+      if isinstance(values, str):
+        values = json.loads(values)
+      if not isinstance(values, dict) or not values:
+        continue
+      root = owned_snapshot_root(str(row["id"]), str(row["snapshot_path"]))
+      if root is None:
+        raise RuntimeError("shared app state has an invalid snapshot path")
+      for path, value in values.items():
+        validate_state_path(str(path))
+        atomic_write(
+          root / "data" / Path(str(path)),
+          json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+        )
+      conn.execute(clear, {"empty": {}, "id": row["id"]})
+
+
+def _add_project_artifact_drawer_state(eng) -> None:
+  """Track built-result opens without treating navigation as a content edit."""
+  from sqlalchemy import (
+    Column,
+    DateTime,
+    ForeignKey,
+    MetaData,
+    String,
+    Table,
+    inspect as sa_inspect,
+  )
+
+  if "projects" not in sa_inspect(eng).get_table_names():
+    return
+  metadata = MetaData()
+  Table("projects", metadata, Column("id", String(64), primary_key=True))
+  drawer_state = Table(
+    "project_artifact_drawer_state", metadata,
+    Column(
+      "project_id",
+      String(64),
+      ForeignKey("projects.id", ondelete="CASCADE"),
+      primary_key=True,
+    ),
+    Column("artifact_id", String(64), primary_key=True),
+    Column("last_opened_at", DateTime, nullable=False),
+  )
+  drawer_state.create(bind=eng, checkfirst=True)
 
 
 def _add_attached_delegation_work(eng) -> None:
@@ -2111,21 +3077,40 @@ def _add_attached_delegation_work(eng) -> None:
     column["name"] for column in inspector.get_columns("delegations")
   }
   with eng.begin() as conn:
-    additions = {
-      "startup_prompt": "TEXT NULL",
-      "source_work_id": "VARCHAR(64) NULL",
-      "source_work_intent": "VARCHAR(32) NULL",
-      "source_work_context_app_id": "INTEGER NULL",
-      "source_work_envelope": "JSON NULL",
-      "source_work_status": "VARCHAR(32) NULL",
-      "source_work_result": "TEXT NULL",
-      "source_work_active_chat_id": "VARCHAR(64) NULL",
-    }
-    for name, declaration in additions.items():
-      if name not in columns:
-        conn.execute(text(
-          f"ALTER TABLE delegations ADD COLUMN {name} {declaration}"
-        ))
+    if "startup_prompt" not in columns:
+      conn.execute(text(
+        "ALTER TABLE delegations ADD COLUMN startup_prompt TEXT NULL"
+      ))
+    if "source_work_id" not in columns:
+      conn.execute(text(
+        "ALTER TABLE delegations ADD COLUMN source_work_id VARCHAR(64) NULL"
+      ))
+    if "source_work_intent" not in columns:
+      conn.execute(text(
+        "ALTER TABLE delegations ADD COLUMN source_work_intent VARCHAR(32) NULL"
+      ))
+    if "source_work_context_app_id" not in columns:
+      conn.execute(text(
+        "ALTER TABLE delegations ADD COLUMN "
+        "source_work_context_app_id INTEGER NULL"
+      ))
+    if "source_work_envelope" not in columns:
+      conn.execute(text(
+        "ALTER TABLE delegations ADD COLUMN source_work_envelope JSON NULL"
+      ))
+    if "source_work_status" not in columns:
+      conn.execute(text(
+        "ALTER TABLE delegations ADD COLUMN source_work_status VARCHAR(32) NULL"
+      ))
+    if "source_work_result" not in columns:
+      conn.execute(text(
+        "ALTER TABLE delegations ADD COLUMN source_work_result TEXT NULL"
+      ))
+    if "source_work_active_chat_id" not in columns:
+      conn.execute(text(
+        "ALTER TABLE delegations ADD COLUMN "
+        "source_work_active_chat_id VARCHAR(64) NULL"
+      ))
     conn.execute(text(
       "CREATE UNIQUE INDEX IF NOT EXISTS ix_delegations_source_work_id "
       "ON delegations (source_work_id)"
@@ -2141,20 +3126,60 @@ def _add_attached_delegation_work(eng) -> None:
     ))
 
 
-def _add_chat_wait_condition_owner(eng) -> None:
-  """Persist the executor named by each observable command wait."""
+def _backfill_chat_app_artifacts(eng) -> None:
+  """Lift the last known chat/app build and its acknowledgement cursor."""
   from sqlalchemy import inspect as sa_inspect, text
 
-  inspector = sa_inspect(eng)
-  if "chat_waits" not in inspector.get_table_names():
+  tables = set(sa_inspect(eng).get_table_names())
+  if not {"apps", "chats", "chat_app_artifacts"}.issubset(tables):
     return
-  columns = {column["name"] for column in inspector.get_columns("chat_waits")}
-  if "condition_owner" in columns:
-    return
+  preview_join = (
+    "LEFT JOIN app_preview_state p ON p.app_id = a.id"
+    if "app_preview_state" in tables else ""
+  )
+  preview_projection = "p.seen_updated_at" if preview_join else "NULL"
+
+  def same_instant(left, right) -> bool:
+    if left is None or right is None:
+      return False
+    def parsed(value):
+      if isinstance(value, datetime):
+        current = value
+      else:
+        current = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+      if current.tzinfo is not None:
+        current = current.astimezone(UTC).replace(tzinfo=None)
+      return current
+    return parsed(left) == parsed(right)
+
   with eng.begin() as conn:
-    conn.execute(text(
-      "ALTER TABLE chat_waits ADD COLUMN condition_owner VARCHAR(200) NULL"
-    ))
+    rows = conn.execute(text(
+      f"SELECT a.chat_id, a.id AS app_id, a.updated_at, {preview_projection} "
+      "AS preview_seen_at "
+      "FROM apps a JOIN chats c ON c.id = a.chat_id "
+      f"{preview_join} "
+      "WHERE a.chat_id IS NOT NULL"
+    )).mappings().all()
+    for row in rows:
+      seen_at = (
+        row["updated_at"]
+        if same_instant(row["preview_seen_at"], row["updated_at"])
+        else None
+      )
+      conn.execute(text(
+        "INSERT INTO chat_app_artifacts "
+        "(chat_id, app_id, touched_at, seen_at) "
+        "SELECT :chat_id, :app_id, :touched_at, :seen_at "
+        "WHERE NOT EXISTS ("
+        "SELECT 1 FROM chat_app_artifacts "
+        "WHERE chat_id = :chat_id AND app_id = :app_id"
+        ")"
+      ), {
+        "chat_id": row["chat_id"],
+        "app_id": row["app_id"],
+        "touched_at": row["updated_at"],
+        "seen_at": seen_at,
+      })
 
 
 def _repair_chat_run_goal_identity_index(eng) -> None:
@@ -2171,6 +3196,7 @@ def _repair_chat_run_goal_identity_index(eng) -> None:
     conn.execute(text(
       "CREATE INDEX IF NOT EXISTS ix_chat_runs_goal_id ON chat_runs (goal_id)"
     ))
+
 
 def _migrate_project_agent_messages(eng) -> None:
   """Copy the project-only mailbox into the provider-neutral room ledger.
@@ -2240,6 +3266,7 @@ def _migrate_project_agent_messages(eng) -> None:
       ")"
     ))
 
+
 def _add_agent_coordination_send_identity(eng) -> None:
   """Add stable multi-recipient send identity without rewriting old mail."""
   from sqlalchemy import inspect as sa_inspect, text
@@ -2269,6 +3296,7 @@ def _add_agent_coordination_send_identity(eng) -> None:
       "ON agent_coordination_messages (from_run_id, send_id, to_chat_id)"
     ))
 
+
 def _add_agent_coordination_send_target(eng) -> None:
   """Make direct and broadcast retry identity enforceable under concurrency."""
   from sqlalchemy import inspect as sa_inspect, text
@@ -2297,6 +3325,25 @@ def _add_agent_coordination_send_target(eng) -> None:
       "(from_run_id, send_id, send_target_key)"
     ))
 
+
+def _add_chat_wait_condition_owner(eng) -> None:
+  """Name the executor/system that can satisfy each durable wait."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chat_waits" not in inspector.get_table_names():
+    return
+  columns = {
+    column["name"] for column in inspector.get_columns("chat_waits")
+  }
+  if "condition_owner" not in columns:
+    with eng.begin() as conn:
+      conn.execute(text(
+        "ALTER TABLE chat_waits "
+        "ADD COLUMN condition_owner VARCHAR(160) NULL"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -2313,23 +3360,39 @@ _SCHEMA_MIGRATIONS = (
   ("0013_app_hosted_publication", _add_app_hosted_publication),
   ("0014_chat_run_goal_plan", _add_chat_run_goal_plan),
   ("0015_chat_run_goal_identity", _add_chat_run_goal_identity),
-  ("0016_app_connect_manage", _add_app_connect_manage),
-  ("0017_retire_restart_resume_toggle", _retire_restart_resume_toggle),
-  ("0018_explicit_legacy_chat_models", _pin_established_legacy_chat_models),
-  ("0019_chat_active_assistant_identity", _add_chat_active_assistant_identity),
-  # Projects append after current upstream history. Collection migration must
-  # precede artifacts because it may rebuild the legacy Projects table.
+  ("0016_chat_retention_orphan_repair", _repair_chat_retention_orphans),
+  ("0017_chat_goal_dismissal", _add_chat_goal_dismissal),
+  ("0018_app_connect_manage", _add_app_connect_manage),
+  ("0019_explicit_legacy_chat_models", _pin_established_legacy_chat_models),
+  # Projects redesign migrations, renumbered to 0020-0022 so they follow main's
+  # 0017-0019 without colliding: both lines had independently claimed 0017/0018/
+  # 0019. The runner applies entries in tuple order and keys the ledger on the
+  # full version string, so distinct numbers keep the append-only ledger clean.
+  # Each is inspector-gated and idempotent; their relative order is preserved
+  # because _add_project_chat_collection rebuilds the projects table and must
+  # run before _add_project_artifacts adds the artifacts column.
   ("0020_app_project_templates", _add_app_project_templates),
   ("0021_project_chat_collection", _add_project_chat_collection),
   ("0022_project_artifacts", _add_project_artifacts),
-  ("0023_project_color", _add_project_color),
-  ("0024_chat_goal_dismissal", _add_chat_goal_dismissal),
-  ("0025_attached_delegation_work", _add_attached_delegation_work),
-  ("0026_chat_wait_condition_owner", _add_chat_wait_condition_owner),
-  ("0027_chat_run_goal_identity_index", _repair_chat_run_goal_identity_index),
-  ("0028_agent_coordination_rooms", _migrate_project_agent_messages),
-  ("0029_agent_coordination_send_identity", _add_agent_coordination_send_identity),
-  ("0030_agent_coordination_send_target", _add_agent_coordination_send_target),
+  # This instance had already published 0019-0022 before the upstream
+  # always-on restart migration arrived. Preserve that immutable ledger and
+  # append the new behavior under the next unused version.
+  ("0023_retire_restart_resume_toggle", _retire_restart_resume_toggle_v2),
+  ("0024_owner_auth_mode", _add_owner_auth_mode),
+  ("0025_chat_active_assistant_identity", _add_chat_active_assistant_identity),
+  ("0026_project_color", _add_project_color),
+  ("0027_shared_app_retention", _add_shared_app_retention),
+  ("0028_shared_app_path_state", _migrate_shared_app_state_files),
+  ("0029_project_artifact_drawer_state", _add_project_artifact_drawer_state),
+  ("0030_attached_delegation_work", _add_attached_delegation_work),
+  ("0031_chat_app_artifacts", _backfill_chat_app_artifacts),
+  ("0032_explicit_active_chat_models", _pin_all_active_chat_models),
+  ("0033_repair_post_0032_model_gaps", _repair_post_0032_model_gaps),
+  ("0034_chat_run_goal_identity_index", _repair_chat_run_goal_identity_index),
+  ("0035_agent_coordination_rooms", _migrate_project_agent_messages),
+  ("0036_agent_coordination_send_identity", _add_agent_coordination_send_identity),
+  ("0037_agent_coordination_send_target", _add_agent_coordination_send_target),
+  ("0038_chat_wait_condition_owner", _add_chat_wait_condition_owner),
 )
 
 
@@ -2349,7 +3412,7 @@ def schema_migration_history(eng) -> list[dict]:
   ]
 
 
-def ensure_migration_ledger(eng) -> None:
+def _ensure_migration_ledger(eng) -> None:
   """Create the durable one-shot ledger if it does not exist yet."""
   from sqlalchemy import text
 
@@ -2362,50 +3425,31 @@ def ensure_migration_ledger(eng) -> None:
     ))
 
 
-def migration_applied(eng, version: str) -> bool:
-  """True when ``version`` has already completed on this database.
-
-  One ledger answers "has this one-shot already run?" for every kind of
-  migration. ``run_migrations`` drives the synchronous schema entries in
-  ``_SCHEMA_MIGRATIONS`` through these same primitives; migrations that cannot
-  live in that tuple — async ones, or ones doing network I/O such as fetching a
-  catalog manifest — call them directly. Same table, same question, one
-  implementation, so the ledger can never disagree with itself.
-
-  Without a durable marker a "one-shot" migration can only infer completion
-  from the shape of the rows it finds, which silently re-arms it for any row
-  created LATER that happens to match that shape.
-  """
-  from sqlalchemy import inspect as sa_inspect, text
-
-  if "schema_migrations" not in sa_inspect(eng).get_table_names():
-    return False
-  with eng.connect() as conn:
-    return conn.execute(text(
-      "SELECT 1 FROM schema_migrations WHERE version = :version"
-    ), {"version": version}).first() is not None
-
-
-def record_migration(eng, version: str) -> None:
-  """Mark ``version`` complete so it never re-evaluates rows. Idempotent."""
+def _applied_migrations(eng) -> set[str]:
+  """Read the completed versions once for one ordered migration pass."""
   from sqlalchemy import text
-  from sqlalchemy.exc import IntegrityError
 
-  ensure_migration_ledger(eng)
-  # Plain INSERT + IntegrityError rather than a dialect-specific upsert: this
-  # ledger runs on both SQLite and PostgreSQL (Railway), and re-recording an
-  # already-complete migration is a no-op either way.
-  try:
-    with eng.begin() as conn:
-      conn.execute(text(
-        "INSERT INTO schema_migrations (version, applied_at) "
-        "VALUES (:version, :applied_at)"
-      ), {
-        "version": version,
-        "applied_at": datetime.now(UTC).replace(tzinfo=None),
-      })
-  except IntegrityError:
-    pass
+  with eng.connect() as conn:
+    return {
+      str(version)
+      for (version,) in conn.execute(text(
+        "SELECT version FROM schema_migrations"
+      ))
+    }
+
+
+def _record_migration(eng, version: str) -> None:
+  """Record one completed version after its idempotent body succeeds."""
+  from sqlalchemy import text
+
+  with eng.begin() as conn:
+    conn.execute(text(
+      "INSERT INTO schema_migrations (version, applied_at) "
+      "VALUES (:version, :applied_at)"
+    ), {
+      "version": version,
+      "applied_at": datetime.now(UTC).replace(tzinfo=None),
+    })
 
 
 def run_migrations(eng) -> None:
@@ -2420,17 +3464,18 @@ def run_migrations(eng) -> None:
   insert safely retries it. The ledger row is committed only after the migration
   returns successfully.
 
-  Drives the shared ledger primitives (``migration_applied`` /
-  ``record_migration``) rather than its own SQL, so a one-shot recorded here and
-  one recorded by an async caller are the same fact in the same table.
+  One runner owns the ledger: it reads the applied set once, executes pending
+  entries in registry order, and records each success before continuing.
   """
   from sqlalchemy import inspect as sa_inspect
 
   if "apps" not in sa_inspect(eng).get_table_names():
     return
-  ensure_migration_ledger(eng)
+  _ensure_migration_ledger(eng)
+  applied = _applied_migrations(eng)
   for version, migration in _SCHEMA_MIGRATIONS:
-    if migration_applied(eng, version):
+    if version in applied:
       continue
     migration(eng)
-    record_migration(eng, version)
+    _record_migration(eng, version)
+    applied.add(version)

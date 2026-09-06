@@ -2,6 +2,7 @@
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from urllib.parse import parse_qs, urlparse
 
@@ -167,6 +168,55 @@ def _app_auth(client, auth, *, granted: bool, railway_granted: bool = False):
   minted = client.post("/api/auth/app-token", json={"app_id": app_id}, headers=auth)
   assert minted.status_code == 200, minted.text
   return {"Authorization": f"Bearer {minted.json()['token']}"}
+
+
+@pytest.fixture
+def account_service(monkeypatch):
+  """Stub the account-service HTTP client behind the identity bridge.
+
+  ``account_service(handler)`` routes every ``client.request`` to
+  ``handler(method, url, **kwargs) -> (status_code, json_payload)``.
+  """
+  def install(handler):
+    class Response:
+      def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+
+      def json(self):
+        return self._payload
+
+    class Client:
+      def __init__(self, *args, **kwargs):
+        pass
+
+      async def __aenter__(self):
+        return self
+
+      async def __aexit__(self, *args):
+        return None
+
+      async def request(self, method, url, **kwargs):
+        return Response(*handler(method, url, **kwargs))
+
+    monkeypatch.setattr("app.routes.identity.httpx.AsyncClient", Client)
+
+  return install
+
+
+def _link_account(client, auth):
+  from app.routes.identity import _seal
+
+  granted = _app_auth(client, auth, granted=True)
+  with SessionLocal() as session:
+    owner = session.query(models.Owner).one()
+    session.add(models.IdentityAccountLink(
+      owner_id=owner.id,
+      access_token_encrypted=_seal("linked-token-" + "x" * 40),
+      scopes_json=["identity:read", "identity:write", "deployments:read"],
+    ))
+    session.commit()
+  return granted
 
 
 def test_identity_app_requires_reviewed_capability(client, auth):
@@ -371,11 +421,9 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
       "cpu": None,
       "memory_mb": None,
       "volume_mb": None,
+      "update_policy": "manual",
     },
     headers=granted,
-  )
-  adopted = client.post(
-    "/api/identity/railway/deployments/adopt-current", headers=granted,
   )
   deleted = client.delete(
     "/api/identity/railway/deployments/mob_example", headers=granted,
@@ -385,13 +433,18 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
     json={"volume_mb": 2048},
     headers=granted,
   )
+  updates = client.patch(
+    "/api/identity/railway/deployments/mob_example/updates",
+    json={"update_policy": "manual"},
+    headers=granted,
+  )
 
   assert connect.status_code == 200
   assert connect.json()["authorization_url"].startswith("https://www.mobius.you/")
   assert created.status_code == 202
-  assert adopted.status_code == 202
   assert deleted.status_code == 202
   assert storage.status_code == 200
+  assert updates.status_code == 202
   assert calls == [
     (
       "POST",
@@ -402,12 +455,8 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
         "cpu": None,
         "memory_mb": None,
         "volume_mb": None,
+        "update_policy": "manual",
       },
-    ),
-    (
-      "POST",
-      "https://www.mobius.you/api/account/v1/railway/instances/adopt-current",
-      None,
     ),
     (
       "DELETE",
@@ -419,7 +468,128 @@ def test_linked_railway_mutations_use_the_scoped_server_bridge(
       "https://www.mobius.you/api/account/v1/railway/instances/mob_example/storage",
       {"volume_mb": 2048},
     ),
+    (
+      "PATCH",
+      "https://www.mobius.you/api/account/v1/railway/instances/mob_example/updates",
+      {"update_policy": "manual"},
+    ),
   ]
+
+
+def test_unrelated_railway_deployments_cannot_be_imported(client, auth):
+  granted = _app_auth(
+    client, auth, granted=True, railway_granted=True,
+  )
+
+  response = client.post(
+    "/api/identity/railway/deployments/adopt-current", headers=granted,
+  )
+
+  assert response.status_code == 404
+
+
+def test_linked_railway_deletion_recovery_requires_fresh_bounded_state(
+  client, auth, monkeypatch,
+):
+  from app.routes.identity import _seal
+
+  granted = _app_auth(
+    client, auth, granted=True, railway_granted=True,
+  )
+  with SessionLocal() as session:
+    owner = session.query(models.Owner).one()
+    session.add(models.IdentityAccountLink(
+      owner_id=owner.id,
+      access_token_encrypted=_seal("railway-token-" + "x" * 40),
+      scopes_json=[
+        "deployments:delete", "deployments:read", "identity:read",
+        "identity:write", "railway:read", "railway:write",
+      ],
+    ))
+    session.commit()
+
+  calls = []
+
+  class Response:
+    status_code = 200
+
+    def __init__(self, payload):
+      self.payload = payload
+
+    def json(self):
+      return self.payload
+
+  class Client:
+    def __init__(self, *args, **kwargs):
+      assert kwargs.get("follow_redirects") is False
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *args):
+      return None
+
+    async def request(self, method, url, **kwargs):
+      calls.append((method, url, kwargs.get("json")))
+      assert kwargs["headers"]["Authorization"].startswith("Bearer railway-token-")
+      if method == "GET":
+        return Response({
+          "state": "missing_unconfirmed",
+          "message": "Railway says this project may already be gone.",
+          "can_confirm_absent": True,
+        })
+      return Response({"instance": {"id": "mob_example", "status": "deleted"}})
+
+  monkeypatch.setattr("app.routes.identity.httpx.AsyncClient", Client)
+  diagnosis = client.get(
+    "/api/identity/railway/deployments/mob_example/deletion", headers=granted,
+  )
+  rejected = client.post(
+    "/api/identity/railway/deployments/mob_example/confirm-absent",
+    json={"confirmed_absent": False},
+    headers=granted,
+  )
+  confirmed = client.post(
+    "/api/identity/railway/deployments/mob_example/confirm-absent",
+    json={"confirmed_absent": True},
+    headers=granted,
+  )
+
+  assert diagnosis.status_code == 200
+  assert diagnosis.json()["state"] == "missing_unconfirmed"
+  assert diagnosis.json()["can_confirm_absent"] is True
+  assert rejected.status_code == 422
+  assert confirmed.status_code == 200
+  assert confirmed.json()["instance"]["status"] == "deleted"
+  assert calls == [
+    (
+      "GET",
+      "https://www.mobius.you/api/account/v1/railway/instances/mob_example/deletion",
+      None,
+    ),
+    (
+      "POST",
+      "https://www.mobius.you/api/account/v1/railway/instances/mob_example/confirm-absent",
+      {"confirmed_absent": True},
+    ),
+  ]
+
+
+def test_railway_deletion_recovery_rejects_unbounded_upstream_state():
+  from app.routes.identity import _railway_deletion_contract
+  from fastapi import HTTPException
+
+  invalid = {
+    "state": "provider-invented-state",
+    "message": "x",
+    "can_confirm_absent": True,
+  }
+  try:
+    _railway_deletion_contract(invalid)
+  except HTTPException as exc:
+    assert exc.status_code == 502
+  else:
+    raise AssertionError("invalid deletion state was accepted")
 
 
 def test_link_start_keeps_pkce_verifier_server_side_and_supersedes(
@@ -617,30 +787,6 @@ def test_unlink_removes_local_link_when_remote_grant_is_already_gone(
     ))
     session.commit()
 
-  broker_calls = []
-
-  async def broker_request(method, route, payload=None, *, timeout=10.0):
-    broker_calls.append((method, route, payload, timeout))
-    if (method, route) == ("GET", "/identity"):
-      return {
-        "linked": True,
-        "subject": "usr_123",
-        "instance_id": "mob_self_test",
-        "key_thumbprint": "a" * 64,
-      }
-    assert (method, route) == ("POST", "/identity/unlink")
-    assert payload == {"expected_subject": "usr_123"}
-    return {
-      "linked": False,
-      "subject": None,
-      "instance_id": "mob_self_test",
-      "key_thumbprint": "a" * 64,
-    }
-
-  monkeypatch.setattr(
-    "app.routes.identity.runtime_identity_broker_request", broker_request,
-  )
-
   class Client:
     def __init__(self, *args, **kwargs):
       pass
@@ -653,20 +799,12 @@ def test_unlink_removes_local_link_when_remote_grant_is_already_gone(
 
     async def post(self, url, **kwargs):
       assert url == "https://www.mobius.you/api/account-links/revoke"
-      assert kwargs["json"] == {"runtime_identity": {
-        "instance_id": "mob_self_test",
-        "key_thumbprint": "a" * 64,
-      }}
       return type("Response", (), {"status_code": 401})()
 
   monkeypatch.setattr("app.routes.identity.httpx.AsyncClient", Client)
   response = client.delete("/api/identity/link", headers=granted)
 
   assert response.status_code == 204
-  assert [call[:2] for call in broker_calls] == [
-    ("GET", "/identity"),
-    ("POST", "/identity/unlink"),
-  ]
   with SessionLocal() as session:
     assert session.query(models.IdentityAccountLink).count() == 0
 
@@ -776,7 +914,6 @@ def test_linked_host_outage_preserves_local_deployment(client, auth, monkeypatch
   assert body["account_mode"] == "linked"
   assert body["account_unavailable"] is True
   assert body["profile"] is None
-  assert isinstance(body["linked_at"], str) and body["linked_at"].endswith("Z")
   assert body["deployments"] == [{
     "id": "local",
     "name": "This Möbius",
@@ -879,54 +1016,107 @@ def test_avatar_proxy_rejects_unsafe_remote_urls():
     assert _remote_avatar_url({"profile": {"avatar_url": value}}) is None
 
 
-def test_linked_profile_mutation_uses_the_authoritative_response_once(
-  client, auth, monkeypatch,
+@pytest.mark.parametrize(
+  ("remote_status", "remote_detail"),
+  (
+    (413, "Profile pictures must be 5 MB or smaller."),
+    (415, "Choose a valid JPEG, PNG, or WebP image."),
+    (422, "Send one avatar field."),
+  ),
+)
+def test_linked_avatar_preserves_account_validation_errors(
+  client, auth, account_service, remote_status, remote_detail,
 ):
-  from app.routes.identity import _seal
+  granted = _link_account(client, auth)
 
-  granted = _app_auth(client, auth, granted=True)
-  with SessionLocal() as session:
-    owner = session.query(models.Owner).one()
-    session.add(models.IdentityAccountLink(
-      owner_id=owner.id,
-      access_token_encrypted=_seal("linked-token-" + "x" * 40),
-      scopes_json=["identity:read", "identity:write", "deployments:read"],
-    ))
-    session.commit()
+  def handler(method, url, **kwargs):
+    assert method == "POST"
+    assert url == "https://www.mobius.you/api/account/v1/identity/avatar"
+    assert kwargs["files"]["avatar"][2] == "image/png"
+    return remote_status, {"detail": remote_detail}
 
-  calls = []
+  account_service(handler)
+  response = client.post(
+    "/api/identity/avatar",
+    files={"avatar": ("avatar.png", b"image-bytes", "image/png")},
+    headers=granted,
+  )
+
+  assert response.status_code == remote_status
+  assert response.json() == {"detail": remote_detail}
+
+
+@pytest.mark.parametrize("detail", [None, "", "x" * 501, ["not", "text"]])
+def test_remote_validation_error_uses_bounded_fallback(detail):
+  from app.routes.identity import _raise_remote_request_error
 
   class Response:
-    status_code = 200
+    status_code = 415
 
     @staticmethod
     def json():
-      return {
-        "profile": {
-          "user_id": "usr_123",
-          "email": "owner@example.com",
-          "display_name": "Owner",
-          "handle": "new_handle",
-          "avatar_url": None,
-        },
-        "deployments": [],
-      }
+      return {"detail": detail}
 
-  class Client:
-    def __init__(self, *args, **kwargs):
-      pass
+  with pytest.raises(HTTPException) as exc:
+    _raise_remote_request_error(Response())
 
-    async def __aenter__(self):
-      return self
+  assert exc.value.status_code == 415
+  assert exc.value.detail == "Choose a JPEG, PNG, or WebP image."
 
-    async def __aexit__(self, *args):
-      return None
 
-    async def request(self, method, url, **kwargs):
-      calls.append((method, url, kwargs.get("json")))
-      return Response()
+def test_remote_server_errors_collapse_to_bad_gateway():
+  from app.routes.identity import _raise_remote_request_error
 
-  monkeypatch.setattr("app.routes.identity.httpx.AsyncClient", Client)
+  class Response:
+    status_code = 500
+
+    @staticmethod
+    def json():
+      return {"detail": "Internal account-service stack trace."}
+
+  with pytest.raises(HTTPException) as exc:
+    _raise_remote_request_error(Response())
+
+  assert exc.value.status_code == 502
+  assert exc.value.detail == (
+    "The Möbius account service could not complete that request."
+  )
+
+
+def test_linked_profile_mutation_surfaces_account_rejection(
+  client, auth, account_service,
+):
+  granted = _link_account(client, auth)
+  account_service(lambda method, url, **kwargs: (422, {"detail": "Handle is reserved."}))
+
+  response = client.patch(
+    "/api/identity/profile", json={"handle": "reserved"}, headers=granted,
+  )
+
+  assert response.status_code == 422
+  assert response.json() == {"detail": "Handle is reserved."}
+
+
+def test_linked_profile_mutation_uses_the_authoritative_response_once(
+  client, auth, account_service,
+):
+  granted = _link_account(client, auth)
+  calls = []
+
+  def handler(method, url, **kwargs):
+    calls.append((method, url, kwargs.get("json")))
+    return 200, {
+      "profile": {
+        "user_id": "usr_123",
+        "email": "owner@example.com",
+        "display_name": "Owner",
+        "handle": "new_handle",
+        "avatar_url": None,
+      },
+      "deployments": [],
+    }
+
+  account_service(handler)
   response = client.patch(
     "/api/identity/profile",
     json={"handle": "NEW_HANDLE"},

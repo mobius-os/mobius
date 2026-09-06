@@ -41,11 +41,7 @@ export default function BrainUsageButton({
     : providerAllowance(provider, providerUsageQuery.data)
   const allowanceSummary = providerAllowanceSummary(provider, allowance)
   const leftPercent = allowance.usedPercent
-  const contextSnapshot = (
-    contextUsageQuery.isLoading
-    || contextUsageQuery.data?.provider !== provider
-    || contextUsageQuery.data?.provider_session_id !== providerSessionId
-  )
+  const contextSnapshot = contextUsageQuery.isLoading
     ? null
     : contextUsageQuery.data
   const contextTokens = resolvedContextTokenCounts(

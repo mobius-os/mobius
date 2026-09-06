@@ -1,0 +1,24 @@
+{
+  "id": "game-studio-example",
+  "name": "Game Studio Example",
+  "version": "1.0.0",
+  "description": "A Project app that turns editable game scenes into playable Creations.",
+  "entry": "index.jsx",
+  "offline_capable": false,
+  "permissions": {},
+  "runtime": { "imports": ["react"], "esm_deps": [] },
+  "source_files": ["game-project.md", "build.sh", "build.py", "player.html", "templates/scene.game.json"],
+  "skills": ["game-project.md"],
+  "project_templates": [{
+    "id": "game",
+    "name": "Canvas game",
+    "kind": "game",
+    "description": "An editable scene with its own playable canvas viewer.",
+    "guidance": "Edit scene.game.json in this project's root. Build the Game Creation to play it. The installed Project app owns the renderer; project source stays independent.",
+    "skills": ["game-project.md"],
+    "files": {"scene.game.json": "templates/scene.game.json"},
+    "previews": [{"id": "game", "name": "Game", "kind": "html", "path": "scene.game.json"}],
+    "artifact_types": [{"id": "game", "name": "Playable game", "extensions": ["json"], "preview": "html", "script": "build.sh", "output": "index.html"}],
+    "actions": [{"id": "level", "name": "Design a level", "prompt": "Help me design a level for this game. Inspect the current scene and ask what I want to change before editing."}]
+  }]
+}

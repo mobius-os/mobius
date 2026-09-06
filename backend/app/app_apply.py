@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, urlsplit
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app import app_git, icon_assets, models, timeutil
+from app import app_git, chat_app_artifacts, icon_assets, models, timeutil
 from app.app_capabilities import (
   contract_from_app_state,
   contract_from_manifest,
@@ -511,8 +511,46 @@ def _apply_explicit_package_runtime(
   app.capability_contract = contract_from_manifest(effective_manifest)
 
 
+def _apply_local_manifest_runtime(
+  app: models.App, manifest: dict, *, package_icon: bytes | None,
+) -> None:
+  """Apply owner-authored metadata without granting server permissions.
+
+  A local app's durable row owns its server grants. Its manifest still owns
+  display metadata, project templates, and host-mediated capabilities, so
+  ordinary source apply can update those fields without becoming a permission
+  escalation path.
+  """
+  from app import install
+
+  runtime_fields = local_manifest_runtime_fields(manifest)
+  app.name = manifest["name"]
+  app.description = manifest["description"]
+  app.version = str(manifest.get("version", "")).strip() or None
+  app.theme_color = install._manifest_color(manifest.get("theme_color"))
+  app.background_color = (
+    install._manifest_color(manifest.get("background_color"))
+    or app.theme_color
+  )
+  app.display = install._manifest_display(manifest.get("display"))
+  app.icon_png = package_icon
+  if "offline_capable" in runtime_fields:
+    app.offline_capable = runtime_fields["offline_capable"]
+  app.embeds_agent = bool(manifest.get("embeds_agent", False))
+  app.offline_contract = manifest.get("offline") or None
+  app.system_prompt_file = manifest.get("system_prompt") or None
+  app.system_app = bool(manifest.get("system_app", False))
+  app.project_templates_json = manifest.get("project_templates") or None
+  app.capability_contract = contract_from_app_state(
+    app,
+    capabilities=runtime_fields["capabilities"],
+    public_access=runtime_fields["public_access"],
+    contract_permissions=manifest.get("permissions") or {},
+  )
+
+
 def _live_runtime_state(app: models.App) -> tuple:
-  """Return fields whose manifest-driven changes make an apply non-empty."""
+  """Fields whose manifest-driven changes make an apply non-empty."""
   return (
     app.name,
     app.description,
@@ -658,6 +696,9 @@ async def apply_source_revision(
         )
       assert app is not None
       previous_state = _live_runtime_state(app)
+      # Captured explicitly so the published-manifest reset below is decoupled
+      # from the runtime-state tuple's field order (the helper carries more
+      # fields than upstream's inline tuple did).
       previous_source_commit = app.source_commit
 
       # Explicit apply is serialized by the lifecycle lock, so it can compile
@@ -684,26 +725,15 @@ async def apply_source_revision(
 
       if manifest is not None:
         _validate_static_asset_publish_paths(source_path, static_assets)
+
+      if manifest is not None:
         if store_managed and accept_local_package:
           _apply_explicit_package_runtime(
             app, manifest, package_icon=package_icon,
           )
         else:
-          # Ordinary owner-authored app source does not grant server
-          # permissions from source. Those live row fields remain under the
-          # explicit settings/update contract; the manifest owns only the
-          # app's display metadata and host-mediated runtime declarations.
-          runtime_fields = local_manifest_runtime_fields(manifest)
-          app.name = manifest["name"]
-          app.description = manifest["description"]
-          app.icon_png = package_icon
-          if "offline_capable" in runtime_fields:
-            app.offline_capable = runtime_fields["offline_capable"]
-          app.capability_contract = contract_from_app_state(
-            app,
-            capabilities=runtime_fields["capabilities"],
-            public_access=runtime_fields["public_access"],
-            contract_permissions=manifest.get("permissions") or {},
+          _apply_local_manifest_runtime(
+            app, manifest, package_icon=package_icon,
           )
       if chat_id is not None:
         app.chat_id = chat_id
@@ -769,10 +799,6 @@ async def apply_source_revision(
       )
       if not changed:
         db.rollback()
-        # An unchanged revision re-declares the SAME manifest, so no prior
-        # declaration can be obsolete and re-registration is idempotent. A
-        # pre-drop here would only widen the window in which a failed
-        # registration leaves a previously healthy schedule retired.
         warnings = await _sync_accepted_app_side_effects(
           db, app, manifest, drop_prior_cron=False,
         )
@@ -785,6 +811,13 @@ async def apply_source_revision(
       app.jsx_source = source
       app.compiled_path = str(published)
       app.updated_at = timeutil.now_naive_utc()
+      if chat_id is not None:
+        chat_app_artifacts.record_touch(
+          db,
+          chat_id=chat_id,
+          app_id=app.id,
+          touched_at=app.updated_at,
+        )
       try:
         db.commit()
       except Exception:

@@ -29,12 +29,26 @@ function cadenceLabel(wait) {
   return `every ${hours} ${hours === 1 ? 'hour' : 'hours'}`
 }
 
-export function resourcePausePresentation(block, summary) {
+function helperTaskLabel(taskKey) {
+  return String(taskKey || '')
+    .replace(/[._-]+/g, ' ')
+    .replace(/^./, letter => letter.toUpperCase())
+}
+
+export const RESOURCE_PAUSE_KINDS = new Set(['memory', 'storage'])
+
+export function isResourcePause(block) {
+  return !!block && RESOURCE_PAUSE_KINDS.has(block.pause?.kind)
+}
+
+export function resourcePausePresentation(block) {
   const kind = block?.pause?.kind
   const next = clockLabel(block?.pause?.resets_at)
   const storage = kind === 'storage'
   return {
-    summary,
+    summary: storage
+      ? 'Waiting for storage headroom'
+      : 'Waiting for memory to settle',
     next: next ? `checks again ${next}` : 'checks again automatically',
     owner: 'Möbius resource monitor',
     pressure: storage
@@ -66,5 +80,19 @@ export function waitPresentation(wait) {
     activity,
     timeout: `This chat wakes to investigate at ${dateTimeLabel(wait.deadline_at)}`,
     usage: 'No model tokens while checking · one turn when it wakes',
+  }
+}
+
+export function helperPresentation(backgroundHelpers) {
+  const count = Number(backgroundHelpers?.count) || 0
+  const tasks = (backgroundHelpers?.items || [])
+    .map(item => helperTaskLabel(item?.task_key))
+    .filter(Boolean)
+  return {
+    count,
+    tasks,
+    summary: `Waiting on ${count} ${count === 1 ? 'helper' : 'helpers'}`,
+    owner: `${count} ${count === 1 ? 'helper agent' : 'helper agents'}`,
+    usage: 'Helpers use their own turns · no separate monitor is polling',
   }
 }

@@ -139,6 +139,27 @@ async def test_unlinked_public_detail_reads_use_the_matching_public_path(path):
 
 
 @pytest.mark.asyncio
+async def test_rejected_linked_capability_is_not_masked_by_public_fallback():
+  # The root broker forwards registry statuses verbatim; a 401 that is not its
+  # own unlinked message means a linked credential was refused upstream.
+  seen = []
+
+  async def handler(request: httpx.Request) -> httpx.Response:
+    seen.append(str(request.url))
+    return httpx.Response(
+      401, json={"error": {"code": "capability_rejected", "message": "Expired."}},
+    )
+
+  client = CommunityBrokerClient(transport=httpx.MockTransport(handler))
+  with pytest.raises(CommunityBrokerError) as raised:
+    await client.request("GET", "/v1/community/apps")
+
+  assert raised.value.status_code == 401
+  assert raised.value.code == "capability_rejected"
+  assert len(seen) == 1
+
+
+@pytest.mark.asyncio
 async def test_unlinked_private_reads_stay_account_gated():
   seen = []
 

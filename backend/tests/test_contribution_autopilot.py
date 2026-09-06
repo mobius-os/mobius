@@ -443,6 +443,7 @@ def test_followup_chat_hidden_until_escalation(db):
   autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
   chat_id = autopilot.ensure_followup_chat(
     db, 1, "rec", title="Autopilot: fix thing", provider="claude",
+    model="claude-opus-4-8", effort="medium",
   )
   assert chat_id
 
@@ -452,6 +453,7 @@ def test_followup_chat_hidden_until_escalation(db):
 
   # A routine round is kept out of the owner's chat list.
   assert _visible_in_owner_drawer(_chat()) is False
+  assert _chat().agent_settings_json["model"] == "claude-opus-4-8"
 
   # Escalation is the one moment it needs the owner → surface it.
   assert autopilot.escalate(db, 1, "rec") is True
@@ -462,12 +464,79 @@ def test_followup_chat_hidden_until_escalation(db):
   assert _visible_in_owner_drawer(_chat()) is False
 
 
+def test_followup_chat_reuses_identity_and_updates_same_model_effort(db):
+  autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
+  chat_id = autopilot.ensure_followup_chat(
+    db, 1, "rec", title="Autopilot: fix thing", provider="claude",
+    model="claude-opus-4-8", effort="medium",
+  )
+  chat = db.get(models.Chat, chat_id)
+  chat.session_id = "claude-session"
+  db.commit()
+
+  reused_id = autopilot.ensure_followup_chat(
+    db, 1, "rec", title="Autopilot: fix thing", provider="claude",
+    model="claude-opus-4-8", effort="high",
+  )
+
+  assert reused_id == chat_id
+  db.expire_all()
+  reused = db.get(models.Chat, chat_id)
+  assert reused.provider == "claude"
+  assert reused.session_id == "claude-session"
+  assert reused.agent_settings_json["model"] == "claude-opus-4-8"
+  assert reused.agent_settings_json["effort"] == "high"
+
+
+@pytest.mark.parametrize(("provider", "model"), [
+  ("claude", "claude-sonnet-4-6"),
+  ("codex", "gpt-5.6-terra"),
+])
+def test_followup_chat_rotates_on_provider_or_model_identity_change(
+  db, provider, model,
+):
+  autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
+  old_id = autopilot.ensure_followup_chat(
+    db, 1, "rec", title="Autopilot: fix thing", provider="claude",
+    model="claude-opus-4-8", effort="medium",
+  )
+  old = db.get(models.Chat, old_id)
+  old.session_id = "claude-session"
+  old.agent_settings_json = {
+    **old.agent_settings_json, "drawer_hidden": False,
+  }
+  db.commit()
+
+  new_id = autopilot.ensure_followup_chat(
+    db, 1, "rec", title="Autopilot: fix thing", provider=provider,
+    model=model, effort="high",
+  )
+
+  assert new_id != old_id
+  db.expire_all()
+  old = db.get(models.Chat, old_id)
+  new = db.get(models.Chat, new_id)
+  row = autopilot.get_row(db, 1, "rec")
+  assert row.followup_chat_id == new_id
+  assert old.provider == "claude"
+  assert old.session_id == "claude-session"
+  assert old.agent_settings_json["model"] == "claude-opus-4-8"
+  assert old.agent_settings_json["drawer_hidden"] is True
+  assert new.provider == provider
+  assert new.session_id is None
+  assert new.messages == []
+  assert new.agent_settings_json["model"] == model
+  assert new.agent_settings_json["effort"] == "high"
+  assert new.agent_settings_json["drawer_hidden"] is True
+
+
 def test_followup_chat_hidden_on_close_out(db):
   from app.routes.chats import _visible_in_owner_drawer
 
   autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
   chat_id = autopilot.ensure_followup_chat(
     db, 1, "rec", title="Autopilot: fix thing", provider="claude",
+    model="claude-opus-4-8", effort="medium",
   )
   autopilot.escalate(db, 1, "rec")
 
@@ -549,6 +618,7 @@ def test_failed_surfacing_leaves_escalation_retryable(db):
   autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
   chat_id = autopilot.ensure_followup_chat(
     db, 1, "rec", title="Autopilot: fix thing", provider="claude",
+    model="claude-opus-4-8", effort="medium",
   )
 
   def _chat():
@@ -582,6 +652,7 @@ def test_failed_hiding_leaves_resume_retryable(db):
   autopilot.stamp_grant(db, 1, "rec", head_sha="abc")
   chat_id = autopilot.ensure_followup_chat(
     db, 1, "rec", title="Autopilot: fix thing", provider="claude",
+    model="claude-opus-4-8", effort="medium",
   )
   assert autopilot.escalate(db, 1, "rec") is True
 

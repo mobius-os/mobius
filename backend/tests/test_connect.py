@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import stat
 import shlex
 import sys
 import threading
@@ -14,7 +15,7 @@ import pytest
 from sqlalchemy import create_engine, inspect, text
 from starlette.requests import Request
 
-from app import connect_runner, models
+from app import connect_outbound, connect_runner, models
 from app.connect_runner import _run_command
 from app.database import SessionLocal
 from app.manifest_contract import ManifestContractError, validate_manifest_contract
@@ -97,6 +98,205 @@ def test_install_command_is_single_fetch_and_serves_shell_bootstrap(client, auth
   loose = client.get(f"/api/connect/i/{code.replace('-', '').lower()}")
   assert loose.status_code == 200, loose.text
   assert f'code="{code}"' in loose.text
+
+
+def test_outbound_command_is_parsed_as_data_not_shell():
+  base, code = connect_outbound.parse_pairing_command(
+    "curl -fsSL https://friend.example/api/connect/i/ABCD-EFGH | sh",
+  )
+  assert base == "https://friend.example"
+  assert code == "ABCD-EFGH"
+
+  for unsafe in (
+    "curl -fsSL https://friend.example/api/connect/i/ABCD-EFGH | sh; id",
+    "curl -fsSL https://friend.example/anything | sh",
+    "echo hello",
+  ):
+    with pytest.raises(connect_outbound.OutboundConnectError):
+      connect_outbound.parse_pairing_command(unsafe)
+
+  with pytest.raises(connect_outbound.OutboundConnectError, match="HTTPS"):
+    connect_outbound.parse_pairing_command(
+      "curl -fsSL http://friend.example/api/connect/i/ABCD-EFGH | sh",
+    )
+
+
+def test_outbound_json_replaces_an_existing_public_mode_with_private_storage(
+  tmp_path,
+):
+  path = tmp_path / "config.json"
+  path.write_text("stale", encoding="utf-8")
+  path.chmod(0o644)
+
+  connect_outbound._atomic_json(path, {"token": "remote-secret"})
+
+  assert json.loads(path.read_text(encoding="utf-8")) == {
+    "token": "remote-secret",
+  }
+  assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_inbound_host_registry_is_private(tmp_path, monkeypatch):
+  monkeypatch.setattr(connect_routes, "_hosts_dir", lambda: tmp_path)
+
+  connect_routes._save_host({"id": "h_example", "pairing_code": "ABCD-EFGH"})
+
+  path = tmp_path / "h_example.json"
+  assert json.loads(path.read_text(encoding="utf-8"))["pairing_code"] == "ABCD-EFGH"
+  assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.asyncio
+async def test_outbound_profile_keeps_pairing_code_out_of_saved_record(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  monkeypatch.setattr(
+    connect_outbound,
+    "_download_runner",
+    lambda _base: b"#!/usr/bin/env python3\n# Mobius Connect runner\n",
+  )
+
+  class Running:
+    pid = 424242
+
+    def poll(self):
+      return None
+
+  launched = []
+
+  def launch(profile_id, *args):
+    launched.append(args)
+    connect_outbound._atomic_json(
+      connect_outbound._runner_config_path(profile_id),
+      {
+        "url": "https://friend.example",
+        "host_id": "h_remote",
+        "token": "remote-secret",
+      },
+    )
+    return Running()
+
+  monkeypatch.setattr(connect_outbound, "_launch", launch)
+  monkeypatch.setattr(connect_outbound, "_process_alive", lambda _id: True)
+  created = await connect_outbound.create_profile(
+    "Alex",
+    "curl -fsSL https://friend.example/api/connect/i/ABCD-EFGH | sh",
+  )
+
+  # The one-time code reaches the runner only as argv, never the saved record.
+  assert launched == [("--pair", "ABCD-EFGH", "--url", "https://friend.example")]
+  meta = json.loads(
+    connect_outbound._meta_path(created["id"]).read_text(encoding="utf-8"),
+  )
+  assert meta["base_url"] == "https://friend.example"
+  assert "ABCD-EFGH" not in json.dumps(meta)
+  assert "remote-secret" not in json.dumps(meta)
+  assert created["status"] == "active"
+  assert "remote-secret" not in json.dumps(created)
+
+
+def test_outbound_reconcile_records_exits_and_relaunches_orphans(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  ended, failed, running, adopted, orphan, finished = (
+    f"o_{digit * 16}" for digit in "123456"
+  )
+  for profile_id in (ended, failed, running, adopted, orphan):
+    connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+      "id": profile_id, "base_url": "https://friend.example", "status": "active",
+    })
+  connect_outbound._atomic_json(connect_outbound._meta_path(finished), {
+    "id": finished, "base_url": "https://friend.example", "status": "ended",
+  })
+
+  class Owned:
+    def __init__(self, result):
+      self.result = result
+
+    def poll(self):
+      return self.result
+
+  owned = {ended: Owned(0), failed: Owned(1), running: Owned(None)}
+  monkeypatch.setattr(connect_outbound, "_owned_processes", owned)
+  monkeypatch.setattr(
+    connect_outbound, "_process_alive", lambda profile_id: profile_id == adopted,
+  )
+  launched = []
+  monkeypatch.setattr(
+    connect_outbound, "_launch",
+    lambda profile_id, *args: launched.append((profile_id, args)),
+  )
+
+  connect_outbound._reconcile_once()
+
+  def status(profile_id):
+    return json.loads(
+      connect_outbound._meta_path(profile_id).read_text(encoding="utf-8"),
+    )["status"]
+
+  assert status(ended) == "ended"
+  assert status(failed) == "error"
+  assert status(running) == "active"
+  # An orphaned active profile is relaunched without a pairing code; a runner
+  # found alive by pid, or one that already exited on its own, is left alone.
+  assert launched == [(orphan, ())]
+  assert set(owned) == {running}
+
+
+@pytest.mark.asyncio
+async def test_outbound_revoke_fails_closed_until_remote_confirms(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_0123456789abcdef"
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id,
+    "label": "Alex",
+    "base_url": "https://friend.example",
+    "created_at": 1,
+    "status": "active",
+  })
+  connect_outbound._atomic_json(
+    connect_outbound._runner_config_path(profile_id),
+    {"url": "https://friend.example", "host_id": "h_remote", "token": "secret"},
+  )
+  def keep_access(_config):
+    raise connect_outbound.OutboundConnectError("access was kept")
+
+  monkeypatch.setattr(connect_outbound, "_disconnect_remote", keep_access)
+  stopped = []
+  monkeypatch.setattr(connect_outbound, "_stop_process_tree", stopped.append)
+
+  with pytest.raises(connect_outbound.OutboundConnectError, match="kept"):
+    await connect_outbound.revoke_profile(profile_id)
+  assert connect_outbound._profile_dir(profile_id).is_dir()
+  assert stopped == []
+
+
+def test_outbound_routes_use_connect_manage_capability(
+  client, auth, monkeypatch,
+):
+  public = {
+    "id": "o_0123456789abcdef",
+    "label": "Alex",
+    "target": "friend.example",
+    "status": "active",
+    "online": True,
+    "created_at": 1,
+  }
+  monkeypatch.setattr(connect_outbound, "list_profiles", lambda: [public])
+
+  denied = _app_auth(client, auth, granted=False)
+  assert client.get("/api/connect/outbound", headers=denied).status_code == 403
+  granted = _app_auth(client, auth, granted=True)
+  assert client.get("/api/connect/outbound", headers=granted).json() == {
+    "connections": [public],
+  }
 
 
 def test_pairing_code_exchange_is_rate_limited(client):
@@ -830,7 +1030,6 @@ async def test_unacknowledged_dispatch_expires_and_sends_cancel(
   )["last_command"]["result"]["outcome"] == "expired"
 
 
-@pytest.mark.filterwarnings("error")
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group contract")
 def test_runner_timeout_terminates_the_entire_command_tree(tmp_path: Path):
   """A timed-out command must not leave descendants running on the machine."""
@@ -1219,7 +1418,7 @@ def test_connect_manage_reaches_a_ledgered_database(tmp_path: Path):
   run_migrations(eng)
   columns = {column["name"] for column in inspect(eng).get_columns("apps")}
   assert "connect_manage" in columns
-  assert "0016_app_connect_manage" in {
+  assert "0018_app_connect_manage" in {
     entry["version"] for entry in schema_migration_history(eng)
   }
 

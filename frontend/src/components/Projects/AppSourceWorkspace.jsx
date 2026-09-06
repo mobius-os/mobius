@@ -1,16 +1,18 @@
 import { useMemo } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import ArrowUpRight from 'lucide-react/dist/esm/icons/arrow-up-right.mjs'
 import AppIcon from '../AppIcon.jsx'
-import { api } from '../../api/client.js'
+import { api, jsonOrThrow } from '../../api/client.js'
 import { appSourceQueries } from '../../hooks/queries.js'
 import ProjectFinder from './ProjectFinder.jsx'
 import './Projects.css'
 
 export default function AppSourceWorkspace({ app, onOpenApp }) {
   const appId = String(app.id)
+  const queryClient = useQueryClient()
   const fileSource = useMemo(() => ({
     id: `app-source:${appId}`,
-    readOnly: true,
+    readOnly: false,
     filesKey: path => appSourceQueries.keys.files(appId, path),
     gitStatusKey: () => appSourceQueries.keys.gitStatus(appId),
     gitDiffKey: path => appSourceQueries.keys.gitDiff(appId, path),
@@ -18,8 +20,28 @@ export default function AppSourceWorkspace({ app, onOpenApp }) {
     gitStatus: options => api.apps.sourceGitStatus(appId, options),
     gitDiff: (path, options) => api.apps.sourceGitDiff(appId, path, options),
     readFile: (path, options) => api.apps.readSourceFile(appId, path, options),
+    writeFile: (path, content, expectedRevision) => (
+      api.apps.writeSourceFile(appId, path, content, expectedRevision)
+    ),
+    writeBytes: (path, bytes, expectedRevision) => (
+      api.apps.writeSourceBytes(appId, path, bytes, expectedRevision)
+    ),
+    createFolder: path => api.apps.createSourceFolder(appId, path),
+    deleteFile: path => api.apps.deleteSourcePath(appId, path),
+    move: payload => api.apps.moveSourcePath(appId, payload),
     invalidate: queryClient => appSourceQueries.invalidate(queryClient, appId),
   }), [appId])
+
+  async function applySourceChange() {
+    if (!app.source_dir) throw new Error('This app source cannot be applied.')
+    try {
+      await jsonOrThrow(await api.apps.applySource({
+        source_dir: app.source_dir,
+      }), 'App update failed:')
+    } finally {
+      await appSourceQueries.invalidate(queryClient, appId)
+    }
+  }
 
   return (
     <section className="project-workspace app-source-workspace" aria-label={`${app.name} source`}>
@@ -37,6 +59,7 @@ export default function AppSourceWorkspace({ app, onOpenApp }) {
           projectId={fileSource.id}
           projectName={`${app.name} source`}
           fileSource={fileSource}
+          onSourceChanged={applySourceChange}
         />
       </div>
     </section>

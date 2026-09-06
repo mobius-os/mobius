@@ -97,27 +97,9 @@ export function deploymentKindLabel(activation) {
   return deploymentKind(activation) === 'railway' ? 'Railway' : 'Self-hosted'
 }
 
-/**
- * An image-level update is finished by rebuilding the container, on both
- * deployments. Railway cuts over to the pinned GHCR image; self-hosted applies
- * the reviewed source in place and then rebuilds the matching sha-<target>
- * image via the host helper. Either way the single reviewed-update confirmation
- * drives the rebuild — there is no separate manual rebuild step.
- */
+/** An image-level update is finished by the reviewed container rebuild on both deployments. */
 export function reviewedUpdateUsesContainerRebuild(preview) {
   return preview?.activation?.level === 'image_rebuild'
-}
-
-/**
- * Only Railway pins the rebuild to an immutable GHCR image digest. Self-hosted
- * anchors on the sha-<target> tag, so its reviewed rebuild has no digest and
- * must not be blocked on one.
- */
-export function reviewedRebuildNeedsDigest(preview) {
-  return (
-    reviewedUpdateUsesContainerRebuild(preview)
-    && deploymentKind(preview?.activation) === 'railway'
-  )
 }
 
 export function platformActivationLabel(activation) {
@@ -131,4 +113,9 @@ export function platformActivationLabel(activation) {
     host_maintenance: 'Host maintenance',
   }
   return labels[activation?.level] || 'Activation details'
+}
+
+/** The activation level is independent of whether a newer release exists. */
+export function platformActivationLevel(platform) {
+  return platform?.activation?.level || (platform?.needs_restart ? 'server_restart' : 'live')
 }

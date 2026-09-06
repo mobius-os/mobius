@@ -1,9 +1,6 @@
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import MarkerCard from './MarkerCard.jsx'
-import {
-  compactionBrief,
-  compactionProviderLabel,
-} from './compactionToolBlock.js'
+import { compactionBrief } from './compactionToolBlock.js'
 
 // A compaction message is a product moment, not a tool call: the chat's
 // earlier context was condensed into a portable briefing (so work can
@@ -20,7 +17,7 @@ export default function CompactionCard({ msg }) {
   const brief = compactionBrief(msg)
   // Atomic provider handoffs attach `to_provider`; older compaction rows have
   // neither field and degrade to the plain label.
-  const provider = compactionProviderLabel(msg)
+  const provider = providerLabel(msg)
   const subtitle = provider ? `before switching to ${provider}` : null
 
   // Renders through the shared MarkerCard shell. When `brief` is empty the
@@ -37,4 +34,12 @@ export default function CompactionCard({ msg }) {
       {brief ? <StandardMarkdown text={brief} /> : null}
     </MarkerCard>
   )
+}
+
+// Pull a readable provider name off new handoff rows while preserving old rows.
+function providerLabel(msg) {
+  const raw = msg?.to_provider || msg?.provider
+  if (typeof raw !== 'string' || !raw.trim()) return null
+  const known = { claude: 'Claude Code', codex: 'OpenAI Codex' }
+  return known[raw.trim().toLowerCase()] || raw.trim()
 }

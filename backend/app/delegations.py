@@ -36,7 +36,6 @@ TERMINAL_DELEGATION_STATUSES = frozenset({
   "interrupted",
 })
 REVIEW_REQUIRED_MARKER = "DELEGATION_WRITE_REVIEW_REQUIRED"
-MAX_DELEGATION_DEPTH = 4
 CONTRIBUTION_WORKFLOW_SKILL = "/data/apps/contribute/attached-work.md"
 
 
@@ -52,7 +51,10 @@ class RunPolicy:
   scope: str
   cwd: str
   depth: int = 1
-  allowed_skill_paths: tuple[str, ...] = ()
+  # Ordinary Subagents never set a local spending ceiling. This field exists
+  # only for an explicitly budgeted owner workflow such as a Gauntlet.
+  explicit_provider_budget_usd: float | None = None
+  required_skill_paths: tuple[str, ...] = ()
 
   @property
   def delegated(self) -> bool:
@@ -75,54 +77,32 @@ class RunPolicy:
         "durable change that completes the bounded task."
       )
     )
-    child_work_rule = (
-      (
-        "You may use Möbius's installed Subagents capability for bounded "
-        "child work when parallelism or local decomposition materially helps; "
-        "you remain responsible for checking your own completion condition "
-        "after those children settle. Its guarded helper is "
-        "$MOBIUS_SUBAGENT_HELPER. Use: python3 "
-        "/data/apps/subagents/subagents.py run --provider claude|codex --name "
-        "stable-key --scope read|write --prompt 'one bounded contract'. A "
-        "read-only owner may create only read-only children. Use stable task "
-        "keys. Do not use any other agent CLI or recursive mechanism. "
-      )
-      if self.provider == "claude"
-      else (
-        "Nested delegated work is not available in this Codex child. Do not "
-        "launch, invoke, or delegate to another agent, provider, workflow, or "
-        "agent CLI. Complete the bounded task yourself. "
-      )
-    )
-    skill_rule = (
-      "Do not inspect unrelated chats, Memory, skills, or installed-app "
-      "instructions. For this bounded contribution workflow, read the complete "
-      f"required playbook {self.allowed_skill_paths[0]}; that exact path is "
-      "permitted by this delegated scope. "
-      if len(self.allowed_skill_paths) == 1
-      else (
-        "Do not inspect unrelated chats, Memory, skills, or installed-app "
-        "instructions. "
-      )
+    required_skills = "".join(
+      "For this bounded contribution workflow, read the complete required "
+      f"playbook {path}; that exact path is permitted by this delegated scope. "
+      for path in self.required_skill_paths
     )
     return (
       "You are a delegated subagent running as a durable child task inside "
       "Möbius. Complete only the bounded user task in this child conversation "
-      f"and return a clear result to the parent. {child_work_rule}"
+      "and return a clear result to the parent. You may use Möbius's installed "
+      "Subagents capability for bounded child work when parallelism or local "
+      "decomposition materially helps; you remain responsible for checking "
+      "your own completion condition after those children settle. Its guarded "
+      "helper is $MOBIUS_SUBAGENT_HELPER. Use: python3 "
+      "/data/apps/subagents/subagents.py run --provider claude|codex --name "
+      "stable-key --scope read|write --prompt 'one bounded contract'. A "
+      "read-only owner may create only read-only children. Use stable task "
+      "keys. Do not use "
+      "a provider CLI directly; provider-native helper tools and the guarded "
+      "Subagents helper are available for bounded decomposition. "
       "Do not ask the owner an interactive question; if a required decision or "
       "credential is missing, stop and state the blocker precisely. Do not "
       "schedule work or wait after this child turn ends. If completion depends "
       "on a future external condition, return that condition and its owner to "
       "the parent; the top-level parent owns any durable Möbius Wait. Do not "
-      "use a shell or provider tool's background/detach option: every process, "
-      "test, or immediate child you start must finish or be cancelled before "
-      "you reply. A progress update, private next-items list, or promise to "
-      "finalize later is not a completed delegated result; return only after "
-      "you have checked the task's stated Done condition, or report the exact "
-      "blocker now. Do not "
-      "inspect unrelated chats or Memory. "
-      f"{skill_rule}"
-      "Owner-managed MCP connections are not available in this run. "
+      "inspect unrelated chats or Memory. Load only skills and connected tools "
+      f"that are relevant to this bounded task. {required_skills}"
       "Never read or write /data/cli-auth or /data/.secret-key. "
       f"Working directory: {self.cwd}. {scope_rule}"
     )
@@ -130,7 +110,7 @@ class RunPolicy:
 
 @dataclass(frozen=True)
 class DelegationIntent:
-  """Validated immutable fields needed to create or attach one child task."""
+  """Validated task identity plus its requested parent-notification policy."""
 
   app_id: int
   parent_chat_id: str
@@ -147,6 +127,9 @@ class DelegationIntent:
   source_work_intent: str | None = None
   source_work_context_app_id: int | None = None
   source_work_envelope: dict | None = None
+  # Kept out of the ordinary submit API. Gauntlet is the sole caller that may
+  # reserve an owner-chosen provider budget on its delegated read slots.
+  explicit_provider_budget_usd: float | None = None
 
 
 def same_delegation_intent(
@@ -163,6 +146,10 @@ def same_delegation_intent(
     row.effort == intent.effort,
     row.scope == intent.scope,
     row.cwd == intent.cwd,
+    (
+      intent.explicit_provider_budget_usd is None
+      or row.max_budget_usd == intent.explicit_provider_budget_usd
+    ),
     row.source_work_id == intent.source_work_id,
     row.source_work_intent == intent.source_work_intent,
     row.source_work_context_app_id == intent.source_work_context_app_id,
@@ -171,6 +158,28 @@ def same_delegation_intent(
       intent.prompt.encode("utf-8")
     ).hexdigest(),
   ))
+
+
+def _attach_existing_delegation(
+  db: Session,
+  row: models.Delegation,
+  intent: DelegationIntent,
+) -> tuple[models.Delegation, bool]:
+  """Attach to the persisted row for this exact intent.
+
+  Parent notification is lifecycle ownership, not part of the work identity.
+  Reattachment may add that ownership but never silently remove it.
+  """
+  if not same_delegation_intent(row, intent):
+    raise ValueError(
+      "task key is already attached to different immutable work"
+    )
+  # Notification is an observation owner, not task identity. Reattachment
+  # must not add a second observer: the submit route may transfer an
+  # undelivered background wake to a blocking caller under the parent's
+  # transition lock, but a later background attachment never steals an
+  # existing inline result owner.
+  return row, True
 
 
 def create_or_attach_delegation(
@@ -188,16 +197,7 @@ def create_or_attach_delegation(
     models.Delegation.task_key == intent.task_key,
   ).first()
   if row is not None:
-    if not same_delegation_intent(row, intent):
-      raise ValueError(
-        "task key is already attached to different immutable work"
-      )
-    # Notification is an observation owner, not task identity. Reattachment
-    # must not add a second observer: the submit route may transfer an
-    # undelivered background wake to a blocking caller under the parent's
-    # transition lock, but a later background attachment never steals an
-    # existing inline result owner.
-    return row, True
+    return _attach_existing_delegation(db, row, intent)
 
   child_id = str(uuid.uuid4())
   row = models.Delegation(
@@ -213,11 +213,8 @@ def create_or_attach_delegation(
     scope=intent.scope,
     cwd=intent.cwd,
     prompt_sha256=hashlib.sha256(intent.prompt.encode("utf-8")).hexdigest(),
-    # Older rows may retain the retired ordinary delegated-run budget. New
-    # work deliberately leaves it unset; provider/account limits remain the
-    # observable boundary instead of a hidden local spending ceiling.
-    max_budget_usd=None,
     startup_prompt=intent.prompt,
+    max_budget_usd=intent.explicit_provider_budget_usd,
     notify_parent_on_complete=intent.notify_parent_on_complete,
     source_work_id=intent.source_work_id,
     source_work_intent=intent.source_work_intent,
@@ -254,11 +251,9 @@ def create_or_attach_delegation(
       models.Delegation.parent_root_run_id == intent.parent_root_run_id,
       models.Delegation.task_key == intent.task_key,
     ).first()
-    if row is None or not same_delegation_intent(row, intent):
-      raise ValueError(
-        "different delegation claimed the task key"
-      )
-    return row, True
+    if row is None:
+      raise ValueError("different delegation claimed the task key")
+    return _attach_existing_delegation(db, row, intent)
   return row, False
 
 
@@ -391,7 +386,7 @@ async def retry_limit_park(
 
 
 async def reconcile_unstarted_delegations() -> int:
-  """Start persisted ordinary child intents left before their first ChatRun.
+  """Start persisted child intents left before their first ChatRun.
 
   The same pass also clears source-work leases whose child settled without the
   live completion hook. It is safe at boot and as a periodic runtime repair.
@@ -429,6 +424,9 @@ async def reconcile_unstarted_delegations() -> int:
         started = await ensure_delegation_started(db, row)
         if started:
           started_count += 1
+        if row.source_work_id is not None:
+          status, _run, _result = derived_status(db, row, load_result=False)
+          publish_source_work_changed(row, status)
     except Exception:
       logging.getLogger("moebius.delegations").warning(
         "unstarted delegation recovery failed id=%s", row_id, exc_info=True,
@@ -477,6 +475,16 @@ def policy_for_chat(db: Session, chat_id: str) -> RunPolicy | None:
     if digest != row.prompt_sha256:
       raise RuntimeError("delegation prompt no longer matches immutable intent")
   depth = delegation_depth(db, row)
+  gauntlet_budget = None
+  if row.max_budget_usd is not None and db.query(
+    models.GauntletTask.id,
+  ).filter(models.GauntletTask.delegation_id == row.id).first() is not None:
+    known_prior_cost = float(sum(
+      float(value or 0.0) for (value,) in db.query(
+        models.ChatRun.cost_usd,
+      ).filter(models.ChatRun.chat_id == chat_id).all()
+    ))
+    gauntlet_budget = max(0.001, row.max_budget_usd - known_prior_cost)
   return RunPolicy(
     delegation_id=row.id,
     app_id=row.app_id,
@@ -486,7 +494,8 @@ def policy_for_chat(db: Session, chat_id: str) -> RunPolicy | None:
     scope=row.scope,
     cwd=row.cwd,
     depth=depth,
-    allowed_skill_paths=(
+    explicit_provider_budget_usd=gauntlet_budget,
+    required_skill_paths=(
       (CONTRIBUTION_WORKFLOW_SKILL,)
       if row.source_work_id is not None
       and row.source_work_intent in {
@@ -545,17 +554,7 @@ def parent_root_run_id(
       run = query.order_by(
         models.ChatRun.started_at.desc(), models.ChatRun.id.desc()
       ).first()
-  if run is None:
-    return None
-  # A delegated owner is one durable unit of work even when child-result wakes
-  # open fresh physical turns in its private chat. Key its direct children to
-  # that delegation, not to whichever physical attempt happened to spawn them.
-  owner = db.query(models.Delegation.id).filter(
-    models.Delegation.child_chat_id == parent_chat_id,
-  ).first()
-  if owner is not None:
-    return str(owner[0])
-  return str(run.goal_id or run.root_run_id or run.id)
+  return (run.goal_id or run.root_run_id or run.id) if run is not None else None
 
 
 def _assistant_result(chat: models.Chat) -> str:
@@ -595,7 +594,7 @@ def derived_status(
   if row.cancelled_at is not None:
     return "cancelled", run, result
   if run is None and row.source_work_status in {
-    "accepted", "retrying", "needs_review",
+    "accepted", "retrying", "needs_review", "completed",
   }:
     return (
       row.source_work_status,
@@ -987,11 +986,10 @@ def publish_source_work_changed(
   if status not in WAKE_ELIGIBLE_STATUSES:
     return
 
-  # Source-attached work deliberately does not wake the source agent or write
-  # its transcript. The same parent_woken_at latch records that the owner has
-  # instead received the durable notification which survives a hidden pane,
-  # SSE disconnect, or restart reconciliation. The conditional update and
-  # notification insert commit together inside notify_owner.
+  # Source-attached work never wakes the source agent or writes its transcript.
+  # Claim the ordinary parent-wake latch instead, then persist one owner-facing
+  # notification so a hidden pane, disconnect, or restart cannot lose terminal
+  # attention. The conditional claim and notification insert share a session.
   from app.database import SessionLocal
   from app.push import notify_owner
 
@@ -1065,13 +1063,18 @@ def active_parent_context(
 
 
 def delegation_execution_token(
-  db: Session, policy: RunPolicy, run_id: str,
-) -> str:
-  """Return an owner bearer bound to this delegated physical run.
+  db: Session,
+  policy: RunPolicy,
+  *,
+  run_id: str | None = None,
+) -> str | None:
+  """Return an owner agent bearer bound to this delegated physical run.
 
-  Delegated agents inherit the parent's approved tool surface. The immutable
-  policy and active-run checks below remain authoritative, while delegation
-  claims let the delegation API preserve direct-child and read-to-write rules.
+  Tool inheritance should be automatic rather than a route-by-route grant
+  list: a delegated agent gets the same owner-approved API tools as its parent.
+  The delegation claims remain attached so /api/delegations can still enforce
+  direct-child ownership and read-to-write escalation. The immutable
+  scope prompt and each provider's native execution policy still apply.
   """
   if policy.scope not in {"read", "write"}:
     raise RuntimeError(f"unknown delegation scope: {policy.scope}")
@@ -1085,29 +1088,13 @@ def delegation_execution_token(
   row = db.query(models.Delegation).filter(
     models.Delegation.id == policy.delegation_id,
   ).first()
-  if row is None or row.cancelled_at is not None:
+  if row is None:
     raise RuntimeError("delegation is unavailable")
-  if any((
-    row.app_id != policy.app_id,
-    row.provider != policy.provider,
-    row.model != policy.model,
-    row.effort != policy.effort,
-    row.scope != policy.scope,
-    row.cwd != policy.cwd,
-  )):
-    raise RuntimeError("delegation policy no longer matches immutable intent")
-  physical = db.query(models.ChatRun.id).filter(
-    models.ChatRun.id == run_id,
-    models.ChatRun.chat_id == row.child_chat_id,
-    models.ChatRun.status == "running",
-  ).first()
-  if physical is None:
-    raise RuntimeError("delegation run is not active")
   return auth.create_agent_token(
     row.child_chat_id,
-    run_id,
     owner.username,
     owner.token_epoch,
+    run_id=run_id,
     expires_delta=auth.AGENT_RUN_TOKEN_TTL,
     delegation_id=policy.delegation_id,
     delegation_chat=row.child_chat_id,
@@ -1411,6 +1398,94 @@ def _self_resuming_helper_rows(
     set(models.NONTERMINAL_RUN_STATUSES)
     | WAKE_ELIGIBLE_RUN_STATUSES
     | {"parked_notified"}
+  )
+  rows = (
+    db.query(models.Delegation)
+    .outerjoin(models.ChatRun, models.ChatRun.id == _latest_child_run_id())
+    .filter(
+      models.Delegation.parent_chat_id.in_(parent_chat_ids),
+      models.Delegation.notify_parent_on_complete.is_(True),
+      models.Delegation.source_work_id.is_(None),
+      models.Delegation.cancelled_at.is_(None),
+      models.Delegation.parent_woken_at.is_(None),
+      or_(
+        models.ChatRun.status.in_(candidate_run_statuses),
+        and_(
+          models.ChatRun.id.is_(None),
+          models.Delegation.startup_prompt.is_not(None),
+        ),
+      ),
+    )
+    .order_by(models.Delegation.created_at.asc(), models.Delegation.id.asc())
+    .all()
+  )
+  waiting_statuses = ACTIVE_DELEGATION_STATUSES | WAKE_ELIGIBLE_STATUSES
+  projected = []
+  for row in rows:
+    status, _run, _result = derived_status(db, row, load_result=False)
+    if status in waiting_statuses:
+      projected.append((row, status))
+  return projected
+
+
+def background_helper_chat_ids(db: Session, parent_chat_ids) -> set[str]:
+  """Chats that are idle while wake-enabled helpers own their next move."""
+  requested = {str(chat_id) for chat_id in parent_chat_ids if chat_id}
+  return {
+    row.parent_chat_id
+    for row, _status in _self_resuming_helper_rows(db, requested)
+  }
+
+
+def background_helper_goal_ids(db: Session, parent_chat_id: str) -> set[str]:
+  """Logical Goal/root identities owned by this chat's waking helpers."""
+  return {
+    row.parent_root_run_id
+    for row, _status in _self_resuming_helper_rows(db, {parent_chat_id})
+  }
+
+
+def serialize_background_helpers(db: Session, parent_chat_id: str) -> dict:
+  """Compact owner-facing helper summary; child transcripts stay private."""
+  rows = _self_resuming_helper_rows(db, {parent_chat_id})
+  return {
+    "count": len(rows),
+    "items": [
+      {
+        "id": row.id,
+        "task_key": row.task_key,
+        "provider": row.provider,
+        "status": status,
+      }
+      for row, status in rows[:BACKGROUND_HELPER_ITEM_LIMIT]
+    ],
+  }
+
+
+def publish_parent_waiting_changed(parent_chat_id: str) -> None:
+  """Reconcile every owner surface that projects self-resuming idle work."""
+  if not parent_chat_id:
+    return
+  try:
+    from app.broadcast import get_system_broadcast
+
+    get_system_broadcast().publish({
+      "type": "chat_wait_changed",
+      "chatId": parent_chat_id,
+      "source": "background_helpers",
+    })
+  except Exception:
+    _LOG.debug("background helper wait broadcast failed", exc_info=True)
+
+
+def _self_resuming_helper_rows(
+  db: Session, parent_chat_ids: set[str],
+) -> list[tuple[models.Delegation, str]]:
+  """Wake-enabled helper rows that still own a future parent continuation."""
+  if not parent_chat_ids:
+    return []
+  candidate_run_statuses = tuple(
+    set(models.NONTERMINAL_RUN_STATUSES) | WAKE_ELIGIBLE_RUN_STATUSES
   )
   rows = (
     db.query(models.Delegation)
@@ -2035,8 +2110,7 @@ async def _deliver_parent_wake_once(
         synchronize_session=False,
       )
       db.commit()
-    if claimed:
-      publish_parent_waiting_changed(parent_chat_id)
+    publish_parent_waiting_changed(parent_chat_id)
     return True
 
 
@@ -2107,6 +2181,7 @@ async def wake_parent_after_child_settled(child_chat_id: str) -> None:
       if row is not None:
         from app.goal_plans import publish_plan_for_delegation
         publish_plan_for_delegation(db, row)
+        publish_parent_waiting_changed(row.parent_chat_id)
       if (
         row is None
         or not row.notify_parent_on_complete
@@ -2139,16 +2214,10 @@ async def wake_parents_for_completed_delegations(
   """
   from app.database import SessionLocal
 
-  def _select_groups() -> list[DelegationWakeCursor]:
-    # Session creation and the correlated GROUP BY scan both run in the worker
-    # thread; no synchronous SQLite wait may stall the server event loop as the
-    # Delegation table grows. Mirrors autopilot_lease_recovery_loop's sweep.
-    with SessionLocal() as db:
-      return _wake_recovery_groups(
-        db, after=after, batch_size=batch_size,
-      )
-
-  wake_groups = await asyncio.to_thread(_select_groups)
+  with SessionLocal() as db:
+    wake_groups = _wake_recovery_groups(
+      db, after=after, batch_size=batch_size,
+    )
 
   async def recover(group: DelegationWakeCursor) -> str | None:
     try:

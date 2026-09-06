@@ -103,6 +103,11 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
     },
     pending_messages: [{ id: 'queued' }],
     pending_question_id: 'question-1',
+    waits: [{ id: 'wait-1', description: 'CI finishes', status: 'armed' }],
+    background_helpers: {
+      count: 1,
+      items: [{ id: 'helper-1', task_key: 'audit', status: 'running' }],
+    },
     provider: 'codex',
     session_id: 'thread-current',
     created_by_app_id: 7,
@@ -110,6 +115,7 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
     effective_agent_settings: { effort: 'high' },
     has_assistant_turns: true,
     auto_resume_on_limit: true,
+    project: { id: 'p1', name: 'Site', root_path: 'projects/p1' },
   }
 
   const cached = chatDetailCacheValue(source)
@@ -123,6 +129,8 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
   assert.equal(cached.activeGoalObjective, 'Finish the migration')
   assert.deepEqual(cached.goal, source.goal)
   assert.equal(cached.pending_question_id, 'question-1')
+  assert.deepEqual(cached.waits, source.waits)
+  assert.deepEqual(cached.background_helpers, source.background_helpers)
   assert.deepEqual(cached.chatInfo, {
     provider: 'codex',
     session_id: 'thread-current',
@@ -131,6 +139,7 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
     effective: { effort: 'high' },
     has_assistant_turns: true,
     auto_resume_on_limit: true,
+    project: { id: 'p1', name: 'Site', root_path: 'projects/p1' },
   })
 })
 
@@ -217,20 +226,50 @@ test('a retained snapshot requires both the row version and pending card', () =>
   }), false)
 })
 
-test('idle foreground reconciliation refetches only a disproven unowned snapshot', () => {
-  const cached = { updated_at: '2026-08-24T00:00:00Z', messages: [] }
-  const moved = { updated_at: '2026-08-24T00:00:01Z', running: false }
-  assert.equal(shouldRefetchTranscriptForRuntime(cached, moved), true)
+test('a retained running snapshot requires the current assistant owner', () => {
+  const updated_at = '2026-07-30T12:00:00Z'
+  const cached = {
+    updated_at,
+    activeAssistantMessageId: 'assistant-before-restart',
+    messages: [],
+  }
+  assert.equal(chatSnapshotMatchesRuntime(cached, {
+    updated_at,
+    active_assistant_message_id: 'assistant-before-restart',
+  }), true)
+  assert.equal(chatSnapshotMatchesRuntime(cached, {
+    updated_at,
+    active_assistant_message_id: 'assistant-current',
+  }), false)
+  assert.equal(chatSnapshotMatchesRuntime({ updated_at, messages: [] }, {
+    updated_at,
+    active_assistant_message_id: 'assistant-current',
+  }), false, 'a legacy cache cannot claim a newly identified live owner')
+})
+
+test('an idle foreground runtime refetches only when it disproves the cache', () => {
+  const updated_at = '2026-07-30T12:00:00Z'
+  const cached = {
+    updated_at,
+    activeAssistantMessageId: null,
+    messages: [],
+  }
+  const matching = {
+    running: false,
+    updated_at,
+    active_assistant_message_id: null,
+  }
+  assert.equal(shouldRefetchTranscriptForRuntime(cached, matching), false)
   assert.equal(shouldRefetchTranscriptForRuntime(cached, {
-    ...moved,
-    updated_at: cached.updated_at,
-  }), false, 'a matching durable version adds no transcript fetch')
+    ...matching,
+    updated_at: '2026-07-30T12:01:00Z',
+  }), true)
+  assert.equal(shouldRefetchTranscriptForRuntime(cached, matching, true), false,
+    'local work remains authoritative until it settles')
   assert.equal(shouldRefetchTranscriptForRuntime(cached, {
-    ...moved,
+    ...matching,
     running: true,
-  }), false, 'an active runtime remains owned by the stream path')
-  assert.equal(shouldRefetchTranscriptForRuntime(cached, moved, true), false,
-    'an optimistic local turn cannot be overwritten by a foreground poll')
+  }), false, 'a live run reconciles through its stream instead')
 })
 
 test('a retained running snapshot requires the current assistant owner', () => {

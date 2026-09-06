@@ -2,6 +2,7 @@
 
 import {
   _topmostVisibleMsg,
+  anchorModeForElement,
   anchorModeFromScroll,
   contentHoldModeFromScroll,
   isQuestionSubmissionMode,
@@ -211,11 +212,18 @@ export function modeForScrollTransition(previousMode, proposedMode, event) {
   if (!proposedMode) return previousMode
   const restoresQuestionSubmissionBase = (
     event === 'stream:question-response-follow'
-      && proposedMode?.kind === 'FOLLOW_BOTTOM'
+    && proposedMode?.kind === 'FOLLOW_BOTTOM'
   )
     && isQuestionSubmissionMode(previousMode)
     && previousMode.questionSubmitBaseMode === proposedMode
-  if (restoresQuestionSubmissionBase) return proposedMode
+  const restoresQuestionPreparationBase = (
+    event === 'send:question-prepare-cancel'
+    && isQuestionSubmissionMode(previousMode)
+    && previousMode.questionPrepareCancelMode === proposedMode
+  )
+  if (restoresQuestionSubmissionBase || restoresQuestionPreparationBase) {
+    return proposedMode
+  }
 
   const samePin = previousMode?.kind === 'PIN_USER_MSG'
     && proposedMode.kind === 'PIN_USER_MSG'
@@ -245,7 +253,7 @@ export function modeForScrollTransition(previousMode, proposedMode, event) {
  * Gesture timing blocks work during the active handoff; the monotonic reader
  * generation prevents work captured before a later gesture from regaining
  * authority when that timing gate eventually opens; live touch contact holds
- * ownership even after the timing gate closes (contract R5, v1.24).
+ * ownership even after the timing gate closes (contract R5, v1.23).
  */
 export function scrollAuthorityAllowsCommit({
   capturedVersion,
@@ -305,7 +313,7 @@ export function terminalLayoutAuthority({
 
 /** Layout observers may own scrollTop only outside the gesture-intent window
  * AND while no touch pointer is physically on the transcript (contract R5,
- * v1.24). Input events precede the browser's first `scroll` event; without the
+ * v1.23). Input events precede the browser's first `scroll` event; without the
  * timing gate, a streaming ResizeObserver can re-pin/follow in that gap and
  * throw the reader back before onScroll has a chance to stamp ANCHOR_AT.
  * Without the contact gate, a finger resting on the glass mid-gesture — a
@@ -498,14 +506,20 @@ export function modeForDisclosureToggle(scrollEl, currentMode) {
 
 /** Submitting an in-message question answer resumes output inside the same
  * assistant row and may replace the card's controls immediately. Freeze the
- * exact visible row/offset during that card-to-stream handoff. The overlay
+ * exact card/offset during that card-to-stream handoff. The overlay
  * remembers the mode that owned the unanswered card: an accepted same-turn
  * answer may restore its prior FOLLOW_BOTTOM, while a reading hold remains a
  * hold. Keyboard, toolbar, pane, and orientation changes preserve the overlay;
  * only visible response activity or newer reader intent releases it. */
-export function modeForQuestionSubmission(scrollEl, currentMode) {
+export function modeForQuestionSubmission(scrollEl, currentMode, questionCard = null) {
   if (!scrollEl) return currentMode
-  const anchor = anchorModeFromScroll(scrollEl)
+  // A question submission promises that the QUESTION stays put. A generic
+  // viewport anchor can target an activity block hundreds of pixels above the
+  // card—and, in a 10k-pixel assistant row, historically fell back to the row
+  // itself. Address the actual card when activation supplies it; retained
+  // legacy callers still get the ordinary visible-content hold.
+  const anchor = anchorModeForElement(scrollEl, questionCard)
+    || anchorModeFromScroll(scrollEl)
   if (!anchor) return currentMode
   // questionSubmitBaseMode records the reader's intent behind the unanswered
   // card so a continuation can restore it. A reader parked at the physical tail

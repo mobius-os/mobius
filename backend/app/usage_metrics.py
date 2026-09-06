@@ -184,10 +184,8 @@ def normalize_codex_usage(
   first_usage: Any | None,
   final_usage: Any | None,
   call_usages: list[Any] | None = None,
-  *,
-  model: str | None = None,
 ) -> dict | None:
-  """Derive one turn aggregate plus its model and billing inputs."""
+  """Derive one turn aggregate plus exact per-model-call billing inputs."""
   if final_usage is None:
     return None
   first_usage = first_usage or final_usage
@@ -227,7 +225,6 @@ def normalize_codex_usage(
   ]
   return {
     "provider": "codex",
-    "model": model,
     "scope": "turn",
     "calculation": calculation,
     "input_tokens": input_total,
@@ -247,3 +244,111 @@ def normalize_codex_usage(
       "final": _plain(final_usage),
     },
   }
+
+
+# OpenAI Codex per-token USD rates as (uncached_input, cached_input_read,
+# output) dollars per 1,000,000 tokens. Sourced from OpenAI's published API
+# pricing (July 2026); cached reads are the standard 90%-discounted input rate.
+# Update these as OpenAI revises pricing; a model absent from this table is left
+# uncharged (cost None) rather than mispriced.
+CODEX_MODEL_RATES: dict[str, tuple[float, float, float]] = {
+  "gpt-5.6-sol": (5.00, 0.50, 30.00),
+  "gpt-5.6-terra": (2.50, 0.25, 15.00),
+  "gpt-5.6-luna": (1.00, 0.10, 6.00),
+  "gpt-5.5": (5.00, 0.50, 30.00),
+  "gpt-5.4": (2.50, 0.25, 15.00),
+  "gpt-5.4-mini": (0.75, 0.075, 4.50),
+}
+
+_CACHE_WRITE_MODELS = frozenset({
+  "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+})
+_LONG_CONTEXT_MODELS = _CACHE_WRITE_MODELS
+_LONG_CONTEXT_INPUT_THRESHOLD = 272_000
+
+
+def _codex_call_cost(
+  model: str,
+  counts: dict[str, Any],
+  rates: tuple[float, float, float],
+  *,
+  long_context_eligible: bool = True,
+) -> float:
+  """Price one upstream model call, including request-scoped surcharges.
+
+  ``long_context_eligible=False`` prices the same arithmetic WITHOUT the
+  long-context surcharge, for callers holding turn totals rather than one
+  request. The surcharge is request-scoped, so a threshold test against a sum
+  over many calls is not the same question and would over-charge.
+  """
+  in_rate, cached_rate, out_rate = rates
+  input_total = _count(counts.get("input_tokens"))
+  cached = min(_count(counts.get("cached_input_tokens")), input_total)
+  cache_write = min(
+    _count(counts.get("cache_write_input_tokens")),
+    max(0, input_total - cached),
+  )
+  uncached = max(0, input_total - cached - cache_write)
+  cache_write_rate = in_rate * (1.25 if model in _CACHE_WRITE_MODELS else 1.0)
+  if (
+    long_context_eligible
+    and model in _LONG_CONTEXT_MODELS
+    and input_total > _LONG_CONTEXT_INPUT_THRESHOLD
+  ):
+    in_rate *= 2
+    cached_rate *= 2
+    cache_write_rate *= 2
+    out_rate *= 1.5
+  return (
+    uncached * in_rate
+    + cached * cached_rate
+    + cache_write * cache_write_rate
+    + _count(counts.get("output_tokens")) * out_rate
+  ) / 1_000_000
+
+
+def codex_cost_usd(model: str | None, usage_metrics: dict | None) -> float | None:
+  """Best-effort USD cost for one Codex turn from its normalized usage.
+
+  Codex, unlike Claude, reports token counts but no dollar cost, so Möbius
+  derives it from the rate card above. Output tokens already include reasoning
+  tokens (OpenAI counts reasoning within completion), so output is billed once.
+  Returns None when the model is unpriced or usage is missing — an unpriced turn
+  is left uncharged rather than charged a guess, exactly matching the prior
+  cost_usd=None behavior for those cases.
+  """
+  if not model or not usage_metrics:
+    return None
+  rates = CODEX_MODEL_RATES.get(model)
+  if rates is None:
+    return None
+  model_calls = usage_metrics.get("model_calls")
+  if isinstance(model_calls, list) and model_calls:
+    return round(sum(
+      _codex_call_cost(model, call, rates)
+      for call in model_calls if isinstance(call, dict)
+    ), 6)
+
+  # No per-call breakdown — only turn TOTALS. Route through `_codex_call_cost`
+  # anyway so the rate arithmetic and the cache-write premium live in exactly
+  # one place; this branch previously inlined a second copy that had already
+  # drifted (different key names, no `min()` clamps).
+  #
+  # But opt OUT of the long-context surcharge: it is request-scoped, and these
+  # totals are a SUM over every call in the turn. Ten 100k-token requests sum
+  # past the 272k threshold while no single request ever crossed it, so testing
+  # the sum would over-charge. Under-charging a genuinely long single request is
+  # the safer error, and matches the behavior this fallback has always had.
+  # The normalized turn keys carry the three input classes DISJOINTLY, while
+  # `_codex_call_cost` expects an inclusive `input_tokens` it subdivides.
+  uncached = max(0, _count(usage_metrics.get("uncached_input_tokens")))
+  cached = max(0, _count(usage_metrics.get("cache_read_input_tokens")))
+  cache_write = max(
+    0, _count(usage_metrics.get("cache_creation_input_tokens"))
+  )
+  return round(_codex_call_cost(model, {
+    "input_tokens": uncached + cached + cache_write,
+    "cached_input_tokens": cached,
+    "cache_write_input_tokens": cache_write,
+    "output_tokens": max(0, _count(usage_metrics.get("output_tokens"))),
+  }, rates, long_context_eligible=False), 6)

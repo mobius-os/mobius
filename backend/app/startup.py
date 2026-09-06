@@ -162,6 +162,37 @@ def _remove_legacy_auto_resume_setting(context: StartupContext) -> None:
     raise RuntimeError("legacy global auto-resume setting cleanup did not persist")
 
 
+def _sweep_codex_provider_sessions(context: StartupContext) -> None:
+  """Reclaim Codex working state before any optional config write or SQLite."""
+  from app.provider_session_retention import sweep_stale_provider_sessions
+
+  codex = sweep_stale_provider_sessions(context.settings.data_dir)
+  if codex["status"] == "skipped_active":
+    context.logger.info("provider session retention skipped while Codex is active")
+    return
+  if codex["reclaimed_bytes"]:
+    context.logger.info(
+      "provider session retention reclaimed %d bytes from %d Codex files",
+      codex["reclaimed_bytes"], codex["removed_files"],
+    )
+  if codex["errors"]:
+    context.logger.warning(
+      "provider session retention skipped %d Codex file(s)", codex["errors"],
+    )
+
+
+def _configure_claude_provider_retention(context: StartupContext) -> None:
+  """Seed Claude's native working-state retention without blocking reclaim."""
+  from app.provider_session_retention import ensure_claude_retention_default
+
+  claude = ensure_claude_retention_default(context.settings.data_dir)
+  if claude["changed"]:
+    context.logger.info(
+      "set Claude native working-state retention default to %d days",
+      claude["retention_days"],
+    )
+
+
 def _initialize_database(context: StartupContext) -> None:
   try:
     context.database_boot = context.init_db()
@@ -366,6 +397,26 @@ async def _wake_completed_delegation_parents(context: StartupContext) -> None:
     )
 
 
+async def _reconcile_running_gauntlets(context: StartupContext) -> None:
+  """Repair missing slots and release barriers committed before restart."""
+  from app.gauntlets import (
+    reconcile_running_gauntlets,
+    repair_terminal_gauntlet_projections,
+  )
+
+  try:
+    count = await reconcile_running_gauntlets()
+    if count:
+      context.logger.info("reconciled %d running Gauntlet(s)", count)
+    repaired = await repair_terminal_gauntlet_projections()
+    if repaired:
+      context.logger.info(
+        "repaired %d terminal Gauntlet projection(s)", repaired,
+      )
+  except Exception:
+    context.logger.warning("Gauntlet boot reconcile skipped", exc_info=True)
+
+
 async def _reconcile_unstarted_delegations(context: StartupContext) -> None:
   """Close the persisted-intent to first-ChatRun crash window."""
   from app.delegations import reconcile_unstarted_delegations
@@ -424,6 +475,14 @@ PROCESS_STARTUP_TASKS = (
     _remove_legacy_auto_resume_setting,
   ),
   StartupTask(
+    "sweep Codex provider sessions",
+    _sweep_codex_provider_sessions,
+  ),
+  StartupTask(
+    "configure Claude provider retention",
+    _configure_claude_provider_retention,
+  ),
+  StartupTask(
     "initialize database",
     _initialize_database,
   ),
@@ -462,6 +521,7 @@ DATABASE_STARTUP_TASKS = (
   ),
   StartupTask("initialize push", _initialize_push),
   StartupTask("notify reconciled chats", _notify_reconciled_chats),
+  StartupTask("reconcile running Gauntlets", _reconcile_running_gauntlets),
   StartupTask(
     "wake completed delegation parents",
     _wake_completed_delegation_parents,

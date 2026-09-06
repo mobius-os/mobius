@@ -66,12 +66,12 @@ def controls(db, owner_token, tmp_path):
   ), run_id="owner-controls-child-run")
   assert delegated is not None
   top_level = auth.create_agent_token(
-    chats["top-level"].id, "owner-controls-top-run",
-    owner.username, owner.token_epoch,
+    chats["top-level"].id, owner.username, owner.token_epoch,
+    run_id="owner-controls-top-run",
   )
   child_agent = auth.create_agent_token(
-    chats["child"].id, "owner-controls-child-run",
-    owner.username, owner.token_epoch,
+    chats["child"].id, owner.username, owner.token_epoch,
+    run_id="owner-controls-child-run",
   )
   app_token = auth.create_app_token(
     app.id, owner.username, owner.token_epoch, app.token_nonce,

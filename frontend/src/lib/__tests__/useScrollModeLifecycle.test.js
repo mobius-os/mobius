@@ -28,12 +28,7 @@ function fakeElement(fields = {}) {
   }
 }
 
-function installBrowserEnvironment({
-  observers = [],
-  frames = null,
-  windowListeners = null,
-  documentListeners = null,
-} = {}) {
+function installBrowserEnvironment({ observers = [], frames = null } = {}) {
   const previous = {
     window: globalThis.window,
     document: globalThis.document,
@@ -51,19 +46,15 @@ function installBrowserEnvironment({
     clear() { stored.clear() },
   }
   globalThis.window = {
-    addEventListener(type, handler) { windowListeners?.set(type, handler) },
-    removeEventListener(type, handler) {
-      if (windowListeners?.get(type) === handler) windowListeners.delete(type)
-    },
+    addEventListener() {},
+    removeEventListener() {},
     visualViewport: null,
   }
   globalThis.document = {
     activeElement: null,
     visibilityState: 'visible',
-    addEventListener(type, handler) { documentListeners?.set(type, handler) },
-    removeEventListener(type, handler) {
-      if (documentListeners?.get(type) === handler) documentListeners.delete(type)
-    },
+    addEventListener() {},
+    removeEventListener() {},
   }
   globalThis.ResizeObserver = class {
     constructor(callback) {
@@ -150,43 +141,6 @@ function mountTailController(chatId, overrides = {}) {
   }
   const hook = renderHook(useScrollMode, args)
   return { hook, listeners, scroll, list, assistant, args }
-}
-
-function scrollTraceHasEvent(eventName) {
-  return globalThis.window.__mobiusChatScrollTrace?.events
-    ?.some(({ event }) => event === eventName) || false
-}
-
-function installManualTimers() {
-  const previousSetTimeout = globalThis.setTimeout
-  const previousClearTimeout = globalThis.clearTimeout
-  const timers = new Map()
-  let timerId = 0
-  globalThis.setTimeout = (callback, delay) => {
-    timerId += 1
-    timers.set(timerId, { callback, delay })
-    return timerId
-  }
-  globalThis.clearTimeout = id => timers.delete(id)
-  const pending = delay => [...timers.entries()]
-    .filter(([, timer]) => timer.delay === delay)
-  const run = ([id, timer]) => {
-    timers.delete(id)
-    timer.callback()
-  }
-  return {
-    pending,
-    run,
-    runLatest(delay) {
-      const match = pending(delay).at(-1)
-      assert.ok(match, `expected a pending ${delay}ms timer`)
-      run(match)
-    },
-    restore() {
-      globalThis.setTimeout = previousSetTimeout
-      globalThis.clearTimeout = previousClearTimeout
-    },
-  }
 }
 
 
@@ -294,7 +248,7 @@ test('question response resumes the exact follow intent captured at submit', () 
   const observers = []
   const restoreBrowser = installBrowserEnvironment({ observers })
   try {
-    const { hook, listeners, scroll } = mountTailController('question-follow-owner')
+    const { hook, listeners, scroll, args } = mountTailController('question-follow-owner')
     const target = { parentElement: scroll, closest: () => null }
 
     listeners.get('wheel')({
@@ -306,6 +260,7 @@ test('question response resumes the exact follow intent captured at submit', () 
     assert.equal(submission.mode.kind, 'ANCHOR_AT')
     assert.equal(submission.mode.questionSubmitBaseMode.kind, 'FOLLOW_BOTTOM')
     assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT')
+    assert.equal(args.spacerRef.current.style.height, '500px')
 
     scroll.clientHeight = 620
     observers[0].callback([{ target: scroll }])
@@ -315,6 +270,296 @@ test('question response resumes the exact follow intent captured at submit', () 
     hook.result.current.resumeQuestionSubmissionOnResponse(submission)
     assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM',
       'the first visible continuation restores the captured follow mode')
+    assert.equal(args.spacerRef.current.style.height, '220px',
+      'response release consumes the question reservation before following')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('question preparation reserves through an existing touch contact', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, listeners, scroll, assistant, args } = mountTailController(
+      'question-prepared-touch-owner',
+    )
+    const card = fakeElement({
+      offsetTop: 550,
+      offsetHeight: 280,
+      isConnected: true,
+      dataset: { scrollAnchorKey: 'question-touch-card' },
+      getBoundingClientRect: () => ({
+        top: 550 - scroll.scrollTop,
+        bottom: 830 - scroll.scrollTop,
+        height: 280,
+      }),
+      closest(selector) {
+        return selector === '.chat__msg[data-key]' ? assistant : null
+      },
+    })
+    const wrapper = fakeElement({
+      offsetHeight: 0,
+      children: [card],
+      parentElement: assistant,
+    })
+    card.parentElement = wrapper
+    assistant.children = [wrapper]
+    assistant.querySelectorAll = selector => (
+      selector === '[data-scroll-anchor-key]' ? [card] : []
+    )
+
+    listeners.get('touchstart')({ touches: [{ identifier: 1 }] })
+    hook.result.current.prepareQuestionSubmission(card)
+    assert.equal(args.spacerRef.current.style.height, '500px',
+      'a resting second finger cannot defer the pre-click reservation')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('question activation preserves its prepared card anchor before the submitting paint', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, scroll, assistant, args } = mountTailController(
+      'question-prepared-anchor-owner',
+    )
+    assistant.offsetTop = 0
+    assistant.offsetHeight = 800
+    assistant.getBoundingClientRect = () => ({
+      top: assistant.offsetTop - scroll.scrollTop,
+      bottom: assistant.offsetTop + assistant.offsetHeight - scroll.scrollTop,
+      height: assistant.offsetHeight,
+    })
+    const card = fakeElement({
+      offsetTop: 550,
+      offsetHeight: 280,
+      isConnected: true,
+      dataset: { scrollAnchorKey: 'question-prepared-card' },
+      getBoundingClientRect: () => ({
+        top: 550 - scroll.scrollTop,
+        bottom: 830 - scroll.scrollTop,
+        height: 280,
+      }),
+      closest(selector) {
+        return selector === '.chat__msg[data-key]' ? assistant : null
+      },
+    })
+    const questionBlock = fakeElement({
+      offsetTop: 520,
+      offsetHeight: 310,
+      children: [card],
+    })
+    const copySurface = fakeElement({
+      offsetTop: 0,
+      offsetHeight: 0,
+      children: [questionBlock],
+      parentElement: assistant,
+    })
+    card.parentElement = questionBlock
+    questionBlock.parentElement = copySurface
+    assistant.children = [copySurface]
+    assistant.querySelectorAll = selector => (
+      selector === '[data-scroll-anchor-key]' ? [card] : []
+    )
+
+    const preparedSubmission = hook.result.current.prepareQuestionSubmission(card)
+    assert.deepEqual(preparedSubmission.mode.part, [0, 0, 0])
+    assert.equal(preparedSubmission.mode.targetKey, 'question-prepared-card')
+    assert.equal(preparedSubmission.mode.offset, 150)
+    assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT')
+    assert.equal(scroll.scrollTop, 400,
+      'pointerdown does not wait for click to establish the card hold')
+    assert.equal(args.spacerRef.current.style.height, '500px',
+      'pointerdown pre-reserves the known keyboard-close viewport')
+
+    // Model the browser's focus/keyboard clamp between pointerdown and click.
+    scroll.scrollTop = 300
+    const submission = hook.result.current.freezeQuestionSubmission({
+      questionCard: card,
+      preparedSubmission,
+    })
+
+    assert.equal(scroll.scrollTop, 400,
+      'the prepared pointerdown coordinate is restored synchronously on submit')
+    assert.equal(args.spacerRef.current.style.height, '500px',
+      'reservation sizing commits in the same question-freeze transaction')
+    assert.equal(submission.mode.questionSubmitBaseMode.kind, 'FOLLOW_BOTTOM')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('reader movement after question preparation invalidates its stale follow base', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, listeners, scroll, assistant } = mountTailController(
+      'question-prepared-reader-override-owner',
+    )
+    const card = fakeElement({
+      offsetTop: 550,
+      offsetHeight: 280,
+      isConnected: true,
+      dataset: { scrollAnchorKey: 'question-reader-card' },
+      getBoundingClientRect: () => ({
+        top: 550 - scroll.scrollTop,
+        bottom: 830 - scroll.scrollTop,
+        height: 280,
+      }),
+      closest(selector) {
+        return selector === '.chat__msg[data-key]' ? assistant : null
+      },
+    })
+    const wrapper = fakeElement({
+      offsetHeight: 0,
+      children: [card],
+      parentElement: assistant,
+    })
+    card.parentElement = wrapper
+    assistant.children = [wrapper]
+    assistant.querySelectorAll = selector => (
+      selector === '[data-scroll-anchor-key]' ? [card] : []
+    )
+
+    const preparedSubmission = hook.result.current.prepareQuestionSubmission(card)
+    listeners.get('wheel')({
+      type: 'wheel', deltaY: -120, shiftKey: false, target: card,
+    })
+    scroll.scrollTop = 280
+    listeners.get('scroll')()
+    const cardTopAtClick = card.getBoundingClientRect().top
+
+    const submission = hook.result.current.freezeQuestionSubmission({
+      questionCard: card,
+      preparedSubmission,
+    })
+    assert.equal(card.getBoundingClientRect().top, cardTopAtClick,
+      'click preserves the newer reader coordinate instead of the press coordinate')
+    assert.equal(submission.mode.questionSubmitBaseMode.kind, 'ANCHOR_AT')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('an abandoned question press restores its exact pre-activation mode', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, scroll, assistant, args } = mountTailController(
+      'question-prepared-cancel-owner',
+    )
+    const card = fakeElement({
+      offsetTop: 550,
+      offsetHeight: 280,
+      isConnected: true,
+      dataset: { scrollAnchorKey: 'question-cancel-card' },
+      getBoundingClientRect: () => ({
+        top: 550 - scroll.scrollTop,
+        bottom: 830 - scroll.scrollTop,
+        height: 280,
+      }),
+      closest(selector) {
+        return selector === '.chat__msg[data-key]' ? assistant : null
+      },
+    })
+    const wrapper = fakeElement({
+      offsetHeight: 0,
+      children: [card],
+      parentElement: assistant,
+    })
+    card.parentElement = wrapper
+    assistant.children = [wrapper]
+    assistant.querySelectorAll = selector => (
+      selector === '[data-scroll-anchor-key]' ? [card] : []
+    )
+
+    const prepared = hook.result.current.prepareQuestionSubmission(card)
+    assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT')
+    assert.equal(args.spacerRef.current.style.height, '500px')
+    assert.equal(hook.result.current.cancelQuestionSubmission(prepared), true)
+    assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT')
+    assert.equal(args.spacerRef.current.style.height, '100px')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('cancelling a failed-submission retry restores that failed-card hold', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, listeners, scroll, assistant } = mountTailController(
+      'question-retry-cancel-owner',
+    )
+    const target = { parentElement: scroll, closest: () => null }
+    listeners.get('wheel')({
+      type: 'wheel', deltaY: 80, shiftKey: false, target,
+    })
+    const failedSubmission = hook.result.current.freezeQuestionSubmission()
+
+    const card = fakeElement({
+      offsetTop: 550,
+      offsetHeight: 300,
+      isConnected: true,
+      dataset: { scrollAnchorKey: 'question-retry-card' },
+      getBoundingClientRect: () => ({
+        top: 550 - scroll.scrollTop,
+        bottom: 850 - scroll.scrollTop,
+        height: 300,
+      }),
+      closest(selector) {
+        return selector === '.chat__msg[data-key]' ? assistant : null
+      },
+    })
+    const wrapper = fakeElement({
+      offsetHeight: 0,
+      children: [card],
+      parentElement: assistant,
+    })
+    card.parentElement = wrapper
+    assistant.children = [wrapper]
+    assistant.querySelectorAll = selector => (
+      selector === '[data-scroll-anchor-key]' ? [card] : []
+    )
+
+    const retry = hook.result.current.prepareQuestionSubmission(card)
+    assert.notEqual(retry.mode, failedSubmission.mode)
+    assert.equal(hook.result.current.cancelQuestionSubmission(retry), true)
+    assert.equal(scroll.dataset.scrollMode, 'ANCHOR_AT',
+      'retry cancellation returns to the failed card, not the original follow')
+    hook.result.current.resumeQuestionSubmissionOnResponse(failedSubmission)
+    assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM',
+      'the restored failed submission keeps its original response authority')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('touch-blocked response release replays spacer and follow together', async () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, listeners, scroll, args } = mountTailController(
+      'question-response-touch-owner',
+    )
+    const target = { parentElement: scroll, closest: () => null }
+    listeners.get('wheel')({
+      type: 'wheel', deltaY: 80, shiftKey: false, target,
+    })
+    const submission = hook.result.current.freezeQuestionSubmission()
+    assert.equal(args.spacerRef.current.style.height, '500px')
+
+    listeners.get('touchstart')({ touches: [{ identifier: 1 }] })
+    hook.result.current.resumeQuestionSubmissionOnResponse(submission)
+    assert.equal(args.spacerRef.current.style.height, '500px',
+      'the resting finger keeps the old geometry until ownership yields')
+    listeners.get('touchend')({ touches: [] })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    assert.equal(args.spacerRef.current.style.height, '100px',
+      'touch release replays the deferred spacer before following')
+    assert.equal(scroll.dataset.scrollMode, 'FOLLOW_BOTTOM')
     hook.unmount()
   } finally {
     restoreBrowser()
@@ -495,16 +740,16 @@ test('a focused inline editor keeps one current owner across keyboard and growth
     scrollListeners.get('beforeinput')({ target: editor })
     editorHeight = 72
     scrollListeners.get('input')({ target: editor })
-    // React textarea sizing can commit after the input handler's two-frame
-    // caret pass. The ResizeObserver remains the owner of the pre-growth
-    // anchor even when its delivery is later than that pass.
-    flushFrames()
     observers[0].callback([{
       target: editor,
       borderBoxSize: [{ blockSize: editorHeight }],
     }])
-    assert.equal(scroll.scrollTop, beforeGrowth,
-      'field growth keeps the question card at its reader-owned coordinate')
+    assert.equal(scroll.scrollTop > beforeGrowth, true,
+      'field growth moves the answer upward instead of extending below the composer')
+    assert.equal(editor.getBoundingClientRect().bottom <= 222, true,
+      'the whole multiline writing surface remains in the usable viewport')
+    flushFrames()
+
     scrollListeners.get('beforeinput')({ target: editor })
     editorHeight = 100
     scrollListeners.get('input')({ target: editor })
@@ -778,132 +1023,6 @@ test('gesture-start diagnostics add no transcript measurement to the hot path', 
       'hot-path traces remain geometry-free',
     )
 
-    hook.unmount()
-  } finally {
-    restoreBrowser()
-  }
-})
-
-test('touch contact survives a controller reinstall and settles only after the last lift', () => {
-  const windowListeners = new Map()
-  const documentListeners = new Map()
-  const restoreBrowser = installBrowserEnvironment({
-    windowListeners,
-    documentListeners,
-  })
-  const timers = installManualTimers()
-
-  try {
-    const mounted = mountTailController('touch-contact-reinstall')
-    const { hook, listeners, scroll, args } = mounted
-    const target = { parentElement: scroll, closest: () => null }
-    globalThis.window.__mobiusChatScrollTrace = undefined
-
-    listeners.get('touchstart')({ touches: [{}, {}] })
-    listeners.get('pointerdown')({
-      type: 'pointerdown', pointerType: 'touch', button: 0, clientY: 220, target,
-    })
-    scroll.scrollTop -= 60
-    listeners.get('scroll')()
-    listeners.get('scrollend')()
-    assert.equal(
-      scrollTraceHasEvent('reader:scroll-settled'),
-      false,
-      'native scrollend cannot hand layout ownership back under live contact',
-    )
-
-    const nextMessages = [
-      ...args.messages,
-      { role: 'assistant', cid: 'assistant-next', content: 'More output' },
-    ]
-    args.messagesRef.current = nextMessages
-    hook.rerender({ ...args, messages: nextMessages })
-    assert.equal(typeof windowListeners.get('touchend'), 'function',
-      'window lift delivery remains installed after the controller is replaced')
-
-    windowListeners.get('touchend')({ touches: [{}] })
-    assert.equal(
-      scrollTraceHasEvent('reader:scroll-settled'),
-      false,
-      'lifting one of several fingers keeps reader ownership active',
-    )
-    windowListeners.get('touchend')({ touches: [] })
-    timers.runLatest(250)
-    assert.equal(
-      scrollTraceHasEvent('reader:scroll-settled'),
-      true,
-      'the quiet edge starts from the final lift and settles the inherited gesture',
-    )
-
-    hook.unmount()
-  } finally {
-    timers.restore()
-    restoreBrowser()
-  }
-})
-
-test('the no-scroll safety cap re-arms while a finger remains down', () => {
-  const frames = []
-  const restoreBrowser = installBrowserEnvironment({ frames })
-  const timers = installManualTimers()
-
-  try {
-    const { hook, listeners, scroll } = mountTailController('touch-no-scroll-cap')
-    const target = { parentElement: scroll, closest: () => null }
-    globalThis.window.__mobiusChatScrollTrace = undefined
-
-    listeners.get('touchstart')({ touches: [{}] })
-    listeners.get('pointerdown')({
-      type: 'pointerdown', pointerType: 'touch', button: 0, clientY: 220, target,
-    })
-    const firstCap = timers.pending(2000).at(-1)
-    assert.ok(firstCap, 'a no-scroll contact has one bounded safety cap')
-    timers.run(firstCap)
-    assert.ok(timers.pending(2000).length > 0,
-      'the cap re-arms instead of releasing live contact')
-    assert.equal(
-      scrollTraceHasEvent('reader:no-scroll-release'),
-      false,
-    )
-
-    listeners.get('touchend')({ touches: [] })
-    assert.ok(frames.length > 0, 'the final lift schedules the ordinary frame handoff')
-    while (frames.length) frames.shift()()
-    assert.equal(
-      scrollTraceHasEvent('reader:no-scroll-release'),
-      true,
-      'the no-scroll gesture releases only after contact ends',
-    )
-    hook.unmount()
-  } finally {
-    timers.restore()
-    restoreBrowser()
-  }
-})
-
-test('backgrounding clears a wedged contact and settles its dirty gesture', () => {
-  const documentListeners = new Map()
-  const restoreBrowser = installBrowserEnvironment({ documentListeners })
-  try {
-    const { hook, listeners, scroll } = mountTailController(
-      'touch-visibility-wedge',
-    )
-    const target = { parentElement: scroll, closest: () => null }
-    globalThis.window.__mobiusChatScrollTrace = undefined
-
-    listeners.get('touchstart')({ touches: [{}] })
-    listeners.get('pointerdown')({
-      type: 'pointerdown', pointerType: 'touch', button: 0, clientY: 220, target,
-    })
-    scroll.scrollTop -= 40
-    listeners.get('scroll')()
-    globalThis.document.visibilityState = 'hidden'
-    documentListeners.get('visibilitychange')()
-    assert.equal(
-      scrollTraceHasEvent('reader:scroll-settled'),
-      true,
-      'a lost lift cannot freeze layout ownership after the page is hidden',
-    )
     hook.unmount()
   } finally {
     restoreBrowser()

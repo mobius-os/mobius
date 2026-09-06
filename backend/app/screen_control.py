@@ -18,7 +18,6 @@ from typing import Any
 
 SESSION_TTL_SECONDS = 15 * 60
 COMMAND_TIMEOUT_SECONDS = 45
-MAX_PENDING_COMMANDS = 4
 
 
 @dataclass
@@ -32,7 +31,7 @@ class ScreenControlSession:
   created_at: float
   expires_at: float
   commands: asyncio.Queue[dict[str, Any] | None] = field(
-    default_factory=lambda: asyncio.Queue(maxsize=MAX_PENDING_COMMANDS),
+    default_factory=asyncio.Queue,
   )
   pending: dict[str, asyncio.Future] = field(default_factory=dict)
   browser_connections: int = 0
@@ -58,10 +57,7 @@ class ScreenControlRegistry:
     self._by_chat.pop(session.chat_id, None)
     try:
       session.commands.put_nowait(None)
-    except asyncio.QueueFull:
-      # A full queue already wakes the browser. The active flag makes that
-      # dequeue resolve to the same terminal outcome without needing a fifth
-      # transport slot for a sentinel.
+    except asyncio.QueueFull:  # pragma: no cover - the queue is unbounded
       pass
     outcome = {"ok": False, "error": reason}
     for future in session.pending.values():
@@ -180,21 +176,8 @@ class ScreenControlRegistry:
         return {"ok": False, "error": "No active shared-screen session."}
       if current.browser_connections < 1:
         return {"ok": False, "error": "The shared browser is not connected."}
-      if len(current.pending) >= MAX_PENDING_COMMANDS:
-        return {"ok": False, "error": "The shared browser is still handling earlier commands."}
       current.pending[command_id] = future
-      try:
-        current.commands.put_nowait({
-          "commandId": command_id,
-          "deadlineAt": int((time.time() + COMMAND_TIMEOUT_SECONDS) * 1000),
-          **command,
-        })
-      except asyncio.QueueFull:
-        current.pending.pop(command_id, None)
-        return {
-          "ok": False,
-          "error": "The shared browser is still handling earlier commands.",
-        }
+      current.commands.put_nowait({"commandId": command_id, **command})
     try:
       return await asyncio.wait_for(future, timeout=COMMAND_TIMEOUT_SECONDS)
     except TimeoutError:
@@ -203,54 +186,6 @@ class ScreenControlRegistry:
         if current is not None:
           current.pending.pop(command_id, None)
       return {"ok": False, "error": "The shared browser did not answer in time."}
-
-  async def next_browser_command(
-    self,
-    session: ScreenControlSession,
-    *,
-    keepalive_seconds: float,
-  ) -> dict[str, Any] | None:
-    """Return only a still-authoritative command, or ``None`` on session end.
-
-    Timed-out commands can remain in the bounded transport queue until the
-    browser catches up. They are transport residue, not latent authority, so
-    discard them here before they cross the browser boundary.
-    """
-    while True:
-      remaining = session.expires_at - time.time()
-      if remaining <= 0:
-        await self.stop(session, "The shared-screen session expired.")
-        return None
-      try:
-        command = await asyncio.wait_for(
-          session.commands.get(),
-          timeout=min(keepalive_seconds, remaining),
-        )
-      except TimeoutError:
-        if session.expires_at <= time.time():
-          await self.stop(session, "The shared-screen session expired.")
-          return None
-        raise
-      if command is None:
-        return None
-      command_id = command.get("commandId")
-      async with self._lock:
-        self._prune_locked()
-        current = self._by_id.get(session.id)
-        if current is None or not current.active:
-          return None
-        future = current.pending.get(command_id)
-        if future is None or future.done():
-          continue
-        deadline_at = command.get("deadlineAt")
-        if not isinstance(deadline_at, int) or deadline_at <= int(time.time() * 1000):
-          current.pending.pop(command_id, None)
-          future.set_result({
-            "ok": False,
-            "error": "The shared browser did not begin the command in time.",
-          })
-          continue
-        return command
 
   async def answer(
     self,

@@ -146,8 +146,8 @@ def test_idle_pending_sweep_never_crosses_owner_question(monkeypatch):
   """An aged product wake stays queued until the owner answers.
 
   This is the restart failure shape from the reported chat: boot has closed
-  the interrupted run, the open question is durable, and a queued wake is old
-  enough for generic idle recovery. Age is not owner authorization.
+  the interrupted run, the open question is durable, and a hidden wait result
+  is old enough for generic idle recovery. Age is not owner authorization.
   """
   chat_id = "question-blocked-old-pending"
   question = {

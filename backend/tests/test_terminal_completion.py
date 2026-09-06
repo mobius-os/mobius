@@ -25,6 +25,7 @@ import pytest
 from app import chat as chat_mod
 from app import chat_queue, chat_writer, models
 from app.broadcast import ChatBroadcast, create_broadcast
+from app.chat_transcript import materialized_messages
 from app.chat_writer import Barrier, get_writer
 from app.database import SessionLocal
 from app.deps import Principal
@@ -62,14 +63,6 @@ def _seed_owner_and_creds():
       "expiresAt": int(time.time() * 1000) + 3_600_000,
     },
   }), encoding="utf-8")
-
-
-def _disconnect_all_providers(monkeypatch):
-  """Pin the no-provider precondition at the registered adapter boundary."""
-  for provider in chat_mod.PROVIDERS.values():
-    monkeypatch.setattr(
-      provider, "check_auth", lambda _data_dir: "not connected",
-    )
 
 
 def _seed_chat(chat_id, messages=None, pending=None, running=None,
@@ -402,6 +395,17 @@ def test_terminal_finalize_failure_leaves_marker_then_reconcile_repairs(
   assert "queued_turn_starting" not in published
   assert state["running"] is True, "failed terminal must LEAVE marker"
   assert len(state["pending_messages"]) == 1, "queue not consumed"
+  db = SessionLocal()
+  try:
+    row = db.query(models.Chat).filter(models.Chat.id == "t2").one()
+    unsaved_blocks = materialized_messages(row)[-1]["blocks"]
+  finally:
+    db.close()
+  assert any(
+    block.get("type") == "error"
+    and "could not be saved" in block.get("message", "")
+    for block in unsaved_blocks
+  ), "the finalize failure must submit a durable PersistError snapshot"
 
   # Reconcile-after-restart: the registry is empty (the run finished), so
   # reconcile sees the stranded marker and repairs it.
@@ -418,7 +422,71 @@ def test_terminal_finalize_failure_leaves_marker_then_reconcile_repairs(
     "reconcile PRESERVES the queue (bug #2); it drains on the next send"
   )
   err = [b for b in state["messages"][-1]["blocks"] if b["type"] == "error"]
-  assert err and "paused" in err[0]["message"].lower()
+  assert any("paused" in block["message"].lower() for block in err)
+
+
+def test_terminal_failure_does_not_overwrite_a_fresh_turn(monkeypatch):
+  """A run disowned during its failed finalize may still notify its old
+  broadcast, but must not persist its stale snapshot over the fresh owner."""
+  _seed_owner_and_creds()
+  _seed_chat(
+    "t2-fresh", messages=[{"role": "user", "content": "hi", "ts": 1}],
+    pending=[], running="running", run_token="rt-2-stale",
+  )
+  _patch_claude_runner(monkeypatch)
+
+  chat_mod.mark_starting("t2-fresh")
+  gen = chat_mod.current_run_generation("t2-fresh")
+
+  def _fail_after_reclaim(db_, chat_id, blocks):
+    from app.chat_writer import StartTurn, _PersistFailed
+    chat_mod.bump_run_generation(chat_id)
+    writer = get_writer()
+    # This hook already runs on the actor thread. Use its domain handlers to
+    # land the successor inside the Finalize ack window without writing the
+    # chat JSON columns directly or deadlocking on another queued command.
+    writer._start_turn(db_, StartTurn(
+      chat_id=chat_id,
+      run_token="rt-2-successor",
+      user_msg={"role": "user", "content": "fresh question", "ts": 9},
+    ))
+    writer._persist_live_message(db_, chat_id, {
+      "id": "rt-2-successor",
+      "role": "assistant",
+      "blocks": [{"type": "text", "content": "fresh answer"}],
+    })
+    raise _PersistFailed("fresh turn reclaimed the chat")
+
+  monkeypatch.setattr(
+    chat_writer, "finalize_response_outcome", _fail_after_reclaim,
+  )
+
+  published = []
+  _run_real_chat(
+    "t2-fresh", run_token="rt-2-stale", run_gen=gen,
+    published=published,
+  )
+  _drain_actor()
+
+  assert "error" in published
+  db = SessionLocal()
+  try:
+    row = db.query(models.Chat).filter(models.Chat.id == "t2-fresh").one()
+    messages = materialized_messages(row)
+    active_assistant_message_id = row.active_assistant_message_id
+  finally:
+    db.close()
+  assert active_assistant_message_id == "rt-2-successor"
+  assert messages[-1]["blocks"] == [
+    {"type": "text", "content": "fresh answer"}
+  ]
+  assert not any(
+    block.get("type") == "error"
+    and "could not be saved" in block.get("message", "")
+    for message in messages
+    if message.get("role") == "assistant"
+    for block in message.get("blocks", [])
+  ), "a disowned run must not replace the fresh owner's live snapshot"
 
 
 # -- 3. await_ack boundary trips mid-promote (small-timeout seam) --------
@@ -1172,7 +1240,9 @@ def test_no_connected_agent_streams_and_persists_guidance(
   # The container's identity broker can expose a host-connected provider even
   # when this test removes local credential files. Pin the product precondition
   # instead of inheriting the developer machine's live connection state.
-  _disconnect_all_providers(monkeypatch)
+  monkeypatch.setattr(
+    chat_mod, "authenticated_provider_ids", lambda _data_dir: [],
+  )
 
   creds = (
     pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "claude"
@@ -1247,7 +1317,9 @@ def test_no_connected_agent_promotes_queued_message(monkeypatch):
   the guidance finalizes first, then the queued row gets a fresh run token."""
   from app import auth as auth_mod
 
-  _disconnect_all_providers(monkeypatch)
+  monkeypatch.setattr(
+    chat_mod, "authenticated_provider_ids", lambda _data_dir: [],
+  )
 
   for creds in (
     pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "claude"
@@ -1314,7 +1386,9 @@ def test_no_connected_agent_stopped_during_metrics_preserves_successor_sink(
   """
   from app import auth as auth_mod
 
-  _disconnect_all_providers(monkeypatch)
+  monkeypatch.setattr(
+    chat_mod, "authenticated_provider_ids", lambda _data_dir: [],
+  )
 
   for creds in (
     pathlib.Path(os.environ["DATA_DIR"]) / "cli-auth" / "claude"
@@ -1396,7 +1470,7 @@ def test_auth_error_cleanup_when_another_provider_is_connected(monkeypatch):
   )
   _seed_run("rt-12-auth", "t12-auth-error")
   monkeypatch.setattr(
-    chat_mod.PROVIDERS["codex"], "check_auth", lambda _data_dir: None,
+    chat_mod, "authenticated_provider_ids", lambda _data_dir: ["codex"],
   )
 
   chat_mod.mark_starting("t12-auth-error")

@@ -13,7 +13,6 @@ if str(BACKEND_ROOT) not in sys.path:
   sys.path.insert(0, str(BACKEND_ROOT))
 
 from app import auth, models
-from app.config import get_settings
 from app.database import SessionLocal
 from app.routes.auth import _write_service_token
 
@@ -31,7 +30,11 @@ def main() -> int:
     owner = db.query(models.Owner).one_or_none()
     if owner is None:
       return 3
-    if get_settings().mobius_sso_enabled:
+    # Setting a local password only makes sense while local login is the active
+    # mode. In 'mobius' mode the either/or gate refuses password login, so a
+    # password set here would be inert and misleading; break-glass is the path
+    # that restores local mode first.
+    if owner.auth_mode != "local":
       return 4
 
     current_password = values.get("current_password", "")

@@ -41,8 +41,16 @@ from app.events import (
   tool_output_exit_code,
   undo_question_scrub,
 )
+from app.config import agent_scratch_root
 from app.memory_recall import (
-  RecallBinding, recall_from_command, settle_recall,
+  RECALL_SEARCHING,
+  RecallBinding,
+  background_dispatch_from_result,
+  background_recall_path,
+  defer_recall_to_task,
+  recall_from_command,
+  settle_recall,
+  settle_recall_from_task_output,
 )
 from app.peer_message import (
   peer_message_from_call, settle_peer_message,
@@ -492,8 +500,68 @@ class ChatEventSink:
       return
     pending = self._memory_recall_for_tool(event.get("tool_use_id"))
     if event.get("output_complete") and pending is not None:
+      dispatch = background_dispatch_from_result(event.get("content"))
+      if dispatch is not None and event.get("output_exit_code") in (None, 0):
+        # A `run_in_background` Bash call: the placeholder is not Memory's
+        # answer. The task_done for this id (or finalize) settles it.
+        event["recall"] = defer_recall_to_task(pending, dispatch)
+        return
       event["recall"] = settle_recall(
         pending, event.get("content"), event.get("output_exit_code"),
+      )
+
+  def _deferred_recall_blocks(self, task_id: str | None = None) -> list[dict]:
+    """Tool blocks whose Memory lookup is still waiting on a background task."""
+    found = []
+    for blk in self.assistant_blocks:
+      if blk.get("type") != "tool":
+        continue
+      recall = blk.get("recall")
+      if not isinstance(recall, dict) or recall.get("status") != RECALL_SEARCHING:
+        continue
+      if not isinstance(recall.get("task_id"), str):
+        continue
+      if task_id is not None and recall["task_id"] != task_id:
+        continue
+      found.append(blk)
+    return found
+
+  def _settle_deferred_recall(
+    self, pending: dict, task_status: object,
+  ) -> dict:
+    """Read the background task's captured output and settle the lookup.
+
+    Only this chat's own scratch task file is honored; an unreadable or
+    still-empty file is a failed lookup, never a silent success.
+    """
+    path = background_recall_path(
+      pending, str(agent_scratch_root() / str(self.chat_id)),
+    )
+    text = None
+    if path is not None:
+      try:
+        with open(path, "rb") as handle:
+          handle.seek(0, 2)
+          size = handle.tell()
+          handle.seek(max(0, size - 262_144))
+          text = handle.read().decode("utf-8", "replace")
+      except OSError:
+        text = None
+    return settle_recall_from_task_output(pending, text, task_status)
+
+  def _stamp_deferred_recall_done(self, event: ChatEvent) -> None:
+    """On a background task's terminal event, settle the lookup it owned.
+
+    The task_done routes to its block by task_id, so process_event copies the
+    stamped recall onto the same block the placeholder deferred from.
+    """
+    task_id = event.get("task_id")
+    if task_id is None:
+      return
+    blocks = self._deferred_recall_blocks(str(task_id))
+    if blocks:
+      event["recall"] = self._settle_deferred_recall(
+        blocks[0]["recall"], event.get("status"),
       )
 
   def _peer_message_for_tool(self, tool_use_id) -> dict | None:
@@ -714,6 +782,8 @@ class ChatEventSink:
           event["output_exit_code"] = exit_code
     if event_type in ("tool_start", "tool_input", "tool_output"):
       self._stamp_memory_recall(event)
+    if event_type == "task_done":
+      self._stamp_deferred_recall_done(event)
     if event_type in ("tool_start", "tool_input"):
       self._stamp_peer_message(event)
     if event_type == "thinking":
@@ -812,6 +882,11 @@ class ChatEventSink:
     if not (self.chat_id and self.run_token):
       return
     await self._flush_lifecycle()
+    # A lookup deferred to a background task whose task_done never reached us
+    # (turn stopped, provider suppressed the terminal frame) must not persist
+    # as searching forever: settle it from the file if the task did finish.
+    for blk in self._deferred_recall_blocks():
+      blk["recall"] = self._settle_deferred_recall(blk["recall"], None)
     if not blocks_have_renderable_content(self.assistant_blocks):
       if self._last_error:
         # Synthesize an error block so the failure is durable in the transcript.

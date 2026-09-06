@@ -929,7 +929,6 @@ def stage_pending_conflict_update(
   raw_base: str,
   capability_digest: str,
   candidate_digest: str,
-  conflict_paths: list[str] | None = None,
 ) -> None:
   """Persist everything explicit resolution needs to finish an update.
 
@@ -954,10 +953,16 @@ def stage_pending_conflict_update(
     "raw_base": raw_base,
     "capability_digest": capability_digest,
     "candidate_digest": candidate_digest,
-    "conflict_paths": sorted(set(conflict_paths or [])),
     "resolution_policy": None,
     "reviewed_tree_oid": None,
   }, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def pending_conflict_update_receipt_present(source_dir: str | Path) -> bool:
+  """Whether any pending-receipt filesystem entry needs validation."""
+  root = Path(source_dir) / ".git" / _PENDING_UPDATE_DIR
+  receipt_path = root / "receipt.json"
+  return os.path.lexists(root) or os.path.lexists(receipt_path)
 
 
 def read_pending_conflict_update_receipt(
@@ -979,10 +984,6 @@ def read_pending_conflict_update_receipt(
   reviewed_tree_oid = (
     receipt.get("reviewed_tree_oid") if schema == 2 else None
   ) if isinstance(receipt, dict) else None
-  conflict_paths = (
-    receipt.get("conflict_paths", [])
-    if isinstance(receipt, dict) else None
-  )
   if (
     not isinstance(receipt, dict)
     or schema not in (1, 2)
@@ -993,11 +994,6 @@ def read_pending_conflict_update_receipt(
     or not isinstance(receipt.get("raw_base"), str)
     or not isinstance(receipt.get("capability_digest"), str)
     or not re.fullmatch(r"[0-9a-f]{64}", receipt.get("candidate_digest", ""))
-    or not isinstance(conflict_paths, list)
-    or any(
-      not isinstance(path, str) or not path or len(path) > 1000
-      for path in conflict_paths
-    )
     or policy not in ({None} | UPDATE_RESOLUTION_POLICIES)
     or (
       reviewed_tree_oid is not None
@@ -1010,7 +1006,6 @@ def read_pending_conflict_update_receipt(
     )
   ):
     return None
-  receipt["conflict_paths"] = sorted(set(conflict_paths))
   # Schema 1 receipts can survive a rolling restart. Normalize them in memory;
   # the first explicit policy choice upgrades the durable receipt atomically.
   receipt["resolution_policy"] = policy
@@ -1387,10 +1382,6 @@ def _drop_app_cron(source_dir: Path) -> None:
     pass
   try:
     (source_dir / "init-cron.sh").unlink()
-  except OSError:
-    pass
-  try:
-    (source_dir / ".cron-pending.json").unlink()
   except OSError:
     pass
 
@@ -2306,12 +2297,6 @@ async def _sync_manifest_cron_unlocked(
   the same manifest contract. Keeping cron convergence here prevents either
   path from becoming add-only: an accepted update that drops its schedule must
   retire both the live entry and its replayable declaration.
-
-  ``drop_prior_cron`` means the previously accepted declaration may be obsolete
-  — a changed manifest can rename its job or drop the schedule outright, and
-  re-registering fixes neither. A caller re-accepting an IDENTICAL manifest
-  passes ``False`` instead: the scaffold already replaces its own entry, so
-  dropping first would only expose a healthy schedule to a failed re-register.
   """
   schedule = manifest.get("schedule")
   job_name = schedule.get("job") if schedule else None
@@ -2568,16 +2553,24 @@ def _apply_manifest_metadata(
   manifest: dict,
   canonical_manifest_url: str,
   capability_contract: dict,
-  entry_source: str,
+  entry_source: str | None,
 ) -> None:
-  """Apply one reviewed package's identity and runtime declarations."""
+  """Attach one reviewed package identity and its runtime declarations.
+
+  A normal install/update calls this while activating the reviewed source
+  tree. The verified publication handoff also calls it when later local edits
+  conflict: that action must still connect the original app row to its public
+  identity, while deliberately leaving its served source and bundle untouched
+  for the ordinary resolver.
+  """
   app.version = str(manifest.get("version", "")).strip() or None
   app.theme_color = _manifest_color(manifest.get("theme_color"))
   app.background_color = (
     _manifest_color(manifest.get("background_color")) or app.theme_color
   )
   app.display = _manifest_display(manifest.get("display"))
-  app.jsx_source = entry_source
+  if entry_source is not None:
+    app.jsx_source = entry_source
   app.manifest_url = canonical_manifest_url
   app.published_manifest_url = None
   permissions = manifest.get("permissions") or {}
@@ -2606,6 +2599,9 @@ def _apply_manifest_metadata(
   app.system_prompt_file = manifest.get("system_prompt") or None
   app.system_app = bool(manifest.get("system_app", False))
   app.capability_contract = capability_contract
+  # Projects workspace: declared project templates travel with the package
+  # identity, so apply them here alongside the other manifest metadata for
+  # every install/update and the reviewed-publication handoff.
   app.project_templates_json = manifest.get("project_templates") or None
 
 
@@ -3312,7 +3308,6 @@ async def install_from_manifest(
           raw_base=raw_base,
           capability_digest=fetched_capability_digest,
           candidate_digest=candidate_digest,
-          conflict_paths=conflict_paths,
         )
 
       # The disk-write phase runs INSIDE the same held lock for the Git path so
@@ -3351,10 +3346,17 @@ async def install_from_manifest(
 
     if mode == "conflict":
       if publication_handoff_app_id is not None:
-        # The reviewed publication owns catalog identity, but the running local
-        # source retains its old version and capabilities until resolution.
-        app.manifest_url = canonical_manifest_url
-        app.published_manifest_url = None
+        # The owner explicitly approved this separately verified publication
+        # handoff. Connect the original row even when later local edits need the
+        # ordinary source resolver: the current source/bundle stay untouched,
+        # while the reviewed identity and capability grant become durable.
+        _apply_manifest_metadata(
+          app,
+          manifest=manifest,
+          canonical_manifest_url=canonical_manifest_url,
+          capability_contract=capability_contract,
+          entry_source=None,
+        )
       # Commit the recorded upstream provenance + return so the App Store can
       # surface a click-gated resolver. The served source/bundle stay the prior
       # good ones until the owner chooses Resolve in chat.

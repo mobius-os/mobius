@@ -60,6 +60,33 @@ def test_insecure_non_loopback_frontend_does_not_become_a_grant_origin():
   assert config.mobius_account_client_origin == ""
 
 
+def test_railway_public_domain_yields_a_grant_origin_without_manual_setup(
+  monkeypatch,
+):
+  monkeypatch.setenv("RAILWAY_PUBLIC_DOMAIN", "foo-production.up.railway.app")
+
+  config = settings()
+
+  assert config.frontend_origin == "https://foo-production.up.railway.app"
+  assert (
+    config.mobius_account_client_origin
+    == "https://foo-production.up.railway.app"
+  )
+
+
+def test_railway_public_domain_backstops_a_non_https_frontend_origin(
+  monkeypatch,
+):
+  monkeypatch.setenv("RAILWAY_PUBLIC_DOMAIN", "bar.up.railway.app")
+
+  # An explicit non-loopback HTTP frontend origin cannot carry the grant, but a
+  # Railway deploy still resolves a usable HTTPS account origin rather than a
+  # silently dead "Link identity" button.
+  config = settings(domain="bar.up.railway.app", frontend_origin="http://bar.internal")
+
+  assert config.mobius_account_client_origin == "https://bar.up.railway.app"
+
+
 @pytest.mark.parametrize(
   "origin",
   [

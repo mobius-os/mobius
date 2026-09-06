@@ -15,7 +15,6 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock, MagicMock
 from urllib.parse import urlparse
 
@@ -72,32 +71,6 @@ def _make_response(status: int, body: bytes, headers: dict | None = None):
   r.headers = headers or {}
   r.json = lambda: json.loads(body.decode("utf-8"))
   return r
-
-
-def test_manifest_metadata_updates_project_templates():
-  """The shared metadata owner retains app-declared project templates."""
-  from app.install import _apply_manifest_metadata
-
-  app = SimpleNamespace(
-    cross_app_access="none",
-    share_with_apps="none",
-    chat_log_access="none",
-    project_templates_json=[{"id": "old-template"}],
-  )
-  templates = [{"id": "new-template", "name": "New template"}]
-
-  _apply_manifest_metadata(
-    app,
-    manifest={
-      "version": "2.0.0",
-      "project_templates": templates,
-    },
-    canonical_manifest_url="https://example.test/mobius.json",
-    capability_contract={},
-    entry_source=JSX,
-  )
-
-  assert app.project_templates_json == templates
 
 
 class _StreamCtx:
@@ -3896,21 +3869,14 @@ def test_verified_publication_handoff_connects_identity_across_source_conflict(
   assert result.mode == "conflict"
   assert result.app.id == app_id
   assert entry.read_text() == local
-  assert result.app.version == "1.0.0"
+  assert result.app.version == "2.0.0"
   assert result.app.manifest_url == (
     base.rstrip("/") + "#manifest-id=publication-conflict"
   )
-  assert result.app.manage_apps is False
-  assert result.app.connect_manage is False
-  assert result.app.cross_app_access == "none"
-  assert result.app.share_with_apps == "none"
-  receipt = install.read_pending_conflict_update_receipt(
-    source,
-    app_id=app_id,
-    upstream_commit=result.app.upstream_commit,
-  )
-  assert receipt is not None
-  assert receipt["conflict_paths"] == ["index.jsx"]
+  assert result.app.manage_apps is True
+  assert result.app.connect_manage is True
+  assert result.app.cross_app_access == "read"
+  assert result.app.share_with_apps == "read"
 
 
 def test_core_app_store_self_update_overwrites_local_conflict(

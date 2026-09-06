@@ -1,10 +1,9 @@
 """Route-level wiring for the platform updater endpoints.
 
 The reconcile plumbing is covered exhaustively in ``test_platform_update.py``
-against throwaway clones; these assert the HTTP surface: owner-gating and the
-degrade-to-empty contract the Settings review step relies on. The empty-preview
-case injects a failure at the route seam, so the test remains hermetic even when
-its runner lives inside a real Möbius installation.
+against throwaway clones; these assert owner-gating, immutable plan forwarding,
+and truthful failures at the HTTP boundary. A failed read must never become
+an apparently successful empty review or up-to-date status.
 """
 
 from app import deployment_control
@@ -15,33 +14,20 @@ def test_update_preview_requires_owner(client):
   assert client.get("/api/platform/update-preview").status_code == 401
 
 
-def test_update_preview_returns_empty_shape_when_preview_fails(
-  client, auth, monkeypatch,
-):
+def test_update_preview_failure_is_not_an_empty_success(client, auth, monkeypatch):
   def fail_preview():
     raise RuntimeError("platform clone unavailable")
 
   monkeypatch.setattr(
-    "app.routes.platform.platform_update.platform_update_preview",
-    fail_preview,
+    "app.routes.platform.platform_update.platform_update_preview", fail_preview,
   )
-  res = client.get("/api/platform/update-preview", headers=auth)
-  assert res.status_code == 200
-  body = res.json()
-  # The keys the review sheet + its summarizer read must always be present.
-  for key in (
-    "available", "state", "commits", "files", "diff", "diff_truncated",
-    "conflict_paths", "plan_id", "total_commits", "commits_truncated",
-  ):
-    assert key in body
-  assert body["available"] is False
-  assert body["commits"] == []
-  assert body["files"] == []
-  assert body["diff"] is None
-  assert body["diff_truncated"] is False
-  assert body["plan_id"] is None
-  assert body["total_commits"] == 0
-  assert body["commits_truncated"] is False
+  response = client.get("/api/platform/update-preview", headers=auth)
+
+  assert response.status_code == 503
+  assert response.json()["detail"] == {
+    "code": "platform_preview_unavailable",
+    "message": "Could not prepare the update review. Try again.",
+  }
 
 
 def test_update_progress_requires_owner(client):
@@ -193,6 +179,7 @@ def test_railway_preview_uses_latest_verified_ghcr_release(
     captured.update(kwargs)
     return {
       "state": "available", "available": True,
+      "actionable": True, "operation": "update",
       "current_sha": "1" * 40, "target_sha": target,
       "plan_id": "a" * 64, "image_digest": digest,
       "activation": classify_activation(
@@ -251,6 +238,7 @@ def test_railway_status_and_check_use_latest_verified_ghcr_target(
       "conflict_paths": [], "conflict_chat_id": None,
       "newer_updates_available": False,
       "rollback_target_sha": None, "rollback_error": None,
+      "overlay": None,
     }
 
   def check(*, target_sha):
@@ -330,7 +318,7 @@ def test_update_check_reports_fetch_failure(client, auth, monkeypatch):
   }
 
 
-def test_status_failure_does_not_disable_owner_updates(
+def test_status_failure_does_not_claim_up_to_date(
   client, auth, monkeypatch,
 ):
   def fail_status():
@@ -342,7 +330,63 @@ def test_status_failure_does_not_disable_owner_updates(
 
   response = client.get("/api/platform/status", headers=auth)
 
+  assert response.status_code == 503
+  assert response.json()["detail"] == {
+    "code": "platform_status_unavailable",
+    "message": "Could not check update status. Try again.",
+  }
+
+
+def test_finish_preview_selects_applied_target_not_latest(client, auth, monkeypatch):
+  from app import platform_update
+  captured = {}
+  target = "1" * 40
+  monkeypatch.setattr(deployment_control, "applied_release_sha", lambda: target)
+  monkeypatch.setattr("app.platform_activation.deployment_kind", lambda: "self_hosted")
+
+  def preview(**kwargs):
+    captured.update(kwargs)
+    return platform_update.empty_platform_update_preview()
+
+  monkeypatch.setattr(platform_update, "platform_update_preview", preview)
+  response = client.get("/api/platform/update-preview?intent=finish", headers=auth)
   assert response.status_code == 200
-  assert response.json()["available"] is False
-  assert "updates_disabled" not in response.json()
-  assert "update_disabled_reason" not in response.json()
+  assert captured == {"target_sha": target, "image_digest": None}
+
+
+def test_finish_preview_verifies_exact_managed_image(client, auth, monkeypatch):
+  from app import platform_update
+  target = "1" * 40
+  digest = "sha256:" + "2" * 64
+  captured = {}
+  monkeypatch.setattr(deployment_control, "applied_release_sha", lambda: target)
+  monkeypatch.setattr("app.platform_activation.deployment_kind", lambda: "railway")
+
+  async def applied_digest(sha):
+    assert sha == target
+    return digest
+
+  def preview(**kwargs):
+    captured.update(kwargs)
+    return platform_update.empty_platform_update_preview()
+
+  monkeypatch.setattr(deployment_control, "applied_release_digest", applied_digest)
+  monkeypatch.setattr(platform_update, "platform_update_preview", preview)
+  response = client.get("/api/platform/update-preview?intent=finish", headers=auth)
+  assert response.status_code == 200
+  assert captured == {"target_sha": target, "image_digest": digest}
+
+
+def test_finish_rejects_source_that_moved_behind_selected_release(client, auth, monkeypatch):
+  from app import platform_update
+  target = "1" * 40
+  monkeypatch.setattr(deployment_control, "applied_release_sha", lambda: target)
+  monkeypatch.setattr("app.platform_activation.deployment_kind", lambda: "self_hosted")
+  monkeypatch.setattr(platform_update, "platform_update_preview", lambda **kwargs: {
+    # A reset between target selection and snapshot means this is now an
+    # incoming update, not a legitimate Finish operation.
+    "available": True, "operation": "update", "target_sha": target,
+  })
+  response = client.get("/api/platform/update-preview?intent=finish", headers=auth)
+  assert response.status_code == 503
+  assert response.json()["detail"]["code"] == "update_plan_stale"

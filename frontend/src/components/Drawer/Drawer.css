@@ -450,7 +450,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 6px 12px;
   background: none;
   border: none;
   border-radius: 10px;
@@ -524,7 +524,6 @@
   place-items: center;
   font-size: 18px;
   color: inherit;
-  opacity: 0.85;
 }
 
 .drawer__item-text {
@@ -536,10 +535,10 @@
 }
 
 .drawer__app-icon {
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
-  font-size: 8px;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  font-size: 9px;
 }
 
 .drawer__project-icon {
@@ -956,19 +955,23 @@
   color: var(--accent);
 }
 
-/* "The agent needs YOUR answer" — amber is reserved here for a blocked
-   handoff, while the diamond silhouette keeps the state distinguishable
-   without colour. Mixing the amber toward --text preserves 3:1+ contrast
-   against the drawer in both built-in themes without adding a second theme
-   palette that custom themes would have to maintain. */
-.drawer__owner-input-dot {
+/* The owner-input handoff is the one diamond-shaped row marker; it leads the
+   title so it reads as "you are needed here". */
+.drawer__attention-diamond {
   flex-shrink: 0;
   width: 6px;
   height: 6px;
-  margin-right: 2px;
   border-radius: 1px;
-  background: color-mix(in srgb, var(--owner-input, #f59e0b) 60%, var(--text));
+  background: currentColor;
   transform: rotate(45deg);
+}
+
+/* "The agent needs YOUR answer" — amber is reserved here for a blocked
+   handoff. Mixing it toward --text preserves 3:1+ contrast against the drawer
+   in both built-in themes without adding a second custom-theme token. */
+.drawer__owner-input-dot {
+  margin-right: 2px;
+  color: color-mix(in srgb, var(--owner-input, #f59e0b) 60%, var(--text));
 }
 
 /* "The latest background run FINISHED while you were elsewhere" — a
@@ -990,6 +993,22 @@
   border-radius: 50%;
   background: transparent;
   border: 1.5px solid var(--green);
+}
+
+/* A genuine terminal failure stays visible until its chat is opened. It is a
+   passive status, not a call for action, so it reads as a circle rather than
+   the diamond reserved for the owner-input handoff. A filled disc keeps a
+   non-colour channel against the hollow --green completion ring (solid vs.
+   ring), so failure and success never rely on red-vs-green alone. Planned
+   restart recovery does not enter this state. */
+.drawer__failure-dot {
+  flex-shrink: 0;
+  box-sizing: border-box;
+  width: 6px;
+  height: 6px;
+  margin-right: 2px;
+  border-radius: 50%;
+  background: var(--danger);
 }
 
 /* Respect prefers-reduced-motion. The streaming dot no longer needs an

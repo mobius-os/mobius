@@ -8,7 +8,6 @@ import {
   platformStatusUnavailable,
   platformUpdateStatusLabel,
   reviewedUpdateUsesContainerRebuild,
-  reviewedRebuildNeedsDigest,
 } from '../platformUpdateState.js'
 
 test('an unavailable release check cannot inherit a cached current claim', () => {
@@ -54,21 +53,6 @@ test('reviewed image updates rebuild directly on both deployments', () => {
     activation: { deployment: 'railway', level: 'server_restart' },
   }), false)
   assert.equal(reviewedUpdateUsesContainerRebuild(null), false)
-})
-
-test('only Railway image rebuilds require a pinned GHCR digest', () => {
-  assert.equal(reviewedRebuildNeedsDigest({
-    activation: { deployment: 'railway', level: 'image_rebuild' },
-  }), true)
-  // Self-hosted anchors on the sha-<target> tag, so no digest is required.
-  assert.equal(reviewedRebuildNeedsDigest({
-    activation: { deployment: 'self_hosted', level: 'image_rebuild' },
-  }), false)
-  // A non-rebuild update never needs a digest.
-  assert.equal(reviewedRebuildNeedsDigest({
-    activation: { deployment: 'railway', level: 'live' },
-  }), false)
-  assert.equal(reviewedRebuildNeedsDigest(null), false)
 })
 
 test('a clean apply consumes the reviewed target but preserves restart readiness', () => {

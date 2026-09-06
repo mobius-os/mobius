@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
+from typing import Callable
 from urllib.parse import quote
 
 from app import github_auth
@@ -24,6 +26,7 @@ from app.terminal_output import readable_output
 
 
 _FETCH_ATTEMPTS = 2
+_FULL_GIT_OID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 
 def _is_transient_transport_error(message: str) -> bool:
@@ -56,7 +59,6 @@ def _is_transient_transport_error(message: str) -> bool:
     "the requested url returned error: 504",
   )
   return any(marker in detail for marker in transient_markers)
-
 
 def _validate_repo_slug(value: object) -> str:
   repo = str(value or "")
@@ -104,12 +106,14 @@ def _run_cmd(
   check: bool = True,
   timeout: int = _SUBMIT_TIMEOUT,
   env: dict | None = None,
+  input_text: str | None = None,
 ) -> subprocess.CompletedProcess:
   proc = subprocess.run(
     argv,
     cwd=str(cwd),
     capture_output=True,
     text=True,
+    input=input_text,
     timeout=timeout,
     check=False,
     env=env or _git_env(cwd),
@@ -224,6 +228,7 @@ def _normalize_head_attribution(
   base_sha: str,
   expected_diff: str,
   record: dict,
+  before_amend: Callable[[dict], None] | None = None,
 ) -> dict:
   before = _head_commit_metadata(repo, branch)
   if (
@@ -234,16 +239,84 @@ def _normalize_head_attribution(
   ):
     return {}
 
+  parents = _git(
+    repo, "show", "-s", "--format=%P", before["sha"],
+  ).stdout.strip().split()
+  raw_commit = _git(repo, "cat-file", "-p", before["sha"]).stdout
+  _headers, separator, message = raw_commit.partition("\n\n")
+  if not separator:
+    raise ContributionSubmitError(
+      "Could not inspect the staged commit before normalizing attribution."
+    )
+
+  identity_env = _git_env(repo)
+  identity_env.update({
+    "GIT_AUTHOR_NAME": author_name,
+    "GIT_AUTHOR_EMAIL": author_email,
+    "GIT_AUTHOR_DATE": before["author_date"],
+    "GIT_COMMITTER_NAME": author_name,
+    "GIT_COMMITTER_EMAIL": author_email,
+    "GIT_COMMITTER_DATE": before["author_date"],
+  })
+  author_ident = _run_cmd(
+    ["git", "-C", str(repo), "var", "GIT_AUTHOR_IDENT"],
+    cwd=repo,
+    env=identity_env,
+  ).stdout.strip()
+  committer_ident = _run_cmd(
+    ["git", "-C", str(repo), "var", "GIT_COMMITTER_IDENT"],
+    cwd=repo,
+    env=identity_env,
+  ).stdout.strip()
+  canonical_lines = [f"tree {before['tree']}"]
+  canonical_lines.extend(f"parent {parent}" for parent in parents)
+  canonical_lines.extend((
+    f"author {author_ident}",
+    f"committer {committer_ident}",
+  ))
+  canonical_commit = "\n".join(canonical_lines) + "\n\n" + message
+  expected_normalized_head = _run_cmd(
+    ["git", "-C", str(repo), "hash-object", "-t", "commit", "--stdin"],
+    cwd=repo,
+    input_text=canonical_commit,
+  ).stdout.strip()
+  if not re.fullmatch(r"[0-9a-f]{40,64}", expected_normalized_head):
+    raise ContributionSubmitError(
+      "Could not derive the deterministic normalized commit identity."
+    )
+
+  if before_amend is not None:
+    before_amend({
+      **before,
+      "parents": parents,
+      "expected_normalized_head_sha": expected_normalized_head,
+    })
+
+  written_head = _run_cmd(
+    [
+      "git", "-C", str(repo), "hash-object", "-t", "commit", "-w", "--stdin",
+    ],
+    cwd=repo,
+    input_text=canonical_commit,
+  ).stdout.strip()
+  if written_head != expected_normalized_head:
+    raise ContributionSubmitError(
+      "Writing the normalized commit produced an unexpected identity."
+    )
   _git(
     repo,
-    "-c", f"user.name={author_name}",
-    "-c", f"user.email={author_email}",
-    "commit", "--amend", "--no-edit", "--no-gpg-sign",
-    "--author", f"{author_name} <{author_email}>",
-    "--date", before["author_date"],
+    "update-ref",
+    f"refs/heads/{branch}",
+    expected_normalized_head,
+    before["sha"],
   )
 
   after = _head_commit_metadata(repo, branch)
+  if after["sha"] != expected_normalized_head:
+    raise ContributionSubmitError(
+      "Normalizing commit attribution produced an unexpected commit identity. "
+      "Ask your agent to prepare this PR again."
+    )
   if after["tree"] != before["tree"]:
     raise ContributionSubmitError(
       "Normalizing commit attribution changed the staged source tree. "
@@ -312,15 +385,19 @@ def _upstream_default_branch(repo: Path, upstream_repo: str) -> str:
   return _validate_branch(branch)
 
 
-def _assert_upstream_push_permission(repo: Path, upstream_repo: str) -> None:
-  """True GitHub stacks need their base branches in the upstream repository."""
+def _has_upstream_push_permission(repo: Path, upstream_repo: str) -> bool:
   proc = _gh(
     repo,
     "api", f"repos/{upstream_repo}",
     "--jq", ".permissions.push",
     check=False,
   )
-  if proc.returncode != 0 or (proc.stdout or "").strip().lower() != "true":
+  return proc.returncode == 0 and (proc.stdout or "").strip().lower() == "true"
+
+
+def _assert_upstream_push_permission(repo: Path, upstream_repo: str) -> None:
+  """True GitHub stacks need their base branches in the upstream repository."""
+  if not _has_upstream_push_permission(repo, upstream_repo):
     raise ContributionSubmitError(
       "GitHub only allows a PR to target a branch in its base repository. "
       "This account cannot publish the upstream stack branches, so nothing "
@@ -343,6 +420,41 @@ def _upstream_branch_sha(
   )
   actual_sha = (proc.stdout or "").strip() if proc.returncode == 0 else ""
   return actual_sha if _GIT_SHA.match(actual_sha) else None
+
+
+def _authoritative_upstream_branch_sha(
+  repo: Path, upstream_repo: str, branch: str,
+) -> str | None:
+  """Read one branch tip, distinguishing absence from an unreadable remote.
+
+  Publication uses the result as a force-with-lease precondition.  Treating a
+  transport/auth/parser failure as an absent branch would turn that lease into
+  a blind create, so only GitHub's explicit 404 maps to ``None``.
+  """
+  upstream_repo = _validate_repo_slug(upstream_repo)
+  branch = _validate_branch(branch)
+  proc = _gh(
+    repo,
+    "api",
+    f"repos/{upstream_repo}/git/ref/heads/{quote(branch, safe='')}",
+    "--jq", ".object.sha",
+    check=False,
+  )
+  detail = (proc.stderr or proc.stdout or "").strip()
+  if proc.returncode != 0:
+    if "404" in detail and "not found" in detail.lower():
+      return None
+    raise ContributionSubmitError(
+      "Could not verify the current GitHub branch before pushing. Nothing "
+      "was sent; try again once GitHub is reachable.",
+      detail=readable_output(detail),
+    )
+  actual_sha = (proc.stdout or "").strip()
+  if not _FULL_GIT_OID.fullmatch(actual_sha):
+    raise ContributionSubmitError(
+      "GitHub returned an invalid branch commit. Nothing was pushed."
+    )
+  return actual_sha
 
 
 def _assert_upstream_branch_at(
@@ -645,14 +757,23 @@ def _conflicts_with_recorded_upstream(record: dict, repo, branch: str) -> bool:
 
 
 
-def _resolve_reviewed_commit(repo: Path, value: object, label: str) -> str:
-  raw = str(value or "").strip()
+def _canonical_reviewed_oid(value: object, label: str) -> str:
+  """Require the exact canonical object id the review actually named."""
+  raw = str(value or "")
   if not raw:
     raise ContributionSubmitError(
       f"This record needs to be prepared again: it has no reviewed {label}."
     )
-  if not _GIT_SHA.match(raw):
-    raise ContributionSubmitError(f"The reviewed {label} is invalid.")
+  if not _FULL_GIT_OID.fullmatch(raw):
+    raise ContributionSubmitError(
+      f"The reviewed {label} is not a full canonical Git object id. Ask the "
+      "agent to refresh and review this contribution again."
+    )
+  return raw
+
+
+def _resolve_reviewed_commit(repo: Path, value: object, label: str) -> str:
+  raw = _canonical_reviewed_oid(value, label)
   try:
     resolved = _git(
       repo, "rev-parse", "--verify", f"{raw}^{{commit}}"
@@ -661,7 +782,7 @@ def _resolve_reviewed_commit(repo: Path, value: object, label: str) -> str:
     raise ContributionSubmitError(
       f"The reviewed {label} is not present in the staged repo."
     )
-  if not _GIT_SHA.match(resolved):
+  if not _FULL_GIT_OID.fullmatch(resolved) or resolved != raw:
     raise ContributionSubmitError(f"The reviewed {label} resolved incorrectly.")
   return resolved
 

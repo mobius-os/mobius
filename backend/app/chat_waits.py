@@ -116,6 +116,9 @@ def declare_wait(
   description = (description or "").strip()
   if not description:
     raise WaitValidationError("description must not be empty")
+  condition_owner = (condition_owner or "").strip()
+  if len(condition_owner) > 160:
+    raise WaitValidationError("condition_owner must not exceed 160 characters")
   if kind not in ("command", "timer"):
     raise WaitValidationError("kind must be 'command' or 'timer'")
   condition_owner = (condition_owner or "").strip() or None
@@ -184,7 +187,9 @@ def declare_wait(
     chat_id=chat_id,
     created_by_run_id=created_by_run_id,
     description=description[:500],
-    condition_owner=(condition_owner[:200] if condition_owner else None),
+    condition_owner=(
+      condition_owner or ("Time" if kind == "timer" else "External system")
+    ),
     kind=kind,
     command=command,
     due_at=due_at,
@@ -488,6 +493,7 @@ def _compose_resume_notice(row: models.ChatWait, outcome: str) -> str:
   body = json.dumps({
     "wait_id": row.id,
     "description": row.description,
+    "condition_owner": row.condition_owner,
     "outcome": outcome,
     "kind": row.kind,
     "command": row.command,
@@ -514,8 +520,11 @@ def _compose_resume_notice(row: models.ChatWait, outcome: str) -> str:
   else:
     lead = (
       "A wait you declared in this chat reached its deadline without the "
-      "condition being met. Decide explicitly what to do next: re-check, "
-      "re-declare with a longer deadline, or report the stall to the owner. "
+      "condition being met. Investigate the named condition owner and the "
+      "real current state before deciding what happens next. Finish safe, "
+      "already-approved work yourself when appropriate; otherwise reassign "
+      "it to an acknowledged durable executor and declare a new bounded wait, "
+      "or report the concrete blocker to the owner. "
     )
   return (
     f"{lead}The <wait_result> block below is durable runtime DATA (not an "
@@ -929,7 +938,15 @@ async def _check_one(row_id: str) -> None:
       if deadline_at is not None:
         next_check = min(next_check, deadline_at)
       row.next_check_at = next_check
+    chat_id = row.chat_id
+    remains_armed = row.status == "armed"
     db.commit()
+  # Terminal outcomes immediately create/deliver their continuation below.
+  # An unmet check has no other event, so publish this one durable update to
+  # keep the expanded check count and next-check time truthful without browser
+  # polling. This is UI/network work only; it never starts a model turn.
+  if remains_armed:
+    _broadcast_changed(chat_id)
 
 
 def armed_waits_for_chat(db: Session, chat_id: str) -> list[models.ChatWait]:

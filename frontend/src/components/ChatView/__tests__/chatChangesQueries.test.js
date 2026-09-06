@@ -24,7 +24,7 @@ test('chat polls while attached work or a durable publication claim is live', ()
   assert.equal(interval({ state: { data: null } }), false)
 })
 
-test('chat completion invalidates every lifecycle input for only that chat', async () => {
+test('chat completion refreshes chat-scoped Changes state and drawer contribution markers', async () => {
   const calls = []
   const queryClient = {
     invalidateQueries: async options => { calls.push(options) },
@@ -32,7 +32,7 @@ test('chat completion invalidates every lifecycle input for only that chat', asy
 
   await invalidateChatChangesQueries(queryClient, 'chat-a')
 
-  assert.equal(calls.length, 3)
+  assert.equal(calls.length, 4)
   assert.equal(calls[0].predicate({
     queryKey: contributionsForChatQueryKey(80, 'chat-a'),
   }), true)
@@ -44,11 +44,14 @@ test('chat completion invalidates every lifecycle input for only that chat', asy
     exact: true,
   })
   assert.equal(calls[2].predicate({
-    queryKey: ['chat-contribution-coverage', 80, 'chat-a', ['/data/platform/a.js']],
+    queryKey: ['chat-contribution-coverage', 80, 'chat-a', []],
   }), true)
   assert.equal(calls[2].predicate({
-    queryKey: ['chat-contribution-coverage', 80, 'chat-b', ['/data/platform/a.js']],
+    queryKey: ['chat-contribution-coverage', 80, 'chat-b', []],
   }), false)
+  assert.deepEqual(calls[3], {
+    queryKey: ['drawer-contribution-flags'],
+  })
 })
 
 test('fresh lifecycle state rejects a stale organize action before agent work', async () => {
@@ -72,10 +75,12 @@ test('fresh lifecycle state rejects a stale organize action before agent work', 
           files: [{ path: '/data/platform/frontend/src/example.js' }],
         },
       }]
-      return { coverage: [{
-        path: '/data/platform/frontend/src/example.js',
-        coverage_at: 200,
-      }] }
+      return {
+        coverage: [{
+          path: '/data/platform/frontend/src/example.js',
+          coverage_at: 200,
+        }],
+      }
     },
   }
 

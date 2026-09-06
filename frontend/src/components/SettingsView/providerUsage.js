@@ -56,7 +56,12 @@ export function providerAllowance(provider, snapshot) {
   const kind = provider === 'mobius' ? 'api_credits' : 'weekly'
   const label = kind === 'api_credits' ? 'API credits usage' : 'Weekly usage'
   if (snapshot?.state !== 'ready' || !Array.isArray(snapshot.windows)) {
-    return { kind, label, usedPercent: null, expiresAt: null }
+    return {
+      kind,
+      label,
+      usedPercent: null,
+      expiresAt: null,
+    }
   }
   const window = snapshot.windows.find(candidate => candidate?.kind === kind)
   const used = window?.used_percent == null ? Number.NaN : Number(window.used_percent)

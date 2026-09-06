@@ -1,7 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { updateChatRuntimeCache } from '../chatRuntimeCache.js'
+import {
+  normalizeBackgroundHelpers,
+  updateChatRuntimeCache,
+} from '../chatRuntimeCache.js'
 
 function cacheHarness(initial) {
   let value = initial
@@ -66,6 +69,34 @@ test('unchanged durable waits do not republish the persisted chat cache', () => 
 
   assert.equal(cache.updates(), 0)
   assert.equal(cache.value().waits, waits)
+})
+
+test('unchanged background helpers do not republish the persisted chat cache', () => {
+  const helpers = {
+    count: 1,
+    items: [{ id: 'helper-1', task_key: 'audit', status: 'running' }],
+  }
+  const cache = cacheHarness({ messages: [], background_helpers: helpers })
+
+  updateChatRuntimeCache(
+    cache.queryClient,
+    ['chat-messages', 'chat-1'],
+    { background_helpers: structuredClone(helpers) },
+  )
+
+  assert.equal(cache.updates(), 0)
+  assert.equal(cache.value().background_helpers, helpers)
+})
+
+test('background helper summaries normalize missing and truncated detail', () => {
+  assert.deepEqual(normalizeBackgroundHelpers(null), { count: 0, items: [] })
+  assert.deepEqual(normalizeBackgroundHelpers({
+    count: 1,
+    items: [{ id: 'one' }, { id: 'two' }],
+  }), {
+    count: 2,
+    items: [{ id: 'one' }, { id: 'two' }],
+  })
 })
 
 test('unchanged settled chat metadata does not republish the persisted cache', () => {

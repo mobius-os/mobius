@@ -1,9 +1,6 @@
 """Activation classification is one ordered contract across deployments."""
 
-import json
 import re
-import subprocess
-import sys
 from pathlib import Path
 
 from app import platform_activation as activation
@@ -142,9 +139,6 @@ def test_only_image_owned_bootstrap_scripts_require_a_rebuild():
     "backend/scripts/rebuild_shell.sh",
   ])["level"] == "live"
   assert activation.classify_activation([
-    "backend/scripts/mapi",
-  ])["level"] == "live"
-  assert activation.classify_activation([
     "backend/scripts/pm-commit",
   ])["level"] == "server_restart"
   assert activation.classify_activation([
@@ -163,14 +157,12 @@ def test_bootstrap_allowlist_covers_entrypoint_app_script_references():
   ))
   # pm-commit is seeded from the image, then deliberately refreshed from the
   # live checkout by FastAPI startup; it needs one server restart, not an image.
-  # mapi is an image fallback only: the installed symlink already targets the
-  # live checkout, so changing that target takes effect immediately.
   image_names = {Path(path).name for path in activation.IMAGE_BOOTSTRAP_SCRIPTS}
-  assert referenced == (image_names - {"entrypoint.sh"}) | {"pm-commit", "mapi"}
+  assert referenced == (image_names - {"entrypoint.sh"}) | {"pm-commit"}
   assert activation.classify_activation([
     "backend/scripts/entrypoint.sh",
   ])["level"] == "image_rebuild"
-  for name in referenced - {"pm-commit", "mapi"}:
+  for name in referenced - {"pm-commit"}:
     assert activation.classify_activation([
       f"backend/scripts/{name}",
     ])["level"] == "image_rebuild", name
@@ -200,19 +192,3 @@ def test_image_inputs_cover_dependency_and_baked_runtime_paths(tmp_path):
       activation.ActivationLevel.IMAGE_REBUILD.value,
       activation.ActivationLevel.DEPENDENCY_SYNC.value,
     }
-
-
-def test_image_input_hashes_cli_matches_the_library_contract(tmp_path):
-  (tmp_path / "backend" / "runtime").mkdir(parents=True)
-  (tmp_path / "Dockerfile").write_text("FROM scratch\n")
-  (tmp_path / "backend" / "runtime" / "broker.py").write_text("x = 1\n")
-
-  module = Path(activation.__file__)
-  completed = subprocess.run(
-    [sys.executable, str(module), "--hashes", str(tmp_path)],
-    check=True,
-    capture_output=True,
-    text=True,
-  )
-
-  assert json.loads(completed.stdout) == activation.image_input_hashes(tmp_path)

@@ -67,6 +67,7 @@ connectors_router = _load("connectors")
 connectors_public_router = _load("connectors", "public_router")
 proxy_router = _load("proxy")
 public_apps_router = _load("public_apps")
+public_storage_router = _load("public_storage")
 local_services_router = _load("local_services")
 notify_router = _load("notify")
 screen_control_router = _load("screen_control")
@@ -77,12 +78,14 @@ uploads_router = _load("uploads")
 media_router = _load("media")
 secrets_router = _load("secrets")
 github_router = _load("github")
+contribution_reviews_router = _load("contribution_reviews")
 identity_router = _load("identity")
 push_router = _load("push")
 notifications_router = _load("notifications")
 debug_router = _load("debug")
 delegations_router = _load("delegations")
 chat_waits_router = _load("chat_waits")
+gauntlets_router = _load("gauntlets")
 goal_plans_router = _load("goal_plans")
 owner_approvals_router = _load("owner_approvals")
 theme_router = _load("theme")
@@ -100,6 +103,7 @@ platform_router = _load("platform")
 published_router = _load("published")
 connect_router = _load("connect")
 projects_router = _load("projects")
+shared_apps_router = _load("shared_apps")
 
 __all__ = [
   "admin_router",
@@ -119,6 +123,7 @@ __all__ = [
   "connectors_public_router",
   "proxy_router",
   "public_apps_router",
+  "public_storage_router",
   "local_services_router",
   "notify_router",
   "screen_control_router",
@@ -127,12 +132,14 @@ __all__ = [
   "media_router",
   "secrets_router",
   "github_router",
+  "contribution_reviews_router",
   "identity_router",
   "push_router",
   "notifications_router",
   "debug_router",
   "delegations_router",
   "chat_waits_router",
+  "gauntlets_router",
   "goal_plans_router",
   "owner_approvals_router",
   "theme_router",
@@ -150,4 +157,5 @@ __all__ = [
   "published_router",
   "connect_router",
   "projects_router",
+  "shared_apps_router",
 ]

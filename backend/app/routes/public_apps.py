@@ -7,6 +7,7 @@ network capability is GET against the app manifest's exact reviewed allowlist.
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 from copy import deepcopy
@@ -18,11 +19,25 @@ from slowapi import Limiter
 
 from app import auth, models
 from app.compiler import owned_public_bundle_path
+from app.config import get_settings
 from app.database import SessionLocal
 from app.deps import resolve_public_app_token
+from app.frontend_assets import baked_frontend_dir, resolve_frontend_dir
 from app.public_app_transport import fetch_public_url
+from app.routes.public_storage import (
+  delete_public_value,
+  legacy_public_app_read_limit,
+  legacy_public_app_write_limit,
+  list_public_values,
+  read_public_value,
+  write_public_value,
+)
 
 router = APIRouter(prefix="/api/public-apps", tags=["public-apps"])
+
+# The host page's script, built from frontend/src/publicHost/ by
+# scripts/build-runtime.mjs and served like every other frontend/public asset.
+PUBLIC_HOST_SCRIPT = "mobius-public-host.js"
 
 PUBLIC_APP_RESERVED_SLUGS = frozenset({
   "api",
@@ -34,6 +49,7 @@ PUBLIC_APP_RESERVED_SLUGS = frozenset({
   "chat",
   "index.html",
   "manifest.webmanifest",
+  PUBLIC_HOST_SCRIPT,
   "mobius-runtime.js",
   "recover",
   "shell",
@@ -53,19 +69,48 @@ def public_slug_is_available(slug: str) -> bool:
   )
 
 
-def _json_for_script(value) -> str:
-  # JSON is executable JavaScript here. Escape '<' so owner-authored app names
-  # cannot manufacture a closing script tag inside the platform-owned page.
+def _json_for_slot(value) -> str:
+  # The HTML parser ends the slot at the first literal `</`; escaping `<` (a
+  # valid JSON escape) keeps owner-authored app names from closing it.
   return json.dumps(value, separators=(",", ":")).replace("<", "\\u003c")
 
 
+def _host_script_rev() -> str:
+  # Folded into the script URL so a redeployed bundle is never masked by the
+  # browser's heuristic caching of an unversioned root asset.
+  data_dir = get_settings().data_dir
+  for directory in (resolve_frontend_dir(data_dir), baked_frontend_dir()):
+    try:
+      bytes_ = (directory / PUBLIC_HOST_SCRIPT).read_bytes()
+    except OSError:
+      continue
+    return hashlib.sha256(bytes_).hexdigest()[:16]
+  return "0"
+
+
 def _public_host_html(app: models.App, token: str) -> str:
-  app_id = app.id
-  frame_version = app.public_bundle_digest or "0"
   title = html.escape(app.public_name, quote=True)
-  app_id_json = _json_for_script(app_id)
-  token_json = _json_for_script(token)
-  version_json = _json_for_script(frame_version)
+  installed_runtime = (
+    app.capability_contract.get("runtime", {})
+    if isinstance(app.capability_contract, dict)
+    else {}
+  )
+  device_storage = installed_runtime.get("device.storage")
+  config = {
+    "appId": app.id,
+    "token": token,
+    "version": app.public_bundle_digest or "0",
+    "appInstance": app.token_nonce or "",
+    # Only device.storage has a trusted provider in this minimal host; every
+    # other declared capability is withheld so the runtime treats it as
+    # undeclared.
+    "capabilityContract": {
+      "runtime": {
+        "device.storage": device_storage,
+      } if isinstance(device_storage, dict) else {},
+    },
+  }
+  script_url = f"/{PUBLIC_HOST_SCRIPT}?v={_host_script_rev()}"
   return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -92,108 +137,8 @@ def _public_host_html(app: models.App, token: str) -> str:
 <body>
   <iframe id="app" title="{title}"></iframe>
   <div id="status" role="status">Opening {title}…</div>
-  <script>
-  (() => {{
-    const APP_ID = {app_id_json};
-    const TOKEN = {token_json};
-    const VERSION = {version_json};
-    const FRAME_URL = '/api/apps/' + APP_ID + '/frame?v=' + encodeURIComponent(VERSION);
-    const frame = document.getElementById('app');
-    const status = document.getElementById('status');
-
-    function send(message, transfer) {{
-      try {{ frame.contentWindow.postMessage(message, '*', transfer || []); }} catch {{}}
-    }}
-
-    function showError(message) {{
-      status.textContent = message || 'This public app could not be opened.';
-      status.className = 'is-error';
-    }}
-
-    frame.addEventListener('load', () => send({{
-      type: 'moebius:frame-init', token: TOKEN, themeCss: '', bg: '#101514',
-      storage: {{}}, capabilityContract: null,
-    }}));
-    frame.src = FRAME_URL;
-
-    window.addEventListener('message', event => {{
-      if (event.source !== frame.contentWindow) return;
-      if (event.origin !== 'null' && event.origin !== window.location.origin) return;
-      const message = event.data;
-      if (!message || typeof message !== 'object') return;
-
-      if (message.type === 'moebius:module-request') {{
-        if (!message.requestId || String(message.appId) !== String(APP_ID)) return;
-        send({{ type: 'moebius:module-ack', requestId: message.requestId, appId: APP_ID }});
-        const retry = message.retry === 1 ? '&retry=1' : '';
-        fetch('/api/public-apps/' + APP_ID + '/module?v=' + encodeURIComponent(VERSION)
-          + retry, {{ headers: {{ Authorization: 'Bearer ' + TOKEN }} }})
-          .then(async response => {{
-            if (!response.ok) {{
-              const error = new Error('The app module returned ' + response.status + '.');
-              error.status = response.status;
-              throw error;
-            }}
-            return response.arrayBuffer();
-          }})
-          .then(bytes => send({{
-            type: 'moebius:module-result', requestId: message.requestId,
-            appId: APP_ID, ok: true, bytes,
-          }}, [bytes]))
-          .catch(error => send({{
-            type: 'moebius:module-result', requestId: message.requestId,
-            appId: APP_ID, ok: false,
-            error: {{ code: 'module-load-failed', message: error.message,
-              status: error.status || null }},
-          }}));
-        return;
-      }}
-
-      if (message.type === 'moebius:storage-rpc') {{
-        if (!message.requestId) return;
-        const method = typeof message.method === 'string' ? message.method : '';
-        const empty = method === 'list' ? []
-          : method === 'pendingCount' || method === 'pendingSignalCount' ? 0
-          : method === 'getWithVersion' ? {{ value: null, version: null }}
-          : method === 'subscribe' || method === 'unsubscribe' ? true
-          : method === 'get' || method === 'getText' || method === 'getBlob' ? null
-          : undefined;
-        if (empty !== undefined) {{
-          send({{ type: 'moebius:storage-rpc-result', requestId: message.requestId,
-            ok: true, result: empty }});
-        }} else {{
-          send({{ type: 'moebius:storage-rpc-result', requestId: message.requestId,
-            ok: false, error: {{ name: 'Error', code: 'public_storage_readonly',
-              status: 403, message: 'Public app sessions do not use owner storage.' }} }});
-        }}
-        return;
-      }}
-
-      if (message.type === 'moebius:capability-open' ||
-          message.type === 'moebius:capability-control') {{
-        if (!message.requestId) return;
-        send({{ type: 'moebius:capability-error', requestId: message.requestId,
-          code: 'public_capability_unavailable', name: 'NotAllowedError',
-          message: 'This device capability is unavailable in a public session.' }});
-        return;
-      }}
-
-      if (message.type === 'moebius:frame-mounted' &&
-          String(message.appId) === String(APP_ID)) {{
-        status.className = 'is-ready';
-        return;
-      }}
-      if (message.type === 'moebius:frame-error') {{
-        showError(message.error?.message || message.message);
-        return;
-      }}
-      if (message.type === 'moebius:token-expired' ||
-          message.type === 'moebius:token-refresh-request') {{
-        window.location.reload();
-      }}
-    }});
-  }})();
-  </script>
+  <script type="application/json" id="mobius-public-host">{_json_for_slot(config)}</script>
+  <script type="module" src="{script_url}"></script>
 </body>
 </html>"""
 
@@ -288,3 +233,66 @@ async def public_app_fetch(
   finally:
     db.close()
   return await fetch_public_url(app_id, url, rules)
+
+
+@router.get("/{app_id}/storage/{path:path}")
+@legacy_public_app_read_limit
+async def public_app_storage_read(
+  app_id: int,
+  path: str,
+  request: Request,
+  authorization: str | None = Header(default=None),
+):
+  """Compatibility alias for pre-unification hosted mini-app bundles."""
+  return await read_public_value(
+    _bearer(authorization), path, expected_app_id=app_id,
+  )
+
+
+@router.get("/{app_id}/storage-list/{prefix:path}")
+@legacy_public_app_read_limit
+async def public_app_storage_list(
+  app_id: int,
+  prefix: str,
+  request: Request,
+  include_content: bool = False,
+  limit: int = 100,
+  cursor: str | None = None,
+  authorization: str | None = Header(default=None),
+):
+  """Compatibility alias for pre-unification hosted mini-app bundles."""
+  return await list_public_values(
+    _bearer(authorization), prefix,
+    include_content=include_content,
+    limit=limit,
+    cursor=cursor,
+    expected_app_id=app_id,
+  )
+
+
+@router.put("/{app_id}/storage/{path:path}", status_code=204)
+@legacy_public_app_write_limit
+async def public_app_storage_write(
+  app_id: int,
+  path: str,
+  request: Request,
+  authorization: str | None = Header(default=None),
+):
+  """Compatibility alias for pre-unification hosted mini-app bundles."""
+  return await write_public_value(
+    _bearer(authorization), path, request, expected_app_id=app_id,
+  )
+
+
+@router.delete("/{app_id}/storage/{path:path}", status_code=204)
+@legacy_public_app_write_limit
+async def public_app_storage_delete(
+  app_id: int,
+  path: str,
+  request: Request,
+  authorization: str | None = Header(default=None),
+):
+  """Compatibility alias for pre-unification hosted mini-app bundles."""
+  return await delete_public_value(
+    _bearer(authorization), path, expected_app_id=app_id,
+  )

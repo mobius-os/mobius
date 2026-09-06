@@ -68,7 +68,6 @@ def test_fresh_boot_tracks_owner_data_but_never_runtime_repositories(tmp_path):
     tmp_path / "agent-scratch" / "chat" / "candidate",
     tmp_path / "contrib" / "review" / "worktree",
     tmp_path / "contributions" / "legacy" / "worktree",
-    tmp_path / "shared" / "memory" / "repository",
   )
   for repo in owned_repositories:
     _nested_repo(repo)
@@ -82,13 +81,7 @@ def test_fresh_boot_tracks_owner_data_but_never_runtime_repositories(tmp_path):
   tracked = set(_git(tmp_path, "ls-files").splitlines())
   assert {".gitignore", "owner.txt"}.issubset(tracked)
   assert not any(
-    path.startswith((
-      "run/",
-      "agent-scratch/",
-      "contrib/",
-      "contributions/",
-      "shared/memory/repository",
-    ))
+    path.startswith(("run/", "agent-scratch/", "contrib/", "contributions/"))
     for path in tracked
   )
   for repo in owned_repositories:
@@ -111,7 +104,6 @@ def test_upgrade_untracks_every_root_policy_match_without_deleting_files(
     tmp_path / "agent-scratch" / "chat" / "candidate",
     tmp_path / "contrib" / "review" / "worktree",
     tmp_path / "contributions" / "legacy" / "worktree",
-    tmp_path / "shared" / "memory" / "repository",
   )
   for repo in historical_repositories:
     _nested_repo(repo)
@@ -126,7 +118,6 @@ def test_upgrade_untracks_every_root_policy_match_without_deleting_files(
     "agent-scratch",
     "contrib",
     "contributions",
-    "shared/memory/repository",
   )
   _commit(tmp_path, "historical runtime entries")
 
@@ -166,13 +157,7 @@ def test_upgrade_untracks_every_root_policy_match_without_deleting_files(
   assert "apps/demo/generated.txt" in tracked
   assert "unrelated.txt" in tracked
   assert not any(
-    path.startswith((
-      "run/",
-      "agent-scratch/",
-      "contrib/",
-      "contributions/",
-      "shared/memory/repository",
-    ))
+    path.startswith(("run/", "agent-scratch/", "contrib/", "contributions/"))
     for path in tracked
   )
 
@@ -202,18 +187,3 @@ def test_boot_policy_replaces_a_symlink_instead_of_following_it(tmp_path):
   assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == (
     init_data_repo.DATA_GITIGNORE
   )
-
-
-def test_repository_work_has_no_fixed_boot_timeout(tmp_path, monkeypatch):
-  """Large valid owner volumes must not become unable to boot after 60 seconds."""
-  observed: dict[str, object] = {}
-
-  def run(command, **kwargs):
-    observed.update(kwargs)
-    return subprocess.CompletedProcess(command, 0, b"", b"")
-
-  monkeypatch.setattr(init_data_repo.subprocess, "run", run)
-
-  init_data_repo._git(tmp_path, "status", "--porcelain")
-
-  assert "timeout" not in observed

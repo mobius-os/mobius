@@ -66,12 +66,6 @@ test('goal is selectable on Codex, which exposes the same durable goal controls'
   assert.equal(slashCommandUnavailableReason(goal, 'codex'), '')
 })
 
-test('goal is selectable on Möbius Evolve through the shared Codex runtime', () => {
-  const [goal] = matchSlashCommands('/go')
-  assert.equal(slashCommandIsAvailable(goal, 'mobius'), true)
-  assert.equal(slashCommandUnavailableReason(goal, 'mobius'), '')
-})
-
 test('provider-specific commands fail closed while provider metadata loads', () => {
   const [goal] = matchSlashCommands('/')
   assert.equal(slashCommandIsAvailable(goal, undefined), false)

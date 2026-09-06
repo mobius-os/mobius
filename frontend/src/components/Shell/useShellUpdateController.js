@@ -79,16 +79,13 @@ export default function useShellUpdateController(inputs) {
     // advances the coherent offline generation.
     replaceNavEntry('base', '/shell/')
     releaseWaitingShellUpdate(registration)
-
-    // Opt only this deliberate shell-generation navigation into the
-    // cross-document continuity treatment. Ordinary reloads retain ordinary
-    // browser semantics, and the rendering boundary gives Chromium time to
-    // activate the dynamically inserted navigation rule before replacement.
     const transitionPrepared = (
       win.__mobiusPrepareShellReloadTransition?.() === true
     )
     const navigate = () => win.location.replace('/shell/')
     if (transitionPrepared && typeof win.requestAnimationFrame === 'function') {
+      // Give Chromium one rendering boundary to activate the cross-document
+      // transition before the owner-approved replacement starts.
       win.requestAnimationFrame(navigate)
     } else {
       navigate()

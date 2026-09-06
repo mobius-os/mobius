@@ -163,6 +163,16 @@ test('one explicit update writes the latest workspace and navigates exactly once
   try {
     const harness = controllerHarness({ registration })
     harness.serviceWorker.controller = active
+    let preparedTransitions = 0
+    let animationFrames = 0
+    harness.win.__mobiusPrepareShellReloadTransition = () => {
+      preparedTransitions += 1
+      return true
+    }
+    harness.win.requestAnimationFrame = callback => {
+      animationFrames += 1
+      callback()
+    }
     const { result } = renderHook(useShellUpdateController, harness.inputs)
 
     result.current.markShellUpdateAvailable()
@@ -183,40 +193,12 @@ test('one explicit update writes the latest workspace and navigates exactly once
     assert.equal(harness.persisted(), 1)
     assert.deepEqual(harness.dispatched, ['mobius:before-shell-reload'])
     assert.deepEqual(waiting.messages, [{ type: 'SKIP_WAITING' }])
+    assert.equal(preparedTransitions, 1)
+    assert.equal(animationFrames, 1)
     assert.equal(
       JSON.parse(harness.stored.get('shell-reload')).activeChatId,
       'latest-chat',
     )
-  } finally {
-    globalThis.history = previousHistory
-  }
-})
-
-test('an explicit update activates its cross-document transition before replacement', async () => {
-  const previousHistory = globalThis.history
-  globalThis.history = { state: null, replaceState() {} }
-  try {
-    const harness = controllerHarness()
-    const frames = []
-    let prepared = 0
-    harness.win.__mobiusPrepareShellReloadTransition = () => {
-      prepared += 1
-      return true
-    }
-    harness.win.requestAnimationFrame = callback => {
-      frames.push(callback)
-      return frames.length
-    }
-    const { result } = renderHook(useShellUpdateController, harness.inputs)
-
-    assert.equal(await result.current.applyShellUpdate(), true)
-    assert.equal(prepared, 1)
-    assert.deepEqual(harness.replacements, [],
-      'replacement must not race the dynamically inserted navigation rule')
-    assert.equal(frames.length, 1)
-
-    frames.shift()()
-    assert.deepEqual(harness.replacements, ['/shell/'])
   } finally {
     globalThis.history = previousHistory
   }

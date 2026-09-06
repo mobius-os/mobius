@@ -85,9 +85,9 @@ def _external_control_auth(client, owner_token, db):
   )
   top_level = auth_mod.create_agent_token(
     top_level_id,
-    "external-control-top-level-run",
     owner.username,
     owner.token_epoch,
+    run_id="external-control-top-level-run",
   )
   app_token = auth_mod.create_app_token(
     app.id,

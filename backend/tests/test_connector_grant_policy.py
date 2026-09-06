@@ -1,6 +1,7 @@
 """Owner MCP connections must follow the owner's own chats only."""
 
 import asyncio
+import hashlib
 
 import pytest
 
@@ -89,7 +90,37 @@ async def test_owner_chat_keeps_owner_connections(chat, db, monkeypatch):
   assert plans == [granted]
 
 
-def test_delegated_prompt_states_connections_unavailable():
+@pytest.mark.asyncio
+async def test_delegated_chat_inherits_owner_connections(chat, db, monkeypatch):
+  app_row = _app_row(db, "delegated")
+  parent = models.Chat(
+    id="grant-policy-parent", title="Parent", messages=[], provider="codex",
+  )
+  db.add(parent)
+  chat.provider = "codex"
+  chat.agent_settings_json = {"model": "gpt-5.4"}
+  chat.created_by_app_id = app_row.id
+  db.add(models.Delegation(
+    id="grant-policy-delegation",
+    app_id=app_row.id,
+    parent_chat_id=parent.id,
+    parent_root_run_id="grant-policy-root",
+    task_key="connected-review",
+    child_chat_id=chat.id,
+    provider="codex",
+    model="gpt-5.4",
+    effort=None,
+    scope="read",
+    cwd="/data",
+    prompt_sha256=hashlib.sha256(b"hi").hexdigest(),
+  ))
+  db.commit()
+
+  plans, granted = await _drive_turn(chat.id, monkeypatch, expected_include=True)
+  assert plans == [granted]
+
+
+def test_delegated_prompt_allows_relevant_connected_tools():
   from app.delegations import RunPolicy
 
   policy = RunPolicy(
@@ -101,9 +132,8 @@ def test_delegated_prompt_states_connections_unavailable():
     scope="read",
     cwd="/data",
   )
-  assert (
-    "Owner-managed MCP connections are not available" in policy.system_prompt
-  )
+  assert "connected tools" in policy.system_prompt
+  assert "Owner-managed MCP connections are not available" not in policy.system_prompt
 
 
 def test_app_chat_context_states_connections_unavailable(db):

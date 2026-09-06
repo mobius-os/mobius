@@ -3,6 +3,7 @@ import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client
 import { QueryClientProvider, useIsRestoring } from '@tanstack/react-query'
 import ErrorBoundary from './components/ErrorBoundary/ErrorBoundary.jsx'
 import PlatformDegradedNotice from './components/ErrorBoundary/PlatformDegradedNotice.jsx'
+import ShellFreshnessNotice from './components/ErrorBoundary/ShellFreshnessNotice.jsx'
 import './components/ErrorBoundary/RecoveryPanel.css'
 import { api, beginEphemeralAuth, getToken, setToken, BASE } from './api/client.js'
 import * as setupSession from './lib/setupSession.js'
@@ -24,6 +25,7 @@ const Shell = lazy(() => import('./components/Shell/Shell.jsx'))
 const ChatEmbed = lazy(() => import('./components/ChatEmbed/ChatEmbed.jsx'))
 const StandaloneApp = lazy(() => import('./components/StandaloneApp/StandaloneApp.jsx'))
 const ProjectShare = lazy(() => import('./components/Projects/ProjectShare.jsx'))
+const SharedApp = lazy(() => import('./components/Projects/SharedApp.jsx'))
 
 // True when this SPA load is the stripped-chrome chat embed
 // (capability A). The SPA catch-all serves index.html for any non-API
@@ -52,11 +54,23 @@ const PROJECT_SHARE_ROUTE = (() => {
     return false
   }
 })()
+const SHARED_APP_ROUTE = (() => {
+  try {
+    const path = window.location.pathname
+    return path === `${BASE}/app-invite` || path.startsWith(`${BASE}/shared/app/`)
+  } catch {
+    return false
+  }
+})()
+const SHARED_APP_INVITE_ROUTE = (() => {
+  try { return window.location.pathname === `${BASE}/app-invite` }
+  catch { return false }
+})()
 const STANDALONE_APP = readStandaloneBoot()
 if (EMBED_ROUTE) {
   beginEphemeralAuth()
   beginEmbedBootstrap()
-} else if (PROJECT_SHARE_ROUTE) {
+} else if (PROJECT_SHARE_ROUTE || SHARED_APP_INVITE_ROUTE) {
   beginEphemeralAuth()
 } else {
   // Capture Chromium's one-shot install event before setup or sign-in can keep
@@ -67,6 +81,13 @@ if (EMBED_ROUTE) {
 function clearInstallPassFromUrl() {
   const next = withoutInstallPass(window.location.href)
   if (next) window.history.replaceState(null, '', next)
+}
+
+function retryMobiusLogin() {
+  const current = new URL(window.location.href)
+  current.searchParams.delete('mobius_login')
+  current.searchParams.delete('mobius_login_error')
+  window.location.replace(current.pathname + current.search + current.hash)
 }
 
 export default function App() {
@@ -95,6 +116,15 @@ export default function App() {
       </QueryClientProvider>
     )
   }
+  if (SHARED_APP_ROUTE) {
+    return (
+      <QueryClientProvider client={queryClient}>
+        <ErrorBoundary label="shared-app" recoveryKey="shared-app:root" canAskAgent={false}>
+          <Suspense fallback={<RouteLoading />}><SharedApp /></Suspense>
+        </ErrorBoundary>
+      </QueryClientProvider>
+    )
+  }
   return (
     <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
       <ErrorBoundary label="app" onError={removeSplash}>
@@ -118,7 +148,7 @@ function AppRoot() {
   const hasToken = !!getToken()
   const savedResumeStep = hasToken ? setupSession.getResumeStep() : null
   const resumeStep = savedResumeStep === 'account' ? savedResumeStep : null
-  let ssoSignal = ''
+  let mobiusLoginSignal = ''
   // A one-time install pass on a standalone app's FIRST launch. iOS gives the
   // newly installed web app its own empty storage, so this is the only moment
   // it can inherit the session that installed it. Read it even when this
@@ -126,8 +156,8 @@ function AppRoot() {
   let installPass = ''
   try {
     const params = new URLSearchParams(window.location.search)
-    if (params.get('mobius_sso') === '1') ssoSignal = 'handoff'
-    if (params.get('mobius_sso_error') === '1') ssoSignal = 'error'
+    if (params.get('mobius_login') === '1') mobiusLoginSignal = 'handoff'
+    if (params.get('mobius_login_error') === '1') mobiusLoginSignal = 'error'
     installPass = readInstallPass(window.location.search, STANDALONE_APP)
   } catch { /* ignore */ }
   const initialStatus = resumeStep
@@ -136,9 +166,11 @@ function AppRoot() {
         ? 'shell'
         : (installPass
             ? 'install-pass'
-            : (ssoSignal === 'handoff'
-                ? 'sso'
-                : (ssoSignal === 'error' ? 'sso-error' : 'loading'))))
+            : (mobiusLoginSignal === 'handoff'
+                ? 'mobius-login'
+                : (mobiusLoginSignal === 'error'
+                    ? 'mobius-login-error'
+                    : 'loading'))))
   const [status, setStatus] = useState(initialStatus)
   const [shellVisualReady, setShellVisualReady] = useState(false)
   const markShellVisualReady = useCallback(() => {
@@ -149,7 +181,7 @@ function AppRoot() {
   // re-surfaces it while the platform is still degraded, so it never hides.
   const [degradedDismissed, setDegradedDismissed] = useState(false)
   const setupStatusQuery = setupQueries.status.useQuery({
-    enabled: !hasToken && !ssoSignal && status !== 'install-pass',
+    enabled: !hasToken && !mobiusLoginSignal && status !== 'install-pass',
   })
   // `/api/version` already owns the identity of the tree actually being served
   // (`platform` vs the image-baked floor). Read it once the authenticated shell
@@ -189,41 +221,29 @@ function AppRoot() {
     return () => { cancelled = true }
   }, [status, installPass])
   useEffect(() => {
-    if (status !== 'sso') return undefined
+    if (status !== 'mobius-login') return undefined
     let cancelled = false
     async function finishSignIn() {
       try {
-        const response = await api.auth.sso.consume()
-        if (!response.ok) throw new Error('SSO_HANDOFF_FAILED')
+        const response = await api.auth.mobius.session()
+        if (!response.ok) throw new Error('MOBIUS_LOGIN_HANDOFF_FAILED')
         const data = await response.json()
-        if (!data?.access_token) throw new Error('SSO_HANDOFF_FAILED')
+        if (!data?.access_token) throw new Error('MOBIUS_LOGIN_HANDOFF_FAILED')
         setToken(data.access_token)
         removeSplash()
         try {
           const current = new URL(window.location.href)
-          current.searchParams.delete('mobius_sso')
+          current.searchParams.delete('mobius_login')
           window.history.replaceState(null, '', current.pathname + current.search + current.hash)
         } catch { /* ignore */ }
         if (cancelled) return
-        if (data.new_owner) {
-          // Managed sign-in already established the owner. Open the product;
-          // provider setup belongs in Settings and must not become a second
-          // onboarding funnel.
-          setupSession.clearResumeStep()
-          setupSession.setInProgress(false)
-          setStatus('shell')
-          return
-        }
-        const ret = safeReturnPath(data.return_path, window.location.origin)
-        if (ret && ret !== '/') {
-          window.location.replace(ret)
-          return
-        }
+        // The owner already exists in mobius mode (host-side binding created
+        // them), so this is always a returning sign-in: open the shell.
         setStatus('shell')
       } catch {
         if (!cancelled) {
           removeSplash()
-          setStatus('sso-error')
+          setStatus('mobius-login-error')
         }
       }
     }
@@ -234,7 +254,7 @@ function AppRoot() {
   }, [status])
 
   useEffect(() => {
-    if (status === 'sso-error') removeSplash()
+    if (status === 'mobius-login-error') removeSplash()
   }, [status])
 
   // Honor a ?return= target. An installed standalone app (its own PWA,
@@ -263,16 +283,11 @@ function AppRoot() {
       return
     }
     if (setupStatusQuery.isSuccess) {
-      if (setupStatusQuery.data.auth_mode === 'mobius_sso') {
-        let returnPath = '/'
-        try {
-          returnPath = (
-            window.location.pathname + window.location.search + window.location.hash
-          )
-        } catch { /* ignore */ }
-        window.location.replace(api.auth.sso.startUrl(returnPath))
-        return
-      }
+      // Do NOT auto-redirect to mobius.you when auth_mode is 'mobius': landing
+      // straight on an external site with no context reads as broken. Render the
+      // login screen instead — LoginForm shows a single "Sign in with
+      // mobius.you" button (the password form is never shown in mobius mode),
+      // and the owner taps it to start the 303 to mobius.you.
       setStatus(setupStatusQuery.data.configured ? 'login' : 'setup')
       removeSplash()
     } else if (setupStatusQuery.isError) {
@@ -284,25 +299,33 @@ function AppRoot() {
   // A token proves that we may load the shell, not that the restored workspace
   // has a frame worth showing. Shell owns that final visual boundary for chats;
   // standalone apps keep their established post-cache-restoration handoff.
+  // Either fallback tree — the baked backend or the baked shell — means the
+  // owner is not looking at their latest changes; both surface the same notice.
+  const degradedVariant = !STANDALONE_APP
+    ? (servedVersionQuery.data?.serving_source === 'baked'
+        ? 'backend'
+        : servedVersionQuery.data?.frontend_source === 'baked'
+          ? 'frontend'
+          : null)
+    : null
   useEffect(() => {
     if (!hasToken || status !== 'shell' || isRestoring) return
-    const showingDegradedNotice = !STANDALONE_APP
-      && servedVersionQuery.data?.serving_source === 'baked'
+    const showingDegradedNotice = Boolean(degradedVariant)
     if (STANDALONE_APP || shellVisualReady || showingDegradedNotice) {
       void removeSplashWhenOwnedFontsReady()
     }
-  }, [hasToken, isRestoring, shellVisualReady, status, servedVersionQuery.data])
+  }, [hasToken, isRestoring, shellVisualReady, status, degradedVariant])
 
   if (status === 'loading' || isRestoring) {
     return <RouteLoading />
   }
-  if (status === 'sso') return <RouteLoading />
+  if (status === 'mobius-login') return <RouteLoading />
   if (status === 'install-pass') return <RouteLoading />
-  if (status === 'sso-error') return (
+  if (status === 'mobius-login-error') return (
     <StartupError
       title="Couldn’t sign in"
       message="Your Möbius account could not be confirmed. Try again from this browser."
-      onRetry={() => window.location.replace(api.auth.sso.startUrl('/shell/'))}
+      onRetry={retryMobiusLogin}
     />
   )
   if (status === 'setup-error') return (
@@ -326,7 +349,7 @@ function AppRoot() {
   )
   if (status === 'login') return (
     <Suspense fallback={<RouteLoading />}>
-      <LoginForm onLogin={() => {
+      <LoginForm authMode={setupStatusQuery.data?.auth_mode} onLogin={() => {
         const ret = safeReturnPath(
           new URLSearchParams(window.location.search).get('return'),
           window.location.origin,
@@ -336,23 +359,28 @@ function AppRoot() {
       }} />
     </Suspense>
   )
-  // The platform failed to import and we are serving the built-in copy. Surface
-  // it before the shell instead of running silently; "Continue" dismisses to the
-  // working fallback. Shell only (a standalone mini-app is not the repair owner).
-  if (
-    hasToken &&
-    status === 'shell' &&
-    !STANDALONE_APP &&
-    servedVersionQuery.data?.serving_source === 'baked' &&
-    !degradedDismissed
-  ) {
-    return <PlatformDegradedNotice onContinue={() => setDegradedDismissed(true)} />
+  // A built-in copy is serving (backend or shell) instead of the owner's
+  // edited tree. Surface it before the shell instead of running silently;
+  // "Continue" dismisses to the working fallback. Shell only (a standalone
+  // mini-app is not the repair owner).
+  if (hasToken && status === 'shell' && degradedVariant && !degradedDismissed) {
+    return (
+      <PlatformDegradedNotice
+        variant={degradedVariant}
+        onContinue={() => setDegradedDismissed(true)}
+      />
+    )
   }
   return (
     <Suspense fallback={<RouteLoading />}>
       {STANDALONE_APP
         ? <StandaloneApp initialApp={STANDALONE_APP} />
-        : <Shell onInitialVisualReady={markShellVisualReady} />}
+        : (
+          <>
+            <Shell onInitialVisualReady={markShellVisualReady} />
+            <ShellFreshnessNotice version={servedVersionQuery.data} />
+          </>
+        )}
     </Suspense>
   )
 }

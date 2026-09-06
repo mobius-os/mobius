@@ -202,3 +202,14 @@ test('legacy migration imports only this app and returns narrow refreshed projec
   }]])
   assert.deepEqual(result, [runtimeView(own)])
 })
+
+ test('template discovery exposes only this installed app and no private contract fields', async () => {
+  const h = harness({ templates: [
+    { key: 'renamed:game', id: 'game', source_app_id: 7, name: 'Canvas game', kind: 'game', description: 'Play', guidance: 'private', files: { secret: 'path' } },
+    { key: 'foreign:game', id: 'game', source_app_id: 8, name: 'Other' },
+  ] })
+  assert.deepEqual(await handleAppProjectsRequest(h.options, { action: 'templates' }), [
+    { key: 'renamed:game', id: 'game', name: 'Canvas game', kind: 'game', description: 'Play' },
+  ])
+  assert.deepEqual(h.opened, [])
+})

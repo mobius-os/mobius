@@ -150,7 +150,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `frontend_watcher.py` | Polling watcher that auto-rebuilds the served frontend clone (`/data/platform/frontend`) on edit — debounced `vite build`, atomic `.dist-next`→`dist` swap |
 | `config.py` | `Settings` via pydantic-settings; reads `.env` |
 | `database.py` | SQLAlchemy engine, pool instrumentation, `SessionLocal`, `Base`, and `get_db`; contains no schema history |
-| `schema_migrations.py` | Append-only schema/data migrations, durable ledger primitives, and ORM/live-schema parity inspection; published functions are semantic-hash frozen |
+| `schema_migrations.py` | One append-only schema/data migration runner, its durable ledger, and mapped table/column inspection; published migration-owned code is target-branch frozen |
 | `startup.py` | Two-phase boot: process/database preflight first, then writer/reconciliation/database supervisors only after migrations and mapped-shape checks succeed |
 | `models.py` | ORM tables: `Owner`, `Chat`, `ChatRun`, `App`, `PushSubscription`, `Notification` |
 | `schemas.py` | Pydantic request/response models |
@@ -553,7 +553,7 @@ installing Möbius.
 
 ## Chat scroll + steer contract
 
-**Owner-authoritative contract — v1.24 (2026-08-24).** This section is the
+**Owner-authoritative contract — v1.25 (2026-08-24).** This section is the
 canonical source of truth for how a chat scrolls and steers. When implementation,
 comments, and this contract disagree, the implementation/comments are the bug:
 fix behavior to match this contract. If a real case is unspecified or the desired
@@ -576,8 +576,8 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   room, or (d) restoration of the exact pre-submit `FOLLOW_BOTTOM` once both
   an accepted same-turn question answer and its first renderable post-answer
   activity have committed, with no newer reader scroll. Answer acceptance alone
-  never enters follow or moves through blank tail room. Only a send may create
-  `PIN_USER_MSG`. Reservation does not create
+  never enters follow or moves through blank tail room. Only
+  a send may create `PIN_USER_MSG`. Reservation does not create
   a second kind of bottom: when `FOLLOW_BOTTOM` is active, it follows the physical
   tail including any remaining room. Real output first consumes that room without
   advancing the tail; after the room reaches zero, the same tail advances with the
@@ -608,10 +608,10 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   participates—an older user row never gets a separate reservation. Durable anchor
   validation still rejects locations wholly inside reserved blank space, so
   restoring a chat lands on real conversation content. R6's transient
-  question-submit hold is the sole calculation exception: it reserves only the
-  exact tail deficit required to keep the card at its submitted viewport offset.
-  Responsive geometry recomputes that deficit and reapplies the same transient
-  anchor; viewport size never releases it. The overlay is never persisted.
+  question-submit hold is the sole calculation exception: it may reserve only the
+  exact tail deficit required for a stable card handoff while the viewport size is
+  unchanged. It is never persisted and must release to the unanswered card's prior
+  mode before a keyboard or other viewport resize is laid out.
 - **R2 — One send rule everywhere.** The first visible user message always pins to
   the viewport top. Every subsequent direct, queued, promoted, or steered message
   pins only when its submit-time DOM snapshot is at the one physical
@@ -701,7 +701,7 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   emits no scroll event; coordinate comparison is the per-move hot path and physical
   geometry is read at most once for that gesture. After a real scroll lands,
   reader ownership remains active through a short trailing-edge quiet window.
-  Physical touch contact is itself reader ownership (v1.24): from a touch
+  Physical touch contact is itself reader ownership (v1.23): from a touch
   pointer's first contact with the transcript until the last touch pointer
   lifts or cancels, the gesture cannot settle, the no-scroll dead-man cannot
   release, and no layout path may commit a direct or indirect scroll write — a
@@ -788,7 +788,7 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   physical tail without moving through blank room. The only ordinary mode change
   is R3's existing armed-pin handoff when the responsive spacer reaches zero; a
   settled pin never gains follow from resize geometry. The R6 question-submission
-  anchor and focused native-caret rebase remain the two explicit editing rules,
+  release and focused native-caret rebase remain the two explicit editing rules,
   not a general keyboard heuristic. Open/close cycles therefore repeat the same
   idempotent operation every time. Browser clamps and controller writes may emit
   `scroll` while the box is changing, but only a gesture-owned scroll may change
@@ -798,24 +798,31 @@ and attaches their rule ids to new diagnostic chats. The Playwright lock-in spec
   separate answers. The answer response declares this ownership independently as
   `answer_turn: "same" | "new"`: an in-process question answer (`answer_delivered`)
   resumes that same row and turn, so answering must not retire its source bridge.
-  Submitting an in-message answer is also a deliberate reading action: before the
-  card enters its pending state or output resumes, the controller snapshots the
-  currently visible message and its exact viewport offset as a transient
-  `ANCHOR_AT`. This prevents the pending card reflow from moving the viewport while
-  the answer request is unresolved. When the same running turn accepts the answer,
+  Submitting an in-message answer is also a deliberate reading action. Pointer
+  activation commits the exact question-card address and its already-observed
+  full-height reservation before native focus can close the keyboard; the click
+  then confirms that same card—not merely its potentially enormous assistant
+  row—as a transient `ANCHOR_AT` together with the exact scroll write. The card
+  also carries a stable semantic locator, while layout-transparent event wrappers
+  remain in the structural fallback address, so active/durable source handoff or
+  preceding-block reconciliation cannot silently retarget the hold. This
+  prevents pending-card or earlier activity reflow from moving the question
+  while the answer request is unresolved. When the same running turn accepts the answer,
   that overlay remains in place. It releases back to `FOLLOW_BOTTOM` only once
   the first renderable post-answer activity also commits, follow owned the
   unanswered card, and no newer reader scroll or semantic location superseded
   it. If response activity races the answer request, neither boundary moves the
   card alone: the release waits until both commits exist. A card that
   began in hold remains held, and a recovered `answer_turn: "new"` continuation
-  never gains follow. Keyboard, toolbar, orientation, and pane changes recompute
-  reachability and reapply that same transient anchor; responsive geometry never
-  restores the pre-submit mode. Acceptance therefore adds no movement, and an
-  already-followed tail begins moving only with the visible response it is
-  following. The transient hold is stripped before persistence. A failed answer
-  keeps that settled reading anchor for the retryable card rather than
-  manufacturing follow intent again.
+  never gains follow. The exact temporary hold is scoped to the viewport where
+  Submit occurred. If the mobile keyboard changes the viewport first, the controller
+  restores the mode that owned the unanswered card before sizing the new geometry.
+  Acceptance therefore adds no movement; an already-followed tail begins moving
+  only with the response it is following. The keyboard still moves the card exactly
+  as it would have moved unanswered.
+  The transient hold is stripped before persistence. A failed answer keeps that
+  settled reading anchor for the retryable card rather than manufacturing follow
+  intent again.
   While the custom-answer field is focused, a visual-viewport change may rebase
   an ordinary `ANCHOR_AT` hold to the browser's current caret-visible position
   instead of reapplying its stale pre-edit offset. `PIN_USER_MSG`,
@@ -876,7 +883,7 @@ path means routing it through the same entries rather than inventing another rul
 | Viewport/keyboard changes | settled `PIN_USER_MSG` | same `PIN_USER_MSG` | Reapply the same pin; geometry never reclassifies it |
 | Viewport/keyboard changes | follow or anchor hold | same mode | Resize reservation to the visible scroll box, then reapply the physical tail or exact anchor; never create or retire follow |
 | Chat exits/backgrounds/returns | any | `ANCHOR_AT` | Restore exact saved anchor |
-| In-message question Submit begins | any | transient `ANCHOR_AT` over the prior mode | Hold the exact visible anchor through acceptance; only response activity may restore captured follow |
+| In-message question Submit begins | any | transient card-addressed `ANCHOR_AT` over the prior mode | Hold the exact submitted question until response activity or newer reader intent |
 | Same running turn accepts a question answer | transient question anchor over any prior mode | same transient anchor; same active assistant row | None; acceptance alone does not move through blank tail room |
 | First renderable activity after an accepted same-turn answer | transient question anchor over prior follow, with no newer reader scroll/location | prior `FOLLOW_BOTTOM`; same active assistant row | Resume the one physical live tail with the response commit |
 | First renderable activity after an accepted same-turn answer | transient question anchor over hold, or superseded submit intent | existing hold | None; resumed output grows below the reader |

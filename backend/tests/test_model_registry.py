@@ -46,6 +46,7 @@ def test_known_models_fallback_lists_current_claude_and_codex():
   # asserting them by name catches a wrong date suffix that a startswith
   # check would miss.
   for model_id in (
+    "claude-fable-5-1",
     "claude-fable-5",
     "claude-sonnet-5",
     "claude-opus-4-8",
@@ -58,7 +59,8 @@ def test_known_models_fallback_lists_current_claude_and_codex():
     "claude-haiku-4-5-20251001",
   ):
     assert model_id in claude, f"{model_id} missing from KNOWN_MODELS[claude]"
-  assert claude[:4] == [
+  assert claude[:5] == [
+    "claude-fable-5-1",
     "claude-fable-5",
     "claude-sonnet-5",
     "claude-opus-4-8",
@@ -81,6 +83,7 @@ def test_known_models_fallback_lists_current_claude_and_codex():
 def test_default_model_visibility_is_curated_until_owner_saves_preferences():
   hidden = set(providers.hidden_model_ids(None))
   for model_id in (
+    "claude-fable-5-1",
     "claude-fable-5",
     "claude-sonnet-5",
     "claude-opus-4-8",
@@ -125,6 +128,15 @@ def test_model_specific_effort_levels_are_registry_metadata(monkeypatch):
     if row["id"] == "claude-opus-4-8"
   )
   assert entry["effort_levels"] == ["low", "medium", "high", "max"]
+
+
+def test_mobius_effort_scale_uses_the_public_product_model():
+  assert providers.MODEL_EFFORT_LEVELS["spark"] == [
+    "minimal", "low", "medium", "high", "max",
+  ]
+  assert providers.MODEL_EFFORT_LEVELS["inkling"] == [
+    "minimal", "low", "medium", "high", "max",
+  ]
 
 
 # --- Expired-token refresh (the 401 root cause) -----------------------
@@ -363,14 +375,6 @@ def test_claude_fallback_context_matches_documented_model_limit():
     entry["id"]: entry
     for entry in providers._fallback_models("claude")
   }
+  assert by_id["claude-fable-5-1"]["context_window"] == 1_000_000
   assert by_id["claude-opus-4-8"]["context_window"] == 1_000_000
   assert by_id["claude-haiku-4-5-20251001"]["context_window"] == 200_000
-
-
-def test_mobius_effort_scale_uses_the_public_product_model():
-  assert providers.MODEL_EFFORT_LEVELS["spark"] == [
-    "minimal", "low", "medium", "high", "max",
-  ]
-  assert providers.MODEL_EFFORT_LEVELS["inkling"] == [
-    "minimal", "low", "medium", "high", "max",
-  ]

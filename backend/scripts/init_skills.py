@@ -61,11 +61,23 @@ RETIRED_SKILLS = DATA_DIR / "shared" / "retired-skills"
 # touched. A set preserves every known unmodified predecessor when one skill
 # needs more than one fix-forward migration over its lifetime.
 _UNMODIFIED_MIGRATIONS = {
+  "agent-coaching.md": {
+    # First shared coaching seed, before Codex gained an exact thread-fork API
+    # and transcript reseeding was removed from the coaching contract.
+    "1730bcf614f0689f2c6459396c342f4090c1374eeb62450e21a81463fe0098bd",
+  },
   "platform-maintenance.md": {
     # Baked copies before the container-boundary guidance. Both hashes are
     # released, untouched generations; owner-edited copies remain protected.
     "bcc617354747c49ddad7fa1f419cf921fd7280909358096323cdbc427ad063c3",
     "b591d15e335c72c0acf394ca7ce4b0daa633e124a487df7a713847cafc13ab6d",
+    # Locally curated hybrid that retained useful mapi diagnostics but omitted
+    # the Host-owned cutover contract. During the 2026-08-24 incident that stale
+    # safety guide left agents without the canonical replacement boundary and
+    # helped raw self-recreation look acceptable. It is not a baked generation,
+    # so register this exact known-bad hash deliberately; any further owner edit
+    # still differs and remains protected.
+    "668bd365e2edf694c921606c9619fff7b8e58806a9eb48745058b22731c44995",
   },
   "goal-planning.md": {
     # First dependency-aware Goal-plan seed. Replace only the untouched copy
@@ -97,9 +109,7 @@ _UNMODIFIED_MIGRATIONS = {
     # existing instances could never receive it without this migration.
     "3993e84013d0359a46306b5a3c21f498b4799767aef84b226a7b07997ab538b9",
     # Seed immediately before parent-owned Wait discovery and the explicit
-    # no-inert-monitor rule. Existing untouched installations must advance to
-    # the same contract as a fresh install, while owner-edited copies remain
-    # protected by the digest gate.
+    # no-inert-monitor rule. Advance only untouched installations.
     "52be8224de1586a91a0a2149907ac09da547aeead99e0649840ea794f8685847",
   },
   "claude.md": {
@@ -123,6 +133,9 @@ _UNMODIFIED_MIGRATIONS = {
     # Current upstream predecessor, including the learning-loop and receipt
     # refinements that Agent Coaching must preserve during migration.
     "3b9af10ffe3db873df8ba7fd9719c126e1de2951c10c7b85cac9f47f27c82217",
+    # Exact upstream seed immediately before coaching became
+    # exact-session-only. Only untouched Reflection copies may migrate.
+    "e5099eee9c5479312a0565c95477d59bab78da325c1622efc7b24d2a81459f34",
   },
   "cron.md": {
     "289336d78ad4268110360f12faac5512d5a53b66aa31c2a6ddd1a44f538f2559",

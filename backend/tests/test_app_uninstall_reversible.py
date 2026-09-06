@@ -299,6 +299,41 @@ def test_purge_after_ttl_hard_deletes(client, auth, db, bypass_url_validation):
   assert not secret_dir.exists()
 
 
+def test_provider_app_purge_detaches_but_preserves_native_project(
+  client, auth, db, bypass_url_validation,
+):
+  app_id = _install(client, auth)["id"]
+  data_root = Path(get_settings().data_dir)
+  project_id = "81d0f51c-cf79-4e82-b0f2-110864cf914e"
+  chat_id = "e85ab07c-4b40-4883-9ae7-ff18cfd0c8a8"
+  project_root = data_root / "projects" / project_id
+  project_root.mkdir(parents=True)
+  (project_root / "keep.txt").write_text("snapshot-owned")
+  db.add(models.Chat(id=chat_id, title="Native project", messages=[]))
+  db.add(models.Project(
+    id=project_id,
+    name="Native project",
+    project_type="provider:template",
+    root_path=f"projects/{project_id}",
+    chat_id=chat_id,
+    source_app_id=app_id,
+    template_snapshot_json={"name": "Snapshot"},
+  ))
+  db.commit()
+
+  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
+  app = db.get(models.App, app_id)
+  app.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
+  db.commit()
+  assert client.get("/api/apps/", headers=auth).status_code == 200
+
+  db.expire_all()
+  project = db.get(models.Project, project_id)
+  assert project is not None
+  assert project.source_app_id is None
+  assert (project_root / "keep.txt").read_text() == "snapshot-owned"
+
+
 def test_purge_keeps_the_row_when_id_keyed_storage_survives(
   client, auth, db, bypass_url_validation, monkeypatch,
 ):

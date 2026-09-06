@@ -69,6 +69,7 @@ ALLOW_UNPUSHED="${ALLOW_UNPUSHED:-0}"
 # empower-with-an-explicit-override shape as --allow-unpushed.
 ALLOW_STALE="${ALLOW_STALE:-0}"
 ALLOW_LOW_DISK="${ALLOW_LOW_DISK:-0}"
+INSTALLED_SOURCE_SHA=""
 BUILT_THIS_RUN=0  # set to 1 once we actually build, so the verify step only
                   # compares the served SHA when THIS run produced the image
 CUTOVER_ID=""
@@ -169,11 +170,25 @@ fi
 
 CURRENT_STEP=""
 LOCAL_SOURCE_CONTEXT=""
+PREFLIGHT_CONTAINER=""
 cleanup_local_source_context() {
   if [ -n "$LOCAL_SOURCE_CONTEXT" ]; then
     rm -rf "$LOCAL_SOURCE_CONTEXT"
     LOCAL_SOURCE_CONTEXT=""
   fi
+}
+# Idempotent: rm -f on a missing container no-ops, and the name is unique to
+# this run ($$), so it can never touch prod.
+cleanup_preflight_container() {
+  if [ -n "$PREFLIGHT_CONTAINER" ]; then
+    docker rm -f "$PREFLIGHT_CONTAINER" >/dev/null 2>&1 || true
+  fi
+}
+# The script's ONE EXIT trap: a second `trap ... EXIT` anywhere below would
+# silently replace it, so every exit-time cleanup is added here.
+on_exit() {
+  cleanup_local_source_context
+  cleanup_preflight_container
 }
 on_err() {
   local rc=$?
@@ -185,7 +200,7 @@ on_err() {
   exit "$rc"
 }
 trap on_err ERR
-trap cleanup_local_source_context EXIT
+trap on_exit EXIT
 
 step()  { CURRENT_STEP="$1"; printf '\n%s[%s] %s%s\n' "$C_BOLD$C_BLUE" "$(date +%H:%M:%S)" "$1" "$C_RESET"; }
 info()  { printf '  %s\n' "$1"; }
@@ -1448,12 +1463,8 @@ fi
 # reuses the already-live (already-proven) image, which needs no pre-check.
 if [ "$BUILT_THIS_RUN" = "1" ] && [ -n "$IMAGE_TAG" ]; then
   step "[preflight] boot the new image in a scratch container"
+  # Naming the scratch box arms its removal in the EXIT trap from here on.
   PREFLIGHT_CONTAINER="${CONTAINER}-preflight-$$"
-  # Remove the scratch box on ANY exit from here on (idempotent: rm -f on a
-  # missing container no-ops). Left set for the rest of the run — it only ever
-  # targets this run's uniquely-$$-named box, so it can't touch prod.
-  _cleanup_preflight() { docker rm -f "$PREFLIGHT_CONTAINER" >/dev/null 2>&1 || true; }
-  trap _cleanup_preflight EXIT
   # Sweep any scratch box a previously-killed run left behind (best-effort).
   docker ps -aq --filter "name=^${CONTAINER}-preflight-" \
     | xargs -r docker rm -f >/dev/null 2>&1 || true
@@ -1463,8 +1474,7 @@ if [ "$BUILT_THIS_RUN" = "1" ] && [ -n "$IMAGE_TAG" ]; then
   _pf_sk=$(python3 -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null \
     || echo "preflight-throwaway-key-at-least-32-chars-not-for-real-use")
   # tmpfs /data → never reads or writes the prod volume; no published port →
-  # no host collision; MOEBIUS_SKIP_BOOTSTRAP skips the first-boot GitHub fetch
-  # (irrelevant to "does it boot"). IMAGE_TAG is the tag compose just rebuilt
+  # no host collision; source is the image’s baked seed, with no remote update. IMAGE_TAG is the tag compose just rebuilt
   # in place, so this runs the about-to-be-deployed image.
   intent "docker run -d --name ${PREFLIGHT_CONTAINER} (tmpfs /data, no port) ${IMAGE_TAG}"
   docker run -d \
@@ -1519,7 +1529,44 @@ if [ "$BUILT_THIS_RUN" = "1" ] && [ -n "$IMAGE_TAG" ]; then
     exit 1
   fi
   ok "preflight protected runtime: current"
-  _cleanup_preflight
+  # Freeze source from the exact image that passed preflight, not a remote ref
+  # that can move during cutover. Fresh volumes seed this same baked clone.
+  INSTALLED_SOURCE_SHA=$(docker exec "$PREFLIGHT_CONTAINER" git -C /app/platform-baked rev-parse HEAD)
+  if ! [[ "$INSTALLED_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    fail "the preflighted image has no verifiable source revision"
+    exit 1
+  fi
+  if docker inspect "$CONTAINER" >/dev/null 2>&1; then
+    step "install the image's reviewed source before container replacement"
+    source_bundle=$(mktemp)
+    container_bundle="/tmp/mobius-deploy-source-$$.bundle"
+    # Image seeds are shallow. Export complete history from the build checkout,
+    # but only after proving it still names the exact preflighted image source.
+    if [ "$(git -C "$REPO_ROOT" rev-parse HEAD)" != "$INSTALLED_SOURCE_SHA" ] ||
+       [ "$(git -C "$REPO_ROOT" rev-parse --is-shallow-repository)" != "false" ]; then
+      rm -f "$source_bundle"
+      fail "source transfer requires a complete checkout still at the image's reviewed commit"
+      fail "restore that checkout (unshallow if necessary), then retry; no container was replaced"
+      exit 1
+    fi
+    if ! git -C "$REPO_ROOT" bundle create "$source_bundle" HEAD ||
+       ! docker exec -i -u mobius "$CONTAINER" sh -c 'cat > "$1"' sh "$container_bundle" < "$source_bundle"; then
+      rm -f "$source_bundle"
+      fail "could not transfer the reviewed source; live container was not replaced"
+      exit 1
+    fi
+    rm -f "$source_bundle"
+    if ! docker exec -i -u mobius -w /data/platform/backend "$CONTAINER" python3 - \
+      --bundle "$container_bundle" --target "$INSTALLED_SOURCE_SHA" \
+      < "$REPO_ROOT/backend/scripts/install_platform_release.py"; then
+      docker exec -u mobius "$CONTAINER" rm -f "$container_bundle" || true
+      fail "source installation did not complete; resolve it before retrying this deployment"
+      fail "the live container has not been replaced"
+      exit 1
+    fi
+    docker exec -u mobius "$CONTAINER" rm -f "$container_bundle"
+  fi
+  cleanup_preflight_container
   ok "preflight passed — the new image is serviceable; cutting over"
 elif [ "$SKIP_BUILD" = "1" ]; then
   info "preflight skipped (--skip-build): reusing the already-live image; nothing new to pre-check"
@@ -1598,7 +1645,7 @@ fi
 
 # ── step 3: rebuild the served platform frontend ───────────────────────
 # The authoritative frontend source and dist now live in /data/platform. After
-# boot reconcile advances the clone, rebuild that tree in place; do not copy
+# explicit installation prepares the clone, rebuild that tree in place; do not copy
 # from /app/shell-src, and do not touch any leftover legacy shell directory.
 # StaticFiles keeps serving the same dist path, so no extra restart is needed
 # after the swap.
@@ -1673,101 +1720,17 @@ else
   exit 1
 fi
 
-# ── served PLATFORM ancestry assertion (prod only) ─────────────────────
-# The backend-sha block above reads the IMAGE build sha. Under the clone model,
-# the deployed backend is the served /data/platform HEAD after boot reconcile.
-# Assert freshness by ancestry: origin/main must be contained in
-# that served HEAD (exact equality is fine; local agent commits replayed on top
-# are also fine).
-# Reconcile conflict/rollback states remain explicit exceptions because they
-# intentionally keep the previous working tree live. Offline verification is
-# a warning because boot reconciliation retries when origin becomes reachable.
-if [ "$TARGET" = "prod" ]; then
+# Verify the frozen source release without a network lookup or a freshness
+# exemption. Local overlay commits are allowed; selecting another release is not.
+if [ "$TARGET" = "prod" ] && [ -n "$INSTALLED_SOURCE_SHA" ]; then
   serving_source=$(served_version_field serving_source)
-  platform_sha=$(served_version_field platform_sha)
-  case "$platform_sha" in null|unknown) platform_sha="" ;; esac
-
-  platform_freshness=$(docker exec -u mobius \
-    "$CONTAINER" bash -c '
-    ref=refs/heads/main
-    tracking=refs/remotes/origin/main
-    cd /data/platform 2>/dev/null || { echo missing; exit 0; }
-    [ -f /data/.platform-conflict ] && { echo conflict; exit 0; }
-    [ -f /data/.platform-rolled-back ] && { echo rolled_back; exit 0; }
-    [ -f /data/.platform-offline ] && { echo offline_flag; exit 0; }
-    head=$(git rev-parse --verify HEAD 2>/dev/null) || { echo invalid; exit 0; }
-    if ! git fetch --quiet --no-tags origin "+$ref:$tracking" >/dev/null 2>&1; then
-      echo offline; exit 0
-    fi
-    target=$(git rev-parse --verify "${tracking}^{commit}" 2>/dev/null) || { echo offline; exit 0; }
-    if [ "$head" = "$target" ]; then
-      echo "exact:$head"; exit 0
-    fi
-    if git merge-base --is-ancestor "$target" "$head" 2>/dev/null; then
-      echo "ancestor:$target:$head"; exit 0
-    fi
-    echo "stale:$target:$head"
-  ' 2>/dev/null || echo probe_failed)
-
-  case "$platform_freshness" in
-    conflict)
-      warn "served platform freshness skipped: /data/.platform-conflict is set."
-      warn "The previous working platform remains live until the conflict is resolved."
-      ;;
-    rolled_back)
-      warn "served platform freshness skipped: /data/.platform-rolled-back is set."
-      warn "Boot reconcile rejected the update and kept the previous working platform live."
-      ;;
-    offline|offline_flag)
-      warn "served platform freshness skipped: ${PLATFORM_RELEASE_LABEL} could not be refreshed in the container."
-      warn "Boot reconcile will retry when origin is reachable."
-      ;;
-    exact:*)
-      head_sha=${platform_freshness#exact:}
-      if [ "$serving_source" != "platform" ]; then
-        fail "served platform source is '${serving_source:-<unknown>}' even though /data/platform is fresh."
-        fail "The backend is not serving the one served tree; investigate entrypoint fallback."
-        exit 1
-      fi
-      ok "served platform: HEAD == ${PLATFORM_RELEASE_LABEL} (${head_sha:0:18}…)"
-      ;;
-    ancestor:*)
-      pair=${platform_freshness#ancestor:}
-      origin_sha=${pair%%:*}
-      head_sha=${pair#*:}
-      if [ "$serving_source" != "platform" ]; then
-        fail "served platform source is '${serving_source:-<unknown>}' even though /data/platform is fresh."
-        fail "The backend is not serving the one served tree; investigate entrypoint fallback."
-        exit 1
-      fi
-      if [ -n "$platform_sha" ] && [ "$platform_sha" != "$head_sha" ]; then
-        fail "/api/version platform_sha ${platform_sha:0:18}… != /data/platform HEAD ${head_sha:0:18}…"
-        fail "The served-platform stamp is stale after reconcile."
-        exit 1
-      fi
-      ok "served platform: ${PLATFORM_RELEASE_LABEL} ${origin_sha:0:18}… is ancestor of served HEAD ${head_sha:0:18}…"
-      ;;
-    stale:*)
-      pair=${platform_freshness#stale:}
-      origin_sha=${pair%%:*}
-      head_sha=${pair#*:}
-      fail "served platform is stale: ${PLATFORM_RELEASE_LABEL} ${origin_sha:0:18}… is not an ancestor of /data/platform HEAD ${head_sha:0:18}…"
-      fail "No reconcile conflict/offline flag explains the drift; deploy did not advance the served tree."
-      exit 1
-      ;;
-    missing)
-      fail "/data/platform is missing after recreate; entrypoint did not seed the served tree."
-      exit 1
-      ;;
-    invalid)
-      fail "/data/platform exists but has no valid git HEAD after recreate."
-      exit 1
-      ;;
-    *)
-      fail "could not verify served platform freshness (${platform_freshness})."
-      exit 1
-      ;;
-  esac
+  if [ "$serving_source" != "platform" ] || ! docker exec -u mobius "$CONTAINER" \
+    git -C /data/platform merge-base --is-ancestor "$INSTALLED_SOURCE_SHA" HEAD; then
+    fail "the running platform does not contain the source selected from the reviewed image"
+    fail "do not report this deployment complete; inspect source recovery and fallback"
+    exit 1
+  fi
+  ok "served platform contains reviewed source ${INSTALLED_SOURCE_SHA:0:18}… plus local changes"
 fi
 
 # Internal /api/health (we already checked this twice during waits, but

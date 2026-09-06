@@ -67,7 +67,9 @@ PY
 echo "  ok — all backend .py parse"
 
 echo "[4/6] immutable schema migration history"
-python3 backend/scripts/check-schema-migrations.py \
+git rev-parse --verify origin/main >/dev/null 2>&1 \
+  || fail "cannot identify origin/main migration baseline"
+python3 backend/scripts/check-schema-migrations.py --against origin/main \
   || fail "published migration history changed"
 
 if [ "$FULL" = "0" ]; then

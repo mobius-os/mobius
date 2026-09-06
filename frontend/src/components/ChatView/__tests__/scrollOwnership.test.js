@@ -114,11 +114,7 @@ test('gesture scroll frames defer anchor, spacer, and persistence work until set
   assert.doesNotMatch(settlePath, /spacerH|hasReservedTail/,
     'physical-bottom intent must not branch on invisible reservation')
   assert.match(settlePath, /persistMode\(\)/)
-  assert.match(
-    settlePath,
-    /syncLayout\(\{ forceApply: true, authorityVersion: currentAuthority\(\) \}\)/,
-    'settlement must resize and re-apply the captured semantic coordinate atomically',
-  )
+  assert.match(settlePath, /sizeSpacer\(currentAuthority\(\)\)/)
   assert.doesNotMatch(settlePath, /PIN_USER_MSG|contentHoldModeFromScroll/,
     'a reader gesture may hold or follow but must never recreate pin authority')
   assert.doesNotMatch(

@@ -1,9 +1,14 @@
 import { useCallback } from 'react'
 
+// Legacy slug aliases keep old deep links working after an app is renamed.
+// The Pages app was historically slugged "artifacts".
+const LEGACY_SLUG_ALIASES = { artifacts: 'pages' }
+
 export function findAppForOpenTarget(list, target) {
   if (target == null) return null
+  const resolved = LEGACY_SLUG_ALIASES[target] || target
   return (list || []).find(app =>
-    String(app.id) === String(target) || app.slug === target) || null
+    String(app.id) === String(target) || app.slug === resolved) || null
 }
 
 export default function useAppIntentNavigation({

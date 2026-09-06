@@ -3,7 +3,7 @@ import { api, setToken } from '../../api/client.js'
 import { detailToMessage } from '../../lib/errorDetail.js'
 import './LoginForm.css'
 
-export default function LoginForm({ onLogin }) {
+export default function LoginForm({ onLogin, authMode = 'local' }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
@@ -56,6 +56,14 @@ export default function LoginForm({ onLogin }) {
         {expired && (
           <p className="login__expired" role="alert">Your session expired — please log in again.</p>
         )}
+        {authMode === 'mobius' ? (
+          // Either/or: in mobius mode the password form is never shown. The
+          // start endpoint is a plain GET that 303-redirects into the PKCE
+          // flow, so a normal link is all that is needed.
+          <a className="login__btn" href={api.auth.mobius.startUrl()}>
+            Sign in with mobius.you
+          </a>
+        ) : (
         <form className="login__form" onSubmit={handleSubmit}>
           <label className="login__label">
             Username
@@ -91,9 +99,12 @@ export default function LoginForm({ onLogin }) {
             {loading ? 'Signing in…' : 'Sign in'}
           </button>
         </form>
-        <p className="login__hint">
-          If you've forgotten your password, ask the server operator for help.
-        </p>
+        )}
+        {authMode === 'local' && (
+          <p className="login__hint">
+            If you've forgotten your password, ask the server operator for help.
+          </p>
+        )}
       </div>
     </div>
   )

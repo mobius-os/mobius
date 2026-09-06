@@ -22,9 +22,9 @@ def _top_level_auth(db, chat_id: str, run_id: str) -> dict[str, str]:
   owner = db.query(models.Owner).first()
   token = auth_mod.create_agent_token(
     chat_id,
-    run_id,
     owner.username,
     owner.token_epoch,
+    run_id=run_id,
     expires_delta=timedelta(minutes=5),
   )
   return {"Authorization": f"Bearer {token}"}

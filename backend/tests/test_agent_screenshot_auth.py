@@ -675,6 +675,7 @@ def test_current_page_capture_preserves_document_but_reuses_verified_boundary(
     command.startswith("eval ") and "__mobiusFontReadiness" in command
     for command in commands
   )
+  assert not any("Not now" in command for command in commands), "capture must not dismiss the owner’s open dialog"
   assert not any("Toggle navigation" in command for command in commands)
   assert not any(".drawer-overlay--blocking" in command for command in commands)
   assert any(command.startswith("screenshot ") for command in commands)
@@ -923,6 +924,7 @@ def test_shell_capture_waits_for_visual_ownership_and_rendered_fonts(tmp_path: P
     and "first-contentful-paint" in command
   )
   settle_command = commands[settle_index]
+  assert "data-mobius-visual-state" in settle_command
   assert "shell__chat-view--staging" not in settle_command
   assert "shell__chat-view--held" not in settle_command
   assert "data-mode-motion" not in settle_command

@@ -208,6 +208,20 @@ export function deriveContentVisibility({
     const slot = workspace.singleScreen
     visibleAppIds = (slot && slot.kind === 'app') ? new Set([String(slot.id)]) : new Set()
   } else visibleAppIds = paneModel.visibleAppIds(workspace, projection.visibleLeaves)
+  // Chat attention and recovery must read the same painted-world decision as
+  // app frame visibility. In Standard mode the slot may not exist in Builder's
+  // pane tree at all, so projecting only visible leaves would leave an opened
+  // chat marked as hidden. Settings and immersive own the box and therefore
+  // expose no chat; ordinary Builder mode exposes every visible pane's active
+  // chat.
+  let visibleChatIds
+  if (settingsOverlay || immersive) visibleChatIds = new Set()
+  else if (single) {
+    const slot = workspace.singleScreen
+    visibleChatIds = (slot && slot.kind === 'chat')
+      ? new Set([String(slot.id)])
+      : new Set()
+  } else visibleChatIds = paneModel.visibleChatIds(workspace, projection.visibleLeaves)
   // Chat panes stay MOUNTED (no remount on overlay/view toggle) but hidden while a
   // takeover owns the box. In an ordinary builder world and single-mode they
   // paint; the renderer additionally gates each NON-focused single-mode chat pane
@@ -219,7 +233,8 @@ export function deriveContentVisibility({
     // builder AND during a single-mode drag preview (viewMode='panes').
     // Shell's PAINT gates read THIS, not the committed-gated nav flag, so the tiled
     // world paints with the takeover suspended exactly as the flags above assume.
-    multiPane, single, focusedActiveKey, chromeActive, fullBleedKey, visibleAppIds,
+    multiPane, single, focusedActiveKey, chromeActive, fullBleedKey,
+    visibleAppIds, visibleChatIds,
     chatPanesVisible, settingsOverlay,
   }
 }

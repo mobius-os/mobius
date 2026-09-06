@@ -52,9 +52,9 @@ export function contributionsForChatQueryOptions(appId, chatId) {
     queryKey: contributionsForChatQueryKey(appId, chatId),
     queryFn: () => api.contributions.forChat(appId, chatId)
       .then(response => (response.ok ? response.json() : null)),
-    // Attached contribution work is durable and does not run this source
-    // chat. Poll only while its child is live so the chat card and Changes
-    // become the progress surface without spending another provider turn.
+    // Attached work and publication claims are durable and do not run this
+    // source chat. Poll only while either is live so Changes can reconcile a
+    // completion or lost response without spending another provider turn.
     refetchInterval: query => {
       const data = query.state.data
       const workActive = [
@@ -74,6 +74,8 @@ export function contributionsForChatQueryOptions(appId, chatId) {
 export function chatEditDiffsQueryOptions(chatId) {
   return {
     queryKey: chatEditDiffsQueryKey(chatId),
+    // This owner route scans the complete persisted transcript. The mounted
+    // message window is only a live supplement in useChatChangesOverview.
     queryFn: ({ signal } = {}) => loadChatDiffEntries(
       chatId,
       { request: apiFetch, signal },
@@ -102,6 +104,9 @@ export function invalidateChatChangesQueries(queryClient, chatId) {
         query?.queryKey?.[0] === 'chat-contribution-coverage'
         && String(query.queryKey[2] || '') === targetChatId
       ),
+    }),
+    queryClient.invalidateQueries({
+      queryKey: ['drawer-contribution-flags'],
     }),
   ])
 }

@@ -13,7 +13,8 @@ export default function StreamingMessage({
   dataKey,
   chatId,
   onAnswer,
-  onAnswerPrepare,
+  onPrepareAnswer,
+  onCancelAnswer,
   onResume,
   onInternalNav,
   autoResumeEnabled,
@@ -39,7 +40,8 @@ export default function StreamingMessage({
         chatId={chatId}
         messageKey={dataKey}
         onQuestionAnswer={onAnswer}
-        onQuestionAnswerPrepare={onAnswerPrepare}
+        onQuestionSubmitIntent={onPrepareAnswer}
+        onQuestionSubmitCancel={onCancelAnswer}
         onResume={onResume}
         onInternalNav={onInternalNav}
         autoResumeEnabled={autoResumeEnabled}

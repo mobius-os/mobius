@@ -42,10 +42,11 @@ def test_apply_prints_compact_reusable_identity_receipt(
   monkeypatch.setattr(sys, "argv", ["apply_app.py", str(source)])
   monkeypatch.setenv("AGENT_TOKEN", "agent-token")
   monkeypatch.setenv("CHAT_ID", "building-chat")
-  monkeypatch.setattr(
-    module.urllib.request,
-    "urlopen",
-    lambda request, timeout: _Response({
+  captured = {}
+
+  def urlopen(request, timeout):
+    captured["payload"] = json.loads(request.data)
+    return _Response({
       "mode": "created",
       "warnings": ["skill guide.md: left unchanged"],
       "app": {
@@ -57,8 +58,9 @@ def test_apply_prints_compact_reusable_identity_receipt(
         "capability_contract": {"large": "payload"},
         "compiled_path": "/private/runtime/path",
       },
-    }),
-  )
+    })
+
+  monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
 
   module.main()
 
@@ -73,6 +75,7 @@ def test_apply_prints_compact_reusable_identity_receipt(
     "open_path": "/shell/?app=73",
     "warnings": ["skill guide.md: left unchanged"],
   }
+  assert "accept_local_package" not in captured["payload"]
 
 
 def test_apply_forwards_explicit_local_package_acceptance(

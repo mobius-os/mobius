@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -17,10 +18,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import (
-  activity, auth, chat_search, models, providers, questions, schemas,
+  activity,
+  auth,
+  chat_failure_activity,
+  chat_search,
+  models,
+  providers,
+  questions,
+  schemas,
   secure_inputs,
 )
-from app.chat_provider import resolve_chat_provider
 from app.chat_visibility import coerce_agent_settings, visible_in_owner_drawer
 from app.chat_event_sink import active_sink_assistant_message_id
 from app.chat_waits import (
@@ -33,10 +40,10 @@ from app.chat import (
   _finish_run,
   bump_run_generation,
   is_chat_running,
-  is_draining,
   mark_chat_deleted,
   recover_chat_generation,
   stop_chat_for,
+  usage_limit_waiting_chat_ids,
 )
 from app.broadcast import get_system_broadcast
 from app.chat_retention import purge_expired_chat_tombstones
@@ -46,10 +53,7 @@ from app.chat_titles import (
   renamed_event,
 )
 from app.database import get_db
-from app.delegations import (
-  background_helper_chat_ids,
-  serialize_background_helpers,
-)
+from app.delegations import background_helper_chat_ids, serialize_background_helpers
 from app.goal_plans import presented_goal
 from app.memory_observability import record_memory_checkpoint_once
 from app.owner_input import OwnerInputKind
@@ -83,6 +87,7 @@ from app.usage_metrics import CHAT_TOKEN_FIELDS, summarize_chat_run_tokens
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chats", tags=["chats"])
+_OWNER_CHAT_CREATE_LOCK = threading.Lock()
 
 
 def _open_question_id_for(chat: models.Chat) -> str | None:
@@ -279,6 +284,8 @@ def _project_ref_for_chat(db: Session, chat) -> dict | None:
   )
   if row is None:
     return None
+  # root_path is the project's logical locator under the data dir; the composer
+  # uses it to turn an @-mentioned file into an ordinary path for the agent.
   return {
     "id": row[0],
     "name": row[1],
@@ -409,9 +416,15 @@ def _owner_chat_summary(
   durable_running: bool = False,
   durable_waiting: bool = False,
   transient_owner_input_kind: OwnerInputKind | None = None,
+  unseen_failure_version: int | None = None,
   project_ref: dict | None = None,
 ) -> dict:
-  """Canonical owner-list shape for a Chat or its lightweight projection."""
+  """Canonical owner-list shape for a Chat or its lightweight projection.
+
+  ``project_ref`` is ``{"id", "name", "root_path", "color"}`` when the chat belongs to a live project,
+  else None — the drawer renders it as a clickable project chip on the Recents
+  row.
+  """
   return {
     "id": chat.id,
     "title": chat.title,
@@ -439,6 +452,8 @@ def _owner_chat_summary(
       if chat.pending_question_id is not None
       else transient_owner_input_kind
     ),
+    "has_unseen_failure": unseen_failure_version is not None,
+    "unseen_failure_version": unseen_failure_version,
   }
 
 
@@ -627,14 +642,26 @@ def _chat_detail_response(
     page = next_page
 
   settings_obj = _coerce_agent_settings(chat.agent_settings_json) or None
+  # The picker's current model must match what a message would actually use. A
+  # chat with no per-chat model reads the LIVE global default model, but its
+  # stored provider was frozen at creation; if the global model's family has
+  # since changed, effective_agent_settings(provider=chat.provider) resolves no
+  # model and the picker shows nothing. Derive the display provider the same way
+  # the send path does: an explicit per-chat model wins; otherwise a pristine
+  # chat follows the current global model (the single source of truth); a chat
+  # that already ran keeps its committed provider.
   _has_assistant_turns = any(m.get("role") == "assistant" for m in all_msgs)
-  provider = resolve_chat_provider(
-    chat,
-    data_dir=get_settings().data_dir,
-    running=running,
-    draining=is_draining(),
+  provider = (
+    providers.provider_of_model((settings_obj or {}).get("model"))
+    or (
+      chat.provider or "claude"
+      if _has_assistant_turns
+      else providers.owner_default_provider(get_settings().data_dir, chat.provider)
+    )
   )
-  active_goal_objective = running_goal_objective(db, chat.id)
+  active_goal_objective = (
+    running_goal_objective(db, chat.id) if running else None
+  )
   goal = presented_goal(db, chat.id)
   response = {
     "id": chat.id,
@@ -663,6 +690,8 @@ def _chat_detail_response(
       provider=provider,
     ),
     "has_assistant_turns": _has_assistant_turns,
+    # Same ref shape as the chat list rows: the composer's @-mention of
+    # project files activates only for a chat that belongs to a live project.
     "project": _project_ref_for_chat(db, chat),
     # Armed durable waits: the visible "Waiting for …" state. Refreshed by the
     # detail refetches the run lifecycle already triggers, so declare (during a
@@ -702,6 +731,14 @@ def list_chats(
   # Drawer projection only. ``has_messages`` is maintained with the transcript
   # by the Chat model and the two writer bulk-update paths, so this hot query
   # never reads or decodes the potentially large ``messages`` JSON column.
+  # Recents now INCLUDES project chats, each carrying its project so the drawer
+  # can render a project chip. The LEFT JOIN attaches the owning live project by
+  # either membership shape — the current ``Chat.project_id`` link OR the legacy
+  # ``Project.chat_id`` primary-chat link a not-yet-backfilled row may still
+  # carry — and its ``deleted_at IS NULL`` guard means a soft-deleted project
+  # never supplies a chip (and its chats are already tombstoned by the cascade,
+  # so they do not appear at all). Project identity columns are labelled to
+  # avoid colliding with the ``Chat.id`` projection.
   q = db.query(
     models.Chat.id,
     models.Chat.title,
@@ -729,7 +766,9 @@ def list_chats(
       | (models.Project.chat_id == models.Chat.id)
     )
     & models.Project.deleted_at.is_(None),
-  ).filter(models.Chat.deleted_at.is_(None))
+  ).filter(
+    models.Chat.deleted_at.is_(None),
+  )
   chats = (
     q.order_by(
       models.Chat.pinned_at.is_(None),
@@ -744,8 +783,13 @@ def list_chats(
     # owner conversation into the drawer by setting owner_visible at creation.
     chats = [c for c in chats if _visible_in_owner_drawer(c)]
   durable_running = running_chat_ids(db, (chat.id for chat in chats))
-  durable_waiting = armed_wait_chat_ids(db) | background_helper_chat_ids(
-    db, (chat.id for chat in chats)
+  durable_waiting = (
+    armed_wait_chat_ids(db)
+    | background_helper_chat_ids(db, (chat.id for chat in chats))
+    | usage_limit_waiting_chat_ids(db, (chat.id for chat in chats))
+  )
+  unseen_failures = chat_failure_activity.unseen_versions(
+    db, (chat.id for chat in chats),
   )
   secure_input_chats = secure_inputs.pending_chat_ids()
   record_memory_checkpoint_once(
@@ -760,6 +804,7 @@ def list_chats(
       transient_owner_input_kind=(
         "secure_input" if chat.id in secure_input_chats else None
       ),
+      unseen_failure_version=unseen_failures.get(chat.id),
       project_ref=(
         {
           "id": chat.project_ref_id,
@@ -773,6 +818,28 @@ def list_chats(
     )
     for chat in chats
   ]
+
+
+class ChatFailureSeenRequest(BaseModel):
+  activity_version: int = Field(ge=1, le=(2**63 - 1))
+
+
+@router.post(
+  "/{chat_id}/failure-activity/seen",
+  status_code=204,
+  dependencies=[Depends(reject_cross_site)],
+)
+def mark_chat_failure_seen(
+  chat_id: str,
+  body: ChatFailureSeenRequest,
+  db: Session = Depends(get_db),
+  _: models.Owner = Depends(get_current_owner),
+):
+  """Clear the exact durable failure marker an opened chat observed."""
+  get_active_chat_or_404(db, chat_id)
+  chat_failure_activity.mark_seen(db, chat_id, body.activity_version)
+  db.commit()
+  return Response(status_code=204)
 
 
 @router.get("/search")
@@ -958,22 +1025,13 @@ def create_chat(
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
-  """Creates a new chat.
+  """Create a chat with the owner's latest complete picker choice.
 
-  Leaves `agent_settings_json` NULL so the chat reads the owner's latest
-  picker choices from `/data/shared/agent-settings.json` until the user
-  picks something specific. Snapshotting at creation time used to
-  freeze whatever the defaults were when the empty chat was first
-  created, and the frontend's empty-chat reuse path then surfaced
-  that stale snapshot — silently ignoring whichever model/effort the
-  user had since picked. The snapshot now happens lazily, at the
-  first commit point: a PATCH from the picker (see `patch_chat`
-  below) or the first admitted message send (see `chat.py`).
-  Either path freezes the chat's settings so subsequent global
-  changes from OTHER chats don't bleed in. Provider is still
-  inherited from owner.provider — the implicit "default = last
-  picked" — because later provider changes require a handoff and we
-  want the new chat to start on the user's current provider.
+  The sole nullable-model exception is the first chat on a fresh install,
+  before the owner has ever selected a model. Every later chat snapshots an
+  explicit model at creation; if that first chat somehow remains unselected
+  while another chat is requested, the connected provider's safe default is
+  persisted rather than creating a second model-less row.
   """
   import uuid
 
@@ -1008,30 +1066,41 @@ def create_chat(
     data_dir, owner.provider if owner else None,
   )
 
-  chat = models.Chat(
-    id=chat_id,
-    title=body.title or "New chat",
-    messages=body.messages or [],
-    provider=provider,
-    agent_settings_json=None,
-    auto_resume_on_limit=(
-      bool(owner.auto_resume_on_limit_default) if owner else False
-    ),
-  )
-  db.add(chat)
-  try:
-    db.commit()
-  except IntegrityError:
-    db.rollback()
-    # Both client-supplied identities (recovery id and a client-minted chat id)
-    # make create idempotent: a concurrent/retried create for the same id
-    # returns the row that won the race instead of failing.
-    if not body.recovery_request_id and not body.id:
-      raise
-    existing = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-    if existing is None or existing.deleted_at is not None:
-      raise
-    return _chat_create_response(existing, db)
+  with _OWNER_CHAT_CREATE_LOCK:
+    agent_settings = providers.snapshot_chat_agent_settings(
+      data_dir, provider,
+    )
+    if agent_settings is None and db.query(models.Chat.id).first() is not None:
+      agent_settings = providers.snapshot_chat_agent_settings(
+        data_dir,
+        provider,
+        fallback_model=providers.DEFAULT_MODELS.get(provider),
+      )
+
+    chat = models.Chat(
+      id=chat_id,
+      title=body.title or "New chat",
+      messages=body.messages or [],
+      provider=provider,
+      agent_settings_json=agent_settings,
+      auto_resume_on_limit=(
+        bool(owner.auto_resume_on_limit_default) if owner else False
+      ),
+    )
+    db.add(chat)
+    try:
+      db.commit()
+    except IntegrityError:
+      db.rollback()
+      # Both client-supplied identities (recovery id and a client-minted chat id)
+      # make create idempotent: a concurrent/retried create for the same id
+      # returns the row that won the race instead of failing.
+      if not body.recovery_request_id and not body.id:
+        raise
+      existing = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+      if existing is None or existing.deleted_at is not None:
+        raise
+      return _chat_create_response(existing, db)
   db.refresh(chat)
   activity.log_event("chat_created", chat_id=chat.id)
   _reclaim_expired_tombstones_after_chat_write(db)
@@ -1146,15 +1215,28 @@ async def update_chat(
 
   get_active_chat_or_404(db, chat_id)
   if body.messages is not None:
-    ack = get_writer().submit(
-      ReplaceTranscript(
-        chat_id=chat_id,
-        run_token="",
-        messages=body.messages,
-        title=body.title,  # None leaves the title unchanged
+    from app.chat_queue import get_transition_lock
+    from app.gauntlets import active_controller_gauntlet
+
+    async with get_transition_lock(chat_id):
+      db.rollback()
+      get_active_chat_or_404(db, chat_id)
+      if active_controller_gauntlet(db, chat_id) is not None:
+        raise HTTPException(
+          status_code=409,
+          detail=(
+            "The Gauntlet owns this controller transcript until it finishes."
+          ),
+        )
+      ack = get_writer().submit(
+        ReplaceTranscript(
+          chat_id=chat_id,
+          run_token="",
+          messages=body.messages,
+          title=body.title,  # None leaves the title unchanged
+        )
       )
-    )
-    await await_ack(ack)
+      await await_ack(ack)
     return {"ok": True}
 
   # Title-only update — direct write (no transcript mutation).
@@ -1220,6 +1302,20 @@ async def patch_chat(
 
   async with get_transition_lock(chat_id):
     chat = get_active_chat_for_principal(db, chat_id, principal)
+    if (
+      body.provider is not None
+      or body.clear_agent_settings
+      or body.agent_settings_json is not None
+    ):
+      from app.gauntlets import active_controller_gauntlet
+      if active_controller_gauntlet(db, chat_id) is not None:
+        raise HTTPException(
+          status_code=409,
+          detail=(
+            "The Gauntlet has frozen this controller's provider and agent "
+            "settings until it finishes."
+          ),
+        )
     agent_settings_patch = (
       body.agent_settings_json.model_dump(exclude_unset=True)
       if body.agent_settings_json is not None else {}
@@ -1249,8 +1345,22 @@ async def patch_chat(
     if body.pinned is not None:
       chat.pinned_at = now_naive_utc() if body.pinned else None
 
+    data_dir = get_app_settings().data_dir
+    if "model" in agent_settings_patch and not (
+      isinstance(agent_settings_patch.get("model"), str)
+      and agent_settings_patch["model"].strip()
+    ):
+      raise HTTPException(
+        status_code=422,
+        detail="A chat must always keep an explicitly selected model.",
+      )
+
     if body.clear_agent_settings:
-      chat.agent_settings_json = None
+      chat.agent_settings_json = providers.snapshot_chat_agent_settings(
+        data_dir,
+        chat.provider or "claude",
+        fallback_model=providers.DEFAULT_MODELS.get(chat.provider or "claude"),
+      )
     elif body.agent_settings_json is not None:
       existing = _coerce_agent_settings(chat.agent_settings_json)
       for k, v in agent_settings_patch.items():
@@ -1284,11 +1394,12 @@ async def patch_chat(
     target_provider = body.provider
     new_model = agent_settings_patch.get("model")
     if target_provider is None and new_model:
-      from app.providers import _known_model_provider
+      from app.providers import _model_belongs_to_other_provider
       current_provider = chat.provider or "claude"
-      inferred_provider = _known_model_provider(new_model)
-      if inferred_provider and inferred_provider != current_provider:
-        target_provider = inferred_provider
+      if _model_belongs_to_other_provider(new_model, current_provider):
+        target_provider = (
+          "codex" if current_provider == "claude" else "claude"
+        )
 
     if new_model:
       from app.providers import _model_belongs_to_other_provider
@@ -1335,23 +1446,22 @@ async def patch_chat(
           "handoff so the incoming provider can continue its context."
         ),
       )
-    if target_provider is not None:
+    if target_provider is not None and target_provider in ("claude", "codex", "mobius"):
       # Reject a switch to a disconnected provider — the picker may
       # have raced ahead of /auth/providers/status, or the user may
       # be on stale state. Without this check the PATCH would succeed
       # silently and then every subsequent message turn would fail
       # auth, leaving the user confused. 409 surfaces the real
       # problem at pick-time.
-      from app.providers import get_provider, provider_requirement_error
+      from app.providers import get_provider
       candidate = get_provider(target_provider)
-      requirement_error = provider_requirement_error(candidate, db)
-      auth_error = requirement_error or await run_in_threadpool(
+      auth_error = await run_in_threadpool(
         candidate.check_auth, get_app_settings().data_dir
       )
       if auth_error is not None:
         raise HTTPException(
           status_code=409,
-          detail=requirement_error or (
+          detail=(
             f"{candidate.name} is not connected. "
             "Open Settings to connect, then try again."
           ),
@@ -1390,8 +1500,6 @@ async def patch_chat(
         provider=chat.provider,
         from_provider=prev_provider,
       )
-    data_dir = get_app_settings().data_dir
-
     # Mirror the new pick to the global default immediately. New
     # chats read /data/shared/agent-settings.json on creation, so
     # the user's latest model/effort/provider becomes the seed for
@@ -1959,7 +2067,6 @@ def get_chat_agent_context(
 @router.get("/{chat_id}/usage")
 def get_chat_usage(
   chat_id: str,
-  include_runs: bool = True,
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
@@ -2008,7 +2115,7 @@ def get_chat_usage(
         "usage": run.usage_json,
       }
       for run in runs
-    ] if include_runs else [],
+    ],
   }
 
 
@@ -2096,15 +2203,37 @@ async def delete_chat(
   _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
-  """Soft-deletes a chat under its send/delegation admission gate."""
-  from app.chat_queue import get_transition_lock
-
-  async with get_transition_lock(chat_id):
-    await _delete_chat_locked(chat_id, db)
-
-
-async def _delete_chat_locked(chat_id: str, db: Session) -> None:
   """Soft-deletes a chat and stops any running agent for it."""
+  from app.gauntlets import active_gauntlet_ids_for_chat, stop_gauntlet
+  for gauntlet_id in active_gauntlet_ids_for_chat(db, chat_id):
+    stopped_gauntlet = await stop_gauntlet(gauntlet_id)
+    if (
+      stopped_gauntlet is not None
+      and stopped_gauntlet.get("status") == "stopping"
+    ):
+      raise HTTPException(
+        status_code=409,
+        detail=(
+          "Could not stop all Gauntlet work yet; retry chat deletion after "
+          "the active provider process exits."
+        ),
+      )
+  from app.delegations import (
+    active_delegation_ids_for_chat,
+    cancel_delegation_execution,
+  )
+  db.rollback()
+  for delegation_id in active_delegation_ids_for_chat(db, chat_id):
+    if not await cancel_delegation_execution(delegation_id):
+      raise HTTPException(
+        status_code=409,
+        detail=(
+          "Could not stop delegated work yet; retry chat deletion after the "
+          "active provider process exits."
+        ),
+      )
+  db.rollback()
+  db.expire_all()
   # Only attempt to stop if the chat is actually running. An idle chat
   # has no proc/SDK client/session to interrupt, so calling
   # stop_chat_for would be a no-op — but a transient error during the
@@ -2123,43 +2252,44 @@ async def _delete_chat_locked(chat_id: str, db: Session) -> None:
         status_code=409,
         detail="Could not stop active agent; retry",
       )
-  from app.delegations import (
-    active_delegation_ids_for_chat,
-    cancel_delegation_execution,
-  )
-  for delegation_id in active_delegation_ids_for_chat(db, chat_id):
-    # This runs under get_transition_lock(chat_id); a delegation whose child
-    # chat IS this chat must not try to re-acquire that same non-reentrant lock.
-    if not await cancel_delegation_execution(
-      delegation_id, held_chat_locks=frozenset({chat_id}),
-    ):
+  # Create and delete share the controller transition lock. Recheck after all
+  # potentially blocking stop I/O: a Gauntlet that won the gap must prevent the
+  # tombstone, while a tombstone that wins here makes the creator's own locked
+  # active-chat recheck fail.
+  from app import chat_queue
+  async with chat_queue.get_transition_lock(chat_id):
+    db.rollback()
+    late_gauntlets = active_gauntlet_ids_for_chat(db, chat_id)
+    if late_gauntlets:
       raise HTTPException(
         status_code=409,
-        detail="Could not stop active delegated work; retry",
+        detail="A Gauntlet started while deletion was waiting; retry deletion.",
       )
-  db.rollback()
-  # Bump generation BEFORE the soft-delete commit so that any run
-  # that started in the TOCTOU window between the is_chat_running
-  # check above and now sees `we_own_gen == False` on its next gen
-  # check and skips auto-promote / continuation. Otherwise a runner
-  # racing the delete could write to the just-deleted row.
-  bump_run_generation(chat_id)
-  chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
-  if chat:
-    # Deleting a chat is also owner intent to stop its future work. Stage the
-    # cancellation in the same transaction as the tombstone so an in-flight
-    # probe cannot re-arm or deliver after deletion; recovery does not revive
-    # a promise the owner explicitly removed.
-    from app.chat_waits import stage_cancel_waits_for_chat
-    stage_cancel_waits_for_chat(db, chat_id)
-    chat.deleted_at = now_naive_utc()
-    db.commit()
-    # Publish the committed tombstone before best-effort run cleanup. If that
-    # cleanup fails after the commit, every live shell must still project the
-    # durable deletion rather than retain a stale drawer row.
-    get_system_broadcast().publish(
-      {"type": "chat_deleted", "chatId": str(chat_id)}
-    )
+    if active_delegation_ids_for_chat(db, chat_id):
+      raise HTTPException(
+        status_code=409,
+        detail=(
+          "Delegated work started while deletion was waiting; retry deletion."
+        ),
+      )
+    # Bump generation BEFORE the soft-delete commit so a run that raced the
+    # earlier liveness check bows out instead of writing onto the tombstone.
+    bump_run_generation(chat_id)
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    if chat:
+      # Deleting a chat is owner intent to stop its future work too. Keep the
+      # wait cancellation atomic with the tombstone so recovery cannot revive
+      # a promise the owner explicitly removed.
+      from app.chat_waits import stage_cancel_waits_for_chat
+      stage_cancel_waits_for_chat(db, chat_id)
+      chat.deleted_at = now_naive_utc()
+      db.commit()
+      # Publish the committed tombstone before best-effort run cleanup. If that
+      # cleanup fails after the commit, every live shell must still project the
+      # durable deletion rather than retain a stale drawer row.
+      get_system_broadcast().publish(
+        {"type": "chat_deleted", "chatId": str(chat_id)}
+      )
   # Flag the chat soft-deleted in the registry (NOT forget_chat, which resets
   # the generation counter to a reusable 0). mark_chat_deleted preserves the
   # finite counter and makes `current_run_generation` return +inf, so a run
@@ -2349,9 +2479,7 @@ async def _compact_chat_locked(
     )
   data_dir = get_settings().data_dir
   candidate = providers.get_provider(body.provider)
-  auth_error = providers.provider_requirement_error(candidate, db)
-  if auth_error is None:
-    auth_error = await run_in_threadpool(candidate.check_auth, data_dir)
+  auth_error = await run_in_threadpool(candidate.check_auth, data_dir)
   if auth_error is not None:
     raise HTTPException(status_code=409, detail=auth_error)
 
@@ -2680,7 +2808,7 @@ def _merge_app_chat_settings(
     if value:
       settings["model"] = value
     else:
-      settings.pop("model", None)
+      raise ValueError("A chat model cannot be cleared.")
   # report_date is already ISO-validated by AppChatCreate; chat.py reads it
   # on the first turn to inject the brief this chat is about. report_kind is
   # a free-form tag (e.g. "reflection") that travels alongside it.
@@ -2771,6 +2899,7 @@ def _app_chat_summary(chat: models.Chat, usage: dict) -> dict:
 
 def _app_chat_started(chat: models.Chat, db: Session) -> bool:
   """Whether a scoped chat already owns a durable or live first turn."""
+  goal = presented_goal(db, chat.id)
   return bool(
     chat.has_messages
     or chat.messages
@@ -2779,6 +2908,7 @@ def _app_chat_started(chat: models.Chat, db: Session) -> bool:
     or chat.session_id
     or is_chat_running(chat.id)
     or has_nonterminal_run(db, chat.id)
+    or (goal and goal.get("status") in {"running", "paused", "completed"})
   )
 
 
@@ -2879,10 +3009,12 @@ def create_app_chat(
 
   owner = db.query(models.Owner).first()
   data_dir = get_settings().data_dir
-  provider = body.provider or providers.owner_default_provider(
+  provider = body.provider or providers.provider_of_model(
+    body.model,
+  ) or providers.owner_default_provider(
     data_dir, owner.provider if owner else None,
   )
-  if provider not in providers.PROVIDER_NAMES:
+  if provider not in ("claude", "codex", "mobius"):
     raise HTTPException(status_code=422, detail=f"unknown provider: {provider}")
   if body.model and providers._model_belongs_to_other_provider(
     body.model, provider,
@@ -2892,18 +3024,27 @@ def create_app_chat(
       detail="The selected model does not belong to that provider.",
     )
 
+  try:
+    agent_settings = providers.snapshot_chat_agent_settings(
+      data_dir,
+      provider,
+      model=body.model,
+      fallback_model=providers.DEFAULT_MODELS.get(provider),
+    )
+  except ValueError as exc:
+    raise HTTPException(status_code=422, detail=str(exc)) from exc
   chat = models.Chat(
     id=str(uuid.uuid4()),
     title=body.title or "New chat",
     messages=[],
     provider=provider,
-    agent_settings_json=None,
+    agent_settings_json=agent_settings,
     created_by_app_id=principal.app_id,
   )
   _merge_app_chat_settings(
     chat,
     system_prompt=body.system_prompt,
-    model=body.model,
+    model=agent_settings["model"],
     report_date=body.report_date,
     report_kind=body.report_kind,
     project_id=body.project_id,
@@ -3062,6 +3203,17 @@ async def patch_app_chat(
 
   async with get_transition_lock(chat_id):
     chat = get_active_chat_for_principal(db, chat_id, principal)
+    if any((body.system_prompt is not None, body.model is not None,
+            body.provider is not None)):
+      from app.gauntlets import active_controller_gauntlet
+      if active_controller_gauntlet(db, chat_id) is not None:
+        raise HTTPException(
+          status_code=409,
+          detail=(
+            "The Gauntlet has frozen this controller's provider, model, and "
+            "prompt until it finishes."
+          ),
+        )
     if body.system_prompt is not None:
       if (
         chat.system_prompt_snapshot_id
@@ -3078,6 +3230,11 @@ async def patch_app_chat(
           ),
         )
     target_provider = body.provider or chat.provider or "claude"
+    if body.model is not None and not body.model.strip():
+      raise HTTPException(
+        status_code=422,
+        detail="A chat must always keep an explicitly selected model.",
+      )
     if (
       body.model
       and providers._model_belongs_to_other_provider(body.model, target_provider)
@@ -3087,7 +3244,7 @@ async def patch_app_chat(
         detail="The selected model does not belong to that provider.",
       )
     if body.provider is not None:
-      if body.provider not in providers.PROVIDER_NAMES:
+      if body.provider not in ("claude", "codex", "mobius"):
         raise HTTPException(
           status_code=422, detail=f"unknown provider: {body.provider}"
         )
@@ -3106,6 +3263,18 @@ async def patch_app_chat(
               "Create a new app chat instead."
             ),
           )
+        selection = providers.snapshot_chat_agent_settings(
+          get_settings().data_dir,
+          body.provider,
+          model=body.model,
+          fallback_model=providers.DEFAULT_MODELS.get(body.provider),
+        )
+        if selection is None:
+          raise HTTPException(
+            status_code=422,
+            detail="Switching provider requires an explicitly selected model.",
+          )
+        body = body.model_copy(update={"model": selection["model"]})
         chat.provider = body.provider
         chat.session_id = None
     _merge_app_chat_settings(

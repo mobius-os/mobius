@@ -51,7 +51,7 @@ export default function ProjectPreviewFrame({ projectId, sourcePath, title, clas
       try {
         previous = event.oldValue ? JSON.parse(event.oldValue) : {}
       } catch {
-        // A malformed old browser value should not break the live bridge.
+        // A malformed old browser value should not break the live preview bridge.
       }
       const next = readProjectPreviewStore(localStorage, storageKey)
       for (const path of new Set([...Object.keys(previous), ...Object.keys(next)])) {

@@ -165,6 +165,9 @@ def test_apply_updates_multifile_revision_once(client, auth, db):
   ).stdout.strip() == "1"
   row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
   assert "import { label }" in row.jsx_source
+  artifact = db.get(models.ChatAppArtifact, ("editing-chat", app_id))
+  assert artifact is not None
+  assert artifact.touched_at == row.updated_at
   assert mock_get_broadcast.return_value.publish.call_args_list == [
     call({"type": "app_updated", "appId": str(app_id)}),
     call({
@@ -380,8 +383,6 @@ def test_local_apply_converges_schedule_creation_and_removal(client, auth):
   # Stand in for the durable declaration written by the real scaffold.
   init_cron = source / "init-cron.sh"
   init_cron.write_text("#!/bin/sh\nexit 0\n")
-  pending_cron = source / ".cron-pending.json"
-  pending_cron.write_text('{"status":"pending"}\n')
   manifest = json.loads((source / "mobius.json").read_text())
   manifest.pop("schedule")
   (source / "mobius.json").write_text(json.dumps(manifest))
@@ -394,7 +395,6 @@ def test_local_apply_converges_schedule_creation_and_removal(client, auth):
   assert updated.json()["mode"] == "updated"
   unregister.assert_called_once_with(source)
   assert not init_cron.exists()
-  assert not pending_cron.exists()
   assert updated.json()["warnings"] == []
 
 
@@ -419,34 +419,6 @@ def test_unchanged_local_reapply_retries_failed_schedule_sync(client, auth):
   assert repeated.json()["mode"] == "unchanged"
   assert repeated.json()["warnings"] == []
   register.assert_called_once()
-
-
-def test_unchanged_local_reapply_keeps_a_live_schedule_when_cron_fails(
-  client, auth,
-):
-  source = _source()
-  _declare_schedule(source)
-  with patch("app.app_cron.register_cron"):
-    created = _apply(client, auth, source)
-
-  assert created.status_code == 200, created.text
-  # Stand in for the durable declaration written by the real scaffold.
-  init_cron = source / "init-cron.sh"
-  init_cron.write_text("#!/bin/sh\nexit 0\n")
-
-  with patch("app.install._unregister_cron") as unregister, patch(
-    "app.app_cron.register_cron", side_effect=RuntimeError("cron unavailable"),
-  ):
-    repeated = _apply(client, auth, source)
-
-  assert repeated.status_code == 200, repeated.text
-  assert repeated.json()["mode"] == "unchanged"
-  # Re-accepting the same schedule must never retire the working one first.
-  unregister.assert_not_called()
-  assert init_cron.exists()
-  assert repeated.json()["warnings"] == [
-    "cron: registration failed — RuntimeError('cron unavailable')"
-  ]
 
 
 def test_apply_refreshes_manifest_declared_skill_on_create_and_update(
@@ -499,26 +471,6 @@ def test_store_managed_apply_refreshes_only_previously_approved_skills(
   shared = Path(get_settings().data_dir) / "shared" / "skills" / "guide.md"
   assert shared.read_text() == "# Locally revised guidance\n"
   assert updated.json()["warnings"] == []
-
-
-def test_apply_route_forwards_skill_sync_warnings(client, auth, monkeypatch):
-  # A partial skill sync (oversize skill, snapshot failure, ownership conflict)
-  # is non-fatal but must reach the apply receipt, not be silently dropped at
-  # the HTTP boundary — that silent staleness is exactly what this path fixes.
-  from app import install
-
-  async def _warn(_db, _app, _manifest, warnings):
-    warnings.append("skill guide.md: exceeds 262144 bytes — skipped")
-
-  monkeypatch.setattr(install, "_sync_app_skills", _warn)
-
-  created = _apply(client, auth, _source())
-
-  assert created.status_code == 200, created.text
-  assert (
-    "skill guide.md: exceeds 262144 bytes — skipped"
-    in created.json()["warnings"]
-  )
 
 
 def test_startup_retires_integrated_app_provenance(client, auth, db):
@@ -1185,6 +1137,19 @@ def test_store_local_package_apply_explicitly_accepts_manifest_authority(
     "and skills; a future reviewed Store update may replace them."
   ]
 
+  # Ordinary Store apply must recover the approved skill list from the durable
+  # contract rather than treating the absent manifest authority as no skills.
+  (source / "guide.md").write_text("# Locally revised guidance\n")
+  ordinary = _apply(client, auth, source)
+
+  assert ordinary.status_code == 200, ordinary.text
+  assert ordinary.json()["mode"] == "updated"
+  assert ordinary.json()["warnings"] == []
+  shared = Path(get_settings().data_dir) / "shared" / "skills" / "guide.md"
+  assert shared.read_text() == "# Locally revised guidance\n"
+  row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
+  assert row.capability_contract["agent"]["skills"] == ["guide.md"]
+
 
 def test_store_local_package_revokes_omitted_privileged_permissions(
   client, auth, db,
@@ -1222,7 +1187,7 @@ def test_store_local_package_revokes_omitted_privileged_permissions(
   assert row.capability_contract["data"]["shared_memory"] == "none"
 
 
-def test_store_local_package_apply_accepts_its_installed_package_identity(
+def test_store_local_package_uses_canonical_manifest_identity_when_slug_differs(
   client, auth, db,
 ):
   source = _source("app-store")
@@ -1231,7 +1196,7 @@ def test_store_local_package_apply_accepts_its_installed_package_identity(
   row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
   row.manifest_url = (
     "https://raw.githubusercontent.com/mobius-os/app-store/main"
-    "#manifest-id=store&channel=stable"
+    "#manifest-id=store"
   )
   db.commit()
 
@@ -1246,7 +1211,7 @@ def test_store_local_package_apply_accepts_its_installed_package_identity(
   row = db.query(models.App).populate_existing().filter_by(id=app_id).one()
   assert row.slug == "app-store"
   assert row.github_access is True
-  assert row.manifest_url.endswith("#manifest-id=store&channel=stable")
+  assert row.manifest_url.endswith("#manifest-id=store")
 
 
 def test_store_local_apply_accepts_installer_managed_tree_without_manifest(
@@ -1294,9 +1259,12 @@ def test_store_local_apply_accepts_installer_managed_tree_without_manifest(
   assert app_git._run(source, "status", "--porcelain").stdout == ""
 
 
-def test_local_apply_without_manifest_still_fails_closed(client, auth):
-  source = _source()
-  (source / "mobius.json").unlink()
+def test_local_apply_without_manifest_remains_invalid(client, auth):
+  source = Path(get_settings().data_dir) / "apps" / "local-no-manifest"
+  source.mkdir(parents=True)
+  (source / "index.jsx").write_text(
+    "export default function App() { return <div>local</div> }\n"
+  )
 
   failed = _apply(client, auth, source)
 

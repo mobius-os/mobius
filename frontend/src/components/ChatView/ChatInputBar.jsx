@@ -107,6 +107,16 @@ import {
   slashCommandUnavailableReason,
   visibleSlashCommands,
 } from './slashCommands.js'
+import FileMentionMenu from './FileMentionMenu.jsx'
+import {
+  applyFileMention,
+  matchMentionFiles,
+  mentionAgentPath,
+  mentionQueryFor,
+} from './fileMentions.js'
+import { useQuery } from '@tanstack/react-query'
+import { api, jsonOrThrow } from '../../api/client.js'
+import { projectQueries } from '../../hooks/queries.js'
 import { filePasteNeedsDefaultPrevented, pastedFiles } from './pasteUpload.js'
 import { hasSendablePayload } from './composerSubmission.js'
 import {
@@ -122,6 +132,8 @@ import {
   focusComposerElement,
   placeCaretAtTextEnd,
 } from './composerFocusPolicy.js'
+
+
 
 
 /** The primary action button — Steer / Send / Stop / Mic —
@@ -212,8 +224,11 @@ function PrimaryAction({
         onTouchEnd={(e) => { e.preventDefault(); onSubmit(e) }}
         onClick={onSubmit}
         aria-label="Send"
-        // Offline is an accepted intent now: doSend records it durably before
-        // the POST and the shell replays it when connectivity returns.
+        // Offline is deliberately NOT a disable here. A send composed offline is
+        // recorded in the durable outbox (chatOutbox) and auto-replays on
+        // reconnect, so the button must reach doSend just like the Enter path
+        // (canSubmit ignores offline). Gating it on `offline` was a leftover
+        // from the old online-only composer and silently swallowed offline taps.
         disabled={hasUploading || submissionBlocked}
       >
         <PrimaryActionGlyphs action="send" />
@@ -479,7 +494,7 @@ function FileChips({ files, onRemove, chatId }) {
  *                        turn; the draft stays editable and Stop owns the
  *                        primary action until the card is answered.
  *   messageHistory     — visible owner-authored message text, oldest first.
- *   provider           — the chat's provider id. Filters
+ *   provider           — the chat's provider id ('claude' | 'codex'). Filters
  *                        the "/" menu to commands that actually dispatch on it;
  *                        provider-specific commands stay hidden while unknown.
  *
@@ -518,6 +533,7 @@ export default function ChatInputBar({
   attachmentsDisabled = false,
   messageHistory = [],
   provider,
+  projectRef = null,
 }) {
   const fileInputRef = useRef(null)
   const historyIndexRef = useRef(null)
@@ -560,6 +576,45 @@ export default function ChatInputBar({
   useEffect(() => {
     if (slashCandidates.length === 0) setSlashDismissed(false)
   }, [slashCandidates.length])
+
+  // @-mention of project files, for chats that belong to a project. Mirrors
+  // slash-menu mechanics: the token is derived from the text every render,
+  // only highlight and dismissal are state, and the textarea keeps focus.
+  const [mentionIndex, setMentionIndex] = useState(0)
+  const [mentionDismissed, setMentionDismissed] = useState(false)
+  const mention = projectRef ? mentionQueryFor(input) : null
+  // The whole project's file list is fetched once per mention session (and
+  // kept briefly fresh) so filtering is instant while the owner types.
+  const mentionFilesQuery = useQuery({
+    queryKey: projectQueries.keys.fileIndex(projectRef?.id),
+    queryFn: async ({ signal }) => jsonOrThrow(
+      await api.projects.files(projectRef.id, '', { signal, recursive: true }),
+      'Project files failed:',
+    ),
+    enabled: !!projectRef && mention !== null,
+    staleTime: 15_000,
+  })
+  const mentionMatches = (mention !== null && slashInputFocused && !mentionDismissed)
+    ? matchMentionFiles(mention.query, mentionFilesQuery.data?.entries)
+    : []
+  const mentionActiveIndex = Math.min(mentionIndex, Math.max(mentionMatches.length - 1, 0))
+  const mentionListId = `file-mention-${chatId}`
+  const mentionOptionId = `${mentionListId}-active`
+  const mentionClosed = mention === null
+  useEffect(() => { setMentionIndex(0) }, [mention?.query])
+  useEffect(() => {
+    if (mentionClosed) setMentionDismissed(false)
+  }, [mentionClosed])
+
+  function acceptFileMention(file) {
+    if (!file || !mention) return
+    const next = applyFileMention(input, mention, mentionAgentPath(projectRef?.root_path, file.path))
+    resetMessageHistory()
+    if (listeningRef?.current) onManualVoiceEdit?.(next)
+    onInputChange(next)
+    focusComposerElement(inputRef?.current)
+    requestAnimationFrame(() => placeCaretAtTextEnd(inputRef?.current))
+  }
 
   // Expose the hidden-file-input trigger to the parent. The parent
   // owns the visible "attach" affordance (now part of ComposerPopover);
@@ -723,9 +778,25 @@ export default function ChatInputBar({
 
   function handleKeyDown(e) {
     pasteAsPlainTextRef.current = isPlainTextPasteShortcut(e)
-    // The menu claims Enter and the arrows while it is open — the same keys
-    // that otherwise send and walk sent-message history — so it resolves
-    // BEFORE both. Keys it doesn't claim fall through untouched.
+    // The menus claim Enter and the arrows while open — the same keys that
+    // otherwise send and walk sent-message history — so they resolve BEFORE
+    // both. Keys they don't claim fall through untouched. Mention and slash
+    // modes are mutually exclusive (a leading "/" cannot also end in an
+    // "@token"), so ordering between them never decides a key.
+    const mentionAction = resolveSlashMenuKey(e, {
+      open: mentionMatches.length > 0,
+      count: mentionMatches.length,
+    })
+    if (mentionAction) {
+      e.preventDefault()
+      const total = mentionMatches.length
+      if (mentionAction === 'dismiss') setMentionDismissed(true)
+      else if (mentionAction === 'next') setMentionIndex((i) => (i + 1) % total)
+      else if (mentionAction === 'previous') setMentionIndex((i) => (i - 1 + total) % total)
+      else if (mentionAction === 'accept') acceptFileMention(mentionMatches[mentionActiveIndex])
+      return
+    }
+
     const slashAction = resolveSlashMenuKey(e, {
       open: slashMatches.length > 0,
       count: slashMatches.length,
@@ -875,6 +946,13 @@ export default function ChatInputBar({
         listId={slashListId}
         optionId={slashOptionId}
       />
+      <FileMentionMenu
+        files={mentionMatches}
+        activeIndex={mentionActiveIndex}
+        onSelect={acceptFileMention}
+        listId={mentionListId}
+        optionId={mentionOptionId}
+      />
       <div className="chat__input-row">
         {leftButtons}
         <div className={`chat__pill${hasFiles ? ' chat__pill--with-attach' : ''}`}>
@@ -907,11 +985,11 @@ export default function ChatInputBar({
               // Combobox semantics apply only while the menu is open. Left on
               // permanently they would announce this plain prose textarea as a
               // picker in every ordinary message the user writes.
-              {...(slashMatches.length > 0 ? {
+              {...(slashMatches.length > 0 || mentionMatches.length > 0 ? {
                 role: 'combobox',
                 'aria-expanded': true,
-                'aria-controls': slashListId,
-                'aria-activedescendant': slashOptionId,
+                'aria-controls': slashMatches.length > 0 ? slashListId : mentionListId,
+                'aria-activedescendant': slashMatches.length > 0 ? slashOptionId : mentionOptionId,
                 'aria-autocomplete': 'list',
               } : {})}
             />

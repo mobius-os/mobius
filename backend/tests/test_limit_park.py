@@ -249,15 +249,15 @@ def test_park_fields_clamps_absurd_future_and_never_raises():
 
 # -- the shared exit classifier ------------------------------------------------
 
-def test_limit_exit_publishes_enriched_event_and_kwargs():
+def test_park_exit_publishes_enriched_event_and_kwargs():
   sink = _Sink()
-  kwargs = chat_mod._limit_exit(
+  kwargs = chat_mod._park_exit(
     sink,
     {"api_error_status": 429,
      "error": "You've hit your weekly limit · resets 1:40am"},
     "You've hit your weekly limit · resets 1:40am",
   )
-  assert kwargs["limit_reached"] is True
+  assert kwargs["parked"] is True
   assert isinstance(kwargs["parked_until"], datetime)
   event = sink.events[-1]
   assert event["type"] == "error"
@@ -268,23 +268,23 @@ def test_limit_exit_publishes_enriched_event_and_kwargs():
   assert event["pause"]["kind"] == kwargs["park_reason"]
 
 
-def test_limit_exit_non_limit_error_stays_plain():
+def test_park_exit_non_limit_error_stays_plain():
   sink = _Sink()
-  kwargs = chat_mod._limit_exit(sink, {"error": "syntax error"}, "syntax error")
-  assert kwargs == {"limit_reached": False}
+  kwargs = chat_mod._park_exit(sink, {"error": "syntax error"}, "syntax error")
+  assert kwargs == {"parked": False}
   assert sink.events[-1] == {"type": "error", "message": "syntax error"}
 
 
-def test_limit_exit_resume_incomplete_publishes_calm_resumable_note():
+def test_park_exit_resume_incomplete_publishes_calm_resumable_note():
   """A steer-interrupted turn (error defused to None, resume_incomplete set)
   publishes a calm, resumable "Paused" note — never a red error block."""
   sink = _Sink()
-  kwargs = chat_mod._limit_exit(
+  kwargs = chat_mod._park_exit(
     sink,
     {"error": None, "terminal_status": "interrupted", "resume_incomplete": True},
     None,
   )
-  assert kwargs == {"limit_reached": False}
+  assert kwargs == {"parked": False}
   note = sink.events[-1]
   assert note["type"] == "error"
   assert note["resumable"] is True
@@ -295,11 +295,11 @@ def test_limit_exit_resume_incomplete_publishes_calm_resumable_note():
   assert "Resume" in note["message"]
 
 
-def test_limit_exit_bare_429_synthesizes_the_card_block():
+def test_park_exit_bare_429_synthesizes_the_card_block():
   """A 429 terminal with NO error text still persists a parked card block."""
   sink = _Sink()
-  kwargs = chat_mod._limit_exit(sink, {"api_error_status": 429}, None)
-  assert kwargs["limit_reached"] is True
+  kwargs = chat_mod._park_exit(sink, {"api_error_status": 429}, None)
+  assert kwargs["parked"] is True
   assert sink.events and sink.events[-1]["type"] == "error"
   assert sink.events[-1]["message"]
 
@@ -565,8 +565,6 @@ def test_prepare_and_resolve_retire_a_stale_nonlatest_park():
   assert resolved is False
   assert _run_row("rt-old-notify")["status"] == "completed"
 
-
-# -- (c) latest-run-wins + supersession ----------------------------------------
 
 def test_parked_probe_latest_run_wins():
   cid = "park-latest"
@@ -2473,7 +2471,7 @@ def test_post_promote_process_death_recovers_as_manual_resume_boundary():
   promoted_token = f"promoted-{cid}"
   synthetic = {
     "role": "user", "content": "continue", "ts": 5,
-    "cid": f"limit-resume-{park_token}",
+    "cid": f"park-resume-{park_token}",
   }
   _seed_chat(cid, pending=[synthetic], auto_resume=True)
   _seed_run(
@@ -2703,22 +2701,22 @@ def test_debug_status_lists_parked_runs(client, auth):
 
 # -- adversarial-review fixes (adjudicated 2026-07-11) --------------------------
 
-def test_limit_exit_exception_with_empty_text_still_publishes():
+def test_park_exit_exception_with_empty_text_still_publishes():
   """H2: an exception exit whose str() is empty (a bare TimeoutError) must
   still persist an error block — otherwise finalize no-ops and the failed
   turn reads as clean."""
   sink = _Sink()
-  kwargs = chat_mod._limit_exit(sink, None, "")
+  kwargs = chat_mod._park_exit(sink, None, "")
 
-  assert kwargs == {"limit_reached": False}
+  assert kwargs == {"parked": False}
   assert len(sink.events) == 1
   assert sink.events[0]["type"] == "error"
   assert sink.events[0]["message"]  # non-empty fallback text
 
   # A TERMINAL-result exit with no error text stays silent (a clean turn).
   quiet = _Sink()
-  assert chat_mod._limit_exit(quiet, {"error": None}, None) == {
-    "limit_reached": False,
+  assert chat_mod._park_exit(quiet, {"error": None}, None) == {
+    "parked": False,
   }
   assert quiet.events == []
 
@@ -2794,7 +2792,7 @@ def _limit_complete_turn(cid, *, parked_until, monkeypatch=None,
   bc = create_broadcast(cid)
   sink = chat_mod._ChatEventSink(bc, cid, run_token=f"rt-{cid}", recall_binding=EMPTY_RECALL_BINDING)
   sink.publish({"type": "text", "content": "partial answer"})
-  sink.publish(chat_mod._limit_error_event(
+  sink.publish(chat_mod._park_event(
     "hit your weekly limit · resets 1:40am", parked_until, "usage_limit",
   ))
   if park_raises:
@@ -2810,7 +2808,7 @@ def _limit_complete_turn(cid, *, parked_until, monkeypatch=None,
   disposition = asyncio.run(chat_mod._complete_turn(
     bc=bc, sink=sink, db=db, chat_id=cid, run_gen=None,
     provider_id="claude", cost_usd=0, close_browser=False,
-    limit_reached=True, parked_until=parked_until,
+    parked=True, parked_until=parked_until,
     park_reason="usage_limit",
   ))
   _drain_writer()
@@ -2880,9 +2878,37 @@ def test_limit_park_releases_starting_claim_before_returning():
   finally:
     chat_mod.discard_starting(cid)
 
-# -- (h) platform-resource parks ----------------------------------------------
 
-def test_sweep_continues_resource_park_without_limit_opt_in(
+# -- (h) platform-resource parks: memory kill and admission deferral ----------
+
+def test_park_exit_attributes_a_kernel_oom_kill_to_a_memory_park(monkeypatch):
+  """A provider process the kernel killed for memory parks and self-continues."""
+  counts = iter([3, 4, 4])
+  monkeypatch.setattr(
+    "app.memory_observability.cgroup_oom_kill_count", lambda: next(counts),
+  )
+  monkeypatch.setattr("app.memory_observability._oom_kills_attributed", None)
+  sink = _Sink()
+  # First exit establishes the mark; nothing to attribute yet.
+  assert chat_mod._park_exit(sink, None, "process exited -9") == {
+    "parked": False,
+  }
+  kwargs = chat_mod._park_exit(sink, None, "process exited -9")
+  assert kwargs["parked"] is True
+  assert kwargs["park_reason"] == "memory"
+  assert kwargs["parked_until"] - datetime.now(UTC).replace(tzinfo=None) <= (
+    chat_mod._PARK_MIN_DELAY
+  )
+  event = sink.events[-1]
+  assert event["pause"]["kind"] == "memory"
+  assert "memory" in event["message"]
+  # The single kill is consumed: an unrelated later failure stays a failure.
+  assert chat_mod._park_exit(sink, None, "syntax error") == {
+    "parked": False,
+  }
+
+
+def test_sweep_continues_a_memory_park_without_the_limit_opt_in(
   owner_token, monkeypatch,
 ):
   del owner_token
@@ -2895,44 +2921,17 @@ def test_sweep_continues_resource_park_without_limit_opt_in(
   monkeypatch.setattr(
     chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw),
   )
+  # Past any stagger window an earlier test's auto-resume may have claimed.
   monkeypatch.setattr(chat_mod, "_limit_auto_resume_now", lambda: 10**9)
   _due_park(
-    "sweep-storage", "rt-sweep-storage",
-    auto_resume=False, park_reason="storage",
+    "sweep-memory", "rt-sweep-memory", auto_resume=False, park_reason="memory",
   )
   try:
-    assert _run_sweep() == ["sweep-storage"]
-    assert len(scheduled) == 1
-    assert scheduled[0]["chat_id"] == "sweep-storage"
+    assert _run_sweep() == ["sweep-memory"]
+    assert len(scheduled) == 1 and scheduled[0]["chat_id"] == "sweep-memory"
     assert notified == []
   finally:
-    chat_mod.discard_starting("sweep-storage")
-
-
-def test_admission_recovery_command_parks_exact_run():
-  from app.chat_writer import RecoverWedgedRun
-
-  cid = "defer-storage-park"
-  _seed_chat(cid)
-  _seed_run(cid, "rt-defer-storage-park")
-  due = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=60)
-  event = chat_mod._limit_error_event("waiting", due, "storage")
-  event.pop("resumable", None)
-  ack = get_writer().submit(RecoverWedgedRun(
-    chat_id=cid,
-    run_token="rt-defer-storage-park",
-    interruption_block=event,
-    parked_until=due,
-    park_reason="storage",
-  ))
-  assert ack.result(timeout=5) is True
-
-  row = _run_row("rt-defer-storage-park")
-  assert row["status"] == "parked"
-  assert row["park_reason"] == "storage"
-  assert row["parked_until"] == due
-  tail = _chat_row(cid)["messages"][-1]
-  assert tail["blocks"][-1]["pause"]["kind"] == "storage"
+    chat_mod.discard_starting("sweep-memory")
 
 
 def test_app_initiated_resource_park_preserves_attribution(
@@ -2963,3 +2962,32 @@ def test_app_initiated_resource_park_preserves_attribution(
     ] == "storage"
   finally:
     chat_mod.discard_starting(cid)
+
+
+def test_admission_deferral_parks_the_run_instead_of_failing_it(owner_token):
+  del owner_token
+  from app.chat_writer import RecoverWedgedRun
+  cid = "defer-park"
+  _seed_chat(cid)
+  _seed_run(cid, "rt-defer-park")
+  due = datetime.now(UTC).replace(tzinfo=None) + timedelta(seconds=60)
+  ack = get_writer().submit(RecoverWedgedRun(
+    chat_id=cid,
+    run_token="rt-defer-park",
+    interruption_block=chat_mod._park_event("waiting", due, "memory"),
+    parked_until=due,
+    park_reason="memory",
+  ))
+  ack.result(timeout=5)
+  row = _run_row("rt-defer-park")
+  assert row["status"] == "parked"
+  assert row["park_reason"] == "memory"
+  assert row["parked_until"] == due
+  db = SessionLocal()
+  try:
+    assert db.get(models.ChatFailureActivity, cid) is None
+  finally:
+    db.close()
+  tail = _chat_row(cid)["messages"][-1]
+  assert tail["role"] == "assistant"
+  assert tail["blocks"][-1]["pause"]["kind"] == "memory"

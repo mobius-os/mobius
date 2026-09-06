@@ -1,0 +1,195 @@
+/* Shortcut help is a compact reference dialog on desktop and a full surface on phones. */
+
+.keyboard-shortcuts__overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1001;
+  box-sizing: border-box;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding:
+    max(52px, env(safe-area-inset-top))
+    max(16px, env(safe-area-inset-right))
+    max(20px, env(safe-area-inset-bottom))
+    max(16px, env(safe-area-inset-left));
+  overflow: hidden;
+  background: color-mix(in srgb, var(--bg) 76%, transparent);
+  backdrop-filter: blur(14px);
+  color: var(--text);
+}
+
+.keyboard-shortcuts {
+  width: min(680px, 100%);
+  max-height: min(760px, calc(100dvh - 72px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--bg);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
+}
+
+.keyboard-shortcuts__header {
+  min-height: 78px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px 16px 14px 20px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.keyboard-shortcuts__header h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 680;
+  letter-spacing: -0.015em;
+}
+
+.keyboard-shortcuts__header p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.keyboard-shortcuts__close {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.keyboard-shortcuts__groups {
+  min-height: 0;
+  display: grid;
+  gap: 20px;
+  padding: 18px 20px 22px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.keyboard-shortcuts__group {
+  display: grid;
+  gap: 7px;
+}
+
+.keyboard-shortcuts__group h3 {
+  margin: 0;
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 680;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.keyboard-shortcuts__list {
+  overflow: hidden;
+  border: 1px solid var(--border-light);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+}
+
+.keyboard-shortcuts__row {
+  min-height: 60px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 10px 12px;
+}
+
+.keyboard-shortcuts__row + .keyboard-shortcuts__row {
+  border-top: 1px solid var(--border-light);
+}
+
+.keyboard-shortcuts__row--unavailable { opacity: 0.58; }
+
+.keyboard-shortcuts__copy {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.keyboard-shortcuts__copy strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 630;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.keyboard-shortcuts__copy span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.keyboard-shortcuts__bindings {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 5px;
+  max-width: 48%;
+}
+
+.keyboard-shortcuts__bindings kbd {
+  min-width: 30px;
+  max-width: 100%;
+  padding: 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text);
+  font: 650 11px/1.35 var(--font, system-ui);
+  text-align: center;
+  overflow-wrap: anywhere;
+  box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--border) 74%, transparent);
+}
+
+.keyboard-shortcuts__close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .keyboard-shortcuts__close:hover { background: var(--surface2); }
+}
+
+@media (max-width: 640px) {
+  .keyboard-shortcuts__overlay {
+    padding:
+      max(12px, env(safe-area-inset-top))
+      max(12px, env(safe-area-inset-right))
+      max(12px, env(safe-area-inset-bottom))
+      max(12px, env(safe-area-inset-left));
+    background: var(--bg);
+    backdrop-filter: none;
+  }
+
+  .keyboard-shortcuts {
+    height: 100%;
+    max-height: none;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .keyboard-shortcuts__header { padding-inline: 4px 0; }
+  .keyboard-shortcuts__groups { padding-inline: 0; }
+}
