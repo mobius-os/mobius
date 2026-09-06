@@ -84,6 +84,7 @@ export default function BrainUsageIcon({
   rightPercent = null,
   width = DEFAULT_SIZE,
   height = DEFAULT_SIZE,
+  color = 'var(--muted)',
 }) {
   // Unique per rendered icon — see the id-collision note above. Multiple
   // mounted chat panes must never resolve this fill to another icon's mask.
@@ -151,7 +152,7 @@ export default function BrainUsageIcon({
       {/* Canonical visible boundary. The SDK path supplies every lobe/fold;
           the fill above only shows through its transparent spaces. */}
       <g filter={`url(#${outlineFilterId})`}>
-        <Brain width="24" height="24" color="var(--muted)" />
+        <Brain width="24" height="24" color={color} />
       </g>
     </svg>
   )
