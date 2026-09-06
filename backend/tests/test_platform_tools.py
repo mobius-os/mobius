@@ -89,7 +89,8 @@ def test_promote_goal_tool_preserves_helper_rejection(monkeypatch):
     control._promote_goal("Ship and verify")
 
 
-def test_control_protocol_advertises_every_run_bound_tool():
+def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
   control = _control_module()
 
   initialized = control._dispatch_message({
@@ -186,6 +187,7 @@ def test_delegated_control_server_advertises_only_coordination(monkeypatch):
 def test_control_protocol_returns_tool_success_without_framework_wrapping(
   monkeypatch,
 ):
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
   control = _control_module()
   monkeypatch.setattr(control, "_promote_goal", lambda objective: {
     "state": "promoted",
@@ -223,6 +225,7 @@ def test_control_protocol_returns_tool_success_without_framework_wrapping(
 
 
 def test_control_protocol_declares_wait_through_the_canonical_client(monkeypatch):
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
   control = _control_module()
   calls = []
 
