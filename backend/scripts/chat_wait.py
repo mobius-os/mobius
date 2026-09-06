@@ -103,15 +103,15 @@ def main() -> None:
   declare = sub.add_parser("declare", help="arm one durable wait")
   declare.add_argument("description", help="what this wait is for, in plain words")
   declare.add_argument(
+    "--owner", dest="condition_owner",
+    help="who or what is expected to make the condition true",
+  )
+  declare.add_argument(
     "--command",
     help=(
       "read-only silent-on-unmet check: 0=met, silent 1=not yet; "
       "any other result wakes the chat as check_failed"
     ),
-  )
-  declare.add_argument(
-    "--owner", dest="condition_owner",
-    help="system, person, or durable agent that can make the condition true",
   )
   declare.add_argument(
     "--in", dest="delay_secs", type=int,
@@ -136,6 +136,10 @@ def main() -> None:
   _, _, chat_id = _settings()
 
   if args.action == "declare":
+    if args.command and not args.condition_owner:
+      parser.error("command waits require --owner")
+    if args.command and args.deadline_secs is None:
+      parser.error("command waits require an explicit --deadline")
     result = declare_wait(
       args.description,
       command=args.command,
