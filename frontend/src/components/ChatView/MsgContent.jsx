@@ -417,7 +417,7 @@ function MsgContentInner({
             {manualResumeAvailable && (
               <button
                 type="button"
-                className="chat__resume"
+                className="chat__resume chat__recovery-action"
                 onClick={() => onResume('continue', {
                   continuation: 'manual',
                   pin: false,

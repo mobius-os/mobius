@@ -115,7 +115,7 @@ test('MsgContent gates the Resume button on a resumable tail note', () => {
   }), false, 'an earlier resumable block cannot own a second action')
   assert.match(
     msgContent,
-    /className="chat__resume"[\s\S]*?onClick=\{\(\)\s*=>\s*onResume\('continue',\s*\{[\s\S]*?continuation:\s*'manual'[\s\S]*?pin:\s*false/,
+    /className="chat__resume chat__recovery-action"[\s\S]*?onClick=\{\(\)\s*=>\s*onResume\('continue',\s*\{[\s\S]*?continuation:\s*'manual'[\s\S]*?pin:\s*false/,
     'the Resume button must open a manual product-owned continuation',
   )
 })
@@ -137,12 +137,12 @@ test('Resume button has styling', () => {
 })
 
 test('Resume button clears the 44px touch floor with press feedback', () => {
-  const block = css.match(/\.chat__resume\s*\{[\s\S]*?\}/)?.[0] ?? ''
+  const block = css.match(/\.chat__recovery-action\s*\{[\s\S]*?\}/)?.[0] ?? ''
   assert.match(block, /min-height:\s*44px/,
     'the Resume button must be at least 44px tall (touch floor)')
   assert.match(block, /var\(--accent\)/,
     'Resume carries an accent-tinted fill so it reads as the primary action')
-  assert.match(css, /\.chat__resume:active\s*\{\s*transform:\s*scale\(0\.97\)/,
+  assert.match(css, /\.chat__recovery-action:active:not\(:disabled\)\s*\{\s*transform:\s*scale\(0\.97\)/,
     'the Resume button has :active press feedback')
 })
 
@@ -298,4 +298,12 @@ test('message equality compares the error-card fields (stale-red-card guard)', (
     }],
   }]
   assert.equal(sameMessageList(oldRows, recoveredRows), false)
+})
+
+
+test('Resume keeps the shared recovery action compact inside the status grid', () => {
+  assert.match(msgContent, /className="chat__resume chat__recovery-action"/)
+  const layout = css.match(/\.chat__resume\s*\{[\s\S]*?\}/)?.[0] ?? ''
+  assert.match(layout, /justify-self:\s*start/)
+  assert.match(layout, /max-width:\s*100%/)
 })

@@ -778,34 +778,13 @@
 .chat-policy-switch button[role="switch"][data-disabled][data-state="checked"] {
   background: var(--switch-track-color-checked-disabled);
 }
-/* One-tap Resume on a turn paused by a drain-gated restart, or Continue after
-   an elapsed provider reset (design §2.2/§2.4).
-   Rendered only on the tail resumable interrupt note; re-sends "continue".
-   This is the single most important recovery gesture, so it clears the 44px
-   touch floor (an inline-flex box, not a 31px text pill) and carries an
-   accent-tinted fill so it reads as the PRIMARY next action, not a muted
-   secondary. */
+/* Resume uses the same action primitive as every other recovery option.
+   Grid items stretch by default; keep this action compact, not full-width. */
 .chat__resume {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 44px;
+  justify-self: start;
+  max-width: 100%;
   margin-top: 8px;
-  padding: 8px 18px;
-  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border-light));
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--accent) 16%, var(--surface));
-  color: var(--accent);
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, transform 0.08s;
 }
-.chat__resume:hover {
-  background: color-mix(in srgb, var(--accent) 26%, var(--surface));
-  border-color: color-mix(in srgb, var(--accent) 65%, var(--border-light));
-}
-.chat__resume:active { transform: scale(0.97); }
 
 /* ── Reasoning lane (reused by the activity stretch) ── */
 

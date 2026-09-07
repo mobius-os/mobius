@@ -24,13 +24,21 @@ import { isResourcePause } from './waitingPresentation.js'
 export function errorCardViewModel(block) {
   const resourceWait = isResourcePause(block)
   const parked = !!block.pause?.resets_at && !resourceWait
-  const benign = !!block.pause
+  // Old saved handoff notes lacked the pause descriptor. Recognize only
+  // that exact producer's prefix; unrelated resumable errors remain errors.
+  const goalHandoff = block.pause?.kind === 'goal_handoff' || (
+    !block.pause && block.resumable === true && block.message?.startsWith(
+      'This Goal paused repeatedly without a visible owner for the next action.',
+    )
+  )
+  const benign = !!block.pause || goalHandoff
   return {
     parked,
     resourceWait,
+    goalHandoff,
     benign,
     className: `chat__text--error${benign ? ' chat__text--parked' : ''}`,
-    label: parked ? 'Rate limit' : (resourceWait ? 'Waiting' : (block.pause ? 'Paused' : 'Error')),
+    label: goalHandoff ? 'Goal paused' : parked ? 'Rate limit' : (resourceWait ? 'Waiting' : (block.pause ? 'Paused' : 'Error')),
     resetLabel: parked ? formatResetTime(block.pause.resets_at) : null,
   }
 }
@@ -101,7 +109,9 @@ export default function ErrorCard({
               {vm.label}
             </div>
             <div className="chat__recovery-copy">
-              {block.pause?.kind === 'restart'
+              {vm.goalHandoff
+                ? 'The agent stopped before arranging the next step. Your progress is saved. Resume to continue this Goal.'
+                : block.pause?.kind === 'restart'
                 ? block.resumable
                   ? 'Möbius will continue automatically when the restart is complete.'
                   : (block.message || 'This response is paused.')

@@ -3275,7 +3275,7 @@ def _prepare_goal_handoff(
   ending_run_token: str,
   sink: "_ChatEventSink",
 ) -> run_state.GoalSettlementTarget | None:
-  """Return a correction target, or persistently mark an exhausted handoff."""
+  """Return the unfinished target and publish a manual pause if exhausted."""
   target = run_state.goal_settlement_target(db, chat_id, ending_run_token)
   if target is None or _goal_handoff_is_owned(
     db, chat_id, target.goal_id, sink,
@@ -3284,11 +3284,11 @@ def _prepare_goal_handoff(
   if target.retry_allowed:
     return target
   sink.publish(_pause_note(
-    "This Goal paused repeatedly without a visible owner for the next "
-    "action. Resume it to continue; before pausing again, use a question "
-    "card, a durable wait, or a wake-enabled helper."
+    "The agent stopped before arranging the next step. "
+    "Your progress is saved. Resume to continue this Goal.",
+    kind="goal_handoff",
   ))
-  return None
+  return target
 
 
 async def _maybe_enqueue_goal_handoff(
@@ -3323,6 +3323,13 @@ async def _maybe_enqueue_goal_handoff(
         "content": (
           "This Goal is still unfinished, but the last turn ended without "
           "assigning who or what will advance it. Continue the work now. "
+          f"The exact unfinished Goal is {target.goal_id}. Inspect its saved "
+          "plan before promoting anything: a follow-up to the same outcome "
+          "must not create a replacement Goal. Background helpers belong to "
+          "their recorded parent_root_run_id, not every Goal in this chat. "
+          "If needed work belongs to an older Goal, arrange an explicit "
+          "handoff for THIS Goal (for example a durable wait for that "
+          "helper's result); a task note alone does not connect ownership. "
           "Before ending again, either complete or update the Goal, ask "
           "through the clarifying-question tool if only the partner can act, "
           "declare a durable wait for an observable external condition, or "
@@ -4067,9 +4074,9 @@ async def _complete_turn(
   # turn can settle, require a truthful next owner: a queued message, an open
   # question, a durable monitor, or a wake-enabled helper. With no owner, one
   # progress-bounded corrective continuation gets queued after finalization.
-  # If the agent repeats the unowned handoff without plan progress, publish a
-  # resumable failure NOW so the same terminal snapshot makes the stop visible
-  # and durable rather than leaving the Goal looking benignly paused.
+  # If the agent repeats the unowned handoff without plan progress, persist
+  # a manual recovery pause in the same terminal snapshot. This is unfinished
+  # work needing intervention, not a provider failure or an automatic wait.
   goal_handoff_target = None
   if (
     we_own_gen
@@ -4102,6 +4109,9 @@ async def _complete_turn(
   ending_status = (
     _clear_after_terminal_status.get(chat_id, "stopped")
     if stop_handoff_successor
+    else "interrupted" if (
+      goal_handoff_target is not None and not goal_handoff_target.retry_allowed
+    )
     else "failed" if sink._last_error or lost_reply
     else "completed"
   )

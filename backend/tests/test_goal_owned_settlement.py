@@ -2,7 +2,7 @@
 
 An unfinished Goal promoted during an ordinary agent turn cannot settle with
 no actor responsible for the next move. One progress-bounded corrective turn
-is allowed; a repeat without plan progress becomes a visible resumable error.
+is allowed; a repeat without plan progress becomes a visible manual recovery pause.
 Explicit ``/goal`` starts retain their native provider continuation owners.
 """
 
@@ -361,7 +361,7 @@ def test_unrelated_wait_or_helper_does_not_own_this_goal(db, chat, monkeypatch):
   assert _goal_handoff_is_owned(db, chat.id, "run-a", _Sink()) is False
 
 
-def test_unowned_exhausted_goal_gets_visible_resumable_failure(db, chat):
+def test_unowned_exhausted_goal_gets_visible_manual_recovery_pause(db, chat):
   from app.chat import _prepare_goal_handoff
 
   chat.messages = [_correction("run-a")]
@@ -369,11 +369,15 @@ def test_unowned_exhausted_goal_gets_visible_resumable_failure(db, chat):
   _add_run(db, chat.id, "run-a", plan=STUCK)
   sink = _Sink()
 
-  assert _prepare_goal_handoff(db, chat.id, "run-a", sink) is None
+  assert _prepare_goal_handoff(db, chat.id, "run-a", sink) == GoalSettlementTarget(
+    goal_id="run-a", retry_allowed=False,
+  )
   assert len(sink.published) == 1
   assert sink.published[0]["type"] == "error"
   assert sink.published[0]["resumable"] is True
-  assert "without a visible owner" in sink.published[0]["message"]
+  assert sink.published[0]["pause"] == {"kind": "goal_handoff"}
+  assert "Your progress is saved" in sink.published[0]["message"]
+  assert "wake-enabled" not in sink.published[0]["message"]
   assert sink._last_error == sink.published[0]["message"]
 
 
@@ -396,7 +400,9 @@ def test_unrelated_pending_work_does_not_hide_exhausted_goal_failure(db, chat):
   _add_run(db, chat.id, "run-a", plan=STUCK)
   sink = _Sink()
 
-  assert _prepare_goal_handoff(db, chat.id, "run-a", sink) is None
+  assert _prepare_goal_handoff(db, chat.id, "run-a", sink) == GoalSettlementTarget(
+    goal_id="run-a", retry_allowed=False,
+  )
   assert len(sink.published) == 1
   assert sink.published[0]["type"] == "error"
   assert sink.published[0]["resumable"] is True
@@ -487,3 +493,46 @@ async def test_enqueue_recheck_yields_to_same_goal_continuation(
     db, chat.id, "run-a", target, SimpleNamespace(assistant_blocks=[]),
   )
   assert writer.submitted == []
+
+
+@pytest.mark.asyncio
+async def test_exhausted_handoff_settles_as_resumable_goal_not_failed_history(
+  db, chat, monkeypatch,
+):
+  from app import chat as chat_mod, chat_queue
+  from app.broadcast import create_broadcast
+  from app.goal_plans import presented_goal
+  from app.chat_event_sink import ChatEventSink
+  from app.memory_recall import EMPTY_RECALL_BINDING
+
+  from app.chat_writer import AppendPending, PromotePending, get_writer
+
+  _add_run(db, chat.id, "run-a", status="running", plan=STUCK)
+  get_writer().submit(AppendPending(
+    chat_id=chat.id, user_msg=_correction("run-a"),
+  )).result(timeout=5)
+  get_writer().submit(PromotePending(
+    chat_id=chat.id, run_token="fixture-correction",
+  )).result(timeout=5)
+  bc = create_broadcast(chat.id)
+  sink = ChatEventSink(
+    bc, chat.id, run_token="fixture-correction", recall_binding=EMPTY_RECALL_BINDING,
+  )
+  sink.publish({"type": "text", "content": "The work is not finished."})
+  monkeypatch.setattr(chat_mod, "_publish_chat_run_finished", lambda *_: None)
+  result = await chat_mod._complete_turn(
+    bc=bc, sink=sink, db=db, chat_id=chat.id, run_gen=None,
+    provider_id="codex", cost_usd=0, close_browser=False,
+  )
+  assert result == chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
+  db.expire_all()
+  run = db.get(models.ChatRun, "fixture-correction")
+  assert run.status == "interrupted"
+  goal = presented_goal(db, chat.id)
+  assert goal["status"] == "paused"
+  assert goal["resumable"] is True
+  saved_chat = db.get(models.Chat, chat.id)
+  assert saved_chat.pending_messages == []
+  assert saved_chat.messages[-1]["blocks"][-1]["pause"] == {
+    "kind": "goal_handoff",
+  }

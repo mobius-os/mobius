@@ -153,7 +153,14 @@ def goal_identity_for_run_start(
     if rows is None:
       return None, None
     presentation = serialize_goal(db, *rows)
-    if presentation["status"] == "paused":
+    if presentation["status"] == "paused" or (
+      manual_continue
+      and presentation["status"] == "failed"
+      and _goal_plan_is_unfinished(db, chat_id, rows[0].goal_id)
+    ):
+      # A visible manual Resume is explicit recovery, including older Goal
+      # handoff notes persisted as failures. Never turn it into ordinary work
+      # with a new Goal identity. Automatic events retain their own gates.
       return rows[0].goal_objective, rows[0].goal_id
     return None, None
   natural_resume = bool(
@@ -411,7 +418,7 @@ def goal_settlement_target(
   Explicit ``/goal`` paths stay under their existing Claude/Codex continuation
   owners. Auto-promoted Goals get one baseline corrective continuation and one
   additional attempt per task that has become completed/cancelled. The caller
-  turns an exhausted target into a visible failure rather than silently doing
+  turns an exhausted target into a manual recovery pause rather than silently doing
   nothing.
   """
   if not ending_run_token:

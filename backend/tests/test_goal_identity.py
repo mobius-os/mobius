@@ -486,3 +486,39 @@ def test_delegation_result_without_a_goal_origin_stays_non_goal(db, chat):
     "hidden": True,
     "source_work_id": "ordinary-root",
   }) == (None, None)
+
+
+@pytest.mark.parametrize("status", ["failed", "interrupted"])
+def test_manual_recovery_preserves_unfinished_goal_and_plan(db, chat, status):
+  db.add(models.ChatRun(
+    id="handoff-goal", root_run_id="handoff-goal", chat_id=chat.id,
+    status=status, provider="codex", goal_objective="Finish rollout",
+    goal_id="handoff-goal", goal_plan_json={
+      "tasks": [{"id": "verify", "status": "running"}],
+    },
+  ))
+  db.commit()
+  assert goal_identity_for_run_start(db, chat.id, {
+    "content": "continue", "kind": "continuation",
+    "continuation_reason": "manual",
+  }) == ("Finish rollout", "handoff-goal")
+  # Ordinary follow-ups must not silently adopt this Goal.
+  assert goal_identity_for_run_start(db, chat.id, {
+    "content": "Explain something unrelated",
+  }) == (None, None)
+
+
+def test_manual_recovery_does_not_revive_a_dismissed_failed_goal(db, chat):
+  db.add(models.ChatRun(
+    id="dismissed-failure", root_run_id="dismissed-failure", chat_id=chat.id,
+    status="failed", provider="codex", goal_objective="Old work",
+    goal_id="dismissed-failure", goal_plan_json={
+      "tasks": [{"id": "verify", "status": "running"}],
+    },
+  ))
+  chat.dismissed_goal_id = "dismissed-failure"
+  db.commit()
+  assert goal_identity_for_run_start(db, chat.id, {
+    "content": "continue", "kind": "continuation",
+    "continuation_reason": "manual",
+  }) == (None, None)

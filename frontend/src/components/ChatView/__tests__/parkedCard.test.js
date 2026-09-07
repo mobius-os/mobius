@@ -294,3 +294,33 @@ test('the park card keeps provider mechanics behind progressive disclosure', () 
   assert.match(css, /\[open\] \.chat__recovery-details-chevron[\s\S]*rotate\(90deg\)/,
     'the disclosure indicator reflects its open state')
 })
+
+
+test('Goal handoff pauses use calm actionable copy, including saved legacy notes', () => {
+  for (const block of [
+    { type: 'error', resumable: true, pause: { kind: 'goal_handoff' } },
+    { type: 'error', resumable: true, message: 'This Goal paused repeatedly without a visible owner for the next action. Resume it to continue; before pausing again, use a question card, a durable wait, or a wake-enabled helper.' },
+  ]) {
+    const html = renderToStaticMarkup(createElement(ErrorCard, { block }))
+    assert.match(html, /chat__text--parked/)
+    assert.match(html, /Goal paused/)
+    assert.match(html, /Your progress is saved/)
+    assert.match(html, /Resume to continue this Goal/)
+    assert.doesNotMatch(html, /wake-enabled|visible owner|role="alert"|continue automatically/)
+  }
+})
+
+test('a genuine resumable failure remains an error, not a Goal pause', (t) => {
+  const previousWindow = globalThis.window
+  globalThis.window = { location: { href: 'https://mobius.test/' } }
+  t.after(() => {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  })
+  const html = renderToStaticMarkup(createElement(ErrorCard, {
+    block: { type: 'error', resumable: true, message: 'Connection failed' },
+  }))
+  assert.match(html, /role="alert"/)
+  assert.match(html, /Connection failed/)
+  assert.doesNotMatch(html, /chat__text--parked|Goal paused/)
+})
