@@ -157,8 +157,8 @@ def test_version_includes_served_frontend_identity(client):
   assert body["served_frontend"] is None or isinstance(
     body["served_frontend"], str
   )
-  # Whether that bundle matches the source on disk, and what the watcher is
-  # doing about it: the owner-facing "did my changes disappear?" fact.
+  # Diagnostics report whether that bundle matches the source on disk and
+  # what the watcher is doing about any difference.
   assert isinstance(body["frontend_stale"], bool)
   assert body["frontend_stale_reason"] in (
     None, "incomplete_build", "source_newer",

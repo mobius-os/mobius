@@ -14,8 +14,8 @@ import {
  *
  * `fingerprint` names the failure. A crash surface passes the one it derived
  * from the error (null while nothing has failed: repair is then a no-op); a
- * surface with no crash to fingerprint (a degraded fallback, a stale shell)
- * omits it and is keyed by the surface alone. A new fingerprint reads its own
+ * surface with no crash to fingerprint (a degraded fallback) omits it and is
+ * keyed by the surface alone. A new fingerprint reads its own
  * ledger entry. A bfcache restore re-reads it and drops any repair still in
  * flight: the navigation that repair was waiting on has been undone.
  * `markRefreshed` records a manual refresh so a still-broken reload escalates

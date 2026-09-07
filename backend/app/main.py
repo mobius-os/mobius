@@ -1100,9 +1100,8 @@ def _served_frontend_identity() -> dict:
   static_dir = _resolve_static_dir()
   out = {"served_frontend": None,
          "frontend_source": "baked" if static_dir == _baked_dir else "platform",
-         # Whether that bundle matches the frontend source on disk right now,
-         # and what the watcher is doing about it. A stale platform bundle or
-         # a baked fallback is the difference an owner sees after a restart.
+         # Diagnostics for whether that bundle matches the frontend source on
+         # disk and what the watcher is doing about any difference.
          "frontend_stale": False,
          "frontend_stale_reason": None,
          "frontend_building": False,

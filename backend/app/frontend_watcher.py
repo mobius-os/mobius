@@ -284,11 +284,10 @@ def _startup_build_needed() -> bool:
 def served_frontend_freshness() -> dict:
   """Whether the shell being served matches the frontend source on disk.
 
-  This is the owner-facing fact behind "my changes disappeared after a
-  restart": the source advanced (an update, a merge, an edit) but the served
-  bundle did not follow, or the live build is incomplete and the image-baked
-  shell is serving instead. Read-only and never raises; the watcher's health
-  says whether a rebuild is already under way or why the last one failed.
+  This read-only diagnostic distinguishes source that advanced beyond its
+  served bundle from an incomplete live build using the image-baked shell.
+  Watcher health adds whether a rebuild is running or why its last attempt
+  failed. The diagnostic never raises.
   """
   try:
     reason, _signature, _seed = _dist_freshness()
