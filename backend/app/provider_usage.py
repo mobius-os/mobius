@@ -450,9 +450,7 @@ async def _run_on_codex_client(data_dir: str, work: Any, *, timeout_error: str) 
 
   ``work`` is a sync callable that receives a started ``CodexClient`` and owns
   the whole request; it runs on worker one while worker two stays free to close
-  the transport and unblock the read on timeout. Both the usage read and the
-  reset-credit redeem share this so the app-server is spun up, session-locked,
-  and reaped identically — there is one place that gets the lifecycle right.
+  the transport and unblock the interaction on timeout.
   """
   from openai_codex.client import CodexClient, CodexConfig
 
@@ -484,8 +482,6 @@ async def _run_on_codex_client(data_dir: str, work: Any, *, timeout_error: str) 
   def in_worker(fn, /, *args):
     return loop.run_in_executor(executor, functools.partial(fn, *args))
 
-  from app.codex_session_lock import acquire_codex_session_activity_async
-  ownership = await acquire_codex_session_activity_async(data_dir)
   task = in_worker(work, client)
   try:
     return await asyncio.wait_for(
@@ -502,16 +498,60 @@ async def _run_on_codex_client(data_dir: str, work: Any, *, timeout_error: str) 
       await in_worker(client.close)
     finally:
       executor.shutdown(wait=False, cancel_futures=True)
-      ownership.release()
 
 
 async def _fetch_codex_usage(data_dir: str) -> dict[str, Any]:
   """Read Codex plan limits with a bounded, explicitly reaped app-server."""
-  account, limits = await _run_on_codex_client(
-    data_dir,
-    _read_codex_client,
-    timeout_error="codex usage read timed out",
+  from openai_codex.client import CodexClient, CodexConfig
+
+  codex_bin = shutil.which("codex")
+  if not codex_bin:
+    raise RuntimeError("codex CLI not found")
+  env = dict(os.environ)
+  env["CODEX_HOME"] = str(Path(data_dir) / "cli-auth" / "codex")
+  client = CodexClient(CodexConfig(
+    codex_bin=codex_bin,
+    cwd=data_dir,
+    env=env,
+    client_name="mobius_settings",
+    client_title="Möbius Settings",
+  ))
+
+  # Keep Settings' short-lived client off the process-wide default executor.
+  # Live Codex turns may each hold one default worker while waiting for a
+  # notification; queuing start/read/close behind them made this probe leak an
+  # app-server exactly when the system was busiest. Worker one owns the whole
+  # blocking read; worker two remains available to close the transport and
+  # unblock it on timeout.
+  executor = _cf.ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="mobius-codex-usage",
   )
+  loop = asyncio.get_running_loop()
+
+  def in_worker(fn, /, *args):
+    return loop.run_in_executor(executor, functools.partial(fn, *args))
+
+  from app.codex_session_lock import acquire_codex_session_activity_async
+  ownership = await acquire_codex_session_activity_async(data_dir)
+  task = in_worker(_read_codex_client, client)
+  try:
+    account, limits = await asyncio.wait_for(
+      asyncio.shield(task),
+      timeout=_PROVIDER_TIMEOUT_SECONDS,
+    )
+  except TimeoutError:
+    await in_worker(client.close)
+    with suppress(Exception):
+      await asyncio.wait_for(task, timeout=2.0)
+    raise RuntimeError("codex usage read timed out")
+  finally:
+    try:
+      await in_worker(client.close)
+    finally:
+      executor.shutdown(wait=False, cancel_futures=True)
+      ownership.release()
+
   raw = limits.model_dump(mode="json", by_alias=False)
   return normalize_codex_usage(raw, plan_type=_codex_plan_type(account))
 
