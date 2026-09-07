@@ -237,6 +237,18 @@ def test_goal_waits_always_name_a_durable_owner_interaction():
   assert "A wait declared inside a Goal resumes under the same Goal" in waiting_normalized
 
 
+def test_core_requires_one_claim_for_convergent_cross_chat_work():
+  repo = Path(__file__).resolve().parents[2]
+  core = " ".join((repo / "skill" / "core.md").read_text(
+    encoding="utf-8",
+  ).split())
+
+  assert "**Claim convergent work once.**" in core
+  assert "The first atomic claimant owns it" in core
+  assert "must not duplicate its approval, mutation, or monitor" in core
+  assert "Claims coordinate agents; they never grant the owner's authority" in core
+
+
 def test_core_prompt_distinguishes_durable_delegation_and_owner_led_contribution():
   repo = Path(__file__).resolve().parents[2]
   core = (repo / "skill" / "core.md").read_text(encoding="utf-8")

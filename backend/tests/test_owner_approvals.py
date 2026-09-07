@@ -171,6 +171,42 @@ def test_identical_creation_retry_returns_same_card_and_different_request_confli
   assert changed.status_code == 409
 
 
+def test_shared_work_key_allows_only_the_first_chat_to_create_an_approval(
+  client, chat, approval_run, db,
+):
+  keyed = {
+    **PROMPT,
+    "work_key": "github:mobius-os/mobius:pr:1079:3134e050:merge",
+  }
+  first = _ask(client, chat, approval_run, keyed)
+  assert first.status_code == 200, first.text
+
+  other = models.Chat(
+    id="other-approval-chat", title="Duplicate integrator", messages=[],
+  )
+  other_run = models.ChatRun(
+    id="other-approval-run", root_run_id="other-approval-run",
+    chat_id=other.id, status="running", provider="codex",
+  )
+  db.add_all([other, other_run])
+  db.commit()
+  owner = db.query(models.Owner).first()
+  token = auth_mod.create_agent_token(
+    chat_id=other.id, owner_username=owner.username,
+    token_epoch=owner.token_epoch, run_id=other_run.id,
+    expires_delta=timedelta(minutes=5),
+  )
+  duplicate = client.post(
+    f"/api/chats/{other.id}/approval", json=keyed,
+    headers={"Authorization": f"Bearer {token}"},
+  )
+
+  assert duplicate.status_code == 409
+  assert "no duplicate card was created" in duplicate.text
+  assert db.query(models.AgentWorkClaim).count() == 1
+  assert _row(other.id)[0] is None
+
+
 def test_creation_failure_has_no_receipt_or_orphan_card(
   client, chat, approval_run, monkeypatch,
 ):

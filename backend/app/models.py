@@ -1431,6 +1431,66 @@ class SharedAppChange(Base):
   created_at = Column(DateTime, nullable=False, default=now_naive_utc, index=True)
 
 
+class AgentWorkClaim(Base):
+  """One workspace-wide owner for a stable unit of agent work.
+
+  The unique owner/work key is the concurrency boundary. Claims coordinate
+  agents; they never grant owner authority for the claimed action.
+  """
+
+  __tablename__ = "agent_work_claims"
+  __table_args__ = (
+    UniqueConstraint("owner_id", "work_key", name="uq_agent_work_claim_key"),
+  )
+
+  id = Column(String(64), primary_key=True)
+  owner_id = Column(Integer, ForeignKey("owner.id", ondelete="CASCADE"),
+                    nullable=False, index=True)
+  work_key = Column(String(256), nullable=False)
+  summary = Column(String(500), nullable=False)
+  owner_chat_id = Column(
+    String(64), ForeignKey("chats.id", ondelete="CASCADE"),
+    nullable=False, index=True,
+  )
+  owner_run_id = Column(String(64), nullable=False)
+  owner_goal_id = Column(String(64), nullable=True, index=True)
+  previous_owner_chat_id = Column(String(64), nullable=True)
+  takeover_reason = Column(String(1000), nullable=True)
+  revision = Column(Integer, nullable=False, default=1, server_default="1")
+  notification_revision = Column(
+    Integer, nullable=False, default=1, server_default="1"
+  )
+  claimed_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  updated_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  released_at = Column(DateTime, nullable=True)
+  completed_at = Column(DateTime, nullable=True)
+  outcome = Column(String(1000), nullable=True)
+
+
+class AgentWorkInterest(Base):
+  """A Goal following work that another chat currently owns."""
+
+  __tablename__ = "agent_work_interests"
+  __table_args__ = (
+    UniqueConstraint(
+      "claim_id", "chat_id", "goal_id", name="uq_agent_work_interest_goal",
+    ),
+  )
+
+  id = Column(String(64), primary_key=True)
+  claim_id = Column(
+    String(64), ForeignKey("agent_work_claims.id", ondelete="CASCADE"),
+    nullable=False, index=True,
+  )
+  chat_id = Column(
+    String(64), ForeignKey("chats.id", ondelete="CASCADE"),
+    nullable=False, index=True,
+  )
+  goal_id = Column(String(64), nullable=False, index=True)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  resolved_at = Column(DateTime, nullable=True)
+
+
 class ProjectPresence(Base):
   """Latest heartbeat for one owner or collaborator in one Project."""
 

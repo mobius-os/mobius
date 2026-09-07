@@ -23,7 +23,7 @@ from urllib.request import Request, urlopen
 
 
 SERVER_NAME = "Möbius control"
-SERVER_VERSION = "1.7.0"
+SERVER_VERSION = "1.8.0"
 LATEST_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = {
   "2024-11-05",
@@ -39,10 +39,14 @@ REQUEST_QUESTION_TOOL = "request_question"
 LIST_AGENT_PEERS_TOOL = "list_agent_peers"
 SEND_AGENT_MESSAGE_TOOL = "send_agent_message"
 READ_AGENT_MESSAGES_TOOL = "read_agent_messages"
+CLAIM_AGENT_WORK_TOOL = "claim_agent_work"
+FINISH_AGENT_WORK_TOOL = "finish_agent_work"
 COORDINATION_TOOLS = (
   LIST_AGENT_PEERS_TOOL,
   SEND_AGENT_MESSAGE_TOOL,
   READ_AGENT_MESSAGES_TOOL,
+  CLAIM_AGENT_WORK_TOOL,
+  FINISH_AGENT_WORK_TOOL,
 )
 OWNER_TOOLS = (
   PROMOTE_GOAL_TOOL,
@@ -326,8 +330,10 @@ def _call_promote_goal(arguments: dict[str, Any]) -> dict:
 
 
 def _call_request_approval(arguments: dict[str, Any]) -> dict:
-  if set(arguments) != {"question", "options"}:
-    raise ValueError("request_approval needs question and options")
+  if not {"question", "options"}.issubset(arguments) or not set(arguments).issubset(
+    {"question", "options", "work_key"}
+  ):
+    raise ValueError("request_approval needs question and options; work_key is optional")
   try:
     return _APPROVALS.request_approval(**arguments)
   except SystemExit as exc:
@@ -462,6 +468,22 @@ def _call_read_agent_messages(arguments: dict[str, Any]) -> dict:
   return _read_agent_messages(wait_seconds=wait_seconds)
 
 
+def _call_claim_agent_work(arguments: dict[str, Any]) -> dict:
+  allowed = {
+    "work_key", "summary", "takeover_reason", "expected_owner_chat_id",
+  }
+  if not {"work_key", "summary"}.issubset(arguments) or not set(arguments).issubset(allowed):
+    raise ValueError("claim_agent_work needs work_key and summary")
+  return _agent_api_call("POST", "/api/agent-coordination/work-claims", arguments)
+
+
+def _call_finish_agent_work(arguments: dict[str, Any]) -> dict:
+  allowed = {"work_key", "outcome", "release"}
+  if not {"work_key", "outcome"}.issubset(arguments) or not set(arguments).issubset(allowed):
+    raise ValueError("finish_agent_work needs work_key and outcome")
+  return _agent_api_call("POST", "/api/agent-coordination/work-claims/finish", arguments)
+
+
 _TOOL_DEFINITIONS = {
   REQUEST_APPROVAL_TOOL: {
     "name": REQUEST_APPROVAL_TOOL,
@@ -483,6 +505,14 @@ _TOOL_DEFINITIONS = {
       "type": "object",
       "properties": {
         "question": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "work_key": {
+          "type": "string", "minLength": 3, "maxLength": 256,
+          "description": (
+            "Stable lowercase identity for a shared or external action. "
+            "Required for PR updates, merges, and any action another chat "
+            "could also reach; the first claimant owns the sole card."
+          ),
+        },
         "options": {
           "type": "array", "minItems": 2, "maxItems": 3,
           "items": {
@@ -669,6 +699,45 @@ _TOOL_DEFINITIONS = {
       "additionalProperties": False,
     },
   },
+  CLAIM_AGENT_WORK_TOOL: {
+    "name": CLAIM_AGENT_WORK_TOOL,
+    "description": (
+      "Atomically claim a stable unit of work before doing it. The first chat "
+      "wins. A later caller receives the current owner and becomes a durable "
+      "follower rather than duplicating the action. Transfer only for a "
+      "specific strong reason, naming the observed owner in "
+      "expected_owner_chat_id; transfer never grants owner authority for the "
+      "underlying action. Use canonical lowercase keys such as "
+      "github:mobius-os/mobius:pr:1079:3134e050:merge."
+    ),
+    "inputSchema": {
+      "type": "object", "additionalProperties": False,
+      "required": ["work_key", "summary"],
+      "properties": {
+        "work_key": {"type": "string", "minLength": 3, "maxLength": 256},
+        "summary": {"type": "string", "minLength": 1, "maxLength": 500},
+        "takeover_reason": {"type": "string", "minLength": 10, "maxLength": 1000},
+        "expected_owner_chat_id": {"type": "string", "minLength": 1, "maxLength": 64},
+      },
+    },
+  },
+  FINISH_AGENT_WORK_TOOL: {
+    "name": FINISH_AGENT_WORK_TOOL,
+    "description": (
+      "Complete or release work owned by this chat. Completion wakes follower "
+      "Goals with the durable outcome. Set release only when another agent "
+      "should be able to claim unfinished work."
+    ),
+    "inputSchema": {
+      "type": "object", "additionalProperties": False,
+      "required": ["work_key", "outcome"],
+      "properties": {
+        "work_key": {"type": "string", "minLength": 3, "maxLength": 256},
+        "outcome": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "release": {"type": "boolean"},
+      },
+    },
+  },
 }
 
 _TOOL_HANDLERS = {
@@ -680,6 +749,8 @@ _TOOL_HANDLERS = {
   LIST_AGENT_PEERS_TOOL: _call_list_agent_peers,
   SEND_AGENT_MESSAGE_TOOL: _call_send_agent_message,
   READ_AGENT_MESSAGES_TOOL: _call_read_agent_messages,
+  CLAIM_AGENT_WORK_TOOL: _call_claim_agent_work,
+  FINISH_AGENT_WORK_TOOL: _call_finish_agent_work,
 }
 
 

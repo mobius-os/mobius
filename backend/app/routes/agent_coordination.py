@@ -17,9 +17,11 @@ from app.agent_coordination import (
   run_started_at,
   scope_for_chat,
   send_agent_message,
+  send_work_claim_notice,
   visible_peer_messages,
   wake_idle_recipients,
 )
+from app.agent_work_claims import acknowledge_notice, claim_work, finish_work
 from app.database import get_db
 from app.deps import (
   Principal,
@@ -62,6 +64,23 @@ class AgentMessageCreate(BaseModel):
     return value
 
 
+class AgentWorkClaimCreate(BaseModel):
+  model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+  work_key: str = Field(min_length=3, max_length=256)
+  summary: str = Field(min_length=1, max_length=500)
+  takeover_reason: str | None = Field(default=None, min_length=10, max_length=1000)
+  expected_owner_chat_id: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class AgentWorkClaimFinish(BaseModel):
+  model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+  work_key: str = Field(min_length=3, max_length=256)
+  outcome: str = Field(min_length=1, max_length=1000)
+  release: bool = False
+
+
 def _agent_scope(
   db: Session, principal: Principal,
 ):
@@ -71,6 +90,94 @@ def _agent_scope(
   if scope is None:
     raise HTTPException(409, "This agent does not have a coordination scope.")
   return scope
+
+
+@router.post("/work-claims", dependencies=[Depends(reject_cross_site)])
+async def claim_current_work(
+  body: AgentWorkClaimCreate,
+  principal: Principal = Depends(get_agent_run_principal),
+  db: Session = Depends(get_db),
+):
+  try:
+    result = claim_work(
+      db,
+      owner_id=principal.owner.id,
+      chat_id=principal.chat_id,
+      run_id=principal.run_id,
+      **body.model_dump(),
+    )
+  except ValueError as exc:
+    raise HTTPException(409, str(exc)) from exc
+  previous = result.get("previous_owner_chat_id")
+  if previous and result.get("notification_pending"):
+    send_work_claim_notice(
+      db,
+      owner_id=principal.owner.id,
+      claim_id=result["id"],
+      revision=result["revision"],
+      sender_chat_id=principal.chat_id,
+      recipients=[previous],
+      body=(
+        f"Work claim {body.work_key} transferred to {principal.chat_id}: "
+        f"{body.takeover_reason}"
+      ),
+    )
+    acknowledge_notice(
+      db, claim_id=result["id"], revision=result["revision"],
+      resolve_interests=False,
+    )
+    result["notification_pending"] = False
+    result["woken"] = await wake_idle_recipients(
+      recipients=[previous], kind="handoff",
+      sender_chat_id=principal.chat_id,
+    )
+  return result
+
+
+@router.post("/work-claims/finish", dependencies=[Depends(reject_cross_site)])
+async def finish_current_work(
+  body: AgentWorkClaimFinish,
+  principal: Principal = Depends(get_agent_run_principal),
+  db: Session = Depends(get_db),
+):
+  try:
+    finished = finish_work(
+      db,
+      owner_id=principal.owner.id,
+      chat_id=principal.chat_id,
+      work_key=body.work_key,
+      outcome=body.outcome,
+      release=body.release,
+    )
+  except ValueError as exc:
+    raise HTTPException(409, str(exc)) from exc
+  recipients = finished.interested_chat_ids
+  woken: list[str] = []
+  if recipients:
+    send_work_claim_notice(
+      db,
+      owner_id=principal.owner.id,
+      claim_id=finished.claim["id"],
+      revision=finished.claim["revision"],
+      sender_chat_id=principal.chat_id,
+      recipients=recipients,
+      body=(
+        f"Work claim {body.work_key} was "
+        f"{'released' if body.release else 'completed'}: {body.outcome}"
+      ),
+    )
+    woken = await wake_idle_recipients(
+      recipients=recipients, kind="handoff",
+      sender_chat_id=principal.chat_id,
+    )
+  acknowledge_notice(
+    db, claim_id=finished.claim["id"], revision=finished.claim["revision"],
+    resolve_interests=True,
+  )
+  return {
+    **finished.claim, "notification_pending": False,
+    "notified": recipients, "woken": woken,
+  }
 
 
 @router.get("/room")

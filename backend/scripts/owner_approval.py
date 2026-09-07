@@ -11,8 +11,13 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
-def request_approval(question: str, options: list[dict]) -> dict:
-  return save_card("approval", {"question": question, "options": options})
+def request_approval(
+  question: str, options: list[dict], work_key: str | None = None,
+) -> dict:
+  body = {"question": question, "options": options}
+  if work_key is not None:
+    body["work_key"] = work_key
+  return save_card("approval", body)
 
 
 def request_question(questions: list[dict]) -> dict:
@@ -62,9 +67,10 @@ def main() -> None:
   parser.add_argument("--questions-json", help="JSON array for a saved ordinary question card")
   parser.add_argument("--option", action="append", nargs=2,
                       metavar=("LABEL", "DESCRIPTION"))
+  parser.add_argument("--work-key", help="stable shared-action ownership key")
   args = parser.parse_args()
   if args.questions_json is not None:
-    if args.question or args.option:
+    if args.question or args.option or args.work_key:
       parser.error("use either --questions-json or an approval question with --option")
     try:
       questions = json.loads(args.questions_json)
@@ -77,7 +83,7 @@ def main() -> None:
     print(json.dumps(request_approval(args.question, [
       {"label": label, "description": description}
       for label, description in args.option
-    ])))
+    ], work_key=args.work_key)))
 
 
 if __name__ == "__main__":

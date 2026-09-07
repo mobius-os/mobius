@@ -1281,6 +1281,39 @@ def send_agent_message(
   )
 
 
+def send_work_claim_notice(
+  db: Session,
+  *,
+  owner_id: int,
+  claim_id: str,
+  revision: int,
+  sender_chat_id: str,
+  recipients: list[str],
+  body: str,
+) -> list[dict[str, Any]]:
+  """Persist a retry-safe claim notice across physical agent turns."""
+  unique_recipients = list(dict.fromkeys(str(value) for value in recipients))
+  if not unique_recipients:
+    return []
+  addressable = _agent_chat_ids(db, set(unique_recipients))
+  if addressable != set(unique_recipients):
+    raise ValueError("A work-claim recipient is not an addressable Möbius peer.")
+  network = CoordinationScope(
+    kind="workspace", id=str(owner_id), root_chat_id=sender_chat_id,
+  )
+  return _persist_send(
+    db,
+    network,
+    sender_chat_id=sender_chat_id,
+    sender_run_id=f"work-claim:{claim_id}",
+    recipients=unique_recipients,
+    broadcast=False,
+    kind="handoff",
+    body=body,
+    send_id=f"revision:{revision}",
+  )
+
+
 # A direct note of one of these kinds asks the recipient to DO something. When
 # that recipient is idle with unfinished Goal work and nothing else scheduled
 # to wake it, the note would otherwise sit in its inbox until the owner happens

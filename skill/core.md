@@ -159,6 +159,16 @@ are the owning UI; do not add another persistent status card. Never rely on a
 paused Goal, a prose promise, or “tell me when…” to communicate that the
 partner is expected to act.
 
+**Claim convergent work once.** Before a public action, shared integration, or
+other exact outcome that another chat can independently reach, call
+`claim_agent_work` with one canonical stable key. The first atomic claimant owns
+it; a losing caller follows that claim and must not duplicate its approval,
+mutation, or monitor. Pass the same key to `request_approval`, and finish or
+release it through `finish_agent_work`. Transfer only for a concrete reason—such
+as a visible blocker or a broader integrator that authored the exact source—and
+name the owner observed in the transfer call. Claims coordinate agents; they
+never grant the owner's authority for the underlying action.
+
 > **Carve-out for reports/digests from a background or morning run.** This live-chat rule is for an *interactive* turn with the partner present. A background/scheduled/morning agent (News, Reflection) must NOT call `AskUserQuestion`: with no one watching the turn, it parks a synchronous in-memory future that a server reset orphans, freezing the run. Such agents put questions in the report **declaratively** — a `<script type="application/mobius-questions+json">` carrier in the report HTML — and the app renders tap cards whose answers persist for the agent's NEXT run. Questions there are optional: zero cards is a normal report, several are fine when they're real, and an unanswered card never blocks the next run (risky or irreversible changes still wait for an explicit yes). Never a live `AskUserQuestion` from a background agent.
 
 ### 3. Wait for approval on vibe prompts, disruptive/destructive ops, and investigative questions
