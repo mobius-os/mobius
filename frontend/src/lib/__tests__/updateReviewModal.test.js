@@ -65,7 +65,9 @@ test('successful apply projection survives an unavailable follow-up status read'
 })
 
 test('errors have one alert owner and results focus a live control', () => {
-  assert.match(modal, /<div className="urm__error"><Alert color="danger"/)
+  assert.match(modal, /<div className="urm__error">/ )
+  assert.match(modal, /<Alert color="danger"/)
+  assert.match(modal, /buttonRef=\{resultActionRef\}/)
   assert.doesNotMatch(modal, /className="urm__error" role="alert"/)
   assert.match(modal, /ref=\{resultActionRef\}/)
   assert.match(modal, /tabIndex=\{-1\}/)
@@ -96,4 +98,13 @@ test('DiffView stays generic, semantic, and keyboard-scrollable', () => {
   assert.doesNotMatch(diffStyles, /width: max-content/)
   assert.match(diffStyles, /var\(--green, #16a34a\)/)
   assert.match(diffStyles, /var\(--danger, #ef4444\)/)
+})
+
+
+test('update repair reuses the shared lifecycle and keeps mobile failure text below actions', () => {
+  const repair = read('../../components/SettingsView/UpdateRepairAction.jsx')
+  assert.match(repair, /useAgentRepair/)
+  assert.doesNotMatch(repair, /api\.chats|fetch\(|window\.location/)
+  assert.match(modalCss, /\.urm__foot \{[^}]*flex-wrap: wrap/)
+  assert.match(modalCss, /\.urm__foot \.platform-updates__description \{[^}]*flex-basis: 100%/)
 })

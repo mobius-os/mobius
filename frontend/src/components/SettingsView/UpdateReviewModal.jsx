@@ -7,6 +7,8 @@ import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { shortSha, summarizePreview } from '../../lib/platformUpdatePreview.js'
 import { deploymentKindLabel, platformActivationLabel, reviewedUpdateUsesContainerRebuild } from '../../lib/platformUpdateState.js'
 import UnifiedDiff from '../DiffView/UnifiedDiff.jsx'
+import UpdateRepairAction from './UpdateRepairAction.jsx'
+import { platformUpdateRepairReason } from '../../lib/platformUpdateRepair.js'
 import './UpdateReviewModal.css'
 
 const UPDATE_PHASE_LABELS = {
@@ -17,7 +19,7 @@ const UPDATE_PHASE_LABELS = {
 }
 
 export default function UpdateReviewModal({
-  intent = 'update', onClose, onApply, onRebuild, onResolve,
+  intent = 'update', platform, rebuild, onClose, onApply, onRebuild, onResolve,
   applying, rebuilding, resolving, observing, applyError, applyErrorCode, onRefreshReview, applyProgress,
 }) {
   const [preview, setPreview] = useState(null)
@@ -31,7 +33,7 @@ export default function UpdateReviewModal({
   const busy = inFlight || observing
 
   const loadPreview = useCallback(async () => {
-    setLoading(true); setLoadError(''); onRefreshReview?.()
+    setLoading(true); setLoadError(''); setPreview(null); onRefreshReview?.()
     try {
       const response = await api.platform.updatePreview({ intent })
       const body = await response.json().catch(() => null)
@@ -40,7 +42,7 @@ export default function UpdateReviewModal({
         throw new Error(detail?.message || (typeof detail === 'string' && detail) || 'Couldn’t verify this update.')
       }
       if (typeof body?.actionable !== 'boolean') {
-        throw new Error('The new update controls are not loaded in the server yet. Close this review and restart the server from Details and maintenance.')
+        throw new Error('The server has not loaded these update controls yet. Close this review and use Restart server in Settings.')
       }
       setPreview(body)
     } catch (error) { setLoadError(error.message || 'Couldn’t verify this update.') }
@@ -76,7 +78,9 @@ export default function UpdateReviewModal({
   const progressLabel = observing ? 'Confirming the request. No second update will be sent…' : rebuilding ? 'Starting the reviewed container update…'
     : (applyProgress?.plan_id === preview?.plan_id && UPDATE_PHASE_LABELS[applyProgress?.phase]) || 'Preparing the update…'
   const needsRestart = ['server_restart', 'dependency_sync'].includes(activation?.level)
-  const external = activation && !['live', 'server_restart', 'dependency_sync', 'image_rebuild'].includes(activation.level)
+  const repairReason = resultState === 'conflict' ? null : platformUpdateRepairReason({
+    preview, platform: { ...platform, state: resultState || platform?.state }, error: applyError, errorCode: applyErrorCode,
+  })
 
   return (
     <div className="urm__overlay" role="presentation" onClick={requestClose}>
@@ -103,23 +107,24 @@ export default function UpdateReviewModal({
               : !actionable ? <p className="urm__notice" role="status">There’s nothing to apply. This update is already complete.</p>
                 : <>
                   <section className="urm__overview">
-                    <h3>{finish ? 'Make the installed update active' : 'Update Möbius'}</h3>
-                    <p>{finish ? 'Finish activation using the installed release’s container image.'
-                      : 'Apply this reviewed version while keeping your local changes. If they overlap, the update stops for you to resolve them.'}</p>
+                    <h3>{repairReason ? 'This update needs help' : finish ? 'Make the installed update active' : 'Update Möbius'}</h3>
+                    <p>{repairReason || (finish ? 'Finish activating the installed release.'
+                      : 'Apply this reviewed version while keeping your local changes. If they overlap, the update stops for you to resolve them.')}</p>
                     <h3>What to expect</h3>
-                    <p>{rebuildUpdate
+                    <p>{repairReason
+                      ? 'Open a repair chat with the update details attached. Möbius will investigate and help preserve your changes, then bring you back to review the update. Nothing is restarted by opening the chat.'
+                      : rebuildUpdate
                       ? 'This replaces the container and briefly takes Möbius offline. Active chats are paused; eligible chats resume after the update. The page reconnects automatically.'
                       : needsRestart
                         ? 'The update is prepared now. A separate restart makes it active, so you can keep working and combine more updates first.'
-                        : external
-                          ? 'The source can be installed now, but this update also needs deployment maintenance. See the details below before continuing.'
-                          : 'The interface is rebuilt or changes take effect when next used. No server restart is needed.'}</p>
-                    {rebuildUpdate && <p>If the new container fails its checks, the controller attempts to restore the previous container. Your saved chats, apps and local source stay on the persistent volume. Startup keeps the installed source and your local changes. Newer releases wait for another explicit update.</p>}
+                        : 'The interface is rebuilt or changes take effect when next used. No server restart is needed.'}</p>
+                    {rebuildUpdate && !repairReason && <p>If the new container fails its checks, the controller attempts to restore the previous container. Your saved chats, apps and local source stay on the persistent volume. Startup keeps the installed source and your local changes. Newer releases wait for another explicit update.</p>}
                   </section>
-                  <details className="urm__technical" open={external || undefined}>
+                  <details className="urm__technical">
                     <summary>Technical details{summary.fileCount ? ` · ${summary.fileCount} files` : ''}</summary>
                     <p>Reviewed version <code className="urm__sha">{target}</code> · {activation && deploymentKindLabel(activation)}</p>
                     {activation && <p>{platformActivationLabel(activation)}</p>}
+                    {preview?.blocking_paths?.length > 0 && <><h3>Local changes to preserve</h3><ul>{preview.blocking_paths.map(path => <li key={path}><code>{path}</code></li>)}</ul></>}
                     {(activation?.guidance || []).map(line => <p key={line}>{line}</p>)}
                     {(activation?.reasons || []).length > 0 && <ul>{activation.reasons.map(reason => <li key={reason.code}>{reason.summary}</li>)}</ul>}
                     {commits.length > 0 && <section>
@@ -134,10 +139,13 @@ export default function UpdateReviewModal({
                 </>}
           {busy && <p className="urm__notice" role="status">{progressLabel}</p>}
         </div>
-        {applyError && <div className="urm__error"><Alert color="danger" variant="soft" description={applyError} /></div>}
+        {applyError && <div className="urm__error">{repairReason
+          ? <details><summary>Failure details</summary><p>{applyError}</p></details>
+          : <Alert color="danger" variant="soft" description={applyError} />}</div>}
         <div className="urm__foot">
           <button type="button" className="urm__btn urm__btn--ghost" onClick={requestClose} disabled={inFlight}>{observing ? 'Keep working' : 'Not now'}</button>
-          {hasResult ? <button ref={resultActionRef} type="button" className="urm__btn"
+          {repairReason ? <UpdateRepairAction preview={preview} platform={{ ...platform, state: resultState || platform?.state }} rebuild={rebuild} error={applyError} errorCode={applyErrorCode} disabled={busy || loading} buttonRef={resultActionRef} className="urm__btn" />
+          : hasResult ? <button ref={resultActionRef} type="button" className="urm__btn"
             onClick={resultState === 'conflict' ? onResolve : requestClose} disabled={busy}>
             {resultState === 'conflict' ? (resolving ? 'Opening…' : 'Resolve in chat') : 'Done'}
           </button> : (loadError || ['update_plan_stale', 'update_plan_invalid', 'activation_changed'].includes(applyErrorCode)) ? <button type="button" className="urm__btn" onClick={loadPreview} disabled={busy}>{loadError ? 'Try again' : 'Refresh review'}</button>

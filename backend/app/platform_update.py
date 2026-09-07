@@ -376,6 +376,9 @@ class PlatformUpdatePreview(TypedDict):
   diff: str | None
   diff_truncated: bool
   conflict_paths: list[str]
+  # The same preservation check used immediately before replacement. A preview
+  # explains these blockers early; it never replaces the mutation's recheck.
+  blocking_paths: list[str]
 
 
 @dataclass(frozen=True)
@@ -2767,7 +2770,7 @@ def empty_platform_update_preview(
     image_digest=image_digest,
     activation=platform_activation.classify_activation([]),
     total_commits=0, commits_truncated=False,
-    commits=[], files=[], diff=None, diff_truncated=False, conflict_paths=[],
+    commits=[], files=[], diff=None, diff_truncated=False, conflict_paths=[], blocking_paths=[],
   )
 
 
@@ -2882,11 +2885,20 @@ def platform_update_preview(
   if not (repo / ".git").exists():
     raise PlatformUpdateError("platform_repo_missing")
   with _reconcile_flock():
-    return _platform_update_preview_unlocked(
+    preview = _platform_update_preview_unlocked(
       repo,
       target_sha=target_sha,
       image_digest=image_digest,
     )
+    if preview["activation"]["level"] == "image_rebuild":
+      current, target = preview["current_sha"], preview["target_sha"]
+      base = _git(
+        "merge-base", current, target, repo=repo, check=False,
+      ).stdout.strip() or current
+      preview["blocking_paths"] = container_replacement_blockers(
+        target, repo, local_change_base=base,
+      )
+    return preview
 
 
 def _platform_update_preview_unlocked(
@@ -2941,7 +2953,7 @@ def _platform_update_preview_unlocked(
       image_digest=image_digest,
       activation=platform_activation.classify_activation(["backend/app"]),
       total_commits=0, commits_truncated=False, commits=[], files=[],
-      diff=None, diff_truncated=False, conflict_paths=[],
+      diff=None, diff_truncated=False, conflict_paths=[], blocking_paths=[],
     )
   diff, truncated = _preview_diff(repo, base, target)
   commits = _preview_commits(repo, base, target)
@@ -2963,7 +2975,7 @@ def _platform_update_preview_unlocked(
     commits=commits,
     files=_preview_files(repo, base, target),
     diff=diff, diff_truncated=truncated,
-    conflict_paths=conflict.get("paths") or [],
+    conflict_paths=conflict.get("paths") or [], blocking_paths=[],
   )
 
 

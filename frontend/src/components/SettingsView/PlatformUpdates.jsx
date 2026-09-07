@@ -7,6 +7,8 @@ import { containerVersionIdentity, platformVersionIdentity } from '../../lib/pla
 import { formatUpstreamCommitDate } from '../../lib/platformProvenance.js'
 import usePlatformUpdates from './usePlatformUpdates.js'
 import UpdateReviewModal from './UpdateReviewModal.jsx'
+import UpdateRepairAction from './UpdateRepairAction.jsx'
+import { platformUpdateRepairReason } from '../../lib/platformUpdateRepair.js'
 import './PlatformUpdates.css'
 
 export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
@@ -19,13 +21,13 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
   const level = platformActivationLevel(platform)
   const restartNeeded = ['server_restart', 'dependency_sync'].includes(level)
   const imageNeeded = level === 'image_rebuild'
-  const externalNeeded = !['live', 'server_restart', 'dependency_sync', 'image_rebuild'].includes(level)
   const conflict = platform?.state === 'conflict'
   const available = platform?.available || platform?.newer_updates_available
   const unavailable = !platform || platform.status_unavailable
   const activeRebuild = rebuildIsActive(rebuild)
   const mobiusVersion = platformVersionIdentity(platform, version)
   const containerVersion = containerVersionIdentity(version)
+  const repairReason = !conflict && platformUpdateRepairReason({ platform, rebuild, error: update.error, errorCode: update.errorCode })
 
   useEffect(() => {
     if (review || busy || !restoreFocus.current) return
@@ -116,18 +118,21 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
           ? 'Taking longer than usual. Still checking; there is no need to restart again.'
           : 'The page will refresh when Möbius is ready.'}</p>
       )}
-      {externalNeeded && (
+      {repairReason && !review && !update.reconnecting && (
         <div className="platform-updates__description">
-          {(platform?.activation?.guidance || []).map(line => <p key={line}>{line}</p>)}
+          <p>{repairReason}</p>
+          <UpdateRepairAction platform={platform} rebuild={rebuild} error={update.error} errorCode={update.errorCode} disabled={busy} />
+          <details><summary>Technical details</summary>
+            {update.error && <p>{update.error}</p>}
+            {platform?.rollback_error && <p>{platform.rollback_error}</p>}
+            {(platform?.activation?.guidance || []).map(line => <p key={line}>{line}</p>)}
+          </details>
         </div>
       )}
       {update.checkResult && <p className="platform-updates__description" role="status">{update.checkResult}</p>}
-      {!review && update.error && <Alert color="danger" variant="soft" description={update.error} />}
-      {platform?.state === 'rolled_back' && !review && (
-        <Alert color="warning" variant="soft" description={platform.rollback_error || 'The update did not complete. Your previous source was restored; review the update before trying again.'} />
-      )}
+      {!review && !repairReason && update.error && <Alert color="danger" variant="soft" description={update.error} />}
       {review && (
-        <UpdateReviewModal intent={review} onClose={closeReview}
+        <UpdateReviewModal intent={review} platform={platform} rebuild={rebuild} onClose={closeReview}
           onApply={plan => update.execute(plan, 'apply')}
           onRebuild={plan => update.execute(plan, 'rebuild')}
           onResolve={update.resolve} applying={phase === 'applying'} rebuilding={phase === 'rebuilding'}

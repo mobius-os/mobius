@@ -3187,3 +3187,59 @@ def test_host_installer_replays_exact_bundled_release_and_preserves_local_edits(
   assert (platform / "backend/app/foo.py").read_text() == "VALUE = 'reviewed'\n"
   assert (platform / "local.txt").read_text() == "owner working edit"
   assert _git(platform, "status", "--porcelain").stdout.strip() == "M local.txt"
+
+
+@pytest.mark.parametrize("deployment", ["self_hosted", "railway"])
+def test_review_exposes_seed_customization_before_replacement_without_mutation(
+  clone_env, monkeypatch, deployment,
+):
+  origin, platform = clone_env
+  monkeypatch.setattr(platform_activation, "deployment_kind", lambda: deployment)
+  paths = ["backend/scripts/seed-skills/cron.md", "backend/scripts/seed-skills/reflection.md"]
+  _local_commit(platform, edits={path: "local instructions\n" for path in paths})
+  target = _advance_origin(origin, edits={"Dockerfile": "FROM official-new\n"})
+  pu._fetch(platform)
+  before = _served_sha(platform)
+  dirty = platform / "keep-working.txt"
+  dirty.write_text("unfinished owner work")
+  before_status = _git(platform, "status", "--porcelain").stdout
+
+  preview = pu.platform_update_preview(platform, target_sha=target)
+  reviewed = pu.reviewed_container_rebuild_plan(
+    repo=platform, plan_id=preview["plan_id"], current_sha=before,
+    target_sha=target, image_digest=None,
+  )
+
+  assert preview["blocking_paths"] == paths
+  assert reviewed["blockers"] == preview["blocking_paths"]
+  assert preview["activation"]["deployment"] == deployment
+  assert _served_sha(platform) == before
+  assert _git(platform, "status", "--porcelain").stdout == before_status
+  assert dirty.read_text() == "unfinished owner work"
+  assert all((platform / path).read_text() == "local instructions\n" for path in paths)
+
+
+def test_review_does_not_block_seed_changes_already_in_the_official_release(clone_env):
+  origin, platform = clone_env
+  path = "backend/scripts/seed-skills/cron.md"
+  _local_commit(platform, edits={path: "same useful instructions\n"})
+  target = _advance_origin(origin, edits={path: "same useful instructions\n"})
+  pu._fetch(platform)
+
+  preview = pu.platform_update_preview(platform, target_sha=target)
+
+  assert preview["activation"]["level"] == "image_rebuild"
+  assert preview["blocking_paths"] == []
+
+
+def test_finish_review_exposes_local_image_blockers_too(clone_env):
+  _, platform = clone_env
+  official = _served_sha(platform)
+  path = "backend/scripts/seed-skills/cron.md"
+  _local_commit(platform, edits={path: "preserve me\n"})
+  pu.mark_activation_needed(_served_sha(platform), [path], upstream_sha=official, repo=platform)
+
+  preview = pu.platform_update_preview(platform, target_sha=official)
+
+  assert preview["operation"] == "finish"
+  assert preview["blocking_paths"] == [path]
