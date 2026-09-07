@@ -7,6 +7,7 @@ import {
   Play,
   Stop,
 } from '@openai/apps-sdk-ui/components/Icon'
+import { projectSourceAction } from '../../lib/projectSourceAction.js'
 import { api } from '../../api/client.js'
 import { appQueries, chatQueries, projectQueries } from '../../hooks/queries.js'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
@@ -113,7 +114,7 @@ export default function Drawer({
   activeChatId,
   onChat,
   onApp,
-  onAppSource,
+  onAddSourceToProjects,
   onNewChat,
   onDeleteChat,
   onDeleteApp,
@@ -450,10 +451,10 @@ export default function Drawer({
       current.resetAppsSurfaceUi({ restoreFocus: false })
       current.onProject?.(project)
     },
-    inspectSource(app) {
+    addToProjects(source) {
       const current = rowActionInputsRef.current
       current.resetAppsSurfaceUi({ restoreFocus: false })
-      current.onAppSource?.(app)
+      current.onAddSourceToProjects?.(source)
     },
     openMenu(menu) {
       rowActionInputsRef.current.showItemMenu(menu)
@@ -1056,7 +1057,7 @@ export default function Drawer({
   rowActionInputsRef.current = {
     onChat,
     onApp,
-    onAppSource,
+    onAddSourceToProjects,
     onProject,
     onProjectDelete,
     onArtifact,
@@ -1382,6 +1383,7 @@ export default function Drawer({
       <DrawerItemMenu
         menu={openMenu}
         item={activeMenuItem}
+        projects={projects}
         actions={rowActions}
         restoreFocusRef={menuRestoreFocusRef}
       />
@@ -2173,9 +2175,12 @@ const DrawerRow = memo(function DrawerRow({
 const DrawerItemMenu = memo(function DrawerItemMenu({
   menu,
   item,
+  projects,
   actions,
   restoreFocusRef,
 }) {
+  const importSources = projectQueries.importSources.useQuery(Boolean(menu && item && ['app', 'artifact'].includes(menu.kind)))
+  const projectAction = projectSourceAction(projects, importSources.data, menu?.kind, menu?.id)
   const kind = menu?.kind || 'chat'
   const id = menu?.id
   const surface = menu?.surface || 'drawer'
@@ -2190,7 +2195,10 @@ const DrawerItemMenu = memo(function DrawerItemMenu({
       pinned={pinned}
       canInstall={kind === 'app' && Boolean(item?.slug)}
       canShare={kind === 'app' && isDrawerAppShareEligible(item)}
-      canInspectSource={kind === 'app'}
+      projectActionLabel={projectAction?.label}
+      onProjectAction={() => projectAction?.project
+        ? actions.openProject(projectAction.project)
+        : actions.addToProjects(projectAction.source)}
       placement={menu?.placement}
       focusFirstAction={menu?.focusFirstAction === true}
       restoreFocusRef={restoreFocusRef}
@@ -2200,7 +2208,6 @@ const DrawerItemMenu = memo(function DrawerItemMenu({
       onRename={() => actions.startRename(kind, id, surface)}
       onInstall={() => actions.install(item)}
       onShare={() => actions.share(item)}
-      onInspectSource={() => actions.inspectSource(item)}
       onDelete={() => actions.remove(kind, id)}
       onDeleteData={() => actions.removeData(id)}
     />

@@ -60,9 +60,10 @@ import { buildEventProjectId, isArtifactBuildEvent } from '../../lib/projectArti
 import {
   appSourceProject,
   appSourceProjectId,
-  appForSourceImport,
+  linkedProjectAppId,
   importedAppForProject,
 } from '../../lib/appSourceProject.js'
+import { projectSourceAction } from '../../lib/projectSourceAction.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
 import { bumpChatRunSignal, chatRunSignal } from '../../lib/chatRunSignal.js'
 import { invalidateChatChangesQueries } from '../ChatView/chatChangesQueries.js'
@@ -1389,6 +1390,7 @@ export default function Shell({ onInitialVisualReady }) {
     }
     return m
   }, [apps, appById, projects])
+  const linkedProjectAppIds = useMemo(() => new Set(projects.map(linkedProjectAppId).filter(Boolean)), [projects])
   const projectArtifactByRef = useMemo(() => {
     const map = new Map()
     for (const project of projects) {
@@ -1659,12 +1661,9 @@ export default function Shell({ onInitialVisualReady }) {
   }
 
   async function importProjectSource(source) {
-    if (source.kind === 'app') {
-      const app = appForSourceImport(source, appsRef.current)
-      if (!app) throw new Error('That app is no longer installed.')
-      const project = appSourceProject(app)
-      openProject(project)
-      return project
+    const eligibility = await jsonOrThrow(await api.projects.importSources(), 'Existing work failed:')
+    if (eligibility?.management !== 'linked') {
+      throw new Error('Add to Projects will be available after the pending server update.')
     }
     const response = await api.projects.importSource({
       kind: source.kind,
@@ -1677,8 +1676,22 @@ export default function Shell({ onInitialVisualReady }) {
       ...projectsRef.current.filter(row => String(row.id) !== String(project.id)),
     ]
     queryClient.setQueryData(projectQueries.keys.all, projectsRef.current)
+    queryClient.setQueryData(projectQueries.keys.importSources, current => current && ({
+      ...current,
+      apps: current.apps?.filter(row => source.kind !== 'app' || String(row.id) !== String(source.id)),
+      artifacts: current.artifacts?.filter(row => source.kind !== 'artifact' || String(row.id) !== String(source.id)),
+    }))
+    void projectQueries.importSources.invalidate(queryClient)
     openProject(project)
     return project
+  }
+
+  async function addSourceToProjects(source) {
+    try {
+      await importProjectSource(source)
+    } catch (error) {
+      showToast(error?.message || 'Could not add this work to Projects.', { variant: 'error' })
+    }
   }
 
   async function patchProject(project, patch) {
@@ -1793,6 +1806,9 @@ export default function Shell({ onInitialVisualReady }) {
   const closeTabMenuFromOutside = useCallback(() => {
     closeTabMenu(false)
   }, [closeTabMenu])
+  const tabImportSources = projectQueries.importSources.useQuery(Boolean(tabMenu && ['app', 'artifact'].includes(tabMenu.tab.kind)))
+  const tabProjectAction = projectSourceAction(projects, tabImportSources.data, tabMenu?.tab?.kind, tabMenu?.tab?.id)
+
   useContextMenuOutsideDismiss({
     open: Boolean(tabMenu),
     menuRef: tabMenuRef,
@@ -1811,8 +1827,8 @@ export default function Shell({ onInitialVisualReady }) {
     menu.style.setProperty('--workspace-menu-x', `${position.x}px`)
     menu.style.setProperty('--workspace-menu-y', `${position.y}px`)
     menu.dataset.positioned = 'true'
-    menu.querySelector('[role="menuitem"]')?.focus()
-  }, [tabMenu])
+    if (!menu.contains(document.activeElement)) menu.querySelector('[role="menuitem"]')?.focus()
+  }, [tabMenu, tabProjectAction?.label])
   const handleTabMenuKeyDown = useCallback((event) => {
     const items = [...(tabMenuRef.current?.querySelectorAll('[role="menuitem"]') || [])]
     if (items.length === 0) return
@@ -4606,7 +4622,7 @@ export default function Shell({ onInitialVisualReady }) {
         activeChatId={activeChatId}
         onChat={selectChat}
         onApp={(id) => navTo('canvas', { appId: id })}
-        onAppSource={openAppSource}
+        onAddSourceToProjects={addSourceToProjects}
         onNewChat={startUserChat}
         onDeleteChat={deleteChat}
         onDeleteApp={deleteApp}
@@ -5104,11 +5120,13 @@ export default function Shell({ onInitialVisualReady }) {
               {sourceApp ? (
                 <AppSourceWorkspace
                   app={sourceApp}
+                  requiresApply={linkedProjectAppIds.has(String(sourceApp.id))}
                   onOpenApp={() => navTo('canvas', { appId: sourceApp.id })}
                 />
               ) : (
                 <ProjectWorkspace
                   project={project}
+                  linkedApp={appById.get(linkedProjectAppId(project))}
                   onOpenChat={chat => openProjectChat(project, chat)}
                   onCreateChat={options => createProjectChat(project, options)}
                   onOpenArtifact={artifactId => openArtifact(project, artifactId)}
@@ -5161,6 +5179,7 @@ export default function Shell({ onInitialVisualReady }) {
               {sourceApp ? (
                 <AppSourceWorkspace
                   app={sourceApp}
+                  requiresApply={linkedProjectAppIds.has(String(sourceApp.id))}
                   onOpenApp={() => navTo('canvas', { appId: sourceApp.id })}
                 />
               ) : (
@@ -5320,6 +5339,12 @@ export default function Shell({ onInitialVisualReady }) {
               onKeyDown={handleTabMenuKeyDown}
             >
               <div className="workspace__menu-items">
+                {tabProjectAction && <button type="button" role="menuitem" className="workspace__menu-item" onClick={() => {
+                  if (tabProjectAction.project) openProject(tabProjectAction.project)
+                  else void addSourceToProjects(tabProjectAction.source)
+                  closeTabMenu()
+                }}>{tabProjectAction.label}</button>}
+
                 <button
                   type="button"
                   role="menuitem"
