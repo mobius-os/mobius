@@ -77,9 +77,9 @@ export function WaitCard({ wait, expanded, onToggle, onCancel }) {
     <HandoffCard
       expanded={expanded}
       onToggle={onToggle}
-      ariaLabel={`waiting details: ${wait.description}`}
-      title={`${wait.description} — ${presentation.summary}`}
-      text={wait.description}
+      ariaLabel={`waiting details: ${presentation.condition}`}
+      title={`${presentation.condition} — ${presentation.summary}`}
+      text={presentation.condition}
       meta={presentation.summary}
       rows={[
         { label: 'Waiting for', value: presentation.condition, primary: true },

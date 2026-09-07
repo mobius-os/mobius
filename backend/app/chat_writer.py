@@ -2568,11 +2568,10 @@ class ChatWriterActor:
     """Append and open an idle, same-root continuation in one commit.
 
     A deterministic ``run_token`` makes a retry attach to an already-created
-    physical run.  A deterministic ``cid`` also lets this command repair the
-    one legacy crash shape produced by the former two-command implementation:
-    exactly the expected synthetic row was appended to ``pending_messages``
-    but never promoted. Ordinary coordinator calls reject foreign pending
-    work. Restart recovery may instead consume the current owner group while
+    physical run. A deterministic ``cid`` also lets this command adopt its
+    exact synthetic row from ``pending_messages`` after a busy/input-blocked
+    wake or a crash before promotion. Ordinary coordinator calls reject foreign
+    pending work. Restart recovery may consume the current owner group while
     preserving group order and every later group.
     """
     from datetime import UTC, datetime

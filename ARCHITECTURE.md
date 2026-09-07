@@ -1040,6 +1040,51 @@ column remains only as an internal latch: it defaults on and is cleared solely
 by `delegations.mark_cancelled`, so a cancelled delegated child cannot
 resurrect itself when the boot sweep claims restart parks.
 
+### Durable waits: observation and continuation are separate
+
+`chat_waits.py` owns command/timer rows and `runtime_supervisors` drives their
+30-second due sweep. Command results are explicit: exit 0 is met, silent exit 1
+(ignoring whitespace) is unmet, and other unsuccessful results or a 120-second
+timeout fail the check. At the deadline, the final check still runs: met wins,
+broken reports failed, and only still-unmet expires. Timer due means met.
+Cancellation applies to armed waits and creates no wake. Every committed check
+outcome emits `chat_wait_changed`, independently of continuation admission.
+
+The sweep bounds concurrent checks, delivers existing terminal receipts first,
+then admits newly terminal results as their checks finish. It serializes wake
+admission and owns/joins all check tasks on shutdown; a slow probe cannot hold
+ready receipts behind the entire check batch. Transient cancellation markers
+exist only while a check is being admitted or run. Durable armed state gates
+admission, and process-group cleanup uses the session leader PID even after the
+shell has exited while children still hold output pipes.
+
+A terminal result has one deterministic message/run identity. Its delivery
+latch advances only after provider-task admission or proven adoption by a later
+completed owner turn, never merely after queue persistence. Fresh programmatic
+continuations share `programmatic_start_blocked`: saved Q&A/sealed input, usage
+parks, and manual restart holds retain authority. Exact already-committed,
+empty continuations remain attachable; ambiguous partial execution is not
+blindly replayed. Legacy source-less Wait rows and stored `auto_continuation`
+names remain readable to preserve existing data, not as alternate schedulers.
+
+`Wait completed` means an observed condition is met, not that its follow-up or
+Goal completed. A warning means a failed check or unmet deadline, not necessarily
+failure of the external work. Goal recovery uses the declaring run and will not
+restore a stopped/dismissed Goal. The wait itself is independent: chat Stop ends
+a turn/questions/consumer but does not cancel armed monitors. Deletion cancels
+armed monitors. A remaining product decision is whether Stop should also dismiss
+terminal, queued wait results: currently their undelivered row can requeue a
+notice cleared by Stop, and the wait cancel action accepts only armed rows.
+Do not broaden Stop silently while cleaning up the implementation.
+
+History markers derive from durable wait rows, using assistant timestamps as
+temporary/final anchors; no duplicate outcomes are written into chat messages.
+This currently scans terminal history and can move a temporary marker to the
+wake's answer. Measure before changing that projection or adding a history index.
+
+Focused contracts live in `test_chat_waits.py`, `test_wait_check_processes.py`,
+`test_wait_recovery_admission.py`, and frontend `waitHistory.test.js`.
+
 ### Tool output rendering
 
 Tool runs are **grouped** so the reader sees at a glance what is running vs finished

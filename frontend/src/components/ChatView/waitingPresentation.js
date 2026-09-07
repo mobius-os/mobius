@@ -1,3 +1,10 @@
+/* Presentation shared by active handoffs and settled wait history. */
+
+export function waitConditionLabel(description) {
+  // Sentence-case the instruction, not case-sensitive project names or refs.
+  return String(description || '').trim().replace(/^resume when\b/, 'Resume when')
+}
+
 function apiDate(value) {
   if (!value) return null
   const text = String(value)
@@ -73,7 +80,7 @@ export function waitPresentation(wait) {
     : (next ? `next check ${next}` : cadence)
 
   return {
-    condition: String(wait.description || 'External condition'),
+    condition: waitConditionLabel(wait.description) || 'External condition',
     owner: wait.condition_owner || (wait.kind === 'timer' ? 'Time' : 'External system'),
     summary,
     checker: `Möbius · ${cadence}${wait.kind !== 'timer' && next ? ` · next at ${next}` : ''}`,

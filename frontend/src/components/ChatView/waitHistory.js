@@ -1,5 +1,7 @@
 /* Pure presentation helpers for settled Waiting transcript markers. */
 
+import { waitConditionLabel } from './waitingPresentation.js'
+
 function formatDuration(seconds) {
   const total = Math.max(0, Math.round(Number(seconds) || 0))
   if (total < 60) return `${total}s`
@@ -19,7 +21,7 @@ const OUTCOMES = {
 }
 
 export function waitHistoryViewModel(summary) {
-  const condition = String(summary?.description || '').trim()
+  const condition = waitConditionLabel(summary?.description)
   const outcome = OUTCOMES[summary?.status]
   if (!condition || !outcome) return null
   const count = Number(summary?.checks_count)
