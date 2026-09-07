@@ -876,10 +876,11 @@ test('opening navigation is presentation-only and never refetches whole lists', 
   )
   assert.match(chatLifecycle, /markChatRunState\(ev\.chatId, true\)/)
   assert.match(chatLifecycle, /markChatRunState\(chatId, false\)/)
-  assert.doesNotMatch(chatLifecycle, /refreshChats\(\)/,
-    'one run-state change must not parse and reconcile the complete chat list')
-  assert.match(shell, /running \? withChatOwnerActivity\(rows, chatId, at\) : rows/,
-    'a run started in another live client must still advance drawer recency')
+  assert.match(chatLifecycle,
+    /ev\.type === 'chat_run_started'[\s\S]*?invalidateShellListCache\('chats'\)\.then\(refreshChats\)/,
+    'a start reconciles durable owner activity instead of guessing from a run')
+  assert.match(shell, /projectChatList\(rows => withChatRunState\(rows, chatId, running\)\)/,
+    'a waiting or background run changes its indicator without changing Recents order')
 })
 
 test('chat drawer indicators distinguish owner input, active work, waiting, and unseen completion', () => {

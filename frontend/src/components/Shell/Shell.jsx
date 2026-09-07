@@ -2422,12 +2422,11 @@ export default function Shell({ onInitialVisualReady }) {
     projectChatList(rows => withChatOwnerActivity(rows, chatId, at))
   }, [projectChatList])
   const markChatRunState = useCallback((chatId, running) => {
-    const at = running ? new Date().toISOString() : null
-    projectChatList(rows => withChatRunState(
-      running ? withChatOwnerActivity(rows, chatId, at) : rows,
-      chatId,
-      running,
-    ))
+    // A run is not necessarily a new owner message: a waiting chat can resume
+    // itself, and background work can start without the owner touching the
+    // conversation. Keep the immediate activity indicator, but let the
+    // authoritative list read below own Recents ordering.
+    projectChatList(rows => withChatRunState(rows, chatId, running))
   }, [projectChatList])
   const markChatOwnerInput = useCallback((chatId, change) => {
     projectChatList(rows => withChatOwnerInput(rows, chatId, change))
@@ -3101,25 +3100,17 @@ export default function Shell({ onInitialVisualReady }) {
       }
     } else if (ev.type === 'chat_run_started') {
       if (ev.chatId) {
-        // Capture drawer membership BEFORE the mark* projections below: those
-        // only patch an existing row, never insert one, so this stays a true
-        // read of whether the drawer already knows this chat.
-        const knownInDrawer = chatsRef.current.some(
-          c => String(c.id) === String(ev.chatId),
-        )
         markChatRunActivity(ev.chatId)
         markStreamingAcknowledged(ev.chatId)
         markChatRunState(ev.chatId, true)
         markChatOwnerInput(ev.chatId, { kind: null, questionId: null })
         // A run can be the drawer's FIRST evidence of a chat created entirely
         // server-side — the platform/app conflict resolver, a background or
-        // morning agent, autopilot. selectChat only navigates; it never
-        // inserts a row, so such a chat is invisible in recents until some
-        // unrelated refresh happens to run. When the started chat isn't in the
-        // cached list yet, pull server truth so it appears immediately.
-        if (!knownInDrawer) {
-          void invalidateShellListCache('chats').then(refreshChats)
-        }
+        // morning agent, autopilot. It can also be a self-resuming Wait, which
+        // must not masquerade as a fresh owner interaction. Reconcile every
+        // start so durable owner activity, rather than the transient run
+        // signal, owns the Recents position.
+        void invalidateShellListCache('chats').then(refreshChats)
       }
     } else if (ev.type === 'chat_run_finished') {
       const chatId = ev.chatId
