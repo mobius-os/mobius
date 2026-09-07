@@ -102,9 +102,14 @@ async def federation_request(
     finally:
       await upstream.aclose()
 
+  # aiter_bytes already decoded content encodings; retain representation
+  # metadata without asking HTTPX to decode the buffered body a second time.
+  headers = upstream.headers.copy()
+  for name in ("content-encoding", "content-length", "transfer-encoding"):
+    headers.pop(name, None)
   response = httpx.Response(
     upstream.status_code,
-    headers=upstream.headers,
+    headers=headers,
     content=bytes(body),
     request=public_request,
   )

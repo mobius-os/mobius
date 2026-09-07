@@ -1,6 +1,7 @@
 """Hermetic security contracts for Common's outbound federation transport."""
 
 import base64
+import gzip
 import socket
 import time
 from pathlib import Path
@@ -278,3 +279,25 @@ def test_all_common_outbound_calls_use_the_federation_transport():
     assert "AsyncClient(" not in source
     assert "urlopen(" not in source
     assert "requests." not in source
+
+@pytest.mark.asyncio
+async def test_compressed_peer_response_is_decoded_once(monkeypatch):
+  _resolve_to(monkeypatch, _PUBLIC_IP)
+  payload = b'{"status":"ok"}'
+  compressed = gzip.compress(payload)
+
+  def handler(_request):
+    return httpx.Response(200, content=compressed, headers={
+      "content-type": "application/json",
+      "content-encoding": "gzip",
+      "content-length": str(len(compressed)),
+    })
+
+  _mock_network(monkeypatch, handler)
+  response = await common_transport.federation_request(
+    "GET", "https://peer.example/api/common/actor"
+  )
+  assert response.json() == {"status": "ok"}
+  assert response.content == payload
+  assert "content-encoding" not in response.headers
+  assert int(response.headers["content-length"]) == len(payload)
