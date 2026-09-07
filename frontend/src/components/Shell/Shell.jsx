@@ -1,3 +1,4 @@
+import { requestChatChanges } from '../../lib/chatChangesNavigation.js'
 import { lazy, Suspense, useState, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, useRef } from 'react'
 import { flushSync } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
@@ -2690,6 +2691,7 @@ export default function Shell({ onInitialVisualReady }) {
         if (draftText != null) {
           stageComposerHandoff(request.chatId, draftText)
         }
+        if (request.view === 'changes') requestChatChanges(request.chatId)
         navToRef.current('chat', { chatId: request.chatId })
         // Storage covers an unmounted target. The explicit request also updates
         // an already-retained ChatView, whose controlled composer state would

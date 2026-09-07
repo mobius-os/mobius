@@ -62,7 +62,8 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from sqlalchemy.orm import Session
+from sqlalchemy import Text, cast, or_
+from sqlalchemy.orm import Session, load_only
 
 from app import (
   app_git,
@@ -2535,6 +2536,88 @@ def _recorded_chat_edits_from_chat(db: Session, chat: models.Chat) -> list[dict]
     if paths:
       entries.append({"id": entry_id, "ts": edited_at, "paths": paths})
   return entries
+
+
+def _source_chat_metadata(app_id: int, source_root: str) -> list[dict]:
+  """Discover source homes lazily without hydrating the general chat index."""
+  with SessionLocal() as db:
+    parents = dict(db.query(
+      models.Delegation.child_chat_id, models.Delegation.parent_chat_id,
+    ).filter(models.Delegation.child_chat_id.isnot(None)).all())
+
+    def source_home(chat_id: str) -> str:
+      seen = set()
+      while chat_id in parents and chat_id not in seen:
+        seen.add(chat_id)
+        chat_id = parents[chat_id]
+      return chat_id
+
+    latest = {}
+    # Server-derived source-work provenance survives a compacted transcript.
+    # The app-editable ledger cannot nominate unrelated chat titles to read.
+    work = db.query(
+      models.Delegation.parent_chat_id, models.Delegation.source_work_envelope,
+    ).filter(models.Delegation.source_work_context_app_id == app_id).yield_per(20)
+    for row in work:
+      envelope = row.source_work_envelope or {}
+      if source_root in envelope.get("project_roots", []):
+        latest.setdefault(source_home(row.parent_chat_id), None)
+    # The explicit picker is the expansion boundary. SQL first skips chats
+    # without edit previews; streaming bounds Python's transcript working set.
+    # Full sidecars remain authoritative even when a preview omitted a path.
+    candidates = db.query(models.Chat).options(load_only(
+      models.Chat.id, models.Chat.messages, models.Chat.live_assistant,
+    )).filter(
+      models.Chat.deleted_at.is_(None),
+      or_(cast(models.Chat.messages, Text).contains('"edit_preview"'),
+          cast(models.Chat.live_assistant, Text).contains('"edit_preview"')),
+    ).yield_per(20)
+    for chat in candidates:
+      for entry in _recorded_chat_edits_from_chat(db, chat):
+        if not any(contribution_work.project_root(path) == source_root
+                   for path in entry["paths"]):
+          continue
+        home = source_home(chat.id)
+        instant = _chat_edit_instant_ms(entry["ts"])
+        previous = latest.get(home)
+        latest[home] = max(previous or 0, instant or 0) or None
+    if not latest:
+      return []
+    rows = db.query(models.Chat.id, models.Chat.title).filter(
+      models.Chat.id.in_(latest), models.Chat.deleted_at.is_(None),
+    ).all()
+    rows.sort(key=lambda row: (-(latest[row.id] or 0), row.title.casefold(), row.id))
+    return [{
+      "chat_id": row.id, "title": row.title,
+      "last_edit_at": (datetime.fromtimestamp(latest[row.id] / 1000, UTC)
+                       .isoformat().replace("+00:00", "Z")) if latest[row.id] else None,
+    } for row in rows]
+
+
+@router.get("/contributions/{app_id}/source-chats")
+@_limiter.limit("20/minute")
+async def contribution_source_chats(
+  request: Request,
+  app_id: int,
+  project_key: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  """Project-bound source chat names, never transcript, diff, or caller paths."""
+  _validate_submit_app(app_id, principal, db)
+  if project_key == "platform":
+    source_root = "/data/platform"
+  else:
+    match = re.fullmatch(r"app:([1-9][0-9]*)", project_key)
+    source = db.query(models.App).filter(
+      models.App.id == int(match.group(1)), models.App.deleted_at.is_(None),
+    ).first() if match else None
+    source_root = contribution_work.project_root(source.source_dir) if source else ""
+    if not source_root or source_root != source.source_dir.rstrip("/"):
+      raise HTTPException(404, "Source project not found.")
+  db.close()
+  await _fence_chat_writes()
+  return {"chats": await asyncio.to_thread(_source_chat_metadata, app_id, source_root)}
 
 
 async def _recorded_chat_edits(db: Session, chat_id: str) -> list[dict]:

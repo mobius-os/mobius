@@ -26,6 +26,7 @@ export function appHostRequest(message) {
     return {
       type: message.type,
       chatId: message.chatId,
+      ...(message.view === 'changes' ? { view: 'changes' } : {}),
       draft: typeof message.draft === 'string' ? message.draft : '',
     }
   }

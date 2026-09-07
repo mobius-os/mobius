@@ -1,3 +1,4 @@
+import { requestChatChanges } from '../../lib/chatChangesNavigation.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import AppCanvas from '../AppCanvas/AppCanvas.jsx'
@@ -198,6 +199,7 @@ export default function StandaloneApp({ initialApp }) {
       }
       if (request.type === 'moebius:open-chat') {
         stageComposerHandoff(request.chatId, request.draft)
+        if (request.view === 'changes') requestChatChanges(request.chatId)
         window.location.href = shellUrl({ chat: request.chatId })
         return
       }

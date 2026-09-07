@@ -65,3 +65,12 @@ test('chat controls retain only a correlated status or stop request', () => {
     type: 'moebius:chat-control', requestId: 'chat-control:abc:2', action: 'delete', chatId: '1',
   }), null)
 })
+
+test('open-chat accepts only navigation to Changes, never a preparation or send command', () => {
+  assert.deepEqual(appHostRequest({type:'moebius:open-chat',chatId:'source',view:'changes',draft:'existing feedback',autoSend:true,prepare:true}), {
+    type:'moebius:open-chat',chatId:'source',view:'changes',draft:'existing feedback',
+  })
+  assert.deepEqual(appHostRequest({type:'moebius:open-chat',chatId:'source',view:'prepare'}), {
+    type:'moebius:open-chat',chatId:'source',draft:'',
+  })
+})

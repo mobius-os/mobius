@@ -1,3 +1,4 @@
+import { consumeChatChanges, subscribeChatChanges } from '../../lib/chatChangesNavigation.js'
 import {
   startTransition,
   useState,
@@ -4549,6 +4550,16 @@ export default function ChatView({
     changesReturnFocusRef.current = returnFocus || document.activeElement
     setShowChanges(true)
   }, [])
+
+  useEffect(() => {
+    if (embedded || hidden) return undefined
+    const openRequestedChanges = () => {
+      if (consumeChatChanges(chatId)) handleOpenChanges()
+    }
+    const unsubscribe = subscribeChatChanges(chatId, openRequestedChanges)
+    openRequestedChanges()
+    return unsubscribe
+  }, [chatId, embedded, hidden, handleOpenChanges])
 
   const handleContributionFollowup = useCallback((record, context = null) => {
     const revision = reviewActionKey(record)
