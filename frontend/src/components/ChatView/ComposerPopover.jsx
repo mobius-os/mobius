@@ -110,6 +110,7 @@ export default function ComposerPopover({
   onOpenInspector,
   onOpenSummary,
   onOpenUsage,
+  onOpenNetwork,
   onOpenChanges,
   initialChangeEntries = [],
   artifactsAppId = null,
@@ -600,7 +601,7 @@ export default function ComposerPopover({
               />
             </div>
           )}
-          {!embedded && chatReady && chatId && <ChatAgentNetwork chatId={chatId} />}
+          {!embedded && chatReady && chatId && <ChatAgentNetwork chatId={chatId} onOpen={() => { setOpen(false); onOpenNetwork?.() }} />}
           {!embedded && (onOpenUsage || onOpenSummary || onOpenInspector) && (
           <div className="composer-popover__section composer-popover__section--context">
             {onOpenUsage && (

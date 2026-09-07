@@ -729,6 +729,9 @@ export const api = {
     moduleUrl: (appId) => `${BASE}/api/apps/${appId}/module`,
   },
   agentCoordination: {
+    history: (chatId, { before, limit = 50 } = {}) => apiFetch(
+      `/agent-coordination/chats/${encodeURIComponent(chatId)}/history?${new URLSearchParams({ limit, ...(before ? { before } : {}) })}`,
+    ),
     chat: (chatId, options = {}) => apiFetch(
       `/agent-coordination/chats/${encodeURIComponent(chatId)}`,
       options,

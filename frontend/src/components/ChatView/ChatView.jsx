@@ -61,6 +61,7 @@ import AgentContextInspector from './AgentContextInspector.jsx'
 import ChatSummaryViewer from './ChatSummaryViewer.jsx'
 import ChatDiffViewer from './ChatDiffViewer.jsx'
 import ChatUsageInspector from './ChatUsageInspector.jsx'
+import ChatNetworkInspector from './ChatNetworkInspector.jsx'
 import {
   contributionStartFailureOutcome,
   finishContributionWork,
@@ -617,6 +618,7 @@ export default function ChatView({
   const [showSummary, setShowSummary] = useState(false)
   const [showChanges, setShowChanges] = useState(false)
   const [showUsage, setShowUsage] = useState(false)
+  const [showNetwork, setShowNetwork] = useState(false)
   const changesReturnFocusRef = useRef(null)
   const [visibleMessageMetaKey, setVisibleMessageMetaKey] = useState(null)
   const messageMetaTimerRef = useRef(null)
@@ -5382,6 +5384,7 @@ export default function ChatView({
           returnFocusRef={changesReturnFocusRef}
         />
       )}
+      {!embedded && showNetwork && <ChatNetworkInspector key={chatId} chatId={chatId} onClose={() => setShowNetwork(false)} />}
       {!embedded && showUsage && (
         <ChatUsageInspector
           chatId={chatId}
@@ -5874,6 +5877,7 @@ export default function ChatView({
                 onOpenInspector={() => setShowInspector(true)}
                 onOpenSummary={() => setShowSummary(true)}
                 onOpenUsage={() => setShowUsage(true)}
+                onOpenNetwork={() => setShowNetwork(true)}
                 onOpenChanges={handleOpenChanges}
                 initialChangeEntries={chatDiffEntries}
                 artifactsAppId={artifactsAppId}

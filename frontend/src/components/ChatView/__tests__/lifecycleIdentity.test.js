@@ -46,14 +46,28 @@ test('composer Waiting follows the compact Goal identity instead of a tile or ba
  assert.match(html, /aria-expanded="false"/)
 })
 
-test('Brain network stays available without a Goal and does not query while collapsed', async () => {
+test('Brain network summary opens a separate view and shows mailbox totals', async () => {
+ const { QueryClient, QueryClientProvider } = await import('@tanstack/react-query')
  const Network = await load('ChatAgentNetwork')
- // No QueryClientProvider: collapsed disclosure must not mount a polling query.
- const html = render(h(Network, { chatId: 'standalone-chat' }))
- assert.match(html, /Agent network/)
- assert.match(html, /aria-expanded="false"/)
- assert.doesNotMatch(html, /agent-relay/)
- assert.equal(render(h(Network, { chatId: null })), '')
+ const client = new QueryClient()
+ client.setQueryData(['chat-network-summary', 'standalone-chat'], { total: 12, sent: 5, received: 7 })
+ const html = render(h(QueryClientProvider, { client }, h(Network, { chatId: 'standalone-chat' })))
+ assert.match(html, /12 messages · 5 sent · 7 received/)
+ assert.match(html, /aria-haspopup="dialog"/)
+ assert.doesNotMatch(html, /agent-relay|aria-expanded/)
+ client.clear()
+})
+
+test('network messages expose routing, broadcast audience and full safe text', async () => {
+ const { NetworkMessage } = await vite.ssrLoadModule('/src/components/ChatView/ChatNetworkInspector.jsx')
+ const html = render(h(NetworkMessage, { chatId: 'self', message: { id: '1', sender_chat_id: 'peer', sender_name: 'Scout', broadcast: true, room_kind: 'project', kind: 'blocker', body: '<script>private note</script>' } }))
+ assert.match(html, /Broadcast received/)
+ assert.match(html, /Scout/)
+ assert.match(html, /Project group/)
+ assert.match(html, /blocker/)
+ assert.match(html, /&lt;script&gt;/)
+ const sent = render(h(NetworkMessage, { chatId: 'self', message: { sender_chat_id: 'self', recipient_name: 'Builder', body: 'Ready', kind: 'handoff' } }))
+ assert.match(sent, /This chat/); assert.match(sent, /Builder/); assert.match(sent, /Sent/)
 })
 
 test('expanded Goal tasks have no dependency on the agent network query', async () => {

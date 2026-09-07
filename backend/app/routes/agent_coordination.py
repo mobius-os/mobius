@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.agent_coordination import (
   MAX_PEERS,
+  chat_message_history,
   MESSAGE_KINDS,
   agent_network_snapshot,
   embedded_chat_snapshot,
@@ -333,5 +334,22 @@ def inspect_project_room(
       peer_limit=peer_limit,
       peer_after=peer_after,
     )
+  except ValueError as exc:
+    raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/chats/{chat_id}/history")
+def inspect_chat_history(
+  chat_id: str,
+  before: str | None = Query(default=None, max_length=64),
+  limit: int = Query(default=50, ge=1, le=100),
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+):
+  """Read only the mail available to this exact chat, across retained history."""
+  require_chat_embed_operation(principal, "chat:read")
+  get_active_chat_for_principal(db, chat_id, principal)
+  try:
+    return chat_message_history(db, chat_id, before=before, limit=limit)
   except ValueError as exc:
     raise HTTPException(422, str(exc)) from exc

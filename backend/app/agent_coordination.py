@@ -857,6 +857,53 @@ def agent_network_snapshot(
   }
 
 
+def chat_message_history(
+  db: Session, chat_id: str, *, before: str | None = None, limit: int = 50,
+) -> dict[str, Any]:
+  """Page retained sent/received mail, never sibling agents' direct exchanges.
+
+  Historical logical runs retain the chat's delegation broadcast affinities.
+  Project broadcasts follow the same current-membership visibility as agent
+  context; this is accessible mail, not a claim that a model read each note.
+  """
+  message = models.AgentCoordinationMessage
+  scopes = []
+  current_scope = scope_for_chat(db, chat_id)
+  if current_scope:
+    scopes.append(and_(message.room_kind == current_scope.kind,
+                       message.room_id == current_scope.id))
+  # A top-level chat can have many completed Goals, not just its latest one.
+  if not _delegation_lineage(db, chat_id):
+    logical_runs = db.query(func.coalesce(
+      models.ChatRun.goal_id, models.ChatRun.root_run_id, models.ChatRun.id,
+    )).filter(models.ChatRun.chat_id == chat_id)
+    scopes.append(and_(message.room_kind == "delegation", message.room_id.in_(logical_runs)))
+  query = db.query(message).filter(or_(
+    message.from_chat_id == chat_id,
+    message.to_chat_id == chat_id,
+    and_(message.to_chat_id.is_(None), or_(*scopes)) if scopes else False,
+  ))
+  total = query.count()
+  sent = query.filter(message.from_chat_id == chat_id).count()
+  broadcasts = query.filter(message.to_chat_id.is_(None)).count()
+  if before:
+    cursor = query.filter(message.id == before).first()
+    if cursor is None:
+      raise ValueError("Message cursor is invalid, invisible, or expired.")
+    query = query.filter(or_(
+      message.created_at < cursor.created_at,
+      and_(message.created_at == cursor.created_at, message.id < cursor.id),
+    ))
+  limit = max(1, min(int(limit), 100))
+  rows = query.order_by(message.created_at.desc(), message.id.desc()).limit(limit + 1).all()
+  return {
+    "messages": serialize_messages(db, rows[:limit]),
+    "next_before": rows[limit - 1].id if len(rows) > limit else None,
+    "total": total, "sent": sent, "received": total - sent,
+    "broadcasts": broadcasts,
+  }
+
+
 def owner_chat_snapshot(
   db: Session,
   chat_id: str,
