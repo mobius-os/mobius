@@ -1080,3 +1080,22 @@ test('embedded chat watchdog stands down once the frame posts', async () => {
     }
   })
 })
+
+test('Projects source import stays parent-mediated and bounds the source identity', async () => {
+  await withFakeWindow(async ({ window, parent }) => {
+    const projects = makeProjects()
+    const listing = projects.importSources()
+    const listRequest = parent.messages.at(-1).data
+    assert.equal(listRequest.action, 'import-sources')
+    window.emit({ type: 'moebius:projects-result', requestId: listRequest.requestId, ok: true, result: [{ id: 'site' }] })
+    assert.deepEqual(await listing, [{ id: 'site' }])
+    const pending = projects.importSource('s'.repeat(200))
+    const request = parent.messages.at(-1).data
+    assert.equal(request.action, 'import-source')
+    assert.equal(request.sourceId.length, 128)
+    assert.equal(request.kind, undefined)
+    window.emit({ type: 'moebius:projects-result', requestId: request.requestId, ok: true, result: { id: 'linked-project' } })
+    assert.deepEqual(await pending, { id: 'linked-project' })
+    projects._destroy()
+  })
+})

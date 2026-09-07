@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Plus, Folder, ArrowLeft, FileCode, FileDocument } from '@openai/apps-sdk-ui/components/Icon'
-import { api, jsonOrThrow } from '../../api/client.js'
+import { Plus, Folder, ArrowLeft } from '@openai/apps-sdk-ui/components/Icon'
+import { projectQueries } from '../../hooks/queries.js'
+import AppIcon from '../AppIcon.jsx'
 import { globalProjectTemplates } from '../../lib/projectTypes.js'
 import ProjectTypeIcon from './ProjectTypeIcon.jsx'
 import './ProjectCreateMenu.css'
@@ -27,8 +28,9 @@ export default function ProjectCreateMenu({
   const [view, setView] = useState('types')
   const [repository, setRepository] = useState('')
   const [projectName, setProjectName] = useState('')
-  const [sources, setSources] = useState(null)
-  const [sourcesLoading, setSourcesLoading] = useState(false)
+  const sourcesQuery = projectQueries.importSources.useQuery(open && view === 'sources')
+  const sources = sourcesQuery.data
+  const sourcesLoading = sourcesQuery.isFetching
   const rootRef = useRef(null)
   const firstItemRef = useRef(null)
   const availableTemplates = useMemo(
@@ -94,23 +96,14 @@ export default function ProjectCreateMenu({
     }
   }
 
-  async function openSources() {
+  function openSources() {
     setView('sources')
     setError('')
-    setSourcesLoading(true)
-    try {
-      setSources(await jsonOrThrow(
-        await api.projects.importSources(), 'Existing work failed:',
-      ))
-    } catch (cause) {
-      setError(cause?.message || 'Could not load existing work.')
-    } finally {
-      setSourcesLoading(false)
-    }
+    if (view === 'sources') void sourcesQuery.refetch()
   }
 
   async function importSource(source) {
-    if (busyKey) return
+    if (busyKey || sources?.management !== 'linked') return
     const key = `${source.kind}:${source.id}`
     setBusyKey(key)
     setError('')
@@ -125,8 +118,8 @@ export default function ProjectCreateMenu({
     }
   }
 
-  const artifactSources = Array.isArray(sources?.artifacts) ? sources.artifacts : []
-  const appSources = Array.isArray(sources?.apps) ? sources.apps : []
+  const artifactSources = sources?.management === 'linked' && Array.isArray(sources?.artifacts) ? sources.artifacts : []
+  const appSources = sources?.management === 'linked' && Array.isArray(sources?.apps) ? sources.apps : []
 
   return (
     <div ref={rootRef} className={`project-create-menu ${className}`.trim()}>
@@ -151,7 +144,7 @@ export default function ProjectCreateMenu({
           const index = items.indexOf(document.activeElement)
           const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length
           items[next].focus()
-        }} aria-label={view === 'types' ? 'Project types' : view === 'sources' ? 'Open existing work' : 'Import GitHub repository'}>
+        }} aria-label={view === 'types' ? 'Project types' : view === 'sources' ? 'Add to Projects' : 'Import GitHub repository'}>
           {view === 'types' ? <>
           <div className="project-create-menu__heading">New project</div>
           {coreTemplates.map((template, index) => (
@@ -194,29 +187,29 @@ export default function ProjectCreateMenu({
             onClick={() => void openSources()}
           >
             <span className="project-create-menu__icon" aria-hidden="true"><Folder width={19} height={19} /></span>
-            <span><strong>Open existing</strong><small>Edit a locally built app’s live source, or copy a Page into a Project.</small></span>
+            <span><strong>Add to Projects</strong><small>Manage existing builder work without making a copy.</small></span>
           </button>}
           </> : view === 'sources' ? <div className="project-create-menu__sources">
             <button ref={firstItemRef} type="button" className="project-create-menu__back" onClick={() => { setView('types'); setError('') }}><ArrowLeft width={16} height={16} /> Project types</button>
-            <div className="project-create-menu__heading">Open existing</div>
-            <p className="project-create-menu__privacy">Apps open their live source. Pages become independent editable copies.</p>
+            <div className="project-create-menu__heading">Add to Projects</div>
+            <p className="project-create-menu__privacy">Apps, websites and LaTeX documents not yet in Projects. Your existing work stays in place.</p>
             {sourcesLoading ? <p className="project-create-menu__state" role="status">Loading your work…</p> : (
               <div className="project-create-menu__source-list">
                 {artifactSources.length > 0 && <>
-                  <h3>Pages</h3>
+                  <h3>Websites & documents</h3>
                   {artifactSources.map(source => <button key={`artifact:${source.id}`} type="button" disabled={busyKey != null} onClick={() => void importSource(source)}>
-                    <span className="project-create-menu__icon" aria-hidden="true"><FileDocument width={18} height={18} /></span>
-                    <span><strong>{busyKey === `artifact:${source.id}` ? 'Importing…' : source.name}</strong><small>{source.description || `Version ${source.current_version}`}</small></span>
+                    <span className="project-create-menu__icon" aria-hidden="true"><ProjectTypeIcon value={source.project_type} size={19} /></span>
+                    <span><strong>{busyKey === `artifact:${source.id}` ? 'Adding…' : source.name}</strong><small>{source.description || 'Manage existing builder work'}</small></span>
                   </button>)}
                 </>}
                 {appSources.length > 0 && <>
                   <h3>Apps</h3>
                   {appSources.map(source => <button key={`app:${source.id}`} type="button" disabled={busyKey != null} onClick={() => void importSource(source)}>
-                    <span className="project-create-menu__icon project-create-menu__icon--app" aria-hidden="true"><FileCode width={18} height={18} /></span>
-                    <span><strong>{busyKey === `app:${source.id}` ? 'Opening…' : source.name}</strong><small>{source.description || 'Edit the installed app source'}</small></span>
+                    <AppIcon item={source} label={source.name} className="project-create-menu__icon" />
+                    <span><strong>{busyKey === `app:${source.id}` ? 'Adding…' : source.name}</strong><small>{source.description || 'Manage the installed app'}</small></span>
                   </button>)}
                 </>}
-                {!sourcesLoading && artifactSources.length === 0 && appSources.length === 0 && !error && <p className="project-create-menu__state">No Pages or locally built apps yet.</p>}
+                {!sourcesLoading && artifactSources.length === 0 && appSources.length === 0 && !error && !sourcesQuery.error && <p className="project-create-menu__state">{sources?.management === 'linked' ? 'No standalone builder work to add. Work already in Projects is hidden.' : 'Add to Projects will be available after the pending server update.'}</p>}
               </div>
             )}
           </div> : <form className="project-create-menu__import" onSubmit={importRepository}>
@@ -231,7 +224,7 @@ export default function ProjectCreateMenu({
             <p className="project-create-menu__privacy">Imports a private local copy. Nothing is pushed or published.</p>
             <button type="submit" className="project-create-menu__submit" disabled={busyKey != null || !repository.trim()}>{busyKey ? 'Importing…' : 'Import repository'}</button>
           </form>}
-          {error && <div role="alert" className="project-create-menu__error"><p>{error}</p>{view === 'sources' && <button type="button" onClick={() => void openSources()}>Try again</button>}</div>}
+          {(error || (view === 'sources' && sourcesQuery.error)) && <div role="alert" className="project-create-menu__error"><p>{error || sourcesQuery.error?.message}</p>{view === 'sources' && <button type="button" onClick={() => void openSources()}>Try again</button>}</div>}
         </div>
       )}
     </div>

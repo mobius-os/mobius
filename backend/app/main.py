@@ -1392,14 +1392,14 @@ def _top_level_app_slug_alias(path: str) -> str | None:
     db.close()
 
 
-def _app_source_dir_for_static_asset(
+def _open_app_runtime_for_static_asset(
   *, slug: str | None = None, app_id: int | None = None,
-) -> str | None:
+) -> tuple[str | None, object | None]:
   db = SessionLocal()
   try:
     # Tombstoned apps don't serve their /app-assets/ static files either —
     # consistent with the frame/module/standalone routes (feature 110).
-    query = db.query(models.App.source_dir).filter(
+    query = db.query(models.App).filter(
       models.App.deleted_at.is_(None)
     )
     if app_id is not None:
@@ -1408,9 +1408,49 @@ def _app_source_dir_for_static_asset(
       row = query.filter(models.App.slug == slug).first()
     else:
       row = None
-    return row[0] if row else None
+    if row is None:
+      return None, None
+    from app.applied_app_runtime import (
+      runtime_root, hold_static_runtime, AppliedRuntimeUnavailable,
+    )
+    pin = hold_static_runtime(row.id)
+    try:
+      return str(runtime_root(row)), pin
+    except AppliedRuntimeUnavailable:
+      pin.close()
+      return None, None
+    except BaseException:
+      pin.close()
+      raise
   finally:
     db.close()
+
+
+class _RuntimePinnedResponse(Response):
+  """Release a runtime read pin even if sending the file is cancelled."""
+
+  def __init__(self, response: Response, pin):
+    super().__init__(status_code=response.status_code)
+    self.raw_headers = response.raw_headers
+    self.response = response
+    self.pin = pin
+
+  async def __call__(self, scope, receive, send):
+    try:
+      await self.response(scope, receive, send)
+    finally:
+      self.pin.close()
+
+
+async def _serve_accepted_app_asset(request: Request, asset_path: str, **identity):
+  root, pin = await run_in_threadpool(_open_app_runtime_for_static_asset, **identity)
+  try:
+    response = _serve_app_static_asset(root, asset_path, request)
+  except BaseException:
+    if pin is not None:
+      pin.close()
+    raise
+  return _RuntimePinnedResponse(response, pin) if pin is not None else response
 
 
 # A content-hash segment in the filename (main.8f3a2b1c.js,
@@ -1532,13 +1572,9 @@ async def app_owned_asset_by_id(app_id: int, asset_path: str, request: Request):
   Imported apps like CubeRun can keep a built static site under
   /data/apps/<slug>/static instead of copying it into the platform frontend.
   This route is public like standalone app shells; it serves only files below
-  the installed app's source_dir/static.
+  the installed app's explicitly applied runtime static/ directory.
   """
-  return _serve_app_static_asset(
-    await run_in_threadpool(_app_source_dir_for_static_asset, app_id=app_id),
-    asset_path,
-    request,
-  )
+  return await _serve_accepted_app_asset(request, asset_path, app_id=app_id)
 
 
 @app.api_route(
@@ -1556,11 +1592,7 @@ async def app_owned_opaque_embed_by_id(
   assets stay below the same alias. Ordinary /app-assets remains protected by
   SAMEORIGIN and is never the document-navigation surface.
   """
-  return _serve_app_static_asset(
-    await run_in_threadpool(_app_source_dir_for_static_asset, app_id=app_id),
-    asset_path,
-    request,
-  )
+  return await _serve_accepted_app_asset(request, asset_path, app_id=app_id)
 
 
 @app.api_route(
@@ -1572,11 +1604,7 @@ async def app_owned_asset(slug: str, asset_path: str, request: Request):
   """Serve durable static assets owned by an installed app slug."""
   if not slug or not all(ch.isalnum() or ch in "-_" for ch in slug):
     raise HTTPException(status_code=404, detail="Not found.")
-  return _serve_app_static_asset(
-    await run_in_threadpool(_app_source_dir_for_static_asset, slug=slug),
-    asset_path,
-    request,
-  )
+  return await _serve_accepted_app_asset(request, asset_path, slug=slug)
 
 
 # Register the frontend serving routes whenever any static tree exists as a

@@ -522,6 +522,7 @@ export const projectQueries = {
   keys: {
     all: projectsKey,
     templates: projectTemplatesKey,
+    importSources: ['projects', 'import-sources'],
     legacy: legacyProjectsKey,
     detail: (projectId) => ['projects', 'detail', projectId],
     chats: (projectId) => ['projects', 'chats', projectId],
@@ -538,6 +539,15 @@ export const projectQueries = {
     fetch: fetchProjects,
     useQuery: useProjectsQuery,
     invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: projectsKey }),
+  },
+  importSources: {
+    useQuery: (enabled = false) => useQuery({
+      queryKey: ['projects', 'import-sources'],
+      queryFn: async () => jsonOrThrow(await api.projects.importSources(), 'Existing work failed:'),
+      enabled,
+      staleTime: 0,
+    }),
+    invalidate: queryClient => queryClient.invalidateQueries({ queryKey: ['projects', 'import-sources'] }),
   },
   templates: {
     key: projectTemplatesKey,

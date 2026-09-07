@@ -32,6 +32,11 @@ def cron_mutation_blocked_in_test_runtime() -> bool:
   )
 
 
+def schedule_state_dir(app_id: int) -> Path:
+  """Owner schedule declarations live with app data, not editable source."""
+  return Path(get_settings().data_dir) / "apps" / str(int(app_id)) / "schedule"
+
+
 def register_cron(
   slug: str,
   schedule_expr: str,
@@ -90,6 +95,8 @@ def register_cron(
   env = dict(os.environ)
   env["API_BASE_URL"] = get_settings().api_base_url
   env["MOBIUS_APP_JOB_RUNNER"] = str(runner_script())
+  if app_id is not None:
+    env["MOBIUS_APP_CRON_STATE_DIR"] = str(schedule_state_dir(app_id))
   result = subprocess.run(
     command, capture_output=True, text=True, timeout=30, env=env,
   )

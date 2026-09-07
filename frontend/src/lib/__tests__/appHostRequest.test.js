@@ -74,3 +74,11 @@ test('open-chat accepts only navigation to Changes, never a preparation or send 
     type:'moebius:open-chat',chatId:'source',draft:'',
   })
 })
+
+test('source import requests retain only the bounded source identity, never a chosen import kind', () => {
+  const result = appHostRequest({ type: 'moebius:projects', requestId: 'projects:abc:1', action: 'import-source', sourceId: 'a'.repeat(200), kind: 'app', token: 'secret' })
+  assert.equal(result.sourceId.length, 128)
+  assert.equal(result.kind, undefined)
+  assert.equal(result.token, undefined)
+  assert.equal(appHostRequest({ type: 'moebius:projects', requestId: 'projects:abc:2', action: 'import-sources' }).action, 'import-sources')
+})

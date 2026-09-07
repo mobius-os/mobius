@@ -2325,6 +2325,7 @@ async def _sync_manifest_cron_unlocked(
   app_data_dir.mkdir(parents=True, exist_ok=True)
   if drop_prior_cron:
     await asyncio.to_thread(_drop_app_cron, app_data_dir)
+    (app_cron.schedule_state_dir(app.id) / "init-cron.sh").unlink(missing_ok=True)
   job_path = app_data_dir / cron_job_name
   if job_name and job_path.exists() and not os.access(job_path, os.X_OK):
     warnings.append(
@@ -2727,6 +2728,13 @@ async def _activate_install_source(
   app.source_commit = await asyncio.to_thread(
     app_git.head_sha, source_dir, app_git.LOCAL_BRANCH,
   )
+  from app import applied_app_runtime
+  runtime_staged = await asyncio.to_thread(
+    applied_app_runtime.prepare_runtime, source_dir, app.source_commit,
+    static_assets=plan.static_assets,
+    runtime_manifest=json.dumps(manifest, sort_keys=True).encode(),
+  )
+  applied_app_runtime.publish_runtime(app, runtime_staged)
   return equivalence_target
 
 
@@ -3485,6 +3493,12 @@ async def install_from_manifest(
     raise HTTPException(
       500, "Install failed due to an unexpected server error.",
     )
+
+  from app.applied_app_runtime import prune_runtime
+  try:
+    await asyncio.to_thread(prune_runtime, app)
+  except OSError:
+    log.warning("Could not prune older applied runtime trees", exc_info=True)
 
   # Phase 4: best-effort effects after the durable boundary.
   await _run_post_commit_effects(

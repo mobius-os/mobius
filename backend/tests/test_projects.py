@@ -503,7 +503,7 @@ def test_manifest_template_scaffolds_files_and_snapshots_metadata(
   assert stable["template"]["dependencies"] == ["tectonic"]
 
 
-def test_standalone_artifact_import_creates_an_independent_editable_copy(
+def test_ordinary_page_is_not_misidentified_as_builder_output(
   client, auth, db,
 ):
   data_root = Path(os.environ["DATA_DIR"])
@@ -532,40 +532,17 @@ def test_standalone_artifact_import_creates_an_independent_editable_copy(
 
   sources = client.get("/api/projects/import-sources", headers=auth)
   assert sources.status_code == 200, sources.text
-  assert sources.json()["artifacts"] == [{
-    "kind": "artifact", "id": "artifact-one", "name": "Standalone",
-    "description": "A demo", "current_version": 1,
-    "updated_at": "2026-01-02T00:00:00Z", "chat_id": None,
-    "project_type": "webstudio:website",
-  }]
-
+  assert sources.json()["artifacts"] == []
   imported = client.post(
     "/api/projects/import", headers=auth,
-    json={
-      "kind": "artifact", "source_id": "artifact-one",
-      "recovery_request_id": "artifact-import-one",
-    },
+    json={"kind": "artifact", "source_id": "artifact-one"},
   )
-  assert imported.status_code == 200, imported.text
-  project = imported.json()
-  assert project["name"] == "Standalone"
-  assert project["template"]["imported_from"] == {
-    "kind": "artifact", "id": "artifact-one", "version": 1,
-    "title": "Standalone",
-  }
-  opened = client.get(
-    f"/api/projects/{project['id']}/file?path=index.html", headers=auth,
-  )
-  assert opened.status_code == 200, opened.text
-  assert opened.json()["content"] == original
-  client.put(
-    f"/api/projects/{project['id']}/file?path=index.html", headers=auth,
-    json={"content": "<h1>Edited copy</h1>", "expected_revision": opened.json()["revision"]},
-  )
+  assert imported.status_code == 409, imported.text
+  assert db.query(models.Project).count() == 0
   assert (storage / "versions" / "artifact-one" / "v1.html").read_text() == original
 
 
-def test_local_app_import_copies_declared_source_without_runtime_data(
+def test_local_app_import_manages_existing_source_once_without_runtime_data(
   client, auth, db,
 ):
   data_root = Path(os.environ["DATA_DIR"])
@@ -601,7 +578,7 @@ def test_local_app_import_copies_declared_source_without_runtime_data(
   project = imported.json()
   assert project["template"]["imported_from"] == {
     "kind": "app", "id": str(app.id), "slug": "my-local-app",
-    "name": "My local app",
+    "name": "My local app", "management": "linked",
   }
   row = db.get(models.Project, project["id"])
   project_root = data_root / row.root_path
@@ -609,10 +586,30 @@ def test_local_app_import_copies_declared_source_without_runtime_data(
   assert (project_root / "styles.css").is_file()
   assert (project_root / "mobius.json").is_file()
   assert not (project_root / "private-state.json").exists()
+  assert project_root == source
+  assert sources.json()["management"] == "linked"
+  opened = client.get(f"/api/projects/{project['id']}/file?path=index.jsx", headers=auth).json()
+  changed = client.put(
+    f"/api/projects/{project['id']}/file?path=index.jsx", headers=auth,
+    json={"content": "// shared draft", "expected_revision": opened["revision"]},
+  )
+  assert changed.status_code == 200, changed.text
+  assert (source / "index.jsx").read_text() == "// shared draft"
+  repeated = client.post("/api/projects/import", headers=auth,
+    json={"kind": "app", "source_id": str(app.id), "recovery_request_id": "another-click"})
+  assert repeated.json()["id"] == project["id"]
+  assert db.query(models.Project).count() == 1
+  assert client.get("/api/projects/import-sources", headers=auth).json()["apps"] == []
+  assert client.delete(f"/api/projects/{project['id']}", headers=auth).status_code == 204
+  assert (source / "index.jsx").read_text() == "// shared draft"
+  assert client.post("/api/projects/import", headers=auth,
+    json={"kind": "app", "source_id": str(app.id)}).status_code == 409
 
 
-def test_latex_artifact_import_restores_declared_editable_sources(
-  client, auth, db,
+
+@pytest.mark.parametrize("source_state", ["valid", "missing", "remapped", "symlink", "builder_uninstalled"])
+def test_latex_artifact_import_manages_declared_sources_in_place(
+  client, auth, db, source_state,
 ):
   data_root = Path(os.environ["DATA_DIR"])
   artifacts_source = data_root / "apps" / "artifacts-package"
@@ -665,6 +662,34 @@ def test_latex_artifact_import_restores_declared_editable_sources(
     },
   }))
 
+  record_path = storage / "artifacts" / "paper-one.json"
+  if source_state == "missing":
+    (storage / "sources" / "paper-one" / "main.tex").unlink()
+  elif source_state == "remapped":
+    record = json.loads(record_path.read_text())
+    record["project_import"]["files"][0]["path"] = "renamed.tex"
+    record_path.write_text(json.dumps(record))
+  elif source_state == "symlink":
+    target = storage / "sources" / "paper-one" / "main.tex"
+    target.unlink()
+    outside = data_root / "outside.tex"
+    outside.write_text("private")
+    target.symlink_to(outside)
+  elif source_state == "builder_uninstalled":
+    latex_app.deleted_at = now_naive_utc()
+    db.commit()
+  listed = client.get("/api/projects/import-sources", headers=auth).json()["artifacts"]
+  if source_state != "valid":
+    assert listed == []
+    response = client.post("/api/projects/import", headers=auth,
+      json={"kind": "artifact", "source_id": "paper-one"})
+    assert response.status_code in (409, 422), response.text
+    assert db.query(models.Project).count() == 0
+    assert record_path.is_file()
+    return
+  assert listed[0]["catalog_app_id"] == catalog_app.id
+  assert listed[0]["project_type"] == "latex:document"
+
   imported = client.post(
     "/api/projects/import", headers=auth,
     json={"kind": "artifact", "source_id": "paper-one"},
@@ -679,6 +704,15 @@ def test_latex_artifact_import_restores_declared_editable_sources(
   assert opened.json()["content"] == tex
   row = db.get(models.Project, project["id"])
   assert not (data_root / row.root_path / "index.html").exists()
+  assert data_root / row.root_path == storage / "sources" / "paper-one"
+  assert project["template"]["imported_from"]["management"] == "linked"
+  assert client.get("/api/projects/import-sources", headers=auth).json()["artifacts"] == []
+  updated = client.put(f"/api/projects/{project['id']}/file?path=main.tex", headers=auth,
+    json={"content": tex + "% shared draft", "expected_revision": opened.json()["revision"]})
+  assert updated.status_code == 200, updated.text
+  assert (storage / "sources" / "paper-one" / "main.tex").read_text() == tex + "% shared draft"
+  assert (storage / "versions" / "paper-one" / "v1.html").read_text() == "<embed src='data:application/pdf;base64,AA=='>"
+
 
 
 def test_file_bytes_rejects_malformed_content_length(client, auth):
@@ -722,13 +756,21 @@ def test_concurrent_file_writes_and_delete_are_atomic(client, auth):
   # Seed once so a concurrent delete has a valid target; unique temp names plus
   # os.replace guarantee the surviving file is one complete writer payload.
   assert write("seed").status_code == 200
-  with ThreadPoolExecutor(max_workers=3) as pool:
-    responses = [
-      pool.submit(write, payloads[0]),
-      pool.submit(delete),
-      pool.submit(write, payloads[1]),
-    ]
-    statuses = [future.result().status_code for future in responses]
+  # Production has one event loop. A contextless TestClient per worker thread
+  # creates separate loops and cannot exercise shared asyncio source locks.
+  import asyncio
+  import httpx
+  from app.main import app
+
+  async def race():
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as ac:
+      responses = await asyncio.gather(
+        ac.put(f"/api/projects/{project_id}/file?path={path}&force=true", headers=auth, json={"content": payloads[0]}),
+        ac.delete(f"/api/projects/{project_id}/file?path={path}", headers=auth),
+        ac.put(f"/api/projects/{project_id}/file?path={path}&force=true", headers=auth, json={"content": payloads[1]}),
+      )
+      return [response.status_code for response in responses]
+  statuses = asyncio.run(race())
   assert all(status in (200, 404) for status in statuses), statuses
   final = client.get(
     f"/api/projects/{project_id}/file?path={path}", headers=auth,
@@ -1155,3 +1197,64 @@ def test_project_retention_retries_native_orphan_after_filesystem_failure(
   monkeypatch.setattr(retention, "_remove_owned_root", real_remove)
   assert purge_expired_project_tombstones(db) == []
   assert not root.exists()
+
+
+@pytest.fixture
+def standalone_native_app(db):
+  root = Path(os.environ["DATA_DIR"]) / "apps" / "linked-native"
+  root.mkdir(parents=True)
+  (root / "index.jsx").write_text("export default function App(){return null}")
+  (root / "mobius.json").write_text(json.dumps({"entry": "index.jsx", "name": "Native"}))
+  app = models.App(name="Native", description="", jsx_source="", slug="linked-native", source_dir=str(root), system_app=False)
+  db.add(app)
+  db.commit()
+  db.refresh(app)
+  return app, root
+
+
+def test_repeated_concurrent_import_has_one_source_owner(client, auth, db, standalone_native_app):
+  import asyncio
+  import httpx
+  from app.main import app as application
+  source_app, root = standalone_native_app
+
+  async def race():
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application), base_url="http://test") as ac:
+      return await asyncio.gather(*[
+        ac.post("/api/projects/import", headers=auth, json={
+          "kind": "app", "source_id": str(source_app.id), "recovery_request_id": f"click-{i}",
+        }) for i in range(3)
+      ])
+  responses = asyncio.run(race())
+  assert all(r.status_code == 200 for r in responses)
+  assert len({r.json()["id"] for r in responses}) == 1
+  assert db.query(models.Project).count() == 1
+  assert root.is_dir()
+
+
+def test_failed_link_commit_never_removes_existing_source(client, auth, monkeypatch, standalone_native_app):
+  from sqlalchemy.orm import Session
+  source_app, root = standalone_native_app
+  original = (root / "index.jsx").read_bytes()
+  commit = Session.commit
+
+  def fail_project_commit(session):
+    if any(isinstance(row, models.Project) for row in session.new):
+      raise RuntimeError("simulated commit failure")
+    return commit(session)
+  monkeypatch.setattr(Session, "commit", fail_project_commit)
+  with pytest.raises(RuntimeError, match="simulated commit failure"):
+    client.post("/api/projects/import", headers=auth, json={"kind": "app", "source_id": str(source_app.id)})
+  assert (root / "index.jsx").read_bytes() == original
+  assert (root / "mobius.json").is_file()
+
+
+def test_unavailable_page_catalog_does_not_hide_native_apps(client, auth, db, standalone_native_app):
+  source_app, root = standalone_native_app
+  catalog = models.App(name="Pages", description="", jsx_source="", slug="pages", source_dir=str(root.parent / "pages"), system_app=True)
+  db.add(catalog)
+  db.commit()
+  listed = client.get("/api/projects/import-sources", headers=auth)
+  assert listed.status_code == 200
+  assert listed.json()["artifacts"] == []
+  assert [row["id"] for row in listed.json()["apps"]] == [str(source_app.id)]

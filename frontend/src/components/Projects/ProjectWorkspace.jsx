@@ -4,6 +4,7 @@ import { Chat as MessageSquare, ChatCompose as MessageSquarePlus, Folder as Gith
 import { api, jsonOrThrow } from '../../api/client.js'
 import { projectQueries } from '../../hooks/queries.js'
 import { queueArtifactBuildsAfterSourceChange } from '../../lib/projectArtifacts.js'
+import ApplyAppSourceButton from './ApplyAppSourceButton.jsx'
 import ProjectArtifacts from './ProjectArtifacts.jsx'
 import ProjectFinder from './ProjectFinder.jsx'
 import ProjectIdentityIcon from './ProjectIdentityIcon.jsx'
@@ -16,6 +17,7 @@ import './Projects.css'
 // An artifact itself is not viewed here: it opens in its own independent tab.
 export default function ProjectWorkspace({
   project,
+  linkedApp,
   onOpenChat,
   onCreateChat,
   onOpenArtifact,
@@ -191,12 +193,15 @@ export default function ProjectWorkspace({
         </div>
 
         <div className="project-workspace__actions">
+          {linkedApp && <ApplyAppSourceButton app={linkedApp} onError={setError} />}
+
           <button type="button" className="project-workspace__collaborate" aria-label="Review publishing" title="Review publishing" aria-expanded={gitOpen} onClick={() => setGitOpen(true)}><Github width={17} height={17} aria-hidden="true" /><span>Publish</span></button>
           <button type="button" className="project-workspace__collaborate" aria-label={activeWorkCount ? `Share and collaborate, ${activeWorkCount} active` : 'Share and collaborate'} title={activeWorkCount ? `${activeWorkCount} active in this project` : 'Share and collaborate'} aria-expanded={collaborationOpen} onClick={() => setCollaborationOpen(true)}><Users width={17} height={17} aria-hidden="true" /><span>{activeWorkCount ? `${activeWorkCount} active` : 'Collaborate'}</span></button>
         </div>
 
       </div>
 
+      {linkedApp && <p className="projects-empty">Saves and builds update your draft preview. Apply to app updates the running app.</p>}
       {error && <p className="projects-error" role="alert">{error}</p>}
 
       <div className="project-workspace__view">

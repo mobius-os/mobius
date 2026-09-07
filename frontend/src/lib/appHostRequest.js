@@ -39,7 +39,7 @@ export function appHostRequest(message) {
     }
   }
   if (message.type === 'moebius:projects') {
-    const actions = new Set(['templates', 'list', 'migrate', 'create', 'open', 'browse'])
+    const actions = new Set(['templates', 'list', 'migrate', 'create', 'open', 'browse', 'import-sources', 'import-source'])
     if (
       typeof message.requestId !== 'string'
       || !/^projects:[a-z0-9]+:[a-z0-9]+$/i.test(message.requestId)
@@ -49,6 +49,7 @@ export function appHostRequest(message) {
       type: message.type,
       requestId: message.requestId,
       action: message.action,
+      ...(message.action === 'import-source' ? { sourceId: typeof message.sourceId === 'string' ? message.sourceId.slice(0, 128) : '' } : {}),
       projectId: typeof message.projectId === 'string' ? message.projectId.slice(0, 128) : '',
       templateId: typeof message.templateId === 'string' ? message.templateId.slice(0, 128) : '',
       name: typeof message.name === 'string' ? message.name.trim().slice(0, 256) : '',

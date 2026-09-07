@@ -10,7 +10,19 @@ from app import app_git, install, models
 from app.config import get_settings
 from app.database import engine
 from sqlalchemy import event
-from test_app_fixtures import create_local_app
+from test_app_fixtures import create_local_app as _create_local_app
+
+
+def create_local_app(*args, **kwargs):
+  """Fixture schedules are owner declarations, not subsequently editable code."""
+  result = _create_local_app(*args, **kwargs)
+  source = kwargs.get("source_dir")
+  if source is not None and (Path(source) / "init-cron.sh").is_file():
+    from app.app_cron import schedule_state_dir
+    state = schedule_state_dir(result["id"])
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "init-cron.sh").write_bytes((Path(source) / "init-cron.sh").read_bytes())
+  return result
 
 
 def _service_auth():
@@ -866,6 +878,8 @@ def test_boot_reconciles_legacy_direct_cron_through_runner(client, db):
   db.refresh(app)
 
   from app.routes import app_schedules as apps_module
+  from app.applied_app_runtime import bootstrap_legacy_runtimes
+  assert bootstrap_legacy_runtimes(db) == (1, [])
   direct = f"15 4 * * * {source_dir}/fetch.sh {app.id}"
   with patch.object(apps_module, "_read_live_crontab", return_value=direct), \
        patch("app.app_cron.register_cron") as register:
@@ -1046,3 +1060,23 @@ def test_get_icon_variant_cache_busts_on_app_update(client, auth, db):
   after = client.get(f"/api/apps/{app_id}/icon", params={"size": 64})
   assert after.status_code == 200
   assert after.content != before.content, "stale cached variant served after update"
+
+
+def test_draft_schedule_declarations_do_not_change_owner_schedule_after_restart(client, auth, db):
+  from app.routes import app_schedules
+
+  source = Path(get_settings().data_dir) / "apps" / "schedule-isolation"
+  source.mkdir(parents=True)
+  (source / "fetch.sh").write_text("#!/bin/sh\n")
+  (source / "init-cron.sh").write_text(f'ENTRY="0 10 * * * {source}/fetch.sh 1"\n')
+  app = create_local_app(client, auth, name="Schedule isolation", source_dir=source)
+  (source / "init-cron.sh").write_text(f'ENTRY="* * * * * {source}/fetch.sh 1"\n')
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["schedule"] = {"job": "draft.sh", "default": "* * * * *"}
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  with patch.object(app_schedules, "_read_live_crontab", return_value=""), \
+       patch("app.app_cron.register_cron") as register:
+    count, warnings = app_schedules.reconcile_app_cron_supervision(db)
+  assert count == 1
+  assert warnings == []
+  register.assert_called_once_with("schedule-isolation", "0 10 * * *", source / "fetch.sh", app["id"])

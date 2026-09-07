@@ -24,6 +24,32 @@ log = logging.getLogger(__name__)
 PROJECT_LIFECYCLE_LOCK = threading.RLock()
 
 
+def projects_using_app_files(db: Session, app: models.App) -> list[models.Project]:
+  """Find projects whose source would disappear if this app were purged.
+
+  A template provider is not necessarily the source owner. Linked builder
+  outputs may live in another app's source or in Pages' numeric storage, so
+  ownership follows the root rather than the provider foreign key. Include
+  tombstones: their files are still needed for Project recovery.
+  """
+  data_root = Path(get_settings().data_dir).resolve()
+  source = Path(app.source_dir)
+  app_roots = (
+    (source if source.is_absolute() else data_root / source).resolve(),
+    (data_root / "apps" / str(app.id)).resolve(),
+  )
+  dependent = []
+  for project in db.query(models.Project).all():
+    stored = Path(project.root_path)
+    root = (stored if stored.is_absolute() else data_root / stored).resolve()
+    if (
+      any(root.is_relative_to(app_root) for app_root in app_roots)
+      or (project.source_app_id == app.id and project.legacy_source_json is not None)
+    ):
+      dependent.append(project)
+  return dependent
+
+
 def _owned_native_root(project_id: str, root_path: str, legacy: object) -> Path | None:
   """Return a root only when it is exactly Möbius' native project directory."""
   if legacy is not None:

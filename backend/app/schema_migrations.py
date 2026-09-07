@@ -3510,6 +3510,19 @@ def _add_provider_execution_admission(eng) -> None:
       ))
 
 
+def _add_app_runtime_revision(eng) -> None:
+  """Separate accepted runtime bytes from source-only Git revision identity."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "apps" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("apps")}
+  if "runtime_revision" not in columns:
+    with eng.begin() as conn:
+      conn.execute(text("ALTER TABLE apps ADD COLUMN runtime_revision VARCHAR(64) NULL"))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -3561,6 +3574,7 @@ _SCHEMA_MIGRATIONS = (
   ("0038_chat_wait_condition_owner", _add_chat_wait_condition_owner),
   ("0039_agent_work_claim_history", _make_agent_work_claim_history_durable),
   ("0040_provider_execution_admission", _add_provider_execution_admission),
+  ("0041_app_runtime_revision", _add_app_runtime_revision),
 )
 
 

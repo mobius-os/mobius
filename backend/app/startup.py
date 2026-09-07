@@ -262,6 +262,23 @@ def _read_restart_authorization(context: StartupContext) -> None:
   context.restart_authorization = authorized_restart_nonce()
 
 
+def _freeze_legacy_app_runtimes(context: StartupContext) -> None:
+  """Freeze pre-isolation live files before any editing or scheduled work resumes."""
+  from app.applied_app_runtime import bootstrap_legacy_runtimes, prune_runtime
+  from app import models
+  with SessionLocal() as db:
+    count, warnings = bootstrap_legacy_runtimes(db)
+    for app in db.query(models.App).all():
+      try:
+        prune_runtime(app)
+      except (OSError, RuntimeError) as exc:
+        warnings.append(f"app {app.id} runtime cleanup: {exc}")
+  if count:
+    context.logger.info("froze %d deployed app runtime baseline(s)", count)
+  for warning in warnings:
+    context.logger.warning("app runtime migration: %s", warning)
+
+
 def _reconcile_startup_chats(context: StartupContext) -> None:
   from app.chat import reconcile_startup_chats
 
@@ -503,6 +520,7 @@ DATABASE_STARTUP_TASKS = (
   StartupTask("backfill prompt snapshots", _backfill_prompt_snapshots),
   StartupTask("fix forward chat media", _fix_forward_chat_media),
   StartupTask("read restart authorization", _read_restart_authorization),
+  StartupTask("freeze legacy app runtimes", _freeze_legacy_app_runtimes),
   StartupTask(
     "reconcile startup chats",
     _reconcile_startup_chats,

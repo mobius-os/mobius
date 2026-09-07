@@ -21,7 +21,7 @@ const { default: ProjectWorkspace } = await vite.ssrLoadModule(
 
 after(() => vite.close())
 
-function renderWorkspace() {
+function renderWorkspace(props = {}) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
@@ -37,6 +37,7 @@ function renderWorkspace() {
       { client },
       React.createElement(ProjectWorkspace, {
         project,
+        ...props,
         onCreateChat() {},
         onDelete() {},
         onOpenArtifact() {},
@@ -95,4 +96,36 @@ test('a failed rebuild keeps the previous Creation and explains what is shown', 
     React.createElement(ArtifactWorkspace, { projectId: 'failed-project', artifactId: 'game' })))
   assert.match(markup, /Showing the last successful Creation/)
   assert.doesNotMatch(markup, /Nothing built yet/)
+})
+
+
+test('linked app Projects offer explicit Apply while ordinary Projects do not', () => {
+  const markup = renderWorkspace({ linkedApp: { id: 123, name: 'Clock', source_dir: '/data/apps/clock' } })
+  assert.match(markup, />Apply to app<\/button>/)
+  assert.match(markup, /Saves and builds update your draft preview/)
+  assert.match(markup, /Save your files first/)
+  assert.doesNotMatch(renderWorkspace(), />Apply to app<\/button>/)
+})
+
+test('managed View source advertises draft-only saves and an explicit Apply action', async () => {
+  const { default: AppSourceWorkspace } = await vite.ssrLoadModule('/src/components/Projects/AppSourceWorkspace.jsx')
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const app = { id: 123, name: 'Clock', source_dir: '/data/apps/clock' }
+  const markup = renderToStaticMarkup(React.createElement(QueryClientProvider, { client },
+    React.createElement(AppSourceWorkspace, { app, requiresApply: true })))
+  assert.match(markup, />Apply to app<\/button>/)
+  assert.match(markup, /Saved source remains a draft until you apply it/)
+})
+
+
+test('legacy imported app copies keep the real Project workspace without installed-app Apply', () => {
+  const markup = renderWorkspace({ project: {
+    id: 'legacy-app-copy', name: 'Preserved copy', chats: [],
+    template: { imported_from: { kind: 'app', id: 123 } },
+  } })
+  assert.match(markup, /aria-label="Preserved copy project"/)
+  assert.match(markup, /aria-label="Project overview"/)
+  assert.match(markup, />Creations<\/h2>/)
+  assert.match(markup, />Collaborate<\/span>/)
+  assert.doesNotMatch(markup, /app-source-workspace|>Apply to app<\/button>/)
 })

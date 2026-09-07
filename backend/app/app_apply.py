@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import logging
 import subprocess
 import tempfile
@@ -579,6 +580,7 @@ def _live_runtime_state(app: models.App) -> tuple:
     app.jsx_source,
     app.compiled_path,
     app.source_commit,
+    app.runtime_revision,
     app.icon_png,
     app.icon_override_png,
     app.published_manifest_url,
@@ -637,6 +639,7 @@ async def apply_source_revision(
   previous_bundle = None
   published = None
   staged = None
+  runtime_staged = None
   static_created: list[Path] = []
   static_rollback: list = []
   static_commit: list = []
@@ -700,6 +703,7 @@ async def apply_source_revision(
       # from the runtime-state tuple's field order (the helper carries more
       # fields than upstream's inline tuple did).
       previous_source_commit = app.source_commit
+      previous_runtime_revision = app.runtime_revision
 
       # Explicit apply is serialized by the lifecycle lock, so it can compile
       # under one shared, non-servable name before a new row has a numeric id.
@@ -776,6 +780,29 @@ async def apply_source_revision(
         # local source advances, require publication verification again rather
         # than silently offering a stale repository to other people.
         app.published_manifest_url = None
+      from app import applied_app_runtime
+      runtime_options = {}
+      runtime_assets = static_assets
+      if manifest is None:
+        # Ordinary Store source Apply accepts code, not a new package contract.
+        # Its ignored generated assets and runtime declarations remain exactly
+        # those from the previously applied package.
+        previous_runtime = applied_app_runtime.runtime_root(app)
+        previous_static = previous_runtime / "static"
+        runtime_assets = {
+          path.relative_to(previous_static).as_posix(): path.read_bytes()
+          for path in previous_static.rglob("*") if path.is_file()
+        }
+        previous_manifest = previous_runtime / "mobius.json"
+        runtime_options["runtime_manifest"] = (
+          previous_manifest.read_bytes() if previous_manifest.is_file() else None
+        )
+      runtime_staged = await asyncio.to_thread(
+        applied_app_runtime.prepare_runtime,
+        source_path, app.source_commit,
+        static_assets=runtime_assets,
+        **runtime_options,
+      )
       if created:
         # A new App has no numeric id until SQLite inserts it. Compiling after
         # that insert used to hold the database write lock for the entire
@@ -785,6 +812,8 @@ async def apply_source_revision(
         # only when the accepted Git tree and compiled bytes are ready.
         db.add(app)
         db.flush()
+      applied_app_runtime.publish_runtime(app, runtime_staged)
+      runtime_staged = None
       app_staged = _compiled_dir() / f"app-{app.id}.js.staging"
       staged.replace(app_staged)
       staged = app_staged
@@ -831,6 +860,13 @@ async def apply_source_revision(
       if previous_bundle != published:
         unlink_app_bundle(app.id, previous_bundle)
       db.refresh(app)
+      try:
+        await asyncio.to_thread(
+          applied_app_runtime.prune_runtime, app,
+          previous_revision=previous_runtime_revision,
+        )
+      except OSError:
+        log.warning("Could not prune older applied runtime trees", exc_info=True)
       warnings = await _sync_accepted_app_side_effects(
         db, app, manifest, drop_prior_cron=not created,
       )
@@ -843,6 +879,8 @@ async def apply_source_revision(
       )
   except Exception:
     db.rollback()
+    if runtime_staged is not None:
+      shutil.rmtree(runtime_staged.root)
     if not durable_commit and static_materialized:
       _rollback_static_assets(static_created, static_rollback)
     if staged is not None:

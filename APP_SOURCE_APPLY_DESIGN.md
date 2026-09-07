@@ -645,3 +645,53 @@ discovery at 12.312 seconds, first apply at 29.118 seconds, first preview at
 34.640 seconds, first browser action at 44.185 seconds, and completion
 notification at 117.028 seconds. The accepted app repository was clean with
 three intentional commits (root, create, polish).
+
+## Linked Projects and applied runtime files
+
+A standalone native app can become a real Project without copying its source.
+The Project root remains the installed app's source directory. Project saves
+and preview builds do not deploy; **Apply to app** uses the same explicit
+application operation as an agent. Existing independent Project copies remain
+independent and are not retargeted during this change.
+
+Compiled JavaScript is not the entire deployed app. Static assets and
+scheduled scripts (including their working-directory siblings) must also be
+independent of collaboratively edited source. `App.runtime_revision` names a
+content-addressed tree under `app-runtime/<app-id>/<revision>`. The existing
+Apply/install transaction prepares and publishes that tree before committing
+its pointer with the accepted App row. `source_commit` remains source-only Git
+identity: generated Store assets deliberately stay outside Git, and a
+static-only installation can change runtime identity without changing source
+identity. A failed database commit keeps the previous pointer live.
+
+The HTTP asset route pins its tree through response completion, including
+cancellation. The job supervisor resolves the committed runtime pointer once
+under its existing single-flight lock, then executes from that directory.
+Cleanup retains current and previous runtime trees and skips active readers.
+Owner schedule declarations live in numeric app data, not editable source.
+
+On the first upgraded startup, before chat and schedule reconciliation, a
+one-time receipt freezes the currently deployed baseline. Known source commits
+provide code; deployed static files and existing schedule declarations preserve
+pre-upgrade behavior. Apps without source provenance get a clearly identified
+migration baseline, not an invented historical Apply. After the receipt exists,
+a missing baseline never causes dirty source to be adopted automatically.
+Lost runtime files are reconstructed only when accepted inputs reproduce the
+exact content address; otherwise an explicit Apply/reinstall is required.
+
+The script/backend rolling-activation boundary preserves old runner behavior
+only before that one-time receipt exists and only when the old backend omits
+the runtime field. Once migration begins, missing runtime context fails closed.
+
+Website and LaTeX imports similarly link retained builder source in Pages,
+not the rendered HTML or a new copy. Eligibility requires the installed builder
+and explicit source provenance. Project retention, app removal, and Clear app
+data respect those source roots, including recoverable Project tombstones.
+
+This is a deployment boundary, not an arbitrary-code sandbox. A legacy job
+that explicitly opens `/data/apps/<slug>/...` can still read those paths;
+source-relative template scripts use the pinned working directory. Known legacy
+Forge and Yas helper scripts have such absolute references and need app-level
+path cleanup before relying on collaborative editing isolation for those
+particular helper operations. The platform does not silently rewrite their
+code or redirect arbitrary filesystem access.

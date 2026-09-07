@@ -1214,8 +1214,9 @@ def test_store_local_package_uses_canonical_manifest_identity_when_slug_differs(
   assert row.manifest_url.endswith("#manifest-id=store")
 
 
+@pytest.mark.parametrize("draft_manifest", [False, True])
 def test_store_local_apply_accepts_installer_managed_tree_without_manifest(
-  client, auth, db,
+  client, auth, db, draft_manifest,
 ):
   """Installed app repos intentionally exclude the reviewed mobius.json."""
   source = Path(get_settings().data_dir) / "apps" / "store-demo"
@@ -1240,10 +1241,15 @@ def test_store_local_apply_accepts_installer_managed_tree_without_manifest(
   )
   db.add(row)
   db.commit()
+  from app.applied_app_runtime import bootstrap_legacy_runtimes, runtime_root
+  assert bootstrap_legacy_runtimes(db) == (1, [])
   app_id = row.id
   (source / "index.jsx").write_text(
     "export default function App() { return <div>local edit</div> }\n"
   )
+
+  if draft_manifest:
+    (source / "mobius.json").write_text('{"name":"unaccepted package manifest"}')
 
   updated = _apply(client, auth, source)
 
@@ -1253,9 +1259,10 @@ def test_store_local_apply_accepts_installer_managed_tree_without_manifest(
   assert row.source_commit != installed_head
   assert row.name == "Reviewed name"
   assert row.capability_contract == {"schema": 2, "reviewed": "store"}
-  assert "mobius.json" not in app_git.read_ref_tree(
+  assert ("mobius.json" in app_git.read_ref_tree(
     source, app_git.LOCAL_BRANCH,
-  )
+  )) is draft_manifest
+  assert not (runtime_root(row) / "mobius.json").exists()
   assert app_git._run(source, "status", "--porcelain").stdout == ""
 
 
@@ -1295,3 +1302,81 @@ def test_legacy_inline_source_mutation_routes_are_retired(client, auth):
     },
   )
   assert old_patch.status_code == 422
+
+
+def test_editing_app_files_does_not_change_static_or_job_runtime_until_apply(client, auth, db):
+  from app.applied_app_runtime import runtime_root
+
+  source = _source()
+  (source / "assets").mkdir()
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["static_assets"] = {"page.txt": "assets/page.txt"}
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  (source / "assets" / "page.txt").write_text("accepted-one")
+  (source / "job.sh").write_text("#!/bin/sh\ncat sibling.txt\n")
+  (source / "sibling.txt").write_text("accepted sibling")
+  response = _apply(client, auth, source)
+  assert response.status_code == 200, response.text
+  app_id = response.json()["app"]["id"]
+  row = db.get(models.App, app_id)
+  old_runtime = runtime_root(row)
+
+  (source / "assets" / "page.txt").write_text("draft-two")
+  (source / "job.sh").write_text("#!/bin/sh\nexit 99\n")
+  (source / "sibling.txt").write_text("draft sibling")
+  assert client.get(f"/app-assets/by-id/{app_id}/page.txt").text == "accepted-one"
+  assert (old_runtime / "job.sh").read_text() == "#!/bin/sh\ncat sibling.txt\n"
+  assert (old_runtime / "sibling.txt").read_text() == "accepted sibling"
+  context = client.get(f"/api/apps/{app_id}/job-context", headers=auth).json()
+  assert context["runtime_dir"] == str(old_runtime)
+
+  applied = _apply(client, auth, source)
+  assert applied.status_code == 200, applied.text
+  db.refresh(row)
+  assert runtime_root(row) != old_runtime
+  assert client.get(f"/app-assets/by-id/{app_id}/page.txt").text == "draft-two"
+  # A path pinned by an already-running job never changes under its feet.
+  assert (old_runtime / "sibling.txt").read_text() == "accepted sibling"
+
+
+def test_database_apply_failure_does_not_publish_new_runtime(client, auth, db, monkeypatch):
+  from app.applied_app_runtime import runtime_root
+
+  source = _source()
+  (source / "assets").mkdir()
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["static_assets"] = {"page.txt": "assets/page.txt"}
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  (source / "assets" / "page.txt").write_text("accepted")
+  created = _apply(client, auth, source)
+  app_id = created.json()["app"]["id"]
+  row = db.get(models.App, app_id)
+  old_runtime = runtime_root(row)
+  (source / "assets" / "page.txt").write_text("not published")
+  original = app_apply.Session.commit
+
+  def fail(session):
+    raise RuntimeError("runtime publication database failure")
+
+  monkeypatch.setattr(app_apply.Session, "commit", fail)
+  with pytest.raises(RuntimeError, match="runtime publication database failure"):
+    _apply(client, auth, source)
+  monkeypatch.setattr(app_apply.Session, "commit", original)
+  db.refresh(row)
+  assert runtime_root(row) == old_runtime
+  assert client.get(f"/app-assets/by-id/{app_id}/page.txt").text == "accepted"
+
+
+def test_runtime_bootstrap_uses_recorded_commit_not_dirty_worktree(client, auth, db):
+  import shutil
+  from app.applied_app_runtime import runtime_root
+
+  source = _source()
+  (source / "job.sh").write_text("accepted job")
+  created = _apply(client, auth, source)
+  row = db.get(models.App, created.json()["app"]["id"])
+  previous = runtime_root(row)
+  shutil.rmtree(previous)
+  (source / "job.sh").write_text("dirty job")
+  rebuilt = runtime_root(row)
+  assert (rebuilt / "job.sh").read_text() == "accepted job"

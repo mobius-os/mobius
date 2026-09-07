@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -11,10 +12,7 @@ import re
 import secrets
 import shutil
 import subprocess
-import threading
 import uuid
-import weakref
-from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -27,7 +25,7 @@ from sqlalchemy.orm import Session, defer
 from sqlalchemy.orm.attributes import flag_modified
 
 from app import (
-  auth, github_auth, models, project_builders, project_drawer, project_git, providers,
+  auth, fs_locks, github_auth, models, project_builders, project_drawer, project_git, providers,
   questions, workspace_files,
 )
 from app.broadcast import get_system_broadcast
@@ -74,10 +72,6 @@ _IMPORT_RESERVED_PARTS = {
   ".git", ".hg", ".svn", "node_modules", "__pycache__", "artifacts",
 }
 
-_FILE_LOCKS_GUARD = threading.Lock()
-_FILE_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = (
-  weakref.WeakValueDictionary()
-)
 
 
 class ProjectCreate(BaseModel):
@@ -153,7 +147,7 @@ class GitHubImport(BaseModel):
 
 
 class ProjectImport(BaseModel):
-  """Create an editable Project copy from existing owner work."""
+  """Add Project management to existing editable builder source."""
 
   model_config = ConfigDict(extra="forbid")
 
@@ -623,22 +617,6 @@ def _resolve_project_path(project: models.Project, path: str) -> tuple[Path, Pat
   return root, target
 
 
-@contextmanager
-def _locked_project_mutation(root: Path):
-  """Serialize saves, moves, and deletes for one project in this process.
-
-  A path-only lock cannot protect a child save while its parent is moving. The
-  project-wide critical section gives all mutators one coherent order.
-  """
-  key = str(root)
-  with _FILE_LOCKS_GUARD:
-    lock = _FILE_LOCKS.get(key)
-    if lock is None:
-      lock = threading.Lock()
-      _FILE_LOCKS[key] = lock
-  with lock:
-    yield
-
 
 def _require_save_precondition(
   principal: ProjectPrincipal, force: bool, named_revision: bool, path: str,
@@ -653,7 +631,7 @@ def _require_save_precondition(
     raise workspace_files.revision_required(path)
 
 
-def _save_project_file(
+async def _save_project_file(
   db: Session,
   project: models.Project,
   principal: ProjectPrincipal,
@@ -664,7 +642,7 @@ def _save_project_file(
   *,
   force: bool,
 ) -> dict:
-  with _locked_project_mutation(root):
+  async with fs_locks.source_dir_lock(str(root)):
     saved = workspace_files.write_file(
       root, target, content, expected_revision, force=force,
     )
@@ -931,17 +909,21 @@ def _artifact_catalog_app(db: Session) -> models.App | None:
 
 
 def _artifact_catalog_root(app: models.App) -> Path:
-  root = (Path(get_settings().data_dir) / "apps" / str(app.id)).resolve()
+  root = Path(get_settings().data_dir) / "apps" / str(app.id)
   if not root.is_dir() or root.is_symlink():
     raise HTTPException(409, "Artifact storage is unavailable.")
-  return root
+  return root.resolve()
 
 
 def _read_artifact_records(db: Session) -> list[tuple[models.App, Path, dict[str, Any]]]:
   app = _artifact_catalog_app(db)
   if app is None:
     return []
-  root = _artifact_catalog_root(app)
+  try:
+    root = _artifact_catalog_root(app)
+  except HTTPException:
+    # A missing Pages catalog must not hide independently usable app sources.
+    return []
   catalog = root / "artifacts"
   if not catalog.is_dir() or catalog.is_symlink():
     return []
@@ -954,6 +936,8 @@ def _read_artifact_records(db: Session) -> list[tuple[models.App, Path, dict[str
         continue
       record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
+      continue
+    if not isinstance(record, dict):
       continue
     artifact_id = str(record.get("id") or "")
     version = record.get("current_version")
@@ -984,88 +968,59 @@ def _artifact_import_source(
   raise HTTPException(404, "Artifact not found.")
 
 
-def _generic_artifact_template() -> dict[str, Any]:
-  snapshot = _safe_template({
-    "id": "html",
-    "name": "Imported artifact",
-    "description": "An editable copy of a standalone HTML artifact.",
-    "guidance": (
-      "Edit the imported self-contained HTML directly. Keep load-time assets local "
-      "and rebuild the website artifact after meaningful changes."
-    ),
-    "skills": [],
-    "dependencies": [],
-    "files": {},
-    "previews": [{
-      "id": "website", "name": "Artifact", "kind": "html", "path": "index.html",
-    }],
-    "artifact_types": [{
-      "id": "website", "name": "Website", "extensions": ["html", "htm"],
-      "preview": "html", "script": "", "output": "{source}",
-    }],
-  })
-  snapshot["key"] = "artifact:html"
-  return snapshot
-
-
-def _copy_declared_artifact_sources(
-  storage_root: Path,
-  project_root: Path,
-  record: dict[str, Any],
-) -> bool:
+def _linked_artifact_source(
+  db: Session, storage_root: Path, record: dict[str, Any],
+) -> tuple[Path, dict, models.App | None]:
+  """Resolve declared builder source in place; a rendered Page is not provenance."""
   metadata = record.get("project_import")
-  if not isinstance(metadata, dict):
-    return False
+  if not isinstance(metadata, dict) or metadata.get("template_id") not in {
+    "webstudio:website", "latex:document",
+  }:
+    raise HTTPException(409, "This Page has no identifiable builder source.")
+  template_row = _installed_template(db, metadata["template_id"])
+  if template_row is None:
+    raise HTTPException(409, "Install this work's builder before adding it to Projects.")
+  source_locator = storage_root / "sources" / str(record["id"])
+  root = source_locator.resolve()
+  if source_locator.is_symlink() or not root.is_dir() or not root.is_relative_to(storage_root):
+    raise HTTPException(409, "This work's editable source is unavailable.")
   files = metadata.get("files")
   if not isinstance(files, list) or not files:
-    return False
+    raise HTTPException(409, "This work has no declared editable source files.")
   if len(files) > _IMPORT_MAX_FILES:
-    raise HTTPException(413, "This artifact declares too many source files.")
+    raise HTTPException(413, "This work declares too many source files.")
   total = 0
-  planned: list[tuple[Path, Path]] = []
-  declared_source_root = (
-    storage_root / "sources" / str(record.get("id") or "")
-  ).resolve()
   for item in files:
     if not isinstance(item, dict):
-      raise HTTPException(422, "Artifact project source metadata is invalid.")
+      raise HTTPException(422, "Builder source metadata is invalid.")
     destination = str(item.get("path") or "")
-    storage_path = str(item.get("storage_path") or "")
     try:
-      source = validate_path_within_base(storage_path, storage_root)
-      target = validate_path_within_base(destination, project_root)
-    except ValueError as exc:
-      raise HTTPException(422, "Artifact project source metadata is invalid.") from exc
-    if (
-      not source.is_file()
-      or source.is_symlink()
-      or not source.is_relative_to(declared_source_root)
-      or any(part in _IMPORT_RESERVED_PARTS for part in Path(destination).parts)
-    ):
-      raise HTTPException(409, "An artifact project source file is unavailable.")
+      source = workspace_files.resolve_path(storage_root, str(item.get("storage_path") or ""))
+      target = workspace_files.resolve_path(root, destination)
+    except (workspace_files.InvalidWorkspacePath, workspace_files.UnavailableWorkspacePath) as exc:
+      raise HTTPException(422, "Builder source metadata is invalid.") from exc
+    if (source != target or not source.is_file()
+        or any(part in _IMPORT_RESERVED_PARTS for part in Path(destination).parts)):
+      raise HTTPException(409, "Builder sources must use the same paths in their existing source folder.")
     total += source.stat().st_size
     if total > _IMPORT_MAX_BYTES:
-      raise HTTPException(413, "Artifact project sources are too large to import.")
-    planned.append((source, target))
-  for source, target in planned:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source, target)
-  return True
+      raise HTTPException(413, "Builder sources are too large.")
+  template, app = template_row
+  return root, _safe_template(template, app), app
 
 
-def _copy_current_artifact_html(
-  storage_root: Path, project_root: Path, record: dict[str, Any],
-) -> None:
-  artifact_id = str(record["id"])
-  version = int(record["current_version"])
-  source = validate_path_within_base(
-    f"versions/{artifact_id}/v{version}.html", storage_root,
-  )
-  if not source.is_file() or source.is_symlink():
-    raise HTTPException(409, "The current artifact version is unavailable.")
-  if source.stat().st_size > _IMPORT_MAX_BYTES:
-    raise HTTPException(413, "This artifact is too large to import.")
-  shutil.copyfile(source, project_root / "index.html")
+def _source_project(db: Session, kind: str, source_id: str) -> models.Project | None:
+  # Old independent imports still count as managed work. Never replace them or
+  # silently retarget their saved source; their owner can deliberately migrate.
+  for project in db.query(models.Project).all():
+    imported = (project.template_snapshot_json or {}).get("imported_from") or {}
+    if imported.get("kind") == kind and str(imported.get("id")) == source_id:
+      return project
+  return None
+
+
+def _project_at_root(db: Session, root: Path) -> models.Project | None:
+  return next((p for p in db.query(models.Project).all() if _project_root(p) == root), None)
 
 
 def _app_import_files(app: models.App) -> list[tuple[Path, Path]]:
@@ -1393,171 +1348,166 @@ def list_project_import_sources(
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
-  """List owner work that can become an independent editable Project copy."""
+  """Only identifiable builder outputs not already managed by a Project."""
+  projects = db.query(models.Project).all()
+  imported = {
+    (str(meta.get("kind")), str(meta.get("id")))
+    for project in projects
+    if (meta := (project.template_snapshot_json or {}).get("imported_from"))
+  }
+  roots = {_project_root(project) for project in projects}
   artifacts = []
-  for _catalog_app, _storage_root, record in _read_artifact_records(db):
-    metadata = record.get("project_import")
+  for _catalog_app, storage_root, record in _read_artifact_records(db):
+    if ("artifact", str(record["id"])) in imported:
+      continue
+    try:
+      root, snapshot, _builder = _linked_artifact_source(db, storage_root, record)
+    except HTTPException:
+      # Ineligible records do not hide unrelated, usable work.
+      continue
+    if root in roots:
+      continue
     artifacts.append({
-      "kind": "artifact",
-      "id": str(record["id"]),
+      "kind": "artifact", "id": str(record["id"]),
+      "catalog_app_id": _catalog_app.id,
       "name": str(record.get("title") or "Untitled artifact"),
       "description": str(record.get("description") or ""),
       "current_version": int(record["current_version"]),
       "updated_at": record.get("updated_at") or record.get("created_at"),
-      "chat_id": record.get("chat_id"),
-      "project_type": (
-        str(metadata.get("template_id"))
-        if isinstance(metadata, dict) and metadata.get("template_id")
-        else "webstudio:website"
-      ),
+      "chat_id": record.get("chat_id"), "project_type": snapshot["key"],
     })
 
   apps = []
   app_rows = db.query(models.App).options(
-    defer(models.App.jsx_source),
-    defer(models.App.icon_png),
+    defer(models.App.jsx_source), defer(models.App.icon_png),
     defer(models.App.icon_override_png),
   ).filter(
-    models.App.deleted_at.is_(None),
-    models.App.manifest_url.is_(None),
+    models.App.deleted_at.is_(None), models.App.manifest_url.is_(None),
     models.App.system_app.is_(False),
   ).order_by(models.App.updated_at.desc(), models.App.id.desc()).all()
   for app in app_rows:
-    source_locator = Path(app.source_dir)
-    if source_locator.is_symlink() or not source_locator.is_dir():
+    if ("app", str(app.id)) in imported:
       continue
-    manifest_path = source_locator / "mobius.json"
-    entry_exists = (source_locator / "index.jsx").is_file()
-    if manifest_path.is_file() and not manifest_path.is_symlink():
-      try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-      except (OSError, UnicodeError, json.JSONDecodeError):
-        manifest = {}
-      entry = manifest.get("entry")
-      entry_exists = isinstance(entry, str) and (
-        not (source_locator / entry).is_symlink()
-        and (source_locator / entry).is_file()
-      )
-    if not entry_exists:
+    try:
+      root = _linked_app_root(app)
+    except HTTPException:
+      continue
+    if root in roots:
       continue
     apps.append({
-      "kind": "app",
-      "id": str(app.id),
-      "name": app.name,
-      "description": app.description or "",
-      "slug": app.slug,
-      "updated_at": app.updated_at,
-      "icon_url": f"/api/apps/{app.id}/icon",
+      "kind": "app", "id": str(app.id), "name": app.name,
+      "description": app.description or "", "slug": app.slug,
+      "updated_at": app.updated_at, "icon_url": f"/api/apps/{app.id}/icon",
       "project_type": "app",
     })
-  return {"artifacts": artifacts, "apps": apps}
+  return {"management": "linked", "artifacts": artifacts, "apps": apps}
+
+
+def _linked_app_root(app: models.App) -> Path:
+  """Recognize native local app source, never its private numeric data tree."""
+  source = Path(app.source_dir)
+  root = source.resolve()
+  apps_root = (Path(get_settings().data_dir) / "apps").resolve()
+  if (source.is_symlink() or root.parent != apps_root or root.name.isdecimal()
+      or not root.is_dir()):
+    raise HTTPException(409, "The app has no standalone source folder.")
+  # The core App builder uses this same native manifest/JSX source format.
+  _app_import_files(app)
+  return root
 
 
 @router.post("/import", dependencies=[Depends(reject_cross_site)])
-def import_project_source(
+async def import_project_source(
   body: ProjectImport,
   _: models.Owner = Depends(get_current_owner),
   db: Session = Depends(get_db),
 ):
-  """Create a Project-owned source copy without coupling it to the original."""
-  with PROJECT_LIFECYCLE_LOCK:
-    if body.recovery_request_id:
-      project_id = str(uuid.uuid5(
-        uuid.NAMESPACE_URL,
-        f"mobius:{body.kind}-project:{body.recovery_request_id}",
-      ))
-      existing = db.query(models.Project).filter(models.Project.id == project_id).first()
-      if existing is not None:
-        if existing.deleted_at is not None:
-          raise HTTPException(409, "Project was deleted.")
-        return _project_response(existing, _live_project_chat_rows(db, existing.id))
+  """Manage the existing source once; never copy, move, or delete its files."""
+  async with fs_locks.install_uninstall_lock():
+    if body.kind == "app":
+      try:
+        app_id = int(body.source_id)
+      except ValueError as exc:
+        raise HTTPException(422, "App source_id must be a number.") from exc
+      app = db.get(models.App, app_id)
     else:
-      project_id = str(uuid.uuid4())
+      app = _artifact_catalog_app(db)
+    if app is None or app.deleted_at is not None:
+      raise HTTPException(404, "The source app is no longer installed.")
+    async with fs_locks.app_storage_lock(app.id), fs_locks.source_dir_lock(app.source_dir):
+      return _import_project_source(body, db)
 
-    root_locator = Path("projects") / project_id
-    root = (Path(get_settings().data_dir) / root_locator).resolve()
-    if root.exists():
-      raise HTTPException(409, "Project root already exists.")
-    root.mkdir(parents=True)
 
-    try:
-      if body.kind == "artifact":
-        _catalog_app, storage_root, record = _artifact_import_source(db, body.source_id)
-        metadata = record.get("project_import")
-        template_row = None
-        if isinstance(metadata, dict) and isinstance(metadata.get("template_id"), str):
-          template_row = _installed_template(db, metadata["template_id"])
-        copied_sources = False
-        if template_row is not None:
-          copied_sources = _copy_declared_artifact_sources(storage_root, root, record)
-        if copied_sources:
-          template, template_app = template_row
-          snapshot = _safe_template(template, template_app)
-        else:
-          website_template = _installed_template(db, "webstudio:website")
-          if website_template is not None:
-            template, template_app = website_template
-            snapshot = _safe_template(template, template_app)
-          else:
-            template_app = None
-            snapshot = _generic_artifact_template()
-          _copy_current_artifact_html(storage_root, root, record)
-        imported_from = {
-          "kind": "artifact",
-          "id": str(record["id"]),
-          "version": int(record["current_version"]),
-          "title": str(record.get("title") or "Untitled artifact"),
-        }
-        project_name = body.name or imported_from["title"]
-      else:
-        try:
-          app_id = int(body.source_id)
-        except ValueError as exc:
-          raise HTTPException(422, "App source_id must be a number.") from exc
-        source_app = db.query(models.App).options(
-          defer(models.App.jsx_source),
-          defer(models.App.icon_png),
-          defer(models.App.icon_override_png),
-        ).filter(
-          models.App.id == app_id,
-          models.App.deleted_at.is_(None),
-          models.App.manifest_url.is_(None),
-          models.App.system_app.is_(False),
-        ).first()
-        if source_app is None:
-          raise HTTPException(404, "Locally built app not found.")
-        template_app = None
-        snapshot = _generic_app_template()
-        for source, relative in _app_import_files(source_app):
-          target = validate_path_within_base(relative.as_posix(), root)
-          target.parent.mkdir(parents=True, exist_ok=True)
-          shutil.copyfile(source, target)
-        imported_from = {
-          "kind": "app", "id": str(source_app.id), "slug": source_app.slug,
-          "name": source_app.name,
-        }
-        project_name = body.name or source_app.name
+def _import_project_source(body: ProjectImport, db: Session):
+  # The async caller owns the same lifecycle locks as Apply/uninstall. This
+  # database/filesystem section has no await, so source ownership commits once.
+  with PROJECT_LIFECYCLE_LOCK:
+    existing = _source_project(db, body.kind, body.source_id)
+    if existing is not None:
+      if existing.deleted_at is not None:
+        raise HTTPException(409, "This work already has a deleted Project; recover it first.")
+      return _project_response(existing, _live_project_chat_rows(db, existing.id))
 
-      snapshot["imported_from"] = imported_from
-      artifacts = _previews_to_artifacts(snapshot, root)
-      project = models.Project(
-        id=project_id,
-        name=project_name,
-        project_type=str(snapshot.get("key") or "blank"),
-        root_path=root_locator.as_posix(),
-        chat_id=None,
-        source_app_id=template_app.id if template_app is not None else None,
-        template_snapshot_json=snapshot,
-        artifacts_json=artifacts or None,
+    if body.kind == "artifact":
+      _catalog_app, storage_root, record = _artifact_import_source(db, body.source_id)
+      root, snapshot, template_app = _linked_artifact_source(db, storage_root, record)
+      imported_from = {
+        "kind": "artifact", "id": str(record["id"]),
+        "version": int(record["current_version"]),
+        "title": str(record.get("title") or "Untitled artifact"),
+        "management": "linked",
+      }
+      project_name = body.name or imported_from["title"]
+    else:
+      try:
+        app_id = int(body.source_id)
+      except ValueError as exc:
+        raise HTTPException(422, "App source_id must be a number.") from exc
+      source_app = db.query(models.App).options(
+        defer(models.App.jsx_source), defer(models.App.icon_png),
+        defer(models.App.icon_override_png),
+      ).filter(
+        models.App.id == app_id, models.App.deleted_at.is_(None),
+        models.App.manifest_url.is_(None), models.App.system_app.is_(False),
+      ).first()
+      if source_app is None:
+        raise HTTPException(404, "Locally built app not found.")
+      root = _linked_app_root(source_app)
+      template_app = None
+      snapshot = _generic_app_template()
+      snapshot["guidance"] += (
+        " This Project manages the installed app's existing source. Edits are "
+        "drafts until the owner explicitly applies them; keep runtime data separate."
       )
-      db.add(project)
+      imported_from = {
+        "kind": "app", "id": str(source_app.id), "slug": source_app.slug,
+        "name": source_app.name, "management": "linked",
+      }
+      project_name = body.name or source_app.name
+
+    existing = _project_at_root(db, root)
+    if existing is not None:
+      if existing.deleted_at is not None:
+        raise HTTPException(409, "This source belongs to a deleted Project; recover it first.")
+      return _project_response(existing, _live_project_chat_rows(db, existing.id))
+    snapshot["imported_from"] = imported_from
+    project = models.Project(
+      id=str(uuid.uuid4()), name=project_name,
+      project_type=str(snapshot["key"]),
+      root_path=root.relative_to(Path(get_settings().data_dir).resolve()).as_posix(),
+      chat_id=None, source_app_id=template_app.id if template_app is not None else None,
+      template_snapshot_json=snapshot,
+      artifacts_json=_previews_to_artifacts(snapshot, root) or None,
+    )
+    db.add(project)
+    try:
       db.commit()
     except Exception:
       db.rollback()
-      shutil.rmtree(root, ignore_errors=True)
+      # Source pre-existed this operation and is never ours to clean up.
       raise
-  db.refresh(project)
-  return _project_response(project)
+    db.refresh(project)
+    return _project_response(project)
 
 
 def _legacy_storage_root(app: models.App, legacy_id: str) -> Path:
@@ -2272,7 +2222,7 @@ def mark_project_opened(
 @router.post(
   "/{project_id}/folder", dependencies=[Depends(reject_cross_site)],
 )
-def create_project_folder(
+async def create_project_folder(
   project_id: str,
   body: FolderCreate,
   principal: ProjectPrincipal = Depends(get_project_principal),
@@ -2282,7 +2232,7 @@ def create_project_folder(
   root, target = _resolve_project_path(project, body.path)
   if target == root:
     raise HTTPException(400, "The project root already exists.")
-  with _locked_project_mutation(root):
+  async with fs_locks.source_dir_lock(str(root)):
     try:
       target.mkdir(parents=True, exist_ok=False)
     except FileExistsError as exc:
@@ -2533,14 +2483,15 @@ def get_project_git_status(
 @router.post(
   "/{project_id}/git/init", dependencies=[Depends(reject_cross_site)],
 )
-def initialize_project_git(
+async def initialize_project_git(
   project_id: str,
   principal: ProjectPrincipal = Depends(get_project_principal),
   db: Session = Depends(get_db),
 ):
   project = _project_for(db, project_id, principal, "maintainer")
   try:
-    return project_git.initialize_project(_project_root(project))
+    async with fs_locks.source_dir_lock(str(_project_root(project))):
+      return await asyncio.to_thread(project_git.initialize_project, _project_root(project))
   except project_git.GitProjectError as exc:
     raise HTTPException(409, str(exc)) from exc
 
@@ -2548,7 +2499,7 @@ def initialize_project_git(
 @router.post(
   "/{project_id}/git/commit", dependencies=[Depends(reject_cross_site)],
 )
-def commit_project_git(
+async def commit_project_git(
   project_id: str,
   body: ProjectCommit,
   principal: ProjectPrincipal = Depends(get_project_principal),
@@ -2556,9 +2507,10 @@ def commit_project_git(
 ):
   project = _project_for(db, project_id, principal, "maintainer")
   try:
-    return project_git.commit_project(
-      _project_root(project), body.message, body.expected_head,
-    )
+    async with fs_locks.source_dir_lock(str(_project_root(project))):
+      return await asyncio.to_thread(
+        project_git.commit_project, _project_root(project), body.message, body.expected_head,
+      )
   except project_git.GitProjectError as exc:
     raise HTTPException(409, str(exc)) from exc
 
@@ -2636,7 +2588,7 @@ def fetch_project_git_remote(
 @router.post(
   "/{project_id}/git/pull", dependencies=[Depends(reject_cross_site)],
 )
-def pull_project_git_remote(
+async def pull_project_git_remote(
   project_id: str,
   body: ProjectRemoteAction,
   owner: models.Owner = Depends(get_current_owner),
@@ -2646,8 +2598,8 @@ def pull_project_git_remote(
   _require_project_github_connection()
   root = _project_root(project)
   try:
-    with _locked_project_mutation(root):
-      result = project_git.pull_project(root, body.expected_head)
+    async with fs_locks.source_dir_lock(str(root)):
+      result = await asyncio.to_thread(project_git.pull_project, root, body.expected_head)
   except project_git.GitProjectError as exc:
     raise HTTPException(409, str(exc)) from exc
   project.updated_at = now_naive_utc()
@@ -2689,7 +2641,7 @@ def push_project_git_remote(
 @router.put(
   "/{project_id}/file", dependencies=[Depends(reject_cross_site)],
 )
-def write_project_file(
+async def write_project_file(
   project_id: str,
   body: FileWrite,
   path: str = Query(min_length=1, max_length=2048),
@@ -2705,7 +2657,7 @@ def write_project_file(
     principal, force, "expected_revision" in body.model_fields_set,
     target.relative_to(root).as_posix(),
   )
-  return _save_project_file(
+  return await _save_project_file(
     db, project, principal, root, target,
     workspace_files.encoded_text(body.content), body.expected_revision,
     force=force,
@@ -2733,7 +2685,7 @@ async def write_project_file_bytes(
   _require_save_precondition(
     principal, force, named, target.relative_to(root).as_posix(),
   )
-  return _save_project_file(
+  return await _save_project_file(
     db, project, principal, root, target, content, expected_revision,
     force=force,
   )
@@ -2742,7 +2694,7 @@ async def write_project_file_bytes(
 @router.delete(
   "/{project_id}/file", dependencies=[Depends(reject_cross_site)],
 )
-def delete_project_file(
+async def delete_project_file(
   project_id: str,
   path: str = Query(min_length=1, max_length=2048),
   principal: ProjectPrincipal = Depends(get_project_principal),
@@ -2752,7 +2704,7 @@ def delete_project_file(
   root, target = _resolve_project_path(project, path)
   if target == root:
     raise HTTPException(400, "The project root cannot be deleted.")
-  with _locked_project_mutation(root):
+  async with fs_locks.source_dir_lock(str(root)):
     if target.is_dir():
       shutil.rmtree(target)
     elif target.is_file():
@@ -2772,7 +2724,7 @@ def delete_project_file(
 @router.post(
   "/{project_id}/move", dependencies=[Depends(reject_cross_site)],
 )
-def move_project_path(
+async def move_project_path(
   project_id: str,
   body: PathMove,
   principal: ProjectPrincipal = Depends(get_project_principal),
@@ -2795,7 +2747,7 @@ def move_project_path(
     raise HTTPException(400, "Cannot move a path into itself or a descendant.")
   if _within_artifacts(root, source) or _within_artifacts(root, dest):
     raise HTTPException(409, "The artifacts area is managed by builds.")
-  with _locked_project_mutation(root):
+  async with fs_locks.source_dir_lock(str(root)):
     if not source.exists():
       raise HTTPException(404, "Source path not found.")
     if dest.exists():

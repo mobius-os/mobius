@@ -15,7 +15,7 @@ no validators — every open re-downloaded everything. The contract now:
 
 from pathlib import Path
 
-from app import models
+from app import models, app_git
 from app.database import SessionLocal
 from app.main import _STATIC_EMBED_CSP
 from test_app_fixtures import create_local_app
@@ -34,6 +34,12 @@ def _write_static(app_id, relpath, content):
     target = Path(row.source_dir) / "static" / relpath
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
+    app_git._run(Path(row.source_dir), "add", "-f", str(target))
+    app_git.commit_local(row.source_dir, "accept fixture static asset")
+    row.source_commit = app_git.head_sha(row.source_dir, app_git.LOCAL_BRANCH)
+    from app.applied_app_runtime import prepare_runtime, publish_runtime
+    publish_runtime(row, prepare_runtime(Path(row.source_dir), row.source_commit))
+    db.commit()
     return target
   finally:
     db.close()

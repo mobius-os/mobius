@@ -233,7 +233,7 @@ def fresh_db():
   # Content-addressed app bundles no longer overwrite app-<id>.js between
   # tests. Clear compiled too, otherwise the per-test id reset leaves the next
   # test seeing an earlier test's immutable artifact for the same numeric id.
-  for _sub in ("apps", "app-secrets", "shared", "compiled", "cli-auth"):
+  for _sub in ("apps", "app-secrets", "app-runtime", "shared", "compiled", "cli-auth"):
     _shutil.rmtree(_os.path.join(_data_dir, _sub), ignore_errors=True)
 
   yield

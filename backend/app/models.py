@@ -1141,6 +1141,9 @@ class App(Base):
   # the editable worktree. Null for legacy rows until their next successful
   # install or explicit apply.
   source_commit = Column(String(64), nullable=True, default=None)
+  # Full deployed file tree, including install-managed static assets omitted
+  # from source Git history. Published atomically with the accepted App row.
+  runtime_revision = Column(String(64), nullable=True, default=None)
   # Owner-visible update-conflict resolver chats are keyed on upstream_commit.
   conflict_resolver_chat_id = Column(String(64), nullable=True, default=None)
   conflict_resolver_upstream_commit = Column(

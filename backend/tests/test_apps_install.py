@@ -5843,3 +5843,71 @@ def test_update_check_accepts_app_token_with_manage_apps_for_other_app(
   payload = res.json()
   assert payload["update_available"] is False
   assert payload["upstream_version"] == "1.0.0"
+
+
+def test_static_only_store_reinstall_publishes_a_distinct_runtime(client, auth, db, bypass_url_validation):
+  """Generated assets have their own publication identity, not the source SHA."""
+  from app.applied_app_runtime import runtime_root
+
+  base = "https://raw.githubusercontent.com/x/runtime-static/main/"
+  manifest = {
+    "id": "runtime-static", "name": "Runtime static", "version": "1.0.0",
+    "description": "Generated assets", "entry": "index.jsx", "permissions": {},
+    "static_assets": {"asset.txt": "build/asset.txt"},
+  }
+
+  def install(content):
+    responses = {
+      base + "mobius.json": (200, json.dumps(manifest).encode()),
+      base + "index.jsx": (200, JSX.encode()),
+      base + "build/asset.txt": (200, content),
+    }
+    with patch("app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses)):
+      result = client.post("/api/apps/install", headers=auth,
+                           json={"manifest_url": base + "mobius.json"})
+    assert result.status_code == 201, result.text
+    return result.json()["id"]
+
+  app_id = install(b"first assets")
+  row = db.get(models.App, app_id)
+  first_runtime = runtime_root(row)
+  first_source_tree = app_git.read_ref_tree(row.source_dir, row.source_commit)
+  install(b"second assets")
+  db.refresh(row)
+  assert app_git.read_ref_tree(row.source_dir, row.source_commit) == first_source_tree
+  assert runtime_root(row) != first_runtime
+  assert (first_runtime / "static" / "asset.txt").read_bytes() == b"first assets"
+  response = client.get(f"/app-assets/by-id/{app_id}/asset.txt")
+  assert response.status_code == 200
+  assert response.content == b"second assets"
+
+
+def test_ordinary_store_source_apply_preserves_package_assets_and_runtime_manifest(client, auth, db, bypass_url_validation):
+  from app.applied_app_runtime import runtime_root
+
+  base = "https://raw.githubusercontent.com/x/runtime-store-apply/main/"
+  manifest = {
+    "id": "runtime-store-apply", "name": "Runtime store apply", "version": "1.0.0",
+    "description": "Generated assets", "entry": "index.jsx", "permissions": {},
+    "static_assets": {"asset.txt": "build/asset.txt"},
+  }
+  responses = {
+    base + "mobius.json": (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "build/asset.txt": (200, b"accepted static"),
+  }
+  with patch("app.install.httpx.AsyncClient", side_effect=_fake_async_client(responses)):
+    installed = client.post("/api/apps/install", headers=auth,
+                            json={"manifest_url": base + "mobius.json"})
+  assert installed.status_code == 201, installed.text
+  row = db.get(models.App, installed.json()["id"])
+  old_manifest = (runtime_root(row) / "mobius.json").read_bytes()
+  source = Path(row.source_dir)
+  (source / "index.jsx").write_text("export default () => <div>new code</div>")
+  (source / "mobius.json").write_text(json.dumps({**manifest, "name": "Unaccepted metadata"}))
+  (source / "static" / "asset.txt").write_text("draft static output")
+  applied = client.post("/api/apps/apply", headers=auth, json={"source_dir": str(source)})
+  assert applied.status_code == 200, applied.text
+  db.refresh(row)
+  assert (runtime_root(row) / "mobius.json").read_bytes() == old_manifest
+  assert client.get(f"/app-assets/by-id/{row.id}/asset.txt").content == b"accepted static"

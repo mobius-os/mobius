@@ -485,16 +485,13 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
     raise RuntimeError(
       "active delegated work must quiesce before permanent app deletion"
     )
-  # Imported Projects still point into this app's id-keyed storage. They must
-  # keep that tree for their own recovery/live lifecycle, so an app tombstone
-  # cannot become a destructive back door around Project retention.
-  legacy_project = db.query(models.Project.id).filter(
-    models.Project.source_app_id == deleted_app_id,
-    models.Project.legacy_source_json.isnot(None),
-  ).first()
-  if legacy_project is not None:
+  # Project recovery includes linked source, not only legacy imports. Provider
+  # metadata alone is not ownership: native projects can detach safely.
+  from app.project_retention import projects_using_app_files
+  dependent_projects = projects_using_app_files(db, app)
+  if dependent_projects:
     raise RuntimeError(
-      f"app {deleted_app_id} still owns imported project {legacy_project.id}"
+      f"app {deleted_app_id} still owns project {dependent_projects[0].id} files"
     )
 
   # Registry state is the revocation boundary; physical cleanup may fail.
@@ -518,6 +515,8 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   purge_app_bundles(deleted_app_id)
   await asyncio.to_thread(_rmtree_strict, storage_dir)
   await asyncio.to_thread(_rmtree_strict, secrets_dir)
+  from app.applied_app_runtime import runtime_parent
+  await asyncio.to_thread(_rmtree_strict, runtime_parent(deleted_app_id))
 
   # Storage is gone; only now free the row and its reusable id. A partial
   # cleanup of the slug-keyed source tree below leaves harmless orphans — those
@@ -2957,18 +2956,18 @@ async def delete_app(
     if not app:
       raise HTTPException(status_code=404, detail="App not found.")
 
-    imported_project = db.query(models.Project.id, models.Project.name).filter(
-      models.Project.source_app_id == app_id,
-      models.Project.legacy_source_json.isnot(None),
-      models.Project.deleted_at.is_(None),
-    ).first()
+    from app.project_retention import projects_using_app_files
+    imported_project = next((
+      project for project in projects_using_app_files(db, app)
+      if project.deleted_at is None
+    ), None)
     if imported_project is not None:
       raise HTTPException(
         status_code=409,
         detail={
           "code": "app_has_imported_project",
           "message": (
-            f"Project “{imported_project.name}” still uses this app's legacy "
+            f"Project “{imported_project.name}” still uses this app's "
             "files. Delete that project before uninstalling the app."
           ),
           "project_id": imported_project.id,
@@ -3149,6 +3148,30 @@ async def delete_app_data(
     # preserves /data/apps/<id>, so a stale live row must not authorize this wipe.
     db.expire_all()
     app = live_app_or_404(db, app_id)
+    # Pages builder sources can be managed in-place by Projects. Clearing
+    # runtime data must not silently destroy that separate workspace contract,
+    # including a Project still inside its recovery window. Source-only app
+    # Projects do not depend on numeric runtime storage and must not block it.
+    from app.project_retention import projects_using_app_files
+    storage_root = (apps_root / str(app.id)).resolve()
+    data_root = Path(data_dir).resolve()
+    for project in projects_using_app_files(db, app):
+      stored = Path(project.root_path)
+      root = (stored if stored.is_absolute() else data_root / stored).resolve()
+      if root.is_relative_to(storage_root):
+        raise HTTPException(
+          status_code=409,
+          detail={
+            "code": "app_data_has_project_source",
+            "message": (
+              f"Project “{project.name}” uses this app's saved files. "
+              "Recover it if deleted, then move its source out of this app "
+              "before clearing data, or remove the Project and wait until "
+              "its recovery period ends."
+            ),
+            "project_id": str(project.id),
+          },
+        )
     await _revoke_app_publish_tokens(
       settings, app.id, app.token_nonce,
     )

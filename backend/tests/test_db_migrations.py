@@ -1330,6 +1330,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
         "0038_chat_wait_condition_owner",
         "0039_agent_work_claim_history",
         "0040_provider_execution_admission",
+        "0041_app_runtime_revision",
       ]
   assert second == first
 

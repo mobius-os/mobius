@@ -1,13 +1,15 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import ArrowUpRight from 'lucide-react/dist/esm/icons/arrow-up-right.mjs'
 import AppIcon from '../AppIcon.jsx'
 import { api, jsonOrThrow } from '../../api/client.js'
 import { appSourceQueries } from '../../hooks/queries.js'
+import ApplyAppSourceButton from './ApplyAppSourceButton.jsx'
 import ProjectFinder from './ProjectFinder.jsx'
 import './Projects.css'
 
-export default function AppSourceWorkspace({ app, onOpenApp }) {
+export default function AppSourceWorkspace({ app, onOpenApp, requiresApply = false }) {
+  const [error, setError] = useState('')
   const appId = String(app.id)
   const queryClient = useQueryClient()
   const fileSource = useMemo(() => ({
@@ -50,16 +52,19 @@ export default function AppSourceWorkspace({ app, onOpenApp }) {
           <AppIcon item={app} label={app.name} className="app-source-workspace__icon" />
           <span><strong>{app.name}</strong><small>Source</small></span>
         </div>
+        {requiresApply && <ApplyAppSourceButton app={app} onError={setError} className="app-source-workspace__open" />}
         <button type="button" className="app-source-workspace__open" onClick={onOpenApp}>
           Open app <ArrowUpRight size={14} aria-hidden="true" />
         </button>
       </header>
+      {requiresApply && <p className="projects-empty">Saved source remains a draft until you apply it to the app.</p>}
+      {error && <p className="projects-error" role="alert">{error}</p>}
       <div className="project-workspace__view">
         <ProjectFinder
           projectId={fileSource.id}
           projectName={`${app.name} source`}
           fileSource={fileSource}
-          onSourceChanged={applySourceChange}
+          onSourceChanged={requiresApply ? undefined : applySourceChange}
         />
       </div>
     </section>

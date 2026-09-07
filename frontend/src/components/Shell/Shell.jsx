@@ -61,7 +61,6 @@ import {
   appSourceProject,
   appSourceProjectId,
   linkedProjectAppId,
-  importedAppForProject,
 } from '../../lib/appSourceProject.js'
 import { projectSourceAction } from '../../lib/projectSourceAction.js'
 import { immersiveReducer, isImmersiveActive } from '../../lib/immersive.js'
@@ -1375,21 +1374,16 @@ export default function Shell({ onInitialVisualReady }) {
     for (const a of apps) m.set(String(a.id), a)
     return m
   }, [apps])
-  // Every row that shows an installed app's source carries it as `app`: the
-  // synthetic app-source rows by construction, legacy imported copies by their
-  // import metadata. Sites below branch on `project.app` alone.
+  // Saved Projects always open their own workspace. Only synthetic View source
+  // rows carry `app`, keeping that source-only surface separate from Projects.
   const projectById = useMemo(() => {
-    const m = new Map()
-    for (const project of projects) {
-      const app = importedAppForProject(project, appById)
-      m.set(String(project.id), app ? { ...project, app } : project)
-    }
+    const m = new Map(projects.map(project => [String(project.id), project]))
     for (const app of apps) {
       const source = appSourceProject(app)
       if (source) m.set(source.id, source)
     }
     return m
-  }, [apps, appById, projects])
+  }, [apps, projects])
   const linkedProjectAppIds = useMemo(() => new Set(projects.map(linkedProjectAppId).filter(Boolean)), [projects])
   const projectArtifactByRef = useMemo(() => {
     const map = new Map()
