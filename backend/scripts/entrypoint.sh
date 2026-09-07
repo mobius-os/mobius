@@ -788,8 +788,10 @@ su -s /bin/sh mobius -c \
 #
 # Profiles are a cache and auth/session mirror for the agent's own browser --
 # never partner transcript data -- so a reaped profile costs at most a re-login
-# inside a chat nobody has touched in two weeks. The 14-day default lives in
-# the script, not here, so operators tune one place.
+# inside a chat nobody has touched in the horizon below. The script default is
+# a conservative 14 days for manual/report use; the nightly job opts into a
+# tighter 2-day horizon via --older-than-days because per-chat profiles
+# accumulate quickly. Tune the nightly aggressiveness here.
 PC_DIR=/data/apps/_profile-cleanup
 if [ ! -f "$PC_DIR/init-cron.sh" ]; then
   su -s /bin/sh mobius -c "mkdir -p $PC_DIR" 2>/dev/null || true
@@ -804,7 +806,7 @@ mkdir -p /data/cron-logs
 {
   echo "=== $(date -u +%Y-%m-%dT%H:%M:%SZ) profile-cleanup start ==="
   python3 /app/scripts/agent-browser-profile-cleanup.py \
-    --delete --include-existing-chats
+    --delete --include-existing-chats --older-than-days 2
   rc=$?
   echo "=== exit $rc ==="
   exit $rc
