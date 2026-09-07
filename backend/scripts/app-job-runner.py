@@ -213,13 +213,6 @@ def _runtime_job(app_id: int, locator: Path, context: dict) -> Path | None:
   if not _job_matches_context(locator, context):
     return None
   runtime = context.get("runtime_dir")
-  if "runtime_dir" not in context:
-    # This script is invoked directly by existing crontab entries, before a
-    # backend restart activates job-context's new contract. Preserve only the
-    # pre-migration behavior during that rolling activation window. Startup's
-    # durable receipt permanently closes this path, including failed copies.
-    receipt = DATA_DIR / "app-runtime" / "legacy-baseline-migration.json"
-    return locator if not receipt.exists() and locator.is_file() else None
   if not isinstance(runtime, str) or not runtime:
     return None
   try:

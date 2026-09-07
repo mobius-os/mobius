@@ -679,9 +679,8 @@ a missing baseline never causes dirty source to be adopted automatically.
 Lost runtime files are reconstructed only when accepted inputs reproduce the
 exact content address; otherwise an explicit Apply/reinstall is required.
 
-The script/backend rolling-activation boundary preserves old runner behavior
-only before that one-time receipt exists and only when the old backend omits
-the runtime field. Once migration begins, missing runtime context fails closed.
+The job runner requires an explicit accepted runtime path. Missing runtime
+context fails closed; it never falls back to executing editable source.
 
 Website and LaTeX imports similarly link retained builder source in Pages,
 not the rendered HTML or a new copy. Eligibility requires the installed builder
@@ -690,8 +689,7 @@ data respect those source roots, including recoverable Project tombstones.
 
 This is a deployment boundary, not an arbitrary-code sandbox. A legacy job
 that explicitly opens `/data/apps/<slug>/...` can still read those paths;
-source-relative template scripts use the pinned working directory. Known legacy
-Forge and Yas helper scripts have such absolute references and need app-level
-path cleanup before relying on collaborative editing isolation for those
-particular helper operations. The platform does not silently rewrite their
+source-relative template scripts use the pinned working directory. The legacy
+Forge and Yas helper scripts were fixed forward to resolve accepted runtime
+code and keep mutable results in numeric app data. The platform does not silently rewrite their
 code or redirect arbitrary filesystem access.

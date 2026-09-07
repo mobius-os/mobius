@@ -631,20 +631,13 @@ def test_job_executes_accepted_script_and_siblings_even_when_draft_job_is_delete
   assert (data / "apps" / "57" / "job-state" / "result").read_text() == "accepted sibling"
 
 
-def test_old_job_context_can_run_only_before_runtime_migration_receipt(tmp_path, monkeypatch):
+def test_missing_runtime_context_never_executes_editable_source(tmp_path, monkeypatch):
   runner = _load_runner()
-  source = tmp_path / "apps" / "legacy"
+  source = tmp_path / "apps" / "draft"
   source.mkdir(parents=True)
   job = source / "job.sh"
-  job.write_text("deployed old script")
+  job.write_text("unapplied script")
   monkeypatch.setattr(runner, "DATA_DIR", tmp_path)
   context = {"source_dir": str(source)}
-  assert runner._runtime_job(7, job, context) == job
-  receipt = tmp_path / "app-runtime" / "legacy-baseline-migration.json"
-  receipt.parent.mkdir()
-  receipt.write_text("{}")
   assert runner._runtime_job(7, job, context) is None
-  # Even before migration, an explicit new-contract missing baseline is not
-  # permission to execute draft files.
-  receipt.unlink()
   assert runner._runtime_job(7, job, {**context, "runtime_dir": None}) is None
