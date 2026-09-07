@@ -427,6 +427,29 @@ def test_goal_wait_ownership_excludes_a_later_ordinary_turn(db, chat):
   assert presented_goal(db, chat.id)["wait_kind"] == "monitor"
 
 
+def test_settled_continuation_card_keeps_goal_waiting_for_owner(db, chat):
+  from app.goal_plans import presented_goal
+
+  run = models.ChatRun(
+    id="settled-card-run", root_run_id="settled-card-run", chat_id=chat.id,
+    status="completed", provider="codex", goal_objective="Await approval",
+    goal_id="settled-card-goal", started_at=datetime.now(UTC),
+  )
+  db.add(run)
+  chat.pending_question_id = "settled-card"
+  chat.messages = [{
+    "id": run.id, "role": "assistant", "content": "", "blocks": [{
+      "type": "question", "question_id": "settled-card",
+      "response_mode": "continuation", "questions": [],
+    }], "ts": 1,
+  }]
+  db.commit()
+
+  goal = presented_goal(db, chat.id)
+  assert goal["status"] == "paused"
+  assert goal["wait_kind"] == "owner_question"
+
+
 def test_goal_wait_ownership_includes_only_its_waking_helpers(
   db, chat, monkeypatch,
 ):

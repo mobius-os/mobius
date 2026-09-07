@@ -41,9 +41,23 @@ def save_card(kind: str, body: dict) -> dict:
     with urlopen(request, timeout=35) as response:
       payload = json.loads(response.read())
   except HTTPError as exc:
+    detail = ""
+    try:
+      raw = exc.read(4096)
+      parsed = json.loads(raw.decode("utf-8", errors="replace"))
+      candidate = parsed.get("detail") if isinstance(parsed, dict) else None
+      if isinstance(candidate, str):
+        detail = " ".join(candidate.split())[:1000]
+    except (OSError, ValueError, AttributeError):
+      pass
+    suffix = f": {detail}" if detail else ""
+    retry = (
+      " Retry the identical request to recover its saved receipt."
+      if exc.code >= 500 else " Fix the stated conflict before trying again."
+    )
     raise SystemExit(
-      f"Could not save approval ({exc.code}); no approval was granted. "
-      "Check the open card or retry the identical request."
+      f"Could not save approval ({exc.code}){suffix}. "
+      f"No approval was granted.{retry}"
     ) from exc
   except (URLError, TimeoutError, ValueError) as exc:
     raise SystemExit(

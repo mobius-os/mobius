@@ -271,10 +271,13 @@ def stage_release_claims_for_chat(
     row.revision += 1
     recipients = [
       interest.chat_id
-      for interest in db.query(models.AgentWorkInterest).filter(
+      for interest in db.query(models.AgentWorkInterest).join(
+        models.Chat, models.Chat.id == models.AgentWorkInterest.chat_id,
+      ).filter(
         models.AgentWorkInterest.claim_id == row.id,
         models.AgentWorkInterest.resolved_at.is_(None),
         models.AgentWorkInterest.chat_id != chat_id,
+        models.Chat.deleted_at.is_(None),
       ).all()
     ]
     released.append(ReleasedClaim(
@@ -332,9 +335,12 @@ def finish_work(
       raise ValueError("The claim changed while finishing; inspect it before retrying.")
     db.expire(row)
     db.refresh(row)
-  interests = db.query(models.AgentWorkInterest).filter(
+  interests = db.query(models.AgentWorkInterest).join(
+    models.Chat, models.Chat.id == models.AgentWorkInterest.chat_id,
+  ).filter(
     models.AgentWorkInterest.claim_id == row.id,
     models.AgentWorkInterest.resolved_at.is_(None),
+    models.Chat.deleted_at.is_(None),
   ).all()
   recipients = []
   for interest in interests:

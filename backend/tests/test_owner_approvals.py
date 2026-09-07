@@ -201,10 +201,18 @@ def test_shared_work_key_allows_only_the_first_chat_to_create_an_approval(
     token_epoch=owner.token_epoch, run_id=other_run.id,
     expires_delta=timedelta(minutes=5),
   )
-  duplicate = client.post(
-    f"/api/chats/{other.id}/approval", json=keyed,
-    headers={"Authorization": f"Bearer {token}"},
+  other_sink = ChatEventSink(
+    create_broadcast(other.id), other.id, run_token=other_run.id,
+    recall_binding=EMPTY_RECALL_BINDING,
   )
+  register_active_sink(other.id, other_sink)
+  try:
+    duplicate = client.post(
+      f"/api/chats/{other.id}/approval", json=keyed,
+      headers={"Authorization": f"Bearer {token}"},
+    )
+  finally:
+    unregister_active_sink(other.id, other_sink)
 
   assert duplicate.status_code == 409
   assert "no duplicate card was created" in duplicate.text
@@ -224,7 +232,7 @@ def test_approval_without_action_identity_is_rejected_before_card_creation(
 
 
 def test_creation_failure_has_no_receipt_or_orphan_card(
-  client, chat, approval_run, monkeypatch,
+  client, chat, approval_run, monkeypatch, db,
 ):
   writer = get_writer()
   original = writer._persist_question_required
@@ -236,6 +244,9 @@ def test_creation_failure_has_no_receipt_or_orphan_card(
   res = _ask(client, chat, approval_run)
   assert res.status_code == 503
   assert _row(chat.id)[0] is None
+  # Admission succeeded, so exact-action ownership remains reserved for the
+  # identical retry even though the card acknowledgement failed.
+  assert db.query(models.AgentWorkClaim).count() == 1
   assert not any(b["type"] == "question" for b in approval_run[0].assistant_blocks)
   monkeypatch.setattr(writer, "_persist_question_required", original)
   assert _ask(client, chat, approval_run).status_code == 200
@@ -307,21 +318,25 @@ def test_failed_early_answer_keeps_the_card_open_and_does_not_queue(
 
 
 def test_approval_requires_exact_agent_run_not_plain_owner_or_foreign_chat(
-  client, chat, auth, approval_run,
+  client, chat, auth, approval_run, db,
 ):
   assert client.post(f"/api/chats/{chat.id}/approval", json=PROMPT, headers=auth).status_code == 403
   foreign = client.post("/api/chats", json={"title": "Other"}, headers=auth).json()["id"]
   assert client.post(f"/api/chats/{foreign}/approval", json=PROMPT,
                      headers=approval_run[1]).status_code == 403
   assert _row(foreign)[0] is None
+  assert db.query(models.AgentWorkClaim).count() == 0
 
 
-def test_approval_rejects_missing_sink_and_superseded_run(client, chat, approval_run):
+def test_approval_rejects_missing_sink_and_superseded_run(
+  client, chat, approval_run, db,
+):
   sink = approval_run[0]
   sink.run_token = "another-run"
   assert _ask(client, chat, approval_run).status_code == 409
   unregister_active_sink(chat.id, sink)
   assert _ask(client, chat, approval_run).status_code == 409
+  assert db.query(models.AgentWorkClaim).count() == 0
 
 
 @pytest.mark.parametrize("status,keeps_card", [
@@ -426,6 +441,29 @@ def test_helper_rejects_unconfirmed_receipt_and_transport_failure(monkeypatch):
   monkeypatch.setattr(helper, "urlopen", fail)
   with pytest.raises(SystemExit, match="No approval was granted"):
     helper.request_approval(**PROMPT)
+
+
+def test_helper_preserves_bounded_deterministic_rejection_detail(monkeypatch):
+  import io
+  from urllib.error import HTTPError
+  from tests.test_platform_tools import _control_module
+
+  helper = _control_module()._APPROVALS
+  for name in ("API_BASE_URL", "AGENT_TOKEN", "CHAT_ID", "MOBIUS_RUN_TOKEN"):
+    monkeypatch.setenv(name, "test-value")
+  monkeypatch.setenv("API_BASE_URL", "http://testserver")
+
+  def reject(request, timeout):
+    return_value = HTTPError(
+      request.full_url, 409, "Conflict", {},
+      io.BytesIO(b'{"detail":"Owned by the integration chat; no duplicate card."}'),
+    )
+    raise return_value
+
+  monkeypatch.setattr(helper, "urlopen", reject)
+  with pytest.raises(SystemExit, match="Owned by the integration chat") as exc:
+    helper.request_approval(**PROMPT)
+  assert "Fix the stated conflict" in str(exc.value)
 
 
 def test_stop_winning_answer_admission_does_not_queue_a_continuation(

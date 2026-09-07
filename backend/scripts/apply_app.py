@@ -36,6 +36,12 @@ def _receipt(result: dict) -> dict:
 
 def main() -> None:
   args = sys.argv[1:]
+  if args in (["-h"], ["--help"]):
+    print(
+      "Usage: apply_app.py [--accept-local-package] <source-dir>\n"
+      "Validate first: python3 /data/platform/backend/scripts/validate-app.py <source-dir>"
+    )
+    return
   accept_local_package = False
   if "--accept-local-package" in args:
     accept_local_package = True

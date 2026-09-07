@@ -220,6 +220,10 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
   ).update({
     models.AgentWorkClaim.owner_chat_id: None,
   }, synchronize_session=False)
+  # Do not rely on SQLite FK enforcement for the follower side either.
+  db.query(models.AgentWorkInterest).filter(
+    models.AgentWorkInterest.chat_id.in_(chat_ids),
+  ).delete(synchronize_session=False)
   # Search rows are derived transcript data without a foreign key because the
   # SQLite FTS trigger owns their lifecycle. Remove them in the same durable
   # transaction as the source row rather than retaining a hard-deleted chat's

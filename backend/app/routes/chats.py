@@ -2285,6 +2285,12 @@ async def delete_chat(
       from app.agent_work_claims import stage_release_claims_for_chat
       stage_cancel_waits_for_chat(db, chat_id)
       released_claims = stage_release_claims_for_chat(db, chat_id)
+      # A deleted follower no longer owns a Goal that should receive exact-
+      # action notices. Retire its interests with the tombstone so one stale
+      # recipient cannot poison fanout to healthy followers.
+      db.query(models.AgentWorkInterest).filter(
+        models.AgentWorkInterest.chat_id == chat_id,
+      ).delete(synchronize_session=False)
       chat.deleted_at = now_naive_utc()
       db.commit()
       # Publish the committed tombstone before best-effort run cleanup. If that

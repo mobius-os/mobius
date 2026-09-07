@@ -118,8 +118,8 @@ async def claim_current_work(
       sender_chat_id=principal.chat_id,
       recipients=[previous],
       body=(
-        f"Work claim {body.work_key} transferred to {principal.chat_id}: "
-        f"{body.takeover_reason}"
+        f"Work claim {result['work_key']} transferred to {principal.chat_id}: "
+        f"{result.get('takeover_reason') or 'ownership changed'}"
       ),
     )
     acknowledge_notice(
@@ -162,8 +162,8 @@ async def finish_current_work(
       sender_chat_id=principal.chat_id,
       recipients=recipients,
       body=(
-        f"Work claim {body.work_key} was "
-        f"{'released' if body.release else 'completed'}: {body.outcome}"
+        f"Work claim {finished.claim['work_key']} was "
+        f"{finished.claim['state']}: {finished.claim.get('outcome') or ''}"
       ),
     )
     woken = await wake_idle_recipients(

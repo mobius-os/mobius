@@ -468,19 +468,24 @@ def _goal_wait_kind(
 ) -> str | None:
   """Name the visible gate only when it belongs to this exact Goal."""
   goal_id = physical.goal_id or root.id
-  pending_question_id = db.query(models.Chat.pending_question_id).filter(
-    models.Chat.id == physical.chat_id,
-  ).scalar()
+  chat = db.query(models.Chat).filter(models.Chat.id == physical.chat_id).first()
+  pending_question_id = chat.pending_question_id if chat is not None else None
   if pending_question_id is not None:
-    question_owner = (
-      db.query(models.ChatRun)
-      .filter(
-        models.ChatRun.chat_id == physical.chat_id,
-        models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+    from app.questions import continuation_question_owner_run_id
+    owner_run_id = continuation_question_owner_run_id(chat, pending_question_id)
+    if owner_run_id is not None:
+      question_owner = db.get(models.ChatRun, owner_run_id)
+    else:
+      # Compatibility for pre-message-identity fixtures and legacy cards.
+      question_owner = (
+        db.query(models.ChatRun)
+        .filter(
+          models.ChatRun.chat_id == physical.chat_id,
+          models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
+        )
+        .order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc())
+        .first()
       )
-      .order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc())
-      .first()
-    )
     if (
       question_owner is not None
       and (
@@ -512,9 +517,6 @@ def _goal_wait_kind(
       for owner in wait_owners
     ):
       return "monitor"
-  from app.delegations import background_helper_goal_ids
-  if goal_id in background_helper_goal_ids(db, physical.chat_id):
-    return "monitor"
   return None
 
 

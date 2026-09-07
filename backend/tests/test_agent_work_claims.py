@@ -1,5 +1,7 @@
 """Workspace work ownership stays singular while explicit transfer remains possible."""
 
+from app.timeutil import now_naive_utc
+
 from app import models
 from app.agent_work_claims import (
   acknowledge_notice,
@@ -129,6 +131,31 @@ def test_completion_resolves_followers_and_same_key_cannot_be_reclaimed(db):
   )
   assert later["state"] == "completed"
   assert later["owner_chat_id"] == first.id
+
+
+def test_deleted_follower_cannot_suppress_live_follower_notification(db):
+  owner, first, deleted = _fixture(db)
+  live = models.Chat(id="claim-live", title="Live follower", messages=[])
+  live_run = models.ChatRun(
+    id="claim-run-live", root_run_id="claim-run-live",
+    goal_id="claim-goal-live", goal_objective="Follow exact work",
+    chat_id=live.id, status="running", provider="codex",
+  )
+  db.add_all([live, live_run])
+  db.commit()
+  key = "platform:claim-fanout:test"
+  claim_work(db, owner_id=owner.id, chat_id=first.id,
+             run_id="claim-run-first", work_key=key, summary="Do exact work")
+  for follower, run_id in ((deleted, "claim-run-second"), (live, live_run.id)):
+    claim_work(db, owner_id=owner.id, chat_id=follower.id, run_id=run_id,
+               work_key=key, summary="Follow exact work")
+  deleted.deleted_at = now_naive_utc()
+  db.commit()
+
+  finished = finish_work(db, owner_id=owner.id, chat_id=first.id,
+                         work_key=key, outcome="Done", release=False)
+
+  assert finished.interested_chat_ids == [live.id]
 
 
 def test_exact_action_claim_never_masquerades_as_whole_goal_handoff(db):
