@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import secrets
+import select
 import shutil
 import signal
 import ssl
@@ -175,7 +176,7 @@ def _process_alive(profile_id: str) -> bool:
     cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
   except (OSError, ProcessLookupError):
     return False
-  return str(_runner_path(profile_id)).encode() in cmdline
+  return str(_runner_path(profile_id)).encode() in cmdline.split(b"\0")
 
 
 def _launch(profile_id: str, *args: str) -> subprocess.Popen:
@@ -193,8 +194,8 @@ def _launch(profile_id: str, *args: str) -> subprocess.Popen:
       stderr=log_file,
       start_new_session=True,
     )
-  _write_pid(profile_id, process.pid)
   _owned_processes[profile_id] = process
+  _write_pid(profile_id, process.pid)
   return process
 
 
@@ -255,83 +256,123 @@ def _create_profile(label: str, command: str) -> dict:
   }
   with _lock:
     _profile_dir(profile_id).mkdir(parents=True, mode=0o700)
-    runner = _runner_path(profile_id)
-    runner.parent.mkdir(parents=True, mode=0o700)
-    runner.write_bytes(source)
-    runner.chmod(0o700)
-    _atomic_json(_meta_path(profile_id), meta)
-    process = _launch(profile_id, "--pair", code, "--url", base_url)
-
-  config = _await_pairing(process, profile_id)
-  if config is None:
-    _discard(profile_id)
-    raise OutboundConnectError(
-      "The other Möbius did not accept that command. It may have expired or already been used.",
-    )
   try:
-    saved_base = connect_runner._validated_base_url(str(config.get("url") or ""))
-  except ValueError:
-    saved_base = ""
-  if saved_base != base_url:
-    _discard(profile_id)
-    raise OutboundConnectError("The Connect runner saved an unexpected address.")
-  meta["status"] = "active"
-  _atomic_json(_meta_path(profile_id), meta)
-  return _public_profile(meta)
+    with _lock:
+      runner = _runner_path(profile_id)
+      runner.parent.mkdir(parents=True, mode=0o700)
+      runner.write_bytes(source)
+      runner.chmod(0o700)
+      _atomic_json(_meta_path(profile_id), meta)
+      process = _launch(profile_id, "--pair", code, "--url", base_url)
+
+    config = _await_pairing(process, profile_id)
+    if config is None:
+      raise OutboundConnectError(
+        "The other Möbius did not accept that command. It may have expired or already been used.",
+      )
+    try:
+      saved_base = connect_runner._validated_base_url(str(config.get("url") or ""))
+    except ValueError:
+      saved_base = ""
+    if saved_base != base_url:
+      raise OutboundConnectError("The Connect runner saved an unexpected address.")
+    meta["status"] = "active"
+    with _lock:
+      _atomic_json(_meta_path(profile_id), meta)
+    return _public_profile(meta)
+  except Exception:
+    with _lock:
+      _discard(profile_id)
+    raise
 
 
 async def create_profile(label: str, command: str) -> dict:
   return await asyncio.to_thread(_create_profile, label, command)
 
 
-def _descendant_pids(root_pid: int) -> list[int]:
-  parents: dict[int, int] = {}
+def _process_identity(pid: int) -> tuple[int, int] | None:
+  """Return parent pid and kernel start time, which distinguishes PID reuse."""
+  try:
+    text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    fields = text[text.rfind(")") + 2:].split()
+    return int(fields[1]), int(fields[19])
+  except (OSError, ValueError, IndexError):
+    return None
+
+
+def _descendant_processes(root_pid: int) -> dict[int, tuple[int, int]]:
+  processes = {}
   for stat in Path("/proc").glob("[0-9]*/stat"):
-    try:
-      text = stat.read_text(encoding="utf-8")
-      tail = text[text.rfind(")") + 2:].split()
-      parents[int(stat.parent.name)] = int(tail[1])
-    except (OSError, ValueError, IndexError):
-      continue
-  descendants = []
+    pid = int(stat.parent.name)
+    identity = _process_identity(pid)
+    if identity is not None:
+      processes[pid] = identity
+  descendants = {}
   frontier = [root_pid]
   while frontier:
     parent = frontier.pop()
-    children = [pid for pid, ppid in parents.items() if ppid == parent]
-    descendants.extend(children)
+    children = {pid: identity for pid, identity in processes.items() if identity[0] == parent}
+    descendants.update(children)
     frontier.extend(children)
   return descendants
 
 
 def _stop_process_tree(profile_id: str) -> None:
-  # The runner starts each remote command in its own session and has no
-  # SIGTERM handler, so killpg on the runner alone would orphan in-flight
-  # commands; walk /proc for every descendant instead.
-  pid = _read_pid(profile_id)
-  if not pid or pid == os.getpid():
+  # Remote commands start independent sessions. Pin every discovered process
+  # with a pidfd so PID reuse, including after SIGTERM, cannot target a stranger.
+  owned = _owned_processes.get(profile_id)
+  pid = owned.pid if owned is not None else _read_pid(profile_id)
+  if not pid or (owned is not None and owned.poll() is not None):
     return
-  descendants = _descendant_pids(pid)
-  for child in reversed(descendants):
-    try:
-      os.kill(child, signal.SIGTERM)
-    except OSError:
-      pass
+  identity = _process_identity(pid)
+  if identity is None or (owned is None and not _process_alive(profile_id)):
+    return
+  processes = _descendant_processes(pid)
+  processes[pid] = identity
+  handles = []
+  root_handle = None
   try:
-    os.kill(pid, signal.SIGTERM)
-  except OSError:
-    pass
-  deadline = time.monotonic() + 3
-  while time.monotonic() < deadline:
-    try:
-      os.kill(pid, 0)
-    except OSError:
-      break
-    time.sleep(0.05)
-  for target in reversed(descendants + [pid]):
-    try:
-      os.kill(target, signal.SIGKILL)
-    except OSError:
-      pass
+    for target, expected in processes.items():
+      try:
+        handle = os.pidfd_open(target)
+      except ProcessLookupError:
+        continue
+      if _process_identity(target) != expected:
+        os.close(handle)
+        continue
+      handles.append(handle)
+      if target == pid:
+        root_handle = handle
+    if root_handle is None or _process_identity(pid) != identity:
+      return
+    for handle in handles:
+      try:
+        signal.pidfd_send_signal(handle, signal.SIGTERM)
+      except ProcessLookupError:
+        pass
+    pending = set(handles)
+    poller = select.poll()
+    for handle in pending:
+      poller.register(handle, select.POLLIN)
+    deadline = time.monotonic() + 3
+    while pending:
+      remaining = deadline - time.monotonic()
+      if remaining <= 0:
+        break
+      for handle, _event in poller.poll(max(1, int(remaining * 1000))):
+        pending.discard(handle)
+        poller.unregister(handle)
+    for handle in pending:
+      try:
+        signal.pidfd_send_signal(handle, signal.SIGKILL)
+      except ProcessLookupError:
+        pass
+    owned = _owned_processes.get(profile_id)
+    if owned is not None:
+      owned.wait(timeout=3)
+  finally:
+    for handle in handles:
+      os.close(handle)
 
 
 def _disconnect_remote(config: dict) -> None:

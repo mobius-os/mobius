@@ -526,7 +526,10 @@ async def list_outbound_access(
   return {"connections": connect_outbound.list_profiles()}
 
 
-@router.post("/outbound")
+@router.post(
+  "/outbound",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def create_outbound_access(
   body: CreateOutboundBody,
   _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
@@ -537,7 +540,10 @@ async def create_outbound_access(
     raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.delete("/outbound/{profile_id}")
+@router.delete(
+  "/outbound/{profile_id}",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def revoke_outbound_access(
   profile_id: str,
   _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),

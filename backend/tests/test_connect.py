@@ -4,6 +4,7 @@ import asyncio
 import json
 import stat
 import shlex
+import signal
 import sys
 import threading
 import time
@@ -278,6 +279,125 @@ async def test_outbound_revoke_fails_closed_until_remote_confirms(
   assert stopped == []
 
 
+def test_outbound_revoke_does_not_signal_a_reused_runner_pid(monkeypatch):
+  profile_id = "o_0123456789abcdef"
+  monkeypatch.setattr(connect_outbound, "_read_pid", lambda _id: 424242)
+  monkeypatch.setattr(connect_outbound, "_process_alive", lambda _id: False)
+  monkeypatch.setattr(connect_outbound, "_process_identity", lambda _pid: (1, 100))
+  opened = []
+  monkeypatch.setattr(connect_outbound, "os", SimpleNamespace(pidfd_open=opened.append))
+
+  connect_outbound._stop_process_tree(profile_id)
+
+  assert opened == []
+
+
+def test_outbound_teardown_pins_processes_before_term_and_kill(monkeypatch):
+  profile_id = "o_0123456789abcdef"
+  monkeypatch.setattr(connect_outbound, "_read_pid", lambda _id: 424242)
+  monkeypatch.setattr(connect_outbound, "_process_alive", lambda _id: True)
+  monkeypatch.setattr(connect_outbound, "_process_identity", lambda _pid: (1, 100))
+  monkeypatch.setattr(connect_outbound, "_descendant_processes", lambda _pid: {424243: (424242, 101)})
+  opened, closed, signals = [], [], []
+
+  def open_pid(pid):
+    opened.append(pid)
+    return pid + 10
+
+  monkeypatch.setattr(connect_outbound, "os", SimpleNamespace(pidfd_open=open_pid, close=closed.append))
+  monkeypatch.setattr(connect_outbound.signal, "pidfd_send_signal", lambda *args: signals.append(args))
+  # No process has exited before the deadline. SIGKILL must reuse the pinned
+  # handle, never look up a numeric PID again after SIGTERM.
+  clock = iter((0, 4))
+  monkeypatch.setattr(connect_outbound, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+
+  connect_outbound._stop_process_tree(profile_id)
+
+  assert opened == [424243, 424242]
+  assert signals == [(424252, signal.SIGTERM), (424252, signal.SIGKILL)]
+  assert closed == [424253, 424252]  # Reused descendant was rejected before signaling.
+
+
+def test_outbound_reused_root_does_not_signal_replacement_descendants(monkeypatch):
+  profile_id = "o_0123456789abcdef"
+  root = 424242
+  monkeypatch.setattr(connect_outbound, "_read_pid", lambda _id: root)
+  monkeypatch.setattr(connect_outbound, "_process_alive", lambda _id: True)
+  root_versions = iter(((1, 100), (1, 200)))
+  monkeypatch.setattr(
+    connect_outbound, "_process_identity",
+    lambda pid: next(root_versions) if pid == root else (root, 300),
+  )
+  monkeypatch.setattr(connect_outbound, "_descendant_processes", lambda _pid: {root + 1: (root, 300)})
+  closed, signals = [], []
+  monkeypatch.setattr(connect_outbound, "os", SimpleNamespace(pidfd_open=lambda pid: pid + 10, close=closed.append))
+  monkeypatch.setattr(connect_outbound.signal, "pidfd_send_signal", lambda *args: signals.append(args))
+
+  connect_outbound._stop_process_tree(profile_id)
+
+  assert signals == []
+  assert set(closed) == {root + 10, root + 11}
+
+
+@pytest.mark.parametrize("failure_stage", ["launch", "pairing"])
+def test_outbound_creation_failure_cleans_profile_and_runner(
+  tmp_path, monkeypatch, failure_stage,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  monkeypatch.setattr(connect_outbound, "_download_runner", lambda _url: b"runner")
+  stopped = []
+  monkeypatch.setattr(connect_outbound, "_stop_process_tree", stopped.append)
+
+  def fail(*_args):
+    raise OSError("setup failed")
+
+  monkeypatch.setattr(connect_outbound, "_launch", fail if failure_stage == "launch" else lambda *_args: object())
+  monkeypatch.setattr(connect_outbound, "_await_pairing", fail)
+
+  with pytest.raises(OSError, match="setup failed"):
+    connect_outbound._create_profile(
+      "Shared access",
+      "curl -fsSL https://friend.example/api/connect/i/ABCD-EFGH | sh",
+    )
+
+  assert len(stopped) == 1
+  assert list(profiles.iterdir()) == []
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux pidfd process ownership")
+def test_outbound_pid_write_failure_stops_and_reaps_started_runner(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  monkeypatch.setattr(connect_outbound, "_download_runner", lambda _url: b"import time\ntime.sleep(60)\n")
+  owned = {}
+  monkeypatch.setattr(connect_outbound, "_owned_processes", owned)
+  started = []
+
+  def fail_pid_write(profile_id, _pid):
+    started.append(owned[profile_id])
+    raise OSError("pid write failed")
+
+  monkeypatch.setattr(connect_outbound, "_write_pid", fail_pid_write)
+  try:
+    with pytest.raises(OSError, match="pid write failed"):
+      connect_outbound._create_profile(
+        "Shared access",
+        "curl -fsSL https://friend.example/api/connect/i/ABCD-EFGH | sh",
+      )
+    assert len(started) == 1
+    assert started[0].poll() is not None
+    assert owned == {}
+    assert list(profiles.iterdir()) == []
+  finally:
+    for process in started:
+      if process.poll() is None:
+        process.kill()
+      process.wait(timeout=5)
+
+
 def test_outbound_routes_use_connect_manage_capability(
   client, auth, monkeypatch,
 ):
@@ -297,6 +417,36 @@ def test_outbound_routes_use_connect_manage_capability(
   assert client.get("/api/connect/outbound", headers=granted).json() == {
     "connections": [public],
   }
+
+
+def test_outbound_mutations_require_permission_and_report_domain_failures(
+  client, auth, monkeypatch,
+):
+  denied = _app_auth(client, auth, granted=False)
+  body = {
+    "label": "Shared access",
+    "command": "curl -fsSL https://friend.example/api/connect/i/ABCD-EFGH | sh",
+  }
+  path = "/api/connect/outbound"
+  assert client.post(path, headers=denied, json=body).status_code == 403
+  assert client.delete(path + "/o_0123456789abcdef", headers=denied).status_code == 403
+  granted = _app_auth(client, auth, granted=True)
+  assert client.post(path, headers=granted, json={**body, "label": "  "}).status_code == 422
+
+  async def rejected_pairing(_label, _command):
+    raise connect_outbound.OutboundConnectError("Pairing was rejected.")
+
+  async def rejected_revocation(_profile_id):
+    raise connect_outbound.OutboundConnectError("Access was kept.")
+
+  monkeypatch.setattr(connect_outbound, "create_profile", rejected_pairing)
+  monkeypatch.setattr(connect_outbound, "revoke_profile", rejected_revocation)
+  response = client.post(path, headers=granted, json=body)
+  assert response.status_code == 400
+  assert response.json()["detail"] == "Pairing was rejected."
+  response = client.delete(path + "/o_0123456789abcdef", headers=granted)
+  assert response.status_code == 409
+  assert response.json()["detail"] == "Access was kept."
 
 
 def test_pairing_code_exchange_is_rate_limited(client):
