@@ -27,6 +27,16 @@ resume.
 the type can be shared without dragging this module's globals into
 the runners. This file owns the registry + lifecycle on top of that
 dataclass.
+
+Design note — two ways to pause. `AskUserQuestion` above is an IN-TURN wait:
+the turn's process stays alive, suspended on the future, and the wait is lost
+on restart. A saved owner-input card (request_question / request_approval /
+secure-input) is instead a DURABLE wait — the card and `pending_question_id`
+persist, the turn ENDS so the process is released, and the answer route
+resumes a fresh turn (restart-safe). Because the card's receipt returns to the
+model immediately, the runner interrupts the live turn the moment such a card
+commits, so nothing follows the card; see `ChatEventSink.publish_question` and
+each runner's `finish_after_owner_card`.
 """
 
 from __future__ import annotations
