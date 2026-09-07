@@ -3223,14 +3223,11 @@ def _goal_handoff_is_owned(
   chat = (
     db.query(
       models.Chat.pending_messages,
-      models.Chat.pending_question_id,
     )
     .filter(models.Chat.id == chat_id)
     .first()
   )
   if chat is None:
-    return True
-  if chat.pending_question_id is not None:
     return True
   # A pending row owns this handoff only when it will actually resume the same
   # Goal. Ordinary owner prose deliberately opens a fresh logical root; it can
@@ -3244,8 +3241,6 @@ def _goal_handoff_is_owned(
     )
     if pending_goal_id == goal_id:
       return True
-  if questions.is_waiting(chat_id):
-    return True
   if sink is not None and any(
     isinstance(block, dict)
     and block.get("type") == "question"
@@ -3253,20 +3248,8 @@ def _goal_handoff_is_owned(
     for block in sink.assistant_blocks
   ):
     return True
-
-  from app.chat_waits import armed_waits_for_chat
-  wait_run_ids = {
-    wait.created_by_run_id
-    for wait in armed_waits_for_chat(db, chat_id)
-    if wait.created_by_run_id
-  }
-  if wait_run_ids and db.query(models.ChatRun.id).filter(
-    models.ChatRun.id.in_(wait_run_ids),
-    models.ChatRun.goal_id == goal_id,
-  ).first() is not None:
-    return True
-  from app.delegations import background_helper_goal_ids
-  return goal_id in background_helper_goal_ids(db, chat_id)
+  from app.goal_plans import goal_handoff_owner_kind
+  return goal_handoff_owner_kind(db, chat_id, goal_id) is not None
 
 
 def _prepare_goal_handoff(

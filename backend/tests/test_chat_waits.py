@@ -20,6 +20,7 @@ from app.chat_waits import (
   declare_wait,
   sweep_due_waits,
 )
+from app.chat_writer import StartTurn, get_writer
 from app.continuations import WAIT_RESULT_MESSAGE_KIND
 from app.delegations import RunPolicy, delegation_execution_token
 from app.run_state import goal_identity_for_run_start
@@ -338,14 +339,26 @@ def test_owner_message_keeps_wait_armed_and_gives_parent_its_identity(
   )
   monkeypatch.setattr(runner_path, fake_runner)
   create_broadcast(chat_id)
+  run_token = f"wait-context-{provider_id}"
+  get_writer().submit(StartTurn(
+    chat_id=chat_id,
+    run_token=run_token,
+    user_msg={
+      "role": "user", "content": "Please change the unrelated copy.",
+      "ts": 1, "cid": f"wait-context-{provider_id}",
+    },
+    title_source="Please change the unrelated copy.",
+    default_provider=provider_id,
+  )).result(timeout=5)
   asyncio.run(chat_mod._run_chat_impl(
     messages=[schemas.ChatMessage(
       role="user", content="Please change the unrelated copy.",
     )],
     chat_id=chat_id,
-    session_id="existing-provider-session",
+    session_id=None,
     provider_id=provider_id,
     run_gen=chat_mod.current_run_generation(chat_id),
+    run_token=run_token,
   ))
 
   agent_message = captured["user_message"]
@@ -1388,6 +1401,7 @@ def test_legacy_wait_orphan_preservation_requires_exact_empty_carrier(
   physical = SimpleNamespace(
     id=resume_run_id, root_run_id=resume_run_id, chat_id=chat_id,
     status="running", initiated_by_app_id=None,
+    provider_execution_admitted=False,
   )
 
   assert not chat_waits_mod.safe_startup_writer_orphan(db, chat, physical)

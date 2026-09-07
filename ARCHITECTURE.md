@@ -1040,6 +1040,29 @@ column remains only as an internal latch: it defaults on and is cleared solely
 by `delegations.mark_cancelled`, so a cancelled delegated child cannot
 resurrect itself when the boot sweep claims restart parks.
 
+### Goal handoff ownership is exact and singular
+
+A `ChatRun.goal_id` identifies one logical Goal across its physical turns;
+the root run owns the visible plan. Finishing a physical turn is not itself
+Goal completion: an unfinished plan must either have a durable next owner or
+receive a bounded corrective continuation.
+
+`goal_plans.goal_handoff_owner_kind` is the shared durable ownership query for
+both Goal presentation and turn settlement. It recognizes an owner question,
+armed Wait, or wake-enabled helper only when that actor belongs to the same
+`goal_id`; an unrelated question or background operation in the chat cannot
+hide an orphaned Goal. A question being composed by the ending turn is the one
+intentional transient exception and is read from that turn's event sink until
+its save-before-broadcast commit makes it durable. Explicit `/goal` starts keep
+their provider-owned continuation contract. Auto-promoted Goals receive one
+baseline correction plus one additional correction per newly settled plan task,
+then become visibly resumable rather than looping without progress.
+
+Workspace `AgentWorkClaim` rows are narrower: they serialize one shared action
+across otherwise independent chats. They do not replace a chat's Goal, a
+project path claim, or a contribution record; conflating those owners would
+make completing one action falsely complete a broader outcome.
+
 ### Durable waits: observation and continuation are separate
 
 `chat_waits.py` owns command/timer rows and `runtime_supervisors` drives their

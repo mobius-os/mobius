@@ -461,14 +461,16 @@ def serialize_plan(
   }
 
 
-def _goal_wait_kind(
-  db: Session,
-  physical: models.ChatRun,
-  root: models.ChatRun,
+def goal_handoff_owner_kind(
+  db: Session, chat_id: str, goal_id: str,
 ) -> str | None:
-  """Name the visible gate only when it belongs to this exact Goal."""
-  goal_id = physical.goal_id or root.id
-  chat = db.query(models.Chat).filter(models.Chat.id == physical.chat_id).first()
+  """Name the durable actor that owns this exact Goal's next move.
+
+  Goal presentation and turn settlement must agree on ownership. Keeping the
+  identity check here prevents an unrelated question, Wait, or helper in the
+  same chat from making unfinished Goal work look safely handed off.
+  """
+  chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
   pending_question_id = chat.pending_question_id if chat is not None else None
   if pending_question_id is not None:
     from app.questions import continuation_question_owner_run_id
@@ -480,7 +482,7 @@ def _goal_wait_kind(
       question_owner = (
         db.query(models.ChatRun)
         .filter(
-          models.ChatRun.chat_id == physical.chat_id,
+          models.ChatRun.chat_id == chat_id,
           models.ChatRun.status.in_(models.NONTERMINAL_RUN_STATUSES),
         )
         .order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc())
@@ -497,19 +499,18 @@ def _goal_wait_kind(
       return "owner_question"
 
   from app.delegations import background_helper_goal_ids
-  if goal_id in background_helper_goal_ids(db, physical.chat_id):
+  if goal_id in background_helper_goal_ids(db, chat_id):
     return "monitor"
 
+  from app.chat_waits import armed_waits_for_chat
   wait_run_ids = [
-    run_id for (run_id,) in db.query(models.ChatWait.created_by_run_id).filter(
-      models.ChatWait.chat_id == physical.chat_id,
-      models.ChatWait.status == "armed",
-      models.ChatWait.created_by_run_id.isnot(None),
-    ).all()
+    wait.created_by_run_id
+    for wait in armed_waits_for_chat(db, chat_id)
+    if wait.created_by_run_id is not None
   ]
   if wait_run_ids:
     wait_owners = db.query(models.ChatRun).filter(
-      models.ChatRun.chat_id == physical.chat_id,
+      models.ChatRun.chat_id == chat_id,
       models.ChatRun.id.in_(wait_run_ids),
     ).all()
     if any(
@@ -527,7 +528,9 @@ def serialize_goal(
 ) -> dict[str, Any]:
   """Project durable Goal presentation independently of turn liveness."""
   plan = serialize_plan(db, physical, root)
-  wait_kind = _goal_wait_kind(db, physical, root)
+  wait_kind = goal_handoff_owner_kind(
+    db, physical.chat_id, physical.goal_id or root.id,
+  )
   if physical.status == "running":
     status = "active"
   elif physical.status in {

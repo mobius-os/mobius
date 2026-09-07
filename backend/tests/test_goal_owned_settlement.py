@@ -309,10 +309,17 @@ def test_stale_goal_handoff_is_retired_before_owner_prose_runs(db, chat, fence):
   )
 
 
-def test_pending_question_marker_or_open_question_block_satisfies_handoff(db, chat):
+def test_exact_pending_question_or_open_question_block_satisfies_handoff(db, chat):
   from app.chat import _goal_handoff_is_owned
 
+  _add_run(db, chat.id, "run-a", status="running", plan=STUCK)
   chat.pending_question_id = "q1"
+  chat.messages = [{
+    "id": "run-a", "role": "assistant", "content": "", "blocks": [{
+      "type": "question", "question_id": "q1",
+      "response_mode": "continuation", "questions": [],
+    }],
+  }]
   db.commit()
   assert _goal_handoff_is_owned(db, chat.id, "run-a", _Sink()) is True
 
@@ -320,6 +327,26 @@ def test_pending_question_marker_or_open_question_block_satisfies_handoff(db, ch
   db.commit()
   sink = _Sink([{"type": "question", "question_id": "q2"}])
   assert _goal_handoff_is_owned(db, chat.id, "run-a", sink) is True
+
+
+def test_unrelated_pending_question_does_not_own_goal_handoff(db, chat):
+  from app.chat import _goal_handoff_is_owned
+
+  _add_run(db, chat.id, "run-a", status="completed", plan=STUCK)
+  _add_run(
+    db, chat.id, "other-run", goal_id="other-goal", status="running",
+    plan=STUCK,
+  )
+  chat.pending_question_id = "other-question"
+  chat.messages = [{
+    "id": "other-run", "role": "assistant", "content": "", "blocks": [{
+      "type": "question", "question_id": "other-question",
+      "response_mode": "continuation", "questions": [],
+    }],
+  }]
+  db.commit()
+
+  assert _goal_handoff_is_owned(db, chat.id, "run-a", _Sink()) is False
 
 
 def test_armed_wait_or_waking_helper_satisfies_handoff(db, chat, monkeypatch):
