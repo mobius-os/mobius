@@ -3497,8 +3497,8 @@
    the active goal (when present) followed by each build milestone emitted this
    turn. Attention, connection, and queue notices deliberately stack
    ABOVE this rail so nothing interrupts its relationship to the chat controls.
-   An opaque reading surface separates status from chat scrolling behind the
-   transparent foot; compact spacing keeps it quiet next to the composer. The most recent phase is
+   Frosted so it reads as a card over the chat scrolling behind the transparent
+   foot, muted so it stays quiet next to the composer. The most recent phase is
    emphasized; earlier ones dim to compact history. Entrance is
    transform/opacity ONLY — the foot's ResizeObserver publishes --composer-h off
    its height, so a height animation would fight the composer clearance. */
@@ -3511,11 +3511,22 @@
   gap: 6px 10px;
   padding: 7px 12px;
   border-radius: 12px;
-  background: var(--surface); /* Opaque so transcript text cannot compete with live status. */
+  background: color-mix(in srgb, var(--surface) 78%, transparent); /* CONTRACT: frosted surface floor over the chat */
   border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on the frosted card */
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
   font-size: var(--chat-status-font-size);
   line-height: 1.3;
   animation: progress-rail-in 0.22s ease both;
+}
+
+/* The compact rail can stay frosted, but an expanded todo list needs a solid
+   reading surface: several lines of chat showing through the list materially
+   reduces task-title and dependency-label contrast. */
+.chat__progress-rail:has(.chat__goal-plan) {
+  background: var(--surface);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 @keyframes progress-rail-in {
@@ -3690,7 +3701,7 @@
   font-size: 11px;
 }
 
-/* Composer draft echo of the goal visual — same reading surface as the rail, shown
+/* Composer draft echo of the goal visual — same frosted card as the rail, shown
    while a `/goal ` draft is still being typed so the goal stays visible. */
 .chat__goal-draft {
   max-width: 720px;
@@ -3701,8 +3712,10 @@
   min-width: 0;
   padding: 7px 12px;
   border-radius: 12px;
-  background: var(--surface);
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
   border: 1px solid var(--border-light);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
   font-size: 12px;
   line-height: 1.3;
   animation: progress-rail-in 0.22s ease both;
@@ -3710,10 +3723,15 @@
 
 .chat__goal-draft-tag {
   flex: 0 0 auto;
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.4;
+  padding: 1px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
 }
 
 .chat__goal-draft-text {
@@ -3741,22 +3759,27 @@
   overflow: hidden;
   border: 1px solid var(--border-light);
   border-radius: 12px;
-  background: var(--surface);
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
   transition: border-color 140ms ease, background 140ms ease;
 }
 
 .chat__wait-card--expanded {
   border-color: color-mix(in srgb, var(--accent) 34%, var(--border-light));
-  background: var(--surface);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
 }
 
 .chat__wait-summary {
+  font: inherit;
+  font-size: var(--chat-status-font-size);
+  line-height: 1.3;
   width: 100%;
   display: flex;
   align-items: center;
   gap: 9px;
   min-width: 0;
-  padding: 7px 10px 7px 12px;
+  padding: 7px 12px;
   border: 0;
   background: transparent;
   color: inherit;
@@ -3773,14 +3796,6 @@
 .chat__wait-summary:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
-}
-
-.chat__wait-tag {
-  flex: 0 0 auto;
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.4;
 }
 
 .chat__wait-text {
@@ -4387,7 +4402,4 @@
   inset: -10px;
 }
 
-.chat__progress-step--button > .chat__progress-step-label { flex: 1; }
-.chat__progress-chevron { flex-shrink: 0; color: var(--muted); }
-.chat__progress-step--button[aria-expanded='true'] > .chat__progress-chevron { transform: rotate(180deg); }
-.chat__progress-step--button > .chat__lifecycle-icon { margin-right: 4px; }
+.chat__progress-identity { display: inline-block; vertical-align: -2px; margin-right: 5px; flex-shrink: 0; }
