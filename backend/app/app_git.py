@@ -3359,6 +3359,59 @@ def _worktree_unmerged(worktree: Path) -> list[str]:
   return sorted(line.strip() for line in out.splitlines() if line.strip())
 
 
+def _semantic_replay_prefix(
+  repo: Path,
+  commits: list[OverlayCommit],
+  start: int,
+  onto: str,
+) -> tuple[int, MergeResult] | None:
+  """Prove a conflicted overlay prefix through its reviewed source tip.
+
+  A source-resolution witness can become complete in a later commit than the
+  one where ordinary cherry-picking first conflicts. The later commits may be
+  consumed by the semantic replay only when every path they touch belongs to
+  the exact reviewed change. That keeps unrelated overlay units separate while
+  allowing one reviewed adaptation to replay as the atomic unit it was.
+  """
+  for end in range(start, len(commits)):
+    merged = merge_with_equivalent_changes(repo, commits[end].sha, onto)
+    if (
+      merged is None
+      or merged.status != "clean"
+      or not merged.merged_tree_oid
+      or not merged.equivalent_change_refs
+    ):
+      continue
+    reviewed_paths: set[str] = set()
+    valid = True
+    for ref in merged.equivalent_change_refs:
+      change = _read_equivalent_change(repo, ref)
+      paths = (
+        endpoint_diff_paths(repo, change.base_sha, change.anchor_sha)
+        if change is not None else None
+      )
+      if not paths:
+        valid = False
+        break
+      reviewed_paths.update(paths)
+    if not valid:
+      continue
+    consumed_paths: set[str] = set()
+    for consumed in commits[start + 1:end + 1]:
+      parent = _resolve_commit(repo, f"{consumed.sha}^")
+      paths = (
+        endpoint_diff_paths(repo, parent, consumed.sha)
+        if parent is not None else None
+      )
+      if paths is None:
+        valid = False
+        break
+      consumed_paths.update(paths)
+    if valid and consumed_paths.issubset(reviewed_paths):
+      return end, merged
+  return None
+
+
 def _replay_into(
   repo: Path,
   worktree: Path,
@@ -3371,9 +3424,40 @@ def _replay_into(
     if commit.sha in skip:
       dropped.append(commit.sha)
       continue
+    previous_tip = _worktree_head(worktree)
     pick = _run(worktree, "cherry-pick", "--no-commit", commit.sha, check=False)
     unmerged = _worktree_unmerged(worktree)
     if unmerged:
+      # A source-resolution witness may bind a reviewed adaptation at a later
+      # source tip even though the adapted bytes entered in this earlier
+      # commit. Re-run the same proof against this commit and, when it is exact,
+      # materialize the proven semantic merge tree while preserving the
+      # original commit message and overlay trailers.
+      semantic = (
+        _semantic_replay_prefix(repo, commits, index, previous_tip)
+        if not replayed else None
+      )
+      if semantic is not None:
+        consumed_through, equivalent = semantic
+        restored = _run(
+          worktree, "reset", "-q", "--hard", previous_tip, check=False,
+        )
+        if restored.returncode == 0:
+          _run(
+            worktree, "read-tree", "--reset", "-u",
+            equivalent.merged_tree_oid,
+          )
+          if _run(
+            worktree, "diff", "--cached", "--quiet", check=False,
+          ).returncode == 0:
+            dropped.append(commit.sha)
+          else:
+            _run(worktree, "commit", "-q", "--no-verify", "-C", commit.sha)
+            replayed.append((commit.sha, _worktree_head(worktree)))
+          skip.update(
+            later.sha for later in commits[index + 1:consumed_through + 1]
+          )
+          continue
       return OverlayReplayResult(
         status="conflict",
         tip=_worktree_head(worktree),
@@ -3423,9 +3507,10 @@ def replay_overlay(
   """Replay ``commits`` onto ``onto`` in a fresh detached worktree.
 
   Every commit keeps its author, message and trailers. A commit in ``skip``
-  or one whose cherry-pick is empty is dropped as already landed. The first
-  conflict stops the replay and leaves the worktree for a resolver; no ref of
-  the live checkout moves here.
+  or one whose cherry-pick is empty is dropped as already landed. A conflict
+  is retried only through an exact landed-change semantic proof; otherwise the
+  first conflict stops the replay and leaves the worktree for a resolver. No
+  ref of the live checkout moves here.
   """
   repo = Path(source_dir)
   path = Path(worktree)

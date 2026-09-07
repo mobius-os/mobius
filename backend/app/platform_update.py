@@ -2276,6 +2276,9 @@ def _apply_overlay(
     return _fold_legacy_overlay(
       repo, carried, target, ordinary_base, reconciliation,
     )
+  equivalent = app_git.merge_with_equivalent_changes(repo, pre, target)
+  if equivalent is not None:
+    reconciliation = equivalent.reconciliation
   skip = app_git.landed_overlay_commits(repo, commits, target)
   worktree = _overlay_candidate_path(repo)
   replay = app_git.replay_overlay(

@@ -3879,6 +3879,88 @@ def test_landed_source_resolution_preserves_adapted_overlay_and_later_intent(
   assert tree["shared.js"] == b"reviewed nonconflicting addition\n"
 
 
+def test_overlay_replay_consumes_only_reviewed_source_resolution_continuation(
+  tmp_path,
+):
+  """A reviewed continuation after an adaptation must not force a resolver.
+
+  Contribute can finish reviewing the source after another commit completes
+  the accepted adaptation. The witness then names that later tip, while the
+  local remainder still belongs to the earlier overlay commit. The semantic
+  replay consumes only that reviewed-path continuation, not unrelated units.
+  """
+  repo, base, head, adapted, digest = _source_resolution_history(tmp_path)
+  (repo / "shared.js").write_text(
+    "reviewed nonconflicting addition\nlocal retained detail\n",
+  )
+  later = _commit_all(repo, "complete reviewed adaptation")
+  later_resolution = app_git.preview_source_resolution(
+    repo, base_sha=base, head_sha=head, source_sha=later,
+    diff_sha256=digest,
+  )
+  assert later_resolution is not None
+  assert app_git.record_prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=head,
+    source_sha=adapted,
+    reviewed_through_sha=later,
+    diff_sha256=digest,
+    contribution_id="adapted-review",
+    review_identity_sha256="a" * 64,
+    source_resolution_sha256=later_resolution.diff_sha256,
+  )
+  witness = app_git.prepublication_source_continuity(
+    repo,
+    base_sha=base,
+    head_sha=head,
+    source_sha=adapted,
+    current_source_sha=later,
+    diff_sha256=digest,
+    contribution_id="adapted-review",
+    review_identity_sha256="a" * 64,
+  )
+  assert witness is not None
+  assert app_git.record_reviewed_source_equivalence(repo, witness=witness)
+  upstream = app_git.record_upstream(
+    repo,
+    {
+      "index.jsx": b"mode = 'published form'\n",
+      "shared.js": b"reviewed nonconflicting addition\n",
+      "upstream-only.js": b"new upstream feature\n",
+    },
+    "https://x/mobius.json",
+    "2.0.0",
+  )
+  assert app_git.mark_equivalent_change_landed(
+    repo, digest, upstream_sha=upstream,
+  )
+
+  commits = app_git.overlay_commits(repo, base, later)
+  replay = app_git.replay_overlay(
+    repo,
+    commits=commits,
+    onto=upstream,
+    worktree=tmp_path / "replay",
+  )
+
+  assert replay.status == "clean"
+  assert [old for old, _new in replay.replayed] == [adapted]
+  assert replay.dropped == (later,)
+  tree = app_git.read_merged_tree(repo, replay.tip)
+  assert tree["index.jsx"] == b"mode = 'local adapted form'\n"
+  assert tree["shared.js"] == (
+    b"reviewed nonconflicting addition\nlocal retained detail\n"
+  )
+  assert tree["local-only.js"] == b"unrelated local feature\n"
+  assert tree["upstream-only.js"] == b"new upstream feature\n"
+  assert app_git._run(
+    repo, "log", "--format=%s", "--reverse", f"{upstream}..{replay.tip}",
+  ).stdout.splitlines() == [
+    "local adaptation and unrelated feature",
+  ]
+
+
 @pytest.mark.parametrize("field,value", [
   ("source_resolution_sha256", "0" * 64),
   ("source_resolution_captured_sha", "0" * 40),
