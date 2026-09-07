@@ -4,20 +4,23 @@ Every Möbius instance is one user's server. This router gives an instance
 three federated capabilities, all instance-to-instance over HTTPS with
 Ed25519-signed envelopes and no third-party storage:
 
-1. **Identity** — a public actor card (`GET /actor`) naming the owner and
-   publishing the instance's Ed25519 public key. Peers verify every envelope
-   against the claimed sender's fetched (and cached) actor card.
+1. **Identity** — an actor card (`GET /actor`) publishing federation keys.
+   Private participants expose only those keys; joining the community also
+   publishes the owner's profile card. Peers verify every envelope against
+   the claimed sender's fetched (and cached) actor card.
 2. **Direct messages** — a signed envelope POSTed straight to the recipient
-   instance's `/inbox`. Each side stores only its own copy (in the Common
-   mini-app's per-app storage), so a conversation lives exclusively on the
-   two participants' servers.
+   instance's `/inbox`. A first inbound conversation is stored as a quiet
+   message request until its owner accepts; an explicit first outbound message
+   establishes consent. Each side stores only its own copy (in the Common
+   mini-app's per-app storage), so a conversation lives exclusively on the two
+   participants' servers.
 3. **Community host role** — any instance can host the shared, public parts:
    an opt-in user directory (search) and a message board. Peers register and
    post with the same signed-envelope scheme. Which host to use is the
    owner's choice (default: their own instance).
 
 Public peer surface (no owner auth; envelope signatures are the authority):
-  GET  /api/common/actor        instance identity card
+  GET  /api/common/actor        federation keys; joined public profile card
   GET  /api/common/avatar       instance profile avatar
   POST /api/common/inbox        deliver a signed DM to this instance's owner
   GET  /api/common/directory    search users registered with this host
@@ -32,6 +35,7 @@ Owner surface (owner JWT or the Common app's scoped token):
   GET  /api/common/me           own profile (creates the keypair lazily)
   PUT  /api/common/me           update profile; re-registers with community host
   POST /api/common/send         sign + deliver a DM; store own copy
+  POST /api/common/requests/dm/{host}/{decision}  accept/decline/block request
   POST /api/common/publish      sign + submit a board post to the community host
   GET  /api/common/board-media/{post_id}  local/cached community board image
   POST /api/common/reply        sign + submit a board reply to the community host
@@ -92,6 +96,7 @@ router = APIRouter(prefix="/api/common", tags=["common"])
 APP_SLUG = "common"
 PEER_AVATAR_CACHE_TTL_S = 24 * 3600
 BOARD_MEDIA_CACHE_TTL_S = 24 * 3600
+REQUEST_STATES = {"pending", "accepted", "declined", "blocked"}
 
 
 # ── paths ────────────────────────────────────────────────────────────────────
@@ -118,7 +123,9 @@ _verify_peer_envelope = _actor_verifier.verify_envelope
 
 
 def _identity_path() -> Path:
-  return _common_dir() / "identity.json"
+  # Unlike the other Common paths, callers use this to distinguish an
+  # untouched installation. Merely probing /actor must not materialize state.
+  return Path(get_settings().data_dir) / "common" / "identity.json"
 
 
 def _avatar_path() -> Path:
@@ -362,9 +369,21 @@ def _save_identity(identity: dict) -> None:
   path.chmod(0o600)
 
 
+def _key_actor_doc(identity: dict) -> dict:
+  """The key-only actor card used by private federation peers."""
+  return {
+    "protocol": PROTOCOL,
+    "host": _own_host(),
+    "public_key": {"alg": "ed25519", "key_b64": identity["public_key_b64"]},
+    "encryption_key": {
+      "alg": "x25519", "key_b64": identity["enc_public_key_b64"],
+    },
+    "inbox": "/api/common/inbox",
+  }
+
+
 def _actor_doc(identity: dict, db: Session) -> dict:
-  """The public identity card. Privacy contract: only the handle is public —
-  the owner's display name never leaves their instance."""
+  """The joined public profile card; the display name remains local."""
   host = _own_host()
   owner = db.query(models.Owner).first()
   member_since = (
@@ -382,23 +401,17 @@ def _actor_doc(identity: dict, db: Session) -> dict:
     .all()
   )
   return {
-    "protocol": PROTOCOL,
-    "host": host,
+    **_key_actor_doc(identity),
     "address": f"{identity.get('handle') or 'someone'}@{host}",
     "handle": identity.get("handle") or "",
     "bio": identity.get("bio") or "",
     "avatar": _avatar_path().is_file(),
-    "public_key": {"alg": "ed25519", "key_b64": identity["public_key_b64"]},
-    "encryption_key": {
-      "alg": "x25519", "key_b64": identity["enc_public_key_b64"],
-    },
     "joined_at": identity.get("joined_at") or None,
     "member_since": member_since,
     "apps": [
       {"name": app.name, "description": (app.description or "")[:140]}
       for app in public_apps
     ],
-    "inbox": "/api/common/inbox",
   }
 
 
@@ -443,39 +456,120 @@ def _bump_version(app: models.App) -> None:
 async def _store_message(
   db: Session, app: models.App, peer_host: str, record: dict,
   attachment: tuple[dict, bytes] | None = None,
-) -> None:
-  """Store one message record and bump the app's change counter."""
+) -> tuple[bool, str]:
+  """Store one message atomically and return ``(created, request_state)``.
+
+  A metadata record written by an older Social version is an established
+  conversation.  Only a genuinely new inbound conversation becomes a quiet
+  request.  Keeping the duplicate check under the app-storage lock also makes
+  concurrent federation retries unable to double-count unread/request state.
+  """
   async with fs_locks.app_storage_lock(app.id):
     convo = _conversation_dir(app, peer_host)
+    meta_path = convo / "meta.json"
+    had_meta = meta_path.is_file()
+    meta = json.loads(meta_path.read_text()) if had_meta else {}
+    state = meta.get("request_status")
+    if state not in REQUEST_STATES:
+      state = "accepted" if had_meta or record["dir"] == "out" else "pending"
+    # Blocking is a receive-time discard policy, not merely a notification
+    # preference.  Decide it under the same lock as owner request decisions
+    # and before materializing either the message or its attachment.
+    if state == "blocked" and record["dir"] == "in":
+      return False, state
+    msgs = convo / "msgs"
+    message_path = msgs / f"{record['id']}.json"
+    if message_path.is_file():
+      return False, state
     if attachment is not None:
       record["attachment"] = _write_app_attachment(
         convo, record["id"], attachment
       )
-    msgs = convo / "msgs"
     msgs.mkdir(parents=True, exist_ok=True)
-    atomic_write(msgs / f"{record['id']}.json", json.dumps(record))
-    meta_path = convo / "meta.json"
-    meta = json.loads(meta_path.read_text()) if meta_path.is_file() else {}
+    atomic_write(message_path, json.dumps(record))
     meta.update(
       peer=peer_host,
       last_text=_message_preview(record["text"]),
       last_at=record["sent_at"],
       last_dir=record["dir"],
+      request_status=state,
     )
     if record.get("peer_handle"):
       meta["peer_handle"] = record["peer_handle"]
-    if record["dir"] == "in":
+    if record["dir"] == "in" and state == "accepted":
       meta["unread"] = int(meta.get("unread") or 0) + 1
+    elif record["dir"] == "in" and state == "pending":
+      meta["request_count"] = int(meta.get("request_count") or 0) + 1
+      meta["unread"] = 0
+    elif state != "accepted":
+      meta["unread"] = 0
     atomic_write(meta_path, json.dumps(meta))
     _bump_version(app)
+    return True, state
+
+
+async def _prepare_outgoing_conversation(
+  app: models.App, peer_host: str,
+) -> None:
+  """Persist consent for a new owner-initiated DM, or reject a request reply."""
+  async with fs_locks.app_storage_lock(app.id):
+    convo = _conversation_dir(app, peer_host)
+    meta_path = convo / "meta.json"
+    if meta_path.is_file():
+      meta = json.loads(meta_path.read_text())
+      state = meta.get("request_status")
+      if state in {"pending", "declined", "blocked"}:
+        raise HTTPException(
+          status_code=409,
+          detail="Accept this message request before replying.",
+        )
+      # Missing state is the backwards-compatible accepted interpretation.
+      return
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(meta_path, json.dumps({
+      "peer": peer_host,
+      "request_status": "accepted",
+      "unread": 0,
+    }))
+    _bump_version(app)
+
+
+async def _set_dm_request_state(
+  app: models.App, peer_host: str, state: str,
+) -> str:
+  """Apply one owner decision without deleting the retained conversation."""
+  async with fs_locks.app_storage_lock(app.id):
+    meta_path = _conversation_dir(app, peer_host) / "meta.json"
+    if not meta_path.is_file():
+      raise HTTPException(status_code=404, detail="Message request not found.")
+    meta = json.loads(meta_path.read_text())
+    current = meta.get("request_status")
+    if current not in REQUEST_STATES:
+      current = "accepted"
+    if state == "accepted" and current == "accepted":
+      return "accepted"
+    if current != "pending":
+      raise HTTPException(status_code=409, detail="Message request is no longer pending.")
+    meta.update(request_status=state, request_count=0, unread=0)
+    atomic_write(meta_path, json.dumps(meta))
+    _bump_version(app)
+    return state
 
 
 # ── public peer surface ─────────────────────────────────────────────────────
 
 @router.get("/actor")
 def get_actor(db: Session = Depends(get_db)):
-  """This instance's public identity card. Public by design."""
-  return _actor_doc(_load_identity(), db)
+  """Publish keys for private federation, and profile data only after join."""
+  # An unauthenticated probe must not lazily create an identity on an
+  # untouched installation. Authenticated owner use and established
+  # federation operations create this file before peers need its keys.
+  if not _identity_path().is_file():
+    raise HTTPException(status_code=404, detail="Social profile not found.")
+  identity = _load_identity()
+  if not identity.get("joined_at"):
+    return _key_actor_doc(identity)
+  return _actor_doc(identity, db)
 
 
 def _serve_avatar(path: Path) -> FileResponse:
@@ -487,6 +581,10 @@ def _serve_avatar(path: Path) -> FileResponse:
 @router.get("/avatar")
 def get_avatar():
   """This instance's public profile avatar. Public by design."""
+  if not _identity_path().is_file():
+    raise HTTPException(status_code=404, detail="Social profile not found.")
+  if not _load_identity().get("joined_at"):
+    raise HTTPException(status_code=404, detail="Social profile not found.")
   return _serve_avatar(_avatar_path())
 
 
@@ -517,10 +615,6 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
   _validate_text_or_attachment(text, attachment, "Message text is invalid.")
   sender = envelope["from"]
   app = _common_app(db)
-  # Idempotent delivery: a redelivered envelope id is acknowledged, not duplicated.
-  existing = _conversation_dir(app, sender) / "msgs" / f"{message_id}.json"
-  if existing.is_file():
-    return {"status": "duplicate"}
   sender_label = f"@{actor['handle']}" if actor.get("handle") else sender
   record = {
     "id": message_id,
@@ -535,9 +629,17 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
     record["encrypted"] = True
   if reply_to is not None:
     record["reply_to"] = reply_to
-  await _store_message(db, app, sender, record, attachment)
+  created, request_state = await _store_message(
+    db, app, sender, record, attachment
+  )
+  if not created:
+    # A blocked sender gets the same successful receipt as ordinary delivery;
+    # the discard policy is local owner state, not federation metadata.
+    if request_state == "blocked":
+      return {"status": "delivered"}
+    return {"status": "duplicate"}
   owner = db.query(models.Owner).first()
-  if owner is not None:
+  if owner is not None and request_state == "accepted":
     try:
       push.notify_owner(
         db,
@@ -550,7 +652,9 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
       )
     except Exception:
       pass  # delivery of the message itself must not fail on push problems
-  return {"status": "delivered"}
+  return {
+    "status": "delivered" if request_state == "accepted" else "pending",
+  }
 
 
 # The directory and board peer surface is shared with the isolated host.
@@ -583,6 +687,13 @@ class SendMessage(BaseModel):
   peer_handle: str | None = None
   attachment: Any = None
   reply_to: Any = None
+
+
+def _request_peer(peer_host: str) -> str:
+  host = peer_host.strip().lower()
+  if not _valid_host(host):
+    raise HTTPException(status_code=400, detail="Invalid peer host.")
+  return host
 
 
 class PublishPost(BaseModel):
@@ -737,6 +848,46 @@ async def update_me(
   return {"status": "saved", "directory": status}
 
 
+@router.post("/requests/dm/{peer_host}/accept")
+async def accept_message_request(
+  peer_host: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  require_nondelegated_owner_control(principal)
+  app = _require_owner_or_common_app(db, principal)
+  # Acceptance may be the first authenticated federation action on a legacy
+  # plaintext request. Create keys now so the accepted peer can verify and
+  # encrypt the owner's reply without requiring a public-directory join.
+  _load_identity()
+  state = await _set_dm_request_state(app, _request_peer(peer_host), "accepted")
+  return {"status": state}
+
+
+@router.post("/requests/dm/{peer_host}/decline")
+async def decline_message_request(
+  peer_host: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  require_nondelegated_owner_control(principal)
+  app = _require_owner_or_common_app(db, principal)
+  state = await _set_dm_request_state(app, _request_peer(peer_host), "declined")
+  return {"status": state}
+
+
+@router.post("/requests/dm/{peer_host}/block")
+async def block_message_request(
+  peer_host: str,
+  db: Session = Depends(get_db),
+  principal: Principal = Depends(get_principal),
+):
+  require_nondelegated_owner_control(principal)
+  app = _require_owner_or_common_app(db, principal)
+  state = await _set_dm_request_state(app, _request_peer(peer_host), "blocked")
+  return {"status": state}
+
+
 @router.post("/send")
 async def send_message(
   message: SendMessage,
@@ -755,6 +906,9 @@ async def send_message(
   _validate_text_or_attachment(text, attachment, "Message text is invalid.")
   identity = _load_identity()
   actor = await _fetch_actor(to_host)
+  # The first deliberate outgoing message establishes consent. A reply to an
+  # inbound request must instead go through the explicit acceptance action.
+  await _prepare_outgoing_conversation(app, to_host)
   message_id = str(uuid.uuid4())
   envelope = {
     "v": 0,
