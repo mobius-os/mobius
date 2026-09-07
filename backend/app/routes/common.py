@@ -4,9 +4,10 @@ Every Möbius instance is one user's server. This router gives an instance
 three federated capabilities, all instance-to-instance over HTTPS with
 Ed25519-signed envelopes and no third-party storage:
 
-1. **Identity** — a public actor card (`GET /actor`) naming the owner and
-   publishing the instance's Ed25519 public key. Peers verify every envelope
-   against the claimed sender's fetched (and cached) actor card.
+1. **Identity** — an actor card (`GET /actor`) publishing federation keys.
+   Private participants expose only those keys; joining the community also
+   publishes the owner's profile card. Peers verify every envelope against
+   the claimed sender's fetched (and cached) actor card.
 2. **Direct messages** — a signed envelope POSTed straight to the recipient
    instance's `/inbox`. A first inbound conversation is stored as a quiet
    message request until its owner accepts; an explicit first outbound message
@@ -19,7 +20,7 @@ Ed25519-signed envelopes and no third-party storage:
    owner's choice (default: their own instance).
 
 Public peer surface (no owner auth; envelope signatures are the authority):
-  GET  /api/common/actor        instance identity card
+  GET  /api/common/actor        federation keys; joined public profile card
   GET  /api/common/avatar       instance profile avatar
   POST /api/common/inbox        deliver a signed DM to this instance's owner
   GET  /api/common/directory    search users registered with this host
@@ -121,7 +122,9 @@ def _common_dir() -> Path:
 
 
 def _identity_path() -> Path:
-  return _common_dir() / "identity.json"
+  # Unlike the other Common paths, callers use this to distinguish an
+  # untouched installation. Merely probing /actor must not materialize state.
+  return Path(get_settings().data_dir) / "common" / "identity.json"
 
 
 def _avatar_path() -> Path:
@@ -479,9 +482,21 @@ def _save_identity(identity: dict) -> None:
   path.chmod(0o600)
 
 
+def _key_actor_doc(identity: dict) -> dict:
+  """The key-only actor card used by private federation peers."""
+  return {
+    "protocol": PROTOCOL,
+    "host": _own_host(),
+    "public_key": {"alg": "ed25519", "key_b64": identity["public_key_b64"]},
+    "encryption_key": {
+      "alg": "x25519", "key_b64": identity["enc_public_key_b64"],
+    },
+    "inbox": "/api/common/inbox",
+  }
+
+
 def _actor_doc(identity: dict, db: Session) -> dict:
-  """The public identity card. Privacy contract: only the handle is public —
-  the owner's display name never leaves their instance."""
+  """The joined public profile card; the display name remains local."""
   host = _own_host()
   owner = db.query(models.Owner).first()
   member_since = (
@@ -499,23 +514,17 @@ def _actor_doc(identity: dict, db: Session) -> dict:
     .all()
   )
   return {
-    "protocol": PROTOCOL,
-    "host": host,
+    **_key_actor_doc(identity),
     "address": f"{identity.get('handle') or 'someone'}@{host}",
     "handle": identity.get("handle") or "",
     "bio": identity.get("bio") or "",
     "avatar": _avatar_path().is_file(),
-    "public_key": {"alg": "ed25519", "key_b64": identity["public_key_b64"]},
-    "encryption_key": {
-      "alg": "x25519", "key_b64": identity["enc_public_key_b64"],
-    },
     "joined_at": identity.get("joined_at") or None,
     "member_since": member_since,
     "apps": [
       {"name": app.name, "description": (app.description or "")[:140]}
       for app in public_apps
     ],
-    "inbox": "/api/common/inbox",
   }
 
 
@@ -648,19 +657,21 @@ async def _store_message(
   """
   async with fs_locks.app_storage_lock(app.id):
     convo = _conversation_dir(app, peer_host)
-    msgs = convo / "msgs"
-    message_path = msgs / f"{record['id']}.json"
-    if message_path.is_file():
-      meta_path = convo / "meta.json"
-      meta = json.loads(meta_path.read_text()) if meta_path.is_file() else {}
-      state = meta.get("request_status")
-      return False, state if state in REQUEST_STATES else "accepted"
     meta_path = convo / "meta.json"
     had_meta = meta_path.is_file()
     meta = json.loads(meta_path.read_text()) if had_meta else {}
     state = meta.get("request_status")
     if state not in REQUEST_STATES:
       state = "accepted" if had_meta or record["dir"] == "out" else "pending"
+    # Blocking is a receive-time discard policy, not merely a notification
+    # preference.  Decide it under the same lock as owner request decisions
+    # and before materializing either the message or its attachment.
+    if state == "blocked" and record["dir"] == "in":
+      return False, state
+    msgs = convo / "msgs"
+    message_path = msgs / f"{record['id']}.json"
+    if message_path.is_file():
+      return False, state
     if attachment is not None:
       record["attachment"] = _write_app_attachment(
         convo, record["id"], attachment
@@ -740,10 +751,15 @@ async def _set_dm_request_state(
 
 @router.get("/actor")
 def get_actor(db: Session = Depends(get_db)):
-  """This instance's public identity card. Public by design."""
+  """Publish keys for private federation, and profile data only after join."""
+  # An unauthenticated probe must not lazily create an identity on an
+  # untouched installation. Authenticated owner use and established
+  # federation operations create this file before peers need its keys.
+  if not _identity_path().is_file():
+    raise HTTPException(status_code=404, detail="Social profile not found.")
   identity = _load_identity()
   if not identity.get("joined_at"):
-    raise HTTPException(status_code=404, detail="Social profile not found.")
+    return _key_actor_doc(identity)
   return _actor_doc(identity, db)
 
 
@@ -756,6 +772,8 @@ def _serve_avatar(path: Path) -> FileResponse:
 @router.get("/avatar")
 def get_avatar():
   """This instance's public profile avatar. Public by design."""
+  if not _identity_path().is_file():
+    raise HTTPException(status_code=404, detail="Social profile not found.")
   if not _load_identity().get("joined_at"):
     raise HTTPException(status_code=404, detail="Social profile not found.")
   return _serve_avatar(_avatar_path())
@@ -825,6 +843,10 @@ async def receive_message(request: Request, db: Session = Depends(get_db)):
     db, app, sender, record, attachment
   )
   if not created:
+    # A blocked sender gets the same successful receipt as ordinary delivery;
+    # the discard policy is local owner state, not federation metadata.
+    if request_state == "blocked":
+      return {"status": "delivered"}
     return {"status": "duplicate"}
   owner = db.query(models.Owner).first()
   if owner is not None and request_state == "accepted":
@@ -1281,6 +1303,10 @@ async def accept_message_request(
 ):
   require_nondelegated_owner_control(principal)
   app = _require_owner_or_common_app(db, principal)
+  # Acceptance may be the first authenticated federation action on a legacy
+  # plaintext request. Create keys now so the accepted peer can verify and
+  # encrypt the owner's reply without requiring a public-directory join.
+  _load_identity()
   state = await _set_dm_request_state(app, _request_peer(peer_host), "accepted")
   return {"status": state}
 

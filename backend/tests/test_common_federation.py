@@ -10,6 +10,7 @@ fetches are faked through the on-disk actor cache so no network is involved.
 import base64
 import json
 import os
+import shutil
 import time
 import uuid
 from datetime import datetime
@@ -197,11 +198,31 @@ def _attachment(data: bytes = b"small image") -> dict:
   }
 
 
-def test_actor_card_is_private_until_join_then_publishes_identity_and_key(client):
-  # Installing Social is not consent to publish a federation identity.
+def test_actor_probe_does_not_initialize_identity_or_publish_private_profile(client):
+  # Installing Social is not consent to create or publish a federation identity.
+  common_dir = common_routes._identity_path().parent
+  shutil.rmtree(common_dir, ignore_errors=True)
+  assert not common_dir.exists()
   assert client.get("/api/common/actor").status_code == 404
   assert client.get("/api/common/avatar").status_code == 404
+  assert not common_routes._identity_path().exists()
+  assert not common_dir.exists()
+
+  # Authenticated owner use initializes private federation. Peers can discover
+  # only the keys needed to verify and encrypt protocol traffic until Join.
   identity = common_routes._load_identity()
+  identity.update(handle="private-handle", bio="private bio")
+  common_routes._save_identity(identity)
+  private_actor = client.get("/api/common/actor")
+  assert private_actor.status_code == 200
+  assert set(private_actor.json()) == {
+    "protocol", "host", "public_key", "encryption_key", "inbox",
+  }
+  assert "private-handle" not in private_actor.text
+  assert "private bio" not in private_actor.text
+  assert client.get("/api/common/avatar").status_code == 404
+  assert not common_routes._directory_path().exists()
+
   identity["joined_at"] = time.time()
   common_routes._save_identity(identity)
   response = client.get("/api/common/actor")
@@ -218,24 +239,158 @@ def test_actor_card_is_private_until_join_then_publishes_identity_and_key(client
   assert actor["apps"] == []
   # The private keys never leave the identity file, and neither does the
   # owner's display name — only the handle is public.
-  assert "private" not in json.dumps(actor)
+  assert "private_key" not in json.dumps(actor)
   assert "name" not in actor
   assert actor["avatar"] is False
 
 
-def test_existing_identity_is_migrated_with_encryption_keys():
+def test_private_dm_cold_cache_discovers_keys_at_real_actor_endpoints(
+  client, db, auth, monkeypatch, tmp_path,
+):
+  """A private first message and accepted reply work without directory join."""
+  app = _install_common_app(db)
+  alice = "alice.example.com"
+  bob = "bob.example.com"
+  base_settings = common_routes.get_settings()
+  settings = {
+    host: base_settings.model_copy(update={
+      "domain": host, "data_dir": str(tmp_path / host),
+    })
+    for host in (alice, bob)
+  }
+  active = {"host": alice}
+  monkeypatch.setattr(
+    common_routes, "get_settings", lambda: settings[active["host"]]
+  )
+
+  async def owner_profile(db, principal):
+    return {
+      "identity": common_routes._load_identity(),
+      "profile": None,
+      "account_error": None,
+    }
+
+  monkeypatch.setattr(common_routes, "_refresh_profile_cache", owner_profile)
+
+  # Bob has explicitly opened Social, but neither owner has joined the public
+  # directory. Alice's first deliberate send initializes her own keys.
+  active["host"] = bob
+  assert client.get("/api/common/me", headers=auth).status_code == 200
+  active["host"] = alice
+  assert not common_routes._identity_path().exists()
+
+  actor_fetches = []
+
+  async def route_to_peer(method, url, *, json=None, params=None, **_kwargs):
+    parsed = httpx.URL(url)
+    target = parsed.host
+    assert target in settings
+    actor_fetches.append((active["host"], target, parsed.path))
+    previous = active["host"]
+    active["host"] = target
+    try:
+      transport = httpx.ASGITransport(app=client.app)
+      async with httpx.AsyncClient(
+        transport=transport, base_url=f"https://{target}",
+      ) as peer:
+        return await peer.request(
+          method, parsed.path, json=json, params=params,
+        )
+    finally:
+      active["host"] = previous
+
+  monkeypatch.setattr(common_routes, "federation_request", route_to_peer)
+  first = client.post(
+    "/api/common/send", json={"to": bob, "text": "private hello"},
+    headers=auth,
+  )
+  assert first.status_code == 200, first.text
+  assert first.json()["status"] == "delivered"
+  active["host"] = bob
+  bob_convo = common_routes._conversation_dir(app, alice)
+  bob_record = json.loads(
+    (bob_convo / "msgs" / f"{first.json()['id']}.json").read_text()
+  )
+  assert bob_record["text"] == "private hello"
+  assert bob_record["encrypted"] is True
+  assert json.loads((bob_convo / "meta.json").read_text())["request_status"] == "pending"
+
+  accepted = client.post(
+    f"/api/common/requests/dm/{alice}/accept", headers=auth,
+  )
+  assert accepted.json() == {"status": "accepted"}
+
+  # Expire both actor caches before the accepted reply. Verification and
+  # encryption must continue to use each instance's real /actor endpoint.
+  common_routes._peer_cache_path(alice).unlink(missing_ok=True)
+  active["host"] = alice
+  common_routes._peer_cache_path(bob).unlink(missing_ok=True)
+  active["host"] = bob
+  reply = client.post(
+    "/api/common/send", json={"to": alice, "text": "accepted reply"},
+    headers=auth,
+  )
+  assert reply.status_code == 200, reply.text
+  assert reply.json()["status"] == "delivered"
+  active["host"] = alice
+  alice_reply = json.loads(
+    (common_routes._conversation_dir(app, bob) / "msgs"
+     / f"{reply.json()['id']}.json").read_text()
+  )
+  assert alice_reply["text"] == "accepted reply"
+  assert alice_reply["encrypted"] is True
+
+  assert actor_fetches.count((alice, bob, "/api/common/actor")) == 2
+  assert actor_fetches.count((bob, alice, "/api/common/actor")) == 2
+  for host in (alice, bob):
+    active["host"] = host
+    actor = client.get("/api/common/actor").json()
+    assert set(actor) == {
+      "protocol", "host", "public_key", "encryption_key", "inbox",
+    }
+    assert not common_routes._directory_path().exists()
+
+
+def test_accepting_legacy_request_initializes_private_keys_without_join(
+  client, db, auth,
+):
+  app = _install_common_app(db)
+  identity_path = common_routes._identity_path()
+  identity_path.unlink(missing_ok=True)
+  convo = common_routes._conversation_dir(app, PEER_HOST)
+  convo.mkdir(parents=True)
+  (convo / "meta.json").write_text(json.dumps({
+    "peer": PEER_HOST, "request_status": "pending", "request_count": 1,
+  }))
+
+  accepted = client.post(
+    f"/api/common/requests/dm/{PEER_HOST}/accept", headers=auth,
+  )
+  assert accepted.json() == {"status": "accepted"}
+  actor = client.get("/api/common/actor")
+  assert actor.status_code == 200
+  assert set(actor.json()) == {
+    "protocol", "host", "public_key", "encryption_key", "inbox",
+  }
+  assert not common_routes._directory_path().exists()
+
+
+def test_existing_private_identity_actor_discovery_migrates_encryption_keys(client):
   identity = common_routes._load_identity()
   signing_public = identity["public_key_b64"]
   identity.pop("enc_private_key_b64")
   identity.pop("enc_public_key_b64")
   common_routes._save_identity(identity)
 
-  migrated = common_routes._load_identity()
+  # Legacy private conversations retain key discovery after a cold-cache
+  # actor fetch, even when their identity predates encrypted DMs.
+  actor = client.get("/api/common/actor")
+  assert actor.status_code == 200
+  migrated = json.loads(common_routes._identity_path().read_text())
   assert migrated["public_key_b64"] == signing_public
   assert len(base64.b64decode(migrated["enc_private_key_b64"])) == 32
   assert len(base64.b64decode(migrated["enc_public_key_b64"])) == 32
-  persisted = json.loads(common_routes._identity_path().read_text())
-  assert persisted["enc_public_key_b64"] == migrated["enc_public_key_b64"]
+  assert actor.json()["encryption_key"]["key_b64"] == migrated["enc_public_key_b64"]
 
 
 def test_actor_card_publishes_join_date_and_only_public_apps(
@@ -659,9 +814,8 @@ async def test_concurrent_duplicate_request_delivery_counts_once(db):
   assert meta["unread"] == 0
 
 
-@pytest.mark.parametrize("decision", ["decline", "block"])
-def test_dismissed_dm_requests_retain_later_messages_quietly(
-  client, db, auth, monkeypatch, decision,
+def test_declined_dm_request_retains_later_messages_quietly(
+  client, db, auth, monkeypatch,
 ):
   app = _install_common_app(db)
   private_b64, public_b64 = _make_peer_keypair()
@@ -673,16 +827,131 @@ def test_dismissed_dm_requests_retain_later_messages_quietly(
   first = _signed_message(private_b64, text="first")
   assert client.post("/api/common/inbox", json=first).json()["status"] == "pending"
   assert client.post(
-    f"/api/common/requests/dm/{PEER_HOST}/{decision}", headers=auth,
-  ).json() == {"status": "declined" if decision == "decline" else "blocked"}
+    f"/api/common/requests/dm/{PEER_HOST}/decline", headers=auth,
+  ).json() == {"status": "declined"}
   later = _signed_message(private_b64, text="retained, still quiet")
   assert client.post("/api/common/inbox", json=later).json()["status"] == "pending"
   convo = common_routes._conversation_dir(app, PEER_HOST)
   assert (convo / "msgs" / f"{later['id']}.json").is_file()
   meta = json.loads((convo / "meta.json").read_text())
-  assert meta["request_status"] == ("declined" if decision == "decline" else "blocked")
+  assert meta["request_status"] == "declined"
   assert meta["unread"] == 0
   assert notified == []
+
+
+def test_blocked_dm_discards_message_and_attachment_without_any_state_change(
+  client, db, auth, monkeypatch,
+):
+  app = _install_common_app(db)
+  private_b64, public_b64 = _make_peer_keypair()
+  _seed_peer_actor_cache(public_b64)
+  notified = []
+  monkeypatch.setattr(
+    common_routes.push, "notify_owner", lambda *_args, **_kwargs: notified.append(True)
+  )
+  first = _signed_message(private_b64, text="retained history")
+  assert client.post("/api/common/inbox", json=first).json()["status"] == "pending"
+  assert client.post(
+    f"/api/common/requests/dm/{PEER_HOST}/block", headers=auth,
+  ).json() == {"status": "blocked"}
+
+  convo = common_routes._conversation_dir(app, PEER_HOST)
+  version_path = common_routes._app_data_dir(app) / "state" / "version.json"
+  before = {
+    path.relative_to(common_routes._app_data_dir(app)).as_posix(): path.read_bytes()
+    for path in common_routes._app_data_dir(app).rglob("*") if path.is_file()
+  }
+  blocked = _signed_message(
+    private_b64, text="", attachment=_attachment(b"must be discarded")
+  )
+  response = client.post("/api/common/inbox", json=blocked)
+  # Do not reveal the owner's local block decision to the remote sender.
+  assert response.json() == {"status": "delivered"}
+  after = {
+    path.relative_to(common_routes._app_data_dir(app)).as_posix(): path.read_bytes()
+    for path in common_routes._app_data_dir(app).rglob("*") if path.is_file()
+  }
+  assert after == before
+  assert (convo / "msgs" / f"{first['id']}.json").is_file()
+  assert not (convo / "msgs" / f"{blocked['id']}.json").exists()
+  assert not (convo / "media" / f"{blocked['id']}.png").exists()
+  assert json.loads((convo / "meta.json").read_text())["request_status"] == "blocked"
+  assert version_path.read_bytes() == before["state/version.json"]
+  assert notified == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("block_first", [True, False])
+async def test_block_decision_and_inbound_store_have_one_lock_order(
+  db, block_first,
+):
+  """A raced message is wholly before Block or wholly discarded after it."""
+  import asyncio
+  app = _install_common_app(db)
+  first = {
+    "id": str(uuid.uuid4()), "dir": "in", "peer": PEER_HOST,
+    "text": "request", "sent_at": time.time(), "status": "delivered",
+  }
+  assert await common_routes._store_message(db, app, PEER_HOST, first) == (
+    True, "pending",
+  )
+  raced = {
+    "id": str(uuid.uuid4()), "dir": "in", "peer": PEER_HOST,
+    "text": "raced", "sent_at": time.time(), "status": "delivered",
+  }
+  lock = common_routes.fs_locks.app_storage_lock(app.id)
+  async with lock:
+    if block_first:
+      decision = asyncio.create_task(
+        common_routes._set_dm_request_state(app, PEER_HOST, "blocked")
+      )
+      delivery = asyncio.create_task(
+        common_routes._store_message(db, app, PEER_HOST, raced)
+      )
+    else:
+      delivery = asyncio.create_task(
+        common_routes._store_message(db, app, PEER_HOST, raced)
+      )
+      decision = asyncio.create_task(
+        common_routes._set_dm_request_state(app, PEER_HOST, "blocked")
+      )
+    await asyncio.sleep(0)
+    assert not decision.done()
+    assert not delivery.done()
+
+  created, state = await delivery
+  assert await decision == "blocked"
+  raced_path = common_routes._conversation_dir(
+    app, PEER_HOST
+  ) / "msgs" / f"{raced['id']}.json"
+  assert (created, state, raced_path.exists()) == (
+    (False, "blocked", False) if block_first
+    else (True, "pending", True)
+  )
+
+  # Once the decision wins, concurrent later traffic is all discarded.
+  later = [
+    {
+      "id": str(uuid.uuid4()), "dir": "in", "peer": PEER_HOST,
+      "text": f"later {index}", "sent_at": time.time(),
+      "status": "delivered",
+    }
+    for index in range(3)
+  ]
+  before_version = (
+    common_routes._app_data_dir(app) / "state" / "version.json"
+  ).read_bytes()
+  results = await asyncio.gather(*(
+    common_routes._store_message(db, app, PEER_HOST, record)
+    for record in later
+  ))
+  assert results == [(False, "blocked")] * len(later)
+  assert all(not (
+    raced_path.parent / f"{record['id']}.json"
+  ).exists() for record in later)
+  assert (
+    common_routes._app_data_dir(app) / "state" / "version.json"
+  ).read_bytes() == before_version
 
 
 def test_inbox_rejects_bad_signature(client, db):
