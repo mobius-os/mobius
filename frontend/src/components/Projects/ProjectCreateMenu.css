@@ -108,6 +108,9 @@
 .project-create-menu__sources { display: grid; gap: 7px; min-height: 120px; }
 .project-create-menu__source-list {
   display: grid;
+  /* Scroll long lists without compressing rows below their wrapped content. */
+  grid-auto-rows: max-content;
+  align-content: start;
   gap: 2px;
   max-height: min(430px, calc(100vh - 210px));
   overflow: auto;
@@ -140,7 +143,7 @@
   background: var(--surface);
 }
 .project-create-menu__source-list button:disabled { cursor: default; opacity: .58; }
-.project-create-menu__source-list button > span:last-child { min-width: 0; display: grid; gap: 2px; }
+.project-create-menu__source-list button > span:last-child { min-width: 0; display: grid; gap: 2px; overflow-wrap: anywhere; }
 .project-create-menu__source-list small { display: block; }
 .project-create-menu__state { margin: 18px 9px !important; color: var(--muted) !important; text-align: center; }
 
