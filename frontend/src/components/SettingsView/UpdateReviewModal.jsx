@@ -41,7 +41,7 @@ export default function UpdateReviewModal({
         const detail = body?.detail
         throw new Error(detail?.message || (typeof detail === 'string' && detail) || 'Couldn’t verify this update.')
       }
-      if (typeof body?.actionable !== 'boolean') {
+      if (typeof body?.actionable !== 'boolean' || !Array.isArray(body?.activation?.required_actions)) {
         throw new Error('The server has not loaded these update controls yet. Close this review and use Restart server in Settings.')
       }
       setPreview(body)

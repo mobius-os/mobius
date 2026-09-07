@@ -289,28 +289,6 @@ async def rebuild_status(
 
 
 @router.post(
-  "/rebuild",
-  dependencies=[Depends(reject_cross_site)],
-  status_code=202,
-)
-async def rebuild_container(
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
-):
-  """Request replacement of this installation's fixed app container.
-
-  The empty owner action is intentional: deployment identity, target source,
-  and provider arguments belong to the external controller, never the browser.
-  """
-  try:
-    return await deployment_control.request_rebuild()
-  except deployment_control.DeploymentControlError as exc:
-    raise HTTPException(
-      status_code=exc.status_code,
-      detail={"code": exc.code, "message": exc.message},
-    ) from exc
-
-
-@router.post(
   "/rebuild/prepare",
   dependencies=[Depends(reject_cross_site)],
   status_code=202,

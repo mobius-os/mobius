@@ -65,6 +65,7 @@ export function platformUpdateStatusLabel(platform) {
   }
   if (state === 'conflict') return 'Update blocked'
   if (state === 'rolled_back') return 'Update needs repair'
+  if (requiresAgentActivation(platform?.activation)) return 'Update needs help'
   if (activationLevel !== 'live' && available) return 'More updates available'
   if (
     activationLevel === 'server_restart'
@@ -97,9 +98,16 @@ export function deploymentKindLabel(activation) {
   return deploymentKind(activation) === 'railway' ? 'Railway' : 'Self-hosted'
 }
 
-/** An image-level update is finished by the reviewed container rebuild on both deployments. */
+/** External actions remain independent even when a release also needs an image. */
+export function requiresAgentActivation(activation) {
+  const routine = new Set(['server_restart', 'dependency_sync', 'image_rebuild'])
+  return activation?.required_actions?.some(action => !routine.has(action)) || false
+}
+
+/** Replacement handles image and in-container work, never external configuration. */
 export function reviewedUpdateUsesContainerRebuild(preview) {
-  return preview?.activation?.level === 'image_rebuild'
+  const activation = preview?.activation
+  return !!activation?.required_actions?.includes('image_rebuild') && !requiresAgentActivation(activation)
 }
 
 export function platformActivationLabel(activation) {

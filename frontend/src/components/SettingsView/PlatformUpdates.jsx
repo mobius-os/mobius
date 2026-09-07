@@ -1,7 +1,7 @@
 /** One next action for updating Möbius, with visible versions and a direct restart control. */
 import { useEffect, useRef, useState } from 'react'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
-import { platformUpdateStatusLabel, platformActivationLevel } from '../../lib/platformUpdateState.js'
+import { platformUpdateStatusLabel, platformActivationLevel, reviewedUpdateUsesContainerRebuild } from '../../lib/platformUpdateState.js'
 import { rebuildIsActive, rebuildProgressMessage } from '../../lib/containerRebuild.js'
 import { containerVersionIdentity, platformVersionIdentity } from '../../lib/platformVersionIdentity.js'
 import { formatUpstreamCommitDate } from '../../lib/platformProvenance.js'
@@ -20,7 +20,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
   const restoreFocus = useRef(false)
   const level = platformActivationLevel(platform)
   const restartNeeded = ['server_restart', 'dependency_sync'].includes(level)
-  const imageNeeded = level === 'image_rebuild'
+  const imageNeeded = reviewedUpdateUsesContainerRebuild(platform)
   const conflict = platform?.state === 'conflict'
   const available = platform?.available || platform?.newer_updates_available
   const unavailable = !platform || platform.status_unavailable

@@ -5,8 +5,17 @@ official image. **Finish update** selects the already-applied release’s image;
 it remains available after a failed replacement. Source is installed through
 one shared Apply path before either a self-hosted or Railway cutover. Startup
 only recovers interrupted work and runs installed source plus local changes;
-it never fetches or selects a newer release. The separate maintenance rebuild
-also uses the installed release, not the latest discovery tag.
+it never fetches or selects a newer release. There is no separate unreviewed
+maintenance-rebuild action: replacement requests enter through the exact plan
+returned by the update review, including retries of unfinished updates.
+
+The classifier reports independent `required_actions`; its aggregate `level`
+is a display summary, not proof that one action covers the others. An image
+replacement may also satisfy in-container restart/dependency work, but never
+Compose/Railway configuration, proxy policy, or the installed host helper.
+Mixed updates require agent assistance before replacement. This is checked
+again at the mutation boundary, not only in Settings. Image verification must
+not clear outstanding external activation work.
 
 The Host `deploy-prod.sh` freezes the source commit from the image that passed
 scratch preflight, exports that exact commit from its complete build checkout,

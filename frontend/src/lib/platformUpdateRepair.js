@@ -1,7 +1,7 @@
 /** Turns update evidence into an agent handoff, without interpreting file contents or bypassing checks. */
 import { redactDiagnosticText } from './diagnosticRedaction.js'
+import { requiresAgentActivation } from './platformUpdateState.js'
 
-const IN_PRODUCT = new Set(['live', 'server_restart', 'dependency_sync', 'image_rebuild'])
 const REVIEW_AGAIN = new Set(['update_plan_stale', 'update_plan_invalid', 'activation_changed'])
 
 export function platformUpdateRepairReason({ preview, platform, rebuild, error = '', errorCode = '' } = {}) {
@@ -10,7 +10,7 @@ export function platformUpdateRepairReason({ preview, platform, rebuild, error =
     return 'This update needs help preserving your local changes.'
   }
   const level = (preview || platform)?.activation?.level
-  if (level && !IN_PRODUCT.has(level)) {
+  if (requiresAgentActivation((preview || platform)?.activation) || errorCode === 'external_activation_required') {
     return 'This update needs a deployment change. Möbius can help prepare it safely.'
   }
   const target = preview?.target_sha || platform?.contained_upstream_sha

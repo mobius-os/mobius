@@ -15,7 +15,7 @@ for (const deployment of ['railway', 'self_hosted']) {
 
 test('routine activation and stale reviews stay with their UI actions', () => {
   for (const level of ['live', 'server_restart', 'dependency_sync', 'image_rebuild']) {
-    assert.equal(platformUpdateRepairReason({ preview: { activation: { level }, blocking_paths: [] } }), null)
+    assert.equal(platformUpdateRepairReason({ preview: { activation: { level, required_actions: level === 'live' ? [] : [level] }, blocking_paths: [] } }), null)
   }
   for (const errorCode of ['update_plan_stale', 'update_plan_invalid', 'activation_changed']) {
     assert.equal(platformUpdateRepairReason({ error: 'review changed', errorCode }), null)
@@ -24,7 +24,7 @@ test('routine activation and stale reviews stay with their UI actions', () => {
 
 test('external deployment work and failed validation earn agent help', () => {
   for (const level of ['proxy_reload', 'container_recreate', 'host_maintenance']) {
-    assert.match(platformUpdateRepairReason({ platform: { activation: { level } } }), /deployment change/)
+    assert.match(platformUpdateRepairReason({ platform: { activation: { level, required_actions: level === 'live' ? [] : [level] } } }), /deployment change/)
   }
   assert.match(platformUpdateRepairReason({ platform: { state: 'rolled_back' } }), /attention/)
   assert.match(platformUpdateRepairReason({ error: 'controller failed' }), /attention/)
@@ -55,4 +55,13 @@ test('a failed unfinished replacement remains actionable after reopening Setting
     assert.equal(platformUpdateRepairReason({ platform, rebuild: { expected_sha: 'old', state } }), null)
     assert.equal(platformUpdateRepairReason({ platform: { ...platform, activation: { level: 'live' } }, rebuild: { expected_sha: 'installed', state } }), null)
   }
+})
+
+test('mixed activation remains agent work regardless of its display level', () => {
+  for (const external of ['proxy_reload', 'container_recreate', 'host_maintenance']) {
+    const preview = { activation: { level: 'image_rebuild', required_actions: ['image_rebuild', external] } }
+    assert.match(platformUpdateRepairReason({ preview }), /deployment change/)
+    assert.deepEqual(platformUpdateRepairEvidence({ preview }).activation.required_actions, ['image_rebuild', external])
+  }
+  assert.match(platformUpdateRepairReason({ errorCode: 'external_activation_required' }), /deployment change/)
 })

@@ -1192,38 +1192,6 @@ def reviewed_container_rebuild_plan(
     )
 
 
-def official_image_rebuild_blockers(
-  target_sha: str,
-  repo: Path = PLATFORM_REPO,
-) -> list[str]:
-  """Fetch and compare local image drift against one GHCR release revision.
-
-  GHCR is authoritative for what can be deployed, while Git supplies the trees
-  needed to prove local edits will not be lost. A newly published image may be
-  ahead of this checkout's last fetch, so refresh the canonical ref before
-  computing the local side from the merge base.
-  """
-  if not re.fullmatch(r"[0-9a-f]{40}", target_sha or ""):
-    raise PlatformUpdateError("image_release_invalid")
-  with _reconcile_flock():
-    if _rev(repo, target_sha) != target_sha:
-      if not _has_origin(repo) or not _fetch(
-        repo, refspec=OWNER_UPDATE_FETCH_REFSPEC,
-      ):
-        raise PlatformUpdateError("image_release_source_unavailable")
-    if _rev(repo, target_sha) != target_sha:
-      raise PlatformUpdateError("image_release_source_unavailable")
-    current = _rev(repo, _local_branch(repo))
-    base = _git(
-      "merge-base", current, target_sha, repo=repo, check=False,
-    ).stdout.strip()
-    if not current or not base:
-      raise PlatformUpdateError("image_release_source_unavailable")
-    return container_replacement_blockers(
-      target_sha, repo, local_change_base=base,
-    )
-
-
 def _write_activation_marker(
   target_sha: str,
   paths: list[str],
@@ -1463,7 +1431,7 @@ def _complete_boot_activation(repo: Path) -> None:
   """Retire activation work this boot can prove complete.
 
   A fresh server always satisfies ``server_restart``.  A new image identity
-  that contains the applied target also proves image/recreate work complete.
+  that contains the applied target proves only matching image work complete.
   Proxy reload and host maintenance remain explicit because the container
   cannot observe or control those external planes.
   """
@@ -2890,7 +2858,7 @@ def platform_update_preview(
       target_sha=target_sha,
       image_digest=image_digest,
     )
-    if preview["activation"]["level"] == "image_rebuild":
+    if "image_rebuild" in preview["activation"]["required_actions"]:
       current, target = preview["current_sha"], preview["target_sha"]
       base = _git(
         "merge-base", current, target, repo=repo, check=False,

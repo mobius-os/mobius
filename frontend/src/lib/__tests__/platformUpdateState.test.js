@@ -50,11 +50,11 @@ test('the deployment badge names an unresolved deployment self-hosted', () => {
 
 test('reviewed image updates rebuild directly on both deployments', () => {
   assert.equal(reviewedUpdateUsesContainerRebuild({
-    activation: { deployment: 'railway', level: 'image_rebuild' },
+    activation: { deployment: 'railway', level: 'image_rebuild', required_actions: ['image_rebuild'] },
   }), true)
   // Self-hosted image updates now also drive the rebuild from the update flow.
   assert.equal(reviewedUpdateUsesContainerRebuild({
-    activation: { deployment: 'self_hosted', level: 'image_rebuild' },
+    activation: { deployment: 'self_hosted', level: 'image_rebuild', required_actions: ['image_rebuild'] },
   }), true)
   assert.equal(reviewedUpdateUsesContainerRebuild({
     activation: { deployment: 'railway', level: 'server_restart' },
@@ -87,7 +87,7 @@ test('a clean apply consumes the reviewed target but preserves restart readiness
 
 test('an image-required apply projects the external activation contract', () => {
   const activation = {
-    level: 'image_rebuild',
+    level: 'image_rebuild', required_actions: ['image_rebuild'],
     guidance: ['Rebuild and deploy.'],
   }
   const projected = platformStatusFromApply(
@@ -242,4 +242,14 @@ test('a legacy deployment flag does not hide an available in-app update', () => 
     }),
     'New update available',
   )
+})
+
+test('routine image replacement requires complete action evidence without external work', () => {
+  for (const external of ['proxy_reload', 'container_recreate', 'host_maintenance']) {
+    const activation = { level: 'image_rebuild', required_actions: ['image_rebuild', external] }
+    assert.equal(reviewedUpdateUsesContainerRebuild({ activation }), false)
+    assert.equal(platformUpdateStatusLabel({ activation }), 'Update needs help')
+  }
+  assert.equal(reviewedUpdateUsesContainerRebuild({ activation: { level: 'image_rebuild' } }), false)
+  assert.equal(reviewedUpdateUsesContainerRebuild({ activation: { level: 'image_rebuild', required_actions: ['server_restart', 'dependency_sync', 'image_rebuild'] } }), true)
 })

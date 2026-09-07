@@ -7,7 +7,7 @@ export default function UpdateRepairAction({ preview, platform, rebuild, error, 
   const evidence = platformUpdateRepairEvidence({ preview, platform, rebuild, error, errorCode })
   const fingerprint = errorRecoveryFingerprint('platform-update', JSON.stringify({
     release: evidence.reviewed_release, installed: evidence.installed_release,
-    paths: evidence.blocking_paths, level: evidence.activation?.level,
+    paths: evidence.blocking_paths, actions: evidence.activation?.required_actions,
     code: evidence.error_code, error: evidence.error,
   }))
   const { repair, repairActive, attempt } = useAgentRepair({
