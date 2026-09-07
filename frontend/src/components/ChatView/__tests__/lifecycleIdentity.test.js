@@ -35,3 +35,25 @@ test('resume, pause and errors share icon geometry without sharing meaning', () 
  assert.notEqual(icon(paused), icon(failed))
  assert.match(resumed, /Resumed manually/); assert.match(paused, /Paused/); assert.match(failed, /role="alert"/)
 })
+
+test('composer identity stays outside truncated text and disclosure remains explicit', async () => {
+ const Rail = await load('ProgressRail')
+ const Identity = await load('LifecycleIcon')
+ const Draft = await load('GoalDraftChip')
+ const rail = render(h(Rail, { items: [{
+   key: 'sample', label: 'A very long objective', expandable: true,
+   icon: h(Identity, { kind: 'goal' }),
+ }], ariaLabel: 'Progress' }))
+ assert.ok(rail.indexOf('chat__lifecycle-icon') < rail.indexOf('chat__progress-step-label'))
+ assert.match(rail, /aria-expanded="false"/)
+ assert.match(rail, /chat__progress-chevron/)
+ assert.ok(icon(render(h(Draft, { objective: 'Draft objective' }))))
+ const { WaitCard } = await vite.ssrLoadModule('/src/components/ChatView/WaitingChip.jsx')
+ const wait = render(h(WaitCard, {
+   wait: { id: 'sample', kind: 'condition', description: 'Review approved' },
+   expanded: false, onToggle: () => {}, onCancel: () => {},
+ }))
+ assert.ok(icon(wait))
+ assert.ok(wait.indexOf('chat__lifecycle-icon') < wait.indexOf('chat__wait-text'))
+ assert.match(wait, /aria-expanded="false"/)
+})

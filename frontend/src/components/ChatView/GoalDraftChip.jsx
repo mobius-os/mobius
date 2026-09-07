@@ -1,3 +1,4 @@
+import LifecycleIcon from './LifecycleIcon.jsx'
 /* GoalDraftChip previews the goal a `/goal ` composer draft will start, so the
    goal visual stays open while the owner types the objective. */
 
@@ -17,6 +18,7 @@ export default function GoalDraftChip({ objective }) {
       aria-live="polite"
       aria-label={hasObjective ? `New goal: ${objective}` : 'Composing a new goal'}
     >
+      <LifecycleIcon kind="goal" />
       <span className="chat__goal-draft-tag" aria-hidden="true">Goal</span>
       <span
         className={`chat__goal-draft-text${

@@ -1,8 +1,9 @@
 /* WaitingChip renders every self-resuming handoff above the composer. The
    collapsed row stays glanceable; expansion explains ownership and cost. */
 
+import LifecycleIcon from './LifecycleIcon.jsx'
 import { useState } from 'react'
-import { ChevronDown, Clock, X } from '@openai/apps-sdk-ui/components/Icon'
+import { ChevronDown, X } from '@openai/apps-sdk-ui/components/Icon'
 import {
   helperPresentation,
   resourcePausePresentation,
@@ -42,10 +43,8 @@ function HandoffCard({
         onPointerDown={(event) => event.preventDefault()}
         onClick={onToggle}
       >
-        <span className="chat__wait-tag" aria-hidden="true">
-          <Clock width={14} height={14} />
-          Waiting
-        </span>
+        <LifecycleIcon kind="wait" />
+        <span className="chat__wait-tag" aria-hidden="true">Waiting</span>
         <span className="chat__wait-text">{text}</span>
         <span className="chat__wait-meta">{meta}</span>
         <ChevronDown
