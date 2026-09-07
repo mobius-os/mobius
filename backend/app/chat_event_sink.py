@@ -1145,6 +1145,19 @@ class ChatEventSink:
       raise
     # Committed durably — now (and only now) show the card.
     self.bc.publish(event)
+    # A continuation owner-input card (request_question / request_approval /
+    # secure-input) is the TERMINAL action of the turn: its receipt returns to
+    # the model immediately (unlike native AskUserQuestion, which parks on an
+    # awaited future in question_bridge and never sets response_mode), so
+    # nothing at the provider level stops the model from emitting more text or
+    # tools after the card. End the live turn at its source now, so the card is
+    # genuinely the last thing in the turn. The owner's saved answer resumes the
+    # chat in a later turn; the durable pending-question marker owns that
+    # resumption, so this is a clean completion, not a Stop or a resumable
+    # pause. Gated strictly on the continuation marker so the native path — which
+    # this same method also serves — is never double-interrupted.
+    if event.get("response_mode") == "continuation":
+      await self._finish_turn_after_owner_card()
     # The card is persisted: record the save time so a subsequent throttled
     # snapshot in publish() doesn't redundantly re-commit the same state
     # immediately after.
@@ -1167,6 +1180,35 @@ class ChatEventSink:
           )
 
       task.add_done_callback(_settle_checkpoint)
+
+  async def _finish_turn_after_owner_card(self) -> None:
+    """End the live turn once a continuation owner-input card has committed.
+
+    Provider-agnostic and best-effort: look up whichever runner handle owns
+    this chat and, if it exposes the card-finish seam, ask it to cut the turn
+    right after the card. A handle that predates this seam simply keeps the
+    older prompt-only "end your turn after the card" contract. Runs on the
+    backend event loop concurrently with the parked runner — the same topology
+    as steering — and only signals the interrupt; it never awaits turn drain
+    (the turn cannot end until the in-flight card tool returns the receipt that
+    triggered this call).
+    """
+    from app.runner_registry import registry
+    for handle in registry.get_handles(self.chat_id):
+      finish = getattr(handle, "finish_after_owner_card", None)
+      if not callable(finish):
+        continue
+      try:
+        await finish()
+      except asyncio.CancelledError:
+        raise
+      except Exception:
+        _get_logger().warning(
+          "finish-after-owner-card failed chat_id=%s kind=%s",
+          self.chat_id,
+          getattr(handle, "kind", "?"),
+          exc_info=True,
+        )
 
 
 async def commit_steer_cut(

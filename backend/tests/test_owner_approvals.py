@@ -73,6 +73,76 @@ def _finish(chat, sink):
   return asyncio.run(finish())
 
 
+class _FakeCardHandle:
+  """A registered runner handle that records card-finish requests."""
+
+  def __init__(self, chat_id):
+    from app.runner_registry import RunnerKind
+    self.chat_id = chat_id
+    self.kind = RunnerKind.CLAUDE_SDK
+    self.finishes = 0
+
+  async def finish_after_owner_card(self):
+    self.finishes += 1
+
+  async def stop(self, timeout: float = 2.0) -> bool:
+    return True
+
+  async def force_stop(self, timeout: float = 5.0) -> bool:
+    return True
+
+
+def test_continuation_card_commit_ends_the_active_turn(
+  client, chat, approval_run,
+):
+  """Saving a continuation owner-input card ends the live turn at its source, so
+  the model cannot emit text or tools after the card. The commit awaits the
+  card-finish before returning the receipt, so it has fired by the time the
+  route responds."""
+  from app.runner_registry import registry
+  handle = _FakeCardHandle(chat.id)
+  registry.register(handle)
+  try:
+    res = _ask(client, chat, approval_run)
+    assert res.status_code == 200, res.text
+    assert res.json()["state"] == "waiting_for_owner"
+    assert handle.finishes == 1
+  finally:
+    registry.unregister(chat.id, handle.kind)
+
+
+def test_native_question_event_does_not_end_the_active_turn(chat, approval_run):
+  """The native AskUserQuestion path shares `publish_question` but carries no
+  `response_mode`: it parks on an awaited future in question_bridge and must NOT
+  be interrupted here. Only continuation cards end the turn."""
+  from app.runner_registry import registry
+  sink = approval_run[0]
+  handle = _FakeCardHandle(chat.id)
+  registry.register(handle)
+
+  async def go():
+    await sink.publish_question({
+      "type": "question",
+      "question_id": "native-1",
+      "questions": [{
+        "question": "Pick a color",
+        "options": [
+          {"label": "Blue", "description": "b"},
+          {"label": "Red", "description": "r"},
+        ],
+      }],
+    })
+
+  try:
+    asyncio.run(go())
+    assert handle.finishes == 0
+    block = _row(chat.id)[1][-1]["blocks"][-1]
+    assert block["question_id"] == "native-1"
+    assert "response_mode" not in block
+  finally:
+    registry.unregister(chat.id, handle.kind)
+
+
 def test_approval_saves_before_receipt_without_a_waiting_future(
   client, chat, approval_run,
 ):

@@ -712,6 +712,13 @@ class ActiveCodexTurn:
     # validation distinguish them without treating a deliberate Stop as an
     # error.
     self._interrupt_requested = False
+    # Set synchronously before finish_after_owner_card()'s first await. A
+    # continuation owner-input card ends the turn on our initiative — like Stop,
+    # terminal validation must read it as "we did this to ourselves" (a clean
+    # TurnStatus.interrupted, not a provider failure) — but it is NOT Stop: it
+    # never clears the pending queue or bumps the chat generation, because the
+    # chat is meant to resume from the owner's answer.
+    self._owner_card_requested = False
     self._finished: asyncio.Future[None] = (
       asyncio.get_running_loop().create_future()
     )
@@ -727,11 +734,44 @@ class ActiveCodexTurn:
       self.turn is not None
       and not self._finished.done()
       and not self._interrupt_requested
+      and not self._owner_card_requested
     )
 
   @property
   def interrupt_requested(self) -> bool:
     return self._interrupt_requested
+
+  @property
+  def owner_card_requested(self) -> bool:
+    """Whether a continuation owner-input card ended this turn on our side."""
+    return self._owner_card_requested
+
+  async def finish_after_owner_card(self) -> None:
+    """End the turn right after a continuation owner-input card commits.
+
+    The card path returns its receipt to the model immediately (unlike native
+    AskUserQuestion, which parks), so nothing stops the model from emitting more
+    text or tools after the card. Interrupt the live turn now so the card is the
+    turn's last action. Distinct from Stop: it marks only `_owner_card_requested`
+    (folded into `stop_requested()` so terminal validation treats the resulting
+    TurnStatus.interrupted as a clean, error-free completion) and never runs
+    Stop's queue-clear / generation-bump, so the owner's saved answer resumes the
+    chat normally. Signal-only — it does not await turn drain, which cannot
+    complete until the in-flight card tool returns the receipt that triggered
+    this call.
+    """
+    if (
+      self._finished.done()
+      or self._interrupt_requested
+      or self._owner_card_requested
+      or self.turn is None
+    ):
+      return
+    self._owner_card_requested = True
+    try:
+      await self.turn.interrupt()
+    except Exception as exc:
+      log.warning("codex owner-card interrupt raised: %s", exc)
 
   async def interrupt(self) -> None:
     """Signals the live turn and waits for runner-side drain."""
@@ -1788,9 +1828,16 @@ async def _run_codex_sdk_turn(
     chat is still Möbius ending this one. That leg can be true before
     `active_turn` exists, which is deliberate — a teardown during startup is
     no more the provider's fault than one mid-stream.
+
+    Also includes a continuation owner-input card ending the turn: that too is
+    Möbius, not the provider, ending the turn, so its TurnStatus.interrupted is
+    a clean completion rather than a failure. Unlike Stop, the card path does
+    not clear the pending queue or bump the generation — the chat resumes from
+    the owner's saved answer.
     """
     return bool(
       (active_turn is not None and active_turn.interrupt_requested)
+      or (active_turn is not None and active_turn.owner_card_requested)
       or abort_requested()
     )
 

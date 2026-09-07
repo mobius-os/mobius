@@ -460,7 +460,7 @@ class ActiveClaudeClient:
     # runner defuses `stop_reason == "interrupt"` only when an owner is set (an
     # unrequested abort stays a visible error), and only a "stop" owner keeps
     # the deliberate Stop's own pause note. Stop always wins over a steer.
-    self._interrupt_owner: Literal["steer", "stop"] | None = None
+    self._interrupt_owner: Literal["steer", "stop", "card"] | None = None
     # FIFO of mid-turn steer texts: two rapid sends must both reach Claude
     # (both are already persisted to the transcript), so a single slot would
     # silently drop the first. The runner drains the whole list on interrupt.
@@ -563,6 +563,37 @@ class ActiveClaudeClient:
       await self._client.interrupt()
     return True
 
+  async def finish_after_owner_card(self) -> None:
+    """End the turn right after a continuation owner-input card commits.
+
+    A saved question / approval / secure-input card is the terminal action of
+    the turn: the owner's answer resumes the chat in a LATER turn, so the model
+    must not emit any more text or tools after the card. That path returns a
+    receipt to the model immediately (unlike native `AskUserQuestion`, which
+    parks in `can_use_tool`), so nothing at the SDK level stops the model from
+    continuing — this fires the same soft interrupt `steer` uses to cut the
+    in-flight generation at its source.
+
+    Signal-only, exactly like `steer`: it never awaits `_finished` (the turn
+    cannot end until the in-flight card tool returns the receipt that triggered
+    this call, so awaiting drain here would deadlock). Tagged `card` so the
+    terminal branch classifies the result as a clean completion — no steer
+    requery (`pending_steer` stays empty) and no resumable "Paused" note; the
+    chat's durable pending-question marker already owns resumption. Defers to a
+    Stop or steer that already owns this turn's interrupt so their semantics
+    win.
+    """
+    if self._finished.done():
+      return
+    if self._interrupt_owner is not None:
+      return
+    self._interrupt_owner = "card"
+    # Collapse a steer that races the card-commit drain window into this cut
+    # rather than firing a second interrupt (mirrors `steer`); the terminal
+    # branch clears the flag.
+    self._interrupt_in_flight = True
+    await self._client.interrupt()
+
   async def interrupt(self) -> None:
     """Interrupts the live run and waits for runner-side drain.
 
@@ -611,6 +642,11 @@ class ActiveClaudeClient:
   def interrupt_issued(self) -> bool:
     """Whether we (a steer or a Stop) issued `client.interrupt()` this turn."""
     return self._interrupt_owner is not None
+
+  @property
+  def owner_card_interrupt(self) -> bool:
+    """Whether this turn's interrupt is a continuation owner-input card end."""
+    return self._interrupt_owner == "card"
 
   async def stop(self, timeout: float = 2.0) -> bool:
     """Interrupts the SDK run and waits up to `timeout` seconds."""
@@ -1493,9 +1529,17 @@ async def run_claude_sdk_turn(
             # whose interrupt raced turn-end (text already re-queried, nothing
             # left to requery) ends the turn here as a resumable "Paused".
             terminal["error"] = None
-            terminal["terminal_status"] = "interrupted"
-            if not active_client.interrupt_requested:
-              terminal["resume_incomplete"] = True
+            if active_client.owner_card_interrupt:
+              # A continuation owner-input card is the turn's NATURAL terminal:
+              # the owner's saved answer resumes the chat, so this is a clean
+              # completion — never a resumable "Paused" (which would auto-offer
+              # Resume and race the pending-question wait) and never a steer
+              # requery (`pending_steer` is empty on this path).
+              terminal["terminal_status"] = "completed"
+            else:
+              terminal["terminal_status"] = "interrupted"
+              if not active_client.interrupt_requested:
+                terminal["resume_incomplete"] = True
           # Terminal result: the interrupt cycle (if any) is closed, so a
           # fresh boundary cut may fire on a later turn.
           active_client._interrupt_in_flight = False

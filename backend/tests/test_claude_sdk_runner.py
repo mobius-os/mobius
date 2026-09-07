@@ -457,6 +457,79 @@ async def test_steer_interrupt_racing_turn_end_is_a_resumable_pause(
   assert result["resume_incomplete"] is True
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_id", [None, "sess-1"])
+async def test_owner_card_commit_ends_turn_as_clean_completion(
+  monkeypatch, session_id,
+):
+  """A committed continuation owner-input card ends the turn at its source.
+
+  The card path returns its receipt to the model immediately, so nothing at the
+  SDK level stops the model from emitting trailing text or tools after the card.
+  `finish_after_owner_card` fires the same soft interrupt `steer` uses, tagged
+  `card`, so the interrupt terminal is classified as a CLEAN completion: no
+  requery (`pending_steer` is empty), no resumable "Paused" note, and the
+  pre-card text is the last thing in the turn. On a resume turn the `card` owner
+  must NOT masquerade as the synthetic-no-op auto-requery (which keys on an
+  interrupt-free clean end) and re-run the original prompt."""
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      if len(self.queries) == 1:
+        yield _stream_delta("text_delta", text="here are your options")
+        handle = registry.get_handle("card-chat", RunnerKind.CLAUDE_SDK)
+        await handle.finish_after_owner_card()
+        assert handle.owner_card_interrupt is True
+        yield _interrupt_result(session_id=session_id or "sess-1")
+        return
+      raise AssertionError("a card end must never requery")
+
+  clients = _install_fake_client(monkeypatch, _Client)
+  bus = _ChatBus()
+  bus.assistant_blocks = []
+
+  result = await _run_turn(
+    "card-chat", bc=bus, prompt="ask me a question", session_id=session_id,
+  )
+
+  client = clients[0]
+  # One interrupt (the card end); the original prompt is the ONLY query — the
+  # card end never requeries.
+  assert client.interrupts == 1
+  assert client.disconnected is True
+  assert client.queries == ["ask me a question"]
+  # A continuation card is a clean completion, not a resumable pause: the raw
+  # "Execution interrupted." provider error is defused and no Resume is offered.
+  assert result["error"] is None
+  assert result["terminal_status"] == "completed"
+  assert "resume_incomplete" not in result
+  # The pre-card text streamed; nothing followed the card.
+  assert [e for e in bus.events if e["type"] == "text"] == [
+    {"type": "text", "content": "here are your options"},
+  ]
+
+
+@pytest.mark.asyncio
+async def test_owner_card_finish_defers_to_an_owner_that_already_interrupted():
+  """A Stop or steer that already owns this turn's interrupt keeps its
+  semantics: a later card commit must not override the owner or fire a second
+  interrupt."""
+  class _Client:
+    def __init__(self):
+      self.interrupts = 0
+
+    async def interrupt(self):
+      self.interrupts += 1
+
+  client = _Client()
+  handle = ActiveClaudeClient(client, chat_id="card-defers")
+  # A Stop already owns the cut.
+  handle._interrupt_owner = "stop"
+  await handle.finish_after_owner_card()
+  assert client.interrupts == 0
+  assert handle._interrupt_owner == "stop"
+  assert handle.owner_card_interrupt is False
+
+
 def _assistant_text(text: str, session_id: str = "sess-1") -> AssistantMessage:
   """A completed assistant TEXT block — the clean boundary the runner
   cuts a buffered steer on. (TextBlock is the snapshot of streamed

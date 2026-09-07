@@ -805,6 +805,51 @@ def test_active_codex_turn_interrupt_waits_for_runner_finish():
   asyncio.run(_scenario())
 
 
+def test_active_codex_turn_owner_card_finish_is_a_clean_non_stop_end():
+  """A continuation owner-input card ends the turn on our initiative, so the
+  resulting TurnStatus.interrupted must read as a clean completion — but it is
+  NOT Stop. It marks only `owner_card_requested` (never `interrupt_requested`),
+  so Stop's queue-clear / generation-bump never runs and the chat resumes from
+  the owner's saved answer. Signal-only: it interrupts the live turn without
+  waiting for drain, and does not re-fire if the card path is entered twice."""
+  async def _scenario() -> None:
+    turn = _FakeTurnHandle()
+    active = codex_sdk_runner.ActiveCodexTurn(
+      object(), turn, chat_id="chat-owner-card",
+    )
+    assert active.owner_card_requested is False
+    assert active.is_steerable is True
+
+    await active.finish_after_owner_card()
+    assert turn.interrupt_calls == 1
+    assert active.owner_card_requested is True
+    # A card end is ours, but not a Stop.
+    assert active.interrupt_requested is False
+    # Once the card owns the end, the turn is no longer steerable.
+    assert active.is_steerable is False
+    # Idempotent — a second entry does not double-interrupt.
+    await active.finish_after_owner_card()
+    assert turn.interrupt_calls == 1
+
+  asyncio.run(_scenario())
+
+
+def test_active_codex_turn_owner_card_finish_defers_to_stop():
+  """When a Stop already owns the turn, a racing card commit must not interrupt
+  again or claim card ownership — Stop's teardown wins."""
+  async def _scenario() -> None:
+    turn = _FakeTurnHandle()
+    active = codex_sdk_runner.ActiveCodexTurn(
+      object(), turn, chat_id="chat-card-vs-stop",
+    )
+    active._interrupt_requested = True  # Stop owns the turn.
+    await active.finish_after_owner_card()
+    assert turn.interrupt_calls == 0
+    assert active.owner_card_requested is False
+
+  asyncio.run(_scenario())
+
+
 def test_active_codex_turn_clear_uses_goal_control_and_waits_for_finish():
   class GoalTurn(_FakeTurnHandle):
     def __init__(self):
