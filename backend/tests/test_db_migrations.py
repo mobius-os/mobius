@@ -64,6 +64,25 @@ def test_previous_release_database_upgrades_to_current_orm(tmp_path):
   ]
 
 
+def test_provider_admission_upgrade_preserves_legacy_uncertainty(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'provider-admission.db'}")
+  models.Base.metadata.create_all(eng)
+  with eng.begin() as conn:
+    conn.execute(text("ALTER TABLE chat_runs DROP COLUMN provider_execution_admitted"))
+    conn.execute(text(
+      "INSERT INTO chat_runs (id, chat_id, status) "
+      "VALUES ('legacy', 'chat', 'running')"
+    ))
+  migrations._add_provider_execution_admission(eng)
+  migrations._add_provider_execution_admission(eng)
+  with Session(eng) as session:
+    assert session.get(models.ChatRun, "legacy").provider_execution_admitted is None
+    fresh = models.ChatRun(id="fresh", chat_id="chat", status="running")
+    session.add(fresh)
+    session.commit()
+    assert fresh.provider_execution_admitted is False
+
+
 def test_run_migrations_drops_removed_image_generation_columns(tmp_path):
   db_path = tmp_path / "legacy-image-generation.db"
   eng = create_engine(f"sqlite:///{db_path}")
@@ -1310,6 +1329,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0037_agent_coordination_send_target",
         "0038_chat_wait_condition_owner",
         "0039_agent_work_claim_history",
+        "0040_provider_execution_admission",
       ]
   assert second == first
 

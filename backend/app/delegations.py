@@ -1754,6 +1754,7 @@ def safe_parent_wake_startup_writer_orphan(
     committed is not None
     and committed[0].id == physical.id
     and physical.status == "running"
+    and physical.provider_execution_admitted is False
     and (chat.live_assistant or {}).get("id") == physical.id
     and not ((chat.live_assistant or {}).get("blocks") or [])
   )

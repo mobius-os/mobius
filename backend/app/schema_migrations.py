@@ -3495,6 +3495,21 @@ def _make_agent_work_claim_history_durable(eng) -> None:
       ))
 
 
+def _add_provider_execution_admission(eng) -> None:
+  """Keep legacy execution unknown; only new runs can prove non-admission."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chat_runs" not in inspector.get_table_names():
+    return
+  columns = {column["name"] for column in inspector.get_columns("chat_runs")}
+  if "provider_execution_admitted" not in columns:
+    with eng.begin() as conn:
+      conn.execute(text(
+        "ALTER TABLE chat_runs ADD COLUMN provider_execution_admitted BOOLEAN NULL"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   ("0001_legacy_schema_convergence", _converge_legacy_schema),
   ("0002_chat_run_goal_objective", _add_chat_run_goal_objective),
@@ -3545,6 +3560,7 @@ _SCHEMA_MIGRATIONS = (
   ("0037_agent_coordination_send_target", _add_agent_coordination_send_target),
   ("0038_chat_wait_condition_owner", _add_chat_wait_condition_owner),
   ("0039_agent_work_claim_history", _make_agent_work_claim_history_durable),
+  ("0040_provider_execution_admission", _add_provider_execution_admission),
 )
 
 

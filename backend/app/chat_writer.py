@@ -278,6 +278,20 @@ class PersistSessionId(_Command):
 
 
 @dataclass
+class AdmitProviderExecution(_Command):
+  """Commit the exact current run's one-way provider-entry boundary.
+
+  Await this ack immediately before invoking a provider runner. Failure or an
+  abandoned ack must not launch a provider; even an ack lost after commit is
+  conservatively treated as potentially executed during crash recovery. This
+  scalar write neither coalesces nor fences transcript snapshots.
+  """
+
+  chat_id: str = ""
+  run_token: str = ""
+
+
+@dataclass
 class RecordRunMetrics(_Command):
   """Persist provider-neutral usage/cost counters on one ChatRun.
 
@@ -536,6 +550,7 @@ def recover_start_continuation(
     or chat is None
     or physical.status != "running"
     or physical.chat_id != chat.id
+    or physical.provider_execution_admitted is not False
   ):
     return None
   live = chat.live_assistant or {}
@@ -1730,6 +1745,8 @@ class ChatWriterActor:
       return self._persist_session_id(db, cmd)
     if isinstance(cmd, RecordRunMetrics):
       return self._record_run_metrics(db, cmd)
+    if isinstance(cmd, AdmitProviderExecution):
+      return self._admit_provider_execution(db, cmd)
     if isinstance(cmd, RecordAgentLifecycle):
       from app.agent_lifecycle import record_event
       return record_event(db, cmd.values)
@@ -1985,6 +2002,23 @@ class ChatWriterActor:
     if not _commit_or_rollback(db):
       raise _PersistFailed("PersistSessionId did not persist")
     return True
+
+  def _admit_provider_execution(self, db, cmd: AdmitProviderExecution) -> None:
+    """Only the current, never-admitted physical run may enter its provider."""
+    from app.run_state import latest_run
+
+    chat = _active_chat(db, cmd.chat_id)
+    run = latest_run(db, cmd.chat_id) if chat is not None else None
+    if (
+      run is None
+      or run.id != cmd.run_token
+      or run.status != "running"
+      or run.provider_execution_admitted is not False
+    ):
+      raise _PersistFailed("AdmitProviderExecution: run is not eligible")
+    run.provider_execution_admitted = True
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("AdmitProviderExecution did not persist")
 
   def _record_run_metrics(self, db, cmd: RecordRunMetrics) -> bool:
     """Attach provider usage/cost to the exact durable run row."""

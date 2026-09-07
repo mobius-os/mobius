@@ -2030,6 +2030,71 @@ def test_restart_spawn_failure_reattaches_deterministic_successor(
   assert _chat_row(cid)["pending"] == []
 
 
+@pytest.mark.parametrize("park_reason", ["restart", "usage_limit", "storage", "memory"])
+@pytest.mark.parametrize("admitted", [True, None])
+@pytest.mark.parametrize("new_restart_authorized", [False, True])
+def test_no_output_successor_requires_non_admission_or_exact_new_restart(
+  owner_token, monkeypatch, park_reason, admitted, new_restart_authorized,
+):
+  """No transcript output cannot renew a consumed restart or retry authority."""
+  del owner_token
+  cid, park_token = "admitted-successor", "rt-admitted-source"
+  nonce = "original-restart-nonce"
+  monkeypatch.setattr("app.restart_ledger.authorized_restart_nonce", lambda: nonce)
+  monkeypatch.setattr("app.push.notify_owner_async", _async_notify(lambda **kwargs: "notice"))
+  _due_park(cid, park_token, auto_resume=True, park_reason=park_reason,
+            restart_nonce=nonce if park_reason == "restart" else None)
+  # Simulate task creation failing after the continuation's writer commit.
+  monkeypatch.setattr(chat_mod, "_schedule_continuation", lambda **kwargs: False)
+  assert _run_sweep() == []
+  chat_mod.discard_starting(cid)
+  successor = chat_mod._auto_resume_run_token(park_token)
+  fresh_nonce = "newly-approved-restart-nonce"
+  with SessionLocal() as db:
+    run = db.get(models.ChatRun, successor)
+    assert run.provider_execution_admitted is False
+    run.provider_execution_admitted = admitted
+    run.goal_objective = "Finish the same Goal"
+    run.goal_id = "original-goal"
+    if new_restart_authorized:
+      run.restart_nonce = fresh_nonce
+    db.commit()
+    assert not chat_mod.safe_auto_resume_startup_orphan(db, db.get(models.Chat, cid), run)
+
+  scheduled = []
+  monkeypatch.setattr(chat_mod, "_schedule_continuation", lambda **kwargs: scheduled.append(kwargs))
+  assert _run_sweep() == []
+  assert scheduled == []
+  with SessionLocal() as db:
+    result = chat_mod.reconcile_startup_chats(
+      db, restart_authorization=fresh_nonce if new_restart_authorized else nonce,
+    )
+  if not new_restart_authorized:
+    assert result.manual == [cid]
+    assert _run_row(successor)["status"] == "interrupted"
+    assert _run_sweep() == []
+    assert scheduled == []
+    return
+
+  assert result.manual == []
+  assert result.restart_parks == [cid]
+  assert _run_row(successor)["status"] == "parked"
+  monkeypatch.setattr("app.restart_ledger.authorized_restart_nonce", lambda: fresh_nonce)
+  try:
+    assert _run_sweep() == [cid]
+    assert len(scheduled) == 1
+    next_token = chat_mod._auto_resume_run_token(successor)
+    assert scheduled[0]["run_token"] == next_token
+    with SessionLocal() as db:
+      next_run = db.get(models.ChatRun, next_token)
+      assert next_run.provider_execution_admitted is False
+      assert next_run.goal_id == "original-goal"
+      assert next_run.goal_objective == "Finish the same Goal"
+    assert _run_row(successor)["restart_nonce"] is None
+  finally:
+    chat_mod.discard_starting(cid)
+
+
 def test_unacknowledged_restart_pending_cannot_bypass_via_idle_sweep(
   monkeypatch,
 ):

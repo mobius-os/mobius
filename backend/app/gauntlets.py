@@ -609,7 +609,11 @@ def safe_startup_writer_orphan(
   output, prompt drift, wrong phase, or foreign physical identity fails closed
   into ordinary interrupted-run recovery rather than replaying tool work.
   """
-  if physical.status != "running" or physical.chat_id != chat.id:
+  if (
+    physical.status != "running"
+    or physical.chat_id != chat.id
+    or physical.provider_execution_admitted is not False
+  ):
     return False
   task = db.query(models.GauntletTask).filter(
     models.GauntletTask.chat_run_id == physical.id,

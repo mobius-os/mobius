@@ -230,7 +230,8 @@ async def start_programmatic_chat_continuation(
               messages = list(chat.messages or []) if chat is not None else []
               continuation = messages[-1] if messages else None
               safe_orphan = bool(
-                isinstance(continuation, dict)
+                existing.provider_execution_admitted is False
+                and isinstance(continuation, dict)
                 and continuation.get("role") == "user"
                 and continuation.get("cid") == continuation_id
                 and continuation.get("content") == content

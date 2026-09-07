@@ -195,6 +195,61 @@ def _patch_claude_runner(monkeypatch, *, text="partial answer"):
   monkeypatch.setattr(csr, "run_claude_sdk_turn", fake_runner)
 
 
+@pytest.mark.parametrize("provider_id", ["claude", "codex"])
+@pytest.mark.parametrize("ack_failure", [False, True])
+def test_provider_entry_requires_durable_admission_ack(
+  monkeypatch, provider_id, ack_failure,
+):
+  """An ack failure must not invoke either provider, even with zero output."""
+  import importlib
+
+  _seed_owner_and_creds()
+  cid, token = "provider-admission", "rt-provider-admission"
+  _seed_chat(cid, messages=[{"role": "user", "content": "hi", "ts": 1}],
+             running="running", run_token=token)
+  with SessionLocal() as db:
+    row = db.get(models.Chat, cid)
+    row.provider = provider_id
+    row.agent_settings_json = {
+      "model": "claude-sonnet-4-6" if provider_id == "claude" else "gpt-5.4",
+    }
+    db.commit()
+  provider = chat_mod.get_provider(provider_id)
+  monkeypatch.setattr(provider, "check_auth", lambda _data_dir: None)
+
+  async def ready(_data_dir):
+    pass
+
+  monkeypatch.setattr(provider, "ensure_auth", ready)
+  entered = []
+
+  async def runner(**_kwargs):
+    with SessionLocal() as db:
+      assert db.get(models.ChatRun, token).provider_execution_admitted is True
+    entered.append(token)
+    return {"cost_usd": 0.0}
+
+  monkeypatch.setattr(
+    importlib.import_module(f"app.{provider_id}_sdk_runner"),
+    f"run_{provider_id}_sdk_turn", runner,
+  )
+  attempted = []
+  admit = chat_writer.ChatWriterActor._admit_provider_execution
+
+  def admission(self, db, cmd):
+    attempted.append(cmd.run_token)
+    if ack_failure:
+      raise chat_writer._PersistFailed("admission commit failed")
+    return admit(self, db, cmd)
+
+  monkeypatch.setattr(chat_writer.ChatWriterActor, "_admit_provider_execution", admission)
+  chat_mod.mark_starting(cid)
+  _run_real_chat(cid, run_token=token,
+                 run_gen=chat_mod.current_run_generation(cid), provider_id=provider_id)
+  assert attempted == [token]
+  assert entered == ([] if ack_failure else [token])
+
+
 # -- 1. empty-queue final continuation CLEARS the marker -----------------
 def test_empty_queue_terminal_clears_marker(monkeypatch):
   """A normal turn with an empty pending queue: the marker is cleared

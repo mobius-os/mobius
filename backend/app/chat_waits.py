@@ -568,6 +568,7 @@ def safe_startup_writer_orphan(
   prefix = "wait-resume-"
   if (
     physical.status != "running"
+    or physical.provider_execution_admitted is not False
     or physical.chat_id != chat.id
     or physical.initiated_by_app_id is not None
     or not physical.id.startswith(prefix)

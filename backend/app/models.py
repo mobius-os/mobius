@@ -322,6 +322,11 @@ class ChatRun(Base):
   # A successfully drained planned restart reuses that retry path with
   # park_reason="restart"; an unplanned crash remains "interrupted".
   status = Column(String(16), nullable=False, default="running", index=True)
+  # False proves this physical run has not crossed provider entry. The writer
+  # commits True before invoking either runner; a crash after that commit is
+  # ambiguous even with no transcript output. NULL preserves that ambiguity
+  # for pre-admission-ledger runs upgraded from an older backend.
+  provider_execution_admitted = Column(Boolean, nullable=True, default=False)
   provider = Column(String(32), nullable=True, default=None)
   # Objective shown by the shell while this exact run owns a native goal.
   # This belongs to the run rather than the transcript tail: mid-turn owner

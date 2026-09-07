@@ -83,6 +83,7 @@ from app.chat_titles import apply_generated_title, renamed_event
 from app.goal_commands import is_goal_continue
 from app.memory_observability import claim_oom_kill
 from app.chat_writer import (
+  AdmitProviderExecution,
   AppendPending,
   Barrier,
   CancelPending,
@@ -822,7 +823,7 @@ def reconcile_startup_chats(
       latest_id = latest[0] if latest is not None else None
       # Durable coordinators reserve their writer slot before the actor
       # atomically appends the continuation + ChatRun. Preserve an exact
-      # no-output orphan created after that commit but before task creation;
+      # never-admitted orphan created after that commit but before provider entry;
       # each owning coordinator safely reschedules it. Ambiguous or partially
       # executed attempts continue through ordinary interruption.
       if len(running_runs) == 1:
@@ -5811,6 +5812,11 @@ async def _run_chat_impl_with_db(
     db.close()
     try:
       from app.codex_sdk_runner import run_codex_sdk_turn
+      await _await_ack(get_writer().submit(AdmitProviderExecution(
+        chat_id=chat_id, run_token=run_token or "",
+      )))
+      if _run_generation_superseded(chat_id, run_gen):
+        return chat_queue.TerminalDisposition.STALE_NO_ACTION
       runner_result = await run_codex_sdk_turn(
         user_message=user_message,
         session_id=session_id,
@@ -5986,6 +5992,11 @@ async def _run_chat_impl_with_db(
     db.close()
     try:
       from app.providers import skills_enabled as _skills_enabled
+      await _await_ack(get_writer().submit(AdmitProviderExecution(
+        chat_id=chat_id, run_token=run_token or "",
+      )))
+      if _run_generation_superseded(chat_id, run_gen):
+        return chat_queue.TerminalDisposition.STALE_NO_ACTION
       runner_result = await run_claude_sdk_turn(
         user_message=user_message,
         session_id=claude_session_id,
