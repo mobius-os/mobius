@@ -146,6 +146,36 @@ def test_only_image_owned_bootstrap_scripts_require_a_rebuild():
   ])["level"] == "host_maintenance"
 
 
+def test_optional_deploy_command_does_not_gate_in_product_updates():
+  for deployment in ("self_hosted", "railway"):
+    assert activation.classify_activation(
+      ["scripts/deploy-prod.sh"], deployment=deployment,
+    )["level"] == "live"
+    for path, expected in (
+      ("frontend/src/App.jsx", "live"),
+      ("backend/app/main.py", "server_restart"),
+      ("Dockerfile", "image_rebuild"),
+    ):
+      impact = activation.classify_activation(
+        ["scripts/deploy-prod.sh", path], deployment=deployment,
+      )
+      assert impact["level"] == expected
+
+
+def test_installed_host_helper_and_topology_keep_their_activation_boundaries():
+  for path, expected in (
+    ("scripts/install-rebuild-helper.sh", "host_maintenance"),
+    ("scripts/mobius-rebuild-host.py", "host_maintenance"),
+    ("docker-compose.yml", "container_recreate"),
+    ("Caddyfile", "proxy_reload"),
+  ):
+    impact = activation.classify_activation([path], deployment="self_hosted")
+    assert impact["level"] == expected
+    if expected == "host_maintenance":
+      assert "sudo scripts/install-rebuild-helper.sh" in " ".join(impact["guidance"])
+      assert "deploy-prod.sh" not in " ".join(impact["guidance"])
+
+
 def test_bootstrap_allowlist_covers_entrypoint_app_script_references():
   root = Path(__file__).resolve().parents[2]
   entrypoint = (root / "backend/scripts/entrypoint.sh").read_text(

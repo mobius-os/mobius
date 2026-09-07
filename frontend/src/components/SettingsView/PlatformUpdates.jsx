@@ -26,7 +26,6 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
   const activeRebuild = rebuildIsActive(rebuild)
   const mobiusVersion = platformVersionIdentity(platform, version)
   const containerVersion = containerVersionIdentity(version)
-  const hostMaintenanceNeeded = level === 'host_maintenance'
 
   useEffect(() => {
     if (review || busy || !restoreFocus.current) return
@@ -119,10 +118,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
       )}
       {externalNeeded && (
         <div className="platform-updates__description">
-          {hostMaintenanceNeeded ? <>
-            <p>To finish this update, update the Möbius files on the computer running it, then run <code>scripts/deploy-prod.sh</code> there.</p>
-            <p>Restart server only loads the changes already installed here; it will not finish this update.</p>
-          </> : (platform?.activation?.guidance || []).map(line => <p key={line}>{line}</p>)}
+          {(platform?.activation?.guidance || []).map(line => <p key={line}>{line}</p>)}
         </div>
       )}
       {update.checkResult && <p className="platform-updates__description" role="status">{update.checkResult}</p>}

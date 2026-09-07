@@ -96,12 +96,13 @@ IMAGE_BOOTSTRAP_SCRIPTS = (
 # backend runtime rule.  A path may require only one owning activation boundary;
 # mixed updates still report every distinct rule they touch.
 _RULES = (
+  # deploy-prod.sh is an optional, on-demand host deployment path, not an
+  # installed controller. Its source updates do not gate Settings updates.
   _Rule(
     "host_operator_tooling",
     ActivationLevel.HOST_MAINTENANCE,
     "Host-operated deployment tooling changed.",
     exact=(
-      "scripts/deploy-prod.sh",
       "scripts/install-rebuild-helper.sh",
       "scripts/mobius-rebuild-host.py",
     ),
@@ -291,7 +292,11 @@ def _guidance(level: ActivationLevel, deployment: DeploymentKind) -> str:
         "docker build/compose against the live instance."
       )
     if level is ActivationLevel.HOST_MAINTENANCE:
-      return "Update the host-operated tooling and complete its maintenance outside the container."
+      return (
+        "Update the Möbius checkout on your host, then run "
+        "sudo scripts/install-rebuild-helper.sh there to update the installed "
+        "Settings update helper. Restarting Möbius does not update that helper."
+      )
   return "Complete this deployment action outside Möbius; an in-product restart is insufficient."
 
 

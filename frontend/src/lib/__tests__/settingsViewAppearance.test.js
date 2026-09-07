@@ -183,11 +183,9 @@ test('simple Updates keeps versions and server restart visible outside optional 
   assert.match(updates, /aria-label="Confirm restart"/)
 })
 
-test('host maintenance gives the owner an exact action and explains the restart limit', () => {
-  assert.match(updates, /update the Möbius files on the computer running it/)
-  assert.match(updates, /<code>scripts\/deploy-prod\.sh<\/code>/)
-  assert.match(updates, /Restart server only loads the changes already installed here; it will not finish this update\./)
-  assert.doesNotMatch(updates, /little maintenance/)
+test('external update instructions come from the activation owner, not a second UI policy', () => {
+  assert.match(updates, /platform\?\.activation\?\.guidance/)
+  assert.doesNotMatch(updates, /scripts\/deploy-prod\.sh|hostMaintenanceNeeded|little maintenance/)
 })
 
 test('only top provider actions are pills; Updates inherits standard Settings corners', () => {

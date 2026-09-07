@@ -2148,6 +2148,40 @@ def test_boot_clears_restart_but_preserves_unverified_image_work(clone_env, monk
   }
 
 
+def test_manual_deploy_source_does_not_hide_pending_server_restart(clone_env):
+  _, platform = clone_env
+  served = _served_sha(platform)
+  pu.SERVING_SOURCE_FILE.write_text("platform\n")
+  pu.SERVING_SHA_FILE.write_text(served + "\n")
+  _local_commit(platform, edits={
+    "scripts/deploy-prod.sh": "# optional deployment command\n",
+    "backend/app/main.py": _MAIN_PY + "NEW_SETTING = True\n",
+  })
+
+  status = pu.platform_status(platform)
+
+  assert status["state"] == pu.PlatformUpdateState.RESTART_NEEDED.value
+  assert status["needs_restart"] is True
+  assert status["activation"]["level"] == "server_restart"
+
+
+def test_boot_retires_old_manual_deploy_markers_without_dropping_real_host_work(clone_env):
+  _, platform = clone_env
+  target = _served_sha(platform)
+  for remainder in ([], ["scripts/mobius-rebuild-host.py"]):
+    pu._write_activation_marker(
+      target, ["scripts/deploy-prod.sh", "backend/app/main.py", *remainder],
+    )
+
+    pu._complete_boot_activation(platform)
+
+    marker = pu._read_activation_marker()
+    if remainder:
+      assert marker["paths"] == remainder
+    else:
+      assert marker is None
+
+
 def test_boot_rebuild_retires_only_upstream_covered_image_paths(
   clone_env, monkeypatch,
 ):

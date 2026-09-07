@@ -23,6 +23,11 @@ The browser never chooses an image, path, Compose project, or Docker argument.
 Self-hosted installations use the host helper below; linked Railway deployments
 use the Möbius account service.
 
+Changes to the optional `deploy-prod.sh` command do not require running it or
+block Settings updates. It uses its updated source when next invoked. Changes
+to the installed host helper are different: update that root-owned helper with
+the installer below; an app restart or image replacement cannot replace it.
+
 ## Install
 
 From the trusted host checkout that owns the running app:
