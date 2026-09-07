@@ -20,13 +20,11 @@ APPROVAL_TOOL_NAME = "request_approval"
 QUESTION_TOOL_NAME = "request_question"
 LIST_PEERS_TOOL_NAME = "list_agent_peers"
 SEND_MESSAGE_TOOL_NAME = "send_agent_message"
-READ_MESSAGES_TOOL_NAME = "read_agent_messages"
 CLAIM_WORK_TOOL_NAME = "claim_agent_work"
 FINISH_WORK_TOOL_NAME = "finish_agent_work"
 COORDINATION_TOOL_NAMES = (
   LIST_PEERS_TOOL_NAME,
   SEND_MESSAGE_TOOL_NAME,
-  READ_MESSAGES_TOOL_NAME,
   CLAIM_WORK_TOOL_NAME,
   FINISH_WORK_TOOL_NAME,
 )

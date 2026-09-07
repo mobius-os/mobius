@@ -25,9 +25,7 @@ from app.compaction import build_transcript_text
 from app.events import process_event
 from app.memory_recall import EMPTY_RECALL_BINDING
 from app.peer_message import (
-  CLAUDE_READ_TOOL,
   CLAUDE_SEND_TOOL,
-  CODEX_READ_TOOL,
   CODEX_SEND_TOOL,
   MAX_BODY_CHARS,
   MAX_PEER_NOTES,
@@ -51,15 +49,15 @@ def _message(**overrides):
   }
 
 
-def test_both_provider_tool_identities_open_the_same_markers():
+def test_both_provider_send_identities_open_the_same_marker():
   for tool in (CLAUDE_SEND_TOOL, CODEX_SEND_TOOL):
     assert peer_message_from_call(tool) == {
       "direction": "send", "status": "sending",
     }
-  for tool in (CLAUDE_READ_TOOL, CODEX_READ_TOOL):
-    assert peer_message_from_call(tool) == {
-      "direction": "read", "status": "reading",
-    }
+  assert peer_message_from_call(
+    "mcp__mobius_control__read_agent_messages",
+  ) is None
+  assert peer_message_from_call("mobius_control:read_agent_messages") is None
   assert peer_message_from_call("Bash") is None
   assert peer_message_from_call(None) is None
 
@@ -99,33 +97,28 @@ def test_compact_multi_recipient_receipt_preserves_owner_card_count_and_names():
 def test_codex_structured_and_text_wrappers_settle_like_direct_results():
   payload = {"messages": [_message(kind="request", body="Please review.")]}
   direct = settle_peer_message(
-    {"direction": "read", "status": "reading"}, json.dumps(payload),
+    {"direction": "send", "status": "sending"}, json.dumps(payload),
   )
   structured = settle_peer_message(
-    {"direction": "read", "status": "reading"},
+    {"direction": "send", "status": "sending"},
     json.dumps({"content": [], "structuredContent": payload}),
   )
   text_wrapped = settle_peer_message(
-    {"direction": "read", "status": "reading"},
+    {"direction": "send", "status": "sending"},
     json.dumps({
       "content": [{"type": "text", "text": json.dumps(payload)}],
     }),
   )
   assert direct == structured == text_wrapped
-  assert direct["notes"] == [{
-    "sender": "Preparing the release",
-    "kind": "request",
-    "body": "Please review.",
-    "body_truncated": False,
-  }]
+  assert direct["status"] == "sent"
+  assert direct["body"] == "Please review."
 
 
 def test_empty_malformed_oversized_and_failed_results_are_honest():
-  pending_read = {"direction": "read", "status": "reading"}
   pending_send = {"direction": "send", "status": "sending"}
-  assert settle_peer_message(
-    pending_read, json.dumps({"messages": []}),
-  ) == {"direction": "read", "status": "empty"}
+  assert settle_peer_message(pending_send, json.dumps({"messages": []})) == {
+    "direction": "send", "status": "failed",
+  }
   assert settle_peer_message(pending_send, "not json") == {
     "direction": "send", "status": "failed",
   }
@@ -160,28 +153,6 @@ def test_wrapper_search_is_bounded_to_the_declared_content_window():
   assert settle_peer_message(pending, past_bound) == {
     "direction": "send", "status": "failed",
   }
-
-
-def test_result_reports_true_count_and_bounded_display():
-  long_body = "x" * 5000
-  exact = settle_peer_message(
-    {"direction": "read", "status": "reading"},
-    json.dumps({"messages": [
-      _message(sender_name=f"peer-{index}", body=long_body)
-      for index in range(50)
-    ]}),
-  )
-  assert exact["count"] == 50  # true total; the card derives "showing 8 of 50"
-  assert len(exact["notes"]) == MAX_PEER_NOTES  # display capped at 8
-  assert len(exact["notes"][0]["body"]) == MAX_BODY_CHARS  # clipped past 4k
-  assert exact["notes"][0]["body_truncated"] is True
-
-  # A read at the API's 200 ceiling is counted in full, not silently at 100.
-  full_page = settle_peer_message(
-    {"direction": "read", "status": "reading"},
-    {"messages": [_message() for _ in range(MAX_RESULT_MESSAGES)]},
-  )
-  assert full_page["count"] == MAX_RESULT_MESSAGES
 
 
 class _McpItem:
@@ -272,18 +243,18 @@ def test_claude_and_codex_adapter_to_sink_paths_settle_identically():
   claude_bus = _ClaudeBus()
   dispatch_sdk_message(AssistantMessage(
     content=[ToolUseBlock(
-      id="claude-read", name=CLAUDE_READ_TOOL, input={"limit": 100},
+      id="claude-send", name=CLAUDE_SEND_TOOL, input={},
     )],
     model="claude-sonnet",
   ), claude_bus, None)
   dispatch_sdk_message(UserMessage(content=[ToolResultBlock(
-    tool_use_id="claude-read", content=json.dumps(payload),
+    tool_use_id="claude-send", content=json.dumps(payload),
   )]), claude_bus, None)
   claude = _sink_lifecycle(claude_bus.events)
 
   sdk = _codex_sdk()
   item = _McpItem(
-    tool="read_agent_messages",
+    tool="send_agent_message",
     result={"content": [{"type": "text", "text": json.dumps(payload)}]},
   )
   codex_events = [_tool_start_event(item, sdk), *_tool_completed_events(item, sdk)]
@@ -291,17 +262,19 @@ def test_claude_and_codex_adapter_to_sink_paths_settle_identically():
     _stamp_tool_use_id(event, item)
   codex = _sink_lifecycle(codex_events)
   assert codex["peer_message"] == claude["peer_message"]
-  assert codex["peer_message"]["status"] == "received"
+  assert codex["peer_message"]["status"] == "sent"
 
 
 def test_compact_chat_projection_keeps_bounded_marker_not_raw_mcp_output():
-  marker = settle_peer_message(
-    {"direction": "read", "status": "reading"},
-    json.dumps({"messages": [_message() for _ in range(20)]}),
-  )
+  marker = {
+    "direction": "read", "status": "received", "count": 20,
+    "notes": [{
+      "sender": "Historic peer", "kind": "finding", "body": "Old note",
+    }],
+  }
   block = {
     "type": "tool",
-    "tool": CODEX_READ_TOOL,
+    "tool": "mobius_control:read_agent_messages",
     "tool_use_id": "read-1",
     "status": "done",
     "input": "private arguments",
@@ -311,7 +284,10 @@ def test_compact_chat_projection_keeps_bounded_marker_not_raw_mcp_output():
   assert _distinctive_activity(block, EMPTY_RECALL_BINDING)
   item = _compact_activity_item(block, EMPTY_RECALL_BINDING)
   assert item["peer_message"]["count"] == 20
-  assert len(item["peer_message"]["notes"]) == MAX_PEER_NOTES
+  assert item["peer_message"]["notes"] == [{
+    "sender": "Historic peer", "kind": "finding", "body": "Old note",
+    "body_truncated": False,
+  }]
 
   compact = compact_messages_for_detail(
     [{"role": "assistant", "blocks": [block]}],
@@ -377,11 +353,11 @@ def test_send_counts_distinct_recipient_chats_not_deduped_names():
 def test_oversized_note_is_flagged_as_an_excerpt():
   long_body = "x" * (MAX_BODY_CHARS + 500)
   settled = settle_peer_message(
-    {"direction": "read", "status": "reading"},
+    {"direction": "send", "status": "sending"},
     json.dumps({"messages": [_message(body=long_body)]}),
   )
-  assert len(settled["notes"][0]["body"]) == MAX_BODY_CHARS
-  assert settled["notes"][0]["body_truncated"] is True
+  assert len(settled["body"]) == MAX_BODY_CHARS
+  assert settled["body_truncated"] is True
 
 
 def test_structured_provider_error_surfaces_a_bounded_reason():
@@ -437,11 +413,11 @@ def test_full_note_is_preserved_up_to_the_platform_limit():
   # A valid 4,000-char note is shown in full — not clipped to an excerpt.
   full = "y" * 4000
   settled = settle_peer_message(
-    {"direction": "read", "status": "reading"},
+    {"direction": "send", "status": "sending"},
     json.dumps({"messages": [_message(body=full)]}),
   )
-  assert settled["notes"][0]["body"] == full
-  assert settled["notes"][0]["body_truncated"] is False
+  assert settled["body"] == full
+  assert settled["body_truncated"] is False
   # The provider-handoff transcript stays tight regardless of the full card body.
   lines = peer_message_compaction_lines(settled)
   assert len(lines[0]) < 500

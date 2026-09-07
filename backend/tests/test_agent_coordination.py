@@ -7,6 +7,8 @@ import pytest
 
 from app import auth as auth_mod, models
 from app.agent_coordination import (
+  MAX_CONTEXT_MESSAGES,
+  agent_context_snapshot,
   build_coordination_context,
   model_peer,
   scope_for_chat,
@@ -141,6 +143,24 @@ def _network_fixture(db):
   return chats, runs
 
 
+def _next_turn_context(db, chat, run_id: str) -> str:
+  """Start one later physical turn and return its injected peer context."""
+  previous_started = max(
+    started for (started,) in db.query(models.ChatRun.started_at).filter(
+      models.ChatRun.chat_id == chat.id,
+    ).all()
+    if started is not None
+  )
+  run = models.ChatRun(
+    id=run_id, root_run_id=run_id, chat_id=chat.id,
+    status="running", provider=chat.provider,
+    started_at=previous_started + timedelta(seconds=10),
+  )
+  db.add(run)
+  db.commit()
+  return build_coordination_context(db, chat.id, run.id)
+
+
 def test_global_roster_unifies_top_level_and_arbitrarily_nested_peers(
   client, auth, db,
 ):
@@ -199,6 +219,10 @@ def test_global_roster_unifies_top_level_and_arbitrarily_nested_peers(
   ).status_code == 422
 
 
+def test_agent_network_exposes_no_model_facing_inbox_read(client):
+  assert client.get("/api/agent-coordination/messages").status_code == 404
+
+
 def test_peer_projection_keeps_completion_time_only_in_turn_context():
   peer = {
     "id": "completed-peer",
@@ -222,9 +246,6 @@ def test_nested_claude_helper_can_message_nested_codex_peer_across_scopes(
 ):
   chats, _ = _network_fixture(db)
   nested_auth = _delegated_auth(db, chats["nested"].id, "nested-run")
-  outside_helper_auth = _delegated_auth(
-    db, chats["outside_helper"].id, "outside-helper-run",
-  )
 
   sent = client.post(
     "/api/agent-coordination/messages",
@@ -241,16 +262,12 @@ def test_nested_claude_helper_can_message_nested_codex_peer_across_scopes(
   assert db.query(models.AgentCoordinationMessage).filter(
     models.AgentCoordinationMessage.send_id == "nested-cross-provider-1",
   ).one().room_kind == "workspace"
-  inbox = client.get(
-    "/api/agent-coordination/messages", headers=outside_helper_auth,
-  ).json()
-  assert [row["body"] for row in inbox["messages"]] == [
-    "The nested verifier found the shared encoding edge case.",
-  ]
-  assert client.get(
-    "/api/agent-coordination/messages",
-    headers=_delegated_auth(db, chats["builder"].id, "builder-run"),
-  ).json()["messages"] == []
+  assert "The nested verifier found the shared encoding edge case." in (
+    _next_turn_context(db, chats["outside_helper"], "outside-helper-next")
+  )
+  assert "The nested verifier found the shared encoding edge case." not in (
+    _next_turn_context(db, chats["builder"], "builder-next")
+  )
 
   observed = client.get(
     f"/api/agent-coordination/chats/{chats['root'].id}", headers=auth,
@@ -337,21 +354,16 @@ def test_scope_broadcast_never_reaches_an_unrelated_peer(client, auth, db):
   assert persisted.room_kind == "delegation"
   assert persisted.send_target_key == ""
 
-  builder_inbox = client.get(
-    "/api/agent-coordination/messages",
-    headers=_delegated_auth(db, chats["builder"].id, "builder-run"),
-  ).json()["messages"]
-  outside_inbox = client.get(
-    "/api/agent-coordination/messages",
-    headers=_top_level_auth(db, chats["outsider"].id, "outside-run"),
-  ).json()["messages"]
-  assert [item["body"] for item in builder_inbox] == [row["body"]]
-  assert outside_inbox == []
+  assert row["body"] in _next_turn_context(
+    db, chats["builder"], "builder-broadcast-next",
+  )
+  assert row["body"] not in _next_turn_context(
+    db, chats["outsider"], "outside-broadcast-next",
+  )
 
 
 def test_offline_peer_receives_direct_note_on_its_next_run(client, auth, db):
   chats, runs = _network_fixture(db)
-  old_auth = _top_level_auth(db, chats["outsider"].id, "outside-run")
   runs["outsider"].status = "completed"
   registry.discard_starting(chats["outsider"].id)
   db.commit()
@@ -365,9 +377,6 @@ def test_offline_peer_receives_direct_note_on_its_next_run(client, auth, db):
     },
   )
   assert sent.status_code == 200, sent.text
-  assert client.get(
-    "/api/agent-coordination/messages", headers=old_auth,
-  ).status_code == 401
 
   db.add(models.ChatRun(
     id="outside-next-run", root_run_id="outside-next-run",
@@ -375,13 +384,8 @@ def test_offline_peer_receives_direct_note_on_its_next_run(client, auth, db):
   ))
   registry.mark_starting(chats["outsider"].id)
   db.commit()
-  next_auth = _top_level_auth(db, chats["outsider"].id, "outside-next-run")
-  # A cursorless tool read covers only this run; the backlog that arrived
-  # while the chat was idle is delivered once, through the next turn's context.
-  inbox = client.get(
-    "/api/agent-coordination/messages", headers=next_auth,
-  ).json()["messages"]
-  assert inbox == []
+  # Backlog that arrived while the chat was idle is delivered once, through
+  # the next turn's context without a model-facing read operation.
   assert "Read this durable handoff" in build_coordination_context(
     db, chats["outsider"].id, "outside-next-run",
   )
@@ -409,10 +413,6 @@ def test_direct_mail_never_mutates_owner_transcripts_or_pending_messages(
     },
   )
   assert sent.status_code == 200, sent.text
-  client.get(
-    "/api/agent-coordination/messages",
-    headers=_delegated_auth(db, chats["builder"].id, "builder-run"),
-  )
   db.expire_all()
   for key in ("scout", "builder"):
     chat = db.get(models.Chat, chats[key].id)
@@ -449,61 +449,6 @@ def test_unknown_deleted_and_never_started_recipients_fail_atomically(
   )
   assert deleted.status_code == 422
   assert db.query(models.AgentCoordinationMessage).count() == 0
-
-
-def test_cursor_rejects_invisible_and_missing_message_ids(client, auth, db):
-  chats, _ = _network_fixture(db)
-  scout_auth = _delegated_auth(db, chats["scout"].id, "scout-run")
-  builder_auth = _delegated_auth(db, chats["builder"].id, "builder-run")
-  outsider_auth = _top_level_auth(db, chats["outsider"].id, "outside-run")
-
-  sent = client.post(
-    "/api/agent-coordination/messages",
-    headers=scout_auth,
-    json={"recipients": [chats["builder"].id], "body": "Builder only."},
-  ).json()["messages"][0]
-  invisible = client.get(
-    "/api/agent-coordination/messages",
-    headers=outsider_auth,
-    params={"after": sent["id"]},
-  )
-  missing = client.get(
-    "/api/agent-coordination/messages",
-    headers=builder_auth,
-    params={"after": "missing-cursor"},
-  )
-  assert invisible.status_code == missing.status_code == 422
-  assert "cursor" in invisible.json()["detail"].lower()
-
-
-def test_cursor_pages_mixed_broadcast_and_direct_mail_without_skips(
-  client, auth, db,
-):
-  chats, _ = _network_fixture(db)
-  scout_auth = _delegated_auth(db, chats["scout"].id, "scout-run")
-  builder_auth = _delegated_auth(db, chats["builder"].id, "builder-run")
-  ids = []
-  for payload in (
-    {"broadcast": True, "body": "First broadcast"},
-    {"recipients": [chats["builder"].id], "body": "Second direct"},
-    {"recipients": [chats["builder"].id], "body": "Third direct"},
-  ):
-    row = client.post(
-      "/api/agent-coordination/messages", headers=scout_auth, json=payload,
-    ).json()["messages"][0]
-    ids.append(row["id"])
-  second = client.get(
-    "/api/agent-coordination/messages",
-    headers=builder_auth,
-    params={"after": ids[0], "limit": 1},
-  ).json()
-  third = client.get(
-    "/api/agent-coordination/messages",
-    headers=builder_auth,
-    params={"after": second["cursor"], "limit": 1},
-  ).json()
-  assert [row["body"] for row in second["messages"]] == ["Second direct"]
-  assert [row["body"] for row in third["messages"]] == ["Third direct"]
 
 
 def test_owner_observes_only_directs_involving_the_selected_scope(
@@ -556,11 +501,9 @@ def test_legacy_scope_direct_row_remains_visible_to_its_recipient(
     body="Preserved legacy direct note.",
   ))
   db.commit()
-  inbox = client.get(
-    "/api/agent-coordination/messages",
-    headers=_delegated_auth(db, chats["builder"].id, "builder-run"),
-  ).json()["messages"]
-  assert [row["body"] for row in inbox] == ["Preserved legacy direct note."]
+  assert "Preserved legacy direct note." in _next_turn_context(
+    db, chats["builder"], "builder-legacy-next",
+  )
 
 
 def test_peer_note_does_not_wake_a_chat_owned_by_durable_wait(client, auth, db):
@@ -641,7 +584,7 @@ def test_network_retention_is_per_recipient_and_does_not_prune_broadcasts(
   ).count() == 1
 
 
-def test_read_and_write_delegation_execution_tokens_reach_the_network(
+def test_delegation_execution_tokens_reach_the_network(
   client, auth, db,
 ):
   chats, _ = _network_fixture(db)
@@ -668,6 +611,7 @@ def test_context_is_bounded_carrier_safe_and_hides_unrelated_goals(db):
   assert "collaborators" in context
   assert "outside-builder" not in context
   assert "before finalizing" not in context
+  assert "delivered automatically in a later turn; never poll" in context
 
 
 def test_context_delivers_only_new_inbound_notes_on_the_next_turn(
@@ -712,6 +656,10 @@ def test_context_delivers_only_new_inbound_notes_on_the_next_turn(
         "late-inbound", chats["outsider"].id, chats["scout"].id,
         "Arrived while the model is working", current_started + timedelta(seconds=1),
       ),
+      (
+        "later-inbound", chats["outsider"].id, chats["scout"].id,
+        "Also arrived during the same turn", current_started + timedelta(seconds=2),
+      ),
     )
   ]
   db.add_all([current, *rows])
@@ -722,15 +670,55 @@ def test_context_delivers_only_new_inbound_notes_on_the_next_turn(
   assert "Already delivered inbound" not in context
   assert "Outgoing echo" not in context
   assert "Arrived while the model is working" not in context
+  assert "Also arrived during the same turn" not in context
 
-  during_turn = client.get(
-    "/api/agent-coordination/messages",
-    headers=_top_level_auth(db, chats["scout"].id, current.id),
+  later = models.ChatRun(
+    id="scout-later-run", root_run_id="scout-later-run",
+    chat_id=chats["scout"].id, status="running", provider="claude",
+    started_at=current_started + timedelta(seconds=10),
   )
-  assert during_turn.status_code == 200, during_turn.text
-  assert [row["body"] for row in during_turn.json()["messages"]] == [
-    "Arrived while the model is working",
+  db.add(later)
+  db.commit()
+  later_context = build_coordination_context(
+    db, chats["scout"].id, later.id,
+  )
+  assert "Arrived while the model is working" in later_context
+  assert "Also arrived during the same turn" in later_context
+  assert "New inbound for this turn" not in later_context
+
+
+def test_next_turn_context_marks_overflow_and_keeps_latest_notes(db):
+  chats, runs = _network_fixture(db)
+  previous_started = runs["scout"].started_at
+  current = models.ChatRun(
+    id="scout-overflow-run", root_run_id="scout-overflow-run",
+    chat_id=chats["scout"].id, status="running", provider="claude",
+    started_at=previous_started + timedelta(seconds=100),
+  )
+  messages = [
+    models.AgentCoordinationMessage(
+      id=f"overflow-{index:02d}", room_kind="workspace", room_id="1",
+      from_chat_id=chats["outsider"].id, from_run_id="outside-run",
+      send_id=f"overflow-send-{index:02d}",
+      send_target_key=chats["scout"].id, to_chat_id=chats["scout"].id,
+      kind="finding", body=f"Overflow note {index:02d}",
+      created_at=previous_started + timedelta(seconds=index + 1),
+    )
+    for index in range(MAX_CONTEXT_MESSAGES + 1)
   ]
+  db.add_all([current, *messages])
+  db.commit()
+
+  snapshot = agent_context_snapshot(db, chats["scout"].id, current.id)
+  assert snapshot is not None
+  assert snapshot["messages_truncated"] is True
+  assert len(snapshot["messages"]) == MAX_CONTEXT_MESSAGES
+  bodies = [message["body"] for message in snapshot["messages"]]
+  assert bodies[0] == "Overflow note 01"
+  assert bodies[-1] == f"Overflow note {MAX_CONTEXT_MESSAGES:02d}"
+  context = build_coordination_context(db, chats["scout"].id, current.id)
+  assert "Earlier peer notes exceeded" in context
+  assert "AgentWorkClaim" in context
 
 
 def test_context_omits_unrelated_global_agents_when_nothing_arrived(db):
@@ -865,12 +853,15 @@ def test_a_direct_ask_wakes_an_idle_chat_with_unfinished_goal_work(
   assert action_kind in wake["content"] and "Scout" in wake["content"]
   assert "<agent_coordination>" in wake["content"]
 
-  # A running recipient reads its inbox itself; no second turn is started.
+  # A running prompt is immutable, so no competing turn is started. The note
+  # is delivered with any peers that arrived during that run in one successor
+  # turn instead of being polled from inside the current turn.
   registry.mark_starting(builder.id)
-  db.add(models.ChatRun(
+  live = models.ChatRun(
     id="builder-live", root_run_id="builder-live", chat_id=builder.id,
     status="running", provider="codex",
-  ))
+  )
+  db.add(live)
   db.commit()
   again = client.post(
     "/api/agent-coordination/messages", headers=scout_auth,
@@ -879,6 +870,20 @@ def test_a_direct_ask_wakes_an_idle_chat_with_unfinished_goal_work(
   assert again.status_code == 200, again.text
   assert again.json()["woken"] == []
   assert len(started) == 1
+  message = db.query(models.AgentCoordinationMessage).filter(
+    models.AgentCoordinationMessage.body == "Again.",
+  ).one()
+  successor = models.ChatRun(
+    id="builder-successor", root_run_id="builder-successor",
+    chat_id=builder.id, status="running", provider="codex",
+    started_at=message.created_at + timedelta(seconds=1),
+  )
+  db.add(successor)
+  db.commit()
+  successor_context = build_coordination_context(
+    db, builder.id, successor.id,
+  )
+  assert "Again." in successor_context
 
 
 def test_a_direct_ask_does_not_wake_a_chat_without_unfinished_goal_work(

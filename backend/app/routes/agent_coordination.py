@@ -15,7 +15,6 @@ from app.agent_coordination import (
   model_message,
   owner_chat_snapshot,
   owner_project_snapshot,
-  run_started_at,
   scope_for_chat,
   send_agent_message,
   send_work_claim_notice,
@@ -201,39 +200,6 @@ def current_network(
   if snapshot is None:
     raise HTTPException(409, "This agent does not have a coordination scope.")
   return snapshot
-
-
-@router.get("/messages")
-def current_messages(
-  after: str | None = Query(default=None, max_length=64),
-  limit: int = Query(default=50, ge=1, le=100),
-  principal: Principal = Depends(get_agent_run_principal),
-  db: Session = Depends(get_db),
-):
-  """Inbox notes after ``after``, or since this run started when no cursor is
-  given; earlier backlog reaches the agent through turn context instead."""
-  scope = _agent_scope(db, principal)
-  created_after = None
-  if after is None:
-    created_after = run_started_at(db, principal.chat_id, principal.run_id)
-    if created_after is None:
-      raise HTTPException(409, "Current agent run is unavailable.")
-  try:
-    items = visible_peer_messages(
-      db, scope,
-      chat_id=principal.chat_id,
-      after_id=after,
-      limit=limit,
-      inbox_only=True,
-      created_after=created_after,
-    )
-  except ValueError as exc:
-    raise HTTPException(422, str(exc)) from exc
-  return {
-    "scope": {"kind": scope.kind, "id": scope.id},
-    "messages": [model_message(item) for item in items],
-    "cursor": items[-1]["id"] if items else after,
-  }
 
 
 @router.post("/messages", dependencies=[Depends(reject_cross_site)])

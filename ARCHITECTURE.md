@@ -1063,6 +1063,31 @@ across otherwise independent chats. They do not replace a chat's Goal, a
 project path claim, or a contribution record; conflating those owners would
 make completing one action falsely complete a broader outcome.
 
+### Peer messages cross turn boundaries; agents never poll
+
+An agent turn's provider prompt is immutable after admission. Peer sends
+therefore persist one bounded note per recipient, and `agent_context_snapshot`
+injects a bounded window of inbound notes created during the preceding
+physical turn into the recipient's next turn as one compact
+`<agent_coordination>` block. Notes that arrive after the current turn starts
+are deliberately excluded until that next boundary, so delivery neither races
+the live prompt nor repeats old backlog. An overflow is explicit rather than
+silent; required work uses an `AgentWorkClaim`, whose ownership cannot be lost
+to message volume.
+
+Actionable direct messages (`request`, `blocker`, and `handoff`) may start one
+hidden turn only when the recipient is already idle, has an unfinished Goal,
+and no question, Wait, park, restart hold, or queued owner work owns its next
+move. A running recipient is never given a competing turn; its ordinary Goal
+settlement supplies the successor when work remains. Plain notes and findings
+wait for the next independently owned turn. The model-facing network exposes
+discovery and send operations, not an inbox read or short poll. A sender that
+needs a later result must hand off through Goal, Wait, or `AgentWorkClaim`
+ownership instead of keeping its current turn alive to check for replies.
+
+Historic transcript markers from the retired read tool remain displayable;
+that is data compatibility, not a second delivery mechanism.
+
 ### Durable waits: observation and continuation are separate
 
 `chat_waits.py` owns command/timer rows and `runtime_supervisors` drives their
