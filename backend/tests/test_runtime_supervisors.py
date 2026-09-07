@@ -126,8 +126,10 @@ async def test_start_fails_open_when_chat_supervisor_wiring_breaks(monkeypatch):
   await supervisors.start_database_services()
 
   assert frontend_started is True
+  assert "connect-outbound" in supervisors._tasks
   assert set(supervisors._tasks) == before
   await supervisors.stop()
+  assert supervisors._tasks == {}
 
 
 @pytest.mark.asyncio
