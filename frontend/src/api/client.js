@@ -1014,7 +1014,9 @@ export const api = {
       '/settings/provider-usage/codex/redeem-reset',
       {
         method: 'POST',
-        body: JSON.stringify({ credit_id: creditId }),
+        // The server refuses to spend a reset without this explicit flag; it is
+        // sent only from the UI's Confirm step, never on a bare/accidental call.
+        body: JSON.stringify({ credit_id: creditId, confirm: true }),
       },
     ),
     save: (payload) => apiFetch('/settings', {

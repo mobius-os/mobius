@@ -1177,3 +1177,35 @@ def test_settings_post_rejects_cross_site_request(client, auth):
     headers={**auth, "Sec-Fetch-Site": "same-origin"},
   )
   assert same_origin.status_code == 200
+
+
+def test_redeem_reset_requires_explicit_confirmation(client, auth, monkeypatch):
+  """A bare or unconfirmed POST must never spend a banked reset."""
+  from app.routes import settings as settings_route
+
+  called = False
+
+  async def _should_not_run(*args, **kwargs):
+    nonlocal called
+    called = True
+    return {"outcome": "reset"}
+
+  monkeypatch.setattr(
+    settings_route.provider_usage, "redeem_codex_reset", _should_not_run
+  )
+
+  # Empty body → confirm defaults to false → refused before any redeem.
+  r = client.post(
+    "/api/settings/provider-usage/codex/redeem-reset", json={}, headers=auth
+  )
+  assert r.status_code == 400
+  assert called is False
+
+  # Explicit confirm=false is likewise refused.
+  r2 = client.post(
+    "/api/settings/provider-usage/codex/redeem-reset",
+    json={"confirm": False},
+    headers=auth,
+  )
+  assert r2.status_code == 400
+  assert called is False

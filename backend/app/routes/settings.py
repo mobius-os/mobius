@@ -294,6 +294,10 @@ async def get_provider_usage(
 
 
 class RedeemResetBody(BaseModel):
+  # Spending a banked reset is immediate and irreversible, so the endpoint
+  # refuses unless the caller sets this explicitly. A bare or accidental POST
+  # (or an agent probing the route) is then a safe no-op, never a spent credit.
+  confirm: bool = False
   credit_id: str | None = None
 
 
@@ -306,6 +310,11 @@ async def redeem_codex_reset(
   _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
 ) -> dict:
   """Redeem one banked Codex rate-limit reset. Immediate and irreversible."""
+  if body is None or not body.confirm:
+    raise HTTPException(
+      status_code=400,
+      detail="Redeeming a banked reset requires explicit confirmation.",
+    )
   try:
     return await provider_usage.redeem_codex_reset(
       get_app_settings().data_dir,
