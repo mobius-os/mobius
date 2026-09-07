@@ -2,7 +2,7 @@
    collapsed row stays glanceable; expansion explains ownership and cost. */
 
 import { useState } from 'react'
-import { ChevronDown, X } from '@openai/apps-sdk-ui/components/Icon'
+import { ChevronDown, Clock, X } from '@openai/apps-sdk-ui/components/Icon'
 import {
   helperPresentation,
   resourcePausePresentation,
@@ -43,7 +43,7 @@ function HandoffCard({
         onClick={onToggle}
       >
         <span className="chat__wait-tag" aria-hidden="true">
-          <span className="chat__wait-pulse" />
+          <Clock width={14} height={14} />
           Waiting
         </span>
         <span className="chat__wait-text">{text}</span>

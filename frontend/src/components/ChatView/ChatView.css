@@ -621,9 +621,13 @@
    bubble background, red bar + label so users can tell at a glance
    that the agent didn't say this — the system did. */
 .chat__text--error {
+  --lifecycle-tone: var(--danger);
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 0 10px;
   background: color-mix(in srgb, var(--danger) 10%, transparent);
   border: 1px solid color-mix(in srgb, var(--danger) 32%, var(--border-light));
-  border-radius: 10px;
+  border-radius: 12px;
   padding: 10px 12px;
   color: var(--text);
   font-size: 13px;
@@ -634,6 +638,9 @@
      read as standalone, not as something the agent typed. */
   max-width: none;
 }
+.chat__text--error > :not(.chat__lifecycle-icon) { grid-column: 2; }
+.chat__error-status { min-width: 0; }
+
 .chat__error-head {
   display: flex;
   align-items: center;
@@ -643,10 +650,8 @@
 }
 .chat__error-label {
   display: block;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   color: var(--danger);
 }
 /* Provider-limit park (design §2.4): a rate-limit note is a WAIT state, not a
@@ -654,14 +659,15 @@
    reset time + Resume-now button carry the card. Declared after
    .chat__text--error so the override wins (the element carries both classes). */
 .chat__text--parked {
+  --lifecycle-tone: var(--accent);
   background: color-mix(in srgb, var(--accent) 8%, transparent);
   border-color: color-mix(in srgb, var(--accent) 32%, var(--border-light));
 }
 .chat__recovery-title {
   color: var(--text);
-  font-size: 14px;
-  font-weight: 650;
-  line-height: 1.35;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
 }
 .chat__recovery-title--paused {
   color: var(--accent);
@@ -2135,7 +2141,7 @@
    from the old `.chat__compaction*` selectors (compaction is the first
    marker, so its look is the default). */
 .chat__marker {
-  border-radius: 10px;
+  border-radius: 12px;
   border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border-light)); /* CONTRACT: accent-tinted hairline framing the marker card */
   background: color-mix(in srgb, var(--accent) 4%, transparent); /* CONTRACT: faint accent tint — sits on the opaque message-list fill beneath, not a standalone surface */
   overflow: hidden;
@@ -2144,9 +2150,9 @@
 .chat__marker-header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   width: 100%;
-  padding: 8px 12px;
+  padding: 10px 12px;
   background: none;
   border: 0;
   text-align: left;
@@ -2163,18 +2169,6 @@
 .chat__marker-header:focus-visible {
   outline: 2px solid var(--accent); /* CONTRACT: vivid accent ring for keyboard focus */
   outline-offset: -2px;
-}
-
-.chat__marker-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 22px;
-  height: 22px;
-  border-radius: 7px;
-  color: var(--accent); /* CONTRACT: vivid accent — the glyph stroke color */
-  background: color-mix(in srgb, var(--accent) 14%, transparent); /* CONTRACT: faint accent tint behind the glyph */
 }
 
 .chat__marker-label {
@@ -2197,8 +2191,7 @@
   color: var(--muted); /* CONTRACT: low-contrast context line on opaque fill */
   line-height: 1.3;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .chat__marker-toggle {
@@ -3818,23 +3811,6 @@
   text-transform: uppercase;
 }
 
-.chat__wait-pulse {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-  animation: chat-wait-pulse 2.4s ease-in-out infinite;
-}
-
-@keyframes chat-wait-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.35; transform: scale(0.72); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .chat__wait-pulse { animation: none; }
-}
-
 .chat__wait-text {
   min-width: 0;
   overflow: hidden;
@@ -3973,134 +3949,39 @@
 }
 
 .chat__goal-history {
+  --lifecycle-tone: var(--green);
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-columns: 28px minmax(0, 1fr);
   gap: 10px;
-  margin-top: 14px;
-  padding: 12px 14px;
-  border: 1px solid color-mix(in srgb, var(--green) 30%, var(--border-light));
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--green) 6%, var(--surface));
-}
-
-.chat__goal-history--failed {
-  border-color: color-mix(in srgb, var(--danger) 28%, var(--border-light));
-  background: color-mix(in srgb, var(--danger) 5%, var(--surface));
-}
-
-.chat__goal-history-marker {
-  position: relative;
-  width: 18px;
-  height: 18px;
-  margin-top: 1px;
-  border-radius: 50%;
-  background: var(--green);
-}
-
-.chat__goal-history-marker::after {
-  content: '';
-  position: absolute;
-  left: 6px;
-  top: 3px;
-  width: 4px;
-  height: 8px;
-  border-right: 2px solid var(--bg);
-  border-bottom: 2px solid var(--bg);
-  transform: rotate(45deg);
-}
-
-.chat__goal-history--failed .chat__goal-history-marker {
-  background: var(--danger);
-}
-
-.chat__goal-history--failed .chat__goal-history-marker::after {
-  content: '!';
-  inset: 0;
-  width: auto;
-  height: auto;
-  border: 0;
-  color: white;
-  font-size: 12px;
-  font-weight: 800;
-  line-height: 18px;
-  text-align: center;
-  transform: none;
-}
-
-.chat__wait-history {
-  grid-template-columns: 18px minmax(0, 1fr);
-  gap: 9px;
   margin-top: 10px;
   padding: 10px 12px;
-  border-radius: 11px;
+  border: 1px solid color-mix(in srgb, var(--lifecycle-tone) 22%, var(--border-light));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--lifecycle-tone) 4%, transparent);
 }
 
-.chat__wait-history--attention {
-  border-color: color-mix(in srgb, var(--warning, #d8922f) 28%, var(--border-light));
-  background: color-mix(in srgb, var(--warning, #d8922f) 5%, var(--surface));
-}
+.chat__goal-history--failed { --lifecycle-tone: var(--danger); }
+.chat__wait-history { --lifecycle-tone: var(--accent); }
+.chat__wait-history--attention { --lifecycle-tone: var(--warning, #d8922f); }
+.chat__wait-history--stopped { --lifecycle-tone: var(--muted); }
 
-.chat__wait-history--stopped {
-  border-color: var(--border-light);
-  background: color-mix(in srgb, var(--text) 2%, var(--surface));
+.chat__lifecycle-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  color: var(--lifecycle-tone, var(--accent));
+  background: color-mix(in srgb, var(--lifecycle-tone, var(--accent)) 12%, transparent);
 }
-
-.chat__wait-history-marker {
-  width: 15px;
-  height: 15px;
-  margin-top: 2px;
+.chat__lifecycle-icon svg,
+.chat__lifecycle-outcome {
+  display: block;
+  flex-shrink: 0;
 }
-
-.chat__wait-history-marker::after {
-  left: 5px;
-  top: 2px;
-  width: 3px;
-  height: 6px;
-}
-
-.chat__wait-history--attention .chat__wait-history-marker {
-  background: var(--warning, #d8922f);
-}
-
-.chat__wait-history--attention .chat__wait-history-marker::after {
-  content: '!';
-  inset: -2px;
-  width: auto;
-  height: auto;
-  border: 0;
-  color: white;
-  font-size: 10px;
-  font-weight: 800;
-  line-height: 15px;
-  text-align: center;
-  transform: none;
-}
-
-.chat__wait-history--stopped .chat__wait-history-marker {
-  background: var(--text-muted);
-}
-
-.chat__wait-history--stopped .chat__wait-history-marker::after {
-  left: 2px;
-  top: 5px;
-  width: 7px;
-  height: 0;
-  border: 0;
-  border-top: 2px solid var(--surface);
-  transform: none;
-}
-
-.chat__wait-history-kicker {
-  letter-spacing: 0.035em;
-}
-
-.chat__wait-history--attention .chat__wait-history-kicker {
-  color: var(--warning, #d8922f);
-}
-
-.chat__wait-history--stopped .chat__wait-history-kicker {
-  color: var(--text-muted);
-}
+.chat__lifecycle-outcome { color: var(--lifecycle-tone, var(--accent)); }
 
 .chat__goal-history-copy {
   min-width: 0;
@@ -4110,14 +3991,14 @@
 }
 
 .chat__goal-history-kicker {
-  color: var(--green);
-  font-size: 11px;
-  font-weight: 750;
-  letter-spacing: 0.055em;
-  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
 }
-
-.chat__goal-history--failed .chat__goal-history-kicker { color: var(--danger); }
 
 .chat__goal-history-objective {
   color: var(--text);
@@ -4164,7 +4045,9 @@
 }
 
 .chat__goal-task-marker {
-  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 12px;
   height: 12px;
   margin-top: 1px;
@@ -4189,20 +4072,8 @@
 }
 
 .chat__goal-task--completed .chat__goal-task-marker {
-  border-color: var(--green);
-  background: var(--green);
-}
-
-.chat__goal-task--completed .chat__goal-task-marker::after {
-  content: '';
-  position: absolute;
-  left: 3px;
-  top: 1px;
-  width: 3px;
-  height: 6px;
-  border-right: 1.5px solid var(--bg);
-  border-bottom: 1.5px solid var(--bg);
-  transform: rotate(45deg);
+  border-color: transparent;
+  color: var(--green);
 }
 
 .chat__goal-task--failed .chat__goal-task-marker,
@@ -4543,3 +4414,5 @@
   /* chat__attach-card-remove is 20×20; expand to 40px on each axis */
   inset: -10px;
 }
+
+.chat__progress-identity { display: inline-block; vertical-align: -2px; margin-right: 5px; flex-shrink: 0; }

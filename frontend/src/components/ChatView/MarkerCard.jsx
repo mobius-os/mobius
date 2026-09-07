@@ -1,3 +1,4 @@
+import LifecycleIcon from './LifecycleIcon.jsx'
 import { useRef, useState } from 'react'
 import { ChevronDown } from '@openai/apps-sdk-ui/components/Icon'
 import { preserveTogglePosition } from './preserveTogglePosition.js'
@@ -7,9 +8,8 @@ import { preserveTogglePosition } from './preserveTogglePosition.js'
 // actions share this family (one card shape and disclosure motion) instead of
 // inventing separate chrome or masquerading as chat bubbles.
 //
-// Extracted from CompactionCard with no visual change — the default look IS the
-// accent-tinted summary divider that card established (`.chat__marker*` CSS,
-// renamed 1:1 from `.chat__compaction*`).
+// LifecycleIcon shares icon geometry with Goal, Waiting and recovery notices;
+// this shell owns the optional disclosure without changing event semantics.
 //
 // `children` is the optional collapsible body. With children the header is a
 // real toggle button; with none the card is a static labeled divider (no
@@ -22,7 +22,7 @@ export default function MarkerCard({ icon, title, subtitle, children }) {
 
   const label = (
     <>
-      <span className="chat__marker-icon" aria-hidden="true">{icon}</span>
+      <LifecycleIcon>{icon}</LifecycleIcon>
       <span className="chat__marker-label">
         <span className="chat__marker-title">{title}</span>
         {subtitle && <span className="chat__marker-sub">{subtitle}</span>}

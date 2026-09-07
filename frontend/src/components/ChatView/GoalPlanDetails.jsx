@@ -1,5 +1,6 @@
 /* GoalPlanDetails renders the expanded dependency-aware todo list. */
 
+import { Check } from '@openai/apps-sdk-ui/components/Icon'
 import { useQuery } from '@tanstack/react-query'
 import { api, jsonOrThrow } from '../../api/client.js'
 import AgentCoordinationFeed from '../Agents/AgentCoordinationFeed.jsx'
@@ -58,7 +59,9 @@ function GoalPlanRow({ title, status, meta, depth, emphasized, children }) {
           emphasized ? ` chat__goal-task--${emphasized}` : ''
         }`}
       >
-        <span className="chat__goal-task-marker" aria-hidden="true" />
+        <span className="chat__goal-task-marker" aria-hidden="true">
+          {status === 'completed' && <Check width={12} height={12} />}
+        </span>
         <span className="chat__goal-task-copy">
           <span className="chat__goal-task-title">{title}</span>
           <span className="chat__goal-task-meta">{meta}</span>

@@ -1,6 +1,7 @@
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import { formatResetTime } from './resetTime.js'
-import { ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
+import LifecycleIcon from './LifecycleIcon.jsx'
+import { ChevronRight, Clock, Pause, Warning } from '@openai/apps-sdk-ui/components/Icon'
 import MessageCopyButton from './MessageCopyButton.jsx'
 import { isResourcePause } from './waitingPresentation.js'
 
@@ -62,6 +63,10 @@ export default function ErrorCard({
     : null
   return (
     <div className={vm.className} ref={cardRef}>
+      <LifecycleIcon>{vm.parked || vm.resourceWait
+        ? <Clock width={18} height={18} />
+        : vm.benign ? <Pause width={18} height={18} />
+          : <Warning width={18} height={18} />}</LifecycleIcon>
       {/* Keep the announced status body separate from interactive children.
           Otherwise a switch update or nested save alert makes the atomic
           status region re-announce the whole rate-limit card. */}

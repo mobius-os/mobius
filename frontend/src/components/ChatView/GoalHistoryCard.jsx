@@ -1,6 +1,7 @@
 /* GoalHistoryCard keeps a terminal Goal's outcome beside its final answer. */
 
 import GoalPlanDetails from './GoalPlanDetails.jsx'
+import LifecycleIcon, { LifecycleOutcome } from './LifecycleIcon.jsx'
 import { goalHistoryViewModel } from './goalHistory.js'
 
 export default function GoalHistoryCard({ summary }) {
@@ -12,10 +13,10 @@ export default function GoalHistoryCard({ summary }) {
       className={`chat__goal-history chat__goal-history--${view.completed ? 'completed' : 'failed'}`}
       aria-label={view.ariaLabel}
     >
-      <span className="chat__goal-history-marker" aria-hidden="true" />
+      <LifecycleIcon kind="goal" />
       <div className="chat__goal-history-copy">
         <span className="chat__goal-history-kicker">
-          {view.kicker}
+          <LifecycleOutcome tone={view.completed ? 'completed' : 'attention'} />{view.kicker}
         </span>
         <strong className="chat__goal-history-objective">{view.objective}</strong>
         {view.metadata && <span className="chat__goal-history-meta">{view.metadata}</span>}

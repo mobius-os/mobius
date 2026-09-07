@@ -1,3 +1,4 @@
+import { Collapse } from '@openai/apps-sdk-ui/components/Icon'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import MarkerCard from './MarkerCard.jsx'
 import { compactionBrief } from './compactionToolBlock.js'
@@ -24,12 +25,7 @@ export default function CompactionCard({ msg }) {
   // shell drops the chevron and stays a static labeled divider on its own.
   return (
     <MarkerCard title="Conversation summarized" subtitle={subtitle} icon={
-      /* Two arrows converging into one line — "context condensed". */
-      <svg viewBox="0 0 16 16" width="14" height="14" fill="none"
-        stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"
-        strokeLinejoin="round">
-        <path d="M2 4h12M4 8h8M6 12h4" />
-      </svg>
+      <Collapse width={18} height={18} aria-hidden="true" />
     }>
       {brief ? <StandardMarkdown text={brief} /> : null}
     </MarkerCard>

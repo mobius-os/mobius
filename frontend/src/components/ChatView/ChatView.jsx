@@ -13,7 +13,7 @@ import { flushSync } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
-import { Chat, Play } from '@openai/apps-sdk-ui/components/Icon'
+import { Chat, Flag, Play } from '@openai/apps-sdk-ui/components/Icon'
 import { api, apiFetch, getAuthHeaders, getToken, jsonOrThrow, BASE } from '../../api/client.js'
 import {
   chatMessagesQueryKey,
@@ -5288,6 +5288,7 @@ export default function ChatView({
             actionIcon: <Play width={13} height={13} aria-hidden="true" />,
           }
         : {}),
+      icon: <Flag width={14} height={14} aria-hidden="true" />,
       ...(activeGoalPlan
         ? { details: <GoalPlanDetails plan={activeGoalPlan} chatId={chatId} /> }
         : {}),
