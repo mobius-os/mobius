@@ -195,13 +195,43 @@ def _launch(profile_id: str, *args: str) -> subprocess.Popen:
       start_new_session=True,
     )
   _owned_processes[profile_id] = process
-  _write_pid(profile_id, process.pid)
+  try:
+    _write_pid(profile_id, process.pid)
+  except BaseException as persistence_error:
+    # Popen and its durable identity form one launch transaction.  Callers
+    # must never receive a failed launch while its runner still grants access.
+    try:
+      _stop_process_tree(profile_id)
+    except BaseException:
+      log.exception("outbound Connect launch cleanup failed for %s", profile_id)
+    # A newly created, unreaped Popen still pins its PID, so this fallback
+    # cannot signal a reused PID even if the broader tree cleanup failed.
+    if process.poll() is None:
+      try:
+        process.kill()
+        process.wait(timeout=3)
+      except (OSError, subprocess.TimeoutExpired):
+        pass
+    if process.poll() is None:
+      raise OutboundConnectError(
+        "The Connect runner started, but its process record could not be saved "
+        "and the runner could not be stopped.",
+      ) from persistence_error
+    _owned_processes.pop(profile_id, None)
+    try:
+      _pid_path(profile_id).unlink(missing_ok=True)
+    except OSError:
+      pass
+    raise
   return process
 
 
 def _public_profile(meta: dict) -> dict:
   profile_id = str(meta.get("id") or "")
-  online = _ID_RE.fullmatch(profile_id) is not None and _process_alive(profile_id)
+  owned = _owned_processes.get(profile_id)
+  online = _ID_RE.fullmatch(profile_id) is not None and (
+    (owned is not None and owned.poll() is None) or _process_alive(profile_id)
+  )
   status = "active" if online else str(meta.get("status") or "ended")
   parsed = urllib.parse.urlsplit(str(meta.get("base_url") or ""))
   return {
@@ -417,12 +447,16 @@ def _revoke_profile(profile_id: str) -> None:
   meta = _read_json(_meta_path(profile_id))
   if meta is None:
     raise LookupError(profile_id)
-  config = _read_json(_runner_config_path(profile_id))
+  config_path = _runner_config_path(profile_id)
+  config = _read_json(config_path)
   if config is None:
-    raise OutboundConnectError(
-      "The saved Connect details are unreadable, so access was kept.",
-    )
-  _disconnect_remote(config)
+    if meta.get("status") != "revoked" or config_path.exists():
+      raise OutboundConnectError(
+        "The saved Connect details are unreadable, so remote revocation "
+        "cannot be confirmed. Access was kept.",
+      )
+  else:
+    _disconnect_remote(config)
   with _lock:
     _discard(profile_id)
 
@@ -446,7 +480,21 @@ def _reconcile_once() -> None:
         if result is None:
           continue
         _owned_processes.pop(profile_id, None)
-        meta["status"] = "ended" if result == 0 else "error"
+        # A remotely requested disconnect cleanly exits only after removing
+        # all local runner artifacts.  Record that observed transition so a
+        # later local removal does not need credentials that no longer exist.
+        runner_uninstalled = result == 0 and all(
+          not artifact.exists()
+          for artifact in (
+            _runner_config_path(profile_id),
+            _runner_path(profile_id),
+            _pid_path(profile_id),
+          )
+        )
+        if runner_uninstalled:
+          meta["status"] = "revoked"
+        else:
+          meta["status"] = "ended" if result == 0 else "error"
         _atomic_json(_meta_path(profile_id), meta)
         continue
       if _process_alive(profile_id):

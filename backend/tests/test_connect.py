@@ -213,6 +213,8 @@ def test_outbound_reconcile_records_exits_and_relaunches_orphans(
   connect_outbound._atomic_json(connect_outbound._meta_path(finished), {
     "id": finished, "base_url": "https://friend.example", "status": "ended",
   })
+  connect_outbound._runner_path(ended).parent.mkdir(parents=True, exist_ok=True)
+  connect_outbound._runner_path(ended).write_text("runner", encoding="utf-8")
 
   class Owned:
     def __init__(self, result):
@@ -275,6 +277,90 @@ async def test_outbound_revoke_fails_closed_until_remote_confirms(
 
   with pytest.raises(connect_outbound.OutboundConnectError, match="kept"):
     await connect_outbound.revoke_profile(profile_id)
+  assert connect_outbound._profile_dir(profile_id).is_dir()
+  assert stopped == []
+
+
+def test_outbound_observed_remote_revocation_allows_local_profile_cleanup(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_0123456789abcdef"
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id,
+    "base_url": "https://friend.example",
+    "status": "active",
+  })
+  connect_outbound._atomic_json(
+    connect_outbound._runner_config_path(profile_id),
+    {"url": "https://friend.example", "host_id": "h_remote", "token": "secret"},
+  )
+  connect_outbound._runner_path(profile_id).write_text("runner", encoding="utf-8")
+  connect_outbound._write_pid(profile_id, 424242)
+
+  class RemotelyRevoked:
+    def poll(self):
+      return 0
+
+  owned = {profile_id: RemotelyRevoked()}
+  monkeypatch.setattr(connect_outbound, "_owned_processes", owned)
+  for artifact in (
+    connect_outbound._runner_config_path(profile_id),
+    connect_outbound._runner_path(profile_id),
+    connect_outbound._pid_path(profile_id),
+  ):
+    artifact.unlink()
+
+  connect_outbound._reconcile_once()
+
+  meta = json.loads(
+    connect_outbound._meta_path(profile_id).read_text(encoding="utf-8"),
+  )
+  assert meta["status"] == "revoked"
+  assert owned == {}
+  monkeypatch.setattr(
+    connect_outbound,
+    "_disconnect_remote",
+    lambda _config: pytest.fail("revoked credentials must not be required"),
+  )
+  connect_outbound._revoke_profile(profile_id)
+  assert not connect_outbound._profile_dir(profile_id).exists()
+
+
+@pytest.mark.parametrize(
+  "config_text",
+  [
+    None,
+    "{not-json",
+    json.dumps({"url": "https://friend.example", "host_id": "h_remote"}),
+  ],
+  ids=["missing-config", "corrupt-config", "missing-credential"],
+)
+def test_outbound_revoke_keeps_ambiguous_unreadable_credentials(
+  tmp_path, monkeypatch, config_text,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_0123456789abcdef"
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id,
+    "base_url": "https://friend.example",
+    "status": "ended",
+  })
+  if config_text is not None:
+    connect_outbound._runner_config_path(profile_id).parent.mkdir(
+      parents=True, exist_ok=True,
+    )
+    connect_outbound._runner_config_path(profile_id).write_text(
+      config_text, encoding="utf-8",
+    )
+  stopped = []
+  monkeypatch.setattr(connect_outbound, "_stop_process_tree", stopped.append)
+
+  with pytest.raises(connect_outbound.OutboundConnectError, match="kept"):
+    connect_outbound._revoke_profile(profile_id)
+
   assert connect_outbound._profile_dir(profile_id).is_dir()
   assert stopped == []
 
@@ -391,6 +477,48 @@ def test_outbound_pid_write_failure_stops_and_reaps_started_runner(
     assert started[0].poll() is not None
     assert owned == {}
     assert list(profiles.iterdir()) == []
+  finally:
+    for process in started:
+      if process.poll() is None:
+        process.kill()
+      process.wait(timeout=5)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux pidfd process ownership")
+def test_outbound_reconcile_pid_write_failure_stops_started_runner_and_marks_error(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  profile_id = "o_0123456789abcdef"
+  connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+    "id": profile_id,
+    "base_url": "https://friend.example",
+    "status": "active",
+  })
+  runner = connect_outbound._runner_path(profile_id)
+  runner.parent.mkdir(parents=True, exist_ok=True)
+  runner.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+  owned = {}
+  monkeypatch.setattr(connect_outbound, "_owned_processes", owned)
+  started = []
+
+  def fail_pid_write(profile_id, _pid):
+    started.append(owned[profile_id])
+    raise OSError("pid write failed")
+
+  monkeypatch.setattr(connect_outbound, "_write_pid", fail_pid_write)
+  try:
+    connect_outbound._reconcile_once()
+
+    assert len(started) == 1
+    assert started[0].poll() is not None
+    assert owned == {}
+    assert not connect_outbound._pid_path(profile_id).exists()
+    meta = json.loads(
+      connect_outbound._meta_path(profile_id).read_text(encoding="utf-8"),
+    )
+    assert meta["status"] == "error"
   finally:
     for process in started:
       if process.poll() is None:
