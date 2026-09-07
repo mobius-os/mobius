@@ -2,7 +2,7 @@
 .platform-updates { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; align-items: center; }
 .platform-updates > * { grid-column: 1 / -1; min-width: 0; }
 .platform-updates__heading { grid-column: 1; }
-.platform-updates > .platform-updates__actions { grid-column: 2; justify-content: flex-end; max-width: 200px; }
+.platform-updates > .platform-updates__actions { grid-column: 2; align-items: stretch; flex-direction: column; max-width: 200px; }
 .platform-updates__heading + .platform-updates__confirmation { grid-column: 1 / -1; }
 .platform-updates__title { margin: 0; font-size: 14px; font-weight: 600; }
 .platform-updates__status { margin: 3px 0 0; color: var(--muted); font-size: 13px; font-weight: 400; }
@@ -19,7 +19,5 @@
 .platform-updates__versions code { margin-inline-start: 6px; color: var(--green); }
 @container settings (max-width: 340px) {
   .platform-updates { grid-template-columns: minmax(0, 1fr); }
-  .platform-updates > .platform-updates__actions { grid-column: 1; justify-content: flex-start; max-width: none; }
+  .platform-updates > .platform-updates__actions { grid-column: 1; align-items: flex-start; max-width: none; }
 }
-
-.platform-updates__maintenance { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; border-top: 1px solid var(--border); padding-top: 8px; }

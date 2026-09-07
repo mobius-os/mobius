@@ -14,6 +14,9 @@ const css = readFileSync(
 const updates = readFileSync(
   new URL('../../components/SettingsView/PlatformUpdates.jsx', import.meta.url), 'utf8',
 )
+const updateCss = readFileSync(
+  new URL('../../components/SettingsView/PlatformUpdates.css', import.meta.url), 'utf8',
+)
 const requests = readFileSync(
   new URL('../../components/SettingsView/usePlatformUpdates.js', import.meta.url), 'utf8',
 )
@@ -42,8 +45,8 @@ test('version details distinguish served Möbius from its container identity', (
   assert.match(updates, /platformVersionIdentity\(platform, version\)/)
   assert.match(updates, /containerVersionIdentity\(version\)/)
   assert.match(updates, /contained_upstream_committed_at/)
-  assert.match(updates, /<dt>Source code<\/dt>/)
-  assert.match(updates, /<dt>Container<\/dt>/)
+  assert.match(updates, /<dt>Installed update<\/dt>/)
+  assert.match(updates, /<dt>Current system<\/dt>/)
   assert.match(updates, /mobiusVersion\.primarySha/)
   assert.match(updates, /containerVersion\.sha/)
   assert.doesNotMatch(updates, /Current with upstream|Last checked|upstream_checked_at/)
@@ -160,6 +163,8 @@ test('compact Updates pairs its status with actions without redundant success co
   assert.match(updates, /aria-label="Confirm restart"/)
   assert.match(updates, /className={`settings__btn settings__btn--sm/)
   assert.match(updates, /settings__btn--outline settings__btn--sm"[^>]*>Restart server<\/button>/)
+  assert.match(updateCss, /\.platform-updates > \.platform-updates__actions\s*\{[^}]*flex-direction:\s*column;/s)
+  assert.doesNotMatch(updateCss, /platform-updates__maintenance/)
 })
 
 
@@ -172,14 +177,13 @@ test('provider actions keep their full labels on one line without a width cap', 
 test('simple Updates keeps versions and server restart visible outside optional details', () => {
   const visible = updates.slice(0, updates.indexOf('{review && ('))
   assert.match(visible, />Updates<\/h2>/)
-  assert.match(visible, /<dt>Source code<\/dt>/)
-  assert.match(visible, /<dt>Container<\/dt>/)
+  assert.match(visible, /<dt>Installed update<\/dt>/)
+  assert.match(visible, /<dt>Current system<\/dt>/)
   assert.match(visible, /onClick=\{askRestart\}>Restart server<\/button>/)
   assert.match(updates, /aria-label="Confirm restart"/)
 })
 
 test('only top provider actions are pills; Updates inherits standard Settings corners', () => {
-  const updateCss = readFileSync(new URL('../../components/SettingsView/PlatformUpdates.css', import.meta.url), 'utf8')
   const providerCss = readFileSync(new URL('../../components/ProviderAuth/ProviderAuth.css', import.meta.url), 'utf8')
   assert.match(css, /\.settings__btn\s*\{[^}]*border-radius:\s*8px;/s)
   assert.doesNotMatch(updateCss, /border-radius:\s*999px/)

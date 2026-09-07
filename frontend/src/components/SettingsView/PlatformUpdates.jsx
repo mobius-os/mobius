@@ -26,6 +26,9 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
   const activeRebuild = rebuildIsActive(rebuild)
   const mobiusVersion = platformVersionIdentity(platform, version)
   const containerVersion = containerVersionIdentity(version)
+  const externalGuidance = level === 'host_maintenance'
+    ? ['This update needs a little maintenance outside Möbius before it can finish.']
+    : (platform?.activation?.guidance || [])
 
   useEffect(() => {
     if (review || busy || !restoreFocus.current) return
@@ -95,11 +98,15 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
           {conflict && platform?.newer_updates_available && (
             <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy} onClick={() => openReview()}>Review all updates</button>
           )}
+          {!available && !conflict && (restartNeeded || imageNeeded) && (
+            <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy} onClick={check}>Check for more</button>
+          )}
+          <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy || confirmRestart} onClick={askRestart}>Restart server</button>
         </div>
       )}
       <dl className="platform-updates__versions">
-        <dt>Source code</dt><dd>{formatUpstreamCommitDate(platform?.contained_upstream_committed_at) || 'Unknown'} {mobiusVersion.primarySha && <code>{mobiusVersion.primarySha}</code>}</dd>
-        <dt>Container</dt><dd>{formatUpstreamCommitDate(version?.build_date) || 'Unknown'} {containerVersion.sha && <code>{containerVersion.sha}</code>}</dd>
+        <dt>Installed update</dt><dd>{formatUpstreamCommitDate(platform?.contained_upstream_committed_at) || 'Unknown'} {mobiusVersion.primarySha && <code>{mobiusVersion.primarySha}</code>}</dd>
+        <dt>Current system</dt><dd>{formatUpstreamCommitDate(version?.build_date) || 'Unknown'} {containerVersion.sha && <code>{containerVersion.sha}</code>}</dd>
       </dl>
       {!busy && !unavailable && !conflict && restartNeeded && (
         <p className="platform-updates__description">Your changes are ready. You can add more updates before restarting once.</p>
@@ -114,7 +121,7 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
       )}
       {externalNeeded && (
         <div className="platform-updates__description">
-          {(platform?.activation?.guidance || []).map(line => <p key={line}>{line}</p>)}
+          {externalGuidance.map(line => <p key={line}>{line}</p>)}
         </div>
       )}
       {update.checkResult && <p className="platform-updates__description" role="status">{update.checkResult}</p>}
@@ -122,12 +129,6 @@ export default function PlatformUpdates({ active, refreshToken, onOpenChat }) {
       {platform?.state === 'rolled_back' && !review && (
         <Alert color="warning" variant="soft" description={platform.rollback_error || 'The update did not complete. Your previous source was restored; review the update before trying again.'} />
       )}
-      <div className="platform-updates__maintenance">
-        {!available && !conflict && (restartNeeded || imageNeeded) && (
-          <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy} onClick={check}>Check for more</button>
-        )}
-        <button className="settings__btn settings__btn--outline settings__btn--sm" disabled={busy || confirmRestart} onClick={askRestart}>Restart server</button>
-      </div>
       {review && (
         <UpdateReviewModal intent={review} onClose={closeReview}
           onApply={plan => update.execute(plan, 'apply')}
