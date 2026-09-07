@@ -568,34 +568,33 @@
 .provider-usage__resets {
   grid-column: 1 / -1;
   display: grid;
-  gap: 6px;
+  gap: 5px;
   margin-top: 4px;
   padding-top: 7px;
   border-top: 1px solid var(--border-light);
 }
 
-.provider-usage__resets-head {
+.provider-usage__resets-row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
 
-.provider-usage__resets-count {
+.provider-usage__resets-detail {
   color: var(--text);
   font-size: 11.5px;
-  font-weight: 500;
+  line-height: 1.3;
 }
 
-.provider-usage__resets-expiry {
-  color: var(--muted);
-  font-size: 10.5px;
-  white-space: nowrap;
+.provider-usage__resets-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 .provider-usage__redeem {
-  justify-self: start;
-  padding: 4px 10px;
+  padding: 3px 10px;
   border: 1px solid var(--border-light);
   border-radius: 999px;
   background: transparent;
@@ -617,26 +616,8 @@
   cursor: default;
 }
 
-.provider-usage__redeem--go {
-  border-color: var(--accent);
-  background: var(--accent);
-  color: var(--on-accent, #fff);
-}
-
-.provider-usage__resets-confirm {
-  display: grid;
-  gap: 6px;
-}
-
-.provider-usage__resets-warn {
+.provider-usage__redeem--ghost {
   color: var(--muted);
-  font-size: 11px;
-  line-height: 1.4;
-}
-
-.provider-usage__resets-actions {
-  display: flex;
-  gap: 6px;
 }
 
 .provider-usage__resets-msg {

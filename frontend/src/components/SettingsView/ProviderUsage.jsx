@@ -22,55 +22,50 @@ function BankedResets({ resets, onRedeem, redeeming = false, result = null }) {
   if (!resets) return null
 
   const expiry = soonestResetExpiry(resets.credits)
-  const expiryLabel = expiry ? formatResetExpiry(expiry) : ''
-  const message = result
-    ? (result.error ? redeemOutcomeMessage(undefined) : redeemOutcomeMessage(result.outcome))
-    : null
   const count = resets.availableCount
-  const countLabel = count === 1 ? '1 banked reset' : `${count} banked resets`
+  const detail = [
+    count === 1 ? '1 banked reset' : `${count} banked resets`,
+    expiry ? formatResetExpiry(expiry) : '',
+  ].filter(Boolean).join(' · ')
+  const message = result
+    ? redeemOutcomeMessage(result.error ? undefined : result.outcome)
+    : null
 
   return (
     <span className="provider-usage__resets">
-      <span className="provider-usage__resets-head">
-        <span className="provider-usage__resets-count">{countLabel}</span>
-        {expiryLabel && (
-          <span className="provider-usage__resets-expiry">{expiryLabel}</span>
-        )}
-      </span>
-      {confirming ? (
-        <span className="provider-usage__resets-confirm">
-          <span className="provider-usage__resets-warn">
-            Spends one saved reset and clears your usage now. This can’t be undone.
-          </span>
+      <span className="provider-usage__resets-row">
+        <span className="provider-usage__resets-detail">
+          {confirming ? 'Spend one reset and clear usage now?' : detail}
+        </span>
+        {confirming ? (
           <span className="provider-usage__resets-actions">
             <button
               type="button"
-              className="provider-usage__redeem provider-usage__redeem--go"
+              className="provider-usage__redeem"
               disabled={redeeming}
               onClick={() => onRedeem()}
             >
-              {redeeming ? 'Redeeming…' : 'Confirm reset'}
+              {redeeming ? 'Redeeming…' : 'Confirm'}
             </button>
             <button
               type="button"
-              className="provider-usage__redeem provider-usage__redeem--cancel"
+              className="provider-usage__redeem provider-usage__redeem--ghost"
               disabled={redeeming}
               onClick={() => setConfirming(false)}
             >
               Cancel
             </button>
           </span>
-        </span>
-      ) : (
-        <button
-          type="button"
-          className="provider-usage__redeem"
-          disabled={redeeming}
-          onClick={() => setConfirming(true)}
-        >
-          Use a reset
-        </button>
-      )}
+        ) : (
+          <button
+            type="button"
+            className="provider-usage__redeem"
+            onClick={() => setConfirming(true)}
+          >
+            Use a reset
+          </button>
+        )}
+      </span>
       {message && (
         <span
           className={`provider-usage__resets-msg provider-usage__resets-msg--${message.tone}`}
